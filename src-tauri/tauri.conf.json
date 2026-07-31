@@ -31,7 +31,7 @@
       "endpoints": [
         "https://releases.pure.app/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI1NTA3OURCRTlFNTM4RjUKUldUMU9PWHAyM2xRdFpjcy8yTWpSQzlaMmhnc1M5ZGcxVXNyVFRFMDlvZVBxRUY0SExDWHl3VG0K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgwMzExOUE4RDlDQUM2REUKUldUZXhzclpxQmt4Z0ZObVNHL2VPNy9oU3NlZHlnWnhkRDdyazFIaWp2b3l1cTZWMXJIbVJJODcK",
       "windows": {
         "installMode": "passive"
       }
