@@ -1,24 +1,11 @@
-name: Build & Release
+name: Release
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
-  pull_request:
-    branches: [main]
-
-env:
-  # Tauri updater signing (minisign). Set in GitHub Secrets.
-  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-  # Apple Developer ID code signing (codesign + notarization). Set in GitHub Secrets.
-  APPLE_DEVELOPER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_IDENTITY }}
-  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-  APPLE_ID: ${{ secrets.APPLE_ID }}
-  APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
 
 jobs:
-  build:
+  release:
     runs-on: macos-latest
     permissions:
       contents: write
@@ -43,94 +30,36 @@ jobs:
       - name: Run tests
         run: bun test
 
-      # ── Import Apple Developer certificate (if secrets are set) ──
-      - name: Import Apple Developer certificate
-        if: env.APPLE_DEVELOPER_IDENTITY != '' && env.APPLE_CERTIFICATE != ''
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
-        run: |
-          CERT_PATH="$RUNNER_TEMP/apple_cert.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
-          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
-          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -T /usr/bin/codesign -T /usr/bin/security
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          rm -f "$CERT_PATH"
-          echo "✓ Certificate imported"
-
-      # ── Build CLI ──
       - name: Build CLI binary (macOS arm64)
         run: bun run cli:build
 
-      # ── Build GUI ──
-      - name: Build GUI (Tauri macOS)
-        run: bun run gui:build
+      # ── Build & publish GUI via Tauri's official action ──
+      # This handles: cargo tauri build, code signing (if secrets set),
+      # notarization, and creating the GitHub Release with all GUI artifacts.
+      - name: Build and publish GUI
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Pure v__VERSION__'
+          releaseBody: 'Download the DMG or .app.tar.gz below. The CLI binary (`pure`) is also attached for terminal use.'
+          releaseDraft: false
+          prerelease: false
 
-      # ── Code-sign the .app bundle ──
-      - name: Code-sign .app bundle
-        run: bun run sign:mac
-
-      # ── Re-pack DMG from signed .app (only if we did Developer ID signing) ──
-      - name: Re-pack signed DMG
-        if: env.APPLE_DEVELOPER_IDENTITY != ''
-        run: |
-          APP_PATH="src-tauri/target/release/bundle/macos/pure.app"
-          DMG_DIR="src-tauri/target/release/bundle/dmg"
-          rm -f "$DMG_DIR"/*.dmg
-          mkdir -p "$DMG_DIR"
-          hdiutil create -volname "pure" -srcfolder "$APP_PATH" -ov -format UDZO \
-            "$DMG_DIR/pure_0.6.0_x64.dmg"
-          echo "✓ DMG re-packed with signed .app"
-
-      # ── Upload artifacts ──
+      # ── Attach CLI binary to the release created by tauri-action ──
       - name: Upload CLI binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: pure-cli-macos-arm64
-          path: pure
-
-      - name: Upload GUI DMG
-        uses: actions/upload-artifact@v4
-        with:
-          name: pure-gui-macos
-          path: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/download-artifact@v4
-
-      - name: Generate release notes
-        run: |
-          echo "## Pure ${{ github.ref_name }}" > release-notes.md
-          echo "" >> release-notes.md
-          echo "### Artifacts" >> release-notes.md
-          echo "- \`pure\` — CLI binary (macOS arm64)" >> release-notes.md
-          echo "- \`pure_*.dmg\` — macOS GUI installer" >> release-notes.md
-          echo "- \`pure.app.tar.gz\` — macOS app archive (for auto-updater)" >> release-notes.md
-
-      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Pure ${{ github.ref_name }}
-          body_path: release-notes.md
-          files: |
-            pure-cli-macos-arm64/pure
-            pure-gui-macos/*.dmg
-            pure-gui-macos/*.app.tar.gz
-            pure-gui-macos/*.app.tar.gz.sig
-          draft: false
-          prerelease: false
+          tag_name: ${{ github.ref_name }}
+          files: pure
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
