@@ -71,10 +71,7 @@ const sidebarSettingsBtn = document.getElementById('sidebar-settings-btn') as HT
   chat.setWorkspace(settings.getWorkspace());
   updateSidebarModel();
   enableInputIfReady();
-
-  await restoreLastSession();
   checkLandingState();
-
   refreshSidebarSessions();
   setTimeout(() => checkForUpdatesSilently(), 3000);
 })().catch(err => console.error('[pure] init failed:', err));
@@ -131,14 +128,6 @@ function applySavedAppearance() {
     cfg.fontSize === 'small' ? '13px' : cfg.fontSize === 'large' ? '15px' : '14px');
   document.documentElement.style.setProperty('--spacing',
     cfg.density === 'compact' ? '8px' : cfg.density === 'spacious' ? '16px' : '12px');
-}
-
-async function restoreLastSession() {
-  const saved = await chat.restoreLastSession();
-  if (!saved) return;
-  renderSessionMessages(saved);
-  currentActiveId = chat.getSessionId();
-  setActiveSession(currentActiveId);
 }
 
 function renderSessionMessages(messages: StoredMessage[]) {
