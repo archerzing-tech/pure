@@ -1,0 +1,206 @@
+// src/coding-agent/Verifier.ts
+// v0.2 — Verifies agent output by running configurable checks.
+// v0.2 adds the LLM-based check: the model itself compares the final output
+// against the original task and returns a strict JSON verdict.
+
+import type { LLMAdapter, Message } from '../shared/types';
+
+export interface VerifierCheck {
+  name: string;
+  run(params: { output: string; context: Message[] }): Promise<{ passed: boolean; feedback?: string }>;
+}
+
+export class Verifier {
+  private checks: VerifierCheck[] = [];
+
+  constructor(checks?: VerifierCheck[]) {
+    if (checks) this.checks = checks;
+  }
+
+  addCheck(check: VerifierCheck): void {
+    this.checks.push(check);
+  }
+
+  async evaluate(params: { output: string; context: Message[] }): Promise<{ passed: boolean; feedback?: string }> {
+    for (const check of this.checks) {
+      const result = await check.run(params);
+      if (!result.passed) {
+        return { passed: false, feedback: `[${check.name}] ${result.feedback ?? 'Check failed'}` };
+      }
+    }
+    return { passed: true };
+  }
+}
+
+// ── Built-in checks ──
+
+/** Check that assistant output is not empty after tool rounds. */
+export const NonEmptyOutputCheck: VerifierCheck = {
+  name: 'non-empty-output',
+  run: async ({ output }) => ({
+    passed: output.trim().length > 0,
+    feedback: output.trim().length === 0 ? 'Assistant produced empty output' : undefined,
+  }),
+};
+
+/** Check that no obvious error messages are present in the output. */
+export const NoErrorMessageCheck: VerifierCheck = {
+  name: 'no-error-message',
+  run: async ({ output }) => {
+    const errorPatterns = [/error:/i, /failed:/i, /unable to/i, /could not/i];
+    for (const pattern of errorPatterns) {
+      if (pattern.test(output)) {
+        return { passed: false, feedback: `Output contains potential error: "${output.slice(0, 100)}"` };
+      }
+    }
+    return { passed: true };
+  },
+};
+
+/** Default verifier with standard checks. */
+export function createDefaultVerifier(): Verifier {
+  const v = new Verifier();
+  v.addCheck(NonEmptyOutputCheck);
+  return v;
+}
+
+// ── LLM-based verification (v0.2) ──
+
+export interface LLMVerifierOptions {
+  /** Cap the output sent to the verifier LLM (chars). Default 6000. */
+  maxOutputChars?: number;
+  /** Cap the task excerpt sent to the verifier LLM (chars). Default 800. */
+  maxTaskChars?: number;
+}
+
+const DEFAULT_MAX_OUTPUT = 6000;
+const DEFAULT_MAX_TASK = 800;
+
+export const LLMVerifyCheckName = 'llm-verify';
+
+/**
+ * Extract the current task from the message context — the most recent
+ * non-empty user message (the prompt this turn is answering).
+ */
+export function extractUserTask(context: Message[]): string {
+  for (let i = context.length - 1; i >= 0; i--) {
+    const m = context[i];
+    if (m.role === 'user' && m.content.trim()) return m.content.trim();
+  }
+  return '';
+}
+
+function buildVerifyPrompt(task: string, output: string): string {
+  return `You are a verification agent. Determine whether the assistant's final response substantially addresses the user's original request.
+
+User request:
+${task || '(no user request found — judge whether the output is coherent and complete on its own)'}
+
+Assistant final output:
+${output}
+
+Rules:
+- Pass if the output substantially addresses the request, even with minor imperfections or missing niceties.
+- Fail ONLY if the output is missing a core deliverable of the request, contradicts the request, or is largely off-topic.
+- If the request is a simple question, pass when the output answers it.
+
+Respond with ONLY a JSON object, no markdown fences, no extra text:
+{"passed": true, "feedback": "short reason"}
+or
+{"passed": false, "feedback": "what is missing and why"}`;
+}
+
+/**
+ * Parse a strict-format verdict, tolerating markdown fences and stray text.
+ * Uses depth counting so braces inside string values (e.g. a feedback
+ * mentioning a literal `}`) don't truncate the JSON. Returns null when the
+ * response is not a usable verdict (caller fails open).
+ */
+export function parseVerdict(raw: string): { passed: boolean; feedback?: string } | null {
+  let text = raw.trim();
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) text = fence[1].trim();
+
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === '{') {
+      if (start < 0) {
+        // Start of a candidate object — clamp any stray `}` seen before it
+        // so the depth counter can't be driven negative by leading noise.
+        start = i;
+        depth = 0;
+      }
+      depth++;
+    } else if (c === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        try {
+          const obj = JSON.parse(text.slice(start, i + 1));
+          if (!obj || typeof obj.passed !== 'boolean') return null;
+          return {
+            passed: obj.passed,
+            feedback: typeof obj.feedback === 'string' ? obj.feedback : undefined,
+          };
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * A VerifierCheck that asks the model itself to judge the final output against
+ * the task. Fail-open: any verifier LLM error or unparseable verdict passes
+ * (with a note) so a broken verdict can never trap the agent in a retry loop.
+ */
+export function createLLMVerifyCheck(llm: LLMAdapter, options?: LLMVerifierOptions): VerifierCheck {
+  const maxOutput = options?.maxOutputChars ?? DEFAULT_MAX_OUTPUT;
+  const maxTask = options?.maxTaskChars ?? DEFAULT_MAX_TASK;
+  return {
+    name: LLMVerifyCheckName,
+    run: async ({ output, context }) => {
+      const task = extractUserTask(context).slice(0, maxTask);
+      const prompt = buildVerifyPrompt(task, output.slice(0, maxOutput));
+      let response: string;
+      try {
+        const res = await llm.complete([{ role: 'user', content: prompt }], []);
+        response = res.content ?? '';
+      } catch (err) {
+        return { passed: true, feedback: `verifier LLM error: ${(err as Error).message}` };
+      }
+      const verdict = parseVerdict(response);
+      if (!verdict) {
+        return { passed: true, feedback: 'verifier returned an unparseable verdict (failed open)' };
+      }
+      return { passed: verdict.passed, feedback: verdict.feedback };
+    },
+  };
+}
+
+/**
+ * LLM-based verifier: fast rule check (non-empty output) first, then the model
+ * judges conformance to the task. Wire it via `config.verifier` to replace the
+ * pure rule-based default in real flows.
+ */
+export function createLLMVerifier(llm: LLMAdapter, options?: LLMVerifierOptions): Verifier {
+  const v = new Verifier();
+  v.addCheck(NonEmptyOutputCheck);
+  v.addCheck(createLLMVerifyCheck(llm, options));
+  return v;
+}

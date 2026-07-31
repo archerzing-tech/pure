@@ -1,0 +1,37 @@
+{
+  "name": "pure",
+  "version": "0.6.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "cli": "bun run src/cli.ts",
+    "cli:build": "bun build --compile src/cli.ts --outfile pure",
+    "dev": "vite",
+    "gui": "bun run tauri dev",
+    "gui:build": "bun run tauri build",
+    "test": "bun test",
+    "typecheck": "bun run --no-run tsc --noEmit",
+    "build": "bun run typecheck && npx vite build && bun run cli:build",
+    "build:cli": "bun run cli:build",
+    "sign:mac": "bash scripts/sign-app.sh",
+    "build:gui:mac": "bash scripts/build-gui-mac.sh",
+    "preview": "npx vite preview"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "@tauri-apps/plugin-process": "^2",
+    "@tauri-apps/plugin-updater": "^2",
+    "highlight.js": "^11.11.1",
+    "marked": "^18.0.7",
+    "mermaid": "^11.16.0",
+    "openai": "^7.1.0",
+    "plantuml-encoder": "^1.4.0",
+    "vite": "^8.1.5"
+  }
+}

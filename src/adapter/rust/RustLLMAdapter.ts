@@ -1,0 +1,214 @@
+// src/adapter/rust/RustLLMAdapter.ts
+// v0.1 — LLM transport through the Tauri Rust backend.
+//
+// Security model (per design doc §2.1): the API key never enters the
+// WebView. It lives in ~/.pure/secrets.json (0600) and is resolved inside
+// the Rust `chat_stream` command. The WebView only sends provider/baseUrl/
+// model + messages, and receives SSE deltas over a Channel.
+//
+// The adapter is also injectable (constructor deps) so unit tests can mock
+// invoke + Channel without a live Tauri runtime.
+
+import type {
+  LLMAdapter,
+  LLMChunk,
+  LLMResponse,
+  Message,
+  ToolCall,
+  ToolDefinition,
+} from '../../shared/types';
+import { buildChatParams } from '../openai/mapping';
+import { isTauriRuntime } from '../../shared/tauri';
+
+export interface RustLLMConfig {
+  provider: string;
+  model: string;
+  baseURL?: string;
+  extraBody?: Record<string, unknown>;
+  maxTokens?: number;
+  temperature?: number;
+}
+
+export interface RustLLMDeps {
+  invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  Channel: new <T = unknown>(options?: { onmessage?: (message: T) => void }) => {
+    onmessage: ((message: T) => void) | null;
+    send: (message: T) => void;
+    close: () => void;
+  };
+}
+
+interface QueueItem {
+  type: 'chunk' | 'end';
+  value?: string;
+}
+
+const SECRET_KEY = 'llm.apiKey';
+
+export class RustLLMAdapter implements LLMAdapter {
+  private config: RustLLMConfig;
+  private deps?: RustLLMDeps;
+
+  constructor(config: RustLLMConfig, deps?: RustLLMDeps) {
+    this.config = config;
+    this.deps = deps;
+  }
+
+  private async getDeps(): Promise<RustLLMDeps> {
+    if (this.deps) return this.deps;
+    if (!isTauriRuntime()) {
+      throw new Error('RustLLMAdapter requires the Tauri runtime');
+    }
+    const mod = await import('@tauri-apps/api/core');
+    return {
+      invoke: mod.invoke,
+      Channel: mod.Channel as unknown as RustLLMDeps['Channel'],
+    };
+  }
+
+  async *stream(
+    messages: Message[],
+    tools: ToolDefinition[],
+    signal?: AbortSignal,
+  ): AsyncGenerator<LLMChunk, void, void> {
+    const deps = await this.getDeps();
+    const params = buildChatParams({
+      model: this.config.model,
+      messages,
+      tools,
+      maxTokens: this.config.maxTokens,
+      temperature: this.config.temperature,
+      stream: true,
+      extraBody: this.config.extraBody,
+    });
+
+    // ── Bridge Rust's callback-based Channel into an async queue ──
+    const channel = new deps.Channel<string>();
+    const queue: QueueItem[] = [];
+    const waiters: Array<(item: QueueItem) => void> = [];
+
+    let invokeDone = false;
+    let finalResult: any = null;
+    let invokeError: Error | null = null;
+    let closed = false;
+
+    const push = (item: QueueItem) => {
+      const waiter = waiters.shift();
+      if (waiter) waiter(item);
+      else queue.push(item);
+    };
+
+    channel.onmessage = (raw) => {
+      push({ type: 'chunk', value: String(raw) });
+    };
+
+    const invokePromise = deps
+      .invoke('chat_stream', {
+        args: {
+          messages: params.messages,
+          tools: (params.tools as unknown[] | undefined) ?? [],
+          model: params.model,
+          apiKey: '',
+          baseUrl: this.config.baseURL ?? '',
+          extraBody: this.config.extraBody,
+          maxTokens: params.max_tokens,
+          temperature: params.temperature,
+        },
+        onChunk: channel,
+      })
+      .then((res) => {
+        finalResult = res;
+      })
+      .catch((err: unknown) => {
+        invokeError = err instanceof Error ? err : new Error(String(err));
+      })
+      .finally(() => {
+        invokeDone = true;
+        push({ type: 'end' });
+      });
+
+    const next = (): Promise<QueueItem> => {
+      const item = queue.shift();
+      if (item) return Promise.resolve(item);
+      if (invokeDone) return Promise.resolve({ type: 'end' });
+      return new Promise((resolve) => waiters.push(resolve));
+    };
+
+    const abortHandler = () => {
+      if (closed) return;
+      closed = true;
+      try {
+        channel.close();
+      } catch {
+        /* channel already closed */
+      }
+      push({ type: 'end' });
+    };
+
+    if (signal?.aborted) abortHandler();
+    signal?.addEventListener('abort', abortHandler, { once: true });
+
+    try {
+      while (true) {
+        const item = await next();
+        if (item.type === 'end') break;
+        if (item.value === undefined) continue;
+
+        let payload: any;
+        try {
+          payload = JSON.parse(item.value);
+        } catch {
+          continue;
+        }
+        if (payload?.type === 'delta' && typeof payload.content === 'string') {
+          yield { type: 'content', content: payload.content };
+        }
+      }
+
+      // Cancelled — do not emit a synthetic `done`.
+      if (signal?.aborted) return;
+      if (invokeError) throw invokeError;
+
+      // Rust resolves with the accumulated text + tool calls once the SSE
+      // stream finishes; emit the terminal `done` chunk the engine expects.
+      const text: string = (finalResult?.text as string | undefined) ?? '';
+      const rawToolCalls: Array<Record<string, any>> =
+        (finalResult?.toolCalls as Array<Record<string, any>> | undefined) ?? [];
+      const toolCalls: ToolCall[] = rawToolCalls.map((tc, i) => ({
+        id: (tc.id as string | undefined) || `call_${i}`,
+        index: i,
+        function: {
+          name: (tc.function?.name as string | undefined) ?? '',
+          arguments: (tc.function?.arguments as string | undefined) ?? '',
+        },
+      }));
+      yield { type: 'done', content: text, toolCalls };
+    } finally {
+      signal?.removeEventListener('abort', abortHandler);
+      if (!closed && !invokeDone) {
+        try {
+          channel.close();
+        } catch {
+          /* ignore */
+        }
+      }
+      void invokePromise;
+    }
+  }
+
+  async complete(messages: Message[], tools: ToolDefinition[]): Promise<LLMResponse> {
+    let content = '';
+    let toolCalls: ToolCall[] = [];
+    for await (const chunk of this.stream(messages, tools)) {
+      if (chunk.type === 'content') {
+        content += chunk.content;
+      } else if (chunk.type === 'done') {
+        content = chunk.content;
+        toolCalls = chunk.toolCalls;
+      }
+    }
+    return { content, toolCalls: toolCalls.length > 0 ? toolCalls : undefined };
+  }
+}
+
+export { SECRET_KEY };

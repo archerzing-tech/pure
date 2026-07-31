@@ -1,0 +1,45 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "productName": "pure",
+  "version": "0.6.0",
+  "identifier": "com.pure.agent",
+  "build": {
+    "beforeDevCommand": "bun run vite",
+    "beforeBuildCommand": "bun run vite build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "pure",
+        "width": 960,
+        "height": 540,
+        "minWidth": 900,
+        "minHeight": 506,
+        "center": true,
+        "resizable": true,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://releases.pure.app/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI1NTA3OURCRTlFNTM4RjUKUldUMU9PWHAyM2xRdFpjcy8yTWpSQzlaMmhnc1M5ZGcxVXNyVFRFMDlvZVBxRUY0SExDWHl3VG0K",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true
+  }
+}

@@ -1,0 +1,32 @@
+- generic [ref=e332]:
+  - complementary [ref=e333]:
+    - button "Back to chat" [ref=e334] [cursor=pointer]:
+      - img [ref=e335]
+      - text: Back to chat
+    - generic [ref=e337]: Settings
+    - button "Models Providers & API keys" [ref=e338] [cursor=pointer]:
+      - img [ref=e340]
+      - generic [ref=e344]:
+        - generic [ref=e345]: Models
+        - generic [ref=e346]: Providers & API keys
+    - button "MCP servers Extend with tools" [active] [ref=e347] [cursor=pointer]:
+      - img [ref=e349]
+      - generic [ref=e352]:
+        - generic [ref=e353]: MCP servers
+        - generic [ref=e354]: Extend with tools
+    - button "Tool safety Permission mode" [ref=e355] [cursor=pointer]:
+      - img [ref=e357]
+      - generic [ref=e360]:
+        - generic [ref=e361]: Tool safety
+        - generic [ref=e362]: Permission mode
+  - generic [ref=e447]:
+    - banner [ref=e448]:
+      - heading "MCP servers" [level=1] [ref=e449]
+      - paragraph [ref=e450]: Connect Model Context Protocol servers to give the agent extra tools. Started per run over stdio.
+    - generic [ref=e451]:
+      - img [ref=e453]
+      - generic [ref=e456]: No MCP servers yet
+      - generic [ref=e457]: Add a server such as a filesystem, database, or web tool.
+    - button "Add MCP server" [ref=e458] [cursor=pointer]:
+      - img [ref=e459]
+      - text: Add MCP server
