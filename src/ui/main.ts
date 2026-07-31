@@ -66,14 +66,18 @@ const sidebarNewChat = document.getElementById('sidebar-new-chat') as HTMLButton
 const sidebarSettingsBtn = document.getElementById('sidebar-settings-btn') as HTMLButtonElement;
 
 // ── Init ──
-applySavedAppearance();
-chat.setWorkspace(settings.getWorkspace());
-updateSidebarModel();
-enableInputIfReady();
-checkLandingState();
-refreshSidebarSessions();
-restoreLastSession();
-setTimeout(() => checkForUpdatesSilently(), 3000);
+(async () => {
+  applySavedAppearance();
+  chat.setWorkspace(settings.getWorkspace());
+  updateSidebarModel();
+  enableInputIfReady();
+
+  await restoreLastSession();
+  checkLandingState();
+
+  refreshSidebarSessions();
+  setTimeout(() => checkForUpdatesSilently(), 3000);
+})().catch(err => console.error('[pure] init failed:', err));
 
 /** Ensure the landing class is set correctly based on chat state */
 function checkLandingState() {
