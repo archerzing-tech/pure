@@ -9,6 +9,10 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
+    # secrets can't be read inside `if:` expressions, so mirror the Apple
+    # signing secret's presence into a job-level env var we CAN branch on.
+    env:
+      HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +45,7 @@ jobs:
       # empty APPLE_CERTIFICATE as "present" and runs `security import` with an
       # empty cert, failing the whole release. The unsigned variant omits them.
       - name: Build and publish GUI (signed)
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        if: env.HAS_APPLE_SIGNING == 'true'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,7 +64,7 @@ jobs:
           prerelease: false
 
       - name: Build and publish GUI (unsigned)
-        if: ${{ secrets.APPLE_CERTIFICATE == '' }}
+        if: env.HAS_APPLE_SIGNING == 'false'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
