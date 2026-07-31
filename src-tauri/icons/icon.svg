@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background rounded rect -->
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <!-- Letter "P" - bold geometric blocks matching CLI wordmark style -->
+  <!-- Vertical bar -->
+  <rect x="280" y="200" width="88" height="624" rx="44" fill="white"/>
+  <!-- Top horizontal -->
+  <rect x="280" y="200" width="352" height="88" rx="44" fill="white"/>
+  <!-- Middle horizontal -->
+  <rect x="280" y="504" width="352" height="88" rx="44" fill="white"/>
+  <!-- Top right vertical (closing the P loop) -->
+  <rect x="544" y="200" width="88" height="392" rx="44" fill="white"/>
+
+  <!-- Purple accent dot - the brand's signature -->
+  <circle cx="736" cy="768" r="48" fill="url(#accent)"/>
+</svg>
