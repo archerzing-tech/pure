@@ -21,7 +21,9 @@
 - **Permission System** — Four modes: YOLO (auto-approve), NORMAL (prompt per write), PLAN (read-only), DONT_ASK (silent block)
 - **Session Persistence** — Checkpoint-based state with resume support (`pure --resume`)
 - **Auto-updater** — GUI checks for updates via signed `.app.tar.gz` artifacts
-- **Multi-language UI** — English / 中文 interface
+- **Multi-language UI** — English / Chinese interface
+
+> 📖 中文文档 → [README_zh.md](README_zh.md)
 
 ---
 
