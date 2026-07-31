@@ -144,7 +144,120 @@
               <div class="settings-page" data-page="llm">
                 <h2 class="settings-page-title" data-i18n="llm.title">LLM Provider</h2>
                 <p class="settings-page-desc" data-i18n="llm.desc">Configure your AI model provider</p>
-                <div class="settings-section">[... settings content unchanged ...]
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="llm.provider">Provider</span><span class="setting-hint" data-i18n="llm.provider.hint">AI model service</span></div>
+                    <select id="cfg-provider" class="setting-select" data-i18n-options="deepseek-openai:provider.deepseek-openai,deepseek-anthropic:provider.deepseek-anthropic,qwen:provider.qwen,glm:provider.glm"><option value="deepseek-openai">DeepSeek (OpenAI)</option><option value="deepseek-anthropic">DeepSeek (Anthropic)</option><option value="qwen">Qwen (Tongyi)</option><option value="glm">GLM (Zhipu)</option></select>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="llm.apiKey">API Key</span><span class="setting-hint" data-i18n="llm.apiKey.hint">Your API key</span></div>
+                    <div class="setting-input-group">
+                      <input id="cfg-apikey" class="setting-input" type="password" data-i18n-placeholder="llm.apiKey.placeholder" placeholder="sk-..." />
+                      <button id="cfg-toggle-key" class="setting-icon-btn" data-i18n-title="llm.apiKey.toggle" title="Toggle visibility"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                    </div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="llm.model">Model</span><span class="setting-hint" data-i18n="llm.model.hint">Model identifier</span></div>
+                    <input id="cfg-model" class="setting-input" type="text" placeholder="deepseek-v4-flash" />
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="llm.baseURL">Base URL</span><span class="setting-hint" data-i18n="llm.baseURL.hint">Custom endpoint (optional)</span></div>
+                    <input id="cfg-baseurl" class="setting-input" type="text" data-i18n-placeholder="llm.baseURL.placeholder" placeholder="Auto-detected" />
+                  </div>
+                </div>
+              </div>
+              <!-- Tools -->
+              <div class="settings-page" data-page="tools">
+                <h2 class="settings-page-title" data-i18n="tools.title">Tools</h2>
+                <p class="settings-page-desc" data-i18n="tools.desc">Available tool integrations</p>
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.fs">File System</span><span class="setting-hint" data-i18n="tools.fs.hint">Read, write, edit, search</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-tool-fs" checked /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.cmd">Command Execution</span><span class="setting-hint" data-i18n="tools.cmd.hint">Run shell commands</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-tool-cmd" checked /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.git">Git Integration</span><span class="setting-hint" data-i18n="tools.git.hint">Diff, log, status</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-tool-git" checked /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.browser">Browser Automation</span><span class="setting-hint" data-i18n="tools.browser.hint">Playwright-based</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-tool-browser" /><span class="toggle-slider"></span></label>
+                  </div>
+                </div>
+              </div>
+              <!-- Skills -->
+              <div class="settings-page" data-page="skills">
+                <h2 class="settings-page-title" data-i18n="skills.title">Skills</h2>
+                <p class="settings-page-desc" data-i18n="skills.desc">Enable or disable agent skills</p>
+                <div class="settings-section">
+                  <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.code-review">Code Review</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="code-review" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.code-review.desc">Review code for correctness and style</p></div>
+                  <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.web-research">Web Research</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="web-research" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.web-research.desc">Search the web for documentation</p></div>
+                  <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.memory">Memory</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="memory" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.memory.desc">Remember preferences and context</p></div>
+                  <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.planning">Planning</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="planning" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.planning.desc">Break down complex tasks</p></div>
+                </div>
+              </div>
+              <!-- MCP -->
+              <div class="settings-page" data-page="mcp">
+                <h2 class="settings-page-title" data-i18n="mcp.title">MCP Servers</h2>
+                <p class="settings-page-desc" data-i18n="mcp.desc">Connect to Model Context Protocol servers for extended tools</p>
+                <div class="settings-section">
+                  <div id="mcp-server-list"></div>
+                  <div id="mcp-add-form" class="mcp-add-form hidden">
+                    <div class="mcp-form-row">
+                      <input id="mcp-form-name" class="setting-input" type="text" data-i18n-placeholder="mcp.serverName.placeholder" placeholder="Server name (e.g. filesystem)" />
+                      <select id="mcp-form-transport" class="setting-select" data-i18n-options="stdio:mcp.transport.stdio,http:mcp.transport.http">
+                        <option value="stdio">stdio (subprocess)</option>
+                        <option value="http">http (SSE)</option>
+                      </select>
+                    </div>
+                    <div class="mcp-form-row" id="mcp-form-cmd-row">
+                      <input id="mcp-form-command" class="setting-input mcp-cmd-input" type="text" data-i18n-placeholder="mcp.command.placeholder" placeholder="npx -y @anthropic/mcp-filesystem /path" />
+                    </div>
+                    <div class="mcp-form-row hidden" id="mcp-form-url-row">
+                      <input id="mcp-form-url" class="setting-input mcp-cmd-input" type="text" data-i18n-placeholder="mcp.url.placeholder" placeholder="http://localhost:3000" />
+                    </div>
+                    <div class="mcp-form-actions">
+                      <button id="mcp-form-save" class="setting-btn primary" data-i18n="mcp.saveBtn">Save</button>
+                      <button id="mcp-form-cancel" class="setting-btn secondary" data-i18n="mcp.cancelBtn">Cancel</button>
+                    </div>
+                  </div>
+                  <button id="cfg-add-mcp" class="setting-btn primary" data-i18n="mcp.addBtn">+ Add MCP Server</button>
+                </div>
+              </div>
+              <!-- Appearance -->
+              <div class="settings-page" data-page="appearance">
+                <h2 class="settings-page-title" data-i18n="appearance.title">Appearance</h2>
+                <p class="settings-page-desc" data-i18n="appearance.desc">Customize the visual style</p>
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="appearance.theme">Theme</span><span class="setting-hint" data-i18n="appearance.theme.hint">Color scheme</span></div>
+                    <div class="theme-selector" id="cfg-theme">
+                      <label class="theme-option active" data-theme="light"><span data-i18n-label="appearance.theme.light">Light</span></label>
+                      <label class="theme-option" data-theme="dark"><span data-i18n-label="appearance.theme.dark">Dark</span></label>
+                      <label class="theme-option" data-theme="system"><span data-i18n-label="appearance.theme.system">System</span></label>
+                    </div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="appearance.fontSize">Font Size</span></div>
+                    <select id="cfg-fontsize" class="setting-select" data-i18n-options="small:appearance.fontSize.small,medium:appearance.fontSize.medium,large:appearance.fontSize.large"><option value="small">Small</option><option value="medium" selected>Medium</option><option value="large">Large</option></select>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="appearance.density">Density</span></div>
+                    <select id="cfg-density" class="setting-select" data-i18n-options="compact:appearance.density.compact,comfortable:appearance.density.comfortable,spacious:appearance.density.spacious"><option value="compact">Compact</option><option value="comfortable" selected>Comfortable</option><option value="spacious">Spacious</option></select>
+                  </div>
+                </div>
+              </div>
+              <!-- Updates -->
+              <div class="settings-page" data-page="updates">
+                <h2 class="settings-page-title" data-i18n="updates.title">Updates</h2>
+                <p class="settings-page-desc" data-i18n="updates.desc">Check for new versions of pure</p>
+                <div class="settings-section">
+                  <div id="updater-status" class="updater-status"></div>
+                  <button id="cfg-check-updates" class="setting-btn primary" data-i18n="updates.checkBtn">Check for updates</button>
                 </div>
               </div>
             </div>
