@@ -1,0 +1,87 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Run tests
+        run: bun test
+
+      - name: Build CLI binary (macOS arm64)
+        run: bun run cli:build
+
+      - name: Build GUI (Tauri macOS)
+        run: bun run gui:build
+
+      - name: Upload CLI binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pure-cli-macos-arm64
+          path: pure
+
+      - name: Upload GUI DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: pure-gui-macos
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Generate release notes
+        run: |
+          echo "## Pure ${{ github.ref_name }}" > release-notes.md
+          echo "" >> release-notes.md
+          echo "### Artifacts" >> release-notes.md
+          echo "- \`pure\` — CLI binary (macOS arm64)" >> release-notes.md
+          echo "- \`pure_*.dmg\` — macOS GUI installer" >> release-notes.md
+          echo "- \`pure.app.tar.gz\` — macOS app archive (for auto-updater)" >> release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Pure ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: |
+            pure-cli-macos-arm64/pure
+            pure-gui-macos/*.dmg
+            pure-gui-macos/*.app.tar.gz
+            pure-gui-macos/*.app.tar.gz.sig
+          draft: false
+          prerelease: false
