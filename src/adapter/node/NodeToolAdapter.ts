@@ -169,6 +169,33 @@ export class NodeToolAdapter implements ToolAdapter {
         required: ['files', 'oldString', 'newString'],
       },
     },
+    {
+      name: 'git_diff',
+      description: 'Show git diff (unstaged changes). Set staged=true for staged changes.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          staged: { type: 'boolean', description: 'Show staged changes' },
+          path: { type: 'string', description: 'Limit to a file path' },
+        },
+      },
+    },
+    {
+      name: 'git_log',
+      description: 'Show recent git commit history.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          maxCount: { type: 'integer', description: 'Max commits (default 10)' },
+          oneline: { type: 'boolean', description: 'One line per commit' },
+        },
+      },
+    },
+    {
+      name: 'git_status',
+      description: 'Show working tree status — modified, added, deleted, and untracked files.',
+      input_schema: { type: 'object', properties: {} },
+    },
   ];
 
   constructor(config: NodeToolConfig) {
@@ -197,6 +224,9 @@ export class NodeToolAdapter implements ToolAdapter {
       web_fetch: { sideEffects: false, isWrite: false },
       glob_files: { sideEffects: false, isWrite: false },
       replace_files: { sideEffects: true, isWrite: true },
+      git_diff: { sideEffects: false, isWrite: false },
+      git_log: { sideEffects: false, isWrite: false },
+      git_status: { sideEffects: false, isWrite: false },
     };
     return meta[toolName];
   }
@@ -219,6 +249,9 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'web_fetch': return this.handleWebFetch(args, signal, start);
         case 'glob_files': return this.handleGlobFiles(args, start);
         case 'replace_files': return this.handleReplaceFiles(args, start);
+        case 'git_diff': return this.handleGitCmd(args, ['diff', ...(args.staged ? ['--staged'] : []), ...(typeof args.path === 'string' ? ['--', args.path as string] : [])], signal, start);
+        case 'git_log': return this.handleGitCmd(args, ['log', '-n', String(args.maxCount ?? 10), ...(args.oneline !== false ? ['--oneline'] : [])], signal, start);
+        case 'git_status': return this.handleGitCmd(args, ['status', '--short'], signal, start);
         default:
           return this.fail(toolCall, start, `Unknown tool: ${toolCall.function.name}`);
       }
@@ -627,6 +660,44 @@ export class NodeToolAdapter implements ToolAdapter {
       success: errors === 0,
       duration: Date.now() - start,
     };
+  }
+
+  private async handleGitCmd(_args: Record<string, unknown>, gitArgs: string[], signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
+    const controller = new AbortController();
+    if (signal) {
+      signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    setTimeout(() => controller.abort(), this.commandTimeout);
+
+    try {
+      const proc = Bun.spawn(['git', ...gitArgs], {
+        cwd: this.workspace,
+        stdout: 'pipe',
+        stderr: 'pipe',
+        signal: controller.signal,
+      });
+
+      const stdout = await new Response(proc.stdout).text();
+      const stderr = await new Response(proc.stderr).text();
+      await proc.exited;
+
+      if (proc.exitCode !== 0) {
+        return this.fail(null!, start, stderr.trim() || `git failed with exit code ${proc.exitCode}`);
+      }
+
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: `git_${gitArgs[0] ?? 'unknown'}`,
+        result: stdout.trim() || '(no output)',
+        success: true,
+        duration: Date.now() - start,
+      };
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        return this.fail(null!, start, `Git command timed out after ${this.commandTimeout}ms`);
+      }
+      return this.fail(null!, start, err?.message ?? 'Git command failed');
+    }
   }
 
   // ── Helpers ──
