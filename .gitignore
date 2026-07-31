@@ -7,3 +7,4 @@ src-tauri/target/
 .env.*.local
 .DS_Store
 pure
+.playwright-mcp/
