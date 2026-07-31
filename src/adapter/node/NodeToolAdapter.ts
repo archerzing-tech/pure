@@ -95,6 +95,53 @@ export class NodeToolAdapter implements ToolAdapter {
         required: ['command'],
       },
     },
+    {
+      name: 'create_directory',
+      description: 'Create a directory (and any missing parent directories) in the workspace.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Directory path relative to workspace root' },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'diff_files',
+      description: 'Show a unified diff between two files in the workspace.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          pathA: { type: 'string', description: 'First file path relative to workspace' },
+          pathB: { type: 'string', description: 'Second file path relative to workspace' },
+        },
+        required: ['pathA', 'pathB'],
+      },
+    },
+    {
+      name: 'web_search',
+      description: 'Search the web and return results with titles, snippets, and URLs. Uses DuckDuckGo — no API key needed.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' },
+          maxResults: { type: 'number', description: 'Max results (default 10, max 20)' },
+        },
+        required: ['query'],
+      },
+    },
+    {
+      name: 'web_fetch',
+      description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Full URL to fetch (https://...)' },
+          maxChars: { type: 'number', description: 'Max characters to return (default 20000)' },
+        },
+        required: ['url'],
+      },
+    },
   ];
 
   constructor(config: NodeToolConfig) {
@@ -117,6 +164,10 @@ export class NodeToolAdapter implements ToolAdapter {
       search_files: { sideEffects: false, isWrite: false },
       list_files: { sideEffects: false, isWrite: false },
       execute_command: { sideEffects: true, isWrite: true },
+      create_directory: { sideEffects: true, isWrite: true },
+      diff_files: { sideEffects: false, isWrite: false },
+      web_search: { sideEffects: false, isWrite: false },
+      web_fetch: { sideEffects: false, isWrite: false },
     };
     return meta[toolName];
   }
@@ -133,6 +184,10 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'search_files': return this.handleSearchFiles(args, start);
         case 'list_files': return this.handleListFiles(args, start);
         case 'execute_command': return this.handleExecuteCommand(args, signal, start);
+        case 'create_directory': return this.handleCreateDirectory(args, start);
+        case 'diff_files': return this.handleDiffFiles(args, start);
+        case 'web_search': return this.handleWebSearch(args, start);
+        case 'web_fetch': return this.handleWebFetch(args, signal, start);
         default:
           return this.fail(toolCall, start, `Unknown tool: ${toolCall.function.name}`);
       }
@@ -331,6 +386,135 @@ export class NodeToolAdapter implements ToolAdapter {
     }
   }
 
+  private async handleCreateDirectory(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const dirPath = this.resolve(String(args.path));
+
+    await mkdir(dirPath, { recursive: true });
+
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'create_directory',
+      result: `Created directory: ${String(args.path)}`,
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
+  private async handleDiffFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const pathA = this.resolve(String(args.pathA));
+    const pathB = this.resolve(String(args.pathB));
+
+    const proc = Bun.spawn(['diff', '-u', pathA, pathB], {
+      cwd: this.workspace,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    await proc.exited;
+
+    if (proc.exitCode === 0) {
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'diff_files',
+        result: '(files are identical)',
+        success: true,
+        duration: Date.now() - start,
+      };
+    }
+
+    if (proc.exitCode === 1) {
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'diff_files',
+        result: stdout.trim() || '(files differ)',
+        success: true,
+        duration: Date.now() - start,
+      };
+    }
+
+    return this.fail(null!, start, stderr.trim() || `diff failed with exit code ${proc.exitCode}`);
+  }
+
+  private async handleWebSearch(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const query = String(args.query);
+    const maxResults = Math.min(typeof args.maxResults === 'number' ? args.maxResults : 10, 20);
+
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Pure/1.0' },
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!resp.ok) {
+      return this.fail(null!, start, `Search failed: HTTP ${resp.status}`);
+    }
+
+    const html = await resp.text();
+    const results = parseDuckDuckGoResults(html, maxResults);
+
+    if (results.length === 0) {
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'web_search',
+        result: `No results found for "${query}"`,
+        success: true,
+        duration: Date.now() - start,
+      };
+    }
+
+    const output = results
+      .map((r, i) => `${i + 1}. ${r.title}\n   ${r.snippet}\n   ${r.url}`)
+      .join('\n\n');
+
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'web_search',
+      result: output,
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
+  private async handleWebFetch(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
+    const url = String(args.url);
+    const maxChars = typeof args.maxChars === 'number' ? args.maxChars : 20000;
+
+    const controller = new AbortController();
+    if (signal) {
+      signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    setTimeout(() => controller.abort(), 30000);
+
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Pure/1.0' },
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) {
+      return this.fail(null!, start, `Fetch failed: HTTP ${resp.status}`);
+    }
+
+    const contentType = resp.headers.get('content-type') || '';
+    if (!contentType.includes('text/html') && !contentType.includes('text/plain')) {
+      return this.fail(null!, start, `Unsupported content type: ${contentType}. Only HTML and plain text are supported.`);
+    }
+
+    const html = await resp.text();
+    const text = stripHtml(html).trim();
+    const truncated = text.length > maxChars ? text.slice(0, maxChars) + '\n\n[truncated]' : text;
+
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'web_fetch',
+      result: truncated || '(empty page)',
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
   // ── Helpers ──
 
   private resolve(filePath: string): string {
@@ -355,4 +539,68 @@ export class NodeToolAdapter implements ToolAdapter {
 
 function safeParseArgs(raw: string): Record<string, unknown> {
   try { return JSON.parse(raw); } catch { return {}; }
+}
+
+// ── DuckDuckGo HTML result parser ──
+
+interface SearchResult {
+  title: string;
+  snippet: string;
+  url: string;
+}
+
+function parseDuckDuckGoResults(html: string, maxResults: number): SearchResult[] {
+  const results: SearchResult[] = [];
+
+  // Parse DuckDuckGo HTML search: each result is in a div with class "result"
+  const resultBlockRegex = /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?=<div[^>]*class="[^"]*result|$)/gi;
+  const blocks = html.match(resultBlockRegex);
+  if (!blocks) return results;
+
+  for (const block of blocks) {
+    if (results.length >= maxResults) break;
+
+    // Extract title + URL from <a class="result__a" href="...">Title</a>
+    const linkMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!linkMatch) continue;
+
+    const url = decodeHtmlEntities(linkMatch[1].trim());
+    const title = stripHtml(linkMatch[2]).trim();
+
+    if (!title || !url) continue;
+
+    // Extract snippet from <a class="result__snippet">
+    const snippetMatch = block.match(/<[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/[^>]+>/i);
+    const snippet = snippetMatch ? stripHtml(snippetMatch[1]).trim() : '';
+
+    results.push({ title, snippet, url });
+  }
+
+  return results;
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/(?:div|h[1-6]|li|tr|section|article)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .join('\n');
 }

@@ -110,6 +110,53 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
     description: 'Show working tree status — modified, added, deleted, and untracked files.',
     input_schema: { type: 'object', properties: {} },
   },
+  {
+    name: 'create_directory',
+    description: 'Create a directory (and any missing parent directories) in the workspace.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Directory path relative to workspace root' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'diff_files',
+    description: 'Show a unified diff between two files in the workspace.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        pathA: { type: 'string', description: 'First file path relative to workspace' },
+        pathB: { type: 'string', description: 'Second file path relative to workspace' },
+      },
+      required: ['pathA', 'pathB'],
+    },
+  },
+  {
+    name: 'web_search',
+    description: 'Search the web and return results with titles, snippets, and URLs. Uses DuckDuckGo — no API key needed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query' },
+        maxResults: { type: 'number', description: 'Max results (default 10, max 20)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'web_fetch',
+    description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Full URL to fetch (https://...)' },
+        maxChars: { type: 'number', description: 'Max characters to return (default 20000)' },
+      },
+      required: ['url'],
+    },
+  },
 ];
 
 const TOOL_METADATA: Record<string, { sideEffects: boolean; isWrite: boolean }> = {
@@ -122,6 +169,10 @@ const TOOL_METADATA: Record<string, { sideEffects: boolean; isWrite: boolean }> 
   git_diff: { sideEffects: false, isWrite: false },
   git_log: { sideEffects: false, isWrite: false },
   git_status: { sideEffects: false, isWrite: false },
+  create_directory: { sideEffects: true, isWrite: true },
+  diff_files: { sideEffects: false, isWrite: false },
+  web_search: { sideEffects: false, isWrite: false },
+  web_fetch: { sideEffects: false, isWrite: false },
 };
 
 type InvokeFunction = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -234,11 +285,39 @@ export class TauriToolAdapter implements ToolAdapter {
           const status = await tauriInvoke('git_status', { workspace: ws }) as string;
           return { id: toolCall.id, toolName: name, result: status, success: true, duration: Date.now() - start };
         }
+        case 'create_directory': {
+          const dirMsg = await tauriInvoke('create_directory', { workspace: ws, path: String(args.path ?? '') }) as string;
+          return { id: toolCall.id, toolName: name, result: dirMsg, success: true, duration: Date.now() - start };
+        }
+        case 'diff_files': {
+          const diff = await tauriInvoke('diff_files', {
+            workspace: ws,
+            pathA: String(args.pathA ?? ''),
+            pathB: String(args.pathB ?? ''),
+          }) as string;
+          return { id: toolCall.id, toolName: name, result: diff, success: true, duration: Date.now() - start };
+        }
+        case 'web_search': {
+          const searchData = await tauriInvoke('web_search', {
+            workspace: ws,
+            query: String(args.query ?? ''),
+            maxResults: args.maxResults ?? 10,
+          }) as string;
+          return { id: toolCall.id, toolName: name, result: searchData, success: true, duration: Date.now() - start };
+        }
+        case 'web_fetch': {
+          const pageText = await tauriInvoke('web_fetch', {
+            workspace: ws,
+            url: String(args.url ?? ''),
+            maxChars: args.maxChars ?? 20000,
+          }) as string;
+          return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
+        }
         default:
           return {
             id: toolCall.id,
             toolName: name,
-            error: `Unknown tool: ${name}. Available: read_file, write_file, execute_command, git_diff, git_log, git_status`,
+            error: `Unknown tool: ${name}. Available: read_file, write_file, edit_file, search_files, list_files, execute_command, create_directory, diff_files, web_search, web_fetch, git_diff, git_log, git_status`,
             success: false,
             duration: Date.now() - start,
           };

@@ -144,6 +144,61 @@ export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze([
     tags: [Tags.SHELL, Tags.READ],
     riskLevel: 'low',
   },
+  {
+    name: 'create_directory',
+    description: 'Create a directory (and any missing parent directories) in the workspace.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Directory path relative to workspace root' },
+      },
+      required: ['path'],
+    },
+    tags: [Tags.FS, Tags.WRITE],
+    riskLevel: 'low',
+  },
+  {
+    name: 'diff_files',
+    description: 'Show a unified diff between two files in the workspace.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        pathA: { type: 'string', description: 'First file path relative to workspace' },
+        pathB: { type: 'string', description: 'Second file path relative to workspace' },
+      },
+      required: ['pathA', 'pathB'],
+    },
+    tags: [Tags.FS, Tags.READ],
+    riskLevel: 'low',
+  },
+  {
+    name: 'web_search',
+    description: 'Search the web and return results with titles, snippets, and URLs. Uses DuckDuckGo — no API key needed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query' },
+        maxResults: { type: 'number', description: 'Max results (default 10, max 20)' },
+      },
+      required: ['query'],
+    },
+    tags: [Tags.SEARCH, Tags.READ],
+    riskLevel: 'low',
+  },
+  {
+    name: 'web_fetch',
+    description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Full URL to fetch (https://...)' },
+        maxChars: { type: 'number', description: 'Max characters to return (default 20000)' },
+      },
+      required: ['url'],
+    },
+    tags: [Tags.READ],
+    riskLevel: 'low',
+  },
 ]);
 
 // ── ToolRegistry ──

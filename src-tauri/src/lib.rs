@@ -394,6 +394,321 @@ fn git_status(workspace: String) -> Result<String, String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  Create Directory
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+fn create_directory(workspace: String, path: String) -> Result<String, String> {
+    let full = resolve(&workspace, &path)?;
+    fs::create_dir_all(&full).map_err(|e| format!("mkdir: {}", e))?;
+    Ok(format!("Created directory: {}", path))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Diff Files
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+fn diff_files(workspace: String, path_a: String, path_b: String) -> Result<String, String> {
+    let full_a = resolve(&workspace, &path_a)?;
+    let full_b = resolve(&workspace, &path_b)?;
+
+    let output = std::process::Command::new("diff")
+        .arg("-u")
+        .arg(&full_a)
+        .arg(&full_b)
+        .output()
+        .map_err(|e| format!("diff: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    match output.status.code() {
+        Some(0) => Ok("(files are identical)".to_string()),
+        Some(1) => Ok(if stdout.is_empty() { stderr } else { stdout }),
+        _ => Err(if stderr.is_empty() { "diff failed".to_string() } else { stderr }),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Web Search (DuckDuckGo HTML)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+async fn web_search(
+    _workspace: String,
+    query: String,
+    max_results: Option<usize>,
+) -> Result<String, String> {
+    let max = max_results.unwrap_or(10).min(20);
+    let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(&query));
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("client: {}", e))?;
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "Pure/1.0")
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Search failed: HTTP {}", resp.status()));
+    }
+
+    let html = resp.text().await.map_err(|e| format!("read: {}", e))?;
+    let results = parse_duckduckgo_results(&html, max);
+
+    if results.is_empty() {
+        return Ok(format!("No results found for \"{}\"", query));
+    }
+
+    let output: Vec<String> = results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| format!("{}. {}\n   {}\n   {}", i + 1, r.title, r.snippet, r.url))
+        .collect();
+
+    Ok(output.join("\n\n"))
+}
+
+fn urlencoding(s: &str) -> String {
+    let mut encoded = String::new();
+    for byte in s.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(*byte as char);
+            }
+            b' ' => encoded.push_str("%20"),
+            _ => encoded.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    encoded
+}
+
+#[derive(Debug)]
+struct SearchResult {
+    title: String,
+    snippet: String,
+    url: String,
+}
+
+fn parse_duckduckgo_results(html: &str, max: usize) -> Vec<SearchResult> {
+    let mut results: Vec<SearchResult> = Vec::new();
+
+    // Simple state-machine parser for DuckDuckGo HTML results
+    let mut in_result = false;
+    let mut current_block = String::new();
+
+    for line in html.lines() {
+        if line.contains("class=\"result\"") || line.contains("class='result'") {
+            in_result = true;
+            current_block = line.to_string();
+        } else if in_result {
+            current_block.push_str(line);
+            if line.contains("</div>") {
+                in_result = false;
+                if let Some(result) = parse_result_block(&current_block) {
+                    results.push(result);
+                    if results.len() >= max {
+                        break;
+                    }
+                }
+                current_block.clear();
+            }
+        }
+    }
+
+    results
+}
+
+fn parse_result_block(block: &str) -> Option<SearchResult> {
+    // Extract link: <a ... class="result__a" href="URL">
+    let href_start = block.find("class=\"result__a\"")?;
+
+    let url = extract_href(block, href_start)?;
+    let title = extract_tag_content(block, "a").unwrap_or_default();
+    let snippet = extract_tag_content(block, "result__snippet").unwrap_or_default();
+
+    let title = strip_html_tags(&title);
+    let snippet = strip_html_tags(&snippet);
+
+    if title.is_empty() || url.is_empty() {
+        return None;
+    }
+
+    Some(SearchResult {
+        title: html_decode(&title),
+        snippet: html_decode(&snippet),
+        url: html_decode(&url),
+    })
+}
+
+fn extract_href(block: &str, from: usize) -> Option<String> {
+    let rest = &block[from..];
+    let href_idx = rest.find("href=")?;
+    let after_href = &rest[href_idx + 5..];
+    let quote = after_href.chars().next()?;
+    let start = 1;
+    let end = after_href[start..].find(quote)?;
+    Some(after_href[start..start + end].to_string())
+}
+
+fn extract_tag_content(block: &str, class_hint: &str) -> Option<String> {
+    let class_idx = block.find(class_hint)?;
+    let rest = &block[class_idx..];
+    let tag_end = rest.find('>')?;
+    let after_tag = &rest[tag_end + 1..];
+    let close_tag = after_tag.find('<')?;
+    Some(after_tag[..close_tag].to_string())
+}
+
+fn strip_html_tags(s: &str) -> String {
+    let mut result = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        if c == '<' {
+            in_tag = true;
+        } else if c == '>' {
+            in_tag = false;
+        } else if !in_tag {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn html_decode(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&nbsp;", " ")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Web Fetch (URL → readable text)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+async fn web_fetch(
+    _workspace: String,
+    url: String,
+    max_chars: Option<usize>,
+) -> Result<String, String> {
+    let max = max_chars.unwrap_or(20000);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("client: {}", e))?;
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "Pure/1.0")
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Fetch failed: HTTP {}", resp.status()));
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !content_type.contains("text/html") && !content_type.contains("text/plain") {
+        return Err(format!(
+            "Unsupported content type: {}. Only HTML and plain text are supported.",
+            content_type
+        ));
+    }
+
+    let html = resp.text().await.map_err(|e| format!("read: {}", e))?;
+    let text = strip_html_full(&html);
+
+    let safe_end = text
+        .char_indices()
+        .nth(max)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    let truncated = if text.len() > safe_end {
+        format!("{}\n\n[truncated]", &text[..safe_end])
+    } else {
+        text.to_string()
+    };
+
+    if truncated.trim().is_empty() {
+        Ok("(empty page)".to_string())
+    } else {
+        Ok(truncated)
+    }
+}
+
+fn strip_html_full(html: &str) -> String {
+    // Remove scripts and styles
+    let mut s = String::new();
+    let mut in_skip = false;
+    let mut skip_tag = String::new();
+    let mut i = 0;
+    let chars: Vec<char> = html.chars().collect();
+
+    while i < chars.len() {
+        if i + 6 < chars.len() && chars[i..i + 7].iter().collect::<String>() == "<script" {
+            in_skip = true;
+            skip_tag = "script".to_string();
+        } else if i + 5 < chars.len() && chars[i..i + 6].iter().collect::<String>() == "<style" {
+            in_skip = true;
+            skip_tag = "style".to_string();
+        }
+
+        if in_skip {
+            let close_tag = format!("</{}>", skip_tag);
+            if i + close_tag.len() <= chars.len()
+                && chars[i..i + close_tag.len()].iter().collect::<String>() == close_tag
+            {
+                in_skip = false;
+                skip_tag.clear();
+                i += close_tag.len();
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        s.push(chars[i]);
+        i += 1;
+    }
+
+    // Now strip all HTML tags
+    let mut result = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        if c == '<' {
+            in_tag = true;
+            // Add newlines for block-level breaks
+            result.push('\n');
+        } else if c == '>' {
+            in_tag = false;
+        } else if !in_tag {
+            result.push(c);
+        }
+    }
+
+    // Collapse whitespace
+    let lines: Vec<&str> = result.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    html_decode(&lines.join("\n"))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  MCP Subprocess Commands
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -976,7 +1291,9 @@ pub fn run() {
         .manage(WatcherRegistry::new(BTreeMap::new()))
         .invoke_handler(tauri::generate_handler![
             // File tools
-            read_file, write_file, edit_file, search_files, list_files,
+            read_file, write_file, edit_file, search_files, list_files, create_directory, diff_files,
+            // Web tools
+            web_search, web_fetch,
             // Command execution
             execute_command, execute_command_stream,
             // Git tools
