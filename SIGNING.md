@@ -10,6 +10,10 @@ failed to sign app bundle: No valid signing key found in environment
 
 This doc explains why we sign, how to generate a key, and how to feed it to the build.
 
+> **CLI vs GUI:** only the **GUI** updater artifacts (`.app.tar.gz` + `.sig`) are signed.
+> The **CLI binary** (`pure`) has no updater and is never signed — CI just compiles and
+> attaches it to the release as-is. Everything below applies to the GUI updater signing.
+
 ## Why
 
 Three reasons:
