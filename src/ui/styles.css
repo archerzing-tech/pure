@@ -127,9 +127,20 @@ body {
 #sidebar-brand {
   font-size: 13px;
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  gap: 6px;
   text-rendering: optimizeLegibility;
   font-feature-settings: "kern" 1, "liga" 1;
+}
+
+#sidebar-brand .app-icon {
+  flex-shrink: 0;
+}
+
+#sidebar-brand .brand-text {
+  font-weight: 600;
+  color: var(--text);
+  transition: color var(--transition);
 }
 
 #sidebar-new-chat {
@@ -422,46 +433,14 @@ body {
 }
 
 #landing-logo {
-  font-size: 56px;
-  line-height: 1;
   display: flex;
-  align-items: baseline;
-  text-rendering: optimizeLegibility;
-  font-feature-settings: "kern" 1, "liga" 1;
+  align-items: center;
+  justify-content: center;
+  animation: landingIn 0.7s var(--ease-out) both;
 }
 
-.logo-c {
-  color: var(--text);
-  transition: color var(--transition);
-}
-
-.logo-p { font-weight: 500; }
-
-.logo-u {
-  font-weight: 700;
-  margin-left: -0.06em;
-}
-
-.logo-r {
-  font-weight: 300;
-  margin-left: -0.04em;
-}
-
-.logo-e {
-  font-weight: 700;
-  color: var(--accent);
-  margin-left: 0.04em;
-}
-
-.logo-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent);
-  position: relative;
-  top: -0.15em;
-  margin-left: 0.14em;
-  transition: background var(--transition);
+#landing-logo .app-icon {
+  display: block;
 }
 
 @keyframes landingIn {

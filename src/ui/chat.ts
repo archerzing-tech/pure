@@ -47,6 +47,7 @@ File tools:
 - glob_files(pattern, path?, maxResults?) — find files matching a glob pattern (e.g. "**/*.ts")
 - create_directory(path) — create a directory (and parents)
 - diff_files(pathA, pathB) — unified diff between two files
+- replace_files(files[], oldString, newString, allowMultiple?) — batch string replacement across multiple files
 
 Shell & Git:
 - execute_command(command) — run a shell command
@@ -98,7 +99,7 @@ function mapPermissionMode(mode: PureConfig['permissionMode'] | undefined): Perm
 function toolCategory(tool: string): 'read' | 'write' | 'cmd' | 'git' | 'other' {
   if (tool.startsWith('git_')) return 'git';
   if (tool === 'execute_command') return 'cmd';
-  if (tool === 'write_file' || tool === 'edit_file' || tool === 'create_directory') return 'write';
+  if (tool === 'write_file' || tool === 'edit_file' || tool === 'create_directory' || tool === 'replace_files') return 'write';
   if (tool === 'read_file' || tool === 'list_files' || tool === 'search_files' || tool === 'glob_files' || tool === 'diff_files') return 'read';
   return 'other';
 }

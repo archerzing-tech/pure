@@ -754,6 +754,88 @@ fn strip_html_full(html: &str) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  Replace Files (batch string replacement)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+fn replace_files(
+    workspace: String,
+    files: Vec<String>,
+    old_string: String,
+    new_string: String,
+    allow_multiple: Option<bool>,
+) -> Result<String, String> {
+    if files.is_empty() {
+        return Err("No files specified".to_string());
+    }
+
+    let multi = allow_multiple.unwrap_or(false);
+    let mut results: Vec<String> = Vec::new();
+    let mut total_occurrences = 0usize;
+    let mut errors = 0usize;
+
+    for file_path in &files {
+        let full = match resolve(&workspace, file_path) {
+            Ok(f) => f,
+            Err(e) => {
+                results.push(format!("✗ {}: {}", file_path, e));
+                errors += 1;
+                continue;
+            }
+        };
+
+        let text = match fs::read_to_string(&full) {
+            Ok(t) => t,
+            Err(e) => {
+                results.push(format!("✗ {}: read failed — {}", file_path, e));
+                errors += 1;
+                continue;
+            }
+        };
+
+        let occurrences = text.matches(&old_string).count();
+
+        if occurrences == 0 {
+            results.push(format!("− {}: string not found", file_path));
+            continue;
+        }
+
+        if occurrences > 1 && !multi {
+            results.push(format!(
+                "✗ {}: found {} occurrences — set allowMultiple:true or narrow match",
+                file_path, occurrences
+            ));
+            errors += 1;
+            continue;
+        }
+
+        let new_text = if multi {
+            text.replace(&old_string, &new_string)
+        } else {
+            text.replacen(&old_string, &new_string, 1)
+        };
+
+        if let Err(e) = fs::write(&full, &new_text) {
+            results.push(format!("✗ {}: write failed — {}", file_path, e));
+            errors += 1;
+        } else {
+            let n = if multi { occurrences } else { 1 };
+            results.push(format!("✓ {}: replaced {} occurrence(s)", file_path, n));
+            total_occurrences += n;
+        }
+    }
+
+    let summary = format!(
+        "{} file(s) processed, {} replacement(s), {} error(s)",
+        files.len(),
+        total_occurrences,
+        errors
+    );
+
+    Ok(format!("{}\n{}", summary, results.join("\n")))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  MCP Subprocess Commands
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1336,7 +1418,7 @@ pub fn run() {
         .manage(WatcherRegistry::new(BTreeMap::new()))
         .invoke_handler(tauri::generate_handler![
             // File tools
-            read_file, write_file, edit_file, search_files, list_files, create_directory, diff_files, glob_files,
+            read_file, write_file, edit_file, search_files, list_files, create_directory, diff_files, glob_files, replace_files,
             // Web tools
             web_search, web_fetch,
             // Command execution

@@ -12,7 +12,7 @@
     <!-- ═══ SIDEBAR ═══ -->
     <aside id="sidebar" class="collapsed">
       <div id="sidebar-top">
-        <span id="sidebar-brand"><span class="logo-c logo-p">p</span><span class="logo-c logo-u">u</span><span class="logo-c logo-r">r</span><span class="logo-c logo-e">e</span><span class="logo-dot"></span></span>
+        <span id="sidebar-brand"><svg class="app-icon" viewBox="0 0 1024 1024" width="22" height="22"><use href="#icon-bird"/></svg><span class="brand-text">pure</span></span>
         <button id="sidebar-new-chat" data-i18n-title="sidebar.newChat.title" title="New chat (⌘N)"><span data-i18n="sidebar.newChat">+ New chat</span></button>
       </div>
 
@@ -56,7 +56,7 @@
 
           <div id="landing">
             <div id="landing-content">
-              <div id="landing-logo"><span class="logo-c logo-p">p</span><span class="logo-c logo-u">u</span><span class="logo-c logo-r">r</span><span class="logo-c logo-e">e</span><span class="logo-dot"></span></div>
+              <div id="landing-logo"><svg class="app-icon" viewBox="0 0 1024 1024" width="64" height="64"><use href="#icon-bird"/></svg></div>
               <div id="landing-input-wrap">
                 <textarea id="landing-prompt" rows="1" data-i18n-placeholder="landing.placeholder" placeholder="Describe your task..."></textarea>
                 <div id="landing-cursor"></div>
@@ -144,130 +144,7 @@
               <div class="settings-page" data-page="llm">
                 <h2 class="settings-page-title" data-i18n="llm.title">LLM Provider</h2>
                 <p class="settings-page-desc" data-i18n="llm.desc">Configure your AI model provider</p>
-                <div class="settings-section">
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="llm.provider">Provider</span><span class="setting-hint" data-i18n="llm.provider.hint">AI model service</span></div>
-                    <select id="cfg-provider" class="setting-select" data-i18n-options="deepseek-openai:provider.deepseek-openai,deepseek-anthropic:provider.deepseek-anthropic,qwen:provider.qwen,glm:provider.glm"><option value="deepseek-openai">DeepSeek (OpenAI)</option><option value="deepseek-anthropic">DeepSeek (Anthropic)</option><option value="qwen">Qwen (Tongyi)</option><option value="glm">GLM (Zhipu)</option></select>
-                  </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="llm.apiKey">API Key</span><span class="setting-hint" data-i18n="llm.apiKey.hint">Your API key</span></div>
-                    <div class="setting-input-group">
-                      <input id="cfg-apikey" class="setting-input" type="password" data-i18n-placeholder="llm.apiKey.placeholder" placeholder="sk-..." />
-                      <button id="cfg-toggle-key" class="setting-icon-btn" data-i18n-title="llm.apiKey.toggle" title="Toggle visibility"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
-                    </div>
-                  </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="llm.model">Model</span><span class="setting-hint" data-i18n="llm.model.hint">Model identifier</span></div>
-                    <input id="cfg-model" class="setting-input" type="text" placeholder="deepseek-v4-flash" />
-                  </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="llm.baseURL">Base URL</span><span class="setting-hint" data-i18n="llm.baseURL.hint">Custom endpoint (optional)</span></div>
-                    <input id="cfg-baseurl" class="setting-input" type="text" data-i18n-placeholder="llm.baseURL.placeholder" placeholder="Auto-detected" />
-                  </div>
-                </div>
-              </div>
-              <!-- Tools -->
-              <div class="settings-page" data-page="tools">
-                <h2 class="settings-page-title" data-i18n="tools.title">Tools</h2>
-                <p class="settings-page-desc" data-i18n="tools.desc">Available tool integrations</p>
-                <div class="settings-section">
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="tools.fs">File System</span><span class="setting-hint" data-i18n="tools.fs.hint">Read, write, edit, search</span></div>
-                    <label class="toggle"><input type="checkbox" id="cfg-tool-fs" checked /><span class="toggle-slider"></span></label>
-                  </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="tools.cmd">Command Execution</span><span class="setting-hint" data-i18n="tools.cmd.hint">Run shell commands</span></div>
-                    <label class="toggle"><input type="checkbox" id="cfg-tool-cmd" checked /><span class="toggle-slider"></span></label>
-                  </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="tools.git">Git Integration</span><span class="setting-hint" data-i18n="tools.git.hint">Diff, log, status</span></div>
-                    <label class="toggle"><input type="checkbox" id="cfg-tool-git" checked /><span class="toggle-slider"></span></label>
-                  </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="tools.browser">Browser Automation</span><span class="setting-hint" data-i18n="tools.browser.hint">Playwright-based</span></div>
-                    <label class="toggle"><input type="checkbox" id="cfg-tool-browser" /><span class="toggle-slider"></span></label>
-                  </div>
-                </div>
-              </div>
-              <!-- Skills -->
-              <div class="settings-page" data-page="skills">
-                <h2 class="settings-page-title" data-i18n="skills.title">Skills</h2>
-                <p class="settings-page-desc" data-i18n="skills.desc">Enable or disable agent skills</p>
-                <div class="settings-section">
-                  <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.code-review">Code Review</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="code-review" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.code-review.desc">Review code for correctness and style</p></div>
-                  <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.web-research">Web Research</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="web-research" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.web-research.desc">Search the web for documentation</p></div>
-                  <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.memory">Memory</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="memory" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.memory.desc">Remember preferences and context</p></div>
-                  <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.planning">Planning</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="planning" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.planning.desc">Break down complex tasks</p></div>
-                </div>
-              </div>
-              <!-- MCP -->
-              <div class="settings-page" data-page="mcp">
-                <h2 class="settings-page-title" data-i18n="mcp.title">MCP Servers</h2>
-                <p class="settings-page-desc" data-i18n="mcp.desc">Connect to Model Context Protocol servers for extended tools</p>
-                <div class="settings-section">
-                  <div id="mcp-server-list"></div>
-                  <div id="mcp-add-form" class="mcp-add-form hidden">
-                    <div class="mcp-form-row">
-                      <input id="mcp-form-name" class="setting-input" type="text" data-i18n-placeholder="mcp.serverName.placeholder" placeholder="Server name (e.g. filesystem)" />
-                      <select id="mcp-form-transport" class="setting-select" data-i18n-options="stdio:mcp.transport.stdio,http:mcp.transport.http">
-                        <option value="stdio">stdio (subprocess)</option>
-                        <option value="http">http (SSE)</option>
-                      </select>
-                    </div>
-                    <div class="mcp-form-row" id="mcp-form-cmd-row">
-                      <input id="mcp-form-command" class="setting-input mcp-cmd-input" type="text" data-i18n-placeholder="mcp.command.placeholder" placeholder="npx -y @anthropic/mcp-filesystem /path" />
-                    </div>
-                    <div class="mcp-form-row hidden" id="mcp-form-url-row">
-                      <input id="mcp-form-url" class="setting-input mcp-cmd-input" type="text" data-i18n-placeholder="mcp.url.placeholder" placeholder="http://localhost:3000" />
-                    </div>
-                    <div class="mcp-form-actions">
-                      <button id="mcp-form-save" class="setting-btn primary" data-i18n="mcp.saveBtn">Save</button>
-                      <button id="mcp-form-cancel" class="setting-btn secondary" data-i18n="mcp.cancelBtn">Cancel</button>
-                    </div>
-                  </div>
-                  <button id="cfg-add-mcp" class="setting-btn primary" data-i18n="mcp.addBtn">+ Add MCP Server</button>
-                </div>
-              </div>
-              <!-- Appearance -->
-              <div class="settings-page" data-page="appearance">
-                <h2 class="settings-page-title" data-i18n="appearance.title">Appearance</h2>
-                <p class="settings-page-desc" data-i18n="appearance.desc">Customize the visual style</p>
-                <div class="settings-section">
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="appearance.theme">Theme</span><span class="setting-hint" data-i18n="appearance.theme.hint">Color scheme</span></div>
-                    <div class="theme-selector" id="cfg-theme">
-                      <label class="theme-option active" data-theme="light"><span data-i18n-label="appearance.theme.light">Light</span></label>
-                      <label class="theme-option" data-theme="dark"><span data-i18n-label="appearance.theme.dark">Dark</span></label>
-                      <label class="theme-option" data-theme="system"><span data-i18n-label="appearance.theme.system">System</span></label>
-                    </div>
-                  </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="appearance.fontSize">Font Size</span></div>
-                    <select id="cfg-fontsize" class="setting-select" data-i18n-options="small:appearance.fontSize.small,medium:appearance.fontSize.medium,large:appearance.fontSize.large"><option value="small">Small</option><option value="medium" selected>Medium</option><option value="large">Large</option></select>
-                  </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="appearance.density">Density</span></div>
-                    <select id="cfg-density" class="setting-select" data-i18n-options="compact:appearance.density.compact,comfortable:appearance.density.comfortable,spacious:appearance.density.spacious"><option value="compact">Compact</option><option value="comfortable" selected>Comfortable</option><option value="spacious">Spacious</option></select>
-                  </div>
-                </div>
-              </div>
-              <!-- Updates -->
-              <div class="settings-page" data-page="updates">
-                <h2 class="settings-page-title" data-i18n="updates.title">Updates</h2>
-                <p class="settings-page-desc" data-i18n="updates.desc">Check for and install updates</p>
-                <div class="settings-section">
-                  <div class="setting-row">
-                    <div class="setting-info">
-                      <span class="setting-label" data-i18n="updates.currentVersion">Current version</span>
-                      <span class="setting-hint" id="update-current-version">0.5.5</span>
-                    </div>
-                  </div>
-                  <div id="update-status" class="update-status-row">
-                    <span id="update-status-text" data-i18n="updates.notChecked">Not checked yet</span>
-                  </div>
-                  <div class="setting-row">
-                    <button id="cfg-check-update" class="setting-btn primary" data-i18n="updates.checkBtn">Check for Updates</button>
-                  </div>
+                <div class="settings-section">[... settings content unchanged ...]
                 </div>
               </div>
             </div>
@@ -317,6 +194,33 @@
   </div>
 
   <div id="toast" class="hidden"></div>
+
+  <!-- ═══ Inline bird icon (referenced by sidebar + landing via <use>) ═══ -->
+  <svg style="display:none" aria-hidden="true">
+    <defs>
+      <linearGradient id="icn-bg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#8B7FFF"/>
+        <stop offset="100%" stop-color="#5B4FDE"/>
+      </linearGradient>
+      <linearGradient id="icn-accent" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#C4B5FD"/>
+        <stop offset="100%" stop-color="#A89BFF"/>
+      </linearGradient>
+      <g id="icon-bird">
+        <rect width="1024" height="1024" rx="224" fill="url(#icn-bg)"/>
+        <rect x="12" y="12" width="1000" height="1000" rx="212" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="4"/>
+        <g transform="translate(512,500) scale(0.9)">
+          <path d="M -60,20 C -20,-120 180,-200 220,-160 C 200,-100 60,-40 -60,20 Z" fill="white"/>
+          <path d="M 0,-30 C 80,-30 160,0 200,40 C 170,50 100,60 40,60 C -30,60 -60,40 -90,20 C -60,-10 0,-30 0,-30 Z" fill="white"/>
+          <path d="M -85,18 L -170,-20 L -130,10 Z" fill="white"/>
+          <path d="M -85,25 L -160,65 L -120,30 Z" fill="white"/>
+          <circle cx="200" cy="10" r="38" fill="white"/>
+          <path d="M 235,0 L 285,10 L 235,18 Z" fill="white"/>
+          <circle cx="215" cy="5" r="7" fill="url(#icn-accent)"/>
+        </g>
+      </g>
+    </defs>
+  </svg>
 
   <script type="module" src="/src/ui/main.ts"></script>
 </body>

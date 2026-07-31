@@ -169,6 +169,20 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
         required: ['pattern'],
       },
     },
+    {
+      name: 'replace_files',
+      description: 'Batch string replacement across multiple files. Replaces oldString with newString in each file independently.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          files: { type: 'array', items: { type: 'string' }, description: 'Array of file paths (relative to workspace) to process' },
+          oldString: { type: 'string', description: 'Exact string to find and replace in each file' },
+          newString: { type: 'string', description: 'Replacement string' },
+          allowMultiple: { type: 'boolean', description: 'Replace all occurrences in each file. Default: false' },
+        },
+        required: ['files', 'oldString', 'newString'],
+      },
+    },
 ];
 
 const TOOL_METADATA: Record<string, { sideEffects: boolean; isWrite: boolean }> = {
@@ -186,6 +200,7 @@ const TOOL_METADATA: Record<string, { sideEffects: boolean; isWrite: boolean }> 
   web_search: { sideEffects: false, isWrite: false },
   web_fetch: { sideEffects: false, isWrite: false },
   glob_files: { sideEffects: false, isWrite: false },
+  replace_files: { sideEffects: true, isWrite: true },
 };
 
 type InvokeFunction = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -334,6 +349,16 @@ export class TauriToolAdapter implements ToolAdapter {
             maxResults: args.maxResults ?? 200,
           }) as string;
           return { id: toolCall.id, toolName: name, result: globResult, success: true, duration: Date.now() - start };
+        }
+        case 'replace_files': {
+          const replaceResult = await tauriInvoke('replace_files', {
+            workspace: ws,
+            files: Array.isArray(args.files) ? args.files : [],
+            oldString: String(args.oldString ?? ''),
+            newString: String(args.newString ?? ''),
+            allowMultiple: Boolean(args.allowMultiple),
+          }) as string;
+          return { id: toolCall.id, toolName: name, result: replaceResult, success: true, duration: Date.now() - start };
         }
         default:
           return {

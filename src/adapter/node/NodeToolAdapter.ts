@@ -155,6 +155,20 @@ export class NodeToolAdapter implements ToolAdapter {
         required: ['pattern'],
       },
     },
+    {
+      name: 'replace_files',
+      description: 'Batch string replacement across multiple files. Replaces oldString with newString in each file independently.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          files: { type: 'array', items: { type: 'string' }, description: 'Array of file paths (relative to workspace) to process' },
+          oldString: { type: 'string', description: 'Exact string to find and replace in each file' },
+          newString: { type: 'string', description: 'Replacement string' },
+          allowMultiple: { type: 'boolean', description: 'Replace all occurrences in each file. Default: false' },
+        },
+        required: ['files', 'oldString', 'newString'],
+      },
+    },
   ];
 
   constructor(config: NodeToolConfig) {
@@ -182,6 +196,7 @@ export class NodeToolAdapter implements ToolAdapter {
       web_search: { sideEffects: false, isWrite: false },
       web_fetch: { sideEffects: false, isWrite: false },
       glob_files: { sideEffects: false, isWrite: false },
+      replace_files: { sideEffects: true, isWrite: true },
     };
     return meta[toolName];
   }
@@ -203,6 +218,7 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'web_search': return this.handleWebSearch(args, start);
         case 'web_fetch': return this.handleWebFetch(args, signal, start);
         case 'glob_files': return this.handleGlobFiles(args, start);
+        case 'replace_files': return this.handleReplaceFiles(args, start);
         default:
           return this.fail(toolCall, start, `Unknown tool: ${toolCall.function.name}`);
       }
@@ -550,6 +566,65 @@ export class NodeToolAdapter implements ToolAdapter {
       toolName: 'glob_files',
       result: results.length > 0 ? results.join('\n') : `No files matching "${pattern}"`,
       success: true,
+      duration: Date.now() - start,
+    };
+  }
+
+  private async handleReplaceFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const files = Array.isArray(args.files) ? args.files.map(String) : [];
+    const oldStr = String(args.oldString);
+    const newStr = String(args.newString);
+    const allowMultiple = Boolean(args.allowMultiple);
+
+    if (files.length === 0) {
+      return this.fail(null!, start, 'No files specified');
+    }
+
+    const results: string[] = [];
+    let totalOccurrences = 0;
+    let errors = 0;
+
+    for (const filePath of files) {
+      try {
+        const path = this.resolve(filePath);
+        const file = Bun.file(path);
+        if (!(await file.exists())) {
+          results.push(`✗ ${filePath}: file not found`);
+          errors++;
+          continue;
+        }
+
+        const text = await file.text();
+        const occurrences = text.split(oldStr).length - 1;
+
+        if (occurrences === 0) {
+          results.push(`− ${filePath}: string not found`);
+          continue;
+        }
+
+        if (occurrences > 1 && !allowMultiple) {
+          results.push(`✗ ${filePath}: found ${occurrences} occurrences — set allowMultiple:true or narrow match`);
+          errors++;
+          continue;
+        }
+
+        const newText = allowMultiple ? text.replaceAll(oldStr, newStr) : text.replace(oldStr, newStr);
+        await Bun.write(path, newText);
+        results.push(`✓ ${filePath}: replaced ${allowMultiple ? occurrences : 1} occurrence(s)`);
+        totalOccurrences += allowMultiple ? occurrences : 1;
+      } catch (err: any) {
+        results.push(`✗ ${filePath}: ${err?.message ?? String(err)}`);
+        errors++;
+      }
+    }
+
+    const summary = `${results.length} file(s) processed, ${totalOccurrences} replacement(s), ${errors} error(s)`;
+
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'replace_files',
+      result: `${summary}\n${results.join('\n')}`,
+      success: errors === 0,
       duration: Date.now() - start,
     };
   }

@@ -214,6 +214,22 @@ export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze([
     tags: [Tags.FS, Tags.READ, Tags.SEARCH],
     riskLevel: 'low',
   },
+  {
+    name: 'replace_files',
+    description: 'Batch string replacement across multiple files. Replaces oldString with newString in each file listed. Each file is processed independently.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        files: { type: 'array', items: { type: 'string' }, description: 'Array of file paths (relative to workspace) to process' },
+        oldString: { type: 'string', description: 'Exact string to find and replace in each file' },
+        newString: { type: 'string', description: 'Replacement string' },
+        allowMultiple: { type: 'boolean', description: 'Replace all occurrences in each file. Default: false' },
+      },
+      required: ['files', 'oldString', 'newString'],
+    },
+    tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE],
+    riskLevel: 'medium',
+  },
 ]);
 
 // ── ToolRegistry ──
@@ -355,7 +371,16 @@ export function buildWritePreview(
   toolName: string,
   args: Record<string, unknown>,
 ): { path?: string; contentPreview?: string } | undefined {
-  if (toolName !== 'write_file' && toolName !== 'edit_file') return undefined;
+  if (toolName !== 'write_file' && toolName !== 'edit_file' && toolName !== 'replace_files') return undefined;
+  if (toolName === 'replace_files') {
+    const files = Array.isArray(args.files) ? args.files.map(String) : [];
+    const oldStr = typeof args.oldString === 'string' ? args.oldString : '';
+    const newStr = typeof args.newString === 'string' ? args.newString : '';
+    return {
+      path: files.length > 0 ? files.join(', ') : undefined,
+      contentPreview: `- ${clip(oldStr, EDIT_SNIPPET_MAX)}\n+ ${clip(newStr, EDIT_SNIPPET_MAX)}`,
+    };
+  }
   const path = typeof args.path === 'string' ? args.path : undefined;
   if (toolName === 'write_file') {
     const content = typeof args.content === 'string' ? args.content : '';
