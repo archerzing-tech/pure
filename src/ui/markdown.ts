@@ -231,7 +231,9 @@ function highlightAll(container: HTMLElement): void {
  */
 export async function renderMarkdown(text: string, container: HTMLElement): Promise<void> {
   // 1) Parse to HTML synchronously (renders fenced-code overrides inline).
-  const html = md.parse(text, { async: false }) as string;
+  // marked always appends a trailing \n; trim it — with white-space:pre-wrap on
+  // the bubble, that trailing newline would render as a visible blank line.
+  const html = (md.parse(text, { async: false }) as string).replace(/\n+$/, '');
   container.innerHTML = html;
 
   // 2) Synchronous: hljs over all code blocks (idempotent).
