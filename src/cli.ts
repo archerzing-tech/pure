@@ -1,5 +1,5 @@
 // src/cli.ts
-// v0.6.0 — one-shot + interactive REPL with self-evolving memory.
+// v0.8.0 — one-shot + interactive REPL with self-evolving memory.
 // Usage: pure "question"              → one-shot
 //        pure --resume abc123          → resume session
 //        pure --workspace .            → REPL
@@ -171,7 +171,7 @@ function renderLogo() {
 
   // Plain ASCII so .length === visible column count and centering is exact.
   const tagline = '---- terminal coding agent ----';
-  const ver = 'v0.6.0';
+  const ver = 'v0.8.0';
 
   console.log('');
   console.log(`  ${F('╔' + border + '╗')}`);
@@ -632,7 +632,7 @@ async function runOneShot(args: CliArgs) {
   memory.learnFromMessage(args.prompt);
 
   renderLogo();
-  console.log(`  ${bold('pure')} ${dim('v0.6.0')} ${dim('—')} ${cyan(label)}`);
+  console.log(`  ${bold('pure')} ${dim('v0.8.0')} ${dim('—')} ${cyan(label)}`);
   if (hasTools) console.log(`  📁 ${dim('Workspace:')} ${process.cwd()} ${dim('(' + toolsDefs.length + ' tools)')}`);
   if (args.resume) console.log(`  💾 ${dim('Session:')} ${sessionId.slice(0, 12)}…`);
   console.log(`  📝 ${args.prompt}`);
@@ -664,7 +664,7 @@ async function runRepl(args: CliArgs) {
   const { harness, sessionId } = createHarness(args);
 
   renderLogo();
-  process.stdout.write(`  ${bold('pure')} ${dim('v0.6.0')} ${dim('—')} ${cyan(label)}\n`);
+  process.stdout.write(`  ${bold('pure')} ${dim('v0.8.0')} ${dim('—')} ${cyan(label)}\n`);
   if (hasTools) process.stdout.write(`  📁 ${dim(process.cwd())} ${dim(`| ${toolsDefs.length} tools`)}\n`);
   process.stdout.write(`  💾 ${dim(sessionId.slice(0, 12))}…\n`);
   process.stdout.write(`  ${dim('/exit /quit — leave   /clear — reset context   Ctrl+C — cancel')}\n`);

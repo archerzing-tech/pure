@@ -3,7 +3,7 @@
 **Pure** 是一个本地优先的 AI 编程助手，直接运行在你的机器上。它可以读取、写入和编辑文件，执行 Shell 命令，并编排多智能体工作流 — 这一切都通过快速的终端 CLI 或原生 macOS 桌面应用完成。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.6.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.8.0-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>

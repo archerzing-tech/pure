@@ -34,20 +34,37 @@ jobs:
         run: bun run cli:build
 
       # ── Build & publish GUI via Tauri's official action ──
-      # This handles: cargo tauri build, code signing (if secrets set),
-      # notarization, and creating the GitHub Release with all GUI artifacts.
-      - name: Build and publish GUI
+      # Two variants, selected by whether the Apple signing secrets exist:
+      #   * Signed   (APPLE_CERTIFICATE present)  → codesign + notarize
+      #   * Unsigned (APPLE_CERTIFICATE missing)  → plain build, no signing
+      # CRITICAL: do NOT pass empty APPLE_* env vars — tauri-bundler sees an
+      # empty APPLE_CERTIFICATE as "present" and runs `security import` with an
+      # empty cert, failing the whole release. The unsigned variant omits them.
+      - name: Build and publish GUI (signed)
+        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Pure v__VERSION__'
+          releaseBody: 'Download the DMG or .app.tar.gz below. The CLI binary (`pure`) is also attached for terminal use.'
+          releaseDraft: false
+          prerelease: false
+
+      - name: Build and publish GUI (unsigned)
+        if: ${{ secrets.APPLE_CERTIFICATE == '' }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Pure v__VERSION__'
