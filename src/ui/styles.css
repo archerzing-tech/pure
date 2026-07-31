@@ -661,6 +661,17 @@ body {
   transition: border-color var(--transition);
 }
 
+.bubble-row.status.pending .bubble.status {
+  border-color: var(--accent);
+  color: var(--accent);
+  animation: statusPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes statusPulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
 /* ── Input bar ── */
 
 #chat-view:not(.landing) #input-bar {

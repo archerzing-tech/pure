@@ -307,38 +307,56 @@ export class ChatController {
         ? codingAgent.continueTurn(systemPrompt, this.messages, userText, this.abortController.signal)
         : codingAgent.run(systemPrompt, userText, this.abortController.signal);
 
+      // Track pending tool-call status bubbles so we can show "calling…"
+      // before execution and "✓/✗" on ToolResult.
+      const pendingToolBubbles = new Map<string, HTMLDivElement>();
+
       for await (const event of events) {
         switch (event.type) {
           case 'TokenDelta': {
             if (!event.payload.isToolCall) {
-              // Empty-content deltas (rare, but LLM APIs sometimes emit them as
-              // keep-alive or separator events) would otherwise schedule a 100ms
-              // throttled markdown render on the same accumulated text → the cache
-              // hit path returns immediately, but we still pay for one setTimeout
-              // and one synchronous parse attempt. Short-circuit before scheduling.
               const delta = event.payload.content;
               if (delta) {
                 const text = (assistantBubble.textContent || '') + delta;
                 assistantBubble.textContent = text;
-                // Progressive throttled markdown render — code blocks colorize and
-                // ``` fences appear as <pre><code> chunks during streaming. Skipped
-                // entirely when the user has disabled streaming render in settings
-                // (low-end hardware / prefers-plain-text), in which case the bubble
-                // stays as inert raw textContent and the full renderMarkdown
-                // pipeline (mermaid / plantuml) only runs once on Completed.
                 if (streamingRenderEnabled) {
                   scheduleStreamingRender(text, assistantBubble);
                 }
               }
-              // Keep the scroll-into-view behavior consistent regardless of content.
               chatEl.scrollTop = chatEl.scrollHeight;
+            } else {
+              // LLM is emitting a tool call — extract the tool name from the
+              // accumulated buffer and show a "calling" status bubble so the
+              // user can see what the agent is about to do before it happens.
+              const buf = event.payload.toolCallBuffer || '';
+              const nameMatch = buf.match(/"name"\s*:\s*"([^"]+)"/);
+              if (nameMatch) {
+                const toolName = nameMatch[1];
+                // Only one pending bubble per tool name at a time — cleanly
+                // handles multi-delta tool calls without duplicates.
+                if (!pendingToolBubbles.has(toolName)) {
+                  const bubble = this.addStatusBubble(`🔧 ${toolName} …`, true);
+                  pendingToolBubbles.set(toolName, bubble);
+                  chatEl.scrollTop = chatEl.scrollHeight;
+                }
+              }
             }
             break;
           }
 
           case 'ToolResult': {
             const status = event.payload.result.success ? '✓' : '✗';
-            this.addStatusBubble(`🔧 ${event.payload.toolName}: ${status} (${event.payload.duration}ms)`);
+            const toolName = event.payload.toolName;
+            const duration = event.payload.duration;
+            // Resolve the pending bubble (if any), otherwise append new.
+            const pending = pendingToolBubbles.get(toolName);
+            if (pending) {
+              pending.textContent = `🔧 ${toolName}: ${status} (${duration}ms)`;
+              pending.parentElement?.classList.remove('pending');
+              pendingToolBubbles.delete(toolName);
+            } else {
+              this.addStatusBubble(`🔧 ${toolName}: ${status} (${duration}ms)`);
+            }
             chatEl.scrollTop = chatEl.scrollHeight;
             break;
           }
@@ -449,15 +467,17 @@ export class ChatController {
     return bubble;
   }
 
-  private addStatusBubble(text: string) {
+  private addStatusBubble(text: string, pending = false) {
     const chatEl = document.getElementById('chat')!;
     const wrapper = document.createElement('div');
     wrapper.className = 'bubble-row status';
+    if (pending) wrapper.classList.add('pending');
     const bubble = document.createElement('div');
     bubble.className = 'bubble status';
     bubble.textContent = text;
     wrapper.appendChild(bubble);
     chatEl.appendChild(wrapper);
+    return bubble;
   }
 
   private setStreaming(v: boolean) {
