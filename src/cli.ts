@@ -385,10 +385,14 @@ async function consumeTurn(
   for await (const event of events) {
     switch (event.type) {
       case 'StateChange':
-        streamMgr.stop();
-        process.stdout.write('\n');
-        process.stdout.write(`  ${dim('[')}${blue(event.payload.from)}${dim(' → ')}${cyan(event.payload.to)}${dim(']')}\n`);
-        streamMgr.start();
+        // Skip redundant transitions: same-state (THINK→THINK on first turn)
+        // and final shutdown (VERIFY→TERMINATE). Only show meaningful phases.
+        if (event.payload.from !== event.payload.to && event.payload.to !== 'TERMINATE') {
+          streamMgr.stop();
+          process.stdout.write('\n');
+          process.stdout.write(`  ${dim('[')}${blue(event.payload.from)}${dim(' → ')}${cyan(event.payload.to)}${dim(']')}\n`);
+          streamMgr.start();
+        }
         break;
       case 'TokenDelta':
         streamMgr.feed(event);
