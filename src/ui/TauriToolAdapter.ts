@@ -144,19 +144,31 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
       required: ['query'],
     },
-  },
-  {
-    name: 'web_fetch',
-    description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        url: { type: 'string', description: 'Full URL to fetch (https://...)' },
-        maxChars: { type: 'number', description: 'Max characters to return (default 20000)' },
+  },    {
+      name: 'web_fetch',
+      description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Full URL to fetch (https://...)' },
+          maxChars: { type: 'number', description: 'Max characters to return (default 20000)' },
+        },
+        required: ['url'],
       },
-      required: ['url'],
     },
-  },
+    {
+      name: 'glob_files',
+      description: 'Find files matching a glob pattern. Returns sorted file paths relative to workspace.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.ts"' },
+          path: { type: 'string', description: 'Directory to search within (default: workspace root)' },
+          maxResults: { type: 'number', description: 'Max results (default 200)' },
+        },
+        required: ['pattern'],
+      },
+    },
 ];
 
 const TOOL_METADATA: Record<string, { sideEffects: boolean; isWrite: boolean }> = {
@@ -173,6 +185,7 @@ const TOOL_METADATA: Record<string, { sideEffects: boolean; isWrite: boolean }> 
   diff_files: { sideEffects: false, isWrite: false },
   web_search: { sideEffects: false, isWrite: false },
   web_fetch: { sideEffects: false, isWrite: false },
+  glob_files: { sideEffects: false, isWrite: false },
 };
 
 type InvokeFunction = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -312,6 +325,15 @@ export class TauriToolAdapter implements ToolAdapter {
             maxChars: args.maxChars ?? 20000,
           }) as string;
           return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
+        }
+        case 'glob_files': {
+          const globResult = await tauriInvoke('glob_files', {
+            workspace: ws,
+            pattern: String(args.pattern ?? ''),
+            path: args.path ?? null,
+            maxResults: args.maxResults ?? 200,
+          }) as string;
+          return { id: toolCall.id, toolName: name, result: globResult, success: true, duration: Date.now() - start };
         }
         default:
           return {

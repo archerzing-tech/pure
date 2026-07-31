@@ -142,6 +142,19 @@ export class NodeToolAdapter implements ToolAdapter {
         required: ['url'],
       },
     },
+    {
+      name: 'glob_files',
+      description: 'Find files matching a glob pattern. Returns sorted file paths relative to workspace.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.ts"' },
+          path: { type: 'string', description: 'Directory to search within (default: workspace root)' },
+          maxResults: { type: 'number', description: 'Max results (default 200)' },
+        },
+        required: ['pattern'],
+      },
+    },
   ];
 
   constructor(config: NodeToolConfig) {
@@ -168,6 +181,7 @@ export class NodeToolAdapter implements ToolAdapter {
       diff_files: { sideEffects: false, isWrite: false },
       web_search: { sideEffects: false, isWrite: false },
       web_fetch: { sideEffects: false, isWrite: false },
+      glob_files: { sideEffects: false, isWrite: false },
     };
     return meta[toolName];
   }
@@ -188,6 +202,7 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'diff_files': return this.handleDiffFiles(args, start);
         case 'web_search': return this.handleWebSearch(args, start);
         case 'web_fetch': return this.handleWebFetch(args, signal, start);
+        case 'glob_files': return this.handleGlobFiles(args, start);
         default:
           return this.fail(toolCall, start, `Unknown tool: ${toolCall.function.name}`);
       }
@@ -510,6 +525,30 @@ export class NodeToolAdapter implements ToolAdapter {
       id: `tool_${Date.now()}`,
       toolName: 'web_fetch',
       result: truncated || '(empty page)',
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
+  private async handleGlobFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const pattern = String(args.pattern);
+    const searchDir = this.resolve(String(args.path || '.'));
+    const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 200;
+
+    const results: string[] = [];
+    const glob = new Bun.Glob(pattern);
+
+    for await (const entry of glob.scan({ cwd: searchDir, absolute: false, onlyFiles: true })) {
+      if (results.length >= maxResults) break;
+      results.push(entry);
+    }
+
+    results.sort();
+
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'glob_files',
+      result: results.length > 0 ? results.join('\n') : `No files matching "${pattern}"`,
       success: true,
       duration: Date.now() - start,
     };

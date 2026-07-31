@@ -199,6 +199,21 @@ export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze([
     tags: [Tags.READ],
     riskLevel: 'low',
   },
+  {
+    name: 'glob_files',
+    description: 'Find files matching a glob pattern (e.g. "**/*.ts", "src/**/*.test.*"). Returns sorted file paths relative to workspace.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.ts" or "src/**/*.{js,ts}"' },
+        path: { type: 'string', description: 'Directory to search within (default: workspace root)' },
+        maxResults: { type: 'number', description: 'Max results (default 200)' },
+      },
+      required: ['pattern'],
+    },
+    tags: [Tags.FS, Tags.READ, Tags.SEARCH],
+    riskLevel: 'low',
+  },
 ]);
 
 // ── ToolRegistry ──

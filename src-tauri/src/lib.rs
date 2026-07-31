@@ -225,6 +225,51 @@ fn list_files(workspace: String, path: String, recursive: Option<bool>) -> Resul
     }
 }
 
+#[tauri::command]
+fn glob_files(
+    workspace: String,
+    pattern: String,
+    path: Option<String>,
+    max_results: Option<usize>,
+) -> Result<String, String> {
+    let search_dir = match &path {
+        Some(p) if !p.is_empty() => resolve(&workspace, p)?,
+        _ => resolve(&workspace, ".")?,
+    };
+
+    let glob_pattern = format!("{}/{}", search_dir.to_string_lossy(), pattern);
+    let max = max_results.unwrap_or(200);
+
+    let mut results: Vec<String> = Vec::new();
+
+    for entry in glob::glob(&glob_pattern).map_err(|e| format!("glob: {}", e))? {
+        if results.len() >= max {
+            break;
+        }
+        let entry_path = match entry {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        // Only include files, skip directories
+        if !entry_path.is_file() {
+            continue;
+        }
+        let rel_path = entry_path
+            .strip_prefix(&search_dir)
+            .unwrap_or(&entry_path)
+            .to_string_lossy()
+            .to_string();
+        results.push(rel_path);
+    }
+
+    results.sort();
+    if results.is_empty() {
+        Ok(format!("No files matching \"{}\"", pattern))
+    } else {
+        Ok(results.join("\n"))
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Async Command Execution (non-blocking tokio version)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1291,7 +1336,7 @@ pub fn run() {
         .manage(WatcherRegistry::new(BTreeMap::new()))
         .invoke_handler(tauri::generate_handler![
             // File tools
-            read_file, write_file, edit_file, search_files, list_files, create_directory, diff_files,
+            read_file, write_file, edit_file, search_files, list_files, create_directory, diff_files, glob_files,
             // Web tools
             web_search, web_fetch,
             // Command execution
