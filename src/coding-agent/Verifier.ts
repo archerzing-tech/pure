@@ -39,7 +39,13 @@ export const NonEmptyOutputCheck: VerifierCheck = {
   name: 'non-empty-output',
   run: async ({ output }) => ({
     passed: output.trim().length > 0,
-    feedback: output.trim().length === 0 ? 'Assistant produced empty output' : undefined,
+    // The hint doubles as the retry instruction the FailurePolicy feeds back
+    // to the model: empty output on a reasoning model almost always means the
+    // output-token budget was consumed by thinking, so the model must write
+    // the answer directly instead of reasoning again.
+    feedback: output.trim().length === 0
+      ? 'Assistant produced empty output (the output token budget was likely consumed by reasoning). Keep reasoning to a minimum and write the final answer/content directly.'
+      : undefined,
   }),
 };
 
@@ -101,7 +107,9 @@ ${output}
 
 Rules:
 - Pass if the output substantially addresses the request, even with minor imperfections or missing niceties.
-- Fail ONLY if the output is missing a core deliverable of the request, contradicts the request, or is largely off-topic.
+- An acknowledgment or polite opening (e.g. "Sure, let me…") followed by a substantive answer is a clear PASS — do NOT fail an output just because it begins with acknowledgment.
+- For requests that ask to CREATE or SHOW a creative/visual artifact — a demo, animation, prototype, HTML page, diagram, slideshow, game, or script — pass if the artifact is present and substantially complete and coherent. Do NOT act as a strict code reviewer: minor implementation bugs, styling imperfections, edge cases, or missing polish do NOT fail such requests (the user can iterate on details). Only fail these requests when the artifact is entirely missing, empty, or unusable.
+- Fail ONLY if the output is missing a core deliverable, contradicts the request, or is largely off-topic with no attempt to address the request.
 - If the request is a simple question, pass when the output answers it.
 
 Respond with ONLY a JSON object, no markdown fences, no extra text:

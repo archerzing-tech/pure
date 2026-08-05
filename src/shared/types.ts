@@ -35,6 +35,10 @@ export interface ToolDefinition {
 
 export type LLMChunk =
   | { type: 'content'; content: string }
+  // Model-internal reasoning/chain-of-thought streamed separately from the
+  // visible answer (DeepSeek/Qwen/GLM `reasoning_content`, OpenAI `reasoning`).
+  // Never folded into `content`, never persisted as assistant text.
+  | { type: 'reasoning'; content: string }
   | { type: 'tool_call_delta'; index: number; name?: string; arguments?: string }
   | { type: 'tool_call'; index: number; id: string; name: string; arguments: string }
   | { type: 'done'; content: string; toolCalls: ToolCall[] };
@@ -184,12 +188,60 @@ export interface IStateStore {
   deleteSession(sessionId: string): Promise<void>;
 }
 
+// ── v0.10: Cross-session long-term memory (Adapter Layer 设计文档 §12) ──
+
+export type MemoryType =
+  | 'user_preference'
+  | 'error_pattern'
+  | 'successful_pattern'
+  | 'project_convention';
+
+export interface MemoryEntry {
+  id: string;
+  type: MemoryType;
+  content: string;
+  timestamp: number;
+  sessionId: string;
+  projectPath: string; // 记忆按项目隔离
+  decayScore?: number; // 时间衰减分数（1.0 = 新，0.0 = 已遗忘）
+}
+
+export interface MemorySearchOptions {
+  type?: MemoryType;
+  k?: number; // 返回条数，默认 5
+  projectPath?: string; // 限定项目，默认当前项目
+}
+
+export interface IMemoryStore {
+  /** 写入一条记忆（Engine/Harness 在关键事件时调用） */
+  add(entry: Omit<MemoryEntry, 'id'>): Promise<string>;
+
+  /** 检索相关记忆（PromptComposer 在会话开始时调用） */
+  search(query: string, opts?: MemorySearchOptions): Promise<MemoryEntry[]>;
+
+  /** 按会话批量清理 */
+  forget(sessionId: string): Promise<void>;
+
+  /** 衰减旧记忆：将超过 olderThan 的记忆 decayScore 减半 */
+  decay(olderThan: number): Promise<void>;
+}
+
 // EngineEvent union
 export type EngineEvent =
-  | { type: 'TokenDelta'; payload: { content: string; stateId: string; isToolCall: boolean; toolCallBuffer?: string }; timestamp: number }
+  | { type: 'TokenDelta'; payload: { content: string; stateId: string; isToolCall: boolean; toolCallBuffer?: string; toolCallName?: string; toolCallId?: string }; timestamp: number }
+  // Reasoning/chain-of-thought deltas, surfaced so the GUI can render a live
+  // "thinking" card (animation while collapsed, streaming text when expanded).
+  | { type: 'ReasoningDelta'; payload: { content: string; stateId: string }; timestamp: number }
   | { type: 'StateChange'; payload: { from: AgentStateType; to: AgentStateType; stateId: string; reason?: string }; timestamp: number }
   | { type: 'ToolResult'; payload: { toolName: string; result: ToolResult; duration: number; toolCallId: string }; timestamp: number }
+  | { type: 'YieldControl'; payload: { turnNumber: number; budget: BudgetSnapshot }; timestamp: number }
+  // v0.10 §12.3 — surfaced so the Harness can persist error_pattern memories:
+  // the engine calls FailurePolicy.decide() at every failure point and yields
+  // the resulting action here. kind 'stop' → write error_pattern immediately;
+  // kind 'retry' → Harness remembers the failure, writes error_pattern once
+  // the session completes successfully ("retry 且最终成功").
+  | { type: 'FailurePolicyDecision'; payload: { action: FailureAction; failure: FailureRecord; turnNumber: number }; timestamp: number }
   | { type: 'BudgetWarning'; payload: { exhausted: boolean; reason: string; remaining: { turns: number; tokens: number; time: number }; gracePeriodEnds: number }; timestamp: number }
   | { type: 'Error'; payload: { code: string; message: string; stateType: AgentStateType; recoverable: boolean; recoveryAction?: 'retry' | 'reflect' | 'skip' | 'terminate' }; timestamp: number }
   | { type: 'Completed'; payload: { finalOutput?: string; isComplete: boolean; interrupted: boolean; turnCount: number; messages?: Message[] }; timestamp: number }
-  | { type: 'Interrupted'; payload: { reason: string; lastState?: AgentStateType; completedSteps: string[] }; timestamp: number };
+  | { type: 'Interrupted'; payload: { reason: string; lastState?: AgentStateType; completedSteps: string[]; messages?: Message[]; turnCount?: number }; timestamp: number };

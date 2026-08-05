@@ -12,12 +12,31 @@
     <!-- ═══ SIDEBAR ═══ -->
     <aside id="sidebar" class="collapsed">
       <div id="sidebar-top">
-        <span id="sidebar-brand"><svg class="app-icon" viewBox="0 0 1024 1024" width="22" height="22"><use href="#icon-bird"/></svg><span class="brand-text">pure</span></span>
+        <span id="sidebar-brand"><svg class="app-icon" viewBox="0 0 1024 1024" width="22" height="22" aria-hidden="true"><use href="#icon-gem"/></svg><span class="brand-text">pure</span></span>
+
+        <!-- ═══ User workspace picker (Claude Desktop style project switcher) ═══ -->
+        <button id="workspace-picker-btn" data-i18n-title="workspace.browseTitle" title="Select workspace folder">
+          <svg class="wp-folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <span id="workspace-picker-label" data-i18n="workspace.none">No workspace</span>
+        </button>
+        <div id="sidebar-workspace-path" class="sidebar-workspace-path" role="button" tabindex="0" data-i18n-title="workspace.changeHint" title="Click to change workspace" hidden>
+          <svg class="wp-folder-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <span id="sidebar-workspace-path-text" class="sidebar-workspace-path-text"></span>
+          <button id="sidebar-workspace-path-clear" class="sidebar-workspace-path-clear" data-i18n-title="workspace.clear" title="Clear workspace" aria-label="Clear workspace" hidden>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
         <button id="sidebar-new-chat" data-i18n-title="sidebar.newChat.title" title="New chat (⌘N)"><span data-i18n="sidebar.newChat">+ New chat</span></button>
       </div>
 
       <nav id="sidebar-sessions">
-        <span id="sidebar-sessions-label" data-i18n="sidebar.sessions">Sessions</span>
+        <div id="sidebar-sessions-header">
+          <span id="sidebar-sessions-label" data-i18n="sidebar.sessions">Sessions</span>
+          <button id="sidebar-sessions-clear" data-i18n-title="sidebar.clearAll.title" title="Delete all sessions">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+          </button>
+        </div>
         <div id="sidebar-session-list">
           <div class="sidebar-session-empty" data-i18n="sidebar.noSessions">No sessions yet</div>
         </div>
@@ -30,6 +49,29 @@
         </button>
       </div>
     </aside>
+
+    <!-- ═══ Workspace picker dropdown (Claude Desktop style project switcher) ═══ -->
+    <div id="workspace-picker-popover" class="hidden">
+      <div id="wp-current-row" class="wp-popover-current-row" role="button" tabindex="0" data-i18n-title="workspace.browseTitle" title="Select workspace folder">
+        <svg class="wp-folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        <span id="wp-popover-current" class="wp-popover-current"></span>
+        <button id="wp-clear-btn" class="wp-current-clear" data-i18n-title="workspace.clear" title="Clear workspace" aria-label="Clear workspace" hidden>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="wp-popover-recent">
+        <span class="wp-popover-recent-label" data-i18n="workspace.recent">Recent</span>
+        <div id="wp-recent-list"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Drag & drop overlay (drop a folder anywhere to switch workspace) ═══ -->
+    <div id="drag-overlay" aria-hidden="true">
+      <div class="drag-overlay-card">
+        <svg class="drag-overlay-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        <span class="drag-overlay-text" data-i18n="workspace.dropHint">Drop a folder to switch workspace</span>
+      </div>
+    </div>
 
     <!-- ═══ MAIN AREA ═══ -->
     <div id="main">
@@ -49,6 +91,11 @@
         </svg>
       </button>
 
+      <!-- ═══ Right context panel toggle (sits inside the panel, vertical center) ═══ -->
+      <button id="context-panel-reopen" type="button" aria-label="Show project context" title="Show project context">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+
       <!-- ═══ View container: chat + settings side by side ═══ -->
       <div id="view-container">
         <div id="chat-view" class="landing">
@@ -56,24 +103,83 @@
 
           <div id="landing">
             <div id="landing-content">
-              <div id="landing-logo"><svg class="app-icon" viewBox="0 0 1024 1024" width="64" height="64"><use href="#icon-bird"/></svg></div>
-              <div id="landing-input-wrap">
+              <div id="landing-logo">
+                <svg class="app-icon" viewBox="0 0 1024 1024" width="64" height="64" aria-hidden="true"><use href="#icon-gem"/></svg>
+                <span class="landing-logo-text">pure</span>
+              </div>
+              <div id="landing-input-zone">
+                <div id="landing-input-wrap">
                 <textarea id="landing-prompt" rows="1" data-i18n-placeholder="landing.placeholder" placeholder="Describe your task..."></textarea>
                 <div id="landing-cursor"></div>
+                <button id="landing-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
+                  <svg class="wp-folder-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                </button>
                 <button id="landing-send-btn" data-i18n-title="input.send.title" aria-label="Send">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
                 </button>
+                </div>
               </div>
             </div>
           </div>
 
           <footer id="input-bar">
+            <button id="input-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
+              <svg class="wp-folder-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </button>
             <textarea id="prompt" rows="1" data-i18n-placeholder="input.placeholder" placeholder="Ask pure anything..." disabled></textarea>
             <button id="send-btn" data-i18n-title="input.send.title" disabled>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
             </button>
           </footer>
         </div>
+
+        <aside id="context-panel" class="collapsed" aria-label="Project context">
+          <div class="context-panel-header">
+            <div>
+              <span class="context-kicker">PROJECT CONTEXT</span>
+              <h2 id="context-panel-title">Live workspace</h2>
+            </div>
+          </div>
+          <div class="context-panel-tabs" role="tablist" aria-label="Project context views">
+            <button id="context-tab-preview" class="context-tab active" type="button" role="tab" aria-selected="true" aria-controls="context-preview" data-context-tab="preview">Preview</button>
+            <button id="context-tab-changes" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-changes" data-context-tab="changes">Changes</button>
+            <button id="context-tab-structure" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-structure" data-context-tab="structure">Structure</button>
+          </div>
+          <div id="context-preview" class="context-panel-body" role="tabpanel" aria-labelledby="context-tab-preview" data-context-view="preview">
+            <div class="preview-toolbar">
+              <span class="preview-live-dot"></span>
+              <span>Live preview</span>
+              <span id="preview-status" class="preview-status">Waiting</span>
+            </div>
+            <div class="preview-window">
+              <div class="preview-window-bar"><span></span><span></span><span></span><b id="preview-route">workspace</b></div>
+              <div class="preview-window-content">
+                <div class="preview-skeleton hero"></div>
+                <div class="preview-skeleton line wide"></div>
+                <div class="preview-skeleton line"></div>
+                <div class="preview-skeleton-grid"><i></i><i></i><i></i></div>
+                <div class="preview-caption">Your generated interface will appear here as the agent builds it.</div>
+              </div>
+            </div>
+          </div>
+          <div id="context-changes" class="context-panel-body hidden" role="tabpanel" aria-labelledby="context-tab-changes" data-context-view="changes">
+            <div class="context-section-heading"><span>AGENT ACTIVITY</span><b id="context-change-count">0 items</b></div>
+            <div class="context-change-empty"><span class="context-empty-icon">✦</span><p>Changes will collect here as the agent edits your project.</p></div>
+          </div>
+          <div id="context-structure" class="context-panel-body hidden" role="tabpanel" aria-labelledby="context-tab-structure" data-context-view="structure">
+            <div class="context-section-heading"><span>PROJECT MAP</span><b>ready</b></div>
+            <div class="structure-tree"><div>⌄ <b id="context-workspace-name">workspace</b></div><div class="tree-child">◇ src</div><div class="tree-child">◇ package.json</div><div class="tree-child">◇ README.md</div></div>
+          </div>
+          <div class="context-meta">
+            <div class="context-meta-row"><span>MODEL</span><strong id="context-model">—</strong></div>
+            <div class="context-meta-row path"><span>WORKSPACE</span><strong id="context-workspace" title="">No workspace</strong></div>
+          </div>
+          <div class="context-stage" aria-live="polite">
+            <div class="context-stage-top"><span class="stage-pulse"></span><span id="context-stage-label">Ready to build</span><span id="context-stage-percent">0%</span></div>
+            <div class="context-stage-track"><i id="context-stage-progress"></i></div>
+            <div class="context-stage-steps"><span class="done">Understand</span><span>Plan</span><span>Build</span><span>Verify</span></div>
+          </div>
+        </aside>
 
         <div id="settings-view">
           <div id="settings-header">
@@ -124,15 +230,11 @@
               <!-- General -->
               <div class="settings-page active" data-page="general">
                 <h2 class="settings-page-title" data-i18n="general.title">General</h2>
-                <p class="settings-page-desc" data-i18n="general.desc">Language and workspace settings</p>
+                <p class="settings-page-desc" data-i18n="general.desc">Language and streaming settings</p>
                 <div class="settings-section">
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="general.language">Language</span><span class="setting-hint" data-i18n="general.language.hint">Interface language</span></div>
                     <select id="cfg-language" class="setting-select"><option value="zh-CN">中文</option><option value="en">English</option></select>
-                  </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="general.workspace">Workspace</span><span class="setting-hint" data-i18n="general.workspace.hint">Project root for file tools</span></div>
-                    <input id="cfg-workspace" class="setting-input" type="text" placeholder="/path/to/project" />
                   </div>
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="general.streaming">Streaming render</span><span class="setting-hint" data-i18n="general.streaming.hint">Format assistant reply progressively</span></div>
@@ -184,8 +286,31 @@
                     <label class="toggle"><input type="checkbox" id="cfg-tool-git" checked /><span class="toggle-slider"></span></label>
                   </div>
                   <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="tools.browser">Browser Automation</span><span class="setting-hint" data-i18n="tools.browser.hint">Playwright-based</span></div>
-                    <label class="toggle"><input type="checkbox" id="cfg-tool-browser" /><span class="toggle-slider"></span></label>
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.browser">Web Tools</span><span class="setting-hint" data-i18n="tools.browser.hint">Web search &amp; fetch</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-tool-browser" checked /><span class="toggle-slider"></span></label>
+                  </div>
+                </div>
+                <h3 class="settings-section-title" data-i18n="tools.permissionSection">Permission &amp; approval</h3>
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.permissionMode">Permission mode</span><span class="setting-hint" data-i18n="tools.permissionMode.hint">Tool call approval policy</span></div>
+                    <select id="cfg-permission-mode" class="setting-select" data-i18n-options="auto:tools.permissionMode.auto,confirm:tools.permissionMode.confirm,restricted:tools.permissionMode.restricted"><option value="auto">Auto-approve all</option><option value="confirm" selected>Ask each time</option><option value="restricted">Read-only</option></select>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.perm.read">Auto-approve reads</span><span class="setting-hint" data-i18n="tools.perm.read.hint">File reads, web search/fetch</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-perm-read" checked /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.perm.write">Auto-approve writes</span><span class="setting-hint" data-i18n="tools.perm.write.hint">File writes &amp; edits</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-perm-write" /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.perm.cmd">Auto-approve commands</span><span class="setting-hint" data-i18n="tools.perm.cmd.hint">Shell command execution</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-perm-cmd" /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.perm.git">Auto-approve git</span><span class="setting-hint" data-i18n="tools.perm.git.hint">Git read operations</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-perm-git" checked /><span class="toggle-slider"></span></label>
                   </div>
                 </div>
               </div>
@@ -256,6 +381,10 @@
                 <h2 class="settings-page-title" data-i18n="updates.title">Updates</h2>
                 <p class="settings-page-desc" data-i18n="updates.desc">Check for new versions of pure</p>
                 <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="updates.currentVersion">Current version</span></div>
+                    <span id="update-current-version" class="update-current-version"></span>
+                  </div>
                   <div id="updater-status" class="updater-status"></div>
                   <button id="cfg-check-updates" class="setting-btn primary" data-i18n="updates.checkBtn">Check for updates</button>
                 </div>
@@ -306,32 +435,55 @@
     </div>
   </div>
 
+  <!-- ═══ CONFIRM DIALOG (in-app; window.confirm is not supported in Tauri's WKWebView) ═══ -->
+  <div id="confirm-overlay" class="hidden">
+    <div id="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div id="confirm-header">
+        <span id="confirm-title" data-i18n="confirm.title">Confirm</span>
+      </div>
+      <div id="confirm-message" class="confirm-message"></div>
+      <div id="confirm-actions">
+        <button id="confirm-cancel" class="setting-btn secondary" data-i18n="confirm.cancel">Cancel</button>
+        <button id="confirm-ok" class="setting-btn danger" data-i18n="confirm.ok">Delete</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="hidden"></div>
 
-  <!-- ═══ Inline bird icon (referenced by sidebar + landing via <use>) ═══ -->
-  <svg style="display:none" aria-hidden="true">
+  <!-- ═══ Inline app icon (gem) — referenced by sidebar via <use> ═══
+       Kept as a 0×0 absolutely-positioned sprite (NOT display:none): WebKit /
+       WKWebView (Tauri on macOS) refuses to paint gradients defined inside a
+       display:none SVG, which rendered the logo blank in the desktop app. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
     <defs>
       <linearGradient id="icn-bg" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#8B7FFF"/>
-        <stop offset="100%" stop-color="#5B4FDE"/>
+        <stop offset="0%" stop-color="#7ED9FF"/>
+        <stop offset="100%" stop-color="#3E63DD"/>
       </linearGradient>
       <linearGradient id="icn-accent" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="#C4B5FD"/>
-        <stop offset="100%" stop-color="#A89BFF"/>
+        <stop offset="0%" stop-color="#C2F1FF"/>
+        <stop offset="100%" stop-color="#8FD9FF"/>
       </linearGradient>
-      <g id="icon-bird">
+      <symbol id="icon-gem" viewBox="0 0 1024 1024">
         <rect width="1024" height="1024" rx="224" fill="url(#icn-bg)"/>
         <rect x="12" y="12" width="1000" height="1000" rx="212" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="4"/>
-        <g transform="translate(512,490) scale(1.08)" fill="white">
-          <path d="M -40,20 C 15,-130 190,-200 270,-130 C 250,-55 115,-15 -40,20 Z"/>
-          <path d="M 25,-25 C 100,-25 185,8 235,50 C 205,62 120,75 55,75 C -15,75 -55,50 -95,22 C -55,-12 25,-25 25,-25 Z"/>
-          <path d="M -85,20 L -165,-15 L -125,8 L -170,55 L -120,32 Z"/>
-          <circle cx="240" cy="12" r="42"/>
-          <path d="M 277,5 L 330,15 L 277,25 Z"/>
-          <circle cx="256" cy="7" r="9" fill="url(#icn-accent)"/>
+
+        <!-- Minimalist geometric gem: trapezoidal crown above, lit/shadow pavilion below -->
+        <g stroke="rgba(255,255,255,0.25)" stroke-width="2" stroke-linejoin="round">
+          <polygon points="320,200 704,200 864,400 160,400" fill="url(#icn-accent)"/>
+          <polygon points="416,200 608,200 512,400" fill="rgba(255,255,255,0.85)"/>
+          <polygon points="160,400 512,400 512,840" fill="rgba(255,255,255,0.7)"/>
+          <polygon points="512,400 864,400 512,840" fill="rgba(255,255,255,0.5)"/>
         </g>
-      </g>
+      </symbol>
     </defs>
+    <!-- Mirror prototype/pure-diamond.svg: top-level <use> so the same SVG,
+         if ever rendered by a spec-strict rasterizer (e.g. someone feeding
+         index.html's snippet through resvg), still paints the icon. Inside
+         the 0×0 sprite it's invisible anyway, but it keeps the pattern
+         identical across the two copies of the icon. -->
+    <use href="#icon-gem"/>
   </svg>
 
   <script type="module" src="/src/ui/main.ts"></script>

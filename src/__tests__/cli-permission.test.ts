@@ -3,7 +3,7 @@
 // and the non-interactive fallback policy.
 
 import { describe, it, expect } from 'bun:test';
-import { formatPermissionRequest, parsePermissionAnswer, nonTtyDecision } from '../cli_permission';
+import { formatPermissionRequest, parsePermissionAnswer, nonTtyDecision, createCliPermissionHandler } from '../cli_permission';
 import type { PermissionRequestInfo } from '../coding-agent/types';
 
 const baseInfo: PermissionRequestInfo = {
@@ -98,5 +98,23 @@ describe('nonTtyDecision', () => {
       riskLevel: 'high',
     });
     expect(d.allowed).toBe(false);
+  });
+});
+
+describe('createCliPermissionHandler', () => {
+  it('auto-approves every call (even danger-level) when autoApprove is true', async () => {
+    const h = createCliPermissionHandler(true);
+    const d = await h({ ...baseInfo, dangerLevel: 'danger', riskLevel: 'high' });
+    expect(d.allowed).toBe(true);
+    expect(d.autoApproved).toBe(true);
+  });
+
+  it('still denies aborted requests even when autoApprove is true', async () => {
+    const h = createCliPermissionHandler(true);
+    const ac = new AbortController();
+    ac.abort();
+    const d = await h({ ...baseInfo, signal: ac.signal, dangerLevel: 'safe' });
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toContain('aborted');
   });
 });

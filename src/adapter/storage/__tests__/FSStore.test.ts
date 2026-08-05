@@ -1,7 +1,7 @@
 // src/adapter/storage/__tests__/FSStore.test.ts
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 const makeStore = async () => {
@@ -99,5 +99,43 @@ describe('FSStore', () => {
     const b = store.loadSession('b');
     expect(a!.state.messages[0].content).toBe('aaa');
     expect(b!.state.messages[0].content).toBe('bbb');
+  });
+
+  describe('sessionId path-traversal validation', () => {
+    it('rejects traversal ids on saveCheckpoint', async () => {
+      const backslash = String.fromCharCode(92);
+      const nul = String.fromCharCode(0);
+      const evilIds = [
+        '../escape', '../../etc', 'a/b', 'a' + backslash + 'b', '..%2F',
+        '..' + backslash, 'sess' + nul + 'ion', '..' + nul + '/etc/passwd',
+      ];
+      for (const evil of evilIds) {
+        await expect(store.saveCheckpoint(evil, {
+          version: 0, label: 'x', state: { messages: [], turnCount: 0 }, createdAt: Date.now(),
+        })).rejects.toThrow();
+      }
+    });
+
+    it('rejects traversal ids on deleteSession and never touches disk outside base', async () => {
+      const outside = `${dir}/../pure-escape-probe`;
+      await expect(store.deleteSession('../pure-escape-probe')).rejects.toThrow();
+      // The parent directory must not contain the would-be escape dir.
+      expect(existsSync(outside)).toBe(false);
+    });
+
+    it('loadSession returns null for traversal ids instead of reading outside base', () => {
+      expect(store.loadSession('../nonexistent')).toBeNull();
+      expect(store.loadSession('/etc/passwd')).toBeNull();
+    });
+
+    it('allows valid id characters (dots, dashes, underscores)', async () => {
+      const cp = {
+        version: 0, label: 'start',
+        state: { messages: [{ role: 'user', content: 'ok' }], turnCount: 0 },
+        createdAt: Date.now(),
+      };
+      await store.saveCheckpoint('subagent.web_1-2', cp);
+      expect(store.loadSession('subagent.web_1-2')).not.toBeNull();
+    });
   });
 });

@@ -83,9 +83,12 @@ export class ContextEngine {
           [{ role: 'user', content: summaryPrompt }],
           []
         );
+        // Per Harness 设计文档 §4 toEngineMessages, the summary is a `system`
+        // message ("Earlier conversation summary: …") — NOT a user turn, which
+        // the model would mistake for fresh user input.
         const summaryMsg: Message = {
-          role: 'user',
-          content: `[Conversation summary] ${String(summary.content)}`,
+          role: 'system',
+          content: `Earlier conversation summary: ${String(summary.content)}`,
         };
         return [...systemMsg, summaryMsg, ...trimmed];
       } catch {

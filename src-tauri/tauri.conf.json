@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "pure",
-  "version": "0.8.0",
+  "version": "0.9.7",
   "identifier": "com.pure.agent",
   "build": {
     "beforeDevCommand": "bun run vite",
@@ -31,7 +31,7 @@
       "endpoints": [
         "https://releases.pure.app/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgwMzExOUE4RDlDQUM2REUKUldUZXhzclpxQmt4Z0ZObVNHL2VPNy9oU3NlZHlnWnhkRDdyazFIaWp2b3l1cTZWMXJIbVJJODcK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ2RjAzQURCOTYwMzI0NDMKUldSREpBT1cyenJ3MXJWN0t0RW1EaGtMSVZpV2ZqMUIwUjc0bE5WZmRIWmVPdnpHbXY2aE5odTUK",
       "windows": {
         "installMode": "passive"
       }

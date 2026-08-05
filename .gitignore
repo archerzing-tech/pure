@@ -8,3 +8,4 @@ src-tauri/target/
 .DS_Store
 pure
 .playwright-mcp/
+public/

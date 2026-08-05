@@ -19,7 +19,7 @@ export function requestPermission(info: PermissionRequestInfo): Promise<Permissi
 /**
  * Render the permission dialog for a tool call and resolve once the user decides.
  * - Allow once   → { allowed: true }                  (not cached)
- * - Always allow → { allowed: true, remember: true }  (cached for session, unless high risk)
+ * - Always allow → { allowed: true, remember: true }  (cached for this session, incl. high risk)
  * - Deny / Esc   → { allowed: false }
  */
 function showDialog(info: PermissionRequestInfo): Promise<PermissionDecision> {
@@ -68,8 +68,12 @@ function showDialog(info: PermissionRequestInfo): Promise<PermissionDecision> {
       previewEl.classList.add('hidden');
     }
 
-    // High risk: never cache → hide "Always allow"
-    alwaysBtn.style.display = isHighRisk ? 'none' : '';
+    // Every tool — including high-risk shell commands — offers the
+    // session-scoped "始终允许(本次会话)" option. The decision is cached by
+    // PermissionManager for the current chat session (cleared on new chat), so
+    // commands don't re-prompt on every call. High-risk dialogs still default
+    // focus to Deny below, so a stray Enter can't approve a destructive call.
+    alwaysBtn.style.display = '';
 
     const cleanup = () => {
       overlay.classList.add('hidden');
@@ -101,6 +105,10 @@ function showDialog(info: PermissionRequestInfo): Promise<PermissionDecision> {
     document.addEventListener('keydown', onKeydown);
 
     overlay.classList.remove('hidden');
-    onceBtn.focus();
+    // High-risk operations default focus to Deny so a stray Enter/Esc can't
+    // accidentally approve a destructive tool call. Safe/medium keep the
+    // primary "Allow once" focused for fast approval.
+    if (isHighRisk) denyBtn.focus();
+    else onceBtn.focus();
   });
 }

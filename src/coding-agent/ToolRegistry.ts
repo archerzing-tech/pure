@@ -145,6 +145,13 @@ export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze([
     riskLevel: 'low',
   },
   {
+    name: 'sys_info',
+    description: 'Get operating system information: timezone, language, current time, and OS version.',
+    input_schema: { type: 'object', properties: {} },
+    tags: [Tags.READ],
+    riskLevel: 'low',
+  },
+  {
     name: 'create_directory',
     description: 'Create a directory (and any missing parent directories) in the workspace.',
     input_schema: {

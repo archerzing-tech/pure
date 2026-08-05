@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'bun:test';
 import { buildWritePreview } from '../ToolRegistry';
 import { PermissionManager } from '../PermissionManager';
-import type { PermissionRequestInfo } from '../types';
+import type { PermissionContext, PermissionRequestInfo } from '../types';
 
 describe('buildWritePreview', () => {
   it('builds a full-content preview for write_file', () => {
@@ -79,6 +79,71 @@ describe('PermissionManager write preview passthrough', () => {
 
     expect(received!.path).toBeUndefined();
     expect(received!.contentPreview).toBeUndefined();
+  });
+
+  it('caches an explicit "allow always this session" decision even for high-risk tools', async () => {
+    let handlerCalls = 0;
+    const pm = new PermissionManager('NORMAL', async () => {
+      handlerCalls++;
+      return { allowed: true, remember: true };
+    });
+
+    const ctx: PermissionContext = {
+      tool: 'execute_command',
+      command: 'rm -rf node_modules',
+      description: 'Execute a shell command',
+      isRead: false,
+      riskLevel: 'high',
+    };
+
+    const first = await pm.askUser(ctx);
+    const second = await pm.askUser(ctx);
+    expect(first.allowed).toBe(true);
+    expect(second.allowed).toBe(true);
+    // Cached → the dialog/handler must not fire a second time.
+    expect(handlerCalls).toBe(1);
+  });
+
+  it('does not cache a one-shot "allow once" decision, even for high risk', async () => {
+    let handlerCalls = 0;
+    const pm = new PermissionManager('NORMAL', async () => {
+      handlerCalls++;
+      return { allowed: true, remember: false };
+    });
+
+    const ctx: PermissionContext = {
+      tool: 'execute_command',
+      command: 'ls',
+      description: 'Execute a shell command',
+      isRead: false,
+      riskLevel: 'high',
+    };
+
+    await pm.askUser(ctx);
+    await pm.askUser(ctx);
+    // Every use re-asks — only explicit session approvals are cached.
+    expect(handlerCalls).toBe(2);
+  });
+
+  it('clearCache resets remembered approvals for a new chat session', async () => {
+    let handlerCalls = 0;
+    const pm = new PermissionManager('NORMAL', async () => {
+      handlerCalls++;
+      return { allowed: true, remember: true };
+    });
+
+    const ctx: PermissionContext = {
+      tool: 'execute_command',
+      command: 'ls',
+      description: 'Execute a shell command',
+      isRead: false,
+      riskLevel: 'high',
+    };
+
+    await pm.askUser(ctx);
+    pm.clearCache();
+    await pm.askUser(ctx);
+    expect(handlerCalls).toBe(2);
   });
 
   it('passes the abort signal through to the request handler', async () => {

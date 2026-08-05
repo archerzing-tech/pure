@@ -24,3 +24,14 @@ export async function loadTauriCore(): Promise<typeof import('@tauri-apps/api/co
     return null;
   }
 }
+
+/**
+ * Resolve the application-owned temporary workspace for a session. Plain web
+ * development has no filesystem-backed application space, so it returns an
+ * empty string and retains the no-workspace behavior there.
+ */
+export async function getApplicationTmpWorkspace(sessionId: string): Promise<string> {
+  const core = await loadTauriCore();
+  if (!core) return '';
+  return await core.invoke<string>('get_tmp_workspace', { sessionId });
+}

@@ -65,14 +65,35 @@ export function nonTtyDecision(info: PermissionRequestInfo): PermissionDecision 
 /**
  * Create the CLI permission request handler. Interactive on a TTY, safe-denies
  * writes on piped stdin.
+ *
+ * `autoApprove`: `true` short-circuits every non-aborted call with
+ * `{ allowed: true, autoApproved: true }`.
+ *
+ * The function-level default is `false` (interactive prompt / non-tty
+ * safe-reads-only fallback) — deliberately the *safer* path, so a future
+ * caller who forgets to pass the arg will be asked instead of silently
+ * approving. The CLI itself inverts this at the call site via the
+ * `DEFAULT_CLI_AUTO_APPROVE` constant at the top of `cli.ts` — flipping
+ * *that* constant (or adding a `--prompt-on-tool` flag) is the documented
+ * knob to switch the CLI between auto-approve and interactive flows. Do not
+ * "fix" the function-level default here to match.
  */
-export function createCliPermissionHandler(): PermissionRequestHandler {
+export function createCliPermissionHandler(autoApprove = false): PermissionRequestHandler {
   return async (info: PermissionRequestInfo): Promise<PermissionDecision> => {
-    if (!process.stdin.isTTY) return nonTtyDecision(info);
-
     // Already-aborted signal: addEventListener on an aborted signal never
-    // fires, so without this the prompt would hang forever.
+    // fires, so without this the prompt would hang forever. Honored *before*
+    // the auto-approve shortcut so Ctrl+C still cancels an in-flight tool call.
     if (info.signal?.aborted) return { allowed: false, reason: 'aborted by user' };
+
+    // CLI default — trust the operator's prompt, approve every tool call.
+    // Replaces both the TTY y/n/a prompt and the non-TTY safe-reads-only
+    // fallback. Use `--prompt-on-tool` (handled in cli.ts parseArgs) to opt
+    // back into the interactive confirmation flow.
+    if (autoApprove) {
+      return { allowed: true, autoApproved: true, reason: 'CLI auto-approve (operator reviewed the prompt)' };
+    }
+
+    if (!process.stdin.isTTY) return nonTtyDecision(info);
 
     // Leading newline separates the prompt from streamed token output (the
     // engine is blocked awaiting this decision, so nothing interleaves here).

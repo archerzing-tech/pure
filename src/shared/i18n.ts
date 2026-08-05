@@ -13,6 +13,43 @@ const translations: Record<Language, Record<string, string>> = {
     'sidebar.noSessions': '暂无会话',
     'sidebar.settings.title': '设置 (⌘,)',
     'sidebar.delete.title': '删除',
+    'sidebar.clearAll.title': '清空全部会话',
+
+    // ── Workspace picker (user workspace space) ──
+    'workspace.picker.title': '切换工作区',
+    'workspace.none': '未设置工作区',
+    'workspace.placeholder': '/path/to/project',
+    'workspace.browse': '浏览…',
+    'workspace.apply': '应用',
+    'workspace.clear': '清除',
+    'workspace.recent': '最近使用',
+    'workspace.recentEmpty': '暂无最近工作区',
+    'workspace.saved': '工作区已更新',
+    'workspace.cleared': '工作区已清除',
+    'workspace.browseTitle': '选择工作区文件夹',
+    'workspace.dropHint': '拖拽文件夹到窗口，松开即可切换工作区',
+    'workspace.changeHint': '点击更换工作区',
+    'workspace.pin': '固定',
+    'workspace.unpin': '取消固定',
+    'workspace.remove': '移除',
+
+    // ── Clickable paths ──
+    'path.open': '打开路径',
+    'path.copied': '路径已复制',
+    'path.openFailed': '无法打开路径',
+
+    // ── Thinking card ──
+    'thinking.thinking': '思考中',
+    'thinking.show': '查看思考过程',
+
+    // ── Code block actions ──
+    'codeBlock.copy': '复制',
+    'codeBlock.copied': '已复制',
+    'codeBlock.copyError': '复制失败',
+    'codeBlock.save': '保存代码',
+    'codeBlock.saved': '已保存',
+    'codeBlock.savedTo': '已保存到',
+    'codeBlock.saveError': '保存失败',
 
     // ── Main ──
     'main.toggleSidebar': '切换侧边栏',
@@ -20,6 +57,8 @@ const translations: Record<Language, Record<string, string>> = {
     'landing.placeholder': '描述您的任务...',
     'input.placeholder': '尽情提问...',
     'input.placeholderDisabled': '请先在设置中配置 API Key',
+    'input.streaming': '正在生成… (Esc 停止)',
+    'input.queued': '已排队，生成完成后自动发送…',
     'input.send.title': '发送',
     'input.stop.title': '停止',
 
@@ -39,11 +78,9 @@ const translations: Record<Language, Record<string, string>> = {
 
     // ── General Page ──
     'general.title': '通用',
-    'general.desc': '语言和工作区设置',
+    'general.desc': '语言和渲染设置',
     'general.language': '语言',
     'general.language.hint': '界面语言',
-    'general.workspace': '工作区',
-    'general.workspace.hint': '文件工具的项目根目录',
     'general.streaming': '流式渲染',
     'general.streaming.hint': '逐字格式化助手的回复',
 
@@ -78,8 +115,22 @@ const translations: Record<Language, Record<string, string>> = {
     'tools.cmd.hint': '运行 Shell 命令',
     'tools.git': 'Git 集成',
     'tools.git.hint': '差异、日志、状态',
-    'tools.browser': '浏览器自动化',
-    'tools.browser.hint': '基于 Playwright',
+    'tools.browser': '网页工具',
+    'tools.browser.hint': '网页搜索与抓取',
+    'tools.permissionSection': '权限与审批',
+    'tools.permissionMode': '权限模式',
+    'tools.permissionMode.hint': '工具调用的审批策略',
+    'tools.permissionMode.auto': '自动放行',
+    'tools.permissionMode.confirm': '每次询问',
+    'tools.permissionMode.restricted': '只读模式',
+    'tools.perm.read': '自动放行读取',
+    'tools.perm.read.hint': '文件读取、网页搜索/抓取',
+    'tools.perm.write': '自动放行写入',
+    'tools.perm.write.hint': '文件写入与编辑',
+    'tools.perm.cmd': '自动放行命令',
+    'tools.perm.cmd.hint': 'Shell 命令执行',
+    'tools.perm.git': '自动放行 Git',
+    'tools.perm.git.hint': 'Git 只读操作',
 
     // ── Skills Page ──
     'skills.title': '技能',
@@ -137,9 +188,15 @@ const translations: Record<Language, Record<string, string>> = {
     'toast.commandRequired': 'stdio 传输需要命令',
     'toast.urlRequired': 'http 传输需要 URL',
     'toast.setApiKey': '请先在设置中配置 API Key (⌘,)',
+    'toast.sessionsCleared': '已删除全部会话',
+    'toast.deleteFailed': '删除失败',
 
     // ── Confirm dialogs ──
+    'confirm.title': '确认',
+    'confirm.cancel': '取消',
+    'confirm.ok': '删除',
     'confirm.deleteSession': '确定删除此会话？',
+    'confirm.deleteAllSessions': '确定删除全部会话？此操作不可撤销。',
 
     // ── Plan review dialog ──
     'plan.title': '任务计划确认',
@@ -171,6 +228,43 @@ const translations: Record<Language, Record<string, string>> = {
     'sidebar.noSessions': 'No sessions yet',
     'sidebar.settings.title': 'Settings (⌘,)',
     'sidebar.delete.title': 'Delete',
+    'sidebar.clearAll.title': 'Delete all sessions',
+
+    // ── Workspace picker (user workspace space) ──
+    'workspace.picker.title': 'Switch workspace',
+    'workspace.none': 'No workspace',
+    'workspace.placeholder': '/path/to/project',
+    'workspace.browse': 'Browse…',
+    'workspace.apply': 'Apply',
+    'workspace.clear': 'Clear',
+    'workspace.recent': 'Recent',
+    'workspace.recentEmpty': 'No recent workspaces',
+    'workspace.saved': 'Workspace updated',
+    'workspace.cleared': 'Workspace cleared',
+    'workspace.browseTitle': 'Select workspace folder',
+    'workspace.dropHint': 'Drop a folder to switch workspace',
+    'workspace.changeHint': 'Click to change workspace',
+    'workspace.pin': 'Pin',
+    'workspace.unpin': 'Unpin',
+    'workspace.remove': 'Remove',
+
+    // ── Clickable paths ──
+    'path.open': 'Open path',
+    'path.copied': 'Path copied',
+    'path.openFailed': 'Could not open path',
+
+    // ── Thinking card ──
+    'thinking.thinking': 'Thinking',
+    'thinking.show': 'Show thinking',
+
+    // ── Code block actions ──
+    'codeBlock.copy': 'Copy',
+    'codeBlock.copied': 'Copied',
+    'codeBlock.copyError': 'Copy failed',
+    'codeBlock.save': 'Save code',
+    'codeBlock.saved': 'Saved',
+    'codeBlock.savedTo': 'Saved to',
+    'codeBlock.saveError': 'Save failed',
 
     // ── Main ──
     'main.toggleSidebar': 'Toggle sidebar',
@@ -178,6 +272,8 @@ const translations: Record<Language, Record<string, string>> = {
     'landing.placeholder': 'Describe your task...',
     'input.placeholder': 'Ask pure anything...',
     'input.placeholderDisabled': 'Set API key in Settings to send…',
+    'input.streaming': 'Generating… (Esc to stop)',
+    'input.queued': 'Queued — will send when generation finishes…',
     'input.send.title': 'Send',
     'input.stop.title': 'Stop',
 
@@ -197,11 +293,9 @@ const translations: Record<Language, Record<string, string>> = {
 
     // ── General Page ──
     'general.title': 'General',
-    'general.desc': 'Language and workspace settings',
+    'general.desc': 'Language and rendering settings',
     'general.language': 'Language',
     'general.language.hint': 'Interface language',
-    'general.workspace': 'Workspace',
-    'general.workspace.hint': 'Project root for file tools',
     'general.streaming': 'Streaming render',
     'general.streaming.hint': 'Format assistant reply progressively',
 
@@ -236,8 +330,22 @@ const translations: Record<Language, Record<string, string>> = {
     'tools.cmd.hint': 'Run shell commands',
     'tools.git': 'Git Integration',
     'tools.git.hint': 'Diff, log, status',
-    'tools.browser': 'Browser Automation',
-    'tools.browser.hint': 'Playwright-based',
+    'tools.browser': 'Web Tools',
+    'tools.browser.hint': 'Web search & fetch',
+    'tools.permissionSection': 'Permission & approval',
+    'tools.permissionMode': 'Permission mode',
+    'tools.permissionMode.hint': 'Tool call approval policy',
+    'tools.permissionMode.auto': 'Auto-approve all',
+    'tools.permissionMode.confirm': 'Ask each time',
+    'tools.permissionMode.restricted': 'Read-only',
+    'tools.perm.read': 'Auto-approve reads',
+    'tools.perm.read.hint': 'File reads, web search/fetch',
+    'tools.perm.write': 'Auto-approve writes',
+    'tools.perm.write.hint': 'File writes & edits',
+    'tools.perm.cmd': 'Auto-approve commands',
+    'tools.perm.cmd.hint': 'Shell command execution',
+    'tools.perm.git': 'Auto-approve git',
+    'tools.perm.git.hint': 'Git read operations',
 
     // ── Skills Page ──
     'skills.title': 'Skills',
@@ -295,9 +403,15 @@ const translations: Record<Language, Record<string, string>> = {
     'toast.commandRequired': 'Command is required for stdio transport',
     'toast.urlRequired': 'URL is required for http transport',
     'toast.setApiKey': 'Set an API key in Settings first (⌘,)',
+    'toast.sessionsCleared': 'All sessions deleted',
+    'toast.deleteFailed': 'Failed to delete',
 
     // ── Confirm dialogs ──
+    'confirm.title': 'Confirm',
+    'confirm.cancel': 'Cancel',
+    'confirm.ok': 'Delete',
     'confirm.deleteSession': 'Delete this session?',
+    'confirm.deleteAllSessions': 'Delete all sessions? This cannot be undone.',
 
     // ── Plan review dialog ──
     'plan.title': 'Plan review',

@@ -1,39 +1,29 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="icn-bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#8B7FFF"/>
       <stop offset="100%" stop-color="#5B4FDE"/>
     </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="icn-accent" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#C4B5FD"/>
       <stop offset="100%" stop-color="#A89BFF"/>
     </linearGradient>
+    <g id="icon-gem">
+      <rect width="1024" height="1024" rx="224" fill="url(#icn-bg)"/>
+      <rect x="12" y="12" width="1000" height="1000" rx="212" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="4"/>
+
+      <!-- Minimalist geometric gem: trapezoidal crown above, lit/shadow pavilion below -->
+      <g stroke="rgba(255,255,255,0.25)" stroke-width="2" stroke-linejoin="round">
+        <polygon points="320,200 704,200 864,400 160,400" fill="url(#icn-accent)"/>
+        <polygon points="416,200 608,200 512,400" fill="rgba(255,255,255,0.85)"/>
+        <polygon points="160,400 512,400 512,840" fill="rgba(255,255,255,0.7)"/>
+        <polygon points="512,400 864,400 512,840" fill="rgba(255,255,255,0.5)"/>
+      </g>
+    </g>
   </defs>
-
-  <!-- Background squircle -->
-  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
-
-  <!-- Subtle inner highlight ring -->
-  <rect x="12" y="12" width="1000" height="1000" rx="212" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="4"/>
-
-  <!-- Bird in flight — balanced proportions, ~60% canvas -->
-  <g transform="translate(512,490) scale(1.08)" fill="white">
-    <!-- Wing — bold sweeping upper arc -->
-    <path d="M -40,20 C 15,-130 190,-200 270,-130 C 250,-55 115,-15 -40,20 Z"/>
-
-    <!-- Body — smooth streamlined teardrop -->
-    <path d="M 25,-25 C 100,-25 185,8 235,50 C 205,62 120,75 55,75 C -15,75 -55,50 -95,22 C -55,-12 25,-25 25,-25 Z"/>
-
-    <!-- Tail — compact forked V -->
-    <path d="M -85,20 L -165,-15 L -125,8 L -170,55 L -120,32 Z"/>
-
-    <!-- Head -->
-    <circle cx="240" cy="12" r="42"/>
-
-    <!-- Beak — sharp, proportional -->
-    <path d="M 277,5 L 330,15 L 277,25 Z"/>
-
-    <!-- Eye — accent color dot -->
-    <circle cx="256" cy="7" r="9" fill="url(#accent)"/>
-  </g>
+  <!-- Top-level <use> so spec-strict SVG rasterizers (npx tauri icon) actually
+       render the icon. Browsers handle <g>-inside-<defs>+<use> fine without
+       this, but resvg / librsvg-as-shipped-with-tauri-cli will paint nothing
+       unless the visuals are pulled into the document tree via <use>. -->
+  <use href="#icon-gem"/>
 </svg>

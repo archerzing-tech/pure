@@ -3,9 +3,23 @@
 **Pure** is a local-first AI coding agent that runs on your machine. It reads, writes, and edits files, executes shell commands, and orchestrates multi-agent workflows — all through a fast terminal CLI or a native macOS desktop app.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.9.7-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
+</p>
+
+---
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/landing.png" alt="Pure landing page" width="720" />
+  <br />
+  <em>Landing page — pick a workspace and describe your task</em>
+  <br /><br />
+  <img src="docs/screenshots/chat.png" alt="Pure in action — the agent reads, edits, and tests your code" width="720" />
+  <br />
+  <em>Agent at work — file tools, shell output, and markdown answers rendered inline</em>
 </p>
 
 ---

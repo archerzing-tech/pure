@@ -88,4 +88,56 @@ describe('ContextEngine', () => {
     expect(result[result.length - 1].content).toBe('msg 19');
     expect(result[result.length - 2].content).toBe('msg 18');
   });
+
+  // ═══ LLM summary fallback (G-3 fix) ═══
+
+  it('summarizes evicted messages when llm is provided and threshold is exceeded', async () => {
+    const llm = {
+      stream: async function* () {
+        yield { type: 'done' as const, content: '', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'KEY DECISIONS: used TypeScript, refactored core loop' }),
+    };
+    const engine = new ContextEngine({ maxMessages: 3, summaryThreshold: 5, llm });
+    const msgs = makeMsgs(12); // evicts 9 → > 5
+    const result = await engine.trim(msgs);
+
+    const summary = result.find(m => m.content.startsWith('Earlier conversation summary:'));
+    expect(summary).toBeDefined();
+    expect(summary).toMatchObject({ role: 'system' });
+    expect(summary!.content).toContain('KEY DECISIONS: used TypeScript');
+    // Summary is inserted before the kept recent window
+    expect(result[result.length - 1].content).toBe('msg 11');
+  });
+
+  it('skips summarization when evicted count is under threshold', async () => {
+    let called = false;
+    const llm = {
+      stream: async function* () {
+        yield { type: 'done' as const, content: '', toolCalls: [] };
+      },
+      complete: async () => { called = true; return { content: 'summary' }; },
+    };
+    const engine = new ContextEngine({ maxMessages: 8, summaryThreshold: 10, llm });
+    const msgs = makeMsgs(12); // evicts 4 → ≤ 10
+    const result = await engine.trim(msgs);
+
+    expect(called).toBe(false);
+    expect(result.some(m => m.content.startsWith('Earlier conversation summary:'))).toBe(false);
+  });
+
+  it('falls back to plain trim when the summary LLM call fails', async () => {
+    const llm = {
+      stream: async function* () {
+        yield { type: 'done' as const, content: '', toolCalls: [] };
+      },
+      complete: async () => { throw new Error('llm down'); },
+    };
+    const engine = new ContextEngine({ maxMessages: 3, summaryThreshold: 5, llm });
+    const msgs = makeMsgs(12);
+    const result = await engine.trim(msgs);
+
+    expect(result.length).toBeLessThanOrEqual(3);
+    expect(result.some(m => m.content.startsWith('Earlier conversation summary:'))).toBe(false);
+  });
 });

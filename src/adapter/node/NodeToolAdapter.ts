@@ -132,7 +132,7 @@ export class NodeToolAdapter implements ToolAdapter {
     },
     {
       name: 'web_fetch',
-      description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles).',
+      description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles). Works on text/HTML/JSON pages; if it reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.',
       input_schema: {
         type: 'object',
         properties: {
@@ -196,6 +196,11 @@ export class NodeToolAdapter implements ToolAdapter {
       description: 'Show working tree status — modified, added, deleted, and untracked files.',
       input_schema: { type: 'object', properties: {} },
     },
+    {
+      name: 'sys_info',
+      description: 'Get operating system information: timezone, language, current time, and OS version.',
+      input_schema: { type: 'object', properties: {} },
+    },
   ];
 
   constructor(config: NodeToolConfig) {
@@ -227,6 +232,7 @@ export class NodeToolAdapter implements ToolAdapter {
       git_diff: { sideEffects: false, isWrite: false },
       git_log: { sideEffects: false, isWrite: false },
       git_status: { sideEffects: false, isWrite: false },
+      sys_info: { sideEffects: false, isWrite: false },
     };
     return meta[toolName];
   }
@@ -252,6 +258,7 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'git_diff': return this.handleGitCmd(args, ['diff', ...(args.staged ? ['--staged'] : []), ...(typeof args.path === 'string' ? ['--', args.path as string] : [])], signal, start);
         case 'git_log': return this.handleGitCmd(args, ['log', '-n', String(args.maxCount ?? 10), ...(args.oneline !== false ? ['--oneline'] : [])], signal, start);
         case 'git_status': return this.handleGitCmd(args, ['status', '--short'], signal, start);
+        case 'sys_info': return this.handleSysInfo(start);
         default:
           return this.fail(toolCall, start, `Unknown tool: ${toolCall.function.name}`);
       }
@@ -562,8 +569,14 @@ export class NodeToolAdapter implements ToolAdapter {
     }
 
     const contentType = resp.headers.get('content-type') || '';
-    if (!contentType.includes('text/html') && !contentType.includes('text/plain')) {
-      return this.fail(null!, start, `Unsupported content type: ${contentType}. Only HTML and plain text are supported.`);
+    // Accept any text-ish media type (text/*, JSON, XML, JS, …) so repeated
+    // web_fetch calls don't keep hitting the same "unsupported content type"
+    // wall on common real-world pages; reject only clearly binary payloads.
+    // The error guides the model toward recovery instead of blind retries.
+    if (!isTextualContentType(contentType)) {
+      // Empty content-type never reaches this branch (helper returns true),
+      // so contentType is always a non-empty binary type here.
+      return this.fail(null!, start, `Unsupported content type: ${contentType} — the URL serves a non-text payload, so web_fetch cannot extract readable text from it. Do NOT retry web_fetch on this URL; instead use web_search to find a text/HTML page with the information, or pick a different URL.`);
     }
 
     const html = await resp.text();
@@ -700,6 +713,25 @@ export class NodeToolAdapter implements ToolAdapter {
     }
   }
 
+  private async handleSysInfo(start: number): Promise<ToolResult> {
+    const tz = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const lang = process.env.LANG ?? process.env.LC_ALL ?? process.env.LC_CTYPE ?? 'unknown';
+    const time = new Date().toString();
+    let osVersion = `${process.platform} ${process.arch}`;
+    try {
+      const uname = Bun.spawnSync({ cmd: ['uname', '-srm'], stdout: 'pipe', stderr: 'pipe' });
+      if (uname.exitCode === 0) osVersion = new TextDecoder().decode(uname.stdout).trim();
+    } catch {}
+
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'sys_info',
+      result: `timezone:  ${tz}\nlanguage:  ${lang}\ntime:      ${time}\n      os:        ${osVersion}`,
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
   // ── Helpers ──
 
   private resolve(filePath: string): string {
@@ -762,6 +794,29 @@ function parseDuckDuckGoResults(html: string, maxResults: number): SearchResult[
   }
 
   return results;
+}
+
+/** True when a Content-Type header is a text-like payload web_fetch can read.
+ * Accepts text/* and common text-bearing application subtypes (JSON, XML, JS,
+ * SVG, RSS/Atom, form data); a missing/empty header is treated as text so the
+ * fetch still works on servers that omit it. Rejects only clearly binary
+ * payloads (images, audio/video, fonts, archives, PDF, octet-stream). */
+function isTextualContentType(contentType: string): boolean {
+  const main = contentType.split(';')[0].trim().toLowerCase();
+  if (!main) return true;
+  if (main.startsWith('text/')) return true;
+  if (main.endsWith('+json') || main.endsWith('+xml')) return true;
+  return [
+    'application/json',
+    'application/xml',
+    'application/xhtml+xml',
+    'application/javascript',
+    'application/x-javascript',
+    'application/x-www-form-urlencoded',
+    'application/svg+xml',
+    'application/rss+xml',
+    'application/atom+xml',
+  ].includes(main);
 }
 
 function decodeHtmlEntities(text: string): string {

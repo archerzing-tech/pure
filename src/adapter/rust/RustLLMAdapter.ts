@@ -163,6 +163,12 @@ export class RustLLMAdapter implements LLMAdapter {
         if (payload?.type === 'delta' && typeof payload.content === 'string') {
           yield { type: 'content', content: payload.content };
         }
+        // Reasoning/thinking deltas (DeepSeek/Qwen/GLM `reasoning_content`)
+        // flow to the UI as their own chunk so the GUI can show the model's
+        // live thinking without mixing it into the visible answer.
+        if (payload?.type === 'reasoning' && typeof payload.content === 'string') {
+          yield { type: 'reasoning', content: payload.content };
+        }
       }
 
       // Cancelled — do not emit a synthetic `done`.

@@ -57,6 +57,21 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
         yield { type: 'content', content: delta.content };
       }
 
+      // Reasoning deltas: DeepSeek/Qwen/GLM expose `reasoning_content`;
+      // OpenAI-style responses use `reasoning` (string or {content: [{text}]}).
+      // Yielded separately so the GUI can render a live thinking card while
+      // keeping the reasoning out of the visible answer.
+      const d = delta as any;
+      const reasoning =
+        typeof d.reasoning_content === 'string'
+          ? d.reasoning_content
+          : typeof d.reasoning === 'string'
+            ? d.reasoning
+            : Array.isArray(d.reasoning?.content)
+              ? d.reasoning.content.map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('')
+              : undefined;
+      if (reasoning) yield { type: 'reasoning', content: reasoning };
+
       if (delta.tool_calls) {
         for (const tc of delta.tool_calls) {
           const idx = tc.index;
@@ -150,6 +165,12 @@ export function createDeepSeekAdapter(apiKey: string, model = 'deepseek-v4-flash
     baseURL: 'https://api.deepseek.com',
     apiKey,
     model,
+    // DeepSeek reasoning models draw reasoning_content and content from the
+    // SAME output-token budget. The shared 8192 default gets exhausted by
+    // thinking on complex tasks (e.g. generating a full HTML animation), so
+    // the visible answer comes back EMPTY → non-empty-output verify failure →
+    // retry loop. 32768 leaves room for reasoning AND the actual answer.
+    maxTokens: 32768,
   });
 }
 

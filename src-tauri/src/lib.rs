@@ -94,6 +94,22 @@ fn write_file(workspace: String, path: String, content: String) -> Result<String
     Ok(format!("Wrote {} bytes to {}", content.len(), path))
 }
 
+/// Save a code block to an absolute path chosen by the user via the GUI's
+/// save dialog (see markdown.ts addCodeBlockActions). Unlike write_file this
+/// takes the path verbatim — no workspace resolution, no traversal guard —
+/// because the dialog path is user-chosen, not LLM-supplied.
+#[tauri::command]
+fn save_file(path: String, content: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+        }
+    }
+    fs::write(&p, &content).map_err(|e| format!("save_file: {}", e))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn edit_file(
     workspace: String,
@@ -670,9 +686,16 @@ async fn web_fetch(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !content_type.contains("text/html") && !content_type.contains("text/plain") {
+    // Accept any text-ish media type so the model doesn't hit the same
+    // "unsupported content type" wall repeatedly on JSON/XML/JS/CSV pages or
+    // when a server omits the header. Only clearly binary payloads (images,
+    // media, archives, PDFs, octet-stream) are rejected — and the error tells
+    // the model how to recover instead of just what failed.
+    if !is_textual_content_type(&content_type) {
+        // Empty content-type never reaches this branch (helper returns true),
+        // so content_type is always a non-empty binary type here.
         return Err(format!(
-            "Unsupported content type: {}. Only HTML and plain text are supported.",
+            "Unsupported content type: {} — the URL serves a non-text payload, so web_fetch cannot extract readable text from it. Do NOT retry web_fetch on this URL; instead use web_search to find a text/HTML page with the information, or pick a different URL.",
             content_type
         ));
     }
@@ -696,6 +719,37 @@ async fn web_fetch(
     } else {
         Ok(truncated)
     }
+}
+
+/// True when a Content-Type header is a text-like payload web_fetch can read.
+/// Accepts text/* and common text-bearing application subtypes (JSON, XML,
+/// JavaScript, SVG, RSS/Atom, form data); a missing/empty header is treated as
+/// text so the fetch still works on servers that omit it. Rejects only clearly
+/// binary payloads (images, audio/video, fonts, archives, PDF, octet-stream).
+fn is_textual_content_type(content_type: &str) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    let main = ct.split(';').next().unwrap_or("").trim();
+    if main.is_empty() {
+        return true;
+    }
+    if main.starts_with("text/") {
+        return true;
+    }
+    if main.ends_with("+json") || main.ends_with("+xml") {
+        return true;
+    }
+    matches!(
+        main,
+        "application/json"
+            | "application/xml"
+            | "application/xhtml+xml"
+            | "application/javascript"
+            | "application/x-javascript"
+            | "application/x-www-form-urlencoded"
+            | "application/svg+xml"
+            | "application/rss+xml"
+            | "application/atom+xml"
+    )
 }
 
 fn strip_html_full(html: &str) -> String {
@@ -914,6 +968,32 @@ async fn mcp_list(state: tauri::State<'_, McpRegistry>, session_id: String) -> R
         .cloned()
         .collect();
     Ok(keys)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Application Temporary Workspace (~/.pure/tmp/<session-id>/)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn application_tmp_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".pure").join("tmp")
+}
+
+fn safe_session_component(session_id: &str) -> String {
+    // Encode every byte instead of replacing punctuation with `_`; replacement
+    // could make distinct session IDs map to the same temporary directory.
+    let encoded: String = session_id.bytes().map(|b| format!("{:02x}", b)).collect();
+    if encoded.is_empty() { "session".to_string() } else { encoded }
+}
+
+#[tauri::command]
+fn get_tmp_workspace(session_id: String) -> Result<String, String> {
+    if session_id.trim().is_empty() {
+        return Err("session id is required".to_string());
+    }
+    let workspace = application_tmp_dir().join(safe_session_component(&session_id));
+    fs::create_dir_all(&workspace).map_err(|e| format!("create tmp workspace: {}", e))?;
+    Ok(workspace.to_string_lossy().to_string())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1181,6 +1261,39 @@ async fn chat_stream(
                 }
             }
 
+            // Emit reasoning deltas separately from content so the GUI can
+            // render a live "thinking" card. DeepSeek/Qwen/GLM stream
+            // `reasoning_content`; OpenAI-style responses use `reasoning`
+            // (string, or an object with a text-part `content` array). The
+            // reasoning text is intentionally NOT appended to `text`, so it
+            // never leaks into the final answer or persisted messages.
+            let reasoning = delta.get("reasoning_content").and_then(|c| c.as_str()).map(|s| s.to_string()).or_else(|| {
+                match delta.get("reasoning") {
+                    Some(r) => {
+                        if let Some(s) = r.as_str() {
+                            Some(s.to_string())
+                        } else if let Some(parts) = r.get("content").and_then(|c| c.as_array()) {
+                            let mut acc = String::new();
+                            for p in parts {
+                                if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                                    acc.push_str(t);
+                                }
+                            }
+                            if acc.is_empty() { None } else { Some(acc) }
+                        } else {
+                            None
+                        }
+                    }
+                    None => None,
+                }
+            });
+            if let Some(rc) = reasoning {
+                let chunk = serde_json::json!({ "type": "reasoning", "content": rc });
+                if on_chunk.send(chunk.to_string()).is_err() {
+                    return Err("cancelled".into());
+                }
+            }
+
             // Accumulate tool_calls
             if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                 for tc in tool_calls {
@@ -1234,6 +1347,11 @@ struct SessionData {
     updated_at: u64,
     #[serde(rename = "messageCount")]
     message_count: usize,
+    // Per-session user workspace override (empty = use the application tmp
+    // workspace for this session). Serde default keeps older session.json files
+    // readable until they are next saved.
+    #[serde(default)]
+    workspace: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1246,6 +1364,8 @@ struct SessionMeta {
     updated_at: u64,
     #[serde(rename = "messageCount")]
     message_count: usize,
+    #[serde(default)]
+    workspace: String,
 }
 
 fn sessions_dir() -> PathBuf {
@@ -1254,7 +1374,11 @@ fn sessions_dir() -> PathBuf {
 }
 
 #[tauri::command]
-fn save_session(session_id: String, messages: Vec<serde_json::Value>) -> Result<(), String> {
+fn save_session(
+    session_id: String,
+    messages: Vec<serde_json::Value>,
+    workspace: Option<String>,
+) -> Result<(), String> {
     let dir = sessions_dir().join(&session_id);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
 
@@ -1263,9 +1387,17 @@ fn save_session(session_id: String, messages: Vec<serde_json::Value>) -> Result<
         .unwrap_or_default()
         .as_millis() as u64;
 
+    // Frontend always sends the current session workspace; older callers omit
+    // it, in which case we preserve the previously stored override (if any).
+    let workspace = match workspace {
+        Some(w) => w,
+        None => load_session_workspace(&session_id).unwrap_or_default(),
+    };
+
     let data = SessionData {
         message_count: messages.len(),
         updated_at: now,
+        workspace: workspace.clone(),
         messages,
     };
 
@@ -1274,7 +1406,7 @@ fn save_session(session_id: String, messages: Vec<serde_json::Value>) -> Result<
         .map_err(|e| format!("write: {}", e))?;
 
     let title = extract_title(&data.messages);
-    update_sessions_index(&session_id, &title, data.message_count, now)?;
+    update_sessions_index(&session_id, &title, data.message_count, now, workspace)?;
 
     Ok(())
 }
@@ -1292,7 +1424,19 @@ fn load_session(session_id: String) -> Result<Option<serde_json::Value>, String>
         "messages": data.messages,
         "updatedAt": data.updated_at,
         "messageCount": data.message_count,
+        "workspace": data.workspace,
     })))
+}
+
+/// Read the stored workspace override for a session ("" when absent).
+fn load_session_workspace(session_id: &str) -> Result<String, String> {
+    let path = sessions_dir().join(session_id).join("session.json");
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
+    let data: SessionData = serde_json::from_str(&raw).map_err(|e| format!("parse: {}", e))?;
+    Ok(data.workspace)
 }
 
 #[tauri::command]
@@ -1327,9 +1471,40 @@ fn load_session_list() -> Result<Vec<serde_json::Value>, String> {
                 "createdAt": s.created_at,
                 "updatedAt": s.updated_at,
                 "messageCount": s.message_count,
+                "workspace": s.workspace,
             })
         })
         .collect())
+}
+
+/// Update ONLY the workspace override of an already-saved session (used when
+/// the user edits the workspace chip without sending a new message, so the
+/// change survives an app restart). No-op when the session dir does not exist
+/// yet — a brand-new chat that has never been persisted has nothing to update,
+/// and its workspace is captured on the first save_session call.
+#[tauri::command]
+fn save_session_workspace(session_id: String, workspace: String) -> Result<(), String> {
+    let dir = sessions_dir().join(&session_id);
+    let data_path = dir.join("session.json");
+    if data_path.exists() {
+        let raw = fs::read_to_string(&data_path).map_err(|e| format!("read: {}", e))?;
+        let mut data: SessionData = serde_json::from_str(&raw).map_err(|e| format!("parse: {}", e))?;
+        data.workspace = workspace.clone();
+        fs::write(&data_path, serde_json::to_string_pretty(&data).unwrap_or_default())
+            .map_err(|e| format!("write: {}", e))?;
+    }
+
+    let index_path = sessions_dir().join("index.json");
+    if index_path.exists() {
+        let raw = fs::read_to_string(&index_path).unwrap_or_default();
+        let mut list: Vec<SessionMeta> = serde_json::from_str(&raw).unwrap_or_default();
+        if let Some(meta) = list.iter_mut().find(|s| s.id == session_id) {
+            meta.workspace = workspace.clone();
+        }
+        fs::write(&index_path, serde_json::to_string_pretty(&list).unwrap_or_default())
+            .map_err(|e| format!("write: {}", e))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1338,6 +1513,10 @@ fn delete_session(session_id: String) -> Result<(), String> {
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|e| format!("remove: {}", e))?;
     }
+    let tmp_dir = application_tmp_dir().join(safe_session_component(&session_id));
+    if tmp_dir.exists() {
+        fs::remove_dir_all(&tmp_dir).map_err(|e| format!("remove tmp workspace: {}", e))?;
+    }
     let index_path = sessions_dir().join("index.json");
     if index_path.exists() {
         let raw = fs::read_to_string(&index_path).unwrap_or_default();
@@ -1345,6 +1524,46 @@ fn delete_session(session_id: String) -> Result<(), String> {
         list.retain(|s| s.id != session_id);
         fs::write(&index_path, serde_json::to_string_pretty(&list).unwrap_or_default())
             .map_err(|e| format!("write: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_all_sessions() -> Result<(), String> {
+    let dir = sessions_dir();
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    let index_path = dir.join("index.json");
+    let session_ids: Vec<String> = if index_path.exists() {
+        let raw = fs::read_to_string(&index_path).unwrap_or_default();
+        serde_json::from_str::<Vec<SessionMeta>>(&raw)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    } else {
+        vec![]
+    };
+
+    for entry in fs::read_dir(&dir).map_err(|e| format!("read_dir: {}", e))? {
+        let entry = entry.map_err(|e| format!("entry: {}", e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|e| format!("remove: {}", e))?;
+        }
+    }
+    fs::write(&index_path, "[]").map_err(|e| format!("write: {}", e))?;
+
+    // Remove only temp workspaces belonging to persisted sessions. Do not
+    // recursively delete the whole tmp root: an active or unsaved session may
+    // still be using another temporary directory.
+    for session_id in session_ids {
+        let tmp_dir = application_tmp_dir().join(safe_session_component(&session_id));
+        if tmp_dir.exists() {
+            fs::remove_dir_all(&tmp_dir).map_err(|e| format!("remove tmp workspace: {}", e))?;
+        }
     }
     Ok(())
 }
@@ -1370,6 +1589,7 @@ fn update_sessions_index(
     title: &str,
     message_count: usize,
     updated_at: u64,
+    workspace: String,
 ) -> Result<(), String> {
     let dir = sessions_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
@@ -1391,6 +1611,7 @@ fn update_sessions_index(
             .unwrap_or(updated_at),
         updated_at,
         message_count,
+        workspace,
     };
 
     if let Some(i) = existing {
@@ -1406,6 +1627,107 @@ fn update_sessions_index(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  System Info
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+fn sys_info(_workspace: String) -> Result<String, String> {
+    let tz = std::env::var("TZ").unwrap_or_else(|_| "UTC".to_string());
+
+    let lang = std::env::var("LANG")
+        .or_else(|_| std::env::var("LC_ALL"))
+        .or_else(|_| std::env::var("LC_CTYPE"))
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let time = {
+        let output = std::process::Command::new("date")
+            .arg("+%Y-%m-%d %H:%M:%S %Z")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        output
+    };
+
+    let os_version = {
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("sw_vers")
+                .arg("-productVersion")
+                .output()
+                .map(|o| {
+                    let ver = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    let arch = std::env::consts::ARCH;
+                    format!("macOS {} ({})", ver, arch)
+                })
+                .unwrap_or_else(|_| "macOS (unknown version)".to_string())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("uname")
+                .args(["-srm"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|_| "Linux (unknown version)".to_string())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
+        }
+    };
+
+    let info = format!(
+        "timezone:  {}\nlanguage:  {}\ntime:      {}\nos:        {}",
+        tz, lang, time, os_version
+    );
+    Ok(info)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Open Path (clickable transcript paths → Finder / default app)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Open a file/directory with the OS default application (macOS `open`, Linux
+/// `xdg-open`, Windows `explorer`). A directory opens in the file manager; a
+/// file opens with its default app. When the exact path doesn't exist yet
+/// (e.g. clicking a file the agent plans to create), fall back to the nearest
+/// existing parent directory so the click still lands somewhere useful.
+#[tauri::command]
+async fn open_path(path: String) -> Result<(), String> {
+    let mut expanded = path;
+    // Expand a leading ~/ to the user's home directory (PathBuf alone does
+    // not resolve ~).
+    if expanded.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            expanded = format!("{}/{}", home.trim_end_matches('/'), &expanded[2..]);
+        }
+    }
+
+    let p = PathBuf::from(&expanded);
+    let target = if p.exists() {
+        p
+    } else {
+        p.parent()
+            .filter(|pp| pp.exists())
+            .map(|pp| pp.to_path_buf())
+            .unwrap_or(p)
+    };
+
+    // Async so a slow launcher never blocks the main thread.
+    #[cfg(target_os = "macos")]
+    let status = TokioCommand::new("open").arg(&target).status().await;
+    #[cfg(target_os = "linux")]
+    let status = TokioCommand::new("xdg-open").arg(&target).status().await;
+    #[cfg(target_os = "windows")]
+    let status = TokioCommand::new("explorer").arg(&target).status().await;
+
+    status
+        .map_err(|e| format!("open_path: {}", e))?
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("open failed: {}", target.display()))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  Tauri App Entry
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1414,11 +1736,15 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(McpRegistry::new(BTreeMap::new()))
         .manage(WatcherRegistry::new(BTreeMap::new()))
         .invoke_handler(tauri::generate_handler![
             // File tools
             read_file, write_file, edit_file, search_files, list_files, create_directory, diff_files, glob_files, replace_files,
+            save_file,
+            // System info
+            sys_info,
             // Web tools
             web_search, web_fetch,
             // Command execution
@@ -1427,14 +1753,17 @@ pub fn run() {
             git_diff, git_log, git_status,
             // MCP subprocess
             spawn_mcp, mcp_request, mcp_shutdown, mcp_list,
-            // Secret management
+            // Application temporary workspace + secret management
+            get_tmp_workspace,
             secret_get, secret_set, secret_delete, secret_list,
             // File watching
             watch_files, unwatch_files,
+            // Open path (clickable transcript paths)
+            open_path,
             // LLM transport
             chat_stream,
             // Session persistence
-            save_session, load_session, load_last_session, load_session_list, delete_session,
+            save_session, load_session, load_last_session, load_session_list, save_session_workspace, delete_session, delete_all_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running pure");

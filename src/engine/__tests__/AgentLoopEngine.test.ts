@@ -57,6 +57,17 @@ function toolThenTextLLM(toolName: string, toolArgs: string, finalText: string):
   };
 }
 
+function reasoningThenTextLLM(reasoning: string, content: string): LLMAdapter {
+  return {
+    stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+      yield { type: 'reasoning', content: reasoning };
+      yield { type: 'content', content };
+      yield { type: 'done', content, toolCalls: [] };
+    },
+    complete: async () => ({ content, toolCalls: [] }),
+  };
+}
+
 function errorLLM(message: string): LLMAdapter {
   return {
     stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
@@ -170,6 +181,27 @@ describe('AgentLoopEngine', () => {
     expect(completed!.payload.finalOutput).toBe('Hello, world!');
     expect(completed!.payload.isComplete).toBe(true);
     expect(tokens.length).toBeGreaterThan(0);
+  });
+
+  it('surfaces reasoning deltas as ReasoningDelta and keeps them out of the answer', async () => {
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm: reasoningThenTextLLM('First inspect the file layout.', 'Done.') });
+
+    const events = await collect(engine.run(
+      { sessionId: 's2', systemPrompt: 'You are helpful.', userPrompt: 'Hi', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const reasoning = events.filter(e => e.type === 'ReasoningDelta');
+    expect(reasoning.length).toBeGreaterThan(0);
+    expect(reasoning.map(e => (e as any).payload.content).join('')).toBe('First inspect the file layout.');
+
+    // Reasoning must never leak into the visible answer / stored messages.
+    const completed = events.find(e => e.type === 'Completed') as any;
+    expect(completed.payload.finalOutput).toBe('Done.');
+    const assistantMsg = completed.payload.messages?.find((m: Message) => m.role === 'assistant');
+    expect(assistantMsg?.content).toBe('Done.');
+    expect(assistantMsg?.content).not.toContain('file layout');
   });
 
   // ═══ ReAct loop: THINK → ACT → OBSERVE → THINK → VERIFY → TERMINATE ═══
@@ -428,6 +460,61 @@ describe('AgentLoopEngine', () => {
     expect(completed!.payload.finalOutput).toBe('Rust is great!');
   });
 
+  // ═══ YieldControl event (G-5 fix) ═══
+
+  it('emits YieldControl with turnNumber and budget snapshot after tool rounds', async () => {
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm: multiRoundLLM(
+        [
+          { toolName: 'read_file', toolArgs: '{"path":"a.ts"}' },
+          { toolName: 'list_files', toolArgs: '{"path":"src"}' },
+        ],
+        'Done.',
+      ),
+      tools: echoToolAdapter([READ_FILE_TOOL, LIST_FILES_TOOL]),
+      toolsDefs: [READ_FILE_TOOL, LIST_FILES_TOOL],
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-yc', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const controls = events.filter(e => e.type === 'YieldControl');
+    // One YieldControl per completed turn (initial + 2 tool rounds → 3 yields)
+    expect(controls.length).toBe(3);
+    const first = controls[0];
+    if (first.type === 'YieldControl') {
+      expect(first.payload.turnNumber).toBeGreaterThan(0);
+      expect(first.payload.budget.turns.max).toBe(STD_BUDGET.maxTurns);
+      expect(typeof first.payload.budget.elapsed).toBe('number');
+    }
+  });
+
+  it('emits YieldControl on the verify-retry path', async () => {
+    const engine = new AgentLoopEngine();
+    let verifyCount = 0;
+    const ctx = baseCtx({
+      llm: textLLM('code'),
+      verifier: {
+        evaluate: async () => {
+          verifyCount++;
+          return { passed: verifyCount > 1, feedback: 'needs fix' };
+        },
+      },
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-yc2', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const controls = events.filter(e => e.type === 'YieldControl');
+    // First verify fails → retry turn yields a YieldControl; second passes.
+    expect(controls.length).toBeGreaterThanOrEqual(1);
+  });
+
   // ═══ BudgetWarning event ═══
 
   it('emits BudgetWarning when approaching limits', async () => {
@@ -486,13 +573,117 @@ describe('AgentLoopEngine', () => {
     ));
 
     // Without a policy this would emit LLM_STREAM_ERROR and stop at once;
-    // with the escalating policy it retries/reflects first and only stops
-    // after 6 consecutive failures.
+    // with the escalating policy it retries/reflects first. The identical
+    // error repeats ('boom' every time) → v0.11 repeated-error detection
+    // stops after 3 identical repeats (not the generic 6-failure ceiling).
     const llmErrors = events.filter(e => e.type === 'Error' && e.payload.code === 'LLM_STREAM_ERROR');
     expect(llmErrors.length).toBe(0);
     const interrupted = events.find(e => e.type === 'Interrupted');
     expect(interrupted).toBeDefined();
     expect(interrupted!.payload.reason).toContain('consecutive failures');
+  });
+
+  // ═══ FailurePolicyDecision event (v0.10 §12.3 memory writes) ═══
+
+  it('emits FailurePolicyDecision on every policy decision', async () => {
+    const engine = new AgentLoopEngine();
+    const policy = {
+      decide: (failures: Array<{ type: string; message: string; turnNumber: number }>) => {
+        return { kind: 'retry' as const, hint: `retry ${failures.length}` };
+      },
+    };
+    // Two failures → two decisions, then a success stops the retry loop.
+    let calls = 0;
+    const flakyLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        if (calls <= 2) throw new Error('transient llm error');
+        yield { type: 'content', content: 'finally ok' };
+        yield { type: 'done', content: 'finally ok', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const ctx = baseCtx({ llm: flakyLLM, failurePolicy: policy });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-policy', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const decisions = events.filter(e => e.type === 'FailurePolicyDecision');
+    expect(decisions).toHaveLength(2);
+    if (decisions[0]?.type === 'FailurePolicyDecision') {
+      expect(decisions[0].payload.action.kind).toBe('retry');
+      expect(decisions[0].payload.failure.type).toBe('llm_error');
+      expect(decisions[0].payload.failure.message).toContain('transient llm error');
+      expect(decisions[0].payload.turnNumber).toBeGreaterThan(0);
+    }
+    // Session recovered and completed.
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed?.payload.isComplete).toBe(true);
+  });
+
+  it('emits FailurePolicyDecision with stop action when policy stops', async () => {
+    const engine = new AgentLoopEngine();
+    const policy = {
+      decide: () => ({ kind: 'stop' as const, reason: 'too many failures, giving up' }),
+    };
+    const ctx = baseCtx({ llm: errorLLM('fatal boom'), failurePolicy: policy });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-policy-stop', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const decision = events.find(e => e.type === 'FailurePolicyDecision');
+    expect(decision).toBeDefined();
+    if (decision?.type === 'FailurePolicyDecision') {
+      expect(decision.payload.action.kind).toBe('stop');
+      if (decision.payload.action.kind === 'stop') {
+        expect(decision.payload.action.reason).toContain('too many failures');
+      }
+    }
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+  });
+
+  // ═══ Lock release on tool throw (P0 fix) ═══
+
+  it('releases the path lock when a tool throws (no deadlock on retry)', async () => {
+    const engine = new AgentLoopEngine();
+    let calls = 0;
+    const throwingToolAdapter: ToolAdapter = {
+      execute: async (): Promise<ToolResult> => {
+        calls++;
+        if (calls === 1) throw new Error('tool exploded');
+        return { id: 'x', toolName: 'read_file', result: 'recovered', success: true, duration: 1 };
+      },
+      getMetadata: (name: string) => ({ isWrite: name === 'write_file' }),
+      getTools: () => [READ_FILE_TOOL],
+    };
+    // Track acquire/release pairing on a custom lock manager.
+    const released: string[] = [];
+    const lockManager = {
+      acquireRead: async (p: string) => {},
+      acquireWrite: async (p: string) => {},
+      release: (p: string) => { released.push(p); },
+    };
+    const ctx = baseCtx({
+      llm: multiRoundLLM([{ toolName: 'read_file', toolArgs: '{"path":"a.ts"}' }], 'done'),
+      tools: throwingToolAdapter,
+      toolsDefs: [READ_FILE_TOOL],
+      lockManager,
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-lock', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // The thrown tool error was caught → error result, not a crash.
+    expect(events.find(e => e.type === 'ToolResult')).toBeDefined();
+    // The lock for a.ts must have been released even though execute threw.
+    expect(released).toContain('a.ts');
   });
 
   it('escalates consecutive TOOL failures (validates the failure-streak reset fix)', async () => {
@@ -514,8 +705,8 @@ describe('AgentLoopEngine', () => {
 
     // Before the reset fix, tool failures were wiped after every THINK, so the
     // policy always saw a count of 1 (retry forever). With the fix the streak
-    // survives across rounds → after 6 consecutive tool failures the policy
-    // stops the run.
+    // survives across rounds → the identical 'tool execution failed' repeats
+    // trigger v0.11 repeated-error detection and stop after 3.
     const interrupted = events.find(e => e.type === 'Interrupted');
     expect(interrupted).toBeDefined();
     expect(interrupted!.payload.reason).toContain('consecutive failures');

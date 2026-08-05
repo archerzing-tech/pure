@@ -31,7 +31,10 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
       baseURL: 'https://api.deepseek.com/anthropic',
     });
     this.model = config.model ?? 'deepseek-v4-flash';
-    this.maxTokens = config.maxTokens ?? 8192;
+    // Same reasoning-vs-content budget rationale as createDeepSeekAdapter: the
+    // default 8192 leaves the visible answer empty on complex tasks because
+    // reasoning_content consumes the whole budget first.
+    this.maxTokens = config.maxTokens ?? 32768;
     this.temperature = config.temperature ?? 0;
   }
 
@@ -73,6 +76,9 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
             yield {
               type: 'tool_call_delta',
               index: idx,
+              // Anthropic emits content_block_start (with the tool name) before
+              // the first input_json_delta, so the block name is available here.
+              name: block.name || undefined,
               arguments: event.delta.partial_json,
             };
           }
@@ -147,46 +153,7 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
     system: string;
     conversationMessages: Anthropic.MessageParam[];
   } {
-    const systemParts: string[] = [];
-    const convMessages: Anthropic.MessageParam[] = [];
-
-    for (const m of messages) {
-      if (m.role === 'system') {
-        systemParts.push(m.content);
-      } else if (m.role === 'user') {
-        convMessages.push({ role: 'user', content: m.content });
-      } else if (m.role === 'assistant') {
-        const content: Anthropic.ContentBlockParam[] = [];
-        if (m.content) {
-          content.push({ type: 'text', text: m.content });
-        }
-        if (m.toolCalls?.length) {
-          for (const tc of m.toolCalls) {
-            content.push({
-              type: 'tool_use',
-              id: tc.id,
-              name: tc.function.name,
-              input: safeParseJSON(tc.function.arguments),
-            });
-          }
-        }
-        convMessages.push({ role: 'assistant', content: content.length > 0 ? content : m.content });
-      } else if (m.role === 'tool') {
-        const prevMsg = convMessages[convMessages.length - 1];
-        const toolResultBlock: Anthropic.ToolResultBlockParam = {
-          type: 'tool_result',
-          tool_use_id: m.toolCallId ?? '',
-          content: m.content,
-        };
-        if (prevMsg?.role === 'user' && Array.isArray(prevMsg.content)) {
-          (prevMsg.content as Anthropic.ContentBlockParam[]).push(toolResultBlock);
-        } else {
-          convMessages.push({ role: 'user', content: [toolResultBlock] });
-        }
-      }
-    }
-
-    return { system: systemParts.join('\n\n'), conversationMessages: convMessages };
+    return mapAnthropicMessages(messages);
   }
 
   private mapTools(tools: ToolDefinition[]): Anthropic.Tool[] {
@@ -196,6 +163,84 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
       input_schema: t.input_schema as Anthropic.Tool.InputSchema,
     }));
   }
+}
+
+/**
+ * Map canonical messages to the Anthropic wire format.
+ *
+ * Anthropic rejects consecutive same-role messages (alternating user/assistant
+ * is required). The engine's recovery paths inject `user`-role hint messages
+ * (failure-policy hints, verification-failure notes) that can land right after
+ * the original user prompt or after `tool` results — so consecutive `user`
+ * turns must be merged here, otherwise `deepseek-anthropic` fails with 400.
+ */
+export function mapAnthropicMessages(
+  messages: Message[],
+): { system: string; conversationMessages: Anthropic.MessageParam[] } {
+  const systemParts: string[] = [];
+  const convMessages: Anthropic.MessageParam[] = [];
+
+  const lastMessage = () => convMessages[convMessages.length - 1];
+
+  /** Append a text block/string to the last user turn (merging consecutive users). */
+  const appendToUser = (text: string): void => {
+    const last = lastMessage();
+    if (last?.role === 'user') {
+      if (typeof last.content === 'string') {
+        last.content = `${last.content}\n\n${text}`;
+      } else {
+        (last.content as Anthropic.ContentBlockParam[]).push({ type: 'text', text });
+      }
+    } else {
+      convMessages.push({ role: 'user', content: text });
+    }
+  };
+
+  for (const m of messages) {
+    if (m.role === 'system') {
+      systemParts.push(m.content);
+    } else if (m.role === 'user') {
+      appendToUser(m.content);
+    } else if (m.role === 'assistant') {
+      const content: Anthropic.ContentBlockParam[] = [];
+      if (m.content) {
+        content.push({ type: 'text', text: m.content });
+      }
+      if (m.toolCalls?.length) {
+        for (const tc of m.toolCalls) {
+          content.push({
+            type: 'tool_use',
+            id: tc.id,
+            name: tc.function.name,
+            input: safeParseJSON(tc.function.arguments),
+          });
+        }
+      }
+      convMessages.push({ role: 'assistant', content: content.length > 0 ? content : m.content });
+    } else if (m.role === 'tool') {
+      const toolResultBlock: Anthropic.ToolResultBlockParam = {
+        type: 'tool_result',
+        tool_use_id: m.toolCallId ?? '',
+        content: m.content,
+      };
+      const prevMsg = lastMessage();
+      if (prevMsg?.role === 'user') {
+        // Normal case: previous user turn is the tool-result array — append.
+        // Defensive: if it's a plain string (e.g. a hint from an old flow),
+        // promote it to blocks so we never emit two consecutive user turns.
+        // Skip an empty-string text block — Anthropic can reject empty text.
+        const blocks = Array.isArray(prevMsg.content)
+          ? (prevMsg.content as Anthropic.ContentBlockParam[])
+          : (prevMsg.content.trim() ? [{ type: 'text' as const, text: prevMsg.content }] : []);
+        blocks.push(toolResultBlock);
+        prevMsg.content = blocks;
+      } else {
+        convMessages.push({ role: 'user', content: [toolResultBlock] });
+      }
+    }
+  }
+
+  return { system: systemParts.join('\n\n'), conversationMessages: convMessages };
 }
 
 function safeParseJSON(raw: string): Record<string, unknown> {

@@ -16,7 +16,6 @@ export interface PureConfig {
    */
   hasApiKey: boolean;
   model: string;
-  workspace: string;
   baseURL: string;
   language: 'zh-CN' | 'en';
   theme: 'light' | 'dark' | 'system';
@@ -33,6 +32,13 @@ export interface PureConfig {
   toolBrowser: boolean;
   skills: Record<string, boolean>;
   mcpServers: Array<{ name: string; transport: 'stdio' | 'http'; command?: string[]; url?: string }>;
+  /**
+   * Bumped when a config migration changes field semantics. v2: toolBrowser
+   * became a functional gate (was a decorative no-op defaulting to false);
+   * legacy configs that stored the old meaningless `false` are migrated to
+   * `true` so existing users keep web tools.
+   */
+  configVersion: number;
   /**
    * When true (default), assistant messages format progressively during
    * streaming (code blocks colorize, mermaid slots show source). When false,
@@ -62,7 +68,6 @@ export function defaults(): PureConfig {
     apiKey: '',
     hasApiKey: false,
     model: '',
-    workspace: '',
     baseURL: '',
     language: 'zh-CN',
     theme: 'light',
@@ -76,10 +81,11 @@ export function defaults(): PureConfig {
     toolFS: true,
     toolCmd: true,
     toolGit: true,
-    toolBrowser: false,
+    toolBrowser: true,
     skills: { 'code-review': true, 'web-research': true, memory: true, planning: true },
     mcpServers: [],
     streamingRender: true,
+    configVersion: 2,
   };
 }
 
@@ -127,7 +133,6 @@ export function loadConfig(): PureConfig | null {
       provider: (params.get('provider') as PureConfig['provider']) || base.provider,
       apiKey: params.get('apikey')!,
       model: params.get('model') || '',
-      workspace: params.get('workspace') || '',
     };
     if (isTauriRuntime()) {
       // CLI-launched desktop flow passes the key via URL: store it in Rust
@@ -143,12 +148,30 @@ export function loadConfig(): PureConfig | null {
     if (raw) {
       const parsed = JSON.parse(raw);
       const cfg: PureConfig = { ...defaults(), ...parsed };
+      // Both migrations below mutate `cfg` and mark it dirty; the single write
+      // at the end persists the result ONCE. Doing the writes inline would be
+      // wrong in the Tauri case: a pre-scrub localStorage.setItem(cfg) could
+      // leak the raw API key into WebView storage before the legacy-key block
+      // cleans it below.
+      let needsPersist = false;
+      // Config v2 migration: pre-v2 toolBrowser was a decorative toggle that
+      // always saved `false` and gated nothing. Once it became a real gate,
+      // those legacy `false` values would silently strip web tools from
+      // existing installs — restore them once via the version bump.
+      if ((parsed.configVersion ?? 1) < 2) {
+        cfg.toolBrowser = true;
+        cfg.configVersion = 2;
+        needsPersist = true;
+      }
       if (isTauriRuntime() && cfg.apiKey) {
         // Legacy migration: move a key previously persisted to localStorage
         // into Rust secrets, then scrub it.
         void syncSecretToRust(cfg.apiKey);
         cfg.hasApiKey = true;
         cfg.apiKey = '';
+        needsPersist = true;
+      }
+      if (needsPersist) {
         try {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
         } catch { /* ignore */ }
@@ -232,10 +255,6 @@ export class SettingsPanel {
     return hasConfiguredKey(loadConfig());
   }
 
-  getWorkspace(): string {
-    return loadConfig()?.workspace || '';
-  }
-
   getAppliedConfig(): PureConfig {
     const cfg = loadConfig();
     if (!cfg) return defaults();
@@ -261,7 +280,7 @@ export class SettingsPanel {
   private bindActions() {
     // Update check
     fetchAndDisplayVersion();
-    document.getElementById('cfg-check-update')?.addEventListener('click', () => checkForUpdatesManual());
+    document.getElementById('cfg-check-updates')?.addEventListener('click', () => checkForUpdatesManual());
 
     // Toggle API key visibility
     const toggleKey = document.getElementById('cfg-toggle-key');
@@ -316,10 +335,11 @@ export class SettingsPanel {
     // Auto-save on all input/select/checkbox changes
     const autoSaveSelectors = [
       '#cfg-provider', '#cfg-apikey', '#cfg-model', '#cfg-baseurl',
-      '#cfg-language', '#cfg-workspace',
+      '#cfg-language',
       '#cfg-fontsize', '#cfg-density',
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
       '#cfg-streaming-render',
+      '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle'
     ];
     autoSaveSelectors.forEach(sel => {
@@ -347,11 +367,16 @@ export class SettingsPanel {
         ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
         : (theme as 'light' | 'dark')
     );
+    const prev = document.documentElement.getAttribute('data-theme');
     document.documentElement.setAttribute('data-theme', resolved);
     // Notify markdown.ts so it can re-render mermaid diagrams (their colors are baked
-    // in at render time and ignore CSS variables). hljs colors are CSS-only, so they
-    // automatically follow [data-theme] via the [data-theme="dark"] `.hljs-*` rules.
-    document.dispatchEvent(new CustomEvent('pure:theme-changed', { detail: { theme: resolved } }));
+    // in at render time and ignore CSS variables) — but ONLY when the resolved theme
+    // actually changed. loadToForm() calls applyTheme() on every settings open;
+    // dispatching unconditionally would re-render every mermaid diagram on the page
+    // (async, flash) each time the panel opens even when nothing changed.
+    if (prev !== resolved) {
+      document.dispatchEvent(new CustomEvent('pure:theme-changed', { detail: { theme: resolved } }));
+    }
   }
 
   // ── Load config into form ──
@@ -377,7 +402,6 @@ export class SettingsPanel {
     }
     (document.getElementById('cfg-model') as HTMLInputElement).value = cfg.model;
     (document.getElementById('cfg-model') as HTMLInputElement).placeholder = defaultModel(cfg.provider);
-    (document.getElementById('cfg-workspace') as HTMLInputElement).value = cfg.workspace;
     (document.getElementById('cfg-baseurl') as HTMLInputElement).value = cfg.baseURL;
     (document.getElementById('cfg-language') as HTMLSelectElement).value = cfg.language;
 
@@ -437,7 +461,7 @@ export class SettingsPanel {
         <div class="mcp-server-info">
           <div>
             <span class="mcp-server-name">${escapeHtml(s.name)}</span>
-            <span class="mcp-server-badge">${s.transport}</span>
+            <span class="mcp-server-badge">${escapeHtml(s.transport)}</span>
             <div class="mcp-server-command">${escapeHtml(label)}</div>
           </div>
         </div>
@@ -527,7 +551,6 @@ export class SettingsPanel {
       provider: (document.getElementById('cfg-provider') as HTMLSelectElement).value as PureConfig['provider'],
       apiKey: (document.getElementById('cfg-apikey') as HTMLInputElement).value.trim(),
       model: (document.getElementById('cfg-model') as HTMLInputElement).value.trim(),
-      workspace: (document.getElementById('cfg-workspace') as HTMLInputElement).value.trim(),
       baseURL: (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim(),
       language: (document.getElementById('cfg-language') as HTMLSelectElement).value as PureConfig['language'],
       theme: (document.querySelector('.theme-option.active')?.getAttribute('data-theme') || 'light') as PureConfig['theme'],
@@ -546,6 +569,10 @@ export class SettingsPanel {
       skills,
       mcpServers: [...this.mcpServers],
       streamingRender: (document.getElementById('cfg-streaming-render') as HTMLInputElement | null)?.checked ?? true,
+      // Preserve the current config version (defaults() always sets it, so the
+      // merged value is never undefined — keep the spread rather than a bare
+      // constant so a future v3 bump survives the round-trip).
+      configVersion: (loadConfig() ?? defaults()).configVersion,
     };
   }
 

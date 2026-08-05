@@ -5,15 +5,22 @@
 
 import { describe, it, expect } from 'bun:test';
 import { Harness } from '../Harness';
+import { DefaultHookRouter } from '../../engine/HookRouter';
+import { DefaultFailurePolicy } from '../../engine/FailurePolicy';
 import type {
   AgentLoopState,
   BudgetConfig,
   Checkpoint,
   EngineEvent,
+  FailureRecord,
+  IMemoryStore,
   IStateStore,
   LLMAdapter,
   LLMChunk,
+  MemoryEntry,
   Message,
+  ToolAdapter,
+  ToolResult,
 } from '../../shared/types';
 
 const STD_BUDGET: BudgetConfig = {
@@ -71,6 +78,324 @@ async function collect(gen: AsyncGenerator<EngineEvent, void, void>): Promise<En
   for await (const e of gen) events.push(e);
   return events;
 }
+
+// ── In-memory IMemoryStore for memory integration tests ──
+
+class FakeMemoryStore implements IMemoryStore {
+  entries: MemoryEntry[] = [];
+  async add(entry: Omit<MemoryEntry, 'id'>): Promise<string> {
+    const id = `mem_${this.entries.length}`;
+    this.entries.push({ ...entry, id, decayScore: 1 });
+    return id;
+  }
+  async search(query: string, opts?: { type?: MemoryEntry['type']; k?: number; projectPath?: string }): Promise<MemoryEntry[]> {
+    const tokens = query.toLowerCase().split(/\s+/).filter(t => t.length >= 2);
+    return this.entries
+      .filter(e => (opts?.projectPath === undefined || e.projectPath === opts.projectPath))
+      .filter(e => (opts?.type === undefined || e.type === opts.type))
+      .filter(e => tokens.some(t => e.content.toLowerCase().includes(t)))
+      .slice(0, opts?.k ?? 5);
+  }
+  async forget(sessionId: string): Promise<void> {
+    this.entries = this.entries.filter(e => e.sessionId !== sessionId);
+  }
+  async decay(_olderThan: number): Promise<void> {}
+}
+
+describe('Harness cross-session memory (v0.10)', () => {
+  it('injects relevant memories into the system prompt at session start', async () => {
+    const memStore = new FakeMemoryStore();
+    await memStore.add({
+      type: 'user_preference',
+      content: 'User prefers the TypeScript language',
+      timestamp: Date.now(),
+      sessionId: 'old-session',
+      projectPath: '/ws',
+    });
+    await memStore.add({
+      type: 'error_pattern',
+      content: 'Error TS2307 fixed by adding missing import',
+      timestamp: Date.now(),
+      sessionId: 'old-session',
+      projectPath: '/ws',
+    });
+
+    const llm = recordingLLM('answer');
+    const harness = new Harness({
+      sessionId: 'sess-mem',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('BASE SYSTEM', 'fix the TS error in my project'));
+
+    const sys = llm.received[0][0].content;
+    expect(sys).toContain('BASE SYSTEM');
+    expect(sys).toContain('<session_memory>');
+    expect(sys).toContain('User prefers the TypeScript language');
+    expect(sys).toContain('Error TS2307 fixed by adding missing import');
+    expect(llm.received[0].length).toBeGreaterThanOrEqual(2); // system + user
+  });
+
+  it('writes a successful_pattern when a session completes', async () => {
+    const memStore = new FakeMemoryStore();
+    const llm = recordingLLM('final output here');
+    const harness = new Harness({
+      sessionId: 'sess-mem2',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('SYS', 'refactor auth module'));
+
+    const written = memStore.entries.filter(e => e.type === 'successful_pattern');
+    expect(written).toHaveLength(1);
+    expect(written[0].projectPath).toBe('/ws');
+    expect(written[0].sessionId).toBe('sess-mem2');
+    expect(written[0].content).toContain('refactor auth module');
+  });
+
+  it('does not inject memory when no store is configured', async () => {
+    const llm = recordingLLM('plain answer');
+    const harness = new Harness({
+      sessionId: 'sess-nomem',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+    });
+    await collect(harness.run('SYS', 'hello'));
+    expect(llm.received[0][0].content).toBe('SYS');
+    expect(llm.received[0][0].content).not.toContain('<session_memory>');
+  });
+
+  it('writes an error_pattern when the failure policy stops the session (§12.3)', async () => {
+    const memStore = new FakeMemoryStore();
+    const failingLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        throw new Error('model overloaded');
+      },
+      complete: async () => { throw new Error('model overloaded'); },
+    };
+    const stopPolicy = {
+      decide: () => ({ kind: 'stop' as const, reason: 'too many failures, giving up' }),
+    };
+    const harness = new Harness({
+      sessionId: 'sess-stop',
+      llm: failingLLM,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      failurePolicy: stopPolicy,
+    });
+
+    const events = await collect(harness.run('SYS', 'do the thing'));
+    expect(events.find(e => e.type === 'Interrupted')).toBeDefined();
+
+    const patterns = memStore.entries.filter(e => e.type === 'error_pattern');
+    expect(patterns).toHaveLength(1);
+    expect(patterns[0].content).toContain('model overloaded');
+    expect(patterns[0].content).toContain('too many failures');
+    expect(patterns[0].sessionId).toBe('sess-stop');
+    expect(patterns[0].projectPath).toBe('/ws');
+  });
+
+  it('writes an error_pattern when a retried failure is eventually overcome (§12.3)', async () => {
+    const memStore = new FakeMemoryStore();
+    let calls = 0;
+    const flakyLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        if (calls === 1) throw new Error('transient tool auth failure');
+        yield { type: 'content', content: 'done it' };
+        yield { type: 'done', content: 'done it', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'done it', toolCalls: [] }),
+    };
+    const retryPolicy = {
+      decide: () => ({ kind: 'retry' as const, hint: 'try again' }),
+    };
+    const harness = new Harness({
+      sessionId: 'sess-retry',
+      llm: flakyLLM,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      failurePolicy: retryPolicy,
+    });
+
+    const events = await collect(harness.run('SYS', 'deploy it'));
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed?.payload.isComplete).toBe(true);
+
+    // successful_pattern (session completed) + error_pattern (retry overcame it)
+    const patterns = memStore.entries.filter(e => e.type === 'error_pattern');
+    expect(patterns).toHaveLength(1);
+    expect(patterns[0].content).toContain('transient tool auth failure');
+    expect(patterns[0].content).toContain('Recovered after retry');
+    expect(memStore.entries.some(e => e.type === 'successful_pattern')).toBe(true);
+  });
+
+  it('writes an error_pattern mid-session when the SAME call fails repeatedly (v0.11)', async () => {
+    const memStore = new FakeMemoryStore();
+    // The tool keeps failing with the SAME message (e.g. web_fetch content
+    // type). The repeated-error policy stops after 3 identical repeats; the
+    // Harness must persist a "Repeated failure" error_pattern (flushed at
+    // session end) so the lesson survives even an interrupted session.
+    const failTool: ToolAdapter = {
+      execute: async (): Promise<ToolResult> => ({
+        id: 'call_1',
+        toolName: 'web_fetch',
+        error: 'Unsupported content type: application/json',
+        success: false,
+        duration: 3,
+      }),
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+    };
+    let call = 0;
+    const repeatToolLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        call++;
+        if (call <= 3) {
+          const tc = { id: `call_${call}`, index: 0, function: { name: 'web_fetch', arguments: '{"url":"https://x/api"}' } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: tc.function.arguments };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'content', content: 'final answer' };
+          yield { type: 'done', content: 'final answer', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'final answer', toolCalls: [] }),
+    };
+    const harness = new Harness({
+      sessionId: 'sess-repeat',
+      llm: repeatToolLLM,
+      tools: failTool,
+      toolsDefs: [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      failurePolicy: new DefaultFailurePolicy(),
+    });
+
+    const events = await collect(harness.run('SYS', 'get the data'));
+    // Policy stops after 3 identical repeats → session interrupted.
+    expect(events.find(e => e.type === 'Interrupted')).toBeDefined();
+
+    const repeated = memStore.entries.filter(e => e.type === 'error_pattern' && e.content.includes('Repeated failure'));
+    // pendingRepeats guarantees exactly one "Repeated failure" memory per failure key.
+    expect(repeated).toHaveLength(1);
+    expect(repeated[0].content).toContain('Unsupported content type');
+    expect(repeated[0].content).toContain('web_fetch');
+    expect(repeated[0].content).toContain('Do not make this exact call again');
+    expect(repeated[0].projectPath).toBe('/ws');
+  });
+
+  it('skips the do-not-retry memory when a repeated failure is later overcome (v0.12 transient exemption)', async () => {
+    const memStore = new FakeMemoryStore();
+    // The SAME web_fetch call fails twice with the identical error (which
+    // would normally write a "Repeated failure: ... Do not make this exact
+    // call again" memory) but the 3rd retry SUCCEEDS — a transient fault, not
+    // a dead-end. The Harness must NOT persist the "勿重试" memory; only the
+    // "Recovered after retry" error_pattern remains.
+    let attempts = 0;
+    const transientTool: ToolAdapter = {
+      execute: async (): Promise<ToolResult> => {
+        attempts++;
+        if (attempts <= 2) {
+          return { id: `call_${attempts}`, toolName: 'web_fetch', error: 'Unsupported content type: application/json', success: false, duration: 3 };
+        }
+        return { id: `call_${attempts}`, toolName: 'web_fetch', result: '{"data":"ok"}', success: true, duration: 3 };
+      },
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+    };
+    let call = 0;
+    const transientLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        call++;
+        if (call <= 3) {
+          const tc = { id: `call_${call}`, index: 0, function: { name: 'web_fetch', arguments: '{"url":"https://x/api"}' } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: tc.function.arguments };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'content', content: 'final answer' };
+          yield { type: 'done', content: 'final answer', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'final answer', toolCalls: [] }),
+    };
+    const harness = new Harness({
+      sessionId: 'sess-transient',
+      llm: transientLLM,
+      tools: transientTool,
+      toolsDefs: [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      failurePolicy: new DefaultFailurePolicy(),
+    });
+
+    const events = await collect(harness.run('SYS', 'get the data'));
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed?.payload.isComplete).toBe(true);
+
+    // No "勿重试" memory: the 3rd retry succeeded → transient fault, not a dead-end.
+    const repeated = memStore.entries.filter(e => e.type === 'error_pattern' && e.content.includes('Repeated failure'));
+    expect(repeated).toHaveLength(0);
+    // Only the "Recovered after retry" memory remains.
+    const recovered = memStore.entries.filter(e => e.type === 'error_pattern' && e.content.includes('Recovered after retry'));
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0].content).toContain('Unsupported content type');
+    expect(recovered[0].content).toContain('web_fetch');
+  });
+
+  it('does NOT write a retry error_pattern when the session ends interrupted', async () => {
+    const memStore = new FakeMemoryStore();
+    // First call fails (policy retries), second call ALSO fails but the policy
+    // now stops → session interrupted → no "recovered" memory.
+    let calls = 0;
+    const alwaysFailLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        throw new Error(`failure #${calls}`);
+      },
+      complete: async () => { throw new Error('failure'); },
+    };
+    const escalatePolicy = {
+      decide: (failures: FailureRecord[]) =>
+        failures.length >= 2
+          ? ({ kind: 'stop' as const, reason: 'giving up' })
+          : ({ kind: 'retry' as const, hint: 'try again' }),
+    };
+    const harness = new Harness({
+      sessionId: 'sess-int',
+      llm: alwaysFailLLM,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      failurePolicy: escalatePolicy,
+    });
+
+    await collect(harness.run('SYS', 'retry me'));
+
+    // The retry failure should NOT produce a "recovered" error_pattern because
+    // the session never succeeded — only the stop decision writes one.
+    const recovered = memStore.entries.filter(e => e.type === 'error_pattern' && e.content.includes('Recovered after retry'));
+    expect(recovered).toHaveLength(0);
+    const stopped = memStore.entries.filter(e => e.type === 'error_pattern' && e.content.includes('Stopped by failure policy'));
+    expect(stopped).toHaveLength(1);
+  });
+});
 
 describe('Harness resume (P1-7)', () => {
   it('feeds the checkpoint history as initial context on resume', async () => {
@@ -188,6 +513,72 @@ describe('Harness resume (P1-7)', () => {
     const msgs = llm.received[0];
     expect(msgs[0]).toEqual({ role: 'system', content: 'SYS v2' });
     expect(contents(msgs)).toEqual(['SYS v2', 'v1', 'a1', 'next']);
+  });
+
+  it('saves an interrupted checkpoint with live messages (P0 fix)', async () => {
+    const store = new MemoryStore();
+    const llm = recordingLLM('partial answer');
+    const harness = new Harness({
+      sessionId: 'sess-int',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      stateStore: store,
+    });
+
+    const controller = new AbortController();
+    controller.abort(); // abort before the run starts
+
+    const events = await collect(harness.run('SYS', 'hello', controller.signal));
+
+    expect(events.find(e => e.type === 'Interrupted')).toBeDefined();
+    const session = store.loadSession('sess-int');
+    expect(session).not.toBeNull();
+    const cp = session!.checkpoints.find(c => c.label === 'interrupted');
+    expect(cp).toBeDefined();
+    // Live messages (system + user) persisted, not an empty array.
+    expect(cp!.state.messages.length).toBeGreaterThanOrEqual(2);
+    expect(cp!.state.messages[1]).toMatchObject({ role: 'user', content: 'hello' });
+  });
+
+  it('trims trailing unresolved toolCalls from interrupted checkpoint', async () => {
+    const store = new MemoryStore();
+    // LLM yields a tool call on the first turn; a before_act hook then aborts
+    // the run — leaving the assistant toolCalls message without tool results.
+    const toolLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        yield { type: 'tool_call', index: 0, id: 'call_1', name: 'read_file', arguments: '{"path":"a.ts"}' };
+        yield { type: 'done', content: '', toolCalls: [{ id: 'call_1', index: 0, function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }] };
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    const tools = {
+      execute: async (): Promise<any> => ({ id: 'call_1', toolName: 'read_file', result: 'x', success: true, duration: 1 }),
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'read_file', description: 'r', input_schema: {} }],
+    };
+    const hooks = new DefaultHookRouter();
+    hooks.register('before_act', () => ({ action: 'abort' as const, reason: 'test abort' }));
+    const harness = new Harness({
+      sessionId: 'sess-int2',
+      llm: toolLLM,
+      tools,
+      toolsDefs: [{ name: 'read_file', description: 'r', input_schema: {} }],
+      budget: STD_BUDGET,
+      stateStore: store,
+      hooks,
+    });
+
+    const events = await collect(harness.run('SYS', 'read a.ts'));
+    expect(events.find(e => e.type === 'Interrupted')).toBeDefined();
+
+    const session = store.loadSession('sess-int2');
+    expect(session).not.toBeNull();
+    const cp = session!.checkpoints.find(c => c.label === 'interrupted');
+    expect(cp).toBeDefined();
+    const last = cp!.state.messages[cp!.state.messages.length - 1];
+    // No trailing assistant message with dangling toolCalls survived the trim.
+    expect(last.role === 'assistant' && !!last.toolCalls?.length).toBe(false);
   });
 
   it('saves a turn_completed checkpoint on completion', async () => {

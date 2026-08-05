@@ -1,12 +1,21 @@
 // src/engine/FileLockManager.ts
-// v0.3 — path-level read/write locks for safe concurrent tool execution.
+// v0.10 — path-level read/write locks for safe concurrent tool execution.
+// Scheduling is writer-preference: once a writer queues, later readers must
+// queue behind it (no starvation), and when the lock frees, the head of the
+// queue is granted — a writer alone, or all consecutive queued readers at once.
 
 type LockType = 'read' | 'write';
+
+interface Waiter {
+  type: LockType;
+  resolve: () => void;
+}
 
 interface LockEntry {
   type: LockType;
   count: number;
-  queue: Array<() => void>;
+  queue: Waiter[];
+  waitingWriters: number;
 }
 
 export class FileLockManager {
@@ -26,30 +35,32 @@ export class FileLockManager {
 
     entry.count--;
 
-    // Grant one waiting waiter — next release will grant the next
-    if (entry.count === 0 && entry.queue.length > 0) {
-      entry.type = 'read';
-      const next = entry.queue.shift();
-      if (next) {
-        next(); // callback in acquire() does entry.count++ and sets type
-      }
+    // Grant the queue whenever the lock is fully free. With multiple
+    // concurrent readers this only happens when the LAST reader releases —
+    // granting there (not on every decrement) keeps readers/readers fair.
+    if (entry.count === 0) {
+      this.grant(entry);
     }
 
-    if (entry.count === 0) {
+    if (entry.count === 0 && entry.queue.length === 0) {
       this.locks.delete(path);
     }
   }
 
   private async acquire(path: string, type: LockType): Promise<void> {
-    if (!this.locks.has(path)) {
-      this.locks.set(path, { type, count: 0, queue: [] });
+    let entry = this.locks.get(path);
+    if (!entry) {
+      entry = { type, count: 0, queue: [], waitingWriters: 0 };
+      this.locks.set(path, entry);
     }
 
-    const entry = this.locks.get(path)!;
-
+    // Writer-preference admission: a new reader may only enter immediately when
+    // (a) the lock is free, or (b) it is already read-held AND no writer is
+    // waiting. Once a writer is queued, new readers join the queue behind it —
+    // this is what prevents writer starvation under continuous reader traffic.
     const canAcquire =
       entry.count === 0 ||
-      (entry.type === 'read' && type === 'read');
+      (entry.type === 'read' && type === 'read' && entry.waitingWriters === 0);
 
     if (canAcquire) {
       entry.count++;
@@ -57,12 +68,37 @@ export class FileLockManager {
       return;
     }
 
-    return new Promise(resolve => {
-      entry.queue.push(() => {
-        entry.count++;
-        entry.type = type;
-        resolve();
-      });
+    return new Promise<void>(resolve => {
+      if (type === 'write') entry.waitingWriters++;
+      entry.queue.push({ type, resolve });
     });
+  }
+
+  /**
+   * Wake the waiters now that the lock is free. FIFO: the head of the queue
+   * decides. A writer takes the lock alone (exclusive); a reader is granted
+   * together with every consecutive reader behind it (they share), stopping
+   * before the next queued writer.
+   */
+  private grant(entry: LockEntry): void {
+    if (entry.queue.length === 0) return;
+
+    const head = entry.queue[0];
+    if (head.type === 'write') {
+      entry.queue.shift();
+      entry.waitingWriters--;
+      entry.type = 'write';
+      entry.count = 1;
+      head.resolve();
+      return;
+    }
+
+    // Grant all consecutive readers at the head of the queue.
+    let n = 0;
+    while (n < entry.queue.length && entry.queue[n].type === 'read') n++;
+    const granted = entry.queue.splice(0, n);
+    entry.type = 'read';
+    entry.count = granted.length;
+    for (const w of granted) w.resolve();
   }
 }

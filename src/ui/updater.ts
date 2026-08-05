@@ -12,7 +12,7 @@ export async function checkForUpdatesSilently(): Promise<void> {
     const update = await check();
     if (!update) return;
 
-    const status = document.getElementById('update-status-text');
+    const status = document.getElementById('updater-status');
     if (status) {
       status.textContent = `Update available: v${update.version}`;
       status.className = 'update-available';
@@ -23,8 +23,8 @@ export async function checkForUpdatesSilently(): Promise<void> {
 }
 
 export async function checkForUpdatesManual(): Promise<void> {
-  const statusEl = document.getElementById('update-status-text');
-  const btn = document.getElementById('cfg-check-update') as HTMLButtonElement | null;
+  const statusEl = document.getElementById('updater-status');
+  const btn = document.getElementById('cfg-check-updates') as HTMLButtonElement | null;
 
   const setStatus = (text: string, cls: string) => {
     if (statusEl) {
@@ -90,6 +90,6 @@ export async function fetchAndDisplayVersion(): Promise<void> {
     const v = await getVersion();
     setCurrentVersion(v);
   } catch {
-    setCurrentVersion('0.5.5');
+    setCurrentVersion('0.9.7');
   }
 }

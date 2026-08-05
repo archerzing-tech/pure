@@ -1,12 +1,11 @@
 // src/cli.ts
-// v0.8.0 — one-shot + interactive REPL with self-evolving memory.
+// v0.9.7 — one-shot + interactive REPL with self-evolving memory.
 // Usage: pure "question"              → one-shot
 //        pure --resume abc123          → resume session
 //        pure --workspace .            → REPL
 //        pure config                   → set up provider + API key (persisted to ~/.pure/config.json)
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
 import * as readline from 'node:readline';
 import { Harness } from './harness/Harness';
 import { MockLLMAdapter } from './adapter/mock/MockLLMAdapter';
@@ -18,21 +17,21 @@ import { FSStore } from './adapter/storage/FSStore';
 import { SQLiteStore } from './adapter/storage/SQLiteStore';
 import { ContextEngine } from './harness/ContextEngine';
 import { createLLMVerifier } from './coding-agent/Verifier';
+import { Planner, formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt } from './coding-agent/Planner';
 import { DefaultHookRouter } from './engine/HookRouter';
 import { DefaultFailurePolicy } from './engine/FailurePolicy';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler } from './cli_permission';
-import { dim, bold, red, green, yellow, blue, cyan, magenta, frameGray } from './termcolors';
-import { MemoryEngine } from './shared/memory';
-import type { UserProfile } from './shared/memory';
+import { dim, bold, red, green, yellow, cyan, purple, frameGray } from './termcolors';
+import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
+import { harvestUserPreferences } from './shared/memory';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
 const HOME = process.env.HOME || '/tmp';
 const PURE_DIR = `${HOME}/.pure`;
-const MEMORY_PATH = `${PURE_DIR}/memory.json`;
 const CONFIG_PATH = `${PURE_DIR}/config.json`;
 
 // Persisted provider credentials. Mirror of the GUI's PureConfig (src/ui/settings.ts),
@@ -67,26 +66,17 @@ function saveConfig(cfg: PureConfig): void {
   }
 }
 
-// ── CLI memory persistence ──
+// ── CLI cross-session memory (IMemoryStore) ──
+// File-backed store under ~/.pure/memories/{projectHash}/memories.jsonl,
+// replacing the old single ~/.pure/memory.json UserProfile. The Harness
+// searches it at session start (PromptComposer injects the top memories into
+// the system prompt) and writes a successful_pattern when a session completes.
+const memoryStore = new FSMemoryStore(`${PURE_DIR}/memories`);
 
-function loadCliMemory(): UserProfile | null {
-  try {
-    if (!existsSync(MEMORY_PATH)) return null;
-    const raw = readFileSync(MEMORY_PATH, 'utf-8');
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
+function learnFromInput(text: string, sessionId: string, projectPath: string): Promise<unknown> {
+  const entries = harvestUserPreferences(text, { sessionId, projectPath });
+  return Promise.all(entries.map(e => memoryStore.add(e).catch(() => '')));
 }
-
-function saveCliMemory(profile: UserProfile): void {
-  try {
-    mkdirSync(dirname(MEMORY_PATH), { recursive: true });
-    writeFileSync(MEMORY_PATH, JSON.stringify(profile), 'utf-8');
-  } catch {}
-}
-
-const memory = new MemoryEngine(loadCliMemory() ?? undefined);
 
 // ── Logo ──
 
@@ -171,7 +161,7 @@ function renderLogo() {
 
   // Plain ASCII so .length === visible column count and centering is exact.
   const tagline = '---- terminal coding agent ----';
-  const ver = 'v0.8.0';
+  const ver = 'v0.9.7';
 
   console.log('');
   console.log(`  ${F('╔' + border + '╗')}`);
@@ -188,12 +178,21 @@ function renderLogo() {
 }
 
 const DEFAULT_BUDGET: BudgetConfig = {
-  maxTurns: 30,
-  maxTotalTokens: 200_000,
-  maxExecutionTime: 600_000,
+  maxTurns: 50,
+  maxTotalTokens: 1_000_000,
+  maxExecutionTime: 3_600_000,
   warningThreshold: 0.8,
   graceTurns: 3,
 };
+
+// Single source of truth for the CLI's permission stance. CLI is invoked by a
+// human who has already read the prompt — they own the consequences of any
+// tool call the agent makes, so we auto-approve by default. `--prompt-on-tool`
+// (handled in parseArgs) inverts this for users who want the original
+// interactive y/n/a flow. The `createCliPermissionHandler` function-level
+// default of `false` is unrelated — see its JSDoc for why the two are
+// intentionally flipped.
+const DEFAULT_CLI_AUTO_APPROVE = true;
 
 const BASE_SYSTEM_PROMPT = `You are pure, a coding agent with file, search, web, and command tools.
 
@@ -214,17 +213,35 @@ Shell & Git:
 - git_log(maxCount?, oneline?) — recent commit history
 - git_status — working tree status
 
+System:
+- sys_info() — timezone, language, current time, OS version. When the user asks for the current time, date, timezone, language, or OS version, call sys_info() FIRST — never guess from your training data.
+
 Web tools:
 - web_search(query, maxResults?) — DuckDuckGo web search (no API key needed)
-- web_fetch(url, maxChars?) — fetch and extract readable text from a URL
+- web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.
 
 Work step by step. Read before you write. Verify after you change. Be concise.
 
-Smart typo tolerance: when the user's message contains obvious typos, pinyin / IME errors ('ji' mapped to the wrong hanzi, homophone slips, repeated/reordered/full-width-punctuation typos), infer their intended meaning, answer that, and briefly note your assumption at the top of the reply (e.g., "Assuming you meant …").`;
+Output style:
+- Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").
+- A bare "generate X", "show me X", "give me X", "what does X look like", or any "write me code for…" without a path means inline output — never reach for write_file.
+- COMPLETE runnable artifacts go to disk by default: when the user asks you to BUILD a full game, mini-game, web page/site, app, tool, script, or small project ("写一个小游戏", "做一个网页", "开发一个工具" — even without naming a path), WRITE it to a file instead of printing the whole source inline. Single-file artifact → a new file like index.html / game.html / app.py in the workspace; multi-file project → a new directory with the files. After writing, state the path(s) and how to run/open it.
+- When you do write a file, briefly state where it landed and confirm the user actually wanted persistence; the EXISTENCE of a workspace does NOT imply "save everything to disk".
+
+Tool-calling rules:
+- NEVER emit tool calls as XML or text (no <tool_calls>, <invoke name="...">, or JSON inside your reply). Tool calls are made ONLY through the function-calling interface, never as visible text.
+- Mirror the GUI's rule (chat.ts BASE_SYSTEM_PROMPT) so piped / non-interactive CLI runs don't regress to the old leak pattern if a model picks it up. The "no workspace → ask the user to set one" bullet is GUI-specific and omitted here — the CLI defaults workspace to '.' already.
+
+Smart typo tolerance: when the user's message contains obvious typos, pinyin / IME errors ('ji' mapped to the wrong hanzi, homophone slips, repeated/reordered/full-width-punctuation typos), infer their intended meaning, answer that, and briefly note your assumption at the top of the reply (e.g., "Assuming you meant …").
+
+Logical traps & approach switching:
+- Before acting, scan the user's request for logical traps: self-contradictory requirements ("不要X但又要X"), impossible constraints, mutually exclusive goals, or a trick premise. If the request as stated is logically impossible or self-contradictory, do NOT blindly follow it into a failure loop — state the trap briefly and solve the most reasonable interpretation (or explain why it is impossible and propose the closest achievable alternative).
+- If your FIRST attempt fails (verification failure, repeated tool errors, or the result keeps getting rejected), do NOT retry the same approach a second time. Re-read the ORIGINAL user request and question whether the premise itself is the problem. If it is, escape the trap by switching to a fundamentally different interpretation or method.`;
 
 function buildSystemPrompt(): string {
-  const mem = memory.buildMemoryPrompt();
-  return mem ? `${BASE_SYSTEM_PROMPT}${mem}` : BASE_SYSTEM_PROMPT;
+  // Memory is composed by the Harness at session start (PromptComposer + the
+  // IMemoryStore), so the base prompt stays clean here.
+  return BASE_SYSTEM_PROMPT;
 }
 
 // ── Types ──
@@ -237,6 +254,15 @@ interface CliArgs {
   workspace: string;
   resume: string;
   stateDb: string;
+  /**
+   * True when every tool call (read, write, execute_command, web_search, …)
+   * should be approved without prompting. Defaults to true so a one-shot
+   * `pure "do thing"` runs straight through — the operator has already
+   * reviewed the prompt and is responsible for what happens. Pass
+   * `--prompt-on-tool` to opt back into the interactive y/n/a flow
+   * (useful when debugging or working in a supervised shell).
+   */
+  autoApprove: boolean;
 }
 
 type SubCommand = 'config' | '';
@@ -290,9 +316,14 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
     (flags.workspace && flags.workspace !== 'true') ? flags.workspace : (fileCfg?.workspace || '.');
   const resume = flags.resume && flags.resume !== 'true' ? flags.resume : '';
   const stateDb = flags['state-db'] ?? '';
+  // CLI default: trust the operator — approve every tool call. The flag is
+  // a one-way opt-out (`--prompt-on-tool`) so users who want the original
+  // interactive confirmation flow can still get it. No positive opt-in
+  // flag is needed because the default already matches the common case.
+  const autoApprove = DEFAULT_CLI_AUTO_APPROVE && flags['prompt-on-tool'] === undefined;
 
   return {
-    args: { prompt: promptParts.join(' '), provider, model, apiKey, workspace, resume, stateDb },
+    args: { prompt: promptParts.join(' '), provider, model, apiKey, workspace, resume, stateDb, autoApprove },
     command,
   };
 }
@@ -367,7 +398,7 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
   }
 }
 
-function createTools(workspace: string): { tools?: ToolAdapter; toolsDefs: ToolDefinition[] } {
+function createTools(workspace: string, autoApprove = false): { tools?: ToolAdapter; toolsDefs: ToolDefinition[] } {
   if (!workspace) return { toolsDefs: [] };
 
   const resolved = workspace.startsWith('/') ? workspace : `${process.cwd()}/${workspace}`;
@@ -379,8 +410,12 @@ function createTools(workspace: string): { tools?: ToolAdapter; toolsDefs: ToolD
   // uses (read auto-approve / write + command confirm / session cache).
   // toolsDefs stay the adapter's own (the 6 CLI-available tools) so the LLM
   // never sees registry-only git_* tools it cannot actually call.
+  //
+  // `autoApprove` (driven by --auto-approve) flips that gate to fully open:
+  // every tool call is allowed without prompting. Useful for piped / scripted
+  // invocations where no human is at the keyboard to answer y/n/a.
   const registry = new ToolRegistry(adapter);
-  registry.setPermissionManager(new PermissionManager('NORMAL', createCliPermissionHandler()));
+  registry.setPermissionManager(new PermissionManager('NORMAL', createCliPermissionHandler(autoApprove)));
 
   return { tools: registry, toolsDefs: adapter.getTools() };
 }
@@ -396,47 +431,119 @@ async function consumeTurn(
   let turnCount = 1;
   let ok = true;
 
-  for await (const event of events) {
-    switch (event.type) {
-      case 'StateChange':
-        // Skip redundant transitions: same-state (THINK→THINK on first turn)
-        // and final shutdown (VERIFY→TERMINATE). Only show meaningful phases.
-        if (event.payload.from !== event.payload.to && event.payload.to !== 'TERMINATE') {
-          streamMgr.stop();
-          process.stdout.write('\n');
-          process.stdout.write(`  ${dim('[')}${blue(event.payload.from)}${dim(' → ')}${cyan(event.payload.to)}${dim(']')}\n`);
-          streamMgr.start();
-        }
-        break;
-      case 'TokenDelta':
-        streamMgr.feed(event);
-        break;
-      case 'ToolResult':
-        streamMgr.stop();
-        const status = event.payload.result.success ? green('✓') : red('✗');
-        process.stdout.write(`  ${magenta('🔧')} ${cyan(event.payload.toolName)}: ${status} ${dim(`(${event.payload.duration}ms)`)}\n`);
-        streamMgr.start();
-        break;
-      case 'Completed':
-        streamMgr.stop();
-        finalOutput = event.payload.finalOutput ?? '';
-        messages = event.payload.messages ?? [];
-        turnCount = event.payload.turnCount;
-        break;
-      case 'Error':
-        streamMgr.stop();
-        process.stdout.write(`\n  ${red('⚠')}  ${red(event.payload.code)}: ${dim(event.payload.message)}\n`);
-        ok = false;
-        break;
-      case 'Interrupted':
-        streamMgr.stop();
-        process.stdout.write(`\n  ${yellow('⏹')}  ${dim(event.payload.reason)}\n`);
-        ok = false;
-        break;
-    }
-  }
+  // ── Thinking indicator ──
+  // The CLI never waits silently: a `💭 thinking…` line is printed the moment
+  // the turn starts (so the user isn't staring at a frozen cursor while the
+  // model reasons / the API round-trips), and reasoning deltas (DeepSeek/Qwen/
+  // GLM `reasoning_content`) live-update that line in place — a dim purple
+  // tail-preview that keeps scrolling as the model thinks. The first visible
+  // answer token or tool call commits the line; a later reasoning phase (after
+  // tool results) opens a fresh line, mirroring the GUI's per-iteration
+  // thinking card. On non-TTY stdout the indicator is skipped entirely so
+  // piped/scripted output stays clean.
+  const tty = !!process.stdout.isTTY;
+  let thinking = false;
+  let thinkingText = '';
+  // Once the visible answer has begun streaming, never open another thinking
+  // line — a stray ReasoningDelta after the answer would otherwise wipe the
+  // mid-stream answer line with its \r\x1b[2K redraw (engine emits reasoning
+  // strictly before content per iteration, so this is purely defensive).
+  let answered = false;
+  const startThinking = () => {
+    if (!tty || thinking || answered) return;
+    thinking = true;
+    thinkingText = '';
+    process.stdout.write(`  ${purple('💭')} ${dim('thinking…')}`);
+  };
+  const updateThinking = (delta: string) => {
+    if (!tty || !thinking) return;
+    thinkingText += delta;
+    const cols = process.stdout.columns || 80;
+    const max = Math.max(20, cols - 14);
+    const preview = thinkingText.replace(/\s+/g, ' ').trim();
+    const shown = preview.length > max ? '…' + preview.slice(-(max - 1)) : preview;
+    process.stdout.write(`\r\x1b[2K  ${purple('💭')} ${dim(shown || 'thinking…')}`);
+  };
+  const endThinking = () => {
+    if (!tty || !thinking) return;
+    thinking = false;
+    thinkingText = '';
+    process.stdout.write('\n');
+  };
 
-  streamMgr.stop();
+  // StateChange (e.g. [THINK → VERIFY]) is intentionally not rendered:
+  // the CLI's user-facing surface is the thinking indicator + streamed output
+  // + tool results, and per-phase state banners just add noise on every turn.
+  startThinking();
+
+  try {
+    for await (const event of events) {
+      switch (event.type) {
+        case 'TokenDelta':
+          // First visible answer token (or a tool call) marks the end of the
+          // thinking phase — commit the indicator line, then stream normally.
+          // Only a real content token (not a tool call) counts as "the answer
+          // started" — tool calls are followed by more reasoning iterations.
+          if (event.payload.isToolCall || event.payload.content) {
+            endThinking();
+            if (!event.payload.isToolCall) answered = true;
+          }
+          streamMgr.feed(event);
+          break;
+        case 'ReasoningDelta':
+          if (event.payload.content) {
+            // Reasoning can resume after tool results (each LLM iteration), so
+            // a fresh indicator line opens whenever a new reasoning phase begins.
+            startThinking();
+            updateThinking(event.payload.content);
+          }
+          break;
+        case 'ToolResult':
+          endThinking();
+          streamMgr.stop();
+          const status = event.payload.result.success ? green('✓') : red('✗');
+          process.stdout.write(`  ${purple(`🔧 ${event.payload.toolName}`)}: ${status} ${dim(`(${event.payload.duration}ms)`)}\n`);
+          streamMgr.start();
+          break;
+        case 'Completed':
+          endThinking();
+          streamMgr.stop();
+          finalOutput = event.payload.finalOutput ?? '';
+          messages = event.payload.messages ?? [];
+          turnCount = event.payload.turnCount;
+          // A turn that truly completed (interrupted=false) succeeded even if
+          // it passed through recoverable VERIFY_FAILED retries earlier — don't
+          // let the sticky `ok=false` from an intermediate recoverable error
+          // mislabel the final summary as ❌. The engine ALWAYS emits a trailing
+          // Completed (also after Interrupted, with interrupted=true), so gate
+          // on the payload: aborted/budget-exhausted runs must stay ❌.
+          if (!event.payload.interrupted) ok = true;
+          break;
+        case 'Error':
+          endThinking();
+          streamMgr.stop();
+          // Recoverable errors (VERIFY_FAILED → retry loop) are an internal
+          // iteration, not a user-facing failure — show them in yellow like
+          // an Interrupted notice. Only unrecoverable errors get the red ⚠.
+          const recoverableErr = event.payload.recoverable === true;
+          process.stdout.write(`\n  ${recoverableErr ? yellow('↻') : red('⚠')}  ${recoverableErr ? yellow(event.payload.code) : red(event.payload.code)}: ${dim(event.payload.message)}\n`);
+          ok = false;
+          break;
+        case 'Interrupted':
+          endThinking();
+          streamMgr.stop();
+          process.stdout.write(`\n  ${yellow('⏹')}  ${dim(event.payload.reason)}\n`);
+          ok = false;
+          break;
+      }
+    }
+  } finally {
+    // Every path — normal completion, engine Error/Interrupted, or an adapter
+    // throwing — commits the thinking line so the shell prompt never prints
+    // onto a dangling `💭 thinking…` cursor. Idempotent (guarded by `thinking`).
+    endThinking();
+    streamMgr.stop();
+  }
   return { output: finalOutput, messages, turnCount, ok };
 }
 
@@ -451,9 +558,13 @@ function createStore(args: CliArgs): IStateStore | undefined {
 
 function createHarness(args: CliArgs) {
   const { adapter } = createAdapter(args);
-  const { tools, toolsDefs } = createTools(args.workspace);
+  const { tools, toolsDefs } = createTools(args.workspace, args.autoApprove);
   const sessionId = args.resume || `session_${Date.now()}`;
   const store = args.resume ? createStore(args) : undefined;
+  // Project-scoped memory: resolved workspace (same as createTools uses).
+  const projectPath = args.workspace
+    ? (args.workspace.startsWith('/') ? args.workspace : `${process.cwd()}/${args.workspace}`)
+    : process.cwd();
 
   const harness = new Harness({
     sessionId,
@@ -462,6 +573,12 @@ function createHarness(args: CliArgs) {
     toolsDefs,
     budget: DEFAULT_BUDGET,
     stateStore: store,
+    memory: memoryStore,
+    projectPath,
+    // G-3 fix: wire the ContextEngine (with LLM summarization fallback) into
+    // the CLI too — long REPL sessions previously grew without bound because
+    // the CLI's Harness never had a contextEngine configured.
+    contextEngine: new ContextEngine({ maxMessages: 20, llm: adapter }),
     // LLM-based verification in the VERIFY phase: the model checks the final
     // output against the task (with a non-empty-output fast-fail pre-check).
     verifier: createLLMVerifier(adapter),
@@ -470,7 +587,7 @@ function createHarness(args: CliArgs) {
     failurePolicy: new DefaultFailurePolicy(),
   });
 
-  return { harness, toolsDefs, store, sessionId };
+  return { harness, toolsDefs, store, sessionId, projectPath };
 }
 
 // ── `pure config` — interactive one-time setup ──
@@ -624,27 +741,33 @@ async function runConfig(): Promise<void> {
 
 async function runOneShot(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
-  const { toolsDefs } = createTools(args.workspace);
+  const { toolsDefs } = createTools(args.workspace, args.autoApprove);
   const hasTools = toolsDefs.length > 0;
 
-  const { harness, sessionId } = createHarness(args);
-
-  memory.learnFromMessage(args.prompt);
+  const { harness, sessionId, projectPath } = createHarness(args);
+  await learnFromInput(args.prompt, sessionId, projectPath);
 
   renderLogo();
-  console.log(`  ${bold('pure')} ${dim('v0.8.0')} ${dim('—')} ${cyan(label)}`);
+  console.log(`  ${bold('pure')} ${dim('v0.9.7')} ${dim('—')} ${cyan(label)}`);
   if (hasTools) console.log(`  📁 ${dim('Workspace:')} ${process.cwd()} ${dim('(' + toolsDefs.length + ' tools)')}`);
   if (args.resume) console.log(`  💾 ${dim('Session:')} ${sessionId.slice(0, 12)}…`);
   console.log(`  📝 ${args.prompt}`);
   console.log(dim('─'.repeat(50)));
 
+  // Logical-trap pre-scan: if the request itself is contradictory/impossible,
+  // warn the user and inject the trap notice into the system prompt so the
+  // model verifies the premise instead of following it into a failure loop.
+  const traps = new Planner().analyzeTask(args.prompt).traps;
+  if (traps.length > 0) {
+    console.log(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}`);
+  }
+  const systemPrompt = buildSystemPrompt() + formatTrapPrompt(traps) + (detectArtifactRequest(args.prompt) ? formatArtifactPrompt() : '');
+
   const streamMgr = new StreamManager(chunk => process.stdout.write(chunk), { flushIntervalMs: 16 });
   streamMgr.start();
 
   const startTime = Date.now();
-  const { output, turnCount, ok } = await consumeTurn(harness.run(buildSystemPrompt(), args.prompt), streamMgr);
-
-  saveCliMemory(memory.getProfile());
+  const { turnCount, ok } = await consumeTurn(harness.run(systemPrompt, args.prompt), streamMgr);
 
   process.stdout.write('\n');
   console.log(dim('─'.repeat(50)));
@@ -658,13 +781,13 @@ async function runOneShot(args: CliArgs) {
 
 async function runRepl(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
-  const { toolsDefs } = createTools(args.workspace);
+  const { toolsDefs } = createTools(args.workspace, args.autoApprove);
   const hasTools = toolsDefs.length > 0;
 
-  const { harness, sessionId } = createHarness(args);
+  const { harness, sessionId, projectPath } = createHarness(args);
 
   renderLogo();
-  process.stdout.write(`  ${bold('pure')} ${dim('v0.8.0')} ${dim('—')} ${cyan(label)}\n`);
+  process.stdout.write(`  ${bold('pure')} ${dim('v0.9.7')} ${dim('—')} ${cyan(label)}\n`);
   if (hasTools) process.stdout.write(`  📁 ${dim(process.cwd())} ${dim(`| ${toolsDefs.length} tools`)}\n`);
   process.stdout.write(`  💾 ${dim(sessionId.slice(0, 12))}…\n`);
   process.stdout.write(`  ${dim('/exit /quit — leave   /clear — reset context   Ctrl+C — cancel')}\n`);
@@ -675,6 +798,10 @@ async function runRepl(args: CliArgs) {
   let firstTurn = true;
   let generating = false;
   let currentAbort: AbortController | null = null;
+  // First prompt prints tight against the header banner; from turn 2 onward
+  // we prepend a blank line so the new `>` sits clearly below the prior
+  // `✅ time | turn N` status row instead of hugging it.
+  let isFirstPrompt = true;
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
@@ -695,7 +822,9 @@ async function runRepl(args: CliArgs) {
   });
 
   const askQuestion = (): Promise<string> => {
-    return new Promise(resolve => { rl.question('> ', answer => resolve(answer.trim())); });
+    const prompt = isFirstPrompt ? '> ' : '\n> ';
+    isFirstPrompt = false;
+    return new Promise(resolve => { rl.question(prompt, answer => resolve(answer.trim())); });
   };
 
   while (true) {
@@ -716,11 +845,19 @@ async function runRepl(args: CliArgs) {
     streamMgr.start();
 
     const startTime = Date.now();
-    memory.learnFromMessage(input);
+    await learnFromInput(input, sessionId, projectPath);
+
+    // Trap pre-scan per REPL turn (same as one-shot): surface the warning and
+    // inject it into the system prompt so the model verifies the premise.
+    const traps = new Planner().analyzeTask(input).traps;
+    if (traps.length > 0) {
+      process.stdout.write(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}\n`);
+    }
+    const systemPrompt = buildSystemPrompt() + formatTrapPrompt(traps) + (detectArtifactRequest(input) ? formatArtifactPrompt() : '');
 
     const events = firstTurn
-      ? harness.run(buildSystemPrompt(), input, currentAbort.signal)
-      : harness.continueTurn(buildSystemPrompt(), messages, input, currentAbort.signal);
+      ? harness.run(systemPrompt, input, currentAbort.signal)
+      : harness.continueTurn(systemPrompt, messages, input, currentAbort.signal);
 
     const result = await consumeTurn(events, streamMgr);
     const wasAborted = currentAbort.signal.aborted;

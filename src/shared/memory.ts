@@ -1,22 +1,15 @@
 // src/shared/memory.ts
-// v0.6 — self-evolving memory engine.
-// Learns user preferences from conversation patterns and injects them into the system prompt.
+// v0.10 — preference harvester for the cross-session memory system.
+// Replaces the old regex MemoryEngine (single global UserProfile persisted to
+// localStorage / ~/.pure/memory.json). The regex patterns still learn, but the
+// output is now typed `user_preference` MemoryEntry[] that the CLI/GUI write
+// into their IMemoryStore (FSMemoryStore / LocalStorageMemoryStore), which the
+// Harness retrieves at session start via PromptComposer.
 
-export interface UserProfile {
-  languages: Record<string, number>;     // language → mention count
-  frameworks: Record<string, number>;    // framework → mention count
-  tools: Record<string, number>;         // tool → mention count
-  style: Record<string, string>;         // style key → value (e.g. indent: tabs)
-  updatedAt: number;
-}
-
-const EMPTY_PROFILE: UserProfile = {
-  languages: {},
-  frameworks: {},
-  tools: {},
-  style: {},
-  updatedAt: 0,
-};
+// Shared Kernel is the bottom layer — import the canonical type from
+// shared/types.ts directly, never from an adapter module (which only re-exports
+// it). See 三层依赖关系总结.md for the dependency direction.
+import type { MemoryEntry } from './types';
 
 // ── Pattern matchers ──
 
@@ -71,117 +64,62 @@ const TOOL_PATTERNS: Array<[RegExp, string]> = [
   [/\bwasm\b/i, 'WASM'],
 ];
 
-// ── Engine ──
+// ── Harvester ──
 
-export class MemoryEngine {
-  private profile: UserProfile;
-
-  constructor(initial?: UserProfile) {
-    this.profile = initial ? { ...EMPTY_PROFILE, ...initial } : { ...EMPTY_PROFILE };
-  }
-
-  /** Learn from a user message — scan for language/framework/tool mentions. */
-  learnFromMessage(text: string): void {
-    if (!text || text.length < 3) return;
-
-    this.matchPatterns(text, LANGUAGE_PATTERNS, this.profile.languages);
-    this.matchPatterns(text, FRAMEWORK_PATTERNS, this.profile.frameworks);
-    this.matchPatterns(text, TOOL_PATTERNS, this.profile.tools);
-    this.detectStyle(text);
-  }
-
-  /** Build the memory context string to inject into the system prompt. */
-  buildMemoryPrompt(): string {
-    const parts: string[] = [];
-
-    const topLanguages = this.topEntries(this.profile.languages, 3);
-    if (topLanguages.length > 0) {
-      parts.push(`User's preferred languages: ${topLanguages.join(', ')}.`);
-    }
-
-    const topFrameworks = this.topEntries(this.profile.frameworks, 3);
-    if (topFrameworks.length > 0) {
-      parts.push(`Frequently used frameworks: ${topFrameworks.join(', ')}.`);
-    }
-
-    const topTools = this.topEntries(this.profile.tools, 3);
-    if (topTools.length > 0) {
-      parts.push(`Preferred tools: ${topTools.join(', ')}.`);
-    }
-
-    if (Object.keys(this.profile.style).length > 0) {
-      const styleParts = Object.entries(this.profile.style).map(([k, v]) => `${k}: ${v}`);
-      parts.push(`Code style preferences: ${styleParts.join(', ')}.`);
-    }
-
-    if (parts.length === 0) return '';
-    return `\n## User Profile (learned from previous conversations)\n${parts.join('\n')}\n\nUse these preferences when writing code for the user.`;
-  }
-
-  /** Return the current profile for persistence. */
-  getProfile(): UserProfile {
-    return JSON.parse(JSON.stringify(this.profile));
-  }
-
-  /** Replace the entire profile (e.g. on load from storage). */
-  setProfile(p: UserProfile): void {
-    this.profile = { ...EMPTY_PROFILE, ...p };
-    this.profile.updatedAt = Date.now();
-  }
-
-  // ── Helpers ──
-
-  private matchPatterns(text: string, patterns: Array<[RegExp, string]>, target: Record<string, number>): void {
-    for (const [regex, label] of patterns) {
-      if (regex.test(text)) {
-        target[label] = (target[label] || 0) + 1;
-      }
-    }
-  }
-
-  private detectStyle(text: string): void {
-    if (/\bno\s*semicolons?\b/i.test(text) || /\bwithout\s*semicolons?\b/i.test(text)) {
-      this.profile.style['semicolons'] = 'no';
-    } else if (/\bwith\s*semicolons?\b/i.test(text) || /\buse\s*semicolons?\b/i.test(text)) {
-      this.profile.style['semicolons'] = 'yes';
-    }
-    if (/\bsingle\s*quotes?\b/i.test(text)) this.profile.style['quotes'] = 'single';
-    if (/\bdouble\s*quotes?\b/i.test(text)) this.profile.style['quotes'] = 'double';
-    if (/\btabs\b(?!\s*and\s*spaces)/i.test(text)) this.profile.style['indent'] = 'tabs';
-    if (/\bspaces\b(?!\s*and\s*tabs)/i.test(text)) this.profile.style['indent'] = 'spaces';
-    if (/\bfunctional\b(?!\s*component)/i.test(text)) this.profile.style['paradigm'] = 'functional';
-    if (/\boop\b|object\s*oriented/i.test(text)) this.profile.style['paradigm'] = 'OOP';
-  }
-
-  private topEntries(map: Record<string, number>, limit: number): string[] {
-    return Object.entries(map)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, limit)
-      .map(([k]) => k);
-  }
+export interface HarvestContext {
+  sessionId: string;
+  projectPath: string;
 }
 
-// ── Storage helpers ──
+/**
+ * Scan a user message for language / framework / tool / style preferences and
+ * return them as `user_preference` MemoryEntry fragments (no `id` — the store
+ * assigns it). Empty when nothing was learned.
+ */
+export function harvestUserPreferences(
+  text: string,
+  ctx: HarvestContext,
+): Array<Omit<MemoryEntry, 'id'>> {
+  if (!text || text.length < 3) return [];
 
-const MEMORY_KEY = 'pure_memory';
+  const entries: Array<Omit<MemoryEntry, 'id'>> = [];
+  const seen = new Set<string>();
+  const push = (content: string) => {
+    if (seen.has(content)) return;
+    seen.add(content);
+    entries.push({
+      type: 'user_preference',
+      content,
+      timestamp: Date.now(),
+      sessionId: ctx.sessionId,
+      projectPath: ctx.projectPath,
+    });
+  };
 
-/** Load profile from localStorage (browser) or return null. */
-export function loadMemoryProfile(): UserProfile | null {
-  try {
-    if (typeof localStorage !== 'undefined') {
-      const raw = localStorage.getItem(MEMORY_KEY);
-      if (raw) return JSON.parse(raw);
-    }
-  } catch {}
-  return null;
+  for (const [regex, label] of LANGUAGE_PATTERNS) {
+    if (regex.test(text)) push(`User prefers the ${label} language`);
+  }
+  for (const [regex, label] of FRAMEWORK_PATTERNS) {
+    if (regex.test(text)) push(`User frequently uses the ${label} framework`);
+  }
+  for (const [regex, label] of TOOL_PATTERNS) {
+    if (regex.test(text)) push(`User prefers the ${label} tool`);
+  }
+  pushStyle(text, push);
+
+  return entries;
 }
 
-/** Save profile to localStorage (browser). */
-export function saveMemoryProfile(profile: UserProfile): void {
-  try {
-    if (typeof localStorage !== 'undefined') {
-      profile.updatedAt = Date.now();
-      localStorage.setItem(MEMORY_KEY, JSON.stringify(profile));
-    }
-  } catch {}
+function pushStyle(text: string, push: (content: string) => void): void {
+  if (/\bno\s*semicolons?\b/i.test(text) || /\bwithout\s*semicolons?\b/i.test(text)) {
+    push('User prefers code without semicolons');
+  } else if (/\bwith\s*semicolons?\b/i.test(text) || /\buse\s*semicolons?\b/i.test(text)) {
+    push('User prefers semicolons in code');
+  }
+  if (/\bsingle\s*quotes?\b/i.test(text)) push('User prefers single quotes');
+  if (/\bdouble\s*quotes?\b/i.test(text)) push('User prefers double quotes');
+  if (/\btabs\b(?!\s*and\s*spaces)/i.test(text)) push('User prefers tabs for indentation');
+  if (/\bspaces\b(?!\s*and\s*tabs)/i.test(text)) push('User prefers spaces for indentation');
+  if (/\bfunctional\b(?!\s*component)/i.test(text)) push('User prefers functional programming style');
+  if (/\boop\b|object\s*oriented/i.test(text)) push('User prefers object-oriented programming style');
 }

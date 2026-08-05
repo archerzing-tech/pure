@@ -91,6 +91,31 @@ describe('RustLLMAdapter', () => {
     expect(args.args.baseUrl).toBe('https://api.deepseek.com');
   });
 
+  it('streams reasoning deltas as reasoning chunks, separate from content', async () => {
+    const { deps } = makeDeps({
+      deltas: [
+        JSON.stringify({ type: 'reasoning', content: 'Let me think about this.' }),
+        JSON.stringify({ type: 'delta', content: 'Answer here.' }),
+      ],
+      result: { text: 'Answer here.', toolCalls: [] },
+    });
+
+    const adapter = new RustLLMAdapter(
+      { provider: 'deepseek-openai', model: 'deepseek-v4-flash', baseURL: 'https://api.deepseek.com' },
+      deps,
+    );
+
+    const contents: string[] = [];
+    const reasoning: string[] = [];
+    for await (const chunk of adapter.stream(MSGS, [])) {
+      if (chunk.type === 'content') contents.push(chunk.content);
+      if (chunk.type === 'reasoning') reasoning.push(chunk.content);
+    }
+
+    expect(reasoning).toEqual(['Let me think about this.']);
+    expect(contents).toEqual(['Answer here.']);
+  });
+
   it('passes provider extraBody through to the request args', async () => {
     const { deps, lastArgs } = makeDeps({ deltas: [JSON.stringify({ type: 'delta', content: 'ok' })], result: { text: 'ok', toolCalls: [] } });
     const adapter = new RustLLMAdapter(

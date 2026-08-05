@@ -51,7 +51,7 @@ export class AgentLoopEngine {
 
     while (true) {
       if (ctx.signal?.aborted) {
-        yield { type: 'Interrupted', payload: { reason: 'aborted', lastState: 'THINK', completedSteps }, timestamp: Date.now() };
+        yield { type: 'Interrupted', payload: { reason: 'aborted', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
         interrupted = true;
         break;
       }
@@ -64,7 +64,7 @@ export class AgentLoopEngine {
           payload: { exhausted: true, reason: 'Budget exhausted', remaining: budget.remaining(), gracePeriodEnds: budget.gracePeriodEnd },
           timestamp: Date.now(),
         };
-        yield { type: 'Interrupted', payload: { reason: 'Budget exceeded', lastState: 'THINK', completedSteps }, timestamp: Date.now() };
+        yield { type: 'Interrupted', payload: { reason: 'Budget exceeded', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
         interrupted = true;
         break;
       } else if (budgetStatus === 'warning') {
@@ -76,7 +76,7 @@ export class AgentLoopEngine {
         if (ctx.hooks) {
           const hookResults = await ctx.hooks.dispatch('on_budget_warning', { messages, turnCount, phase: 'THINK' });
           if (hookResults.some(r => r.action === 'abort')) {
-            yield { type: 'Interrupted', payload: { reason: 'Hook aborted on budget warning', lastState: 'THINK', completedSteps }, timestamp: Date.now() };
+            yield { type: 'Interrupted', payload: { reason: 'Hook aborted on budget warning', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
         }
@@ -90,7 +90,7 @@ export class AgentLoopEngine {
       if (ctx.hooks) {
         const results = await ctx.hooks.dispatch('before_think', { messages, turnCount, phase: 'THINK' });
         if (results.some(r => r.action === 'abort')) {
-          yield { type: 'Interrupted', payload: { reason: 'Hook aborted before think', lastState: 'THINK', completedSteps }, timestamp: Date.now() };
+          yield { type: 'Interrupted', payload: { reason: 'Hook aborted before think', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
           interrupted = true; break;
         }
         const modify = results.find(r => r.action === 'modify' && r.modifiedMessages);
@@ -101,6 +101,7 @@ export class AgentLoopEngine {
       }
 
       let content = '';
+      let reasoningText = '';
       let toolCalls: ToolCall[] = [];
 
       try {
@@ -111,14 +112,34 @@ export class AgentLoopEngine {
               content += chunk.content;
               yield { type: 'TokenDelta', payload: { content: chunk.content, stateId: sid(), isToolCall: false }, timestamp: Date.now() };
               break;
+            case 'reasoning':
+              // Reasoning (chain-of-thought) is surfaced to the GUI as its own
+              // event — never folded into TokenDelta content, so it stays out of
+              // the visible answer and the persisted assistant message.
+              reasoningText += chunk.content;
+              yield { type: 'ReasoningDelta', payload: { content: chunk.content, stateId: sid() }, timestamp: Date.now() };
+              break;
             case 'tool_call_delta':
-              yield { type: 'TokenDelta', payload: { content: chunk.arguments ?? '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments }, timestamp: Date.now() };
+              yield { type: 'TokenDelta', payload: { content: chunk.arguments ?? '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name }, timestamp: Date.now() };
               break;
             case 'tool_call':
+              // BUG-6: surface the completed tool-call id for streaming
+              // adapters that emit it mid-stream (Anthropic-style). The UI
+              // keys its toasts by toolCallId, not toolName — parallel
+              // same-name calls would otherwise collide on one toast.
+              yield { type: 'TokenDelta', payload: { content: '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name, toolCallId: chunk.id }, timestamp: Date.now() };
               break;
             case 'done':
               content = chunk.content || content;
               toolCalls = chunk.toolCalls;
+              // BUG-6: the `done` chunk is the single guaranteed source of the
+              // final tool calls (every adapter emits it per the LLMAdapter
+              // contract, even ones that never stream `tool_call` chunks).
+              // Emit one id-bearing TokenDelta per call so the UI can key its
+              // pending toasts by toolCallId before any ToolResult arrives.
+              for (const tc of chunk.toolCalls) {
+                yield { type: 'TokenDelta', payload: { content: '', stateId: sid(), isToolCall: true, toolCallBuffer: tc.function.arguments, toolCallName: tc.function.name, toolCallId: tc.id }, timestamp: Date.now() };
+              }
               break;
           }
         }
@@ -126,28 +147,32 @@ export class AgentLoopEngine {
         failures.push({ type: 'llm_error', message: err?.message ?? String(err), turnNumber: turnCount });
         if (ctx.failurePolicy) {
           const action = ctx.failurePolicy.decide(failures);
+          // §12.3: surface the decision so the Harness can persist error_pattern
+          // memories (stop → error_pattern now, retry → on eventual success).
+          yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
           if (action.kind === 'stop') {
-            yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'THINK', completedSteps }, timestamp: Date.now() };
+            yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
           if (action.kind !== 'degrade') {
             messages.push({ role: 'user' as const, content: action.hint });
           }
           turnCount++; budget.incrementTurn();
+          yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
           continue;
         }
         yield { type: 'Error', payload: { code: 'LLM_STREAM_ERROR', message: err?.message ?? String(err), stateType: 'THINK', recoverable: false, recoveryAction: 'terminate' }, timestamp: Date.now() };
         return;
       }
 
-      budget.addTokens(content);
+      budget.addTokens(content + reasoningText);
       messages.push({ role: 'assistant' as const, content, ...(toolCalls.length > 0 ? { toolCalls } : {}) });
 
       // Hook: after_think
       if (ctx.hooks) {
         const results = await ctx.hooks.dispatch('after_think', { messages, turnCount, phase: 'THINK' });
         if (results.some(r => r.action === 'abort')) {
-          yield { type: 'Interrupted', payload: { reason: 'Hook aborted after think', lastState: 'THINK', completedSteps }, timestamp: Date.now() };
+          yield { type: 'Interrupted', payload: { reason: 'Hook aborted after think', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
           interrupted = true; break;
         }
       }
@@ -158,7 +183,7 @@ export class AgentLoopEngine {
         if (ctx.hooks) {
           const results = await ctx.hooks.dispatch('before_act', { messages, turnCount, phase: 'ACT' });
           if (results.some(r => r.action === 'abort')) {
-            yield { type: 'Interrupted', payload: { reason: 'Hook aborted before act', lastState: 'ACT', completedSteps }, timestamp: Date.now() };
+            yield { type: 'Interrupted', payload: { reason: 'Hook aborted before act', lastState: 'ACT', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
         }
@@ -178,8 +203,9 @@ export class AgentLoopEngine {
         }
         if (toolErrors.length > 0 && ctx.failurePolicy) {
           const action = ctx.failurePolicy.decide(failures);
+          yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
           if (action.kind === 'stop') {
-            yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'ACT', completedSteps }, timestamp: Date.now() };
+            yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'ACT', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
           // Append tool results so the LLM sees them on retry
@@ -194,6 +220,7 @@ export class AgentLoopEngine {
             messages.push({ role: 'user' as const, content: action.hint });
           }
           turnCount++; budget.incrementTurn();
+          yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
           continue;
         }
 
@@ -201,7 +228,7 @@ export class AgentLoopEngine {
         if (ctx.hooks) {
           const results = await ctx.hooks.dispatch('after_act', { messages, turnCount, phase: 'ACT' });
           if (results.some(r => r.action === 'abort')) {
-            yield { type: 'Interrupted', payload: { reason: 'Hook aborted after act', lastState: 'ACT', completedSteps }, timestamp: Date.now() };
+            yield { type: 'Interrupted', payload: { reason: 'Hook aborted after act', lastState: 'ACT', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
         }
@@ -223,9 +250,10 @@ export class AgentLoopEngine {
 
         turnCount++;
         budget.incrementTurn();
+        yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
 
         if (turnCount > ctx.budget.maxTurns) {
-          yield { type: 'Interrupted', payload: { reason: 'max_turns', lastState: 'OBSERVE', completedSteps }, timestamp: Date.now() };
+          yield { type: 'Interrupted', payload: { reason: 'max_turns', lastState: 'OBSERVE', completedSteps, messages, turnCount }, timestamp: Date.now() };
           interrupted = true;
           break;
         }
@@ -237,7 +265,7 @@ export class AgentLoopEngine {
       if (ctx.hooks) {
         const results = await ctx.hooks.dispatch('before_verify', { messages, turnCount, phase: 'VERIFY' });
         if (results.some(r => r.action === 'abort')) {
-          yield { type: 'Interrupted', payload: { reason: 'Hook aborted before verify', lastState: 'VERIFY', completedSteps }, timestamp: Date.now() };
+          yield { type: 'Interrupted', payload: { reason: 'Hook aborted before verify', lastState: 'VERIFY', completedSteps, messages, turnCount }, timestamp: Date.now() };
           interrupted = true; break;
         }
       }
@@ -254,8 +282,9 @@ export class AgentLoopEngine {
             failures.push({ type: 'verify_failure', message: result.feedback ?? 'Verification failed', turnNumber: turnCount });
             if (ctx.failurePolicy) {
               const action = ctx.failurePolicy.decide(failures);
+              yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
               if (action.kind === 'stop') {
-                yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'VERIFY', completedSteps }, timestamp: Date.now() };
+                yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'VERIFY', completedSteps, messages, turnCount }, timestamp: Date.now() };
                 interrupted = true; break;
               }
               const recoveryAction = action.kind === 'retry' ? 'retry' as const : action.kind === 'degrade' ? 'skip' as const : 'reflect' as const;
@@ -281,6 +310,7 @@ export class AgentLoopEngine {
             }
             turnCount++;
             budget.incrementTurn();
+            yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
             // Hook: after_verify (failed path)
             if (ctx.hooks) {
               await ctx.hooks.dispatch('after_verify', { messages, turnCount, phase: 'VERIFY' });
@@ -304,6 +334,12 @@ export class AgentLoopEngine {
 
       // Successful verification resets the failure streak.
       failures.length = 0;
+
+      // G-5: the design yields YieldControl at the bottom of every loop
+      // iteration — including the one where VERIFY passes and we terminate.
+      // Emit a final snapshot (no turn increment here; turnCount was already
+      // counted by the last completed phase).
+      yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
 
       finalOutput = content;
       yield { type: 'StateChange', payload: { from: 'VERIFY', to: 'TERMINATE', stateId: sid() }, timestamp: Date.now() };
@@ -342,9 +378,14 @@ export class AgentLoopEngine {
         const path = typeof args.path === 'string' ? args.path : '';
         const lm = ctx.lockManager ?? this.fileLock;
         if (path) await lm.acquireRead(path);
-        const result = await ctx.tools!.execute(tc, ctx.signal);
-        if (path) lm.release(path);
-        return { toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id };
+        try {
+          const result = await ctx.tools!.execute(tc, ctx.signal);
+          return { toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id };
+        } finally {
+          // Release even when the tool itself throws — a leaked lock would
+          // deadlock every later write to the same path.
+          if (path) lm.release(path);
+        }
       } catch (err: any) {
         return { toolName: tc.function.name, result: { id: tc.id, toolName: tc.function.name, error: err?.message ?? 'unknown', success: false, duration: 0 }, duration: 0, toolCallId: tc.id };
       }
@@ -358,9 +399,12 @@ export class AgentLoopEngine {
         const path = typeof args.path === 'string' ? args.path : '';
         const lm = ctx.lockManager ?? this.fileLock;
         if (path) await lm.acquireWrite(path);
-        const result = await ctx.tools!.execute(tc, ctx.signal);
-        if (path) lm.release(path);
-        results.push({ toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id });
+        try {
+          const result = await ctx.tools!.execute(tc, ctx.signal);
+          results.push({ toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id });
+        } finally {
+          if (path) lm.release(path);
+        }
       } catch (err: any) {
         results.push({ toolName: tc.function.name, result: { id: tc.id, toolName: tc.function.name, error: err?.message ?? 'unknown', success: false, duration: 0 }, duration: 0, toolCallId: tc.id });
       }

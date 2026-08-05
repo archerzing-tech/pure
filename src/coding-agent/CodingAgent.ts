@@ -20,6 +20,7 @@ import type {
   EngineEvent,
   FailurePolicy,
   HookRouter,
+  IMemoryStore,
   LLMAdapter,
   Message,
   ToolAdapter,
@@ -42,8 +43,17 @@ export interface CodingAgentConfig {
   toolsDefs?: ToolDefinition[];
   budget: BudgetConfig;
   stateStore?: IStateStore;
+  /** Cross-session long-term memory (IMemoryStore) — retrieved at session
+   *  start, written at session end. Omit to run without memory. */
+  memory?: IMemoryStore;
+  /** Project path for memory isolation; defaults to process.cwd(). */
+  projectPath?: string;
   permissionMode?: PermissionMode;
   permissionHandler?: PermissionRequestHandler;
+  /** Pre-built PermissionManager to reuse (e.g. a session-scoped instance so
+   *  "allow always this session" survives across turns). When provided,
+   *  permissionMode / permissionHandler are ignored. */
+  permissionManager?: PermissionManager;
   /** Custom verifier — defaults to the built-in rule checks. */
   verifier?: Verifier;
   /** Custom hook router — defaults to an empty DefaultHookRouter. */
@@ -75,7 +85,7 @@ export class CodingAgent {
   constructor(config: CodingAgentConfig) {
     this.toolRegistry = new ToolRegistry(config.toolAdapter);
     this.planner = new Planner();
-    this.permissionManager = new PermissionManager(
+    this.permissionManager = config.permissionManager ?? new PermissionManager(
       config.permissionMode ?? 'NORMAL',
       config.permissionHandler,
     );
@@ -131,7 +141,10 @@ export class CodingAgent {
       this.fileWatcher = new FileWatcher(config.fileWatcher);
     }
 
-    const contextEngine = new ContextEngine({ maxMessages: 20 });
+    // G-3 fix: pass the LLM so the summary fallback actually runs when a lot
+    // of history gets evicted (previously `llm` was omitted → summarizeEvicted
+    // was dead code and the summary path never triggered).
+    const contextEngine = new ContextEngine({ maxMessages: 20, llm: config.llm });
 
     this.harness = new Harness({
       sessionId: config.sessionId,
@@ -147,6 +160,8 @@ export class CodingAgent {
         : undefined,
       budget: config.budget,
       stateStore: config.stateStore,
+      memory: config.memory,
+      projectPath: config.projectPath,
       contextEngine,
       fileWatcher: this.fileWatcher,
       // VERIFY phase: run the built-in checks (or the caller's custom verifier)

@@ -146,7 +146,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
   },    {
       name: 'web_fetch',
-      description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles).',
+      description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles). Works on text/HTML/JSON pages; if it reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.',
       input_schema: {
         type: 'object',
         properties: {
@@ -179,11 +179,29 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
           oldString: { type: 'string', description: 'Exact string to find and replace in each file' },
           newString: { type: 'string', description: 'Replacement string' },
           allowMultiple: { type: 'boolean', description: 'Replace all occurrences in each file. Default: false' },
-        },
-        required: ['files', 'oldString', 'newString'],
-      },
+        },      required: ['files', 'oldString', 'newString'],
     },
+  },
+  {
+    name: 'sys_info',
+    description: 'Get operating system information: timezone, language, current time, and OS version.',
+    input_schema: { type: 'object', properties: {} },
+  },
 ];
+
+/** Web-only subset of TOOL_DEFINITIONS — exported so chat.ts can pin this
+ * exact list as the LLM-visible toolsDef in plain-chat mode without
+ * duplicating the schema. Order is stable (matches declaration order). */
+export function getWebToolDefs(): ToolDefinition[] {
+  return TOOL_DEFINITIONS.filter((t) => t.name === 'web_search' || t.name === 'web_fetch');
+}
+
+/** sys_info tool def — workspace-independent (the Rust backend ignores the
+ * workspace field), so plain-chat mode can always advertise it regardless of
+ * the browser-tool toggle. */
+export function getSysInfoToolDefs(): ToolDefinition[] {
+  return TOOL_DEFINITIONS.filter((t) => t.name === 'sys_info');
+}
 
 const TOOL_METADATA: Record<string, { sideEffects: boolean; isWrite: boolean }> = {
   read_file: { sideEffects: false, isWrite: false },
@@ -201,6 +219,7 @@ const TOOL_METADATA: Record<string, { sideEffects: boolean; isWrite: boolean }> 
   web_fetch: { sideEffects: false, isWrite: false },
   glob_files: { sideEffects: false, isWrite: false },
   replace_files: { sideEffects: true, isWrite: true },
+  sys_info: { sideEffects: false, isWrite: false },
 };
 
 type InvokeFunction = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -360,11 +379,15 @@ export class TauriToolAdapter implements ToolAdapter {
           }) as string;
           return { id: toolCall.id, toolName: name, result: replaceResult, success: true, duration: Date.now() - start };
         }
+        case 'sys_info': {
+          const info = await tauriInvoke('sys_info', { workspace: ws }) as string;
+          return { id: toolCall.id, toolName: name, result: info, success: true, duration: Date.now() - start };
+        }
         default:
           return {
             id: toolCall.id,
             toolName: name,
-            error: `Unknown tool: ${name}. Available: read_file, write_file, edit_file, search_files, list_files, execute_command, create_directory, diff_files, web_search, web_fetch, git_diff, git_log, git_status`,
+            error: `Unknown tool: ${name}. Available: read_file, write_file, edit_file, search_files, list_files, execute_command, create_directory, diff_files, web_search, web_fetch, glob_files, replace_files, git_diff, git_log, git_status, sys_info`,
             success: false,
             duration: Date.now() - start,
           };

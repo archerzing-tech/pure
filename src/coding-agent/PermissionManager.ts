@@ -49,10 +49,12 @@ export class PermissionManager {
 
     const cacheKey = this.buildCacheKey(ctx);
 
-    // Medium risk: cached only if the user chose "allow always" this session.
-    // High risk: never cached — confirmed on every use.
+    // Cached only when the user explicitly chose "allow always this session"
+    // (decision.remember). High risk is included — the user opted in, and the
+    // cache is cleared on new chat — so shell commands don't re-prompt for
+    // every call within a session.
     const cached = this.cache.get(cacheKey);
-    if (cached && ctx.riskLevel !== 'high') {
+    if (cached) {
       return cached;
     }
 
@@ -71,8 +73,9 @@ export class PermissionManager {
       };
       const decision = await this.requestHandler(info);
 
-      // "Allow always" caches the decision for the rest of the session
-      if (decision.allowed && decision.remember && ctx.riskLevel !== 'high') {
+      // "Always allow" caches the decision for the rest of the session — this
+      // applies to high-risk tools too when the user explicitly chose it.
+      if (decision.allowed && decision.remember) {
         this.cache.set(cacheKey, decision);
       }
       return decision;

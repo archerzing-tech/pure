@@ -4,6 +4,19 @@
 import { readFileSync, existsSync, mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
 import type { IStateStore, Checkpoint, AgentLoopState } from '../../shared/types';
 
+// Session ids flow into filesystem paths, so anything that could escape the
+// sessions base dir — path separators, `..`, null bytes — is rejected before
+// any read/write/delete. Legit ids are `session_<ts>` (CLI/GUI), subagent
+// ids (`subagent_<name>_<ts>`), or user-supplied `--resume` handles, all of
+// which match [A-Za-z0-9._-].
+const VALID_SESSION_ID = /^[A-Za-z0-9._-]+$/;
+
+function assertValidSessionId(sessionId: string): void {
+  if (!VALID_SESSION_ID.test(sessionId)) {
+    throw new Error(`Invalid sessionId '${sessionId}' — path traversal is not allowed`);
+  }
+}
+
 export class FSStore implements IStateStore {
   private basePath: string;
 
@@ -12,6 +25,7 @@ export class FSStore implements IStateStore {
   }
 
   private sessionDir(sessionId: string): string {
+    assertValidSessionId(sessionId);
     return `${this.basePath}/${sessionId}`;
   }
 
