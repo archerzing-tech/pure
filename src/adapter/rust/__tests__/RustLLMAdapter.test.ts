@@ -116,6 +116,33 @@ describe('RustLLMAdapter', () => {
     expect(contents).toEqual(['Answer here.']);
   });
 
+  it('forwards tool_call_delta payloads as tool_call_delta chunks', async () => {
+    const { deps } = makeDeps({
+      deltas: [
+        JSON.stringify({ type: 'tool_call_delta', index: 0, name: 'write_file', arguments: '{"path":' }),
+        JSON.stringify({ type: 'tool_call_delta', index: 0, name: 'write_file', arguments: '{"path":"snake.html","content":"<html>' }),
+      ],
+      result: { text: '', toolCalls: [{ id: 'c1', function: { name: 'write_file', arguments: '{"path":"snake.html","content":"<html></html>"}' } }] },
+    });
+
+    const adapter = new RustLLMAdapter(
+      { provider: 'deepseek-openai', model: 'deepseek-v4-flash' },
+      deps,
+    );
+
+    const deltas: string[] = [];
+    for await (const chunk of adapter.stream(MSGS, [])) {
+      if (chunk.type === 'tool_call_delta') {
+        deltas.push(`${chunk.name ?? ''}:${chunk.arguments ?? ''}`);
+      }
+    }
+
+    expect(deltas).toEqual([
+      'write_file:{"path":',
+      'write_file:{"path":"snake.html","content":"<html>',
+    ]);
+  });
+
   it('passes provider extraBody through to the request args', async () => {
     const { deps, lastArgs } = makeDeps({ deltas: [JSON.stringify({ type: 'delta', content: 'ok' })], result: { text: 'ok', toolCalls: [] } });
     const adapter = new RustLLMAdapter(
@@ -184,5 +211,50 @@ describe('RustLLMAdapter', () => {
     const res = await adapter.complete(MSGS, []);
     expect(res.content).toBe('answer');
     expect(res.toolCalls).toHaveLength(1);
+  });
+
+  it('aborting the stream fires cancel_chat_stream with the same request id', async () => {
+    const invokeCalls: Array<{ cmd: string; args: any }> = [];
+    // chat_stream never resolves in this test; only cancel_chat_stream does.
+    const never = new Promise<unknown>(() => {});
+    const deps = {
+      invoke: async (cmd: string, args: any) => {
+        invokeCalls.push({ cmd, args });
+        if (cmd === 'cancel_chat_stream') return true;
+        return never;
+      },
+      Channel: MockChannel as unknown as RustLLMDeps['Channel'],
+    };
+    const adapter = new RustLLMAdapter(
+      { provider: 'deepseek-openai', model: 'deepseek-v4-flash' },
+      deps,
+    );
+
+    const ac = new AbortController();
+    const gen = adapter.stream(MSGS, [], ac.signal);
+
+    // Async generators are lazy — kick the body with a first next() (it
+    // suspends at `await this.getDeps()` before invoking chat_stream, hence
+    // the microtask flush), then keep the returned promise for draining below
+    // so the stream is never double-awaited.
+    const first = gen.next();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // chat_stream is invoked with a fresh request id (nested under the outer
+    // { args, onChunk } invoke payload, unlike cancel_chat_stream's flat args).
+    const startArgs = invokeCalls.find(c => c.cmd === 'chat_stream')!.args;
+    expect(startArgs.args.requestId).toBeTruthy();
+
+    // Abort → the handler must tell Rust to cancel THE SAME stream.
+    ac.abort();
+    const cancel = invokeCalls.find(c => c.cmd === 'cancel_chat_stream');
+    expect(cancel?.args.requestId).toBe(startArgs.args.requestId);
+
+    // The generator ends without emitting a synthetic `done`.
+    const types: string[] = [];
+    const firstResult = await first;
+    if (!firstResult.done) types.push(firstResult.value.type);
+    for await (const c of gen) types.push(c.type);
+    expect(types).not.toContain('done');
   });
 });

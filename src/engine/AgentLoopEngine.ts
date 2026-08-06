@@ -261,6 +261,16 @@ export class AgentLoopEngine {
       }
 
       // ── No tool calls → VERIFY ──
+      // A turn aborted mid-THINK (the stream ended because the user hit Stop)
+      // must NOT run a fresh verifier LLM call — surface the interruption
+      // immediately instead of a pointless (and slow) verify round-trip. The
+      // top-of-loop check would catch this next iteration, but only after the
+      // verifier had already been invoked.
+      if (ctx.signal?.aborted) {
+        yield { type: 'Interrupted', payload: { reason: 'aborted', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+        interrupted = true;
+        break;
+      }
       // Hook: before_verify
       if (ctx.hooks) {
         const results = await ctx.hooks.dispatch('before_verify', { messages, turnCount, phase: 'VERIFY' });

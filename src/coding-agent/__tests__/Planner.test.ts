@@ -31,6 +31,69 @@ describe('Planner', () => {
     expect(r.complexity).toBe('simple');
   });
 
+  it('classifies Chinese large-project requests as complex', () => {
+    const r = new Planner().analyzeTask('帮我制作一个大型工程，包含完整的项目管理功能。');
+    expect(r.complexity).toBe('complex');
+    expect(r.plan).toBeDefined();
+  });
+
+  it('classifies Chinese full-stack / multi-file builds as complex', () => {
+    expect(new Planner().analyzeTask('搭建一个完整的全栈项目。').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('从零开始构建一个多文件系统。').complexity).toBe('complex');
+  });
+
+  it('keeps single-file Chinese artifacts simple', () => {
+    const r = new Planner().analyzeTask('帮我写一个打地鼠小游戏。');
+    expect(r.complexity).toBe('simple');
+    expect(new Planner().analyzeTask('做一个简单的网页。').complexity).toBe('simple');
+  });
+
+  it('keeps Chinese documentation requests simple (bare verb + noun, no scale word)', () => {
+    expect(new Planner().analyzeTask('帮我写一个项目总结。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('写个项目方案。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('做个系统介绍。').complexity).toBe('simple');
+  });
+
+  it('keeps Chinese doc requests simple even with a scale word present', () => {
+    expect(new Planner().analyzeTask('帮我写一个完整的项目方案。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('写一个完整的项目总结。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('搭建完整项目的开发文档。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('帮我写一个完整项目的技术方案。').complexity).toBe('simple');
+  });
+
+  it('keeps destructive / query actions on whole projects simple', () => {
+    expect(new Planner().analyzeTask('删除整个项目。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('查看整个项目的结构。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('整理整个项目的依赖。').complexity).toBe('simple');
+  });
+
+  it('keeps Chinese how-to questions simple even with scale words', () => {
+    expect(new Planner().analyzeTask('请帮我看看怎么搭建一个完整的全栈项目。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('如何搭建一个完整的全栈项目？').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('全栈项目的数据库怎么设计？').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('这个大型工程要怎么规划？').complexity).toBe('simple');
+  });
+
+  it('classifies scale word + noun + build verb as complex', () => {
+    expect(new Planner().analyzeTask('重构整个项目。').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('迁移整个项目到 monorepo。').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('搭建整个项目。').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('从零开始做一个项目。').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('从头搭建一个网站。').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('搭建一个大型网站。').complexity).toBe('complex');
+  });
+
+  it('treats a build command with a trailing question as complex', () => {
+    expect(new Planner().analyzeTask('帮我搭建一个全栈项目，怎么做性能优化？').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('请帮我搭建一个全栈项目，怎么部署？').complexity).toBe('complex');
+  });
+
+  it('keeps from-scratch learning and doc requests simple', () => {
+    expect(new Planner().analyzeTask('从零开始学习。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('从零搭建一个网站的教程。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('从头写一个项目的总结。').complexity).toBe('simple');
+  });
+
   // ═══ Logical-trap detection (v0.2) ═══
 
   it('flags no traps for a normal request', () => {

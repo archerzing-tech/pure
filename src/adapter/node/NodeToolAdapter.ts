@@ -120,7 +120,7 @@ export class NodeToolAdapter implements ToolAdapter {
     },
     {
       name: 'web_search',
-      description: 'Search the web and return results with titles, snippets, and URLs. Uses DuckDuckGo — no API key needed.',
+      description: 'Search the web and return results with titles, snippets, and URLs. Chinese-priority backends (cn.bing.com → DuckDuckGo → Bing) — no API key needed.',
       input_schema: {
         type: 'object',
         properties: {
@@ -438,14 +438,31 @@ export class NodeToolAdapter implements ToolAdapter {
         signal: controller.signal,
       });
 
-      const stdout = await new Response(proc.stdout).text();
-      const stderr = await new Response(proc.stderr).text();
+      const stdout = (await new Response(proc.stdout).text()).trim();
+      const stderr = (await new Response(proc.stderr).text()).trim();
       await proc.exited;
+      const exitCode = proc.exitCode ?? -1;
 
+      const result = { stdout, stderr, exitCode };
+      // Exit code is the single source of truth for success: a command that
+      // printed output but exited non-zero FAILED (a failed `npm install` or
+      // `cargo build`). Report it as such so the LLM and the failure policy
+      // can react instead of treating the run as successful. stderr stays in
+      // the result (and the error message) so the model sees what went wrong.
+      if (exitCode !== 0) {
+        return {
+          id: `tool_${Date.now()}`,
+          toolName: 'execute_command',
+          result,
+          error: formatCommandError(exitCode, [stdout, stderr ? `[stderr]\n${stderr}` : ''].filter(Boolean).join('\n')),
+          success: false,
+          duration: Date.now() - start,
+        };
+      }
       return {
         id: `tool_${Date.now()}`,
         toolName: 'execute_command',
-        result: { stdout: stdout.trim(), stderr: stderr.trim(), exitCode: proc.exitCode },
+        result,
         success: true,
         duration: Date.now() - start,
       };
@@ -512,28 +529,91 @@ export class NodeToolAdapter implements ToolAdapter {
     const query = String(args.query);
     const maxResults = Math.min(typeof args.maxResults === 'number' ? args.maxResults : 10, 20);
 
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    // Multi-backend fallback: DuckDuckGo is unreachable on some networks
+    // (timeouts / blocks), which used to make EVERY search fail. Try backends
+    // in order and stop at the first that yields results; a backend that
+    // errors OR returns nothing rolls over to the next one, so challenge pages
+    // and empty result sets degrade gracefully instead of hard failures.
+    //
+    // Chinese-priority: CJK queries hit cn.bing.com FIRST — international Bing
+    // frequently serves a block page and DuckDuckGo returns irrelevant results
+    // for Chinese, which pushed the agent into repeated searches. Mirrors the
+    // Rust web_search backend order.
+    const backends: Array<{ label: string; fetch: () => Promise<SearchResult[]> }> = [
+      ...(containsCJK(query)
+        ? [{
+            label: 'cn.bing.com',
+            fetch: async () => {
+              const resp = await fetch(`https://cn.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`, {
+                headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8' },
+                redirect: 'follow',
+                signal: AbortSignal.timeout(8000),
+              });
+              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+              return parseBingResults(await resp.text(), maxResults);
+            },
+          }]
+        : []),
+      {
+        label: 'DuckDuckGo',
+        fetch: async () => {
+          const resp = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+            headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8' },
+            redirect: 'follow',
+            signal: AbortSignal.timeout(8000),
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          return parseDuckDuckGoResults(await resp.text(), maxResults);
+        },
+      },
+      {
+        label: 'Bing',
+        fetch: async () => {
+          const resp = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`, {
+            headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8' },
+            redirect: 'follow',
+            signal: AbortSignal.timeout(8000),
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          return parseBingResults(await resp.text(), maxResults);
+        },
+      },
+    ];
 
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Pure/1.0' },
-      signal: AbortSignal.timeout(15000),
-    });
-
-    if (!resp.ok) {
-      return this.fail(null!, start, `Search failed: HTTP ${resp.status}`);
+    let results: SearchResult[] = [];
+    const failed: string[] = [];
+    let anyEmpty = false;
+    for (const backend of backends) {
+      if (results.length > 0) break;
+      try {
+        const r = await backend.fetch();
+        if (r.length > 0) results = r;
+        else anyEmpty = true;
+      } catch (err: any) {
+        failed.push(`${backend.label}: ${err?.message ?? String(err)}`);
+      }
     }
 
-    const html = await resp.text();
-    const results = parseDuckDuckGoResults(html, maxResults);
-
     if (results.length === 0) {
-      return {
-        id: `tool_${Date.now()}`,
-        toolName: 'web_search',
-        result: `No results found for "${query}"`,
-        success: true,
-        duration: Date.now() - start,
-      };
+      // At least one backend answered with an empty result set: the search
+      // infrastructure works, the query just has no hits — rephrase, don't
+      // repeat. (Other backends may have been unreachable; either way the
+      // actionable guidance is the same.)
+      if (anyEmpty) {
+        return {
+          id: `tool_${Date.now()}`,
+          toolName: 'web_search',
+          result: `No results found for "${query}" on the available search backends (cn.bing.com, DuckDuckGo, Bing). Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to contain the information.`,
+          success: true,
+          duration: Date.now() - start,
+        };
+      }
+      // Every backend errored (none returned empty): almost always network /
+      // rate-limit / geo-block, NOT a bad query — tell the model not to
+      // blindly retry, and how to recover. This is the message the failure
+      // policy feeds back on.
+      const details = failed.length > 0 ? failed.join('; ') : 'all backends unreachable';
+      return this.fail(null!, start, `Web search failed on all backends (${details}). This looks like a network or rate-limit issue rather than a bad query — do NOT retry web_search immediately with the same or similar queries. Retry later, or use web_fetch on a URL you expect to contain the information.`);
     }
 
     const output = results
@@ -560,7 +640,7 @@ export class NodeToolAdapter implements ToolAdapter {
     setTimeout(() => controller.abort(), 30000);
 
     const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Pure/1.0' },
+      headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9' },
       signal: controller.signal,
     });
 
@@ -580,7 +660,12 @@ export class NodeToolAdapter implements ToolAdapter {
     }
 
     const html = await resp.text();
-    const text = stripHtml(html).trim();
+    // Decode HTML entities at the PIPELINE level (mirrors the Rust web_fetch
+    // path, whose strip_html_full html-decodes after stripping). NOT inside
+    // the shared stripHtml — that helper also feeds the DDG/Bing parsers,
+    // which decode AFTER stripping themselves; decoding there would
+    // double-decode (&amp;copy; → ©).
+    const text = extractReadableText(html);
     const truncated = text.length > maxChars ? text.slice(0, maxChars) + '\n\n[truncated]' : text;
 
     return {
@@ -758,6 +843,19 @@ function safeParseArgs(raw: string): Record<string, unknown> {
   try { return JSON.parse(raw); } catch { return {}; }
 }
 
+/** Build the error message for a failed command (non-zero exit code). Mirrors
+ * the GUI adapter's formatCommandError so CLI and GUI report failures the
+ * same way. */
+function formatCommandError(exitCode: number, output: string): string {
+  const tail = output.trim() ? `:\n${output.trim()}` : '';
+  return `Command failed with exit code ${exitCode}${tail}`;
+}
+
+// Browser User-Agent: search engines and many sites block the bare "Pure/1.0"
+// string, which surfaced as a wall of generic HTTP errors. A real browser UA
+// keeps both search backends and web_fetch targets responsive.
+const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
 // ── DuckDuckGo HTML result parser ──
 
 interface SearchResult {
@@ -766,7 +864,20 @@ interface SearchResult {
   url: string;
 }
 
-function parseDuckDuckGoResults(html: string, maxResults: number): SearchResult[] {
+/** True when the query contains CJK ideographs (CJK Unified Ideographs, CJK
+ * Extension A, and CJK Compatibility Ideographs) — the trigger for routing a
+ * search through the China Bing backend (cn.bing.com) first. Mirrors
+ * src-tauri/src/lib.rs `is_chinese_query`; both sides have matching tests. */
+export function containsCJK(query: string): boolean {
+  return /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(query);
+}
+
+/** Parse DuckDuckGo HTML results (`<div class="result">` blocks containing
+ * `<a class="result__a" href="…">TITLE</a>` plus a
+ * `<div class="result__snippet">…</div>`). Exported for the mirror tests in
+ * searchParser.test.ts, which lock behavior against the Rust parser
+ * (src-tauri/src/lib.rs parse_duckduckgo_results). */
+export function parseDuckDuckGoResults(html: string, maxResults: number): SearchResult[] {
   const results: SearchResult[] = [];
 
   // Parse DuckDuckGo HTML search: each result is in a div with class "result"
@@ -782,13 +893,13 @@ function parseDuckDuckGoResults(html: string, maxResults: number): SearchResult[
     if (!linkMatch) continue;
 
     const url = decodeHtmlEntities(linkMatch[1].trim());
-    const title = stripHtml(linkMatch[2]).trim();
+    const title = decodeHtmlEntities(stripHtml(linkMatch[2])).trim();
 
     if (!title || !url) continue;
 
     // Extract snippet from <a class="result__snippet">
     const snippetMatch = block.match(/<[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/[^>]+>/i);
-    const snippet = snippetMatch ? stripHtml(snippetMatch[1]).trim() : '';
+    const snippet = snippetMatch ? decodeHtmlEntities(stripHtml(snippetMatch[1])).trim() : '';
 
     results.push({ title, snippet, url });
   }
@@ -827,10 +938,100 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&#x27;/g, "'")
-    .replace(/&nbsp;/g, ' ');
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&ensp;/g, ' ')
+    // Numeric character references (common in Bing snippets, e.g. &#0183;).
+    .replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(Number(d)));
 }
 
-function stripHtml(html: string): string {
+// ── Bing HTML result parser (multi-backend fallback) ──
+
+/** Parse Bing results (`<li class="b_algo">` blocks): `<h2><a href="…">TITLE</a></h2>`
+ * plus a `<p>…</p>` snippet. Mirrors the Rust parser in src-tauri/src/lib.rs — the
+ * two MUST stay behaviorally identical (entity decoding, quote handling, block
+ * skipping, max cap); tests on both sides lock the shared fixtures. INTENTIONAL
+ * divergences: whitespace handling (TS stripHtml collapses block tags to
+ * newlines — shared with the DDG/web_fetch paths — while Rust keeps raw
+ * whitespace) and unquoted hrefs (TS skips, Rust would parse). Both favor TS
+ * in practice and must not be "unified" blindly. */
+export function parseBingResults(html: string, maxResults: number): SearchResult[] {
+  const results: SearchResult[] = [];
+  let rest = html;
+  while (results.length < maxResults) {
+    const idx = rest.indexOf('<li class="b_algo');
+    if (idx === -1) break;
+    const tail = rest.slice(idx);
+    const liEnd = tail.indexOf('</li>');
+    if (liEnd === -1) break;
+    const block = tail.slice(0, liEnd + '</li>'.length);
+    const parsed = parseBingBlock(block);
+    if (parsed) results.push(parsed);
+    rest = tail.slice(liEnd + '</li>'.length);
+  }
+  return results;
+}
+
+function parseBingBlock(block: string): SearchResult | undefined {
+  // Result link lives inside <h2>: find <h2>, then the first <a after it.
+  const h2 = block.indexOf('<h2');
+  if (h2 === -1) return undefined;
+  const afterH2 = block.slice(h2);
+  const aIdx = afterH2.indexOf('<a');
+  if (aIdx === -1) return undefined;
+  const url = extractHref(afterH2, aIdx);
+  if (url === undefined) return undefined;
+
+  // Title: text between the anchor's '>' and the next '<'. A block whose
+  // anchor never closes is skipped entirely (mirrors the Rust `?` on find).
+  const afterA = afterH2.slice(aIdx);
+  const gt = afterA.indexOf('>');
+  if (gt === -1) return undefined;
+  const afterGt = afterA.slice(gt + 1);
+  const titleEnd = afterGt.indexOf('<');
+  if (titleEnd === -1) return undefined;
+  const title = decodeHtmlEntities(stripHtml(afterGt.slice(0, titleEnd))).trim();
+  if (!title || !url) return undefined;
+
+  // Snippet: first <p ...>…</p> in the block. Decoded like the title so
+  // numeric/named entities in Bing snippets (&#0183; middle dots, &ensp;)
+  // render as characters, matching the Rust parser.
+  let snippet = '';
+  const pIdx = block.indexOf('<p');
+  if (pIdx !== -1) {
+    const afterP = block.slice(pIdx);
+    const pGt = afterP.indexOf('>');
+    if (pGt !== -1) {
+      const content = afterP.slice(pGt + 1);
+      const pEnd = content.indexOf('</p>');
+      if (pEnd !== -1) snippet = decodeHtmlEntities(stripHtml(content.slice(0, pEnd))).trim();
+    }
+  }
+
+  return { title, snippet, url };
+}
+
+/** Extract an href attribute value after a `<a` marker, mirroring the Rust
+ * parser's extract_href: read the quote char (single OR double) that follows
+ * `href=`, then the text up to the matching quote. Returns undefined when the
+ * attribute is missing or unquoted so the block is skipped. */
+function extractHref(s: string, from: number): string | undefined {
+  const rest = s.slice(from);
+  const hrefIdx = rest.indexOf('href=');
+  if (hrefIdx === -1) return undefined;
+  const afterHref = rest.slice(hrefIdx + 'href='.length);
+  const quote = afterHref[0];
+  if (quote !== '"' && quote !== "'") return undefined;
+  const end = afterHref.indexOf(quote, 1);
+  if (end === -1) return undefined;
+  return decodeHtmlEntities(afterHref.slice(1, end));
+}
+
+/** Strip HTML to readable text (shared by web_fetch and the DDG/Bing result
+ * parsers). Mirror-tested against the Rust strip_html_full in
+ * stripHtml.test.ts — the two must agree on the common core (tag stripping,
+ * script/style removal, whitespace collapse, block breaks). Intentional
+ * divergences (entities, inline tags, script case) are documented there. */
+export function stripHtml(html: string): string {
   return html
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
@@ -843,4 +1044,14 @@ function stripHtml(html: string): string {
     .map(line => line.trim())
     .filter(line => line.length > 0)
     .join('\n');
+}
+
+/** web_fetch pipeline: strip tags, collapse whitespace, then decode HTML
+ * entities — the same output shape as the Rust strip_html_full (which also
+ * decodes after stripping). Decoding is intentionally NOT folded into
+ * stripHtml (shared with the DDG/Bing parsers, which decode after stripping
+ * themselves — decoding in the helper would double-decode). Mirror-tested in
+ * stripHtml.test.ts. */
+export function extractReadableText(html: string): string {
+  return decodeHtmlEntities(stripHtml(html).trim());
 }

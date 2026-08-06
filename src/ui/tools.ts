@@ -132,11 +132,19 @@ export async function executeTool(
         return { toolName: name, output: msg, success: true };
       }
       case 'execute_command': {
-        const output = await invoke<string>('execute_command', {
+        // Rust execute_command now returns structured { exitCode, stdout, stderr }
+        // so a failed command (non-zero exit) is reported as a failure.
+        const exec = await invoke<{ exitCode: number; stdout: string; stderr: string }>('execute_command', {
           workspace,
           command: String(args.command ?? ''),
         });
-        return { toolName: name, output, success: true };
+        const output = [exec.stdout, exec.stderr ? `[stderr]\n${exec.stderr}` : ''].filter(Boolean).join('\n');
+        return {
+          toolName: name,
+          output,
+          success: exec.exitCode === 0,
+          error: exec.exitCode === 0 ? undefined : `Command failed with exit code ${exec.exitCode}${output.trim() ? `:\n${output.trim()}` : ''}`,
+        };
       }
       case 'git_diff': {
         const output = await invoke<string>('git_diff', {

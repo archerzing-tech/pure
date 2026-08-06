@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::Instant;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -292,8 +293,11 @@ fn glob_files(
 
 /// Execute a shell command and return all output at once.
 /// Uses tokio::process::Command so it does NOT block the async runtime.
+/// Returns structured `{ exitCode, stdout, stderr }` so the frontend can tell
+/// a failed command (non-zero exit) apart from a successful one instead of
+/// squashing everything into a `success: true` string.
 #[tauri::command]
-async fn execute_command(workspace: String, command: String) -> Result<String, String> {
+async fn execute_command(workspace: String, command: String) -> Result<serde_json::Value, String> {
     let output = TokioCommand::new("sh")
         .arg("-c")
         .arg(&command)
@@ -302,46 +306,100 @@ async fn execute_command(workspace: String, command: String) -> Result<String, S
         .await
         .map_err(|e| format!("execute_command: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    let mut result = String::new();
-    if !stdout.is_empty() {
-        result.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        result.push_str("[stderr]\n");
-        result.push_str(&stderr);
-    }
-    if output.status.code() != Some(0) && result.is_empty() {
-        result = format!("exit code: {}", output.status.code().unwrap_or(-1));
-    }
-    Ok(result)
+    Ok(serde_json::json!({
+        "exitCode": output.status.code().unwrap_or(-1),
+        "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+        "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+    }))
 }
 
-/// Execute a shell command with streaming output via Channel (safe concurrent reader pattern).
-/// Uses `tokio::spawn` + `tokio::join!` so both stdout and stderr are read independently
-/// — no data loss when one pipe closes before the other.
-#[tauri::command]
-async fn execute_command_stream(
-    workspace: String,
-    command: String,
-    on_output: Channel<String>,
-) -> Result<i32, String> {
-    let mut child = TokioCommand::new("sh")
-        .arg("-c")
-        .arg(&command)
-        .current_dir(&workspace)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn: {}", e))?;
+/// Track running shell commands (keyed by the LLM tool-call id) so the GUI can
+/// cancel one mid-run: execute_command_stream registers the child pid when it
+/// starts and removes it when it exits; kill_command SIGKILLs the process
+/// group. The child is spawned with process_group(0), so its pgid equals its
+/// pid and killing the group takes down sh plus any grandchildren (npm
+/// install, cargo build, …) instead of orphaning them.
+type CommandRegistry = StdMutex<BTreeMap<String, u32>>;
 
+// Track in-flight LLM streaming requests (keyed by a per-call request id) so
+// the GUI can abort one mid-stream: chat_stream registers a oneshot cancel
+// Sender under `requestId` when it starts and removes it when it finishes
+// (via ChatCancelGuard, which fires on every exit path); a Stop click calls
+// cancel_chat_stream, which sends on that channel. The stream loop then
+// selects on it and bails out of the SSE read immediately — instead of the
+// abandoned task lingering (generating AND billing output tokens) until the
+// idle timeout. Mirror of the CommandRegistry pattern above.
+type ChatStreamRegistry = Arc<StdMutex<BTreeMap<String, tokio::sync::oneshot::Sender<()>>>>;
+
+/// Spawn `sh -c <command>` in its own process group (Unix) so a cancellation
+/// can kill the whole command tree. process_group(0) makes the child its own
+/// group leader (pgid == pid), which is what kill_process_group targets.
+fn spawn_shell_command(workspace: &str, command: &str) -> std::io::Result<Child> {
+    let mut cmd = TokioCommand::new("sh");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(workspace)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+}
+
+/// Send SIGKILL to the process group led by `pid` (negative pgid kills the
+/// whole group on Unix — the child was spawned with process_group(0), so its
+/// pgid equals its pid).
+#[cfg(unix)]
+fn kill_process_group(pid: i32) -> std::io::Result<()> {
+    let ret = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        let err = std::io::Error::last_os_error();
+        // ESRCH: the process already exited (normal race between command
+        // completion and a kill arriving) — nothing to kill, treat as success.
+        if err.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(err) }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(pid: i32) -> std::io::Result<()> {
+    let ret = unsafe { libc::kill(pid, libc::SIGKILL) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(err) }
+    }
+}
+
+/// Core of execute_command_stream, split out for unit testing (a Tauri
+/// CommandRegistry State can't be constructed inside a plain test).
+async fn execute_command_stream_inner(
+    registry: &StdMutex<BTreeMap<String, u32>>,
+    id: &str,
+    workspace: &str,
+    command: &str,
+    on_output: &Channel<String>,
+) -> Result<i32, String> {
+    let mut child = spawn_shell_command(workspace, command).map_err(|e| format!("spawn: {}", e))?;
+
+    // Take the pipes BEFORE registering so an early return on a missing pipe
+    // (practically impossible with Stdio::piped, but the API allows it) can't
+    // leave a stale pid in the registry.
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take().ok_or("no stderr")?;
+
+    // Register the running process under the tool-call id so the GUI can
+    // cancel it mid-run (kill_command). An empty id (legacy callers) skips
+    // registration — the command still runs, just uncancellable.
+    let pid = child.id().unwrap_or(0);
+    if !id.is_empty() {
+        let mut reg = registry.lock().map_err(|e| format!("lock: {}", e))?;
+        reg.insert(id.to_string(), pid);
+    }
 
     let ch_stdout = on_output.clone();
     let ch_stderr = on_output.clone();
@@ -381,12 +439,57 @@ async fn execute_command_stream(
     // Wait for both readers to finish independently
     let _ = tokio::join!(stdout_task, stderr_task);
 
+    let wait_result = child.wait().await;
+
+    // Always unregister, even when wait failed (the process may already be
+    // gone) — a stale entry would make a later kill_command target a reused
+    // pid and kill an unrelated process.
+    if !id.is_empty() {
+        let mut reg = registry.lock().map_err(|e| format!("lock: {}", e))?;
+        reg.remove(id);
+    }
+
     // Now get the exit code (on_output is still available since only clones were moved)
-    let exit_code = child.wait().await.map_err(|e| format!("wait: {}", e))?.code().unwrap_or(-1);
+    let exit_code = wait_result.map_err(|e| format!("wait: {}", e))?.code().unwrap_or(-1);
     let done = serde_json::json!({ "type": "exit", "code": exit_code });
     let _ = on_output.send(done.to_string());
 
     Ok(exit_code)
+}
+
+/// Execute a shell command with streaming output via Channel (safe concurrent reader pattern).
+/// Uses `tokio::spawn` + `tokio::join!` so both stdout and stderr are read independently
+/// — no data loss when one pipe closes before the other. The command is registered in the
+/// CommandRegistry under `id` while it runs, so the GUI can cancel it (kill_command) when
+/// the user stops the turn.
+#[tauri::command]
+async fn execute_command_stream(
+    state: tauri::State<'_, CommandRegistry>,
+    id: String,
+    workspace: String,
+    command: String,
+    on_output: Channel<String>,
+) -> Result<i32, String> {
+    execute_command_stream_inner(&state, &id, &workspace, &command, &on_output).await
+}
+
+/// Kill a running command started via execute_command_stream. The GUI calls
+/// this when the turn is cancelled (Stop button): the shell tree is SIGKILLed
+/// as a process group so grandchildren don't survive as background orphans.
+/// No-op when the id is unknown (already exited or never registered).
+#[tauri::command]
+async fn kill_command(
+    state: tauri::State<'_, CommandRegistry>,
+    id: String,
+) -> Result<(), String> {
+    let pid = {
+        let mut reg = state.lock().map_err(|e| format!("lock: {}", e))?;
+        reg.remove(&id)
+    };
+    if let Some(pid) = pid {
+        kill_process_group(pid as i32).map_err(|e| format!("kill: {}", e))?;
+    }
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -492,8 +595,74 @@ fn diff_files(workspace: String, path_a: String, path_b: String) -> Result<Strin
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Web Search (DuckDuckGo HTML)
+//  Web Search (multi-backend, Chinese-priority: cn.bing.com → DuckDuckGo → Bing)
 // ═══════════════════════════════════════════════════════════════════════════════
+// DuckDuckGo is unreachable on some networks (connection timeouts / blocks),
+// which used to make EVERY search fail with a generic request error — the
+// agent then saw a wall of identical failures with no way out. The search now
+// tries backends in order and stops at the first one that yields results, so
+// a dead backend degrades to a working one instead of a hard failure.
+//
+// CJK queries get a Chinese-priority order: international Bing frequently
+// serves a block page and DuckDuckGo returns IRRELEVANT results for Chinese
+// (tested: "西安到重庆 机票" → unrelated education/tax sites), which pushed
+// the agent into repeated searches. cn.bing.com returns real Chinese results
+// with the SAME b_algo markup, so it is tried FIRST for CJK queries. A
+// browser User-Agent + redirect following keeps the endpoints responsive.
+
+const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
+
+async fn fetch_search_page(url: &str) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("client: {}", e))?;
+    let resp = client
+        .get(url)
+        .header("User-Agent", BROWSER_UA)
+        .header("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8")
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.text().await.map_err(|e| format!("read: {}", e))
+}
+
+async fn search_backend_duckduckgo(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+    let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
+    let html = fetch_search_page(&url).await?;
+    Ok(parse_duckduckgo_results(&html, max))
+}
+
+async fn search_backend_bing(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+    let url = format!("https://www.bing.com/search?q={}&count={}", urlencoding(query), max);
+    let html = fetch_search_page(&url).await?;
+    Ok(parse_bing_results(&html, max))
+}
+
+/// True when the query contains CJK ideographs (CJK Unified Ideographs, CJK
+/// Extension A, and CJK Compatibility Ideographs) — the trigger for routing a
+/// search through the China Bing backend (cn.bing.com) first. Mirrored by
+/// NodeToolAdapter.ts `containsCJK`; both sides have matching tests.
+fn is_chinese_query(query: &str) -> bool {
+    query.chars().any(|c| {
+        matches!(c as u32,
+            0x3400..=0x4DBF   // CJK Extension A
+            | 0x4E00..=0x9FFF // CJK Unified Ideographs
+            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+        )
+    })
+}
+
+/// China Bing: real Chinese results with the same b_algo markup as
+/// www.bing.com, so it reuses `parse_bing_results` unchanged.
+async fn search_backend_bing_cn(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+    let url = format!("https://cn.bing.com/search?q={}&count={}", urlencoding(query), max);
+    let html = fetch_search_page(&url).await?;
+    Ok(parse_bing_results(&html, max))
+}
 
 #[tauri::command]
 async fn web_search(
@@ -502,29 +671,63 @@ async fn web_search(
     max_results: Option<usize>,
 ) -> Result<String, String> {
     let max = max_results.unwrap_or(10).min(20);
-    let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(&query));
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("client: {}", e))?;
+    let mut results: Vec<SearchResult> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut any_empty = false;
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "Pure/1.0")
-        .send()
-        .await
-        .map_err(|e| format!("request: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Search failed: HTTP {}", resp.status()));
+    // Backend order: CJK queries hit cn.bing.com FIRST (international Bing /
+    // DuckDuckGo return irrelevant results for Chinese), then DuckDuckGo, then
+    // www.bing.com. Non-CJK keeps the established DuckDuckGo → Bing order. A
+    // backend that errors OR returns nothing rolls over to the next one, so
+    // challenge pages and empty result sets degrade gracefully instead of
+    // failing the search.
+    let backends: &[&str] = if is_chinese_query(&query) {
+        &["cn.bing.com", "DuckDuckGo", "Bing"]
+    } else {
+        &["DuckDuckGo", "Bing"]
+    };
+    for backend in backends {
+        if !results.is_empty() { break; }
+        // Explicit arms only — a future backend added to the order list must
+        // name its fetch here instead of silently falling through to Bing.
+        let attempt: Result<Vec<SearchResult>, String> = match *backend {
+            "cn.bing.com" => search_backend_bing_cn(&query, max).await,
+            "DuckDuckGo" => search_backend_duckduckgo(&query, max).await,
+            "Bing" => search_backend_bing(&query, max).await,
+            _ => unreachable!("unknown web_search backend label: {}", backend),
+        };
+        match attempt {
+            Ok(r) if !r.is_empty() => results = r,
+            Ok(_) => any_empty = true,
+            Err(e) => failed.push(format!("{}: {}", backend, e)),
+        }
     }
 
-    let html = resp.text().await.map_err(|e| format!("read: {}", e))?;
-    let results = parse_duckduckgo_results(&html, max);
-
     if results.is_empty() {
-        return Ok(format!("No results found for \"{}\"", query));
+        // At least one backend answered with an empty result set: the search
+        // infrastructure works, the query just has no hits — rephrase, don't
+        // repeat. (Other backends may have been unreachable; either way the
+        // actionable guidance is the same.)
+        if any_empty {
+            return Ok(format!(
+                "No results found for \"{}\" on the available search backends (cn.bing.com, DuckDuckGo, Bing). Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to contain the information.",
+                query
+            ));
+        }
+        // Every backend errored (none returned empty): almost always network /
+        // rate-limit / geo-block, NOT a bad query — tell the model not to
+        // blindly retry, and how to recover. This is the message the failure
+        // policy feeds back on.
+        let details = if failed.is_empty() {
+            "all backends unreachable".to_string()
+        } else {
+            failed.join("; ")
+        };
+        return Err(format!(
+            "Web search failed on all backends ({}). This looks like a network or rate-limit issue rather than a bad query — do NOT retry web_search immediately with the same or similar queries. Retry later, or use web_fetch on a URL you expect to contain the information.",
+            details
+        ));
     }
 
     let output: Vec<String> = results
@@ -591,20 +794,35 @@ fn parse_result_block(block: &str) -> Option<SearchResult> {
     let href_start = block.find("class=\"result__a\"")?;
 
     let url = extract_href(block, href_start)?;
-    let title = extract_tag_content(block, "a").unwrap_or_default();
+    // Title lives in the anchor text (after the `result__a` tag's '>'), the
+    // same way URL and snippet are targeted. Note: must NOT be `"a"` — that
+    // finds the FIRST 'a' in the block (inside the div's `class`) and grabs
+    // whatever text sits right after the div tag instead of the title.
+    let title = extract_tag_content(block, "result__a").unwrap_or_default();
     let snippet = extract_tag_content(block, "result__snippet").unwrap_or_default();
 
     let title = strip_html_tags(&title);
     let snippet = strip_html_tags(&snippet);
+
+    // Decode THEN trim — mirrors the Node parser (strip → decode → trim). The
+    // order matters: &nbsp; decodes to a space, so trimming before decoding
+    // would leave a trailing space on titles ending in &nbsp;. Trimming before
+    // the empty-check also skips whitespace-only titles the same way the Node
+    // side skips them (its `if (!title)` runs after trim).
+    let title = html_decode(&title).trim().to_string();
+    let snippet = html_decode(&snippet).trim().to_string();
 
     if title.is_empty() || url.is_empty() {
         return None;
     }
 
     Some(SearchResult {
-        title: html_decode(&title),
-        snippet: html_decode(&snippet),
-        url: html_decode(&url),
+        title,
+        snippet,
+        // TS trims the href before decoding (decodeHtmlEntities(linkMatch[1]
+        // .trim())); trim here too so a malformed `href=" url "` doesn't
+        // diverge the mirror.
+        url: html_decode(&url.trim()),
     })
 }
 
@@ -643,19 +861,357 @@ fn strip_html_tags(s: &str) -> String {
 }
 
 fn html_decode(s: &str) -> String {
-    s.replace("&amp;", "&")
+    let named = s
+        .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&#x27;", "'")
         .replace("&nbsp;", " ")
+        .replace("&ensp;", " ");
+    decode_numeric_entities(&named)
+}
+
+/// Decode `&#\d+;` numeric character references (common in Bing snippets,
+/// e.g. `&#0183;` for a middle dot) into their actual characters.
+fn decode_numeric_entities(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '&' && i + 1 < chars.len() && chars[i + 1] == '#' {
+            let mut j = i + 2;
+            let mut digits = String::new();
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                digits.push(chars[j]);
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == ';' && !digits.is_empty() {
+                if let Some(c) = digits.parse::<u32>().ok().and_then(char::from_u32) {
+                    result.push(c);
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
+}
+
+/// Parse Bing HTML results (`<li class="b_algo">` blocks). Bing markup:
+/// `<h2><a href="URL" h="…">TITLE</a></h2>` plus a `<p>…</p>` snippet. The
+/// same lightweight approach as the DuckDuckGo parser: scan for blocks, then
+/// pull href/title/snippet out with string finds (no full HTML parser).
+fn parse_bing_results(html: &str, max: usize) -> Vec<SearchResult> {
+    let mut results: Vec<SearchResult> = Vec::new();
+    let mut rest = html;
+    while results.len() < max {
+        let Some(idx) = rest.find("<li class=\"b_algo") else { break };
+        let tail = &rest[idx..];
+        let Some(li_end) = tail.find("</li>") else { break };
+        let block = &tail[..li_end + "</li>".len()];
+        if let Some(r) = parse_bing_block(block) {
+            results.push(r);
+        }
+        rest = &tail[li_end + "</li>".len()..];
+    }
+    results
+}
+
+fn parse_bing_block(block: &str) -> Option<SearchResult> {
+    // Result link lives inside <h2>: find <h2>, then the first <a after it.
+    let h2 = block.find("<h2")?;
+    let after_h2 = &block[h2..];
+    let a_idx = after_h2.find("<a")?;
+    let url = extract_href(after_h2, a_idx)?;
+
+    // Title: text between the anchor's '>' and the next '<'.
+    let after_a = &after_h2[a_idx..];
+    let gt = after_a.find('>')?;
+    let after_gt = &after_a[gt + 1..];
+    let title_end = after_gt.find('<')?;
+    let title = strip_html_tags(&after_gt[..title_end]);
+
+    // Snippet: first <p ...>…</p> in the block.
+    let snippet = block.find("<p").and_then(|p| {
+        let after_p = &block[p..];
+        let gt = after_p.find('>')?;
+        let content = &after_p[gt + 1..];
+        let end = content.find("</p>")?;
+        Some(strip_html_tags(&content[..end]))
+    }).unwrap_or_default();
+
+    // Decode → trim BEFORE the empty-check — same restructure as the DDG
+    // parser: trims whitespace-only titles (skipping them, like the Node
+    // side) and must decode first because &nbsp; decodes to a space.
+    let title = html_decode(&title).trim().to_string();
+    let snippet = html_decode(&snippet).trim().to_string();
+
+    if title.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some(SearchResult {
+        title,
+        snippet,
+        url: html_decode(&url),
+    })
+}
+
+#[cfg(test)]
+mod web_search_tests {
+    use super::*;
+
+    #[test]
+    fn parses_bing_result_blocks() {
+        // Titles/snippets padded with stray whitespace — both parsers
+        // strip → decode → trim, so it must not leak into the output.
+        let html = r#"<html><body><ol id="b_results">
+<li class="b_algo"><h2><a href="https://rust-lang.org/" h="ID=SERP,5039.1"> Rust Programming Language </a></h2><div class="b_caption"><p> Rust is blazingly fast and memory-efficient. </p></div></li>
+<li class="b_algo b_algo_big"><h2><a href="https://www.runoob.com/rust/rust-tutorial.html"> Rust &#10148; 教程 </a></h2><div class="b_caption"><p> Rust 教程 &ensp;&#0183;&ensp;由 Mozilla 主导开发。 </p></div></li>
+</ol></body></html>"#;
+        let results = parse_bing_results(html, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust Programming Language");
+        assert_eq!(results[0].url, "https://rust-lang.org/");
+        assert!(results[0].snippet.contains("memory-efficient"));
+        assert!(results[1].title.contains("教程"));
+        assert!(results[1].snippet.contains("Mozilla"));
+        // Numeric + named entities decoded out of the raw markup — in BOTH
+        // the title (&#10148; arrow) and the snippet (&#0183; / &ensp;). The
+        // Node parser (NodeToolAdapter.ts) mirrors these assertions.
+        assert!(!results[1].title.contains("&#10148;"));
+        assert!(!results[1].snippet.contains("&#"));
+        assert!(!results[1].snippet.contains("&ensp;"));
+    }
+
+    #[test]
+    fn bing_parser_stops_at_max() {
+        let html = r#"<li class="b_algo"><h2><a href="https://a.com">A</a></h2><p>a</p></li><li class="b_algo"><h2><a href="https://b.com">B</a></h2><p>b</p></li><li class="b_algo"><h2><a href="https://c.com">C</a></h2><p>c</p></li>"#;
+        let results = parse_bing_results(html, 2);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, "https://a.com");
+        assert_eq!(results[1].url, "https://b.com");
+    }
+
+    #[test]
+    fn bing_parser_skips_blocks_without_links() {
+        let html = r#"<li class="b_algo"><div>no link here</div></li><li class="b_algo"><h2><a href="https://ok.com">OK</a></h2><p>snippet</p></li>"#;
+        let results = parse_bing_results(html, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://ok.com");
+    }
+
+    #[test]
+    fn bing_parser_accepts_single_quoted_hrefs() {
+        let html = r#"<li class="b_algo"><h2><a href='https://single-quoted.example/x'>Single</a></h2><p>s</p></li>"#;
+        let results = parse_bing_results(html, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://single-quoted.example/x");
+    }
+
+    // ── DuckDuckGo parser (same mirror contract as the Bing tests) ──
+    // DDG markup is `<div class="result">` blocks containing
+    // `<a class="result__a" href="…">TITLE</a>` plus a
+    // `<div class="result__snippet">…</div>`. The Node parser
+    // (NodeToolAdapter.ts) mirrors these fixtures and assertions exactly.
+
+    #[test]
+    fn parses_duckduckgo_results_with_entity_decoding() {
+        // The title/snippet are intentionally padded with stray whitespace:
+        // BOTH parsers strip → decode → trim, so the padding must not leak
+        // into the parsed output. Locked here so the mirror holds even when
+        // real HTML has ragged spacing inside the anchor/snippet tags.
+        let html = r#"<div class="result"><a class="result__a" href="https://rust-lang.org/"> Rust Programming Language </a>
+<div class="result__snippet"> Rust is blazingly fast and memory-efficient. </div>
+</div>
+<div class="result"><a class="result__a" href="https://www.runoob.com/rust/rust-tutorial.html?a=1&amp;b=2"> Rust &#10148; 教程 </a>
+<div class="result__snippet"> Rust 教程 &ensp;&#0183;&ensp;由 Mozilla 主导开发。 </div>
+</div>"#;
+        let results = parse_duckduckgo_results(html, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust Programming Language");
+        assert_eq!(results[0].url, "https://rust-lang.org/");
+        assert!(results[0].snippet.contains("memory-efficient"));
+        assert!(results[1].title.contains("教程"));
+        assert!(results[1].snippet.contains("Mozilla"));
+        // Numeric + named entities decoded out of the raw markup — the title
+        // (&#10148; arrow), the snippet (&#0183; middle dot / &ensp;), and
+        // &amp; in the URL. The Node parser mirrors these assertions.
+        assert!(results[1].title.contains('➤'));
+        assert!(!results[1].title.contains("&#10148;"));
+        assert!(results[1].snippet.contains('·'));
+        assert!(!results[1].snippet.contains("&#"));
+        assert!(!results[1].snippet.contains("&ensp;"));
+        assert_eq!(results[1].url, "https://www.runoob.com/rust/rust-tutorial.html?a=1&b=2");
+    }
+
+    #[test]
+    fn duckduckgo_parser_stops_at_max() {
+        let html = r#"<div class="result"><a class="result__a" href="https://a.com/x">A</a>
+<div class="result__snippet">a</div>
+</div>
+<div class="result"><a class="result__a" href="https://b.com/x">B</a>
+<div class="result__snippet">b</div>
+</div>
+<div class="result"><a class="result__a" href="https://c.com/x">C</a>
+<div class="result__snippet">c</div>
+</div>"#;
+        let results = parse_duckduckgo_results(html, 2);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, "https://a.com/x");
+        assert_eq!(results[1].url, "https://b.com/x");
+    }
+
+    #[test]
+    fn duckduckgo_parser_skips_blocks_without_links() {
+        let html = r#"<div class="result"><div class="result__snippet">No link here</div>
+</div>
+<div class="result"><a class="result__a" href="https://ok.com/x">OK Title</a>
+<div class="result__snippet">snippet</div>
+</div>"#;
+        let results = parse_duckduckgo_results(html, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://ok.com/x");
+    }
+
+    #[test]
+    fn parses_cn_bing_markup_with_shared_parser() {
+        // cn.bing.com serves the SAME b_algo structure as www.bing.com — this
+        // locks that the China backend can reuse parse_bing_results unchanged.
+        // Mirrors the Node fixture (searchParser.test.ts).
+        let html = r#"<li class="b_algo"><h2><a href="https://baike.baidu.com/item/西安"> 西安市（Xi'an City） </a></h2><div class="b_caption"><p> 陕西省省会、副省级市、特大城市。 </p></div></li>"#;
+        let results = parse_bing_results(html, 10);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].title.contains("西安"));
+        assert!(results[0].snippet.contains("省会"));
+        assert_eq!(results[0].url, "https://baike.baidu.com/item/西安");
+    }
+
+    #[test]
+    fn chinese_query_detection_mirrors_node() {
+        // The CJK detection that routes Chinese queries to cn.bing.com FIRST.
+        // NodeToolAdapter.ts `containsCJK` must agree on every case.
+        assert!(is_chinese_query("查机票，从西安到重庆"));
+        assert!(is_chinese_query("西安到重庆 机票 航班 价格"));
+        assert!(is_chinese_query("繁體中文"));
+        assert!(!is_chinese_query("flights Xi'an to Chongqing"));
+        assert!(!is_chinese_query("rust programming language"));
+        assert!(!is_chinese_query(""));
+    }
+}
+
+
+#[cfg(test)]
+mod execute_command_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reports_success_with_zero_exit() {
+        let out = execute_command(".".to_string(), "echo hello".to_string()).await.unwrap();
+        assert_eq!(out["exitCode"], 0);
+        assert!(out["stdout"].as_str().unwrap().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn reports_failure_with_nonzero_exit_and_stderr() {
+        let out = execute_command(".".to_string(), "echo boom >&2; exit 3".to_string()).await.unwrap();
+        assert_eq!(out["exitCode"], 3);
+        assert!(out["stderr"].as_str().unwrap().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn keeps_stdout_even_when_command_fails() {
+        let out = execute_command(".".to_string(), "echo partial; exit 2".to_string()).await.unwrap();
+        assert_eq!(out["exitCode"], 2);
+        assert!(out["stdout"].as_str().unwrap().contains("partial"));
+    }
+}
+
+#[cfg(test)]
+mod command_cancel_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn kill_process_group_terminates_shell_tree() {
+        #[cfg(unix)]
+        {
+            let mut child = TokioCommand::new("sh")
+                .arg("-c")
+                .arg("sleep 30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let pid = child.id().unwrap() as i32;
+
+            kill_process_group(pid).unwrap();
+
+            let status = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                child.wait(),
+            )
+            .await
+            .expect("killed process should exit within the timeout")
+            .unwrap();
+            assert!(!status.success(), "killed process must not report success");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_registers_then_unregisters_running_command() {
+        let registry = StdMutex::new(BTreeMap::<String, u32>::new());
+        let ch = Channel::new(|_: tauri::ipc::InvokeResponseBody| Ok(()));
+        let code = execute_command_stream_inner(&registry, "test-call-1", ".", "echo hello", &ch)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let reg = registry.lock().unwrap();
+        assert!(!reg.contains_key("test-call-1"), "registry must be cleaned up after the command finishes");
+    }
+
+    #[tokio::test]
+    async fn kill_command_terminates_a_registered_streaming_command() {
+        let registry = Arc::new(StdMutex::new(BTreeMap::<String, u32>::new()));
+        let ch = Channel::new(|_: tauri::ipc::InvokeResponseBody| Ok(()));
+        let id = "test-call-kill".to_string();
+        let reg_for_task = Arc::clone(&registry);
+        let ch_for_task = ch.clone();
+        let id_for_task = id.clone();
+        let task = tokio::spawn(async move {
+            execute_command_stream_inner(&reg_for_task, &id_for_task, ".", "sleep 30", &ch_for_task)
+                .await
+                .unwrap_or(-1)
+        });
+
+        // Give the command a moment to spawn and register itself.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let pid = {
+            let reg = registry.lock().unwrap();
+            reg.get(&id).copied()
+        };
+        assert!(pid.is_some(), "running command must be registered while alive");
+        kill_process_group(pid.unwrap() as i32).unwrap();
+
+        let code = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("killed command should exit promptly")
+            .unwrap();
+        assert_ne!(code, 0, "killed command must report a non-zero exit code");
+
+        let reg = registry.lock().unwrap();
+        assert!(!reg.contains_key(&id), "registry must be cleaned up after the kill");
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Web Fetch (URL → readable text)
 // ═══════════════════════════════════════════════════════════════════════════════
-
 #[tauri::command]
 async fn web_fetch(
     _workspace: String,
@@ -671,7 +1227,8 @@ async fn web_fetch(
 
     let resp = client
         .get(&url)
-        .header("User-Agent", "Pure/1.0")
+        .header("User-Agent", BROWSER_UA)
+        .header("Accept-Language", "en-US,en;q=0.9")
         .send()
         .await
         .map_err(|e| format!("request: {}", e))?;
@@ -761,10 +1318,28 @@ fn strip_html_full(html: &str) -> String {
     let chars: Vec<char> = html.chars().collect();
 
     while i < chars.len() {
-        if i + 6 < chars.len() && chars[i..i + 7].iter().collect::<String>() == "<script" {
+        // Case-insensitive open-tag detection (<SCRIPT>/<Style> count too),
+        // mirroring the Node stripHtml regexes' /gi flag. Both script and
+        // style are ASCII, so eq_ignore_ascii_case is safe. The tag-name
+        // boundary (next char is '>', whitespace, or EOF) rejects tags like
+        // <scripture> that merely START with "script" — matching the Node
+        // side, which only enters skip mode for a real <script …> opening.
+        if i + 6 < chars.len()
+            && chars[i..i + 7].iter().collect::<String>().eq_ignore_ascii_case("<script")
+            && matches!(
+                chars.get(i + 7).copied(),
+                None | Some('>') | Some(' ') | Some('\t') | Some('\n') | Some('\r')
+            )
+        {
             in_skip = true;
             skip_tag = "script".to_string();
-        } else if i + 5 < chars.len() && chars[i..i + 6].iter().collect::<String>() == "<style" {
+        } else if i + 5 < chars.len()
+            && chars[i..i + 6].iter().collect::<String>().eq_ignore_ascii_case("<style")
+            && matches!(
+                chars.get(i + 6).copied(),
+                None | Some('>') | Some(' ') | Some('\t') | Some('\n') | Some('\r')
+            )
+        {
             in_skip = true;
             skip_tag = "style".to_string();
         }
@@ -772,7 +1347,10 @@ fn strip_html_full(html: &str) -> String {
         if in_skip {
             let close_tag = format!("</{}>", skip_tag);
             if i + close_tag.len() <= chars.len()
-                && chars[i..i + close_tag.len()].iter().collect::<String>() == close_tag
+                && chars[i..i + close_tag.len()]
+                    .iter()
+                    .collect::<String>()
+                    .eq_ignore_ascii_case(&close_tag)
             {
                 in_skip = false;
                 skip_tag.clear();
@@ -805,6 +1383,118 @@ fn strip_html_full(html: &str) -> String {
     // Collapse whitespace
     let lines: Vec<&str> = result.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
     html_decode(&lines.join("\n"))
+}
+
+// Mirrors the Node web_fetch text extractor (NodeToolAdapter.ts stripHtml) —
+// both must produce IDENTICAL results on the common core: tag stripping,
+// script/style removal, <br> and block tags as line breaks, whitespace
+// collapsed to trimmed non-empty lines. KNOWN INTENTIONAL DIVERGENCES (each
+// side pinned in the tests below, do NOT "unify" blindly):
+// 1. Entities — this side html-decodes (&amp; → &); the Node side keeps raw
+//    entities because its stripHtml feeds the DDG/Bing parsers which decode
+//    AFTER stripping.
+// 2. Tag boundaries — this side inserts a line break at EVERY tag boundary
+//    ("Hello\nworld", "A\nB" for table cells); the Node side only breaks on
+//    <br> and the block closers </p>, </div>, </h1-6>, </li>, </tr>, </section>,
+//    </article>, removing every other tag (inline <b>/<span>, <td>/<th> cells,
+//    attribute-bearing <br class="…">) without a break ("Hello world", "AB").
+#[cfg(test)]
+mod web_fetch_tests {
+    use super::*;
+
+    // ── Common core: identical fixtures + identical assertions on both sides ──
+
+    #[test]
+    fn passes_plain_text_through() {
+        assert_eq!(strip_html_full("Hello world"), "Hello world");
+    }
+
+
+    #[test]
+    fn strips_tags_and_collapses_block_layout_to_lines() {
+        assert_eq!(strip_html_full("<h1>Title</h1><p>Hello world</p>"), "Title\nHello world");
+    }
+
+    #[test]
+    fn turns_paragraphs_into_separate_lines() {
+        let html = "<div><p>First paragraph.</p><p>Second paragraph.</p></div>";
+        assert_eq!(strip_html_full(html), "First paragraph.\nSecond paragraph.");
+    }
+
+    #[test]
+    fn treats_br_as_a_line_break() {
+        assert_eq!(strip_html_full("a<br>b"), "a\nb");
+    }
+
+    #[test]
+    fn drops_script_and_style_blocks_entirely() {
+        let html = "<script>var x = 1;</script><style>.c { color: red }</style><p>Clean</p>";
+        assert_eq!(strip_html_full(html), "Clean");
+    }
+
+    #[test]
+    fn strips_uppercase_and_mixed_case_script_style() {
+        // Case-insensitive like the Node regexes (/gi) — <SCRIPT>/<ScRiPt>
+        // and </STYLE> are stripped too, not kept as text.
+        assert_eq!(strip_html_full("<SCRIPT>var x=1;</SCRIPT><p>Ok</p>"), "Ok");
+        assert_eq!(strip_html_full("<ScRiPt type=\"text/javascript\">var y=2;</ScRiPt><Style>.a{}</Style><p>Hi</p>"), "Hi");
+    }
+
+    #[test]
+    fn treats_script_like_tags_as_plain_tags() {
+        // <scripture> only STARTS with "script" — the tag-name boundary check
+        // keeps it out of skip mode, so it is stripped like any other tag
+        // (matching the Node side; without the check this would swallow to
+        // EOF and drop the whole page).
+        assert_eq!(strip_html_full("<scripture>foo</scripture>"), "foo");
+    }
+
+    #[test]
+    fn collapses_indentation_but_keeps_inner_spacing() {
+        let html = "<div>\n  <p>  Indented  text  </p>\n</div>";
+        assert_eq!(strip_html_full(html), "Indented  text");
+    }
+
+    // ── Documented divergences (each side pinned; see module header) ──
+
+    #[test]
+    fn decodes_html_entities() {
+        // Node stripHtml keeps &amp; raw — intentional (see header). The Node
+        // web_fetch pipeline (extractReadableText) decodes AFTER trim, same
+        // as here.
+        assert_eq!(strip_html_full("<p>Tom &amp; Jerry</p>"), "Tom & Jerry");
+    }
+
+    #[test]
+    fn decodes_nbsp_after_trim_keeping_trailing_space() {
+        // Locks the trim-then-decode ordering: &nbsp; is literal text at trim
+        // time, so it survives to decode and becomes a trailing space. The
+        // Node extractReadableText mirrors this (same "a " result).
+        assert_eq!(strip_html_full("<p>a&nbsp;</p>"), "a ");
+    }
+
+    #[test]
+    fn splits_at_inline_tag_boundaries() {
+        // Node stripHtml keeps inline content on one line — intentional (see header).
+        assert_eq!(strip_html_full("<p>Hello <b>world</b></p>"), "Hello\nworld");
+    }
+
+    #[test]
+    fn splits_table_cells_into_separate_lines() {
+        // Node stripHtml merges <td> cells ("AB\nC") — <td>/<th> are outside
+        // its block list; only </tr> separates rows there. Intentional (see
+        // module header).
+        let html = "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td></tr></table>";
+        assert_eq!(strip_html_full(html), "A\nB\nC");
+    }
+
+    #[test]
+    fn splits_at_attribute_bearing_br() {
+        // Node stripHtml only matches bare/self-closed <br> ("ab" for
+        // <br class="…">); this side breaks at every tag. Intentional (see
+        // module header).
+        assert_eq!(strip_html_full("a<br class=\"x\">b"), "a\nb");
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1146,10 +1836,191 @@ struct ChatStreamArgs {
     max_tokens_override: Option<u32>,
     #[serde(default)]
     temperature: Option<f64>,
+    #[serde(default, rename = "requestId")]
+    request_id: String,
+}
+
+// Tool-call argument delta emit throttle (ms): forwarding the FULL accumulated
+// buffer on every token would be O(n²) over the channel for a giant argument
+// (write_file `content`, a whole HTML file). ~10 emits/s keeps the GUI's tool
+// row live while bounding the payload volume to a few hundred KB total. The
+// UI-side parse throttle (TOOL_CALL_REFRESH_MS, src/ui/chat.ts) sits at 120ms
+// on top of this, so the WebView only re-parses roughly every other event.
+const TOOL_CALL_EMIT_MS: u128 = 100;
+
+// ── LLM stream cancellation (mirror of the CommandRegistry/kill_command
+//    pattern: register a oneshot cancel channel under `requestId`, fire it
+//    from cancel_chat_stream on Stop, and select on it in the read loop). ──
+
+/// Register a chat_stream's cancel channel. Split out for testing. Empty ids
+/// (legacy callers) skip registration — the stream still runs, uncancellable.
+fn register_chat_cancel(
+    registry: &ChatStreamRegistry,
+    request_id: &str,
+) -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    if !request_id.is_empty() {
+        if let Ok(mut reg) = registry.lock() {
+            reg.insert(request_id.to_string(), tx);
+        }
+    }
+    rx
+}
+
+/// Fire a registered stream's cancel channel. Returns whether a live stream
+/// was found and signalled (no-op for finished or unknown ids).
+fn cancel_chat_stream_inner(registry: &ChatStreamRegistry, request_id: &str) -> bool {
+    let tx = match registry.lock() {
+        Ok(mut reg) => reg.remove(request_id),
+        Err(_) => return false,
+    };
+    match tx {
+        Some(tx) => tx.send(()).is_ok(),
+        None => false,
+    }
+}
+
+/// Removes a chat_stream's registry entry when dropped — on EVERY exit path
+/// (normal finish, error, cancel) — so stale ids never accumulate in the map
+/// or fire a reused slot.
+struct ChatCancelGuard {
+    registry: ChatStreamRegistry,
+    key: String,
+}
+
+impl Drop for ChatCancelGuard {
+    fn drop(&mut self) {
+        if let Ok(mut reg) = self.registry.lock() {
+            reg.remove(&self.key);
+        }
+    }
+}
+
+/// Abort an in-flight chat_stream call (the GUI calls this when the turn is
+/// stopped). No-op when the id is unknown — the stream already finished or
+/// was never registered.
+#[tauri::command]
+async fn cancel_chat_stream(
+    state: tauri::State<'_, ChatStreamRegistry>,
+    request_id: String,
+) -> Result<bool, String> {
+    Ok(cancel_chat_stream_inner(state.inner(), &request_id))
+}
+
+#[cfg(test)]
+mod chat_cancel_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn register_then_cancel_resolves_the_receiver_and_cleans_up() {
+        let reg = ChatStreamRegistry::new(StdMutex::new(BTreeMap::new()));
+        let mut rx = register_chat_cancel(&reg, "req-1");
+        assert!(reg.lock().unwrap().contains_key("req-1"));
+        assert!(
+            cancel_chat_stream_inner(&reg, "req-1"),
+            "a live stream must be cancellable"
+        );
+        assert!(rx.await.is_ok(), "cancel must resolve the stream's receiver");
+        assert!(
+            reg.lock().unwrap().is_empty(),
+            "the entry must be removed on cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_id_is_a_noop() {
+        let reg = ChatStreamRegistry::new(StdMutex::new(BTreeMap::new()));
+        assert!(!cancel_chat_stream_inner(&reg, "missing"));
+    }
+
+    #[test]
+    fn guard_removes_the_entry_when_dropped() {
+        let reg = ChatStreamRegistry::new(StdMutex::new(BTreeMap::new()));
+        {
+            let _rx = register_chat_cancel(&reg, "req-2");
+            assert!(reg.lock().unwrap().contains_key("req-2"));
+            let _guard = ChatCancelGuard {
+                registry: reg.clone(),
+                key: "req-2".to_string(),
+            };
+        }
+        assert!(
+            reg.lock().unwrap().is_empty(),
+            "dropping the guard must unregister the entry"
+        );
+    }
+}
+
+// LLM streaming timeouts. reqwest's bare `Client::new()` applies NO total or
+// read timeout — if the upstream stalls (server-side reasoning queue, flaky
+// network, half-open connection) or never sends headers, `send()` /
+// `bytes_stream()` block forever and the GUI sits frozen on the thinking
+// card. Both bounds below are generous: a long reasoning generation streams
+// chunks continuously, so every chunk resets the idle clock; the timeouts
+// only fire on genuinely dead connections.
+const LLM_REQUEST_TIMEOUT_SECS: u64 = 180;
+const LLM_STREAM_IDLE_TIMEOUT_SECS: u64 = 180;
+
+/// One line of the SSE stream, classified. Split out so the `[DONE]`
+/// termination contract is unit-testable: `[DONE]` must terminate the READ
+/// loop (not just the current line batch) — a connection the server keeps
+/// open after the terminal frame would otherwise block the outer
+/// `stream.next()` forever.
+enum SseLine {
+    NotData,
+    Done,
+    Data(serde_json::Value),
+}
+
+fn classify_sse_line(line: &str) -> SseLine {
+    if !line.starts_with("data: ") {
+        return SseLine::NotData;
+    }
+    let data = line[6..].trim();
+    if data == "[DONE]" {
+        return SseLine::Done;
+    }
+    match serde_json::from_str(data) {
+        Ok(v) => SseLine::Data(v),
+        Err(_) => SseLine::NotData,
+    }
+}
+
+#[cfg(test)]
+mod chat_stream_tests {
+    use super::*;
+
+    #[test]
+    fn sse_done_terminates_the_read_loop() {
+        // [DONE] — with and without surrounding whitespace — is the terminal
+        // frame. The caller MUST break the outer read loop on it (labeled
+        // break), never fall back into stream.next().
+        assert!(matches!(classify_sse_line("data: [DONE]"), SseLine::Done));
+        assert!(matches!(classify_sse_line("data:  [DONE]  "), SseLine::Done));
+    }
+
+    #[test]
+    fn sse_data_lines_parse_to_json() {
+        match classify_sse_line(r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#) {
+            SseLine::Data(v) => assert_eq!(v["choices"][0]["delta"]["content"], "hi"),
+            _ => panic!("expected Data"),
+        }
+    }
+
+    #[test]
+    fn sse_non_data_and_garbage_lines_are_ignored() {
+        // Keep-alive comments, non-`data:` events, and malformed JSON all
+        // fall through (old behavior: `continue` the line loop).
+        assert!(matches!(classify_sse_line(": keep-alive"), SseLine::NotData));
+        assert!(matches!(classify_sse_line("event: message"), SseLine::NotData));
+        assert!(matches!(classify_sse_line(""), SseLine::NotData));
+        assert!(matches!(classify_sse_line("data: not json {"), SseLine::NotData));
+    }
 }
 
 #[tauri::command]
 async fn chat_stream(
+    state: tauri::State<'_, ChatStreamRegistry>,
     args: ChatStreamArgs,
     on_chunk: Channel<String>,
 ) -> Result<serde_json::Value, String> {
@@ -1201,14 +2072,26 @@ async fn chat_stream(
         }
     }
 
-    let resp = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("request: {}", e))?;
+    // Timeout the whole send: with `Client::new()` a server that accepts the
+    // connection but never sends headers would block here forever. 180s covers
+    // even long reasoning-model time-to-first-byte.
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
+        client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .send(),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "request timeout: the LLM API did not respond within {}s (network or server issue) — try the turn again.",
+            LLM_REQUEST_TIMEOUT_SECS
+        )
+    })?
+    .map_err(|e| format!("request: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -1221,12 +2104,57 @@ async fn chat_stream(
         ));
     }
 
+    // Register the cancel channel for this call (Stop → cancel_chat_stream →
+    // this receiver fires → the select! below aborts the read loop). The
+    // guard removes the entry on ANY exit path — normal finish, error, or
+    // cancel — so a stale id can never fire a reused slot.
+    let request_id = args.request_id.clone();
+    let reg = state.inner().clone();
+    let mut cancel_rx = register_chat_cancel(&reg, &request_id);
+    let _guard = ChatCancelGuard {
+        registry: reg,
+        key: request_id,
+    };
+
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     let mut text = String::new();
     let mut tc_map: BTreeMap<u32, serde_json::Value> = BTreeMap::new();
+    // Last time a tool-call delta was forwarded to the WebView (throttle
+    // below). Streaming a giant argument (e.g. write_file `content`, a whole
+    // HTML file) grows the accumulated buffer to tens of KB; forwarding it on
+    // every token is O(n²) over the channel.
+    let mut last_tool_emit = Instant::now();
 
-    while let Some(chunk_result) = stream.next().await {
+    // SSE read loop with a labeled break: the idle timeout (every chunk
+    // resets the clock) fails only on genuinely dead connections, and the
+    // `[DONE]` terminal frame exits the OUTER loop — not just the inner line
+    // loop. Falling back into `stream.next()` after [DONE] would hang forever
+    // on endpoints that keep the connection open (previous bug: frozen GUI
+    // thinking card, no visible answer).
+    'stream: loop {
+        // Select between the upstream stream (idle-timeout bounded) and the
+        // cancel channel: a Stop click aborts the read immediately instead of
+        // letting the abandoned task keep generating (and billing tokens)
+        // until the idle timeout fires. `biased` prefers the cancel branch.
+        let item = tokio::select! {
+            biased;
+            _ = &mut cancel_rx => {
+                return Err("cancelled".into());
+            }
+            next_chunk = tokio::time::timeout(
+                std::time::Duration::from_secs(LLM_STREAM_IDLE_TIMEOUT_SECS),
+                stream.next(),
+            ) => {
+                next_chunk.map_err(|_| {
+                    format!(
+                        "stream stalled: no data from the LLM API for {}s — the connection likely died. Try the turn again.",
+                        LLM_STREAM_IDLE_TIMEOUT_SECS
+                    )
+                })?
+            }
+        };
+        let Some(chunk_result) = item else { break };
         let chunk = chunk_result.map_err(|e| format!("stream: {}", e))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -1234,17 +2162,10 @@ async fn chat_stream(
             let line = buffer[..line_end].to_string();
             buffer = buffer[line_end + 1..].to_string();
 
-            if !line.starts_with("data: ") {
-                continue;
-            }
-            let data = line[6..].trim().to_string();
-            if data == "[DONE]" {
-                break;
-            }
-
-            let json: serde_json::Value = match serde_json::from_str(&data) {
-                Ok(v) => v,
-                Err(_) => continue,
+            let json = match classify_sse_line(&line) {
+                SseLine::NotData => continue,
+                SseLine::Done => break 'stream,
+                SseLine::Data(v) => v,
             };
 
             let delta = match json["choices"][0]["delta"].as_object() {
@@ -1294,18 +2215,28 @@ async fn chat_stream(
                 }
             }
 
-            // Accumulate tool_calls
+            // Accumulate tool_calls, forwarding throttled argument deltas so
+            // the GUI shows the tool row growing live instead of sitting
+            // silent while a giant argument (write_file `content`) is
+            // generated — otherwise the UI only learns about the call when the
+            // entire stream finishes, which reads as a frozen app. The final
+            // id + full args still arrive via the returned result below.
             if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                 for tc in tool_calls {
                     let idx = tc["index"].as_u64().unwrap_or(0) as u32;
                     let cur = tc_map.entry(idx).or_insert_with(|| {
                         serde_json::json!({"id": "", "name": "", "arguments": ""})
                     });
+                    // Only forward when this delta actually added something
+                    // (name, or appended arguments) — a delta that merely
+                    // carries the id must not re-send an identical buffer.
+                    let mut updated = false;
                     if let Some(id) = tc["id"].as_str() {
                         cur["id"] = serde_json::Value::String(id.to_string());
                     }
                     if let Some(name) = tc["function"]["name"].as_str() {
                         cur["name"] = serde_json::Value::String(name.to_string());
+                        updated = true;
                     }
                     if let Some(args) = tc["function"]["arguments"].as_str() {
                         cur["arguments"] = serde_json::Value::String(format!(
@@ -1313,6 +2244,22 @@ async fn chat_stream(
                             cur["arguments"].as_str().unwrap_or(""),
                             args
                         ));
+                        updated = true;
+                    }
+                    if updated
+                        && !cur["name"].as_str().map_or(true, |n| n.is_empty())
+                        && last_tool_emit.elapsed().as_millis() >= TOOL_CALL_EMIT_MS
+                    {
+                        last_tool_emit = Instant::now();
+                        let chunk = serde_json::json!({
+                            "type": "tool_call_delta",
+                            "index": idx,
+                            "name": cur["name"].as_str().unwrap_or(""),
+                            "arguments": cur["arguments"].as_str().unwrap_or(""),
+                        });
+                        if on_chunk.send(chunk.to_string()).is_err() {
+                            return Err("cancelled".into());
+                        }
                     }
                 }
             }
@@ -1739,6 +2686,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(McpRegistry::new(BTreeMap::new()))
         .manage(WatcherRegistry::new(BTreeMap::new()))
+        .manage(CommandRegistry::new(BTreeMap::new()))
+        .manage(ChatStreamRegistry::new(StdMutex::new(BTreeMap::new())))
         .invoke_handler(tauri::generate_handler![
             // File tools
             read_file, write_file, edit_file, search_files, list_files, create_directory, diff_files, glob_files, replace_files,
@@ -1748,7 +2697,7 @@ pub fn run() {
             // Web tools
             web_search, web_fetch,
             // Command execution
-            execute_command, execute_command_stream,
+            execute_command, execute_command_stream, kill_command,
             // Git tools
             git_diff, git_log, git_status,
             // MCP subprocess
@@ -1761,7 +2710,7 @@ pub fn run() {
             // Open path (clickable transcript paths)
             open_path,
             // LLM transport
-            chat_stream,
+            chat_stream, cancel_chat_stream,
             // Session persistence
             save_session, load_session, load_last_session, load_session_list, save_session_workspace, delete_session, delete_all_sessions,
         ])

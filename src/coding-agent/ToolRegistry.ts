@@ -180,7 +180,7 @@ export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze([
   },
   {
     name: 'web_search',
-    description: 'Search the web and return results with titles, snippets, and URLs. Uses DuckDuckGo — no API key needed.',
+    description: 'Search the web and return results with titles, snippets, and URLs. Chinese-priority backends (cn.bing.com → DuckDuckGo → Bing) — no API key needed.',
     input_schema: {
       type: 'object',
       properties: {

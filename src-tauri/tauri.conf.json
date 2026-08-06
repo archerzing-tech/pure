@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "pure",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "identifier": "com.pure.agent",
   "build": {
     "beforeDevCommand": "bun run vite",
@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "pure",
-        "width": 1200,
-        "height": 750,
+        "width": 1400,
+        "height": 850,
         "minWidth": 1000,
         "minHeight": 600,
         "center": true,

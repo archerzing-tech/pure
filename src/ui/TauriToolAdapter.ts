@@ -4,6 +4,7 @@
 // Removed tools that don't have Rust backend implementations (edit_file, search_files, list_files).
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../shared/types';
+import type { Channel } from '@tauri-apps/api/core';
 
 // ── Tool definitions (mirrors src/ui/tools.ts TOOL_DEFS, only tools with Rust backend) ──
 
@@ -135,7 +136,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'web_search',
-    description: 'Search the web and return results with titles, snippets, and URLs. Uses DuckDuckGo — no API key needed.',
+    description: 'Search the web and return results with titles, snippets, and URLs. Chinese-priority backends (cn.bing.com → DuckDuckGo → Bing) — no API key needed.',
     input_schema: {
       type: 'object',
       properties: {
@@ -228,18 +229,37 @@ type InvokeFunction = (cmd: string, args?: Record<string, unknown>) => Promise<u
 // Loads once at module level so adapters don't need async init per-constructor.
 
 let tauriInvoke: InvokeFunction | null = null;
+let tauriChannel: typeof Channel | null = null;
 
 async function initTauriInvoke() {
   try {
     const mod = await import('@tauri-apps/api/core');
     if (typeof mod.invoke === 'function') {
       tauriInvoke = mod.invoke as InvokeFunction;
+      tauriChannel = (mod as { Channel?: typeof Channel }).Channel ?? null;
     }
   } catch {
     // No Tauri runtime — tools will be unavailable
   }
 }
 initTauriInvoke();
+
+// ── Live tool output listener ──
+// The Rust backend's execute_command_stream pushes stdout/stderr lines over a
+// Channel as the command runs (instead of buffering everything until exit).
+// chat.ts registers a listener here so each line lands in the matching tool
+// row's Output panel in real time — a long-running command shows progress
+// instead of a silent wait. Keyed by the LLM tool call id, the same id the
+// engine uses for the id-bearing TokenDelta and the ToolResult event.
+
+export type ToolOutputKind = 'stdout' | 'stderr';
+export type ToolOutputListener = (toolCallId: string, kind: ToolOutputKind, line: string) => void;
+
+let toolOutputListener: ToolOutputListener | null = null;
+
+export function setToolOutputListener(fn: ToolOutputListener | null): void {
+  toolOutputListener = fn;
+}
 
 export class TauriToolAdapter implements ToolAdapter {
   private workspace: string;
@@ -317,8 +337,72 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: listing, success: true, duration: Date.now() - start };
         }
         case 'execute_command': {
-          const output = await tauriInvoke('execute_command', { workspace: ws, command: String(args.command ?? '') }) as string;
-          return { id: toolCall.id, toolName: name, result: output, success: true, duration: Date.now() - start };
+          // Stream the command's output as it is produced so a long-running
+          // command (bundle, install, test) shows live progress in the tool
+          // row instead of waiting silently for the full buffered result.
+          if (tauriChannel) {
+            const channel = new tauriChannel<string>();
+            // Collected lines keep their stream identity (stdout vs stderr) so
+            // the final result can label stderr sections — the LLM needs to
+            // tell a warning from an error even when a command fails.
+            const collected: Array<{ kind: 'stdout' | 'stderr'; line: string }> = [];
+            channel.onmessage = (raw: string) => {
+              let parsed: { type?: string; content?: unknown } | null = null;
+              try { parsed = JSON.parse(raw); } catch { parsed = null; }
+              if (!parsed) return;
+              if (parsed.type === 'stdout' || parsed.type === 'stderr') {
+                const line = String(parsed.content ?? '');
+                collected.push({ kind: parsed.type, line });
+                toolOutputListener?.(toolCall.id, parsed.type, line);
+              }
+            };
+            // Cancel wiring: when the engine aborts this tool call (user
+            // clicked Stop, or the turn was superseded), ask the Rust backend
+            // to kill the running shell tree. Without this, the command keeps
+            // running in the background after the GUI stopped listening — a
+            // ghost process holding locks, ports, and file handles. The exit
+            // code then arrives as -1 (signal-killed); we surface a clear
+            // "cancelled" result instead of a confusing exit-code error.
+            let cancelled = false;
+            const onAbort = () => {
+              cancelled = true;
+              if (tauriInvoke) {
+                tauriInvoke('kill_command', { id: toolCall.id }).catch(() => {});
+              }
+            };
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
+            try {
+              const code = await tauriInvoke('execute_command_stream', {
+                id: toolCall.id,
+                workspace: ws,
+                command: String(args.command ?? ''),
+                onOutput: channel,
+              }) as number;
+              if (cancelled) {
+                return {
+                  id: toolCall.id,
+                  toolName: name,
+                  result: 'Command cancelled by user.',
+                  error: 'Command cancelled by user.',
+                  success: false,
+                  duration: Date.now() - start,
+                };
+              }
+              return { id: toolCall.id, toolName: name, ...buildCommandResult(code, collected), duration: Date.now() - start };
+            } finally {
+              // { once: true } already removed it if it fired; this covers the
+              // normal-completion case so a reused signal can't fire a stale
+              // kill for a command that already exited.
+              signal?.removeEventListener('abort', onAbort);
+            }
+          }
+          const exec = await tauriInvoke('execute_command', { workspace: ws, command: String(args.command ?? '') }) as { exitCode: number; stdout: string; stderr: string };
+          const execLines: Array<{ kind: 'stdout' | 'stderr'; line: string }> = [
+            ...(exec.stdout ? [{ kind: 'stdout' as const, line: exec.stdout }] : []),
+            ...(exec.stderr ? [{ kind: 'stderr' as const, line: exec.stderr }] : []),
+          ];
+          return { id: toolCall.id, toolName: name, ...buildCommandResult(exec.exitCode, execLines), duration: Date.now() - start };
         }
         case 'git_diff': {
           const diff = await tauriInvoke('git_diff', { workspace: ws, staged: args.staged ?? false, path: args.path ?? null }) as string;
@@ -400,4 +484,50 @@ export class TauriToolAdapter implements ToolAdapter {
 
 function safeParseArgs(raw: string): Record<string, unknown> {
   try { return JSON.parse(raw); } catch { return {}; }
+}
+
+// ── Command output formatting (shared by the streamed and buffered paths) ──
+// Streamed lines are captured with their stream identity; the final result
+// must keep stderr distinguishable so the LLM sees errors as errors. Grouping
+// stderr sections under a `[stderr]` marker (mirroring the old Rust-side
+// execute_command text format) keeps output readable without interleaving.
+
+/** Build the ToolResult fields for an execute_command run: success is decided
+ * by the exit code (the single source of truth), the result keeps the full
+ * output, and a non-zero exit produces an error naming the code + output.
+ * Pure so the exit-code → success mapping is unit-testable without a Tauri
+ * runtime. */
+export function buildCommandResult(
+  exitCode: number,
+  lines: Array<{ kind: 'stdout' | 'stderr'; line: string }>,
+): Pick<ToolResult, 'result' | 'error' | 'success'> {
+  const output = formatCommandOutput(lines);
+  if (exitCode !== 0) {
+    return { result: output, error: formatCommandError(exitCode, output), success: false };
+  }
+  return { result: output, success: true };
+}
+
+export function formatCommandOutput(lines: Array<{ kind: 'stdout' | 'stderr'; line: string }>): string {
+  const out: string[] = [];
+  let inStderr = false;
+  for (const { kind, line } of lines) {
+    if (kind === 'stderr') {
+      if (!inStderr) {
+        if (out.length > 0) out.push('');
+        out.push('[stderr]');
+        inStderr = true;
+      }
+    } else {
+      inStderr = false;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+/** Build the error message for a failed command (non-zero exit code). */
+export function formatCommandError(exitCode: number, output: string): string {
+  const tail = output.trim() ? `:\n${output.trim()}` : '';
+  return `Command failed with exit code ${exitCode}${tail}`;
 }

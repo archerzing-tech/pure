@@ -124,9 +124,28 @@ export class Planner {
 
   private detectComplexity(prompt: string): TaskComplexity {
     const lower = prompt.toLowerCase();
+    const trimmed = prompt.trim();
 
-    // User explicitly asks for planning
-    if (/plan|先计划|规划|设计|think step by step|think through/i.test(prompt)) {
+    // Chinese questions — hoisted so both the planning-rule guard below and
+    // the Chinese build rules can skip question phrasing ("怎么规划？" is
+    // ASKING, not planning; "如何搭建一个全栈项目" asks HOW, not to build).
+    // Leading prefixes AND question words anywhere in the prompt count — EXCEPT
+    // when the prompt starts with an imperative build verb ("帮我搭建…",
+    // "写一个…"): then the build intent dominates, and a trailing question
+    // ("…怎么做性能优化？") must not suppress planning.
+    const startsWithBuild = /^(?:请)?\s*(?:帮我|麻烦你|给我)?\s*(?:编写|写|做|开发|制作|创建|搭建|实现|构建|设计|生成|部署|重构|重写|迁移|规划)\s*/.test(trimmed);
+    const cnQuestion = !startsWithBuild && (
+      /^(?:如何|怎么|怎样|能否|能不能|是否|请问|为什么|该不该|应不应该|(?:请)?帮我?(?:看看|查查|看下|分析|解释|介绍|讲讲|说说|告诉我|描述|总结|评估))/.test(trimmed) ||
+      /(?:怎么|如何|怎样|能否|能不能|是否|该不该|应不应该|为什么|吗|呢|什么(?!都|也|能))/.test(trimmed)
+    );
+
+    // User explicitly asks for planning. 规划/设计 only count as a planning
+    // command when followed by a design target and NOT phrased as a question —
+    // a bare "怎么设计？"/"怎么规划？" mention is a question, not a plan.
+    if (/plan|先计划|think step by step|think through/i.test(prompt)) {
+      return 'complex';
+    }
+    if (!cnQuestion && /(?:规划|设计)\s*(?:一个|一套|个|套|一下|一番)?\s*(?:工程|项目|系统|网站|应用|平台|框架|架构|方案|模块|功能|页面|界面)/i.test(prompt)) {
       return 'complex';
     }
 
@@ -154,6 +173,56 @@ export class Planner {
 
     if (scopeIndicators.some(p => p.test(lower))) {
       return 'complex';
+    }
+
+    // ── Chinese project-scale requests ──
+    // A multi-phase build needs ALL THREE elements in one clause: an
+    // imperative build verb + a scale word + a project noun ("制作一个大型工
+    // 程", "搭建完整的全栈项目"). Requiring the scale word kills the old
+    // false positives where a bare verb + noun matched ("写个项目方案", "做个
+    // 系统介绍") — those are small or documentation requests. The project noun
+    // must NOT be a document object: when a doc word (方案/总结/文档/介绍/报
+    // 告…) follows it, the request is producing paperwork, not a system.
+    // Questions stay simple too: both leading question prefixes ("如何/怎
+    // 么…", "请帮我看看…") AND question words anywhere in the prompt ("…怎么
+    // 设计？") mean the user is ASKING about a large system, not building one.
+    if (!cnQuestion) {
+      // Document nouns — when one follows the matched project noun (possibly
+      // via 的/技术/开发/测试…, "项目的技术方案", "工程的开发文档"), the
+      // "build" is really a documentation task and stays simple.
+      const cnDoc = '(?:方案|总结|文档|介绍|报告|说明|计划|清单|列表|简介|笔记|心得|草案|书|表|设计稿|规划|大纲|教程)';
+      const docExclusion = `(?!\\s*(?:的)?\\s*[^，。！？;；\\n]{0,4}?${cnDoc})`;
+      const cnBuild = new RegExp(
+        `(?:编写|写|做|开发|制作|创建|搭建|实现|构建|设计|生成|部署|重构|重写|迁移|规划)` +
+        `\\s*(?:一个|一套|个|套)?\\s*` +
+        `(?:(?:大型|完整|全栈|复杂|多文件|整个|从零|从头|多模块|整套|一站式)(?:的)?\\s*){1,3}` +
+        `(?:工程|项目|系统|网站|应用|平台|框架|架构|小程序|脚手架|软件|服务)` +
+        docExclusion
+      );
+      if (cnBuild.test(trimmed)) {
+        return 'complex';
+      }
+      // Scale word + project noun as a fused phrase ("全栈项目", "多模块系
+      // 统") — but only when a build verb appears somewhere in the request, so
+      // consultations ("全栈项目的技术选型") don't trigger a plan dialog.
+      const cnScope = new RegExp(
+        `(?:大型|完整|全栈|复杂|多文件|多模块|整套|一站式)\\s*的?\\s*` +
+        `(?:工程|项目|系统|网站|应用|平台|框架|架构|小程序|脚手架|软件|服务)` +
+        docExclusion
+      );
+      if (/(?:编写|写|做|开发|制作|创建|搭建|实现|构建|设计|生成|部署|重构|重写|迁移)/.test(trimmed) && cnScope.test(trimmed)) {
+        return 'complex';
+      }
+      // From-scratch idioms embed their own build intent ("从零开始做一个项
+      // 目", "从头搭建一个网站") — the noun is still required so "从零开始学
+      // 习" stays simple, and the same doc-exclusion applies ("从零搭建一个网
+      // 站的教程" is a doc request, not a build).
+      if (new RegExp(
+        `(?:从零|从头)\\s*(?:开始)?\\s*(?:做一个?|搭建一个?|构建一个?|开发一个?|实现一个?|写一个?|重写一个?|重构一个?)\\s*(?:工程|项目|系统|网站|应用|平台|框架|架构|小程序|脚手架|软件|服务)` +
+        docExclusion
+      ).test(trimmed)) {
+        return 'complex';
+      }
     }
 
     return 'simple';

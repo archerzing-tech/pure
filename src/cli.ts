@@ -217,7 +217,7 @@ System:
 - sys_info() — timezone, language, current time, OS version. When the user asks for the current time, date, timezone, language, or OS version, call sys_info() FIRST — never guess from your training data.
 
 Web tools:
-- web_search(query, maxResults?) — DuckDuckGo web search (no API key needed)
+- web_search(query, maxResults?) — web search across cn.bing.com + DuckDuckGo + Bing (no API key needed; Chinese queries are routed to the China Bing backend first for much better Chinese results). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
 - web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.
 
 Work step by step. Read before you write. Verify after you change. Be concise.

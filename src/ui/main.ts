@@ -544,11 +544,20 @@ function renderSessionMessages(messages: StoredMessage[]) {
 }
 
 function flushToolExecs(execs: ToolExecMeta[], parent: HTMLElement) {
+  if (execs.length === 0) return;
+  // Restored sessions render each round's tool calls in the same horizontal
+  // grid as live streaming (chat.ts appendToolRow), so parallel batches (two
+  // web_search calls, a search + list, …) read as parallel instead of a
+  // vertical stack of identical rows. Each flush batch == one LLM iteration
+  // (flushToolExecs is called at assistant-message boundaries).
+  const grid = document.createElement('div');
+  grid.className = 'bubble-row tool-grid';
   for (const te of execs) {
     const row = createToolRow(te.toolName, te.args ?? {});
     finalizeToolRow(row, te);
-    parent.appendChild(row.el);
+    grid.appendChild(row.el);
   }
+  parent.appendChild(grid);
 }
 
 // ── Input handling ──

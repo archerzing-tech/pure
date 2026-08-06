@@ -82,6 +82,15 @@ export class RustLLMAdapter implements LLMAdapter {
       extraBody: this.config.extraBody,
     });
 
+    // One request id per stream call: passed into chat_stream so the Rust
+    // backend can register a cancel channel under it, and reused by the abort
+    // handler below to fire cancel_chat_stream (Stop must abort the in-flight
+    // request instead of letting it generate + bill until the idle timeout).
+    const requestId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `llm_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
     // ── Bridge Rust's callback-based Channel into an async queue ──
     const channel = new deps.Channel<string>();
     const queue: QueueItem[] = [];
@@ -113,6 +122,7 @@ export class RustLLMAdapter implements LLMAdapter {
           extraBody: this.config.extraBody,
           maxTokens: params.max_tokens,
           temperature: params.temperature,
+          requestId,
         },
         onChunk: channel,
       })
@@ -142,6 +152,10 @@ export class RustLLMAdapter implements LLMAdapter {
       } catch {
         /* channel already closed */
       }
+      // Tell Rust to abort the in-flight chat_stream so it stops generating
+      // (and billing tokens) immediately instead of lingering until its idle
+      // timeout. No-op when the stream already finished (registry entry gone).
+      deps.invoke('cancel_chat_stream', { requestId }).catch(() => {});
       push({ type: 'end' });
     };
 
@@ -168,6 +182,20 @@ export class RustLLMAdapter implements LLMAdapter {
         // live thinking without mixing it into the visible answer.
         if (payload?.type === 'reasoning' && typeof payload.content === 'string') {
           yield { type: 'reasoning', content: payload.content };
+        }
+        // Tool-call argument deltas — the Rust backend forwards the
+        // accumulating arguments buffer (throttled to ~100ms) so the GUI can
+        // render the tool row live while a giant argument (e.g. write_file
+        // `content`, a whole HTML file) is generated, instead of appearing
+        // frozen until the entire stream ends. The id-bearing `done` chunk
+        // still delivers the final parsed args.
+        if (payload?.type === 'tool_call_delta') {
+          yield {
+            type: 'tool_call_delta',
+            index: typeof payload.index === 'number' ? payload.index : 0,
+            name: typeof payload.name === 'string' ? payload.name : undefined,
+            arguments: typeof payload.arguments === 'string' ? payload.arguments : undefined,
+          };
         }
       }
 

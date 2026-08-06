@@ -13,14 +13,22 @@ import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createLLMVerifier, createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS } from '../coding-agent/SubagentOrchestrator';
 import { requestPermission } from './permission';
-import { requestPlanReview, formatPlanForPrompt } from './plan';
-import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs } from './TauriToolAdapter';
+import {
+  requestPlanReview,
+  formatPlanForPrompt,
+  createPlanCard,
+  updatePlanCardPhase,
+  finalizePlanCard,
+  matchPlanPhaseMarker,
+  type PlanCardHandle,
+} from './plan';
+import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener } from './TauriToolAdapter';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
 import { getApplicationTmpWorkspace, isTauriRuntime } from '../shared/tauri';
 import { renderMarkdown, scheduleStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdown';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, type ToolRowHandle } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, type ToolRowHandle } from './toolRow';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, type ThinkingCardHandle } from './thinkingCard';
 import type { MCPClient } from '../harness/mcp/MCPClient';
 import type { FileWatcher } from '../harness/FileWatcher';
@@ -34,7 +42,7 @@ import type {
   Message,
   BudgetConfig,
 } from '../shared/types';
-import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning } from '../coding-agent/types';
+import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan } from '../coding-agent/types';
 
 // Friendly labels for the logical-trap status bubble (raw type ids like
 // 'self-contradiction' are cryptic to users).
@@ -44,6 +52,12 @@ const TRAP_TYPE_LABELS: Record<TrapWarning['type'], string> = {
   'mutually-exclusive': '互斥要求',
   'trap-keyword': '悖论/陷阱题',
 };
+
+// Tool-call JSON re-parse throttle: streaming a giant argument (write_file
+// `content`, a whole HTML file) grows the buffer to tens of KB; re-parsing it
+// and rebuilding the Input panel on every token is O(n²) and freezes the UI.
+// Mirrors the 100ms streaming-render throttle (markdown.ts).
+const TOOL_CALL_REFRESH_MS = 120;
 
 const DEFAULT_BUDGET: BudgetConfig = {
   maxTurns: 50,
@@ -64,7 +78,7 @@ const DEFAULT_BUDGET: BudgetConfig = {
 // also keeps the original XML-tool-call leak defense: when a workspace is
 // missing, models are only told about the tools they can actually invoke.
 const WEB_TOOLS_PROMPT = `Web tools:
-- web_search(query, maxResults?) — DuckDuckGo web search (no API key needed)
+- web_search(query, maxResults?) — web search across cn.bing.com + DuckDuckGo + Bing (no API key needed; Chinese queries are routed to the China Bing backend first for much better Chinese results). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
 - web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.`;
 
 const FS_TOOLS_PROMPT = `File tools:
@@ -120,7 +134,15 @@ type ToolRowEntry = {
   toolCallId?: string;
 };
 
-function parseToolCallBuffer(buf: string | undefined): { name?: string; args?: Record<string, unknown> } {
+// Parse a tool-call buffer into { name?, args? }. Two formats occur in practice:
+// 1. The { name, arguments } wrapper some adapters emit (arguments either a
+//    pre-parsed object or a JSON string).
+// 2. RAW function-arguments JSON ({"query": "..."}) — the engine forwards
+//    tc.function.arguments / chunk.arguments verbatim, which is exactly this
+//    format. Without the fallback every tool row rendered with empty args: two
+//    parallel web_search calls then looked like ONE duplicated search instead
+//    of two queries (see the "两个 web Search 同时出现" report).
+export function parseToolCallBuffer(buf: string | undefined): { name?: string; args?: Record<string, unknown> } {
   const trimmed = (buf ?? '').trim();
   if (!trimmed) return {};
   let parsed: any;
@@ -132,6 +154,11 @@ function parseToolCallBuffer(buf: string | undefined): { name?: string; args?: R
     args = parsed.arguments as Record<string, unknown>;
   } else if (typeof parsed.arguments === 'string') {
     try { args = JSON.parse(parsed.arguments) as Record<string, unknown>; } catch { args = undefined; }
+  } else if (!('arguments' in parsed) && !name) {
+    // Raw arguments object (no wrapper keys): treat the whole parsed object as
+    // the args. The `!name` guard keeps a name-only payload from being misread
+    // as args.
+    args = parsed as Record<string, unknown>;
   }
   return { name, args };
 }
@@ -193,6 +220,13 @@ function setPinnedToBottom(el: HTMLElement, v: boolean): void {
   pinnedStates.set(el, v);
 }
 
+// rAF-coalesced auto-scroll frames: tokens / streamed command lines / reasoning
+// deltas can arrive many times per frame. Each direct scrollTop write reads
+// scrollHeight (a forced layout on the WHOLE transcript — all bubbles, code
+// blocks, SVGs), so per-event scrolling is the classic long-transcript stutter.
+// One rAF-scheduled scroll per frame caps the cost at the display refresh rate.
+const scrollFrames = new WeakMap<HTMLElement, number>();
+
 // Wire once per element: a user scroll away from the bottom unpins; a return
 // to the bottom (or a programmatic scroll-to-bottom while pinned) re-pins.
 function wireScrollPin(el: HTMLElement): void {
@@ -206,13 +240,20 @@ function wireScrollPin(el: HTMLElement): void {
 
 function scrollChatToBottomIfPinned(el: HTMLElement): void {
   if (!isPinnedToBottom(el)) return;
-  el.scrollTop = el.scrollHeight;
+  if (scrollFrames.has(el)) return;
+  scrollFrames.set(el, requestAnimationFrame(() => {
+    scrollFrames.delete(el);
+    if (isPinnedToBottom(el)) el.scrollTop = el.scrollHeight;
+  }));
 }
 
 // Resolve every still-pending tool row (stream ended without a ToolResult —
 // aborted mid-call, error, or budget stop) so none remains in `pending` state.
 // Rows stay in the transcript, marked stopped (⏹) instead of dismissed.
-function resolvePendingToolRows(...maps: Map<string, ToolRowEntry>[]): void {
+// The per-call parse-throttle map is cleared alongside so stale keys never
+// accumulate across turns.
+function resolvePendingToolRows(refresh: Map<string, number>, ...maps: Map<string, ToolRowEntry>[]): void {
+  refresh.clear();
   for (const map of maps) {
     for (const [, entry] of map) {
       markToolRowStopped(entry.row);
@@ -574,14 +615,73 @@ export class ChatController {
     // `done` chunks) migrates the staged row onto the id-keyed map.
     const pendingRows = new Map<string, ToolRowEntry>();
     const pendingByName = new Map<string, ToolRowEntry>();
+    // Per-call throttle for tool-call JSON re-parses (keyed by toolCallId or
+    // staged tool name). Streaming a giant argument (write_file `content`, a
+    // whole HTML file) grows the buffer to tens of KB; re-parsing it AND
+    // re-rendering the Input panel on every token freezes the UI mid-stream
+    // ("stuck with only the blinking cursor"). See the TokenDelta handler.
+    const toolCallRefresh = new Map<string, number>();
+    // Live bash output: lines the Rust backend streams while a command runs
+    // (execute_command_stream) are appended to the matching pending tool row's
+    // Output panel in real time — a long-running command shows progress rather
+    // than a silent wait. Keyed by the LLM tool call id, the same id the
+    // engine uses for the id-bearing TokenDelta and the ToolResult event; rows
+    // staged by name migrate onto the id key before execution, so the row
+    // always exists by the time the first line streams.
+    setToolOutputListener((toolCallId, kind, line) => {
+      if (gen !== this.generation) return;
+      const entry = pendingRows.get(toolCallId);
+      if (!entry || !entry.row.details.classList.contains('pending')) return;
+      appendToolStreamLine(entry.row, kind, line);
+      scrollChatToBottomIfPinned(chatEl);
+    });
     // toolCallId → outcome, replayed as status rows (StoredMessage.toolExec)
     // when the session is restored from storage.
     const toolResults = new Map<string, ToolExecMeta>();
+    // Tool-round grid: tool calls issued in the SAME LLM iteration (e.g. two
+    // parallel web_search calls, or a web_search + list_files batch) render
+    // side by side in one horizontal grid, so the transcript reads "running
+    // simultaneously" instead of a vertical stack of identical-looking rows.
+    // A single-call round renders as one full-width item (the grid collapses
+    // to one column). Closed by the next StateChange → THINK.
+    let toolGrid: HTMLElement | null = null;
+    const appendToolRow = (toolName: string, args: Record<string, unknown>): ToolRowHandle => {
+      if (!toolGrid) {
+        toolGrid = document.createElement('div');
+        toolGrid.className = 'bubble-row tool-grid';
+        chatEl.appendChild(toolGrid);
+      }
+      return this.addToolRow(toolName, args, toolGrid);
+    };
     // Live thinking card: created once the user bubble lands, finalized on the
     // first content/tool delta, and nulled so a later reasoning phase (after
     // tool results) opens a fresh card below whatever it followed.
     let thinkingCard: ThinkingCardHandle | null = null;
+    // Reasoning deltas are batched into 50ms flushes before touching the DOM:
+    // reasoning streams (DeepSeek/Qwen/GLM) can deliver hundreds of deltas per
+    // second, and a per-delta append + scroll forces a layout read every time
+    // (the classic streaming stutter). thinkingPhases still accumulates EVERY
+    // delta for persistence — only the DOM append is throttled.
+    let thinkingPending = '';
+    let thinkingFlushTimer: number | undefined;
+    const THINKING_FLUSH_MS = 50;
+    const flushThinking = (): void => {
+      thinkingFlushTimer = undefined;
+      if (!thinkingCard || !thinkingPending) return;
+      appendThinkingText(thinkingCard, thinkingPending);
+      thinkingPending = '';
+    };
     const endThinking = () => {
+      if (thinkingFlushTimer !== undefined) {
+        clearTimeout(thinkingFlushTimer);
+        thinkingFlushTimer = undefined;
+      }
+      // Flush any buffered reasoning before finalizing so the card never loses
+      // the last (un-flushed) slice of the stream.
+      if (thinkingPending) {
+        if (thinkingCard) appendThinkingText(thinkingCard, thinkingPending);
+        thinkingPending = '';
+      }
       if (!thinkingCard) return;
       finalizeThinkingCard(thinkingCard);
       thinkingCard = null;
@@ -689,12 +789,17 @@ export class ChatController {
 
       // ── Plan review pre-flight (P1-6): complex tasks get a user-approved
       // plan before execution. It also applies in the application temporary
-      // workspace when the user has not selected a project directory.
+      // workspace when the user has not selected a project directory. An
+      // approved plan becomes a live phase-progress card in the transcript
+      // (approvedPlan below) and the model is told to emit `## 阶段 n/m`
+      // markers so the card can track which phase is running.
+      let approvedPlan: Plan | null = null;
       if (effectiveWorkspace && (config.skills?.planning ?? true)) {
         if (analysis.complexity === 'complex' && analysis.plan) {
           const decision = await requestPlanReview(analysis);
           if (decision === 'cancel') return; // finally resets streaming, no bubbles left behind
           if (decision === 'approve') {
+            approvedPlan = analysis.plan;
             systemPrompt += formatPlanForPrompt(analysis.plan);
           }
         }
@@ -705,6 +810,26 @@ export class ChatController {
       // escaped text, but path-shaped substrings become clickable.
       const userBubble = this.addBubble('user', userText);
       linkifyPaths(userBubble);
+      // Approved execution plan → a compact phase tracker in the transcript:
+      // total phase count + which phase is currently running, updated live
+      // from the model's `## 阶段 n/m` markers (see formatPlanForPrompt).
+      let planCard: PlanCardHandle | null = null;
+      const planTrack = { seg: null as { el: HTMLDivElement; text: string } | null, scanLen: 0 };
+      if (approvedPlan) {
+        planCard = createPlanCard(approvedPlan);
+        chatEl.appendChild(planCard.el);
+      }
+      const trackPlanPhase = (seg: { el: HTMLDivElement; text: string }) => {
+        if (!planCard) return;
+        if (planTrack.seg !== seg) { planTrack.seg = seg; planTrack.scanLen = 0; }
+        if (planTrack.scanLen >= seg.text.length) return;
+        // Overlap window keeps the previous 24 chars in the slice so a marker
+        // split across token boundaries ("## 阶段 " + "2/4") is still seen whole.
+        const tail = seg.text.slice(Math.max(0, planTrack.scanLen - 24));
+        planTrack.scanLen = seg.text.length;
+        const phase = matchPlanPhaseMarker(tail);
+        if (phase) updatePlanCardPhase(planCard, phase);
+      };
       // Surface detected logical traps as a neutral notice (not an error): the
       // agent will verify the premise before executing.
       if (analysis.traps.length > 0) {
@@ -754,7 +879,13 @@ export class ChatController {
         if (gen !== this.generation) break;
         switch (event.type) {
           case 'StateChange': {
-            if (event.payload.to === 'THINK') assistantIteration++;
+            if (event.payload.to === 'THINK') {
+              assistantIteration++;
+              // A new LLM iteration = a new tool round: close the previous
+              // round's parallel grid so the next batch of tool rows starts
+              // its own horizontal group.
+              toolGrid = null;
+            }
             break;
           }
 
@@ -766,6 +897,9 @@ export class ChatController {
                 endThinking();
                 const seg = ensureSegment();
                 seg.text += delta;
+                // Scan newly-appended text for `阶段 n/m` plan markers so the
+                // approved-plan phase card advances as the run progresses.
+                trackPlanPhase(seg);
                 // Strip leaked <tool_calls> XML before it ever reaches the DOM.
                 const text = stripToolCallXml(seg.text);
                 if (streamingRenderEnabled) {
@@ -791,12 +925,14 @@ export class ChatController {
                 (event.payload.toolCallBuffer || '').match(/"name"\s*:\s*"([^"]+)"/)?.[1];
               const toolCallId = event.payload.toolCallId;
               if (toolName) {
-                const parsed = parseToolCallBuffer(event.payload.toolCallBuffer);
-                const args = parsed.args || {};
+                const now = Date.now();
                 if (toolCallId) {
-                  // Id-bearing chunk (`tool_call` / `done`): key the row by
-                  // toolCallId so parallel same-name calls get distinct rows.
-                  // Migrate a name-staged streaming row if one exists.
+                  // Id-bearing chunk (`tool_call` / `done`): the call's FINAL
+                  // args — parse once (fires once per call) and fill the full
+                  // Input section. Also key the row by toolCallId so parallel
+                  // same-name calls get distinct rows, migrating a name-staged
+                  // streaming row if one exists.
+                  const args = parseToolCallBuffer(event.payload.toolCallBuffer).args || {};
                   let entry = pendingRows.get(toolCallId);
                   if (!entry) {
                     const staged = pendingByName.get(toolName);
@@ -806,7 +942,7 @@ export class ChatController {
                       pendingRows.set(toolCallId, entry);
                     } else {
                       endThinking();
-                      const row = this.addToolRow(toolName, args);
+                      const row = appendToolRow(toolName, args);
                       toolRowSinceSegment = true;
                       entry = { row, toolName, args, toolCallId };
                       pendingRows.set(toolCallId, entry);
@@ -816,16 +952,29 @@ export class ChatController {
                   updateToolRowArgs(entry.row, toolName, args);
                 } else {
                   // Mid-stream argument delta: id unknown, stage by name. The
-                  // final id-bearing chunk migrates this entry.
+                  // final id-bearing chunk migrates this entry. Streaming a
+                  // giant argument (write_file `content`, a whole HTML file)
+                  // grows the buffer to tens of KB, so parsing it AND
+                  // re-rendering the Input section on every token is O(n²) and
+                  // freezes the UI. Throttle the parse to ~120ms and only
+                  // refresh the compact one-line summary while streaming; the
+                  // Input body is filled on row creation and the id chunk.
+                  const key = toolName;
+                  const lastRefresh = toolCallRefresh.get(key) ?? 0;
+                  const due = now - lastRefresh >= TOOL_CALL_REFRESH_MS;
+                  if (due) toolCallRefresh.set(key, now);
+                  const args = due
+                    ? (parseToolCallBuffer(event.payload.toolCallBuffer).args || {})
+                    : undefined;
                   const existing = pendingByName.get(toolName);
                   if (!existing) {
                     endThinking();
-                    const row = this.addToolRow(toolName, args);
+                    const row = appendToolRow(toolName, args ?? {});
                     toolRowSinceSegment = true;
-                    pendingByName.set(toolName, { row, toolName, args });
-                  } else {
+                    pendingByName.set(toolName, { row, toolName, args: args ?? {} });
+                  } else if (args) {
                     existing.args = args;
-                    updateToolRowArgs(existing.row, toolName, args);
+                    updateToolRowArgs(existing.row, toolName, args, false);
                   }
                 }
               }
@@ -839,11 +988,17 @@ export class ChatController {
             // Reasoning can resume after tool rows (each LLM iteration), so a
             // fresh card opens below whatever was appended since the last one.
             if (!thinkingCard) thinkingCard = openThinkingCard();
-            if (thinkingPhases.length === 0 || thinkingCard.textEl.textContent === '') {
+            // Phase tracking runs per-delta (persistence); the DOM append is
+            // throttled, so "card empty" must also consider the pending buffer
+            // to avoid opening a duplicate phase while text is only buffered.
+            if (thinkingPhases.length === 0 || (thinkingCard.textEl.textContent === '' && !thinkingPending)) {
               thinkingPhases.push({ text: '', assistantIndex: thinkingAssistantOffset + Math.max(assistantIteration, 0) });
             }
             thinkingPhases[thinkingPhases.length - 1].text += content;
-            appendThinkingText(thinkingCard, content);
+            thinkingPending += content;
+            if (thinkingFlushTimer === undefined) {
+              thinkingFlushTimer = window.setTimeout(flushThinking, THINKING_FLUSH_MS);
+            }
             scrollChatToBottomIfPinned(chatEl);
             break;
           }
@@ -866,6 +1021,14 @@ export class ChatController {
               } else if (toolName === 'web_fetch') {
                 resultKind = 'fetch';
                 resultPreview = resultText.slice(0, 800);
+              } else if (toolName === 'execute_command') {
+                // Bash output was already streamed into the row live; keep the
+                // trace on finalize (streaming was about progress, not
+                // truncation) so the panel never visibly shrinks — but cap it
+                // at MAX_LIVE_STREAM_LINES: a 5000-line build log must not
+                // balloon the DOM (nor the persisted session preview). The
+                // LLM still received the FULL output in the tool result.
+                resultPreview = truncateResultLines(resultText);
               } else {
                 resultPreview = resultText.slice(0, 800);
               }
@@ -926,11 +1089,12 @@ export class ChatController {
 
           case 'Completed': {
             endThinking();
+            if (planCard) finalizePlanCard(planCard);
             // Cancel any throttled streaming render on every segment so a
             // late-firing tick from before completion cannot race with the
             // final pipeline below.
             for (const seg of assistantSegments) cancelStreamingRender(seg.el);
-            resolvePendingToolRows(pendingRows, pendingByName);
+            resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
             for (const seg of assistantSegments) seg.el.classList.remove('streaming');
             // Render the text the user actually watched stream in. Each segment
             // carries its own accumulated deltas; the engine's finalOutput only
@@ -975,7 +1139,7 @@ export class ChatController {
             // the finalization below, and resolve any "calling…" pending tool
             // cards whose ToolResult will never arrive.
             for (const seg of assistantSegments) cancelStreamingRender(seg.el);
-            resolvePendingToolRows(pendingRows, pendingByName);
+            resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
             for (const seg of assistantSegments) seg.el.classList.remove('streaming');
             const hasContent = assistantSegments.some(s => s.el.textContent || s.el.children.length > 0);
             const lastSeg = assistantSegments.length ? assistantSegments[assistantSegments.length - 1] : null;
@@ -1010,6 +1174,13 @@ export class ChatController {
       // Only write when this send is still the current generation, and always
       // to the session/workspace snapshot captured at send() start.
       if (finalMessages.length > 0 && gen === this.generation) {
+        // The turn's output is complete and on screen — release the streaming
+        // UI (send button back to Send, input live) BEFORE the disk write so a
+        // large session doesn't hold the UI in the "generating" state while
+        // the JSON is serialized + written. chat.send() still awaits the write
+        // below, so doSend's finally (sidebar refresh / queued send) keeps its
+        // ordering — only the visual streaming state flips early.
+        this.setStreaming(false);
         await this.persistSession(finalMessages, toolResults, thinkingPhases, sendSessionId, sendWorkspace);
       }
     } catch (err: any) {
@@ -1018,7 +1189,7 @@ export class ChatController {
         seg.el.classList.remove('streaming');
         cancelStreamingRender(seg.el);
       }
-      resolvePendingToolRows(pendingRows, pendingByName);
+      resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
       if (interruptedMessages && gen === this.generation) {
         await this.persistSession(interruptedMessages, toolResults, thinkingPhases, sendSessionId, sendWorkspace);
       } else if (thinkingPhases.length > 0 && gen === this.generation) {
@@ -1152,10 +1323,10 @@ export class ChatController {
     chatEl.appendChild(wrapper);
   }
 
-  private addToolRow(toolName: string, args: Record<string, unknown>): ToolRowHandle {
+  private addToolRow(toolName: string, args: Record<string, unknown>, parent: HTMLElement): ToolRowHandle {
     const chatEl = document.getElementById('chat')!;
     const row = createToolRow(toolName, args);
-    chatEl.appendChild(row.el);
+    parent.appendChild(row.el);
     scrollChatToBottomIfPinned(chatEl);
     return row;
   }

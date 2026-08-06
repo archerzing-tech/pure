@@ -39,7 +39,7 @@ const translations: Record<Language, Record<string, string>> = {
     'path.openFailed': '无法打开路径',
 
     // ── Thinking card ──
-    'thinking.thinking': '思考中',
+    'thinking.thinking': '思考',
     'thinking.show': '查看思考过程',
 
     // ── Code block actions ──
@@ -204,6 +204,8 @@ const translations: Record<Language, Record<string, string>> = {
     'plan.approve': '按计划执行',
     'plan.skip': '跳过计划,直接执行',
     'plan.cancel': '取消',
+    'plan.progress.title': '📋 执行计划',
+    'plan.progress.phases': '共 {n} 个阶段',
 
     // ── Permission dialog ──
     'permission.title': '需要权限确认',
@@ -419,6 +421,8 @@ const translations: Record<Language, Record<string, string>> = {
     'plan.approve': 'Approve & execute',
     'plan.skip': 'Execute without plan',
     'plan.cancel': 'Cancel',
+    'plan.progress.title': '📋 Execution plan',
+    'plan.progress.phases': '{n} phases',
 
     // ── Permission dialog ──
     'permission.title': 'Permission required',

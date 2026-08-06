@@ -830,9 +830,11 @@ body {
   display: none;
   flex-direction: column;
   gap: 16px;
-  /* Claude Code uses a readable centered column instead of full-bleed width. */
+  /* Claude Code uses a readable centered column instead of full-bleed width.
+     Kept in sync with the default window width (tauri.conf.json 1400px minus
+     the sidebar) so the wider GUI is actually filled, not padded with margins. */
   width: 100%;
-  max-width: 860px;
+  max-width: 1100px;
   margin: 0 auto;
   /* Programmatic scrollTop assignments happen on every streamed token; smooth
      scrolling would animate each one and cause janky lag during streaming. */
@@ -982,6 +984,26 @@ body {
   margin: 2px 0 6px;
 }
 
+/* Parallel tool round: tool calls issued in the SAME LLM iteration (multiple
+   web_search / list_files / …) render side by side so the transcript reads
+   "running simultaneously" instead of a vertical stack of identical rows.
+   auto-fit yields 3 windows for a 3-call round at the real #chat width
+   (1100px minus padding ≈ 1000px content → 3 × ~330px columns), collapsing
+   to 2 / 1 on narrower windows; auto-fit also COLLAPSES empty tracks, so a
+   single-call round spans one full-width item. */
+.bubble-row.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 6px 10px;
+  align-items: start;
+  width: 100%;
+  margin: 2px 0 6px;
+}
+.bubble-row.tool-grid > .bubble-row.tool-row-row {
+  margin: 0;
+  min-width: 0;
+}
+
 .tool-row {
   background: transparent;
   border: 0;
@@ -1057,6 +1079,9 @@ body {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .tool-row.success .tool-row-status {
   color: var(--success);
@@ -1064,11 +1089,16 @@ body {
 .tool-row.failure .tool-row-status {
   color: var(--danger);
 }
+/* Pending rows: the status switches to the accent color + a soft pulse so the
+   "waiting for output" state reads at a glance instead of a muted gray ring. */
+.tool-row.pending .tool-row-status {
+  color: var(--accent);
+}
 .tool-row-status .spinner {
   display: inline-block;
-  width: 13px;
-  height: 13px;
-  border: 2px solid var(--border);
+  width: 15px;
+  height: 15px;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: toolRowSpin 0.7s linear infinite;
@@ -1076,6 +1106,33 @@ body {
 }
 @keyframes toolRowSpin {
   to { transform: rotate(360deg); }
+}
+
+/* Indeterminate shimmer line under a pending row's summary — a moving accent
+   streak that says "something is running" without needing to read any text. */
+.tool-row.pending .tool-row-summary {
+  position: relative;
+}
+.tool-row.pending .tool-row-summary::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 75%, transparent) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: toolRowShimmer 1.1s linear infinite;
+}
+@keyframes toolRowShimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
 }
 
 .tool-row-body {
@@ -1130,6 +1187,89 @@ body {
   line-height: 1.45;
 }
 
+/* ── Waiting-for-output placeholder (pending rows) ──
+ * Shown inside the Output panel while a tool is running: dim text, animated
+ * ellipsis dots, and a blinking block cursor — a terminal-native cue that
+ * output is on its way, impossible to miss in the console block. Cleared by
+ * finalizeToolRow / markToolRowStopped.
+ */
+.tool-row-waiting {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 0;
+  color: #8f8f8f;
+}
+.tool-row-waiting .waiting-dots::after {
+  content: '';
+  animation: waitingDotsBlink 1.4s steps(4, end) infinite;
+}
+@keyframes waitingDotsBlink {
+  0% { content: ''; }
+  25% { content: '.'; }
+  50% { content: '..'; }
+  75% { content: '...'; }
+  100% { content: ''; }
+}
+.tool-row-waiting .term-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 14px;
+  margin-left: 6px;
+  background: #f2f2f2;
+  animation: termCursorBlink 1.05s steps(2, start) infinite;
+}
+@keyframes termCursorBlink {
+  to { visibility: hidden; }
+}
+
+/* Live output lines streamed into the Output panel while a command runs
+   (execute_command_stream). Monospace console text; stderr tinted so the two
+   streams stay distinguishable at a glance. */
+.tool-row-stream-line {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+  padding: 0 2px;
+}
+.tool-row-stream-line.stderr {
+  color: #e5857e;
+}
+
+/* Progress/status highlighting for live streamed output: percentages, step
+   counters, progress bars, and error/warning/success tokens pop out of the
+   console text; whole-line build-step headers get a step tint. */
+.stream-step {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+/* Truncation notice appended to a capped terminal result (execute_command
+   final output past MAX_LIVE_STREAM_LINES) — dimmed italic so it reads as a
+   system note, not part of the command output. */
+.tool-result-truncated {
+  opacity: 0.55;
+  font-style: italic;
+}
+.stream-hl-progress {
+  color: var(--accent);
+  font-weight: 600;
+}
+.stream-hl-error {
+  color: #e5857e;
+  font-weight: 600;
+}
+.stream-hl-warn {
+  color: #e0b25e;
+  font-weight: 600;
+}
+.stream-hl-success {
+  color: #7cc97f;
+  font-weight: 600;
+}
+
 /* Read, Write, Bash, and List contents use the same neutral black surface as
    a terminal, while the surrounding tool row keeps the normal chat styling.
    The Input + Output panels render as ONE continuous console block framed by
@@ -1169,6 +1309,111 @@ body {
 }
 .tool-row-section.terminal-panel .path-link:hover {
   background: #202020;
+}
+/* Web-search rich list stays readable on the black console panel. */
+.tool-row-section.terminal-panel .search-result-title,
+.tool-row-section.terminal-panel .search-result-url {
+  color: #8ecbff;
+}
+.tool-row-section.terminal-panel .search-result-snippet {
+  color: #c8c8c8;
+}
+.tool-row-section.terminal-panel .search-result-item {
+  border-bottom-color: #242424;
+}
+
+/* ── Plan progress card (approved execution plan in the transcript) ──
+ * Shown after a user approves the pre-run plan: lists every phase with the
+ * current one highlighted, advancing live as the model emits `## 阶段 n/m`
+ * markers. Done phases collapse to a ✓ chip. (See plan.ts createPlanCard.)
+ */
+.plan-progress-row {
+  margin-top: 2px;
+}
+.plan-progress-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.plan-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.plan-progress-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.plan-progress-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.plan-progress-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.plan-progress-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.plan-progress-step-num {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--line-strong);
+  color: var(--text-tertiary);
+}
+.plan-progress-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.plan-progress-step-action {
+  font-weight: 500;
+  color: inherit;
+}
+.plan-progress-step-desc {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.plan-progress-step.active {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text-primary);
+}
+.plan-progress-step.active .plan-progress-step-num {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.plan-progress-step.active .plan-progress-step-action {
+  color: var(--accent);
+}
+.plan-progress-step.done {
+  color: var(--text-secondary);
+}
+.plan-progress-step.done .plan-progress-step-num {
+  border-color: var(--success);
+  color: var(--success);
+}
+.plan-progress-step.pending .plan-progress-step-num {
+  opacity: 0.6;
 }
 
 /* ── Thinking card (live reasoning stream) ──

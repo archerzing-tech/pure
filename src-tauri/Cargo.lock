@@ -2642,10 +2642,11 @@ dependencies = [
 
 [[package]]
 name = "pure"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "futures-util",
  "glob",
+ "libc",
  "notify",
  "reqwest 0.12.28",
  "serde",
