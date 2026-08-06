@@ -15,7 +15,9 @@ jobs:
       HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
 
     steps:
-      - uses: actions/checkout@v4
+      # Node 24 runtime (v4 pinned node20, which GitHub now deprecates — v4
+      # still runs but emits a deprecation annotation on every release).
+      - uses: actions/checkout@v5
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -80,7 +82,10 @@ jobs:
 
       # ── Attach CLI binary to the release created by tauri-action ──
       - name: Upload CLI binary
-        uses: softprops/action-gh-release@v2
+        # v3 = Node 24 runtime (v2 pinned node20 → deprecation annotation).
+        # v3.0.0's only breaking change is the runtime move; tag_name/files
+        # inputs are unchanged.
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           files: pure
