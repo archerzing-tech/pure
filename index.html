@@ -65,7 +65,7 @@
       </div>
     </div>
 
-    <!-- ═══ Drag & drop overlay (drop a folder anywhere to switch workspace) ═══ -->
+    <!-- ═══ Drag & drop overlay (drop a file to import or folder to switch workspace) ═══ -->
     <div id="drag-overlay" aria-hidden="true">
       <div class="drag-overlay-card">
         <svg class="drag-overlay-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
@@ -241,6 +241,18 @@
                     <label class="toggle"><input type="checkbox" id="cfg-streaming-render" checked /><span class="toggle-slider"></span></label>
                   </div>
                 </div>
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tmp.title">Temp pasted files</span><span class="setting-hint" data-i18n="tmp.desc">Clean pasted files in ~/.pure/tmp older than N days</span></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tmp.usage">Current usage</span><span class="setting-hint" id="tmp-usage">—</span></div>
+                    <div class="setting-input-group tmp-clean-group">
+                      <input id="tmp-days" class="setting-input" type="number" min="1" max="365" value="7" data-i18n-title="tmp.daysHint" title="Days to keep" />
+                      <button id="tmp-clean-btn" class="setting-btn secondary" data-i18n="tmp.cleanBtn">Clean up</button>
+                    </div>
+                  </div>
+                </div>
               </div>
               <!-- LLM -->
               <div class="settings-page" data-page="llm">
@@ -288,6 +300,10 @@
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="tools.browser">Web Tools</span><span class="setting-hint" data-i18n="tools.browser.hint">Web search &amp; fetch</span></div>
                     <label class="toggle"><input type="checkbox" id="cfg-tool-browser" checked /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.tavily">Tavily Search API</span><span class="setting-hint" data-i18n="tools.tavily.hint">Optional: Tavily key for high-quality web search (free tier at tavily.com) — falls back to free backends when empty</span></div>
+                    <input id="cfg-tavily-key" class="setting-input" type="password" placeholder="tvly-..." autocomplete="off" style="max-width: 220px" />
                   </div>
                 </div>
                 <h3 class="settings-section-title" data-i18n="tools.permissionSection">Permission &amp; approval</h3>

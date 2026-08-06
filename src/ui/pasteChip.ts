@@ -1,0 +1,554 @@
+// src/ui/pasteChip.ts
+// Paste handling for content the textarea should not swallow:
+//   • TEXT pastes ≥ PASTE_FILE_THRESHOLD chars → saved to the session tmp
+//     workspace (~/.pure/tmp/<session-id>/) and shown as a file chip.
+//   • IMAGE pastes (screenshots, copied pictures) → saved the same way and
+//     shown as a THUMBNAIL chip (a textarea can't hold an image at all).
+// Double-clicking a chip opens a fullscreen viewer (text in a <pre>, images
+// rendered). On send the attachments ride along with the typed text (see
+// composeMessageWithAttachments, used by main.ts doSend).
+
+import { formatBytes } from './TauriToolAdapter';
+import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { t } from '../shared/i18n';
+import { showToast } from '../shared/toast';
+
+export interface PasteAttachment {
+  id: string;
+  name: string;
+  /** Bytes for files/images; character count for text (what the chip shows). */
+  size: number;
+  /** Text content ('text' kind); '' for images and binary files. */
+  content: string;
+  /** Absolute tmp path when persisted to disk ('' in browser/dev mode). */
+  path: string;
+  kind: 'text' | 'image' | 'binary';
+  /** data: URL for image thumbnails/viewer ('' for text/binary). */
+  dataUrl: string;
+  mime?: string;
+  truncated?: boolean;
+  /** Dropped files open with one click; pasted chips keep their double-click behavior. */
+  openOnClick?: boolean;
+}
+
+export interface DroppedFileRecord {
+  name: string;
+  path: string;
+  size: number;
+  kind: 'text' | 'image' | 'binary';
+  content: string;
+  dataUrl: string;
+  mime: string;
+  truncated?: boolean;
+  isDirectory?: boolean;
+}
+
+/** Text pastes at or above this length become file chips instead of text. */
+export const PASTE_FILE_THRESHOLD = 64 * 1024;
+
+/** Images larger than this are rejected (bounds memory + the base64 IPC). */
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+
+/** Viewer display cap — keeps a 50MB log from freezing the webview. */
+const VIEWER_MAX_CHARS = 2_000_000;
+
+const FILE_ICON_SVG =
+  '<svg class="paste-chip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">' +
+  '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>' +
+  '<polyline points="14 2 14 8 20 8"/>' +
+  '<line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg>';
+
+const CLOSE_ICON_SVG =
+  '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+  '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+/** Timestamp used in paste filenames (second granularity is fine — a random
+ * suffix is appended by the caller to disambiguate same-second pastes). */
+function pasteStamp(): string {
+  return new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
+}
+
+/** Extension for an image MIME type (.png / .jpg / .gif / .webp / …). */
+export function imageExtOf(mime: string): string {
+  const m = /^image\/([a-z0-9.+-]+)/i.exec(mime);
+  const raw = m ? m[1].toLowerCase() : '';
+  if (raw === 'jpeg') return 'jpg';
+  // 'svg+xml' and friends → the primary subtype ('svg').
+  return raw.split('+')[0] || 'png';
+}
+
+/** Pick a compact visual marker for a dropped file without trusting its name as HTML. */
+export function fileIconOf(name: string, kind: PasteAttachment['kind']): string {
+  if (kind === 'image') return '🖼️';
+  const ext = name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '';
+  if (ext === 'pdf') return '📕';
+  if (['zip', 'gz', 'tar', 'rar', '7z'].includes(ext)) return '🗜️';
+  if (['xls', 'xlsx', 'csv', 'tsv'].includes(ext)) return '📊';
+  if (['doc', 'docx', 'rtf', 'md'].includes(ext)) return '📝';
+  if (['js', 'ts', 'jsx', 'tsx', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'css', 'html', 'json', 'xml', 'sh', 'sql'].includes(ext)) return '💻';
+  if (kind === 'binary') return '📦';
+  return '📄';
+}
+
+/**
+ * Pick a sensible extension for a pasted text blob based on its head: JSON
+ * objects / arrays, markdown fences or headings, and uniform-delimiter tables
+ * (CSV / TSV) get their own extension; everything else falls back to .txt.
+ */
+export function guessPasteName(content: string): string {
+  const head = content.slice(0, 2000).trim();
+  const base = `pasted-${pasteStamp()}`;
+  if (/^[\{\[]/.test(head) && /["']/.test(head)) return `${base}.json`;
+  if (head.includes('```') || /^#{1,6}\s/m.test(head)) return `${base}.md`;
+  const lines = head.split('\n').filter(l => l.trim().length > 0);
+  if (lines.length >= 2) {
+    const count = (l: string) => l.split(/[,;\t]/).length;
+    const first = count(lines[0]);
+    if (first >= 2 && lines.every(l => count(l) === first)) return `${base}.csv`;
+  }
+  return `${base}.txt`;
+}
+
+/** Read a pasted File as a data: URL (used for thumbnails and the viewer). */
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error('read failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Build the outgoing user message: the typed text followed by every pasted
+ * attachment. Text attachments inline their full content after a marker;
+ * image attachments reference the saved tmp file (the text-only adapters in
+ * use cannot see the picture, so the path is the honest artifact).
+ */
+export function composeMessageWithAttachments(text: string, attachments: PasteAttachment[]): string {
+  if (attachments.length === 0) return text;
+  const parts = [text];
+  for (const a of attachments) {
+    if (a.kind === 'image' || a.kind === 'binary') {
+      const marker = (a.kind === 'image' ? t('paste.imageMarker') : t('paste.attachmentMarker'))
+        .replace('{name}', a.name)
+        .replace('{size}', formatBytes(a.size));
+      parts.push(a.path ? `${marker}\n${a.path}` : marker);
+    } else {
+      const marker = t('paste.attachmentMarker')
+        .replace('{name}', a.name)
+        .replace('{size}', formatBytes(a.size));
+      parts.push(`${marker}\n${a.content}`);
+    }
+  }
+  return parts.filter(p => p.trim().length > 0).join('\n\n');
+}
+
+/**
+ * Owns the attachment list and the chip rows rendered into every mounted host
+ * (the bottom input bar and the landing input share ONE list per session).
+ */
+export class PasteChipManager {
+  private attachments: PasteAttachment[] = [];
+  private hosts = new Map<HTMLElement, HTMLDivElement>();
+  private viewerEl: HTMLDivElement | null = null;
+  private getSessionId: () => string;
+  private onChanged: () => void;
+
+  constructor(getSessionId: () => string, onChanged: () => void = () => {}) {
+    this.getSessionId = getSessionId;
+    this.onChanged = onChanged;
+  }
+
+  /** Insert a chip row as the first child of `host` (renders the shared list). */
+  mount(host: HTMLElement): void {
+    if (this.hosts.has(host)) return;
+    const row = document.createElement('div');
+    row.className = 'paste-chips';
+    host.insertBefore(row, host.firstChild);
+    this.hosts.set(host, row);
+    this.render();
+  }
+
+  getAttachments(): PasteAttachment[] {
+    return [...this.attachments];
+  }
+
+  /** Whether any pasted file is waiting to be sent (enables send with no text). */
+  hasAttachments(): boolean {
+    return this.attachments.length > 0;
+  }
+
+  remove(id: string): void {
+    this.attachments = this.attachments.filter(a => a.id !== id);
+    this.render();
+    this.onChanged();
+  }
+
+  clear(): void {
+    if (this.attachments.length === 0) return;
+    this.attachments = [];
+    this.render();
+    this.onChanged();
+  }
+
+  /**
+   * Intercept a paste on a prompt textarea. Returns true when the paste was
+   * consumed (turned into a chip) — the caller must not insert it. Images
+   * (screenshots) always win; oversized text falls back to the file chip.
+   */
+  consumePaste(e: ClipboardEvent): boolean {
+    // 1) Image paste: any image/* file in the clipboard becomes a thumbnail
+    // chip. No size threshold — a textarea cannot hold a picture at all.
+    const images = imageFilesOf(e.clipboardData);
+    if (images.length > 0) {
+      e.preventDefault();
+      this.handleImagePaste(images);
+      return true;
+    }
+    // 2) Oversized text paste → file chip (sync path, disk write async).
+    const text = e.clipboardData?.getData('text') ?? '';
+    if (text.length < PASTE_FILE_THRESHOLD) return false;
+    e.preventDefault();
+    // A random suffix keeps two pastes inside the same second from colliding
+    // on disk (the second save would otherwise overwrite the first).
+    const id = `paste-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const name = guessPasteName(text).replace(/\.(\w+)$/, `-${id.slice(-6)}.$1`);
+    const att: PasteAttachment = { id, name, size: text.length, content: text, path: '', kind: 'text', dataUrl: '' };
+    this.attachments.push(att);
+    this.render();
+    this.onChanged();
+    // Capture the session id NOW — a session switch before the write completes
+    // must not redirect the file into the newly-opened session's tmp dir.
+    const sessionId = this.getSessionId();
+    if (isTauriRuntime()) {
+      void (async () => {
+        try {
+          const core = await loadTauriCore();
+          const path = await core?.invoke<string>('save_paste_file', { sessionId, name, content: text });
+          if (path) {
+            att.path = path;
+            this.render();
+          }
+        } catch (err) {
+          // Keep the chip (memory copy still works) — just no disk file.
+          console.error('[pure] save_paste_file failed:', err);
+        }
+      })();
+    }
+    return true;
+  }
+
+  /** Add files supplied by a browser drop. Tauri drops use addImportedFile after Rust copies them. */
+  addDroppedFiles(files: File[]): void {
+    const sessionId = this.getSessionId();
+    for (const file of files) {
+      const mime = file.type || mimeOfFileName(file.name);
+      const kind = mime.startsWith('image/') ? 'image' : isBrowserTextFile(file.name, mime) ? 'text' : 'binary';
+      if (kind === 'image' && file.size > MAX_IMAGE_BYTES) {
+        showToast(t('paste.imageTooLarge'));
+        continue;
+      }
+      const id = `drop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const att: PasteAttachment = {
+        id,
+        name: file.name || 'dropped-file',
+        size: file.size,
+        content: '',
+        path: '',
+        kind,
+        dataUrl: '',
+        mime,
+        openOnClick: true,
+      };
+      this.attachments.push(att);
+      this.render();
+      this.onChanged();
+      void (async () => {
+        try {
+          if (kind === 'image') {
+            att.dataUrl = await readFileAsDataUrl(file);
+          } else if (kind === 'text') {
+            const raw = await file.slice(0, VIEWER_MAX_CHARS + 1).text();
+            att.content = raw.slice(0, VIEWER_MAX_CHARS);
+            att.truncated = file.size > VIEWER_MAX_CHARS;
+          }
+          this.render();
+          this.onChanged();
+        } catch (err) {
+          console.error('[pure] dropped browser file failed:', err);
+        }
+      })();
+    }
+  }
+
+  /** Add a file that the Tauri backend has copied into the application tmp directory. */
+  addImportedFile(record: DroppedFileRecord): void {
+    if (record.isDirectory) return;
+    const id = `drop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    this.attachments.push({
+      id,
+      name: record.name,
+      size: record.size,
+      content: record.content,
+      path: record.path,
+      kind: record.kind,
+      dataUrl: record.dataUrl,
+      mime: record.mime,
+      truncated: record.truncated,
+      openOnClick: true,
+    });
+    this.render();
+    this.onChanged();
+  }
+
+  /** Read pasted image files → thumbnail chip each + persist the bytes. */
+  private handleImagePaste(files: File[]): void {
+    const sessionId = this.getSessionId();
+    for (const file of files) {
+      // Bounds memory: a giant screenshot becomes a giant data URL + base64
+      // IPC payload. Reject with a toast instead of silently attaching.
+      if (file.size > MAX_IMAGE_BYTES) {
+        showToast(t('paste.imageTooLarge'));
+        continue;
+      }
+      const id = `paste-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const name = `pasted-${pasteStamp()}-${id.slice(-6)}.${imageExtOf(file.type)}`;
+      const att: PasteAttachment = {
+        id, name, size: file.size, content: '', path: '', kind: 'image', dataUrl: '',
+      };
+      this.attachments.push(att);
+      this.render();
+      this.onChanged();
+      void (async () => {
+        try {
+          // 1) data URL drives the thumbnail + viewer (works in browser mode).
+          att.dataUrl = await readFileAsDataUrl(file);
+          this.render();
+          // 2) Persist the raw bytes (base64 over IPC) in Tauri mode.
+          if (isTauriRuntime()) {
+            const core = await loadTauriCore();
+            const dataBase64 = att.dataUrl.slice(att.dataUrl.indexOf(',') + 1);
+            const path = await core?.invoke<string>('save_paste_image', { sessionId, name, dataBase64 });
+            if (path) {
+              att.path = path;
+              this.render();
+            }
+          }
+        } catch (err) {
+          console.error('[pure] paste image failed:', err);
+        }
+      })();
+    }
+  }
+
+  private render(): void {
+    for (const row of this.hosts.values()) {
+      row.replaceChildren();
+      for (const a of this.attachments) {
+        const chip = document.createElement('div');
+        chip.className = `paste-chip paste-chip-${a.kind}`;
+        chip.dataset.id = a.id;
+        chip.dataset.kind = a.kind;
+        chip.title = `${a.path || t('paste.memory')}\n${a.openOnClick ? t('paste.clickHint') : t('paste.dblclickHint')}`;
+        if (a.kind === 'image' && a.dataUrl) {
+          const thumb = document.createElement('img');
+          thumb.className = 'paste-chip-thumb';
+          thumb.alt = '';
+          thumb.src = a.dataUrl;
+          chip.appendChild(thumb);
+        } else {
+          if (a.openOnClick) {
+            const typeIcon = document.createElement('span');
+            typeIcon.className = 'paste-chip-type-icon';
+            typeIcon.textContent = fileIconOf(a.name, a.kind);
+            chip.appendChild(typeIcon);
+          } else {
+            chip.innerHTML = FILE_ICON_SVG;
+          }
+        }
+        const name = document.createElement('span');
+        name.className = 'paste-chip-name';
+        name.textContent = a.name;
+        const size = document.createElement('span');
+        size.className = 'paste-chip-size';
+        size.textContent = formatBytes(a.size);
+        const remove = document.createElement('button');
+        remove.className = 'paste-chip-remove';
+        remove.type = 'button';
+        remove.title = t('paste.remove');
+        remove.setAttribute('aria-label', t('paste.removeLabel'));
+        remove.innerHTML = CLOSE_ICON_SVG;
+        remove.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          this.remove(a.id);
+        });
+        chip.append(name, size, remove);
+        chip.setAttribute('role', 'button');
+        chip.tabIndex = 0;
+        const open = () => this.openViewer(a);
+        chip.addEventListener(a.openOnClick ? 'click' : 'dblclick', open);
+        chip.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            open();
+          }
+        });
+        row.appendChild(chip);
+      }
+    }
+  }
+
+  private openViewer(att: PasteAttachment): void {
+    this.closeViewer();
+    const overlay = document.createElement('div');
+    overlay.className = 'paste-viewer-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-label', att.name);
+
+    const header = document.createElement('div');
+    header.className = 'paste-viewer-header';
+    const title = document.createElement('div');
+    title.className = 'paste-viewer-title';
+    if (att.kind === 'image') {
+      const icon = document.createElement('span');
+      icon.className = 'paste-viewer-title-icon';
+      icon.textContent = '🖼';
+      title.appendChild(icon);
+    } else if (att.openOnClick) {
+      const icon = document.createElement('span');
+      icon.className = 'paste-viewer-title-icon';
+      icon.textContent = fileIconOf(att.name, att.kind);
+      title.appendChild(icon);
+    } else {
+      title.innerHTML = FILE_ICON_SVG;
+    }
+    const nameEl = document.createElement('span');
+    nameEl.className = 'paste-viewer-name';
+    nameEl.textContent = att.name;
+    const meta = document.createElement('span');
+    meta.className = 'paste-viewer-meta';
+    meta.textContent = `${formatBytes(att.size)}${att.path ? ` · ${att.path}` : ''}`;
+    title.append(nameEl, meta);
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'paste-viewer-close';
+    closeBtn.type = 'button';
+    closeBtn.title = t('paste.closeTitle');
+    closeBtn.setAttribute('aria-label', t('paste.close'));
+    closeBtn.innerHTML = CLOSE_ICON_SVG;
+    closeBtn.addEventListener('click', () => this.closeViewer());
+    header.append(title, closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'paste-viewer-body';
+    if (att.kind === 'image') {
+      if (att.dataUrl) {
+        const img = document.createElement('img');
+        img.className = 'paste-viewer-img';
+        img.alt = att.name;
+        img.src = att.dataUrl;
+        body.appendChild(img);
+      } else {
+        // Double-click raced the async FileReader — hold a placeholder rather
+        // than showing an empty text pane.
+        const loading = document.createElement('div');
+        loading.className = 'paste-viewer-loading';
+        loading.textContent = t('paste.loading');
+        body.appendChild(loading);
+      }
+    } else if (att.kind === 'text') {
+      const pre = document.createElement('pre');
+      pre.className = 'paste-viewer-pre';
+      pre.textContent = att.content.slice(0, VIEWER_MAX_CHARS);
+      body.appendChild(pre);
+      if (att.truncated || att.content.length > VIEWER_MAX_CHARS) {
+        const note = document.createElement('div');
+        note.className = 'paste-viewer-truncated';          note.textContent = t('paste.truncatedFile')
+            .replace('{shown}', VIEWER_MAX_CHARS.toLocaleString())
+            .replace('{total}', formatBytes(att.size));
+        body.appendChild(note);
+      }
+    } else {
+      const info = document.createElement('div');
+      info.className = 'paste-viewer-binary';
+      info.innerHTML = `<span class="paste-viewer-binary-icon" aria-hidden="true">${fileIconOf(att.name, att.kind)}</span>`;
+      const message = document.createElement('p');
+      message.textContent = t('paste.binaryInfo').replace('{type}', att.mime || t('paste.unknownType'));
+      info.appendChild(message);
+      if (att.path) {
+        const openBtn = document.createElement('button');
+        openBtn.className = 'paste-viewer-open-default';
+        openBtn.type = 'button';
+        openBtn.textContent = t('paste.openWithDefault');
+        openBtn.addEventListener('click', async () => {
+          if (!isTauriRuntime()) return;
+          try {
+            const core = await loadTauriCore();
+            await core?.invoke('open_path', { path: att.path });
+          } catch (err) {
+            console.error('[pure] open dropped file failed:', err);
+          }
+        });
+        info.appendChild(openBtn);
+      }
+      body.appendChild(info);
+    }
+
+    overlay.append(header, body);
+    document.body.appendChild(overlay);
+    this.viewerEl = overlay;
+    // Click on the backdrop closes; clicks inside (scroll etc.) do not.
+    overlay.addEventListener('mousedown', (e) => {
+      if (e.target === overlay) this.closeViewer();
+    });
+    document.addEventListener('keydown', this.onViewerKeydown);
+    closeBtn.focus();
+  }
+
+  private onViewerKeydown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') this.closeViewer();
+  };
+
+  private closeViewer(): void {
+    if (!this.viewerEl) return;
+    this.viewerEl.remove();
+    this.viewerEl = null;
+    document.removeEventListener('keydown', this.onViewerKeydown);
+  }
+}
+
+/** Every image/* file the clipboard exposes (items first, then files). */
+function mimeOfFileName(name: string): string {
+  const ext = name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '';
+  const types: Record<string, string> = {
+    txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', tsv: 'text/tab-separated-values',
+    json: 'application/json', js: 'text/javascript', ts: 'text/typescript', jsx: 'text/javascript', tsx: 'text/typescript',
+    html: 'text/html', css: 'text/css', xml: 'application/xml', py: 'text/x-python', rs: 'text/x-rust',
+    pdf: 'application/pdf', zip: 'application/zip',
+  };
+  return types[ext] || 'application/octet-stream';
+}
+
+function isBrowserTextFile(name: string, mime: string): boolean {
+  if (mime.startsWith('text/')) return true;
+  if (mime === 'application/json' || mime === 'application/xml' || mime === 'application/javascript') return true;
+  return ['txt', 'md', 'csv', 'tsv', 'json', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'xml', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'sql', 'sh', 'log'].includes(name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '');
+}
+
+function imageFilesOf(cd: DataTransfer | null): File[] {
+  if (!cd) return [];
+  const files: File[] = [];
+  for (const item of Array.from(cd.items)) {
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  // Some platforms (older WebKit) only surface files via `cd.files`.
+  if (files.length === 0) {
+    for (const f of Array.from(cd.files)) {
+      if (f.type.startsWith('image/')) files.push(f);
+    }
+  }
+  return files;
+}

@@ -68,6 +68,8 @@ export class Harness {
   private engine: AgentLoopEngine;
   private config: HarnessConfig;
   private stateMgr?: StateManager;
+  private writtenLessonKeys = new Set<string>();
+  private verificationSummary = 'Engine VERIFY phase passed; no project-level command was recorded.';
 
   constructor(config: HarnessConfig) {
     this.engine = new AgentLoopEngine();
@@ -103,6 +105,7 @@ export class Harness {
     userPrompt: string,
     signal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
+    this.verificationSummary = 'Engine VERIFY phase passed; no project-level command was recorded.';
     let runningMessages: Message[] = [];
     let resumed = false;
     if (this.stateMgr) {
@@ -211,6 +214,7 @@ export class Harness {
       // Track messages for checkpoint saving
       if (event.type === 'Completed' && event.payload.messages) {
         runningMessages = event.payload.messages;
+        this.updateVerificationSummary(event.payload.messages);
         if (this.stateMgr) {
           await this.stateMgr.saveCheckpoint('turn_completed', event.payload.messages, event.payload.turnCount);
         }
@@ -227,7 +231,14 @@ export class Harness {
             await this.writeRepeatedFailureMemory(failure).catch(() => {});
           }
           pendingRepeats.clear();
-          await this.writeSessionMemory(userPrompt, event.payload.finalOutput).catch(() => {});
+          if (event.payload.isComplete) {
+            await this.writeSessionMemory(
+              userPrompt,
+              event.payload.finalOutput,
+              event.payload.messages,
+              retriedFailures,
+            ).catch(() => {});
+          }
           if (event.payload.isComplete && retriedFailures.length > 0) {
             await this.writeRetriedErrorPatterns(retriedFailures).catch(() => {});
           }
@@ -253,6 +264,7 @@ export class Harness {
     newUserPrompt: string,
     signal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
+    this.verificationSummary = 'Engine VERIFY phase passed; no project-level command was recorded.';
     // Memory refresh on continuation: compose the current prompt with memories
     // relevant to the new follow-up (same layer as run()).
     let effectiveSystemPrompt = systemPrompt;
@@ -317,8 +329,11 @@ export class Harness {
         }
       }
 
-      if (this.stateMgr && event.type === 'Completed' && event.payload.messages) {
-        await this.stateMgr.saveCheckpoint('turn_completed', event.payload.messages, event.payload.turnCount);
+      if (event.type === 'Completed' && event.payload.messages) {
+        this.updateVerificationSummary(event.payload.messages);
+        if (this.stateMgr) {
+          await this.stateMgr.saveCheckpoint('turn_completed', event.payload.messages, event.payload.turnCount);
+        }
       }
       // §12.3 retried-error write — NOT gated on stateMgr: the GUI runs
       // continuation turns without a state store but with memory.
@@ -329,8 +344,16 @@ export class Harness {
           await this.writeRepeatedFailureMemory(failure).catch(() => {});
         }
         pendingRepeats.clear();
-        if (event.payload.isComplete && retriedFailures.length > 0) {
-          await this.writeRetriedErrorPatterns(retriedFailures).catch(() => {});
+        if (event.payload.isComplete) {
+          await this.writeSessionMemory(
+            newUserPrompt,
+            event.payload.finalOutput,
+            event.payload.messages,
+            retriedFailures,
+          ).catch(() => {});
+          if (retriedFailures.length > 0) {
+            await this.writeRetriedErrorPatterns(retriedFailures).catch(() => {});
+          }
         }
       }
       if (this.stateMgr && event.type === 'Interrupted') {
@@ -435,19 +458,68 @@ export class Harness {
     });
   }
 
-  /** Write a successful_pattern memory when a session completes (non-fatal). */
-  private async writeSessionMemory(userPrompt: string, finalOutput?: string): Promise<void> {
+  /**
+   * Persist a compact, reusable lesson rather than a generic completion log.
+   * The next similar task can retrieve the symptom/tool/recovery path from the
+   * existing <session_memory> pipeline without replaying the whole transcript.
+   */
+  private async writeSessionMemory(
+    userPrompt: string,
+    finalOutput?: string,
+    messages?: Message[],
+    retriedFailures: FailureRecord[] = [],
+  ): Promise<void> {
     if (!this.config.memory) return;
-    const content = finalOutput
-      ? `Session completed: ${userPrompt.substring(0, 200)} → ${finalOutput.substring(0, 200)}`
-      : `Session completed: ${userPrompt.substring(0, 200)}`;
+    const tools = [...new Set((messages ?? [])
+      .filter(m => m.role === 'tool' && m.toolName)
+      .map(m => m.toolName!))];
+    const recovery = retriedFailures.length > 0
+      ? `Diagnosed and recovered from ${[...new Set(retriedFailures.map(f => f.message.substring(0, 120)))].join(' | ')}`
+      : 'No retry was required';
+    const symptom = userPrompt.substring(0, 180);
+    const lesson = {
+      symptom,
+      rootCause: retriedFailures.length > 0
+        ? [...new Set(retriedFailures.map(f => f.message.substring(0, 160)))].join(' | ')
+        : 'Not determined by the engine; no retry or failure metadata was recorded',
+      recoveryPath: recovery,
+      verification: this.verificationSummary,
+      avoidNextTime: retriedFailures.length > 0
+        ? 'Do not repeat the failed approach without new evidence; use the recorded recovery path.'
+        : 'Keep the same inspection and verification sequence for similar tasks.',
+      ...(tools.length > 0 ? { tools } : {}),
+    };
+    const dedupeKey = `${this.config.sessionId}:${userPrompt.trim().toLowerCase()}`;
+    if (this.writtenLessonKeys.has(dedupeKey)) return;
+    const parts = [
+      `Symptom: ${lesson.symptom}`,
+      `Root cause: ${lesson.rootCause}`,
+      `Recovery path: ${lesson.recoveryPath}`,
+      `Verification: ${lesson.verification}`,
+      `Avoid next time: ${lesson.avoidNextTime}`,
+      tools.length > 0 ? `Tools used: ${tools.join(', ')}` : 'Tools used: none recorded',
+    ];
+    if (finalOutput) parts.push(`Outcome: ${finalOutput.substring(0, 180)}`);
     await this.config.memory.add({
       type: 'successful_pattern',
-      content,
+      content: `Reusable lesson — ${parts.join('. ')}.`.slice(0, 900),
       timestamp: Date.now(),
       sessionId: this.config.sessionId,
       projectPath: this.projectPath(),
+      lesson,
+      dedupeKey,
     });
+    this.writtenLessonKeys.add(dedupeKey);
+  }
+
+  private updateVerificationSummary(messages: Message[]): void {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.role === 'tool' && message.toolName === 'execute_command') {
+        this.verificationSummary = `Engine VERIFY phase passed; execute_command output was observed, but its purpose was not classified by the engine: ${message.content.slice(0, 180)}`;
+        return;
+      }
+    }
   }
 
   private projectPath(): string {

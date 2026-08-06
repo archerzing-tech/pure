@@ -5,6 +5,7 @@ import { fetchAndDisplayVersion, checkForUpdatesManual } from './updater';
 import { escapeHtml } from '../shared/html';
 import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { formatBytes } from './TauriToolAdapter';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
 
 export interface PureConfig {
@@ -30,6 +31,13 @@ export interface PureConfig {
   toolCmd: boolean;
   toolGit: boolean;
   toolBrowser: boolean;
+  /**
+   * Optional Tavily Search API key (Settings → Tools → Web Tools). When set,
+   * web_search uses the Tavily API first (stable index, no HTML scraping,
+   * good Chinese coverage — the approach Claude Code / opencode use) and
+   * falls back to the free HTML backends (Sogou / cn.bing / DDG / Bing).
+   */
+  tavilyApiKey: string;
   skills: Record<string, boolean>;
   mcpServers: Array<{ name: string; transport: 'stdio' | 'http'; command?: string[]; url?: string }>;
   /**
@@ -82,6 +90,7 @@ export function defaults(): PureConfig {
     toolCmd: true,
     toolGit: true,
     toolBrowser: true,
+    tavilyApiKey: '',
     skills: { 'code-review': true, 'web-research': true, memory: true, planning: true },
     mcpServers: [],
     streamingRender: true,
@@ -189,6 +198,8 @@ export class SettingsPanel {
   private currentCategory: string = 'general';
   private visible = false;
   private mcpServers: PureConfig['mcpServers'] = [];
+  /** Bound in the constructor; refreshes the paste-file footprint on open. */
+  private refreshTmpUsage: () => Promise<void> = async () => {};
 
   constructor(onSave: () => void, onOpen?: () => void, onClose?: () => void) {
     this.onSave = onSave;
@@ -213,6 +224,8 @@ export class SettingsPanel {
     toggleBtn.style.display = 'none';
     this.loadToForm();
     this.onOpen?.();
+    // Refresh the paste-file footprint every time the panel opens.
+    void this.refreshTmpUsage();
   }
 
   close() {
@@ -281,6 +294,44 @@ export class SettingsPanel {
     // Update check
     fetchAndDisplayVersion();
     document.getElementById('cfg-check-updates')?.addEventListener('click', () => checkForUpdatesManual());
+
+    // ── Temp paste files: usage + one-click cleanup (Tauri only) ──
+    const tmpUsageEl = document.getElementById('tmp-usage');
+    const tmpDaysEl = document.getElementById('tmp-days') as HTMLInputElement | null;
+    const tmpCleanBtn = document.getElementById('tmp-clean-btn') as HTMLButtonElement | null;
+
+    this.refreshTmpUsage = async () => {
+      if (!tmpUsageEl || !isTauriRuntime()) return;
+      try {
+        const core = await loadTauriCore();
+        const usage = await core?.invoke<{ files: number; bytes: number }>('tmp_paste_usage');
+        tmpUsageEl.textContent = usage && usage.files > 0
+          ? `${usage.files} · ${formatBytes(usage.bytes)}`
+          : t('tmp.usageNone');
+      } catch (err) {
+        console.error('[pure] tmp_paste_usage failed:', err);
+      }
+    };
+
+    tmpCleanBtn?.addEventListener('click', async () => {
+      if (!isTauriRuntime()) return;
+      const days = Math.max(1, Math.min(365, parseInt(tmpDaysEl?.value || '7', 10) || 7));
+      tmpCleanBtn.disabled = true;
+      try {
+        const core = await loadTauriCore();
+        const res = await core?.invoke<{ deleted: number; freedBytes: number }>('cleanup_tmp_pastes', { days });
+        const deleted = res?.deleted ?? 0;
+        this.toast(deleted > 0
+          ? t('tmp.cleaned').replace('{n}', String(deleted)).replace('{size}', formatBytes(res?.freedBytes ?? 0))
+          : t('tmp.nothing'));
+      } catch (err) {
+        console.error('[pure] cleanup_tmp_pastes failed:', err);
+        this.toast(t('tmp.cleanFailed'));
+      } finally {
+        tmpCleanBtn.disabled = false;
+        void this.refreshTmpUsage();
+      }
+    });
 
     // Toggle API key visibility
     const toggleKey = document.getElementById('cfg-toggle-key');
@@ -426,6 +477,8 @@ export class SettingsPanel {
     (document.getElementById('cfg-tool-cmd') as HTMLInputElement).checked = cfg.toolCmd;
     (document.getElementById('cfg-tool-git') as HTMLInputElement).checked = cfg.toolGit;
     (document.getElementById('cfg-tool-browser') as HTMLInputElement).checked = cfg.toolBrowser;
+    const tavilyKeyEl = document.getElementById('cfg-tavily-key') as HTMLInputElement | null;
+    if (tavilyKeyEl) tavilyKeyEl.value = cfg.tavilyApiKey ?? '';
 
     document.querySelectorAll('.cfg-skill-toggle').forEach(el => {
       const skill = el.getAttribute('data-skill');
@@ -566,6 +619,7 @@ export class SettingsPanel {
       toolCmd: (document.getElementById('cfg-tool-cmd') as HTMLInputElement).checked,
       toolGit: (document.getElementById('cfg-tool-git') as HTMLInputElement).checked,
       toolBrowser: (document.getElementById('cfg-tool-browser') as HTMLInputElement).checked,
+      tavilyApiKey: (document.getElementById('cfg-tavily-key') as HTMLInputElement | null)?.value.trim() ?? '',
       skills,
       mcpServers: [...this.mcpServers],
       streamingRender: (document.getElementById('cfg-streaming-render') as HTMLInputElement | null)?.checked ?? true,

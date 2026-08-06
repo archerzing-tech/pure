@@ -1,11 +1,11 @@
 {
   "name": "pure",
-  "version": "0.9.9",
+  "version": "0.10.0",
   "private": true,
   "type": "module",
   "scripts": {
     "cli": "bun run src/cli.ts",
-    "cli:build": "bun build --compile src/cli.ts --outfile pure",
+    "cli:build": "bun build --compile src/cli.ts --outfile pure --external @huggingface/transformers",
     "dev": "vite",
     "gui": "bun run tauri dev",
     "gui:build": "bun run tauri build",

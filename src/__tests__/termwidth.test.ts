@@ -73,6 +73,8 @@ describe('sanitizeForTerminal', () => {
     expect(sanitizeForTerminal('a\x00b\x08c\x1bd')).toBe('abcd');
     expect(sanitizeForTerminal('line1\nline2\ttab')).toBe('line1\nline2\ttab');
     expect(sanitizeForTerminal('bell\x07here')).toBe('bellhere');
+    // CR would overwrite the current terminal line mid-answer — stripped.
+    expect(sanitizeForTerminal('a\rb')).toBe('ab');
   });
 
   test('leaves normal CJK and punctuation untouched', () => {

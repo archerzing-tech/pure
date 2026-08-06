@@ -7,6 +7,7 @@
 // render identically.
 
 import { linkifyPaths } from './pathLink';
+import { formatBytes } from './TauriToolAdapter';
 
 // Friendly display names + icons per tool (Claude Code uses short verbs).
 const TOOL_META: Record<string, { name: string; icon: string }> = {
@@ -25,6 +26,7 @@ const TOOL_META: Record<string, { name: string; icon: string }> = {
   git_status:       { name: 'Git Status',    icon: '⑂' },
   web_search:       { name: 'Web Search',    icon: '🌐' },
   web_fetch:        { name: 'Fetch',         icon: '📡' },
+  web_researcher:   { name: 'Web Research',  icon: '🧭' },
   sys_info:         { name: 'System Info',   icon: 'ℹ️' },
 };
 
@@ -46,6 +48,8 @@ export function formatToolArgsSummary(toolName: string, args: Record<string, unk
       return typeof v('query') === 'string' ? `query="${String(v('query'))}"` : '';
     case 'web_fetch':
       return typeof v('url') === 'string' ? `url="${String(v('url'))}"` : '';
+    case 'web_researcher':
+      return typeof v('prompt') === 'string' ? `prompt="${String(v('prompt'))}"` : '';
     case 'read_file':
     case 'write_file':
     case 'edit_file':
@@ -89,10 +93,10 @@ export function shouldExpandToolRowInitially(_toolName: string): boolean {
 }
 
 export function shouldUseTerminalPanel(toolName: string): boolean {
-  // Every file / shell / search / git / web tool renders as a black console
-  // block — the whole non-LLM work surface shares the terminal look. The
-  // planner's search_files / glob_files calls must match too (they previously
-  // fell through to the light chat background).
+  // File / shell / search / git tools render as black console blocks. Web
+  // lookups use the dedicated pale-blue surface below so their links and
+  // snippets read as a separate knowledge-lookup result.
+
   switch (toolName) {
     case 'read_file':
     case 'write_file':
@@ -107,8 +111,6 @@ export function shouldUseTerminalPanel(toolName: string): boolean {
     case 'git_diff':
     case 'git_log':
     case 'git_status':
-    case 'web_search':
-    case 'web_fetch':
       return true;
     default:
       return false;
@@ -142,6 +144,49 @@ export function truncateResultLines(text: string, maxLines = MAX_LIVE_STREAM_LIN
   if (lines.length <= maxLines) return text;
   const cut = lines.length - maxLines;
   return `${lines.slice(0, maxLines).join('\n')}\n… (${cut.toLocaleString()} lines truncated)`;
+}
+
+// ── Pending-state label ──
+// What the row is DOING while it runs, shown in place of the generic
+// "等待输出" placeholder so a write that hasn't emitted its first progress
+// chunk yet reads as "正在写入 …" instead of "waiting for output". The path
+// (and content size, matching the Rust "Wrote N bytes" result) appear as
+// soon as the tool-call args arrive — see updateToolRowArgs.
+export function pendingActionLabel(toolName: string, args: Record<string, unknown> | undefined): string {
+  switch (toolName) {
+    case 'write_file': {
+      const path = typeof args?.path === 'string' ? args.path : '';
+      if (!path) return '正在写入文件…';
+      const content = typeof args?.content === 'string' ? args.content : '';
+      return `正在写入 ${path}（${formatBytes(byteLength(content))}）`;
+    }
+    case 'edit_file':
+      return '正在编辑文件…';
+    case 'replace_files':
+      return '正在替换文件内容…';
+    case 'execute_command':
+      return '正在执行命令…';
+    case 'web_search':
+      return '正在搜索…';
+    case 'web_fetch':
+      return '正在获取页面…';
+    case 'web_researcher':
+      return '正在研究网页资料…';
+    case 'create_directory':
+      return '正在创建目录…';
+    default:
+      return '等待输出';
+  }
+}
+
+function byteLength(s: string): number {
+  // UTF-8 byte length — matches the Rust side's content.len() so the size in
+  // the placeholder agrees with the "Wrote N bytes" final result.
+  try {
+    return new TextEncoder().encode(s).length;
+  } catch {
+    return s.length;
+  }
 }
 
 function displayArgValue(value: unknown): string {
@@ -180,6 +225,11 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
 
   const details = document.createElement('details');
   details.className = 'tool-row pending';
+  if (toolName === 'sys_info') details.classList.add('sys-info');
+  if (toolName === 'web_search' || toolName === 'web_fetch' || toolName === 'web_researcher') {
+    details.classList.add('web-tool');
+  }
+  if (toolName === 'web_researcher') details.classList.add('web-researcher');
 
   const summary = document.createElement('summary');
   summary.className = 'tool-row-summary';
@@ -240,7 +290,10 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   waiting.className = 'tool-row-waiting';
   const waitingText = document.createElement('span');
   waitingText.className = 'waiting-text';
-  waitingText.textContent = '等待输出';
+  // Tool-aware "what is happening right now" text (正在写入 … / 正在搜索 …)
+  // instead of a generic 等待输出 — refreshed with the final args by
+  // updateToolRowArgs once the id-bearing tool-call chunk arrives.
+  waitingText.textContent = pendingActionLabel(toolName, args);
   const waitingDots = document.createElement('span');
   waitingDots.className = 'waiting-dots';
   const termCursor = document.createElement('span');
@@ -268,6 +321,15 @@ export function updateToolRowArgs(
   refreshInput = true,
 ): void {
   row.argsEl.textContent = formatToolArgsSummary(toolName, args);
+  // Refresh the pending label as the streamed args converge: a write row
+  // created before its args arrived upgrades from "正在写入文件…" to
+  // "正在写入 src/foo.ts（12.3 KB）" the moment path + content are known.
+  // Cheap (text node only), so it runs on every delta regardless of
+  // refreshInput.
+  if (row.details.classList.contains('pending')) {
+    const waitingText = row.resultEl.querySelector('.tool-row-waiting .waiting-text');
+    if (waitingText) waitingText.textContent = pendingActionLabel(toolName, args);
+  }
   // Streaming deltas skip the Input-body rebuild: re-creating every field (and
   // re-running path-linkification over a multi-KB content arg) on each token
   // is what froze the UI mid-stream. The body is filled on row creation and on

@@ -16,7 +16,7 @@ import { StreamManager } from './harness/StreamManager';
 import { FSStore } from './adapter/storage/FSStore';
 import { SQLiteStore } from './adapter/storage/SQLiteStore';
 import { ContextEngine } from './harness/ContextEngine';
-import { createLLMVerifier } from './coding-agent/Verifier';
+import { createDefaultVerifier } from './coding-agent/Verifier';
 import { Planner, formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt } from './coding-agent/Planner';
 import { DefaultHookRouter } from './engine/HookRouter';
 import { DefaultFailurePolicy } from './engine/FailurePolicy';
@@ -24,9 +24,12 @@ import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler } from './cli_permission';
 import { dim, bold, red, green, yellow, cyan, purple, frameGray } from './termcolors';
-import { displayWidth, fitTail, sanitizeForTerminal } from './termwidth';
+import { sanitizeForTerminal } from './termwidth';
+import { ThinkingCard } from './cli-thinking';
 import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
+import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
 import { harvestUserPreferences } from './shared/memory';
+import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT } from './shared/agentBehavior';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
@@ -72,7 +75,22 @@ function saveConfig(cfg: PureConfig): void {
 // replacing the old single ~/.pure/memory.json UserProfile. The Harness
 // searches it at session start (PromptComposer injects the top memories into
 // the system prompt) and writes a successful_pattern when a session completes.
-const memoryStore = new FSMemoryStore(`${PURE_DIR}/memories`);
+//
+// WASM (v2.1): the store is wrapped in WASMEmbeddingStore — the same
+// transformers.js-WASM semantic retrieval the GUI uses — so recall is
+// vector-similarity based instead of literal keyword matching. The WASM model
+// is lazy: it only downloads (~80MB, cached after first use) on the first
+// search over a NON-EMPTY corpus, and any embedder failure (offline / no
+// model / WASM unavailable) falls back to keyword search, so the CLI keeps
+// working exactly as before in every environment. Scripts/CI that don't want
+// the first-search download can force keyword mode with PURE_MEMORY_KEYWORD=1.
+// Note: standalone released binaries ship with @huggingface/transformers
+// external (package.json cli:build — onnxruntime-node can't be bundled), so
+// their runtime import always fails and they use keyword search; WASM recall
+// is active for repo/dev runs (`bun run cli`).
+const memoryStore = process.env.PURE_MEMORY_KEYWORD
+  ? new FSMemoryStore(`${PURE_DIR}/memories`)
+  : new WASMEmbeddingStore({ store: new FSMemoryStore(`${PURE_DIR}/memories`) });
 
 function learnFromInput(text: string, sessionId: string, projectPath: string): Promise<unknown> {
   const entries = harvestUserPreferences(text, { sessionId, projectPath });
@@ -218,13 +236,16 @@ System:
 - sys_info() — timezone, language, current time, OS version. When the user asks for the current time, date, timezone, language, or OS version, call sys_info() FIRST — never guess from your training data.
 
 Web tools:
-- web_search(query, maxResults?) — web search across cn.bing.com + DuckDuckGo + Bing (no API key needed; Chinese queries are routed to the China Bing backend first for much better Chinese results). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
+- web_search(query, maxResults?) — web search (with TAVILY_API_KEY set it uses the Tavily API first for higher-quality results; otherwise free backends are probed in parallel — Sogou + cn.bing.com + DuckDuckGo + Bing for Chinese queries). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
 - web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.
+
+For weather forecasts or other time-sensitive data, call web_search FIRST and use the returned forecast data; never invent future weather. If the user did not provide a location, ask for it or state the location assumption clearly. To show a weather trend in the GUI, include a fenced chart block with one numeric value per day (prefer average temperature; use "周一：25℃" or "周一 | 25") alongside the explanation.
 
 Work step by step. Read before you write. Verify after you change. Be concise.
 
 Output style:
 - Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").
+- Structure longer replies into clear sections — use Markdown headings (##) for each category, short paragraphs for each point, and lists where items fit. Wrap the KEY phrase(s) of each section in ==double equals== (e.g. ==西安到重庆==, ==3 小时 40 分==) so they render HIGHLIGHTED (the GUI renders ==...== as a highlighted mark); keep the surrounding prose plain so the highlighted-vs-plain contrast is visible.
 - A bare "generate X", "show me X", "give me X", "what does X look like", or any "write me code for…" without a path means inline output — never reach for write_file.
 - COMPLETE runnable artifacts go to disk by default: when the user asks you to BUILD a full game, mini-game, web page/site, app, tool, script, or small project ("写一个小游戏", "做一个网页", "开发一个工具" — even without naming a path), WRITE it to a file instead of printing the whole source inline. Single-file artifact → a new file like index.html / game.html / app.py in the workspace; multi-file project → a new directory with the files. After writing, state the path(s) and how to run/open it.
 - When you do write a file, briefly state where it landed and confirm the user actually wanted persistence; the EXISTENCE of a workspace does NOT imply "save everything to disk".
@@ -237,7 +258,11 @@ Smart typo tolerance: when the user's message contains obvious typos, pinyin / I
 
 Logical traps & approach switching:
 - Before acting, scan the user's request for logical traps: self-contradictory requirements ("不要X但又要X"), impossible constraints, mutually exclusive goals, or a trick premise. If the request as stated is logically impossible or self-contradictory, do NOT blindly follow it into a failure loop — state the trap briefly and solve the most reasonable interpretation (or explain why it is impossible and propose the closest achievable alternative).
-- If your FIRST attempt fails (verification failure, repeated tool errors, or the result keeps getting rejected), do NOT retry the same approach a second time. Re-read the ORIGINAL user request and question whether the premise itself is the problem. If it is, escape the trap by switching to a fundamentally different interpretation or method.`;
+- If your FIRST attempt fails (verification failure, repeated tool errors, or the result keeps getting rejected), do NOT retry the same approach a second time. Re-read the ORIGINAL user request and question whether the premise itself is the problem. If it is, escape the trap by switching to a fundamentally different interpretation or method.
+
+${PROACTIVE_WORKFLOW_PROMPT}
+
+${COMPLETION_LESSON_PROMPT}`;
 
 function buildSystemPrompt(): string {
   // Memory is composed by the Harness at session start (PromptComposer + the
@@ -444,40 +469,39 @@ async function consumeTurn(
   // piped/scripted output stays clean.
   const tty = !!process.stdout.isTTY;
   let thinking = false;
-  let thinkingText = '';
+  let thinkingCard: ThinkingCard | null = null;
   // Once the visible answer has begun streaming, never open another thinking
-  // line — a stray ReasoningDelta after the answer would otherwise wipe the
-  // mid-stream answer line with its \r\x1b[2K redraw (engine emits reasoning
-  // strictly before content per iteration, so this is purely defensive).
+  // card — a stray ReasoningDelta after the answer would otherwise redraw the
+  // box over the streamed answer (engine emits reasoning strictly before
+  // content per iteration, so this is purely defensive).
   let answered = false;
+  // Thinking renders as a BOXED CARD (see cli-thinking.ts): height-capped,
+  // tail-following scroll window into the reasoning stream, content in PLAIN
+  // non-highlighted text. On end it collapses to a one-line summary so the
+  // transcript stays clean.
   const startThinking = () => {
     if (!tty || thinking || answered) return;
     thinking = true;
-    thinkingText = '';
-    process.stdout.write(`  ${purple('💭')} ${dim('thinking…')}`);
+    thinkingCard = new ThinkingCard({
+      write: s => process.stdout.write(s),
+      columns: () => process.stdout.columns || 80,
+    });
+    thinkingCard.redraw();
   };
   const updateThinking = (delta: string) => {
-    if (!tty || !thinking) return;
+    if (!tty || !thinking || !thinkingCard) return;
     // Sanitize on ACCUMULATION: a leaked ANSI escape / control byte from the
     // reasoning stream must never survive into later redraws.
-    thinkingText += sanitizeForTerminal(delta);
-    // Truncate by DISPLAY COLUMNS, not UTF-16 length: CJK/fullwidth chars are
-    // 2 columns wide, so a 66-char mixed preview could span 100+ terminal
-    // columns → the line wraps and the \r\x1b[2K redraw can't clear the
-    // wrapped remnant rows (they pile up as visible garbage).
-    const cols = process.stdout.columns || 80;
-    const max = Math.max(20, cols - 14);
-    const preview = thinkingText.replace(/\s+/g, ' ').trim();
-    const shown = displayWidth(preview) > max
-      ? '…' + fitTail(preview, max - displayWidth('…'))  // ellipsis + tail fit exactly
-      : preview;
-    process.stdout.write(`\r\x1b[2K  ${purple('💭')} ${dim(shown || 'thinking…')}`);
+    thinkingCard.append(sanitizeForTerminal(delta));
+    thinkingCard.redraw();
   };
   const endThinking = () => {
     if (!tty || !thinking) return;
     thinking = false;
-    thinkingText = '';
-    process.stdout.write('\n');
+    if (thinkingCard) {
+      process.stdout.write(`${dim(thinkingCard.collapse())}\n`);
+      thinkingCard = null;
+    }
   };
 
   // StateChange (e.g. [THINK → VERIFY]) is intentionally not rendered:
@@ -588,9 +612,12 @@ function createHarness(args: CliArgs) {
     // the CLI too — long REPL sessions previously grew without bound because
     // the CLI's Harness never had a contextEngine configured.
     contextEngine: new ContextEngine({ maxMessages: 20, llm: adapter }),
-    // LLM-based verification in the VERIFY phase: the model checks the final
-    // output against the task (with a non-empty-output fast-fail pre-check).
-    verifier: createLLMVerifier(adapter),
+    // P1-1 (async verification): the CLI uses the pure rule-based verifier
+    // (non-empty-output check — a hard failure still triggers an in-engine
+    // rewrite). The LLM re-check of the final answer is NOT run synchronously
+    // here: the round-trip it added after the answer stream kept the CLI stuck
+    // in "verifying…" and a failed verdict rewrote the answer just printed.
+    verifier: createDefaultVerifier(),
     // Lifecycle hooks + escalating failure recovery policy.
     hooks: new DefaultHookRouter(),
     failurePolicy: new DefaultFailurePolicy(),

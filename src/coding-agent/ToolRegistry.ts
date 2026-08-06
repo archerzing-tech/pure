@@ -180,7 +180,7 @@ export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze([
   },
   {
     name: 'web_search',
-    description: 'Search the web and return results with titles, snippets, and URLs. Chinese-priority backends (cn.bing.com → DuckDuckGo → Bing) — no API key needed.',
+    description: 'Search the web and return results with titles, snippets, and URLs. With a Tavily API key configured searches go through the Tavily API first for higher-quality results; otherwise free backends are probed in parallel (Sogou → cn.bing.com → DuckDuckGo → Bing for Chinese queries, DuckDuckGo → Bing otherwise).',
     input_schema: {
       type: 'object',
       properties: {

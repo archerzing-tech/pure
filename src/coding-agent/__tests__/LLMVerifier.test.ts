@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'bun:test';
 import {
   createLLMVerifier,
+  createLLMOnlyVerifier,
   createLLMVerifyCheck,
   extractUserTask,
   parseVerdict,
@@ -131,5 +132,42 @@ describe('createLLMVerifier', () => {
     expect(prompt).toContain('Now also handle empty input.'); // the task
     expect(prompt).toContain('the final answer'); // the output
     expect(prompt).toContain('verification agent');
+  });
+});
+
+describe('createLLMOnlyVerifier (P1-1 async verification)', () => {
+  it('passes when the model verdict is passed', async () => {
+    const v = createLLMOnlyVerifier(verdictLLM('{"passed": true, "feedback": "addresses request"}'));
+    const result = await v.evaluate({ output: 'answer text', context: CTX });
+    expect(result.passed).toBe(true);
+  });
+
+  it('fails with the model feedback when the verdict is failed', async () => {
+    const v = createLLMOnlyVerifier(verdictLLM('{"passed": false, "feedback": "missing conclusion"}'));
+    const result = await v.evaluate({ output: 'answer text', context: CTX });
+    expect(result.passed).toBe(false);
+    expect(result.feedback).toContain('missing conclusion');
+  });
+
+  it('consults the LLM even for an EMPTY output — no non-empty fast-fail', async () => {
+    // Key difference from createLLMVerifier: the LLM-only variant is the
+    // async post-Completed check, where the empty-output rule check already
+    // ran inside the engine's synchronous verifier. Here the model judges
+    // whatever was streamed (which may be empty after a rewrite loop).
+    const { llm, lastMessages } = capturingLLM('{"passed": false, "feedback": "empty"}');
+    const v = createLLMOnlyVerifier(llm);
+    const result = await v.evaluate({ output: '   ', context: CTX });
+    expect(result.passed).toBe(false);
+    expect(lastMessages()).toHaveLength(1); // LLM WAS consulted
+  });
+
+  it('fails open (passes) when the verifier LLM throws', async () => {
+    const throwing: LLMAdapter = {
+      complete: async () => { throw new Error('llm down'); },
+      stream: async function* () {},
+    };
+    const v = createLLMOnlyVerifier(throwing);
+    const result = await v.evaluate({ output: 'output', context: CTX });
+    expect(result.passed).toBe(true);
   });
 });

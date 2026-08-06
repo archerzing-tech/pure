@@ -1,7 +1,7 @@
 // src/ui/__tests__/chat.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { parseToolCallBuffer } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText } from '../chat';
 
 describe('parseToolCallBuffer', () => {
   it('parses the { name, arguments: string } wrapper format', () => {
@@ -46,5 +46,45 @@ describe('parseToolCallBuffer', () => {
     const parsed = parseToolCallBuffer('{"name":"web_search"}');
     expect(parsed.name).toBe('web_search');
     expect(parsed.args).toBeUndefined();
+  });
+});
+
+describe('assistant bubble copy target policy', () => {
+  it('allows ordinary assistant text targets', () => {
+    expect(shouldCopyAssistantBubbleTarget(null)).toBe(true);
+  });
+
+  it('ignores interactive buttons, links, and diagram targets', () => {
+    const target = (selector: string) => ({ closest: (value: string) => value.includes(selector) ? {} : null });
+    expect(shouldCopyAssistantBubbleTarget(target('button') as unknown as EventTarget)).toBe(false);
+    expect(shouldCopyAssistantBubbleTarget(target('a') as unknown as EventTarget)).toBe(false);
+    expect(shouldCopyAssistantBubbleTarget(target('.svg-target') as unknown as EventTarget)).toBe(false);
+    expect(shouldCopyAssistantBubbleTarget(target('.chart-target') as unknown as EventTarget)).toBe(false);
+  });
+});
+
+describe('assistant bubble copy feedback', () => {
+  it('copies text and reports success', async () => {
+    const messages: string[] = [];
+    const copied = await copyAssistantBubbleText('assistant reply', async (text) => {
+      expect(text).toBe('assistant reply');
+      return true;
+    }, (message) => messages.push(message));
+    expect(copied).toBe(true);
+    expect(messages).toEqual(['已复制回复内容']);
+  });
+
+  it('reports failure when clipboard writing fails', async () => {
+    const messages: string[] = [];
+    const copied = await copyAssistantBubbleText('assistant reply', async () => false, (message) => messages.push(message));
+    expect(copied).toBe(false);
+    expect(messages).toEqual(['复制回复内容失败']);
+  });
+
+  it('does not invoke clipboard or toast for empty output', async () => {
+    let calls = 0;
+    const copied = await copyAssistantBubbleText('', async () => { calls++; return true; }, () => { calls++; });
+    expect(copied).toBe(false);
+    expect(calls).toBe(0);
   });
 });

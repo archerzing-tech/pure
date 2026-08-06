@@ -205,10 +205,30 @@ export function createLLMVerifyCheck(llm: LLMAdapter, options?: LLMVerifierOptio
  * LLM-based verifier: fast rule check (non-empty output) first, then the model
  * judges conformance to the task. Wire it via `config.verifier` to replace the
  * pure rule-based default in real flows.
+ *
+ * P1-1 note: this SYNC variant is no longer the default in the GUI/CLI — the
+ * LLM round-trip it adds after the answer stream blocks the "turn complete"
+ * UX, and a failed verdict rewrites the answer the user just read. The
+ * GUI now uses `createLLMOnlyVerifier` in fire-and-forget mode instead.
  */
 export function createLLMVerifier(llm: LLMAdapter, options?: LLMVerifierOptions): Verifier {
   const v = new Verifier();
   v.addCheck(NonEmptyOutputCheck);
+  v.addCheck(createLLMVerifyCheck(llm, options));
+  return v;
+}
+
+/**
+ * LLM-only verifier for ASYNC verification (P1-1): the model judges the final
+ * output against the task AFTER the answer has already been delivered. The GUI
+ * runs it fire-and-forget — a failed verdict appends a neutral suggestion
+ * bubble instead of rewriting the displayed answer, so the LLM round-trip can
+ * never delay the turn-complete UI or undo streamed content. Skips the
+ * rule-based checks (they stay in the engine's synchronous `verifier`, where a
+ * hard failure like empty output must still trigger a rewrite).
+ */
+export function createLLMOnlyVerifier(llm: LLMAdapter, options?: LLMVerifierOptions): Verifier {
+  const v = new Verifier();
   v.addCheck(createLLMVerifyCheck(llm, options));
   return v;
 }

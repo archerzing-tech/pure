@@ -7,10 +7,11 @@ import { saveSession, loadLastSession, type StoredMessage, type ToolExecMeta } f
 import { LocalStorageMemoryStore } from '../adapter/memory/LocalStorageMemoryStore';
 import { WASMEmbeddingStore } from '../adapter/memory/WASMEmbeddingStore';
 import { harvestUserPreferences } from '../shared/memory';
+import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT } from '../shared/agentBehavior';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt } from '../coding-agent/Planner';
 import { PermissionManager } from '../coding-agent/PermissionManager';
-import { createLLMVerifier, createDefaultVerifier } from '../coding-agent/Verifier';
+import { createLLMOnlyVerifier, createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS } from '../coding-agent/SubagentOrchestrator';
 import { requestPermission } from './permission';
 import {
@@ -28,8 +29,12 @@ import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
 import { getApplicationTmpWorkspace, isTauriRuntime } from '../shared/tauri';
 import { renderMarkdown, scheduleStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdown';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
+import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, type ToolRowHandle } from './toolRow';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, type ThinkingCardHandle } from './thinkingCard';
+import { copyTextToClipboard } from '../shared/clipboard';
+import { showToast } from '../shared/toast';
+import { t } from '../shared/i18n';
 import type { MCPClient } from '../harness/mcp/MCPClient';
 import type { FileWatcher } from '../harness/FileWatcher';
 import type {
@@ -78,7 +83,7 @@ const DEFAULT_BUDGET: BudgetConfig = {
 // also keeps the original XML-tool-call leak defense: when a workspace is
 // missing, models are only told about the tools they can actually invoke.
 const WEB_TOOLS_PROMPT = `Web tools:
-- web_search(query, maxResults?) — web search across cn.bing.com + DuckDuckGo + Bing (no API key needed; Chinese queries are routed to the China Bing backend first for much better Chinese results). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
+- web_search(query, maxResults?) — web search (with a Tavily API key in Settings → Tools it uses the Tavily API first for higher-quality results; otherwise free backends are probed in parallel — Sogou + cn.bing.com + DuckDuckGo + Bing for Chinese queries). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
 - web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.`;
 
 const FS_TOOLS_PROMPT = `File tools:
@@ -96,7 +101,9 @@ Shell & Git:
 - execute_command(command) — run a shell command
 - git_diff(staged?, path?) — show git diff
 - git_log(maxCount?, oneline?) — recent commit history
-- git_status — working tree status`;
+- git_status — working tree status
+
+Path rule: pass file and directory paths relative to the selected workspace root (for example src/app.ts, not the workspace absolute path). The backend also accepts an absolute path only when it is inside the selected workspace; never invent or prepend the workspace twice.`;
 
 // sys_info works without a workspace (the Rust backend ignores the workspace
 // field), so it is advertised in BOTH plain-chat and workspace mode.
@@ -142,6 +149,39 @@ type ToolRowEntry = {
 //    format. Without the fallback every tool row rendered with empty args: two
 //    parallel web_search calls then looked like ONE duplicated search instead
 //    of two queries (see the "两个 web Search 同时出现" report).
+export function assistantBubbleTextForCopy(bubble: HTMLElement): string {
+  const clone = bubble.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll('button, .svg-slot, .chart-slot, .mermaid-slot, .puml-diagram').forEach((el) => el.remove());
+  return (clone.innerText || clone.textContent || '').trim();
+}
+
+export function shouldCopyAssistantBubbleTarget(target: EventTarget | null): boolean {
+  if (!target || typeof (target as { closest?: unknown }).closest !== 'function') return true;
+  return !(target as Element).closest('button, a, [role="button"], .svg-target, .chart-target, .mermaid-target');
+}
+
+export async function copyAssistantBubbleText(
+  text: string,
+  copy: (value: string) => Promise<boolean> = copyTextToClipboard,
+  toast: (message: string) => void = showToast,
+): Promise<boolean> {
+  if (!text) return false;
+  const copied = await copy(text);
+  toast(copied ? t('assistant.copied') : t('assistant.copyFailed'));
+  return copied;
+}
+
+export function bindAssistantBubbleCopy(bubble: HTMLElement): void {
+  if (bubble.dataset.assistantCopyBound === '1') return;
+  bubble.dataset.assistantCopyBound = '1';
+  bubble.addEventListener('dblclick', async (event) => {
+    if (!shouldCopyAssistantBubbleTarget(event.target)) return;
+    const text = assistantBubbleTextForCopy(bubble);
+    if (!text) return;
+    void copyAssistantBubbleText(text);
+  });
+}
+
 export function parseToolCallBuffer(buf: string | undefined): { name?: string; args?: Record<string, unknown> } {
   const trimmed = (buf ?? '').trim();
   if (!trimmed) return {};
@@ -196,13 +236,16 @@ function isToolEnabled(name: string, config: PureConfig): boolean {
 }
 
 // ── Scroll & status-bubble helpers ──
-
-// Track whether the user is "pinned" to the bottom of the chat view.
-// Pinned = the user hasn't manually scrolled away from the bottom. While
-// pinned, every content change scrolls to the absolute bottom; once the user
-// scrolls up, auto-scroll stops until they return to the bottom.
 //
-// Why not a px threshold? The old approach (scroll only when
+// Pinned-to-bottom tracking and rAF-coalesced auto-scroll live in scrollPin.ts
+// (shared with main.ts session restore). The reason it is coalesced: tokens /
+// streamed command lines / reasoning deltas can arrive many times per frame,
+// and each direct scrollTop write reads scrollHeight (a forced layout on the
+// WHOLE transcript — all bubbles, code blocks, SVGs), so per-event scrolling
+// is the classic long-transcript stutter. One rAF-scheduled scroll per frame
+// caps the cost at the display refresh rate.
+//
+// Why not a px threshold for pinning? The old approach (scroll only when
 // scrollHeight - scrollTop - clientHeight < 120) broke the moment a single
 // markdown render grew the transcript by more than the threshold in one step
 // — e.g. diffStreaming landing a complete fenced code block in one throttled
@@ -210,42 +253,6 @@ function isToolEnabled(name: string, config: PureConfig): boolean {
 // from bottom then exceeded the threshold and auto-scroll silently stopped
 // even though the user never scrolled up, leaving the scrollbar stuck above
 // the newest content.
-const pinnedStates = new WeakMap<HTMLElement, boolean>();
-
-function isPinnedToBottom(el: HTMLElement): boolean {
-  return pinnedStates.get(el) ?? true;
-}
-
-function setPinnedToBottom(el: HTMLElement, v: boolean): void {
-  pinnedStates.set(el, v);
-}
-
-// rAF-coalesced auto-scroll frames: tokens / streamed command lines / reasoning
-// deltas can arrive many times per frame. Each direct scrollTop write reads
-// scrollHeight (a forced layout on the WHOLE transcript — all bubbles, code
-// blocks, SVGs), so per-event scrolling is the classic long-transcript stutter.
-// One rAF-scheduled scroll per frame caps the cost at the display refresh rate.
-const scrollFrames = new WeakMap<HTMLElement, number>();
-
-// Wire once per element: a user scroll away from the bottom unpins; a return
-// to the bottom (or a programmatic scroll-to-bottom while pinned) re-pins.
-function wireScrollPin(el: HTMLElement): void {
-  if (el.dataset.scrollPinWired === '1') return;
-  el.dataset.scrollPinWired = '1';
-  const NEAR_BOTTOM_PX = 40;
-  el.addEventListener('scroll', () => {
-    setPinnedToBottom(el, el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX);
-  }, { passive: true });
-}
-
-function scrollChatToBottomIfPinned(el: HTMLElement): void {
-  if (!isPinnedToBottom(el)) return;
-  if (scrollFrames.has(el)) return;
-  scrollFrames.set(el, requestAnimationFrame(() => {
-    scrollFrames.delete(el);
-    if (isPinnedToBottom(el)) el.scrollTop = el.scrollHeight;
-  }));
-}
 
 // Resolve every still-pending tool row (stream ended without a ToolResult —
 // aborted mid-call, error, or budget stop) so none remains in `pending` state.
@@ -281,10 +288,18 @@ const BASE_SYSTEM_PROMPT = (hasWorkspace: boolean, temporaryWorkspace = false): 
     : `${WEB_TOOLS_PROMPT}\n\n${SYS_INFO_PROMPT}`;
   return `${persona}\n\n${toolsBlock}
 
+${PROACTIVE_WORKFLOW_PROMPT}
+
+${COMPLETION_LESSON_PROMPT}
+
 Work step by step. Read before you write. Verify after you change. Be concise.
 
 Output style:
 - Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").
+- Structure longer replies into clear sections — use Markdown headings (##) for each category, short paragraphs for each point, and lists where items fit. Wrap the KEY phrase(s) of each section in ==double equals== (e.g. ==西安到重庆==, ==3 小时 40 分==) so they render HIGHLIGHTED; keep the surrounding prose plain so the highlighted-vs-plain contrast is visible.
+- To SHOW a picture/diagram, emit it as a fenced code block tagged svg containing complete standalone SVG — the app renders it inline as an image (diagrams render too: mermaid for flowchart/gantt/sequence, puml for PlantUML).
+- To SHOW data as a chart, emit a fenced code block tagged chart: put type: bar|line|pie on its own line (default bar), optional title: and unit: lines, then one label value row per line (e.g. 一月 120, 二月 180). The app renders bar/line/pie charts inline. For weather trends, use one numeric value per day (prefer average temperature; use "周一：25℃" or "周一 | 25"), not a prose-only table.
+- For a weather forecast or other time-sensitive data, call web_search FIRST and use the returned forecast data; never invent future weather. If the user did not provide a location, ask for it or state the location assumption clearly. Then include both a concise explanation and a fenced chart block so the GUI renders the image.
 - A bare "generate X", "show me X", "give me X", "what does X look like", or any "write me code for…" without a path means inline output — never reach for write_file.
 - COMPLETE runnable artifacts go to disk by default: when the user asks you to BUILD a full game, mini-game, web page/site, app, tool, script, or small project ("写一个小游戏", "做一个网页", "开发一个工具" — even without naming a path), WRITE it to a file instead of printing the whole source inline. Single-file artifact → a new file like index.html / game.html / app.py in the workspace; multi-file project → a new directory with the files. After writing, state the path(s) and how to run/open it.
 - When you do write a file, briefly state where it landed and confirm the user actually wanted persistence; the EXISTENCE of a workspace does NOT imply "save everything to disk".
@@ -424,7 +439,7 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
 // an application-owned temporary directory for this session; web tools remain
 // filesystem-independent.
 function createToolAdapter(workspace: string, config: PureConfig): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace);
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey);
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.
@@ -766,11 +781,21 @@ export class ChatController {
         mcpServers: this.deferredInitDone ? undefined : (config.mcpServers ?? []),
         fileWatcher: this.deferredInitDone ? undefined : (effectiveWorkspace ? { cwd: effectiveWorkspace } : undefined),
         permissionManager: this.permissionManager,
-        // Code-review skill toggle: when disabled, fall back to the pure
-        // rule-based verifier (non-empty-output check) instead of the
-        // LLM re-check of the final output against the task.
-        verifier: (config.skills?.['code-review'] ?? true) ? createLLMVerifier(llm) : createDefaultVerifier(),
+        // P1-1 (async verification): the engine's `verifier` stays PURELY
+        // rule-based (non-empty-output check — a hard failure there must still
+        // trigger an in-engine rewrite). The LLM re-check of the final output
+        // no longer blocks the turn: it runs fire-and-forget after Completed
+        // (see the Completed handler) and a failed verdict only appends a
+        // suggestion bubble instead of rewriting the displayed answer.
+        verifier: createDefaultVerifier(),
       });
+
+      // LLM-only verifier for the post-Completed async check (P1-1). Created
+      // once per send when the Code Review skill is enabled; invoked
+      // fire-and-forget so it can never delay the turn-complete UI.
+      const llmVerifyVerifier = (config.skills?.['code-review'] ?? true)
+        ? createLLMOnlyVerifier(llm)
+        : undefined;
 
       // ── Logical-trap pre-scan (runs in plain-chat AND workspace mode):
       // contradictory / impossible / trick premises are flagged before the
@@ -839,7 +864,10 @@ export class ChatController {
       // Eager thinking indicator: the user sees the animation while waiting
       // for the first token; reasoning deltas upgrade it with live text.
       thinkingCard = openThinkingCard();
-      chatEl.scrollTop = chatEl.scrollHeight;
+      // Route through the rAF-coalesced scroll helper so this first content
+      // growth joins the same frame budget as every streamed token (a direct
+      // scrollTop write here forced a synchronous full-transcript layout).
+      scrollChatToBottomIfPinned(chatEl);
 
       // ── Deferred init: boot MCP + FileWatcher on first use ──
       if (!this.deferredInitDone) {
@@ -1124,6 +1152,33 @@ export class ChatController {
               this.messages = event.payload.messages;
               this.hasHistory = true;
             }
+
+            // P1-1 (async verification): the LLM re-check of the answer runs
+            // AFTER the stream — fire-and-forget so the UI flips back to Send
+            // immediately (setStreaming(false) below is not delayed by an LLM
+            // round-trip). A failed verdict does NOT rewrite the answer the
+            // user just read; it only appends a neutral suggestion bubble.
+            // Skipped on interrupted turns (user Stop) and stale generations.
+            const verifyOutput = event.payload.finalOutput ||
+              assistantSegments.map(s => s.text).filter(Boolean).join('\n\n');
+            if (llmVerifyVerifier && verifyOutput && !event.payload.interrupted && gen === this.generation) {
+              const verifyCtx = event.payload.messages ?? this.messages;
+              // Only append the suggestion while the transcript is still at the
+              // completed answer: if the user has already sent a follow-up, a
+              // late-arriving bubble would land out of chronological order.
+              const msgCountAtComplete = this.messages.length;
+              void (async () => {
+                try {
+                  const verdict = await llmVerifyVerifier.evaluate({ output: verifyOutput, context: verifyCtx });
+                  if (!verdict.passed && gen === this.generation && this.messages.length <= msgCountAtComplete) {
+                    this.addStatusBubble(`🔎 验证建议: ${verdict.feedback ?? ''}`, true);
+                    scrollChatToBottomIfPinned(chatEl);
+                  }
+                } catch {
+                  // A broken verifier call must never break the session.
+                }
+              })();
+            }
             break;
           }
 
@@ -1281,6 +1336,7 @@ export class ChatController {
     // Assistant bubbles start empty: they get markdown-rendered at the
     // `Completed` event (see send()); user bubbles stay as raw escaped text.
     if (role === 'user') bubble.textContent = content;
+    else bindAssistantBubbleCopy(bubble);
     wrapper.appendChild(bubble);
     chatEl.appendChild(wrapper);
     return bubble;

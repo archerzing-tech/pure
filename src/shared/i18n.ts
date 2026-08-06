@@ -27,7 +27,7 @@ const translations: Record<Language, Record<string, string>> = {
     'workspace.saved': '工作区已更新',
     'workspace.cleared': '工作区已清除',
     'workspace.browseTitle': '选择工作区文件夹',
-    'workspace.dropHint': '拖拽文件夹到窗口，松开即可切换工作区',
+    'workspace.dropHint': '拖拽文件或文件夹到窗口，松开即可导入或切换工作区',
     'workspace.changeHint': '点击更换工作区',
     'workspace.pin': '固定',
     'workspace.unpin': '取消固定',
@@ -37,6 +37,8 @@ const translations: Record<Language, Record<string, string>> = {
     'path.open': '打开路径',
     'path.copied': '路径已复制',
     'path.openFailed': '无法打开路径',
+    'paste.openWithDefault': '用系统默认应用打开',
+    'diagram.openViewer': '打开图像查看器',
 
     // ── Thinking card ──
     'thinking.thinking': '思考',
@@ -61,6 +63,10 @@ const translations: Record<Language, Record<string, string>> = {
     'input.queued': '已排队，生成完成后自动发送…',
     'input.send.title': '发送',
     'input.stop.title': '停止',
+    'input.copied': '已复制输入内容',
+    'input.copyFailed': '复制输入内容失败',
+    'assistant.copied': '已复制回复内容',
+    'assistant.copyFailed': '复制回复内容失败',
 
     // ── Settings Panel ──
     'settings.back.title': '返回聊天',
@@ -117,6 +123,8 @@ const translations: Record<Language, Record<string, string>> = {
     'tools.git.hint': '差异、日志、状态',
     'tools.browser': '网页工具',
     'tools.browser.hint': '网页搜索与抓取',
+    'tools.tavily': 'Tavily 搜索 API',
+    'tools.tavily.hint': '可选：填写 Tavily 密钥以启用高质量搜索（tavily.com 有免费额度）——留空则回退到免费后端',
     'tools.permissionSection': '权限与审批',
     'tools.permissionMode': '权限模式',
     'tools.permissionMode.hint': '工具调用的审批策略',
@@ -217,6 +225,34 @@ const translations: Record<Language, Record<string, string>> = {
     'permission.allowOnce': '允许一次',
     'permission.allowAlways': '始终允许(本次会话)',
 
+    // ── Paste chips ──
+    'paste.memory': '应用临时空间（内存）',
+    'paste.dblclickHint': '双击查看内容',
+    'paste.clickHint': '点击查看内容',
+    'paste.remove': '移除',
+    'paste.removeLabel': '移除粘贴文件',
+    'paste.close': '关闭',
+    'paste.closeTitle': '关闭 (Esc)',
+    'paste.truncated': '内容过长，仅显示前 {shown} 字符（共 {total} 字符）',
+    'paste.truncatedFile': '文件过大，仅显示前 {shown}（文件共 {total}）',
+    'paste.attachmentMarker': '[粘贴文件: {name} ({size})]',
+    'paste.imageMarker': '[粘贴图片/截图: {name} ({size})]',
+    'paste.loading': '图片加载中…',
+    'paste.imageTooLarge': '图片超过 25MB，未添加',
+    'paste.binaryInfo': '这是 {type} 文件，已保存到应用临时目录。可从上方路径打开。',
+    'paste.unknownType': '未知类型',
+
+    // ── Temp paste files (Settings → General) ──
+    'tmp.title': '临时粘贴文件',
+    'tmp.desc': '清理 ~/.pure/tmp 下超过 N 天的粘贴文件（不影响会话工作区文件）',
+    'tmp.usage': '当前占用',
+    'tmp.usageNone': '无粘贴文件',
+    'tmp.daysHint': '保留天数',
+    'tmp.cleanBtn': '清理',
+    'tmp.cleaned': '已清理 {n} 个粘贴文件，释放 {size}',
+    'tmp.nothing': '没有需要清理的粘贴文件',
+    'tmp.cleanFailed': '清理失败',
+
     // ── Session list ──
     'session.loadError': '无法加载会话',
     'session.sessionDeleteBtn': '删除',
@@ -244,7 +280,7 @@ const translations: Record<Language, Record<string, string>> = {
     'workspace.saved': 'Workspace updated',
     'workspace.cleared': 'Workspace cleared',
     'workspace.browseTitle': 'Select workspace folder',
-    'workspace.dropHint': 'Drop a folder to switch workspace',
+    'workspace.dropHint': 'Drop a file or folder to import it or switch workspace',
     'workspace.changeHint': 'Click to change workspace',
     'workspace.pin': 'Pin',
     'workspace.unpin': 'Unpin',
@@ -254,6 +290,8 @@ const translations: Record<Language, Record<string, string>> = {
     'path.open': 'Open path',
     'path.copied': 'Path copied',
     'path.openFailed': 'Could not open path',
+    'paste.openWithDefault': 'Open with default app',
+    'diagram.openViewer': 'Open image viewer',
 
     // ── Thinking card ──
     'thinking.thinking': 'Thinking',
@@ -278,6 +316,10 @@ const translations: Record<Language, Record<string, string>> = {
     'input.queued': 'Queued — will send when generation finishes…',
     'input.send.title': 'Send',
     'input.stop.title': 'Stop',
+    'input.copied': 'Input copied',
+    'input.copyFailed': 'Could not copy input',
+    'assistant.copied': 'Reply copied',
+    'assistant.copyFailed': 'Could not copy reply',
 
     // ── Settings Panel ──
     'settings.back.title': 'Back to chat',
@@ -334,6 +376,8 @@ const translations: Record<Language, Record<string, string>> = {
     'tools.git.hint': 'Diff, log, status',
     'tools.browser': 'Web Tools',
     'tools.browser.hint': 'Web search & fetch',
+    'tools.tavily': 'Tavily Search API',
+    'tools.tavily.hint': 'Optional: Tavily key for high-quality web search (free tier at tavily.com) — falls back to free backends when empty',
     'tools.permissionSection': 'Permission & approval',
     'tools.permissionMode': 'Permission mode',
     'tools.permissionMode.hint': 'Tool call approval policy',
@@ -433,6 +477,34 @@ const translations: Record<Language, Record<string, string>> = {
     'permission.deny': 'Deny',
     'permission.allowOnce': 'Allow once',
     'permission.allowAlways': 'Always allow',
+
+    // ── Paste chips ──
+    'paste.memory': 'App temp space (memory)',
+    'paste.dblclickHint': 'Double-click to view',
+    'paste.clickHint': 'Click to view',
+    'paste.remove': 'Remove',
+    'paste.removeLabel': 'Remove pasted file',
+    'paste.close': 'Close',
+    'paste.closeTitle': 'Close (Esc)',
+    'paste.truncated': 'Content too long — showing first {shown} characters (of {total})',
+    'paste.truncatedFile': 'File is large — showing first {shown} (of {total})',
+    'paste.attachmentMarker': '[Pasted file: {name} ({size})]',
+    'paste.imageMarker': '[Pasted screenshot/image: {name} ({size})]',
+    'paste.loading': 'Loading image…',
+    'paste.imageTooLarge': 'Image over 25MB, not attached',
+    'paste.binaryInfo': 'This is a {type} file. It was saved in the app temp directory; use the path above to open it.',
+    'paste.unknownType': 'unknown type',
+
+    // ── Temp paste files (Settings → General) ──
+    'tmp.title': 'Temp pasted files',
+    'tmp.desc': 'Delete pasted files older than N days in ~/.pure/tmp (session workspace files are untouched)',
+    'tmp.usage': 'Current usage',
+    'tmp.usageNone': 'No pasted files',
+    'tmp.daysHint': 'Days to keep',
+    'tmp.cleanBtn': 'Clean up',
+    'tmp.cleaned': 'Cleaned {n} pasted files, freed {size}',
+    'tmp.nothing': 'Nothing to clean',
+    'tmp.cleanFailed': 'Cleanup failed',
 
     // ── Session list ──
     'session.loadError': 'Could not load sessions',

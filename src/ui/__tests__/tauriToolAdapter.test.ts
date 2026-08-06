@@ -1,7 +1,7 @@
 // src/ui/__tests__/tauriToolAdapter.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { formatCommandOutput, formatCommandError, buildCommandResult } from '../TauriToolAdapter';
+import { formatCommandOutput, formatCommandError, buildCommandResult, formatBytes, formatWriteProgress } from '../TauriToolAdapter';
 
 describe('formatCommandOutput', () => {
   it('joins plain stdout lines', () => {
@@ -67,5 +67,32 @@ describe('buildCommandResult', () => {
     expect(r.success).toBe(false);
     expect(r.error).toContain('partial');
     expect(r.result).toBe('partial');
+  });
+});
+
+describe('formatBytes', () => {
+  it('formats bytes, KB, and MB', () => {
+    expect(formatBytes(512)).toBe('512 B');
+    expect(formatBytes(1024)).toBe('1.0 KB');
+    expect(formatBytes(12 * 1024)).toBe('12.0 KB');
+    expect(formatBytes(1.5 * 1024 * 1024)).toBe('1.5 MB');
+  });
+});
+
+describe('formatWriteProgress (Rust write_file_stream protocol lock)', () => {
+  it('formats the exact line the adapter streams for a progress event', () => {
+    // 230/512 KB = 44.9% → 45%; mirrors the Rust {type,written,total} event.
+    expect(formatWriteProgress('src/foo.ts', 230 * 1024, 512 * 1024))
+      .toBe('正在写入 src/foo.ts — 45% (230.0 KB/512.0 KB)');
+  });
+
+  it('treats a zero-total (empty file) as 100%', () => {
+    expect(formatWriteProgress('empty.txt', 0, 0))
+      .toBe('正在写入 empty.txt — 100% (0 B/0 B)');
+  });
+
+  it('shows the full write at the final chunk', () => {
+    expect(formatWriteProgress('big.bin', 1024 * 1024, 1024 * 1024))
+      .toBe('正在写入 big.bin — 100% (1.0 MB/1.0 MB)');
   });
 });

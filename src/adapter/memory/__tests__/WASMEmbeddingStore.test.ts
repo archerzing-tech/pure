@@ -160,6 +160,66 @@ describe('WASMEmbeddingStore', () => {
     });
   });
 
+  describe('batched embedding (v2.1)', () => {
+    it('embeds all uncached entries in ONE batched call, then scores', async () => {
+      const dir = mkdtempSync('/tmp/pure-wasm-embed-batch-');
+      const inner = new FSMemoryStore(dir, '/proj');
+      const store = new WASMEmbeddingStore({
+        store: inner,
+        minScore: 0.1,
+        embedBatch: async (texts: string[]) => {
+          // Deterministic bag-of-words vectors: each text gets its own dim,
+          // so the query can be made to overlap exactly one of them.
+          return texts.map((t, i) => {
+            const vec = new Array(32).fill(0);
+            vec[i % 32] = 1;
+            vec[31] = t.includes('typescript') ? 1 : 0;
+            return vec;
+          });
+        },
+      });
+      await store.add(entry({ content: 'user prefers the TypeScript language' }));
+      await store.add(entry({ content: 'user likes coffee in the morning' }));
+      await store.add(entry({ content: 'project uses typescript and vite' }));
+
+      const results = await store.search('typescript developer', { k: 2 });
+      expect(results).toHaveLength(2);
+      // Both typescript-tagged entries outrank the coffee one.
+      expect(results.every(r => r.content.toLowerCase().includes('typescript'))).toBe(true);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('never touches the embedder when the corpus is empty', async () => {
+      const dir = mkdtempSync('/tmp/pure-wasm-embed-empty-');
+      const inner = new FSMemoryStore(dir, '/proj');
+      let embedderCalls = 0;
+      const store = new WASMEmbeddingStore({
+        store: inner,
+        embed: async () => { embedderCalls++; return [1]; },
+      });
+      const results = await store.search('anything');
+      expect(results).toHaveLength(0);
+      expect(embedderCalls).toBe(0); // no model download / embed on empty corpus
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('skips entries whose batch embedding failed (fallback stays keyword)', async () => {
+      const dir = mkdtempSync('/tmp/pure-wasm-embed-batchfail-');
+      const inner = new FSMemoryStore(dir, '/proj');
+      const store = new WASMEmbeddingStore({
+        store: inner,
+        embedBatch: async () => { throw new Error('wasm crashed'); },
+      });
+      await store.add(entry({ content: 'prefers pnpm over npm' }));
+      // Batch embed fails → query embed also fails (only embedBatch given →
+      // query falls back to batch([text]) → throws) → keyword fallback.
+      const results = await store.search('pnpm', { k: 5 });
+      expect(results).toHaveLength(1);
+      expect(results[0].content).toContain('pnpm');
+      rmSync(dir, { recursive: true, force: true });
+    });
+  });
+
   describe('delegation', () => {
     it('add/forget/decay delegate to the inner store', async () => {
       const { store, inner } = makeStore();

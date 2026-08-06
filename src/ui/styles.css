@@ -41,6 +41,16 @@
   --ease-in-out:  cubic-bezier(0.65, 0, 0.35, 1);
   --transition:   0.2s cubic-bezier(0.16, 1, 0.3, 1);
   --transition-slow: 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  /* Terminal-style tool panels (file / shell / git tools). Dark console
+     surface in BOTH themes so the same token pair keeps the command-line
+     look consistent without hardcoding theme-locked hex values. */
+  --term-bg:      #000000;
+  --term-border:  #242424;
+  --term-ink:     #f2f2f2;
+  --term-muted:   #a8a8a8;
+  --term-dim:     #8f8f8f;
+  --term-accent:  #8ecbff;
+  --term-soft:    #202020;
 }
 
 /* ── Dark theme ── */
@@ -67,6 +77,10 @@
   --shadow-sm:    0 1px 2px rgba(0,0,0,0.2);
   --shadow-md:    0 4px 16px rgba(0,0,0,0.3);
   --shadow-lg:    0 8px 30px rgba(0,0,0,0.5);
+  /* Slightly lifted console surface so the terminal block reads as a raised
+     panel instead of a void against the dark chat background. */
+  --term-bg:      #141414;
+  --term-border:  #2c2c2c;
 }
 
 /* ── Reset ── */
@@ -1232,7 +1246,7 @@ body {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--text-primary);
+  color: var(--term-ink);
   padding: 0 2px;
 }
 .tool-row-stream-line.stderr {
@@ -1270,56 +1284,56 @@ body {
   font-weight: 600;
 }
 
-/* Read, Write, Bash, and List contents use the same neutral black surface as
-   a terminal, while the surrounding tool row keeps the normal chat styling.
+/* Read, Write, Bash, and List contents use the same neutral console surface
+   as a terminal, while the surrounding tool row keeps the normal chat styling.
    The Input + Output panels render as ONE continuous console block framed by
-   a very light gray border line. The seam in the middle carries no border,
-   no rounded corners and no gap — the first panel's top corners and the
-   second panel's bottom corners carry the block's outer radius. */
+   a thin border line. The seam in the middle carries no border, no rounded
+   corners and no gap — the first panel's top corners and the second panel's
+   bottom corners carry the block's outer radius. */
 .tool-row-section.terminal-panel {
   margin-top: 4px;
   padding: 9px 10px 10px;
-  border: 1px solid #242424;
+  border: 1px solid var(--term-border);
   border-bottom: 0;
   border-radius: 6px 6px 0 0;
-  background: #000;
+  background: var(--term-bg);
 }
 .tool-row-section.terminal-panel + .tool-row-section.terminal-panel {
   margin-top: 0;
   padding-top: 9px;
-  border: 1px solid #242424;
+  border: 1px solid var(--term-border);
   border-top: 0;
   border-radius: 0 0 6px 6px;
 }
 .tool-row-section.terminal-panel .tool-row-section-label {
-  color: #8f8f8f;
+  color: var(--term-dim);
 }
 .tool-row-section.terminal-panel .tool-row-field-key {
-  color: #a8a8a8;
+  color: var(--term-muted);
 }
 .tool-row-section.terminal-panel .tool-row-field-value,
 .tool-row-section.terminal-panel .tool-row-result,
 .tool-row-section.terminal-panel .tool-result-preview,
 .tool-row-section.terminal-panel .fetch-preview {
-  color: #f2f2f2;
+  color: var(--term-ink);
 }
 .tool-row-section.terminal-panel .path-link {
-  color: #8ecbff;
-  text-decoration-color: #8ecbff;
+  color: var(--term-accent);
+  text-decoration-color: var(--term-accent);
 }
 .tool-row-section.terminal-panel .path-link:hover {
-  background: #202020;
+  background: var(--term-soft);
 }
-/* Web-search rich list stays readable on the black console panel. */
+/* Web-search rich list stays readable on the console panel. */
 .tool-row-section.terminal-panel .search-result-title,
 .tool-row-section.terminal-panel .search-result-url {
-  color: #8ecbff;
+  color: var(--term-accent);
 }
 .tool-row-section.terminal-panel .search-result-snippet {
-  color: #c8c8c8;
+  color: var(--term-muted);
 }
 .tool-row-section.terminal-panel .search-result-item {
-  border-bottom-color: #242424;
+  border-bottom-color: var(--term-border);
 }
 
 /* ── Plan progress card (approved execution plan in the transcript) ──
@@ -1331,10 +1345,10 @@ body {
   margin-top: 2px;
 }
 .plan-progress-card {
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px 12px;
-  background: var(--surface);
+  background: var(--bg-card);
 }
 .plan-progress-head {
   display: flex;
@@ -1345,7 +1359,7 @@ body {
 .plan-progress-title {
   font-weight: 600;
   font-size: 13px;
-  color: var(--text-primary);
+  color: var(--text);
 }
 .plan-progress-count {
   margin-left: auto;
@@ -1377,7 +1391,7 @@ body {
   border-radius: 50%;
   font-size: 11px;
   font-weight: 600;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--border);
   color: var(--text-tertiary);
 }
 .plan-progress-step-body {
@@ -1396,7 +1410,7 @@ body {
 }
 .plan-progress-step.active {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
-  color: var(--text-primary);
+  color: var(--text);
 }
 .plan-progress-step.active .plan-progress-step-num {
   border-color: var(--accent);
@@ -4756,5 +4770,459 @@ button svg,
   .setting-input-group .setting-input {
     width: auto;
     flex-basis: auto;
+  }
+}
+
+/* ── Tool row readability ──
+ * The disclosure affordance is intentionally larger than the surrounding
+ * metadata so every tool row has an obvious, easy-to-hit expand target. */
+.tool-row-summary::before {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-tertiary) 12%, transparent);
+  color: var(--text-secondary);
+  content: '›';
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1;
+  transition: transform var(--transition), background var(--transition), color var(--transition);
+}
+.tool-row-summary:hover::before,
+.tool-row-summary:focus-visible::before {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+.tool-row[open] .tool-row-summary::before {
+  transform: rotate(90deg);
+}
+
+/* Web tools use one continuous pale-blue surface. The summary is the first
+   row of that surface and the body flows directly beneath it without a second
+   card, seam, border, radius, or artificial section gap. */
+.tool-row.web-tool {
+  overflow: hidden;
+  border: 1px solid #cfe8f8;
+  border-radius: 10px;
+  background: #eef8ff;
+}
+.tool-row.web-tool .tool-row-summary,
+.tool-row.web-tool .tool-row-summary:hover {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 12px;
+}
+.tool-row.web-tool .tool-row-body {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0 12px 12px 52px;
+  max-height: 320px;
+}
+.tool-row.web-tool .tool-row-section + .tool-row-section {
+  margin-top: 0;
+  padding-top: 10px;
+  border-top: 0;
+}
+.tool-row.web-tool .tool-row-section-label {
+  margin-bottom: 4px;
+}
+[data-theme="dark"] .tool-row.web-tool {
+  border-color: #2d5870;
+  background: #182d3a;
+}
+[data-theme="dark"] .tool-row.web-tool .tool-row-summary,
+[data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover,
+[data-theme="dark"] .tool-row.web-tool .tool-row-body {
+  background: transparent;
+}
+
+/* ── Web and system tool surfaces ──
+ * Web tools (web_search / web_fetch / web_researcher) and sys_info never use
+ * .terminal-panel (shouldUseTerminalPanel returns false for them — see
+ * toolRow.ts), so only the plain .tool-row-body surface is styled here. */
+.tool-row.sys-info .tool-row-body,
+.tool-row.web-tool .tool-row-body {
+  background: #eef8ff;
+  border-color: #cfe8f8;
+  color: #26485b;
+}
+.tool-row.sys-info .tool-row-body,
+.tool-row.web-tool .tool-row-body {
+  border: 1px solid #cfe8f8;
+  border-radius: 8px;
+  padding: 10px 12px 12px 36px;
+}
+.tool-row.web-tool .tool-row-summary {
+  background: #eef8ff;
+  border: 1px solid #cfe8f8;
+  border-radius: 8px;
+  padding: 7px 12px;
+}
+.tool-row.web-tool .tool-row-summary:hover {
+  background: #e3f3fc;
+}
+.tool-row.web-tool .tool-row-section + .tool-row-section,
+.tool-row.sys-info .tool-row-section + .tool-row-section {
+  border-top-color: #cfe8f8;
+}
+.tool-row.web-tool .tool-row-section-label,
+.tool-row.web-tool .tool-row-field-key {
+  color: #527589;
+}
+.tool-row.web-tool .tool-row-field-value,
+.tool-row.web-tool .tool-row-result,
+.tool-row.web-tool .tool-result-preview,
+.tool-row.web-tool .fetch-preview {
+  color: #26485b;
+}
+.tool-row.web-tool .search-result-item {
+  border-bottom-color: #cfe8f8;
+}
+.tool-row.web-tool .search-result-title,
+.tool-row.web-tool .search-result-url,
+.tool-row.web-tool .path-link {
+  color: #2474a6;
+  text-decoration-color: #2474a6;
+}
+.tool-row.web-tool .search-result-snippet {
+  color: #31566b;
+}
+[data-theme="dark"] .tool-row.sys-info .tool-row-body,
+[data-theme="dark"] .tool-row.web-tool .tool-row-body {
+  background: #182d3a;
+  border-color: #2d5870;
+  color: #d7f1fc;
+}
+[data-theme="dark"] .tool-row.web-tool .tool-row-summary {
+  background: #182d3a;
+  border-color: #2d5870;
+}
+[data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover {
+  background: #1d3949;
+}
+[data-theme="dark"] .tool-row.web-tool .tool-row-section + .tool-row-section,
+[data-theme="dark"] .tool-row.sys-info .tool-row-section + .tool-row-section {
+  border-top-color: #2d5870;
+}
+[data-theme="dark"] .tool-row.web-tool .tool-row-section-label,
+[data-theme="dark"] .tool-row.web-tool .tool-row-field-key,
+[data-theme="dark"] .tool-row.web-tool .search-result-snippet {
+  color: #9ccfe5;
+}
+[data-theme="dark"] .tool-row.web-tool .search-result-title,
+[data-theme="dark"] .tool-row.web-tool .search-result-url,
+[data-theme="dark"] .tool-row.web-tool .path-link {
+  color: #8ecbff;
+  text-decoration-color: #8ecbff;
+}
+
+/* ── SVG / chart previews ── */
+.bubble .svg-slot,
+.bubble .chart-slot {
+  width: 100%;
+  margin: 12px 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  overflow: hidden;
+}
+.bubble .svg-slot {
+  width: 50%;
+  max-width: 50%;
+  margin-left: 0;
+}
+.bubble .svg-source,
+.bubble .chart-source {
+  margin: 0;
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  padding: 0;
+  pointer-events: none;
+}
+.bubble .svg-target,
+.bubble .chart-target {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  cursor: zoom-in;
+  transition: background var(--transition), box-shadow var(--transition);
+}
+.bubble .svg-target:hover,
+.bubble .chart-target:hover {
+  background: color-mix(in srgb, var(--accent-soft) 35%, transparent);
+}
+.bubble .svg-target svg,
+.bubble .chart-target svg {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+}
+.bubble .svg-slot[data-state="pending"] .svg-source,
+.bubble .chart-slot[data-state="pending"] .chart-source {
+  max-height: 320px;
+  padding: 12px;
+  opacity: 1;
+  overflow-x: auto;
+}
+.bubble .svg-gallery {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  width: 100%;
+  margin: 12px 0;
+}
+.bubble .svg-gallery .svg-slot {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+
+/* ── Attachment chips and merged composer ── */
+.paste-chips {
+  display: flex;
+  flex: 1 0 100%;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  order: -1;
+  padding: 0 2px 2px;
+}
+.paste-chips:empty {
+  display: none;
+}
+.paste-chip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: min(320px, 100%);
+  min-height: 42px;
+  padding: 6px 8px 6px 6px;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-card) 88%, var(--accent-soft));
+  box-shadow: var(--shadow-sm);
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition), transform var(--transition);
+}
+.paste-chip:hover,
+.paste-chip:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--accent-soft);
+  box-shadow: var(--shadow-md);
+  outline: none;
+  transform: translateY(-1px);
+}
+.paste-chip-image {
+  padding-left: 6px;
+}
+.paste-chip-thumb,
+.paste-chip-type-icon,
+.paste-chip-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 8px;
+}
+.paste-chip-thumb {
+  object-fit: cover;
+  background: var(--bg-input);
+}
+.paste-chip-type-icon {
+  font-size: 19px;
+  line-height: 1;
+  background: var(--accent-soft);
+}
+.paste-chip-icon {
+  padding: 7px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.paste-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.paste-chip-size {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.paste-chip-remove,
+.paste-viewer-close {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition), transform var(--transition);
+}
+.paste-chip-remove:hover,
+.paste-viewer-close:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+  transform: scale(1.06);
+}
+#input-bar,
+#landing-input-wrap {
+  flex-wrap: wrap;
+  border-top: 0;
+  border-bottom: 0;
+  background: transparent;
+}
+#input-bar:focus-within,
+#landing-input-wrap:focus-within {
+  border-top-color: transparent;
+  border-bottom-color: transparent;
+}
+#prompt,
+#landing-prompt {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+#prompt:focus,
+#landing-prompt:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+/* Attachment viewer used by dropped files and oversized pastes. */
+.paste-viewer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--bg) 94%, #000 6%);
+  animation: viewerIn 0.22s var(--ease-out) both;
+}
+.paste-viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 0 0 auto;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--bg-card) 86%, transparent);
+}
+.paste-viewer-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.paste-viewer-title-icon {
+  font-size: 20px;
+}
+.paste-viewer-name {
+  overflow: hidden;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.paste-viewer-meta {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font: 11px var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.paste-viewer-body {
+  display: grid;
+  place-items: center;
+  flex: 1;
+  min-height: 0;
+  padding: 24px;
+  overflow: auto;
+}
+.paste-viewer-img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 120px);
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+}
+.paste-viewer-pre {
+  width: min(1100px, 100%);
+  max-height: 100%;
+  margin: 0;
+  padding: 18px;
+  overflow: auto;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text);
+  font: 12px/1.6 var(--font-mono);
+  white-space: pre-wrap;
+}
+.paste-viewer-binary,
+.paste-viewer-loading {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+.paste-viewer-binary-icon {
+  font-size: 44px;
+}
+.paste-viewer-open-default {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+.paste-viewer-truncated {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+@media (max-width: 720px) {
+  .bubble .svg-slot {
+    width: 100%;
+    max-width: 100%;
+  }
+  .bubble .svg-gallery {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .paste-chip {
+    max-width: 100%;
+    flex: 1 1 100%;
+  }
+  .paste-viewer-header {
+    padding: 12px 14px;
+  }
+  .paste-viewer-meta {
+    display: none;
   }
 }

@@ -136,7 +136,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'web_search',
-    description: 'Search the web and return results with titles, snippets, and URLs. Chinese-priority backends (cn.bing.com → DuckDuckGo → Bing) — no API key needed.',
+    description: 'Search the web and return results with titles, snippets, and URLs. With a Tavily API key configured (Settings → Tools) searches go through the Tavily API first for higher-quality results; otherwise free backends are probed in parallel (Sogou → cn.bing.com → DuckDuckGo → Bing for Chinese queries, DuckDuckGo → Bing otherwise).',
     input_schema: {
       type: 'object',
       properties: {
@@ -263,9 +263,11 @@ export function setToolOutputListener(fn: ToolOutputListener | null): void {
 
 export class TauriToolAdapter implements ToolAdapter {
   private workspace: string;
+  private tavilyApiKey: string;
 
-  constructor(workspace: string) {
+  constructor(workspace: string, tavilyApiKey = '') {
     this.workspace = workspace;
+    this.tavilyApiKey = tavilyApiKey;
   }
 
   getTools(): ToolDefinition[] {
@@ -305,7 +307,30 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: content, success: true, duration: Date.now() - start };
         }
         case 'write_file': {
-          const msg = await tauriInvoke('write_file', { workspace: ws, path: String(args.path ?? ''), content: String(args.content ?? '') }) as string;
+          const path = String(args.path ?? '');
+          const content = String(args.content ?? '');
+          // Stream byte-level progress while the file is written so the tool
+          // row shows "正在写入 … 45% (230/512 KB)" instead of a silent
+          // "等待输出" wait for the whole (possibly large) write to finish.
+          // Progress lines go to the live tool-output listener only — the LLM
+          // still gets the single "Wrote N bytes" result, not the noise.
+          if (tauriChannel) {
+            const channel = new tauriChannel<string>();
+            channel.onmessage = (raw: string) => {
+              let parsed: { type?: string; written?: number; total?: number } | null = null;
+              try { parsed = JSON.parse(raw); } catch { parsed = null; }
+              if (!parsed || parsed.type !== 'progress') return;
+              toolOutputListener?.(toolCall.id, 'stdout', formatWriteProgress(path, parsed.written ?? 0, parsed.total ?? 0));
+            };
+            const msg = await tauriInvoke('write_file_stream', {
+              workspace: ws,
+              path,
+              content,
+              onProgress: channel,
+            }) as string;
+            return { id: toolCall.id, toolName: name, result: msg, success: true, duration: Date.now() - start };
+          }
+          const msg = await tauriInvoke('write_file', { workspace: ws, path, content }) as string;
           return { id: toolCall.id, toolName: name, result: msg, success: true, duration: Date.now() - start };
         }
         case 'edit_file': {
@@ -433,6 +458,10 @@ export class TauriToolAdapter implements ToolAdapter {
             workspace: ws,
             query: String(args.query ?? ''),
             maxResults: args.maxResults ?? 10,
+            // Optional Tavily API key from Settings → Tools: when set, the
+            // Rust backend searches via the Tavily API first (stable, no
+            // scraping) and falls back to the free HTML backends otherwise.
+            apiKey: this.tavilyApiKey,
           }) as string;
           return { id: toolCall.id, toolName: name, result: searchData, success: true, duration: Date.now() - start };
         }
@@ -506,6 +535,23 @@ export function buildCommandResult(
     return { result: output, error: formatCommandError(exitCode, output), success: false };
   }
   return { result: output, success: true };
+}
+
+/** Human-readable byte size ("512 B", "12.3 KB", "1.5 MB") — used by the
+ * write_file progress lines and the tool row's pending label. */
+export function formatBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+/** Format ONE write_file progress event (the exact protocol the Rust
+ * write_file_stream command pushes over its Channel: `{ type: 'progress',
+ * written, total }`) as the live tool-row line. Pure + exported so the
+ * Rust/TS protocol is locked by a unit test, mirroring buildCommandResult. */
+export function formatWriteProgress(path: string, written: number, total: number): string {
+  const pct = total > 0 ? Math.round((written / total) * 100) : 100;
+  return `正在写入 ${path} — ${pct}% (${formatBytes(written)}/${formatBytes(total)})`;
 }
 
 export function formatCommandOutput(lines: Array<{ kind: 'stdout' | 'stderr'; line: string }>): string {

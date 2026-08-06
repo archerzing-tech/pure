@@ -6,7 +6,16 @@
 // by its own suite.
 
 import { describe, expect, it } from 'bun:test';
-import { parseBingResults, parseDuckDuckGoResults, containsCJK } from '../NodeToolAdapter';
+import {
+  parseBingResults,
+  parseDuckDuckGoResults,
+  parseSogouResults,
+  resultsRelevant,
+  significantCJKBigrams,
+  containsCJK,
+  tavilySearch,
+  firstRelevantResult,
+} from '../NodeToolAdapter';
 
 describe('Bing HTML result parser (mirrors Rust web_search_tests)', () => {
   it('parses result blocks with titles, snippets, and URLs', () => {
@@ -139,5 +148,164 @@ describe('DuckDuckGo HTML result parser (mirrors Rust web_search_tests)', () => 
     const results = parseDuckDuckGoResults(html, 10);
     expect(results.length).toBe(1);
     expect(results[0].url).toBe('https://ok.com/x');
+  });
+});
+
+describe('Sogou HTML result parser (mirrors Rust parse_sogou_results)', () => {
+  it('parses titles with <em> highlights, snippets, and absolutizes /link redirects', () => {
+    const html = `<h3 class="vr-title  "  vrcid="title.b429921">
+    <a class=" " target="_blank" href="http://u.ctrip.com/union/CtripRedirect.aspx?TypeID=2"  id="sogou_vr_11002601_title_1"  ><em><!--red_beg-->西安到重庆<!--red_end--></em>特价<em><!--red_beg-->机票<!--red_end--></em>查询 携程旅行网提供<span class="tag-website" >认证</span></a>
+</h3>
+<div class="text-layout ">
+<p class="star-wiki base-ellipsis clamp3 space-txt"  vrcid="baike.498ee65"><em><!--red_beg-->西安<!--red_end--></em>到<em><!--red_beg-->重庆<!--red_end--></em>特价<em><!--red_beg-->机票<!--red_end--></em>查询</p>
+</div>
+<h3 class="vr-title  "  vrcid="title.ba18e87">
+    <a class=" " target="_blank" href="/link?url=hedJjaC291MBtMZVirtXo7CqjI0tE6P9O"   >为什么<em><!--red_beg-->从西安去<!--red_end--></em>成都<em><!--red_beg-->的机票<!--red_end--></em>比<em><!--red_beg-->去重庆<!--red_end--></em>贵 ? - 知乎</a>
+</h3>
+<div class="text-layout ">
+<div class="fz-mid space-txt"  vrsid="otherLayout.ab819d7" vrcid="otherLayout.876963e">因此，航空公司能买到的航时，机位资源相对来说会比<em><!--red_beg-->重庆<!--red_end--></em>贵。</div>
+</div>
+<h3 class="vr-title  "  vrcid="title.c23308d">
+    <a class=" " target="_blank" href="https://baike.baidu.com/item/西安" id="sogou_vr_11002601_title_3" >西安</a>
+</h3>
+<h3 class="vr-title  "  vrcid="title.c23308e">
+    <a class=" " target="_blank" href="https://baike.baidu.com/item/西安" id="sogou_vr_11002601_title_4" >西安（dup）</a>
+</h3>`;
+    const results = parseSogouResults(html, 10);
+    expect(results.length).toBe(3); // dedup drops the same-URL repeat
+    expect(results[0].title).toContain('西安到重庆');
+    expect(results[0].title).toContain('机票');
+    expect(results[0].title).not.toContain('<!--');
+    expect(results[0].title).not.toContain('<em>');
+    expect(results[0].url).toBe('http://u.ctrip.com/union/CtripRedirect.aspx?TypeID=2');
+    expect(results[0].snippet).toContain('特价机票');
+    expect(results[1].url).toBe('https://www.sogou.com/link?url=hedJjaC291MBtMZVirtXo7CqjI0tE6P9O');
+    expect(results[1].title).toContain('重庆');
+    expect(results[1].snippet).toContain('重庆');
+    expect(results[2].title).toBe('西安');
+  });
+
+  it('stops at max results', () => {
+    const html = `<h3><a href="https://a.com">A</a></h3><p class="star-wiki">a</p><h3><a href="https://b.com">B</a></h3><p class="star-wiki">b</p><h3><a href="https://c.com">C</a></h3><p class="star-wiki">c</p>`;
+    const results = parseSogouResults(html, 2);
+    expect(results.length).toBe(2);
+    expect(results[0].url).toBe('https://a.com');
+    expect(results[1].url).toBe('https://b.com');
+  });
+
+  it('skips h3 blocks without anchors', () => {
+    const html = `<h3>no link here</h3><h3><a href="https://ok.com">OK</a></h3><p class="star-wiki">s</p>`;
+    const results = parseSogouResults(html, 10);
+    expect(results.length).toBe(1);
+    expect(results[0].url).toBe('https://ok.com');
+  });
+});
+
+describe('Relevance gate (mirrors Rust results_relevant)', () => {
+  it('drops glue chars from significant bigrams', () => {
+    expect(significantCJKBigrams('西安到重庆 机票')).toEqual(['西安', '重庆', '机票']);
+    const disney = significantCJKBigrams('上海迪士尼门票价格');
+    expect(disney).toContain('上海');
+    expect(disney).toContain('门票');
+    expect(disney).toContain('价格');
+    expect(significantCJKBigrams('rust programming')).toEqual([]);
+  });
+
+  it('rejects cn.bing.com tourism garbage for a flight query', () => {
+    const results = [
+      { title: '西安市_百度百科', snippet: '陕西省省会', url: 'https://baike.baidu.com/item/西安' },
+      { title: '西安旅游攻略', snippet: '西安必去景点', url: 'https://x.example/1' },
+      { title: '西安市人民政府', snippet: '', url: 'https://x.example/2' },
+      { title: '西安美食', snippet: '', url: 'https://x.example/3' },
+      { title: '西安天气', snippet: '', url: 'https://x.example/4' },
+    ];
+    expect(resultsRelevant('西安到重庆 机票', results)).toBe(false);
+  });
+
+  it('accepts Sogou flight results for the same query', () => {
+    const results = [
+      { title: '西安到重庆特价机票查询 携程旅行网', snippet: '经过搜狗确认', url: 'http://u.ctrip.com/x' },
+      { title: '为什么从西安去成都的机票比去重庆贵', snippet: '', url: 'https://www.sogou.com/link?url=1' },
+      { title: '重庆到西安机票比价', snippet: '', url: 'https://x.example/1' },
+    ];
+    expect(resultsRelevant('西安到重庆 机票', results)).toBe(true);
+  });
+
+  it('accepts non-CJK and short queries unconditionally', () => {
+    const results = [{ title: 'anything', snippet: '', url: 'https://x.example/1' }];
+    expect(resultsRelevant('rust programming language', results)).toBe(true);
+    expect(resultsRelevant('机票', results)).toBe(true);
+  });
+});
+
+describe('Tavily API backend + parallel first-win (mirrors Rust lib.rs)', () => {
+  it('maps Tavily JSON results to SearchResult (title/url/content → snippet)', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({
+        results: [
+          { title: '西安到重庆机票查询', url: 'https://flights.example.com/1', content: '携程特价机票：西安到重庆 ¥380 起', score: 0.95 },
+          { title: 'Second', url: 'https://b.com', content: 'plain snippet' },
+        ],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    ) as unknown as typeof fetch;
+    process.env.TAVILY_API_KEY = 'tvly-test';
+    try {
+      const results = await tavilySearch('西安到重庆 机票', 10);
+      expect(results.length).toBe(2);
+      expect(results[0].title).toBe('西安到重庆机票查询');
+      expect(results[0].url).toBe('https://flights.example.com/1');
+      expect(results[0].snippet).toContain('携程');
+      expect(results[1].snippet).toBe('plain snippet');
+    } finally {
+      delete process.env.TAVILY_API_KEY;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('throws when no TAVILY_API_KEY is set', async () => {
+    delete process.env.TAVILY_API_KEY;
+    await expect(tavilySearch('query', 10)).rejects.toThrow('TAVILY_API_KEY');
+  });
+
+  it('first-win: returns the first backend whose results pass the relevance gate', async () => {
+    // The slow backend is the RELEVANT one (passes the gate); the fast one is
+    // garbage. First-win must wait for the slow good result, not take the fast
+    // garbage — same guarantee the old serial chain gave, but without waiting
+    // for the slowest backend when a fast good one exists.
+    const slowRelevant = async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      return [
+        { title: '西安到重庆特价机票 携程', snippet: '机票查询', url: 'https://ctrip.example/1' },
+        { title: '西安到重庆机票价格', snippet: '', url: 'https://x.example/2' },
+      ];
+    };
+    const fastIrrelevant = async () => [
+      { title: '西安旅游攻略', snippet: '', url: 'https://x.example/3' },
+    ];
+    const outcome = await firstRelevantResult('西安到重庆 机票', [
+      { label: 'fast-garbage', fetch: fastIrrelevant },
+      { label: 'slow-good', fetch: slowRelevant },
+    ]);
+    expect(outcome.results).toBeDefined();
+    expect(outcome.results![0].title).toContain('携程');
+    expect(outcome.irrelevant).toBe(1);
+  });
+
+  it('aggregates failures when every backend fails the gate or is empty', async () => {
+    const garbage = async () => [
+      { title: '西安旅游攻略', snippet: '', url: 'https://x.example/3' },
+    ];
+    const empty = async () => [];
+    const failing = async () => { throw new Error('boom'); };
+    const outcome = await firstRelevantResult('西安到重庆 机票', [
+      { label: 'garbage', fetch: garbage },
+      { label: 'empty', fetch: empty },
+      { label: 'failing', fetch: failing },
+    ]);
+    expect(outcome.results).toBeUndefined();
+    expect(outcome.irrelevant).toBe(1);
+    expect(outcome.anyEmpty).toBe(true);
+    expect(outcome.failed.some((f) => f.includes('failing'))).toBe(true);
   });
 });

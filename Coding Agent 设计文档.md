@@ -142,7 +142,21 @@ async askUser(tool: string, ctx: PermissionContext): Promise<PermissionDecision>
 
 前端把 `PermissionDialog` 的结果通过 Tauri event/channel 回传；`DONT_ASK` 模式现在**只读放行、写操作拒绝**（原版默认 `allowed:true` 是 bug）。
 
-## 5. 验证：Verifier
+## 5. 主动解决问题工作流
+
+Coding Agent 不应把“调用一次工具并返回结果”当作完成。每个任务按以下闭环运行：
+
+1. **理解**：确认目标、约束、环境和完成定义；先查看仓库结构、相关文件、配置和可用命令。
+2. **诊断**：遇到错误时读取完整错误、复现或隔离问题，并判断是代码、数据、依赖、环境、权限、网络还是错误前提。
+3. **研究**：遇到不熟悉的库、API、格式或平台行为，主动使用 web/docs 工具和本地权威文档；不得编造 API。
+4. **补齐工具**：缺少依赖或开发工具时，优先使用项目既有包管理器做本地、可复现安装。系统级安装、凭据、付费服务、生产变更和破坏性操作必须先获得用户确认。
+5. **换路**：第一次失败后必须改变假设或方法；禁止无新证据重复同一个命令、查询或补丁。多次失败后使用 fallback、缩小问题，或向用户提出唯一缺失决策。
+6. **验证**：先运行最小相关测试，再按需运行类型检查、lint、全量测试和构建；没有验证结果不得声称成功。
+7. **沉淀**：任务结束记录“症状、根因、成功路径、验证命令、下次避免事项”，写入长期记忆供相似任务检索。
+
+GUI 与 CLI 必须注入同一份主动工作流提示，避免行为漂移。Harness 的 `successful_pattern` 应记录可复用成功路径，而不只是“session completed”。
+
+## 6. 验证：Verifier
 
 `Verifier implements VerifierAdapter`。Engine 在 VERIFY 阶段调用 `verifier.evaluate({ output, context })`，
 返回 `{ passed: boolean }`。Verifier 内部可按优先级分级执行检查（如先跑 lint 再跑 test），
@@ -150,7 +164,7 @@ async askUser(tool: string, ctx: PermissionContext): Promise<PermissionDecision>
 用户确认（写文件前）放在 quick 第 3 步，避免拒绝时浪费计算。Engine 在 VERIFY 阶段调用
 `verifier.evaluate`；不通过则回到 THINK 重试。
 
-## 6. 用户体验流程（修正后）
+## 7. 用户体验流程（修正后）
 
 ```
 prompt → analyzeTask → simple: Harness.run
@@ -163,7 +177,7 @@ Harness.run → Engine.run (流式 EngineEvent)
   Completed/Interrupted → 结束
 ```
 
-## 7. 前端 / Rust（保持原版结构，修正边界）
+## 8. 前端 / Rust（保持原版结构，修正边界）
 
 - 前端 `AgentAPI` 通过 Tauri `Channel` 收 `EngineEvent`，本地 `StreamManager` 合并后渲染。
 - Rust `SessionManager` **只持有 Rust 侧资源**（PTY、MCP 子进程、文件 watcher），按 `sessionId`

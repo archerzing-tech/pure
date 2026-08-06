@@ -55,11 +55,15 @@ export class FSMemoryStore implements IMemoryStore {
   async add(entry: Omit<MemoryEntry, 'id'>): Promise<string> {
     const project = entry.projectPath || this.defaultProject;
     const entries = this.load(project);
-    // Skip exact duplicates (same type + content + project) so repeated
-    // messages don't pile up identical memories.
-    if (entries.some(e => e.type === entry.type && e.content === entry.content)) {
-      return entries.find(e => e.type === entry.type && e.content === entry.content)!.id;
-    }
+    // Skip exact or keyed duplicates (same type + project) so repeated
+    // continuation turns do not pile up the same reusable lesson.
+    const duplicate = entries.find(e =>
+      e.type === entry.type && (
+        e.content === entry.content ||
+        (!!entry.dedupeKey && e.dedupeKey === entry.dedupeKey)
+      )
+    );
+    if (duplicate) return duplicate.id;
     const id = newId();
     entries.push({ ...entry, id, decayScore: entry.decayScore ?? 1 });
     this.persist(project, entries);

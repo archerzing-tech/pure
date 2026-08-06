@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "pure",
-  "version": "0.9.9",
+  "version": "0.10.0",
   "identifier": "com.pure.agent",
   "build": {
     "beforeDevCommand": "bun run vite",

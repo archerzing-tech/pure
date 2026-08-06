@@ -1,7 +1,7 @@
 // src/ui/main.ts
 // pure v0.8 — Notion-style sidebar + modal settings
 
-import { ChatController } from './chat';
+import { ChatController, bindAssistantBubbleCopy } from './chat';
 import { SettingsPanel, loadConfig, hasConfiguredKey } from './settings';
 import { loadSessionList, loadSession, deleteSession, deleteAllSessions, saveSessionWorkspace, getStoredThinkingSegments, type SessionMeta, type StoredMessage, type ToolExecMeta } from './store';
 import { loadRecentWorkspaces, touchRecentWorkspace, setRecentPinned, removeRecentWorkspace } from './recentWorkspaces';
@@ -11,12 +11,24 @@ import { t, applyTranslations, updateLanguage } from '../shared/i18n';
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { isTauriRuntime } from '../shared/tauri';
 import { showToast } from '../shared/toast';
+import { copyTextToClipboard } from '../shared/clipboard';
 import { renderMarkdown, stripToolCallXml } from './markdown';
 import { createToolRow, finalizeToolRow } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
+import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned } from './scrollPin';
 import { initPathLinks, linkifyPaths } from './pathLink';
+import { PasteChipManager, composeMessageWithAttachments, type DroppedFileRecord } from './pasteChip';
 
 const chat = new ChatController();
+
+// ── Oversized-paste chips (see pasteChip.ts) ──
+// Pastes above 64KB become a file chip (saved to ~/.pure/tmp/<session-id>/)
+// instead of jamming the textarea; double-click opens a viewer. Both the
+// bottom input bar and the landing input mount a chip row sharing one list.
+const pasteChips = new PasteChipManager(() => chat.getSessionId());
+pasteChips.mount(document.getElementById('input-bar')!);
+pasteChips.mount(document.getElementById('landing-input-wrap')!);
+
 let hasStartedChat = false;
 let contextCollapsed = false;
 let contextCollapsedBeforeSettings = false;
@@ -73,12 +85,14 @@ chat.onStreamingStateChange((streaming) => {
     sendBtn.innerHTML = sendSvg;
     sendBtn.title = 'Send';
     sendBtn.classList.remove('stopping');
-    sendBtn.disabled = !promptEl.value.trim();
+    // A message consisting only of pasted file chips (no typed text) is still
+    // sendable — the chips' content rides along in the composed message.
+    sendBtn.disabled = !promptEl.value.trim() && !pasteChips.hasAttachments();
     promptEl.placeholder = t('input.placeholder');
     promptEl.disabled = !hasConfiguredKey(loadConfig());
     landingSend.innerHTML = sendSvg;
     landingSend.title = 'Send';
-    landingSend.disabled = !landingPrompt.value.trim();
+    landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
     updateContextPanelStage(false);
     updateContextPanelChanges();
   }
@@ -364,6 +378,28 @@ function handleDroppedWorkspacePath(path: string) {
   void commitWorkspace(path);
 }
 
+async function handleDroppedPaths(paths: string[]): Promise<void> {
+  const sessionId = chat.getSessionId();
+  for (const path of paths) {
+    if (!path) continue;
+    try {
+      if (isTauriRuntime()) {
+        const core = await (await import('../shared/tauri')).loadTauriCore();
+        const record = await core?.invoke<DroppedFileRecord>('import_dropped_file', { sessionId, sourcePath: path });
+        if (record?.isDirectory) {
+          handleDroppedWorkspacePath(path);
+        } else if (record) {
+          pasteChips.addImportedFile(record);
+        }
+      }
+    } catch (err) {
+      console.error('[pure] dropped file import failed:', err);
+      showToast(`无法导入文件: ${path}`);
+    }
+  }
+  enableInputIfReady();
+}
+
 /** Native folder drop (Tauri). The webview's default dragDropEnabled:true
  * intercepts OS drops and emits enter/over/drop/leave events instead of
  * navigating to the dropped file. */
@@ -377,7 +413,7 @@ async function setupNativeDragDrop() {
         setDragActive(true);
       } else if (p.type === 'drop') {
         setDragActive(false);
-        handleDroppedWorkspacePath(p.paths[0] ?? '');
+        void handleDroppedPaths(p.paths);
       } else if (p.type === 'leave') {
         setDragActive(false);
       }
@@ -388,9 +424,9 @@ async function setupNativeDragDrop() {
 }
 
 /** Browser fallback (vite dev / plain web preview): prevents the page from
- * navigating to a dropped file and mirrors the overlay. Browsers do not
- * expose absolute folder paths, so the drop is a no-op there — the native
- * Tauri path above is what actually switches the workspace. */
+ * navigating to a dropped file and mirrors the overlay. Browser File objects
+ * are sent through the same attachment manager; directories remain a no-op.
+ */
 function setupBrowserDragDrop() {
   if (isTauriRuntime()) return;
   let depth = 0;
@@ -410,6 +446,8 @@ function setupBrowserDragDrop() {
     e.preventDefault();
     depth = 0;
     setDragActive(false);
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (files.length > 0) pasteChips.addDroppedFiles(files);
   });
 }
 
@@ -461,6 +499,7 @@ function updateSidebarModel() {
 function goToLanding() {
   hasStartedChat = false;
   queuedWhileStreaming = null;
+  pasteChips.clear();
   updateContextPanelStage(false);
   chatView.classList.add('landing');
   landingPrompt.value = '';
@@ -494,6 +533,10 @@ function renderSessionMessages(messages: StoredMessage[]) {
 
   const chatEl = document.getElementById('chat')!;
   chatEl.innerHTML = '';
+  // Same coalesced scroll machinery as live streaming (chat.ts), so the
+  // one-shot restore scroll joins the shared rAF budget instead of forcing a
+  // synchronous full-transcript layout at the end of the restore.
+  wireScrollPin(chatEl);
   const toolExecs: ToolExecMeta[] = [];
 
   for (const m of messages) {
@@ -514,12 +557,13 @@ function renderSessionMessages(messages: StoredMessage[]) {
       wrapper.appendChild(label);
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
+      bindAssistantBubbleCopy(bubble);
       wrapper.appendChild(bubble);
       chatEl.appendChild(wrapper);
       // Same leaked-<tool_calls> filter as live streaming; re-scroll once the
       // async diagram pass settles so restored content is never hidden.
       void renderMarkdown(stripToolCallXml(m.content), bubble).then(() => {
-        chatEl.scrollTop = chatEl.scrollHeight;
+        scrollChatToBottomIfPinned(chatEl);
       });
     } else if (m.role === 'user' && m.content) {
       flushToolExecs(toolExecs, chatEl);
@@ -539,7 +583,11 @@ function renderSessionMessages(messages: StoredMessage[]) {
     }
   }
   flushToolExecs(toolExecs, chatEl);
-  chatEl.scrollTop = chatEl.scrollHeight;
+  // A session restore rebuilds the transcript from scratch, so it always
+  // lands at the newest content — force the pin state the same way a fresh
+  // stream would, then scroll through the shared coalesced helper.
+  setPinnedToBottom(chatEl, true);
+  scrollChatToBottomIfPinned(chatEl);
   updateContextPanelChanges();
 }
 
@@ -566,8 +614,8 @@ function enableInputIfReady() {
   const config = loadConfig();
   const ready = hasConfiguredKey(config);
   promptEl.disabled = !ready;
-  sendBtn.disabled = !ready;
-  landingSend.disabled = !ready;
+  sendBtn.disabled = !ready || (!promptEl.value.trim() && !pasteChips.hasAttachments());
+  landingSend.disabled = !ready || (!landingPrompt.value.trim() && !pasteChips.hasAttachments());
   if (!ready) {
     promptEl.placeholder = t('input.placeholderDisabled');
     landingPrompt.placeholder = t('input.placeholderDisabled');
@@ -583,7 +631,7 @@ landingPrompt.addEventListener('input', () => {
   landingPrompt.style.height = 'auto';
   landingPrompt.style.height = Math.min(landingPrompt.scrollHeight, 200) + 'px';
   if (!chat.isStreaming()) {
-    landingSend.disabled = !landingPrompt.value.trim();
+    landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
   }
 });
 
@@ -602,9 +650,27 @@ landingPrompt.addEventListener('keydown', (e) => {
 promptEl.addEventListener('input', () => {
   autoResizePrompt();
   if (!chat.isStreaming()) {
-    sendBtn.disabled = !promptEl.value.trim();
+    sendBtn.disabled = !promptEl.value.trim() && !pasteChips.hasAttachments();
   }
 });
+
+// Double-click either composer to copy the current draft without disturbing
+// the selection or send behavior. Empty drafts are ignored.
+function bindDraftDoubleClickCopy(input: HTMLTextAreaElement): void {
+  input.addEventListener('dblclick', async () => {
+    const text = input.value;
+    if (!text) return;
+    const copied = await copyTextToClipboard(text);
+    showToast(copied ? t('input.copied') : t('input.copyFailed'));
+  });
+}
+
+bindDraftDoubleClickCopy(promptEl);
+bindDraftDoubleClickCopy(landingPrompt);
+
+// Oversized pastes are intercepted here (both inputs) and become file chips.
+promptEl.addEventListener('paste', (e) => { pasteChips.consumePaste(e); });
+landingPrompt.addEventListener('paste', (e) => { pasteChips.consumePaste(e); });
 
 promptEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -651,7 +717,8 @@ function handleLandingSendOrStop() {
 
 async function sendMessage(sourceEl: HTMLTextAreaElement) {
   const text = sourceEl.value.trim();
-  if (!text || chat.isStreaming()) return;
+  // Empty typed text is fine when pasted file chips carry the message.
+  if ((!text && !pasteChips.hasAttachments()) || chat.isStreaming()) return;
 
   // Validate BEFORE clearing the input: without a key we return here and the
   // user's draft stays in the box (doSend's own check covers the queued path).
@@ -680,14 +747,19 @@ async function doSend(text: string) {
     settings.open();
     return;
   }
+  // Large pasted content rides along with the typed text (each attachment is
+  // prefixed with a [粘贴文件] marker). Chips are cleared ONLY after a
+  // successful send — on failure the user keeps them for a retry.
+  const fullText = composeMessageWithAttachments(text, pasteChips.getAttachments());
   try {
     enterChatMode();
-    await chat.send(text);
+    await chat.send(fullText);
+    pasteChips.clear();
   } catch (err: any) {
     showToast(`Error: ${err?.message || err}`);
     console.error('[pure] sendMessage failed:', err);
   } finally {
-    sendBtn.disabled = !promptEl.value.trim();
+    sendBtn.disabled = !promptEl.value.trim() && !pasteChips.hasAttachments();
     focusPromptCaretEnd();
     refreshSidebarSessions();
     flushQueued();
@@ -1109,6 +1181,8 @@ async function loadAndDisplaySession(id: string) {
   const loaded = await loadSession(id);
   if (!loaded || loaded.messages.length === 0) return;
   queuedWhileStreaming = null;
+  // A different session's pending pastes must not leak into this transcript.
+  pasteChips.clear();
   // Abort any in-flight generation first: the old send() loop must not keep
   // appending to (or persisting into) the session we're about to switch to.
   // chat.setSessionId also bumps the generation guard, which is the second

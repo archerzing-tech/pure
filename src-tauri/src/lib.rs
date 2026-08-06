@@ -54,29 +54,109 @@ async fn mcp_call_inner(handle: &McpHandle, request: &str) -> Result<String, Str
 //  File Tools
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Resolve a tool path below `workspace`.
+///
+/// Tool schemas describe paths relative to the workspace, but models sometimes
+/// echo the selected absolute workspace path back in `path`. `Path::join`
+/// treats an absolute second argument as a replacement, so handle that case
+/// explicitly and accept it only when it still resolves inside the workspace.
+/// The nearest existing ancestor is canonicalized before missing children are
+/// appended; this keeps new-file writes safe even when an intermediate
+/// directory is a symlink.
 fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
-    let base = PathBuf::from(workspace);
-    let base_canonical = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
-    let joined = base_canonical.join(path);
-    let mut stack: Vec<PathBuf> = Vec::new();
-    for c in joined.components() {
-        match c {
-            std::path::Component::ParentDir => {
-                stack.pop();
+    let base = PathBuf::from(workspace.trim());
+    if base.as_os_str().is_empty() {
+        return Err("workspace is required".to_string());
+    }
+    let base_canonical = fs::canonicalize(&base)
+        .map_err(|e| format!("invalid workspace '{}': {}", workspace, e))?;
+    if !base_canonical.is_dir() {
+        return Err(format!("workspace is not a directory: {}", workspace));
+    }
+
+    let raw = path.trim();
+    if raw.is_empty() {
+        return Err("path is required".to_string());
+    }
+    let requested = PathBuf::from(raw);
+    let candidate = if requested.is_absolute() {
+        requested
+    } else {
+        base_canonical.join(requested)
+    };
+    let normalized = normalize_lexical(&candidate)
+        .map_err(|_| format!("path escapes workspace: {}", path))?;
+
+    // Canonicalize the deepest existing ancestor, then append the missing
+    // components in reverse order. This resolves existing symlinks while still
+    // allowing write_file to target a file that does not exist yet.
+    let mut existing = normalized.clone();
+    let mut missing: Vec<PathBuf> = Vec::new();
+    while !existing.exists() {
+        // `Path::exists()` follows symlinks and returns false for a dangling
+        // link. Inspect metadata before climbing so a broken link cannot be
+        // treated as an ordinary missing directory and later followed by a
+        // write into an arbitrary target outside the workspace.
+        if let Ok(meta) = fs::symlink_metadata(&existing) {
+            if meta.file_type().is_symlink() {
+                return Err(format!("path uses an unresolved symlink: {}", path));
             }
-            std::path::Component::Normal(_) => {
-                stack.push(PathBuf::from(c.as_os_str()));
-            }
-            _ => {}
+        }
+        let Some(name) = existing.file_name().map(PathBuf::from) else {
+            return Err(format!("path cannot be resolved: {}", path));
+        };
+        missing.push(name);
+        if !existing.pop() {
+            return Err(format!("path cannot be resolved: {}", path));
         }
     }
-    let normalized: PathBuf = stack.iter().collect();
-    let full = base_canonical.join(&normalized);
-    let canonical = std::fs::canonicalize(&full).unwrap_or_else(|_| full.clone());
-    if !canonical.starts_with(&base_canonical) {
+
+    let canonical_existing = fs::canonicalize(&existing)
+        .map_err(|e| format!("resolve '{}': {}", path, e))?;
+    if !canonical_existing.starts_with(&base_canonical) {
         return Err(format!("path escapes workspace: {}", path));
     }
-    Ok(canonical)
+
+    let mut resolved = canonical_existing;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    if !resolved.starts_with(&base_canonical) {
+        return Err(format!("path escapes workspace: {}", path));
+    }
+    Ok(resolved)
+}
+
+/// Lexically normalize `.` and `..` without touching the filesystem. The
+/// filesystem-aware containment check in `resolve` runs after this step.
+fn normalize_lexical(path: &std::path::Path) -> Result<PathBuf, ()> {
+    let mut normalized = PathBuf::new();
+    let mut root_seen = false;
+    let mut normal_depth = 0usize;
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if normal_depth > 0 {
+                    normalized.pop();
+                    normal_depth -= 1;
+                } else if root_seen {
+                    return Err(());
+                } else {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                normalized.push(component.as_os_str());
+                root_seen = true;
+            }
+            std::path::Component::Normal(value) => {
+                normalized.push(value);
+                normal_depth += 1;
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 #[tauri::command]
@@ -93,6 +173,53 @@ fn write_file(workspace: String, path: String, content: String) -> Result<String
     }
     fs::write(&full, &content).map_err(|e| format!("write_file: {}", e))?;
     Ok(format!("Wrote {} bytes to {}", content.len(), path))
+}
+
+/// Write a file with live progress events over a Channel — the GUI tool row
+/// shows "正在写入 … 45% (230/512 KB)" instead of a silent "等待输出" wait
+/// until the whole (possibly large) write completes. The content is written
+/// in 64 KB chunks; after each chunk a JSON `{ "type": "progress",
+/// "written", "total" }` event is pushed. Small files emit a single 100%
+/// event and finish instantly — the frontend treats it as an immediate status
+/// update. The return value mirrors write_file ("Wrote N bytes to path") so
+/// callers can't tell the two apart.
+#[tauri::command]
+async fn write_file_stream(
+    workspace: String,
+    path: String,
+    content: String,
+    on_progress: Channel<String>,
+) -> Result<String, String> {
+    write_file_stream_inner(&workspace, &path, &content, &on_progress).await
+}
+
+/// Core of write_file_stream, split out for unit testing (a Tauri Channel
+/// built via Channel::new works in a plain test, but keeping the command
+/// wrapper tiny mirrors the execute_command_stream_inner convention).
+async fn write_file_stream_inner(
+    workspace: &str,
+    path: &str,
+    content: &str,
+    on_progress: &Channel<String>,
+) -> Result<String, String> {
+    let full = resolve(workspace, path)?;
+    if let Some(parent) = full.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+    }
+    let bytes = content.as_bytes();
+    let total = bytes.len();
+    let mut file = fs::File::create(&full).map_err(|e| format!("create: {}", e))?;
+    use std::io::Write as _;
+    const CHUNK: usize = 64 * 1024;
+    let mut written = 0usize;
+    while written < total {
+        let end = (written + CHUNK).min(total);
+        file.write_all(&bytes[written..end]).map_err(|e| format!("write: {}", e))?;
+        written = end;
+        let evt = serde_json::json!({ "type": "progress", "written": written, "total": total });
+        let _ = on_progress.send(evt.to_string());
+    }
+    Ok(format!("Wrote {} bytes to {}", total, path))
 }
 
 /// Save a code block to an absolute path chosen by the user via the GUI's
@@ -1105,6 +1232,196 @@ mod web_search_tests {
 
 
 #[cfg(test)]
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    fn temp_workspace(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("pure-resolve-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // resolve() canonicalizes the workspace base (macOS /var → /private/var);
+        // the assertion must compare against the same canonical base.
+        let canonical = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        canonical.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn joins_without_doubling_the_workspace_path() {
+        // Regression: the old implementation re-joined the absolute path
+        // components onto the base, doubling every path. The resolved path
+        // must be exactly base.join(path).
+        let ws = temp_workspace("nodouble");
+        let r = resolve(&ws, "sub/dir/file.txt").unwrap();
+        assert_eq!(r, PathBuf::from(&ws).join("sub/dir/file.txt"));
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn collapses_dot_dot_segments() {
+        let ws = temp_workspace("dots");
+        let r = resolve(&ws, "a/../b.txt").unwrap();
+        assert_eq!(r, PathBuf::from(&ws).join("b.txt"));
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn accepts_absolute_paths_inside_workspace() {
+        let ws = temp_workspace("absolute");
+        let absolute = PathBuf::from(&ws).join("src/新 文件.txt");
+        let r = resolve(&ws, absolute.to_str().unwrap()).unwrap();
+        assert_eq!(r, absolute);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn accepts_new_files_below_a_workspace_with_spaces() {
+        let ws = temp_workspace("空 格");
+        let r = resolve(&ws, "src/中文 文件.ts").unwrap();
+        assert_eq!(r, PathBuf::from(&ws).join("src/中文 文件.ts"));
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_new_files_through_a_symlink_outside_workspace() {
+        let ws = temp_workspace("symlink");
+        let outside = std::env::temp_dir().join(format!("pure-resolve-outside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, PathBuf::from(&ws).join("linked")).unwrap();
+        assert!(resolve(&ws, "linked/evil.txt").is_err());
+        fs::remove_dir_all(&outside).unwrap();
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_new_files_through_a_dangling_symlink() {
+        let ws = temp_workspace("dangling-symlink");
+        let link = PathBuf::from(&ws).join("linked");
+        std::os::unix::fs::symlink("/definitely/missing/outside", &link).unwrap();
+        assert!(resolve(&ws, "linked/evil.txt").is_err());
+        assert!(!PathBuf::from(&ws).join("linked/evil.txt").exists());
+        fs::remove_file(link).unwrap();
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn rejects_paths_escaping_the_workspace() {
+        let ws = temp_workspace("escape");
+        assert!(resolve(&ws, "../../etc/passwd").is_err());
+        assert!(resolve(&ws, "sub/../../../etc/passwd").is_err());
+        // More `..` segments than the absolute root can absorb must never be
+        // silently normalized into a different relative path.
+        assert!(resolve(&ws, "../../../../../../etc/passwd").is_err());
+        fs::remove_dir_all(&ws).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod write_file_stream_tests {
+    use super::*;
+
+    // Channel::send serializes the String payload as a JSON string, exactly
+    // what the JS side receives (JSON.parse(raw)) — so the test callback
+    // mirrors the adapter: deserialize to String, then parse the JSON.
+    fn capturing_channel(
+        events: &Arc<StdMutex<Vec<serde_json::Value>>>,
+    ) -> Channel<String> {
+        let events = Arc::clone(events);
+        Channel::new(move |body| {
+            if let Ok(s) = body.deserialize::<String>() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                    events.lock().unwrap().push(v);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn temp_workspace(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("pure-write-stream-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // resolve() canonicalizes the workspace base (macOS /var → /private/var);
+        // the test must read back through the SAME canonical path, or the
+        // read misses the file the command wrote.
+        let canonical = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        canonical.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn streams_chunked_progress_and_writes_the_file() {
+        let workspace = temp_workspace("chunked");
+        // 128 KB + 1 byte forces 3 chunks (64 KB each) → ≥3 progress events
+        // with monotonic written counts ending exactly at the total.
+        let content = "x".repeat(128 * 1024 + 1);
+        let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
+        let ch = capturing_channel(&events);
+
+        let msg = write_file_stream_inner(&workspace, "sub/dir/app.js", &content, &ch)
+            .await
+            .unwrap();
+        assert!(msg.contains("131073 bytes"), "msg: {}", msg);
+        assert!(msg.contains("sub/dir/app.js"));
+
+        // File landed with the exact content (parent dirs auto-created).
+        let dir = PathBuf::from(&workspace);
+        let written = fs::read_to_string(dir.join("sub/dir/app.js")).unwrap();
+        assert_eq!(written.len(), content.len());
+
+        let events = events.lock().unwrap();
+        assert!(events.len() >= 3, "expected ≥3 chunk events, got {}", events.len());
+        let mut last = 0usize;
+        for ev in events.iter() {
+            assert_eq!(ev["type"], "progress");
+            let written = ev["written"].as_u64().unwrap() as usize;
+            let total = ev["total"].as_u64().unwrap() as usize;
+            assert_eq!(total, content.len());
+            assert!(written >= last && written <= total);
+            last = written;
+        }
+        assert_eq!(last, content.len(), "final event must report full write");
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn small_file_emits_a_single_full_event() {
+        let workspace = temp_workspace("small");
+        let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
+        let ch = capturing_channel(&events);
+
+        let msg = write_file_stream_inner(&workspace, "hi.txt", "hello", &ch)
+            .await
+            .unwrap();
+        assert_eq!(msg, "Wrote 5 bytes to hi.txt");
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["written"], 5);
+        assert_eq!(events[0]["total"], 5);
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_content_writes_zero_bytes() {
+        let workspace = temp_workspace("empty");
+        let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
+        let ch = capturing_channel(&events);
+
+        let msg = write_file_stream_inner(&workspace, "empty.txt", "", &ch)
+            .await
+            .unwrap();
+        assert_eq!(msg, "Wrote 0 bytes to empty.txt");
+        assert_eq!(fs::read_to_string(PathBuf::from(&workspace).join("empty.txt")).unwrap(), "");
+        // No chunks → no events (nothing to report for a zero-byte write).
+        assert!(events.lock().unwrap().is_empty());
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod execute_command_tests {
     use super::*;
 
@@ -1684,6 +2001,304 @@ fn get_tmp_workspace(session_id: String) -> Result<String, String> {
     let workspace = application_tmp_dir().join(safe_session_component(&session_id));
     fs::create_dir_all(&workspace).map_err(|e| format!("create tmp workspace: {}", e))?;
     Ok(workspace.to_string_lossy().to_string())
+}
+
+/// Reduce a paste-provided filename to its final path component so a name can
+/// never escape the session tmp dir (`../../evil.txt` → `evil.txt`).
+fn sanitize_paste_name(name: &str) -> String {
+    std::path::Path::new(name)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "pasted.txt".to_string())
+}
+
+/// Write a large pasted snippet into the session's tmp workspace and return
+/// the absolute path. Split out for unit testing (a Tauri command can't be
+/// constructed inside a plain test).
+fn write_paste_file(dir: &std::path::Path, name: &str, content: &str) -> Result<String, String> {
+    write_paste_bytes(dir, name, content.as_bytes())
+}
+
+/// Write raw pasted bytes (image payloads) into the session's tmp workspace.
+fn write_paste_bytes(dir: &std::path::Path, name: &str, bytes: &[u8]) -> Result<String, String> {
+    let path = dir.join(sanitize_paste_name(name));
+    fs::write(&path, bytes).map_err(|e| format!("write paste file: {}", e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Decode a base64 image payload sent over IPC (split out for unit tests).
+/// Whitespace-only payloads decode to zero bytes under the STANDARD engine
+/// (it ignores whitespace) — reject them explicitly so we never persist an
+/// empty image file.
+fn decode_paste_image(data_base64: &str) -> Result<Vec<u8>, String> {
+    let trimmed = data_base64.trim();
+    if trimmed.is_empty() {
+        return Err("empty image payload".to_string());
+    }
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .map_err(|e| format!("decode paste image: {}", e))
+}
+
+/// The GUI turns oversized paste events (see pasteChip.ts, 64KB threshold)
+/// into a file chip instead of stuffing hundreds of KB into the textarea;
+/// this persists the content under ~/.pure/tmp/<session-id>/ and the chip
+/// double-click viewer reads it back from memory (path kept for reference).
+#[tauri::command]
+fn save_paste_file(session_id: String, name: String, content: String) -> Result<String, String> {
+    if session_id.trim().is_empty() {
+        return Err("session id is required".to_string());
+    }
+    let dir = application_tmp_dir().join(safe_session_component(&session_id));
+    fs::create_dir_all(&dir).map_err(|e| format!("create paste dir: {}", e))?;
+    write_paste_file(&dir, &name, &content)
+}
+
+/// The GUI turns pasted screenshots/images (see pasteChip.ts) into a thumbnail
+/// chip and persists the raw bytes here under ~/.pure/tmp/<session-id>/.
+#[tauri::command]
+fn save_paste_image(session_id: String, name: String, data_base64: String) -> Result<String, String> {
+    if session_id.trim().is_empty() {
+        return Err("session id is required".to_string());
+    }
+    let bytes = decode_paste_image(&data_base64)?;
+    let dir = application_tmp_dir().join(safe_session_component(&session_id));
+    fs::create_dir_all(&dir).map_err(|e| format!("create paste dir: {}", e))?;
+    write_paste_bytes(&dir, &name, &bytes)
+}
+
+const DROPPED_FILE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+const DROPPED_IMAGE_MAX_BYTES: u64 = 25 * 1024 * 1024;
+const DROPPED_TEXT_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
+
+fn dropped_file_mime(name: &str, bytes: &[u8]) -> String {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let known = match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        "pdf" => Some("application/pdf"),
+        "zip" => Some("application/zip"),
+        "json" => Some("application/json"),
+        "xml" => Some("application/xml"),
+        "txt" | "log" | "md" | "csv" | "tsv" | "js" | "ts" | "jsx" | "tsx"
+        | "html" | "css" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "sql" | "sh" => Some("text/plain"),
+        _ => None,
+    };
+    if let Some(mime) = known {
+        return mime.to_string();
+    }
+    if std::str::from_utf8(bytes).is_ok() {
+        "text/plain".to_string()
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
+fn dropped_file_kind(mime: &str) -> &'static str {
+    if mime.starts_with("image/") { "image" } else if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" { "text" } else { "binary" }
+}
+
+fn unique_tmp_file(dir: &std::path::Path, name: &str, attempt: u32) -> PathBuf {
+    let safe = sanitize_paste_name(name);
+    if attempt == 0 {
+        return dir.join(safe);
+    }
+    let stem = std::path::Path::new(&safe).file_stem().and_then(|s| s.to_str()).unwrap_or("dropped-file");
+    let ext = std::path::Path::new(&safe).extension().and_then(|s| s.to_str()).map(|s| format!(".{}", s)).unwrap_or_default();
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    dir.join(format!("{}-{}-{}{}", stem, stamp, attempt, ext))
+}
+
+fn import_dropped_file_inner(tmp_dir: &std::path::Path, source: &std::path::Path) -> Result<serde_json::Value, String> {
+    let metadata = fs::symlink_metadata(source).map_err(|e| format!("inspect dropped path: {}", e))?;
+    if metadata.is_dir() {
+        return Ok(serde_json::json!({ "isDirectory": true, "name": source.file_name().and_then(|s| s.to_str()).unwrap_or("folder") }));
+    }
+    if !metadata.is_file() {
+        return Err("dropped path is not a regular file".to_string());
+    }
+    if metadata.len() > DROPPED_FILE_MAX_BYTES {
+        return Err(format!("dropped file exceeds {} MB", DROPPED_FILE_MAX_BYTES / (1024 * 1024)));
+    }
+    let name = source.file_name().and_then(|s| s.to_str()).unwrap_or("dropped-file").to_string();
+    let bytes = fs::read(source).map_err(|e| format!("read dropped file: {}", e))?;
+    if bytes.len() as u64 > DROPPED_FILE_MAX_BYTES {
+        return Err(format!("dropped file exceeds {} MB", DROPPED_FILE_MAX_BYTES / (1024 * 1024)));
+    }
+    let mime = dropped_file_mime(&name, &bytes);
+    let kind = dropped_file_kind(&mime);
+    if kind == "image" && bytes.len() as u64 > DROPPED_IMAGE_MAX_BYTES {
+        return Err(format!("dropped image exceeds {} MB", DROPPED_IMAGE_MAX_BYTES / (1024 * 1024)));
+    }
+    fs::create_dir_all(tmp_dir).map_err(|e| format!("create dropped-file dir: {}", e))?;
+
+    use std::io::Write as _;
+    let stored_name = format!("dropped-{}", sanitize_paste_name(&name));
+    let (destination, mut file) = (0..1000)
+        .map(|attempt| unique_tmp_file(tmp_dir, &stored_name, attempt))
+        .find_map(|candidate| {
+            match fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+                Ok(file) => Some((candidate, file)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(_) => None,
+            }
+        })
+        .ok_or_else(|| "could not allocate a unique temporary filename".to_string())?;
+    if let Err(e) = file.write_all(&bytes) {
+        let _ = fs::remove_file(&destination);
+        return Err(format!("copy dropped file: {}", e));
+    }
+
+    let mut record = serde_json::json!({
+        "isDirectory": false,
+        "name": name,
+        "path": destination.to_string_lossy(),
+        "size": bytes.len(),
+        "kind": kind,
+        "mime": mime,
+        "content": "",
+        "dataUrl": "",
+    });
+    if kind == "image" {
+        use base64::Engine as _;
+        let data_url = format!("data:{};base64,{}", record["mime"].as_str().unwrap_or("application/octet-stream"), base64::engine::general_purpose::STANDARD.encode(&bytes));
+        record["dataUrl"] = serde_json::Value::String(data_url);
+    } else if kind == "text" {
+        let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(DROPPED_TEXT_PREVIEW_BYTES)]).to_string();
+        record["content"] = serde_json::Value::String(preview);
+        record["truncated"] = serde_json::Value::Bool(bytes.len() > DROPPED_TEXT_PREVIEW_BYTES);
+    }
+    Ok(record)
+}
+
+/// Copy a user-dropped file into the application-owned session tmp directory.
+/// The source path comes from the OS drag/drop API, while the destination is
+/// always sanitized and collision-safe inside ~/.pure/tmp/<session-id>/.
+#[tauri::command]
+fn import_dropped_file(session_id: String, source_path: String) -> Result<serde_json::Value, String> {
+    if session_id.trim().is_empty() {
+        return Err("session id is required".to_string());
+    }
+    let source = PathBuf::from(&source_path);
+    let tmp_dir = application_tmp_dir().join(safe_session_component(&session_id));
+    import_dropped_file_inner(&tmp_dir, &source)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Temp paste-file cleanup (Settings → General → 清理临时文件)
+// ═══════════════════════════════════════════════════════════════════════════
+// Only `pasted-*` and `dropped-*` files (our own input artifacts) are ever
+// deleted — project files the agent wrote into a session tmp workspace (no user
+// workspace selected) are left alone. Input files live at <tmp>/<session-id>/
+// root, so the scan walks the session dirs one level deep.
+
+const PASTE_PREFIXES: &[&str] = &["pasted-", "dropped-"];
+
+struct PasteFileInfo {
+    path: std::path::PathBuf,
+    size: u64,
+    modified: std::time::SystemTime,
+}
+
+/// Non-recursive scan of `dir` for `pasted-*` FILES (dirs with the prefix are
+/// ignored). Split out for unit testing.
+fn scan_paste_files_in(dir: &std::path::Path) -> Vec<PasteFileInfo> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else { return out };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !PASTE_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let modified = meta.modified().unwrap_or_else(|_| std::time::SystemTime::now());
+        out.push(PasteFileInfo { path: entry.path(), size: meta.len(), modified });
+    }
+    out
+}
+
+/// Scan the app tmp root AND each session dir (one level deep).
+fn scan_all_paste_files(tmp: &std::path::Path) -> Vec<PasteFileInfo> {
+    let mut out = scan_paste_files_in(tmp);
+    if let Ok(entries) = fs::read_dir(tmp) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                out.extend(scan_paste_files_in(&entry.path()));
+            }
+        }
+    }
+    out
+}
+
+/// Age check: strictly older than `days` days (so fresh files are never
+/// deleted, even with days = 0). Pure — synthetic times testable.
+fn older_than(modified: std::time::SystemTime, now: std::time::SystemTime, days: u64) -> bool {
+    let cutoff = days.saturating_mul(24 * 60 * 60);
+    now.duration_since(modified)
+        .map(|d| d.as_secs() >= cutoff)
+        .unwrap_or(false)
+}
+
+/// Delete paste files older than `days` days, then remove session dirs that
+/// became empty. Returns `(deleted_count, freed_bytes)`. Split out for tests.
+fn cleanup_paste_files_in(dir: &std::path::Path, days: u64) -> Result<(u64, u64), String> {
+    let now = std::time::SystemTime::now();
+    let mut deleted = 0u64;
+    let mut freed = 0u64;
+    for f in scan_all_paste_files(dir) {
+        if older_than(f.modified, now, days) {
+            match fs::remove_file(&f.path) {
+                Ok(()) => {
+                    deleted += 1;
+                    freed += f.size;
+                }
+                Err(e) => eprintln!("cleanup: remove {}: {}", f.path.display(), e),
+            }
+        }
+    }
+    // Remove session dirs left empty by the cleanup — only when something was
+    // actually deleted, so an active-but-empty session dir is never disturbed.
+    if deleted > 0 {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir()
+                    && fs::read_dir(&p).map(|mut it| it.next().is_none()).unwrap_or(false)
+                {
+                    let _ = fs::remove_dir(&p);
+                }
+            }
+        }
+    }
+    Ok((deleted, freed))
+}
+
+/// Settings → General: current paste-file footprint (files + bytes).
+#[tauri::command]
+fn tmp_paste_usage() -> Result<serde_json::Value, String> {
+    let files = scan_all_paste_files(&application_tmp_dir());
+    let bytes: u64 = files.iter().map(|f| f.size).sum();
+    Ok(serde_json::json!({ "files": files.len(), "bytes": bytes }))
+}
+
+/// Settings → General: delete paste files older than `days` days.
+#[tauri::command]
+fn cleanup_tmp_pastes(days: u64) -> Result<serde_json::Value, String> {
+    let days = days.clamp(1, 365);
+    let (deleted, freed_bytes) = cleanup_paste_files_in(&application_tmp_dir(), days)?;
+    Ok(serde_json::json!({ "deleted": deleted, "freedBytes": freed_bytes }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2690,7 +3305,7 @@ pub fn run() {
         .manage(ChatStreamRegistry::new(StdMutex::new(BTreeMap::new())))
         .invoke_handler(tauri::generate_handler![
             // File tools
-            read_file, write_file, edit_file, search_files, list_files, create_directory, diff_files, glob_files, replace_files,
+            read_file, write_file, write_file_stream, edit_file, search_files, list_files, create_directory, diff_files, glob_files, replace_files,
             save_file,
             // System info
             sys_info,
@@ -2703,7 +3318,8 @@ pub fn run() {
             // MCP subprocess
             spawn_mcp, mcp_request, mcp_shutdown, mcp_list,
             // Application temporary workspace + secret management
-            get_tmp_workspace,
+            get_tmp_workspace, save_paste_file, save_paste_image, import_dropped_file,
+            tmp_paste_usage, cleanup_tmp_pastes,
             secret_get, secret_set, secret_delete, secret_list,
             // File watching
             watch_files, unwatch_files,
@@ -2716,4 +3332,230 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running pure");
+}
+
+#[cfg(test)]
+mod save_paste_file_tests {
+    use super::*;
+
+    fn temp_paste_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pure-paste-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn writes_content_and_returns_absolute_path() {
+        let dir = temp_paste_dir("basic");
+        let path = write_paste_file(&dir, "pasted.txt", "line1\nline2").unwrap();
+        assert!(path.ends_with("pasted.txt"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "line1\nline2");
+    }
+
+    #[test]
+    fn strips_directory_components_from_name() {
+        let dir = temp_paste_dir("traversal");
+        // A hostile name must never escape the session tmp dir: the file lands
+        // exactly in `dir`, never in dir/../.. — and no sibling is created.
+        let path = write_paste_file(&dir, "../../evil.txt", "x").unwrap();
+        assert_eq!(std::path::Path::new(&path), dir.join("evil.txt"));
+        assert!(!dir.join("..").join("..").join("evil.txt").exists());
+    }
+
+    #[test]
+    fn falls_back_to_default_name_when_empty() {
+        let dir = temp_paste_dir("empty-name");
+        let path = write_paste_file(&dir, "/", "x").unwrap();
+        assert!(path.ends_with("pasted.txt"));
+    }
+
+    #[test]
+    fn decodes_base64_and_writes_image_bytes() {
+        use base64::Engine as _;
+        let dir = temp_paste_dir("img-basic");
+        let bytes = vec![0x89u8, b'P', b'N', b'G', 13, 10, 26, 10, 1, 2, 3];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let decoded = decode_paste_image(&b64).unwrap();
+        assert_eq!(decoded, bytes);
+        let path = write_paste_bytes(&dir, "shot.png", &decoded).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn rejects_malformed_base64() {
+        assert!(decode_paste_image("@@not-base64@@").is_err());
+        // Whitespace-only payload → decode error, never an empty silent file.
+        assert!(decode_paste_image("   ").is_err());
+    }
+
+    #[test]
+    fn image_name_is_sanitized_like_text() {
+        let dir = temp_paste_dir("img-traversal");
+        let path = write_paste_bytes(&dir, "../../evil.png", &[1, 2, 3]).unwrap();
+        assert_eq!(std::path::Path::new(&path), dir.join("evil.png"));
+    }
+}
+
+#[cfg(test)]
+mod import_dropped_file_tests {
+    use super::*;
+
+    fn temp_import_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pure-import-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn classifies_and_copies_text_without_overwriting() {
+        let source_dir = temp_import_dir("text-source");
+        let tmp_dir = temp_import_dir("text-dest");
+        let source = source_dir.join("notes.txt");
+        fs::write(&source, "hello dropped file").unwrap();
+        let record = import_dropped_file_inner(&tmp_dir, &source).unwrap();
+        assert_eq!(record["kind"], "text");
+        assert_eq!(record["content"], "hello dropped file");
+        assert_eq!(fs::read_to_string(record["path"].as_str().unwrap()).unwrap(), "hello dropped file");
+        fs::write(tmp_dir.join("notes.txt"), "existing").unwrap();
+        let second = import_dropped_file_inner(&tmp_dir, &source).unwrap();
+        assert_ne!(second["path"], tmp_dir.join("notes.txt").to_string_lossy().to_string());
+        let _ = fs::remove_dir_all(source_dir);
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
+
+    #[test]
+    fn classifies_images_and_builds_a_data_url() {
+        let source_dir = temp_import_dir("image-source");
+        let tmp_dir = temp_import_dir("image-dest");
+        let source = source_dir.join("shot.png");
+        fs::write(&source, [0x89, b'P', b'N', b'G']).unwrap();
+        let record = import_dropped_file_inner(&tmp_dir, &source).unwrap();
+        assert_eq!(record["kind"], "image");
+        assert!(record["dataUrl"].as_str().unwrap().starts_with("data:image/png;base64,"));
+        assert_eq!(fs::read(record["path"].as_str().unwrap()).unwrap(), [0x89, b'P', b'N', b'G']);
+        let _ = fs::remove_dir_all(source_dir);
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
+
+    #[test]
+    fn classifies_binary_and_directories() {
+        let source_dir = temp_import_dir("binary-source");
+        let tmp_dir = temp_import_dir("binary-dest");
+        let source = source_dir.join("archive.bin");
+        fs::write(&source, [0, 159, 146, 150]).unwrap();
+        let record = import_dropped_file_inner(&tmp_dir, &source).unwrap();
+        assert_eq!(record["kind"], "binary");
+        assert_eq!(record["content"], "");
+        let folder = source_dir.join("folder");
+        fs::create_dir_all(&folder).unwrap();
+        let dir_record = import_dropped_file_inner(&tmp_dir, &folder).unwrap();
+        assert_eq!(dir_record["isDirectory"], true);
+        let _ = fs::remove_dir_all(source_dir);
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
+
+}
+
+#[cfg(test)]
+mod tmp_cleanup_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn temp_cleanup_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pure-cleanup-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Backdate a file's mtime (and atime) by `days` via utimensat (libc).
+    #[cfg(unix)]
+    fn backdate_file(path: &std::path::Path, days: i64) {
+        use std::ffi::CString;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as libc::time_t;
+        let ts = libc::timespec { tv_sec: now - days * 86400, tv_nsec: 0 };
+        let times = [ts, ts];
+        let cpath = CString::new(path.to_str().unwrap()).unwrap();
+        unsafe {
+            libc::utimensat(libc::AT_FDCWD, cpath.as_ptr(), times.as_ptr(), 0);
+        }
+    }
+
+    #[test]
+    fn older_than_is_pure_and_strict() {
+        let now = SystemTime::now();
+        let ten_days = now - Duration::from_secs(10 * 86400);
+        let just_now = now - Duration::from_secs(60);
+        assert!(older_than(ten_days, now, 7));
+        assert!(!older_than(just_now, now, 7));
+        // Exactly at the cutoff counts as old (>=).
+        let exactly = now - Duration::from_secs(7 * 86400);
+        assert!(older_than(exactly, now, 7));
+        // Future mtime (clock skew) → never old.
+        assert!(!older_than(now + Duration::from_secs(3600), now, 7));
+    }
+
+    #[test]
+    fn scan_finds_paste_files_in_session_dirs_only() {
+        let dir = temp_cleanup_dir("scan");
+        let session = dir.join("aabbcc");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("pasted-1.txt"), "x").unwrap();
+        fs::write(session.join("pasted-2.png"), "12345").unwrap();
+        fs::write(session.join("dropped-report.pdf"), "123456").unwrap();
+        fs::write(session.join("notes.txt"), "keep").unwrap();
+        // A dir whose name carries the prefix must NOT be treated as a file.
+        fs::create_dir_all(session.join("pasted-dir")).unwrap();
+        let files = scan_all_paste_files(&dir);
+        assert_eq!(files.len(), 3);
+        let bytes: u64 = files.iter().map(|f| f.size).sum();
+        assert_eq!(bytes, 12);
+    }
+
+    #[test]
+    fn cleanup_deletes_only_aged_pastes() {
+        let dir = temp_cleanup_dir("age");
+        let session = dir.join("sess1");
+        fs::create_dir_all(&session).unwrap();
+        let old = session.join("pasted-old.txt");
+        let fresh = session.join("pasted-new.txt");
+        let other = session.join("notes.txt");
+        fs::write(&old, "12345").unwrap();
+        fs::write(&fresh, "1").unwrap();
+        fs::write(&other, "keep").unwrap();
+        backdate_file(&old, 10);
+
+        let (deleted, freed) = cleanup_paste_files_in(&dir, 7).unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(freed, 5);
+        assert!(!old.exists(), "old paste removed");
+        assert!(fresh.exists(), "fresh paste kept");
+        assert!(other.exists(), "non-paste file untouched");
+    }
+
+    #[test]
+    fn cleanup_removes_session_dirs_left_empty() {
+        let dir = temp_cleanup_dir("empty");
+        let session = dir.join("hexses");
+        fs::create_dir_all(&session).unwrap();
+        let old = session.join("pasted-old.txt");
+        fs::write(&old, "abc").unwrap();
+        backdate_file(&old, 10);
+
+        let (deleted, freed) = cleanup_paste_files_in(&dir, 7).unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(freed, 3);
+        assert!(!session.exists(), "empty session dir removed");
+    }
+
+    #[test]
+    fn fresh_files_survive_zero_day_cleanup() {
+        let dir = temp_cleanup_dir("zero");
+        fs::write(dir.join("pasted-today.txt"), "today").unwrap();
+        let (deleted, _) = cleanup_paste_files_in(&dir, 1).unwrap();
+        assert_eq!(deleted, 0);
+        assert!(dir.join("pasted-today.txt").exists());
+    }
 }

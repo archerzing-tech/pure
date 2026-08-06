@@ -66,9 +66,11 @@ export function fitTail(s: string, maxCols: number): string {
 /**
  * Strip anything that would corrupt a terminal if written raw: ANSI escape
  * sequences (CSI colors/cursor, OSC titles/hyperlinks, charset selects) and
- * C0 control characters other than newline/tab. Model reasoning streams
- * occasionally leak such bytes; the thinking preview collapses whitespace
- * anyway, so this only removes invisible or harmful content.
+ * C0 control characters other than newline/tab (CR is stripped too — a raw
+ * carriage return mid-answer overwrites the current line). Model reasoning
+ * and answer streams occasionally leak such bytes; the thinking preview
+ * collapses whitespace anyway, so this only removes invisible or harmful
+ * content. Used by the CLI thinking line AND the streamed answer output.
  */
 export function sanitizeForTerminal(s: string): string {
   return s
@@ -80,6 +82,6 @@ export function sanitizeForTerminal(s: string): string {
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
     // Charset select: ESC ( / ESC ) + one char
     .replace(/\x1b[()][0-9A-Za-z]/g, '')
-    // C0 controls except \n \t (bell, backspace, NUL, …) + DEL
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+    // C0 controls except \n \t (bell, backspace, NUL, CR, …) + DEL
+    .replace(/[\u0000-\u0008\u000b-\u000d\u000e-\u001f\u007f]/g, '');
 }

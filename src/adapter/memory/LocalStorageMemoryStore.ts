@@ -44,7 +44,10 @@ export class LocalStorageMemoryStore implements IMemoryStore {
     // projectPath, or identical content in project B collapses into project
     // A's entry and B's memory is silently lost (search(B) finds nothing).
     const dup = entries.find(e =>
-      e.type === entry.type && e.content === entry.content && e.projectPath === entry.projectPath
+      e.type === entry.type && e.projectPath === entry.projectPath && (
+        e.content === entry.content ||
+        (!!entry.dedupeKey && e.dedupeKey === entry.dedupeKey)
+      )
     );
     if (dup) return dup.id;
     const id = newId();

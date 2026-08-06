@@ -159,6 +159,29 @@ describe('Harness cross-session memory (v0.10)', () => {
     expect(written[0].projectPath).toBe('/ws');
     expect(written[0].sessionId).toBe('sess-mem2');
     expect(written[0].content).toContain('refactor auth module');
+    expect(written[0].content).toContain('Engine VERIFY phase passed');
+    expect(written[0].lesson?.symptom).toContain('refactor auth module');
+    expect(written[0].lesson?.verification).toContain('no project-level command');
+  });
+
+  it('does not duplicate a lesson when the same prompt is completed twice in one session', async () => {
+    const memStore = new FakeMemoryStore();
+    const llm = recordingLLM('same answer');
+    const harness = new Harness({
+      sessionId: 'sess-dedupe',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    const first = await collect(harness.run('SYS', 'same task'));
+    const completed = first.find(e => e.type === 'Completed');
+    expect(completed?.payload.messages).toBeDefined();
+    await collect(harness.continueTurn('SYS', completed!.payload.messages!, 'same task'));
+
+    expect(memStore.entries.filter(e => e.type === 'successful_pattern')).toHaveLength(1);
   });
 
   it('does not inject memory when no store is configured', async () => {

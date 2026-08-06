@@ -120,7 +120,7 @@ export class NodeToolAdapter implements ToolAdapter {
     },
     {
       name: 'web_search',
-      description: 'Search the web and return results with titles, snippets, and URLs. Chinese-priority backends (cn.bing.com → DuckDuckGo → Bing) — no API key needed.',
+      description: 'Search the web and return results with titles, snippets, and URLs. With a Tavily API key configured (TAVILY_API_KEY env var) searches go through the Tavily API first for higher-quality results; otherwise free backends are probed in parallel (Sogou → cn.bing.com → DuckDuckGo → Bing for Chinese queries, DuckDuckGo → Bing otherwise).',
       input_schema: {
         type: 'object',
         properties: {
@@ -528,31 +528,67 @@ export class NodeToolAdapter implements ToolAdapter {
   private async handleWebSearch(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const query = String(args.query);
     const maxResults = Math.min(typeof args.maxResults === 'number' ? args.maxResults : 10, 20);
+    const cjk = containsCJK(query);
 
-    // Multi-backend fallback: DuckDuckGo is unreachable on some networks
-    // (timeouts / blocks), which used to make EVERY search fail. Try backends
-    // in order and stop at the first that yields results; a backend that
-    // errors OR returns nothing rolls over to the next one, so challenge pages
-    // and empty result sets degrade gracefully instead of hard failures.
-    //
-    // Chinese-priority: CJK queries hit cn.bing.com FIRST — international Bing
-    // frequently serves a block page and DuckDuckGo returns irrelevant results
-    // for Chinese, which pushed the agent into repeated searches. Mirrors the
-    // Rust web_search backend order.
+    // 1) Tavily API backend (the approach Claude Code / opencode use): opt-in
+    // via the TAVILY_API_KEY env var. Mirrors the Rust web_search — on
+    // failure or (for CJK) a relevance-gated-out set, degrade to the free
+    // HTML backends below.
+    let results: SearchResult[] = [];
+    const failed: string[] = [];
+    let anyEmpty = false;
+    let irrelevant = 0;
+    if (process.env.TAVILY_API_KEY?.trim()) {
+      try {
+        const r = await tavilySearch(query, maxResults);
+        if (r.length > 0) {
+          // API results are usually on-topic; the CJK relevance gate still
+          // applies so a bad API answer degrades to scraping.
+          if (!cjk || resultsRelevant(query, r)) results = dedupeResults(r);
+          else irrelevant += 1;
+        } else {
+          anyEmpty = true;
+        }
+      } catch (err: any) {
+        failed.push(`Tavily: ${err?.message ?? String(err)}`);
+      }
+    }
+
+    // Free HTML backends, probed IN PARALLEL by firstRelevantResult below
+    // (first set that passes the CJK relevance gate wins). CJK queries add
+    // Sogou + cn.bing.com — Sogou is the only major Chinese engine reachable
+    // without a captcha that returns genuinely relevant results (cn.bing.com
+    // returns Xi'an tourism guides for "西安到重庆 机票", Baidu redirects to a
+    // captcha); non-CJK probes DuckDuckGo + Bing. Mirrors the Rust backend
+    // set (Sogou → cn.bing.com → DuckDuckGo → Bing).
     const backends: Array<{ label: string; fetch: () => Promise<SearchResult[]> }> = [
-      ...(containsCJK(query)
-        ? [{
-            label: 'cn.bing.com',
-            fetch: async () => {
-              const resp = await fetch(`https://cn.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`, {
-                headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8' },
-                redirect: 'follow',
-                signal: AbortSignal.timeout(8000),
-              });
-              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-              return parseBingResults(await resp.text(), maxResults);
+      ...(cjk
+        ? [
+            {
+              label: 'Sogou',
+              fetch: async () => {
+                const resp = await fetch(`https://www.sogou.com/web?query=${encodeURIComponent(query)}`, {
+                  headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8' },
+                  redirect: 'follow',
+                  signal: AbortSignal.timeout(8000),
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                return parseSogouResults(await resp.text(), maxResults);
+              },
             },
-          }]
+            {
+              label: 'cn.bing.com',
+              fetch: async () => {
+                const resp = await fetch(`https://cn.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`, {
+                  headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8' },
+                  redirect: 'follow',
+                  signal: AbortSignal.timeout(8000),
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                return parseBingResults(await resp.text(), maxResults);
+              },
+            },
+          ]
         : []),
       {
         label: 'DuckDuckGo',
@@ -580,30 +616,32 @@ export class NodeToolAdapter implements ToolAdapter {
       },
     ];
 
-    let results: SearchResult[] = [];
-    const failed: string[] = [];
-    let anyEmpty = false;
-    for (const backend of backends) {
-      if (results.length > 0) break;
-      try {
-        const r = await backend.fetch();
-        if (r.length > 0) results = r;
-        else anyEmpty = true;
-      } catch (err: any) {
-        failed.push(`${backend.label}: ${err?.message ?? String(err)}`);
+    // 2) Free HTML backends, probed IN PARALLEL — first relevant set wins
+    // ("first win"), so a dead/slow/irrelevant backend no longer serializes
+    // the search. Mirrors the Rust run_html_backends_parallel.
+    if (results.length === 0) {
+      const outcome = await firstRelevantResult(query, backends);
+      if (outcome.results) {
+        results = outcome.results;
+      } else {
+        failed.push(...outcome.failed);
+        anyEmpty = anyEmpty || outcome.anyEmpty;
+        irrelevant += outcome.irrelevant;
       }
     }
 
     if (results.length === 0) {
-      // At least one backend answered with an empty result set: the search
-      // infrastructure works, the query just has no hits — rephrase, don't
-      // repeat. (Other backends may have been unreachable; either way the
-      // actionable guidance is the same.)
-      if (anyEmpty) {
+      // Backends answered but nothing usable (empty OR relevance-gated-out OR
+      // all unreachable): the actionable guidance is the same — the query
+      // itself needs rephrasing, or the search infra is down.
+      if (anyEmpty || irrelevant > 0) {
+        // When some backends were unreachable, say so — the model should not
+        // conclude the query is bad when the real cause was network.
+        const unreachable = failed.length > 0 ? ` (some backends unreachable: ${failed.join('; ')})` : '';
         return {
           id: `tool_${Date.now()}`,
           toolName: 'web_search',
-          result: `No results found for "${query}" on the available search backends (cn.bing.com, DuckDuckGo, Bing). Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to contain the information.`,
+          result: `No results found for "${query}" on the available search backends (Tavily, Sogou, cn.bing.com, DuckDuckGo, Bing) — the backends returned either no hits or only content unrelated to the query${unreachable}. Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to contain the information.`,
           success: true,
           duration: Date.now() - start,
         };
@@ -858,6 +896,85 @@ const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
 
 // ── DuckDuckGo HTML result parser ──
 
+// ── Web search helpers (Tavily API + parallel first-win, mirrors lib.rs) ──
+
+/**
+ * Tavily Search API backend (used by Claude Code / opencode-class agents):
+ * stable index, captcha-free, good Chinese coverage. Enabled when
+ * TAVILY_API_KEY is set; throws otherwise so callers degrade to scraping.
+ */
+export async function tavilySearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  const apiKey = process.env.TAVILY_API_KEY?.trim();
+  if (!apiKey) throw new Error('TAVILY_API_KEY not set');
+  const resp = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      query,
+      max_results: maxResults,
+      search_depth: 'basic',
+      include_answer: false,
+    }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data: { results?: Array<{ title?: string; url?: string; content?: string }> } = await resp.json();
+  return (data.results ?? [])
+    .filter((r) => r.title && r.url)
+    .map((r) => ({ title: r.title!, snippet: r.content ?? '', url: r.url! }));
+}
+
+/**
+ * Probe all HTML backends concurrently and return the first result set that
+ * passes the relevance gate ("first win"). A backend that errors, returns
+ * empty, or fails the gate just drops out; if none survives, the aggregated
+ * failure info lets the caller compose the right message. O(backends) memory
+ * for the pending-promise set is fine (≤4 backends).
+ */
+export async function firstRelevantResult(
+  query: string,
+  backends: Array<{ label: string; fetch: () => Promise<SearchResult[]> }>,
+): Promise<{ results?: SearchResult[]; failed: string[]; anyEmpty: boolean; irrelevant: number }> {
+  const failed: string[] = [];
+  let anyEmpty = false;
+  let irrelevant = 0;
+  let pending = backends.map((b, i) =>
+    b.fetch().then(
+      (r) => ({ i, r }),
+      (err: any) => ({ i, error: err?.message ?? String(err) }),
+    ),
+  );
+  while (pending.length > 0) {
+    // Race the current pending set; the resolved VALUE carries the ORIGINAL
+    // backend index (captured at creation) while pendingIndex is the index
+    // within the CURRENT (shrinking) array — the two must stay separate so
+    // removing a finished task never mislabels a later one.
+    const { value, pendingIndex } = await Promise.race(
+      pending.map((p, idx) => p.then((v) => ({ value: v, pendingIndex: idx }))),
+    );
+    pending = pending.filter((_, k) => k !== pendingIndex);
+    if ('error' in value) {
+      failed.push(`${backends[value.i].label}: ${value.error}`);
+      continue;
+    }
+    if (value.r.length > 0) {
+      // Relevance gate: a set that does not address the query must not be
+      // handed to the model — it is what pushed the agent into repeated
+      // searches. Gated-out sets drop out like empty ones.
+      if (resultsRelevant(query, value.r)) {
+        return { results: dedupeResults(value.r), failed, anyEmpty, irrelevant };
+      }
+      irrelevant += 1;
+    } else {
+      anyEmpty = true;
+    }
+  }
+  return { failed, anyEmpty, irrelevant };
+}
+
 interface SearchResult {
   title: string;
   snippet: string;
@@ -870,6 +987,164 @@ interface SearchResult {
  * src-tauri/src/lib.rs `is_chinese_query`; both sides have matching tests. */
 export function containsCJK(query: string): boolean {
   return /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(query);
+}
+
+// ── Sogou HTML result parser (CJK-priority backend) ──
+
+/** Parse Sogou results (`<h3 class="vr-title …">` blocks with a single
+ * `<a href="…">TITLE</a>`, snippet in the block's trailing
+ * `<p class="star-wiki …">` or `<div class="fz-mid space-txt">`). Sogou
+ * highlights matched terms with `<em><!--red_beg-->…<!--red_end--></em>` inside
+ * titles — the title is stripped to `</a>` (NOT to the first '<' like the Bing
+ * parser, whose titles have no nested tags). `/link?url=…` redirects are
+ * absolutized to `https://www.sogou.com/…` so the model can still web_fetch
+ * them. Dedupes by URL/title. Mirrors src-tauri/src/lib.rs
+ * `parse_sogou_results` — both sides have matching tests. */
+export function parseSogouResults(html: string, maxResults: number): SearchResult[] {
+  const results: SearchResult[] = [];
+  let pos = 0;
+  while (results.length < maxResults) {
+    const relH3 = html.indexOf('<h3', pos);
+    if (relH3 === -1) break;
+    // Block = this <h3> through the start of the next <h3> (or end of page):
+    // the anchor/title live inside the h3, while the snippet container
+    // (<p class="star-wiki"> / <div class="fz-mid space-txt">) sits right
+    // AFTER </h3>, before the next result block.
+    const afterH3 = relH3 + 3;
+    const nextRel = html.indexOf('<h3', afterH3);
+    const nextH3 = nextRel === -1 ? html.length : nextRel;
+    const block = html.slice(relH3, nextH3);
+    const parsed = parseSogouBlock(block);
+    if (parsed && !results.some(x => x.url === parsed.url || x.title === parsed.title)) {
+      results.push(parsed);
+    }
+    pos = nextH3;
+  }
+  return results;
+}
+
+function parseSogouBlock(block: string): SearchResult | undefined {
+  const aIdx = block.indexOf('<a');
+  if (aIdx === -1) return undefined;
+  const rawUrl = extractHref(block, aIdx);
+  if (!rawUrl) return undefined;
+  // Absolutize Sogou's relative redirect links (/link?url=…, //www.sogou.com/…).
+  let url = rawUrl;
+  if (url.startsWith('//')) url = `https:${url}`;
+  else if (url.startsWith('/')) url = `https://www.sogou.com${url}`;
+
+  // Title: anchor text, stripped to </a> — Sogou bolds matched terms with <em>
+  // INSIDE the title text, so stripping to the first '<' would cut the title
+  // short; strip tags and keep everything up to </a>.
+  const afterA = block.slice(aIdx);
+  const gt = afterA.indexOf('>');
+  if (gt === -1) return undefined;
+  const afterGt = afterA.slice(gt + 1);
+  const anchorEnd = afterGt.indexOf('</a>');
+  if (anchorEnd === -1) return undefined;
+  const title = decodeHtmlEntities(stripHtml(afterGt.slice(0, anchorEnd))).trim();
+
+  // Snippet: star-wiki <p> first (organic results), else the fz-mid div
+  // (zhihu/other layouts). Both sit after the anchor inside the h3 block.
+  let snippet = '';
+  const region = afterGt.slice(anchorEnd + '</a>'.length);
+  const star = region.indexOf('<p class="star-wiki');
+  if (star !== -1) {
+    const afterStar = region.slice(star);
+    const starGt = afterStar.indexOf('>');
+    if (starGt !== -1) {
+      const content = afterStar.slice(starGt + 1);
+      const end = content.indexOf('</p>');
+      if (end !== -1) snippet = content.slice(0, end);
+    }
+  } else {
+    // fz-mid div (zhihu/other layouts). Substring search so a reordered class
+    // list ("space-txt fz-mid") still matches; the star-wiki <p> was already
+    // ruled out above, so a stray match here is a genuine snippet container.
+    const fz = region.indexOf('fz-mid');
+    if (fz !== -1) {
+      const afterFz = region.slice(fz);
+      const fzGt = afterFz.indexOf('>');
+      if (fzGt !== -1) {
+        const content = afterFz.slice(fzGt + 1);
+        const end = content.indexOf('</div>');
+        if (end !== -1) snippet = content.slice(0, end);
+      }
+    }
+  }
+  snippet = decodeHtmlEntities(stripHtml(snippet)).trim();
+
+  if (!title || !url) return undefined;
+  return { title, snippet, url };
+}
+
+// ── Relevance gate (keeps garbage result sets from reaching the model) ──
+
+/** Chars that glue Chinese queries together (particles / prepositions /
+ * function words) — a CJK bigram containing one is NOT a meaningful content
+ * token ("西安到重庆" keeps 西安/重庆; 安到/到重 are dropped). Content words like
+ * 时间/价格/大小 are deliberately NOT here — they are what relevance is
+ * measured against. Mirrors src-tauri/src/lib.rs `significant_cjk_bigrams`
+ * (same table, same semantics). */
+const CJK_FUNCTION_CHARS = new Set(
+  // Particles / prepositions / function words that glue CJK queries together.
+  // Direction/position words (上下左右前后内外中) are deliberately ABSENT — 上/中
+  // etc. start too many content words (上海/中国) for them to be safe to drop.
+  '到从的与和及了在是这那之而或把被让为对于等些个吗呢吧啊呀过并但可就最很也都' +
+  '不没无来去要将会正已经还又请问想有里给做用得着所以且者起向往自从于对'.split(''),
+);
+
+function isCJKChar(c: string): boolean {
+  return /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(c);
+}
+
+/** Significant CJK content bigrams of a query (deduped, glue chars dropped).
+ * Mirrors the Rust side; exported for the mirror tests. */
+export function significantCJKBigrams(query: string): string[] {
+  const chars = [...query];
+  const out = new Set<string>();
+  for (let i = 0; i + 1 < chars.length; i++) {
+    const a = chars[i];
+    const b = chars[i + 1];
+    if (isCJKChar(a) && isCJKChar(b) && !CJK_FUNCTION_CHARS.has(a) && !CJK_FUNCTION_CHARS.has(b)) {
+      out.add(a + b);
+    }
+  }
+  return [...out];
+}
+
+/** Relevance gate: accept a backend's result set only if the top-5 results
+ * actually address the query. For CJK queries this means covering the query's
+ * significant bigrams (cn.bing.com returning Xi'an tourism guides for
+ * "西安到重庆 机票" covers only 西安 → 1/3 → REJECTED, so the chain rolls over
+ * instead of handing the model garbage that triggers repeated searches).
+ * Accept when ≥2 distinct bigrams are covered, or ≥ half of a short query's
+ * bigrams. Non-CJK queries and queries with <2 significant bigrams are always
+ * accepted. Mirrors src-tauri/src/lib.rs `results_relevant`. */
+export function resultsRelevant(query: string, results: SearchResult[]): boolean {
+  const sig = significantCJKBigrams(query);
+  if (sig.length < 2) return true;
+  const covered = new Set<string>();
+  for (const r of results.slice(0, 5)) {
+    const hay = `${r.title}\n${r.snippet}\n${r.url}`;
+    for (const bg of sig) {
+      if (hay.includes(bg)) covered.add(bg);
+    }
+  }
+  if (covered.size >= 2) return true;
+  return covered.size / sig.length >= 0.5;
+}
+
+/** Drop duplicate results (same URL or same title) — search pages repeat
+ * entries across sections, and duplicated titles confuse the LLM. */
+export function dedupeResults(results: SearchResult[]): SearchResult[] {
+  const seen = new Set<string>();
+  return results.filter(r => {
+    const key = r.url || r.title;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /** Parse DuckDuckGo HTML results (`<div class="result">` blocks containing

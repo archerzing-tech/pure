@@ -196,6 +196,15 @@ export type MemoryType =
   | 'successful_pattern'
   | 'project_convention';
 
+export interface MemoryLesson {
+  symptom: string;
+  rootCause: string;
+  recoveryPath: string;
+  verification: string;
+  avoidNextTime: string;
+  tools?: string[];
+}
+
 export interface MemoryEntry {
   id: string;
   type: MemoryType;
@@ -204,6 +213,8 @@ export interface MemoryEntry {
   sessionId: string;
   projectPath: string; // 记忆按项目隔离
   decayScore?: number; // 时间衰减分数（1.0 = 新，0.0 = 已遗忘）
+  lesson?: MemoryLesson;
+  dedupeKey?: string;
 }
 
 export interface MemorySearchOptions {
