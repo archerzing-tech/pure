@@ -1,5 +1,5 @@
 // src/cli.ts
-// v0.9.7 — one-shot + interactive REPL with self-evolving memory.
+// v0.9.9 — one-shot + interactive REPL with self-evolving memory.
 // Usage: pure "question"              → one-shot
 //        pure --resume abc123          → resume session
 //        pure --workspace .            → REPL
@@ -24,6 +24,7 @@ import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler } from './cli_permission';
 import { dim, bold, red, green, yellow, cyan, purple, frameGray } from './termcolors';
+import { displayWidth, fitTail, sanitizeForTerminal } from './termwidth';
 import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
 import { harvestUserPreferences } from './shared/memory';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
@@ -161,7 +162,7 @@ function renderLogo() {
 
   // Plain ASCII so .length === visible column count and centering is exact.
   const tagline = '---- terminal coding agent ----';
-  const ver = 'v0.9.7';
+  const ver = 'v0.9.9';
 
   console.log('');
   console.log(`  ${F('╔' + border + '╗')}`);
@@ -457,11 +458,19 @@ async function consumeTurn(
   };
   const updateThinking = (delta: string) => {
     if (!tty || !thinking) return;
-    thinkingText += delta;
+    // Sanitize on ACCUMULATION: a leaked ANSI escape / control byte from the
+    // reasoning stream must never survive into later redraws.
+    thinkingText += sanitizeForTerminal(delta);
+    // Truncate by DISPLAY COLUMNS, not UTF-16 length: CJK/fullwidth chars are
+    // 2 columns wide, so a 66-char mixed preview could span 100+ terminal
+    // columns → the line wraps and the \r\x1b[2K redraw can't clear the
+    // wrapped remnant rows (they pile up as visible garbage).
     const cols = process.stdout.columns || 80;
     const max = Math.max(20, cols - 14);
     const preview = thinkingText.replace(/\s+/g, ' ').trim();
-    const shown = preview.length > max ? '…' + preview.slice(-(max - 1)) : preview;
+    const shown = displayWidth(preview) > max
+      ? '…' + fitTail(preview, max - displayWidth('…'))  // ellipsis + tail fit exactly
+      : preview;
     process.stdout.write(`\r\x1b[2K  ${purple('💭')} ${dim(shown || 'thinking…')}`);
   };
   const endThinking = () => {
@@ -748,7 +757,7 @@ async function runOneShot(args: CliArgs) {
   await learnFromInput(args.prompt, sessionId, projectPath);
 
   renderLogo();
-  console.log(`  ${bold('pure')} ${dim('v0.9.7')} ${dim('—')} ${cyan(label)}`);
+  console.log(`  ${bold('pure')} ${dim('v0.9.9')} ${dim('—')} ${cyan(label)}`);
   if (hasTools) console.log(`  📁 ${dim('Workspace:')} ${process.cwd()} ${dim('(' + toolsDefs.length + ' tools)')}`);
   if (args.resume) console.log(`  💾 ${dim('Session:')} ${sessionId.slice(0, 12)}…`);
   console.log(`  📝 ${args.prompt}`);
@@ -787,7 +796,7 @@ async function runRepl(args: CliArgs) {
   const { harness, sessionId, projectPath } = createHarness(args);
 
   renderLogo();
-  process.stdout.write(`  ${bold('pure')} ${dim('v0.9.7')} ${dim('—')} ${cyan(label)}\n`);
+  process.stdout.write(`  ${bold('pure')} ${dim('v0.9.9')} ${dim('—')} ${cyan(label)}\n`);
   if (hasTools) process.stdout.write(`  📁 ${dim(process.cwd())} ${dim(`| ${toolsDefs.length} tools`)}\n`);
   process.stdout.write(`  💾 ${dim(sessionId.slice(0, 12))}…\n`);
   process.stdout.write(`  ${dim('/exit /quit — leave   /clear — reset context   Ctrl+C — cancel')}\n`);
