@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, parseChartSource, buildChartSvg, groupAdjacentSvgSlots } from '../markdown';
+import { suggestFilename, highlightExt, parseChartSource, buildChartSvg, groupAdjacentSvgSlots, diagramSlot } from '../markdown';
 
 // ── ==text== highlight extension ──
 
@@ -111,6 +111,38 @@ type FakeElement = {
   appendChild(child: FakeElement): FakeElement;
   insertBefore(child: FakeElement, reference: FakeElement): FakeElement;
 };
+
+describe('diagramSlot', () => {
+  it('starts with a square loading placeholder and keeps source hidden by CSS state', () => {
+    const html = diagramSlot('svg', '<svg><text>secret</text></svg>', '');
+    expect(html).toContain('data-state="loading"');
+    expect(html).toContain('data-view="preview"');
+    expect(html).toContain('diagram-loading-square');
+    expect(html).toContain('diagram-spinner');
+    expect(html).toContain('diagram-view-btn');
+    expect(html).toContain('data-diagram-view="source"');
+    expect(html).toContain('secret');
+  });
+
+  it('keeps preview as the default view and exposes a reversible source toggle', () => {
+    const html = diagramSlot('svg', '<svg />', '<svg class="rendered" />');
+    expect(html).toContain('data-state="loading"');
+    expect(html).toContain('data-view="preview"');
+    expect(html).toContain('data-diagram-view="preview" aria-pressed="true"');
+    expect(html).toContain('data-diagram-view="source" aria-pressed="false"');
+    expect(html).toContain('class="diagram-preview svg-target"');
+    expect(html).toContain('class="diagram-source svg-source"');
+  });
+
+  it('keeps the full raw SVG source in the source block and data-raw for the viewer', () => {
+    const raw = '<svg viewBox="0 0 10 10"><text>描述文字</text></svg>';
+    const html = diagramSlot('svg', raw, '');
+    // The source block escapes the markup but preserves every character.
+    expect(html).toContain('&lt;svg viewBox="0 0 10 10"&gt;&lt;text&gt;描述文字&lt;/text&gt;&lt;/svg&gt;');
+    // The data-raw attribute keeps the verbatim source for viewer lookup.
+    expect(html).toContain(`data-raw="${encodeURIComponent(raw)}"`);
+  });
+});
 
 describe('groupAdjacentSvgSlots', () => {
   it('places consecutive SVG slots in a spaced gallery and leaves separated slots alone', () => {
@@ -261,7 +293,13 @@ describe('buildChartSvg', () => {
   it('renders bars as rects with value labels for bar charts', () => {
     const svg = buildChartSvg({ type: 'bar', title: 'T', unit: '个', data: [{ label: 'A', value: 3 }, { label: 'B', value: 7 }] });
     expect(svg).toContain('<svg');
+    expect(svg).toContain('chart-accessible-title');
+    expect(svg).toContain('<title class="chart-accessible-title">T</title>');
     expect(svg).toContain('chart-title');
+    expect(svg).toContain('chart-text');
+    expect(svg).toContain('chart-grid');
+    expect(svg).toContain('chart-axis');
+    expect(svg).toContain('chart-value');
     expect(svg).toContain('T');
     expect(svg).toContain('<path'); // rounded bars
     expect(svg).toContain('>7</text>'); // value label
@@ -276,7 +314,11 @@ describe('buildChartSvg', () => {
   it('renders donut slices + a legend for pie charts', () => {
     const svg = buildChartSvg({ type: 'pie', title: 'P', unit: '%', data: [{ label: 'X', value: 25 }, { label: 'Y', value: 75 }] });
     expect(svg).toContain('<path'); // arcs
+    expect(svg).toContain('<title class="chart-accessible-title">P</title>');
     expect(svg).toContain('chart-legend');
+    expect(svg).toContain('chart-legend-label');
+    expect(svg).toContain('chart-legend-value');
+    expect(svg).toContain('chart-slice-pct');
     expect(svg).toContain('75%');
     expect(svg).toContain('25');
   });

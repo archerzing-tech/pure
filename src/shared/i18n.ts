@@ -39,6 +39,18 @@ const translations: Record<Language, Record<string, string>> = {
     'path.openFailed': '无法打开路径',
     'paste.openWithDefault': '用系统默认应用打开',
     'diagram.openViewer': '打开图像查看器',
+    'diagram.viewControls': '图形视图切换',
+    'diagram.preview': '图形',
+    'diagram.source': '源码',
+    'diagram.loading': '正在渲染图形…',
+    'diagram.renderFailed': '图形渲染失败',
+    'diagram.retry': '重试',
+    'diagram.showSource': '查看源码',
+    'diagram.sourceHidden': '渲染期间源码已隐藏',
+    'diagram.plantumlAlt': 'PlantUML 图形',
+    'diagram.missingTarget': '图形目标不存在',
+    'diagram.timeout': '图形加载超时',
+    'diagram.imageLoadFailed': 'PlantUML 图形加载失败',
 
     // ── Thinking card ──
     'thinking.thinking': '思考',
@@ -57,6 +69,7 @@ const translations: Record<Language, Record<string, string>> = {
     'main.toggleSidebar': '切换侧边栏',
     'main.rightSettings': '设置 (⌘,)',
     'landing.placeholder': '描述您的任务...',
+    'landing.placeholderDisabled': '先描述任务，发送时再配置 API Key',
     'input.placeholder': '尽情提问...',
     'input.placeholderDisabled': '请先在设置中配置 API Key',
     'input.streaming': '正在生成… (Esc 停止)',
@@ -67,6 +80,38 @@ const translations: Record<Language, Record<string, string>> = {
     'input.copyFailed': '复制输入内容失败',
     'assistant.copied': '已复制回复内容',
     'assistant.copyFailed': '复制回复内容失败',
+
+    // ── Context panel ──
+    'context.kicker': '项目上下文',
+    'context.panel.ariaLabel': '项目上下文',
+    'context.tabs.ariaLabel': '项目上下文视图',
+    'context.title': '当前工作区',
+    'context.tab.preview': '预览',
+    'context.tab.changes': '变更',
+    'context.tab.structure': '结构',
+    'context.preview.live': '实时预览',
+    'context.preview.caption': '智能体构建过程中，生成的界面会显示在这里。',
+    'context.activity': '智能体活动',
+    'context.changes.none': '暂无变更',
+    'context.changes.count': '{n} 项变更',
+    'context.changes.empty': '智能体编辑项目后，变更会显示在这里。',
+    'context.projectMap': '项目结构',
+    'context.workspace': '工作区',
+    'context.status.waiting': '等待中',
+    'context.status.updating': '更新中',
+    'context.status.ready': '就绪',
+    'context.stage.ready': '准备开始',
+    'context.stage.next': '可以继续下一步',
+    'context.stage.building': '正在构建项目',
+    'context.show': '显示项目上下文',
+    'context.hide': '隐藏项目上下文',
+    'context.model.notConfigured': '未配置',
+    'context.role.you': '你',
+    'context.role.pure': 'pure',
+
+    // ── Status footer ──
+    'status.ready': '就绪',
+    'status.generating': '正在生成…',
 
     // ── Settings Panel ──
     'settings.back.title': '返回聊天',
@@ -196,6 +241,7 @@ const translations: Record<Language, Record<string, string>> = {
     'toast.commandRequired': 'stdio 传输需要命令',
     'toast.urlRequired': 'http 传输需要 URL',
     'toast.setApiKey': '请先在设置中配置 API Key (⌘,)',
+    'toast.sendFailed': '发送失败',
     'toast.sessionsCleared': '已删除全部会话',
     'toast.deleteFailed': '删除失败',
 
@@ -292,6 +338,18 @@ const translations: Record<Language, Record<string, string>> = {
     'path.openFailed': 'Could not open path',
     'paste.openWithDefault': 'Open with default app',
     'diagram.openViewer': 'Open image viewer',
+    'diagram.viewControls': 'Diagram view controls',
+    'diagram.preview': 'Diagram',
+    'diagram.source': 'Source',
+    'diagram.loading': 'Rendering diagram…',
+    'diagram.renderFailed': 'Diagram rendering failed',
+    'diagram.retry': 'Retry',
+    'diagram.showSource': 'View source',
+    'diagram.sourceHidden': 'Source is hidden while rendering',
+    'diagram.plantumlAlt': 'PlantUML diagram',
+    'diagram.missingTarget': 'Diagram target is missing',
+    'diagram.timeout': 'Diagram loading timed out',
+    'diagram.imageLoadFailed': 'PlantUML diagram failed to load',
 
     // ── Thinking card ──
     'thinking.thinking': 'Thinking',
@@ -310,6 +368,7 @@ const translations: Record<Language, Record<string, string>> = {
     'main.toggleSidebar': 'Toggle sidebar',
     'main.rightSettings': 'Settings (⌘,)',
     'landing.placeholder': 'Describe your task...',
+    'landing.placeholderDisabled': 'Describe your task; set an API key when you send',
     'input.placeholder': 'Ask pure anything...',
     'input.placeholderDisabled': 'Set API key in Settings to send…',
     'input.streaming': 'Generating… (Esc to stop)',
@@ -320,6 +379,38 @@ const translations: Record<Language, Record<string, string>> = {
     'input.copyFailed': 'Could not copy input',
     'assistant.copied': 'Reply copied',
     'assistant.copyFailed': 'Could not copy reply',
+
+    // ── Context panel ──
+    'context.kicker': 'PROJECT CONTEXT',
+    'context.panel.ariaLabel': 'Project context',
+    'context.tabs.ariaLabel': 'Project context views',
+    'context.title': 'Live workspace',
+    'context.tab.preview': 'Preview',
+    'context.tab.changes': 'Changes',
+    'context.tab.structure': 'Structure',
+    'context.preview.live': 'Live preview',
+    'context.preview.caption': 'Your generated interface will appear here as the agent builds it.',
+    'context.activity': 'AGENT ACTIVITY',
+    'context.changes.none': 'No changes yet',
+    'context.changes.count': '{n} change(s)',
+    'context.changes.empty': 'Changes will collect here as the agent edits your project.',
+    'context.projectMap': 'PROJECT MAP',
+    'context.workspace': 'WORKSPACE',
+    'context.status.waiting': 'Waiting',
+    'context.status.updating': 'Updating',
+    'context.status.ready': 'Ready',
+    'context.stage.ready': 'Ready to build',
+    'context.stage.next': 'Ready for next step',
+    'context.stage.building': 'Building project',
+    'context.show': 'Show project context',
+    'context.hide': 'Hide project context',
+    'context.model.notConfigured': 'Not configured',
+    'context.role.you': 'You',
+    'context.role.pure': 'pure',
+
+    // ── Status footer ──
+    'status.ready': 'Ready',
+    'status.generating': 'Generating…',
 
     // ── Settings Panel ──
     'settings.back.title': 'Back to chat',
@@ -449,6 +540,7 @@ const translations: Record<Language, Record<string, string>> = {
     'toast.commandRequired': 'Command is required for stdio transport',
     'toast.urlRequired': 'URL is required for http transport',
     'toast.setApiKey': 'Set an API key in Settings first (⌘,)',
+    'toast.sendFailed': 'Send failed',
     'toast.sessionsCleared': 'All sessions deleted',
     'toast.deleteFailed': 'Failed to delete',
 
@@ -552,6 +644,12 @@ export function applyTranslations(): void {
   document.querySelectorAll('[data-i18n-title]').forEach(el => {
     const key = el.getAttribute('data-i18n-title')!;
     el.setAttribute('title', t(key));
+  });
+
+  // data-i18n-aria-label → accessible name for icon-only controls
+  document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+    const key = el.getAttribute('data-i18n-aria-label')!;
+    el.setAttribute('aria-label', t(key));
   });
 
   // data-i18n-label → textContent for labels/spans (used for option text)

@@ -153,6 +153,7 @@ function showPlanDialog(analysis: AnalysisResult): Promise<PlanReviewDecision> {
     const approveBtn = document.getElementById('plan-approve') as HTMLButtonElement;
     const skipBtn = document.getElementById('plan-skip') as HTMLButtonElement;
     const cancelBtn = document.getElementById('plan-cancel') as HTMLButtonElement;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
     titleEl.textContent = t('plan.title');
     badgeEl.textContent = t('plan.complex');
@@ -172,13 +173,26 @@ function showPlanDialog(analysis: AnalysisResult): Promise<PlanReviewDecision> {
       skipBtn.removeEventListener('click', onSkip);
       cancelBtn.removeEventListener('click', onCancel);
       document.removeEventListener('keydown', onKeydown);
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
     };
     const onApprove = () => { cleanup(); resolve('approve'); };
     const onSkip = () => { cleanup(); resolve('skip'); };
     const onCancel = () => { cleanup(); resolve('cancel'); };
     const onKeydown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCancel();
-      if (e.key === 'Enter') onApprove();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCancel();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const focusable = [approveBtn, skipBtn, cancelBtn].filter((button) => !button.disabled && !button.hidden);
+      if (focusable.length === 0) return;
+      const current = focusable.indexOf(document.activeElement as HTMLButtonElement);
+      const next = e.shiftKey
+        ? (current <= 0 ? focusable.length - 1 : current - 1)
+        : (current < 0 || current === focusable.length - 1 ? 0 : current + 1);
+      e.preventDefault();
+      focusable[next].focus();
     };
 
     approveBtn.addEventListener('click', onApprove);

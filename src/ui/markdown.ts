@@ -109,6 +109,44 @@ function isDark(): boolean {
   return document.documentElement.getAttribute('data-theme') === 'dark';
 }
 
+const DIAGRAM_RENDER_TIMEOUT_MS = 15000;
+
+type DiagramKind = 'mermaid' | 'svg' | 'chart' | 'puml';
+type DiagramState = 'loading' | 'preview' | 'error';
+const diagramRenderVersions = new WeakMap<HTMLElement, number>();
+
+function nextDiagramRenderVersion(slot: HTMLElement): number {
+  const version = (diagramRenderVersions.get(slot) ?? 0) + 1;
+  diagramRenderVersions.set(slot, version);
+  return version;
+}
+
+function isCurrentDiagramRender(slot: HTMLElement, version: number): boolean {
+  return diagramRenderVersions.get(slot) === version;
+}
+
+function diagramControls(): string {
+  return `<div class="diagram-toolbar" role="group" aria-label="${attr(t('diagram.viewControls'))}">` +
+    `<button type="button" class="diagram-view-btn active" data-diagram-view="preview" aria-pressed="true">${esc(t('diagram.preview'))}</button>` +
+    `<button type="button" class="diagram-view-btn" data-diagram-view="source" aria-pressed="false">${esc(t('diagram.source'))}</button>` +
+    `</div>`;
+}
+
+function diagramLoading(): string {
+  return `<div class="diagram-loading" role="status" aria-live="polite" aria-label="${attr(t('diagram.loading'))}">` +
+    `<span class="diagram-loading-square" aria-hidden="true"><span class="diagram-spinner"></span></span>` +
+    `</div>`;
+}
+
+export function diagramSlot(kind: DiagramKind, source: string, preview: string): string {
+  return `<div class="diagram-slot ${kind}-slot" data-diagram-kind="${kind}" data-state="loading" data-view="preview" data-raw="${attr(encodeRawAttr(source))}">` +
+    diagramControls() + diagramLoading() +
+    `<div class="diagram-preview ${kind}-target">${preview}</div>` +
+    `<pre class="diagram-source ${kind}-source"><code class="hljs language-${kind}">${esc(source)}</code></pre>` +
+    `<div class="diagram-error" role="alert"></div>` +
+    `</div>`;
+}
+
 // ── Custom renderer: route mermaid / puml code blocks away from hljs ──
 
 const renderer = new Renderer();
@@ -119,44 +157,21 @@ renderer.code = (token: { text: string; lang?: string }): string => {
   const lang: string = langOf(token.lang);
 
   if (lang === 'mermaid') {
-    // Same outer slot structure as the streaming-mode renderer so diffStreaming
-    // can leave the node alone when the raw source is unchanged (cheap reuse).
-    // data-state starts as "pending"; renderMermaidNodes flips to "arrived"
-    // after a successful mermaid.render() — that's the CSS cross-fade trigger.
-    return `<div class="mermaid-slot" data-md-raw="${attr(code)}" data-state="pending">` +
-           `<pre class="mermaid-source"><code class="hljs language-mermaid">${esc(code)}</code></pre>` +
-           `<div class="mermaid-target"></div>` +
-           `</div>`;
+    return diagramSlot('mermaid', code, '');
   }
 
   if (lang === 'puml' || lang === 'plantuml') {
     const url = plantumlUrl(code);
-    // Keep generic alt text — the full source goes in data-raw so the
-    // error-fallback path can render it without leaking to screen-readers or
-    // search bots via the <img alt> attribute.
-    return `<img class="puml-diagram" src="${attr(url)}" alt="PlantUML diagram" data-raw="${attr(encodeRawAttr(code))}" loading="lazy" referrerpolicy="no-referrer" />`;
+    const image = `<img class="puml-diagram" src="${attr(url)}" alt="${attr(t('diagram.plantumlAlt'))}" loading="eager" referrerpolicy="no-referrer" />`;
+    return diagramSlot('puml', code, image);
   }
 
   if (lang === 'svg') {
-    // Standalone SVG the model generated → rendered inline as a picture. Same
-    // slot pattern as mermaid: source stays visible until renderSvgNodes fills
-    // the target (which it does synchronously inside renderMarkdown). The raw
-    // source only ever lives as element TEXT here — DOMPurify cannot touch it
-    // — and the SVG itself is re-sanitized before it reaches the DOM.
-    return `<div class="svg-slot" data-state="pending">` +
-           `<pre class="svg-source"><code class="hljs language-svg">${esc(code)}</code></pre>` +
-           `<div class="svg-target"></div>` +
-           `</div>`;
+    return diagramSlot('svg', code, '');
   }
 
   if (lang === 'chart' || lang === 'charts') {
-    // Bar / line / pie charts rendered from a tiny data DSL (see
-    // parseChartSource). Mirrors the svg/mermaid slot pattern: the data stays
-    // visible until renderChartNodes builds the SVG into the target.
-    return `<div class="chart-slot" data-state="pending">` +
-           `<pre class="chart-source"><code class="hljs language-chart">${esc(code)}</code></pre>` +
-           `<div class="chart-target"></div>` +
-           `</div>`;
+    return diagramSlot('chart', code, '');
   }
 
   // Other code blocks: emit <pre><code>; hljs tags inside after parse. The code
@@ -253,51 +268,94 @@ async function ensureMermaid(): Promise<MermaidAPI> {
  * trusted as a source store once sanitize() has run. The source also lives as
  * element text, which sanitize never removes.
  */
+function diagramRawOf(slot: HTMLElement): string {
+  return slot.querySelector<HTMLElement>('.diagram-source code')?.textContent
+    ?? slot.getAttribute('data-raw')
+    ?? '';
+}
+
+/**
+ * Recover the original source text for display (viewer source view). The
+ * `.diagram-source code` path is already plain text; only the `data-raw`
+ * fallback is URI-encoded (see encodeRawAttr), so decode it defensively.
+ */
+function decodeDiagramSource(raw: string): string {
+  if (!raw) return '';
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function setDiagramState(slot: HTMLElement, state: DiagramState, message = ''): void {
+  slot.setAttribute('data-state', state);
+  const error = slot.querySelector<HTMLElement>('.diagram-error');
+  if (error) {
+    error.innerHTML = state === 'error'
+      ? `<strong>${esc(t('diagram.renderFailed'))}</strong><span>${esc(message)}</span>` +
+        `<button type="button" class="diagram-retry">${esc(t('diagram.retry'))}</button>`
+      : '';
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs = DIAGRAM_RENDER_TIMEOUT_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(t('diagram.renderFailed'))), timeoutMs);
+    promise.then((value) => { window.clearTimeout(timer); resolve(value); }, (err) => {
+      window.clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
 function mermaidRawOf(slot: HTMLElement): string {
-  const src = slot.querySelector<HTMLElement>('.mermaid-source code');
-  return src?.textContent ?? slot.getAttribute('data-md-raw') ?? '';
+  return diagramRawOf(slot);
 }
 
 async function renderMermaidNodes(container: HTMLElement): Promise<void> {
-  // Render into `.mermaid-target` (the absolute-positioned child of `.mermaid-slot`).
-  // data-state toggling here is the trigger for the CSS source→svg cross-fade:
-  // when mermaid.render() returns successfully we flip state from "pending" → "arrived".
-  const slots = container.querySelectorAll<HTMLElement>('.mermaid-slot:not([data-processed])');
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.mermaid-slot:not([data-processed])'));
   if (slots.length === 0) return;
+  const attempts = slots.map((slot) => ({
+    slot,
+    version: nextDiagramRenderVersion(slot),
+  }));
 
   let mermaid: MermaidAPI;
   try {
-    mermaid = await ensureMermaid();
+    mermaid = await withTimeout(ensureMermaid());
   } catch (err) {
-    for (const slot of Array.from(slots)) {
-      const target = slot.querySelector<HTMLElement>('.mermaid-target');
-      if (target) target.innerHTML = `<pre class="mermaid-error">${esc(String(err))}</pre>`;
+    for (const { slot, version } of attempts) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
       slot.setAttribute('data-processed', 'true');
-      slot.setAttribute('data-state', 'arrived');
+      setDiagramState(slot, 'error', err instanceof Error ? err.message : String(err));
     }
     return;
   }
 
-  for (const slot of Array.from(slots)) {
+  for (const { slot, version } of attempts) {
     const target = slot.querySelector<HTMLElement>('.mermaid-target');
     if (!target) {
-      slot.setAttribute('data-processed', 'true');
+      if (isCurrentDiagramRender(slot, version)) {
+        slot.setAttribute('data-processed', 'true');
+        setDiagramState(slot, 'error', t('diagram.missingTarget'));
+      }
       continue;
     }
     const raw = mermaidRawOf(slot);
+    if (!isCurrentDiagramRender(slot, version)) continue;
     slot.setAttribute('data-processed', 'true');
-    // Hold source visible until the SVG has actually arrived in target.innerHTML;
-    // an optical glitch-free handoff requires source to fade out AS target fades in.
-    slot.setAttribute('data-state', 'pending');
+    setDiagramState(slot, 'loading');
     try {
       const id = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
-      const { svg } = await mermaid.render(id, raw);
+      const { svg } = await withTimeout(mermaid.render(id, raw));
+      if (!isCurrentDiagramRender(slot, version)) continue;
       target.innerHTML = svg;
-      slot.setAttribute('data-state', 'arrived');
+      setDiagramState(slot, 'preview');
     } catch (err) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
       const msg = err instanceof Error ? err.message : String(err);
-      target.innerHTML = `<pre class="mermaid-error"><code>${attr(msg)}</code>\n\n${esc(raw)}</pre>`;
-      slot.setAttribute('data-state', 'arrived');
+      setDiagramState(slot, 'error', msg);
     }
   }
 }
@@ -306,18 +364,36 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
 
 function bindPumlFallbacks(container: HTMLElement): void {
   for (const img of Array.from(container.querySelectorAll<HTMLImageElement>('.puml-diagram'))) {
-    img.addEventListener(
-      'error',
-      () => {
-        // Use data-raw (the encoded source) rather than img.alt to avoid stuffing
-        // the diagram syntax into a fallback that may be itself selected/copied.
-        const stored = img.getAttribute('data-raw') ?? '';
-        let raw = stored;
-        try { raw = decodeURIComponent(stored); } catch { /* stored already raw */ }
-        img.outerHTML = `<pre class="puml-fallback"><code>${esc(raw)}</code></pre>`;
-      },
-      { once: true },
-    );
+    const slot = img.closest<HTMLElement>('.puml-slot');
+    if (!slot || img.hasAttribute('data-diagram-bound')) continue;
+    img.setAttribute('data-diagram-bound', 'true');
+    const version = nextDiagramRenderVersion(slot);
+    slot.setAttribute('data-state', 'loading');
+    const timeout = window.setTimeout(() => {
+      if (isCurrentDiagramRender(slot, version) && slot.getAttribute('data-state') === 'loading') {
+        setDiagramState(slot, 'error', t('diagram.timeout'));
+      }
+    }, DIAGRAM_RENDER_TIMEOUT_MS);
+    img.addEventListener('load', () => {
+      window.clearTimeout(timeout);
+      if (!isCurrentDiagramRender(slot, version) || slot.getAttribute('data-state') !== 'loading') return;
+      setDiagramState(slot, 'preview');
+      bindPumlPopup(slot);
+    }, { once: true });
+    img.addEventListener('error', () => {
+      window.clearTimeout(timeout);
+      if (!isCurrentDiagramRender(slot, version) || slot.getAttribute('data-state') !== 'loading') return;
+      setDiagramState(slot, 'error', t('diagram.imageLoadFailed'));
+    }, { once: true });
+    if (img.complete) {
+      if (img.naturalWidth > 0) {
+        window.clearTimeout(timeout);
+        if (isCurrentDiagramRender(slot, version)) setDiagramState(slot, 'preview');
+      } else {
+        window.clearTimeout(timeout);
+        if (isCurrentDiagramRender(slot, version)) setDiagramState(slot, 'error', t('diagram.imageLoadFailed'));
+      }
+    }
   }
 }
 
@@ -375,26 +451,54 @@ export function groupAdjacentSvgSlots(container: HTMLElement): void {
   flush();
 }
 
-/** Fill every unprocessed `.svg-slot`'s target with the rendered SVG (sync). */
-function renderSvgNodes(container: HTMLElement): void {
-  for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.svg-slot:not([data-processed])'))) {
+/** Fill every unprocessed `.svg-slot`'s target with the rendered SVG. */
+async function renderSvgNodes(container: HTMLElement): Promise<void> {
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.svg-slot:not([data-processed])'));
+  if (slots.length === 0) return;
+  const attempts = slots.map((slot) => ({ slot, version: nextDiagramRenderVersion(slot) }));
+
+  // Commit the loading state before doing any sanitization/injection. Yielding
+  // one frame gives the WebView a chance to paint the square placeholder so a
+  // large SVG source can never flash on screen while it is being prepared.
+  for (const { slot } of attempts) {
     slot.setAttribute('data-processed', 'true');
+    slot.setAttribute('data-view', 'preview');
     const target = slot.querySelector<HTMLElement>('.svg-target');
-    if (!target) continue;
-    const src = slot.querySelector<HTMLElement>('.svg-source code')?.textContent ?? '';
+    if (target) target.innerHTML = '';
+    setDiagramState(slot, 'loading');
+  }
+  await new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      // Two frames give the WebView one complete paint opportunity between
+      // loading-state commit and SVG sanitization/injection.
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+
+  for (const { slot, version } of attempts) {
+    // A retry or newer render invalidates this attempt while it is yielding.
+    // Never let stale sanitization overwrite the newer preview/error state.
+    if (!isCurrentDiagramRender(slot, version)) continue;
+    const target = slot.querySelector<HTMLElement>('.svg-target');
+    if (!target) {
+      setDiagramState(slot, 'error', t('diagram.missingTarget'));
+      continue;
+    }
+    const src = diagramRawOf(slot);
     if (!src.trim()) {
-      target.innerHTML = '<pre class="chart-error">(empty SVG)</pre>';
-      slot.setAttribute('data-state', 'arrived');
+      setDiagramState(slot, 'error', '(empty SVG)');
       continue;
     }
     const svg = sanitizeSvgSource(src);
     if (!svg) {
-      target.innerHTML = '<pre class="chart-error">SVG sanitization produced no output</pre>';
-      slot.setAttribute('data-state', 'arrived');
+      setDiagramState(slot, 'error', 'SVG sanitization produced no output');
       continue;
     }
+    if (!isCurrentDiagramRender(slot, version)) continue;
     target.innerHTML = svg;
-    slot.setAttribute('data-state', 'arrived');
+    setDiagramState(slot, 'preview');
   }
 }
 
@@ -628,7 +732,11 @@ export function buildChartSvg(spec: ChartSpec): string {
 }
 
 function chartHeader(title: string, extra = ''): string {
-  return `<text class="chart-title" x="16" y="26">${esc(title)}</text>${extra}`;
+  // SVG <title> gives the generated chart an accessible name for VoiceOver
+  // and other screen readers without adding visible text or changing layout.
+  const accessibleTitle = title.trim() || 'Chart';
+  return `<title class="chart-accessible-title">${esc(accessibleTitle)}</title>` +
+    `<text class="chart-title" x="16" y="26">${esc(title)}</text>${extra}`;
 }
 
 function yGrid(min: number, max: number, x0: number, x1: number, y0: number, y1: number): string {
@@ -835,16 +943,18 @@ function renderChartNodes(container: HTMLElement): void {
   for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.chart-slot:not([data-processed])'))) {
     slot.setAttribute('data-processed', 'true');
     const target = slot.querySelector<HTMLElement>('.chart-target');
-    if (!target) continue;
-    const src = slot.querySelector<HTMLElement>('.chart-source code')?.textContent ?? '';
+    if (!target) {
+      setDiagramState(slot, 'error', t('diagram.missingTarget'));
+      continue;
+    }
+    const src = diagramRawOf(slot);
     try {
       const spec = parseChartSource(src);
       target.innerHTML = buildChartSvg(spec);
-      slot.setAttribute('data-state', 'arrived');
+      setDiagramState(slot, 'preview');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      target.innerHTML = `<pre class="chart-error"><code>${attr(msg)}</code></pre>`;
-      slot.setAttribute('data-state', 'arrived');
+      setDiagramState(slot, 'error', msg);
     }
   }
 }
@@ -953,18 +1063,19 @@ export async function renderMarkdown(text: string, container: HTMLElement): Prom
   linkifyPaths(container);
 
   // 3) Inline SVG (```svg) + native charts (```chart) — both synchronous.
-  renderSvgNodes(container);
+  await renderSvgNodes(container);
   groupAdjacentSvgSlots(container);
   renderChartNodes(container);
+
+  // Start PlantUML listeners before awaiting Mermaid so a slow Mermaid render
+  // cannot extend the PlantUML spinner beyond its own bounded timeout.
+  bindPumlFallbacks(container);
 
   // 4) Async: mermaid renders embed SVG into .mermaid-diagram nodes.
   await renderMermaidNodes(container);
 
-  // 5) PlantUML <img>: offline/encoding error fallback (delegated to the renderer).
-  bindPumlFallbacks(container);
-
-  // 6) Bind diagram viewers. Inline SVGs use double-click to avoid accidental
-  // expansion while charts and server-rendered diagrams keep their click action.
+  // 5) Bind the post-render preview/source controls and diagram viewers.
+  bindDiagramControls(container);
   bindMermaidPopup(container);
   bindPumlPopup(container);
   bindSvgChartPopup(container);
@@ -1009,34 +1120,9 @@ streamRenderer.link = function (
 };
 streamRenderer.code = (token: { text: string; lang?: string }): string => {
   const lang = langOf(token.lang);
-  if (lang === 'mermaid') {
-    // Mermaid blocks render as a `.mermaid-slot` with two stacked children:
-    //   • <pre.mermaid-source> shows the source during the stream
-    //   • <div.mermaid-target> is the placeholder for the rendered SVG
-    // When `data-state` flips to "arrived" (set by renderMermaidNodes), CSS
-    // cross-fades source→target so the user sees the source shrink into the
-    // diagram on Completed. The slot's outer height is preserved by keeping
-    // `source` in normal flow until `target` becomes the visible element.
-    return `<div class="mermaid-slot" data-md-raw="${attr(token.text)}" data-state="pending">` +
-           `<pre class="mermaid-source"><code class="hljs language-mermaid">${esc(token.text)}</code></pre>` +
-           `<div class="mermaid-target"></div>` +
-           `</div>`;
-  }
-  if (lang === 'svg') {
-    // Same slot markup as the completed renderer so diffStreaming can leave a
-    // closed block alone; the SVG is only rendered into the target at
-    // completion (renderSvgNodes), like mermaid.
-    return `<div class="svg-slot" data-state="pending">` +
-           `<pre class="svg-source"><code class="hljs language-svg">${esc(token.text)}</code></pre>` +
-           `<div class="svg-target"></div>` +
-           `</div>`;
-  }
-  if (lang === 'chart' || lang === 'charts') {
-    return `<div class="chart-slot" data-state="pending">` +
-           `<pre class="chart-source"><code class="hljs language-chart">${esc(token.text)}</code></pre>` +
-           `<div class="chart-target"></div>` +
-           `</div>`;
-  }
+  if (lang === 'mermaid') return diagramSlot('mermaid', token.text, '');
+  if (lang === 'svg') return diagramSlot('svg', token.text, '');
+  if (lang === 'chart' || lang === 'charts') return diagramSlot('chart', token.text, '');
   return `<pre><code class="hljs language-${attr(lang)}">${esc(token.text)}</code></pre>`;
 };
 const mdStream = new Marked({ gfm: true, breaks: true, renderer: streamRenderer });
@@ -1271,14 +1357,16 @@ if (typeof document !== 'undefined') {
     if (all.length === 0) return;
     for (const slot of all) {
       const target = slot.querySelector<HTMLElement>('.mermaid-target');
-      const raw = mermaidRawOf(slot);
+      nextDiagramRenderVersion(slot);
       slot.removeAttribute('data-processed');
       if (target) target.innerHTML = '';
-      slot.setAttribute('data-state', 'pending');
+      slot.setAttribute('data-state', 'loading');
     }
     await renderMermaidNodes(document.body);
+    bindDiagramControls(document.body);
     bindMermaidPopup(document.body);
     bindPumlPopup(document.body);
+    bindSvgChartPopup(document.body);
   });
 }
 
@@ -1288,26 +1376,82 @@ function bindDiagramActivation(
   target: HTMLElement,
   getDiagram: () => HTMLElement | null,
   activation: 'click' | 'dblclick' = 'click',
+  getSource?: () => string,
 ): void {
   if (target.hasAttribute('data-popup-bound')) return;
   target.setAttribute('data-popup-bound', 'true');
   target.setAttribute('role', 'button');
   target.setAttribute('tabindex', '0');
   target.setAttribute('aria-label', t('diagram.openViewer'));
-  target.addEventListener(activation, () => {
+  const open = (event?: Event) => {
+    // Let interactive descendants keep their own behavior (links inside a
+    // rendered SVG must navigate, not open the viewer).
+    const clicked = event?.target as Element | null;
+    if (clicked && typeof clicked.closest === 'function' && clicked.closest('a[href], button, [role="button"]')) {
+      return;
+    }
     const diagram = getDiagram();
-    if (diagram) showDiagramViewer(diagram);
-  });
+    if (diagram) showDiagramViewer(diagram, getSource ? getSource() : undefined);
+  };
+  target.addEventListener(activation, (event) => open(event));
   target.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault();
-    const diagram = getDiagram();
-    if (diagram) showDiagramViewer(diagram);
+    open();
   });
 }
 
+function bindDiagramControls(container: HTMLElement): void {
+  for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.diagram-slot'))) {
+    if (slot.hasAttribute('data-controls-bound')) continue;
+    slot.setAttribute('data-controls-bound', 'true');
+    for (const button of Array.from(slot.querySelectorAll<HTMLButtonElement>('.diagram-view-btn'))) {
+      button.addEventListener('click', () => {
+        const view = button.getAttribute('data-diagram-view') === 'source' ? 'source' : 'preview';
+        slot.setAttribute('data-view', view);
+        for (const sibling of Array.from(slot.querySelectorAll<HTMLButtonElement>('.diagram-view-btn'))) {
+          const active = sibling.getAttribute('data-diagram-view') === view;
+          sibling.classList.toggle('active', active);
+          sibling.setAttribute('aria-pressed', String(active));
+        }
+      });
+    }
+    slot.addEventListener('click', (event) => {
+      if (!(event.target as Element | null)?.closest('.diagram-retry')) return;
+      const kind = slot.getAttribute('data-diagram-kind');
+      const target = slot.querySelector<HTMLElement>('.diagram-preview');
+      if (!kind || !target) return;
+      slot.removeAttribute('data-processed');
+      target.innerHTML = kind === 'puml' ? target.innerHTML : '';
+      setDiagramState(slot, 'loading');
+      const host = slot.parentElement ?? slot;
+      if (kind === 'mermaid') {
+        void renderMermaidNodes(host).then(() => {
+          bindMermaidPopup(host);
+        });
+      } else if (kind === 'svg') {
+        void renderSvgNodes(host).then(() => bindSvgChartPopup(host));
+      } else if (kind === 'chart') {
+        renderChartNodes(host);
+        bindSvgChartPopup(host);
+      } else {
+        const oldImage = target.querySelector<HTMLImageElement>('.puml-diagram');
+        if (oldImage) {
+          const replacement = oldImage.cloneNode(true) as HTMLImageElement;
+          replacement.removeAttribute('data-diagram-bound');
+          target.replaceChildren(replacement);
+          bindPumlFallbacks(slot);
+          bindPumlPopup(slot);
+        }
+      }
+    });
+  }
+}
+
 function bindMermaidPopup(container: HTMLElement): void {
-  const slots = container.querySelectorAll<HTMLElement>('.mermaid-slot[data-state="arrived"]');
+  const slots = container.matches('.mermaid-slot')
+    ? [container]
+    : Array.from(container.querySelectorAll<HTMLElement>('.mermaid-slot[data-state="preview"]'));
   for (const slot of Array.from(slots)) {
     const target = slot.querySelector<HTMLElement>('.mermaid-target');
     if (!target) continue;
@@ -1319,22 +1463,27 @@ function bindMermaidPopup(container: HTMLElement): void {
 }
 
 function bindPumlPopup(container: HTMLElement): void {
-  const imgs = container.querySelectorAll<HTMLImageElement>('.puml-diagram');
-  for (const img of Array.from(imgs)) {
+  const imgs = container.matches('img.puml-diagram')
+    ? [container as HTMLImageElement]
+    : Array.from(container.querySelectorAll<HTMLImageElement>('.puml-slot[data-state="preview"] .puml-diagram'));
+  for (const img of imgs) {
     bindDiagramActivation(img, () => img.cloneNode(true) as HTMLElement);
   }
 }
 
 function bindSvgChartPopup(container: HTMLElement): void {
-  const svgTargets = container.querySelectorAll<HTMLElement>('.svg-slot[data-state="arrived"] .svg-target');
+  const svgTargets = container.querySelectorAll<HTMLElement>('.svg-slot[data-state="preview"] .svg-target');
   for (const target of Array.from(svgTargets)) {
+    const slot = target.closest<HTMLElement>('.svg-slot');
+    // Single click opens the viewer (the preview already shows a zoom-in
+    // cursor), and the viewer offers the raw SVG source alongside the image.
     bindDiagramActivation(target, () => {
       const svg = target.querySelector('svg');
       return svg?.cloneNode(true) as HTMLElement | null;
-    }, 'dblclick');
+    }, 'click', slot ? () => decodeDiagramSource(diagramRawOf(slot)) : undefined);
   }
 
-  const chartTargets = container.querySelectorAll<HTMLElement>('.chart-slot[data-state="arrived"] .chart-target');
+  const chartTargets = container.querySelectorAll<HTMLElement>('.chart-slot[data-state="preview"] .chart-target');
   for (const target of Array.from(chartTargets)) {
     bindDiagramActivation(target, () => {
       const svg = target.querySelector('svg');
@@ -1343,7 +1492,7 @@ function bindSvgChartPopup(container: HTMLElement): void {
   }
 }
 
-function showDiagramViewer(el: HTMLElement): void {
+function showDiagramViewer(el: HTMLElement, source?: string): void {
   // Remove any existing viewer
   const existing = document.querySelector('.mermaid-viewer-overlay');
   if (existing) existing.remove();
@@ -1403,10 +1552,42 @@ function showDiagramViewer(el: HTMLElement): void {
   zoomResetBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>';
   zoomResetBtn.title = 'Reset zoom';
 
+  // ── Optional source/view toggle (SVG diagrams) ──
+  let sourcePre: HTMLPreElement | null = null;
+  let sourceBtn: HTMLButtonElement | null = null;
+  if (source !== undefined) {
+    sourcePre = document.createElement('pre');
+    sourcePre.className = 'mermaid-viewer-source';
+    sourcePre.textContent = source;
+    sourcePre.style.display = 'none';
+    overlay.appendChild(sourcePre);
+
+    sourceBtn = document.createElement('button');
+    sourceBtn.className = 'mermaid-viewer-zoom-btn mermaid-viewer-source-btn';
+    sourceBtn.textContent = t('diagram.source');
+    sourceBtn.title = t('diagram.source');
+    sourceBtn.setAttribute('aria-pressed', 'false');
+    sourceBtn.addEventListener('click', () => {
+      const showingSource = sourcePre!.style.display !== 'none';
+      if (showingSource) {
+        sourcePre!.style.display = 'none';
+        svgWrap.style.display = '';
+        sourceBtn!.textContent = t('diagram.source');
+      } else {
+        svgWrap.style.display = 'none';
+        sourcePre!.style.display = 'block';
+        sourceBtn!.textContent = t('diagram.preview');
+      }
+      ctrlBar.classList.toggle('source-mode', !showingSource);
+      sourceBtn!.setAttribute('aria-pressed', String(!showingSource));
+    });
+  }
+
   ctrlBar.appendChild(zoomOutBtn);
   ctrlBar.appendChild(zoomPct);
   ctrlBar.appendChild(zoomInBtn);
   ctrlBar.appendChild(zoomResetBtn);
+  if (sourceBtn) ctrlBar.appendChild(sourceBtn);
   overlay.appendChild(ctrlBar);
 
   // ── Apply transform ──
@@ -1433,9 +1614,15 @@ function showDiagramViewer(el: HTMLElement): void {
     svgWrap.classList.add('ready');
   };
 
+  // When the source view is open, pointer/wheel/dblclick gestures on the
+  // <pre> must scroll/select text instead of panning/zooming the diagram.
+  const onSourceLayer = (target: EventTarget | null): boolean =>
+    !!sourcePre && sourcePre.style.display !== 'none'
+    && target instanceof Node && sourcePre.contains(target);
+
   // ── Pan handlers ──
   const onMouseDown = (e: MouseEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || onSourceLayer(e.target)) return;
     dragging = true;
     didDrag = false;
     dragStartX = e.clientX;
@@ -1491,10 +1678,14 @@ function showDiagramViewer(el: HTMLElement): void {
   zoomResetBtn.addEventListener('click', () => fitToViewport());
 
   // Double-click to fit
-  overlay.addEventListener('dblclick', () => fitToViewport());
+  overlay.addEventListener('dblclick', (e) => {
+    if (onSourceLayer(e.target)) return;
+    fitToViewport();
+  });
 
   // Ctrl+wheel / pinch zoom at cursor
   overlay.addEventListener('wheel', (e) => {
+    if (onSourceLayer(e.target)) return;
     e.preventDefault();
     if (e.deltaY === 0) return;
     zoomAt(zoom + (e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP), e.clientX, e.clientY);
@@ -1652,6 +1843,7 @@ function addCodeBlockActions(container: HTMLElement): void {
     if (pre.classList.contains('mermaid-source')) continue;
     if (pre.classList.contains('svg-source')) continue;
     if (pre.classList.contains('chart-source')) continue;
+    if (pre.classList.contains('diagram-source')) continue;
     if (pre.querySelector('.code-copy-btn')) continue;
 
     const code = pre.querySelector('code');

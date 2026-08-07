@@ -167,8 +167,15 @@ export class WASMEmbeddingStore implements IMemoryStore {
     }
     if (!this.embedderPromise) {
       this.embedderPromise = (async () => {
-        const { pipeline } = await import('@huggingface/transformers');
-        const extractor = await pipeline('feature-extraction', this.model);
+        const transformers = await import('@huggingface/transformers');
+        // The browser build otherwise defaults to the asyncify runtime (~23MB).
+        // Configure the standard SIMD runtime (~13MB) before creating a session;
+        // Vite emits both files as cacheable, lazy assets.
+        if (typeof window !== 'undefined') {
+          const { configureTransformersWasm } = await import('./wasmRuntime');
+          configureTransformersWasm(transformers.env);
+        }
+        const extractor = await transformers.pipeline('feature-extraction', this.model);
         return {
           embed: async (text: string): Promise<number[]> => {
             const out = await extractor(text, { pooling: 'mean', normalize: true });

@@ -2,7 +2,8 @@
 // v0.4 — 6 file/command tools: read_file, write_file, edit_file, search_files, list_files, execute_command.
 // Fixes: handleWriteFile uses proper fs.mkdir() instead of fragile .ensure hack.
 
-import { resolve as pathResolve, relative as pathRelative } from 'node:path';
+import { basename, dirname, resolve as pathResolve, relative as pathRelative } from 'node:path';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
@@ -204,9 +205,7 @@ export class NodeToolAdapter implements ToolAdapter {
   ];
 
   constructor(config: NodeToolConfig) {
-    this.workspace = config.workspace.endsWith('/')
-      ? config.workspace.slice(0, -1)
-      : config.workspace;
+    this.workspace = pathResolve(config.workspace);
     this.commandTimeout = config.commandTimeout ?? 30000;
     this.maxFileSize = config.maxFileSize ?? 1_048_576; // 1MB
   }
@@ -243,22 +242,22 @@ export class NodeToolAdapter implements ToolAdapter {
 
     try {
       switch (toolCall.function.name) {
-        case 'read_file': return this.handleReadFile(args, start);
-        case 'write_file': return this.handleWriteFile(args, start);
-        case 'edit_file': return this.handleEditFile(args, start);
-        case 'search_files': return this.handleSearchFiles(args, start);
-        case 'list_files': return this.handleListFiles(args, start);
-        case 'execute_command': return this.handleExecuteCommand(args, signal, start);
-        case 'create_directory': return this.handleCreateDirectory(args, start);
-        case 'diff_files': return this.handleDiffFiles(args, start);
-        case 'web_search': return this.handleWebSearch(args, start);
-        case 'web_fetch': return this.handleWebFetch(args, signal, start);
-        case 'glob_files': return this.handleGlobFiles(args, start);
-        case 'replace_files': return this.handleReplaceFiles(args, start);
-        case 'git_diff': return this.handleGitCmd(args, ['diff', ...(args.staged ? ['--staged'] : []), ...(typeof args.path === 'string' ? ['--', args.path as string] : [])], signal, start);
-        case 'git_log': return this.handleGitCmd(args, ['log', '-n', String(args.maxCount ?? 10), ...(args.oneline !== false ? ['--oneline'] : [])], signal, start);
-        case 'git_status': return this.handleGitCmd(args, ['status', '--short'], signal, start);
-        case 'sys_info': return this.handleSysInfo(start);
+        case 'read_file': return await this.handleReadFile(args, start);
+        case 'write_file': return await this.handleWriteFile(args, start);
+        case 'edit_file': return await this.handleEditFile(args, start);
+        case 'search_files': return await this.handleSearchFiles(args, start);
+        case 'list_files': return await this.handleListFiles(args, start);
+        case 'execute_command': return await this.handleExecuteCommand(args, signal, start);
+        case 'create_directory': return await this.handleCreateDirectory(args, start);
+        case 'diff_files': return await this.handleDiffFiles(args, start);
+        case 'web_search': return await this.handleWebSearch(args, start);
+        case 'web_fetch': return await this.handleWebFetch(args, signal, start);
+        case 'glob_files': return await this.handleGlobFiles(args, start);
+        case 'replace_files': return await this.handleReplaceFiles(args, start);
+        case 'git_diff': return await this.handleGitCmd(args, ['diff', ...(args.staged ? ['--staged'] : []), ...(typeof args.path === 'string' ? ['--', args.path as string] : [])], signal, start);
+        case 'git_log': return await this.handleGitCmd(args, ['log', '-n', String(args.maxCount ?? 10), ...(args.oneline !== false ? ['--oneline'] : [])], signal, start);
+        case 'git_status': return await this.handleGitCmd(args, ['status', '--short'], signal, start);
+        case 'sys_info': return await this.handleSysInfo(start);
         default:
           return this.fail(toolCall, start, `Unknown tool: ${toolCall.function.name}`);
       }
@@ -423,19 +422,14 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleExecuteCommand(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
     const command = String(args.command);
-
-    const controller = new AbortController();
-    if (signal) {
-      signal.addEventListener('abort', () => controller.abort(), { once: true });
-    }
-    setTimeout(() => controller.abort(), this.commandTimeout);
+    const abort = createAbortController(signal, this.commandTimeout);
 
     try {
       const proc = Bun.spawn(['sh', '-c', command], {
         cwd: this.workspace,
         stdout: 'pipe',
         stderr: 'pipe',
-        signal: controller.signal,
+        signal: abort.signal,
       });
 
       const stdout = (await new Response(proc.stdout).text()).trim();
@@ -471,6 +465,8 @@ export class NodeToolAdapter implements ToolAdapter {
         return this.fail(null!, start, `Command timed out after ${this.commandTimeout}ms`);
       }
       return this.fail(null!, start, err?.message ?? 'Command execution failed');
+    } finally {
+      abort.cleanup();
     }
   }
 
@@ -670,17 +666,13 @@ export class NodeToolAdapter implements ToolAdapter {
   private async handleWebFetch(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
     const url = String(args.url);
     const maxChars = typeof args.maxChars === 'number' ? args.maxChars : 20000;
+    const abort = createAbortController(signal, 30000);
 
-    const controller = new AbortController();
-    if (signal) {
-      signal.addEventListener('abort', () => controller.abort(), { once: true });
-    }
-    setTimeout(() => controller.abort(), 30000);
-
-    const resp = await fetch(url, {
+    try {
+      const resp = await fetch(url, {
       headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9' },
-      signal: controller.signal,
-    });
+        signal: abort.signal,
+      });
 
     if (!resp.ok) {
       return this.fail(null!, start, `Fetch failed: HTTP ${resp.status}`);
@@ -706,13 +698,16 @@ export class NodeToolAdapter implements ToolAdapter {
     const text = extractReadableText(html);
     const truncated = text.length > maxChars ? text.slice(0, maxChars) + '\n\n[truncated]' : text;
 
-    return {
-      id: `tool_${Date.now()}`,
-      toolName: 'web_fetch',
-      result: truncated || '(empty page)',
-      success: true,
-      duration: Date.now() - start,
-    };
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'web_fetch',
+        result: truncated || '(empty page)',
+        success: true,
+        duration: Date.now() - start,
+      };
+    } finally {
+      abort.cleanup();
+    }
   }
 
   private async handleGlobFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
@@ -799,18 +794,14 @@ export class NodeToolAdapter implements ToolAdapter {
   }
 
   private async handleGitCmd(_args: Record<string, unknown>, gitArgs: string[], signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
-    const controller = new AbortController();
-    if (signal) {
-      signal.addEventListener('abort', () => controller.abort(), { once: true });
-    }
-    setTimeout(() => controller.abort(), this.commandTimeout);
+    const abort = createAbortController(signal, this.commandTimeout);
 
     try {
       const proc = Bun.spawn(['git', ...gitArgs], {
         cwd: this.workspace,
         stdout: 'pipe',
         stderr: 'pipe',
-        signal: controller.signal,
+        signal: abort.signal,
       });
 
       const stdout = await new Response(proc.stdout).text();
@@ -833,6 +824,8 @@ export class NodeToolAdapter implements ToolAdapter {
         return this.fail(null!, start, `Git command timed out after ${this.commandTimeout}ms`);
       }
       return this.fail(null!, start, err?.message ?? 'Git command failed');
+    } finally {
+      abort.cleanup();
     }
   }
 
@@ -860,10 +853,32 @@ export class NodeToolAdapter implements ToolAdapter {
   private resolve(filePath: string): string {
     const resolved = pathResolve(this.workspace, filePath);
     const rel = pathRelative(this.workspace, resolved);
-    if (rel.startsWith('..') || pathResolve(this.workspace, rel) !== resolved) {
+    if (rel === '..' || rel.startsWith(`..${requireSeparator()}`) || rel.startsWith(requireSeparator())) {
       throw new Error(`Path escapes workspace: ${filePath}`);
     }
-    return resolved;
+
+    const baseCanonical = realpathSync(this.workspace);
+    let existing = resolved;
+    const missing: string[] = [];
+    while (!existsSync(existing)) {
+      if (lstatSync(existing, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        throw new Error(`Path uses an unresolved symlink: ${filePath}`);
+      }
+      const parent = dirname(existing);
+      if (parent === existing) throw new Error(`Path cannot be resolved: ${filePath}`);
+      missing.push(basename(existing));
+      existing = parent;
+    }
+
+    const canonicalExisting = realpathSync(existing);
+    const existingRel = pathRelative(baseCanonical, canonicalExisting);
+    if (existingRel === '..' || existingRel.startsWith(`..${requireSeparator()}`) || existingRel.startsWith(requireSeparator())) {
+      throw new Error(`Path escapes workspace: ${filePath}`);
+    }
+
+    let safePath = canonicalExisting;
+    for (const component of missing.reverse()) safePath = pathResolve(safePath, component);
+    return safePath;
   }
 
   private fail(toolCall: ToolCall | null, start: number, error: string): ToolResult {
@@ -879,6 +894,28 @@ export class NodeToolAdapter implements ToolAdapter {
 
 function safeParseArgs(raw: string): Record<string, unknown> {
   try { return JSON.parse(raw); } catch { return {}; }
+}
+
+function requireSeparator(): string {
+  return process.platform === 'win32' ? '\\\\' : '/';
+}
+
+function createAbortController(parent: AbortSignal | undefined, timeoutMs: number): {
+  signal: AbortSignal;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (parent?.aborted) controller.abort();
+  else parent?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      parent?.removeEventListener('abort', onAbort);
+    },
+  };
 }
 
 /** Build the error message for a failed command (non-zero exit code). Mirrors

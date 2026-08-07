@@ -282,7 +282,10 @@ export class ToolRegistry implements ToolAdapter {
     const tool = this.tools.find(t => t.name === toolName);
     if (!tool) return this.delegate.getMetadata(toolName);
     return {
-      sideEffects: tool.tags.includes(Tags.DESTRUCTIVE) || tool.tags.includes(Tags.SHELL),
+      sideEffects: tool.tags.includes(Tags.DESTRUCTIVE)
+        || tool.tags.includes(Tags.SHELL)
+        || tool.tags.includes(Tags.MCP)
+        || tool.tags.includes(Tags.AGENT),
       isWrite: tool.tags.includes(Tags.WRITE) || tool.tags.includes(Tags.DESTRUCTIVE),
     };
   }

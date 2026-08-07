@@ -191,7 +191,7 @@ export class AgentLoopEngine {
         yield { type: 'StateChange', payload: { from: 'THINK', to: 'ACT', stateId: sid() }, timestamp: Date.now() };
         completedSteps.push('ACT');
 
-        const toolResults = await this.executeTools(toolCalls, ctx);
+        const toolResults = await this.executeTools(toolCalls, ctx, budget);
         for (const result of toolResults) {
           yield { type: 'ToolResult', payload: result, timestamp: Date.now() };
         }
@@ -367,14 +367,19 @@ export class AgentLoopEngine {
   private async executeTools(
     toolCalls: ToolCall[],
     ctx: EngineContext,
+    budget: BudgetManager,
   ): Promise<Array<{ toolName: string; result: import('../shared/types').ToolResult; duration: number; toolCallId: string }>> {
     const results: Array<{ toolName: string; result: import('../shared/types').ToolResult; duration: number; toolCallId: string }> = [];
     const reads: ToolCall[] = [];
     const writes: ToolCall[] = [];
 
     for (const tc of toolCalls) {
+      budget.incrementToolCall();
       const meta = ctx.tools!.getMetadata(tc.function.name);
-      if (meta?.isWrite) {
+      // Tools marked side-effectful (MCP and subagents included) must not be
+      // run concurrently merely because they are not file writes. Parallel
+      // execution is reserved for explicitly read-only tools.
+      if (meta?.isWrite || meta?.sideEffects) {
         writes.push(tc);
       } else {
         reads.push(tc);

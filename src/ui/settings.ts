@@ -197,6 +197,7 @@ export class SettingsPanel {
   private onClose?: () => void;
   private currentCategory: string = 'general';
   private visible = false;
+  private focusBeforeOpen: HTMLElement | null = null;
   private mcpServers: PureConfig['mcpServers'] = [];
   /** Bound in the constructor; refreshes the paste-file footprint on open. */
   private refreshTmpUsage: () => Promise<void> = async () => {};
@@ -215,6 +216,7 @@ export class SettingsPanel {
 
   open() {
     if (this.visible) return;
+    this.focusBeforeOpen = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     this.visible = true;
     const settingsView = document.getElementById('settings-view')!;
     const chatView = document.getElementById('chat-view')!;
@@ -224,6 +226,9 @@ export class SettingsPanel {
     toggleBtn.style.display = 'none';
     this.loadToForm();
     this.onOpen?.();
+    // Move keyboard focus into the settings view so opening it never leaves
+    // the user tabbing through controls behind the squeezed chat view.
+    document.getElementById('settings-back-btn')?.focus();
     // Refresh the paste-file footprint every time the panel opens.
     void this.refreshTmpUsage();
   }
@@ -238,6 +243,8 @@ export class SettingsPanel {
     chatView.classList.remove('squeezed');
     toggleBtn.style.display = '';
     this.onClose?.();
+    if (this.focusBeforeOpen?.isConnected) this.focusBeforeOpen.focus();
+    this.focusBeforeOpen = null;
   }
 
   isVisible(): boolean {

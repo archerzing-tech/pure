@@ -206,6 +206,25 @@ describe('AgentLoopEngine', () => {
 
   // ═══ ReAct loop: THINK → ACT → OBSERVE → THINK → VERIFY → TERMINATE ═══
 
+  it('counts every tool call in the budget snapshot', async () => {
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm: toolThenTextLLM('read_file', '{"path":"src/a.ts"}', 'done'),
+      tools: echoToolAdapter([READ_FILE_TOOL]),
+      toolsDefs: [READ_FILE_TOOL],
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-tool-budget', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const controls = events.filter(e => e.type === 'YieldControl');
+    const first = controls[0];
+    expect(first?.type).toBe('YieldControl');
+    if (first?.type === 'YieldControl') expect(first.payload.budget.toolCalls.used).toBe(1);
+  });
+
   it('executes the full ReAct loop with tool calls', async () => {
     const engine = new AgentLoopEngine();
     const ctx = baseCtx({

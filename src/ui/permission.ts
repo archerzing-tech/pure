@@ -36,6 +36,7 @@ function showDialog(info: PermissionRequestInfo): Promise<PermissionDecision> {
     const denyBtn = document.getElementById('permission-deny') as HTMLButtonElement;
     const onceBtn = document.getElementById('permission-allow-once') as HTMLButtonElement;
     const alwaysBtn = document.getElementById('permission-allow-always') as HTMLButtonElement;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
     const isHighRisk = info.riskLevel === 'high';
 
@@ -81,6 +82,7 @@ function showDialog(info: PermissionRequestInfo): Promise<PermissionDecision> {
       onceBtn.removeEventListener('click', onOnce);
       alwaysBtn.removeEventListener('click', onAlways);
       document.removeEventListener('keydown', onKeydown);
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
     };
 
     const onDeny = () => {
@@ -96,7 +98,20 @@ function showDialog(info: PermissionRequestInfo): Promise<PermissionDecision> {
       resolve({ allowed: true, remember: true });
     };
     const onKeydown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onDeny();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onDeny();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const focusable = [denyBtn, onceBtn, alwaysBtn].filter((button) => button.style.display !== 'none' && !button.disabled && !button.hidden);
+      if (focusable.length === 0) return;
+      const current = focusable.indexOf(document.activeElement as HTMLButtonElement);
+      const next = e.shiftKey
+        ? (current <= 0 ? focusable.length - 1 : current - 1)
+        : (current < 0 || current === focusable.length - 1 ? 0 : current + 1);
+      e.preventDefault();
+      focusable[next].focus();
     };
 
     denyBtn.addEventListener('click', onDeny);

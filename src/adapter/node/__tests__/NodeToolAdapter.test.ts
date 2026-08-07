@@ -1,7 +1,7 @@
 // src/adapter/node/__tests__/NodeToolAdapter.test.ts
 
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeToolAdapter } from '../NodeToolAdapter';
@@ -61,5 +61,22 @@ describe('NodeToolAdapter execute_command', () => {
     expect(r.success).toBe(false);
     // sh reports the failure on stderr; the exit code must be non-zero.
     expect(resultOf(r).exitCode).not.toBe(0);
+  });
+
+  it('rejects reads through a symlink that escapes the workspace', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'pure-node-outside-'));
+    try {
+      symlinkSync(outside, join(workspace, 'linked'));
+      const r = await adapter.execute({
+        id: 'call-symlink',
+        index: 0,
+        function: { name: 'read_file', arguments: JSON.stringify({ path: 'linked/secret.txt' }) },
+      });
+      expect(r.success).toBe(false);
+      expect(r.error).toContain('Path escapes workspace');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+      rmSync(join(workspace, 'linked'), { force: true });
+    }
   });
 });

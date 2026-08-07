@@ -92,7 +92,7 @@
       </button>
 
       <!-- ═══ Right context panel toggle (sits inside the panel, vertical center) ═══ -->
-      <button id="context-panel-reopen" type="button" aria-label="Show project context" title="Show project context">
+      <button id="context-panel-reopen" type="button" aria-label="显示项目上下文" title="显示项目上下文">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       </button>
 
@@ -106,6 +106,7 @@
               <div id="landing-logo">
                 <svg class="app-icon" viewBox="0 0 1024 1024" width="64" height="64" aria-hidden="true"><use href="#icon-gem"/></svg>
                 <span class="landing-logo-text">pure</span>
+                <span id="landing-version" class="landing-version"></span>
               </div>
               <div id="landing-input-zone">
                 <div id="landing-input-wrap">
@@ -114,7 +115,7 @@
                 <button id="landing-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
                   <svg class="wp-folder-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 </button>
-                <button id="landing-send-btn" data-i18n-title="input.send.title" aria-label="Send">
+                <button id="landing-send-btn" data-i18n-title="input.send.title" data-i18n-aria-label="input.send.title" aria-label="发送">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
                 </button>
                 </div>
@@ -127,29 +128,48 @@
               <svg class="wp-folder-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
             </button>
             <textarea id="prompt" rows="1" data-i18n-placeholder="input.placeholder" placeholder="Ask pure anything..." disabled></textarea>
-            <button id="send-btn" data-i18n-title="input.send.title" disabled>
+            <button id="send-btn" data-i18n-title="input.send.title" data-i18n-aria-label="input.send.title" aria-label="发送" disabled>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
             </button>
           </footer>
-        </div>
 
-        <aside id="context-panel" class="collapsed" aria-label="Project context">
-          <div class="context-panel-header">
-            <div>
-              <span class="context-kicker">PROJECT CONTEXT</span>
-              <h2 id="context-panel-title">Live workspace</h2>
+          <!-- ═══ Persistent status footer: workspace · model · live state · version ═══
+               Always-on slim bar at the bottom of the chat view (also visible on
+               the landing page): the workspace shortcut on the left, then model,
+               a live state dot and the app version on the right. -->
+          <div id="status-bar" role="status" aria-live="polite">
+            <button id="status-workspace" class="status-bar-workspace" type="button" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
+              <svg class="wp-folder-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              <span id="status-workspace-text"></span>
+            </button>
+            <div class="status-bar-right">
+              <span id="status-model" class="status-bar-item" title=""></span>
+              <span class="status-bar-item status-bar-state">
+                <i id="status-dot" class="status-dot"></i>
+                <span id="status-text" data-i18n="status.ready">就绪</span>
+              </span>
+              <span id="status-version" class="status-bar-item status-bar-version"></span>
             </div>
           </div>
-          <div class="context-panel-tabs" role="tablist" aria-label="Project context views">
-            <button id="context-tab-preview" class="context-tab active" type="button" role="tab" aria-selected="true" aria-controls="context-preview" data-context-tab="preview">Preview</button>
-            <button id="context-tab-changes" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-changes" data-context-tab="changes">Changes</button>
-            <button id="context-tab-structure" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-structure" data-context-tab="structure">Structure</button>
+        </div>
+
+        <aside id="context-panel" class="collapsed" data-i18n-aria-label="context.panel.ariaLabel" aria-label="项目上下文">
+          <div class="context-panel-header">
+            <div>
+              <span class="context-kicker" data-i18n="context.kicker">项目上下文</span>
+              <h2 id="context-panel-title" data-i18n="context.title">当前工作区</h2>
+            </div>
+          </div>
+          <div class="context-panel-tabs" role="tablist" data-i18n-aria-label="context.tabs.ariaLabel" aria-label="项目上下文视图">
+            <button id="context-tab-preview" class="context-tab active" type="button" role="tab" aria-selected="true" aria-controls="context-preview" data-context-tab="preview" data-i18n="context.tab.preview">预览</button>
+            <button id="context-tab-changes" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-changes" data-context-tab="changes" data-i18n="context.tab.changes">变更</button>
+            <button id="context-tab-structure" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-structure" data-context-tab="structure" data-i18n="context.tab.structure">结构</button>
           </div>
           <div id="context-preview" class="context-panel-body" role="tabpanel" aria-labelledby="context-tab-preview" data-context-view="preview">
             <div class="preview-toolbar">
               <span class="preview-live-dot"></span>
-              <span>Live preview</span>
-              <span id="preview-status" class="preview-status">Waiting</span>
+              <span data-i18n="context.preview.live">实时预览</span>
+              <span id="preview-status" class="preview-status" data-i18n="context.status.waiting">等待中</span>
             </div>
             <div class="preview-window">
               <div class="preview-window-bar"><span></span><span></span><span></span><b id="preview-route">workspace</b></div>
@@ -158,24 +178,24 @@
                 <div class="preview-skeleton line wide"></div>
                 <div class="preview-skeleton line"></div>
                 <div class="preview-skeleton-grid"><i></i><i></i><i></i></div>
-                <div class="preview-caption">Your generated interface will appear here as the agent builds it.</div>
+                <div class="preview-caption" data-i18n="context.preview.caption">智能体构建过程中，生成的界面会显示在这里。</div>
               </div>
             </div>
           </div>
           <div id="context-changes" class="context-panel-body hidden" role="tabpanel" aria-labelledby="context-tab-changes" data-context-view="changes">
-            <div class="context-section-heading"><span>AGENT ACTIVITY</span><b id="context-change-count">0 items</b></div>
-            <div class="context-change-empty"><span class="context-empty-icon">✦</span><p>Changes will collect here as the agent edits your project.</p></div>
+            <div class="context-section-heading"><span data-i18n="context.activity">智能体活动</span><b id="context-change-count" data-i18n="context.changes.none">暂无变更</b></div>
+            <div class="context-change-empty"><span class="context-empty-icon">✦</span><p data-i18n="context.changes.empty">智能体编辑项目后，变更会显示在这里。</p></div>
           </div>
           <div id="context-structure" class="context-panel-body hidden" role="tabpanel" aria-labelledby="context-tab-structure" data-context-view="structure">
-            <div class="context-section-heading"><span>PROJECT MAP</span><b>ready</b></div>
+            <div class="context-section-heading"><span data-i18n="context.projectMap">项目结构</span><b data-i18n="context.status.ready">就绪</b></div>
             <div class="structure-tree"><div>⌄ <b id="context-workspace-name">workspace</b></div><div class="tree-child">◇ src</div><div class="tree-child">◇ package.json</div><div class="tree-child">◇ README.md</div></div>
           </div>
           <div class="context-meta">
             <div class="context-meta-row"><span>MODEL</span><strong id="context-model">—</strong></div>
-            <div class="context-meta-row path"><span>WORKSPACE</span><strong id="context-workspace" title="">No workspace</strong></div>
+            <div class="context-meta-row path"><span data-i18n="context.workspace">工作区</span><strong id="context-workspace" title="" data-i18n="workspace.none">未设置工作区</strong></div>
           </div>
           <div class="context-stage" aria-live="polite">
-            <div class="context-stage-top"><span class="stage-pulse"></span><span id="context-stage-label">Ready to build</span><span id="context-stage-percent">0%</span></div>
+            <div class="context-stage-top"><span class="stage-pulse"></span><span id="context-stage-label" data-i18n="context.stage.ready">准备开始</span><span id="context-stage-percent">0%</span></div>
             <div class="context-stage-track"><i id="context-stage-progress"></i></div>
             <div class="context-stage-steps"><span class="done">Understand</span><span>Plan</span><span>Build</span><span>Verify</span></div>
           </div>
@@ -465,7 +485,7 @@
     </div>
   </div>
 
-  <div id="toast" class="hidden"></div>
+  <div id="toast" class="hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 
   <!-- ═══ Inline app icon (gem) — referenced by sidebar via <use> ═══
        Kept as a 0×0 absolutely-positioned sprite (NOT display:none): WebKit /

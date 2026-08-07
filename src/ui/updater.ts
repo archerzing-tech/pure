@@ -1,6 +1,9 @@
 // src/ui/updater.ts
 // Auto-update check using Tauri updater plugin.
 
+// Injected by Vite (build time) as a fallback for non-Tauri / dev runs.
+declare const __APP_VERSION__: string;
+
 let _checkedOnStartup = false;
 
 export async function checkForUpdatesSilently(): Promise<void> {
@@ -84,12 +87,19 @@ export function setCurrentVersion(version: string): void {
   if (el) el.textContent = version;
 }
 
-export async function fetchAndDisplayVersion(): Promise<void> {
+/**
+ * Current app version: the real bundle version inside Tauri, otherwise the
+ * version baked in at build time (vite.config.ts define).
+ */
+export async function fetchAppVersion(): Promise<string> {
   try {
     const { getVersion } = await import('@tauri-apps/api/app');
-    const v = await getVersion();
-    setCurrentVersion(v);
+    return await getVersion();
   } catch {
-    setCurrentVersion('0.9.7');
+    return __APP_VERSION__;
   }
+}
+
+export async function fetchAndDisplayVersion(): Promise<void> {
+  setCurrentVersion(await fetchAppVersion());
 }

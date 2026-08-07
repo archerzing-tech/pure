@@ -5,7 +5,7 @@ import { ChatController, bindAssistantBubbleCopy } from './chat';
 import { SettingsPanel, loadConfig, hasConfiguredKey } from './settings';
 import { loadSessionList, loadSession, deleteSession, deleteAllSessions, saveSessionWorkspace, getStoredThinkingSegments, type SessionMeta, type StoredMessage, type ToolExecMeta } from './store';
 import { loadRecentWorkspaces, touchRecentWorkspace, setRecentPinned, removeRecentWorkspace } from './recentWorkspaces';
-import { checkForUpdatesSilently } from './updater';
+import { checkForUpdatesSilently, fetchAppVersion } from './updater';
 import { escapeHtml } from '../shared/html';
 import { t, applyTranslations, updateLanguage } from '../shared/i18n';
 import type { Language as I18nLanguage } from '../shared/i18n';
@@ -32,6 +32,9 @@ pasteChips.mount(document.getElementById('landing-input-wrap')!);
 let hasStartedChat = false;
 let contextCollapsed = false;
 let contextCollapsedBeforeSettings = false;
+
+// App version cached from fetchAppVersion() — shown in the status footer.
+let appVersion = '';
 
 // Message typed while the assistant is generating — queued and auto-sent when
 // the current turn finishes (Claude Code behavior, so the input stays live).
@@ -65,6 +68,7 @@ chat.onStreamingStateChange((streaming) => {
     const stopSvg = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>`;
     sendBtn.innerHTML = stopSvg;
     sendBtn.title = t('input.stop.title');
+    sendBtn.setAttribute('aria-label', t('input.stop.title'));
     sendBtn.classList.add('stopping');
     // The stop/pause button must ALWAYS be clickable while a task runs: send()
     // disables the button when it empties the input, and this branch is the
@@ -78,12 +82,14 @@ chat.onStreamingStateChange((streaming) => {
     promptEl.placeholder = queuedWhileStreaming ? t('input.queued') : t('input.streaming');
     landingSend.innerHTML = stopSvg;
     landingSend.title = t('input.stop.title');
+    landingSend.setAttribute('aria-label', t('input.stop.title'));
     updateContextPanelStage(true);
     updateContextPanelChanges();
   } else {
     const sendSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>`;
     sendBtn.innerHTML = sendSvg;
-    sendBtn.title = 'Send';
+    sendBtn.title = t('input.send.title');
+    sendBtn.setAttribute('aria-label', t('input.send.title'));
     sendBtn.classList.remove('stopping');
     // A message consisting only of pasted file chips (no typed text) is still
     // sendable — the chips' content rides along in the composed message.
@@ -91,7 +97,8 @@ chat.onStreamingStateChange((streaming) => {
     promptEl.placeholder = t('input.placeholder');
     promptEl.disabled = !hasConfiguredKey(loadConfig());
     landingSend.innerHTML = sendSvg;
-    landingSend.title = 'Send';
+    landingSend.title = t('input.send.title');
+    landingSend.setAttribute('aria-label', t('input.send.title'));
     landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
     updateContextPanelStage(false);
     updateContextPanelChanges();
@@ -153,14 +160,55 @@ function updateContextPanelModel() {
   const cfg = loadConfig();
   const model = document.getElementById('context-model');
   if (!model) return;
-  model.textContent = cfg?.model ? `${providerLabel(cfg.provider)} · ${cfg.model}` : (cfg?.provider ? providerLabel(cfg.provider) : 'Not configured');
+  model.textContent = cfg?.model ? `${providerLabel(cfg.provider)} · ${cfg.model}` : (cfg?.provider ? providerLabel(cfg.provider) : t('context.model.notConfigured'));
 }
 
 function updateContextPanelChanges() {
   const count = document.getElementById('context-change-count');
   if (!count) return;
   const changed = document.querySelectorAll('#chat .tool-row.success, #chat .diff-card, #chat .bubble.md-rendered pre').length;
-  count.textContent = `${changed} file${changed === 1 ? '' : 's'}`;
+  count.textContent = changed === 0
+    ? t('context.changes.none')
+    : t('context.changes.count').replace('{n}', String(changed));
+}
+
+/** Persistent status footer: workspace · model · live state · version. */
+function updateStatusBar() {
+  const cfg = loadConfig();
+  const ws = chat.getWorkspace();
+
+  // Workspace shortcut (left) — same ghost-button language as the sidebar.
+  const wsBtn = document.getElementById('status-workspace');
+  const wsText = document.getElementById('status-workspace-text');
+  if (wsBtn) {
+    wsBtn.classList.toggle('has-workspace', !!ws);
+    wsBtn.title = ws || t('workspace.browseTitle');
+    wsBtn.setAttribute('aria-label', ws || t('workspace.browseTitle'));
+  }
+  if (wsText) {
+    wsText.textContent = ws || t('workspace.none');
+    wsText.title = ws || '';
+  }
+
+  // Model badge — same format as the sidebar model chip.
+  const model = document.getElementById('status-model');
+  if (model) {
+    model.textContent = cfg?.model
+      ? `${providerLabel(cfg.provider)} · ${cfg.model}`
+      : (cfg?.provider ? providerLabel(cfg.provider) : t('context.model.notConfigured'));
+    model.title = cfg?.model ? cfg.model : '';
+  }
+
+  // Live state dot + text (busy while the agent is generating).
+  const bar = document.getElementById('status-bar');
+  const statusText = document.getElementById('status-text');
+  const busy = chat.isStreaming();
+  if (bar) bar.classList.toggle('busy', busy);
+  if (statusText) statusText.textContent = busy ? t('status.generating') : t('status.ready');
+
+  // App version pill (right).
+  const version = document.getElementById('status-version');
+  if (version) version.textContent = appVersion ? `v${appVersion}` : '';
 }
 
 function updateContextPanelStage(streaming = chat.isStreaming()) {
@@ -168,13 +216,14 @@ function updateContextPanelStage(streaming = chat.isStreaming()) {
   const percent = document.getElementById('context-stage-percent');
   const progress = document.getElementById('context-stage-progress');
   const status = document.getElementById('preview-status');
-  const stage = streaming ? 'Building project' : (hasStartedChat ? 'Ready for next step' : 'Ready to build');
+  const stage = streaming ? t('context.stage.building') : (hasStartedChat ? t('context.stage.next') : t('context.stage.ready'));
   const value = streaming ? 62 : (hasStartedChat ? 28 : 0);
   updateContextPanelChanges();
   if (label) label.textContent = stage;
   if (percent) percent.textContent = `${value}%`;
   if (progress) progress.style.width = `${value}%`;
-  if (status) status.textContent = streaming ? 'Updating' : (hasStartedChat ? 'Ready' : 'Waiting');
+  if (status) status.textContent = streaming ? t('context.status.updating') : (hasStartedChat ? t('context.status.ready') : t('context.status.waiting'));
+  updateStatusBar();
 }
 
 function updateWorkspacePicker() {
@@ -221,6 +270,7 @@ function updateWorkspacePicker() {
   // state.
   const clearBtn = document.getElementById('wp-clear-btn');
   if (clearBtn) clearBtn.hidden = !ws;
+  updateStatusBar();
 }
 
 function openWorkspacePopover() {
@@ -465,6 +515,12 @@ function setupBrowserDragDrop() {
   void setupNativeDragDrop();
   initPathLinks();
   setTimeout(() => checkForUpdatesSilently(), 3000);
+  void fetchAppVersion().then((version) => {
+    appVersion = version;
+    const el = document.getElementById('landing-version');
+    if (el) el.textContent = `v${version}`;
+    updateStatusBar();
+  });
 })().catch(err => console.error('[pure] init failed:', err));
 
 /** Ensure the landing class is set correctly based on chat state */
@@ -492,6 +548,7 @@ function updateSidebarModel() {
   if (!el) return;
   el.textContent = cfg?.model ? `${providerLabel(cfg.provider)} · ${cfg.model}` : (cfg?.provider ? providerLabel(cfg.provider) : '');
   updateContextPanelModel();
+  // updateContextPanelStage() already refreshes the status footer.
   updateContextPanelStage();
 }
 
@@ -504,7 +561,7 @@ function goToLanding() {
   chatView.classList.add('landing');
   landingPrompt.value = '';
   landingPrompt.style.height = 'auto';
-  landingSend.disabled = true;
+  landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
 }
 
 /** Apply saved theme, language, font size, and density on initial load */
@@ -553,7 +610,7 @@ function renderSessionMessages(messages: StoredMessage[]) {
       wrapper.className = 'bubble-row assistant';
       const label = document.createElement('span');
       label.className = 'bubble-label';
-      label.textContent = 'pure';
+      label.textContent = t('context.role.pure');
       wrapper.appendChild(label);
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
@@ -572,7 +629,7 @@ function renderSessionMessages(messages: StoredMessage[]) {
       wrapper.className = 'bubble-row user';
       const label = document.createElement('span');
       label.className = 'bubble-label';
-      label.textContent = 'You';
+      label.textContent = t('context.role.you');
       wrapper.appendChild(label);
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
@@ -615,10 +672,13 @@ function enableInputIfReady() {
   const ready = hasConfiguredKey(config);
   promptEl.disabled = !ready;
   sendBtn.disabled = !ready || (!promptEl.value.trim() && !pasteChips.hasAttachments());
-  landingSend.disabled = !ready || (!landingPrompt.value.trim() && !pasteChips.hasAttachments());
+  landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
+  // Keep the landing composer usable before setup so the user can write a
+  // draft first. Sending it opens Settings and the draft remains intact.
+  landingPrompt.disabled = false;
   if (!ready) {
     promptEl.placeholder = t('input.placeholderDisabled');
-    landingPrompt.placeholder = t('input.placeholderDisabled');
+    landingPrompt.placeholder = t('landing.placeholderDisabled');
   } else {
     promptEl.placeholder = t('input.placeholder');
     landingPrompt.placeholder = t('landing.placeholder');
@@ -756,7 +816,7 @@ async function doSend(text: string) {
     await chat.send(fullText);
     pasteChips.clear();
   } catch (err: any) {
-    showToast(`Error: ${err?.message || err}`);
+    showToast(`${t('toast.sendFailed')}: ${err?.message || err}`);
     console.error('[pure] sendMessage failed:', err);
   } finally {
     sendBtn.disabled = !promptEl.value.trim() && !pasteChips.hasAttachments();
@@ -832,6 +892,12 @@ for (const id of ['landing-ws-btn', 'input-ws-btn']) {
     void browseWorkspace();
   });
 }
+
+// The status-footer workspace shortcut opens the same native folder picker.
+document.getElementById('status-workspace')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  void browseWorkspace();
+});
 
 // The sidebar workspace path shortcut lets users re-pick the folder without
 // opening the sidebar popover first.
@@ -932,8 +998,9 @@ function setContextPanelCollapsed(collapsed: boolean) {
   // pointing right while the panel is open (collapse), left while collapsed
   // (expand). The hidden attribute is reserved for settings mode (see the
   // SettingsPanel open/close callbacks above).
-  contextPanelReopen.setAttribute('aria-label', collapsed ? 'Show project context' : 'Hide project context');
-  contextPanelReopen.title = collapsed ? 'Show project context' : 'Hide project context';
+  const contextLabel = collapsed ? t('context.show') : t('context.hide');
+  contextPanelReopen.setAttribute('aria-label', contextLabel);
+  contextPanelReopen.title = contextLabel;
   const poly = contextPanelReopen.querySelector('polyline');
   if (poly) poly.setAttribute('points', collapsed ? '15 18 9 12 15 6' : '9 18 15 12 9 6');
 }

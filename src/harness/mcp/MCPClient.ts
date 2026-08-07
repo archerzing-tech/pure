@@ -45,7 +45,27 @@ export class MCPClient implements ToolAdapter {
     }
   }
 
+  private connecting = new Map<string, Promise<void>>();
+
   async connectServer(config: MCPServerConfig): Promise<void> {
+    const existing = this.connecting.get(config.name);
+    if (existing) return existing;
+    const connection = this.connectServerInternal(config);
+    this.connecting.set(config.name, connection);
+    try {
+      await connection;
+    } finally {
+      if (this.connecting.get(config.name) === connection) this.connecting.delete(config.name);
+    }
+  }
+
+  private async connectServerInternal(config: MCPServerConfig): Promise<void> {
+    const previous = this.servers.get(config.name);
+    if (previous) {
+      previous.transport.close();
+      this.removeServerTools(config.name);
+    }
+
     const transport: MCPTransport =
       config.transport === 'stdio'
         ? new StdioTransport(config.command ?? [], config.env)
@@ -90,8 +110,15 @@ export class MCPClient implements ToolAdapter {
     for (const [, state] of this.servers) {
       state.transport.close();
       state.connected = false;
+      state.tools = [];
     }
     this.toolToServer.clear();
+  }
+
+  private removeServerTools(serverName: string): void {
+    for (const [toolName, owner] of this.toolToServer) {
+      if (owner === serverName) this.toolToServer.delete(toolName);
+    }
   }
 
   getServerNames(): string[] {

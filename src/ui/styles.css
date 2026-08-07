@@ -51,6 +51,13 @@
   --term-dim:     #8f8f8f;
   --term-accent:  #8ecbff;
   --term-soft:    #202020;
+  --chart-text:   #37352F;
+  --chart-muted:  #6B6965;
+  --chart-grid:   #D8D5CF;
+  --chart-axis:   #9B9995;
+  --chart-value:  #37352F;
+  --chart-total:  #37352F;
+  --chart-slice-text: #172033;
 }
 
 /* ── Dark theme ── */
@@ -81,6 +88,13 @@
      panel instead of a void against the dark chat background. */
   --term-bg:      #141414;
   --term-border:  #2c2c2c;
+  --chart-text:   #F0F2F5;
+  --chart-muted:  #C5CBD3;
+  --chart-grid:   #4B5563;
+  --chart-axis:   #9CA3AF;
+  --chart-value:  #FFFFFF;
+  --chart-total:  #FFFFFF;
+  --chart-slice-text: #FFFFFF;
 }
 
 /* ── Reset ── */
@@ -633,6 +647,18 @@ body {
   letter-spacing: -0.02em;
   color: var(--text);
   transition: color var(--transition);
+}
+
+/* Version badge next to the landing logo — subtle, baseline-aligned with the
+   large wordmark so it never distracts from the input. */
+.landing-version {
+  align-self: flex-end;
+  margin-bottom: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  letter-spacing: 0.01em;
+  user-select: none;
 }
 
 @keyframes landingIn {
@@ -2068,6 +2094,152 @@ body {
 #send-btn:disabled { opacity: 0.35; cursor: default; transform: none; }
 #send-btn.stopping { background: var(--danger); }
 #send-btn.stopping:hover { background: #C93535; }
+
+/* ── Persistent status footer (VS Code style bottom bar) ──
+ * Always-visible slim strip at the bottom of the chat view: the workspace
+ * shortcut on the left, then model · live state dot · app version on the
+ * right. It carries the app's bottom border in chat mode, where the
+ * composer itself has none (see the glass-thread overrides below). */
+
+#status-bar {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  /* In landing mode the chat and the composer are display:none, so the bar is
+     the only in-flow child of #chat-view — the auto top margin pushes it to
+     the bottom edge (in chat mode #chat's flex:1 already absorbs the space,
+     so the margin resolves to 0 there). */
+  margin-top: auto;
+  min-height: 28px;
+  padding: 4px 20px;
+  border-top: 1px solid var(--border-light);
+  background: var(--bg-header);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  user-select: none;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.status-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.status-bar-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* Workspace shortcut: ghost button, tints accent while a workspace is set.
+   One click opens the same native folder picker as the sidebar chip. */
+.status-bar-workspace {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 45%;
+  margin-left: -6px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: color 0.15s var(--ease-out), background 0.15s var(--ease-out);
+}
+
+.status-bar-workspace .wp-folder-icon {
+  flex-shrink: 0;
+}
+
+.status-bar-workspace:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.status-bar-workspace.has-workspace {
+  color: var(--accent);
+}
+
+/* The inner svg carries its own .wp-folder-icon color rule, which would beat
+   the button's inherited color — override it so the icon tints accent with
+   the text (same pattern as .input-ws-btn.has-workspace). */
+.status-bar-workspace.has-workspace .wp-folder-icon {
+  color: var(--accent);
+}
+
+.status-bar-workspace.has-workspace:hover {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+.status-bar-workspace.has-workspace:hover .wp-folder-icon {
+  color: var(--accent-hover);
+}
+
+#status-workspace-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#status-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+.status-bar-state {
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* Live state dot: dim by default, pulsing accent while the agent is busy. */
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transition: background var(--transition);
+}
+
+#status-bar.busy .status-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  animation: statusDotPulse 1.6s ease-in-out infinite;
+}
+
+#status-bar.busy #status-text {
+  color: var(--accent);
+}
+
+@keyframes statusDotPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+/* App version — monospace pill on the far right. */
+.status-bar-version {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
 
 /* ── Settings Header ── */
 #settings-header {
@@ -3949,6 +4121,13 @@ select:focus-visible,
   border-top: 1px solid var(--border);
 }
 
+#status-bar {
+  padding: 5px 32px;
+  background: color-mix(in srgb, var(--bg-header) 82%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
 #input-bar .input-ws-btn {
   width: 42px;
   height: 42px;
@@ -4081,6 +4260,16 @@ select:focus-visible,
     padding-bottom: 14px;
   }
 
+  #status-bar {
+    padding: 4px 14px;
+  }
+
+  /* Narrow windows: the model badge is the least critical piece of the
+     footer — drop it before the workspace path or the live state. */
+  #status-model {
+    display: none;
+  }
+
   .bubble-row.user .bubble {
     max-width: 90%;
   }
@@ -4113,6 +4302,11 @@ select:focus-visible,
   .bubble-row,
   #input-bar {
     animation: none;
+  }
+
+  #status-bar.busy .status-dot {
+    animation: none;
+    opacity: 1;
   }
 }
 
@@ -5225,4 +5419,327 @@ button svg,
   .paste-viewer-meta {
     display: none;
   }
+}
+
+/* ── Tool rows: one frame, no internal card seams ──
+ * The tool <details> is the single visual container. Summary/header, body,
+ * Input/Output sections, and search-result rows provide spacing and surfaces
+ * only; they must not introduce a second border line inside the tool frame.
+ * This final cascade layer intentionally overrides the older web-tool and
+ * terminal-panel rules above. */
+.tool-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.tool-row.tool-row.pending,
+.tool-row.tool-row.success,
+.tool-row.tool-row.failure,
+.tool-row.tool-row.stopped {
+  border-color: var(--border);
+}
+.tool-row .tool-row-summary,
+.tool-row .tool-row-summary:hover,
+.tool-row .tool-row-body,
+.tool-row .tool-row-section,
+.tool-row .tool-row-section + .tool-row-section,
+.tool-row .tool-row-section.terminal-panel,
+.tool-row .tool-row-section.terminal-panel + .tool-row-section.terminal-panel,
+.tool-row .search-result-item {
+  border: 0;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
+}
+.tool-row .tool-row-summary,
+.tool-row .tool-row-summary:hover {
+  background: transparent;
+}
+.tool-row .tool-row-body {
+  background: transparent;
+}
+.tool-row .tool-row-section.terminal-panel,
+.tool-row .tool-row-section.terminal-panel + .tool-row-section.terminal-panel {
+  background: var(--term-bg);
+}
+.tool-row .search-result-item:last-child {
+  border-bottom: 0;
+}
+
+.tool-row.web-tool {
+  border-color: #cfe8f8;
+  border-radius: 10px;
+  background: #eef8ff;
+}
+.tool-row.web-tool .tool-row-summary,
+.tool-row.web-tool .tool-row-summary:hover,
+.tool-row.web-tool .tool-row-body,
+.tool-row.web-tool .tool-row-section,
+.tool-row.web-tool .tool-row-section + .tool-row-section,
+.tool-row.web-tool .search-result-item {
+  border: 0;
+  border-radius: 0;
+}
+.tool-row.web-tool .tool-row-summary,
+.tool-row.web-tool .tool-row-summary:hover,
+.tool-row.web-tool .tool-row-body {
+  background: transparent;
+}
+[data-theme="dark"] .tool-row.web-tool {
+  border-color: #2d5870;
+  background: #182d3a;
+}
+[data-theme="dark"] .tool-row.web-tool .tool-row-summary,
+[data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover,
+[data-theme="dark"] .tool-row.web-tool .tool-row-body {
+  background: transparent;
+}
+.tool-row.web-tool.pending {
+  border-color: #cfe8f8;
+}
+[data-theme="dark"] .tool-row.web-tool.pending {
+  border-color: #2d5870;
+}
+
+/* Pending state is communicated by the spinner/status, not an internal
+   header/body divider. */
+.tool-row.pending .tool-row-summary::after {
+  display: none;
+}
+
+/* ── Settings selects: one stable chevron across WebView engines ──
+ * Keep this final rule after the later form-surface background overrides.
+ * Tauri's WKWebView can otherwise retain its native disclosure indicator while
+ * the custom background SVG is also painted, producing oversized or doubled
+ * arrows in dark mode. */
+.setting-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 32px;
+  background-color: color-mix(in srgb, var(--bg-input) 92%, transparent);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%236B6965' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='1,2 6,7 11,2'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 10px 6px;
+}
+[data-theme="dark"] .setting-select {
+  background-color: color-mix(in srgb, var(--bg-input) 92%, transparent);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%23C5CBD3' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='1,2 6,7 11,2'/></svg>");
+}
+
+/* ── Diagram slots: render first, reveal source on demand ──
+ * SVG source stays in the DOM for recovery and accessibility, but is never the
+ * loading view. A slot starts as a quiet square glass placeholder, then swaps
+ * to the rendered picture. The toolbar appears only after rendering finishes,
+ * so the first thing the user sees is the image—not implementation text. */
+.bubble .diagram-slot {
+  position: relative;
+  width: 100%;
+  margin: 12px 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text);
+  overflow: hidden;
+  transition: background var(--transition), border-color var(--transition), min-height 220ms ease;
+}
+.bubble .diagram-slot[data-state="loading"] {
+  width: min(100%, 360px);
+  aspect-ratio: 1;
+  min-height: min(220px, 100%);
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg-card) 88%, var(--accent-soft));
+}
+.bubble .diagram-slot[data-state="loading"] .diagram-toolbar,
+.bubble .diagram-slot[data-state="loading"] .diagram-preview,
+.bubble .diagram-slot[data-state="loading"] .diagram-source,
+.bubble .diagram-slot[data-state="loading"] .diagram-error {
+  display: none;
+}
+.diagram-loading {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  pointer-events: none;
+}
+.bubble .diagram-slot[data-state="loading"] .diagram-loading {
+  display: grid;
+}
+.diagram-loading-square {
+  width: 42%;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+}
+.diagram-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: diagramSpinner 0.8s linear infinite;
+}
+@keyframes diagramSpinner {
+  to { transform: rotate(360deg); }
+}
+.diagram-toolbar {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+}
+.bubble .diagram-slot[data-state="preview"] .diagram-toolbar,
+.bubble .diagram-slot[data-state="error"] .diagram-toolbar {
+  display: flex;
+}
+.diagram-view-btn {
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  padding: 4px 9px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: 11px var(--font-sans);
+  cursor: pointer;
+}
+.diagram-view-btn:hover,
+.diagram-view-btn:focus-visible,
+.diagram-view-btn.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.diagram-preview {
+  display: none;
+  width: 100%;
+  padding: 12px;
+  cursor: zoom-in;
+}
+.bubble .diagram-slot[data-state="preview"][data-view="preview"] .diagram-preview,
+.bubble .diagram-slot[data-state="error"][data-view="preview"] .diagram-preview {
+  display: block;
+}
+.diagram-preview svg {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+}
+.diagram-source {
+  display: none;
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg-input);
+  color: var(--text);
+  font: 12px/1.55 var(--font-mono);
+  white-space: pre;
+  text-align: left;
+}
+.diagram-source code {
+  background: none;
+  color: inherit;
+  padding: 0;
+}
+.bubble .diagram-slot[data-state="preview"][data-view="source"] .diagram-source,
+.bubble .diagram-slot[data-state="error"][data-view="source"] .diagram-source {
+  display: block;
+}
+.diagram-error {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 14px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  font-size: 12px;
+}
+.diagram-error strong {
+  flex: 0 0 auto;
+}
+.bubble .diagram-slot[data-state="error"] .diagram-error {
+  display: flex;
+  flex-wrap: wrap;
+}
+.diagram-error span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.diagram-retry {
+  margin-left: auto;
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: var(--radius-xs);
+  padding: 4px 9px;
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  font: inherit;
+}
+.diagram-retry:hover {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .diagram-spinner {
+    animation: none;
+  }
+  .bubble .diagram-slot {
+    transition: none;
+  }
+}
+
+/* ── Tool rows: keep content clear of the outer frame ──
+ * The tool row is a single bordered container; summary and body must leave
+ * breathing room so icons, labels, and text never touch the frame edges. The
+ * body keeps its historical left indent (summary icon alignment) while the
+ * remaining sides get a consistent gutter. */
+.tool-row .tool-row-summary,
+.tool-row .tool-row-summary:hover {
+  padding: 8px 12px;
+}
+.tool-row .tool-row-body {
+  padding: 4px 12px 12px 24px;
+}
+.tool-row.web-tool .tool-row-body,
+.tool-row.sys-info .tool-row-body {
+  padding: 4px 12px 12px 52px;
+}
+
+/* ── Diagram viewer: source view ──
+ * The image viewer is a dark overlay; the raw source is shown as light text on
+ * the app background so code stays readable in both themes. */
+.mermaid-viewer-source {
+  position: absolute;
+  inset: 0;
+  z-index: 1005;
+  margin: 0;
+  padding: 28px 32px;
+  overflow: auto;
+  background: var(--bg);
+  color: var(--text);
+  font: 12px/1.7 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.mermaid-viewer-source-btn {
+  width: auto;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.mermaid-viewer-controls.source-mode .mermaid-viewer-zoom-btn:not(.mermaid-viewer-source-btn),
+.mermaid-viewer-controls.source-mode .mermaid-viewer-zoom-pct {
+  display: none;
 }
