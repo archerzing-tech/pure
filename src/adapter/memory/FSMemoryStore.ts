@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { IMemoryStore, MemoryEntry, MemorySearchOptions } from './IMemoryStore';
 import { searchMemories } from './keywordSearch';
@@ -22,7 +23,7 @@ export class FSMemoryStore implements IMemoryStore {
   private rootPath: string;
   private defaultProject: string;
 
-  constructor(rootPath = `${process.env.HOME || '~'}/.pure/memories`, defaultProject = '') {
+  constructor(rootPath = `${process.env.HOME || homedir()}/.pure/memories`, defaultProject = '') {
     this.rootPath = rootPath;
     this.defaultProject = defaultProject;
   }

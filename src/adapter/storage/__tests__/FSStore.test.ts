@@ -2,11 +2,12 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const makeStore = async () => {
   const { FSStore } = await import('../FSStore');
-  const dir = mkdtempSync('/tmp/pure-fsstore-');
+  const dir = mkdtempSync(join(tmpdir(), 'pure-fsstore-'));
   return { store: new FSStore(dir), dir };
 };
 

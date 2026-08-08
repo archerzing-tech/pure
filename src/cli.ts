@@ -6,6 +6,7 @@
 //        pure config                   → set up provider + API key (persisted to ~/.pure/config.json)
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import * as os from 'node:os';
 import * as readline from 'node:readline';
 import { Harness } from './harness/Harness';
 import { MockLLMAdapter } from './adapter/mock/MockLLMAdapter';
@@ -41,7 +42,9 @@ const CLI_VERSION = 'v1.1.0';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
-const HOME = process.env.HOME || '/tmp';
+// Windows has no HOME env var (USERPROFILE instead) and no /tmp; os.homedir()
+// resolves the platform home directory on every OS.
+const HOME = process.env.HOME || os.homedir();
 const PURE_DIR = `${HOME}/.pure`;
 const CONFIG_PATH = `${PURE_DIR}/config.json`;
 

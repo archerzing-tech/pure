@@ -2,6 +2,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { StateManager } from '../StateManager';
 import { FSStore } from '../../adapter/storage/FSStore';
 import type { Message } from '../../shared/types';
@@ -11,7 +13,7 @@ describe('StateManager', () => {
   let store: FSStore;
 
   beforeEach(() => {
-    dir = mkdtempSync('/tmp/pure-sm-');
+    dir = mkdtempSync(join(tmpdir(), 'pure-sm-'));
     store = new FSStore(dir);
   });
 

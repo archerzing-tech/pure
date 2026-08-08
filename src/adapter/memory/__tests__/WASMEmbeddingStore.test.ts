@@ -2,6 +2,8 @@
 
 import { describe, it, expect } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { WASMEmbeddingStore, cosineSimilarity } from '../WASMEmbeddingStore';
 import { FSMemoryStore } from '../FSMemoryStore';
 import type { MemoryEntry } from '../IMemoryStore';
@@ -35,7 +37,7 @@ function makeFakeEmbed(): { embed: (t: string) => Promise<number[]>; calls: () =
 }
 
 function makeStore() {
-  const dir = mkdtempSync('/tmp/pure-wasm-embed-');
+  const dir = mkdtempSync(join(tmpdir(), 'pure-wasm-embed-'));
   const inner = new FSMemoryStore(dir, '/proj');
   const { embed, calls } = makeFakeEmbed();
   const store = new WASMEmbeddingStore({ store: inner, minScore: 0.1, embed });
@@ -109,7 +111,7 @@ describe('WASMEmbeddingStore', () => {
     it('returns [] for a query with no similarity above minScore', async () => {
       // Explicit vector control (not hash collisions): every entry embeds to
       // dim0, the query to dim1 → cosine is exactly 0 → below minScore.
-      const dir = mkdtempSync('/tmp/pure-wasm-embed-nomatch-');
+      const dir = mkdtempSync(join(tmpdir(), 'pure-wasm-embed-nomatch-'));
       const inner = new FSMemoryStore(dir, '/proj');
       const store = new WASMEmbeddingStore({
         store: inner,
@@ -131,7 +133,7 @@ describe('WASMEmbeddingStore', () => {
     });
 
     it('falls back to keyword search when the embedder fails', async () => {
-      const dir = mkdtempSync('/tmp/pure-wasm-embed-fail-');
+      const dir = mkdtempSync(join(tmpdir(), 'pure-wasm-embed-fail-'));
       const inner = new FSMemoryStore(dir, '/proj');
       const failingEmbed = async () => { throw new Error('no wasm'); };
       const store = new WASMEmbeddingStore({ store: inner, embed: failingEmbed });
@@ -162,7 +164,7 @@ describe('WASMEmbeddingStore', () => {
 
   describe('batched embedding (v2.1)', () => {
     it('embeds all uncached entries in ONE batched call, then scores', async () => {
-      const dir = mkdtempSync('/tmp/pure-wasm-embed-batch-');
+      const dir = mkdtempSync(join(tmpdir(), 'pure-wasm-embed-batch-'));
       const inner = new FSMemoryStore(dir, '/proj');
       const store = new WASMEmbeddingStore({
         store: inner,
@@ -190,7 +192,7 @@ describe('WASMEmbeddingStore', () => {
     });
 
     it('never touches the embedder when the corpus is empty', async () => {
-      const dir = mkdtempSync('/tmp/pure-wasm-embed-empty-');
+      const dir = mkdtempSync(join(tmpdir(), 'pure-wasm-embed-empty-'));
       const inner = new FSMemoryStore(dir, '/proj');
       let embedderCalls = 0;
       const store = new WASMEmbeddingStore({
@@ -204,7 +206,7 @@ describe('WASMEmbeddingStore', () => {
     });
 
     it('skips entries whose batch embedding failed (fallback stays keyword)', async () => {
-      const dir = mkdtempSync('/tmp/pure-wasm-embed-batchfail-');
+      const dir = mkdtempSync(join(tmpdir(), 'pure-wasm-embed-batchfail-'));
       const inner = new FSMemoryStore(dir, '/proj');
       const store = new WASMEmbeddingStore({
         store: inner,

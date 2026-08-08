@@ -2,6 +2,7 @@
 // v0.4 — file-based JSON session persistence under ~/.pure/sessions/
 
 import { readFileSync, existsSync, mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import type { IStateStore, Checkpoint, AgentLoopState } from '../../shared/types';
 
 // Session ids flow into filesystem paths, so anything that could escape the
@@ -20,7 +21,7 @@ function assertValidSessionId(sessionId: string): void {
 export class FSStore implements IStateStore {
   private basePath: string;
 
-  constructor(basePath = `${process.env.HOME || '~'}/.pure/sessions`) {
+  constructor(basePath = `${process.env.HOME || homedir()}/.pure/sessions`) {
     this.basePath = basePath;
   }
 
