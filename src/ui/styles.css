@@ -822,8 +822,10 @@ body {
   height: 36px;
   border: none;
   border-radius: var(--radius);
-  background: var(--accent);
-  color: white;
+  /* Same ink-colored treatment as #send-btn (see there) so the landing
+     composer and the chat composer read as one design. */
+  background: var(--text);
+  color: var(--bg);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -862,8 +864,8 @@ body {
 }
 
 #landing-send-btn:hover:not(:disabled) {
-  background: var(--accent-hover);
-  color: white;
+  background: var(--text-secondary);
+  color: var(--bg);
 }
 #landing-send-btn:active:not(:disabled) {
   transform: scale(0.92);
@@ -2235,8 +2237,12 @@ body {
   height: 40px;
   border: none;
   border-radius: var(--radius);
-  background: var(--accent);
-  color: white;
+  /* Ink-colored send button: the button surface matches the interface's own
+     text color (--text) instead of a saturated accent block, so it reads as
+     part of the warm Notion palette. The arrow uses the surface color (--bg),
+     which flips correctly in dark mode (light button, dark arrow). */
+  background: var(--text);
+  color: var(--bg);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -2244,7 +2250,7 @@ body {
   transition: all 0.25s var(--ease-spring);
   flex-shrink: 0;
 }
-#send-btn:hover:not(:disabled) { background: var(--accent-hover); transform: scale(1.08); }
+#send-btn:hover:not(:disabled) { background: var(--text-secondary); transform: scale(1.08); }
 #send-btn:active:not(:disabled) { transform: scale(0.9); }
 #send-btn:disabled { opacity: 0.35; cursor: default; transform: none; }
 #send-btn.stopping { background: var(--danger); }
@@ -2880,6 +2886,99 @@ body {
 .skill-desc {
   font-size: 12px;
   color: var(--text-tertiary);
+}
+
+/* ── Skill Hub (third-party skills from open-source hubs) ── */
+
+.hub-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 8px 2px 0;
+}
+.hub-status.hub-status-error {
+  color: var(--danger);
+}
+
+.hub-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+  margin: 14px 0 8px;
+}
+
+.hub-group {
+  margin-top: 10px;
+}
+.hub-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+.hub-group-desc {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-bottom: 8px;
+}
+
+.hub-skill-card .skill-card-header {
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.hub-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.hub-badge-installed {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+.hub-install-btn {
+  margin-top: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+.hub-install-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hub-installed-card .skill-card-header {
+  justify-content: flex-start;
+  gap: 8px;
+}
+.hub-source {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-remove-btn {
+  margin-top: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--danger);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: all 0.15s var(--ease-out);
+}
+.hub-remove-btn:hover {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
 }
 
 /* ── MCP Server List ── */
@@ -4103,13 +4202,13 @@ select:focus-visible,
   height: 38px;
   border-radius: 11px;
   margin-left: 8px;
-  background: var(--accent);
-  box-shadow: 0 5px 14px color-mix(in srgb, var(--accent) 18%, transparent);
+  background: var(--text);
+  box-shadow: 0 5px 14px color-mix(in srgb, var(--text) 18%, transparent);
 }
 
 #landing-send-btn:hover:not(:disabled) {
-  background: var(--accent-hover);
-  box-shadow: 0 7px 18px color-mix(in srgb, var(--accent-hover) 28%, transparent);
+  background: var(--text-secondary);
+  box-shadow: 0 7px 18px color-mix(in srgb, var(--text-secondary) 28%, transparent);
 }
 
 #chat {
@@ -4245,11 +4344,11 @@ select:focus-visible,
   width: 42px;
   height: 42px;
   border-radius: 12px;
-  box-shadow: 0 5px 14px color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: 0 5px 14px color-mix(in srgb, var(--text) 22%, transparent);
 }
 
 #send-btn:hover:not(:disabled) {
-  box-shadow: 0 8px 20px color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--text) 30%, transparent);
 }
 
 #settings-header {

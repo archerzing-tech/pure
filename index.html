@@ -448,6 +448,21 @@
                   <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.memory">Memory</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="memory" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.memory.desc">Remember preferences and context</p></div>
                   <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.planning">Planning</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="planning" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.planning.desc">Break down complex tasks</p></div>
                 </div>
+
+                <!-- ── Skill Hub: install third-party skills from open-source
+                     hubs (skills.sh.json / .well-known/skills/index.json) ── -->
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="hub.title">Skill Hub</span><span class="setting-hint" data-i18n="hub.desc">Browse and install skills from open-source agent skill hubs (skills.sh ecosystem)</span></div>
+                  </div>
+                  <div class="setting-input-group">
+                    <input id="hub-repo" class="setting-input" type="text" data-i18n-placeholder="hub.repoPlaceholder" placeholder="vercel-labs/agent-skills" autocomplete="off" spellcheck="false" />
+                    <button id="hub-browse-btn" class="setting-btn secondary" data-i18n="hub.browse">Browse</button>
+                  </div>
+                  <div id="hub-status" class="hub-status" hidden></div>
+                  <div id="hub-grouped" class="hub-grouped"></div>
+                  <div id="hub-installed" class="hub-installed"></div>
+                </div>
               </div>
               <!-- MCP -->
               <div class="settings-page" data-page="mcp">

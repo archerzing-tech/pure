@@ -7,6 +7,7 @@
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
 import type { ProviderId } from '../shared/providers';
+import type { HubSkill } from './skillHub';
 
 export interface PureConfig {
   /** Provider id — typed from the registry so the two can never drift. */
@@ -54,6 +55,12 @@ export interface PureConfig {
    */
   serperApiKey: string;
   skills: Record<string, boolean>;
+  /**
+   * Third-party skills installed from an open-source skill hub (Settings →
+   * Skills → Skill Hub). Each entry carries the downloaded SKILL.md body;
+   * enabled entries are injected into the system prompt (chat.ts / cli.ts).
+   */
+  hubSkills: HubSkill[];
   mcpServers: Array<{ name: string; transport: 'stdio' | 'http'; command?: string[]; url?: string }>;
   /**
    * Bumped when a config migration changes field semantics. v2: toolBrowser
@@ -128,10 +135,11 @@ export function defaults(): PureConfig {
     tavilyApiKey: '',
     serperApiKey: '',
     skills: { 'code-review': true, 'web-research': true, memory: true, planning: true },
+    hubSkills: [],
     mcpServers: [...DEFAULT_MCP_SERVERS],
     streamingRender: true,
     taskMode: 'auto',
-    configVersion: 3,
+    configVersion: 4,
   };
 }
 
@@ -235,6 +243,13 @@ export function loadConfig(): PureConfig | null {
           cfg.mcpServers = [...DEFAULT_MCP_SERVERS, ...current];
         }
         cfg.configVersion = 3;
+        needsPersist = true;
+      }
+      // Config v4 migration: third-party hub skills (Settings → Skills →
+      // Skill Hub) were added. Legacy configs simply start with an empty list.
+      if ((parsed.configVersion ?? 1) < 4) {
+        cfg.hubSkills = Array.isArray(cfg.hubSkills) ? cfg.hubSkills : [];
+        cfg.configVersion = 4;
         needsPersist = true;
       }
       if (isTauriRuntime() && cfg.apiKey) {

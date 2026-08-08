@@ -21,6 +21,15 @@ import {
   storeSecretInRust,
   type PureConfig,
 } from './config';
+import {
+  DEFAULT_HUB_REPO,
+  fetchHubIndex,
+  fetchSkillBody,
+  makeHubSkill,
+  normalizeHubRepo,
+  splitSkillMarkdown,
+  type HubSkill,
+} from './skillHub';
 
 export class SettingsPanel {
   private onSave: () => void;
@@ -153,6 +162,152 @@ export class SettingsPanel {
         console.error('[pure] tmp_paste_usage failed:', err);
       }
     };
+
+    // ── Skill Hub: browse + install third-party skills ──
+    const hubRepoInput = document.getElementById('hub-repo') as HTMLInputElement | null;
+    const hubBrowseBtn = document.getElementById('hub-browse-btn') as HTMLButtonElement | null;
+    const hubStatusEl = document.getElementById('hub-status');
+    const hubGroupedEl = document.getElementById('hub-grouped');
+    const hubInstalledEl = document.getElementById('hub-installed');
+
+    const setHubStatus = (msg: string, isError = false) => {
+      if (!hubStatusEl) return;
+      hubStatusEl.textContent = msg;
+      hubStatusEl.hidden = !msg;
+      hubStatusEl.classList.toggle('hub-status-error', isError);
+    };
+
+    const renderInstalled = () => this.renderInstalledHubSkills();
+
+    hubBrowseBtn?.addEventListener('click', async () => {
+      const repo = normalizeHubRepo(hubRepoInput?.value.trim() || DEFAULT_HUB_REPO);
+      if (!repo) return;
+      hubBrowseBtn.disabled = true;
+      hubBrowseBtn.textContent = t('hub.loading');
+      hubGroupedEl!.innerHTML = '';
+      setHubStatus('');
+      try {
+        const index = await fetchHubIndex(repo);
+        const cfg = loadConfig() ?? defaults();
+        const installed = new Set((cfg.hubSkills ?? []).map(s => s.name));
+        const groups = index.groupings.length > 0 ? index.groupings : [{
+          title: t('hub.allSkills'),
+          description: '',
+          skills: index.skills,
+        }];
+        hubGroupedEl!.innerHTML = groups.map(g => `
+          <div class="hub-group">
+            <div class="hub-group-title">${escapeHtml(g.title)}</div>
+            ${g.description ? `<div class="hub-group-desc">${escapeHtml(g.description)}</div>` : ''}
+            <div class="hub-group-skills">
+              ${g.skills.map(s => `
+                <div class="skill-card hub-skill-card" data-repo="${escapeHtml(repo)}" data-skill="${escapeHtml(s.name)}">
+                  <div class="skill-card-header">
+                    <span class="skill-name">${escapeHtml(s.name)}</span>
+                    ${installed.has(s.name) ? `<span class="hub-badge hub-badge-installed" data-i18n="hub.installedBadge">已安装</span>` : ''}
+                  </div>
+                  <p class="skill-desc">${escapeHtml(s.description || '')}</p>
+                  <button class="setting-btn hub-install-btn" data-repo="${escapeHtml(repo)}" data-skill="${escapeHtml(s.name)}" ${installed.has(s.name) ? 'disabled' : ''} data-i18n="hub.install">安装</button>
+                </div>`).join('')}
+            </div>
+          </div>`).join('');
+        applyTranslations();
+        setHubStatus(index.groupings.length === 0 && index.skills.length === 0
+          ? t('hub.empty')
+          : t('hub.loaded').replace('{n}', String((index.groupings.length > 0 ? index.groupings.reduce((a, g) => a + g.skills.length, 0) : index.skills.length))));
+      } catch (err) {
+        console.error('[pure] skill hub browse failed:', err);
+        setHubStatus((err as Error)?.message || t('hub.failed'), true);
+      } finally {
+        hubBrowseBtn.disabled = false;
+        hubBrowseBtn.textContent = t('hub.browse');
+      }
+    });
+
+    // Install buttons are event-delegated (the grid is rebuilt on each browse).
+    hubGroupedEl?.addEventListener('click', async (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.hub-install-btn');
+      if (!btn || btn.disabled) return;
+      const repo = btn.dataset.repo;
+      const skill = btn.dataset.skill;
+      if (!repo || !skill) return;
+      btn.disabled = true;
+      btn.textContent = t('hub.installing');
+      try {
+        const raw = await fetchSkillBody(repo, skill);
+        if (raw === null) {
+          setHubStatus(t('hub.bodyFailed').replace('{s}', skill), true);
+          return;
+        }
+        const cfg = loadConfig() ?? defaults();
+        const skills = [...(cfg.hubSkills ?? [])];
+        if (skills.some(s => s.name === skill)) {
+          setHubStatus(t('hub.alreadyInstalled').replace('{s}', skill), true);
+          return;
+        }
+        const split = splitSkillMarkdown(raw);
+        const summary = { name: skill, description: split.description ?? '', hasDescription: !!split.description };
+        skills.push(makeHubSkill(repo, summary, split.body || raw));
+        cfg.hubSkills = skills;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+        invalidateConfigCache();
+        renderInstalled();
+        // Mark the card installed IN PLACE (badge + disabled) instead of
+        // re-fetching the whole index — no extra network round-trip, and the
+        // success toast below is not overwritten by a browse status.
+        const card = hubGroupedEl?.querySelector(`.hub-skill-card[data-skill="${CSS.escape(skill)}"]`);
+        const cardBtn = card?.querySelector<HTMLButtonElement>('.hub-install-btn');
+        if (card) {
+          card.querySelector('.skill-card-header')?.insertAdjacentHTML('beforeend',
+            `<span class="hub-badge hub-badge-installed" data-i18n="hub.installedBadge">已安装</span>`);
+          applyTranslations();
+        }
+        if (cardBtn) {
+          cardBtn.disabled = true;
+          cardBtn.textContent = t('hub.installedBadge');
+        }
+        setHubStatus(t('hub.installedToast').replace('{s}', skill));
+      } catch (err) {
+        console.error('[pure] skill hub install failed:', err);
+        setHubStatus((err as Error)?.message || t('hub.failed'), true);
+        btn.disabled = false;
+        btn.textContent = t('hub.install');
+      }
+    });
+
+    // Installed-skill enable/disable toggles + remove buttons.
+    hubInstalledEl?.addEventListener('change', (e) => {
+      const input = e.target as HTMLInputElement;
+      if (!input.classList.contains('cfg-hub-skill-toggle')) return;
+      const idx = parseInt(input.dataset.hubSkill || '', 10);
+      if (isNaN(idx)) return;
+      const cfg = loadConfig() ?? defaults();
+      const skills = [...(cfg.hubSkills ?? [])];
+      if (skills[idx]) {
+        skills[idx] = { ...skills[idx], enabled: input.checked };
+        cfg.hubSkills = skills;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+        invalidateConfigCache();
+      }
+    });
+    hubInstalledEl?.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.hub-remove-btn');
+      if (!btn) return;
+      const idx = parseInt(btn.dataset.index || '', 10);
+      if (isNaN(idx)) return;
+      const cfg = loadConfig() ?? defaults();
+      const skills = [...(cfg.hubSkills ?? [])];
+      skills.splice(idx, 1);
+      cfg.hubSkills = skills;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+      invalidateConfigCache();
+      renderInstalled();
+      setHubStatus(t('hub.removed'));
+    });
+
+    // Seed the repo input + installed list on first bind.
+    if (hubRepoInput && !hubRepoInput.value) hubRepoInput.value = DEFAULT_HUB_REPO;
+    renderInstalled();
 
     // ── Environment: auto-detect the user's city from IP ──
     const locateBtn = document.getElementById('cfg-locate-btn') as HTMLButtonElement | null;
@@ -474,6 +629,10 @@ export class SettingsPanel {
       }
     });
 
+    // Re-render the Skill Hub installed list so toggles reflect the persisted
+    // enabled state when the panel reopens.
+    this.renderInstalledHubSkills();
+
     document.querySelectorAll('.theme-option').forEach(el => {
       const active = el.getAttribute('data-theme') === cfg.theme;
       el.classList.toggle('active', active);
@@ -583,6 +742,31 @@ export class SettingsPanel {
     this.renderMcpServers();
   }
 
+  // ── Skill Hub installed-list rendering (shared by bindActions + loadToForm) ──
+
+  /** Render the installed third-party skills (toggle + remove per card).
+   * Called on settings open and after every install/remove/toggle. */
+  private renderInstalledHubSkills(): void {
+    const hubInstalledEl = document.getElementById('hub-installed');
+    if (!hubInstalledEl) return;
+    const skills = (loadConfig() ?? defaults()).hubSkills ?? [];
+    if (skills.length === 0) {
+      hubInstalledEl.innerHTML = '';
+      return;
+    }
+    hubInstalledEl.innerHTML = `<div class="hub-section-label" data-i18n="hub.installed">已安装</div>` + skills.map((s, i) => `
+      <div class="skill-card hub-installed-card" data-index="${i}">
+        <div class="skill-card-header">
+          <span class="skill-name">${escapeHtml(s.name)}</span>
+          <span class="hub-source">${escapeHtml(s.source)}</span>
+          <label class="toggle"><input type="checkbox" class="cfg-hub-skill-toggle" data-hub-skill="${i}" ${s.enabled ? 'checked' : ''} /><span class="toggle-slider"></span></label>
+        </div>
+        <p class="skill-desc">${escapeHtml(s.description || '')}</p>
+        <button class="hub-remove-btn" data-index="${i}" data-i18n="hub.remove">移除</button>
+      </div>`).join('');
+    applyTranslations();
+  }
+
   // ── Gather form values ──
 
   private gatherForm(): PureConfig {
@@ -590,6 +774,15 @@ export class SettingsPanel {
     document.querySelectorAll('.cfg-skill-toggle').forEach(el => {
       const skill = el.getAttribute('data-skill');
       if (skill) skills[skill] = (el as HTMLInputElement).checked;
+    });
+
+    // Third-party hub skills: carry the persisted list through, syncing each
+    // entry's enabled state from its toggle (the remove button mutates the
+    // list in place before this runs).
+    const hubSkills = [...((loadConfig() ?? defaults()).hubSkills ?? [])];
+    document.querySelectorAll<HTMLInputElement>('.cfg-hub-skill-toggle').forEach(el => {
+      const idx = parseInt(el.dataset.hubSkill || '', 10);
+      if (!isNaN(idx) && hubSkills[idx]) hubSkills[idx] = { ...hubSkills[idx], enabled: el.checked };
     });
 
     return {
@@ -615,6 +808,7 @@ export class SettingsPanel {
       tavilyApiKey: (document.getElementById('cfg-tavily-key') as HTMLInputElement | null)?.value.trim() ?? '',
       serperApiKey: (document.getElementById('cfg-serper-key') as HTMLInputElement | null)?.value.trim() ?? '',
       skills,
+      hubSkills,
       mcpServers: [...this.mcpServers],
       streamingRender: (document.getElementById('cfg-streaming-render') as HTMLInputElement | null)?.checked ?? true,
       // The composer's mode selector lives outside this form — carry its value

@@ -11,6 +11,7 @@ import { harvestUserPreferences } from '../shared/memory';
 import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT } from '../shared/agentBehavior';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt, parsePlanJson } from '../coding-agent/Planner';
+import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createLLMOnlyVerifier, createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS } from '../coding-agent/SubagentOrchestrator';
@@ -372,7 +373,24 @@ function buildEnvironmentContext(config: PureConfig | null): string {
 function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null): string {
   return `${BASE_SYSTEM_PROMPT(hasWorkspace, temporaryWorkspace)}
 
-${buildEnvironmentContext(config)}`;
+${buildEnvironmentContext(config)}${buildHubSkillsContext(config)}`;
+}
+
+// Third-party skills installed from a Skill Hub (Settings → Skills → Skill
+// Hub) are injected into the system prompt when enabled — the model follows
+// each skill's SKILL.md instructions just like the built-in skills. Bodies are
+// pre-stripped of frontmatter at install time (splitSkillMarkdown).
+function buildHubSkillsContext(config: PureConfig | null): string {
+  const skills = config?.hubSkills ?? [];
+  const enabled = skills.filter((s) => s.enabled && s.body);
+  if (enabled.length === 0) return '';
+  return `
+
+Installed skills (follow these when they apply):
+${enabled.map((s) => `
+<skill name="${sanitizeSkillName(s.name)}">
+${s.body}
+</skill>`).join('')}`;
 }
 
 // ── Permission policy mapping ──

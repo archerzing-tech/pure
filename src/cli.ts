@@ -38,7 +38,7 @@ import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolA
 // Single source of truth for the CLI's displayed version (kept in sync with
 // package.json / src-tauri by the release flow; the CLI banner + startup line
 // both read from here).
-const CLI_VERSION = 'v1.1.0';
+const CLI_VERSION = 'v1.2.0';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
@@ -56,6 +56,12 @@ interface PureConfig {
   apiKey: string;
   model: string;
   workspace?: string;
+  /**
+   * Third-party skills installed via the GUI's Skill Hub (Settings → Skills →
+   * Skill Hub). Enabled entries' SKILL.md bodies are injected into the CLI's
+   * system prompt so terminal and GUI sessions behave identically.
+   */
+  hubSkills?: Array<{ name: string; description: string; source: string; body: string; enabled: boolean }>;
 }
 
 function loadConfig(): PureConfig | null {
@@ -290,7 +296,23 @@ function buildEnvironmentContext(): string {
 function buildSystemPrompt(mode: TaskMode): string {
   // Memory is composed by the Harness at session start (PromptComposer + the
   // IMemoryStore), so the base prompt stays clean here.
-  return `${BASE_SYSTEM_PROMPT}\n\n${buildEnvironmentContext()}${modeFragment(mode)}`;
+  return `${BASE_SYSTEM_PROMPT}\n\n${buildEnvironmentContext()}${buildHubSkillsContext()}${modeFragment(mode)}`;
+}
+
+// Third-party skills installed via the GUI's Skill Hub are injected when
+// enabled — mirrors chat.ts buildHubSkillsContext so CLI and GUI sessions give
+// the model the same skill instructions.
+function buildHubSkillsContext(): string {
+  const skills = loadConfig()?.hubSkills ?? [];
+  const enabled = skills.filter((s) => s.enabled && s.body);
+  if (enabled.length === 0) return '';
+  return `\n\nInstalled skills (follow these when they apply):\n${enabled.map((s) => `\n<skill name="${sanitizePromptTag(s.name)}">\n${s.body}\n</skill>`).join('')}`;
+}
+
+/** Keep a hub-supplied skill id from breaking the `<skill name="…">` prompt
+ * tag (mirrors sanitizeSkillName in src/ui/skillHub.ts). */
+function sanitizePromptTag(name: string): string {
+  return name.replace(/[^A-Za-z0-9_.\-/]/g, '_');
 }
 
 // ── Task-mode integration (mirrors the GUI's yolo → plan/build switching) ──
