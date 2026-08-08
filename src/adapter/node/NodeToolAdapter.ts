@@ -2,7 +2,7 @@
 // v0.4 — 6 file/command tools: read_file, write_file, edit_file, search_files, list_files, execute_command.
 // Fixes: handleWriteFile uses proper fs.mkdir() instead of fragile .ensure hack.
 
-import { basename, dirname, join, resolve as pathResolve, relative as pathRelative } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 
@@ -902,7 +902,12 @@ export class NodeToolAdapter implements ToolAdapter {
   private resolve(filePath: string): string {
     const resolved = pathResolve(this.workspace, filePath);
     const rel = pathRelative(this.workspace, resolved);
-    if (rel === '..' || rel.startsWith(`..${requireSeparator()}`) || rel.startsWith(requireSeparator())) {
+    // Path escape check mirroring the Rust resolve(): the relative path must
+    // stay strictly inside the workspace. On Windows pathRelative uses a
+    // single `\` separator (path.sep) and returns an ABSOLUTE path when the
+    // two inputs are on different drives — both must be handled, or a
+    // different-drive absolute path would slip past the prefix checks.
+    if (!isWithin(this.workspace, resolved)) {
       throw new Error(`Path escapes workspace: ${filePath}`);
     }
 
@@ -920,8 +925,7 @@ export class NodeToolAdapter implements ToolAdapter {
     }
 
     const canonicalExisting = realpathSync(existing);
-    const existingRel = pathRelative(baseCanonical, canonicalExisting);
-    if (existingRel === '..' || existingRel.startsWith(`..${requireSeparator()}`) || existingRel.startsWith(requireSeparator())) {
+    if (!isWithin(baseCanonical, canonicalExisting)) {
       throw new Error(`Path escapes workspace: ${filePath}`);
     }
 
@@ -945,8 +949,15 @@ function safeParseArgs(raw: string): Record<string, unknown> {
   try { return JSON.parse(raw); } catch { return {}; }
 }
 
-function requireSeparator(): string {
-  return process.platform === 'win32' ? '\\\\' : '/';
+/** True when `target` resolves strictly inside `base` (both canonicalized
+ * before comparison). Uses the platform separator (path.sep) — a single `\`
+ * on Windows, which a hardcoded escaped `\\` would never match — and treats
+ * an absolute relative() result (different drives on Windows) as an escape.
+ * Mirrors the Rust resolve() containment check. */
+function isWithin(base: string, target: string): boolean {
+  const rel = pathRelative(base, target);
+  if (rel === '..' || rel.startsWith(`..${sep}`)) return false;
+  return !isAbsolute(rel);
 }
 
 function createAbortController(parent: AbortSignal | undefined, timeoutMs: number): {
