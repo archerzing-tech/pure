@@ -1,7 +1,7 @@
 // src/adapter/node/__tests__/NodeToolAdapter.test.ts
 
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeToolAdapter } from '../NodeToolAdapter';
@@ -18,6 +18,11 @@ function makeCall(command: string): ToolCall {
 function resultOf(r: ToolResult): { stdout: string; stderr: string; exitCode: number } {
   return r.result as { stdout: string; stderr: string; exitCode: number };
 }
+
+// POSIX shell syntax tests (redirects, `;`) only apply on Unix — Windows runs
+// cmd.exe via `cmd /C`, whose grammar differs. The cross-platform cases (plain
+// echo, unknown command, exit codes) still run everywhere.
+const shOnly = process.platform === 'win32';
 
 describe('NodeToolAdapter execute_command', () => {
   let workspace: string;
@@ -40,7 +45,7 @@ describe('NodeToolAdapter execute_command', () => {
     expect(resultOf(r).stdout).toContain('hello');
   });
 
-  it('reports failure with a non-zero exit code and stderr in the error', async () => {
+  it.skipIf(shOnly)('reports failure with a non-zero exit code and stderr in the error', async () => {
     const r = await adapter.execute(makeCall('echo boom >&2; exit 3'));
     expect(r.success).toBe(false);
     expect(r.error).toContain('exit code 3');
@@ -49,7 +54,7 @@ describe('NodeToolAdapter execute_command', () => {
     expect(resultOf(r).stderr).toContain('boom');
   });
 
-  it('keeps stdout in the result even when the command fails', async () => {
+  it.skipIf(shOnly)('keeps stdout in the result even when the command fails', async () => {
     const r = await adapter.execute(makeCall('echo partial; exit 2'));
     expect(r.success).toBe(false);
     expect(r.error).toContain('exit code 2');
@@ -76,7 +81,12 @@ describe('NodeToolAdapter execute_command', () => {
       expect(r.error).toContain('Path escapes workspace');
     } finally {
       rmSync(outside, { recursive: true, force: true });
-      rmSync(join(workspace, 'linked'), { force: true });
+      // Windows: rmSync on a symlink raises EFAULT; unlink the link itself.
+      try {
+        unlinkSync(join(workspace, 'linked'));
+      } catch {
+        rmSync(join(workspace, 'linked'), { force: true });
+      }
     }
   });
 });

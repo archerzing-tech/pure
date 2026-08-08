@@ -2,11 +2,16 @@
 // v0.4 — 6 file/command tools: read_file, write_file, edit_file, search_files, list_files, execute_command.
 // Fixes: handleWriteFile uses proper fs.mkdir() instead of fragile .ensure hack.
 
-import { basename, dirname, resolve as pathResolve, relative as pathRelative } from 'node:path';
+import { basename, dirname, join, resolve as pathResolve, relative as pathRelative } from 'node:path';
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
+
+/** Windows has no POSIX shell (`sh`) or `diff` binary — cmd.exe / Git for
+ * Windows provide the equivalents. Module-level so every handler branches
+ * consistently. */
+const IS_WINDOWS = process.platform === 'win32';
 
 export interface NodeToolConfig {
   workspace: string;
@@ -313,8 +318,8 @@ export class NodeToolAdapter implements ToolAdapter {
     const content = String(args.content);
 
     // Ensure parent directory exists
-    const dir = path.substring(0, path.lastIndexOf('/'));
-    if (dir) {
+    const dir = dirname(path);
+    if (dir && dir !== path) {
       await mkdir(dir, { recursive: true });
     }
 
@@ -378,7 +383,7 @@ export class NodeToolAdapter implements ToolAdapter {
       if (count >= maxResults) break;
 
       try {
-        const fullPath = `${searchDir}/${entry}`;
+        const fullPath = join(searchDir, entry);
         const file = Bun.file(fullPath);
         const text = await file.text();
         const lines = text.split('\n');
@@ -433,7 +438,8 @@ export class NodeToolAdapter implements ToolAdapter {
     const abort = createAbortController(signal, this.commandTimeout);
 
     try {
-      const proc = Bun.spawn(['sh', '-c', command], {
+      const shellArgs = IS_WINDOWS ? ['cmd', '/C', command] : ['sh', '-c', command];
+      const proc = Bun.spawn(shellArgs, {
         cwd: this.workspace,
         stdout: 'pipe',
         stderr: 'pipe',
@@ -496,11 +502,22 @@ export class NodeToolAdapter implements ToolAdapter {
     const pathA = this.resolve(String(args.pathA));
     const pathB = this.resolve(String(args.pathB));
 
-    const proc = Bun.spawn(['diff', '-u', pathA, pathB], {
-      cwd: this.workspace,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
+    // Windows ships no `diff`; fall back to `git diff --no-index` (Git for
+    // Windows ships git.exe) with the same exit-code convention.
+    let proc;
+    try {
+      proc = Bun.spawn(['diff', '-u', pathA, pathB], {
+        cwd: this.workspace,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+    } catch {
+      proc = Bun.spawn(['git', 'diff', '--no-index', '--', pathA, pathB], {
+        cwd: this.workspace,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+    }
 
     const stdout = await new Response(proc.stdout).text();
     const stderr = await new Response(proc.stderr).text();
