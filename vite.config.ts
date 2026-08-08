@@ -118,12 +118,6 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (!id.includes('node_modules')) return undefined;
-          if (id.includes('@huggingface/transformers') || id.includes('onnxruntime-web') || id.includes('onnxruntime-common')) {
-            return 'transformers';
-          }
-          if (id.includes('@mermaid-js/parser')) return 'mermaid-parser';
-          if (id.includes('/mermaid/')) return 'mermaid-core';
-          if (id.includes('/cytoscape')) return 'cytoscape';
           if (id.includes('/katex')) return 'katex';
           if (id.includes('/highlight.js')) return 'highlight';
           return undefined;

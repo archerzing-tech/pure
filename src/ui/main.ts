@@ -393,28 +393,85 @@ function updateContextPanelStage(streaming = chat.isStreaming()) {
   updateStatusBar();
 }
 
+// ── Boot splash ──
+// The branded splash (index.html #boot-splash) covers the window from first
+// paint while the app initializes. dismissBootSplash() reveals the landing
+// once it has been painted AND a short minimum display time has passed, so
+// fast machines get a smooth transition instead of a blink. A pure-CSS
+// failsafe hides the splash after 6s even if this module never runs.
+const bootStartedAt = performance.now();
+
+function dismissBootSplash(minVisibleMs = 450): void {
+  const splash = document.getElementById('boot-splash');
+  if (!splash) return;
+  const wait = Math.max(0, minVisibleMs - (performance.now() - bootStartedAt));
+  setTimeout(() => {
+    // Two rAFs guarantee the landing page has actually painted before the
+    // fade starts — otherwise the reveal could flash a blank background.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      splash.classList.add('boot-dismiss');
+      document.getElementById('chat-view')?.classList.add('boot-reveal');
+      const remove = () => splash.remove();
+      splash.addEventListener('transitionend', remove, { once: true });
+      setTimeout(remove, 600); // fallback if transitionend never fires
+    }));
+  }, wait);
+}
+
+/** Run non-essential work after the landing is revealed, in idle slots
+ * (falls back to a short timeout where requestIdleCallback is missing). */
+function deferToIdle(fn: () => void): void {
+  const idle = (window as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void }).requestIdleCallback;
+  if (idle) {
+    idle(() => fn(), { timeout: 500 });
+  } else {
+    setTimeout(fn, 200);
+  }
+}
+
 // ── Init ──
+// Startup is split into a CRITICAL path and a DEFERRED path so the landing
+// page becomes interactive as early as possible:
+//   • critical — theme/language (applySavedAppearance), landing mode, the
+//     composer's mode/model dropdowns and input enablement: everything the
+//     landing hero needs. dismissBootSplash() runs as soon as this finishes.
+//   • deferred — status-bar chrome, session list, drag & drop, version fetch:
+//     all safe to run in idle slots after the first reveal, so none of it can
+//     delay the first paint or the splash transition.
 (async () => {
   applySavedAppearance();
   chat.setWorkspace('');
-  workspace.refresh();
-  updateSidebarModel();
-  updateContextPanelStage();
-  enableInputIfReady();
   wireComposerSelects();
   checkLandingState();
-  sessionSidebar.refresh();
-  workspace.init();
-  sessionSidebar.init();
-  initPathLinks();
-  setTimeout(() => checkForUpdatesSilently(), 3000);
-  void fetchAppVersion().then((version) => {
-    appVersion = version;
-    const el = document.getElementById('landing-version');
-    if (el) el.textContent = `v${version}`;
-    updateStatusBar();
+  enableInputIfReady();
+  dismissBootSplash();
+
+  deferToIdle(() => {
+    // Error isolation: a throw in any single deferred step must not silently
+    // skip the rest (e.g. an unbound session sidebar for the whole session).
+    try {
+      workspace.refresh();
+      updateSidebarModel();
+      updateContextPanelStage();
+      sessionSidebar.refresh();
+      workspace.init();
+      sessionSidebar.init();
+      initPathLinks();
+      void fetchAppVersion().then((version) => {
+        appVersion = version;
+        const el = document.getElementById('landing-version');
+        if (el) el.textContent = `v${version}`;
+        updateStatusBar();
+      });
+    } catch (err) {
+      console.error('[pure] deferred init failed:', err);
+    }
   });
-})().catch(err => console.error('[pure] init failed:', err));
+  setTimeout(() => checkForUpdatesSilently(), 3000);
+})().catch(err => {
+  console.error('[pure] init failed:', err);
+  dismissBootSplash();
+});
 
 /** Ensure the landing class is set correctly based on chat state */
 function checkLandingState() {

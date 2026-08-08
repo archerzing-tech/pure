@@ -6613,3 +6613,89 @@ button svg,
   .provider-config-header { flex-direction: column; gap: 10px; }
   .provider-config-fields .setting-row { padding-inline: 8px; }
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+   Boot splash — branded startup transition (index.html #boot-splash).
+   Rendered by pure CSS from first paint (no JS dependency), then faded out
+   by dismissBootSplash() in main.ts once the landing page has painted.
+   Failsafe: if the module never runs, a delayed CSS animation hides it
+   after 6s so the window is never stuck on a blank splash. ═══════════════ */
+#boot-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  pointer-events: none; /* purely visual — never blocks interaction */
+  transition: opacity .38s ease, visibility .38s ease;
+  animation: boot-failsafe 0s linear 6s forwards;
+}
+#boot-splash.boot-dismiss { opacity: 0; visibility: hidden; }
+@keyframes boot-failsafe { to { opacity: 0; visibility: hidden; } }
+
+.boot-splash-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  animation: boot-pop .5s cubic-bezier(.2, .8, .3, 1.05) both;
+}
+@keyframes boot-pop {
+  from { opacity: 0; transform: scale(.9) translateY(6px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.boot-logo {
+  filter: drop-shadow(0 6px 16px rgba(62, 99, 221, .22));
+  animation: boot-glow 2.4s ease-in-out infinite;
+}
+@keyframes boot-glow {
+  0%, 100% { filter: drop-shadow(0 6px 14px rgba(62, 99, 221, .16)); }
+  50%      { filter: drop-shadow(0 9px 24px rgba(62, 99, 221, .38)); }
+}
+
+.boot-wordmark {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--text);
+}
+
+.boot-dots { display: flex; gap: 7px; }
+.boot-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  animation: boot-blink 1.2s ease-in-out infinite;
+}
+.boot-dots i:nth-child(2) { animation-delay: .18s; }
+.boot-dots i:nth-child(3) { animation-delay: .36s; }
+@keyframes boot-blink {
+  0%, 100% { opacity: .25; transform: scale(.82); }
+  50%      { opacity: 1;    transform: scale(1); }
+}
+
+/* Landing reveal: the page settles in gently as the splash fades out. */
+.boot-reveal #landing-content { animation: landing-reveal .5s cubic-bezier(.2, .8, .3, 1) both; }
+@keyframes landing-reveal {
+  from { opacity: .4; transform: translateY(8px); }
+  to   { opacity: 1;  transform: translateY(0); }
+}
+
+@media (prefers-color-scheme: dark) {
+  /* Failsafe only: before JS applies the saved theme, :root has no
+     data-theme yet — match the OS so dark-mode users never see a light
+     splash. Once the app theme is applied, follow var(--bg) instead of
+     overriding a saved light theme. */
+  :root:not([data-theme]) #boot-splash { background: #191919; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #boot-splash .boot-splash-inner,
+  #boot-splash .boot-logo,
+  #boot-splash .boot-dots i,
+  .boot-reveal #landing-content { animation: none; }
+  #boot-splash { transition-duration: .01ms; }
+}

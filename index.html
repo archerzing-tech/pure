@@ -8,6 +8,19 @@
   <link rel="stylesheet" href="/src/ui/styles.css" />
 </head>
 <body>
+  <!-- ═══ Boot splash: branded startup transition shown from first paint while
+       the app initializes. Pure CSS renders it — no JS needed. main.ts fades it
+       out once the landing page has painted (see #boot-splash in styles.css and
+       dismissBootSplash() in main.ts); a CSS failsafe hides it after 6s if the
+       module never runs, so the window is never stuck on a blank splash. ═══ -->
+  <div id="boot-splash" aria-hidden="true">
+    <div class="boot-splash-inner">
+      <svg class="app-icon boot-logo" viewBox="0 0 1024 1024" width="52" height="52" aria-hidden="true"><use href="#icon-gem"/></svg>
+      <span class="boot-wordmark">pure</span>
+      <span class="boot-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    </div>
+  </div>
+
   <div id="app-shell">
     <!-- ═══ SIDEBAR ═══ -->
     <aside id="sidebar" class="collapsed">
