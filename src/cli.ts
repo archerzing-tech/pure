@@ -12,7 +12,7 @@ import { Harness } from './harness/Harness';
 import { MockLLMAdapter } from './adapter/mock/MockLLMAdapter';
 import { createDeepSeekAdapter, createQwenAdapter, createGLMAdapter } from './adapter/openai/OpenAICompatibleAdapter';
 import { DeepSeekAnthropicAdapter } from './adapter/deepseek/DeepSeekAnthropicAdapter';
-import { NodeToolAdapter } from './adapter/node/NodeToolAdapter';
+import { NodeToolAdapter, detectRuntimeVersions } from './adapter/node/NodeToolAdapter';
 import { StreamManager } from './harness/StreamManager';
 import { FSStore } from './adapter/storage/FSStore';
 import { SQLiteStore } from './adapter/storage/SQLiteStore';
@@ -38,7 +38,7 @@ import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolA
 // Single source of truth for the CLI's displayed version (kept in sync with
 // package.json / src-tauri by the release flow; the CLI banner + startup line
 // both read from here).
-const CLI_VERSION = 'v1.2.0';
+const CLI_VERSION = 'v1.2.1';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
@@ -249,7 +249,7 @@ Shell & Git:
 - git_status — working tree status
 
 System:
-- sys_info() — timezone, language, current time, OS version, and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data.
+- sys_info() — timezone, language, current time, OS version, installed runtimes (node/bun/python3/rustc/git versions), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, a runtime version, a git capability, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data.
 
 Web tools:
 - web_search(query, maxResults?) — web search (with SERPER_API_KEY set it uses the Serper Google-index API first — best for Chinese AND English; then TAVILY_API_KEY; otherwise free backends are probed in parallel — Sogou + cn.bing.com + DuckDuckGo + Bing for Chinese queries). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
@@ -291,12 +291,20 @@ function buildEnvironmentContext(): string {
     return `Environment: the user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.`;
   }
   return `Environment: user location is ${city} (PURE_LOCATION). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.`;
+}   // Probe installed runtime versions (node / bun / python3 / rustc / git) once per process
+// and inject them into the system prompt, reusing the NodeToolAdapter probe so
+// sys_info() and the prompt always report identical versions. CLI runs inside
+// Bun, so the spawn is synchronous — cheap, one-time, at first prompt build.
+let cachedRuntimes: string | null = null;
+function buildRuntimesContext(): string {
+  if (cachedRuntimes === null) cachedRuntimes = detectRuntimeVersions().join('  ');
+  return `\nEnvironment runtimes (installed on this machine): ${cachedRuntimes}. Use the actual versions above when the task depends on a runtime or tool version (e.g. writing a package.json engines field, a requirements.txt, or a CI/git workflow), and assume a tool is NOT installed when it is absent from this list.`;
 }
 
 function buildSystemPrompt(mode: TaskMode): string {
   // Memory is composed by the Harness at session start (PromptComposer + the
   // IMemoryStore), so the base prompt stays clean here.
-  return `${BASE_SYSTEM_PROMPT}\n\n${buildEnvironmentContext()}${buildHubSkillsContext()}${modeFragment(mode)}`;
+  return `${BASE_SYSTEM_PROMPT}\n\n${buildEnvironmentContext()}${buildRuntimesContext()}${buildHubSkillsContext()}${modeFragment(mode)}`;
 }
 
 // Third-party skills installed via the GUI's Skill Hub are injected when

@@ -185,7 +185,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'sys_info',
-    description: 'Get operating system information: timezone, language, current time, OS version, and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
+    description: 'Get operating system information: timezone, language, current time, OS version, installed runtimes (node/bun/python3/rustc/git versions), and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
     input_schema: { type: 'object', properties: {} },
   },
 ];

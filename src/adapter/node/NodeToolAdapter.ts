@@ -211,7 +211,7 @@ export class NodeToolAdapter implements ToolAdapter {
     },
     {
       name: 'sys_info',
-      description: 'Get operating system information: timezone, language, current time, OS version, and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
+      description: 'Get operating system information: timezone, language, current time, OS version, installed runtimes (node/bun/python3/rustc/git versions), and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
       input_schema: { type: 'object', properties: {} },
     },
   ];
@@ -883,15 +883,17 @@ export class NodeToolAdapter implements ToolAdapter {
     } catch {}
     // Mirrors the Rust sys_info output shape (timezone/language/time/os
     // aligned under the same 10-char label column) plus the user-configured
-    // location when present (CLI: PURE_LOCATION / PURE_CITY env var).
+    // location when present (CLI: PURE_LOCATION / PURE_CITY env var) and the
+    // installed runtimes (node / bun / python3 / rustc / git --version).
     const location = this.location
       ? `${this.location} (user-set)`
       : 'not set';
+    const runtimes = detectRuntimeVersions().join('  ');
 
     return {
       id: `tool_${Date.now()}`,
       toolName: 'sys_info',
-      result: `timezone:  ${tz}\nlanguage:  ${lang}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}`,
+      result: `timezone:  ${tz}\nlanguage:  ${lang}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}\nruntimes:  ${runtimes}`,
       success: true,
       duration: Date.now() - start,
     };
@@ -947,6 +949,32 @@ export class NodeToolAdapter implements ToolAdapter {
 
 function safeParseArgs(raw: string): Record<string, unknown> {
   try { return JSON.parse(raw); } catch { return {}; }
+}   /** Probe installed runtime versions (node / bun / python3 / rustc / git --version),
+ * mirroring detect_runtime_versions in src-tauri/src/lib.rs. python3 prints
+ * to stderr, so both streams are checked. Never throws. */
+export function detectRuntimeVersions(): string[] {
+  const out: string[] = [];
+  for (const [label, args] of [
+    ['node', ['--version']],
+    ['bun', ['--version']],
+    ['python3', ['--version']],
+    ['rustc', ['--version']],
+    ['git', ['--version']],
+  ] as const) {
+    let version = 'not installed';
+    try {
+      const r = Bun.spawnSync({ cmd: [label, ...args], stdout: 'pipe', stderr: 'pipe' });
+      if (r.exitCode === 0) {
+        // Collapse internal whitespace/newlines: version output lands in the
+        // system prompt verbatim, so multi-line banners must not break out of
+        // the context sentence (also mirrors the chat.ts first-line regex).
+        const text = (new TextDecoder().decode(r.stdout).trim() || new TextDecoder().decode(r.stderr).trim()).replace(/\s+/g, ' ');
+        if (text) version = text;
+      }
+    } catch {}
+    out.push(`${label}: ${version}`);
+  }
+  return out;
 }
 
 /** True when `target` resolves strictly inside `base` (both canonicalized

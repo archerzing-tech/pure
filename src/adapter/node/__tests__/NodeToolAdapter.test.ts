@@ -4,7 +4,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeToolAdapter } from '../NodeToolAdapter';
+import { NodeToolAdapter, detectRuntimeVersions } from '../NodeToolAdapter';
 import type { ToolCall, ToolResult } from '../../../shared/types';
 
 function makeCall(command: string): ToolCall {
@@ -91,6 +91,33 @@ describe('NodeToolAdapter execute_command', () => {
       } catch {
         rmSync(join(workspace, 'linked'), { force: true });
       }
+    }
+  });
+});
+
+describe('detectRuntimeVersions', () => {
+  it('reports node, bun, python3, rustc and git entries in a stable order', () => {
+    const out = detectRuntimeVersions();
+    expect(out.length).toBe(5);
+    // Every entry is "label: version" — never an empty label or value.
+    for (const entry of out) {
+      expect(entry).toMatch(/^(node|bun|python3|rustc|git): .+$/);
+    }
+    // Labels appear in the documented order (node, bun, python3, rustc, git).
+    expect(out[0].startsWith('node:')).toBe(true);
+    expect(out[1].startsWith('bun:')).toBe(true);
+    expect(out[2].startsWith('python3:')).toBe(true);
+    expect(out[3].startsWith('rustc:')).toBe(true);
+    expect(out[4].startsWith('git:')).toBe(true);
+  });
+
+  it('never injects multi-line banners (whitespace collapsed)', () => {
+    const out = detectRuntimeVersions();
+    for (const entry of out) {
+      // Version output lands in the system prompt verbatim; it must stay on
+      // one line so it cannot break out of the context sentence.
+      expect(entry).not.toContain('\n');
+      expect(entry).not.toMatch(/ {2,}/);
     }
   });
 });

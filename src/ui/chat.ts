@@ -28,7 +28,7 @@ import {
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener } from './TauriToolAdapter';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
-import { getApplicationTmpWorkspace, isTauriRuntime } from '../shared/tauri';
+import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { renderMarkdown, scheduleStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdown';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
 import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned } from './scrollPin';
@@ -373,7 +373,43 @@ function buildEnvironmentContext(config: PureConfig | null): string {
 function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null): string {
   return `${BASE_SYSTEM_PROMPT(hasWorkspace, temporaryWorkspace)}
 
-${buildEnvironmentContext(config)}${buildHubSkillsContext(config)}`;
+${buildEnvironmentContext(config)}${buildRuntimesContext()}${buildHubSkillsContext(config)}`;
+}
+
+// ── Installed-runtime context (node / python / rust versions) ──
+// Probed ONCE per session via the Rust sys_info backend (Tauri only) and
+// cached, then injected into every system prompt so the model knows which
+// runtimes exist on this machine (e.g. whether `node` is available before
+// proposing a Node script). A missing probe (browser dev mode, Rust invoke
+// failure) leaves the context empty — the sys_info tool still reports
+// runtimes on demand in that case.
+let cachedRuntimes = '';
+let runtimesProbe: Promise<string> | null = null;
+
+/** Kick off the one-shot runtime probe (idempotent). Callers await the same
+ * promise so the first send doesn't race the probe. */
+export function ensureRuntimesProbed(): Promise<string> {
+  if (runtimesProbe) return runtimesProbe;
+  runtimesProbe = (async () => {
+    try {
+      const core = await loadTauriCore();
+      if (!core) return '';
+      const raw = await core.invoke<string>('sys_info', { workspace: '', location: null }) ?? '';
+      // sys_info output: "runtimes:  node: v22.x.x  bun: 1.3.x  python3: 3.x.x  rustc: …"
+      const m = raw.match(/^runtimes:\s*(.+)$/m);
+      cachedRuntimes = m?.[1]?.trim() ?? '';
+    } catch {
+      cachedRuntimes = '';
+    }
+    return cachedRuntimes;
+  })();
+  return runtimesProbe;
+}
+
+function buildRuntimesContext(): string {
+  return cachedRuntimes
+    ? `\nEnvironment runtimes (installed on this machine): ${cachedRuntimes}. Use the actual versions above when the task depends on a runtime or tool version (e.g. writing a package.json engines field, a requirements.txt, or a CI/git workflow), and assume a tool is NOT installed when it is absent from this list.`
+    : '';
 }
 
 // Third-party skills installed from a Skill Hub (Settings → Skills → Skill
@@ -842,6 +878,10 @@ export class ChatController {
       // application temporary workspace is a real filesystem root for this
       // session, while web tools remain available independently.
       const usingTemporaryWorkspace = !sendWorkspace && !!effectiveWorkspace;
+      // One-shot runtime probe (node/bun/python3/rustc/git versions) — the cached
+      // promise resolves in ms after the first send; awaiting here guarantees
+      // the first turn already carries the runtimes line in its prompt.
+      await ensureRuntimesProbed();
       let systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config);
 
       const llm = createLLMAdapter(config);

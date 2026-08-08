@@ -3548,6 +3548,38 @@ async fn detect_location() -> Result<String, String> {
     Err(format!("all geolocation backends failed: {}", failed.join("; ")))
 }
 
+/// Probe installed runtime versions (Node.js, Python, Rust) for sys_info.
+/// Each is a quick `--version` subprocess; a missing binary yields "not
+/// installed" instead of failing the whole sys_info call. python --version
+/// prints to stderr, so both streams are checked.
+fn detect_runtime_versions() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (label, args) in [
+        ("node", vec!["--version"]),
+        ("bun", vec!["--version"]),
+        ("python3", vec!["--version"]),
+        ("rustc", vec!["--version"]),
+        ("git", vec!["--version"]),
+    ] {
+        let version = std::process::Command::new(label)
+            .args(&args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                // Collapse whitespace so multi-line banners cannot break out of
+                // the system-prompt sentence (mirrors the Node adapter).
+                let stdout = String::from_utf8_lossy(&o.stdout).trim().replace(char::is_whitespace, " ");
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().replace(char::is_whitespace, " ");
+                if !stdout.is_empty() { stdout } else { stderr }
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "not installed".to_string());
+        out.push(format!("{}: {}", label, version));
+    }
+    out
+}
+
 #[tauri::command]
 fn sys_info(_workspace: String, location: Option<String>) -> Result<String, String> {
     let tz = std::env::var("TZ").unwrap_or_else(|_| "UTC".to_string());
@@ -3614,9 +3646,11 @@ fn sys_info(_workspace: String, location: Option<String>) -> Result<String, Stri
         }
     };
 
+    let runtimes = detect_runtime_versions().join("  ");
+
     let info = format!(
-        "timezone:  {}\nlanguage:  {}\ntime:      {}\nos:        {}\nlocation:  {}",
-        tz, lang, time, os_version, loc
+        "timezone:  {}\nlanguage:  {}\ntime:      {}\nos:        {}\nlocation:  {}\nruntimes:  {}",
+        tz, lang, time, os_version, loc, runtimes
     );
     Ok(info)
 }
