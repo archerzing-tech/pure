@@ -71,7 +71,11 @@ describe('NodeToolAdapter execute_command', () => {
   it('rejects reads through a symlink that escapes the workspace', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'pure-node-outside-'));
     try {
-      symlinkSync(outside, join(workspace, 'linked'));
+      // Directory symlinks need an explicit 'dir' type on Windows (a missing
+      // type creates a file link and the escape check is bypassed); the type
+      // argument is ignored on POSIX.
+      symlinkSync(outside, join(workspace, 'linked'), 'dir');
+
       const r = await adapter.execute({
         id: 'call-symlink',
         index: 0,
