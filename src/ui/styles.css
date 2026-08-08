@@ -836,8 +836,7 @@ body {
   pointer-events: none;
 }
 
-#landing-input-wrap:focus-within #landing-send-btn,
-#landing-prompt:not(:placeholder-shown) ~ #landing-send-btn {
+#landing-input-wrap:focus-within #landing-send-btn {
   opacity: 1;
   transform: scale(1);
   pointer-events: auto;
@@ -853,9 +852,7 @@ body {
 }
 
 #landing-input-wrap:focus-within .input-ws-btn,
-#landing-prompt:not(:placeholder-shown) ~ .input-ws-btn,
-#landing-input-wrap:focus-within .attach-btn,
-#landing-prompt:not(:placeholder-shown) ~ .attach-btn {
+#landing-input-wrap:focus-within .attach-btn {
   opacity: 1;
 }
 
@@ -1201,6 +1198,15 @@ body {
   border: 0;
   background: transparent;
   padding: 4px 0 10px 24px;
+  /* max-height + overflow-y live on .tool-row-scroll below: padding at the
+     END of a scroll container sits below the fold at scrollTop 0, so a tall
+     Input/Output pair used to clip the last terminal panel flush against the
+     frame's bottom edge (zero gap) until the user scrolled the inner body. */
+}
+/* Scroll window for a tool row's Input/Output sections — the ONLY part that
+   scrolls, so .tool-row-body's padding (esp. the 10px bottom) stays visible
+   above and below it at all times. */
+.tool-row-scroll {
   max-height: 320px;
   overflow-y: auto;
 }
@@ -1421,6 +1427,66 @@ body {
   border-radius: 7px;
 }
 
+/* ── Confirm modal (destructive actions) ──
+ * Session deletion / delete-all render in a centered modal overlay (see
+ * modal.ts) instead of an inline card in the chat transcript — a destructive
+ * action deserves an explicit dialog that can't be missed mid-conversation,
+ * and unlike window.confirm() (which Tauri's WKWebView does not implement) it
+ * works everywhere. Theme tokens keep it consistent with light/dark; buttons
+ * reuse the .setting-btn variants. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  animation: modalOverlayIn 0.2s var(--ease-out);
+}
+.modal-dialog {
+  width: min(380px, calc(100vw - 48px));
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 20px;
+  animation: modalDialogIn 0.25s var(--ease-spring);
+}
+.modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.modal-message {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+.modal-btn {
+  min-width: 72px;
+  justify-content: center;
+}
+@keyframes modalOverlayIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes modalDialogIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 /* ── Plan progress card (approved execution plan in the transcript) ──
  * Shown after a user approves the pre-run plan: lists every phase with the
  * current one highlighted, advancing live as the model emits `## 阶段 n/m`
@@ -1450,6 +1516,21 @@ body {
   margin-left: auto;
   font-size: 11px;
   color: var(--text-tertiary);
+}
+
+/* Mode chip on the plan-progress card head — surfaces the auto mode switch
+   (yolo → plan/build) so the user sees the agent enter a structured workflow. */
+.plan-mode-chip {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: 999px;
+  padding: 2px 9px;
+  flex-shrink: 0;
+  user-select: none;
 }
 .plan-progress-steps {
   display: flex;
@@ -1653,6 +1734,11 @@ body {
   border: 0;
   background: transparent;
   padding: 4px 0 10px 24px;
+  /* max-height + overflow-y live on .thinking-scroll below — see .tool-row-body
+     for why the bottom padding must stay outside the scroll window. */
+}
+/* Scroll window for the reasoning text (same pattern as .tool-row-scroll). */
+.thinking-scroll {
   max-height: 320px;
   overflow-y: auto;
 }
@@ -4937,7 +5023,9 @@ button svg,
   border-radius: 0;
   background: transparent;
   padding: 0 12px 12px 52px;
-  max-height: 320px;
+  /* Scrolling lives on .tool-row-scroll (320px, overflow-y: auto); the body
+     must not clamp its own height or the bottom padding gets clipped against
+     the frame's overflow:hidden edge again (see .tool-row-body above). */
 }
 .tool-row.web-tool .tool-row-section + .tool-row-section {
   margin-top: 0;
@@ -4979,7 +5067,8 @@ button svg,
   border-radius: 0;
   background: transparent;
   padding: 0 12px 12px 52px;
-  max-height: 320px;
+  /* Same as web-tool: scrolling lives on .tool-row-scroll; the body height
+     must not be clamped or the bottom padding clips against the frame. */
 }
 .tool-row.planner .tool-row-section + .tool-row-section {
   margin-top: 0;
@@ -5206,7 +5295,11 @@ button svg,
 /* ── Attachment chips and merged composer ── */
 .paste-chips {
   display: flex;
-  flex: 1 0 100%;
+  /* The chip row lives inside COLUMN-flex hosts (#composer-box / the landing
+     wrap), so a row-axis `flex: 1 0 100%` grows VERTICALLY and stretches the
+     chips (~145px). Basis stays auto (content height); `width: 100%` covers
+     the row width. */
+  flex: 0 1 auto;
   flex-wrap: wrap;
   align-items: stretch;
   gap: 8px;
@@ -5777,4 +5870,285 @@ button svg,
 .tool-row.web-tool .tool-row-body,
 .tool-row.sys-info .tool-row-body {
   padding: 4px 12px 12px 52px;
+}
+
+/* ════════════════════════════════════════════
+   UNIFIED COMPOSER (two-row input box)
+   ════════════════════════════════════════════
+   The chat composer reads as ONE surface: the textarea on top, a single
+   control row below (attach · mode · workspace · model · send). Only the
+   outermost #composer-box has a border — every control inside is borderless
+   and only gains a soft hover chip, so there are no internal separators.
+   Appended last so these rules win the cascade over the older per-control
+   frames (base #prompt / .input-ws-btn / .attach-btn / #send-btn rules). */
+
+#input-bar {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+#composer-box {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  border: 1px solid var(--border-light);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-input) 78%, transparent);
+  box-shadow: 0 14px 44px rgba(8, 14, 26, 0.16), inset 0 0 0 1px color-mix(in srgb, #fff 42%, transparent);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  transition: border-color 0.2s var(--ease-out), box-shadow 0.3s var(--ease-out), background var(--transition);
+}
+
+#composer-box:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  box-shadow: 0 14px 44px color-mix(in srgb, var(--accent) 14%, transparent), 0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* Pasted-file chips land INSIDE the frame (mounted into #composer-box), so
+   they share the one border instead of floating above a separate strip. */
+#composer-box > .paste-chips {
+  padding: 8px 8px 0;
+  order: 0;
+}
+
+/* ── Row 1: text input ── */
+#composer-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 14px 2px;
+}
+
+#composer-input-row #prompt {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  min-height: 40px;
+}
+
+#composer-input-row #prompt:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+/* ── Row 2: quick controls ── */
+#composer-tool-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px 8px;
+}
+
+/* Attach + workspace: ghost icon buttons, no frame — hover gets a soft chip. */
+#composer-tool-row .input-ws-btn,
+#composer-tool-row .attach-btn {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out), transform 0.15s var(--ease-out);
+}
+
+#composer-tool-row .input-ws-btn:hover,
+#composer-tool-row .attach-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+#composer-tool-row .input-ws-btn:active,
+#composer-tool-row .attach-btn:active {
+  transform: scale(0.9);
+}
+
+#composer-tool-row .input-ws-btn.has-workspace {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+#composer-tool-row .input-ws-btn.has-workspace .wp-folder-icon {
+  color: var(--accent);
+}
+
+#composer-tool-row .attach-btn.has-attachments {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Mode / model dropdowns: frameless selects with a soft hover chip and a
+   chevron drawn via background-image (no <select> chrome). */
+.composer-select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background-color: transparent;
+  color: var(--text-secondary);
+  font: 500 12px/1.4 var(--font-sans);
+  padding: 5px 22px 5px 9px;
+  border-radius: 8px;
+  cursor: pointer;
+  max-width: 180px;
+  min-width: 0;
+  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239B9995' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+}
+
+.composer-select:hover,
+.composer-select:focus-visible {
+  background-color: var(--bg-hover);
+  color: var(--text);
+  outline: none;
+}
+
+.composer-select-model {
+  max-width: 230px;
+}
+
+.composer-spacer {
+  flex: 1;
+}
+
+#composer-tool-row #send-btn {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 10px;
+}
+
+/* ════════════════════════════════════════════
+   UNIFIED LANDING COMPOSER (two-row input box)
+   ════════════════════════════════════════════
+   The landing hero input mirrors the chat composer: textarea on top, a single
+   control row below (attach · mode · workspace · model · send), all inside ONE
+   bordered box with no internal separators. The older glass-thread override
+   stripped the wrap's top/bottom borders + background for the single-line
+   hero — the two-row layout closes the frame again so it reads as the same
+   unified card as #composer-box. */
+
+#landing-input-wrap {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  min-height: 0;
+  padding: 8px 8px 6px 8px;
+  border: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--bg-input) 78%, transparent);
+}
+
+#landing-input-wrap:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  box-shadow: 0 14px 44px color-mix(in srgb, var(--accent) 14%, transparent), 0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* Pasted-file chips stay INSIDE the frame (mounted into the wrap). */
+#landing-input-wrap > .paste-chips {
+  padding: 2px 6px 0;
+  order: 0;
+}
+
+#landing-input-row {
+  display: flex;
+  align-items: flex-end;
+  padding: 6px 6px 2px 8px;
+  position: relative;
+}
+
+#landing-input-row #landing-prompt {
+  min-height: 30px;
+}
+
+/* Blinking "start typing" caret — anchored to the prompt row's bottom-left. */
+#landing-cursor {
+  bottom: 12px;
+  left: 10px;
+}
+
+#landing-tool-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 2px 2px;
+}
+
+/* Ghost icon buttons inside the landing tool row (mirror the chat composer's
+   frameless chips — borderless, hover gets a soft fill). */
+#landing-tool-row .input-ws-btn,
+#landing-tool-row .attach-btn {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  margin: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  opacity: 0.75;
+}
+
+#landing-tool-row .input-ws-btn:hover,
+#landing-tool-row .attach-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  opacity: 1;
+}
+
+#landing-tool-row .input-ws-btn.has-workspace {
+  color: var(--accent);
+  background: var(--accent-soft);
+  opacity: 1;
+}
+
+#landing-tool-row .input-ws-btn.has-workspace .wp-folder-icon {
+  color: var(--accent);
+}
+
+#landing-tool-row .attach-btn.has-attachments {
+  color: var(--accent);
+  background: var(--accent-soft);
+  opacity: 1;
+}
+
+/* Landing send: keep the fade-in-spring reveal, now driven by focus-within or
+   the JS-toggled .has-text class (the old `~` sibling rules no longer match
+   once the button moved into #landing-tool-row). */
+#landing-tool-row #landing-send-btn {
+  width: 34px;
+  height: 34px;
+  margin: 0;
+  border-radius: 10px;
+}
+
+#landing-input-wrap:focus-within #landing-send-btn,
+#landing-input-wrap.has-text #landing-send-btn {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+}
+
+#landing-input-wrap:focus-within #landing-tool-row .input-ws-btn,
+#landing-input-wrap:focus-within #landing-tool-row .attach-btn,
+#landing-input-wrap.has-text #landing-tool-row .input-ws-btn,
+#landing-input-wrap.has-text #landing-tool-row .attach-btn {
+  opacity: 1;
+}
+
+/* ── Narrow windows: the model picker is the least critical composer control
+   — drop it before the mode picker or the workspace/attach buttons (same
+   policy as the status bar dropping #status-model below 720px). */
+@media (max-width: 720px) {
+  #composer-model-select,
+  #landing-model-select {
+    display: none;
+  }
+  #composer-tool-row,
+  #landing-tool-row {
+    gap: 2px;
+  }
 }

@@ -3,18 +3,20 @@
 // and the logical-trap detection that primes premise verification.
 
 import { describe, it, expect } from 'bun:test';
-import { Planner, formatTrapPrompt } from '../Planner';
+import { Planner, formatTrapPrompt, parsePlanJson } from '../Planner';
 
 describe('Planner', () => {
-  it('classifies straightforward tasks as simple (no plan)', () => {
+  it('classifies straightforward tasks as simple (no plan, yolo mode)', () => {
     const r = new Planner().analyzeTask('Summarize this file for me.');
     expect(r.complexity).toBe('simple');
+    expect(r.mode).toBe('yolo');
     expect(r.plan).toBeUndefined();
   });
 
   it('classifies explicit planning requests as complex and generates a plan', () => {
     const r = new Planner().analyzeTask('Please plan how to refactor the auth module.');
     expect(r.complexity).toBe('complex');
+    expect(r.mode).toBe('plan');
     expect(r.plan).toBeDefined();
     expect(r.plan!.steps.length).toBeGreaterThan(0);
     expect(r.plan!.steps[0]).toMatchObject({ action: 'Understand' });
@@ -35,6 +37,13 @@ describe('Planner', () => {
     const r = new Planner().analyzeTask('帮我制作一个大型工程，包含完整的项目管理功能。');
     expect(r.complexity).toBe('complex');
     expect(r.plan).toBeDefined();
+  });
+
+  it('switches build mode for complex requests with build/artifact intent', () => {
+    expect(new Planner().analyzeTask('帮我制作一个大型工程，包含完整的项目管理功能。').mode).toBe('build');
+    expect(new Planner().analyzeTask('搭建一个完整的全栈项目。').mode).toBe('build');
+    expect(new Planner().analyzeTask('请帮我搭建一个全栈项目，怎么做性能优化？').mode).toBe('build');
+    expect(new Planner().analyzeTask('Implement a new feature across multiple files in the project.').mode).toBe('plan');
   });
 
   it('classifies Chinese full-stack / multi-file builds as complex', () => {
@@ -152,5 +161,48 @@ describe('Planner', () => {
     const text = formatTrapPrompt([{ type: 'self-contradiction', description: 'X but X' }]);
     expect(text).toContain('<logical_trap_warning>');
     expect(text).toContain('verify the premise');
+  });
+});
+
+describe('parsePlanJson (LLM plan parsing)', () => {
+  it('parses a plain JSON array of steps', () => {
+    const plan = parsePlanJson('[{"action":"Inspect","description":"Read the auth module","expectedOutcome":"Understand the current flow"},{"action":"Rewrite","description":"Replace the token logic"}]');
+    expect(plan).not.toBeNull();
+    expect(plan!.steps).toHaveLength(2);
+    expect(plan!.steps[0]).toMatchObject({ action: 'Inspect', description: 'Read the auth module' });
+    // expectedOutcome defaults to the description when absent
+    expect(plan!.steps[1].expectedOutcome).toBe('Replace the token logic');
+  });
+
+  it('accepts an object with a steps array', () => {
+    const plan = parsePlanJson('{"steps":[{"action":"A","description":"d"}]}');
+    expect(plan?.steps).toHaveLength(1);
+  });
+
+  it('accepts ```json fences', () => {
+    const plan = parsePlanJson('```json\n[{"action":"A","description":"d"}]\n```');
+    expect(plan?.steps).toHaveLength(1);
+  });
+
+  it('returns null for malformed / empty / non-array input', () => {
+    expect(parsePlanJson('')).toBeNull();
+    expect(parsePlanJson('not json')).toBeNull();
+    expect(parsePlanJson('{}')).toBeNull();
+    expect(parsePlanJson('[]')).toBeNull();
+    expect(parsePlanJson('{"steps":[]}')).toBeNull();
+    expect(parsePlanJson('[{"foo":1}]')).toBeNull();
+  });
+
+  it('drops empty steps and fills action/description fallbacks', () => {
+    const plan = parsePlanJson('[{"action":"","description":""},{"action":"Only action"}]');
+    expect(plan?.steps).toHaveLength(1);
+    expect(plan!.steps[0].description).toBe('Only action');
+  });
+
+  it('caps runaway step lists at 10 and re-indexes ids', () => {
+    const many = Array.from({ length: 25 }, (_, i) => JSON.stringify({ action: `S${i}`, description: `d${i}` })).join(',');
+    const plan = parsePlanJson(`[${many}]`);
+    expect(plan?.steps).toHaveLength(10);
+    expect(plan!.steps[9]).toMatchObject({ id: '10', action: 'S9' });
   });
 });

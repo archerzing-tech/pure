@@ -117,6 +117,51 @@ describe('scrollPin auto-scroll', () => {
     expect(rafCallbacks.length).toBe(0);
   });
 
+  it('a scroll event fired by OUR OWN write never unpins, even when content grew in between', () => {
+    // Regression for the "chat suddenly stops scrolling while content streams"
+    // bug: a programmatic `scrollTop = scrollHeight` write fires a 'scroll'
+    // event. If content grows between the write and the event dispatch (a
+    // throttled markdown pass / async diagram / restore loop), a naive handler
+    // reads the stale scrollTop against the NEW scrollHeight → distance past
+    // the threshold → wrongly unpins → auto-scroll dies for the session.
+    let scrollHeight = 900;
+    let scrollTop = 0;
+    const listeners: Record<string, Array<(ev: unknown) => void>> = {};
+    const el = {
+      dataset: {} as Record<string, string>,
+      get scrollTop() { return scrollTop; },
+      set scrollTop(v: number) { scrollTop = v; },
+      get scrollHeight() { return scrollHeight; },
+      get clientHeight() { return 600; },
+      addEventListener(type: string, fn: (ev: unknown) => void) {
+        (listeners[type] ??= []).push(fn);
+      },
+      dispatchEvent(type: string) {
+        for (const fn of listeners[type] ?? []) fn({});
+      },
+    };
+    const chatEl = el as unknown as HTMLElement;
+
+    wireScrollPin(chatEl);
+    scrollTop = 850; // user is at the bottom (within the 40px threshold)
+    el.dispatchEvent('scroll'); // → pinned
+
+    // Content change schedules a coalesced scroll-to-bottom.
+    scrollChatToBottomIfPinned(chatEl);
+    flushRaf(); // the write lands at the bottom as of THIS moment (900)
+    expect(scrollTop).toBe(900);
+
+    // Async content growth lands AFTER the write but BEFORE the write's own
+    // scroll event is handled — the exact race that used to unpin the chat.
+    scrollHeight = 1200;
+    el.dispatchEvent('scroll'); // the event the programmatic write fired
+
+    // Still pinned: the next content change must scroll to the NEW bottom.
+    scrollChatToBottomIfPinned(chatEl);
+    flushRaf();
+    expect(scrollTop).toBe(1200);
+  });
+
   it('wireScrollPin is idempotent and setPinnedToBottom re-pins explicitly', () => {
     const { el } = makeChatEl();
     wireScrollPin(el as unknown as HTMLElement);

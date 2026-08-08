@@ -21,7 +21,8 @@ export function appendStoredThinking(text: string, parent: HTMLElement): void {
 export interface ThinkingCardHandle {
   el: HTMLElement;              // .bubble-row.thinking-row
   card: HTMLDetailsElement;     // .thinking-card
-  body: HTMLElement;            // .thinking-body (scroll container)
+  body: HTMLElement;            // .thinking-body (non-scrolling; owns the padding)
+  scrollEl: HTMLElement;        // .thinking-scroll (max-height scroll window)
   textEl: HTMLElement;          // .thinking-text (reasoning content)
 }
 
@@ -66,10 +67,18 @@ export function createThinkingCard(): ThinkingCardHandle {
   const body = document.createElement('div');
   body.className = 'thinking-body';
 
+  // Scroll window for the reasoning text. The body's bottom padding must stay
+  // OUTSIDE it (same rationale as .tool-row-scroll in toolRow.ts): padding at
+  // the end of a scroll container is below the fold, which used to clip long
+  // reasoning flush against the card's bottom edge.
+  const scrollEl = document.createElement('div');
+  scrollEl.className = 'thinking-scroll';
+
   const textEl = document.createElement('div');
   textEl.className = 'thinking-text';
 
-  body.appendChild(textEl);
+  scrollEl.appendChild(textEl);
+  body.appendChild(scrollEl);
   card.append(summary, body);
   el.appendChild(card);
 
@@ -80,7 +89,7 @@ export function createThinkingCard(): ThinkingCardHandle {
     el.classList.toggle('expanded', card.open);
   });
 
-  return { el, card, body, textEl };
+  return { el, card, body, scrollEl, textEl };
 }
 
 /** Append a reasoning delta to the card body. */
@@ -92,7 +101,7 @@ export function appendThinkingText(handle: ThinkingCardHandle, text: string): vo
   // While expanded, keep the reasoning body pinned to the newest text so the
   // thinking "continuously scrolls" as requested.
   if (handle.card.open) {
-    handle.body.scrollTop = handle.body.scrollHeight;
+    handle.scrollEl.scrollTop = handle.scrollEl.scrollHeight;
   }
 }
 

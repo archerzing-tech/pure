@@ -134,6 +134,18 @@ const translations: Record<Language, Record<string, string>> = {
     'general.streaming': '流式渲染',
     'general.streaming.hint': '逐字格式化助手的回复',
 
+    // ── Environment (Settings → General) ──
+    'env.title': '环境上下文',
+    'env.city': '城市 / 位置',
+    'env.city.hint': '回答问题时以它为位置基准（如旅行规划的出发地）',
+    'env.city.placeholder': '如 上海 / Shanghai',
+    'env.detect': '自动检测',
+    'env.detect.hint': '通过 IP 定位所在城市（免费服务，精度到城市级）',
+    'env.detectBtn': '检测',
+    'env.detecting': '检测中…',
+    'env.detected': '已检测到位置：{city}',
+    'env.detectFailed': '自动检测失败，请手动填写',
+
     // ── LLM Page ──
     'llm.title': 'LLM 提供商',
     'llm.desc': '配置 AI 模型提供商',
@@ -262,6 +274,24 @@ const translations: Record<Language, Record<string, string>> = {
     'plan.cancel': '取消',
     'plan.progress.title': '📋 执行计划',
     'plan.progress.phases': '共 {n} 个阶段',
+    'plan.mode.build': 'Build 模式',
+    'plan.mode.plan': 'Plan 模式',
+    'plan.mode.yolo': 'YOLO 模式',
+    'plan.modeSwitch': '🧭 检测到复杂任务，切换为 {mode} 模式，正在生成执行计划…',
+    'plan.modeActive': '🧭 已切换为 {mode} 模式，按计划分步执行',
+    'plan.modeForced': '🧭 已按你的选择进入 {mode} 模式，正在生成执行计划…',
+    'plan.modeNoWorkspace': '🧭 计划/构建模式需要先选择工作区，本次按普通对话继续',
+    'plan.modeDisabled': '🧭 计划/构建模式已被禁用（设置 → Skills → Planning），本次按普通对话继续',
+
+    // ── Composer quick selectors ──
+    'composer.mode.title': '任务模式 — 自动:智能判断 · YOLO:直接执行 · 计划:先看计划再执行 · 构建:分阶段构建并汇报',
+    'composer.mode.auto': '自动',
+    'composer.mode.yolo': 'YOLO',
+    'composer.mode.plan': '计划',
+    'composer.mode.build': '构建',
+    'composer.modeSaved': '模式已切换',
+    'composer.model.title': '模型',
+    'composer.modelSaved': '模型已切换',
 
     // ── Permission dialog ──
     'permission.title': '需要权限确认',
@@ -435,6 +465,18 @@ const translations: Record<Language, Record<string, string>> = {
     'general.streaming': 'Streaming render',
     'general.streaming.hint': 'Format assistant reply progressively',
 
+    // ── Environment (Settings → General) ──
+    'env.title': 'Environment',
+    'env.city': 'City / location',
+    'env.city.hint': 'Location baseline for answers (e.g. trip-planning departure point)',
+    'env.city.placeholder': 'e.g. Shanghai',
+    'env.detect': 'Auto-detect',
+    'env.detect.hint': 'Detect city from your IP address (free service, city-level accuracy)',
+    'env.detectBtn': 'Detect',
+    'env.detecting': 'Detecting…',
+    'env.detected': 'Location detected: {city}',
+    'env.detectFailed': 'Auto-detection failed — set it manually',
+
     // ── LLM Page ──
     'llm.title': 'LLM Provider',
     'llm.desc': 'Configure your AI model provider',
@@ -563,6 +605,24 @@ const translations: Record<Language, Record<string, string>> = {
     'plan.cancel': 'Cancel',
     'plan.progress.title': '📋 Execution plan',
     'plan.progress.phases': '{n} phases',
+    'plan.mode.build': 'Build mode',
+    'plan.mode.plan': 'Plan mode',
+    'plan.mode.yolo': 'YOLO mode',
+    'plan.modeSwitch': '🧭 Complex task detected — switched to {mode} mode, generating execution plan…',
+    'plan.modeActive': '🧭 Switched to {mode} mode — executing the plan step by step',
+    'plan.modeForced': '🧭 Entering {mode} mode as you selected — generating execution plan…',
+    'plan.modeNoWorkspace': '🧭 Plan/Build mode needs a workspace first — continuing as a normal chat',
+    'plan.modeDisabled': '🧭 Plan/Build mode is disabled (Settings → Skills → Planning) — continuing as a normal chat',
+
+    // ── Composer quick selectors ──
+    'composer.mode.title': 'Task mode — Auto: decide per task · YOLO: run directly · Plan: review a plan first · Build: build in phases',
+    'composer.mode.auto': 'Auto',
+    'composer.mode.yolo': 'YOLO',
+    'composer.mode.plan': 'Plan',
+    'composer.mode.build': 'Build',
+    'composer.modeSaved': 'Mode switched',
+    'composer.model.title': 'Model',
+    'composer.modelSaved': 'Model switched',
 
     // ── Permission dialog ──
     'permission.title': 'Permission required',

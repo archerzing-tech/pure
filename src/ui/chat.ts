@@ -2,14 +2,15 @@
 // v0.6 — Uses CodingAgent/Harness instead of self-built ReAct loop.
 // Iterates over EngineEvents stream to update the UI reactively.
 
-import { loadConfig, hasConfiguredKey, type PureConfig } from './settings';
+import { loadConfig, hasConfiguredKey, type PureConfig } from './config';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily } from '../shared/providers';
 import { saveSession, loadLastSession, type StoredMessage, type ToolExecMeta } from './store';
 import { LocalStorageMemoryStore } from '../adapter/memory/LocalStorageMemoryStore';
 import { WASMEmbeddingStore } from '../adapter/memory/WASMEmbeddingStore';
 import { harvestUserPreferences } from '../shared/memory';
 import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT } from '../shared/agentBehavior';
 import { CodingAgent } from '../coding-agent/CodingAgent';
-import { formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt } from '../coding-agent/Planner';
+import { formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt, parsePlanJson } from '../coding-agent/Planner';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createLLMOnlyVerifier, createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS } from '../coding-agent/SubagentOrchestrator';
@@ -47,7 +48,7 @@ import type {
   Message,
   BudgetConfig,
 } from '../shared/types';
-import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan } from '../coding-agent/types';
+import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, TaskMode } from '../coding-agent/types';
 
 // Friendly labels for the logical-trap status bubble (raw type ids like
 // 'self-contradiction' are cryptic to users).
@@ -133,7 +134,7 @@ Path rule: pass file and directory paths relative to the selected workspace root
 // sys_info works without a workspace (the Rust backend ignores the workspace
 // field), so it is advertised in BOTH plain-chat and workspace mode.
 const SYS_INFO_PROMPT = `System:
-- sys_info() — timezone, language, current time, OS version. When the user asks for the current time, date, timezone, language, or OS version, call sys_info() FIRST — never guess from your training data.`;
+- sys_info() — timezone, language, current time, OS version, and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data. The user can set/override their location in Settings → General → Environment.`;
 
 const WEB_TOOL_NAMES: ReadonlySet<string> = new Set(['web_search', 'web_fetch']);
 
@@ -354,8 +355,24 @@ const memoryStore = new WASMEmbeddingStore({
   store: new LocalStorageMemoryStore(),
 });
 
-function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false): string {
-  return BASE_SYSTEM_PROMPT(hasWorkspace, temporaryWorkspace);
+// Lightweight environment context injected into every turn's system prompt.
+// Time/timezone intentionally stay OUT (they go stale immediately — the model
+// calls sys_info() for those); only the location + answer language are stable
+// enough to pre-seed. This is what lets "帮我安排一个去上海的旅游计划" resolve
+// its departure point to the user's configured city without a lookup.
+function buildEnvironmentContext(config: PureConfig | null): string {
+  const lang = config?.language === 'en' ? 'English' : 'Chinese (zh-CN)';
+  const city = config?.city?.trim();
+  if (!city) {
+    return `Environment: reply in ${lang}. The user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.`;
+  }
+  return `Environment: reply in ${lang}; user location is ${city} (configured in Settings → General → Environment). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.`;
+}
+
+function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null): string {
+  return `${BASE_SYSTEM_PROMPT(hasWorkspace, temporaryWorkspace)}
+
+${buildEnvironmentContext(config)}`;
 }
 
 // ── Permission policy mapping ──
@@ -407,20 +424,9 @@ function createPermissionHandler(config: PureConfig): PermissionRequestHandler {
 // ── Adapter factory ──
 
 function providerBaseURL(provider: PureConfig['provider']): string {
-  switch (provider) {
-    case 'qwen': return 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-    case 'glm': return 'https://open.bigmodel.cn/api/paas/v4';
-    default: return 'https://api.deepseek.com';
-  }
+  return baseURLFor(provider);
 }
 
-function defaultModelForProvider(provider: PureConfig['provider']): string {
-  switch (provider) {
-    case 'qwen': return 'qwen3-coder-next';
-    case 'glm': return 'glm-5.2';
-    default: return 'deepseek-v4-flash';
-  }
-}
 
 function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
   if (!config) {
@@ -431,7 +437,7 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
   // generating a full HTML animation) exhaust the budget on thinking and the
   // visible answer comes back EMPTY → verify failure → retry loop. Give
   // DeepSeek a larger budget; Qwen/GLM keep the shared default.
-  const maxTokens = (config.provider === 'deepseek-openai' || config.provider === 'deepseek-anthropic')
+  const maxTokens = isDeepSeekFamily(config.provider)
     ? 32768
     : undefined;
   if (isTauriRuntime()) {
@@ -439,7 +445,7 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
     // is resolved inside `chat_stream` — it never passes through the WebView.
     return new RustLLMAdapter({
       provider: config.provider,
-      model: config.model || defaultModelForProvider(config.provider),
+      model: config.model || defaultModelFor(config.provider),
       baseURL: config.baseURL || providerBaseURL(config.provider),
       extraBody: config.provider === 'glm' ? { tool_stream: true } : undefined,
       maxTokens,
@@ -449,7 +455,7 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
     throw new Error('No API key configured');
   }
   const baseURL = config.baseURL || providerBaseURL(config.provider);
-  const model = config.model || defaultModelForProvider(config.provider);
+  const model = config.model || defaultModelFor(config.provider);
   return new OpenAICompatibleAdapter({
     baseURL,
     apiKey: config.apiKey,
@@ -463,8 +469,55 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
 // for every call. When the user has not selected a workspace, send() supplies
 // an application-owned temporary directory for this session; web tools remain
 // filesystem-independent.
+// ── Task-specific plan generation (P1-6 enhancement) ──
+// Complex multi-step tasks get a CONCRETE plan from the LLM before the review
+// card shows — the heuristic generic template (Understand/Plan/Implement/Verify)
+// is replaced by real per-task steps, which is what makes the live checkoff
+// card meaningful ("把步骤和 todo list 列出来，完成一个消减一个"). One
+// non-streaming call raced against a timeout; on failure/timeout the heuristic
+// plan from analyzeTask() stays as the fallback.
+const PLAN_GENERATION_TIMEOUT_MS = 8000;
+const PLAN_GENERATION_PROMPT = `You are a meticulous planner for an AI coding agent. Break the user's request into 4-8 concrete, ordered, independently verifiable steps that the agent will execute ONE BY ONE. Do NOT invent file contents; steps describe what to do and how success is checked. Respond with ONLY a JSON array — no prose, no code fences — in exactly this shape:
+[{"action": "short verb phrase", "description": "what this step does and why", "expectedOutcome": "how success is verified"}]
+Use the same language as the user's request.`;
+
+export async function generateTaskPlan(
+  llm: LLMAdapter,
+  userText: string,
+  timeoutMs: number = PLAN_GENERATION_TIMEOUT_MS,
+): Promise<Plan | null> {
+  try {
+    const res = await Promise.race([
+      llm.complete(
+        [
+          { role: 'system', content: PLAN_GENERATION_PROMPT },
+          { role: 'user', content: userText },
+        ],
+        [],
+      ),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('plan generation timed out')), timeoutMs),
+      ),
+    ]);
+    return parsePlanJson(res.content);
+  } catch (err) {
+    console.warn('[pure] plan generation failed, falling back to heuristic plan:', (err as Error)?.message ?? err);
+    return null;
+  }
+}
+
+// Short display label for the auto-selected task mode (used in status bubbles
+// and the plan-card chip).
+function modeLabel(mode: TaskMode): string {
+  switch (mode) {
+    case 'build': return t('plan.mode.build');
+    case 'plan': return t('plan.mode.plan');
+    default: return t('plan.mode.yolo');
+  }
+}
+
 function createToolAdapter(workspace: string, config: PureConfig): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey);
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city);
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.
@@ -692,6 +745,9 @@ export class ChatController {
     // to one column). Closed by the next StateChange → THINK.
     let toolGrid: HTMLElement | null = null;
     const appendToolRow = (toolName: string, args: Record<string, unknown>): ToolRowHandle => {
+      // Tool calls interrupt text streaming — the bubble above the new row
+      // stops blinking now, not at turn completion (see above).
+      finalizeStreamingSegments();
       if (!toolGrid) {
         toolGrid = document.createElement('div');
         toolGrid.className = 'bubble-row tool-grid';
@@ -732,6 +788,19 @@ export class ChatController {
       finalizeThinkingCard(thinkingCard);
       thinkingCard = null;
     };
+    // Stop the streaming caret on every text bubble the moment a tool row is
+    // appended: the pre-tool text is complete once the agent hands off to a
+    // tool, and write_file / edit_file / execute_command can run for seconds
+    // or minutes — the `|` cursor (.bubble.streaming::after) must not blink
+    // above the row for the whole execution. Finalized segments keep their
+    // rendered text; if the model streams again after the tool, ensureSegment
+    // opens a fresh bubble below the tool rows (with its own caret).
+    const finalizeStreamingSegments = (): void => {
+      for (const seg of assistantSegments) {
+        cancelStreamingRender(seg.el);
+        seg.el.classList.remove('streaming');
+      }
+    };
     // createThinkingCard() builds the element tree but does NOT attach it —
     // append to the transcript here, right below whatever was last added.
     const openThinkingCard = (): ThinkingCardHandle => {
@@ -755,7 +824,7 @@ export class ChatController {
       // application temporary workspace is a real filesystem root for this
       // session, while web tools remain available independently.
       const usingTemporaryWorkspace = !sendWorkspace && !!effectiveWorkspace;
-      let systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace);
+      let systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config);
 
       const llm = createLLMAdapter(config);
       const toolAdapter = createToolAdapter(effectiveWorkspace, config);
@@ -845,6 +914,13 @@ export class ChatController {
       // premise instead of following it into a failure loop. The same analysis
       // also drives the plan review below.
       const analysis = codingAgent.analyzeTask(userText);
+      // Manual mode override from the composer's mode selector (config.taskMode,
+      // persisted — Settings-independent). 'auto' keeps the Planner's per-task
+      // detection; a forced yolo/plan/build wins for this turn: it drives the
+      // plan-review gate below AND the label on the mode bubble / plan card.
+      const forcedMode: TaskMode | undefined =
+        config.taskMode && config.taskMode !== 'auto' ? config.taskMode : undefined;
+      if (forcedMode) analysis.mode = forcedMode;
       if (analysis.traps.length > 0) {
         systemPrompt += formatTrapPrompt(analysis.traps);
       }
@@ -860,16 +936,70 @@ export class ChatController {
       // approved plan becomes a live phase-progress card in the transcript
       // (approvedPlan below) and the model is told to emit `## 阶段 n/m`
       // markers so the card can track which phase is running.
+      //
+      // Smarter behavior: complex multi-step requests first get a CONCRETE
+      // plan from the LLM (generateTaskPlan) — real per-task steps replace the
+      // generic heuristic template, so the review card and the live checkoff
+      // card show the actual work ahead. The mode switch (yolo → plan/build)
+      // is surfaced to the user as a status bubble.
       let approvedPlan: Plan | null = null;
       if (effectiveWorkspace && (config.skills?.planning ?? true)) {
-        if (analysis.complexity === 'complex' && analysis.plan) {
-          const decision = await requestPlanReview(analysis);
-          if (decision === 'cancel') return; // finally resets streaming, no bubbles left behind
-          if (decision === 'approve') {
-            approvedPlan = analysis.plan;
-            systemPrompt += formatPlanForPrompt(analysis.plan);
+        // Plan review runs when: auto-detected complex task (has a heuristic
+        // plan), OR the user forced plan/build mode from the composer. A forced
+        // YOLO suppresses review even for complex tasks.
+        const wantsPlan = forcedMode
+          ? forcedMode === 'plan' || forcedMode === 'build'
+          : analysis.complexity === 'complex' && !!analysis.plan;
+        if (wantsPlan) {
+          const modeBubble = this.addStatusBubble(
+            forcedMode
+              ? t('plan.modeForced', '🧭 已按你的选择进入 {mode} 模式，正在生成执行计划…').replace('{mode}', modeLabel(analysis.mode))
+              : t('plan.modeSwitch', '🧭 检测到复杂任务，切换为 {mode} 模式，正在生成执行计划…').replace('{mode}', modeLabel(analysis.mode)),
+          );
+          // Upgrade the heuristic plan with an LLM-generated task-specific one;
+          // keep the heuristic result when the generation call fails/times out.
+          // A forced plan/build on a simple task has no heuristic plan yet —
+          // fall back to the generic scaffold (same shape as Planner's) so the
+          // review card always has steps to show.
+          let planForReview: Plan = analysis.plan ?? {
+            steps: [
+              { id: '1', action: 'Understand', description: 'Read relevant files and understand what needs to change.', expectedOutcome: 'Clear understanding of the task.' },
+              { id: '2', action: 'Plan', description: 'Design the solution approach and identify files to modify.', expectedOutcome: 'An executable step list.' },
+              { id: '3', action: 'Implement', description: 'Make the changes step by step and verify each one.', expectedOutcome: 'The core work is done.' },
+              { id: '4', action: 'Verify', description: 'Check the result and summarize what changed.', expectedOutcome: 'A verified, usable result.' },
+            ],
+            reasoning: 'Plan mode was selected manually — working through generic steps.',
+          };
+          const llmPlan = await generateTaskPlan(llm, userText);
+          // The user may have switched sessions / started a new chat during the
+          // (up-to-8s) generation — abandon this turn before showing anything.
+          if (gen !== this.generation) return;
+          if (llmPlan) planForReview = llmPlan;
+          const decision = await requestPlanReview({ ...analysis, plan: planForReview, reasoning: planForReview.reasoning });
+          if (decision === 'cancel') {
+            // Cancelled pre-flight leaves no ghost bubbles (see the "bubbles
+            // are added after the interactive pre-flight" invariant).
+            modeBubble.remove();
+            return; // finally resets streaming
+          }
+          if (decision === 'skip') {
+            modeBubble.remove();
+          } else {
+            approvedPlan = planForReview;
+            systemPrompt += formatPlanForPrompt(planForReview);
+            // Plan is ready + approved: the bubble no longer promises generation.
+            modeBubble.textContent = t('plan.modeActive', '🧭 已切换为 {mode} 模式，按计划分步执行').replace('{mode}', modeLabel(analysis.mode));
           }
         }
+      } else if (forcedMode === 'plan' || forcedMode === 'build') {
+        // The plan gate needs a real filesystem root (and the Planning skill);
+        // without it a forced plan/build would silently do nothing. Surface the
+        // mismatch instead of ignoring the user's mode choice.
+        this.addStatusBubble(
+          effectiveWorkspace
+            ? t('plan.modeDisabled', '🧭 计划/构建模式已被禁用（设置 → Skills → Planning），本次按普通对话继续')
+            : t('plan.modeNoWorkspace', '🧭 计划/构建模式需要先选择工作区，本次按普通对话继续'),
+        );
       }
 
       // Add bubbles after the (possibly interactive) pre-flight so a cancelled
@@ -883,7 +1013,7 @@ export class ChatController {
       let planCard: PlanCardHandle | null = null;
       const planTrack = { seg: null as { el: HTMLDivElement; text: string } | null, scanLen: 0 };
       if (approvedPlan) {
-        planCard = createPlanCard(approvedPlan);
+        planCard = createPlanCard(approvedPlan, analysis.mode);
         chatEl.appendChild(planCard.el);
       }
       const trackPlanPhase = (seg: { el: HTMLDivElement; text: string }) => {
@@ -1393,7 +1523,7 @@ export class ChatController {
     return bubble;
   }
 
-  private addStatusBubble(text: string, pending = false, isError = false) {
+  private addStatusBubble(text: string, pending = false, isError = false): HTMLElement {
     const chatEl = document.getElementById('chat')!;
     const wrapper = document.createElement('div');
     wrapper.className = 'bubble-row status';

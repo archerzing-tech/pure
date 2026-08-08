@@ -185,7 +185,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'sys_info',
-    description: 'Get operating system information: timezone, language, current time, and OS version.',
+    description: 'Get operating system information: timezone, language, current time, OS version, and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
     input_schema: { type: 'object', properties: {} },
   },
 ];
@@ -265,11 +265,13 @@ export class TauriToolAdapter implements ToolAdapter {
   private workspace: string;
   private tavilyApiKey: string;
   private serperApiKey: string;
+  private location: string;
 
-  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '') {
+  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '') {
     this.workspace = workspace;
     this.tavilyApiKey = tavilyApiKey;
     this.serperApiKey = serperApiKey;
+    this.location = location;
   }
 
   getTools(): ToolDefinition[] {
@@ -487,7 +489,10 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: replaceResult, success: true, duration: Date.now() - start };
         }
         case 'sys_info': {
-          const info = await tauriInvoke('sys_info', { workspace: ws }) as string;
+          // The user-configured location (Settings → General → Environment) is
+          // forwarded so the model gets the location baseline without a round
+          // trip — the Rust command treats it as optional.
+          const info = await tauriInvoke('sys_info', { workspace: ws, location: this.location }) as string;
           return { id: toolCall.id, toolName: name, result: info, success: true, duration: Date.now() - start };
         }
         default:

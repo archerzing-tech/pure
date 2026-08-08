@@ -5,7 +5,10 @@
 //        can verify them before execution and escape the trap by switching
 //        approach after a failed round instead of repeating the same one.
 
-import type { AnalysisResult, TaskComplexity, Plan, PlanStep, TrapWarning } from './types';
+import type { AnalysisResult, TaskComplexity, TaskMode, Plan, PlanStep, TrapWarning } from './types';
+
+/** Upper bound on LLM-plan steps kept in the review card / system prompt. */
+const MAX_PLAN_STEPS = 10;
 
 export interface PlannerConfig {
   /** Threshold for 'complex': > this many file ops triggers planning. */
@@ -30,6 +33,10 @@ export class Planner {
     if (complexity === 'complex') {
       return {
         complexity,
+        // Build intent ("写一个小游戏", "搭建全栈项目") switches the agent into
+        // build mode; anything else complex gets plan mode. Both run the same
+        // plan-review → live-todo-checkoff flow, only the label differs.
+        mode: this.detectMode(prompt, complexity),
         plan: this.generatePlan(prompt),
         reasoning: this.getComplexReasoning(prompt),
         traps,
@@ -38,9 +45,17 @@ export class Planner {
 
     return {
       complexity: 'simple',
+      mode: 'yolo',
       reasoning: 'Task appears straightforward — direct execution is appropriate.',
       traps,
     };
+  }
+
+  /** Map a task to its operating mode: simple → yolo; complex + build/artifact
+   * intent → build; complex otherwise → plan. */
+  private detectMode(prompt: string, complexity: TaskComplexity): TaskMode {
+    if (complexity !== 'complex') return 'yolo';
+    return detectArtifactRequest(prompt) ? 'build' : 'plan';
   }
 
   /**
@@ -321,4 +336,55 @@ export function detectArtifactRequest(prompt: string): boolean {
  */
 export function formatArtifactPrompt(): string {
   return `\n\n<artifact_output_rule>\nThis request asks you to BUILD a complete runnable artifact (a game, web page, app, tool, script, or small project). Write it to a file on disk — do NOT dump the full source code in your reply.\n- Single-file artifact (HTML page, single JS/CSS file, small script): write it as a new file in the workspace, e.g. index.html, game.html, app.py, or a sensible name derived from the request.\n- Multi-file project: create a directory and write the files into it (entry point + assets), e.g. ./mini-game/index.html.\nAfter writing, briefly tell the user the file path(s) and how to run/open the artifact (e.g. open the HTML in a browser). If no workspace is configured, say so and ask for one instead of printing the code.\n</artifact_output_rule>`;
+}
+
+/**
+ * Parse + validate a task-specific plan the LLM returned as JSON (the output
+ * of the plan-generation pre-flight call). Accepts a plain JSON array, a JSON
+ * object with a `steps` array, or the same wrapped in ```json fences. Each
+ * step must carry `action` (string) and `description` (string); `expectedOutcome`
+ * is optional and defaults to the description. Returns null on any malformed
+ * input so the caller can fall back to the heuristic generic plan.
+ */
+export function parsePlanJson(text: string): Plan | null {
+  if (!text) return null;
+  let cleaned = text.trim();
+  // Strip ```json ... ``` fences (some models wrap structured output).
+  const fence = cleaned.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+  if (fence) cleaned = fence[1].trim();
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return null;
+  }
+
+  const rawSteps: unknown = Array.isArray(parsed) ? parsed : (parsed as { steps?: unknown })?.steps;
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) return null;
+
+  const steps: PlanStep[] = [];
+  for (const raw of rawSteps) {
+    const step = raw as { action?: unknown; description?: unknown; expectedOutcome?: unknown };
+    const action = typeof step.action === 'string' ? step.action.trim() : '';
+    const description = typeof step.description === 'string' ? step.description.trim() : '';
+    if (!action && !description) continue;
+    steps.push({
+      id: String(steps.length + 1),
+      action: action || description,
+      description: description || action,
+      expectedOutcome: typeof step.expectedOutcome === 'string' ? step.expectedOutcome.trim() : description || action,
+    });
+  }
+  if (steps.length === 0) return null;
+  // Hard cap so a non-compliant model can't balloon the review card / system
+  // prompt with dozens of micro-steps (the prompt asks for 4-8).
+  const capped = steps.slice(0, MAX_PLAN_STEPS);
+  // Re-index ids after the cap (parsePlanJson assigned sequential ids above).
+  const indexed = capped.map((s, i) => ({ ...s, id: String(i + 1) }));
+
+  return {
+    steps: indexed,
+    reasoning: `The task has been broken into ${indexed.length} concrete steps, each with a defined outcome.`,
+  };
 }

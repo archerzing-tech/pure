@@ -10,6 +10,18 @@
 
 const pinnedStates = new WeakMap<HTMLElement, boolean>();
 
+// A programmatic `scrollTop = scrollHeight` write ALSO fires a 'scroll' event.
+// If the content grows in the window between the write and the event dispatch
+// (a 100ms-throttled markdown pass, an async diagram render, or the session-
+// restore loop appending more bubbles), the handler below would read the STALE
+// scrollTop against the NEW scrollHeight — a distance beyond the threshold —
+// and wrongly flip the pin to false. Auto-scroll then silently stops for the
+// rest of the session even though the user never scrolled away ("the chat
+// suddenly stopped scrolling while content kept streaming"). Track our own
+// writes so the handler skips re-evaluating them; only a genuine user scroll
+// can unpin.
+const selfScrollWrites = new WeakMap<HTMLElement, boolean>();
+
 function isPinnedToBottom(el: HTMLElement): boolean {
   return pinnedStates.get(el) ?? true;
 }
@@ -38,6 +50,14 @@ export function wireScrollPin(el: HTMLElement): void {
   el.dataset.scrollPinWired = '1';
   const NEAR_BOTTOM_PX = 40;
   el.addEventListener('scroll', () => {
+    // The scroll event fired by OUR OWN scroll-to-bottom write is not user
+    // intent — re-evaluating it there is exactly what misreads a transient
+    // content-growth race as a scroll-away (see selfScrollWrites above).
+    // Consume the marker and leave the pin untouched.
+    if (selfScrollWrites.get(el)) {
+      selfScrollWrites.delete(el);
+      return;
+    }
     setPinnedToBottom(el, isNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight, NEAR_BOTTOM_PX));
   }, { passive: true });
 }
@@ -47,6 +67,17 @@ export function scrollChatToBottomIfPinned(el: HTMLElement): void {
   if (scrollFrames.has(el)) return;
   scrollFrames.set(el, requestAnimationFrame(() => {
     scrollFrames.delete(el);
-    if (isPinnedToBottom(el)) el.scrollTop = el.scrollHeight;
+    if (isPinnedToBottom(el)) {
+      const target = el.scrollHeight;
+      // Skip the write (and the flag) when already at the bottom, or when the
+      // content fits the viewport (scrollHeight ≤ clientHeight — scrollTop is
+      // clamped to 0, so no scroll event would fire and the marker would
+      // linger, silently swallowing a later genuine user-scroll event):
+      // nothing needs consuming in either case.
+      if (el.scrollHeight > el.clientHeight && el.scrollTop !== target) {
+        selfScrollWrites.set(el, true);
+        el.scrollTop = target;
+      }
+    }
   }));
 }

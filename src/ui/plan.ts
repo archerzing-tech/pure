@@ -3,7 +3,7 @@
 // Shown before a run when the Planner classifies a task as complex; the user
 // can approve (plan injected into the system prompt), skip planning, or cancel.
 
-import type { AnalysisResult, Plan } from '../coding-agent/types';
+import type { AnalysisResult, Plan, TaskMode } from '../coding-agent/types';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { showInlineCard } from './inlineCard';
@@ -44,7 +44,18 @@ export interface PlanCardHandle {
   current: number;
 }
 
-export function createPlanCard(plan: Plan): PlanCardHandle {
+// Short chip label for the auto-selected task mode (shown in the progress-card
+// head so the user sees the yolo → plan/build switch). Defined here (not in
+// chat.ts) to avoid a circular import.
+function modeChipLabel(mode: TaskMode | undefined): string | null {
+  switch (mode) {
+    case 'build': return t('plan.mode.build');
+    case 'plan': return t('plan.mode.plan');
+    default: return null;
+  }
+}
+
+export function createPlanCard(plan: Plan, mode?: TaskMode): PlanCardHandle {
   const el = document.createElement('div');
   el.className = 'bubble-row plan-progress-row';
 
@@ -59,7 +70,15 @@ export function createPlanCard(plan: Plan): PlanCardHandle {
   const count = document.createElement('span');
   count.className = 'plan-progress-count';
   count.textContent = t('plan.progress.phases', '共 {n} 个阶段').replace('{n}', String(plan.steps.length));
-  head.append(title, count);
+  const chipLabel = modeChipLabel(mode);
+  if (chipLabel) {
+    const chip = document.createElement('span');
+    chip.className = 'plan-mode-chip';
+    chip.textContent = chipLabel;
+    head.append(title, chip, count);
+  } else {
+    head.append(title, count);
+  }
 
   const steps = document.createElement('div');
   steps.className = 'plan-progress-steps';

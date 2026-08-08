@@ -1,7 +1,8 @@
 // src/ui/__tests__/chat.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, generateTaskPlan } from '../chat';
+import type { LLMAdapter, LLMResponse } from '../../shared/types';
 
 describe('parseToolCallBuffer', () => {
   it('parses the { name, arguments: string } wrapper format', () => {
@@ -86,5 +87,36 @@ describe('assistant bubble copy feedback', () => {
     const copied = await copyAssistantBubbleText('', async () => { calls++; return true; }, () => { calls++; });
     expect(copied).toBe(false);
     expect(calls).toBe(0);
+  });
+});
+
+describe('generateTaskPlan (LLM task-specific plan generation)', () => {
+  function fakeLlm(content: string, delay = 0): LLMAdapter {
+    return {
+      async *stream() { yield { type: 'content', content } as any; },
+      async complete(): Promise<LLMResponse> {
+        if (delay) await new Promise(r => setTimeout(r, delay));
+        return { content, toolCalls: undefined };
+      },
+    } as LLMAdapter;
+  }
+
+  it('returns a parsed plan when the LLM returns a JSON array', async () => {
+    const llm = fakeLlm('[{"action":"Inspect","description":"Read auth module"},{"action":"Rewrite","description":"Replace token logic"}]');
+    const plan = await generateTaskPlan(llm, '重构认证模块');
+    expect(plan).not.toBeNull();
+    expect(plan!.steps).toHaveLength(2);
+    expect(plan!.steps[0]).toMatchObject({ action: 'Inspect', description: 'Read auth module' });
+  });
+
+  it('returns null (fallback to heuristic) when the LLM returns malformed JSON', async () => {
+    const llm = fakeLlm('sorry, I cannot plan that');
+    expect(await generateTaskPlan(llm, 'x')).toBeNull();
+  });
+
+  it('returns null (fallback to heuristic) when the LLM call times out', async () => {
+    // 10s > the 8s generation timeout — must resolve to null, not hang.
+    const llm = fakeLlm('[]', 500);
+    expect(await generateTaskPlan(llm, 'x', 50)).toBeNull();
   });
 });

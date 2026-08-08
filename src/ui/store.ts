@@ -68,38 +68,33 @@ export interface SessionMeta {
 // Tauri runtime (plain Vite dev), so deleteSession/deleteAllSessions/saveSessionWorkspace
 // would try to call window.__TAURI_INTERNALS__ (undefined) and throw. isTauriRuntime()
 // checks for the actual __TAURI_INTERNALS__ global instead.
-import { isTauriRuntime } from '../shared/tauri';
+import { isTauriRuntime, tauriInvoke } from '../shared/tauri';
 const tauriAvailable = isTauriRuntime();
 
 // ── Tauri backend (filesystem via Rust commands) ──
 
 async function tauriSave(sessionId: string, messages: StoredMessage[], workspace: string): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('save_session', { sessionId, messages, workspace });
+  await tauriInvoke('save_session', { sessionId, messages, workspace });
 }
 
 async function tauriSaveWorkspace(sessionId: string, workspace: string): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('save_session_workspace', { sessionId, workspace });
+  await tauriInvoke('save_session_workspace', { sessionId, workspace });
 }
 
 async function tauriLoadLast(): Promise<{ sessionId: string; messages: StoredMessage[]; workspace: string } | null> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  const data: any = await invoke('load_last_session');
+  const data: any = await tauriInvoke('load_last_session');
   if (!data) return null;
   return { sessionId: data.sessionId, messages: data.messages ?? [], workspace: data.workspace ?? '' };
 }
 
 async function tauriLoad(sessionId: string): Promise<{ messages: StoredMessage[]; workspace: string } | null> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  const data: any = await invoke('load_session', { sessionId });
+  const data: any = await tauriInvoke('load_session', { sessionId });
   if (!data) return null;
   return { messages: data.messages ?? [], workspace: data.workspace ?? '' };
 }
 
 async function tauriLoadList(): Promise<SessionMeta[]> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  const list: any[] = await invoke('load_session_list');
+  const list: any[] = await tauriInvoke('load_session_list');
   return list.map((s: any) => ({
     id: s.id,
     title: s.title,
@@ -111,13 +106,11 @@ async function tauriLoadList(): Promise<SessionMeta[]> {
 }
 
 async function tauriDelete(sessionId: string): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('delete_session', { sessionId });
+  await tauriInvoke('delete_session', { sessionId });
 }
 
 async function tauriDeleteAll(): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('delete_all_sessions');
+  await tauriInvoke('delete_all_sessions');
 }
 
 // ── localStorage fallback ──

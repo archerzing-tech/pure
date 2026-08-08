@@ -1,24 +1,30 @@
 // src/ui/main.ts
-// pure v0.8 — Notion-style sidebar + modal settings
+// App shell: wires the domain controllers together and owns the chat
+// transcript + composer. Extracted concerns live in:
+//   • ./workspace.ts      — workspace picker, drag & drop, file attach
+//   • ./sessionSidebar.ts — session list, grouping, deletion
+//   • ./settings.ts       — settings panel (lazy-loaded on first open)
+//   • ../shared/providers.ts — provider metadata (labels / default models)
 
 import { ChatController, bindAssistantBubbleCopy, wireTranscriptPrune } from './chat';
-import { SettingsPanel, loadConfig, hasConfiguredKey } from './settings';
-import { loadSessionList, loadSession, deleteSession, deleteAllSessions, saveSessionWorkspace, getStoredThinkingSegments, type SessionMeta, type StoredMessage, type ToolExecMeta } from './store';
-import { loadRecentWorkspaces, touchRecentWorkspace, setRecentPinned, removeRecentWorkspace } from './recentWorkspaces';
+import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, type PureConfig } from './config';
+import type { SettingsPanel } from './settings';
+import { getStoredThinkingSegments, type StoredMessage, type ToolExecMeta } from './store';
 import { checkForUpdatesSilently, fetchAppVersion } from './updater';
-import { escapeHtml } from '../shared/html';
-import { t, applyTranslations, updateLanguage } from '../shared/i18n';
+import { t, updateLanguage } from '../shared/i18n';
 import type { Language as I18nLanguage } from '../shared/i18n';
-import { isTauriRuntime } from '../shared/tauri';
 import { showToast } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
+import { providerLabel, providerDef, PROVIDERS, defaultModelFor, type ProviderId } from '../shared/providers';
 import { renderMarkdown, stripToolCallXml } from './markdown';
 import { createToolRow, finalizeToolRow } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
 import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned } from './scrollPin';
 import { initPathLinks, linkifyPaths } from './pathLink';
-import { PasteChipManager, composeMessageWithAttachments, type DroppedFileRecord } from './pasteChip';
-import { showInlineCard } from './inlineCard';
+import { PasteChipManager, composeMessageWithAttachments } from './pasteChip';
+import { showConfirmModal } from './modal';
+import { WorkspaceController } from './workspace';
+import { SessionSidebar } from './sessionSidebar';
 
 const chat = new ChatController();
 
@@ -31,9 +37,94 @@ const pasteChips = new PasteChipManager(() => chat.getSessionId(), () => {
   const has = pasteChips.hasAttachments();
   document.querySelectorAll('.attach-btn').forEach(b => b.classList.toggle('has-attachments', has));
   enableInputIfReady();
+});  pasteChips.mount(document.getElementById('composer-box')!);
+  pasteChips.mount(document.getElementById('landing-input-wrap')!);
+
+// ── App controllers ──
+// `sessionSidebar` is declared before `workspace` so the workspace's onCommitted
+// callback can close over it without a forward-reference; the callbacks only
+// fire on user interaction (after both are initialized), never during module
+// evaluation.
+let sessionSidebar: SessionSidebar;
+
+const workspace = new WorkspaceController({
+  chat,
+  pasteChips,
+  onWorkspaceChanged: () => {
+    updateStatusBar();
+  },
+  onAttachmentsChanged: () => {
+    enableInputIfReady();
+  },
+  onCommitted: () => {
+    sessionSidebar.refresh();
+  },
 });
-pasteChips.mount(document.getElementById('input-bar')!);
-pasteChips.mount(document.getElementById('landing-input-wrap')!);
+
+sessionSidebar = new SessionSidebar({
+  chat,
+  pasteChips,
+  confirm: confirmDialog,
+  renderMessages: renderSessionMessages,
+  focusPrompt: focusPromptCaretEnd,
+  onSessionActivated: () => {
+    queuedWhileStreaming = null;
+    workspace.refresh();
+    updateContextPanelStage();
+  },
+  onChatCleared: () => {
+    goToLanding();
+    workspace.refresh();
+    updateContextPanelStage();
+  },
+});
+
+// ── Settings panel: lazy-loaded on first open so the eager startup bundle
+//    stays lean. The panel binds its DOM (index.html) when constructed. ──
+
+let settingsPanelPromise: Promise<SettingsPanel> | null = null;
+
+function getSettingsPanel(): Promise<SettingsPanel> {
+  if (!settingsPanelPromise) {
+    settingsPanelPromise = import('./settings')
+      .then(({ SettingsPanel }) =>
+        new SettingsPanel(
+          onConfigSaved,
+          () => {
+            contextCollapsedBeforeSettings = contextCollapsed;
+            setContextPanelCollapsed(true);
+            document.getElementById('main')?.classList.add('settings-mode');
+            if (contextPanelReopen) contextPanelReopen.hidden = true;
+          },
+          () => {
+            document.getElementById('main')?.classList.remove('settings-mode');
+            setContextPanelCollapsed(contextCollapsedBeforeSettings);
+            updateContextPanelStage();
+            enableInputIfReady();
+          },
+        ),
+      )
+      // A failed import/construction must not brick the panel for the whole
+      // session: reset the cached promise so the next open retries.
+      .catch((err) => {
+        settingsPanelPromise = null;
+        throw err;
+      });
+  }
+  return settingsPanelPromise;
+}
+
+async function openSettings(): Promise<void> {
+  (await getSettingsPanel()).open();
+}
+
+async function closeSettings(): Promise<void> {
+  (await getSettingsPanel()).close();
+}
+
+async function settingsVisible(): Promise<boolean> {
+  return (await getSettingsPanel()).isVisible();
+}
 
 let hasStartedChat = false;
 let contextCollapsed = false;
@@ -45,22 +136,6 @@ let appVersion = '';
 // Message typed while the assistant is generating — queued and auto-sent when
 // the current turn finishes (Claude Code behavior, so the input stays live).
 let queuedWhileStreaming: string | null = null;
-
-const settings = new SettingsPanel(
-  onConfigSaved,
-  () => {
-    contextCollapsedBeforeSettings = contextCollapsed;
-    setContextPanelCollapsed(true);
-    document.getElementById('main')?.classList.add('settings-mode');
-    if (contextPanelReopen) contextPanelReopen.hidden = true;
-  },
-  () => {
-    document.getElementById('main')?.classList.remove('settings-mode');
-    setContextPanelCollapsed(contextCollapsedBeforeSettings);
-    updateContextPanelStage();
-    enableInputIfReady();
-  },
-);
 
 // ── Streaming state → update both send buttons ──
 
@@ -114,10 +189,13 @@ chat.onStreamingStateChange((streaming) => {
 function onConfigSaved() {
   // Each session owns its workspace independently (persisted with the
   // session); a settings save must never touch the current chat's workspace.
-  updateWorkspacePicker();
+  workspace.refresh();
   updateSidebarModel();
   updateContextPanelStage();
   enableInputIfReady();
+  // The composer's mode/model dropdowns mirror the persisted config — a
+  // settings save (provider/model change, language switch) must re-sync them.
+  populateComposerSelects();
 }
 
 // ── DOM refs ──
@@ -129,38 +207,121 @@ const landingSend = document.getElementById('landing-send-btn') as HTMLButtonEle
 const sidebarNewChat = document.getElementById('sidebar-new-chat') as HTMLButtonElement;
 const sidebarSettingsBtn = document.getElementById('sidebar-settings-btn') as HTMLButtonElement;
 
-// ── Workspace picker (sidebar top, Claude Desktop style) ──
-// Every session is an independent workspace: this string is the session's own
-// path ('' = no workspace), persisted with the session. There is no global
-// default — a brand-new chat always starts with no workspace.
-let sessionWorkspace = '';
+// ── Composer quick selectors (mode + model) ──
+// Both the chat composer and the landing hero have the same pair of frameless
+// dropdowns that write straight into the config the Settings panel uses
+// (config.taskMode, provider + model). populateComposerSelects() rebuilds the
+// <option> lists and re-syncs the values — it is called on boot and after
+// every settings save so the selects always mirror the persisted config. The
+// change listeners are attached ONCE in wireComposerSelects (to the <select>
+// elements, not the options), so re-populating never duplicates them.
 
-/** Last path segment (basename) for display, e.g. "/a/b" → "b". */
-function workspaceBase(path: string): string {
-  const trimmed = path.replace(/[\/\\]+$/, '');
-  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
-}
+const MODE_SELECT_IDS = ['composer-mode-select', 'landing-mode-select'] as const;
+const MODEL_SELECT_IDS = ['composer-model-select', 'landing-model-select'] as const;
 
-function updateContextPanelWorkspace(path: string) {
-  const workspace = document.getElementById('context-workspace');
-  const name = document.getElementById('context-workspace-name');
-  if (workspace) {
-    workspace.textContent = path || t('workspace.none');
-    workspace.title = path;
+function populateModeSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
+  const modes: Array<[PureConfig['taskMode'], string]> = [
+    ['auto', t('composer.mode.auto')],
+    ['yolo', t('composer.mode.yolo')],
+    ['plan', t('composer.mode.plan')],
+    ['build', t('composer.mode.build')],
+  ];
+  sel.innerHTML = '';
+  for (const [value, label] of modes) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    sel.appendChild(opt);
   }
-  if (name) name.textContent = path ? workspaceBase(path) : 'workspace';
+  sel.value = cfg.taskMode ?? 'auto';
 }
 
-function providerLabel(provider: string | undefined): string {
-  const labels: Record<string, string> = {
-    'deepseek-openai': 'DeepSeek',
-    'deepseek-anthropic': 'DeepSeek',
-    qwen: 'Qwen',
-    glm: 'GLM',
-  };
-  return labels[provider ?? ''] || provider || 'Model';
+function populateModelSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
+  const provider = cfg.provider;
+  const model = cfg.model?.trim() || defaultModelFor(provider);
+  // One option per known provider (its default model), labeled with the full
+  // display name (t(i18nKey)) so the two DeepSeek entries — same label +
+  // same default model, different API protocol — stay distinguishable. A
+  // custom model typed into Settings is appended with a UNIQUE value
+  // ("<provider>:custom") so the select can actually point at it; a plain
+  // provider value would resolve to the first matching default option and
+  // silently display the wrong model.
+  sel.innerHTML = '';
+  const isCustom = !PROVIDERS.some((p) => p.id === provider && p.defaultModel === model);
+  let selectedValue: string = provider;
+  for (const p of PROVIDERS) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.dataset.model = p.defaultModel;
+    opt.textContent = `${t(p.i18nKey)} · ${p.defaultModel}`;
+    sel.appendChild(opt);
+  }
+  if (isCustom) {
+    const opt = document.createElement('option');
+    opt.value = `${provider}:custom`;
+    opt.dataset.model = model;
+    // Same label style as the default options (t(i18nKey)) so a custom model
+    // stays visually consistent (e.g. "DeepSeek (OpenAI)" not "DeepSeek").
+    opt.textContent = `${t(providerDef(provider)?.i18nKey ?? provider)} · ${model}`;
+    sel.appendChild(opt);
+    selectedValue = `${provider}:custom`;
+  }
+  sel.value = selectedValue;
 }
+
+function populateComposerSelects(): void {
+  const cfg = loadConfig() ?? defaults();
+  for (const id of MODE_SELECT_IDS) {
+    const sel = document.getElementById(id) as HTMLSelectElement | null;
+    if (sel) populateModeSelect(sel, cfg);
+  }
+  for (const id of MODEL_SELECT_IDS) {
+    const sel = document.getElementById(id) as HTMLSelectElement | null;
+    if (sel) populateModelSelect(sel, cfg);
+  }
+}
+
+function wireModeSelect(sel: HTMLSelectElement): void {
+  sel.addEventListener('change', () => {
+    const cfg = loadConfig() ?? defaults();
+    cfg.taskMode = sel.value as PureConfig['taskMode'];
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    invalidateConfigCache();
+    showToast(t('composer.modeSaved'));
+  });
+}
+
+function wireModelSelect(sel: HTMLSelectElement): void {
+  sel.addEventListener('change', () => {
+    const cfg = loadConfig() ?? defaults();
+    const opt = sel.selectedOptions[0];
+    // Custom entries carry a "<provider>:custom" value so they stay
+    // distinct from the plain provider option (see populate above).
+    const raw = sel.value;
+    const providerId = raw.endsWith(':custom') ? raw.slice(0, -':custom'.length) : raw;
+    cfg.provider = providerId as ProviderId;
+    cfg.model = opt?.dataset.model || defaultModelFor(providerId);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    invalidateConfigCache();
+    // updateSidebarModel() cascades into the status footer + context panel.
+    updateSidebarModel();
+    showToast(t('composer.modelSaved'));
+  });
+}
+
+function wireComposerSelects(): void {
+  for (const id of MODE_SELECT_IDS) {
+    const sel = document.getElementById(id) as HTMLSelectElement | null;
+    if (sel) wireModeSelect(sel);
+  }
+  for (const id of MODEL_SELECT_IDS) {
+    const sel = document.getElementById(id) as HTMLSelectElement | null;
+    if (sel) wireModelSelect(sel);
+  }
+  populateComposerSelects();
+}
+
+// ── Context panel display ──
 
 function updateContextPanelModel() {
   const cfg = loadConfig();
@@ -232,345 +393,19 @@ function updateContextPanelStage(streaming = chat.isStreaming()) {
   updateStatusBar();
 }
 
-function updateWorkspacePicker() {
-  const btn = document.getElementById('workspace-picker-btn') as HTMLButtonElement | null;
-  const label = document.getElementById('workspace-picker-label');
-  const current = document.getElementById('wp-popover-current');
-  const ws = chat.getWorkspace();
-  updateContextPanelWorkspace(ws);
-  // The input-bar folder buttons mirror the same workspace state (accent when
-  // a workspace is set, tooltip shows the full path) so clicking them re-picks.
-  const inputWsBtns = [
-    document.getElementById('landing-ws-btn'),
-    document.getElementById('input-ws-btn'),
-  ].filter(Boolean) as HTMLButtonElement[];
-  for (const b of inputWsBtns) {
-    b.classList.toggle('has-workspace', !!ws);
-    b.title = ws || t('workspace.browseTitle');
-    b.setAttribute('aria-label', ws || t('workspace.browseTitle'));
-  }
-  // Show the full workspace path in the sidebar beneath the picker. The text
-  // is ellipsized by CSS while its title preserves the full path.
-  for (const refs of [
-    { bar: 'sidebar-workspace-path', text: 'sidebar-workspace-path-text', clear: 'sidebar-workspace-path-clear' },
-  ]) {
-    const bar = document.getElementById(refs.bar);
-    const text = document.getElementById(refs.text);
-    if (!bar || !text) continue;
-    bar.hidden = !ws;
-    text.textContent = ws || '';
-    text.title = ws || '';
-    const clear = document.getElementById(refs.clear);
-    if (clear) clear.hidden = !ws;
-  }
-  if (!btn || !label) return;
-  label.textContent = ws ? workspaceBase(ws) : t('workspace.none');
-  label.title = ws || '';
-  btn.classList.toggle('has-workspace', !!ws);
-  if (current) {
-    current.textContent = ws || t('workspace.none');
-    current.title = ws || '';
-  }
-  // The clear (×) affordance on the popover's current-path row only makes
-  // sense while a workspace is set — it stays hidden for the "no workspace"
-  // state.
-  const clearBtn = document.getElementById('wp-clear-btn');
-  if (clearBtn) clearBtn.hidden = !ws;
-  updateStatusBar();
-}
-
-function openWorkspacePopover() {
-  const popover = document.getElementById('workspace-picker-popover')!;
-  const btn = document.getElementById('workspace-picker-btn');
-  // Anchor the popover below the picker button (the sidebar has overflow
-  // hidden, so a child dropdown would be clipped — position against the
-  // button's viewport rect instead).
-  if (btn) {
-    const rect = btn.getBoundingClientRect();
-    popover.style.left = `${Math.max(8, rect.left)}px`;
-    popover.style.top = `${rect.bottom + 6}px`;
-  }
-  popover.classList.remove('hidden');
-  void renderRecentWorkspaces();
-  updateWorkspacePicker();
-}
-
-function closeWorkspacePopover() {
-  document.getElementById('workspace-picker-popover')!.classList.add('hidden');
-  updateWorkspacePicker();
-}
-
-/** Native folder dialog in the desktop app; fall back to the popover. */
-async function browseWorkspace() {
-  if (isTauriRuntime()) {
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const selected = await open({ directory: true, multiple: false, title: t('workspace.browseTitle') });
-      if (typeof selected === 'string' && selected) {
-        await commitWorkspace(selected);
-      }
-    } catch (err) {
-      console.error('[pure] folder picker failed:', err);
-    }
-  } else {
-    // No native dialog in plain web/dev mode — show the simplified popover
-    // (current path + recent folders the user can switch to).
-    openWorkspacePopover();
-  }
-}
-
-async function commitWorkspace(value: string) {
-  const ws = value.trim();
-  if (ws) {
-    // Record usage in the independent recent list (MRU bump + pin state).
-    touchRecentWorkspace(ws);
-  }
-  if (ws === chat.getWorkspace()) {
-    // Nothing changed (e.g. re-applying the current path) — just close.
-    closeWorkspacePopover();
-    return;
-  }
-  if (ws) {
-    // Pin this session only — workspaces are per-session, never global.
-    sessionWorkspace = ws;
-    chat.setWorkspace(ws);
-  } else {
-    // Cleared → this session simply has no workspace.
-    sessionWorkspace = '';
-    chat.setWorkspace('');
-  }
-  closeWorkspacePopover();
-  updateWorkspacePicker();
-  // Persist with the session so the override survives a restart. The backend
-  // no-ops when the session dir doesn't exist yet (brand-new unsaved chat);
-  // the override is then captured on the first save_session call.
-  try {
-    await saveSessionWorkspace(chat.getSessionId(), ws);
-  } catch (err) {
-    console.error('[pure] saveSessionWorkspace failed:', err);
-  }
-  scheduleSidebarRefresh();
-  showToast(ws ? t('workspace.saved') : t('workspace.cleared'));
-}
-
-/** Render the "Recent" list from the independent recents store (not sessions):
- * pinned projects always first, each row with pin + remove actions. */
-function renderRecentWorkspaces() {
-  const list = document.getElementById('wp-recent-list');
-  if (!list) return;
-  const recents = loadRecentWorkspaces();
-  if (recents.length === 0) {
-    list.innerHTML = `<div class="wp-recent-empty">${t('workspace.recentEmpty')}</div>`;
-    return;
-  }
-  // Pinned entries are always shown; unpinned are already capped by the store.
-  list.innerHTML = recents.map(r => {
-    const pinTitle = r.pinned ? t('workspace.unpin') : t('workspace.pin');
-    const starFill = r.pinned ? 'currentColor' : 'none';
-    return `
-    <div class="wp-recent-item" role="button" tabindex="0" data-ws="${escapeHtml(r.path)}" title="${escapeHtml(r.path)}">
-      <svg class="wp-recent-folder" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-      <span class="wp-recent-item-path">${escapeHtml(r.path)}</span>
-      <span class="wp-recent-item-actions">
-        <button class="wp-recent-pin${r.pinned ? ' pinned' : ''}" data-ws="${escapeHtml(r.path)}" title="${pinTitle}" aria-label="${pinTitle}">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="${starFill}" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-        </button>
-        <button class="wp-recent-remove" data-ws="${escapeHtml(r.path)}" title="${t('workspace.remove')}" aria-label="${t('workspace.remove')}">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-      </span>
-    </div>`;
-  }).join('');
-
-  // Row click → switch workspace (ignore clicks on the action buttons).
-  // Typed as HTMLElement so addEventListener picks the typed overloads.
-  list.querySelectorAll<HTMLElement>('.wp-recent-item').forEach(el => {
-    el.addEventListener('click', (e) => {
-      const target = e.target as HTMLElement;
-      if (target.closest('.wp-recent-pin') || target.closest('.wp-recent-remove')) return;
-      const ws = el.getAttribute('data-ws') || '';
-      void commitWorkspace(ws);
-    });
-    // Keyboard parity with the old <button> row: Enter/Space activates.
-    el.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        const ws = el.getAttribute('data-ws') || '';
-        void commitWorkspace(ws);
-      }
-    });
-  });
-
-  // Pin / unpin.
-  list.querySelectorAll('.wp-recent-pin').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const ws = btn.getAttribute('data-ws') || '';
-      setRecentPinned(ws, !btn.classList.contains('pinned'));
-      void renderRecentWorkspaces();
-    });
-  });
-
-  // Remove from recents (does not delete the session or the folder).
-  list.querySelectorAll('.wp-recent-remove').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const ws = btn.getAttribute('data-ws') || '';
-      removeRecentWorkspace(ws);
-      void renderRecentWorkspaces();
-    });
-  });
-}
-
-// ── Drag & drop: drop a folder anywhere on the window to switch workspace ──
-
-function setDragActive(active: boolean) {
-  const overlay = document.getElementById('drag-overlay');
-  if (overlay) overlay.classList.toggle('active', active);
-}
-
-function handleDroppedWorkspacePath(path: string) {
-  if (!path) return;
-  void commitWorkspace(path);
-}
-
-async function handleDroppedPaths(paths: string[]): Promise<void> {
-  const sessionId = chat.getSessionId();
-  for (const path of paths) {
-    if (!path) continue;
-    try {
-      if (isTauriRuntime()) {
-        const core = await (await import('../shared/tauri')).loadTauriCore();
-        const record = await core?.invoke<DroppedFileRecord>('import_dropped_file', { sessionId, sourcePath: path });
-        if (record?.isDirectory) {
-          handleDroppedWorkspacePath(path);
-        } else if (record) {
-          pasteChips.addImportedFile(record);
-        }
-      }
-    } catch (err) {
-      console.error('[pure] dropped file import failed:', err);
-      showToast(`无法导入文件: ${path}`);
-    }
-  }
-  enableInputIfReady();
-}
-
-/** Native folder drop (Tauri). The webview's default dragDropEnabled:true
- * intercepts OS drops and emits enter/over/drop/leave events instead of
- * navigating to the dropped file. */
-async function setupNativeDragDrop() {
-  if (!isTauriRuntime()) return;
-  try {
-    const { getCurrentWebview } = await import('@tauri-apps/api/webview');
-    await getCurrentWebview().onDragDropEvent((event) => {
-      const p = event.payload;
-      if (p.type === 'enter' || p.type === 'over') {
-        setDragActive(true);
-      } else if (p.type === 'drop') {
-        setDragActive(false);
-        void handleDroppedPaths(p.paths);
-      } else if (p.type === 'leave') {
-        setDragActive(false);
-      }
-    });
-  } catch (err) {
-    console.error('[pure] drag-drop setup failed:', err);
-  }
-}
-
-/** Browser fallback (vite dev / plain web preview): prevents the page from
- * navigating to a dropped file and mirrors the overlay. Browser File objects
- * are sent through the same attachment manager; directories remain a no-op.
- */
-function setupBrowserDragDrop() {
-  if (isTauriRuntime()) return;
-  let depth = 0;
-  document.addEventListener('dragenter', (e) => {
-    e.preventDefault();
-    depth++;
-    setDragActive(true);
-  });
-  document.addEventListener('dragover', (e) => {
-    e.preventDefault();
-  });
-  document.addEventListener('dragleave', () => {
-    depth = Math.max(0, depth - 1);
-    if (depth === 0) setDragActive(false);
-  });
-  document.addEventListener('drop', (e) => {
-    e.preventDefault();
-    depth = 0;
-    setDragActive(false);
-    const files = Array.from(e.dataTransfer?.files ?? []);
-    if (files.length > 0) {
-      pasteChips.addDroppedFiles(files);
-      enableInputIfReady();
-    }
-  });
-}
-
-// ── Composer attach button: upload files as attachment chips ──
-// Tauri: native multi-file dialog → same import path as OS drops. Browser:
-// a hidden <input type="file"> since plain web has no native dialog.
-let attachFileInput: HTMLInputElement | null = null;
-
-function getAttachFileInput(): HTMLInputElement {
-  if (!attachFileInput) {
-    attachFileInput = document.createElement('input');
-    attachFileInput.type = 'file';
-    attachFileInput.multiple = true;
-    attachFileInput.style.display = 'none';
-    document.body.appendChild(attachFileInput);
-    attachFileInput.addEventListener('change', () => {
-      const input = attachFileInput;
-      if (!input) return;
-      const files = Array.from(input.files ?? []);
-      input.value = '';
-      if (files.length > 0) {
-        pasteChips.addDroppedFiles(files);
-        enableInputIfReady();
-      }
-    });
-  }
-  return attachFileInput;
-}
-
-async function attachFiles() {
-  if (isTauriRuntime()) {
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const selected = await open({ multiple: true, directory: false, title: t('input.attach.title') });
-      const paths = Array.isArray(selected) ? selected : (typeof selected === 'string' && selected ? [selected] : []);
-      if (paths.length > 0) await handleDroppedPaths(paths);
-    } catch (err) {
-      console.error('[pure] attach file picker failed:', err);
-    }
-  } else {
-    getAttachFileInput().click();
-  }
-}
-
-// The paperclip buttons on both composers (landing + chat) share one handler.
-for (const id of ['attach-btn', 'landing-attach-btn']) {
-  document.getElementById(id)?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    void attachFiles();
-  });
-}
-
 // ── Init ──
 (async () => {
   applySavedAppearance();
   chat.setWorkspace('');
-  updateWorkspacePicker();
+  workspace.refresh();
   updateSidebarModel();
   updateContextPanelStage();
   enableInputIfReady();
+  wireComposerSelects();
   checkLandingState();
-  scheduleSidebarRefresh();
-  setupBrowserDragDrop();
-  void setupNativeDragDrop();
+  sessionSidebar.refresh();
+  workspace.init();
+  sessionSidebar.init();
   initPathLinks();
   setTimeout(() => checkForUpdatesSilently(), 3000);
   void fetchAppVersion().then((version) => {
@@ -619,6 +454,7 @@ function goToLanding() {
   chatView.classList.add('landing');
   landingPrompt.value = '';
   landingPrompt.style.height = 'auto';
+  syncLandingHasText();
   landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
 }
 
@@ -753,9 +589,20 @@ function enableInputIfReady() {
 
 // ── Landing input auto-resize ──
 
+// The landing send button fades in once the user has typed something (or the
+// box has focus). Because the send button now lives in the toolbar row below
+// the prompt, the old `:not(:placeholder-shown) ~ #landing-send-btn` sibling
+// selector no longer matches — a .has-text class on the wrap drives the same
+// reveal from JS (see #landing-input-wrap.has-text in styles.css).
+function syncLandingHasText(): void {
+  const wrap = document.getElementById('landing-input-wrap');
+  if (wrap) wrap.classList.toggle('has-text', !!landingPrompt.value.trim());
+}
+
 landingPrompt.addEventListener('input', () => {
   landingPrompt.style.height = 'auto';
   landingPrompt.style.height = Math.min(landingPrompt.scrollHeight, 200) + 'px';
+  syncLandingHasText();
   if (!chat.isStreaming()) {
     landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
   }
@@ -850,7 +697,7 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
   // user's draft stays in the box (doSend's own check covers the queued path).
   if (!hasConfiguredKey(loadConfig())) {
     showToast(t('toast.setApiKey'));
-    settings.open();
+    void openSettings();
     return;
   }
 
@@ -858,6 +705,7 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
   sourceEl.style.height = 'auto';
   if (sourceEl === landingPrompt) {
     landingSend.disabled = true;
+    syncLandingHasText();
   }
   sendBtn.disabled = true;
   await doSend(text);
@@ -870,7 +718,7 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
 async function doSend(text: string) {
   if (!hasConfiguredKey(loadConfig())) {
     showToast(t('toast.setApiKey'));
-    settings.open();
+    void openSettings();
     return;
   }
   // Large pasted content rides along with the typed text (each attachment is
@@ -887,7 +735,13 @@ async function doSend(text: string) {
   } finally {
     sendBtn.disabled = !promptEl.value.trim() && !pasteChips.hasAttachments();
     focusPromptCaretEnd();
-    scheduleSidebarRefresh();
+    // A conversation created from the landing page never went through
+    // SessionSidebar.load(), so the sidebar didn't know it was active — deleting
+    // it then left a stale transcript instead of returning to the landing view.
+    // Marking the current session active on every send keeps delete-in-place
+    // (resetToLanding) and the list highlight correct.
+    sessionSidebar.setActive(chat.getSessionId());
+    sessionSidebar.refresh();
     flushQueued();
   }
 }
@@ -934,112 +788,25 @@ sidebarToggle.addEventListener('click', () => {
   // The picker button is hidden when the sidebar collapses — don't leave a
   // floating popover behind.
   if (sidebar.classList.contains('collapsed')) {
-    closeWorkspacePopover();
+    workspace.closePopover();
   }
 });
-
-// ── Workspace picker (sidebar top): toggle + commit ──
-
-const workspacePickerBtn = document.getElementById('workspace-picker-btn');
-// The sidebar chip is now the same fast path as the input-box folder icons:
-// one click opens the native folder dialog (or the simplified popover with
-// recents in browser/dev mode, where no native dialog exists).
-workspacePickerBtn?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  void browseWorkspace();
-});
-
-// ── Input-box folder buttons: one click opens the native folder dialog ──
-// (same fast path as the sidebar chip). In browser/dev mode, where there is no
-// native dialog, fall back to opening the workspace popover instead.
-for (const id of ['landing-ws-btn', 'input-ws-btn']) {
-  document.getElementById(id)?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    void browseWorkspace();
-  });
-}
-
-// The status-footer workspace shortcut opens the same native folder picker.
-document.getElementById('status-workspace')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  void browseWorkspace();
-});
-
-// The sidebar workspace path shortcut lets users re-pick the folder without
-// opening the sidebar popover first.
-const sidebarPathBar = document.getElementById('sidebar-workspace-path');
-if (sidebarPathBar) {
-  sidebarPathBar.addEventListener('click', (e) => {
-    if ((e.target as HTMLElement).closest('.sidebar-workspace-path-clear')) return;
-    void browseWorkspace();
-  });
-  // Keyboard parity (the bar is role=button): Enter/Space re-picks. The nested
-  // clear button keeps its own activation — return BEFORE preventDefault.
-  sidebarPathBar.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    if ((e.target as HTMLElement).closest('.sidebar-workspace-path-clear')) return;
-    e.preventDefault();
-    void browseWorkspace();
-  });
-}
-document.getElementById('sidebar-workspace-path-clear')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  void commitWorkspace('');
-});
-
-// The popover's single current-path row is clickable too: it opens the same
-// native picker (in browser/dev mode this re-opens the already-open popover,
-// where the recents below remain the actionable list). Clicks on the clear
-// (×) button are handled separately and must not trigger the picker.
-document.getElementById('wp-current-row')?.addEventListener('click', (e) => {
-  if ((e.target as HTMLElement).closest('#wp-clear-btn')) return;
-  e.stopPropagation();
-  void browseWorkspace();
-});
-// Keyboard parity with the old <button> row: Enter/Space picks a folder.
-// The nested clear (×) button must keep its own native keyboard activation,
-// so its keydown returns BEFORE preventDefault (otherwise Enter/Space on the
-// focused clear button would be swallowed by this row-level handler).
-document.getElementById('wp-current-row')?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' || e.key === ' ') {
-    if ((e.target as HTMLElement).closest('#wp-clear-btn')) return;
-    e.preventDefault();
-    void browseWorkspace();
-  }
-});
-// Restore the ability to clear a session's workspace (was lost when the old
-// popover input row was simplified away): a small × on the current-path row.
-document.getElementById('wp-clear-btn')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  void commitWorkspace('');
-});
-
-// Close the popover on outside click (input's own keydown stays live).
-document.addEventListener('click', (e) => {
-  const popover = document.getElementById('workspace-picker-popover');
-  if (!popover || popover.classList.contains('hidden')) return;
-  if (popover.contains(e.target as Node) || workspacePickerBtn?.contains(e.target as Node)) return;
-  closeWorkspacePopover();
-});
-
-// ── Sidebar: new chat ──
 
 sidebarNewChat.addEventListener('click', () => {
   chat.clear();
   goToLanding();
   landingPrompt.focus();
-  setActiveSession(null);
+  sessionSidebar.setActive(null);
   // A fresh session is independent: it starts with no workspace.
-  sessionWorkspace = '';
   chat.setWorkspace('');
-  updateWorkspacePicker();
+  workspace.refresh();
 });
 
 // ── Sidebar: settings ──
 
 sidebarSettingsBtn.addEventListener('click', () => {
-  closeWorkspacePopover();
-  settings.open();
+  workspace.closePopover();
+  void openSettings();
 });
 
 // ── Right-side floating settings button ──
@@ -1047,8 +814,8 @@ sidebarSettingsBtn.addEventListener('click', () => {
 const rightSettingsBtn = document.getElementById('right-settings-btn') as HTMLButtonElement;
 if (rightSettingsBtn) {
   rightSettingsBtn.addEventListener('click', () => {
-    closeWorkspacePopover();
-    settings.open();
+    workspace.closePopover();
+    void openSettings();
   });
 }
 
@@ -1092,242 +859,21 @@ document.querySelectorAll<HTMLButtonElement>('[data-context-tab]').forEach((tab)
   });
 });
 
-// ── Inline confirm card ──
-// Tauri's WKWebView does NOT implement window.confirm(): calling it silently
-// returns false. Confirmations render as a card appended to the chat transcript
-// (see inlineCard.ts) instead of a modal overlay. If the app is still on the
-// landing view the card is appended into, switch to chat mode first so it is
-// visible, then revert on cancel.
+// ── Confirm modal (destructive actions) ──
+// Session deletion / delete-all render in a centered MODAL overlay (see
+// modal.ts) instead of a card in the chat transcript: a destructive action
+// deserves an explicit dialog that can't be missed mid-conversation, and unlike
+// window.confirm() (which Tauri's WKWebView does not implement) it works
+// everywhere. The permission / plan-review confirmations keep their inline-card
+// form (they belong in the conversation flow).
 function confirmDialog(message: string): Promise<boolean> {
-  const wasLanding = chatView.classList.contains('landing');
-  if (wasLanding) enterChatMode();
-  return showInlineCard({
-    cardClass: 'confirm',
+  return showConfirmModal({
     title: t('confirm.title'),
-    bodyHTML: `<div class="confirm-message">${escapeHtml(message)}</div>`,
-    actions: [
-      { label: t('confirm.cancel'), value: 'cancel' },
-      { label: t('confirm.ok'), value: 'ok', kind: 'danger' },
-    ],
-    // Esc cancels; Enter deliberately does NOT confirm — the focus sits on the
-    // Cancel button, and a habitual Enter on a destructive dialog must never
-    // delete data.
-    focusIndex: 0,
-    escValue: 'cancel',
-  }).then((choice) => {
-    if (choice === 'ok') return true;
-    if (wasLanding) goToLanding();
-    return false;
+    message,
+    okLabel: t('confirm.ok'),
+    cancelLabel: t('confirm.cancel'),
+    danger: true,
   });
-}
-
-// ── Sidebar sessions ──
-
-let currentActiveId: string | null = null;
-
-// ── Collapsible session groups (persisted per workspace) ──
-
-const COLLAPSED_GROUPS_KEY = 'pure_collapsed_groups';
-
-function loadCollapsedGroups(): Set<string> {
-  try {
-    const raw = localStorage.getItem(COLLAPSED_GROUPS_KEY);
-    if (raw) return new Set(JSON.parse(raw) as string[]);
-  } catch { /* ignore */ }
-  return new Set();
-}
-
-function saveCollapsedGroups(groups: Set<string>): void {
-  try {
-    localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...groups]));
-  } catch { /* ignore */ }
-}
-
-let collapsedGroups = loadCollapsedGroups();
-
-function toggleGroupCollapsed(key: string): void {
-  if (collapsedGroups.has(key)) {
-    collapsedGroups.delete(key);
-  } else {
-    collapsedGroups.add(key);
-  }
-  saveCollapsedGroups(collapsedGroups);
-}
-
-function setActiveSession(id: string | null) {
-  currentActiveId = id;
-  document.querySelectorAll('.sidebar-session-item').forEach(el => {
-    el.classList.toggle('active', el.getAttribute('data-sid') === id);
-  });
-}
-
-let sidebarRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-
-// Coalesce rapid sidebar rebuilds into a single one: doSend's finally fires
-// after EVERY send (and flushQueued can send several queued messages back to
-// back), each triggering a full innerHTML rebuild + a loadSessionList disk
-// read. Debouncing collapses those bursts into one refresh with no visible lag.
-function scheduleSidebarRefresh(): void {
-  if (sidebarRefreshTimer) return;
-  sidebarRefreshTimer = setTimeout(() => {
-    sidebarRefreshTimer = undefined;
-    void refreshSidebarSessions();
-  }, 150);
-}
-
-async function refreshSidebarSessions() {
-  const container = document.getElementById('sidebar-session-list')!;
-  try {
-    const list = await loadSessionList();
-    if (!list || list.length === 0) {
-      container.innerHTML = `<div class="sidebar-session-empty">${t('sidebar.noSessions')}</div>`;
-      return;
-    }
-
-    const sorted = [...list].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 30);
-
-    // Group sessions by their workspace (Claude Desktop style project
-    // grouping): a sticky folder header per workspace, sessions beneath it.
-    const groups = new Map<string, SessionMeta[]>();
-    for (const s of sorted) {
-      const key = s.workspace || '';
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(s);
-    }
-
-    container.innerHTML = [...groups.entries()].map(([ws, sessions]) => {
-      const key = ws || '';
-      const collapsed = collapsedGroups.has(key);
-      const chevron = `<svg class="group-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`;
-      const label = ws
-        ? `<button class="sidebar-session-group-label" data-group="${escapeHtml(key)}" title="${escapeHtml(ws)}" aria-expanded="${collapsed ? 'false' : 'true'}">
-             ${chevron}
-             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-             <span class="group-name">${escapeHtml(workspaceBase(ws))}</span>
-           </button>`
-        : `<button class="sidebar-session-group-label" data-group="" aria-expanded="${collapsed ? 'false' : 'true'}">
-             ${chevron}
-             <span class="group-name">${t('workspace.none')}</span>
-           </button>`;
-      const items = sessions.map(s => {
-        const title = escapeHtml(s.title.slice(0, 50));
-        return `<div class="sidebar-session-item" data-sid="${s.id}">
-          <div class="sidebar-session-item-main">
-            <span class="sidebar-session-item-title" title="${title}">${title}</span>
-          </div>
-          <button class="sidebar-session-delete" data-sid="${s.id}" title="${t('sidebar.delete.title')}">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-        </div>`;
-      }).join('');
-      return `<div class="sidebar-session-group${collapsed ? ' collapsed' : ''}">${label}<div class="sidebar-session-group-items">${items}</div></div>`;
-    }).join('');
-
-    // Restore active state
-    setActiveSession(currentActiveId);
-
-    // Toggle group collapse on header click
-    container.querySelectorAll('.sidebar-session-group-label').forEach(el => {
-      el.addEventListener('click', () => {
-        const group = el.closest('.sidebar-session-group') as HTMLElement | null;
-        if (!group) return;
-        // The header button carries the same data-group as the one used to
-        // render the group — read it directly from the clicked element.
-        const key = el.getAttribute('data-group') || '';
-        toggleGroupCollapsed(key);
-        const nowCollapsed = collapsedGroups.has(key);
-        group.classList.toggle('collapsed', nowCollapsed);
-        el.setAttribute('aria-expanded', nowCollapsed ? 'false' : 'true');
-      });
-    });
-
-    // Click session → load it
-    container.querySelectorAll('.sidebar-session-item').forEach(el => {
-      el.addEventListener('click', (e) => {
-        const sid = el.getAttribute('data-sid');
-        if (sid && !(e.target as HTMLElement).closest('.sidebar-session-delete')) {
-          loadAndDisplaySession(sid);
-        }
-      });
-    });
-
-    // Delete session
-    container.querySelectorAll('.sidebar-session-delete').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const sid = btn.getAttribute('data-sid');
-        if (!sid) return;
-        if (!(await confirmDialog(t('confirm.deleteSession')))) return;
-        try {
-          await deleteSession(sid);
-        } catch (err) {
-          console.error('[pure] deleteSession failed:', err);
-          showToast(t('toast.deleteFailed'));
-          return;
-        }
-        if (currentActiveId === sid) {
-          chat.clear();
-          goToLanding();
-          setActiveSession(null);
-          sessionWorkspace = '';
-          chat.setWorkspace('');
-          updateWorkspacePicker();
-        }
-        scheduleSidebarRefresh();
-      });
-    });
-  } catch {
-    container.innerHTML = `<div class="sidebar-session-empty">${t('session.loadError')}</div>`;
-  }
-}
-
-// ── Sidebar: delete all sessions ──
-
-const sidebarSessionsClear = document.getElementById('sidebar-sessions-clear') as HTMLButtonElement;
-if (sidebarSessionsClear) {
-  sidebarSessionsClear.addEventListener('click', async () => {
-    if (!(await confirmDialog(t('confirm.deleteAllSessions')))) return;
-    try {
-      await deleteAllSessions();
-    } catch (err) {
-      console.error('[pure] deleteAllSessions failed:', err);
-      showToast(t('toast.deleteFailed'));
-      return;
-    }
-    chat.clear();
-    goToLanding();
-    setActiveSession(null);
-    sessionWorkspace = '';
-    chat.setWorkspace('');
-    updateWorkspacePicker();
-    scheduleSidebarRefresh();
-    showToast(t('toast.sessionsCleared'));
-  });
-}
-
-async function loadAndDisplaySession(id: string) {
-  const loaded = await loadSession(id);
-  if (!loaded || loaded.messages.length === 0) return;
-  queuedWhileStreaming = null;
-  // A different session's pending pastes must not leak into this transcript.
-  pasteChips.clear();
-  // Abort any in-flight generation first: the old send() loop must not keep
-  // appending to (or persisting into) the session we're about to switch to.
-  // chat.setSessionId also bumps the generation guard, which is the second
-  // line of defense (see ChatController.send).
-  chat.cancel();
-  chat.setSessionId(id);
-  // Restore this session's own workspace ('' = none) — sessions are
-  // independent, so there is no global-default fallback. Set it BEFORE
-  // rendering so clickable relative paths in the transcript resolve against
-  // the restored workspace.
-  sessionWorkspace = loaded.workspace || '';
-  chat.setWorkspace(sessionWorkspace);
-  await chat.syncEffectiveWorkspace();
-  renderSessionMessages(loaded.messages);
-  updateWorkspacePicker();
-  setActiveSession(id);
-  focusPromptCaretEnd();
 }
 
 // ── Theme: respond to system preference change ──
@@ -1345,24 +891,28 @@ darkModeMedia.addEventListener('change', () => {
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === ',') {
     e.preventDefault();
-    if (settings.isVisible()) {
-      settings.close();
-    } else {
-      closeWorkspacePopover();
-      settings.open();
-    }
+    void (async () => {
+      if (await settingsVisible()) {
+        await closeSettings();
+      } else {
+        workspace.closePopover();
+        await openSettings();
+      }
+    })();
   }
   if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
     e.preventDefault();
-    if (!settings.isVisible()) {
-      closeWorkspacePopover();
-      chat.clear();
-      goToLanding();
-      landingPrompt.focus();
-      sessionWorkspace = '';
-      chat.setWorkspace('');
-      updateWorkspacePicker();
-    }
+    void (async () => {
+      if (!(await settingsVisible())) {
+        workspace.closePopover();
+        chat.clear();
+        goToLanding();
+        landingPrompt.focus();
+        chat.setWorkspace('');
+        workspace.refresh();
+        sessionSidebar.setActive(null);
+      }
+    })();
   }
   if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
     e.preventDefault();
@@ -1370,15 +920,17 @@ document.addEventListener('keydown', (e) => {
     // Same as the sidebarToggle click handler: don't leave a floating popover
     // when the sidebar (and its picker button) collapse.
     if (sidebar.classList.contains('collapsed')) {
-      closeWorkspacePopover();
+      workspace.closePopover();
     }
   }
   if (e.key === 'Escape') {
-    if (settings.isVisible()) {
-      settings.close();
-    }
-    if (!document.getElementById('workspace-picker-popover')!.classList.contains('hidden')) {
-      closeWorkspacePopover();
-    }
+    void (async () => {
+      if (await settingsVisible()) {
+        await closeSettings();
+      }
+      if (!document.getElementById('workspace-picker-popover')!.classList.contains('hidden')) {
+        workspace.closePopover();
+      }
+    })();
   }
 });

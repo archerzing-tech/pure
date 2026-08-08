@@ -1,253 +1,26 @@
 // src/ui/settings.ts
-// v0.8 — Modal overlay settings panel.
+// Modal settings panel. Lazy-loaded on first open (see src/ui/main.ts) so the
+// eager startup bundle stays lean; the config model it edits lives in
+// ./config.ts (needed at startup by chat.ts / main.ts) and provider defaults
+// come from ../shared/providers.ts.
 
 import { fetchAndDisplayVersion, checkForUpdatesManual } from './updater';
 import { escapeHtml } from '../shared/html';
 import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { formatBytes } from './TauriToolAdapter';
-import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
-
-export interface PureConfig {
-  provider: 'deepseek-openai' | 'deepseek-anthropic' | 'qwen' | 'glm';
-  apiKey: string;
-  /**
-   * True when an API key is stored outside the WebView (Rust secrets in the
-   * desktop app). The raw key is then never persisted to localStorage.
-   */
-  hasApiKey: boolean;
-  model: string;
-  baseURL: string;
-  language: 'zh-CN' | 'en';
-  theme: 'light' | 'dark' | 'system';
-  fontSize: 'small' | 'medium' | 'large';
-  density: 'compact' | 'comfortable' | 'spacious';
-  permissionMode: 'auto' | 'confirm' | 'restricted';
-  autoPermRead: boolean;
-  autoPermWrite: boolean;
-  autoPermCmd: boolean;
-  autoPermGit: boolean;
-  toolFS: boolean;
-  toolCmd: boolean;
-  toolGit: boolean;
-  toolBrowser: boolean;
-  /**
-   * Optional Tavily Search API key (Settings → Tools → Web Tools). When set,
-   * web_search uses the Tavily API after Serper (stable index, no HTML
-   * scraping) and falls back to the free HTML backends (Sogou / cn.bing /
-   * DDG / Bing).
-   */
-  tavilyApiKey: string;
-  /**
-   * Optional Serper.dev Search API key (Settings → Tools → Web Tools). When
-   * set, web_search uses the Serper API first — a real Google index, the best
-   * quality for both Chinese and English (~2500 free trial queries).
-   */
-  serperApiKey: string;
-  skills: Record<string, boolean>;
-  mcpServers: Array<{ name: string; transport: 'stdio' | 'http'; command?: string[]; url?: string }>;
-  /**
-   * Bumped when a config migration changes field semantics. v2: toolBrowser
-   * became a functional gate (was a decorative no-op defaulting to false);
-   * legacy configs that stored the old meaningless `false` are migrated to
-   * `true` so existing users keep web tools.
-   */
-  configVersion: number;
-  /**
-   * When true (default), assistant messages format progressively during
-   * streaming (code blocks colorize, mermaid slots show source). When false,
-   * the bubble's textContent stays raw for the entire stream and the full
-   * renderMarkdown pipeline only runs once on Completed — saving CPU on
-   * low-end hardware, at the cost of watching an inert plaintext bubble until
-   * the assistant finishes.
-   */
-  streamingRender: boolean;
-}
-
-const STORAGE_KEY = 'pure_config';
-
-/**
- * Built-in MCP servers shipped with pure. `web-search` wraps the
- * DuckDuckGo-based @sthbryan/web-search-mcp server (search / fetch_page /
- * query tools, no API key) — it strengthens web search, especially for
- * Chinese queries. Users can remove it in Settings → MCP like any other
- * server; the removal is persisted (the config v3 migration only re-adds it
- * once).
- */
-export const DEFAULT_MCP_SERVERS: PureConfig['mcpServers'] = [
-  {
-    name: 'web-search',
-    transport: 'stdio',
-    command: ['bunx', '-y', '@sthbryan/web-search-mcp'],
-  },
-];
-
-/** True when `name` is one of the built-in (non user-added) MCP servers. */
-export function isDefaultMcpServer(name: string): boolean {
-  return DEFAULT_MCP_SERVERS.some((s) => s.name === name);
-}
-
-function defaultModel(provider: string): string {
-  switch (provider) {
-    case 'deepseek-openai': return 'deepseek-v4-flash';
-    case 'deepseek-anthropic': return 'deepseek-v4-flash';
-    case 'qwen': return 'qwen3-coder-next';
-    case 'glm': return 'glm-5.2';
-    default: return 'deepseek-v4-flash';
-  }
-}
-
-export function defaults(): PureConfig {
-  return {
-    provider: 'deepseek-openai',
-    apiKey: '',
-    hasApiKey: false,
-    model: '',
-    baseURL: '',
-    language: 'zh-CN',
-    theme: 'light',
-    fontSize: 'medium',
-    density: 'comfortable',
-    permissionMode: 'confirm',
-    autoPermRead: true,
-    autoPermWrite: false,
-    autoPermCmd: false,
-    autoPermGit: true,
-    toolFS: true,
-    toolCmd: true,
-    toolGit: true,
-    toolBrowser: true,
-    tavilyApiKey: '',
-    serperApiKey: '',
-    skills: { 'code-review': true, 'web-research': true, memory: true, planning: true },
-    mcpServers: [...DEFAULT_MCP_SERVERS],
-    streamingRender: true,
-    configVersion: 3,
-  };
-}
-
-/**
- * In the desktop app the API key lives in Rust secrets (~/.pure/secrets.json,
- * 0600) and must never round-trip through localStorage. When one is supplied
- * via the settings form or the ?apikey= launch URL, store it with the Rust
- * backend and scrub it from the config object before it is persisted.
- */
-async function syncSecretToRust(value: string): Promise<void> {
-  const core = await loadTauriCore();
-  if (!core) return;
-  try {
-    await core.invoke('secret_set', { key: SECRET_KEY, value });
-  } catch (e) {
-    console.warn('[pure] failed to store API key in Rust secrets:', e);
-  }
-}
-
-async function deleteSecretFromRust(): Promise<void> {
-  const core = await loadTauriCore();
-  if (!core) return;
-  try {
-    await core.invoke('secret_delete', { key: SECRET_KEY });
-  } catch (e) {
-    console.warn('[pure] failed to remove API key from Rust secrets:', e);
-  }
-}
-
-/**
- * True when an API key is available (localStorage in browser / Rust secrets
- * in Tauri). Declared as a type predicate so `if (!hasConfiguredKey(cfg))`
- * narrows `cfg` to a non-null PureConfig for the rest of the block.
- */
-export function hasConfiguredKey(cfg: PureConfig | null): cfg is PureConfig {
-  return !!(cfg && (cfg.apiKey || cfg.hasApiKey));
-}
-
-// Cached parse of the config: loadConfig() JSON.parses localStorage and is
-// called on hot paths (every send, every streaming-state change, sidebar
-// updates). Re-parsing hundreds of times per turn is wasted work — cache the
-// result until a save actually rewrites it. The apikey URL param is constant
-// for the page session, so caching is safe there too. Returns a shallow copy
-// so callers can't mutate the shared cache.
-let configCache: PureConfig | null | undefined;
-
-export function invalidateConfigCache(): void {
-  configCache = undefined;
-}
-
-export function loadConfig(): PureConfig | null {
-  if (configCache !== undefined) {
-    return configCache === null ? null : { ...configCache };
-  }
-  const params = new URLSearchParams(window.location.search);
-  if (params.get('apikey')) {
-    const base: PureConfig = defaults();
-    const cfg: PureConfig = {
-      ...base,
-      provider: (params.get('provider') as PureConfig['provider']) || base.provider,
-      apiKey: params.get('apikey')!,
-      model: params.get('model') || '',
-    };
-    if (isTauriRuntime()) {
-      // CLI-launched desktop flow passes the key via URL: store it in Rust
-      // secrets (once) and drop it from the in-memory config.
-      void syncSecretToRust(cfg.apiKey);
-      cfg.hasApiKey = true;
-      cfg.apiKey = '';
-    }
-    configCache = cfg;
-    return cfg;
-  }
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      const cfg: PureConfig = { ...defaults(), ...parsed };
-      // Both migrations below mutate `cfg` and mark it dirty; the single write
-      // at the end persists the result ONCE. Doing the writes inline would be
-      // wrong in the Tauri case: a pre-scrub localStorage.setItem(cfg) could
-      // leak the raw API key into WebView storage before the legacy-key block
-      // cleans it below.
-      let needsPersist = false;
-      // Config v2 migration: pre-v2 toolBrowser was a decorative toggle that
-      // always saved `false` and gated nothing. Once it became a real gate,
-      // those legacy `false` values would silently strip web tools from
-      // existing installs — restore them once via the version bump.
-      if ((parsed.configVersion ?? 1) < 2) {
-        cfg.toolBrowser = true;
-        cfg.configVersion = 2;
-        needsPersist = true;
-      }
-      // Config v3 migration: the built-in web-search MCP server was added.
-      // Existing configs get it ONCE; users who later delete it in Settings →
-      // MCP save an explicit list without it (configVersion stays 3), so it
-      // never silently returns.
-      if ((parsed.configVersion ?? 1) < 3) {
-        const current = cfg.mcpServers ?? [];
-        if (!current.some((s) => s.name === DEFAULT_MCP_SERVERS[0].name)) {
-          cfg.mcpServers = [...DEFAULT_MCP_SERVERS, ...current];
-        }
-        cfg.configVersion = 3;
-        needsPersist = true;
-      }
-      if (isTauriRuntime() && cfg.apiKey) {
-        // Legacy migration: move a key previously persisted to localStorage
-        // into Rust secrets, then scrub it.
-        void syncSecretToRust(cfg.apiKey);
-        cfg.hasApiKey = true;
-        cfg.apiKey = '';
-        needsPersist = true;
-      }
-      if (needsPersist) {
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
-        } catch { /* ignore */ }
-      }
-      configCache = cfg;
-      return cfg;
-    }
-  } catch { /* ignore */ }
-  configCache = null;
-  return null;
-}
+import { defaultModelFor } from '../shared/providers';
+import {
+  STORAGE_KEY,
+  defaults,
+  hasConfiguredKey,
+  invalidateConfigCache,
+  isDefaultMcpServer,
+  loadConfig,
+  revokeSecretFromRust,
+  storeSecretInRust,
+  type PureConfig,
+} from './config';
 
 export class SettingsPanel {
   private onSave: () => void;
@@ -378,6 +151,29 @@ export class SettingsPanel {
       }
     };
 
+    // ── Environment: auto-detect the user's city from IP ──
+    const locateBtn = document.getElementById('cfg-locate-btn') as HTMLButtonElement | null;
+    locateBtn?.addEventListener('click', async () => {
+      if (locateBtn.disabled) return;
+      locateBtn.disabled = true;
+      locateBtn.textContent = t('env.detecting');
+      try {
+        const city = await this.detectLocation();
+        const cityInput = document.getElementById('cfg-city') as HTMLInputElement | null;
+        if (cityInput) {
+          cityInput.value = city;
+          this.autoSave();
+        }
+        this.toast(t('env.detected').replace('{city}', city));
+      } catch (err) {
+        console.error('[pure] location detection failed:', err);
+        this.toast(t('env.detectFailed'));
+      } finally {
+        locateBtn.disabled = false;
+        locateBtn.textContent = t('env.detectBtn');
+      }
+    });
+
     tmpCleanBtn?.addEventListener('click', async () => {
       if (!isTauriRuntime()) return;
       const days = Math.max(1, Math.min(365, parseInt(tmpDaysEl?.value || '7', 10) || 7));
@@ -418,7 +214,7 @@ export class SettingsPanel {
     // Provider change → update model placeholder + auto-save
     document.getElementById('cfg-provider')!.addEventListener('change', () => {
       const p = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
-      (document.getElementById('cfg-model') as HTMLInputElement).placeholder = defaultModel(p);
+      (document.getElementById('cfg-model') as HTMLInputElement).placeholder = defaultModelFor(p);
       this.autoSave();
     });
 
@@ -452,6 +248,7 @@ export class SettingsPanel {
     const autoSaveSelectors = [
       '#cfg-provider', '#cfg-apikey', '#cfg-model', '#cfg-baseurl',
       '#cfg-language',
+      '#cfg-city',
       '#cfg-fontsize', '#cfg-density',
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
       '#cfg-tavily-key', '#cfg-serper-key',
@@ -496,6 +293,34 @@ export class SettingsPanel {
     }
   }
 
+  // ── Environment: IP-based city detection ──
+
+  /** Detect the user's city from their IP address. In the Tauri app this runs
+   * in Rust (detect_location, multi-backend: ipwho.is → ipinfo.io →
+   * ip-api.com); in plain browser dev mode it probes the two HTTPS endpoints
+   * directly (the browser blocks mixed http:// content on an https page).
+   * Returns the composed "city, region, country" string or throws. */
+  private async detectLocation(): Promise<string> {
+    if (isTauriRuntime()) {
+      const core = await loadTauriCore();
+      const loc = await core?.invoke<string>('detect_location');
+      if (!loc) throw new Error('empty location result');
+      return loc;
+    }
+    for (const url of ['https://ipwho.is/', 'https://ipinfo.io/json']) {
+      try {
+        const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (!resp.ok) continue;
+        const data = await resp.json() as { city?: string; region?: string; regionName?: string; country?: string };
+        const parts = [data.city, data.region ?? data.regionName, data.country]
+          .map(s => (s ?? '').trim())
+          .filter(Boolean);
+        if (parts.length > 0) return parts.join(', ');
+      } catch { /* try next backend */ }
+    }
+    throw new Error('all geolocation backends failed');
+  }
+
   // ── Load config into form ──
 
   private loadToForm() {
@@ -518,9 +343,11 @@ export class SettingsPanel {
       keyInput.placeholder = t('llm.apiKey.placeholder');
     }
     (document.getElementById('cfg-model') as HTMLInputElement).value = cfg.model;
-    (document.getElementById('cfg-model') as HTMLInputElement).placeholder = defaultModel(cfg.provider);
+    (document.getElementById('cfg-model') as HTMLInputElement).placeholder = defaultModelFor(cfg.provider);
     (document.getElementById('cfg-baseurl') as HTMLInputElement).value = cfg.baseURL;
     (document.getElementById('cfg-language') as HTMLSelectElement).value = cfg.language;
+    const cityEl = document.getElementById('cfg-city') as HTMLInputElement | null;
+    if (cityEl) cityEl.value = cfg.city ?? '';
 
     const streamingRenderEl = document.getElementById('cfg-streaming-render') as HTMLInputElement | null;
     if (streamingRenderEl) streamingRenderEl.checked = cfg.streamingRender;
@@ -677,6 +504,7 @@ export class SettingsPanel {
       model: (document.getElementById('cfg-model') as HTMLInputElement).value.trim(),
       baseURL: (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim(),
       language: (document.getElementById('cfg-language') as HTMLSelectElement).value as PureConfig['language'],
+      city: (document.getElementById('cfg-city') as HTMLInputElement | null)?.value.trim() ?? '',
       theme: (document.querySelector('.theme-option.active')?.getAttribute('data-theme') || 'light') as PureConfig['theme'],
       fontSize: (document.getElementById('cfg-fontsize') as HTMLSelectElement).value as PureConfig['fontSize'],
       density: (document.getElementById('cfg-density') as HTMLSelectElement).value as PureConfig['density'],
@@ -695,6 +523,9 @@ export class SettingsPanel {
       skills,
       mcpServers: [...this.mcpServers],
       streamingRender: (document.getElementById('cfg-streaming-render') as HTMLInputElement | null)?.checked ?? true,
+      // The composer's mode selector lives outside this form — carry its value
+      // through so a settings save never silently resets a user's mode choice.
+      taskMode: (loadConfig() ?? defaults()).taskMode,
       // Preserve the current config version (defaults() always sets it, so the
       // merged value is never undefined — keep the spread rather than a bare
       // constant so a future v3 bump survives the round-trip).
@@ -710,18 +541,18 @@ export class SettingsPanel {
     cfg.hasApiKey = prev.hasApiKey;
 
     if (!cfg.model) {
-      cfg.model = defaultModel(cfg.provider);
+      cfg.model = defaultModelFor(cfg.provider);
     }
 
     if (isTauriRuntime()) {
       // Desktop: the key is owned by Rust secrets, never localStorage.
       const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
       if (cfg.apiKey) {
-        void syncSecretToRust(cfg.apiKey);
+        void storeSecretInRust(cfg.apiKey);
         cfg.hasApiKey = true;
       } else if (cfg.hasApiKey && keyInput.dataset.touched === '1') {
         // User edited the field and cleared it → revoke the stored key.
-        void deleteSecretFromRust();
+        void revokeSecretFromRust();
         cfg.hasApiKey = false;
         delete keyInput.dataset.touched;
       }

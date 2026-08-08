@@ -3449,14 +3449,82 @@ fn update_sessions_index(
 //  System Info
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// IP-based city geolocation for the Environment section of Settings. No API
+/// key, no system permission, city-level accuracy — good enough as the
+/// location baseline for tasks like trip planning ("from where I am").
+///
+/// Backends are probed IN ORDER and the first with a usable city wins, the
+/// same degrade-instead-of-fail pattern as web_search: ipapi.co (which returns
+/// Chinese names via ?lang=zh) is Cloudflare-gated from many networks, so it
+/// is deliberately NOT first. Order: ipwho.is (HTTPS, no key, no challenge) →
+/// ipinfo.io (HTTPS fallback) → ip-api.com (Chinese names; HTTP only, so the
+/// browser dev fallback skips it).
 #[tauri::command]
-fn sys_info(_workspace: String) -> Result<String, String> {
+async fn detect_location() -> Result<String, String> {
+    let backends: &[&str] = &[
+        "https://ipwho.is/",
+        "https://ipinfo.io/json",
+        "http://ip-api.com/json/?lang=zh-CN",
+    ];
+    let mut failed: Vec<String> = Vec::new();
+    for url in backends {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => { failed.push(format!("{}: client: {}", url, e)); continue; }
+        };
+        let body: serde_json::Value = match client
+            .get(*url)
+            .header("User-Agent", BROWSER_UA)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => match r.json().await {
+                Ok(v) => v,
+                Err(e) => { failed.push(format!("{}: read: {}", url, e)); continue; }
+            },
+            Ok(r) => { failed.push(format!("{}: HTTP {}", url, r.status())); continue; }
+            Err(e) => { failed.push(format!("{}: request: {}", url, e)); continue; }
+        };
+        // Normalize per-backend key differences (ipwho.is/ipinfo: city/region/
+        // country; ip-api: city/regionName/country) and reject placeholder
+        // "unknown" values.
+        let get = |keys: &[&str]| -> Option<String> {
+            for k in keys {
+                if let Some(v) = body.get(k).and_then(|v| v.as_str()).map(|s| s.trim()) {
+                    if !v.is_empty() && v != "unknown" {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+            None
+        };
+        let Some(city) = get(&["city"]) else { continue };
+        let mut parts: Vec<String> = vec![city];
+        if let Some(r) = get(&["region", "regionName"]) { parts.push(r); }
+        if let Some(c) = get(&["country", "country_name"]) { parts.push(c); }
+        return Ok(parts.join(", "));
+    }
+    Err(format!("all geolocation backends failed: {}", failed.join("; ")))
+}
+
+#[tauri::command]
+fn sys_info(_workspace: String, location: Option<String>) -> Result<String, String> {
     let tz = std::env::var("TZ").unwrap_or_else(|_| "UTC".to_string());
 
     let lang = std::env::var("LANG")
         .or_else(|_| std::env::var("LC_ALL"))
         .or_else(|_| std::env::var("LC_CTYPE"))
         .unwrap_or_else(|_| "unknown".to_string());
+
+    let loc = location
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("{} (user-set)", s))
+        .unwrap_or_else(|| "not set".to_string());
 
     let time = {
         let output = std::process::Command::new("date")
@@ -3495,8 +3563,8 @@ fn sys_info(_workspace: String) -> Result<String, String> {
     };
 
     let info = format!(
-        "timezone:  {}\nlanguage:  {}\ntime:      {}\nos:        {}",
-        tz, lang, time, os_version
+        "timezone:  {}\nlanguage:  {}\ntime:      {}\nos:        {}\nlocation:  {}",
+        tz, lang, time, os_version, loc
     );
     Ok(info)
 }
@@ -3565,7 +3633,7 @@ pub fn run() {
             read_file, write_file, write_file_stream, edit_file, search_files, list_files, create_directory, diff_files, glob_files, replace_files,
             save_file, save_file_binary,
             // System info
-            sys_info,
+            sys_info, detect_location,
             // Web tools
             web_search, web_fetch,
             // Command execution

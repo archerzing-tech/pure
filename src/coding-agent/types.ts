@@ -45,6 +45,16 @@ export interface Plan {
 export type TaskComplexity = 'simple' | 'complex';
 
 /**
+ * Operating mode the agent auto-selects per turn from the task analysis:
+ *   - 'yolo'  — simple task: direct execution, no planning step.
+ *   - 'plan'  — complex task: plan review + approved plan + live todo checkoffs.
+ *   - 'build' — complex task with an explicit build/artifact intent ("写一个小游
+ *     戏", "搭建全栈项目"): same plan + checkoff flow, labeled as build mode so
+ *     the user sees the agent switched into a structured build workflow.
+ */
+export type TaskMode = 'yolo' | 'plan' | 'build';
+
+/**
  * A potential logical trap detected in the user's request — a premise that is
  * self-contradictory, impossible, mutually exclusive, or explicitly framed as
  * a trick/paradox. Detected by the Planner before execution so the agent can
@@ -59,6 +69,8 @@ export interface TrapWarning {
 
 export interface AnalysisResult {
   complexity: TaskComplexity;
+  /** Auto-selected operating mode derived from complexity + build intent. */
+  mode: TaskMode;
   plan?: Plan;
   reasoning: string;
   /** Potential logical traps in the prompt; empty when none were detected. */

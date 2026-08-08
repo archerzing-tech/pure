@@ -1,6 +1,6 @@
 {
   "name": "pure",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,8 @@
     "dev": "vite",
     "gui": "bun run tauri dev",
     "gui:build": "bun run tauri build",
+    "toolchain:check": "bash scripts/check-toolchain.sh",
+    "toolchain:setup": "bash scripts/setup-mac-toolchain.sh",
     "test": "bun test",
     "typecheck": "bun run --no-run tsc --noEmit",
     "build": "bun run typecheck && npx vite build && bun run cli:build",

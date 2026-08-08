@@ -1,5 +1,5 @@
 // src/cli.ts
-// v0.9.9 — one-shot + interactive REPL with self-evolving memory.
+// v1.0.3 — one-shot + interactive REPL with self-evolving memory.
 // Usage: pure "question"              → one-shot
 //        pure --resume abc123          → resume session
 //        pure --workspace .            → REPL
@@ -18,6 +18,7 @@ import { SQLiteStore } from './adapter/storage/SQLiteStore';
 import { ContextEngine } from './harness/ContextEngine';
 import { createDefaultVerifier } from './coding-agent/Verifier';
 import { Planner, formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt } from './coding-agent/Planner';
+import type { TaskMode } from './coding-agent/types';
 import { DefaultHookRouter } from './engine/HookRouter';
 import { DefaultFailurePolicy } from './engine/FailurePolicy';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
@@ -30,7 +31,13 @@ import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
 import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
 import { harvestUserPreferences } from './shared/memory';
 import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT } from './shared/agentBehavior';
+import { defaultModelFor } from './shared/providers';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
+
+// Single source of truth for the CLI's displayed version (kept in sync with
+// package.json / src-tauri by the release flow; the CLI banner + startup line
+// both read from here).
+const CLI_VERSION = 'v1.0.3';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
@@ -38,7 +45,7 @@ const HOME = process.env.HOME || '/tmp';
 const PURE_DIR = `${HOME}/.pure`;
 const CONFIG_PATH = `${PURE_DIR}/config.json`;
 
-// Persisted provider credentials. Mirror of the GUI's PureConfig (src/ui/settings.ts),
+// Persisted provider credentials. Mirror of the GUI's PureConfig (src/ui/config.ts),
 // but stored on disk so the Node/Bun CLI can read them. The GUI's localStorage
 // config is browser-only and cannot be reached from the CLI.
 interface PureConfig {
@@ -180,7 +187,7 @@ function renderLogo() {
 
   // Plain ASCII so .length === visible column count and centering is exact.
   const tagline = '---- terminal coding agent ----';
-  const ver = 'v0.9.9';
+  const ver = CLI_VERSION;
 
   console.log('');
   console.log(`  ${F('╔' + border + '╗')}`);
@@ -233,7 +240,7 @@ Shell & Git:
 - git_status — working tree status
 
 System:
-- sys_info() — timezone, language, current time, OS version. When the user asks for the current time, date, timezone, language, or OS version, call sys_info() FIRST — never guess from your training data.
+- sys_info() — timezone, language, current time, OS version, and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data.
 
 Web tools:
 - web_search(query, maxResults?) — web search (with SERPER_API_KEY set it uses the Serper Google-index API first — best for Chinese AND English; then TAVILY_API_KEY; otherwise free backends are probed in parallel — Sogou + cn.bing.com + DuckDuckGo + Bing for Chinese queries). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
@@ -264,10 +271,44 @@ ${PROACTIVE_WORKFLOW_PROMPT}
 
 ${COMPLETION_LESSON_PROMPT}`;
 
-function buildSystemPrompt(): string {
+// Lightweight environment context for the CLI, mirroring the GUI's
+// buildEnvironmentContext (chat.ts): a stable location/language pre-seed, with
+// time/timezone left to sys_info() so they never go stale. The location comes
+// from the PURE_LOCATION env var (PURE_CITY as a fallback) and is also what
+// NodeToolAdapter reports inside sys_info() output.
+function buildEnvironmentContext(): string {
+  const city = (process.env.PURE_LOCATION ?? process.env.PURE_CITY ?? '').trim();
+  if (!city) {
+    return `Environment: the user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.`;
+  }
+  return `Environment: user location is ${city} (PURE_LOCATION). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.`;
+}
+
+function buildSystemPrompt(mode: TaskMode): string {
   // Memory is composed by the Harness at session start (PromptComposer + the
   // IMemoryStore), so the base prompt stays clean here.
-  return BASE_SYSTEM_PROMPT;
+  return `${BASE_SYSTEM_PROMPT}\n\n${buildEnvironmentContext()}${modeFragment(mode)}`;
+}
+
+// ── Task-mode integration (mirrors the GUI's yolo → plan/build switching) ──
+// The Planner auto-classifies every request. Complex multi-step tasks run in an
+// explicit BUILD/PLAN mode: a mode line is printed to the terminal (so the user
+// sees the switch) AND a directive is injected into the system prompt so the
+// model structures its work into visible, step-by-step phases.
+function modeFragment(mode: TaskMode): string {
+  if (mode === 'yolo') return '';
+  const label = mode === 'build' ? 'BUILD' : 'PLAN';
+  const directive = mode === 'build'
+    ? 'Work through the request in clear phases; when you complete each phase, briefly state what was done and what remains.'
+    : 'Work through the request in ordered steps and verify after each change.';
+  return `\n\n<task_mode>\nOperating mode: ${label} — auto-detected from the user's request as a complex multi-step task. ${directive}\n</task_mode>`;
+}
+
+/** Print the yolo → plan/build switch for the current request (complex only). */
+function printModeSwitch(mode: TaskMode): void {
+  if (mode === 'yolo') return;
+  const label = mode === 'build' ? 'Build mode' : 'Plan mode';
+  process.stdout.write(`  ${cyan('🧭')} ${cyan(label)} ${dim('— complex multi-step task, will execute in phases')}\n`);
 }
 
 // ── Types ──
@@ -370,14 +411,11 @@ function envKeyForProvider(provider: CliArgs['provider']): string | undefined {
 }
 
 function resolveDefaultModel(provider: string): string {
-  switch (provider) {
-    case 'deepseek-openai': return 'deepseek-v4-flash';
-    case 'deepseek-anthropic': return 'deepseek-v4-flash';
-    case 'qwen': return 'qwen3-coder-next';
-    case 'glm': return 'glm-5.2';
-    case 'mock': return 'mock';
-    default: return 'deepseek-v4-flash';
-  }
+  // Shared provider registry (src/shared/providers.ts) is the single source
+  // of truth for the GUI + CLI default models; only the CLI-only 'mock'
+  // provider keeps its special case here.
+  if (provider === 'mock') return 'mock';
+  return defaultModelFor(provider);
 }
 
 function autoDetectProvider(): CliArgs['provider'] {
@@ -428,7 +466,12 @@ function createTools(workspace: string, autoApprove = false): { tools?: ToolAdap
   if (!workspace) return { toolsDefs: [] };
 
   const resolved = workspace.startsWith('/') ? workspace : `${process.cwd()}/${workspace}`;
-  const adapter = new NodeToolAdapter({ workspace: resolved });
+  // Pass the user-configured location (PURE_LOCATION / PURE_CITY env var) so
+  // sys_info() reports it as the location baseline, mirroring the GUI.
+  const adapter = new NodeToolAdapter({
+    workspace: resolved,
+    location: process.env.PURE_LOCATION ?? process.env.PURE_CITY,
+  });
 
   // P1-8: wire PermissionManager + write confirmation into the CLI direct
   // path. The engine executes tools through ctx.tools; wrapping the adapter
@@ -784,7 +827,7 @@ async function runOneShot(args: CliArgs) {
   await learnFromInput(args.prompt, sessionId, projectPath);
 
   renderLogo();
-  console.log(`  ${bold('pure')} ${dim('v0.9.9')} ${dim('—')} ${cyan(label)}`);
+  console.log(`  ${bold('pure')}  ${dim(CLI_VERSION)} ${dim('—')} ${cyan(label)}`);
   if (hasTools) console.log(`  📁 ${dim('Workspace:')} ${process.cwd()} ${dim('(' + toolsDefs.length + ' tools)')}`);
   if (args.resume) console.log(`  💾 ${dim('Session:')} ${sessionId.slice(0, 12)}…`);
   console.log(`  📝 ${args.prompt}`);
@@ -793,11 +836,13 @@ async function runOneShot(args: CliArgs) {
   // Logical-trap pre-scan: if the request itself is contradictory/impossible,
   // warn the user and inject the trap notice into the system prompt so the
   // model verifies the premise instead of following it into a failure loop.
-  const traps = new Planner().analyzeTask(args.prompt).traps;
+  const analysis = new Planner().analyzeTask(args.prompt);
+  const traps = analysis.traps;
   if (traps.length > 0) {
     console.log(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}`);
   }
-  const systemPrompt = buildSystemPrompt() + formatTrapPrompt(traps) + (detectArtifactRequest(args.prompt) ? formatArtifactPrompt() : '');
+  printModeSwitch(analysis.mode);
+  const systemPrompt = buildSystemPrompt(analysis.mode) + formatTrapPrompt(traps) + (detectArtifactRequest(args.prompt) ? formatArtifactPrompt() : '');
 
   const streamMgr = new StreamManager(chunk => process.stdout.write(chunk), { flushIntervalMs: 16 });
   streamMgr.start();
@@ -823,7 +868,7 @@ async function runRepl(args: CliArgs) {
   const { harness, sessionId, projectPath } = createHarness(args);
 
   renderLogo();
-  process.stdout.write(`  ${bold('pure')} ${dim('v0.9.9')} ${dim('—')} ${cyan(label)}\n`);
+  process.stdout.write(`  ${bold('pure')}  ${dim(CLI_VERSION)} ${dim('—')} ${cyan(label)}\n`);
   if (hasTools) process.stdout.write(`  📁 ${dim(process.cwd())} ${dim(`| ${toolsDefs.length} tools`)}\n`);
   process.stdout.write(`  💾 ${dim(sessionId.slice(0, 12))}…\n`);
   process.stdout.write(`  ${dim('/exit /quit — leave   /clear — reset context   Ctrl+C — cancel')}\n`);
@@ -832,6 +877,7 @@ async function runRepl(args: CliArgs) {
   let messages: Message[] = [];
   let turnNum = 1;
   let firstTurn = true;
+  let lastMode: TaskMode = 'yolo';
   let generating = false;
   let currentAbort: AbortController | null = null;
   // First prompt prints tight against the header banner; from turn 2 onward
@@ -885,11 +931,18 @@ async function runRepl(args: CliArgs) {
 
     // Trap pre-scan per REPL turn (same as one-shot): surface the warning and
     // inject it into the system prompt so the model verifies the premise.
-    const traps = new Planner().analyzeTask(input).traps;
+    const analysis = new Planner().analyzeTask(input);
+    const traps = analysis.traps;
     if (traps.length > 0) {
       process.stdout.write(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}\n`);
     }
-    const systemPrompt = buildSystemPrompt() + formatTrapPrompt(traps) + (detectArtifactRequest(input) ? formatArtifactPrompt() : '');
+    // Announce mode changes only (not every turn) so long complex sessions
+    // stay quiet; the first complex turn switches from yolo and is announced.
+    if (analysis.mode !== lastMode) {
+      printModeSwitch(analysis.mode);
+      lastMode = analysis.mode;
+    }
+    const systemPrompt = buildSystemPrompt(analysis.mode) + formatTrapPrompt(traps) + (detectArtifactRequest(input) ? formatArtifactPrompt() : '');
 
     const events = firstTurn
       ? harness.run(systemPrompt, input, currentAbort.signal)

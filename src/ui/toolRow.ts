@@ -262,6 +262,14 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   const body = document.createElement('div');
   body.className = 'tool-row-body';
 
+  // Scroll window for the Input/Output sections. The body's own padding (and
+  // especially its bottom padding) must stay OUTSIDE this window — a padding
+  // inside a scroll container sits at the END of the scrollable content, so a
+  // tall Input/Output pair clipped the last terminal panel flush against the
+  // frame's bottom edge (zero gap) until the user scrolled the inner body.
+  const scroll = document.createElement('div');
+  scroll.className = 'tool-row-scroll';
+
   const usesTerminalPanel = shouldUseTerminalPanel(toolName);
 
   // Input section
@@ -273,7 +281,7 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   inputLabel.textContent = 'Input';
   inputSection.appendChild(inputLabel);
   fillInputSection(inputSection, args);
-  body.appendChild(inputSection);
+  scroll.appendChild(inputSection);
 
   // Output section
   const outputSection = document.createElement('div');
@@ -306,7 +314,9 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   resultEl.appendChild(waiting);
   outputSection.appendChild(outputLabel);
   outputSection.appendChild(resultEl);
-  body.appendChild(outputSection);
+  scroll.appendChild(outputSection);
+
+  body.appendChild(scroll);
 
   details.append(summary, body);
   wrapper.appendChild(details);

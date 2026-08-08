@@ -35,3 +35,14 @@ export async function getApplicationTmpWorkspace(sessionId: string): Promise<str
   if (!core) return '';
   return await core.invoke<string>('get_tmp_workspace', { sessionId });
 }
+
+/**
+ * Single choke-point for invoking Rust commands. Callers must already be
+ * inside a runtime check (isTauriRuntime()) — outside the Tauri runtime this
+ * throws instead of failing with a confusing undefined access.
+ */
+export async function tauriInvoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const core = await loadTauriCore();
+  if (!core) throw new Error(`tauriInvoke: Tauri runtime unavailable for command '${cmd}'`);
+  return await core.invoke<T>(cmd, args);
+}

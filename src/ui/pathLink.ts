@@ -5,7 +5,7 @@
 // command (macOS `open` / Linux `xdg-open` / Windows `explorer`). In plain
 // browser dev (no Tauri runtime) clicking copies the path to the clipboard.
 
-import { isTauriRuntime } from '../shared/tauri';
+import { isTauriRuntime, tauriInvoke } from '../shared/tauri';
 import { t } from '../shared/i18n';
 import { showToast as toast } from '../shared/toast';
 
@@ -155,8 +155,7 @@ export function openPathLink(rawPath: string): void {
   if (isTauriRuntime()) {
     (async () => {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('open_path', { path: resolved });
+        await tauriInvoke('open_path', { path: resolved });
       } catch (err) {
         toast(`${t('path.openFailed')}: ${rawPath}`);
         console.error('[pure] open_path failed:', err);

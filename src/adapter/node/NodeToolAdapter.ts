@@ -12,12 +12,19 @@ export interface NodeToolConfig {
   workspace: string;
   commandTimeout?: number;
   maxFileSize?: number;
+  /**
+   * User-configured location/city (CLI: PURE_LOCATION / PURE_CITY env var).
+   * Reported by sys_info() as the location baseline for answers that depend
+   * on where the user is (trip planning, weather, local services).
+   */
+  location?: string;
 }
 
 export class NodeToolAdapter implements ToolAdapter {
   private workspace: string;
   private commandTimeout: number;
   private maxFileSize: number;
+  private location: string;
 
   private tools: ToolDefinition[] = [
     {
@@ -199,7 +206,7 @@ export class NodeToolAdapter implements ToolAdapter {
     },
     {
       name: 'sys_info',
-      description: 'Get operating system information: timezone, language, current time, and OS version.',
+      description: 'Get operating system information: timezone, language, current time, OS version, and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
       input_schema: { type: 'object', properties: {} },
     },
   ];
@@ -208,6 +215,7 @@ export class NodeToolAdapter implements ToolAdapter {
     this.workspace = pathResolve(config.workspace);
     this.commandTimeout = config.commandTimeout ?? 30000;
     this.maxFileSize = config.maxFileSize ?? 1_048_576; // 1MB
+    this.location = (config.location ?? '').trim();
   }
 
   getTools(): ToolDefinition[] {
@@ -856,11 +864,17 @@ export class NodeToolAdapter implements ToolAdapter {
       const uname = Bun.spawnSync({ cmd: ['uname', '-srm'], stdout: 'pipe', stderr: 'pipe' });
       if (uname.exitCode === 0) osVersion = new TextDecoder().decode(uname.stdout).trim();
     } catch {}
+    // Mirrors the Rust sys_info output shape (timezone/language/time/os
+    // aligned under the same 10-char label column) plus the user-configured
+    // location when present (CLI: PURE_LOCATION / PURE_CITY env var).
+    const location = this.location
+      ? `${this.location} (user-set)`
+      : 'not set';
 
     return {
       id: `tool_${Date.now()}`,
       toolName: 'sys_info',
-      result: `timezone:  ${tz}\nlanguage:  ${lang}\ntime:      ${time}\n      os:        ${osVersion}`,
+      result: `timezone:  ${tz}\nlanguage:  ${lang}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}`,
       success: true,
       duration: Date.now() - start,
     };
