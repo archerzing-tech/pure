@@ -6,6 +6,7 @@
 import type { AnalysisResult, Plan } from '../coding-agent/types';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
+import { showInlineCard } from './inlineCard';
 
 export type PlanReviewDecision = 'approve' | 'skip' | 'cancel';
 
@@ -144,63 +145,28 @@ export function matchPlanPhaseMarker(text: string): number | null {
 }
 
 function showPlanDialog(analysis: AnalysisResult): Promise<PlanReviewDecision> {
-  return new Promise((resolve) => {
-    const overlay = document.getElementById('plan-overlay') as HTMLDivElement;
-    const titleEl = document.getElementById('plan-title') as HTMLSpanElement;
-    const badgeEl = document.getElementById('plan-complexity-badge') as HTMLSpanElement;
-    const reasoningEl = document.getElementById('plan-reasoning') as HTMLDivElement;
-    const stepsEl = document.getElementById('plan-steps') as HTMLDivElement;
-    const approveBtn = document.getElementById('plan-approve') as HTMLButtonElement;
-    const skipBtn = document.getElementById('plan-skip') as HTMLButtonElement;
-    const cancelBtn = document.getElementById('plan-cancel') as HTMLButtonElement;
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const steps = (analysis.plan?.steps ?? []).map((s, i) => `
+    <div class="plan-step">
+      <span class="plan-step-num">${i + 1}</span>
+      <div class="plan-step-body">
+        <span class="plan-step-action">${escapeHtml(s.action)}</span>
+        <span class="plan-step-desc">${escapeHtml(s.description)}</span>
+      </div>
+    </div>`).join('');
 
-    titleEl.textContent = t('plan.title');
-    badgeEl.textContent = t('plan.complex');
-    reasoningEl.textContent = analysis.reasoning;
-    stepsEl.innerHTML = (analysis.plan?.steps ?? []).map((s, i) => `
-      <div class="plan-step">
-        <span class="plan-step-num">${i + 1}</span>
-        <div class="plan-step-body">
-          <span class="plan-step-action">${escapeHtml(s.action)}</span>
-          <span class="plan-step-desc">${escapeHtml(s.description)}</span>
-        </div>
-      </div>`).join('');
-
-    const cleanup = () => {
-      overlay.classList.add('hidden');
-      approveBtn.removeEventListener('click', onApprove);
-      skipBtn.removeEventListener('click', onSkip);
-      cancelBtn.removeEventListener('click', onCancel);
-      document.removeEventListener('keydown', onKeydown);
-      if (previouslyFocused?.isConnected) previouslyFocused.focus();
-    };
-    const onApprove = () => { cleanup(); resolve('approve'); };
-    const onSkip = () => { cleanup(); resolve('skip'); };
-    const onCancel = () => { cleanup(); resolve('cancel'); };
-    const onKeydown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onCancel();
-        return;
-      }
-      if (e.key !== 'Tab') return;
-      const focusable = [approveBtn, skipBtn, cancelBtn].filter((button) => !button.disabled && !button.hidden);
-      if (focusable.length === 0) return;
-      const current = focusable.indexOf(document.activeElement as HTMLButtonElement);
-      const next = e.shiftKey
-        ? (current <= 0 ? focusable.length - 1 : current - 1)
-        : (current < 0 || current === focusable.length - 1 ? 0 : current + 1);
-      e.preventDefault();
-      focusable[next].focus();
-    };
-
-    approveBtn.addEventListener('click', onApprove);
-    skipBtn.addEventListener('click', onSkip);
-    cancelBtn.addEventListener('click', onCancel);
-    document.addEventListener('keydown', onKeydown);
-
-    overlay.classList.remove('hidden');
-    approveBtn.focus();
-  });
+  return showInlineCard({
+    cardClass: 'plan',
+    title: t('plan.title'),
+    bodyHTML:
+      `<span class="plan-complexity-badge">${t('plan.complex')}</span>` +
+      `<div class="plan-reasoning">${escapeHtml(analysis.reasoning)}</div>` +
+      `<div class="plan-steps">${steps}</div>`,
+    actions: [
+      { label: t('plan.cancel'), value: 'cancel' },
+      { label: t('plan.skip'), value: 'skip' },
+      { label: t('plan.approve'), value: 'approve', kind: 'primary' },
+    ],
+    focusIndex: 2,
+    escValue: 'cancel',
+  }) as Promise<PlanReviewDecision>;
 }

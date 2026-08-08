@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, parseChartSource, buildChartSvg, groupAdjacentSvgSlots, diagramSlot } from '../markdown';
+import { suggestFilename, highlightExt, parseChartSource, buildChartSvg, groupAdjacentSvgSlots, diagramSlot, type DiagramKind } from '../markdown';
 
 // ── ==text== highlight extension ──
 
@@ -113,25 +113,23 @@ type FakeElement = {
 };
 
 describe('diagramSlot', () => {
-  it('starts with a square loading placeholder and keeps source hidden by CSS state', () => {
+  it('starts with a ring loading placeholder and keeps the raw source for recovery', () => {
     const html = diagramSlot('svg', '<svg><text>secret</text></svg>', '');
     expect(html).toContain('data-state="loading"');
     expect(html).toContain('data-view="preview"');
-    expect(html).toContain('diagram-loading-square');
-    expect(html).toContain('diagram-spinner');
-    expect(html).toContain('diagram-view-btn');
-    expect(html).toContain('data-diagram-view="source"');
+    expect(html).toContain('diagram-loading-ring');
+    expect(html).toContain('diagram-loading-label');
     expect(html).toContain('secret');
   });
 
-  it('keeps preview as the default view and exposes a reversible source toggle', () => {
+  it('renders a single 下载图片 button and no view/source toggle', () => {
     const html = diagramSlot('svg', '<svg />', '<svg class="rendered" />');
-    expect(html).toContain('data-state="loading"');
-    expect(html).toContain('data-view="preview"');
-    expect(html).toContain('data-diagram-view="preview" aria-pressed="true"');
-    expect(html).toContain('data-diagram-view="source" aria-pressed="false"');
+    expect(html).toContain('>下载图片</button>');
     expect(html).toContain('class="diagram-preview svg-target"');
-    expect(html).toContain('class="diagram-source svg-source"');
+    // Source view is gone entirely: no toggle buttons, no format split.
+    expect(html).not.toContain('data-diagram-view');
+    expect(html).not.toContain('>查看源码</button>');
+    expect(html).not.toContain('data-diagram-download');
   });
 
   it('keeps the full raw SVG source in the source block and data-raw for the viewer', () => {
@@ -139,8 +137,29 @@ describe('diagramSlot', () => {
     const html = diagramSlot('svg', raw, '');
     // The source block escapes the markup but preserves every character.
     expect(html).toContain('&lt;svg viewBox="0 0 10 10"&gt;&lt;text&gt;描述文字&lt;/text&gt;&lt;/svg&gt;');
-    // The data-raw attribute keeps the verbatim source for viewer lookup.
+    // The data-raw attribute keeps the verbatim source for internal recovery.
     expect(html).toContain(`data-raw="${encodeURIComponent(raw)}"`);
+  });
+
+  it('gives every image kind the same single 下载图片 button with no source toggle', () => {
+    const samples: Array<[DiagramKind, string]> = [
+      ['svg', '<svg />'],
+      ['chart', 'type: bar\nA 1\nB 2'],
+      ['mermaid', 'graph TD; A-->B'],
+      ['puml', '@startuml\nA-->B\n@enduml'],
+    ];
+    for (const [kind, source] of samples) {
+      const html = diagramSlot(kind, source, '');
+      expect(html).toContain('>下载图片</button>');
+      expect(html).not.toContain('data-diagram-view');
+      expect(html).not.toContain('data-diagram-download');
+    }
+  });
+
+  it('keeps the raw chart DSL in the hidden source block for parse recovery', () => {
+    const html = diagramSlot('chart', 'type: bar\nA 1\nB 2', '');
+    expect(html).toContain('class="diagram-source chart-source"');
+    expect(html).toContain('A 1');
   });
 });
 

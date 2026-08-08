@@ -1,7 +1,7 @@
 // src/ui/main.ts
 // pure v0.8 — Notion-style sidebar + modal settings
 
-import { ChatController, bindAssistantBubbleCopy } from './chat';
+import { ChatController, bindAssistantBubbleCopy, wireTranscriptPrune } from './chat';
 import { SettingsPanel, loadConfig, hasConfiguredKey } from './settings';
 import { loadSessionList, loadSession, deleteSession, deleteAllSessions, saveSessionWorkspace, getStoredThinkingSegments, type SessionMeta, type StoredMessage, type ToolExecMeta } from './store';
 import { loadRecentWorkspaces, touchRecentWorkspace, setRecentPinned, removeRecentWorkspace } from './recentWorkspaces';
@@ -18,6 +18,7 @@ import { appendStoredThinking } from './thinkingCard';
 import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned } from './scrollPin';
 import { initPathLinks, linkifyPaths } from './pathLink';
 import { PasteChipManager, composeMessageWithAttachments, type DroppedFileRecord } from './pasteChip';
+import { showInlineCard } from './inlineCard';
 
 const chat = new ChatController();
 
@@ -25,7 +26,12 @@ const chat = new ChatController();
 // Pastes above 64KB become a file chip (saved to ~/.pure/tmp/<session-id>/)
 // instead of jamming the textarea; double-click opens a viewer. Both the
 // bottom input bar and the landing input mount a chip row sharing one list.
-const pasteChips = new PasteChipManager(() => chat.getSessionId());
+const pasteChips = new PasteChipManager(() => chat.getSessionId(), () => {
+  // Attachments enable send-with-no-text and tint the composer attach button.
+  const has = pasteChips.hasAttachments();
+  document.querySelectorAll('.attach-btn').forEach(b => b.classList.toggle('has-attachments', has));
+  enableInputIfReady();
+});
 pasteChips.mount(document.getElementById('input-bar')!);
 pasteChips.mount(document.getElementById('landing-input-wrap')!);
 
@@ -343,7 +349,7 @@ async function commitWorkspace(value: string) {
   } catch (err) {
     console.error('[pure] saveSessionWorkspace failed:', err);
   }
-  refreshSidebarSessions();
+  scheduleSidebarRefresh();
   showToast(ws ? t('workspace.saved') : t('workspace.cleared'));
 }
 
@@ -497,7 +503,59 @@ function setupBrowserDragDrop() {
     depth = 0;
     setDragActive(false);
     const files = Array.from(e.dataTransfer?.files ?? []);
-    if (files.length > 0) pasteChips.addDroppedFiles(files);
+    if (files.length > 0) {
+      pasteChips.addDroppedFiles(files);
+      enableInputIfReady();
+    }
+  });
+}
+
+// ── Composer attach button: upload files as attachment chips ──
+// Tauri: native multi-file dialog → same import path as OS drops. Browser:
+// a hidden <input type="file"> since plain web has no native dialog.
+let attachFileInput: HTMLInputElement | null = null;
+
+function getAttachFileInput(): HTMLInputElement {
+  if (!attachFileInput) {
+    attachFileInput = document.createElement('input');
+    attachFileInput.type = 'file';
+    attachFileInput.multiple = true;
+    attachFileInput.style.display = 'none';
+    document.body.appendChild(attachFileInput);
+    attachFileInput.addEventListener('change', () => {
+      const input = attachFileInput;
+      if (!input) return;
+      const files = Array.from(input.files ?? []);
+      input.value = '';
+      if (files.length > 0) {
+        pasteChips.addDroppedFiles(files);
+        enableInputIfReady();
+      }
+    });
+  }
+  return attachFileInput;
+}
+
+async function attachFiles() {
+  if (isTauriRuntime()) {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({ multiple: true, directory: false, title: t('input.attach.title') });
+      const paths = Array.isArray(selected) ? selected : (typeof selected === 'string' && selected ? [selected] : []);
+      if (paths.length > 0) await handleDroppedPaths(paths);
+    } catch (err) {
+      console.error('[pure] attach file picker failed:', err);
+    }
+  } else {
+    getAttachFileInput().click();
+  }
+}
+
+// The paperclip buttons on both composers (landing + chat) share one handler.
+for (const id of ['attach-btn', 'landing-attach-btn']) {
+  document.getElementById(id)?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    void attachFiles();
   });
 }
 
@@ -510,7 +568,7 @@ function setupBrowserDragDrop() {
   updateContextPanelStage();
   enableInputIfReady();
   checkLandingState();
-  refreshSidebarSessions();
+  scheduleSidebarRefresh();
   setupBrowserDragDrop();
   void setupNativeDragDrop();
   initPathLinks();
@@ -584,7 +642,7 @@ function applySavedAppearance() {
     cfg.density === 'compact' ? '8px' : cfg.density === 'spacious' ? '16px' : '12px');
 }
 
-function renderSessionMessages(messages: StoredMessage[]) {
+async function renderSessionMessages(messages: StoredMessage[]) {
   enterChatMode();
   chat.loadFromStorage(messages);
 
@@ -594,7 +652,13 @@ function renderSessionMessages(messages: StoredMessage[]) {
   // one-shot restore scroll joins the shared rAF budget instead of forcing a
   // synchronous full-transcript layout at the end of the restore.
   wireScrollPin(chatEl);
+  wireTranscriptPrune(chatEl);
   const toolExecs: ToolExecMeta[] = [];
+  // Restoring a long session must not block the GUI: each bubble's markdown
+  // pass (marked parse + sanitize + hljs + linkify) is effectively synchronous
+  // for plain content, so yield to the browser between bubbles for a paint and
+  // input processing instead of rendering the whole transcript in one burst.
+  const yieldToUI = (): Promise<void> => new Promise(resolve => requestAnimationFrame(() => resolve()));
 
   for (const m of messages) {
     if (m.role === 'tool' && m.toolExec) {
@@ -638,6 +702,8 @@ function renderSessionMessages(messages: StoredMessage[]) {
       wrapper.appendChild(bubble);
       chatEl.appendChild(wrapper);
     }
+    // Let the browser paint + process input between bubbles.
+    await yieldToUI();
   }
   flushToolExecs(toolExecs, chatEl);
   // A session restore rebuilds the transcript from scratch, so it always
@@ -821,7 +887,7 @@ async function doSend(text: string) {
   } finally {
     sendBtn.disabled = !promptEl.value.trim() && !pasteChips.hasAttachments();
     focusPromptCaretEnd();
-    refreshSidebarSessions();
+    scheduleSidebarRefresh();
     flushQueued();
   }
 }
@@ -1026,51 +1092,32 @@ document.querySelectorAll<HTMLButtonElement>('[data-context-tab]').forEach((tab)
   });
 });
 
-// ── In-app confirm dialog ──
+// ── Inline confirm card ──
 // Tauri's WKWebView does NOT implement window.confirm(): calling it silently
-// returns false, which made the session delete button a no-op. Render a real
-// dialog instead and resolve a promise with the user's choice.
-// One dialog at a time: a second confirmDialog() call while one is open (e.g.
-// a rapid double-click before the overlay intercepts) must not stack a second
-// set of listeners on the same buttons — resolve the pending one as "no" and
-// let the newest call own the overlay.
-let pendingConfirm: { resolve: (v: boolean) => void } | null = null;
-
+// returns false. Confirmations render as a card appended to the chat transcript
+// (see inlineCard.ts) instead of a modal overlay. If the app is still on the
+// landing view the card is appended into, switch to chat mode first so it is
+// visible, then revert on cancel.
 function confirmDialog(message: string): Promise<boolean> {
-  if (pendingConfirm) {
-    pendingConfirm.resolve(false);
-    pendingConfirm = null;
-  }
-  return new Promise((resolve) => {
-    pendingConfirm = { resolve };
-    const overlay = document.getElementById('confirm-overlay') as HTMLDivElement;
-    const messageEl = document.getElementById('confirm-message') as HTMLDivElement;
-    const okBtn = document.getElementById('confirm-ok') as HTMLButtonElement;
-    const cancelBtn = document.getElementById('confirm-cancel') as HTMLButtonElement;
-
-    messageEl.textContent = message;
-    overlay.classList.remove('hidden');
-    cancelBtn.focus();
-
-    const cleanup = () => {
-      if (pendingConfirm?.resolve === resolve) pendingConfirm = null;
-      overlay.classList.add('hidden');
-      okBtn.removeEventListener('click', onOk);
-      cancelBtn.removeEventListener('click', onCancel);
-      document.removeEventListener('keydown', onKeydown);
-    };
-    const onOk = () => { cleanup(); resolve(true); };
-    const onCancel = () => { cleanup(); resolve(false); };
-    const onKeydown = (e: KeyboardEvent) => {
-      // Esc cancels; Enter deliberately does NOT confirm — the focus sits on
-      // the Cancel button, and a habitual Enter on a destructive dialog must
-      // never delete data.
-      if (e.key === 'Escape') onCancel();
-    };
-
-    okBtn.addEventListener('click', onOk);
-    cancelBtn.addEventListener('click', onCancel);
-    document.addEventListener('keydown', onKeydown);
+  const wasLanding = chatView.classList.contains('landing');
+  if (wasLanding) enterChatMode();
+  return showInlineCard({
+    cardClass: 'confirm',
+    title: t('confirm.title'),
+    bodyHTML: `<div class="confirm-message">${escapeHtml(message)}</div>`,
+    actions: [
+      { label: t('confirm.cancel'), value: 'cancel' },
+      { label: t('confirm.ok'), value: 'ok', kind: 'danger' },
+    ],
+    // Esc cancels; Enter deliberately does NOT confirm — the focus sits on the
+    // Cancel button, and a habitual Enter on a destructive dialog must never
+    // delete data.
+    focusIndex: 0,
+    escValue: 'cancel',
+  }).then((choice) => {
+    if (choice === 'ok') return true;
+    if (wasLanding) goToLanding();
+    return false;
   });
 }
 
@@ -1112,6 +1159,20 @@ function setActiveSession(id: string | null) {
   document.querySelectorAll('.sidebar-session-item').forEach(el => {
     el.classList.toggle('active', el.getAttribute('data-sid') === id);
   });
+}
+
+let sidebarRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+// Coalesce rapid sidebar rebuilds into a single one: doSend's finally fires
+// after EVERY send (and flushQueued can send several queued messages back to
+// back), each triggering a full innerHTML rebuild + a loadSessionList disk
+// read. Debouncing collapses those bursts into one refresh with no visible lag.
+function scheduleSidebarRefresh(): void {
+  if (sidebarRefreshTimer) return;
+  sidebarRefreshTimer = setTimeout(() => {
+    sidebarRefreshTimer = undefined;
+    void refreshSidebarSessions();
+  }, 150);
 }
 
 async function refreshSidebarSessions() {
@@ -1212,7 +1273,7 @@ async function refreshSidebarSessions() {
           chat.setWorkspace('');
           updateWorkspacePicker();
         }
-        refreshSidebarSessions();
+        scheduleSidebarRefresh();
       });
     });
   } catch {
@@ -1239,7 +1300,7 @@ if (sidebarSessionsClear) {
     sessionWorkspace = '';
     chat.setWorkspace('');
     updateWorkspacePicker();
-    refreshSidebarSessions();
+    scheduleSidebarRefresh();
     showToast(t('toast.sessionsCleared'));
   });
 }

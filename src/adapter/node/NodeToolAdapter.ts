@@ -121,7 +121,7 @@ export class NodeToolAdapter implements ToolAdapter {
     },
     {
       name: 'web_search',
-      description: 'Search the web and return results with titles, snippets, and URLs. With a Tavily API key configured (TAVILY_API_KEY env var) searches go through the Tavily API first for higher-quality results; otherwise free backends are probed in parallel (Sogou → cn.bing.com → DuckDuckGo → Bing for Chinese queries, DuckDuckGo → Bing otherwise).',
+      description: 'Search the web and return results with titles, snippets, and URLs. With a Serper or Tavily API key configured (SERPER_API_KEY / TAVILY_API_KEY env vars) searches go through the API backends first (Serper = real Google index, best for Chinese and English); otherwise free backends are probed in parallel (Sogou → cn.bing.com → DuckDuckGo → Bing for Chinese queries, DuckDuckGo → Bing otherwise).',
       input_schema: {
         type: 'object',
         properties: {
@@ -526,14 +526,32 @@ export class NodeToolAdapter implements ToolAdapter {
     const maxResults = Math.min(typeof args.maxResults === 'number' ? args.maxResults : 10, 20);
     const cjk = containsCJK(query);
 
-    // 1) Tavily API backend (the approach Claude Code / opencode use): opt-in
-    // via the TAVILY_API_KEY env var. Mirrors the Rust web_search — on
-    // failure or (for CJK) a relevance-gated-out set, degrade to the free
-    // HTML backends below.
+    // 1) Serper API backend (real Google index — best quality for Chinese AND
+    // English): opt-in via the SERPER_API_KEY env var. Mirrors the Rust
+    // web_search — on failure or (for CJK) a relevance-gated-out set, degrade
+    // to Tavily and then the free HTML backends below.
     let results: SearchResult[] = [];
     const failed: string[] = [];
     let anyEmpty = false;
     let irrelevant = 0;
+    if (process.env.SERPER_API_KEY?.trim()) {
+      try {
+        const r = await serperSearch(query, maxResults);
+        if (r.length > 0) {
+          if (!cjk || resultsRelevant(query, r)) results = dedupeResults(r);
+          else irrelevant += 1;
+        } else {
+          anyEmpty = true;
+        }
+      } catch (err: any) {
+        failed.push(`Serper: ${err?.message ?? String(err)}`);
+      }
+    }
+
+    // 2) Tavily API backend (the approach Claude Code / opencode use): opt-in
+    // via the TAVILY_API_KEY env var. Mirrors the Rust web_search — on
+    // failure or (for CJK) a relevance-gated-out set, degrade to the free
+    // HTML backends below.
     if (process.env.TAVILY_API_KEY?.trim()) {
       try {
         const r = await tavilySearch(query, maxResults);
@@ -934,6 +952,38 @@ const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
 // ── DuckDuckGo HTML result parser ──
 
 // ── Web search helpers (Tavily API + parallel first-win, mirrors lib.rs) ──
+
+/**
+ * Serper.dev Google SERP API backend: a real Google index — the best quality
+ * for both Chinese and English, captcha-free. ~2500 free trial queries, then
+ * prepaid credits (~$0.3–1 per 1k). Enabled when SERPER_API_KEY is set;
+ * throws otherwise so callers degrade to Tavily / scraping. Mirrors the Rust
+ * search_backend_serper in lib.rs (same gl/hl selection for CJK).
+ */
+export async function serperSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  const apiKey = process.env.SERPER_API_KEY?.trim();
+  if (!apiKey) throw new Error('SERPER_API_KEY not set');
+  const cjk = containsCJK(query);
+  const resp = await fetch('https://google.serper.dev/search', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-KEY': apiKey,
+    },
+    body: JSON.stringify({
+      q: query,
+      gl: cjk ? 'cn' : 'us',
+      hl: cjk ? 'zh-cn' : 'en',
+      num: maxResults,
+    }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data: { organic?: Array<{ title?: string; link?: string; snippet?: string }> } = await resp.json();
+  return (data.organic ?? [])
+    .filter((r) => r.title && r.link)
+    .map((r) => ({ title: r.title!, snippet: r.snippet ?? '', url: r.link! }));
+}
 
 /**
  * Tavily Search API backend (used by Claude Code / opencode-class agents):

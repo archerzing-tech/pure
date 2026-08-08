@@ -128,6 +128,7 @@ export class CodingAgent {
     } else if (config.mcpServers && config.mcpServers.length > 0) {
       this.mcpClient = new MCPClient({
         servers: config.mcpServers,
+        sessionId: config.sessionId,
         onToolDiscovered: (tool) => this.toolRegistry.register(tool),
       });
       this.toolRegistry.setMCPExecutor(this.mcpClient);

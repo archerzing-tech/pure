@@ -64,6 +64,31 @@ const TRAP_TYPE_LABELS: Record<TrapWarning['type'], string> = {
 // Mirrors the 100ms streaming-render throttle (markdown.ts).
 const TOOL_CALL_REFRESH_MS = 120;
 
+// Transcript DOM cap: bounds #chat's row count so a long session can't grow
+// the WebView DOM without limit (every bubble, tool row and thinking card stays
+// in memory once appended). Sessions persist to disk, so pruning the oldest
+// rows never loses data — reloading the session restores the full history.
+// A childList observer funnels every append path (live streaming, restore,
+// status bubbles) through one place. Idempotent like wireScrollPin.
+const MAX_TRANSCRIPT_ROWS = 300;
+const transcriptPruneState = new WeakMap<HTMLElement, MutationObserver>();
+
+export function wireTranscriptPrune(el: HTMLElement): void {
+  if (transcriptPruneState.has(el)) return;
+  const observer = new MutationObserver(() => {
+    const excess = el.childElementCount - MAX_TRANSCRIPT_ROWS;
+    if (excess <= 0) return;
+    let removed = 0;
+    for (const child of Array.from(el.children)) {
+      if (removed >= excess) break;
+      child.remove();
+      removed++;
+    }
+  });
+  transcriptPruneState.set(el, observer);
+  observer.observe(el, { childList: true });
+}
+
 const DEFAULT_BUDGET: BudgetConfig = {
   maxTurns: 50,
   maxTotalTokens: 1_000_000,
@@ -83,7 +108,7 @@ const DEFAULT_BUDGET: BudgetConfig = {
 // also keeps the original XML-tool-call leak defense: when a workspace is
 // missing, models are only told about the tools they can actually invoke.
 const WEB_TOOLS_PROMPT = `Web tools:
-- web_search(query, maxResults?) — web search (with a Tavily API key in Settings → Tools it uses the Tavily API first for higher-quality results; otherwise free backends are probed in parallel — Sogou + cn.bing.com + DuckDuckGo + Bing for Chinese queries). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
+- web_search(query, maxResults?) — web search. With a Serper or Tavily API key in Settings → Tools it uses the API backends first (Serper = real Google index, best for Chinese AND English); otherwise free backends are probed in parallel — Sogou + cn.bing.com + DuckDuckGo + Bing for Chinese queries. If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
 - web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.`;
 
 const FS_TOOLS_PROMPT = `File tools:
@@ -439,7 +464,7 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
 // an application-owned temporary directory for this session; web tools remain
 // filesystem-independent.
 function createToolAdapter(workspace: string, config: PureConfig): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey);
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey);
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.
@@ -473,6 +498,11 @@ export class ChatController {
   private fileWatcher?: FileWatcher;
   private deferredInitDone = false;
   private watcherWorkspace = '';
+  // Session identity + MCP config the current mcpClient was built with. MCP
+  // stdio transports are session-bound (the Rust registry keys subprocesses by
+  // sessionId), so a client must be torn down and rebuilt when either changes.
+  private mcpSessionId = '';
+  private mcpConfigSnapshot = '';
   // Generation counter: bumped on every session switch / new chat so an
   // in-flight send() loop notices it has been superseded (see send()).
   private generation = 0;
@@ -555,6 +585,7 @@ export class ChatController {
   async send(userText: string) {
     const chatEl = document.getElementById('chat')!;
     wireScrollPin(chatEl);
+    wireTranscriptPrune(chatEl);
     const config = loadConfig();
     if (!hasConfiguredKey(config)) return;
 
@@ -750,10 +781,21 @@ export class ChatController {
       this.permissionManager.setMode(mapPermissionMode(config.permissionMode));
       this.permissionManager.setRequestHandler(createPermissionHandler(config));
 
-      // Rebind the watcher when a session switches between its application
-      // tmp directory and an explicit user workspace (or vice versa). The
-      // MCP client is reused; only the filesystem watcher is workspace-bound.
-      if (this.deferredInitDone && this.watcherWorkspace !== effectiveWorkspace) {
+      // Rebuild MCP + FileWatcher when the session identity, MCP config, or
+      // the filesystem-watching workspace changed since the last init.
+      // MCP transports are session-bound (the Rust subprocess registry keys
+      // them by sessionId), so reusing a client across sessions would leave
+      // subprocesses under a stale session AND ignore config edits made in
+      // Settings. disconnectAll() closes every transport, killing the spawned
+      // servers, before the next deferred init reconnects under the new
+      // sessionId/config. Only the filesystem watcher is workspace-bound.
+      if (this.deferredInitDone && (
+        this.watcherWorkspace !== effectiveWorkspace ||
+        this.mcpSessionId !== sendSessionId ||
+        this.mcpConfigSnapshot !== JSON.stringify(config.mcpServers ?? [])
+      )) {
+        this.mcpClient?.disconnectAll();
+        this.mcpClient = undefined;
         await this.fileWatcher?.stop();
         this.fileWatcher = undefined;
         this.deferredInitDone = false;
@@ -872,6 +914,8 @@ export class ChatController {
       // ── Deferred init: boot MCP + FileWatcher on first use ──
       if (!this.deferredInitDone) {
         this.deferredInitDone = true;
+        this.mcpSessionId = sendSessionId;
+        this.mcpConfigSnapshot = JSON.stringify(config.mcpServers ?? []);
         this.mcpClient = codingAgent.mcpClient;
         this.fileWatcher = codingAgent.fileWatcher;
         this.watcherWorkspace = effectiveWorkspace;
@@ -1274,6 +1318,11 @@ export class ChatController {
         }
       }
     } finally {
+      // Release the turn-scoped closure (pendingRows, toolResults, chatEl,
+      // assistantSegments DOM nodes …) held by the module-level tool output
+      // listener; otherwise it keeps the whole last turn alive until the next
+      // send (and, after a chat.clear(), detached bubbles stay in memory).
+      setToolOutputListener(null);
       this.setStreaming(false);
       this.abortController = null;
     }
@@ -1288,7 +1337,9 @@ export class ChatController {
     this.sessionId = `session_${Date.now()}`;
     // New chat = a fresh session: drop any session-scoped tool approvals.
     this.permissionManager.clearCache();
-    // Keep mcpClient and fileWatcher alive across clear
+    // New chat = a fresh session (new sessionId): mcpClient/fileWatcher are
+    // left for GC here, and the next send() tears down + rebuilds MCP under the
+    // new sessionId (see the session-identity check in send()).
     const chatEl = document.getElementById('chat')!;
     chatEl.innerHTML = '';
   }

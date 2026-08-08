@@ -17,7 +17,9 @@
 // - Any embedder failure (offline, model missing, WASM unavailable) falls back
 //   to the keyword search from keywordSearch.ts, so memory never breaks.
 // - Entry embeddings are cached by id+content so repeat searches don't
-//   re-embed the whole corpus.
+//   re-embed the whole corpus. The cache is bounded: it is pruned to the
+//   current corpus on each search (so decayed/deleted entries release their
+//   vectors + duplicated content instead of lingering) and capped by size.
 //
 // NOTE: the official successor of the doc's `@xenova/transformers` is
 // `@huggingface/transformers` (same API: pipeline('feature-extraction', …)).
@@ -56,6 +58,11 @@ interface Embedder {
 }
 
 export class WASMEmbeddingStore implements IMemoryStore {
+  // Bounds the embedding cache: entries are pruned to the current corpus and
+  // capped by size (insertion order evicts oldest), so the duplicated content
+  // text cached alongside each vector can't accumulate without limit.
+  static readonly MAX_VEC_CACHE_ENTRIES = 1000;
+
   private store: WASMEmbeddingStoreOptions['store'];
   private model: string;
   private minScore: number;
@@ -90,6 +97,19 @@ export class WASMEmbeddingStore implements IMemoryStore {
     // memories to search (fresh installs stay zero-cost).
     if (all.length === 0) return [];
 
+    // Drop cache entries no longer in the current corpus before scanning:
+    // decay()/forget() remove from the store, but the cache would otherwise
+    // keep stale vectors + their cached content text alive indefinitely.
+    // Entries from other projects fall out too (they re-embed on the next
+    // visit) — a bounded tradeoff that keeps the cache in sync with the
+    // corpus actually being searched.
+    if (this.vecCache.size > all.length) {
+      const liveIds = new Set(all.map(e => e.id));
+      for (const id of [...this.vecCache.keys()]) {
+        if (!liveIds.has(id)) this.vecCache.delete(id);
+      }
+    }
+
     // Embedder unavailable → keyword fallback keeps memory working offline.
     const embedder = await this.getEmbedder().catch(() => undefined);
     if (!embedder) return searchMemories(all, query, opts);
@@ -111,6 +131,13 @@ export class WASMEmbeddingStore implements IMemoryStore {
       const vecs = await embedder.embedBatch(uncached.map(e => e.content)).catch(() => undefined);
       if (vecs && vecs.length === uncached.length) {
         uncached.forEach((e, i) => this.vecCache.set(e.id, { content: e.content, vec: vecs[i] }));
+        // Bound cache size: Map preserves insertion order, so evict the
+        // oldest entries once the cap is exceeded.
+        while (this.vecCache.size > WASMEmbeddingStore.MAX_VEC_CACHE_ENTRIES) {
+          const oldest = this.vecCache.keys().next().value;
+          if (oldest === undefined) break;
+          this.vecCache.delete(oldest);
+        }
       } else {
         // The batch embedder failed for the whole set (e.g. one pathological
         // entry). Fall back to keyword search instead of silently returning

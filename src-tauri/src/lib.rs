@@ -31,6 +31,29 @@ fn mcp_key(session_id: &str, name: &str) -> String {
     format!("{}:{}", session_id, name)
 }
 
+/// Augment a PATH with the common per-user runtime dirs (bun, npm global,
+/// Homebrew) plus the system defaults. A Finder-launched app inherits a
+/// minimal PATH (/usr/bin:/bin:…) that omits per-user runtimes, so MCP
+/// servers launched with bunx/npx would fail to spawn without this. `existing`
+/// is the caller-supplied or inherited PATH to preserve as the base.
+fn augmented_mcp_path(existing: Option<&str>) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut dirs = vec![
+        format!("{}/.bun/bin", home),
+        format!("{}/.npm-global/bin", home),
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+        "/usr/bin".to_string(),
+        "/bin".to_string(),
+        "/usr/sbin".to_string(),
+        "/sbin".to_string(),
+    ];
+    if let Some(base) = existing.filter(|s| !s.is_empty()) {
+        dirs.push(base.to_string());
+    }
+    dirs.join(":")
+}
+
 async fn mcp_call_inner(handle: &McpHandle, request: &str) -> Result<String, String> {
     // Write request to stdin
     {
@@ -235,6 +258,23 @@ fn save_file(path: String, content: String) -> Result<(), String> {
         }
     }
     fs::write(&p, &content).map_err(|e| format!("save_file: {}", e))?;
+    Ok(())
+}
+
+/// Write raw bytes (base64-encoded over IPC) to a user-chosen path. Used for
+/// PNG image exports, where the payload isn't UTF-8 text. Mirrors save_file's
+/// mkdir-parent behavior; the payload is decoded by the same helper that
+/// handles pasted screenshots, so malformed input can never persist garbage.
+#[tauri::command]
+fn save_file_binary(path: String, data_base64: String) -> Result<(), String> {
+    let bytes = decode_paste_image(&data_base64)?;
+    let p = PathBuf::from(&path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+        }
+    }
+    fs::write(&p, &bytes).map_err(|e| format!("save_file_binary: {}", e))?;
     Ok(())
 }
 
@@ -791,11 +831,110 @@ async fn search_backend_bing_cn(query: &str, max: usize) -> Result<Vec<SearchRes
     Ok(parse_bing_results(&html, max))
 }
 
+/// Human-readable list of the configured search backends (API keys that were
+/// passed in plus the always-available free HTML backends) for the error /
+/// no-results guidance the model feeds back on.
+fn configured_backend_names(serper_api_key: &Option<String>, api_key: &Option<String>) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    if serper_api_key.as_deref().map_or(false, |k| !k.is_empty()) { names.push("Serper"); }
+    if api_key.as_deref().map_or(false, |k| !k.is_empty()) { names.push("Tavily"); }
+    names.extend(["cn.bing.com", "DuckDuckGo", "Bing"]);
+    names.join(", ")
+}
+
+/// Serper.dev Google SERP API backend (opt-in via the `serper_api_key` arg):
+/// a real Google index — excellent for BOTH Chinese and English, captcha-free.
+/// ~2500 free trial queries, then prepaid credits (~$0.3–1 per 1k). Mirrors
+/// the Node serperSearch() in NodeToolAdapter.ts.
+async fn search_backend_serper(query: &str, max: usize, api_key: &str) -> Result<Vec<SearchResult>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("client: {}", e))?;
+    let (gl, hl) = if is_chinese_query(query) { ("cn", "zh-cn") } else { ("us", "en") };
+    let resp = client
+        .post("https://google.serper.dev/search")
+        .header("X-API-KEY", api_key)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "q": query, "gl": gl, "hl": hl, "num": max }))
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("read: {}", e))?;
+    Ok(parse_serper_results(&body, max))
+}
+
+fn parse_serper_results(body: &serde_json::Value, max: usize) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    if let Some(organic) = body.get("organic").and_then(|v| v.as_array()) {
+        for item in organic {
+            if out.len() >= max { break; }
+            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let link = item.get("link").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let snippet = item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !title.is_empty() && !link.is_empty() {
+                out.push(SearchResult { title, snippet, url: link });
+            }
+        }
+    }
+    out
+}
+
+/// Tavily Search API backend (opt-in via the `api_key` arg — Settings → Tools
+/// in the GUI, TAVILY_API_KEY in the CLI). The desktop app has been passing
+/// this key to web_search for a while but Rust never read the arg — now it is
+/// honored here, mirroring the Node tavilySearch() in NodeToolAdapter.ts.
+async fn search_backend_tavily(query: &str, max: usize, api_key: &str) -> Result<Vec<SearchResult>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("client: {}", e))?;
+    let resp = client
+        .post("https://api.tavily.com/search")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "query": query,
+            "max_results": max,
+            "search_depth": "basic",
+            "include_answer": false,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("read: {}", e))?;
+    Ok(parse_tavily_results(&body, max))
+}
+
+fn parse_tavily_results(body: &serde_json::Value, max: usize) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    if let Some(results) = body.get("results").and_then(|v| v.as_array()) {
+        for item in results {
+            if out.len() >= max { break; }
+            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let snippet = item.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !title.is_empty() && !url.is_empty() {
+                out.push(SearchResult { title, snippet, url });
+            }
+        }
+    }
+    out
+}
+
 #[tauri::command]
 async fn web_search(
     _workspace: String,
     query: String,
     max_results: Option<usize>,
+    api_key: Option<String>,
+    serper_api_key: Option<String>,
 ) -> Result<String, String> {
     let max = max_results.unwrap_or(10).min(20);
 
@@ -803,12 +942,39 @@ async fn web_search(
     let mut failed: Vec<String> = Vec::new();
     let mut any_empty = false;
 
-    // Backend order: CJK queries hit cn.bing.com FIRST (international Bing /
-    // DuckDuckGo return irrelevant results for Chinese), then DuckDuckGo, then
-    // www.bing.com. Non-CJK keeps the established DuckDuckGo → Bing order. A
-    // backend that errors OR returns nothing rolls over to the next one, so
-    // challenge pages and empty result sets degrade gracefully instead of
-    // failing the search.
+    // API backends first (opt-in): Serper — a real Google index, the best
+    // quality for BOTH Chinese and English — then Tavily. Each degrades to
+    // the free HTML backends below on failure or an empty result set.
+    //
+    // NB: unlike the Node side (which applies a CJK relevance gate to API
+    // results because its scraping backends return garbage for Chinese), the
+    // Rust side accepts API results unconditionally — Serper is a real Google
+    // index, so the gate's benefit there is marginal and duplicating the
+    // bigram logic here isn't worth it. The free HTML backends below are
+    // likewise ungated on the Rust side.
+    if let Some(k) = serper_api_key.as_deref().filter(|k| !k.is_empty()) {
+        match search_backend_serper(&query, max, k).await {
+            Ok(r) if !r.is_empty() => results = r,
+            Ok(_) => any_empty = true,
+            Err(e) => failed.push(format!("Serper: {}", e)),
+        }
+    }
+    if results.is_empty() {
+        if let Some(k) = api_key.as_deref().filter(|k| !k.is_empty()) {
+            match search_backend_tavily(&query, max, k).await {
+                Ok(r) if !r.is_empty() => results = r,
+                Ok(_) => any_empty = true,
+                Err(e) => failed.push(format!("Tavily: {}", e)),
+            }
+        }
+    }
+
+    // Free HTML backends: CJK queries hit cn.bing.com FIRST (international
+    // Bing / DuckDuckGo return irrelevant results for Chinese), then
+    // DuckDuckGo, then www.bing.com. Non-CJK keeps the established
+    // DuckDuckGo → Bing order. A backend that errors OR returns nothing rolls
+    // over to the next one, so challenge pages and empty result sets degrade
+    // gracefully instead of failing the search.
     let backends: &[&str] = if is_chinese_query(&query) {
         &["cn.bing.com", "DuckDuckGo", "Bing"]
     } else {
@@ -838,8 +1004,8 @@ async fn web_search(
         // actionable guidance is the same.)
         if any_empty {
             return Ok(format!(
-                "No results found for \"{}\" on the available search backends (cn.bing.com, DuckDuckGo, Bing). Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to contain the information.",
-                query
+                "No results found for \"{}\" on the available search backends ({}). Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to contain the information.",
+                query, configured_backend_names(&serper_api_key, &api_key)
             ));
         }
         // Every backend errored (none returned empty): almost always network /
@@ -1227,6 +1393,67 @@ mod web_search_tests {
         assert!(!is_chinese_query("flights Xi'an to Chongqing"));
         assert!(!is_chinese_query("rust programming language"));
         assert!(!is_chinese_query(""));
+    }
+
+    #[test]
+    fn parses_serper_organic_results() {
+        // Serper returns `organic[]` with title/link/snippet. Entries missing
+        // a title or link are skipped; snippet may be empty and is kept.
+        let body = serde_json::json!({
+            "organic": [
+                { "title": "Rust 编程语言", "link": "https://www.rust-lang.org/zh-CN/", "snippet": "Rust 是一门系统编程语言", "position": 1 },
+                { "title": "No link", "snippet": "x" },
+                { "title": "", "link": "https://x.com", "snippet": "y" },
+                { "title": "B", "link": "https://b.com/", "snippet": "" }
+            ]
+        });
+        let results = parse_serper_results(&body, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust 编程语言");
+        assert_eq!(results[0].url, "https://www.rust-lang.org/zh-CN/");
+        assert!(results[0].snippet.contains("系统编程"));
+        assert_eq!(results[1].url, "https://b.com/");
+        assert_eq!(results[1].snippet, "");
+    }
+
+    #[test]
+    fn serper_parser_respects_max() {
+        let body = serde_json::json!({
+            "organic": [
+                { "title": "A", "link": "https://a.com" },
+                { "title": "B", "link": "https://b.com" },
+                { "title": "C", "link": "https://c.com" }
+            ]
+        });
+        let results = parse_serper_results(&body, 2);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn parses_tavily_results_mirroring_node() {
+        // Tavily returns `results[]` with title/url/content. The Node
+        // tavilySearch() (NodeToolAdapter.ts) mirrors these assertions.
+        let body = serde_json::json!({
+            "results": [
+                { "title": "西安到重庆机票", "url": "https://flights.example.com/xian-chongqing", "content": "航班时刻表与价格" },
+                { "title": "", "url": "https://bad.example", "content": "x" },
+                { "title": "B", "url": "https://b.example", "content": "" }
+            ]
+        });
+        let results = parse_tavily_results(&body, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "西安到重庆机票");
+        assert!(results[0].snippet.contains("航班时刻表"));
+        assert_eq!(results[1].url, "https://b.example");
+        assert_eq!(results[1].snippet, "");
+    }
+
+    #[test]
+    fn configured_backend_names_reflects_api_keys() {
+        assert_eq!(configured_backend_names(&None, &None), "cn.bing.com, DuckDuckGo, Bing");
+        assert_eq!(configured_backend_names(&Some("k".into()), &None), "Serper, cn.bing.com, DuckDuckGo, Bing");
+        assert_eq!(configured_backend_names(&Some("k".into()), &Some("".into())), "Serper, cn.bing.com, DuckDuckGo, Bing");
+        assert_eq!(configured_backend_names(&Some("k".into()), &Some("t".into())), "Serper, Tavily, cn.bing.com, DuckDuckGo, Bing");
     }
 }
 
@@ -1907,16 +2134,25 @@ async fn spawn_mcp(
     name: String,
     command: String,
     args: Vec<String>,
+    env: Option<BTreeMap<String, String>>,
 ) -> Result<String, String> {
     let key = mcp_key(&session_id, &name);
 
-    let mut child = TokioCommand::new(&command)
-        .args(&args)
+    let mut cmd = TokioCommand::new(&command);
+    cmd.args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("spawn {}: {}", command, e))?;
+        .stderr(Stdio::null());
+    if let Some(extra) = &env {
+        cmd.envs(extra);
+    }
+    // Prepend the runtime dirs to the effective PATH (a config-supplied PATH
+    // in `env` wins as the base over the inherited one — never clobber it).
+    let configured_path = env.as_ref().and_then(|e| e.get("PATH")).cloned();
+    let base_path = configured_path.or_else(|| std::env::var("PATH").ok());
+    cmd.env("PATH", augmented_mcp_path(base_path.as_deref()));
+
+    let mut child = cmd.spawn().map_err(|e| format!("spawn {}: {}", command, e))?;
 
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
@@ -1946,6 +2182,27 @@ async fn mcp_request(
         registry.get(&key).ok_or_else(|| format!("MCP not found: {}", key))?.clone()
     };
     mcp_call_inner(&handle, &request).await
+}
+
+/// Send an MCP JSON-RPC notification (write-only — the server sends no
+/// response, so unlike `mcp_request` this must NOT block waiting for a line).
+#[tauri::command]
+async fn mcp_notify(
+    state: tauri::State<'_, McpRegistry>,
+    session_id: String,
+    name: String,
+    request: String,
+) -> Result<(), String> {
+    let key = mcp_key(&session_id, &name);
+    let handle = {
+        let registry = state.lock().await;
+        registry.get(&key).ok_or_else(|| format!("MCP not found: {}", key))?.clone()
+    };
+    let mut stdin = handle.stdin.lock().await;
+    stdin.write_all(request.as_bytes()).await.map_err(|e| format!("write stdin: {}", e))?;
+    stdin.write_all(b"\n").await.map_err(|e| format!("write newline: {}", e))?;
+    stdin.flush().await.map_err(|e| format!("flush stdin: {}", e))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -3306,7 +3563,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // File tools
             read_file, write_file, write_file_stream, edit_file, search_files, list_files, create_directory, diff_files, glob_files, replace_files,
-            save_file,
+            save_file, save_file_binary,
             // System info
             sys_info,
             // Web tools
@@ -3316,7 +3573,7 @@ pub fn run() {
             // Git tools
             git_diff, git_log, git_status,
             // MCP subprocess
-            spawn_mcp, mcp_request, mcp_shutdown, mcp_list,
+            spawn_mcp, mcp_request, mcp_notify, mcp_shutdown, mcp_list,
             // Application temporary workspace + secret management
             get_tmp_workspace, save_paste_file, save_paste_image, import_dropped_file,
             tmp_paste_usage, cleanup_tmp_pastes,
@@ -3332,6 +3589,67 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running pure");
+}
+
+#[cfg(test)]
+mod mcp_subprocess_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mcp_call_roundtrips_jsonrpc_over_subprocess() {
+        // Line-echo server: prints back each JSON line — the exact shape a
+        // stdio MCP server produces for a request (one JSON-RPC response per
+        // request line).
+        let mut child = TokioCommand::new("sh")
+            .arg("-c")
+            .arg("while IFS= read -r line; do printf '%s\\n' \"$line\"; done")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let handle = McpHandle {
+            child: tokio::sync::Mutex::new(child),
+            stdin: tokio::sync::Mutex::new(stdin),
+            stdout: tokio::sync::Mutex::new(BufReader::new(stdout)),
+        };
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        let resp = mcp_call_inner(&handle, request).await.unwrap();
+        assert_eq!(resp, request, "call must round-trip the request line verbatim");
+
+        // Notification path: write-only, must NOT block waiting for a
+        // response line (the echo server sends nothing back for a notify).
+        {
+            let mut stdin = handle.stdin.lock().await;
+            stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"x\"}\n").await.unwrap();
+            stdin.flush().await.unwrap();
+        }
+
+        let mut child = handle.child.lock().await;
+        let _ = child.kill().await;
+    }
+
+    #[tokio::test]
+    async fn spawn_mcp_augments_path_and_forwards_env() {
+        // Can't invoke the Tauri command (needs State), so exercise the shared
+        // path helper + env forwarding against a real child process.
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = augmented_mcp_path(Some("/custom/bin"));
+        assert!(path.starts_with(&format!("{}/.bun/bin", home)), "bun dir must be prepended: {}", path);
+        assert!(path.contains("/custom/bin"), "existing PATH must be preserved: {}", path);
+
+        let mut cmd = TokioCommand::new("sh");
+        cmd.arg("-c").arg("printf '%s' \"$PURE_TEST_VAR $PATH\"");
+        cmd.env("PURE_TEST_VAR", "hello");
+        cmd.env("PATH", augmented_mcp_path(None));
+        let out = cmd.output().await.unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(text.starts_with("hello "), "env var must reach the child: {}", text);
+        assert!(text.contains(&format!("{}/.bun/bin", home)), "PATH augmentation missing: {}", text);
+    }
 }
 
 #[cfg(test)]
@@ -3387,6 +3705,25 @@ mod save_paste_file_tests {
         assert!(decode_paste_image("@@not-base64@@").is_err());
         // Whitespace-only payload → decode error, never an empty silent file.
         assert!(decode_paste_image("   ").is_err());
+    }
+
+    #[test]
+    fn save_file_binary_writes_decoded_bytes_to_path() {
+        use base64::Engine as _;
+        let dir = temp_paste_dir("save-file-binary");
+        let path = dir.join("chart.png");
+        let bytes = vec![0x89u8, b'P', b'N', b'G', 13, 10, 26, 10, 42, 43, 44];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        save_file_binary(path.to_string_lossy().to_string(), b64).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn save_file_binary_rejects_bad_base64_and_never_writes() {
+        let dir = temp_paste_dir("save-file-binary-bad");
+        let path = dir.join("bad.png");
+        assert!(save_file_binary(path.to_string_lossy().to_string(), "@@nope@@".to_string()).is_err());
+        assert!(!path.exists());
     }
 
     #[test]

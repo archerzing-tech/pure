@@ -4,6 +4,8 @@
 
 import { StdioTransport } from '../../adapter/mcp/StdioTransport';
 import { HttpTransport } from '../../adapter/mcp/HttpTransport';
+import { TauriStdioTransport } from '../../adapter/mcp/TauriStdioTransport';
+import { isTauriRuntime } from '../../shared/tauri';
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import type { TaggedTool } from '../../coding-agent/types';
 import { Tags } from '../../coding-agent/ToolRegistry';
@@ -17,6 +19,8 @@ import { mcpToolToDefinition } from '../../adapter/mcp/MCPTransport';
 export interface MCPClientConfig {
   servers: MCPServerConfig[];
   onToolDiscovered?: (tool: TaggedTool) => void;
+  /** Session id — passed to the Rust subprocess registry in the desktop app. */
+  sessionId?: string;
 }
 
 interface ServerState {
@@ -68,7 +72,12 @@ export class MCPClient implements ToolAdapter {
 
     const transport: MCPTransport =
       config.transport === 'stdio'
-        ? new StdioTransport(config.command ?? [], config.env)
+        // Desktop WebView can't import node:child_process — spawn stdio MCP
+        // servers through the Rust subprocess manager instead. Plain browser /
+        // CLI keep the JS StdioTransport.
+        ? (this.config.sessionId && isTauriRuntime()
+            ? new TauriStdioTransport(this.config.sessionId, config.name, config.command ?? [], config.env)
+            : new StdioTransport(config.command ?? [], config.env))
         : new HttpTransport(config.url ?? 'http://localhost:3000');
 
     const state: ServerState = { config, transport, tools: [], connected: false };

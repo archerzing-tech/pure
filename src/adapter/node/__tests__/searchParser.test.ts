@@ -13,6 +13,7 @@ import {
   resultsRelevant,
   significantCJKBigrams,
   containsCJK,
+  serperSearch,
   tavilySearch,
   firstRelevantResult,
 } from '../NodeToolAdapter';
@@ -235,6 +236,39 @@ describe('Relevance gate (mirrors Rust results_relevant)', () => {
     const results = [{ title: 'anything', snippet: '', url: 'https://x.example/1' }];
     expect(resultsRelevant('rust programming language', results)).toBe(true);
     expect(resultsRelevant('机票', results)).toBe(true);
+  });
+});
+
+describe('Serper API backend (mirrors Rust lib.rs search_backend_serper)', () => {
+  it('maps Serper organic results to SearchResult (title/link/snippet)', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({
+        organic: [
+          { title: '西安到重庆机票查询', link: 'https://flights.example.com/1', snippet: '携程特价机票：西安到重庆 ¥380 起', position: 1 },
+          { title: 'Second', link: 'https://b.com', snippet: 'plain snippet' },
+          { title: 'No link', snippet: 'x' },
+          { title: '', link: 'https://empty.example', snippet: 'y' },
+        ],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    ) as unknown as typeof fetch;
+    process.env.SERPER_API_KEY = 'serper-test';
+    try {
+      const results = await serperSearch('西安到重庆 机票', 10);
+      expect(results.length).toBe(2);
+      expect(results[0].title).toBe('西安到重庆机票查询');
+      expect(results[0].url).toBe('https://flights.example.com/1');
+      expect(results[0].snippet).toContain('携程');
+      expect(results[1].snippet).toBe('plain snippet');
+    } finally {
+      delete process.env.SERPER_API_KEY;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('throws when no SERPER_API_KEY is set', async () => {
+    delete process.env.SERPER_API_KEY;
+    await expect(serperSearch('query', 10)).rejects.toThrow('SERPER_API_KEY');
   });
 });
 

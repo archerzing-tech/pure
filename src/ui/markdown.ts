@@ -111,7 +111,7 @@ function isDark(): boolean {
 
 const DIAGRAM_RENDER_TIMEOUT_MS = 15000;
 
-type DiagramKind = 'mermaid' | 'svg' | 'chart' | 'puml';
+export type DiagramKind = 'mermaid' | 'svg' | 'chart' | 'puml';
 type DiagramState = 'loading' | 'preview' | 'error';
 const diagramRenderVersions = new WeakMap<HTMLElement, number>();
 
@@ -126,15 +126,17 @@ function isCurrentDiagramRender(slot: HTMLElement, version: number): boolean {
 }
 
 function diagramControls(): string {
+  // Every image-display diagram (svg / chart / mermaid / puml) gets exactly one
+  // action — 下载图片 (PNG export). No source view, no view toggle.
   return `<div class="diagram-toolbar" role="group" aria-label="${attr(t('diagram.viewControls'))}">` +
-    `<button type="button" class="diagram-view-btn active" data-diagram-view="preview" aria-pressed="true">${esc(t('diagram.preview'))}</button>` +
-    `<button type="button" class="diagram-view-btn" data-diagram-view="source" aria-pressed="false">${esc(t('diagram.source'))}</button>` +
+    `<button type="button" class="diagram-download-btn" title="${attr(t('diagram.download'))}">${esc(t('diagram.download'))}</button>` +
     `</div>`;
 }
 
 function diagramLoading(): string {
   return `<div class="diagram-loading" role="status" aria-live="polite" aria-label="${attr(t('diagram.loading'))}">` +
-    `<span class="diagram-loading-square" aria-hidden="true"><span class="diagram-spinner"></span></span>` +
+    `<span class="diagram-loading-ring" aria-hidden="true"></span>` +
+    `<span class="diagram-loading-label">${esc(t('diagram.loading'))}</span>` +
     `</div>`;
 }
 
@@ -272,20 +274,6 @@ function diagramRawOf(slot: HTMLElement): string {
   return slot.querySelector<HTMLElement>('.diagram-source code')?.textContent
     ?? slot.getAttribute('data-raw')
     ?? '';
-}
-
-/**
- * Recover the original source text for display (viewer source view). The
- * `.diagram-source code` path is already plain text; only the `data-raw`
- * fallback is URI-encoded (see encodeRawAttr), so decode it defensively.
- */
-function decodeDiagramSource(raw: string): string {
-  if (!raw) return '';
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
 }
 
 function setDiagramState(slot: HTMLElement, state: DiagramState, message = ''): void {
@@ -1078,7 +1066,7 @@ export async function renderMarkdown(text: string, container: HTMLElement): Prom
   bindDiagramControls(container);
   bindMermaidPopup(container);
   bindPumlPopup(container);
-  bindSvgChartPopup(container);
+  bindVectorPopup(container);
 
   // 6) Add copy + save buttons to code blocks.
   addCodeBlockActions(container);
@@ -1366,7 +1354,7 @@ if (typeof document !== 'undefined') {
     bindDiagramControls(document.body);
     bindMermaidPopup(document.body);
     bindPumlPopup(document.body);
-    bindSvgChartPopup(document.body);
+    bindVectorPopup(document.body);
   });
 }
 
@@ -1376,7 +1364,6 @@ function bindDiagramActivation(
   target: HTMLElement,
   getDiagram: () => HTMLElement | null,
   activation: 'click' | 'dblclick' = 'click',
-  getSource?: () => string,
 ): void {
   if (target.hasAttribute('data-popup-bound')) return;
   target.setAttribute('data-popup-bound', 'true');
@@ -1385,13 +1372,17 @@ function bindDiagramActivation(
   target.setAttribute('aria-label', t('diagram.openViewer'));
   const open = (event?: Event) => {
     // Let interactive descendants keep their own behavior (links inside a
-    // rendered SVG must navigate, not open the viewer).
+    // rendered SVG must navigate, not open the viewer). The activation target
+    // itself carries role="button" (for keyboard access), so only a hit on a
+    // DIFFERENT interactive element underneath suppresses the viewer — a click
+    // on the target or its picture content always opens it.
     const clicked = event?.target as Element | null;
-    if (clicked && typeof clicked.closest === 'function' && clicked.closest('a[href], button, [role="button"]')) {
-      return;
+    if (clicked && typeof clicked.closest === 'function') {
+      const hit = clicked.closest('a[href], button, [role="button"]');
+      if (hit && hit !== target) return;
     }
     const diagram = getDiagram();
-    if (diagram) showDiagramViewer(diagram, getSource ? getSource() : undefined);
+    if (diagram) showDiagramViewer(diagram);
   };
   target.addEventListener(activation, (event) => open(event));
   target.addEventListener('keydown', (event) => {
@@ -1405,14 +1396,14 @@ function bindDiagramControls(container: HTMLElement): void {
   for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.diagram-slot'))) {
     if (slot.hasAttribute('data-controls-bound')) continue;
     slot.setAttribute('data-controls-bound', 'true');
-    for (const button of Array.from(slot.querySelectorAll<HTMLButtonElement>('.diagram-view-btn'))) {
+    // Every slot has a single 下载图片 action: PlantUML images come from an
+    // external server URL, the rest are locally-rendered SVGs to rasterize.
+    for (const button of Array.from(slot.querySelectorAll<HTMLButtonElement>('.diagram-download-btn'))) {
       button.addEventListener('click', () => {
-        const view = button.getAttribute('data-diagram-view') === 'source' ? 'source' : 'preview';
-        slot.setAttribute('data-view', view);
-        for (const sibling of Array.from(slot.querySelectorAll<HTMLButtonElement>('.diagram-view-btn'))) {
-          const active = sibling.getAttribute('data-diagram-view') === view;
-          sibling.classList.toggle('active', active);
-          sibling.setAttribute('aria-pressed', String(active));
+        if (slot.getAttribute('data-diagram-kind') === 'puml') {
+          void downloadPumlImage(slot);
+        } else {
+          void exportDiagramPng(slot);
         }
       });
     }
@@ -1430,10 +1421,10 @@ function bindDiagramControls(container: HTMLElement): void {
           bindMermaidPopup(host);
         });
       } else if (kind === 'svg') {
-        void renderSvgNodes(host).then(() => bindSvgChartPopup(host));
+        void renderSvgNodes(host).then(() => bindVectorPopup(host));
       } else if (kind === 'chart') {
         renderChartNodes(host);
-        bindSvgChartPopup(host);
+        bindVectorPopup(host);
       } else {
         const oldImage = target.querySelector<HTMLImageElement>('.puml-diagram');
         if (oldImage) {
@@ -1471,29 +1462,29 @@ function bindPumlPopup(container: HTMLElement): void {
   }
 }
 
-function bindSvgChartPopup(container: HTMLElement): void {
-  const svgTargets = container.querySelectorAll<HTMLElement>('.svg-slot[data-state="preview"] .svg-target');
-  for (const target of Array.from(svgTargets)) {
-    const slot = target.closest<HTMLElement>('.svg-slot');
-    // Single click opens the viewer (the preview already shows a zoom-in
-    // cursor), and the viewer offers the raw SVG source alongside the image.
+function bindVectorPopup(container: HTMLElement): void {
+  // Every svg-rendered preview (```svg blocks AND ```chart charts) opens the
+  // enlarged pan/zoom viewer on double-click; a single click stays a natural
+  // selection gesture. The floating 下载图片 button handles exports.
+  const targets = container.querySelectorAll<HTMLElement>(
+    '.svg-slot[data-state="preview"] .svg-target, .chart-slot[data-state="preview"] .chart-target',
+  );
+  for (const target of Array.from(targets)) {
     bindDiagramActivation(target, () => {
       const svg = target.querySelector('svg');
       return svg?.cloneNode(true) as HTMLElement | null;
-    }, 'click', slot ? () => decodeDiagramSource(diagramRawOf(slot)) : undefined);
-  }
-
-  const chartTargets = container.querySelectorAll<HTMLElement>('.chart-slot[data-state="preview"] .chart-target');
-  for (const target of Array.from(chartTargets)) {
-    bindDiagramActivation(target, () => {
-      const svg = target.querySelector('svg');
-      return svg?.cloneNode(true) as HTMLElement | null;
-    });
+    }, 'dblclick');
   }
 }
 
-function showDiagramViewer(el: HTMLElement, source?: string): void {
+// Tracks the active diagram viewer's cleanup so opening a new viewer releases
+// the previous one's window/document listeners (a leak when only `.remove()`
+// was called on the old overlay).
+let activeViewerCleanup: (() => void) | null = null;
+
+function showDiagramViewer(el: HTMLElement): void {
   // Remove any existing viewer
+  activeViewerCleanup?.();
   const existing = document.querySelector('.mermaid-viewer-overlay');
   if (existing) existing.remove();
 
@@ -1552,42 +1543,10 @@ function showDiagramViewer(el: HTMLElement, source?: string): void {
   zoomResetBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>';
   zoomResetBtn.title = 'Reset zoom';
 
-  // ── Optional source/view toggle (SVG diagrams) ──
-  let sourcePre: HTMLPreElement | null = null;
-  let sourceBtn: HTMLButtonElement | null = null;
-  if (source !== undefined) {
-    sourcePre = document.createElement('pre');
-    sourcePre.className = 'mermaid-viewer-source';
-    sourcePre.textContent = source;
-    sourcePre.style.display = 'none';
-    overlay.appendChild(sourcePre);
-
-    sourceBtn = document.createElement('button');
-    sourceBtn.className = 'mermaid-viewer-zoom-btn mermaid-viewer-source-btn';
-    sourceBtn.textContent = t('diagram.source');
-    sourceBtn.title = t('diagram.source');
-    sourceBtn.setAttribute('aria-pressed', 'false');
-    sourceBtn.addEventListener('click', () => {
-      const showingSource = sourcePre!.style.display !== 'none';
-      if (showingSource) {
-        sourcePre!.style.display = 'none';
-        svgWrap.style.display = '';
-        sourceBtn!.textContent = t('diagram.source');
-      } else {
-        svgWrap.style.display = 'none';
-        sourcePre!.style.display = 'block';
-        sourceBtn!.textContent = t('diagram.preview');
-      }
-      ctrlBar.classList.toggle('source-mode', !showingSource);
-      sourceBtn!.setAttribute('aria-pressed', String(!showingSource));
-    });
-  }
-
   ctrlBar.appendChild(zoomOutBtn);
   ctrlBar.appendChild(zoomPct);
   ctrlBar.appendChild(zoomInBtn);
   ctrlBar.appendChild(zoomResetBtn);
-  if (sourceBtn) ctrlBar.appendChild(sourceBtn);
   overlay.appendChild(ctrlBar);
 
   // ── Apply transform ──
@@ -1614,15 +1573,9 @@ function showDiagramViewer(el: HTMLElement, source?: string): void {
     svgWrap.classList.add('ready');
   };
 
-  // When the source view is open, pointer/wheel/dblclick gestures on the
-  // <pre> must scroll/select text instead of panning/zooming the diagram.
-  const onSourceLayer = (target: EventTarget | null): boolean =>
-    !!sourcePre && sourcePre.style.display !== 'none'
-    && target instanceof Node && sourcePre.contains(target);
-
   // ── Pan handlers ──
   const onMouseDown = (e: MouseEvent) => {
-    if (e.button !== 0 || onSourceLayer(e.target)) return;
+    if (e.button !== 0) return;
     dragging = true;
     didDrag = false;
     dragStartX = e.clientX;
@@ -1678,14 +1631,12 @@ function showDiagramViewer(el: HTMLElement, source?: string): void {
   zoomResetBtn.addEventListener('click', () => fitToViewport());
 
   // Double-click to fit
-  overlay.addEventListener('dblclick', (e) => {
-    if (onSourceLayer(e.target)) return;
+  overlay.addEventListener('dblclick', () => {
     fitToViewport();
   });
 
   // Ctrl+wheel / pinch zoom at cursor
   overlay.addEventListener('wheel', (e) => {
-    if (onSourceLayer(e.target)) return;
     e.preventDefault();
     if (e.deltaY === 0) return;
     zoomAt(zoom + (e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP), e.clientX, e.clientY);
@@ -1697,6 +1648,7 @@ function showDiagramViewer(el: HTMLElement, source?: string): void {
     window.removeEventListener('mousemove', onMouseMove);
     window.removeEventListener('mouseup', onMouseUp);
     document.removeEventListener('keydown', onKey);
+    if (activeViewerCleanup === cleanup) activeViewerCleanup = null;
   };
 
   // Close on backdrop click (only when not dragging)
@@ -1711,10 +1663,245 @@ function showDiagramViewer(el: HTMLElement, source?: string): void {
   };
   document.addEventListener('keydown', onKey);
 
+  activeViewerCleanup = cleanup;
   document.body.appendChild(overlay);
 
   // Initial fit
   requestAnimationFrame(() => fitToViewport());
+}
+
+/**
+ * Theme-resolved snapshot of the chart CSS (see styles.css `.chart-svg …`
+ * rules). The class rules live in the host document, so a saved standalone SVG
+ * must inline them with the CURRENT theme's concrete colors — otherwise the
+ * exported file would show invisible grid/axis strokes and unstyled text.
+ */
+function chartExportStyles(): string {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name: string, fallback: string): string => cs.getPropertyValue(name).trim() || fallback;
+  const font = getComputedStyle(document.body).fontFamily || 'sans-serif';
+  // --bg-card: the chart sits on the card background, and buildLineSvg paints
+  // its point markers with `var(--bg-card, #fff)`; resolving it here keeps the
+  // exported SVG/PNG faithful to the current theme (light card vs dark card).
+  const bg = v('--bg-card', isDark() ? '#1f2430' : '#ffffff');
+  return `:root{--bg-card:${bg}}` +
+    `.chart-title,.chart-text,.chart-legend-label{fill:${v('--chart-text', '#37352F')};font-family:${font}}` +
+    `.chart-title{font-size:14px;font-weight:600}` +
+    `.chart-text{font-size:11px}` +
+    `.chart-unit{fill:${v('--chart-muted', '#6B6965')};font:11px ${font}}` +
+    `.chart-value{fill:${v('--chart-value', '#37352F')};font:600 12px ${font}}` +
+    `.chart-total{fill:${v('--chart-total', '#37352F')};font:600 20px ${font}}` +
+    `.chart-slice-pct{fill:${v('--chart-slice-text', '#172033')};font:600 11px ${font}}` +
+    `.chart-legend-value{fill:${v('--chart-value', '#37352F')};font:600 11px ${font}}` +
+    `.chart-grid{stroke:${v('--chart-grid', '#D8D5CF')};stroke-width:1}` +
+    `.chart-axis{stroke:${v('--chart-axis', '#9B9995')};stroke-width:1.5}`;
+}
+
+/**
+ * Derive an export filename base for a diagram slot: prefer the chart
+ * `title:` line (sanitized to filesystem-safe characters), falling back to a
+ * kind-appropriate name (mermaid/chart) on parse failure.
+ */
+function diagramSourceName(slot: HTMLElement): string {
+  const kind = slot.getAttribute('data-diagram-kind');
+  const fallback = kind === 'mermaid' ? 'mermaid' : kind === 'svg' ? 'svg' : 'chart';
+  let base = fallback;
+  try {
+    const title = parseChartSource(diagramRawOf(slot)).title.trim();
+    if (title) {
+      base = title.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').slice(0, 60) || fallback;
+    }
+  } catch {
+    /* non-chart source (e.g. mermaid) — keep the default name */
+  }
+  return base;
+}
+
+/**
+ * Serialize a rendered diagram SVG into a self-contained document: xmlns added
+ * if missing; charts additionally get a <style> embedding the CURRENT theme's
+ * resolved colors (their generated SVG is styled purely by classes). Mermaid
+ * already carries its own <style> inside the rendered SVG, so no injection is
+ * needed there. Supports chart, mermaid, and SVG slots.
+ */
+function serializeDiagramSvg(slot: HTMLElement): { svg: string; nameBase: string } | null {
+  const kind = slot.getAttribute('data-diagram-kind');
+  const svg = slot.querySelector<SVGSVGElement>('.chart-target svg, .svg-target svg, .mermaid-target svg');
+  if (!svg) return null;
+  const clone = svg.cloneNode(true) as SVGSVGElement;
+  if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  if (kind === 'chart') {
+    const styleEl = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+    styleEl.textContent = chartExportStyles();
+    clone.insertBefore(styleEl, clone.firstChild);
+  }
+  return { svg: new XMLSerializer().serializeToString(clone), nameBase: diagramSourceName(slot) };
+}
+
+/**
+ * Rasterize a self-contained SVG document to a PNG blob at `scale`× its
+ * size, painted over the current theme's card background so the result is
+ * readable anywhere (transparent would expose the theme-colored text).
+ * Sizing prefers the source SVG's viewBox (mermaid emits width="100%" on the
+ * root, which can make img.naturalWidth resolve to 0 in the image context);
+ * natural size is the fallback. Returns null when rasterization fails.
+ */
+function svgToPngBlob(svgText: string, scale = 2): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' }));
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      // Size from the SVG's own viewBox when present (mermaid emits width="100%"
+      // on the root, which can make img.naturalWidth resolve to 0 in the image
+      // context); the decoded natural size is the fallback.
+      const vb = svgText.match(/viewBox=["']?\s*[\d.-]+\s+[\d.-]+\s+([\d.]+)\s+([\d.]+)/i);
+      const w = vb ? Number(vb[1]) : img.naturalWidth;
+      const h = vb ? Number(vb[2]) : img.naturalHeight;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(w * scale));
+      canvas.height = Math.max(1, Math.round(h * scale));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { resolve(null); return; }
+      ctx.fillStyle = getComputedStyle(document.documentElement)
+        .getPropertyValue('--bg-card').trim() || (isDark() ? '#1f2430' : '#ffffff');
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      // toBlob can silently never invoke its callback (engine quirk, memory
+      // pressure) — a safety timer guarantees the caller's error path runs.
+      let settled = false;
+      const settle = (blob: Blob | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(blob);
+      };
+      const timer = setTimeout(() => settle(null), 5000);
+      canvas.toBlob((blob) => settle(blob), 'image/png');
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+}
+
+/**
+ * Save an image blob through the native save dialog (Tauri) or browser
+ * download (File System Access / anchor fallback). The Tauri path base64-encodes
+ * the bytes for the save_file_binary IPC command (save_file is text-only).
+ */
+async function saveImageFile(blob: Blob, filename: string, mime: string): Promise<string | null> {
+  const ext = mime === 'image/png' ? 'png' : 'svg';
+  if (isTauriRuntime()) {
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    const path = await save({ defaultPath: filename, filters: [{ name: 'Image', extensions: [ext] }] });
+    if (!path) return null; // cancelled
+    const dataUrl: string = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error ?? new Error('FileReader failed'));
+      reader.readAsDataURL(blob);
+    });
+    const core = await loadTauriCore();
+    if (!core) throw new Error('Tauri core unavailable');
+    await core.invoke('save_file_binary', { path, dataBase64: dataUrl.slice(dataUrl.indexOf(',') + 1) });
+    return path;
+  }
+
+  // Browser dev mode: File System Access API (Chrome/Edge).
+  const w = window as unknown as {
+    showSaveFilePicker?: (opts: {
+      suggestedName?: string;
+      types?: Array<{ description: string; accept: Record<string, string[]> }>;
+    }) => Promise<{
+      createWritable(): Promise<{ write(d: Blob): Promise<void>; close(): Promise<void> }>;
+    }>;
+  };
+  if (typeof w.showSaveFilePicker === 'function') {
+    try {
+      const handle = await w.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: 'Image', accept: { [mime]: [`.${ext}`] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return filename;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return null; // cancelled
+      // Any other failure — fall through to the download fallback.
+    }
+  }
+
+  // Last-resort download (works everywhere).
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return null;
+}
+
+/**
+ * Rasterize the rendered diagram (svg / chart / mermaid) and export it as a
+ * PNG image (2× scale for crisp output on HiDPI displays).
+ *
+ * Known limitation: mermaid sequence/class diagrams render some labels inside
+ * <foreignObject>, which browsers refuse to paint when an SVG is loaded as an
+ * <img> — those labels drop out of the PNG.
+ */
+async function exportDiagramPng(slot: HTMLElement): Promise<void> {
+  const out = serializeDiagramSvg(slot);
+  if (!out) {
+    showToast(t('diagram.downloadError'));
+    return;
+  }
+  try {
+    const blob = await svgToPngBlob(out.svg, 2);
+    if (!blob) {
+      showToast(t('diagram.downloadError'));
+      return;
+    }
+    const savedTo = await saveImageFile(blob, `${out.nameBase}.png`, 'image/png');
+    if (savedTo) showToast(`${t('codeBlock.savedTo')} ${savedTo}`);
+  } catch {
+    showToast(t('diagram.downloadError'));
+  }
+}
+
+/**
+ * Export a PlantUML diagram (rendered from the external plantuml.com URL) as
+ * a PNG image. The server sends CORS headers, so we fetch the SVG it rendered
+ * and rasterize it like local diagrams; if the fetch ever fails (offline,
+ * CORS change), fall back to downloading the raw SVG file directly.
+ */
+async function downloadPumlImage(slot: HTMLElement): Promise<void> {
+  const img = slot.querySelector<HTMLImageElement>('.puml-diagram');
+  if (!img?.src) {
+    showToast(t('diagram.downloadError'));
+    return;
+  }
+  const stamp = Date.now();
+  try {
+    const resp = await fetch(img.src, { mode: 'cors' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const svgText = await resp.text();
+    if (!/<svg[\s>]/i.test(svgText)) throw new Error('not an SVG response');
+    const blob = await svgToPngBlob(svgText, 2);
+    if (!blob) throw new Error('rasterization failed');
+    const savedTo = await saveImageFile(blob, `diagram-${stamp}.png`, 'image/png');
+    if (savedTo) showToast(`${t('codeBlock.savedTo')} ${savedTo}`);
+  } catch {
+    // CORS/offline: fall back to downloading the raw SVG the server rendered.
+    const a = document.createElement('a');
+    a.href = img.src;
+    a.download = `diagram-${stamp}.svg`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
 }
 
 // ── Code block actions (copy + save) ──

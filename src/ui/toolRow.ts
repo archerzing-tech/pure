@@ -27,6 +27,7 @@ const TOOL_META: Record<string, { name: string; icon: string }> = {
   web_search:       { name: 'Web Search',    icon: '🌐' },
   web_fetch:        { name: 'Fetch',         icon: '📡' },
   web_researcher:   { name: 'Web Research',  icon: '🧭' },
+  planner:          { name: 'Plan',          icon: '📋' },
   sys_info:         { name: 'System Info',   icon: 'ℹ️' },
 };
 
@@ -172,6 +173,8 @@ export function pendingActionLabel(toolName: string, args: Record<string, unknow
       return '正在获取页面…';
     case 'web_researcher':
       return '正在研究网页资料…';
+    case 'planner':
+      return '正在制定执行计划…';
     case 'create_directory':
       return '正在创建目录…';
     default:
@@ -230,6 +233,7 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
     details.classList.add('web-tool');
   }
   if (toolName === 'web_researcher') details.classList.add('web-researcher');
+  if (toolName === 'planner') details.classList.add('planner');
 
   const summary = document.createElement('summary');
   summary.className = 'tool-row-summary';

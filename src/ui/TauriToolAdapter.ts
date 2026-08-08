@@ -136,7 +136,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'web_search',
-    description: 'Search the web and return results with titles, snippets, and URLs. With a Tavily API key configured (Settings → Tools) searches go through the Tavily API first for higher-quality results; otherwise free backends are probed in parallel (Sogou → cn.bing.com → DuckDuckGo → Bing for Chinese queries, DuckDuckGo → Bing otherwise).',
+    description: 'Search the web and return results with titles, snippets, and URLs. With a Serper or Tavily API key configured (Settings → Tools) searches go through the API backends first (Serper = real Google index, best for Chinese and English); otherwise free backends are probed in parallel (Sogou → cn.bing.com → DuckDuckGo → Bing for Chinese queries, DuckDuckGo → Bing otherwise).',
     input_schema: {
       type: 'object',
       properties: {
@@ -264,10 +264,12 @@ export function setToolOutputListener(fn: ToolOutputListener | null): void {
 export class TauriToolAdapter implements ToolAdapter {
   private workspace: string;
   private tavilyApiKey: string;
+  private serperApiKey: string;
 
-  constructor(workspace: string, tavilyApiKey = '') {
+  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '') {
     this.workspace = workspace;
     this.tavilyApiKey = tavilyApiKey;
+    this.serperApiKey = serperApiKey;
   }
 
   getTools(): ToolDefinition[] {
@@ -454,15 +456,7 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: diff, success: true, duration: Date.now() - start };
         }
         case 'web_search': {
-          const searchData = await tauriInvoke('web_search', {
-            workspace: ws,
-            query: String(args.query ?? ''),
-            maxResults: args.maxResults ?? 10,
-            // Optional Tavily API key from Settings → Tools: when set, the
-            // Rust backend searches via the Tavily API first (stable, no
-            // scraping) and falls back to the free HTML backends otherwise.
-            apiKey: this.tavilyApiKey,
-          }) as string;
+          const searchData = await tauriInvoke('web_search', buildWebSearchArgs(ws, args, this.tavilyApiKey, this.serperApiKey)) as string;
           return { id: toolCall.id, toolName: name, result: searchData, success: true, duration: Date.now() - start };
         }
         case 'web_fetch': {
@@ -513,6 +507,28 @@ export class TauriToolAdapter implements ToolAdapter {
 
 function safeParseArgs(raw: string): Record<string, unknown> {
   try { return JSON.parse(raw); } catch { return {}; }
+}
+
+/** Pure arg builder for the web_search invoke. Exported so a unit test locks
+ * the exact Tauri arg names (apiKey → Rust api_key, serperApiKey → Rust
+ * serper_api_key) — a typo here would only fail at runtime in the packaged
+ * app, since tauriInvoke is unavailable in tests. */
+export function buildWebSearchArgs(
+  workspace: string,
+  args: Record<string, unknown>,
+  tavilyApiKey: string,
+  serperApiKey: string,
+): Record<string, unknown> {
+  return {
+    workspace,
+    query: String(args.query ?? ''),
+    maxResults: args.maxResults ?? 10,
+    // Optional API keys from Settings → Tools: when set, the Rust backend
+    // searches via Serper (Google index) then Tavily first, falling back to
+    // the free HTML backends otherwise.
+    apiKey: tavilyApiKey,
+    serperApiKey,
+  };
 }
 
 // ── Command output formatting (shared by the streamed and buffered paths) ──

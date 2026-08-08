@@ -115,6 +115,9 @@
                 <button id="landing-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
                   <svg class="wp-folder-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 </button>
+                <button id="landing-attach-btn" class="attach-btn" type="button" data-i18n-title="input.attach.title" data-i18n-aria-label="input.attach.title" title="附加文件" aria-label="附加文件">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                </button>
                 <button id="landing-send-btn" data-i18n-title="input.send.title" data-i18n-aria-label="input.send.title" aria-label="发送">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
                 </button>
@@ -126,6 +129,9 @@
           <footer id="input-bar">
             <button id="input-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
               <svg class="wp-folder-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </button>
+            <button id="attach-btn" class="attach-btn" type="button" data-i18n-title="input.attach.title" data-i18n-aria-label="input.attach.title" title="附加文件" aria-label="附加文件">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
             <textarea id="prompt" rows="1" data-i18n-placeholder="input.placeholder" placeholder="Ask pure anything..." disabled></textarea>
             <button id="send-btn" data-i18n-title="input.send.title" data-i18n-aria-label="input.send.title" aria-label="发送" disabled>
@@ -322,6 +328,10 @@
                     <label class="toggle"><input type="checkbox" id="cfg-tool-browser" checked /><span class="toggle-slider"></span></label>
                   </div>
                   <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.serper">Serper.dev Search API</span><span class="setting-hint" data-i18n="tools.serper.hint">Optional: Serper key for Google-index web search (2500 free queries at serper.dev) — falls back to Tavily / free backends when empty</span></div>
+                    <input id="cfg-serper-key" class="setting-input" type="password" placeholder="serper-..." autocomplete="off" style="max-width: 220px" />
+                  </div>
+                  <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="tools.tavily">Tavily Search API</span><span class="setting-hint" data-i18n="tools.tavily.hint">Optional: Tavily key for high-quality web search (free tier at tavily.com) — falls back to free backends when empty</span></div>
                     <input id="cfg-tavily-key" class="setting-input" type="password" placeholder="tvly-..." autocomplete="off" style="max-width: 220px" />
                   </div>
@@ -432,58 +442,9 @@
     </div>
   </div>
 
-  <!-- ═══ PLAN REVIEW DIALOG ═══ -->
-  <div id="plan-overlay" class="hidden">
-    <div id="plan-dialog" role="alertdialog" aria-modal="true" aria-labelledby="plan-title">
-      <div id="plan-header">
-        <span id="plan-title" data-i18n="plan.title">Plan review</span>
-        <span id="plan-complexity-badge" class="plan-complexity-badge" data-i18n="plan.complex">Complex task</span>
-      </div>
-      <div id="plan-reasoning" class="plan-reasoning"></div>
-      <div id="plan-steps" class="plan-steps"></div>
-      <div id="plan-actions">
-        <button id="plan-cancel" class="setting-btn secondary" data-i18n="plan.cancel">Cancel</button>
-        <button id="plan-skip" class="setting-btn secondary" data-i18n="plan.skip">Execute without plan</button>
-        <button id="plan-approve" class="setting-btn primary" data-i18n="plan.approve">Approve &amp; execute</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ═══ PERMISSION DIALOG ═══ -->
-  <div id="permission-overlay" class="hidden">
-    <div id="permission-dialog" role="alertdialog" aria-modal="true" aria-labelledby="permission-title">
-      <div id="permission-header">
-        <span id="permission-title" data-i18n="permission.title">Permission required</span>
-        <span id="permission-risk-badge" class="permission-risk-badge"></span>
-      </div>
-      <div id="permission-tool-name" class="permission-tool-name"></div>
-      <div id="permission-description" class="permission-description"></div>
-      <pre id="permission-command" class="permission-command hidden"></pre>
-      <div id="permission-preview" class="permission-preview hidden">
-        <div id="permission-preview-path" class="permission-preview-path"></div>
-        <pre id="permission-preview-content" class="permission-preview-content"></pre>
-      </div>
-      <div id="permission-actions">
-        <button id="permission-deny" class="setting-btn secondary" data-i18n="permission.deny">Deny</button>
-        <button id="permission-allow-once" class="setting-btn secondary" data-i18n="permission.allowOnce">Allow once</button>
-        <button id="permission-allow-always" class="setting-btn primary" data-i18n="permission.allowAlways">Always allow</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ═══ CONFIRM DIALOG (in-app; window.confirm is not supported in Tauri's WKWebView) ═══ -->
-  <div id="confirm-overlay" class="hidden">
-    <div id="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
-      <div id="confirm-header">
-        <span id="confirm-title" data-i18n="confirm.title">Confirm</span>
-      </div>
-      <div id="confirm-message" class="confirm-message"></div>
-      <div id="confirm-actions">
-        <button id="confirm-cancel" class="setting-btn secondary" data-i18n="confirm.cancel">Cancel</button>
-        <button id="confirm-ok" class="setting-btn danger" data-i18n="confirm.ok">Delete</button>
-      </div>
-    </div>
-  </div>
+  <!-- ═══ Inline action cards (permission / plan / confirm) are built in
+       JS and appended to the chat transcript (see src/ui/inlineCard.ts) —
+       no modal overlay DOM. ═══ -->
 
   <div id="toast" class="hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 

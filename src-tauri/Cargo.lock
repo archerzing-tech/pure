@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "pure"
-version = "0.10.1"
+version = "1.0.0"
 dependencies = [
  "base64 0.21.7",
  "futures-util",

@@ -33,11 +33,17 @@ export interface PureConfig {
   toolBrowser: boolean;
   /**
    * Optional Tavily Search API key (Settings → Tools → Web Tools). When set,
-   * web_search uses the Tavily API first (stable index, no HTML scraping,
-   * good Chinese coverage — the approach Claude Code / opencode use) and
-   * falls back to the free HTML backends (Sogou / cn.bing / DDG / Bing).
+   * web_search uses the Tavily API after Serper (stable index, no HTML
+   * scraping) and falls back to the free HTML backends (Sogou / cn.bing /
+   * DDG / Bing).
    */
   tavilyApiKey: string;
+  /**
+   * Optional Serper.dev Search API key (Settings → Tools → Web Tools). When
+   * set, web_search uses the Serper API first — a real Google index, the best
+   * quality for both Chinese and English (~2500 free trial queries).
+   */
+  serperApiKey: string;
   skills: Record<string, boolean>;
   mcpServers: Array<{ name: string; transport: 'stdio' | 'http'; command?: string[]; url?: string }>;
   /**
@@ -59,6 +65,27 @@ export interface PureConfig {
 }
 
 const STORAGE_KEY = 'pure_config';
+
+/**
+ * Built-in MCP servers shipped with pure. `web-search` wraps the
+ * DuckDuckGo-based @sthbryan/web-search-mcp server (search / fetch_page /
+ * query tools, no API key) — it strengthens web search, especially for
+ * Chinese queries. Users can remove it in Settings → MCP like any other
+ * server; the removal is persisted (the config v3 migration only re-adds it
+ * once).
+ */
+export const DEFAULT_MCP_SERVERS: PureConfig['mcpServers'] = [
+  {
+    name: 'web-search',
+    transport: 'stdio',
+    command: ['bunx', '-y', '@sthbryan/web-search-mcp'],
+  },
+];
+
+/** True when `name` is one of the built-in (non user-added) MCP servers. */
+export function isDefaultMcpServer(name: string): boolean {
+  return DEFAULT_MCP_SERVERS.some((s) => s.name === name);
+}
 
 function defaultModel(provider: string): string {
   switch (provider) {
@@ -91,10 +118,11 @@ export function defaults(): PureConfig {
     toolGit: true,
     toolBrowser: true,
     tavilyApiKey: '',
+    serperApiKey: '',
     skills: { 'code-review': true, 'web-research': true, memory: true, planning: true },
-    mcpServers: [],
+    mcpServers: [...DEFAULT_MCP_SERVERS],
     streamingRender: true,
-    configVersion: 2,
+    configVersion: 3,
   };
 }
 
@@ -133,7 +161,22 @@ export function hasConfiguredKey(cfg: PureConfig | null): cfg is PureConfig {
   return !!(cfg && (cfg.apiKey || cfg.hasApiKey));
 }
 
+// Cached parse of the config: loadConfig() JSON.parses localStorage and is
+// called on hot paths (every send, every streaming-state change, sidebar
+// updates). Re-parsing hundreds of times per turn is wasted work — cache the
+// result until a save actually rewrites it. The apikey URL param is constant
+// for the page session, so caching is safe there too. Returns a shallow copy
+// so callers can't mutate the shared cache.
+let configCache: PureConfig | null | undefined;
+
+export function invalidateConfigCache(): void {
+  configCache = undefined;
+}
+
 export function loadConfig(): PureConfig | null {
+  if (configCache !== undefined) {
+    return configCache === null ? null : { ...configCache };
+  }
   const params = new URLSearchParams(window.location.search);
   if (params.get('apikey')) {
     const base: PureConfig = defaults();
@@ -150,6 +193,7 @@ export function loadConfig(): PureConfig | null {
       cfg.hasApiKey = true;
       cfg.apiKey = '';
     }
+    configCache = cfg;
     return cfg;
   }
   try {
@@ -172,6 +216,18 @@ export function loadConfig(): PureConfig | null {
         cfg.configVersion = 2;
         needsPersist = true;
       }
+      // Config v3 migration: the built-in web-search MCP server was added.
+      // Existing configs get it ONCE; users who later delete it in Settings →
+      // MCP save an explicit list without it (configVersion stays 3), so it
+      // never silently returns.
+      if ((parsed.configVersion ?? 1) < 3) {
+        const current = cfg.mcpServers ?? [];
+        if (!current.some((s) => s.name === DEFAULT_MCP_SERVERS[0].name)) {
+          cfg.mcpServers = [...DEFAULT_MCP_SERVERS, ...current];
+        }
+        cfg.configVersion = 3;
+        needsPersist = true;
+      }
       if (isTauriRuntime() && cfg.apiKey) {
         // Legacy migration: move a key previously persisted to localStorage
         // into Rust secrets, then scrub it.
@@ -185,9 +241,11 @@ export function loadConfig(): PureConfig | null {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
         } catch { /* ignore */ }
       }
+      configCache = cfg;
       return cfg;
     }
   } catch { /* ignore */ }
+  configCache = null;
   return null;
 }
 
@@ -396,6 +454,7 @@ export class SettingsPanel {
       '#cfg-language',
       '#cfg-fontsize', '#cfg-density',
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
+      '#cfg-tavily-key', '#cfg-serper-key',
       '#cfg-streaming-render',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle'
@@ -486,6 +545,8 @@ export class SettingsPanel {
     (document.getElementById('cfg-tool-browser') as HTMLInputElement).checked = cfg.toolBrowser;
     const tavilyKeyEl = document.getElementById('cfg-tavily-key') as HTMLInputElement | null;
     if (tavilyKeyEl) tavilyKeyEl.value = cfg.tavilyApiKey ?? '';
+    const serperKeyEl = document.getElementById('cfg-serper-key') as HTMLInputElement | null;
+    if (serperKeyEl) serperKeyEl.value = cfg.serperApiKey ?? '';
 
     document.querySelectorAll('.cfg-skill-toggle').forEach(el => {
       const skill = el.getAttribute('data-skill');
@@ -517,11 +578,14 @@ export class SettingsPanel {
       const label = s.transport === 'stdio'
         ? (s.command ? s.command.join(' ') : 'stdio')
         : (s.url || 'http');
+      const builtin = isDefaultMcpServer(s.name)
+        ? ` <span class="mcp-server-badge mcp-server-badge-builtin">${t('mcp.builtin')}</span>`
+        : '';
       return `<div class="mcp-server-card" data-index="${i}">
         <div class="mcp-server-info">
           <div>
             <span class="mcp-server-name">${escapeHtml(s.name)}</span>
-            <span class="mcp-server-badge">${escapeHtml(s.transport)}</span>
+            <span class="mcp-server-badge">${escapeHtml(s.transport)}</span>${builtin}
             <div class="mcp-server-command">${escapeHtml(label)}</div>
           </div>
         </div>
@@ -627,6 +691,7 @@ export class SettingsPanel {
       toolGit: (document.getElementById('cfg-tool-git') as HTMLInputElement).checked,
       toolBrowser: (document.getElementById('cfg-tool-browser') as HTMLInputElement).checked,
       tavilyApiKey: (document.getElementById('cfg-tavily-key') as HTMLInputElement | null)?.value.trim() ?? '',
+      serperApiKey: (document.getElementById('cfg-serper-key') as HTMLInputElement | null)?.value.trim() ?? '',
       skills,
       mcpServers: [...this.mcpServers],
       streamingRender: (document.getElementById('cfg-streaming-render') as HTMLInputElement | null)?.checked ?? true,
@@ -666,6 +731,8 @@ export class SettingsPanel {
     }
 
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    // Drop the cached config so the next loadConfig() re-reads the saved state.
+    invalidateConfigCache();
 
     updateLanguage(cfg.language as I18nLanguage);
     this.applyTheme(cfg.theme);

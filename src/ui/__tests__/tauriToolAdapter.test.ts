@@ -1,7 +1,7 @@
 // src/ui/__tests__/tauriToolAdapter.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { formatCommandOutput, formatCommandError, buildCommandResult, formatBytes, formatWriteProgress } from '../TauriToolAdapter';
+import { formatCommandOutput, formatCommandError, buildCommandResult, formatBytes, formatWriteProgress, buildWebSearchArgs } from '../TauriToolAdapter';
 
 describe('formatCommandOutput', () => {
   it('joins plain stdout lines', () => {
@@ -76,6 +76,28 @@ describe('formatBytes', () => {
     expect(formatBytes(1024)).toBe('1.0 KB');
     expect(formatBytes(12 * 1024)).toBe('12.0 KB');
     expect(formatBytes(1.5 * 1024 * 1024)).toBe('1.5 MB');
+  });
+});
+
+describe('buildWebSearchArgs (Rust web_search invoke arg lock)', () => {
+  it('passes the query, default maxResults, and both API keys', () => {
+    expect(buildWebSearchArgs('/ws', { query: '西安到重庆 机票' }, 'tvly-1', 'serper-2')).toEqual({
+      workspace: '/ws',
+      query: '西安到重庆 机票',
+      maxResults: 10,
+      apiKey: 'tvly-1',
+      serperApiKey: 'serper-2',
+    });
+  });
+
+  it('keeps a caller-supplied maxResults and defaults empty keys to empty strings', () => {
+    expect(buildWebSearchArgs('/ws', { query: 'rust', maxResults: 5 }, '', '')).toEqual({
+      workspace: '/ws',
+      query: 'rust',
+      maxResults: 5,
+      apiKey: '',
+      serperApiKey: '',
+    });
   });
 });
 

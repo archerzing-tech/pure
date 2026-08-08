@@ -22,6 +22,7 @@
   --accent:       #7B6FF0;
   --accent-hover: #6A5DE0;
   --accent-soft:  #F1EFFC;
+  --plan-bg:      #EEF3FB; /* planner surfaces (plan dialog / progress card) */
   --danger:       #E03E3E;
   --danger-soft:  #FDF2F2;
   --success:      #0F7B4E;
@@ -79,6 +80,7 @@
   --accent:       #A89BFF;
   --accent-hover: #BFB5FF;
   --accent-soft:  #2A2440;
+  --plan-bg:      #1C2632;
   --danger:       #FF6B6B;
   --danger-soft:  #3A2020;
   --shadow-sm:    0 1px 2px rgba(0,0,0,0.2);
@@ -490,10 +492,12 @@ body {
   top: 4px;
   left: 4px;
   z-index: 10;
-  background: rgba(255,255,255,0.55);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid transparent;
+  /* Solid chip, no backdrop-filter: blur() makes WKWebView re-blur the layers
+     beneath on every repaint (streaming scroll, theme flip) — a constant
+     compositor cost even when the button is idle. A crisp opaque surface
+     reads the same at 34px and costs nothing. */
+  background: var(--bg-card);
+  border: 1px solid var(--border);
   cursor: pointer;
   color: var(--text-tertiary);
   padding: 6px 7px;
@@ -501,9 +505,6 @@ body {
   display: flex;
   opacity: 1;
   transition: opacity 0.4s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
-}
-[data-theme="dark"] #sidebar-toggle {
-  background: rgba(25,25,25,0.55);
 }
 
 #sidebar-toggle:hover {
@@ -520,10 +521,10 @@ body {
   top: 4px;
   right: 4px;
   z-index: 20;
-  background: rgba(255,255,255,0.55);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid transparent;
+  /* Same no-backdrop-filter treatment as #sidebar-toggle — see there for the
+     WKWebView compositing rationale. */
+  background: var(--bg-card);
+  border: 1px solid var(--border);
   cursor: pointer;
   color: var(--text-tertiary);
   padding: 7px 8px;
@@ -531,9 +532,6 @@ body {
   display: flex;
   opacity: 1;
   transition: opacity 0.4s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
-}
-[data-theme="dark"] #right-settings-btn {
-  background: rgba(25,25,25,0.55);
 }
 
 #right-settings-btn:hover {
@@ -750,7 +748,8 @@ body {
  * that tints accent when a workspace is active, mirroring the sidebar chip.
  */
 
-.input-ws-btn {
+.input-ws-btn,
+.attach-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -766,13 +765,15 @@ body {
   padding: 0;
 }
 
-.input-ws-btn:hover {
+.input-ws-btn:hover,
+.attach-btn:hover {
   background: var(--bg-hover);
   color: var(--text);
   border-color: var(--text-tertiary);
 }
 
-.input-ws-btn:active {
+.input-ws-btn:active,
+.attach-btn:active {
   transform: scale(0.92);
 }
 
@@ -796,6 +797,21 @@ body {
 }
 
 .input-ws-btn.has-workspace:hover .wp-folder-icon {
+  color: var(--accent-hover);
+}
+
+/* ── Composer attach button (paperclip) ──
+ * Ghost button that opens a native file picker to upload attachments as chips.
+ * Base look is shared with .input-ws-btn above. Tints accent while
+ * attachments are queued (has-attachments, set by main.ts).
+ */
+.attach-btn.has-attachments {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.attach-btn.has-attachments:hover {
   color: var(--accent-hover);
 }
 
@@ -829,18 +845,22 @@ body {
 
 /* The landing folder button sits between prompt and send — keep it subtly
    visible even when the send button is faded out (it is a workspace action,
-   not tied to typing). */
-#landing-input-wrap .input-ws-btn {
+   not tied to typing). The attach button mirrors the same treatment. */
+#landing-input-wrap .input-ws-btn,
+#landing-input-wrap .attach-btn {
   margin-left: 8px;
   opacity: 0.75;
 }
 
 #landing-input-wrap:focus-within .input-ws-btn,
-#landing-prompt:not(:placeholder-shown) ~ .input-ws-btn {
+#landing-prompt:not(:placeholder-shown) ~ .input-ws-btn,
+#landing-input-wrap:focus-within .attach-btn,
+#landing-prompt:not(:placeholder-shown) ~ .attach-btn {
   opacity: 1;
 }
 
-#landing-input-wrap .input-ws-btn:hover {
+#landing-input-wrap .input-ws-btn:hover,
+#landing-input-wrap .attach-btn:hover {
   opacity: 1;
 }
 
@@ -1081,16 +1101,18 @@ body {
   display: none;
 }
 .tool-row-summary::before {
-  content: '▸';
-  font-size: 10px;
+  content: '›';
+  font-size: 12px;
   color: var(--text-tertiary);
-  transition: transform 0.2s var(--ease-out);
+  transition: transform 0.2s var(--ease-out), color 0.15s;
   display: inline-block;
-  width: 12px;
+  width: 14px;
   flex-shrink: 0;
+  /* Collapsed → arrow points DOWN (expand). */
+  transform: rotate(90deg);
 }
 .tool-row[open] .tool-row-summary::before {
-  transform: rotate(90deg);
+  transform: rotate(-90deg);
 }
 
 .tool-row-icon {
@@ -1312,24 +1334,22 @@ body {
 
 /* Read, Write, Bash, and List contents use the same neutral console surface
    as a terminal, while the surrounding tool row keeps the normal chat styling.
-   The Input + Output panels render as ONE continuous console block framed by
-   a thin border line. The seam in the middle carries no border, no rounded
-   corners and no gap — the first panel's top corners and the second panel's
-   bottom corners carry the block's outer radius. */
+   Terminal panels keep the dark console look but render as clean rounded
+   rectangles matching the app's card borders: a lone panel is fully rounded;
+   stacked panels merge into one block (shared edge, top/bottom corners on the
+   first/last). */
 .tool-row-section.terminal-panel {
   margin-top: 4px;
   padding: 9px 10px 10px;
   border: 1px solid var(--term-border);
-  border-bottom: 0;
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--radius-sm);
   background: var(--term-bg);
 }
 .tool-row-section.terminal-panel + .tool-row-section.terminal-panel {
   margin-top: 0;
   padding-top: 9px;
-  border: 1px solid var(--term-border);
   border-top: 0;
-  border-radius: 0 0 6px 6px;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
 }
 .tool-row-section.terminal-panel .tool-row-section-label {
   color: var(--term-dim);
@@ -1362,6 +1382,45 @@ body {
   border-bottom-color: var(--term-border);
 }
 
+/* ── Inline action cards (permission / plan review / confirm) ──
+ * Authorization and confirmation prompts render as a card appended to the chat
+ * transcript (see inlineCard.ts) instead of a modal overlay, so the user keeps
+ * full conversation context while deciding. Reuses the permission/plan/confirm
+ * sub-element styles (risk badge, plan steps, content preview, …) from the
+ * former dialog CSS below. */
+.bubble-row.inline-card {
+  margin: 2px 0 6px;
+}
+.inline-card-box {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+}
+.inline-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.inline-card-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+.inline-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.inline-card-actions .setting-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 7px;
+}
+
 /* ── Plan progress card (approved execution plan in the transcript) ──
  * Shown after a user approves the pre-run plan: lists every phase with the
  * current one highlighted, advancing live as the model emits `## 阶段 n/m`
@@ -1374,7 +1433,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px 12px;
-  background: var(--bg-card);
+  background: var(--plan-bg);
 }
 .plan-progress-head {
   display: flex;
@@ -1619,6 +1678,16 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* Kill every looping animation (thinking dots, spinners, blinkers, pulses)
+     so a reduced-motion user never pays the compositor cost of infinite
+     animations while the app is open. */
+  #landing-cursor,
+  .bubble.streaming::after,
+  .bubble-row.status.pending .bubble.status,
+  .tool-row-status .spinner,
+  .tool-row.pending .tool-row-summary::after,
+  .tool-row-waiting .waiting-dots::after,
+  .tool-row-waiting .term-cursor,
   .thinking-dots i,
   .thinking-card.thinking .thinking-icon svg {
     animation: none;
@@ -2715,6 +2784,16 @@ body {
   vertical-align: middle;
 }
 
+/* Built-in (shipped with pure) server badge — green tint so it reads as a
+   system component rather than user configuration, distinct from the accent
+   transport badge. */
+.mcp-server-badge-builtin {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
 .mcp-server-command {
   font-size: 11px;
   color: var(--text-tertiary);
@@ -2827,54 +2906,12 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Permission Dialog ── */
-#permission-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 400;
-  background: rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  animation: viewerIn 0.25s var(--ease-out) both;
-}
-#permission-overlay.hidden {
-  display: none;
-}
-
-#permission-dialog {
-  width: 420px;
-  max-width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-  padding: 20px 22px;
-  animation: dialogIn 0.35s var(--ease-spring) both;
-}
-@keyframes dialogIn {
-  from { opacity: 0; transform: translateY(14px) scale(0.96); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-#permission-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-#permission-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text);
-  letter-spacing: -0.01em;
-}
-
+/* ── Permission / Plan / Confirm prompts ──
+ * Formerly centered modal overlays; now rendered as inline cards appended to
+ * the chat transcript (see inlineCard.ts). The card container styling lives in
+ * the "Inline action cards" block above; the permission/plan/confirm sub-element
+ * classes below (risk badge, tool name, command/preview, steps, message…) are
+ * reused inside the cards. */
 .permission-risk-badge {
   font-size: 10px;
   font-weight: 700;
@@ -2972,58 +3009,6 @@ body {
   overflow-y: auto;
 }
 
-#permission-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-/* ── Plan Review Dialog ── */
-#plan-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 410;
-  background: rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  animation: viewerIn 0.25s var(--ease-out) both;
-}
-#plan-overlay.hidden {
-  display: none;
-}
-
-#plan-dialog {
-  width: 460px;
-  max-width: 100%;
-  max-height: 80vh;
-  overflow-y: auto;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-  padding: 20px 22px;
-  animation: dialogIn 0.35s var(--ease-spring) both;
-}
-
-#plan-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-#plan-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text);
-  letter-spacing: -0.01em;
-}
-
 .plan-complexity-badge {
   font-size: 10px;
   font-weight: 700;
@@ -3093,67 +3078,10 @@ body {
   line-height: 1.45;
 }
 
-#plan-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-/* ── Confirm Dialog (in-app; window.confirm is unsupported in Tauri's WKWebView) ── */
-#confirm-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 420;
-  background: rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  animation: viewerIn 0.25s var(--ease-out) both;
-}
-#confirm-overlay.hidden {
-  display: none;
-}
-
-#confirm-dialog {
-  width: 380px;
-  max-width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-  padding: 20px 22px;
-  animation: dialogIn 0.35s var(--ease-spring) both;
-}
-
-#confirm-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-#confirm-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text);
-  letter-spacing: -0.01em;
-}
-
 .confirm-message {
   font-size: 13px;
   line-height: 1.55;
   color: var(--text-secondary);
-  margin-bottom: 18px;
-}
-
-#confirm-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
 }
 
 /* ── Toast ── */
@@ -4001,7 +3929,8 @@ select:focus-visible,
   border-radius: 2px;
 }
 
-#landing-input-wrap .input-ws-btn {
+#landing-input-wrap .input-ws-btn,
+#landing-input-wrap .attach-btn {
   width: 34px;
   height: 34px;
   margin-left: 10px;
@@ -4119,6 +4048,13 @@ select:focus-visible,
   gap: 10px;
   padding: 12px 32px 16px;
   border-top: 1px solid var(--border);
+  /* Match the centered chat column (#chat is max-width 920px) so the
+     composer aligns with the transcript instead of spanning the whole
+     window — same width + same 32px side padding means the folder button,
+     input and send button line up exactly with the message column edges. */
+  width: 100%;
+  max-width: 920px;
+  margin: 0 auto;
 }
 
 #status-bar {
@@ -4128,7 +4064,8 @@ select:focus-visible,
   -webkit-backdrop-filter: blur(14px);
 }
 
-#input-bar .input-ws-btn {
+#input-bar .input-ws-btn,
+#input-bar .attach-btn {
   width: 42px;
   height: 42px;
   border-radius: 12px;
@@ -4211,25 +4148,6 @@ select:focus-visible,
   border-color: var(--border-light);
   border-radius: 10px;
   background: color-mix(in srgb, var(--bg-card) 72%, transparent);
-}
-
-#permission-overlay,
-#plan-overlay,
-#confirm-overlay {
-  background: color-mix(in srgb, #080b12 68%, transparent);
-  backdrop-filter: blur(14px);
-}
-
-#permission-dialog,
-#plan-dialog,
-#confirm-dialog {
-  border-color: color-mix(in srgb, var(--border) 85%, transparent);
-  border-radius: 18px;
-  box-shadow: var(--shadow-lg);
-}
-
-#plan-dialog {
-  width: 540px;
 }
 
 .plan-step {
@@ -4825,6 +4743,7 @@ button svg,
 }
 
 #landing-input-wrap .input-ws-btn,
+#landing-input-wrap .attach-btn,
 #landing-send-btn {
   width: 36px;
   height: 36px;
@@ -4841,6 +4760,7 @@ button svg,
 }
 
 #input-bar .input-ws-btn,
+#input-bar .attach-btn,
 #send-btn {
   width: 42px;
   height: 42px;
@@ -4968,31 +4888,32 @@ button svg,
 }
 
 /* ── Tool row readability ──
- * The disclosure affordance is intentionally larger than the surrounding
- * metadata so every tool row has an obvious, easy-to-hit expand target. */
+ * The disclosure affordance is a bare chevron — no box, border or background:
+ * pointing DOWN while collapsed (click to expand) and pointing UP while open
+ * (click to collapse). The hover tint is text-only so the row stays clean. */
 .tool-row-summary::before {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--text-tertiary) 12%, transparent);
-  color: var(--text-secondary);
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--text-tertiary);
   content: '›';
-  font-size: 22px;
-  font-weight: 500;
+  font-size: 16px;
+  font-weight: 600;
   line-height: 1;
-  transition: transform var(--transition), background var(--transition), color var(--transition);
+  /* Collapsed → arrow points down (expand). */
+  transform: rotate(90deg);
+  transition: transform var(--transition), color var(--transition);
 }
 .tool-row-summary:hover::before,
 .tool-row-summary:focus-visible::before {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent);
 }
+/* Open → arrow points up (collapse). */
 .tool-row[open] .tool-row-summary::before {
-  transform: rotate(90deg);
+  transform: rotate(-90deg);
 }
 
 /* Web tools use one continuous pale-blue surface. The summary is the first
@@ -5034,6 +4955,63 @@ button svg,
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover,
 [data-theme="dark"] .tool-row.web-tool .tool-row-body {
   background: transparent;
+}
+
+/* Planner (planning subagent) tool rows use a continuous pale-blue surface
+   matching the plan card (--plan-bg), so a planning delegation reads as a
+   planning surface at a glance — same seam-less summary→body layout as the
+   web tools. */
+.tool-row.planner {
+  overflow: hidden;
+  border: 1px solid #cfe0f6;
+  border-radius: 10px;
+  background: var(--plan-bg);
+}
+.tool-row.planner .tool-row-summary,
+.tool-row.planner .tool-row-summary:hover {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 12px;
+}
+.tool-row.planner .tool-row-body {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0 12px 12px 52px;
+  max-height: 320px;
+}
+.tool-row.planner .tool-row-section + .tool-row-section {
+  margin-top: 0;
+  padding-top: 10px;
+  border-top: 0;
+}
+.tool-row.planner .tool-row-section-label,
+.tool-row.planner .tool-row-field-key {
+  color: #5a6f8c;
+}
+.tool-row.planner .tool-row-field-value,
+.tool-row.planner .tool-row-result,
+.tool-row.planner .tool-result-preview {
+  color: #2c3e58;
+}
+[data-theme="dark"] .tool-row.planner {
+  border-color: #33486a;
+  background: #1b2436;
+}
+[data-theme="dark"] .tool-row.planner .tool-row-summary,
+[data-theme="dark"] .tool-row.planner .tool-row-summary:hover,
+[data-theme="dark"] .tool-row.planner .tool-row-body {
+  background: transparent;
+}
+[data-theme="dark"] .tool-row.planner .tool-row-section-label,
+[data-theme="dark"] .tool-row.planner .tool-row-field-key {
+  color: #7a8fb0;
+}
+[data-theme="dark"] .tool-row.planner .tool-row-field-value,
+[data-theme="dark"] .tool-row.planner .tool-row-result,
+[data-theme="dark"] .tool-row.planner .tool-result-preview {
+  color: #c3cfe2;
 }
 
 /* ── Web and system tool surfaces ──
@@ -5166,6 +5144,51 @@ button svg,
   padding: 12px;
   opacity: 1;
   overflow-x: auto;
+}
+
+/* ── Native chart internals — themed via the --chart-* variables so the same
+   generated SVG reads correctly in light and dark mode (and the exported
+   standalone file can mirror these rules via the theme-resolved snapshot). ── */
+.chart-svg .chart-title,
+.chart-svg .chart-text,
+.chart-svg .chart-legend-label {
+  fill: var(--chart-text);
+  font-family: var(--font-sans);
+}
+.chart-svg .chart-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+.chart-svg .chart-text {
+  font-size: 11px;
+}
+.chart-svg .chart-unit {
+  fill: var(--chart-muted);
+  font: 11px var(--font-sans);
+}
+.chart-svg .chart-value {
+  fill: var(--chart-value);
+  font: 600 12px var(--font-sans);
+}
+.chart-svg .chart-total {
+  fill: var(--chart-total);
+  font: 600 20px var(--font-sans);
+}
+.chart-svg .chart-slice-pct {
+  fill: var(--chart-slice-text);
+  font: 600 11px var(--font-sans);
+}
+.chart-svg .chart-legend-value {
+  fill: var(--chart-value);
+  font: 600 11px var(--font-sans);
+}
+.chart-svg .chart-grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+}
+.chart-svg .chart-axis {
+  stroke: var(--chart-axis);
+  stroke-width: 1.5;
 }
 .bubble .svg-gallery {
   display: grid;
@@ -5560,6 +5583,9 @@ button svg,
 .bubble .diagram-slot[data-state="loading"] .diagram-error {
   display: none;
 }
+.bubble .diagram-slot[data-state="loading"] {
+  min-height: 160px;
+}
 .diagram-loading {
   position: absolute;
   inset: 0;
@@ -5568,55 +5594,90 @@ button svg,
   pointer-events: none;
 }
 .bubble .diagram-slot[data-state="loading"] .diagram-loading {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
 }
-.diagram-loading-square {
-  width: 42%;
-  aspect-ratio: 1;
-  display: grid;
-  place-items: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
-  border-radius: var(--radius-xs);
-  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
-}
-.diagram-spinner {
-  width: 28px;
-  height: 28px;
-  border: 3px solid color-mix(in srgb, var(--accent) 22%, transparent);
-  border-top-color: var(--accent);
+.diagram-loading-ring {
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
-  animation: diagramSpinner 0.8s linear infinite;
+  background: conic-gradient(from 0deg, transparent 0deg, var(--accent) 300deg, transparent 360deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  animation: diagramRing 1.1s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
 }
-@keyframes diagramSpinner {
+.diagram-loading-label {
+  font: 11px var(--font-sans);
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  animation: diagramPulse 1.6s ease-in-out infinite;
+}
+@keyframes diagramRing {
   to { transform: rotate(360deg); }
 }
+@keyframes diagramPulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+/* The download action is NO longer a header bar above the image: it floats as
+   a compact save pill pinned to the slot's top-right corner, fading in only
+   while the pointer hovers the rendered picture (or the button is focused via
+   keyboard, :focus-within). The image itself stays chrome-free. */
 .diagram-toolbar {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 3;
   display: none;
   align-items: center;
   gap: 4px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-light);
-  background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 160ms ease, transform 160ms ease;
+  pointer-events: none;
 }
 .bubble .diagram-slot[data-state="preview"] .diagram-toolbar,
 .bubble .diagram-slot[data-state="error"] .diagram-toolbar {
   display: flex;
 }
-.diagram-view-btn {
-  border: 1px solid transparent;
-  border-radius: var(--radius-xs);
-  padding: 4px 9px;
-  background: transparent;
-  color: var(--text-secondary);
-  font: 11px var(--font-sans);
-  cursor: pointer;
+.bubble .diagram-slot[data-state="preview"]:hover .diagram-toolbar,
+.bubble .diagram-slot[data-state="preview"]:focus-within .diagram-toolbar,
+.bubble .diagram-slot[data-state="error"]:hover .diagram-toolbar,
+.bubble .diagram-slot[data-state="error"]:focus-within .diagram-toolbar {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
 }
-.diagram-view-btn:hover,
-.diagram-view-btn:focus-visible,
-.diagram-view-btn.active {
+.diagram-download-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--border-light) 75%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-card) 94%, transparent);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--text-secondary);
+  font: 12px var(--font-sans);
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease, border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+.diagram-download-btn:hover,
+.diagram-download-btn:focus-visible {
   color: var(--accent);
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+  background: color-mix(in srgb, var(--bg-card) 88%, var(--accent-soft));
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
 }
 .diagram-preview {
   display: none;
@@ -5692,7 +5753,8 @@ button svg,
   background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 @media (prefers-reduced-motion: reduce) {
-  .diagram-spinner {
+  .diagram-loading-ring,
+  .diagram-loading-label {
     animation: none;
   }
   .bubble .diagram-slot {
@@ -5715,31 +5777,4 @@ button svg,
 .tool-row.web-tool .tool-row-body,
 .tool-row.sys-info .tool-row-body {
   padding: 4px 12px 12px 52px;
-}
-
-/* ── Diagram viewer: source view ──
- * The image viewer is a dark overlay; the raw source is shown as light text on
- * the app background so code stays readable in both themes. */
-.mermaid-viewer-source {
-  position: absolute;
-  inset: 0;
-  z-index: 1005;
-  margin: 0;
-  padding: 28px 32px;
-  overflow: auto;
-  background: var(--bg);
-  color: var(--text);
-  font: 12px/1.7 var(--font-mono);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.mermaid-viewer-source-btn {
-  width: auto;
-  padding: 0 12px;
-  font-size: 13px;
-  font-weight: 500;
-}
-.mermaid-viewer-controls.source-mode .mermaid-viewer-zoom-btn:not(.mermaid-viewer-source-btn),
-.mermaid-viewer-controls.source-mode .mermaid-viewer-zoom-pct {
-  display: none;
 }
