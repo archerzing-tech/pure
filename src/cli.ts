@@ -1,5 +1,5 @@
 // src/cli.ts
-// v1.0.3 — one-shot + interactive REPL with self-evolving memory.
+// v1.1.0 — one-shot + interactive REPL with self-evolving memory.
 // Usage: pure "question"              → one-shot
 //        pure --resume abc123          → resume session
 //        pure --workspace .            → REPL
@@ -37,7 +37,7 @@ import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolA
 // Single source of truth for the CLI's displayed version (kept in sync with
 // package.json / src-tauri by the release flow; the CLI banner + startup line
 // both read from here).
-const CLI_VERSION = 'v1.0.3';
+const CLI_VERSION = 'v1.1.0';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 

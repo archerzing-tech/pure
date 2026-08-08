@@ -238,7 +238,10 @@
               <button id="settings-back-btn" class="icon-btn" data-i18n-title="settings.back.title" title="Back to chat">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
               </button>
-              <span id="settings-title" data-i18n="settings.title">Settings</span>
+              <div class="settings-heading-stack">
+                <span id="settings-title" data-i18n="settings.title">Settings</span>
+                <span id="settings-autosave-note" data-i18n="settings.autosave">Changes save automatically</span>
+              </div>
             </div>
             <button id="settings-close" class="icon-btn" data-i18n-title="settings.close.title" title="Close (Esc)">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -246,8 +249,9 @@
           </div>
 
           <div id="settings-body">
-            <nav id="settings-nav">
-              <button class="settings-nav-item active" data-category="general">
+            <nav id="settings-nav" data-i18n-aria-label="settings.categories" aria-label="Settings categories">
+              <div class="settings-nav-caption" data-i18n="settings.categories">Workspace controls</div>
+              <button class="settings-nav-item active" data-category="general" aria-current="page">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                 <span data-i18n="nav.general">General</span>
               </button>
@@ -322,25 +326,61 @@
               <div class="settings-page" data-page="llm">
                 <h2 class="settings-page-title" data-i18n="llm.title">LLM Provider</h2>
                 <p class="settings-page-desc" data-i18n="llm.desc">Configure your AI model provider</p>
-                <div class="settings-section">
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="llm.provider">Provider</span><span class="setting-hint" data-i18n="llm.provider.hint">AI model service</span></div>
-                    <select id="cfg-provider" class="setting-select" data-i18n-options="deepseek-openai:provider.deepseek-openai,deepseek-anthropic:provider.deepseek-anthropic,qwen:provider.qwen,glm:provider.glm"><option value="deepseek-openai">DeepSeek (OpenAI)</option><option value="deepseek-anthropic">DeepSeek (Anthropic)</option><option value="qwen">Qwen (Tongyi)</option><option value="glm">GLM (Zhipu)</option></select>
+                <div class="provider-section-heading">
+                  <div>
+                    <h3 data-i18n="llm.choose">Choose a provider</h3>
+                    <p data-i18n="llm.choose.hint">Your selected provider powers every new conversation.</p>
                   </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="llm.apiKey">API Key</span><span class="setting-hint" data-i18n="llm.apiKey.hint">Your API key</span></div>
-                    <div class="setting-input-group">
-                      <input id="cfg-apikey" class="setting-input" type="password" data-i18n-placeholder="llm.apiKey.placeholder" placeholder="sk-..." />
-                      <button id="cfg-toggle-key" class="setting-icon-btn" data-i18n-title="llm.apiKey.toggle" title="Toggle visibility"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                  <span class="provider-section-count">4</span>
+                </div>
+                <div id="provider-card-grid" class="provider-card-grid" role="listbox" data-i18n-aria-label="llm.choose" aria-label="Choose a provider">
+                  <button class="provider-card" type="button" data-provider="deepseek-openai" role="option" aria-selected="false">
+                    <span class="provider-card-topline"><span class="provider-card-mark provider-mark-deepseek">DS</span><span class="provider-card-status" data-provider-status>选择</span></span>
+                    <span class="provider-card-name" data-i18n="provider.deepseek-openai">DeepSeek (OpenAI)</span>
+                    <span class="provider-card-meta"><span data-i18n="llm.protocol.openai">OpenAI 兼容</span><b>·</b><span class="provider-card-model-value">deepseek-v4-flash</span></span>
+                  </button>
+                  <button class="provider-card" type="button" data-provider="deepseek-anthropic" role="option" aria-selected="false">
+                    <span class="provider-card-topline"><span class="provider-card-mark provider-mark-deepseek">DS</span><span class="provider-card-status" data-provider-status>选择</span></span>
+                    <span class="provider-card-name" data-i18n="provider.deepseek-anthropic">DeepSeek (Anthropic)</span>
+                    <span class="provider-card-meta"><span data-i18n="llm.protocol.anthropic">Anthropic 兼容</span><b>·</b><span class="provider-card-model-value">deepseek-v4-flash</span></span>
+                  </button>
+                  <button class="provider-card" type="button" data-provider="qwen" role="option" aria-selected="false">
+                    <span class="provider-card-topline"><span class="provider-card-mark provider-mark-qwen">Q</span><span class="provider-card-status" data-provider-status>选择</span></span>
+                    <span class="provider-card-name" data-i18n="provider.qwen">通义千问 (Tongyi)</span>
+                    <span class="provider-card-meta"><span data-i18n="llm.protocol.openai">OpenAI 兼容</span><b>·</b><span class="provider-card-model-value">qwen3-coder-next</span></span>
+                  </button>
+                  <button class="provider-card" type="button" data-provider="glm" role="option" aria-selected="false">
+                    <span class="provider-card-topline"><span class="provider-card-mark provider-mark-glm">GLM</span><span class="provider-card-status" data-provider-status>选择</span></span>
+                    <span class="provider-card-name" data-i18n="provider.glm">智谱 GLM (Zhipu)</span>
+                    <span class="provider-card-meta"><span data-i18n="llm.protocol.openai">OpenAI 兼容</span><b>·</b><span class="provider-card-model-value">glm-5.2</span></span>
+                  </button>
+                </div>
+                <div class="provider-config-card">
+                  <div class="provider-config-header">
+                    <div>
+                      <span class="provider-config-kicker" data-i18n="llm.connection.kicker">CONNECTION</span>
+                      <h3 id="provider-config-title">DeepSeek (OpenAI)</h3>
+                      <p id="provider-config-endpoint">https://api.deepseek.com</p>
                     </div>
+                    <span class="provider-config-badge" data-i18n="llm.active">当前使用</span>
                   </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="llm.model">Model</span><span class="setting-hint" data-i18n="llm.model.hint">Model identifier</span></div>
-                    <input id="cfg-model" class="setting-input" type="text" placeholder="deepseek-v4-flash" />
-                  </div>
-                  <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="llm.baseURL">Base URL</span><span class="setting-hint" data-i18n="llm.baseURL.hint">Custom endpoint (optional)</span></div>
-                    <input id="cfg-baseurl" class="setting-input" type="text" data-i18n-placeholder="llm.baseURL.placeholder" placeholder="Auto-detected" />
+                  <select id="cfg-provider" class="sr-only" data-i18n-options="deepseek-openai:provider.deepseek-openai,deepseek-anthropic:provider.deepseek-anthropic,qwen:provider.qwen,glm:provider.glm" tabindex="-1" aria-hidden="true"><option value="deepseek-openai">DeepSeek (OpenAI)</option><option value="deepseek-anthropic">DeepSeek (Anthropic)</option><option value="qwen">Qwen (Tongyi)</option><option value="glm">GLM (Zhipu)</option></select>
+                  <div class="provider-config-fields">
+                    <div class="setting-row">
+                      <div class="setting-info"><span class="setting-label" data-i18n="llm.apiKey">API Key</span><span class="setting-hint" data-i18n="llm.apiKey.hint">Your API key</span></div>
+                      <div class="setting-input-group">
+                        <input id="cfg-apikey" class="setting-input" type="password" data-i18n-placeholder="llm.apiKey.placeholder" placeholder="sk-..." />
+                        <button id="cfg-toggle-key" class="setting-icon-btn" data-i18n-title="llm.apiKey.toggle" title="Toggle visibility"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                      </div>
+                    </div>
+                    <div class="setting-row">
+                      <div class="setting-info"><span class="setting-label" data-i18n="llm.model">Model</span><span class="setting-hint" data-i18n="llm.model.hint">Model identifier</span></div>
+                      <input id="cfg-model" class="setting-input" type="text" placeholder="deepseek-v4-flash" />
+                    </div>
+                    <div class="setting-row">
+                      <div class="setting-info"><span class="setting-label" data-i18n="llm.baseURL">Base URL</span><span class="setting-hint" data-i18n="llm.baseURL.hint">Custom endpoint (optional)</span></div>
+                      <input id="cfg-baseurl" class="setting-input" type="text" data-i18n-placeholder="llm.baseURL.placeholder" placeholder="Auto-detected" />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -444,10 +484,10 @@
                 <div class="settings-section">
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="appearance.theme">Theme</span><span class="setting-hint" data-i18n="appearance.theme.hint">Color scheme</span></div>
-                    <div class="theme-selector" id="cfg-theme">
-                      <label class="theme-option active" data-theme="light"><span data-i18n-label="appearance.theme.light">Light</span></label>
-                      <label class="theme-option" data-theme="dark"><span data-i18n-label="appearance.theme.dark">Dark</span></label>
-                      <label class="theme-option" data-theme="system"><span data-i18n-label="appearance.theme.system">System</span></label>
+                    <div class="theme-selector" id="cfg-theme" role="radiogroup" data-i18n-aria-label="appearance.theme" aria-label="Theme">
+                      <label class="theme-option active" data-theme="light" role="radio" tabindex="0" aria-checked="true"><span data-i18n-label="appearance.theme.light">Light</span></label>
+                      <label class="theme-option" data-theme="dark" role="radio" tabindex="0" aria-checked="false"><span data-i18n-label="appearance.theme.dark">Dark</span></label>
+                      <label class="theme-option" data-theme="system" role="radio" tabindex="0" aria-checked="false"><span data-i18n-label="appearance.theme.system">System</span></label>
                     </div>
                   </div>
                   <div class="setting-row">

@@ -465,13 +465,22 @@ fn glob_files(
 /// squashing everything into a `success: true` string.
 #[tauri::command]
 async fn execute_command(workspace: String, command: String) -> Result<serde_json::Value, String> {
-    let output = TokioCommand::new("sh")
-        .arg("-c")
-        .arg(&command)
-        .current_dir(&workspace)
-        .output()
-        .await
-        .map_err(|e| format!("execute_command: {}", e))?;
+    // Unix shells run `sh -c`, Windows runs `cmd /C` (no `sh` binary there).
+    let output = {
+        #[cfg(unix)]
+        let mut cmd = TokioCommand::new("sh");
+        #[cfg(windows)]
+        let mut cmd = TokioCommand::new("cmd");
+        #[cfg(unix)]
+        cmd.arg("-c");
+        #[cfg(windows)]
+        cmd.arg("/C");
+        cmd.arg(&command)
+            .current_dir(&workspace)
+            .output()
+            .await
+            .map_err(|e| format!("execute_command: {}", e))?
+    };
 
     Ok(serde_json::json!({
         "exitCode": output.status.code().unwrap_or(-1),
@@ -502,9 +511,20 @@ type ChatStreamRegistry = Arc<StdMutex<BTreeMap<String, tokio::sync::oneshot::Se
 /// can kill the whole command tree. process_group(0) makes the child its own
 /// group leader (pgid == pid), which is what kill_process_group targets.
 fn spawn_shell_command(workspace: &str, command: &str) -> std::io::Result<Child> {
-    let mut cmd = TokioCommand::new("sh");
-    cmd.arg("-c")
-        .arg(command)
+    // Unix shells run `sh -c`, Windows runs `cmd /C` (no `sh` binary there).
+    #[cfg(unix)]
+    let mut cmd = {
+        let mut c = TokioCommand::new("sh");
+        c.arg("-c");
+        c
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = TokioCommand::new("cmd");
+        c.arg("/C");
+        c
+    };
+    cmd.arg(command)
         .current_dir(workspace)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -531,14 +551,26 @@ fn kill_process_group(pid: i32) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn kill_process_group(pid: i32) -> std::io::Result<()> {
-    let ret = unsafe { libc::kill(pid, libc::SIGKILL) };
-    if ret == 0 {
+    // Windows has no POSIX process groups; terminate the whole command tree
+    // (/T) forcibly (/F) via taskkill. A missing process (normal race between
+    // command completion and a kill arriving) is treated as success.
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else if status.code() == Some(128) {
+        // ERROR_PROC_NOT_FOUND: the process already exited (normal race between
+        // command completion and a kill arriving) — treat as success, mirroring
+        // the Unix ESRCH handling.
         Ok(())
     } else {
-        let err = std::io::Error::last_os_error();
-        if err.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(err) }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("taskkill exit {:?}", status.code()),
+        ))
     }
 }
 
@@ -744,12 +776,18 @@ fn diff_files(workspace: String, path_a: String, path_b: String) -> Result<Strin
     let full_a = resolve(&workspace, &path_a)?;
     let full_b = resolve(&workspace, &path_b)?;
 
-    let output = std::process::Command::new("diff")
-        .arg("-u")
-        .arg(&full_a)
-        .arg(&full_b)
-        .output()
-        .map_err(|e| format!("diff: {}", e))?;
+    // Windows ships no `diff` binary; fall back to `git diff --no-index` (Git
+    // for Windows ships git.exe) which reports differences with the same
+    // exit-code convention (0 identical / 1 differs).
+    let output = match std::process::Command::new("diff").arg("-u").arg(&full_a).arg(&full_b).output() {
+        Ok(o) => o,
+        Err(_) => std::process::Command::new("git")
+            .args(["diff", "--no-index", "--"])
+            .arg(&full_a)
+            .arg(&full_b)
+            .output()
+            .map_err(|e| format!("diff: {}", e))?,
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -3527,8 +3565,22 @@ fn sys_info(_workspace: String, location: Option<String>) -> Result<String, Stri
         .unwrap_or_else(|| "not set".to_string());
 
     let time = {
+        #[cfg(target_os = "macos")]
         let output = std::process::Command::new("date")
             .arg("+%Y-%m-%d %H:%M:%S %Z")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        #[cfg(target_os = "linux")]
+        let output = std::process::Command::new("date")
+            .arg("+%Y-%m-%d %H:%M:%S %Z")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        // Windows has no `date` binary; PowerShell formats the local time.
+        #[cfg(windows)]
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'"])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
@@ -3571,47 +3623,93 @@ fn sys_info(_workspace: String, location: Option<String>) -> Result<String, Stri
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Open Path (clickable transcript paths → Finder / default app)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════/// True for the URL schemes that should be handed to the system browser or
+/// mail client. Keep this allowlist narrow: `open_path` is exposed to the
+/// WebView and must not become a generic URI launcher.
+fn is_external_open_url(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:")
+}
 
-/// Open a file/directory with the OS default application (macOS `open`, Linux
-/// `xdg-open`, Windows `explorer`). A directory opens in the file manager; a
-/// file opens with its default app. When the exact path doesn't exist yet
-/// (e.g. clicking a file the agent plans to create), fall back to the nearest
-/// existing parent directory so the click still lands somewhere useful.
+/// Reject unsupported URI schemes while allowing normal POSIX paths and
+/// Windows drive paths (`C:\\...`).
+fn has_unsupported_uri_scheme(raw: &str) -> bool {
+    let Some(colon) = raw.find(':') else { return false };
+    if colon == 1 && raw.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic()) {
+        return false;
+    }
+    let scheme = &raw[..colon];
+    !scheme.is_empty()
+        && scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+/// Open a URL, file, or directory with the OS default application. URLs are
+/// handed to the default browser; directories open in the file manager and
+/// files open with their default app. Absolute OS command paths are deliberate:
+/// Finder-launched Tauri apps inherit a minimal PATH that may not contain
+/// `/usr/bin`, so invoking `open` by name can silently fail in the packaged GUI.
 #[tauri::command]
 async fn open_path(path: String) -> Result<(), String> {
-    let mut expanded = path;
-    // Expand a leading ~/ to the user's home directory (PathBuf alone does
-    // not resolve ~).
+    let raw = path.trim();
+    if raw.is_empty() {
+        return Err("open_path: path is empty".to_string());
+    }
+    if raw.contains('\0') {
+        return Err("open_path: path contains NUL".to_string());
+    }
+    if !is_external_open_url(raw) && has_unsupported_uri_scheme(raw) {
+        return Err(format!("open_path: unsupported URI scheme: {}", raw));
+    }
+
+    let is_url = is_external_open_url(raw);
+
+
+    let mut expanded = raw.to_string();
     if expanded.starts_with("~/") {
         if let Ok(home) = std::env::var("HOME") {
             expanded = format!("{}/{}", home.trim_end_matches('/'), &expanded[2..]);
         }
     }
 
-    let p = PathBuf::from(&expanded);
-    let target = if p.exists() {
-        p
+    let target = if is_url {
+        expanded
     } else {
-        p.parent()
-            .filter(|pp| pp.exists())
-            .map(|pp| pp.to_path_buf())
-            .unwrap_or(p)
+        let p = PathBuf::from(&expanded);
+        if p.exists() {
+            expanded
+        } else {
+            p.parent()
+                .filter(|pp| pp.exists())
+                .map(|pp| pp.to_string_lossy().to_string())
+                .unwrap_or(expanded)
+        }
     };
 
-    // Async so a slow launcher never blocks the main thread.
+    // Async so a slow launcher never blocks the main thread. Keep the command
+    // path explicit for packaged apps launched from Finder.
     #[cfg(target_os = "macos")]
-    let status = TokioCommand::new("open").arg(&target).status().await;
+    let status = TokioCommand::new("/usr/bin/open").arg(&target).status().await;
     #[cfg(target_os = "linux")]
-    let status = TokioCommand::new("xdg-open").arg(&target).status().await;
+    let status = TokioCommand::new("/usr/bin/xdg-open").arg(&target).status().await;
+    // explorer.exe is fire-and-forget and returns exit code 1 even on success,
+    // so `cmd /C start "" <target>` is used instead: it hands files, folders
+    // and URLs to the default app with a reliable exit code.
     #[cfg(target_os = "windows")]
-    let status = TokioCommand::new("explorer").arg(&target).status().await;
+    let status = TokioCommand::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(&target)
+        .status()
+        .await;
 
     status
         .map_err(|e| format!("open_path: {}", e))?
         .success()
         .then_some(())
-        .ok_or_else(|| format!("open failed: {}", target.display()))
+        .ok_or_else(|| format!("open failed: {}", target))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3662,6 +3760,22 @@ pub fn run() {
 #[cfg(test)]
 mod mcp_subprocess_tests {
     use super::*;
+
+    #[test]
+    fn external_open_url_allowlist_is_case_insensitive() {
+        assert!(is_external_open_url("HTTPS://example.com"));
+        assert!(is_external_open_url("MailTo:user@example.com"));
+        assert!(!is_external_open_url("javascript:alert(1)"));
+        assert!(!is_external_open_url("file:///tmp/report.txt"));
+    }
+
+    #[test]
+    fn unsupported_uri_scheme_keeps_local_paths_allowed() {
+        assert!(has_unsupported_uri_scheme("javascript:alert(1)"));
+        assert!(has_unsupported_uri_scheme("file:///tmp/report.txt"));
+        assert!(!has_unsupported_uri_scheme("/Users/me/report.txt"));
+        assert!(!has_unsupported_uri_scheme("C:\\Users\\me\\report.txt"));
+    }
 
     #[tokio::test]
     async fn mcp_call_roundtrips_jsonrpc_over_subprocess() {

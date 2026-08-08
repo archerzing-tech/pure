@@ -9,7 +9,7 @@ import { escapeHtml } from '../shared/html';
 import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { formatBytes } from './TauriToolAdapter';
-import { defaultModelFor } from '../shared/providers';
+import { defaultModelFor, providerDef } from '../shared/providers';
 import {
   STORAGE_KEY,
   defaults,
@@ -88,7 +88,10 @@ export class SettingsPanel {
     this.currentCategory = category;
 
     document.querySelectorAll('.settings-nav-item').forEach(el => {
-      el.classList.toggle('active', el.getAttribute('data-category') === category);
+      const isActive = el.getAttribute('data-category') === category;
+      el.classList.toggle('active', isActive);
+      if (isActive) el.setAttribute('aria-current', 'page');
+      else el.removeAttribute('aria-current');
     });
 
     document.querySelectorAll('.settings-page').forEach(el => {
@@ -211,20 +214,53 @@ export class SettingsPanel {
       if (keyInput.value.trim()) keyInput.dataset.touched = '1';
     });
 
-    // Provider change → update model placeholder + auto-save
+    // Provider cards + hidden compatibility select share one source of truth.
+    document.querySelectorAll<HTMLButtonElement>('.provider-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const provider = card.dataset.provider;
+        if (!provider) return;
+        const select = document.getElementById('cfg-provider') as HTMLSelectElement;
+        select.value = provider;
+        this.updateProviderPresentation(provider);
+        this.autoSave();
+      });
+    });
+
+    // Provider change → update the card presentation, model placeholder + auto-save.
     document.getElementById('cfg-provider')!.addEventListener('change', () => {
       const p = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
-      (document.getElementById('cfg-model') as HTMLInputElement).placeholder = defaultModelFor(p);
+      this.updateProviderPresentation(p);
       this.autoSave();
     });
 
     // Theme selector
     document.querySelectorAll('.theme-option').forEach(el => {
-      el.addEventListener('click', () => {
-        document.querySelectorAll('.theme-option').forEach(o => o.classList.remove('active'));
-        el.classList.add('active');
+      const selectTheme = () => {
+        document.querySelectorAll('.theme-option').forEach(o => {
+          const active = o === el;
+          o.classList.toggle('active', active);
+          o.setAttribute('aria-checked', String(active));
+        });
         this.applyTheme(el.getAttribute('data-theme') || 'light');
         this.autoSave();
+      };
+      el.addEventListener('click', selectTheme);
+      el.addEventListener('keydown', (event) => {
+        const key = (event as KeyboardEvent).key;
+        if (key === 'Enter' || key === ' ') {
+          event.preventDefault();
+          selectTheme();
+          return;
+        }
+        if (key === 'ArrowRight' || key === 'ArrowDown' || key === 'ArrowLeft' || key === 'ArrowUp') {
+          event.preventDefault();
+          const options = [...document.querySelectorAll<HTMLElement>('.theme-option')];
+          const index = options.indexOf(el as HTMLElement);
+          const step = key === 'ArrowRight' || key === 'ArrowDown' ? 1 : -1;
+          const next = options[(index + step + options.length) % options.length];
+          next?.focus();
+          next?.click();
+        }
       });
     });
 
@@ -260,7 +296,13 @@ export class SettingsPanel {
       document.querySelectorAll(sel).forEach(el => {
         el.addEventListener('change', () => this.autoSave());
         if (el.tagName === 'INPUT' && (el as HTMLInputElement).type === 'text') {
-          el.addEventListener('input', () => this.autoSave());
+          el.addEventListener('input', () => {
+            if (sel === '#cfg-model' || sel === '#cfg-baseurl') {
+              const provider = (document.getElementById('cfg-provider') as HTMLSelectElement | null)?.value;
+              if (provider) this.updateProviderPresentation(provider);
+            }
+            this.autoSave();
+          });
         }
       });
     });
@@ -321,6 +363,54 @@ export class SettingsPanel {
     throw new Error('all geolocation backends failed');
   }
 
+  // ── Provider card presentation ──
+
+  private updateProviderPresentation(provider: string): void {
+    const def = providerDef(provider);
+    if (!def) return;
+    const cfg = loadConfig() ?? defaults();
+    const selectedLabel = t(def.i18nKey);
+    const modelInput = document.getElementById('cfg-model') as HTMLInputElement | null;
+    const baseUrlInput = document.getElementById('cfg-baseurl') as HTMLInputElement | null;
+    const currentModel = modelInput?.value.trim() || '';
+    const currentBaseURL = baseUrlInput?.value.trim() || '';
+    const previousDef = providerDef(cfg.provider);
+    const previousDefault = defaultModelFor(cfg.provider);
+
+    // Switching providers should not carry provider-specific defaults into the
+    // next card, while deliberate custom model/endpoint values are preserved.
+    if (cfg.provider !== provider) {
+      if (modelInput && (!currentModel || currentModel === previousDefault)) {
+        modelInput.value = '';
+      }
+      if (baseUrlInput && currentBaseURL && currentBaseURL === previousDef?.baseURL) {
+        baseUrlInput.value = '';
+      }
+    }
+
+    document.querySelectorAll<HTMLElement>('.provider-card').forEach(card => {
+      const cardProvider = card.dataset.provider;
+      const active = cardProvider === provider;
+      card.classList.toggle('selected', active);
+      card.setAttribute('aria-selected', String(active));
+      const status = card.querySelector<HTMLElement>('[data-provider-status]');
+      if (status) status.textContent = active ? t('llm.selected') : t('llm.chooseCard');
+      const modelValue = card.querySelector<HTMLElement>('.provider-card-model-value');
+      const cardDef = providerDef(cardProvider);
+      if (modelValue && cardDef) {
+        modelValue.textContent = active && modelInput?.value.trim()
+          ? modelInput.value.trim()
+          : cardDef.defaultModel;
+      }
+    });
+
+    const title = document.getElementById('provider-config-title');
+    const endpoint = document.getElementById('provider-config-endpoint');
+    if (title) title.textContent = selectedLabel;
+    if (endpoint) endpoint.textContent = baseUrlInput?.value.trim() || def.baseURL;
+    if (modelInput) modelInput.placeholder = def.defaultModel;
+  }
+
   // ── Load config into form ──
 
   private loadToForm() {
@@ -329,6 +419,7 @@ export class SettingsPanel {
     const cfg = loadConfig() || defaults();
 
     (document.getElementById('cfg-provider') as HTMLSelectElement).value = cfg.provider;
+    this.updateProviderPresentation(cfg.provider);
     const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
     keyInput.value = cfg.apiKey;
     if (isTauriRuntime() && cfg.hasApiKey) {
@@ -345,6 +436,7 @@ export class SettingsPanel {
     (document.getElementById('cfg-model') as HTMLInputElement).value = cfg.model;
     (document.getElementById('cfg-model') as HTMLInputElement).placeholder = defaultModelFor(cfg.provider);
     (document.getElementById('cfg-baseurl') as HTMLInputElement).value = cfg.baseURL;
+    this.updateProviderPresentation(cfg.provider);
     (document.getElementById('cfg-language') as HTMLSelectElement).value = cfg.language;
     const cityEl = document.getElementById('cfg-city') as HTMLInputElement | null;
     if (cityEl) cityEl.value = cfg.city ?? '';
@@ -383,7 +475,9 @@ export class SettingsPanel {
     });
 
     document.querySelectorAll('.theme-option').forEach(el => {
-      el.classList.toggle('active', el.getAttribute('data-theme') === cfg.theme);
+      const active = el.getAttribute('data-theme') === cfg.theme;
+      el.classList.toggle('active', active);
+      el.setAttribute('aria-checked', String(active));
     });
     this.applyTheme(cfg.theme);
 

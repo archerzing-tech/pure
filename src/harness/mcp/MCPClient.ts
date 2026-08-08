@@ -87,7 +87,7 @@ export class MCPClient implements ToolAdapter {
     const initResult = await transport.send('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: { tools: {} },
-      clientInfo: { name: 'pure', version: '1.0.3' },
+      clientInfo: { name: 'pure', version: '1.1.0' },
     });
 
     // Send initialized notification (no response expected)

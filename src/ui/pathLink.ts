@@ -149,6 +149,11 @@ export function resolvePathForOpen(raw: string): string {
   return p;
 }
 
+/** True for links that should be handed to the operating system. */
+export function isExternalUrl(raw: string): boolean {
+  return /^(?:https?:|mailto:)/i.test(raw.trim());
+}
+
 /** Open a raw path match (or copy it in browser dev). */
 export function openPathLink(rawPath: string): void {
   const resolved = resolvePathForOpen(rawPath);
@@ -216,11 +221,31 @@ export function initPathLinks(): void {
   bound = true;
   document.addEventListener('click', (e) => {
     const target = e.target as HTMLElement | null;
-    const link = target?.closest?.('.path-link') as HTMLElement | null;
-    if (!link) return;
+    const pathLink = target?.closest?.('.path-link') as HTMLElement | null;
+    if (pathLink) {
+      e.preventDefault();
+      e.stopPropagation();
+      const raw = pathLink.getAttribute('data-path') ?? '';
+      if (raw) openPathLink(raw);
+      return;
+    }
+
+    // Tauri WebViews do not reliably hand target="_blank" anchors to the
+    // system browser. Route safe Markdown/search-result links through the same
+    // Rust `open_path` command instead; in a normal browser, leave native link
+    // behavior untouched so dev mode still opens a new tab.
+    const anchor = target?.closest?.('a[href]') as HTMLAnchorElement | null;
+    const href = anchor?.getAttribute('href')?.trim() ?? '';
+    if (!anchor || !isTauriRuntime() || !isExternalUrl(href)) return;
     e.preventDefault();
     e.stopPropagation();
-    const raw = link.getAttribute('data-path') ?? '';
-    if (raw) openPathLink(raw);
+    void (async () => {
+      try {
+        await tauriInvoke('open_path', { path: href });
+      } catch (err) {
+        toast(`${t('path.openFailed')}: ${href}`);
+        console.error('[pure] external link open failed:', err);
+      }
+    })();
   });
 }

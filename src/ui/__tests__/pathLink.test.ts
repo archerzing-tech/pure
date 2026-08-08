@@ -3,7 +3,7 @@
 // resolver (resolvePathForOpen). Pure functions — no DOM required.
 
 import { describe, expect, test } from 'bun:test';
-import { findPathMatches, resolvePathForOpen, setPathLinkWorkspace } from '../pathLink';
+import { findPathMatches, isExternalUrl, resolvePathForOpen, setPathLinkWorkspace } from '../pathLink';
 
 function paths(text: string): string[] {
   return findPathMatches(text).map((m) => m.path);
@@ -42,6 +42,20 @@ describe('findPathMatches — absolute paths', () => {
 
   test('windows drive path', () => {
     expect(paths('open C:\\Users\\foo\\x.ts')).toEqual(['C:\\Users\\foo\\x.ts']);
+  });
+});
+
+describe('external URL detection', () => {
+  test('recognizes browser and mail URLs', () => {
+    expect(isExternalUrl('https://example.com/docs')).toBe(true);
+    expect(isExternalUrl('http://localhost:3000')).toBe(true);
+    expect(isExternalUrl('mailto:test@example.com')).toBe(true);
+  });
+
+  test('rejects unsafe or local schemes', () => {
+    expect(isExternalUrl('javascript:alert(1)')).toBe(false);
+    expect(isExternalUrl('file:///tmp/report.txt')).toBe(false);
+    expect(isExternalUrl('/Users/me/report.txt')).toBe(false);
   });
 });
 

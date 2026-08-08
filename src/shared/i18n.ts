@@ -115,6 +115,8 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Settings Panel ──
     'settings.back.title': '返回聊天',
     'settings.title': '设置',
+    'settings.categories': '设置分类',
+    'settings.autosave': '更改会自动保存',
     'settings.close.title': '关闭 (Esc)',
 
     // ── Nav ──
@@ -149,6 +151,14 @@ const translations: Record<Language, Record<string, string>> = {
     // ── LLM Page ──
     'llm.title': 'LLM 提供商',
     'llm.desc': '配置 AI 模型提供商',
+    'llm.choose': '选择供应商',
+    'llm.choose.hint': '选中的供应商将用于新的对话。',
+    'llm.protocol.openai': 'OpenAI 兼容',
+    'llm.protocol.anthropic': 'Anthropic 兼容',
+    'llm.connection.kicker': '连接配置',
+    'llm.active': '当前使用',
+    'llm.selected': '已选择',
+    'llm.chooseCard': '选择',
     'llm.provider': '提供商',
     'llm.provider.hint': 'AI 模型服务',
     'llm.apiKey': 'API Key',
@@ -446,6 +456,8 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Settings Panel ──
     'settings.back.title': 'Back to chat',
     'settings.title': 'Settings',
+    'settings.categories': 'Settings categories',
+    'settings.autosave': 'Changes save automatically',
     'settings.close.title': 'Close (Esc)',
 
     // ── Nav ──
@@ -480,6 +492,14 @@ const translations: Record<Language, Record<string, string>> = {
     // ── LLM Page ──
     'llm.title': 'LLM Provider',
     'llm.desc': 'Configure your AI model provider',
+    'llm.choose': 'Choose a provider',
+    'llm.choose.hint': 'Your selected provider powers every new conversation.',
+    'llm.protocol.openai': 'OpenAI compatible',
+    'llm.protocol.anthropic': 'Anthropic compatible',
+    'llm.connection.kicker': 'CONNECTION',
+    'llm.active': 'Active',
+    'llm.selected': 'Selected',
+    'llm.chooseCard': 'Choose',
     'llm.provider': 'Provider',
     'llm.provider.hint': 'AI model service',
     'llm.apiKey': 'API Key',
