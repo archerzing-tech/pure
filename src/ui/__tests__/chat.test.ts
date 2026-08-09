@@ -1,9 +1,8 @@
 // src/ui/__tests__/chat.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, generateTaskPlan, BASE_SYSTEM_PROMPT } from '../chat';
-import type { LLMAdapter, LLMResponse } from '../../shared/types';
-
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, generateTaskPlan, pickHistoryMessages, BASE_SYSTEM_PROMPT } from '../chat';
+import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 // Regression guard for the layered prompt (promptLayers.ts): a past splice
 // bug doubled the "Output style:" header in the composed GUI base prompt.
 // Each section header must appear EXACTLY once in every persona variant.
@@ -155,5 +154,30 @@ describe('generateTaskPlan (LLM task-specific plan generation)', () => {
     // 10s > the 8s generation timeout — must resolve to null, not hang.
     const llm = fakeLlm('[]', 500);
     expect(await generateTaskPlan(llm, 'x', 50)).toBeNull();
+  });
+});
+
+describe('pickHistoryMessages (background pre-compaction reuse)', () => {
+  const full: Message[] = [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }];
+  const window: Message[] = [
+    { role: 'system', content: 'Earlier conversation summary: …' },
+    { role: 'assistant', content: 'b' },
+  ];
+
+  it('reuses the pre-compacted window when session + message count match', () => {
+    expect(pickHistoryMessages(window, 's1', 2, 's1', full)).toBe(window);
+  });
+
+  it('falls back to the full history when no pre-compaction is cached', () => {
+    expect(pickHistoryMessages(null, 's1', 2, 's1', full)).toBe(full);
+  });
+
+  it('falls back when the session changed (stale window from another session)', () => {
+    expect(pickHistoryMessages(window, 's1', 2, 's2', full)).toBe(full);
+  });
+
+  it('falls back when the message count changed (new turn already appended)', () => {
+    const grown: Message[] = [...full, { role: 'user', content: 'c' }];
+    expect(pickHistoryMessages(window, 's1', 2, 's1', grown)).toBe(grown);
   });
 });

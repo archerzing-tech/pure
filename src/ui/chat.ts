@@ -77,6 +77,26 @@ const TOOL_CALL_REFRESH_MS = 120;
 const MAX_TRANSCRIPT_ROWS = 300;
 const transcriptPruneState = new WeakMap<HTMLElement, MutationObserver>();
 
+/**
+ * Resolve which message history a continuation turn should run on: the
+ * background pre-compacted window when it still matches the current session
+ * and message state, otherwise the full transcript (whose in-engine trim then
+ * runs synchronously as before).
+ */
+export function pickHistoryMessages(
+  preCompacted: Message[] | null,
+  preCompactSessionId: string,
+  preCompactMessageCount: number,
+  sessionId: string,
+  messages: Message[],
+): Message[] {
+  return preCompacted !== null &&
+    preCompactSessionId === sessionId &&
+    messages.length === preCompactMessageCount
+    ? preCompacted
+    : messages;
+}
+
 export function wireTranscriptPrune(el: HTMLElement): void {
   if (transcriptPruneState.has(el)) return;
   const observer = new MutationObserver(() => {
@@ -592,6 +612,13 @@ export class ChatController {
   private sessionId: string = '';
   private messages: Message[] = [];
   private hasHistory = false;
+  // Background pre-compaction cache: the ContextEngine's LLM summarization —
+  // the dominant pre-send cost once a long session crosses maxMessages — runs
+  // after each completed turn (idle) instead of blocking the next send. The
+  // reuse guard (sessionId + message count) makes a stale window inert.
+  private preCompactedMessages: Message[] | null = null;
+  private preCompactSessionId = '';
+  private preCompactMessageCount = 0;
   private mcpClient?: MCPClient;
   private fileWatcher?: FileWatcher;
   private deferredInitDone = false;
@@ -744,6 +771,17 @@ export class ChatController {
     const config = loadConfig();
     if (!hasConfiguredKey(config)) return;
 
+    // IMMEDIATE feedback: the user's own message renders synchronously here,
+    // BEFORE any await below (workspace resolve, memory harvest, runtime
+    // probe, LLM plan generation up to 8s, interactive review). Delaying it
+    // made complex tasks feel like the submit didn't register — the transcript
+    // stayed frozen while the pre-flight silently ran. If the plan review is
+    // then cancelled, the bubble is removed (see the cancel branch) so no
+    // ghost message remains.
+    const userBubble = this.addBubble('user', userText);
+    linkifyPaths(userBubble);
+    forceScrollToBottom(chatEl);
+
     // Snapshot the user-selected workspace separately from the effective tool
     // workspace. An empty user workspace uses an application-owned tmp folder,
     // but the session must continue to persist an empty user workspace so the
@@ -754,7 +792,12 @@ export class ChatController {
     this.cancel();
     const gen = ++this.generation;
     const effectiveWorkspace = sendWorkspace || await getApplicationTmpWorkspace(sendSessionId);
-    if (gen !== this.generation) return;
+    if (gen !== this.generation) {
+      // The immediately-rendered user bubble belongs to the superseded
+      // transcript — drop it so no ghost message appears in the new session.
+      userBubble.remove();
+      return;
+    }
     if (effectiveWorkspace) setPathLinkWorkspace(effectiveWorkspace);
 
     this.setStreaming(true);
@@ -1100,12 +1143,16 @@ export class ChatController {
           const llmPlan = await generateTaskPlan(llm, userText);
           // The user may have switched sessions / started a new chat during the
           // (up-to-8s) generation — abandon this turn before showing anything.
-          if (gen !== this.generation) return;
+          if (gen !== this.generation) {
+            userBubble.remove();
+            return;
+          }
           if (llmPlan) planForReview = llmPlan;
           const decision = await requestPlanReview({ ...analysis, plan: planForReview, reasoning: planForReview.reasoning });
           if (decision === 'cancel') {
-            // Cancelled pre-flight leaves no ghost bubbles (see the "bubbles
-            // are added after the interactive pre-flight" invariant).
+            // Cancelled pre-flight leaves no ghost bubbles: remove the
+            // immediately-rendered user bubble along with the mode notice.
+            userBubble.remove();
             modeBubble.remove();
             return; // finally resets streaming
           }
@@ -1129,11 +1176,9 @@ export class ChatController {
         );
       }
 
-      // Add bubbles after the (possibly interactive) pre-flight so a cancelled
-      // plan review leaves no ghost messages in the chat. User text stays raw
-      // escaped text, but path-shaped substrings become clickable.
-      const userBubble = this.addBubble('user', userText);
-      linkifyPaths(userBubble);
+      // The user bubble was already rendered synchronously at send() start
+      // (immediate feedback, before the plan pre-flight above) — do NOT add it
+      // again here; a duplicate would appear after the interactive review.
       // Approved execution plan → a compact phase tracker in the transcript:
       // total phase count + which phase is currently running, updated live
       // from the model's `## 阶段 n/m` markers (see formatPlanForPrompt).
@@ -1202,8 +1247,16 @@ export class ChatController {
       }
 
       const userTurn = composeUserTurn(userText, { traps: userTraps, buildProtocol: userBuildProtocol, plan: userPlan });
+      // Hand the background pre-compacted window (when it matches the current
+      // session + message state) to continueTurn instead of the full history:
+      // the in-engine trim then short-circuits (already under threshold) and
+      // the LLM summarization stays off the send critical path.
+      const historyMessages = pickHistoryMessages(
+        this.preCompactedMessages, this.preCompactSessionId, this.preCompactMessageCount,
+        sendSessionId, this.messages,
+      );
       const events = this.hasHistory
-        ? codingAgent.continueTurn(systemPrompt, this.messages, userTurn, this.abortController.signal)
+        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, this.abortController.signal)
         : codingAgent.run(systemPrompt, userTurn, this.abortController.signal);
 
       for await (const event of events) {
@@ -1478,6 +1531,10 @@ export class ChatController {
               finalMessages = event.payload.messages;
               this.messages = event.payload.messages;
               this.hasHistory = true;
+              // Background pre-compaction: trim + LLM-summarize the now-complete
+              // transcript in the idle window so the next send is not blocked.
+              this.preCompactedMessages = null;
+              this.preCompactInBackground(systemPrompt, event.payload.messages, gen, codingAgent);
             }
             // Merge this turn's billing usage into the session totals, then
             // persist + refresh the right-panel 统计 tab.
@@ -1535,6 +1592,10 @@ export class ChatController {
               finalMessages = event.payload.messages;
               this.messages = event.payload.messages;
               this.hasHistory = true;
+              // Background pre-compaction on interruption too: the next send
+              // benefits from the already-trimmed window just the same.
+              this.preCompactedMessages = null;
+              this.preCompactInBackground(systemPrompt, event.payload.messages, gen, codingAgent);
             }
             // Stop any in-flight throttled render so a late tick can't race
             // the finalization below, and resolve any "calling…" pending tool
@@ -1603,6 +1664,14 @@ export class ChatController {
         cancelStreamingRender(seg.el);
       }
       resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
+      // Pre-flight failure (the plan gate threw before any engine event): the
+      // immediately-rendered user bubble never entered this.messages, so drop
+      // it — a visual-only ghost would otherwise linger until session reload.
+      // A genuine streaming error always produced assistant segments, so this
+      // cleanly distinguishes pre-flight failure from mid-stream failure.
+      if (assistantSegments.length === 0 && finalMessages.length === 0 && !interruptedMessages) {
+        userBubble.remove();
+      }
       if (interruptedMessages && gen === this.generation) {
         await this.persistSession(interruptedMessages, toolResults, thinkingPhases, sendSessionId, sendWorkspace);
       } else if (thinkingPhases.length > 0 && gen === this.generation) {
@@ -1649,6 +1718,8 @@ export class ChatController {
     this.generation++;
     this.messages = [];
     this.hasHistory = false;
+    // Invalidate any background pre-compaction from the previous session.
+    this.preCompactedMessages = null;
     this.sessionId = `session_${Date.now()}`;
     // New chat = a fresh session: drop any session-scoped tool approvals.
     this.permissionManager.clearCache();
@@ -1690,6 +1761,30 @@ export class ChatController {
       };
     });
     await saveSession(sessionId, storedMsgs, workspace);
+  }
+
+  /**
+   * Background context pre-compaction (see the preCompactedMessages field):
+   * run ContextEngine.trim — whose LLM summarization is the dominant pre-send
+   * cost in long sessions — after a completed turn instead of blocking the
+   * next send. The result is cached only while the generation still matches,
+   * and the send path double-checks session id + message count before reuse.
+   */
+  private preCompactInBackground(systemPrompt: string, msgs: Message[], gen: number, agent: CodingAgent): void {
+    const ctx = agent.getHarness().getContextEngine();
+    if (!ctx) return;
+    void (async () => {
+      try {
+        const trimmed = await ctx.trim([{ role: 'system', content: systemPrompt }, ...msgs]);
+        if (gen === this.generation && this.messages === msgs) {
+          this.preCompactedMessages = trimmed;
+          this.preCompactSessionId = this.sessionId;
+          this.preCompactMessageCount = msgs.length;
+        }
+      } catch {
+        // Background pre-compaction must never break the session.
+      }
+    })();
   }
 
   private addBubble(role: 'user' | 'assistant', content: string): HTMLDivElement {

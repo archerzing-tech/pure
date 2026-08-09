@@ -103,6 +103,11 @@ export class Harness {
     return this.stateMgr;
   }
 
+  /** 上下文压缩引擎（GUI 在每轮完成后后台预压缩，避免下次发送时阻塞）。 */
+  getContextEngine(): ContextEngine | undefined {
+    return this.config.contextEngine;
+  }
+
   getFileWatcher(): FileWatcher | undefined {
     return this.config.fileWatcher;
   }

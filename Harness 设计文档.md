@@ -915,5 +915,6 @@ function toEngineMessages(workspace: ContextWorkspace): Message[] {
 - TS/Rust 边界已明确：Harness 运行在 WebView 的 TS 中，Rust 只提供 OS 能力。
 - StateManager 从旧版版本链降级为检查点，删除旧版 diff、撤销、版本对比等复杂逻辑。
 - ContextEngine 从旧版多级压缩降级为滑动窗口 + 可选 LLM 摘要。
+- GUI 发送路径延迟优化：① 用户气泡在 send() 开头同步渲染（不再等待最长 8s 的 LLM 计划生成与交互式计划评审），plan 取消/会话切换/预检异常时移除，无幽灵消息；② 每轮 Completed/Interrupted 后在后台预跑 `ContextEngine.trim`（`Harness.getContextEngine()`，LLM 摘要移出关键路径），下次发送经 `pickHistoryMessages()` 复用已压缩窗口（会话 id + 消息数守卫），引擎内 trim 变为 no-op。
 - 明确 tool_call / tool_result 成对保留约束。
 - Engine 在 `StateChange` 到 `OBSERVE` / `TERMINATE` 时触发 Harness 检查点。

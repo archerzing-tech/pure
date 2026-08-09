@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "pure"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "base64 0.21.7",
  "encoding_rs",
