@@ -6,7 +6,8 @@
 
 import { describe, it, expect } from 'bun:test';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, parseChartSource, buildChartSvg, groupAdjacentSvgSlots, diagramSlot, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, parseChartSource, groupAdjacentSvgSlots, diagramSlot, type DiagramKind } from '../markdown';
+import { buildChartOption } from '../echartsChart';
 
 // ── ==text== highlight extension ──
 
@@ -298,124 +299,202 @@ unit: 万元
     expect(() => parseChartSource('周一 暂无数据12')).toThrow('at least one data row');
   });
 
-  it('builds an SVG from a complete weather chart response', () => {
+  it('parses a multi-series table (header + ≥2 numeric columns) into named series', () => {
+    const spec = parseChartSource(`type: line\ntitle: 双城气温\nunit: ℃\n日期 北京 上海\n周一 25 27\n周二 26 28\n周三 24 26`);
+    expect(spec.type).toBe('line');
+    expect(spec.series).toHaveLength(2);
+    expect(spec.series?.[0].name).toBe('北京');
+    expect(spec.series?.[1].name).toBe('上海');
+    expect(spec.series?.[0].data.map(d => d.value)).toEqual([25, 26, 24]);
+    expect(spec.series?.[1].data.map(d => d.value)).toEqual([27, 28, 26]);
+    expect(spec.series?.[0].data[0].label).toBe('周一');
+  });
+
+  it('parses a markdown-table multi-series chart', () => {
+    const spec = parseChartSource(`| 日期 | 北京 | 上海 |\n| --- | --- | --- |\n| 周一 | 25 | 27 |\n| 周二 | 26 | 28 |`);
+    expect(spec.series?.[0].name).toBe('北京');
+    expect(spec.series?.[1].name).toBe('上海');
+    expect(spec.series?.[1].data.map(d => d.value)).toEqual([27, 28]);
+  });
+
+  it('parses CSV multi-series and defaults series names without a header', () => {
+    const spec = parseChartSource('line\nA, 10, 20\nB, 11, 21');
+    expect(spec.type).toBe('line');
+    expect(spec.series?.[0].name).toBe('系列1');
+    expect(spec.series?.[1].name).toBe('系列2');
+    expect(spec.series?.[0].data.map(d => d.value)).toEqual([10, 11]);
+  });
+
+  it('keeps a numeric first column as the x label (years are not series values)', () => {
+    const spec = parseChartSource(`line\n2024 10 20\n2025 15 25\n2026 22 30`);
+    expect(spec.series).toHaveLength(2);
+    expect(spec.series?.[0].name).toBe('系列1');
+    expect(spec.series?.[0].data.map(d => d.label)).toEqual(['2024', '2025', '2026']);
+    expect(spec.series?.[0].data.map(d => d.value)).toEqual([10, 15, 22]);
+    expect(spec.series?.[1].data.map(d => d.value)).toEqual([20, 25, 30]);
+  });
+
+  it('keeps single-series weather tables single (categorical columns stay non-numeric)', () => {
+    const spec = parseChartSource(`日期 | 天气 | 平均气温 | 风力\n--- | --- | --- | ---\n周一 | 晴 | 25℃ | 3级\n周二 | 阴 | 23℃ | 2级`);
+    expect(spec.series).toBeUndefined();
+    expect(spec.data).toEqual([
+      { label: '周一 / 晴', value: 25 },
+      { label: '周二 / 阴', value: 23 },
+    ]);
+  });
+
+  it('keeps a pie chart with header + multi-columns single-series (no overlapping donuts)', () => {
+    const spec = parseChartSource(`type: pie\ntitle: 来源占比\n渠道 线上 线下\n一月 60 40\n二月 55 45`);
+    expect(spec.series).toHaveLength(2);
+    const option = buildChartOption(spec, false);
+    const series = option.series as Array<{ type?: string }>;
+    expect(series).toHaveLength(1);
+    expect(series[0].type).toBe('pie');
+  });
+
+  it('builds an echarts option from a complete weather chart response', () => {
     const spec = parseChartSource(`type：line\ntitle：未来一周天气\nunit：℃\n周一：25℃\n周二：26℃\n周三：24℃`);
-    const svg = buildChartSvg(spec);
-    expect(svg).toContain('<svg');
-    expect(svg).toContain('<polyline');
-    expect(svg).toContain('周一');
-    expect(svg).toContain('26');
+    const option = buildChartOption(spec, false);
+    const series = option.series as Array<{ type?: string }>;
+    expect(series[0].type).toBe('line');
+    expect((option.xAxis as { data?: string[] }).data).toEqual(['周一', '周二', '周三']);
+    expect(option.title).toMatchObject({ text: '未来一周天气' });
   });
 });
 
-describe('buildChartSvg', () => {
-  it('renders bars as rects with value labels for bar charts', () => {
-    const svg = buildChartSvg({ type: 'bar', title: 'T', unit: '个', data: [{ label: 'A', value: 3 }, { label: 'B', value: 7 }] });
-    expect(svg).toContain('<svg');
-    expect(svg).toContain('chart-accessible-title');
-    expect(svg).toContain('<title class="chart-accessible-title">T</title>');
-    expect(svg).toContain('chart-title');
-    expect(svg).toContain('chart-text');
-    expect(svg).toContain('chart-grid');
-    expect(svg).toContain('chart-axis');
-    expect(svg).toContain('chart-value');
-    expect(svg).toContain('T');
-    expect(svg).toContain('<path'); // rounded bars
-    expect(svg).toContain('>7</text>'); // value label
+describe('buildChartOption', () => {
+  const spec = (type: 'bar' | 'hbar' | 'line' | 'pie', data: Array<[string, number]>) => ({
+    type,
+    title: 'T',
+    unit: '个',
+    data: data.map(([label, value]) => ({ label, value })),
   });
 
-  it('renders a polyline for line charts', () => {
-    const svg = buildChartSvg({ type: 'line', title: '', unit: '', data: [{ label: 'a', value: 1 }, { label: 'b', value: 2 }] });
-    expect(svg).toContain('<polyline');
-    expect(svg).toContain('<circle');
+  it('bar charts map categories to xAxis and values to the series', () => {
+    const option = buildChartOption(spec('bar', [['A', 3], ['B', 7]]), false);
+    const series = option.series as Array<{ type?: string; data?: Array<{ value: number }>; itemStyle?: { borderRadius?: number[] } }>;
+    expect(series[0].type).toBe('bar');
+    expect((option.xAxis as { data?: string[] }).data).toEqual(['A', 'B']);
+    expect(series[0].data?.map(d => d.value)).toEqual([3, 7]);
+    expect(series[0].itemStyle?.borderRadius).toEqual([6, 6, 0, 0]);
   });
 
-  it('renders donut slices + a legend for pie charts', () => {
-    const svg = buildChartSvg({ type: 'pie', title: 'P', unit: '%', data: [{ label: 'X', value: 25 }, { label: 'Y', value: 75 }] });
-    expect(svg).toContain('<path'); // arcs
-    expect(svg).toContain('<title class="chart-accessible-title">P</title>');
-    expect(svg).toContain('chart-legend');
-    expect(svg).toContain('chart-legend-label');
-    expect(svg).toContain('chart-legend-value');
-    expect(svg).toContain('chart-slice-pct');
-    expect(svg).toContain('75%');
-    expect(svg).toContain('25');
+  it('hbar maps categories to the inverted yAxis (first item on top)', () => {
+    const option = buildChartOption(spec('hbar', [['A', 1], ['B', 2]]), false);
+    const yAxis = option.yAxis as { inverse?: boolean; data?: string[] };
+    expect((option.series as Array<{ type?: string }>)[0].type).toBe('bar');
+    expect(yAxis.inverse).toBe(true);
+    expect(yAxis.data).toEqual(['A', 'B']);
   });
 
-  it('escapes model-provided labels so charts can never inject markup', () => {
-    const svg = buildChartSvg({ type: 'bar', title: '<script>alert(1)</script>', unit: '', data: [{ label: '<img onerror=x>', value: 1 }] });
-    expect(svg).not.toContain('<script>');
-    expect(svg).not.toContain('<img');
-    expect(svg).toContain('&lt;script&gt;');
+  it('line charts use a line series with a gradient area fill', () => {
+    const option = buildChartOption(spec('line', [['a', 1], ['b', 2]]), false);
+    expect((option.series as Array<{ type?: string }>)[0].type).toBe('line');
+    const area = (option.series as Array<{ areaStyle?: { color?: { type?: string } } }>)[0].areaStyle;
+    expect(area?.color?.type).toBe('linear');
+  });
+
+  it('pie charts use donut radius, per-slice colors, and a vertical legend', () => {
+    const option = buildChartOption(spec('pie', [['X', 25], ['Y', 75]]), false);
+    const series = (option.series as Array<{ type?: string; radius?: string[]; data?: Array<{ value: number }> }>)[0];
+    expect(series.type).toBe('pie');
+    expect(series.radius).toEqual(['42%', '68%']);
+    expect(series.data?.map(d => d.value)).toEqual([25, 75]);
+    expect(option.legend).toMatchObject({ orient: 'vertical' });
   });
 
   it('throws for a pie with no positive values', () => {
-    expect(() => buildChartSvg({ type: 'pie', title: '', unit: '', data: [{ label: 'a', value: 0 }] }))
-      .toThrow('positive');
+    expect(() => buildChartOption(spec('pie', [['a', 0]]), false)).toThrow('positive');
   });
 
-  it('keeps negative bars inside the viewBox on a two-sided axis', () => {
-    const svg = buildChartSvg({ type: 'bar', title: '', unit: '', data: [
-      { label: 'A', value: -30 }, { label: 'B', value: 20 },
-    ] });
-    // Every path/text coordinate must stay within the 0..360 viewBox — the
-    // old single-sided scale drew -30 as a bar extending past the bottom.
-    const ys = [...svg.matchAll(/[MLQ]\s*-?[\d.]+\s+(-?[\d.]+)/g)].map(m => parseFloat(m[1]));
-    expect(Math.max(...ys)).toBeLessThanOrEqual(360);
-    expect(Math.min(...ys)).toBeGreaterThanOrEqual(0);
-    expect(svg).toContain('chart-axis'); // zero baseline
-    expect(svg).toContain('-30');       // negative value label
+  it('appends the unit to axis-triggered tooltip lines', () => {
+    const option = buildChartOption(spec('bar', [['A', 3], ['B', 7]]), false) as unknown as {
+      tooltip: { formatter: (params: Array<{ name: string; value: number }>) => string };
+    };
+    expect(option.tooltip.formatter([{ name: 'A', value: 3 }])).toBe('A: 3个');
   });
 
-  it('renders hbar negatives extending left from the zero line', () => {
-    const svg = buildChartSvg({ type: 'hbar', title: '', unit: '', data: [
-      { label: 'A', value: -4 }, { label: 'B', value: 6 },
-    ] });
-    // Old code emitted width="-…" (invalid); now every rect has a positive
-    // width and stays inside the 640-wide viewBox.
-    const rects = [...svg.matchAll(/<rect x="([\d.]+)" y="[\d.]+" width="([\d.]+)"/g)]
-      .map(m => ({ x: parseFloat(m[1]), w: parseFloat(m[2]) }));
-    expect(rects.length).toBe(2);
-    for (const r of rects) {
-      expect(r.w).toBeGreaterThan(0);
-      expect(r.x + r.w).toBeLessThanOrEqual(640);
-      expect(r.x).toBeGreaterThanOrEqual(0);
-    }
+  it('dark theme swaps text and palette colors', () => {
+    const light = buildChartOption(spec('bar', [['A', 1]]), false);
+    const dark = buildChartOption(spec('bar', [['A', 1]]), true);
+    const lText = (light.textStyle as { color?: string }).color;
+    const dText = (dark.textStyle as { color?: string }).color;
+    expect(lText).not.toBe(dText);
+    const lSeries = (light.series as Array<{ data?: Array<{ itemStyle: { color: string } }> }>)[0];
+    const dSeries = (dark.series as Array<{ data?: Array<{ itemStyle: { color: string } }> }>)[0];
+    expect(lSeries.data?.[0].itemStyle.color).not.toBe(dSeries.data?.[0].itemStyle.color);
   });
 
-  it('line charts keep negative points inside the plot area', () => {
-    const svg = buildChartSvg({ type: 'line', title: '', unit: '', data: [
-      { label: 'a', value: -5 }, { label: 'b', value: 10 },
-    ] });
-    const cy = [...svg.matchAll(/<circle cx="[\d.]+" cy="([\d.]+)"/g)].map(m => parseFloat(m[1]));
-    expect(cy.length).toBe(2);
-    for (const y of cy) {
-      expect(y).toBeGreaterThanOrEqual(48 - 1);
-      expect(y).toBeLessThanOrEqual(296 + 1);
-    }
+  it('keeps model labels as plain data strings (no HTML injection path)', () => {
+    const option = buildChartOption({
+      type: 'bar',
+      title: '<script>alert(1)</script>',
+      unit: '',
+      data: [{ label: '<img onerror=x>', value: 1 }],
+    }, false);
+    expect((option.xAxis as { data?: string[] }).data).toEqual(['<img onerror=x>']);
+    // echarts renders labels as SVG text nodes (never parsed HTML), so the raw
+    // string is safe by construction.
+    expect(option.title).toMatchObject({ text: '<script>alert(1)</script>' });
   });
 
-  it('keeps long labels instead of truncating them', () => {
+  it('keeps every long label instead of truncating', () => {
     const label = '2026年第一季度华东区域销售额';
-    const bar = buildChartSvg({ type: 'bar', title: '', unit: '', data: [{ label, value: 12 }] });
-    const line = buildChartSvg({ type: 'line', title: '', unit: '', data: [{ label, value: 12 }] });
-    const hbar = buildChartSvg({ type: 'hbar', title: '', unit: '', data: [{ label, value: 12 }] });
-    expect(bar).toContain(label.slice(0, 12));
-    expect(bar).toContain(label.slice(12));
-    expect(line).toContain(label.slice(0, 12));
-    expect(hbar).toContain(label.slice(0, 18));
-    expect(hbar).toContain(label.slice(18));
-    expect(bar).not.toContain('…');
-    expect(line).not.toContain('…');
-    expect(hbar).not.toContain('…');
+    const option = buildChartOption({ type: 'bar', title: '', unit: '', data: [{ label, value: 12 }] }, false);
+    expect((option.xAxis as { data?: string[] }).data).toEqual([label]);
   });
 
-  it('expands the pie viewBox for every legend row', () => {
-    const data = Array.from({ length: 14 }, (_, i) => ({ label: `分类-${i + 1}`, value: i + 1 }));
-    const svg = buildChartSvg({ type: 'pie', title: '完整图例', unit: '', data });
-    const viewBox = svg.match(/viewBox="0 0 640 (\d+)"/);
-    expect(viewBox).not.toBeNull();
-    expect(Number(viewBox?.[1])).toBeGreaterThan(360);
-    expect(svg).toContain('分类-14');
+  it('shows line symbols only up to 12 points', () => {
+    const many = buildChartOption(spec('line', Array.from({ length: 20 }, (_, i) => [`k${i}`, i])), false);
+    expect((many.series as Array<{ showSymbol?: boolean }>)[0].showSymbol).toBe(false);
+    const few = buildChartOption(spec('line', [['a', 1], ['b', 2]]), false);
+    expect((few.series as Array<{ showSymbol?: boolean }>)[0].showSymbol).toBe(true);
+  });
+});
+
+describe('buildChartOption multi-series', () => {
+  const multiSpec = {
+    type: 'line' as const,
+    title: '双城气温',
+    unit: '℃',
+    data: [{ label: '周一', value: 25 }],
+    series: [
+      { name: '北京', data: [{ label: '周一', value: 25 }, { label: '周二', value: 26 }] },
+      { name: '上海', data: [{ label: '周一', value: 27 }, { label: '周二', value: 28 }] },
+    ],
+  };
+
+  it('emits one line series per named column', () => {
+    const option = buildChartOption(multiSpec, false);
+    const series = option.series as Array<{ name?: string; type?: string; data?: number[] }>;
+    expect(series).toHaveLength(2);
+    expect(series[0].name).toBe('北京');
+    expect(series[0].type).toBe('line');
+    expect(series[0].data).toEqual([25, 26]);
+    expect(series[1].data).toEqual([27, 28]);
+  });
+
+  it('shows a legend and an axis-linked tooltip with the unit on every series line', () => {
+    const option = buildChartOption(multiSpec, false) as unknown as {
+      legend: { top: number | string };
+      tooltip: { trigger: string; formatter: (params: Array<{ seriesName: string; name: string; value: number }>) => string };
+    };
+    expect(option.legend).toBeTruthy();
+    expect(option.tooltip.trigger).toBe('axis');
+    const out = option.tooltip.formatter([
+      { seriesName: '北京', name: '周一', value: 25 },
+      { seriesName: '上海', name: '周一', value: 27 },
+    ]);
+    expect(out).toContain('周一');
+    expect(out).toContain('北京: 25℃');
+    expect(out).toContain('上海: 27℃');
+  });
+
+  it('renders grouped bars for multi-series bar charts', () => {
+    const option = buildChartOption({ ...multiSpec, type: 'bar' }, false);
+    const series = option.series as Array<{ type?: string; name?: string }>;
+    expect(series).toHaveLength(2);
+    expect(series[0].type).toBe('bar');
+    expect(series[1].name).toBe('上海');
   });
 });

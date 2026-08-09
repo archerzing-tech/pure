@@ -33,7 +33,7 @@ import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore } from '../sh
 import { renderMarkdown, scheduleStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdown';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
 import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned } from './scrollPin';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, type ToolRowHandle } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, type ToolRowHandle } from './toolRow';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, type ThinkingCardHandle } from './thinkingCard';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { showToast } from '../shared/toast';
@@ -138,10 +138,10 @@ Path rule: pass file and directory paths relative to the selected workspace root
 const SYS_INFO_PROMPT = `System:
 - sys_info() — timezone, language, current time, OS version, and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data. The user can set/override their location in Settings → General → Environment.`;
 
-const WEB_TOOL_NAMES: ReadonlySet<string> = new Set(['web_search', 'web_fetch']);
-
 function isWebTool(name: string): boolean {
-  return WEB_TOOL_NAMES.has(name);
+  // Includes MCP-discovered web tools (serverName__search / __fetch / ...) —
+  // see isWebSearchLike in toolRow.ts for the base-name matching.
+  return isWebSearchLike(name);
 }
 
 // File-system tool family — gated by the `toolFS` settings toggle so users can

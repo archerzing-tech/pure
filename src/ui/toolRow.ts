@@ -222,6 +222,19 @@ function fillInputSection(section: HTMLElement, args: Record<string, unknown>): 
   linkifyPaths(section);
 }
 
+// Web tools also arrive from MCP servers, registered as `serverName__toolName`
+// (e.g. a `web-search` server exposing `search`). Match the base name after
+// the server prefix so MCP search/fetch tools get the same treatment as the
+// built-in web_search / web_fetch: light-blue card, read-only permission
+// class, browser-toggle gate and workspace independence. web_researcher is
+// excluded here — it is a subagent tool, not a plain web read.
+const WEB_TOOL_BASE_NAMES = new Set(['web_search', 'web_fetch', 'web-search', 'web-fetch', 'search', 'fetch']);
+
+export function isWebSearchLike(toolName: string): boolean {
+  const base = toolName.includes('__') ? toolName.slice(toolName.lastIndexOf('__') + 2) : toolName;
+  return WEB_TOOL_BASE_NAMES.has(base);
+}
+
 export function createToolRow(toolName: string, args: Record<string, unknown>): ToolRowHandle {
   const wrapper = document.createElement('div');
   wrapper.className = 'bubble-row tool-row-row';
@@ -229,7 +242,7 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   const details = document.createElement('details');
   details.className = 'tool-row pending';
   if (toolName === 'sys_info') details.classList.add('sys-info');
-  if (toolName === 'web_search' || toolName === 'web_fetch' || toolName === 'web_researcher') {
+  if (isWebSearchLike(toolName) || toolName === 'web_researcher') {
     details.classList.add('web-tool');
   }
   if (toolName === 'web_researcher') details.classList.add('web-researcher');

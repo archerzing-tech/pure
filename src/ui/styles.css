@@ -52,13 +52,6 @@
   --term-dim:     #8f8f8f;
   --term-accent:  #8ecbff;
   --term-soft:    #202020;
-  --chart-text:   #37352F;
-  --chart-muted:  #6B6965;
-  --chart-grid:   #D8D5CF;
-  --chart-axis:   #9B9995;
-  --chart-value:  #37352F;
-  --chart-total:  #37352F;
-  --chart-slice-text: #172033;
 }
 
 /* ── Dark theme ── */
@@ -90,13 +83,6 @@
      panel instead of a void against the dark chat background. */
   --term-bg:      #141414;
   --term-border:  #2c2c2c;
-  --chart-text:   #F0F2F5;
-  --chart-muted:  #C5CBD3;
-  --chart-grid:   #4B5563;
-  --chart-axis:   #9CA3AF;
-  --chart-value:  #FFFFFF;
-  --chart-total:  #FFFFFF;
-  --chart-slice-text: #FFFFFF;
 }
 
 /* ── Reset ── */
@@ -5433,20 +5419,34 @@ button svg,
 .bubble .chart-target {
   display: block;
   width: 100%;
-  padding: 10px;
   cursor: zoom-in;
   transition: background var(--transition), box-shadow var(--transition);
+}
+.bubble .svg-target {
+  padding: 10px;
+}
+.bubble .chart-target {
+  /* echarts sizes its SVG to the container: give the chart a concrete height
+     (its own ResizeObserver keeps it fitted when the sidebar toggles). */
+  height: 340px;
+  padding: 0;
+  background: var(--bg-card);
 }
 .bubble .svg-target:hover,
 .bubble .chart-target:hover {
   background: color-mix(in srgb, var(--accent-soft) 35%, transparent);
 }
-.bubble .svg-target svg,
-.bubble .chart-target svg {
+.bubble .svg-target svg {
   display: block;
   width: 100%;
   max-width: 100%;
   height: auto;
+  margin: 0;
+}
+.bubble .chart-target svg {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
   margin: 0;
 }
 .bubble .svg-slot[data-state="pending"] .svg-source,
@@ -5457,50 +5457,6 @@ button svg,
   overflow-x: auto;
 }
 
-/* ── Native chart internals — themed via the --chart-* variables so the same
-   generated SVG reads correctly in light and dark mode (and the exported
-   standalone file can mirror these rules via the theme-resolved snapshot). ── */
-.chart-svg .chart-title,
-.chart-svg .chart-text,
-.chart-svg .chart-legend-label {
-  fill: var(--chart-text);
-  font-family: var(--font-sans);
-}
-.chart-svg .chart-title {
-  font-size: 14px;
-  font-weight: 600;
-}
-.chart-svg .chart-text {
-  font-size: 11px;
-}
-.chart-svg .chart-unit {
-  fill: var(--chart-muted);
-  font: 11px var(--font-sans);
-}
-.chart-svg .chart-value {
-  fill: var(--chart-value);
-  font: 600 12px var(--font-sans);
-}
-.chart-svg .chart-total {
-  fill: var(--chart-total);
-  font: 600 20px var(--font-sans);
-}
-.chart-svg .chart-slice-pct {
-  fill: var(--chart-slice-text);
-  font: 600 11px var(--font-sans);
-}
-.chart-svg .chart-legend-value {
-  fill: var(--chart-value);
-  font: 600 11px var(--font-sans);
-}
-.chart-svg .chart-grid {
-  stroke: var(--chart-grid);
-  stroke-width: 1;
-}
-.chart-svg .chart-axis {
-  stroke: var(--chart-axis);
-  stroke-width: 1.5;
-}
 .bubble .svg-gallery {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

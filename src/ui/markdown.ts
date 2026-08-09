@@ -491,13 +491,20 @@ async function renderSvgNodes(container: HTMLElement): Promise<void> {
 }
 
 // ── Native charts (```chart blocks) ──
-// A tiny zero-dependency chart engine: parse a line-based data DSL, then emit
-// theme-aware SVG directly (bar / hbar / line / pie). Kept dependency-free so
-// bar/line/pie charts render instantly inside the app — no canvas, no CDN.
+// Parse a line-based data DSL into a ChartSpec, then render it with the lazily
+// loaded echarts module (src/ui/echartsChart.ts). The parser stays dependency-
+// free and is tuned for AI-generated output (units, weather tables, full-width
+// punctuation); rendering delegates to echarts' SVG renderer.
 
 export interface ChartSeries {
   label: string;
   value: number;
+}
+
+/** One named column of a multi-series chart (header row + multiple numeric columns). */
+export interface ChartMultiSeries {
+  name: string;
+  data: ChartSeries[];
 }
 
 export interface ChartSpec {
@@ -505,9 +512,9 @@ export interface ChartSpec {
   title: string;
   unit: string;
   data: ChartSeries[];
+  /** Present when the source carries a header plus >=2 numeric columns: one entry per column. */
+  series?: ChartMultiSeries[];
 }
-
-const CHART_PALETTE = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6'];
 
 /**
  * Parse the ```chart DSL into a ChartSpec. Supported forms:
@@ -519,8 +526,17 @@ const CHART_PALETTE = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#
  *   二月 180                                accepts `label, 120`, `label:120`,
  *                                           tab-separated, or CSV)
  *
- * A JSON payload (`{ "type": "pie", "data": [["a",1],…] }`) is also
- * accepted. Throws on unparseable input.
+ * Multi-series (line/bar/hbar): a header row plus rows with >=2 numeric
+ * columns renders one series per column — the first column is the x label:
+ *
+ *   日期 北京 上海
+ *   周一 25 27
+ *   周二 26 28
+ *
+ * The same shape works as a markdown table (`| 日期 | 北京 | 上海 |`), CSV,
+ * or tab-separated rows; without a header the series fall back to
+ * `系列1/系列2/…`. A JSON payload (`{ "type": "pie", "data": [["a",1],…] }`)
+ * is also accepted. Throws on unparseable input.
  */
 export function parseChartSource(source: string): ChartSpec {
   const trimmed = source.trim();
@@ -558,8 +574,7 @@ export function parseChartSource(source: string): ChartSpec {
   let type: ChartSpec['type'] = 'bar';
   let title = '';
   let unit = '';
-  const data: ChartSeries[] = [];
-  let tableValueIndex: number | null = null;
+  const lines: string[] = [];
 
   for (const rawLine of trimmed.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -574,8 +589,29 @@ export function parseChartSource(source: string): ChartSpec {
     if (titleM) { title = titleM[1].trim().replace(/^["']|["']$/g, ''); continue; }
     const unitM = line.match(/^unit\s*[:=：]\s*(.+)$/i);
     if (unitM) { unit = unitM[1].trim().replace(/^["']|["']$/g, ''); continue; }
-    // Bare type shorthand as its own line (only meaningful before data rows).
-    if (data.length === 0 && /^(bar|hbar|horizontal\s*bar|line|pie|area|柱状图?|横向柱状图?|折线图?|饼图)$/i.test(line)) {
+    // Bare type shorthand (`line`, `pie`, …) as its own line — only honored
+    // while no data row has been collected yet (the single-series pass below
+    // re-checks it against actual parsed rows for the legacy note-first case).
+    if (lines.length === 0 && CHART_BARE_TYPE_RE.test(line)) {
+      type = normalizeChartType(line);
+      continue;
+    }
+    lines.push(line);
+  }
+
+  if (lines.length === 0) throw new Error('chart needs at least one data row');
+
+  // Multi-series: at least two rows with >=2 numeric columns (after the label)
+  // render as one series per column — `日期 北京 上海` header + `周一 25 27` rows.
+  if (isMultiSeries(lines)) {
+    return parseMultiSeries(type, title, unit, lines);
+  }
+
+  // Single-series parsing (weather tables, `label value` rows, …).
+  const data: ChartSeries[] = [];
+  let tableValueIndex: number | null = null;
+  for (const line of lines) {
+    if (data.length === 0 && CHART_BARE_TYPE_RE.test(line)) {
       type = normalizeChartType(line);
       continue;
     }
@@ -611,6 +647,126 @@ export function parseChartSource(source: string): ChartSpec {
   return { type, title, unit, data };
 }
 
+const CHART_BARE_TYPE_RE = /^(bar|hbar|horizontal\s*bar|line|pie|area|柱状图?|横向柱状图?|折线图?|饼图)$/i;
+
+function isNumericToken(token: string): boolean {
+  return Number.isFinite(chartNumber(token));
+}
+
+interface MultiRow {
+  label: string;
+  values: number[];
+  /** Every cell/column token of the row — used to match a header's column count. */
+  cells: string[];
+}
+
+/**
+ * A multi-series data row: a label plus >=2 numeric columns. Table/CSV/TSV use
+ * `label v1 v2` separators (pipes, commas, tabs, colons); the whitespace form
+ * treats the trailing pure-number tokens as the columns (`周一 25 27`). Returns
+ * null for single-value rows, header rows, and malformed lines.
+ */
+function parseMultiRow(line: string): MultiRow | null {
+  let cells: string[];
+  if (line.includes('|')) {
+    cells = line.split('|').map((c) => c.trim()).filter(Boolean);
+  } else if (/[\t,，:：]/.test(line)) {
+    cells = line.split(/[\t,，:：]+/).map((s) => s.trim()).filter(Boolean);
+  } else {
+    const parts = line.split(/\s+/).filter(Boolean);
+    const values: number[] = [];
+    // Collect trailing numeric tokens as values, but always keep the first
+    // token as the row label — a line like `2024 10 20` means x=2024, not a
+    // numeric column. Matches the single-series `label value` semantics.
+    let i = parts.length;
+    while (i > 1 && isNumericToken(parts[i - 1])) {
+      values.unshift(chartNumber(parts[i - 1]));
+      i--;
+    }
+    if (values.length < 2) return null;
+    return { label: parts.slice(0, i).join(' '), values, cells: parts };
+  }
+  if (cells.length < 3) return null;
+  const values = cells.slice(1).map((c) => chartNumber(c));
+  if (values.some((v) => !Number.isFinite(v))) return null;
+  return { label: cells[0], values, cells };
+}
+
+/** True when at least two lines carry >=2 numeric columns — the chart is multi-series. */
+function isMultiSeries(lines: string[]): boolean {
+  let count = 0;
+  for (const line of lines) {
+    if (parseMultiRow(line)) count++;
+  }
+  return count >= 2;
+}
+
+/** Split a possible header line into cells (pipes, tabs, commas, or spaces). */
+function splitHeaderCells(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  if (line.includes('|')) return line.split('|').map((c) => c.trim()).filter(Boolean);
+  return line.split(/[\t,，:：\s]+/).filter(Boolean);
+}
+
+function parseMultiSeries(
+  type: ChartSpec['type'],
+  title: string,
+  unit: string,
+  lines: string[],
+): ChartSpec {
+  // A bare type line that slipped past collection (note-first sources) still wins.
+  if (lines[0] && CHART_BARE_TYPE_RE.test(lines[0])) {
+    type = normalizeChartType(lines[0]);
+  }
+  const rows: Array<{ label: string; values: number[] }> = [];
+  let names: string[] | null = null;
+  const isSeparatorRow = (l: string): boolean => {
+    const cells = l.includes('|') ? l.split('|').map((x) => x.trim()).filter(Boolean) : [];
+    return cells.length > 0 && cells.every((x) => /^:?-{2,}:?$/.test(x));
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const row = parseMultiRow(lines[i]);
+    if (row) {
+      rows.push(row);
+      continue;
+    }
+    // A non-data FIRST line with the same column count as the following data
+    // row is the header (series names). Skip separator rows (`---`) and notes
+    // to find the first real data row. Other non-data lines are notes.
+    if (names === null && rows.length === 0 && i < lines.length - 1 && !CHART_BARE_TYPE_RE.test(lines[i])) {
+      const cells = splitHeaderCells(lines[i]);
+      let next: MultiRow | null = null;
+      for (let j = i + 1; j < lines.length; j++) {
+        if (!isSeparatorRow(lines[j])) {
+          next = parseMultiRow(lines[j]);
+          if (next) break;
+        }
+      }
+      if (cells && next && cells.length >= 3 && cells.length === next.cells.length
+          && cells.slice(1).every((c) => !isNumericToken(c))
+          && !cells.every((c) => /^:?-{2,}:?$/.test(c))) {
+        names = cells.slice(1);
+        continue;
+      }
+    }
+  }
+  if (rows.length === 0) throw new Error('chart needs at least one data row');
+  const seriesCount = Math.max(...rows.map((r) => r.values.length));
+  const seriesNames = names !== null && names.length >= seriesCount
+    ? names.slice(0, seriesCount)
+    : Array.from({ length: seriesCount }, (_, i) => `系列${i + 1}`);
+  return {
+    type,
+    title,
+    unit,
+    data: rows.map((r) => ({ label: r.label, value: r.values[0] ?? 0 })),
+    series: seriesNames.map((name, si) => ({
+      name,
+      data: rows.map((r) => ({ label: r.label, value: Number.isFinite(r.values[si]) ? r.values[si] : 0 })),
+    })),
+  };
+}
 function chartNumber(value: unknown): number {
   if (typeof value === 'number') return Number.isFinite(value) ? value : Number.NaN;
   if (typeof value !== 'string') return Number.NaN;
@@ -653,294 +809,69 @@ function normalizeChartType(t: string): ChartSpec['type'] {
   return 'bar';
 }
 
-/** Compact number for axis ticks: 1200 → 1.2k, 2_400_000 → 2.4M. */
-function fmtNum(n: number): string {
-  const abs = Math.abs(n);
-  if (abs >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
-  if (abs >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
-  if (abs >= 1e4) return `${(n / 1e3).toFixed(1)}k`;
-  if (Number.isInteger(n)) return String(n);
-  return String(Math.round(n * 100) / 100);
-}
-
-/** "Nice" upper bound for an axis: round max up to a 1/2/5×10ⁿ step. */
-function niceCeil(max: number): number {
-  if (max <= 0) return 1;
-  const exp = Math.floor(Math.log10(max));
-  const base = Math.pow(10, exp);
-  const frac = max / base;
-  const step = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 5 ? 5 : 10;
-  return step * base;
-}
-
 /**
- * Two-sided axis extent covering the data AND zero, so negative bars sit on a
- * visible zero baseline instead of overflowing the viewBox. All-positive data
- * yields { min: 0, max: niceCeil(max) } — identical to the old single-sided
- * axis; all-negative yields the mirror image.
+ * Fill every unprocessed `.chart-slot`'s target with an echarts SVG chart.
+ * Lazily loads the echarts module (its own ~400KB chunk) so the first chart in
+ * a session pays one small import while startup stays untouched. Parse errors
+ * are synchronous; import/render failures surface the standard error state.
  */
-function niceScale(...values: number[]): { min: number; max: number } {
-  const rawMin = Math.min(0, ...values);
-  const rawMax = Math.max(0, ...values);
-  return {
-    min: rawMin < 0 ? -niceCeil(-rawMin) : 0,
-    max: rawMax > 0 ? niceCeil(rawMax) : 0,
-  };
-}
+let echartsChartMod: typeof import('./echartsChart') | null = null;
 
-function spanOf(min: number, max: number): number {
-  return max - min || 1;
-}
-
-/** Y pixel for a data value within a two-sided [min, max] axis (y1 = min). */
-function yFor(min: number, max: number, v: number, y0: number, y1: number): number {
-  return y1 - ((v - min) / spanOf(min, max)) * (y1 - y0);
-}
-
-/** X pixel for a data value within a two-sided [min, max] axis (x0 = min). */
-function xFor(min: number, max: number, v: number, x0: number, x1: number): number {
-  return x0 + ((v - min) / spanOf(min, max)) * (x1 - x0);
-}
-
-const VB_W = 640;
-const VB_H = 360;
-
-/**
- * Build the SVG markup for a chart spec. Pure — testable without a DOM. Text
- * and grid strokes use classes (.chart-text / .chart-grid / …) themed by
- * styles.css, so the same SVG works in light and dark mode.
- */
-export function buildChartSvg(spec: ChartSpec): string {
-  switch (spec.type) {
-    case 'pie': return buildPieSvg(spec);
-    case 'line': return buildLineSvg(spec);
-    case 'hbar': return buildHbarSvg(spec);
-    default: return buildBarSvg(spec);
+async function ensureEchartsChart(): Promise<typeof import('./echartsChart')> {
+  if (!echartsChartMod) {
+    echartsChartMod = await withTimeout(import('./echartsChart'));
   }
+  return echartsChartMod;
 }
 
-function chartHeader(title: string, extra = ''): string {
-  // SVG <title> gives the generated chart an accessible name for VoiceOver
-  // and other screen readers without adding visible text or changing layout.
-  const accessibleTitle = title.trim() || 'Chart';
-  return `<title class="chart-accessible-title">${esc(accessibleTitle)}</title>` +
-    `<text class="chart-title" x="16" y="26">${esc(title)}</text>${extra}`;
-}
+async function renderChartNodes(container: HTMLElement): Promise<void> {
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.chart-slot:not([data-processed])'));
+  if (slots.length === 0) return;
+  const attempts = slots.map((slot) => ({ slot, version: nextDiagramRenderVersion(slot) }));
 
-function yGrid(min: number, max: number, x0: number, x1: number, y0: number, y1: number): string {
-  const ticks = 4;
-  let out = '';
-  for (let i = 0; i <= ticks; i++) {
-    const v = min + ((max - min) * i) / ticks;
-    const y = yFor(min, max, v, y0, y1);
-    out += `<line class="chart-grid" x1="${x0}" y1="${y}" x2="${x1}" y2="${y}"/>`;
-    out += `<text class="chart-text" x="${x0 - 8}" y="${y + 4}" text-anchor="end">${fmtNum(v)}</text>`;
-  }
-  // Zero axis at the zero line when the data crosses 0 (so positive and
-  // negative bars visibly split), otherwise at the plot bottom — matches the
-  // old single-sided behavior for all-positive data.
-  const zy = yFor(min, max, 0, y0, y1);
-  out += `<line class="chart-axis" x1="${x0}" y1="${zy}" x2="${x1}" y2="${zy}"/>`;
-  return out;
-}
-
-function roundTopRect(x: number, y: number, w: number, h: number, r: number): string {
-  const rr = Math.min(r, w / 2, h);
-  return `M${x} ${y + h} L${x} ${y + rr} Q${x} ${y} ${x + rr} ${y} L${x + w - rr} ${y} Q${x + w} ${y} ${x + w} ${y + rr} L${x + w} ${y + h} Z`;
-}
-
-function splitChartLabel(label: string, maxChars = 12): string[] {
-  const chars = Array.from(label);
-  if (chars.length === 0) return [''];
-  const lines: string[] = [];
-  for (let i = 0; i < chars.length; i += maxChars) {
-    lines.push(chars.slice(i, i + maxChars).join(''));
-  }
-  return lines;
-}
-
-function chartMultilineText(
-  className: string,
-  x: number,
-  y: number,
-  lines: string[],
-  anchor: 'start' | 'middle' | 'end',
-  lineHeight = 14,
-): string {
-  const firstY = y - ((lines.length - 1) * lineHeight) / 2;
-  return `<text class="${className}" x="${x}" y="${firstY}" text-anchor="${anchor}">` +
-    lines.map((line, i) => `<tspan x="${x}" dy="${i === 0 ? 0 : lineHeight}">${esc(line)}</tspan>`).join('') +
-    `</text>`;
-}
-
-function chartHeightForLabels(maxLines: number): number {
-  return Math.max(VB_H, 304 + Math.max(1, maxLines) * 16 + 8);
-}
-
-function buildBarSvg(spec: ChartSpec): string {
-  const { title, unit, data } = spec;
-  const { min, max } = niceScale(...data.map(d => d.value));
-  const x0 = 52, x1 = 620, y0 = 48, y1 = 296;
-  const labels = data.map(d => splitChartLabel(d.label));
-  const chartHeight = chartHeightForLabels(Math.max(...labels.map(lines => lines.length)));
-  const band = (x1 - x0) / data.length;
-  const barW = Math.min(band * 0.58, 64);
-  const zeroY = yFor(min, max, 0, y0, y1);
-  let bars = '';
-  data.forEach((d, i) => {
-    const h = (Math.abs(d.value) / spanOf(min, max)) * (y1 - y0);
-    const bx = x0 + band * i + (band - barW) / 2;
-    // Positive bars grow UP from the zero baseline; negatives grow DOWN.
-    const by = d.value >= 0 ? zeroY - h : zeroY;
-    const color = CHART_PALETTE[i % CHART_PALETTE.length];
-    bars += `<path d="${roundTopRect(bx, by, barW, h, 4)}" fill="${color}">` +
-            `<title>${esc(`${d.label}: ${d.value}${unit}`)}</title></path>`;
-    // Value label above the bar (or below for negatives).
-    const ly = d.value >= 0 ? by - 6 : by + h + 14;
-    bars += `<text class="chart-value" x="${bx + barW / 2}" y="${ly}" text-anchor="middle">${fmtNum(d.value)}</text>`;
-    // Keep every label; wrap it into SVG tspans instead of replacing the tail with an ellipsis.
-    bars += chartMultilineText('chart-text', bx + barW / 2, y1 + 18, labels[i], 'middle');
-  });
-  return `<svg class="chart-svg" viewBox="0 0 ${VB_W} ${chartHeight}" xmlns="http://www.w3.org/2000/svg" role="img">` +
-    chartHeader(title, unit ? `<text class="chart-unit" x="${x1}" y="26" text-anchor="end">${esc(unit)}</text>` : '') +
-    yGrid(min, max, x0, x1, y0, y1) + bars + `</svg>`;
-}
-
-function buildHbarSvg(spec: ChartSpec): string {
-  const { title, unit, data } = spec;
-  const { min, max } = niceScale(...data.map(d => d.value));
-  // Reserve a real label column. The previous x0=8 put long labels outside the
-  // viewBox, so even short labels could be clipped at the left edge.
-  const x0 = 160, x1 = 620, y0 = 48;
-  const labels = data.map(d => splitChartLabel(d.label, 18));
-  const rowHeight = Math.max(30, Math.max(...labels.map(lines => lines.length)) * 16 + 10);
-  const y1 = y0 + rowHeight * data.length;
-  const chartHeight = y1 + 36;
-  const band = (y1 - y0) / data.length;
-  const barH = Math.min(band * 0.58, 26);
-  const zeroX = xFor(min, max, 0, x0, x1);
-  // Grid under the bars, spanning the whole [min, max] extent (incl. negatives).
-  let grid = '';
-  for (let i = 0; i <= 4; i++) {
-    const v = min + ((max - min) * i) / 4;
-    const x = xFor(min, max, v, x0, x1);
-    grid += `<line class="chart-grid" x1="${x}" y1="${y0}" x2="${x}" y2="${y1}"/>`;
-    grid += `<text class="chart-text" x="${x}" y="${y1 + 20}" text-anchor="middle">${fmtNum(v)}</text>`;
-  }
-  grid += `<line class="chart-axis" x1="${zeroX}" y1="${y0}" x2="${zeroX}" y2="${y1}"/>`;
-  let bars = '';
-  data.forEach((d, i) => {
-    // Positive bars grow RIGHT from the zero line; negatives grow LEFT.
-    const w = (d.value / spanOf(min, max)) * (x1 - x0);
-    const bx = d.value >= 0 ? zeroX : zeroX + w;
-    const bw = Math.abs(w);
-    const by = y0 + band * i + (band - barH) / 2;
-    const color = CHART_PALETTE[i % CHART_PALETTE.length];
-    bars += `<rect x="${bx}" y="${by}" width="${bw}" height="${barH}" rx="4" fill="${color}">` +
-            `<title>${esc(`${d.label}: ${d.value}${unit}`)}</title></rect>`;
-    bars += chartMultilineText('chart-text', x0 - 8, by + barH / 2, labels[i], 'end');
-    const vx = d.value >= 0 ? bx + bw + 6 : bx - 6;
-    const anchor = d.value >= 0 ? '' : ' text-anchor="end"';
-    bars += `<text class="chart-value" x="${vx}" y="${by + barH / 2 + 4}"${anchor}>${fmtNum(d.value)}</text>`;
-  });
-  return `<svg class="chart-svg" viewBox="0 0 ${VB_W} ${chartHeight}" xmlns="http://www.w3.org/2000/svg" role="img">` +
-    chartHeader(title, unit ? `<text class="chart-unit" x="${x1}" y="26" text-anchor="end">${esc(unit)}</text>` : '') +
-    grid + bars + `</svg>`;
-}
-
-function buildLineSvg(spec: ChartSpec): string {
-  const { title, unit, data } = spec;
-  const { min, max } = niceScale(...data.map(d => d.value));
-  const x0 = 52, x1 = 620, y0 = 48, y1 = 296;
-  const labels = data.map(d => splitChartLabel(d.label));
-  const zeroY = yFor(min, max, 0, y0, y1);
-  const pts = data.map((d, i) => ({
-    x: data.length === 1 ? (x0 + x1) / 2 : x0 + ((x1 - x0) * i) / (data.length - 1),
-    y: yFor(min, max, d.value, y0, y1),
-    d,
-  }));
-  const line = pts.map(p => `${p.x},${p.y}`).join(' ');
-  // Area fill anchors on the zero baseline (falls back to the plot bottom
-  // when all values are positive — same shape as before).
-  const area = pts.length > 1
-    ? `${x0},${zeroY} ${line} ${x1},${zeroY}`
-    : `${pts[0].x},${zeroY} ${pts[0].x},${pts[0].y} ${pts[0].x},${zeroY}`;
-  const color = CHART_PALETTE[0];
-  let body = `<polygon points="${area}" fill="${color}" opacity="0.12"/>`;
-  body += `<polyline points="${line}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
-  pts.forEach((p, i) => {
-    body += `<circle cx="${p.x}" cy="${p.y}" r="3.5" fill="var(--bg-card, #fff)" stroke="${color}" stroke-width="2">` +
-            `<title>${esc(`${p.d.label}: ${p.d.value}${unit}`)}</title></circle>`;
-    if (pts.length <= 12) {
-      body += `<text class="chart-value" x="${p.x}" y="${p.y - 9}" text-anchor="middle">${fmtNum(p.d.value)}</text>`;
-    }
-    body += chartMultilineText('chart-text', p.x, y1 + 18, labels[i], 'middle');
-  });
-  const chartHeight = chartHeightForLabels(Math.max(...labels.map(lines => lines.length)));
-  return `<svg class="chart-svg" viewBox="0 0 ${VB_W} ${chartHeight}" xmlns="http://www.w3.org/2000/svg" role="img">` +
-    chartHeader(title, unit ? `<text class="chart-unit" x="${x1}" y="26" text-anchor="end">${esc(unit)}</text>` : '') +
-    yGrid(min, max, x0, x1, y0, y1) + body + `</svg>`;
-}
-
-function buildPieSvg(spec: ChartSpec): string {
-  const { title, unit, data } = spec;
-  const total = data.reduce((s, d) => s + Math.max(0, d.value), 0);
-  if (total <= 0) throw new Error('pie chart needs positive values');
-  const cx = 190, cy = 180, R = 118, r = 62;
-  let angle = -Math.PI / 2;
-  let slices = '';
-  let legend = '';
-  let legendY = 62;
-  data.forEach((d, i) => {
-    const frac = Math.max(0, d.value) / total;
-    const a2 = angle + frac * Math.PI * 2;
-    const large = frac > 0.5 ? 1 : 0;
-    const x1 = cx + R * Math.cos(angle), y1 = cy + R * Math.sin(angle);
-    const x2 = cx + R * Math.cos(a2), y2 = cy + R * Math.sin(a2);
-    const ix1 = cx + r * Math.cos(a2), iy1 = cy + r * Math.sin(a2);
-    const ix2 = cx + r * Math.cos(angle), iy2 = cy + r * Math.sin(angle);
-    const color = CHART_PALETTE[i % CHART_PALETTE.length];
-    slices += `<path d="M${x1} ${y1} A${R} ${R} 0 ${large} 1 ${x2} ${y2} L${ix1} ${iy1} A${r} ${r} 0 ${large} 0 ${ix2} ${iy2} Z" fill="${color}">` +
-              `<title>${esc(`${d.label}: ${d.value}${unit} (${(frac * 100).toFixed(1)}%)`)}</title></path>`;
-    const mid = angle + frac * Math.PI;
-    if (frac >= 0.06) {
-      const lx = cx + ((R + r) / 2) * Math.cos(mid);
-      const ly = cy + ((R + r) / 2) * Math.sin(mid);
-      slices += `<text class="chart-slice-pct" x="${lx}" y="${ly + 4}" text-anchor="middle">${Math.round(frac * 100)}%</text>`;
-    }
-    const labelLines = splitChartLabel(d.label, 18);
-    const rowHeight = Math.max(28, labelLines.length * 16 + 8);
-    legend += `<rect class="chart-legend-chip" x="330" y="${legendY - 9}" width="10" height="10" rx="3" fill="${color}"/>`;
-    legend += chartMultilineText('chart-legend-label', 348, legendY, labelLines, 'start', 16);
-    legend += `<text class="chart-legend-value" x="620" y="${legendY}" text-anchor="end">${fmtNum(d.value)} · ${(frac * 100).toFixed(1)}%</text>`;
-    legendY += rowHeight;
-    angle = a2;
-  });
-  const center = `<text class="chart-total" x="${cx}" y="${cy - 4}" text-anchor="middle">${fmtNum(total)}</text>` +
-                 `<text class="chart-text" x="${cx}" y="${cy + 18}" text-anchor="middle">${esc(unit || 'total')}</text>`;
-  const chartHeight = Math.max(VB_H, legendY + 12);
-  return `<svg class="chart-svg" viewBox="0 0 ${VB_W} ${chartHeight}" xmlns="http://www.w3.org/2000/svg" role="img">` +
-    chartHeader(title) + slices + center +
-    `<g class="chart-legend">${legend}</g>` +
-    `</svg>`;
-}
-
-
-/** Fill every unprocessed `.chart-slot`'s target with the generated SVG. */
-function renderChartNodes(container: HTMLElement): void {
-  for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.chart-slot:not([data-processed])'))) {
+  // Commit the loading state, then yield two frames so the slot is laid out
+  // before echarts init. Without the yield, echarts can measure a 0/100px
+  // container width when a chart is rendered synchronously right after its DOM
+  // is inserted (session restore, retry) — the SVG then comes out distorted
+  // and the PNG export inherits the wrong dimensions.
+  for (const { slot, version } of attempts) {
+    if (!isCurrentDiagramRender(slot, version)) continue;
     slot.setAttribute('data-processed', 'true');
+    setDiagramState(slot, 'loading');
+  }
+  await new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+
+  let mod: typeof import('./echartsChart');
+  try {
+    mod = await ensureEchartsChart();
+  } catch (err) {
+    for (const { slot, version } of attempts) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      setDiagramState(slot, 'error', err instanceof Error ? err.message : String(err));
+    }
+    return;
+  }
+
+  for (const { slot, version } of attempts) {
+    if (!isCurrentDiagramRender(slot, version)) continue;
     const target = slot.querySelector<HTMLElement>('.chart-target');
     if (!target) {
       setDiagramState(slot, 'error', t('diagram.missingTarget'));
       continue;
     }
-    const src = diagramRawOf(slot);
     try {
-      const spec = parseChartSource(src);
-      target.innerHTML = buildChartSvg(spec);
+      const spec = parseChartSource(diagramRawOf(slot));
+      mod.renderEchartInto(target, spec);
+      if (!isCurrentDiagramRender(slot, version)) continue;
       setDiagramState(slot, 'preview');
     } catch (err) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
       const msg = err instanceof Error ? err.message : String(err);
       setDiagramState(slot, 'error', msg);
     }
@@ -1053,7 +984,7 @@ export async function renderMarkdown(text: string, container: HTMLElement): Prom
   // 3) Inline SVG (```svg) + native charts (```chart) — both synchronous.
   await renderSvgNodes(container);
   groupAdjacentSvgSlots(container);
-  renderChartNodes(container);
+  await renderChartNodes(container);
 
   // Start PlantUML listeners before awaiting Mermaid so a slow Mermaid render
   // cannot extend the PlantUML spinner beyond its own bounded timeout.
@@ -1341,6 +1272,20 @@ export function cancelStreamingRender(container: HTMLElement): void {
 if (typeof document !== 'undefined') {
   document.addEventListener('pure:theme-changed', async () => {
     mermaidInitTheme = null; // force re-init on next mermaid call
+    // echarts charts also bake colors at render time — re-render every chart
+    // slot so they follow the theme (the old instance is disposed inside
+    // renderEchartInto before the new one renders).
+    const chartSlots = Array.from(document.querySelectorAll<HTMLElement>('.chart-slot[data-state="preview"]'));
+    if (chartSlots.length > 0) {
+      for (const slot of chartSlots) {
+        nextDiagramRenderVersion(slot);
+        slot.removeAttribute('data-processed');
+        const target = slot.querySelector<HTMLElement>('.chart-target');
+        if (target) target.innerHTML = '';
+      }
+      await renderChartNodes(document.body);
+      bindVectorPopup(document.body);
+    }
     const all = Array.from(document.querySelectorAll<HTMLElement>('.mermaid-slot'));
     if (all.length === 0) return;
     for (const slot of all) {
@@ -1423,8 +1368,7 @@ function bindDiagramControls(container: HTMLElement): void {
       } else if (kind === 'svg') {
         void renderSvgNodes(host).then(() => bindVectorPopup(host));
       } else if (kind === 'chart') {
-        renderChartNodes(host);
-        bindVectorPopup(host);
+        void renderChartNodes(host).then(() => bindVectorPopup(host));
       } else {
         const oldImage = target.querySelector<HTMLImageElement>('.puml-diagram');
         if (oldImage) {
@@ -1670,32 +1614,6 @@ function showDiagramViewer(el: HTMLElement): void {
   requestAnimationFrame(() => fitToViewport());
 }
 
-/**
- * Theme-resolved snapshot of the chart CSS (see styles.css `.chart-svg …`
- * rules). The class rules live in the host document, so a saved standalone SVG
- * must inline them with the CURRENT theme's concrete colors — otherwise the
- * exported file would show invisible grid/axis strokes and unstyled text.
- */
-function chartExportStyles(): string {
-  const cs = getComputedStyle(document.documentElement);
-  const v = (name: string, fallback: string): string => cs.getPropertyValue(name).trim() || fallback;
-  const font = getComputedStyle(document.body).fontFamily || 'sans-serif';
-  // --bg-card: the chart sits on the card background, and buildLineSvg paints
-  // its point markers with `var(--bg-card, #fff)`; resolving it here keeps the
-  // exported SVG/PNG faithful to the current theme (light card vs dark card).
-  const bg = v('--bg-card', isDark() ? '#1f2430' : '#ffffff');
-  return `:root{--bg-card:${bg}}` +
-    `.chart-title,.chart-text,.chart-legend-label{fill:${v('--chart-text', '#37352F')};font-family:${font}}` +
-    `.chart-title{font-size:14px;font-weight:600}` +
-    `.chart-text{font-size:11px}` +
-    `.chart-unit{fill:${v('--chart-muted', '#6B6965')};font:11px ${font}}` +
-    `.chart-value{fill:${v('--chart-value', '#37352F')};font:600 12px ${font}}` +
-    `.chart-total{fill:${v('--chart-total', '#37352F')};font:600 20px ${font}}` +
-    `.chart-slice-pct{fill:${v('--chart-slice-text', '#172033')};font:600 11px ${font}}` +
-    `.chart-legend-value{fill:${v('--chart-value', '#37352F')};font:600 11px ${font}}` +
-    `.chart-grid{stroke:${v('--chart-grid', '#D8D5CF')};stroke-width:1}` +
-    `.chart-axis{stroke:${v('--chart-axis', '#9B9995')};stroke-width:1.5}`;
-}
 
 /**
  * Derive an export filename base for a diagram slot: prefer the chart
@@ -1719,22 +1637,14 @@ function diagramSourceName(slot: HTMLElement): string {
 
 /**
  * Serialize a rendered diagram SVG into a self-contained document: xmlns added
- * if missing; charts additionally get a <style> embedding the CURRENT theme's
- * resolved colors (their generated SVG is styled purely by classes). Mermaid
- * already carries its own <style> inside the rendered SVG, so no injection is
- * needed there. Supports chart, mermaid, and SVG slots.
+ * if missing. Chart SVGs (echarts) and mermaid carry their colors inline, so
+ * no extra <style> injection is needed. Supports chart, mermaid, and SVG slots.
  */
 function serializeDiagramSvg(slot: HTMLElement): { svg: string; nameBase: string } | null {
-  const kind = slot.getAttribute('data-diagram-kind');
   const svg = slot.querySelector<SVGSVGElement>('.chart-target svg, .svg-target svg, .mermaid-target svg');
   if (!svg) return null;
   const clone = svg.cloneNode(true) as SVGSVGElement;
   if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-  if (kind === 'chart') {
-    const styleEl = document.createElementNS('http://www.w3.org/2000/svg', 'style');
-    styleEl.textContent = chartExportStyles();
-    clone.insertBefore(styleEl, clone.firstChild);
-  }
   return { svg: new XMLSerializer().serializeToString(clone), nameBase: diagramSourceName(slot) };
 }
 
