@@ -15,6 +15,33 @@ use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command as TokioCommand};
 
+// ── Silent child processes ──
+// A Windows GUI app has no attached console, so every console child (cmd,
+// git, node, powershell, …) spawns a fresh console window that flashes on
+// screen for each tool call. CREATE_NO_WINDOW hides it. Both wrappers are
+// no-ops on Unix/macOS, so call sites use them everywhere.
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
+
+// CREATE_NO_WINDOW — Windows flag that suppresses the console window a child
+// process would otherwise open when the parent GUI app has no console.
+#[allow(dead_code)] // only referenced from cfg(windows) bodies
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[allow(unused_mut)] // mut is only used by the cfg(windows) body
+fn silent_child(mut cmd: std::process::Command) -> std::process::Command {
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+#[allow(unused_mut)] // mut is only used by the cfg(windows) body
+fn silent_child_tokio(mut cmd: TokioCommand) -> TokioCommand {
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  MCP Subprocess Manager
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -468,9 +495,9 @@ async fn execute_command(workspace: String, command: String) -> Result<serde_jso
     // Unix shells run `sh -c`, Windows runs `cmd /C` (no `sh` binary there).
     let output = {
         #[cfg(unix)]
-        let mut cmd = TokioCommand::new("sh");
+        let mut cmd = silent_child_tokio(TokioCommand::new("sh"));
         #[cfg(windows)]
-        let mut cmd = TokioCommand::new("cmd");
+        let mut cmd = silent_child_tokio(TokioCommand::new("cmd"));
         #[cfg(unix)]
         cmd.arg("-c");
         #[cfg(windows)]
@@ -514,13 +541,13 @@ fn spawn_shell_command(workspace: &str, command: &str) -> std::io::Result<Child>
     // Unix shells run `sh -c`, Windows runs `cmd /C` (no `sh` binary there).
     #[cfg(unix)]
     let mut cmd = {
-        let mut c = TokioCommand::new("sh");
+        let mut c = silent_child_tokio(TokioCommand::new("sh"));
         c.arg("-c");
         c
     };
     #[cfg(windows)]
     let mut cmd = {
-        let mut c = TokioCommand::new("cmd");
+        let mut c = silent_child_tokio(TokioCommand::new("cmd"));
         c.arg("/C");
         c
     };
@@ -556,7 +583,7 @@ fn kill_process_group(pid: i32) -> std::io::Result<()> {
     // Windows has no POSIX process groups; terminate the whole command tree
     // (/T) forcibly (/F) via taskkill. A missing process (normal race between
     // command completion and a kill arriving) is treated as success.
-    let status = std::process::Command::new("taskkill")
+    let status = silent_child(std::process::Command::new("taskkill"))
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .status()?;
     if status.success() {
@@ -696,7 +723,7 @@ async fn kill_command(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn run_git(workspace: &str, args: &[String]) -> Result<String, String> {
-    let output = std::process::Command::new("git")
+    let output = silent_child(std::process::Command::new("git"))
         .args(args)
         .current_dir(workspace)
         .output()
@@ -779,9 +806,9 @@ fn diff_files(workspace: String, path_a: String, path_b: String) -> Result<Strin
     // Windows ships no `diff` binary; fall back to `git diff --no-index` (Git
     // for Windows ships git.exe) which reports differences with the same
     // exit-code convention (0 identical / 1 differs).
-    let output = match std::process::Command::new("diff").arg("-u").arg(&full_a).arg(&full_b).output() {
+    let output = match silent_child(std::process::Command::new("diff")).arg("-u").arg(&full_a).arg(&full_b).output() {
         Ok(o) => o,
-        Err(_) => std::process::Command::new("git")
+        Err(_) => silent_child(std::process::Command::new("git"))
             .args(["diff", "--no-index", "--"])
             .arg(&full_a)
             .arg(&full_b)
@@ -2302,7 +2329,7 @@ async fn spawn_mcp(
 ) -> Result<String, String> {
     let key = mcp_key(&session_id, &name);
 
-    let mut cmd = TokioCommand::new(&command);
+    let mut cmd = silent_child_tokio(TokioCommand::new(&command));
     cmd.args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -3768,7 +3795,7 @@ fn detect_runtime_versions() -> Vec<String> {
         ("rustc", vec!["--version"]),
         ("git", vec!["--version"]),
     ] {
-        let version = std::process::Command::new(label)
+        let version = silent_child(std::process::Command::new(label))
             .args(&args)
             .output()
             .ok()
@@ -3818,7 +3845,7 @@ fn sys_info(_workspace: String, location: Option<String>) -> Result<String, Stri
             .unwrap_or_else(|_| "unknown".to_string());
         // Windows has no `date` binary; PowerShell formats the local time.
         #[cfg(windows)]
-        let output = std::process::Command::new("powershell")
+        let output = silent_child(std::process::Command::new("powershell"))
             .args(["-NoProfile", "-Command", "Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'"])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -3940,7 +3967,7 @@ async fn open_path(path: String) -> Result<(), String> {
     // so `cmd /C start "" <target>` is used instead: it hands files, folders
     // and URLs to the default app with a reliable exit code.
     #[cfg(target_os = "windows")]
-    let status = TokioCommand::new("cmd")
+    let status = silent_child_tokio(TokioCommand::new("cmd"))
         .args(["/C", "start", ""])
         .arg(&target)
         .status()

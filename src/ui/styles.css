@@ -139,12 +139,27 @@ body {
   overflow: hidden;
   -webkit-app-region: drag;
   user-select: none;
-  transition: width 0.3s var(--ease-out), background var(--transition), border-color var(--transition);
+  /* Two-phase open/close: the VISIBLE tween runs on `transform` (pure
+     compositor, never touches layout), and the flex width is reclaimed in a
+     SINGLE layout at the end (width transition-delay = tween duration). This
+     keeps the sidebar's width from reflowing the whole flex row every frame
+     — the main thread stays free for typing/streaming — while the layout
+     stays identical to before (inline flex, #main takes the freed space). */
+  contain: layout style;
+  will-change: transform;
+  /* Width is reclaimed with a ZERO delay here so OPENING restores it
+     instantly (the slide-in stays visible); the delay lives in the
+     .collapsed rule so CLOSING keeps the footprint until the tween ends. */
+  transition: transform 0.3s var(--ease-out), width 0s, background var(--transition), border-color var(--transition);
 }
 
 #sidebar.collapsed {
+  transform: translateX(-100%);
   width: 0;
   border-right: none;
+  /* Two-phase close: slide out on transform first, reclaim the flex width in
+     ONE layout after the tween ends (delay = tween duration). */
+  transition: transform 0.3s var(--ease-out), width 0s 0.3s, background var(--transition), border-color var(--transition);
 }
 
 #sidebar-top {
@@ -902,6 +917,12 @@ body {
 #chat {
   flex: 1;
   overflow-y: auto;
+  /* Layout containment: streaming tokens, image loads, and diagram renders
+     all reflow inside this scroll box — long conversations stop relaying out
+     the input bar, sidebars, and status footer on every update. Mirrors the
+     sidebars' containment; safe because both fixed overlays (mermaid viewer,
+     paste viewer) are mounted on document.body, not inside #chat. */
+  contain: layout;
   padding: 48px 48px 20px;
   display: none;
   flex-direction: column;
@@ -922,7 +943,31 @@ body {
   display: flex;
   flex-direction: column;
   width: 100%;
+  /* The entrance animation is scoped to the newest row (:last-child below):
+     off-screen rows must stay animation-free so the content-visibility skip
+     can neither defer nor replay bubbleIn while scrolling history. */
+  animation: none;
+  /* Long conversations make #chat reflow every off-screen message on each
+     streamed token — that O(messages) main-thread work is what made typing
+     and sidebar toggles lag. content-visibility skips rendering for
+     off-screen rows entirely (O(visible) layout/paint); contain-intrinsic-
+     block-size keeps the scrollbar stable with a per-type estimate, and the
+     `auto` keyword caches each row's last rendered height. Safari < 17
+     lacks `auto`, so a plain estimate declaration comes first. */
+  content-visibility: auto;
+  contain-intrinsic-block-size: 140px;
+  contain-intrinsic-block-size: auto 140px;
+}
+.bubble-row:last-child {
   animation: bubbleIn 0.4s var(--ease-spring) both;
+}
+.bubble-row.status {
+  contain-intrinsic-block-size: 40px;
+  contain-intrinsic-block-size: auto 40px;
+}
+.bubble-row.tool-grid {
+  contain-intrinsic-block-size: 100px;
+  contain-intrinsic-block-size: auto 100px;
 }
 @keyframes bubbleIn {
   from { opacity: 0; transform: translateY(12px) scale(0.97); }
@@ -4178,9 +4223,10 @@ select:focus-visible,
      radius, translucency and shadow so both inputs read as one component. */
   border: 1px solid var(--border-light);
   border-radius: 16px;
-  background: color-mix(in srgb, var(--bg-input) 78%, transparent);
+  /* Same no-backdrop-filter treatment as #composer-box — see there for the
+     WKWebView compositing rationale (typing re-blurs every frame). */
+  background: color-mix(in srgb, var(--bg-input) 92%, var(--bg));
   box-shadow: 0 14px 44px rgba(8, 14, 26, 0.16), inset 0 0 0 1px color-mix(in srgb, #fff 42%, transparent);
-  backdrop-filter: blur(18px);
 }
 
 #landing-input-wrap:focus-within {
@@ -4544,15 +4590,25 @@ select:focus-visible,
   overflow: hidden;
   background: color-mix(in srgb, var(--bg-chat) 92%, var(--accent-soft));
   border-left: 1px solid var(--border-light);
-  transition: width 0.35s var(--ease-out), flex-basis 0.35s var(--ease-out), opacity 0.25s var(--ease-out), border-color var(--transition);
+  /* Two-phase open/close — same transform-then-reclaim pattern as #sidebar
+     (see there): the slide tween is compositor-only; width/flex-basis are
+     reclaimed in one layout after the tween via transition-delay. */
+  contain: layout style;
+  will-change: transform;
+  /* Same two-phase asymmetry as #sidebar: instant width restore on open,
+     delayed reclaim on close (see .collapsed below). */
+  transition: transform 0.35s var(--ease-out), width 0s, flex-basis 0s, opacity 0.25s var(--ease-out), border-color var(--transition);
 }
 
 #context-panel.collapsed {
+  transform: translateX(100%);
   width: 0;
   flex-basis: 0;
   border-left-color: transparent;
   opacity: 0;
   pointer-events: none;
+  /* Delay the width/flex-basis reclaim until the slide-out tween ends. */
+  transition: transform 0.35s var(--ease-out), width 0s 0.35s, flex-basis 0s 0.35s, opacity 0.25s var(--ease-out), border-color var(--transition);
 }
 
 #context-panel[hidden] {
@@ -4648,31 +4704,6 @@ select:focus-visible,
   to   { opacity: 1; transform: translate(0, -50%); }
 }
 
-.context-panel-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 0 14px 12px;
-  border-bottom: 1px solid var(--border-light);
-  flex-shrink: 0;
-}
-
-.context-tab {
-  padding: 6px 8px;
-  color: var(--text-tertiary);
-  background: transparent;
-  border: 0;
-  border-radius: 7px;
-  cursor: pointer;
-  font: 10px var(--font-sans);
-  transition: color var(--transition), background var(--transition);
-}
-
-.context-tab:hover,
-.context-tab.active {
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-
 .context-panel-body {
   flex: 1;
   min-height: 0;
@@ -4680,117 +4711,8 @@ select:focus-visible,
   padding: 14px;
 }
 
-.preview-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--text-secondary);
-  font-size: 10px;
-}
-
-.preview-live-dot,
-.stage-pulse {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 6px;
-  border-radius: 50%;
-  background: var(--success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 13%, transparent);
-}
-
-.preview-status {
-  margin-left: auto;
-  color: var(--text-tertiary);
-  font: 9px var(--font-mono);
-}
-
-.preview-window {
-  margin-top: 12px;
-  overflow: hidden;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  box-shadow: var(--shadow-sm);
-}
-
-.preview-window-bar {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  height: 25px;
-  padding: 0 9px;
-  background: var(--bg-input);
-  border-bottom: 1px solid var(--border-light);
-}
-
-.preview-window-bar span {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--border);
-}
-
-.preview-window-bar b {
-  margin-left: 5px;
-  overflow: hidden;
-  color: var(--text-tertiary);
-  font: 8px var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.preview-window-content {
-  min-height: 245px;
-  padding: 15px;
-  background: linear-gradient(145deg, color-mix(in srgb, var(--accent-soft) 55%, var(--bg-card)), var(--bg-card) 60%);
-}
-
-.preview-skeleton {
-  background: color-mix(in srgb, var(--accent) 23%, var(--bg-input));
-  border-radius: 5px;
-}
-
-.preview-skeleton.hero {
-  height: 72px;
-  margin-bottom: 14px;
-  background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 30%, var(--bg-input)), color-mix(in srgb, var(--accent) 8%, var(--bg-input)));
-}
-
-.preview-skeleton.line {
-  width: 62%;
-  height: 7px;
-  margin: 8px 0;
-}
-
-.preview-skeleton.line.wide {
-  width: 82%;
-}
-
-.preview-skeleton-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 7px;
-  margin-top: 18px;
-}
-
-.preview-skeleton-grid i {
-  display: block;
-  height: 52px;
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg-input));
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
-  border-radius: 7px;
-}
-
-.preview-caption {
-  margin-top: 18px;
-  color: var(--text-tertiary);
-  font-size: 10px;
-  line-height: 1.5;
-}
-
 .context-section-heading,
-.context-meta-row,
-.context-stage-top {
+.context-meta-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4809,52 +4731,7 @@ select:focus-visible,
   text-transform: none;
 }
 
-.context-change-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 220px;
-  padding: 25px;
-  color: var(--text-tertiary);
-  text-align: center;
-}
-
-.context-empty-icon {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  margin-bottom: 10px;
-  color: var(--accent);
-  background: var(--accent-soft);
-  border-radius: 10px;
-}
-
-.context-change-empty p {
-  max-width: 190px;
-  margin: 0;
-  font-size: 10px;
-  line-height: 1.55;
-}
-
-.structure-tree {
-  margin-top: 14px;
-  color: var(--text-secondary);
-  font: 11px/2 var(--font-mono);
-}
-
-.structure-tree b {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.tree-child {
-  padding-left: 21px;
-  color: var(--text-tertiary);
-}
-
-/* ── Session stats (右面板「统计」tab) ── */
+/* ── Session stats (右面板「统计」view) ── */
 
 /* Export button + dropdown menu in the stats heading row (导出 → JSON/MD). */
 .stats-heading {
@@ -5079,55 +4956,6 @@ select:focus-visible,
   font: 9px var(--font-mono);
 }
 
-.context-stage {
-  padding: 14px;
-  flex-shrink: 0;
-}
-
-.context-stage-top {
-  color: var(--text-secondary);
-  font-size: 10px;
-}
-
-.context-stage-top .stage-pulse {
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-
-#context-stage-percent {
-  margin-left: auto;
-  color: var(--text-tertiary);
-  font: 9px var(--font-mono);
-}
-
-.context-stage-track {
-  height: 4px;
-  margin: 10px 0 9px;
-  overflow: hidden;
-  background: var(--bg-input);
-  border-radius: 99px;
-}
-
-.context-stage-track i {
-  display: block;
-  width: 0;
-  height: 100%;
-  background: var(--accent);
-  border-radius: inherit;
-  transition: width 0.4s var(--ease-out);
-}
-
-.context-stage-steps {
-  display: flex;
-  justify-content: space-between;
-  color: var(--text-tertiary);
-  font-size: 8px;
-}
-
-.context-stage-steps .done {
-  color: var(--accent);
-}
-
 #sidebar-model {
   max-width: 130px;
   overflow: hidden;
@@ -5206,8 +5034,7 @@ button svg,
 #landing-input-wrap,
 .settings-header-left,
 .setting-input-group,
-.context-panel-header,
-.context-panel-tabs {
+.context-panel-header {
   align-items: center;
 }
 
@@ -5347,13 +5174,6 @@ button svg,
 
 .context-panel-header {
   min-height: 76px;
-}
-
-.context-tab {
-  min-height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 
 @media (max-width: 720px) {
@@ -6295,10 +6115,14 @@ button svg,
   width: 100%;
   border: 1px solid var(--border-light);
   border-radius: 16px;
-  background: color-mix(in srgb, var(--bg-input) 78%, transparent);
+  /* NOTE: deliberately NO backdrop-filter here. WKWebView re-blurs the
+     backdrop on every repaint — typing/pasting changes the textarea height,
+     so the blur sample area changes every frame and steals the main thread
+     while a sidebar width animation is running. A high-opacity layered
+     background reads the same as glass at 16px radius at a fraction of the
+     compositor cost (see #sidebar-toggle for the same rationale). */
+  background: color-mix(in srgb, var(--bg-input) 92%, var(--bg));
   box-shadow: 0 14px 44px rgba(8, 14, 26, 0.16), inset 0 0 0 1px color-mix(in srgb, #fff 42%, transparent);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
   transition: border-color 0.2s var(--ease-out), box-shadow 0.3s var(--ease-out), background var(--transition);
 }
 

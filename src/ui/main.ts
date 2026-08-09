@@ -169,7 +169,6 @@ chat.onStreamingStateChange((streaming) => {
     landingSend.title = t('input.stop.title');
     landingSend.setAttribute('aria-label', t('input.stop.title'));
     updateContextPanelStage(true);
-    updateContextPanelChanges();
   } else {
     const sendSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>`;
     sendBtn.innerHTML = sendSvg;
@@ -186,7 +185,6 @@ chat.onStreamingStateChange((streaming) => {
     landingSend.setAttribute('aria-label', t('input.send.title'));
     landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
     updateContextPanelStage(false);
-    updateContextPanelChanges();
   }
 });
 
@@ -334,15 +332,6 @@ function updateContextPanelModel() {
   model.textContent = cfg?.model ? `${providerLabel(cfg.provider)} · ${cfg.model}` : (cfg?.provider ? providerLabel(cfg.provider) : t('context.model.notConfigured'));
 }
 
-function updateContextPanelChanges() {
-  const count = document.getElementById('context-change-count');
-  if (!count) return;
-  const changed = document.querySelectorAll('#chat .tool-row.success, #chat .diff-card, #chat .bubble.md-rendered pre').length;
-  count.textContent = changed === 0
-    ? t('context.changes.none')
-    : t('context.changes.count').replace('{n}', String(changed));
-}
-
 /** Persistent status footer: workspace · model · live state · version. */
 function updateStatusBar() {
   const cfg = loadConfig();
@@ -383,17 +372,6 @@ function updateStatusBar() {
 }
 
 function updateContextPanelStage(streaming = chat.isStreaming()) {
-  const label = document.getElementById('context-stage-label');
-  const percent = document.getElementById('context-stage-percent');
-  const progress = document.getElementById('context-stage-progress');
-  const status = document.getElementById('preview-status');
-  const stage = streaming ? t('context.stage.building') : (hasStartedChat ? t('context.stage.next') : t('context.stage.ready'));
-  const value = streaming ? 62 : (hasStartedChat ? 28 : 0);
-  updateContextPanelChanges();
-  if (label) label.textContent = stage;
-  if (percent) percent.textContent = `${value}%`;
-  if (progress) progress.style.width = `${value}%`;
-  if (status) status.textContent = streaming ? t('context.status.updating') : (hasStartedChat ? t('context.status.ready') : t('context.status.waiting'));
   updateStatusBar();
 }
 
@@ -611,7 +589,6 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   // stream would, then scroll through the shared coalesced helper.
   setPinnedToBottom(chatEl, true);
   scrollChatToBottomIfPinned(chatEl);
-  updateContextPanelChanges();
   // The restored session's stats belong to the same conversation id —
   // re-render the 统计 tab so the panel matches the transcript.
   renderSessionStats();
@@ -666,13 +643,87 @@ function syncLandingHasText(): void {
   if (wrap) wrap.classList.toggle('has-text', !!landingPrompt.value.trim());
 }
 
-landingPrompt.addEventListener('input', () => {
-  landingPrompt.style.height = 'auto';
-  landingPrompt.style.height = Math.min(landingPrompt.scrollHeight, 200) + 'px';
-  syncLandingHasText();
-  if (!chat.isStreaming()) {
-    landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
+// ── Input event profiling (performance.measure) ──
+// Records each input event's synchronous handler cost (auto-resize, send
+// button state) so the jank fixes — no per-keystroke forced layout, purely
+// compositor sidebar animation, #chat layout containment — can be verified
+// numerically. Every INPUT_PROFILE_WINDOW events a compact summary logs to
+// the console; per-event records are inspectable via
+// performance.getEntriesByType('measure'); an on-demand dump is available as
+// window.__pureInputProfile().
+const INPUT_PROFILE_WINDOW = 200;
+
+interface InputProfileStats {
+  count: number;
+  max: number;
+  recent: number[];
+}
+
+const inputProfileStats = new Map<string, InputProfileStats>();
+
+function logInputProfileSummary(name: string, s: InputProfileStats): void {
+  const recent = s.recent;
+  const sorted = [...recent].sort((a, b) => a - b);
+  const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
+  const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+  console.log(
+    `[pure] input profile "${name}" — ${recent.length} events · avg ${avg.toFixed(2)}ms · p95 ${p95.toFixed(2)}ms · max ${s.max.toFixed(2)}ms`,
+  );
+}
+
+function recordInputProfile(name: string, duration: number): void {
+  let s = inputProfileStats.get(name);
+  if (!s) {
+    s = { count: 0, max: 0, recent: [] };
+    inputProfileStats.set(name, s);
   }
+  s.count += 1;
+  s.max = Math.max(s.max, duration);
+  s.recent.push(duration);
+  if (s.recent.length > INPUT_PROFILE_WINDOW) s.recent.shift();
+  if (s.count % INPUT_PROFILE_WINDOW === 0) logInputProfileSummary(name, s);
+}
+
+/** Run fn under a performance.measure record named `input:${name}`. */
+function profileInput(name: string, fn: () => void): void {
+  const startMark = `input:${name}:${performance.now()}`;
+  performance.mark(startMark);
+  const start = performance.now();
+  fn();
+  const duration = performance.now() - start;
+  try {
+    performance.measure(`input:${name}`, startMark);
+  } catch {
+    // The start mark may have been evicted from the performance buffer — the
+    // manual now() delta above is the source of truth for the stats.
+  }
+  recordInputProfile(name, duration);
+}
+
+function dumpInputProfiles(): void {
+  if (inputProfileStats.size === 0) {
+    console.log('[pure] input profile: no data yet — type in either composer.');
+    return;
+  }
+  for (const [name, s] of inputProfileStats) logInputProfileSummary(name, s);
+}
+
+const profileGlobal = window as unknown as { __pureInputProfile: () => void };
+profileGlobal.__pureInputProfile = dumpInputProfiles;
+
+landingPrompt.addEventListener('input', () => {
+  profileInput('landing', () => {
+    // Only write when the height actually changed — see autoResizePrompt() for
+    // why per-keystroke forced layout stalls sidebar animations.
+    const next = Math.min(landingPrompt.scrollHeight, 200);
+    if (landingPrompt.style.height !== `${next}px`) {
+      landingPrompt.style.height = `${next}px`;
+    }
+    syncLandingHasText();
+    if (!chat.isStreaming()) {
+      landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
+    }
+  });
 });
 
 landingPrompt.addEventListener('keydown', (e) => {
@@ -688,10 +739,12 @@ landingPrompt.addEventListener('keydown', (e) => {
 // ── Chat (bottom) input auto-resize ──
 
 promptEl.addEventListener('input', () => {
-  autoResizePrompt();
-  if (!chat.isStreaming()) {
-    sendBtn.disabled = !promptEl.value.trim() && !pasteChips.hasAttachments();
-  }
+  profileInput('chat', () => {
+    autoResizePrompt();
+    if (!chat.isStreaming()) {
+      sendBtn.disabled = !promptEl.value.trim() && !pasteChips.hasAttachments();
+    }
+  });
 });
 
 // Double-click either composer to copy the current draft without disturbing
@@ -820,10 +873,20 @@ function focusPromptCaretEnd() {
   promptEl.setSelectionRange(len, len);
 }
 
-/** Match the bottom input's auto-resize so programmatic value sets grow the box. */
+/**
+ * Match the bottom input's auto-resize so programmatic value sets grow the
+ * box. Writing style.height twice per keystroke forces a synchronous layout
+ * (style write → scrollHeight read → write) that steals the main thread and
+ * makes sidebar width animations jank while typing — so only touch the DOM
+ * when the height actually changed.
+ */
 function autoResizePrompt() {
-  promptEl.style.height = 'auto';
-  promptEl.style.height = Math.min(promptEl.scrollHeight, 120) + 'px';
+  profileInput('autoresize', () => {
+    const next = Math.min(promptEl.scrollHeight, 120);
+    if (promptEl.style.height !== `${next}px`) {
+      promptEl.style.height = `${next}px`;
+    }
+  });
 }
 
 /** Auto-send a message queued with Enter while the assistant was generating. */
@@ -850,8 +913,32 @@ function flushQueued() {
 const sidebarToggle = document.getElementById('sidebar-toggle') as HTMLButtonElement;
 const sidebar = document.getElementById('sidebar')!;
 
+// The chat view carries a 0.4s width transition for the settings-mode
+// squeeze (#chat-view.squeezed). A sidebar toggle reclaims flex width in a
+// SINGLE layout at the end of its transform tween — without this guard that
+// snap would replay a per-frame width animation on the chat area (composer
+// included) right while the user might be typing. Drop the transition for
+// the duration of the tween so the chat area snaps with the sidebar instead.
+// The 600ms restore covers the longest reclaim (context panel: 0.35s tween +
+// 0.35s width delay) — keep it in sync with those durations if they change.
+function withChatWidthSnap(action: () => void) {
+  const main = document.getElementById('main');
+  const chatView = document.getElementById('chat-view');
+  if (!main || !chatView || main.classList.contains('settings-mode')) {
+    action();
+    return;
+  }
+  chatView.style.transition = 'none';
+  // Schedule the restore BEFORE running the action so a synchronous throw
+  // can never leave the chat view permanently transition-less.
+  window.setTimeout(() => {
+    chatView.style.transition = '';
+  }, 600);
+  action();
+}
+
 sidebarToggle.addEventListener('click', () => {
-  sidebar.classList.toggle('collapsed');
+  withChatWidthSnap(() => sidebar.classList.toggle('collapsed'));
   // The picker button is hidden when the sidebar collapses — don't leave a
   // floating popover behind.
   if (sidebar.classList.contains('collapsed')) {
@@ -905,28 +992,15 @@ function setContextPanelCollapsed(collapsed: boolean) {
   if (poly) poly.setAttribute('points', collapsed ? '15 18 9 12 15 6' : '9 18 15 12 9 6');
 }
 
-contextPanelReopen?.addEventListener('click', () => setContextPanelCollapsed(!contextCollapsed));
+contextPanelReopen?.addEventListener('click', () => withChatWidthSnap(() => setContextPanelCollapsed(!contextCollapsed)));
 
 // Both sidebars start collapsed: the right context panel begins hidden and its
 // edge toggle flips to the left-pointing "expand" arrow (the left sidebar's
 // collapsed class lives in index.html).
 setContextPanelCollapsed(true);
 
-document.querySelectorAll<HTMLButtonElement>('[data-context-tab]').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    const selected = tab.dataset.contextTab;
-    document.querySelectorAll<HTMLButtonElement>('[data-context-tab]').forEach((item) => {
-      const active = item === tab;
-      item.classList.toggle('active', active);
-      item.setAttribute('aria-selected', String(active));
-    });
-    document.querySelectorAll<HTMLElement>('[data-context-view]').forEach((view) => {
-      view.classList.toggle('hidden', view.dataset.contextView !== selected);
-    });
-    // Re-render the stats tab on open so it never shows stale numbers.
-    if (selected === 'stats') renderSessionStats();
-  });
-});
+// The right panel is now a single always-visible stats view (预览/变更/结构
+// tabs were removed).
 
 // Stats panel export menu (导出 → JSON / Markdown).
 initStatsExportMenu();
@@ -1458,7 +1532,7 @@ document.addEventListener('keydown', (e) => {
   }
   if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
     e.preventDefault();
-    sidebar.classList.toggle('collapsed');
+    withChatWidthSnap(() => sidebar.classList.toggle('collapsed'));
     // Same as the sidebarToggle click handler: don't leave a floating popover
     // when the sidebar (and its picker button) collapse.
     if (sidebar.classList.contains('collapsed')) {

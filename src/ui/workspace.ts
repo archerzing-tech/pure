@@ -99,12 +99,10 @@ export class WorkspaceController {
 
   private updateContextPanelWorkspace(path: string) {
     const workspace = document.getElementById('context-workspace');
-    const name = document.getElementById('context-workspace-name');
     if (workspace) {
       workspace.textContent = path || t('workspace.none');
       workspace.title = path;
     }
-    if (name) name.textContent = path ? workspaceBase(path) : 'workspace';
   }
 
   // ── Popover ──
@@ -134,8 +132,17 @@ export class WorkspaceController {
   async browse(): Promise<void> {
     if (isTauriRuntime()) {
       try {
+        const importStart = performance.now();
         const { open } = await import('@tauri-apps/plugin-dialog');
+        const importMs = performance.now() - importStart;
+        const dialogStart = performance.now();
         const selected = await open({ directory: true, multiple: false, title: t('workspace.browseTitle') });
+        const dialogMs = performance.now() - dialogStart;
+        // Diagnostic: when the folder picker feels slow, this pinpoints
+        // whether the delay is the module load or the native panel itself.
+        if (importMs > 100 || dialogMs > 300) {
+          console.log(`[pure] folder picker latency — import ${importMs.toFixed(0)}ms · native dialog ${dialogMs.toFixed(0)}ms`);
+        }
         if (typeof selected === 'string' && selected) {
           await this.commit(selected);
         }
@@ -372,6 +379,13 @@ export class WorkspaceController {
   // ── Init: bind all workspace-owned DOM events ──
 
   init(): void {
+    // Warm the native dialog module during startup: it is otherwise lazily
+    // imported on the first click (folder picker and both save dialogs share
+    // the same chunk), so the first workspace dialog opens immediately
+    // instead of paying module load on top of the native panel init.
+    if (isTauriRuntime()) {
+      void import('@tauri-apps/plugin-dialog').catch(() => {});
+    }
     const workspacePickerBtn = document.getElementById('workspace-picker-btn');
     workspacePickerBtn?.addEventListener('click', (e) => {
       e.stopPropagation();

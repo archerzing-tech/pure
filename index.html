@@ -204,38 +204,7 @@
               <h2 id="context-panel-title" data-i18n="context.title">当前工作区</h2>
             </div>
           </div>
-          <div class="context-panel-tabs" role="tablist" data-i18n-aria-label="context.tabs.ariaLabel" aria-label="项目上下文视图">
-            <button id="context-tab-preview" class="context-tab active" type="button" role="tab" aria-selected="true" aria-controls="context-preview" data-context-tab="preview" data-i18n="context.tab.preview">预览</button>
-            <button id="context-tab-changes" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-changes" data-context-tab="changes" data-i18n="context.tab.changes">变更</button>
-            <button id="context-tab-structure" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-structure" data-context-tab="structure" data-i18n="context.tab.structure">结构</button>
-            <button id="context-tab-stats" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-stats" data-context-tab="stats" data-i18n="context.tab.stats">统计</button>
-          </div>
-          <div id="context-preview" class="context-panel-body" role="tabpanel" aria-labelledby="context-tab-preview" data-context-view="preview">
-            <div class="preview-toolbar">
-              <span class="preview-live-dot"></span>
-              <span data-i18n="context.preview.live">实时预览</span>
-              <span id="preview-status" class="preview-status" data-i18n="context.status.waiting">等待中</span>
-            </div>
-            <div class="preview-window">
-              <div class="preview-window-bar"><span></span><span></span><span></span><b id="preview-route">workspace</b></div>
-              <div class="preview-window-content">
-                <div class="preview-skeleton hero"></div>
-                <div class="preview-skeleton line wide"></div>
-                <div class="preview-skeleton line"></div>
-                <div class="preview-skeleton-grid"><i></i><i></i><i></i></div>
-                <div class="preview-caption" data-i18n="context.preview.caption">智能体构建过程中，生成的界面会显示在这里。</div>
-              </div>
-            </div>
-          </div>
-          <div id="context-changes" class="context-panel-body hidden" role="tabpanel" aria-labelledby="context-tab-changes" data-context-view="changes">
-            <div class="context-section-heading"><span data-i18n="context.activity">智能体活动</span><b id="context-change-count" data-i18n="context.changes.none">暂无变更</b></div>
-            <div class="context-change-empty"><span class="context-empty-icon">✦</span><p data-i18n="context.changes.empty">智能体编辑项目后，变更会显示在这里。</p></div>
-          </div>
-          <div id="context-structure" class="context-panel-body hidden" role="tabpanel" aria-labelledby="context-tab-structure" data-context-view="structure">
-            <div class="context-section-heading"><span data-i18n="context.projectMap">项目结构</span><b data-i18n="context.status.ready">就绪</b></div>
-            <div class="structure-tree"><div>⌄ <b id="context-workspace-name">workspace</b></div><div class="tree-child">◇ src</div><div class="tree-child">◇ package.json</div><div class="tree-child">◇ README.md</div></div>
-          </div>
-          <div id="context-stats" class="context-panel-body hidden" role="tabpanel" aria-labelledby="context-tab-stats" data-context-view="stats">
+          <div id="context-stats" class="context-panel-body" data-context-view="stats">
             <div class="context-section-heading stats-heading">
               <span data-i18n="stats.title">会话统计</span><b data-i18n="stats.subtitle">本会话用量</b>
               <span class="stats-export-wrap">
@@ -281,11 +250,6 @@
           <div class="context-meta">
             <div class="context-meta-row"><span>MODEL</span><strong id="context-model">—</strong></div>
             <div class="context-meta-row path"><span data-i18n="context.workspace">工作区</span><strong id="context-workspace" title="" data-i18n="workspace.none">未设置工作区</strong></div>
-          </div>
-          <div class="context-stage" aria-live="polite">
-            <div class="context-stage-top"><span class="stage-pulse"></span><span id="context-stage-label" data-i18n="context.stage.ready">准备开始</span><span id="context-stage-percent">0%</span></div>
-            <div class="context-stage-track"><i id="context-stage-progress"></i></div>
-            <div class="context-stage-steps"><span class="done">Understand</span><span>Plan</span><span>Build</span><span>Verify</span></div>
           </div>
         </aside>
 
