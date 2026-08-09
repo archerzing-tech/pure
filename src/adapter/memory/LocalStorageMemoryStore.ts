@@ -5,6 +5,7 @@
 
 import type { IMemoryStore, MemoryEntry, MemorySearchOptions } from './IMemoryStore';
 import { searchMemories } from './keywordSearch';
+import { decayEntry, findSupersedeTarget, healthScore, lifecycleOf } from './evolution';
 
 const STORAGE_KEY = 'pure_memories_v2';
 
@@ -50,14 +51,46 @@ export class LocalStorageMemoryStore implements IMemoryStore {
       )
     );
     if (dup) return dup.id;
+    const now = Date.now();
+    // 进化：同情境新策略取代旧策略（见 evolution.ts）。localStorage 全量数组，
+    // 取代判定已按 projectPath 隔离。
+    const target = findSupersedeTarget(entries, entry);
     const id = newId();
-    entries.push({ ...entry, id, decayScore: entry.decayScore ?? 1 });
+    const seeded: MemoryEntry = { ...entry, id, timestamp: entry.timestamp ?? now };
+    if (target) {
+      target.supersededBy = id;
+      target.lifecycle = 'degraded';
+    }
+    // 默认健康分按多维公式种子化；调用方显式给的 decayScore 优先。
+    const score = entry.decayScore ?? healthScore(seeded, now);
+    entries.push({ ...seeded, decayScore: score, lifecycle: entry.lifecycle ?? lifecycleOf(score) });
     writeAll(entries);
     return id;
   }
 
   async search(query: string, opts?: MemorySearchOptions): Promise<MemoryEntry[]> {
-    return searchMemories(readAll(), query, opts);
+    const hits = searchMemories(readAll(), query, opts);
+    // 使用频率信号：命中即 +1 并刷新 lastUsedAt。localStorage 的条目每次都是
+    // 重新 parse 的对象，必须写回才能持久。
+    await this.recordHits(hits);
+    return hits;
+  }
+
+  async recordHits(entries: MemoryEntry[]): Promise<void> {
+    if (entries.length === 0) return;
+    const all = readAll();
+    if (all.length === 0) return;
+    const now = Date.now();
+    const byId = new Map(all.map(e => [e.id, e]));
+    let changed = false;
+    for (const e of entries) {
+      const target = byId.get(e.id);
+      if (!target) continue;
+      target.hitCount = (target.hitCount ?? 0) + 1;
+      target.lastUsedAt = now;
+      changed = true;
+    }
+    if (changed) writeAll(all);
   }
 
   async forget(sessionId: string): Promise<void> {
@@ -66,15 +99,16 @@ export class LocalStorageMemoryStore implements IMemoryStore {
   }
 
   async decay(olderThan: number): Promise<void> {
-    const cutoff = Date.now() - olderThan;
-    let changed = false;
+    const now = Date.now();
     const entries = readAll();
+    const kept: MemoryEntry[] = [];
+    let changed = false;
     for (const e of entries) {
-      if (e.timestamp < cutoff && (e.decayScore ?? 1) > 0.05) {
-        e.decayScore = (e.decayScore ?? 1) / 2;
-        changed = true;
-      }
+      const outcome = decayEntry(e, now, olderThan);
+      if (outcome === 'deleted') { changed = true; continue; }
+      if (outcome === 'updated') changed = true;
+      kept.push(e);
     }
-    if (changed) writeAll(entries);
+    if (changed) writeAll(kept);
   }
 }

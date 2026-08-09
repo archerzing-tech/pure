@@ -139,7 +139,7 @@ describe('FSMemoryStore.forget / decay', () => {
     expect(kept).toHaveLength(1);
   });
 
-  it('decay halves decayScore of memories older than the threshold', async () => {
+  it('decay recomputes the multi-dim health score of memories idle past the threshold', async () => {
     const now = Date.now();
     await store.add(base({ content: 'old memory', timestamp: now - 10 * 24 * 3600 * 1000 }));
     await store.add(base({ content: 'fresh memory', timestamp: now }));
@@ -148,29 +148,51 @@ describe('FSMemoryStore.forget / decay', () => {
     const lines = readFileSync(file, 'utf-8').trim().split('\n');
     const old = lines.map(l => JSON.parse(l)).find(e => e.content === 'old memory');
     const fresh = lines.map(l => JSON.parse(l)).find(e => e.content === 'fresh memory');
-    expect(old.decayScore).toBe(0.5);
-    expect(fresh.decayScore).toBe(1);
+    // fresh（闲置 < 阈值）保持 add 时的新鲜分 0.72；old 按绝对时间重算：
+    // recency 2^(-10/30) × 0.72 ≈ 0.5715（确定性，不叠加）。
+    expect(fresh.decayScore).toBeCloseTo(0.72, 5);
+    expect(old.decayScore).toBeCloseTo(0.7937005 * 0.72, 5);
+    expect(old.lifecycle).toBe('active');
   });
 
-  it('decay is idempotent on already-decayed entries (floor at 0.05)', async () => {
+  it('decay is deterministic — repeated passes converge instead of compounding', async () => {
     const now = Date.now();
     await store.add(base({ content: 'old', timestamp: now - 10 * 24 * 3600 * 1000 }));
     await store.decay(7 * 24 * 3600 * 1000);
+    const first = JSON.parse(readFileSync(join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl'), 'utf-8').trim());
     await store.decay(7 * 24 * 3600 * 1000);
-    const file = join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl');
-    const parsed = JSON.parse(readFileSync(file, 'utf-8').trim());
-    expect(parsed.decayScore).toBe(0.25);
+    const second = JSON.parse(readFileSync(join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl'), 'utf-8').trim());
+    // 按绝对时间重算（≈0.5715），不叠加 —— 旧实现第二次会再减半到 0.25。
+    expect(first.decayScore).toBeCloseTo(0.7937005 * 0.72, 5);
+    expect(second.decayScore).toBeCloseTo(0.7937005 * 0.72, 5);
   });
 
-  it('decay deletes memories whose halved score sinks below the forget floor', async () => {
+  it('decay deletes memories whose health score sinks below the floor', async () => {
     const now = Date.now();
-    await store.add(base({ content: 'very stale', timestamp: now - 10 * 24 * 3600 * 1000 }));
-    // 1 → 0.5 → 0.25 → 0.125 → 0.0625 → (0.03125 ≤ 0.05) removed.
-    for (let i = 0; i < 6; i++) await store.decay(7 * 24 * 3600 * 1000);
+    // 200 天闲置、从未使用：recency 2^(-200/30) ≈ 0.0098 → 健康分 ≈ 0.007 < 0.05。
+    await store.add(base({ content: 'very stale', timestamp: now - 200 * 24 * 3600 * 1000 }));
+    await store.decay(7 * 24 * 3600 * 1000);
     const file = join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl');
     expect(readFileSync(file, 'utf-8').trim()).toBe('');
     const hits = await store.search('very', {});
     expect(hits).toHaveLength(0);
+  });
+
+  it('dormant 记忆在宽限期内保留、超期删除（被取代策略更快走完生命周期）', async () => {
+    const now = Date.now();
+    // 40 天闲置 + 被取代：健康分 = 2^(-40/30) × 0.775 × 0.4 ≈ 0.123 → dormant，
+    // 40 天 < 60 天宽限 → 首次 decay 后仍保留在文件里。
+    await store.add(base({ content: 'retained', timestamp: now - 40 * 24 * 3600 * 1000, supersededBy: 'new' }));
+    await store.decay(7 * 24 * 3600 * 1000);
+    let file = join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl');
+    expect(readFileSync(file, 'utf-8').trim()).toContain('retained');
+    // 65 天闲置 + 被取代：健康分 ≈ 0.069 → dormant，65 天 ≥ 60 天宽限 → 删除。
+    await store.add(base({ content: 'purged', timestamp: now - 65 * 24 * 3600 * 1000, supersededBy: 'new' }));
+    await store.decay(7 * 24 * 3600 * 1000);
+    file = join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl');
+    const lines = readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean);
+    expect(lines.some(l => l.includes('retained'))).toBe(true);
+    expect(lines.some(l => l.includes('purged'))).toBe(false);
   });
 });
 

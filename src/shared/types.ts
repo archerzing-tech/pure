@@ -221,6 +221,13 @@ export interface MemoryLesson {
   tools?: string[];
 }
 
+// ── v1.5 智能进化记忆（Adapter Layer 设计文档 §12.8）──
+// 健康分从单一时间衰减扩展为多维（时间 × 可信度 × 使用频率 × 进化状态），
+// 生命周期为 活跃 → 降级 → 休眠 → 删除，新策略可取代旧策略。纯规则实现见
+// src/adapter/memory/evolution.ts。
+
+export type MemoryLifecycle = 'active' | 'degraded' | 'dormant';
+
 export interface MemoryEntry {
   id: string;
   type: MemoryType;
@@ -228,7 +235,17 @@ export interface MemoryEntry {
   timestamp: number;
   sessionId: string;
   projectPath: string; // 记忆按项目隔离
-  decayScore?: number; // 时间衰减分数（1.0 = 新，0.0 = 已遗忘）
+  /** 综合健康分（1.0 = 新/最有用，0.0 = 已遗忘）。由 evolution.ts 从
+   *  时间 × 可信度 × 使用频率 × 进化状态多维计算，decay() 定期重算。 */
+  decayScore?: number;
+  /** 进化生命周期：active（活跃）→ degraded（降级）→ dormant（休眠，不进检索）→ 删除。 */
+  lifecycle?: MemoryLifecycle;
+  /** 使用频率：被 search() 命中并注入提示词的次数（每次检索 +1）。 */
+  hitCount?: number;
+  /** 最近一次被检索的时间（与 hitCount 共同构成使用频率/新鲜度维度）。 */
+  lastUsedAt?: number;
+  /** 被哪条新记忆取代（进化：新策略替代旧策略后，旧条目打此标记加速降级）。 */
+  supersededBy?: string;
   lesson?: MemoryLesson;
   dedupeKey?: string;
 }
@@ -249,8 +266,14 @@ export interface IMemoryStore {
   /** 按会话批量清理 */
   forget(sessionId: string): Promise<void>;
 
-  /** 衰减旧记忆：将超过 olderThan 的记忆 decayScore 减半 */
+  /** 衰减旧记忆：将闲置超过 olderThan 的记忆按多维健康分重算，逐级降级，
+   *  跌穿删除线或休眠超宽限期即删除（见 evolution.ts） */
   decay(olderThan: number): Promise<void>;
+
+  /** 记录检索命中：被 search() 返回的记忆 hitCount+1、lastUsedAt 刷新 ——
+   *  使用频率维度的信号。实现须廉价持久化（FS：内存缓存、decay 时落盘；
+   *  localStorage：直接写回）。 */
+  recordHits(entries: MemoryEntry[]): Promise<void>;
 }
 
 // EngineEvent union

@@ -34,7 +34,7 @@ import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore } from '../sh
 import { renderMarkdown, scheduleStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdown';
 import { renderArtifactCards, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
-import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned } from './scrollPin';
+import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, type ToolRowHandle } from './toolRow';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, type ThinkingCardHandle } from './thinkingCard';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -113,7 +113,7 @@ const DEFAULT_BUDGET: BudgetConfig = {
 // also keeps the original XML-tool-call leak defense: when a workspace is
 // missing, models are only told about the tools they can actually invoke.
 const WEB_TOOLS_PROMPT = `Web tools:
-- web_search(query, maxResults?) — web search. With a Serper or Tavily API key in Settings → Tools it uses the API backends first (Serper = real Google index, best for Chinese AND English); otherwise free backends are probed in parallel — Sogou + cn.bing.com + DuckDuckGo + Bing for Chinese queries. If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
+- web_search(query, maxResults?) — web search. With a Serper or Tavily API key in Settings → Tools it uses the API backends first (Serper = real Google index, best for Chinese AND English); otherwise free backends are probed in parallel — cn.bing.com + DuckDuckGo + Bing for Chinese queries, DuckDuckGo + Bing otherwise (the first backend to return results wins). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
 - web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.`;
 
 // File-tool list is shared with the CLI (FILE_TOOLS_CORE in promptLayers.ts);
@@ -1173,10 +1173,15 @@ export class ChatController {
       // Eager thinking indicator: the user sees the animation while waiting
       // for the first token; reasoning deltas upgrade it with live text.
       thinkingCard = openThinkingCard();
-      // Route through the rAF-coalesced scroll helper so this first content
-      // growth joins the same frame budget as every streamed token (a direct
-      // scrollTop write here forced a synchronous full-transcript layout).
-      scrollChatToBottomIfPinned(chatEl);
+      // A new user turn is explicit intent to continue at the bottom: re-pin
+      // even if the user had scrolled up to re-read history (the pin normally
+      // survives until a manual scroll-away, but a fresh send must resume
+      // following the newest content — otherwise the transcript stays frozen
+      // above the reply for the rest of the session). Route through the
+      // rAF-coalesced helper so this first content growth joins the same frame
+      // budget as every streamed token (a direct scrollTop write here forced a
+      // synchronous full-transcript layout).
+      forceScrollToBottom(chatEl);
 
       // ── Deferred init: boot MCP + FileWatcher on first use ──
       if (!this.deferredInitDone) {

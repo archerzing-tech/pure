@@ -6,7 +6,7 @@
 // the UI suite.
 
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
-import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned, isNearBottom } from '../scrollPin';
+import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned, forceScrollToBottom, isNearBottom } from '../scrollPin';
 
 // Deterministic rAF: collect callbacks and flush them on demand instead of
 // depending on real animation frames.
@@ -160,6 +160,26 @@ describe('scrollPin auto-scroll', () => {
     scrollChatToBottomIfPinned(chatEl);
     flushRaf();
     expect(scrollTop).toBe(1200);
+  });
+
+  it('forceScrollToBottom re-pins and scrolls even after a scroll-away (new user turn)', () => {
+    const { el, setTop } = makeChatEl();
+    wireScrollPin(el as unknown as HTMLElement);
+    setTop(100); // 200px from the bottom → unpinned
+    el.dispatchEvent('scroll');
+
+    // A fresh user message is explicit intent to continue at the bottom —
+    // forceScrollToBottom must override the previous scroll-away.
+    forceScrollToBottom(el as unknown as HTMLElement);
+    expect(rafCallbacks.length).toBe(1);
+    flushRaf();
+    expect(el.scrollTop).toBe(SCROLL_HEIGHT);
+
+    // The pin survived: a later content change keeps following the bottom
+    // (the regression — after scrolling up, subsequent turns never scrolled).
+    scrollChatToBottomIfPinned(el as unknown as HTMLElement);
+    flushRaf();
+    expect(el.scrollTop).toBe(SCROLL_HEIGHT);
   });
 
   it('wireScrollPin is idempotent and setPinnedToBottom re-pins explicitly', () => {

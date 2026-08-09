@@ -81,3 +81,16 @@ export function scrollChatToBottomIfPinned(el: HTMLElement): void {
     }
   }));
 }
+
+/**
+ * Force the transcript back to pinned and scroll to the bottom — the explicit
+ * "continue at the bottom" intent (a new user message, a session restore).
+ * Overrides a previous scroll-away: scrolling up to re-read history is a
+ * per-session preference, but a FRESH user turn always resumes following the
+ * newest content — otherwise the chat would stay frozen above the new reply
+ * for the rest of the session.
+ */
+export function forceScrollToBottom(el: HTMLElement): void {
+  setPinnedToBottom(el, true);
+  scrollChatToBottomIfPinned(el);
+}

@@ -5,6 +5,7 @@
 // (WASMEmbeddingStore) behind the same IMemoryStore interface.
 
 import type { MemoryEntry, MemorySearchOptions } from './IMemoryStore';
+import { EVOLUTION, healthScore } from './evolution';
 
 /**
  * Split a query into lowercase keyword tokens. Handles CJK text by emitting
@@ -35,6 +36,9 @@ function matchScore(content: string, tokens: string[]): number {
 /**
  * Rank entries by keyword overlap, then timestamp desc (newest first), and
  * return the top k. decayScore factors into the rank so decayed memories sink.
+ * Dormant memories (健康分 ≤ DORMANT_MAX) are excluded from retrieval entirely
+ * — the lifecycle's dormant stage means "asleep, not gone": they stop being
+ * injected while decay still holds a grace window to delete them outright.
  */
 export function searchMemories(
   entries: MemoryEntry[],
@@ -45,10 +49,12 @@ export function searchMemories(
   const projectPath = opts?.projectPath;
   const type = opts?.type;
   const k = opts?.k ?? 5;
+  const now = Date.now();
 
   return entries
     .filter(e => (projectPath === undefined || e.projectPath === projectPath))
     .filter(e => (type === undefined || e.type === type))
+    .filter(e => healthScore(e, now) >= EVOLUTION.DORMANT_MAX)
     .map(e => ({ entry: e, score: matchScore(e.content, tokens) * (e.decayScore ?? 1) }))
     .filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score || b.entry.timestamp - a.entry.timestamp)

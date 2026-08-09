@@ -103,6 +103,16 @@ class FakeMemoryStore implements IMemoryStore {
   async decay(_olderThan: number): Promise<void> {
     this.decayCalls++;
   }
+  async recordHits(entries: MemoryEntry[]): Promise<void> {
+    const byId = new Map(this.entries.map(e => [e.id, e]));
+    for (const e of entries) {
+      const t = byId.get(e.id);
+      if (t) {
+        t.hitCount = (t.hitCount ?? 0) + 1;
+        t.lastUsedAt = Date.now();
+      }
+    }
+  }
 }
 
 describe('Harness cross-session memory (v0.10)', () => {

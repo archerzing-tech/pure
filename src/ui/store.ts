@@ -29,7 +29,7 @@ export interface ToolExecMeta {
   resultKind?: 'search' | 'fetch';
   /**
    * Parsed result for `resultKind: 'search'`. Each item is a search hit the
-   * web_search backends returned (Sogou → cn.bing.com → DuckDuckGo → Bing; see
+   * web_search backends returned (cn.bing.com → DuckDuckGo → Bing; see
    * src-tauri/src/lib.rs web_search).
    */
   resultItems?: Array<{ title: string; snippet: string; url: string }>;

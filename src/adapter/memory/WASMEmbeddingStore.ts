@@ -26,6 +26,7 @@
 
 import type { IMemoryStore, MemoryEntry, MemorySearchOptions } from './IMemoryStore';
 import { searchMemories } from './keywordSearch';
+import { EVOLUTION, healthScore } from './evolution';
 
 export type EmbedFunction = (text: string) => Promise<number[]>;
 export type EmbedBatchFunction = (texts: string[]) => Promise<number[][]>;
@@ -112,17 +113,21 @@ export class WASMEmbeddingStore implements IMemoryStore {
 
     // Embedder unavailable → keyword fallback keeps memory working offline.
     const embedder = await this.getEmbedder().catch(() => undefined);
-    if (!embedder) return searchMemories(all, query, opts);
+    if (!embedder) return this.fallbackSearch(all, query, opts);
 
     const queryVec = await embedder.embed(query).catch(() => undefined);
-    if (!queryVec) return searchMemories(all, query, opts);
+    if (!queryVec) return this.fallbackSearch(all, query, opts);
 
     // Embed every uncached (matching-type) entry in ONE batched WASM call —
     // transformers.js runs the whole batch through the model at once. The
-    // loop below then only does cosine scoring in JS.
+    // loop below then only does cosine scoring in JS. Dormant memories are
+    // skipped before embedding (they are excluded from retrieval anyway and
+    // would only waste the WASM inference cost).
+    const nowForEmbed = Date.now();
     const uncached: MemoryEntry[] = [];
     for (const entry of all) {
       if (type !== undefined && entry.type !== type) continue;
+      if (healthScore(entry, nowForEmbed) < EVOLUTION.DORMANT_MAX) continue;
       const cached = this.vecCache.get(entry.id);
       if (cached && cached.content === entry.content) continue;
       uncached.push(entry);
@@ -142,13 +147,17 @@ export class WASMEmbeddingStore implements IMemoryStore {
         // The batch embedder failed for the whole set (e.g. one pathological
         // entry). Fall back to keyword search instead of silently returning
         // no results — same recovery path as an unavailable embedder.
-        return searchMemories(all, query, opts);
+        return this.fallbackSearch(all, query, opts);
       }
     }
 
+    const now = Date.now();
     const scored: Array<{ entry: MemoryEntry; score: number }> = [];
     for (const entry of all) {
       if (type !== undefined && entry.type !== type) continue;
+      // 休眠记忆不进检索（健康分 ≤ DORMANT_MAX）—— 也不付 embedding 的 WASM
+      // 成本。与 keyword 路径的 dormant 过滤保持一致。
+      if (healthScore(entry, now) < EVOLUTION.DORMANT_MAX) continue;
       // Entries whose embedding failed stay out of the cache → skipped,
       // mirroring the old per-entry `.catch(() => undefined)` semantics.
       const cached = this.vecCache.get(entry.id);
@@ -161,7 +170,18 @@ export class WASMEmbeddingStore implements IMemoryStore {
     }
 
     scored.sort((a, b) => b.score - a.score || b.entry.timestamp - a.entry.timestamp);
-    return scored.slice(0, k).map(s => s.entry);
+    const results = scored.slice(0, k).map(s => s.entry);
+    // 使用频率信号：命中即 +1（委托内层 store —— FS 进内存缓存、decay 落盘；
+    // localStorage 直接写回）。
+    await this.recordHits(results);
+    return results;
+  }
+
+  /** Keyword fallback（embedder 不可用/失败）—— 与语义路径一致地记录命中。 */
+  private async fallbackSearch(all: MemoryEntry[], query: string, opts?: MemorySearchOptions): Promise<MemoryEntry[]> {
+    const results = searchMemories(all, query, opts);
+    await this.recordHits(results);
+    return results;
   }
 
   async forget(sessionId: string): Promise<void> {
@@ -171,6 +191,10 @@ export class WASMEmbeddingStore implements IMemoryStore {
 
   async decay(olderThan: number): Promise<void> {
     return this.store.decay(olderThan);
+  }
+
+  async recordHits(entries: MemoryEntry[]): Promise<void> {
+    await this.store.recordHits(entries);
   }
 
   /**

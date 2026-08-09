@@ -954,9 +954,9 @@ Harness.run(systemPrompt, userPrompt)
   memories.jsonl           ← 每行一条 JSON MemoryEntry
 ```
 
-- `search()` 使用全文匹配（keywords in content），按 timestamp 降序取前 k 条
-- `add()` 追加一行 JSON
-- `decay()` 定时任务，每天运行一次，将 >7 天的记忆 decayScore 减半
+- `search()` 使用全文匹配（keywords in content），按 keyword × decayScore 排序取前 k 条；休眠（dormant）记忆不进检索
+- `add()` 追加一行 JSON，并按 §12.9 执行「新策略取代旧策略」判定
+- `decay()` 定时任务（Harness 每小时一次），按 §12.9 的多维健康分逐级降级、休眠、删除
 
 **第二阶段（Phase 8+）**：向量检索升级
 
@@ -1023,3 +1023,42 @@ export class WASMEmbeddingStore implements IMemoryStore {
 | **检索方式** | 按 sessionId 精确查找 | 按语义/关键词相似度检索 |
 | **使用者** | StateManager（Harness） | PromptComposer（Harness） + FailurePolicy |
 | **隔离粒度** | 按 sessionId | 按 projectPath |
+
+### 12.9 智能进化记忆（多维打分 + 生命周期 + 策略取代）
+
+> 实现：`src/adapter/memory/evolution.ts`（纯规则、确定性，无 LLM/网络依赖）。
+
+旧的衰减是单一时间轴「>7 天减半」；v1.5 升级为**多维健康分 + 生命周期 + 进化**，让记忆「该用的越用越活、过时的逐级降级、被取代的慢慢淘汰」：
+
+**多维健康分（0..1，确定性公式）**
+
+```
+health = recency(时间) × [0.55×credibility + 0.45×usage(饱和)] × superseded(进化)
+
+recency      = 2^(-闲置天数 / 30)          // 30 天半衰期，闲置越久越低
+credibility  = 按类型：successful_pattern/procedure 1.0、user_preference 0.9、
+               project_convention 0.85、error_pattern 0.8
+usage        = min(1, hitCount / 4)        // 每次检索命中 +1（search 时记录），4 次饱和
+superseded   = 被取代 ? 0.4 : 1            // 被新策略取代的旧策略惩罚因子
+```
+
+**生命周期（decay 逐级推进）**
+
+| 阶段 | 健康分 | 行为 |
+|:------|:------|:------|
+| active 活跃 | ≥ 0.45 | 正常进检索、注入提示词 |
+| degraded 降级 | (0.15, 0.45) | 仍可检索，但排序靠后 |
+| dormant 休眠 | ≤ 0.15 | 不进检索（睡着，不是没了）；文件保留 |
+| 删除 | < 0.05，或休眠 ≥ 60 天宽限期 | 从文件移除 |
+
+- `decay()` 对**闲置超过阈值**的记忆按绝对时间重算（确定性收敛，不叠加）；被取代的策略因 ×0.4 惩罚约 30 天即休眠、60 天删除，比普通记忆（约 90 天休眠）淘汰得更快。
+- 60 天休眠宽限主要作用于**被取代的策略**：普通记忆跌入休眠时已闲置约 68 天（本身已超宽限），其删除由分数线触发；被取代的策略约 30 天即休眠，宽限在分数跌到底线之前就把它们清出系统。
+- 使用频率信号：`search()` 命中即 `hitCount+1`、刷新 `lastUsedAt`（FS 进内存缓存、decay 时落盘并合并；localStorage 直接写回）—— 高频使用的记忆即使闲置也降级得慢。
+
+**策略取代（进化）**
+
+- 新增 `procedure` / `successful_pattern` / `user_preference` / `project_convention` 时，与同项目、同类型、未被取代的旧条目比较**内容定向覆盖率**（新条目 ≥55% 的有效 token 被旧条目覆盖，剥离模板样板、中文按二元组分词）：命中即标记 `supersededBy` 并立即降级，新条目成为该情境的最新版本。
+- `error_pattern` 不参与取代（其内容充满共享模板样板，相似度是噪音），靠 dedupe + 衰减自然淘汰。
+- 旧条目不立即删除，而是带着惩罚因子走完 降级→休眠→删除 —— 「不合时宜的策略慢慢进化成最新最好用的」。
+
+**示例时序**（被取代的旧策略，40 天闲置）：健康分 0.775×0.4×2^(-40/30) ≈ 0.12 → dormant（第 1 次 decay）→ 40 天后仍保留；闲置到 ≥60 天 → 删除。

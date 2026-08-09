@@ -10,6 +10,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { IMemoryStore, MemoryEntry, MemorySearchOptions } from './IMemoryStore';
 import { searchMemories } from './keywordSearch';
+import { applyHits, decayEntry, findSupersedeTarget, healthScore, lifecycleOf } from './evolution';
 
 function projectHash(projectPath: string): string {
   return createHash('sha256').update(projectPath).digest('hex').slice(0, 16);
@@ -75,15 +76,37 @@ export class FSMemoryStore implements IMemoryStore {
       )
     );
     if (duplicate) return duplicate.id;
+    const now = Date.now();
+    // 进化：新策略/流程/偏好与同类型旧条目针对同一情境时，新条目取代旧条目 ——
+    // 旧条目打 supersededBy 标记并立即降级，之后更快走完 降级→休眠→删除。
+    const target = findSupersedeTarget(entries, entry);
     const id = newId();
-    entries.push({ ...entry, id, decayScore: entry.decayScore ?? 1 });
+    const seeded: MemoryEntry = { ...entry, id, timestamp: entry.timestamp ?? now };
+    if (target) {
+      target.supersededBy = id;
+      target.lifecycle = 'degraded';
+    }
+    // 默认健康分按多维公式种子化；调用方显式给的 decayScore 优先（兼容
+    // 语义注入），lifecycle 与存储分数保持一致。
+    const score = entry.decayScore ?? healthScore(seeded, now);
+    entries.push({ ...seeded, decayScore: score, lifecycle: entry.lifecycle ?? lifecycleOf(score) });
     this.persist(project, entries);
     return id;
   }
 
   async search(query: string, opts?: MemorySearchOptions): Promise<MemoryEntry[]> {
     const project = opts?.projectPath ?? this.defaultProject;
-    return searchMemories(this.load(project), query, { ...opts, projectPath: project });
+    const hits = searchMemories(this.load(project), query, { ...opts, projectPath: project });
+    // 使用频率信号：命中即 +1 并刷新 lastUsedAt（进内存缓存，decay 时落盘）。
+    await this.recordHits(hits);
+    return hits;
+  }
+
+  async recordHits(entries: MemoryEntry[]): Promise<void> {
+    // search()/list() 返回的就是内存缓存里的对象，直接变更即更新缓存；
+    // 下一次 persist()/decay() 会把 hitCount/lastUsedAt 落盘 —— 每次检索都写
+    // 文件会抵消缓存存在的意义（长会话每轮都检索记忆）。
+    applyHits(entries);
   }
 
   async forget(sessionId: string): Promise<void> {
@@ -105,28 +128,34 @@ export class FSMemoryStore implements IMemoryStore {
 
   async decay(olderThan: number): Promise<void> {
     if (!existsSync(this.rootPath)) return;
-    const cutoff = Date.now() - olderThan;
+    const now = Date.now();
     let changedAny = false;
     for (const dir of readdirSync(this.rootPath)) {
       const file = join(this.rootPath, dir, 'memories.jsonl');
       if (!existsSync(file)) continue;
       const entries = this.loadFromFile(file);
-      const kept: MemoryEntry[] = [];
-      let changed = false;
-      for (const e of entries) {
-        const score = e.decayScore ?? 1;
-        if (e.timestamp < cutoff && score > 0.05) {
-          const next = score / 2;
-          if (next <= 0.05) {
-            // Halving would sink this memory below the forget floor — delete it
-            // outright so stale, unused lessons eventually leave the file
-            // ("慢慢降级，然后删除"), not just sink in ranking forever.
-            changed = true;
-            continue;
+      // 合并 recordHits() 只写进内存缓存的命中数据 —— decay 直接读盘（而非缓存），
+      // 不合并会把 hitCount/lastUsedAt 弄丢；合并本身也要落盘，否则这些使用频率
+      // 信号会在下一次缓存清理时蒸发。
+      const cached = this.cachedForDir(dir);
+      let mergedAny = false;
+      if (cached) {
+        const byId = new Map(cached.map(c => [c.id, c]));
+        for (const e of entries) {
+          const c = byId.get(e.id);
+          if (c && (c.hitCount ?? 0) > (e.hitCount ?? 0)) {
+            e.hitCount = c.hitCount;
+            e.lastUsedAt = c.lastUsedAt ?? e.lastUsedAt;
+            mergedAny = true;
           }
-          e.decayScore = next;
-          changed = true;
         }
+      }
+      const kept: MemoryEntry[] = [];
+      let changed = mergedAny;
+      for (const e of entries) {
+        const outcome = decayEntry(e, now, olderThan);
+        if (outcome === 'deleted') { changed = true; continue; }
+        if (outcome === 'updated') changed = true;
         kept.push(e);
       }
       if (changed) {
@@ -139,6 +168,14 @@ export class FSMemoryStore implements IMemoryStore {
     // otherwise a per-turn decay() (Harness schedules it at every run) would
     // clear the cache unconditionally and defeat the point of caching at all.
     if (changedAny) this.cache.clear();
+  }
+
+  /** 反向映射：hashed 目录 → 内存缓存列表（decay 合并命中数据用）。 */
+  private cachedForDir(dir: string): MemoryEntry[] | undefined {
+    for (const [project, list] of this.cache) {
+      if (projectHash(project || this.defaultProject) === dir) return list;
+    }
+    return undefined;
   }
 
   /** Raw file loader used by forget/decay which iterate hashed dirs directly. */

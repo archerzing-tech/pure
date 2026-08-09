@@ -598,8 +598,9 @@ export class NodeToolAdapter implements ToolAdapter {
     // Sogou + cn.bing.com — Sogou is the only major Chinese engine reachable
     // without a captcha that returns genuinely relevant results (cn.bing.com
     // returns Xi'an tourism guides for "西安到重庆 机票", Baidu redirects to a
-    // captcha); non-CJK probes DuckDuckGo + Bing. Mirrors the Rust backend
-    // set (Sogou → cn.bing.com → DuckDuckGo → Bing).
+    // captcha); non-CJK probes DuckDuckGo + Bing. Same parallel first-win
+    // design as the Rust desktop backend, which probes cn.bing.com →
+    // DuckDuckGo → Bing (no Sogou on the Rust side).
     const backends: Array<{ label: string; fetch: () => Promise<SearchResult[]> }> = [
       ...(cjk
         ? [

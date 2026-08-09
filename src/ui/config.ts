@@ -44,8 +44,7 @@ export interface PureConfig {
   /**
    * Optional Tavily Search API key (Settings → Tools → Web Tools). When set,
    * web_search uses the Tavily API after Serper (stable index, no HTML
-   * scraping) and falls back to the free HTML backends (Sogou / cn.bing /
-   * DDG / Bing).
+   * scraping) and falls back to the free HTML backends (cn.bing / DDG / Bing).
    */
   tavilyApiKey: string;
   /**

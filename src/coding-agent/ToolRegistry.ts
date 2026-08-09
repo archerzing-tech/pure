@@ -180,7 +180,7 @@ export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze([
   },
   {
     name: 'web_search',
-    description: 'Search the web and return results with titles, snippets, and URLs. With a Serper or Tavily API key configured searches go through the API backends first (Serper = real Google index, best for Chinese and English); otherwise free backends are probed in parallel (Sogou → cn.bing.com → DuckDuckGo → Bing for Chinese queries, DuckDuckGo → Bing otherwise).',
+    description: 'Search the web and return results with titles, snippets, and URLs. With a Serper or Tavily API key configured searches go through the API backends first (Serper = real Google index, best for Chinese and English); otherwise free backends are probed in parallel — the first backend to return relevant results wins.',
     input_schema: {
       type: 'object',
       properties: {

@@ -1073,6 +1073,12 @@ fn parse_tavily_results(body: &serde_json::Value, max: usize) -> Vec<SearchResul
     out
 }
 
+/// Grace window granted to cn.bing.com (the CJK-relevant backend) after a
+/// faster DuckDuckGo/Bing race win, so a Chinese query isn't answered with
+/// English-biased results just because cn.bing.com was a few hundred ms
+/// slower. Only adds latency when cn.bing.com is still in flight.
+const CN_BING_GRACE_MS: std::time::Duration = std::time::Duration::from_millis(1500);
+
 #[tauri::command]
 async fn web_search(
     _workspace: String,
@@ -1114,40 +1120,65 @@ async fn web_search(
         }
     }
 
-    // Free HTML backends probed IN PARALLEL — the tool prompt advertises
-    // "probed in parallel" and the old serial fallback stacked every backend's
-    // timeout (cn.bing.com 8s → DuckDuckGo 8s → Bing 10s ≈ up to 26s for a
-    // Chinese query), the single biggest perceived web_search delay. All three
-    // probes run concurrently now (each bounded by its own request timeout)
-    // and the first non-empty winner is picked in the same priority order as
-    // before: cn.bing.com first for CJK (international backends return
-    // irrelevant results for Chinese), then DuckDuckGo, then www.bing.com.
-    let chinese = is_chinese_query(&query);
-    let (cn, ddg, bing) = tokio::join!(
-        async {
+    // Free HTML backends — probed ONLY when the API backends produced nothing
+    // (a successful Serper hit no longer triggers three wasted scrapes), and
+    // then IN PARALLEL with first-success-returns. Each backend keeps its own
+    // bounded request timeout (8s via fetch_search_page), so the effective
+    // latency is the FIRST backend to deliver a non-empty result, not the
+    // slowest — the join!-style sweep this replaces still waited for every
+    // probe to finish (up to the worst-case timeout). cn.bing.com is biased
+    // to win ties for CJK (biased select checks branches in declaration
+    // order) and gets a short grace window (CN_BING_GRACE_MS) when another
+    // backend wins the race, because international backends return
+    // irrelevant results for Chinese; otherwise the first non-empty winner
+    // is used and the still-in-flight probes are dropped. Errors and empty
+    // sets are still accumulated for the degraded-error message below.
+    if results.is_empty() {
+        let chinese = is_chinese_query(&query);
+        let mut cn = Box::pin(async {
             if chinese {
                 search_backend_bing_cn(&query, max).await
             } else {
                 Err("cn.bing.com not probed for non-CJK queries".to_string())
             }
-        },
-        search_backend_duckduckgo(&query, max),
-        search_backend_bing(&query, max),
-    );
-    let candidates: [(&str, Result<Vec<SearchResult>, String>); 3] = [
-        ("cn.bing.com", cn),
-        ("DuckDuckGo", ddg),
-        ("Bing", bing),
-    ];
-    for (name, attempt) in candidates {
-        if !results.is_empty() { break; }
-        // Non-CJK never consulted cn.bing.com (its probe is a no-op above);
-        // the synthetic error must not surface in the degraded-error message.
-        if !chinese && name == "cn.bing.com" { continue; }
-        match attempt {
-            Ok(r) if !r.is_empty() => results = r,
-            Ok(_) => any_empty = true,
-            Err(e) => failed.push(format!("{}: {}", name, e)),
+        });
+        let mut ddg = Box::pin(search_backend_duckduckgo(&query, max));
+        let mut bing = Box::pin(search_backend_bing(&query, max));
+        let (mut cn_done, mut ddg_done, mut bing_done) = (false, false, false);
+        while results.is_empty() {
+            // A completed branch is guarded off (never re-polled) so the loop
+            // keeps racing only the still-pending backends; when every branch
+            // is done or disabled the else arm breaks out. Non-CJK never
+            // consults cn.bing.com (guard false), so its synthetic error can't
+            // surface in the degraded-error message.
+            let winner = tokio::select! {
+                biased;
+                r = &mut cn, if chinese && !cn_done => { cn_done = true; ("cn.bing.com", r) }
+                r = &mut ddg, if !ddg_done => { ddg_done = true; ("DuckDuckGo", r) }
+                r = &mut bing, if !bing_done => { bing_done = true; ("Bing", r) }
+                else => break,
+            };
+            match winner {
+                (_, Ok(r)) if !r.is_empty() => {
+                    // CJK relevance guard: a fast-but-English-biased DDG/Bing
+                    // win must not preempt cn.bing.com, the Chinese-relevant
+                    // backend. When cn.bing.com is still in flight, grant it a
+                    // short grace window and only accept the race winner if
+                    // cn.bing.com times out or returns nothing usable.
+                    if chinese && !cn_done {
+                        let grace = tokio::time::timeout(CN_BING_GRACE_MS, &mut cn).await;
+                        cn_done = true;
+                        match grace {
+                            Ok(Ok(cn_r)) if !cn_r.is_empty() => results = cn_r,
+                            _ => results = r,
+                        }
+                    } else {
+                        results = r;
+                    }
+                }
+                (_, Ok(_)) => any_empty = true,
+                (name, Err(e)) => failed.push(format!("{}: {}", name, e)),
+            }
         }
     }
 

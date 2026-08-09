@@ -25,7 +25,7 @@ import { providerLabel, providerDef, PROVIDERS, defaultModelFor, type ProviderId
 import { renderMarkdown, stripToolCallXml } from './markdown';
 import { createToolRow, finalizeToolRow } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
-import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned } from './scrollPin';
+import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { PasteChipManager, composeMessageWithAttachments } from './pasteChip';
 import { showConfirmModal } from './modal';
@@ -606,8 +606,7 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   // A session restore rebuilds the transcript from scratch, so it always
   // lands at the newest content — force the pin state the same way a fresh
   // stream would, then scroll through the shared coalesced helper.
-  setPinnedToBottom(chatEl, true);
-  scrollChatToBottomIfPinned(chatEl);
+  forceScrollToBottom(chatEl);
   // The restored session's stats belong to the same conversation id —
   // re-render the 统计 tab so the panel matches the transcript.
   renderSessionStats();
