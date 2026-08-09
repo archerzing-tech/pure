@@ -14,7 +14,7 @@ There are **five** design documents plus this spec and the system prompt. Read i
 | # | File | What it defines |
 |---|------|-----------------|
 | 0 | `pure Spec.md` (this file) | Master spec, architecture decision, data flow, canonical types |
-| 1 | `system-prompt.md` | The agent's system prompt (original; see note below) |
+| 1 | `system-prompt.md` | The agent's system prompt (original; see note below) — layered prompt architecture (L0 system / L1 application / L2 user) defined in its header + `src/shared/promptLayers.ts` |
 | 2 | `Agent-Event-Loop Engine 设计文档.md` | Stateless scheduling engine |
 | 3 | `Adapter Layer 设计文档.md` | LLM / tool / storage / MCP adapters |
 | 4 | `Harness 设计文档.md` | Stateful session management |

@@ -9,6 +9,8 @@ export interface PromptComposeInput {
   memory?: {
     preferences: string[];
     errorPatterns: string[];
+    /** Verified reusable procedures from past sessions (skill layer). */
+    procedures?: string[];
   };
   project?: string;
 }
@@ -19,19 +21,32 @@ const SESSION_MEMORY_CLOSE = '</session_memory>';
 export class PromptComposer {
   compose(input: PromptComposeInput): string {
     const { template, memory, project } = input;
-    if (!memory || (memory.preferences.length === 0 && memory.errorPatterns.length === 0)) {
+    const mem = memory;
+    const hasMemory = !!mem && (
+      mem.preferences.length > 0 ||
+      mem.errorPatterns.length > 0 ||
+      (mem.procedures?.length ?? 0) > 0
+    );
+    if (!hasMemory) {
       return template;
     }
 
     const lines: string[] = [];
     if (project) lines.push(`Project: ${project}`);
-    if (memory.preferences.length > 0) {
+    if (mem!.preferences.length > 0) {
       lines.push('User preferences:');
-      for (const p of memory.preferences) lines.push(`- ${p}`);
+      for (const p of mem!.preferences) lines.push(`- ${p}`);
     }
-    if (memory.errorPatterns.length > 0) {
+    if (mem!.errorPatterns.length > 0) {
       lines.push('Known error patterns:');
-      for (const e of memory.errorPatterns) lines.push(`- ${e}`);
+      for (const e of mem!.errorPatterns) lines.push(`- ${e}`);
+    }
+    // Proven procedures (skill layer): verified, reusable step sequences from
+    // past successful sessions. Ranked first because applying a proven
+    // procedure beats rediscovering it.
+    if ((mem!.procedures?.length ?? 0) > 0) {
+      lines.push('Proven procedures (apply when the situation matches):');
+      for (const p of mem!.procedures!) lines.push(`- ${p}`);
     }
     const block = lines.join('\n');
     const section = `${SESSION_MEMORY_OPEN}\n${block}\n${SESSION_MEMORY_CLOSE}`;

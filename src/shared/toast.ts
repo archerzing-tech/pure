@@ -14,3 +14,19 @@ export function showToast(msg: string, ms = 2500): void {
   clearTimeout(timer);
   timer = window.setTimeout(() => el.classList.add('hidden'), ms);
 }
+
+/**
+ * Same toast, but with trusted innerHTML (used for messages that embed a
+ * clickable `.path-link` span — e.g. "stats exported, double-click to open").
+ * The caller MUST pass escaped HTML only (paths escaped via escapeHtml); never
+ * pass raw user input here. Defaults to a longer duration than showToast so a
+ * clickable path stays visible long enough to click.
+ */
+export function showToastHtml(msg: string, ms = 8000): void {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.innerHTML = msg;
+  el.classList.remove('hidden');
+  clearTimeout(timer);
+  timer = window.setTimeout(() => el.classList.add('hidden'), ms);
+}

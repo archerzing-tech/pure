@@ -83,6 +83,7 @@ async function collect(gen: AsyncGenerator<EngineEvent, void, void>): Promise<En
 
 class FakeMemoryStore implements IMemoryStore {
   entries: MemoryEntry[] = [];
+  decayCalls = 0;
   async add(entry: Omit<MemoryEntry, 'id'>): Promise<string> {
     const id = `mem_${this.entries.length}`;
     this.entries.push({ ...entry, id, decayScore: 1 });
@@ -99,7 +100,9 @@ class FakeMemoryStore implements IMemoryStore {
   async forget(sessionId: string): Promise<void> {
     this.entries = this.entries.filter(e => e.sessionId !== sessionId);
   }
-  async decay(_olderThan: number): Promise<void> {}
+  async decay(_olderThan: number): Promise<void> {
+    this.decayCalls++;
+  }
 }
 
 describe('Harness cross-session memory (v0.10)', () => {
@@ -195,6 +198,27 @@ describe('Harness cross-session memory (v0.10)', () => {
     await collect(harness.run('SYS', 'hello'));
     expect(llm.received[0][0].content).toBe('SYS');
     expect(llm.received[0][0].content).not.toContain('<session_memory>');
+  });
+
+  it('throttles memory decay to once per interval even across turns (v0.13)', async () => {
+    const memStore = new FakeMemoryStore();
+    const llm = recordingLLM('answer');
+    const harness = new Harness({
+      sessionId: 'sess-decay',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    // Two runs in quick succession (well inside the hourly window) must not
+    // decay twice — decay() scans every project's memory file on disk, so the
+    // throttle keeps the per-turn overhead at zero for back-to-back turns.
+    await collect(harness.run('BASE SYSTEM', 'first turn'));
+    await collect(harness.run('BASE SYSTEM', 'second turn'));
+
+    expect(memStore.decayCalls).toBe(1);
   });
 
   it('writes an error_pattern when the failure policy stops the session (§12.3)', async () => {

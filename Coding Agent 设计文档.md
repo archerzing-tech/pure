@@ -2,12 +2,28 @@
 
 > PHASE 5–8. 依赖 Harness / Engine / Adapter。原始草稿的 **Planner/analyzeTask 只有流程图无定义**、
 > **扁平工具列表示例不完整**、**权限用进程内 EventBus 做 request-response
-> （跨 WebView↔Rust 不成立）**。本版补齐。系统提示词见 `system-prompt.md`。
+> （跨 WebView↔Rust 不成立）**。本版补齐。系统提示词见 `system-prompt.md`，
+> **分层 prompt 架构（system/application/user）见 `system-prompt.md` 头部与 `src/shared/promptLayers.ts`**。
 
 ## 1. 应用层职责
 
 Coding Agent 是组装层：把 Engine + Harness + Adapter 串成一次用户任务，并负责
 **任务分析（Planner）、工具注册（ToolRegistry/Tags）、权限（PermissionManager）、验证（Verifier）**。
+
+## 1.5 Prompt 分层组装
+
+Coding Agent 端到端组装 prompt 时按三层（见 `src/shared/promptLayers.ts`）：
+
+- **L0 system**：`SYSTEM_CORE_PROMPT`（不可变身份 + 操作原则 + 权限模式 + 运行时 + 响应格式，
+  单一来源）。
+- **L1 application**：工具块（`<capabilities>`）、`WORKFLOW_PROMPT` + `COMPLETION_PROMPT`、
+  输出风格、工具调用规则、typo 容错、逻辑陷阱防御 + 环境/运行时/技能/任务模式上下文 ——
+  由 GUI `chat.ts` 与 CLI `cli.ts` 的 `buildSystemPrompt()` 组装进 system 消息。
+- **L2 user**：`composeUserTurn(userText, { traps, artifact, plan })` 把本次请求的
+  trap 警告、artifact 构建协议、已批准计划拼进 **user 消息**（贴近请求，模型注意力最强；
+  且 system 消息跨会话稳定，不重复计费）。
+
+规则：依赖本次请求的碎片一律进 L2（user 消息）；仅依赖应用状态的在 L1；不可变契约在 L0。
 
 ## 2. 任务分析：Planner / analyzeTask（原版缺失，现补齐）
 

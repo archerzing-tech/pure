@@ -58,4 +58,27 @@ describe('PromptComposer.compose', () => {
     expect(out).not.toContain('User preferences:');
     expect(out).toContain('Known error patterns:');
   });
+
+  it('emits proven procedures ahead of preferences and error patterns', () => {
+    const out = composer.compose({
+      template: 'Base.',
+      memory: {
+        preferences: ['User prefers tabs'],
+        errorPatterns: ['Error X'],
+        procedures: ['When facing Y, run npm test first'],
+      },
+    });
+    expect(out).toContain('Proven procedures (apply when the situation matches):');
+    expect(out.indexOf('Proven procedures')).toBeGreaterThan(out.indexOf('User preferences:'));
+    expect(out.indexOf('Proven procedures')).toBeGreaterThan(out.indexOf('Known error patterns:'));
+    expect(out).toContain('- When facing Y, run npm test first');
+  });
+
+  it('returns the template unchanged when only procedures are absent', () => {
+    const out = composer.compose({
+      template: 'Base.',
+      memory: { preferences: [], errorPatterns: [], procedures: [] },
+    });
+    expect(out).toBe('Base.');
+  });
 });

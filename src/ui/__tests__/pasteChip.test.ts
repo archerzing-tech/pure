@@ -7,6 +7,9 @@ import {
   imageExtOf,
   fileIconOf,
   composeMessageWithAttachments,
+  classifyUploadFile,
+  isDocFileName,
+  UPLOAD_LIMITS,
   type PasteAttachment,
 } from '../pasteChip';
 
@@ -17,6 +20,36 @@ function att(name: string, content: string): PasteAttachment {
 function imgAtt(name: string, path: string): PasteAttachment {
   return { id: 'i1', name, size: 1024 * 1024, content: '', path, kind: 'image', dataUrl: 'data:image/png;base64,AAAA' };
 }
+
+describe('classifyUploadFile (upload limits)', () => {
+  it('accepts text files', () => {
+    expect(classifyUploadFile('readme.md', 'text/markdown', 100)).toBe('text');
+    expect(classifyUploadFile('main.py', 'text/x-python', 100)).toBe('text');
+  });
+
+  it('accepts images within the cap and rejects oversized ones', () => {
+    expect(classifyUploadFile('shot.png', 'image/png', 1024)).toBe('image');
+    expect(classifyUploadFile('big.png', 'image/png', UPLOAD_LIMITS.MAX_IMAGE_BYTES + 1)).toBeNull();
+  });
+
+  it('accepts document files by extension or mime', () => {
+    expect(classifyUploadFile('report.pdf', 'application/pdf', 1024)).toBe('doc');
+    expect(classifyUploadFile('plan.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 1024)).toBe('doc');
+    expect(isDocFileName('表格.xlsx')).toBe(true);
+    expect(isDocFileName('notes.txt')).toBe(false);
+  });
+
+  it('rejects archives, executables, and unknown binaries', () => {
+    expect(classifyUploadFile('archive.zip', 'application/zip', 1024)).toBeNull();
+    expect(classifyUploadFile('setup.exe', 'application/octet-stream', 1024)).toBeNull();
+    expect(classifyUploadFile('data.bin', 'application/octet-stream', 1024)).toBeNull();
+  });
+
+  it('rejects any file over the size cap regardless of type', () => {
+    expect(classifyUploadFile('big.txt', 'text/plain', UPLOAD_LIMITS.MAX_UPLOAD_BYTES + 1)).toBeNull();
+    expect(classifyUploadFile('big.pdf', 'application/pdf', UPLOAD_LIMITS.MAX_UPLOAD_BYTES + 1)).toBeNull();
+  });
+});
 
 describe('guessPasteName', () => {
   it('detects JSON payloads', () => {

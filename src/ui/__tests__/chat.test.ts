@@ -1,8 +1,45 @@
 // src/ui/__tests__/chat.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, generateTaskPlan } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, generateTaskPlan, BASE_SYSTEM_PROMPT } from '../chat';
 import type { LLMAdapter, LLMResponse } from '../../shared/types';
+
+// Regression guard for the layered prompt (promptLayers.ts): a past splice
+// bug doubled the "Output style:" header in the composed GUI base prompt.
+// Each section header must appear EXACTLY once in every persona variant.
+describe('BASE_SYSTEM_PROMPT structure', () => {
+  const HEADERS = ['Output style:', 'Tool-calling rules:', 'Smart typo tolerance:', 'Logical traps & approach switching:', '<capabilities>', '<agent_identity>'];
+
+  it('has no duplicated section headers (workspace variant)', () => {
+    const prompt = BASE_SYSTEM_PROMPT(true);
+    for (const h of HEADERS) {
+      const count = prompt.split(h).length - 1;
+      expect(count, `${h} should appear exactly once`).toBe(1);
+    }
+  });
+
+  it('has no duplicated section headers (no-workspace variant)', () => {
+    const prompt = BASE_SYSTEM_PROMPT(false);
+    for (const h of HEADERS) {
+      const count = prompt.split(h).length - 1;
+      expect(count, `${h} should appear exactly once`).toBe(1);
+    }
+  });
+
+  it('has no duplicated section headers (temporary-workspace variant)', () => {
+    const prompt = BASE_SYSTEM_PROMPT(true, true);
+    for (const h of HEADERS) {
+      const count = prompt.split(h).length - 1;
+      expect(count, `${h} should appear exactly once`).toBe(1);
+    }
+  });
+
+  it('wraps tools in <capabilities> and keeps L0 before L1', () => {
+    const prompt = BASE_SYSTEM_PROMPT(true);
+    expect(prompt.indexOf('<capabilities>')).toBeGreaterThan(prompt.indexOf('</agent_identity>'));
+    expect(prompt.indexOf('Output style:')).toBeGreaterThan(prompt.indexOf('<capabilities>'));
+  });
+});
 
 describe('parseToolCallBuffer', () => {
   it('parses the { name, arguments: string } wrapper format', () => {

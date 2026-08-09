@@ -65,10 +65,17 @@ export interface HarnessConfig {
 }
 
 export class Harness {
+  /** Memories older than this (14 days) get decayed at the start of a turn. */
+  static readonly MEMORY_DECAY_MS = 14 * 24 * 60 * 60 * 1000;
+  /** Throttle window: decay() scans every project's memory file, so it must
+   *  not run on every turn — once an hour is plenty and keeps it cheap. */
+  static readonly MEMORY_DECAY_INTERVAL_MS = 60 * 60 * 1000;
+
   private engine: AgentLoopEngine;
   private config: HarnessConfig;
   private stateMgr?: StateManager;
   private writtenLessonKeys = new Set<string>();
+  private lastDecayAt = 0;
   private verificationSummary = 'Engine VERIFY phase passed; no project-level command was recorded.';
 
   constructor(config: HarnessConfig) {
@@ -106,6 +113,7 @@ export class Harness {
     signal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'Engine VERIFY phase passed; no project-level command was recorded.';
+    this.scheduleMemoryDecay();
     let runningMessages: Message[] = [];
     let resumed = false;
     if (this.stateMgr) {
@@ -265,6 +273,7 @@ export class Harness {
     signal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'Engine VERIFY phase passed; no project-level command was recorded.';
+    this.scheduleMemoryDecay();
     // Memory refresh on continuation: compose the current prompt with memories
     // relevant to the new follow-up (same layer as run()).
     let effectiveSystemPrompt = systemPrompt;
@@ -366,6 +375,21 @@ export class Harness {
   }
 
   /**
+   * Fire-and-forget memory decay: old, unused memories get their decayScore
+   * halved so stale entries sink in retrieval and eventually drop below the
+   * relevance floor. Throttled to once per hour — decay() scans every
+   * project's memory file, so running it on every turn would be needless I/O
+   * on long sessions. Best-effort: never blocks or fails a turn.
+   */
+  private scheduleMemoryDecay(): void {
+    if (!this.config.memory) return;
+    const now = Date.now();
+    if (now - this.lastDecayAt < Harness.MEMORY_DECAY_INTERVAL_MS) return;
+    this.lastDecayAt = now;
+    void this.config.memory.decay(Harness.MEMORY_DECAY_MS).catch(() => {});
+  }
+
+  /**
    * Search the IMemoryStore with the user prompt and inject the top relevant
    * preferences / error patterns into the system prompt. Never throws — a
    * memory failure degrades to the plain system prompt.
@@ -382,10 +406,13 @@ export class Harness {
       const errorPatterns = memories
         .filter(m => m.type === 'error_pattern')
         .map(m => m.content);
-      if (preferences.length === 0 && errorPatterns.length === 0) return systemPrompt;
+      const procedures = memories
+        .filter(m => m.type === 'procedure')
+        .map(m => m.content);
+      if (preferences.length === 0 && errorPatterns.length === 0 && procedures.length === 0) return systemPrompt;
       return new PromptComposer().compose({
         template: systemPrompt,
-        memory: { preferences, errorPatterns },
+        memory: { preferences, errorPatterns, procedures },
         project: this.projectPath(),
       });
     } catch {
@@ -508,6 +535,19 @@ export class Harness {
       projectPath: this.projectPath(),
       lesson,
       dedupeKey,
+    });
+    // Skill/experience sink (procedure layer): a compact, actionable version of
+    // the lesson — WHAT was achieved and the verified HOW — so future sessions
+    // can apply the proven procedure instead of rediscovering it. Kept short
+    // (the full lesson lives in the successful_pattern entry above).
+    const procedure = `When facing "${lesson.symptom}": apply the verified procedure — ${lesson.recoveryPath}. Verify via: ${lesson.verification}.${lesson.avoidNextTime.startsWith('Do not repeat') ? ` If it fails, ${lesson.avoidNextTime}` : ''}`;
+    await this.config.memory.add({
+      type: 'procedure',
+      content: procedure.slice(0, 600),
+      timestamp: Date.now(),
+      sessionId: this.config.sessionId,
+      projectPath: this.projectPath(),
+      dedupeKey: `procedure:${dedupeKey}`,
     });
     this.writtenLessonKeys.add(dedupeKey);
   }

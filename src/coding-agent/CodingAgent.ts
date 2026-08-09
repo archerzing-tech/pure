@@ -145,7 +145,7 @@ export class CodingAgent {
     // G-3 fix: pass the LLM so the summary fallback actually runs when a lot
     // of history gets evicted (previously `llm` was omitted → summarizeEvicted
     // was dead code and the summary path never triggered).
-    const contextEngine = new ContextEngine({ maxMessages: 20, llm: config.llm });
+    const contextEngine = new ContextEngine({ maxMessages: 20, maxTokens: 32000, llm: config.llm });
 
     this.harness = new Harness({
       sessionId: config.sessionId,

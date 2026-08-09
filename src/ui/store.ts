@@ -322,6 +322,20 @@ const STATS_PREFIX = 'pure_stats:';
 /** In-memory mirror of every session's stats for synchronous reads. */
 const statsCache = new Map<string, SessionStats>();
 
+// Bound the in-memory stats mirror: a long-lived session list must not grow
+// the Map without limit. LRU eviction (insertion order) keeps the most recent
+// sessions cached; older ones fall back to the disk/localStorage read.
+const STATS_CACHE_MAX = 100;
+
+function cacheStats(id: string, stats: SessionStats): void {
+  statsCache.set(id, stats);
+  while (statsCache.size > STATS_CACHE_MAX) {
+    const oldest = statsCache.keys().next().value;
+    if (oldest === undefined) break;
+    statsCache.delete(oldest);
+  }
+}
+
 function emptyStats(): SessionStats {
   return { searches: [], fileWrites: [], fileReads: [], commands: [] };
 }
@@ -346,7 +360,7 @@ export function loadSessionStats(sessionId: string): SessionStats {
   } catch {
     // fall through to empty
   }
-  statsCache.set(sessionId, stats);
+  cacheStats(sessionId, stats);
   // Kick off an async read of the durable file (Tauri only) so disk data wins
   // over any stale localStorage entry; the sync path above returns instantly.
   void refreshStatsFromDisk(sessionId);
@@ -366,7 +380,7 @@ async function refreshStatsFromDisk(sessionId: string): Promise<void> {
       fileReads: data.fileReads ?? [],
       commands: data.commands ?? [],
     };
-    statsCache.set(sessionId, stats);
+    cacheStats(sessionId, stats);
   } catch {
     // Disk read is best-effort; the cache/localStorage already has a value.
   }
@@ -402,7 +416,9 @@ export async function loadSessionStatsForList(sessionIds: string[]): Promise<Map
 
   if (tauriAvailable) {
     try {
-      const data: Record<string, any> = await tauriInvoke('load_all_session_stats');
+      // Pass only the uncached ids so the Rust side reads just those
+      // stats.json files instead of sweeping every session on disk.
+      const data: Record<string, any> = await tauriInvoke('load_all_session_stats', { sessionIds: uncached });
       for (const id of uncached) {
         const raw = data?.[id];
         if (!raw) continue;
@@ -414,7 +430,7 @@ export async function loadSessionStatsForList(sessionIds: string[]): Promise<Map
           fileReads: raw.fileReads ?? [],
           commands: raw.commands ?? [],
         };
-        statsCache.set(id, stats);
+        cacheStats(id, stats);
         result.set(id, stats);
       }
       return result;
@@ -436,7 +452,7 @@ export async function loadSessionStatsForList(sessionIds: string[]): Promise<Map
         fileReads: parsed.fileReads ?? [],
         commands: parsed.commands ?? [],
       };
-      statsCache.set(id, stats);
+      cacheStats(id, stats);
       result.set(id, stats);
     } catch {
       // skip unparseable entries
@@ -446,7 +462,7 @@ export async function loadSessionStatsForList(sessionIds: string[]): Promise<Map
 }
 
 export function saveSessionStats(sessionId: string, stats: SessionStats): void {
-  statsCache.set(sessionId, stats);
+  cacheStats(sessionId, stats);
   if (tauriAvailable) {
     // Durable copy: ~/.pure/sessions/<id>/stats.json. Fire-and-forget — the
     // in-memory cache is authoritative for the current session.

@@ -2,9 +2,27 @@
 
 > **Original prompt.** Not derived from any third-party leaked source; written to the public
 > behavior contract of an agentic coding assistant. Treat as the single source for the agent's
-> `system` message. GUI and CLI compose environment-specific tool blocks, but both inject the
-> shared behavior contract from `src/shared/agentBehavior.ts`. Keep it concise — verbosity wastes
-> tokens and annoys the user.
+> `system` message — the **L0 system layer**. GUI and CLI compose environment-specific tool
+> blocks (L1 application layer), but both inject the shared behavior contract from
+> `src/shared/agentBehavior.ts` / `src/shared/promptLayers.ts`. Keep it concise — verbosity
+> wastes tokens and annoys the user.
+
+## 分层 Prompt 架构（system / application / user）
+
+Prompt 不是单层文本，而是三个明确层级的组合（见 `src/shared/promptLayers.ts`）：
+
+| 层级 | 内容 | 生命周期 | 代码位置 |
+|------|------|----------|----------|
+| **L0 · System** | 身份、全局操作原则、权限模式、运行时契约、响应格式（本文件） | 不可变，产品契约 | `SYSTEM_CORE_PROMPT`（promptLayers.ts）—— 运行时唯一来源，本文件为其人读镜像，两者须保持同步 |
+| **L1 · Application** | 工具列表、工作流+完成报告契约、输出风格、工具调用规则、typo 容错、逻辑陷阱防御、环境上下文、已装技能、任务模式 | 每会话/每轮，随应用状态变 | `WORKFLOW_PROMPT` / `COMPLETION_PROMPT` / `TYPO_TOLERANCE_PROMPT` / `LOGICAL_TRAPS_PROMPT` + chat.ts/cli.ts 的 buildSystemPrompt |
+| **L2 · User** | 本次请求的逻辑陷阱警告、artifact 构建协议、已批准执行计划 | 每请求，随请求变 | `composeUserTurn()`（promptLayers.ts），拼进 user 消息 |
+
+**归属判定规则**：不可变产品契约 → L0；依赖应用状态而非请求 → L1；依赖**本次请求** → L2。
+
+> 历史教训：早期把 trap 警告 / artifact 协议 / 计划全部 `systemPrompt +=` 进 system 消息，导致
+> ① system 消息在长会话中膨胀、每轮重复计费；② 每请求指令与身份规则混在一起、注意力被稀释；
+> ③ GUI 与 CLI 各维护一份重复行为契约，容易漂移。现在统一为分层组装：system 稳定，请求上下文
+> 跟随用户消息（贴近请求、模型注意力最强），共享契约单一来源。
 
 ---
 

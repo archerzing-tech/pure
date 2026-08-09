@@ -400,7 +400,7 @@ export class AgentLoopEngine {
         const args = safeParseJSON(tc.function.arguments);
         const path = typeof args.path === 'string' ? args.path : '';
         const lm = ctx.lockManager ?? this.fileLock;
-        if (path) await lm.acquireRead(path);
+        if (path) await lm.acquireRead(path, ctx.signal);
         try {
           const result = await ctx.tools!.execute(tc, ctx.signal);
           return { toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id };
@@ -421,7 +421,7 @@ export class AgentLoopEngine {
         const args = safeParseJSON(tc.function.arguments);
         const path = typeof args.path === 'string' ? args.path : '';
         const lm = ctx.lockManager ?? this.fileLock;
-        if (path) await lm.acquireWrite(path);
+        if (path) await lm.acquireWrite(path, ctx.signal);
         try {
           const result = await ctx.tools!.execute(tc, ctx.signal);
           results.push({ toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id });

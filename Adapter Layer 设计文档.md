@@ -931,13 +931,15 @@ Harness.run(systemPrompt, userPrompt)
      │      → 返回最相关的近期记忆
      │
      ├─ 2. PromptComposer.compose({
-     │      template: system-prompt.md,
+     │      template: system-prompt.md,   // L0 system-prompt.md 模板
      │      memory:   { preferences, errorPatterns },
      │      project:  projectContext
      │    })
-     │      → 记忆注入到 <session_memory> 段
+     │      → 记忆注入到 <session_memory> 段（L0 尾部，会话级上下文）
      │
      ├─ 3. Engine.run(composedSystemPrompt, userPrompt)
+     │      // L2 每请求碎片（trap/artifact/plan）由 GUI/CLI 在调用前
+     │      // 经 composeUserTurn() 拼入 userPrompt，不进 system（见 promptLayers.ts）
      │
      └─ 4. 监听 Completed / Error 事件
             → 提取关键信息 → IMemoryStore.add(...)

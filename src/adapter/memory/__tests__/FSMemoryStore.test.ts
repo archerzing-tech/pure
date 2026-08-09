@@ -100,6 +100,31 @@ describe('FSMemoryStore.search', () => {
   });
 });
 
+describe('FSMemoryStore in-memory cache', () => {
+  it('serves repeat searches from the cache and invalidates on forget', async () => {
+    await store.add(base({ sessionId: 's-c', content: 'cache me', projectPath: '/proj/c' }));
+    // First search populates the cache; second hits it (no disk read).
+    const hits1 = await store.search('cache', { projectPath: '/proj/c' });
+    const hits2 = await store.search('cache', { projectPath: '/proj/c' });
+    expect(hits1).toHaveLength(1);
+    expect(hits2).toHaveLength(1);
+
+    // forget() must invalidate the mirror even though its directory-key differs
+    // from the cache's project-path key.
+    await store.forget('s-c');
+    const after = await store.search('cache', { projectPath: '/proj/c' });
+    expect(after).toHaveLength(0);
+  });
+
+  it('invalidates the cache after decay rewrites decayScore', async () => {
+    await store.add(base({ sessionId: 's-d', content: 'stale me', projectPath: '/proj/d', timestamp: Date.now() - 200_000 }));
+    await store.decay(100_000);
+    const hits = await store.search('stale', { projectPath: '/proj/d' });
+    expect(hits).toHaveLength(1);
+    expect(hits[0].decayScore).toBeLessThan(1);
+  });
+});
+
 describe('FSMemoryStore.forget / decay', () => {
   it('forget removes every entry for the given session across projects', async () => {
     await store.add(base({ sessionId: 's-del', projectPath: '/proj/a' }));
@@ -135,6 +160,17 @@ describe('FSMemoryStore.forget / decay', () => {
     const file = join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl');
     const parsed = JSON.parse(readFileSync(file, 'utf-8').trim());
     expect(parsed.decayScore).toBe(0.25);
+  });
+
+  it('decay deletes memories whose halved score sinks below the forget floor', async () => {
+    const now = Date.now();
+    await store.add(base({ content: 'very stale', timestamp: now - 10 * 24 * 3600 * 1000 }));
+    // 1 → 0.5 → 0.25 → 0.125 → 0.0625 → (0.03125 ≤ 0.05) removed.
+    for (let i = 0; i < 6; i++) await store.decay(7 * 24 * 3600 * 1000);
+    const file = join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl');
+    expect(readFileSync(file, 'utf-8').trim()).toBe('');
+    const hits = await store.search('very', {});
+    expect(hits).toHaveLength(0);
   });
 });
 

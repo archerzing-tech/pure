@@ -1454,6 +1454,85 @@ body {
   background: var(--bg-card);
   box-shadow: var(--shadow-sm);
 }
+
+/* ── Generated-file cards ──
+   Shown after a turn that wrote files: ≤ MAX_CARD_FILES artifacts render as a
+   grid of clickable cards (open with default app / reveal in file manager),
+   more collapse to a single project-directory card. The row is plain
+   transcript content (like tool rows), not a floating overlay. */
+.bubble-row.artifact-row {
+  align-self: stretch;
+  max-width: 100%;
+  margin: 2px 0 6px;
+}
+.artifact-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+.artifact-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: border-color var(--transition), background var(--transition),
+    transform 0.12s var(--ease-out), box-shadow var(--transition);
+}
+.artifact-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--bg-card) 96%, var(--accent) 4%);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.artifact-card:active {
+  transform: translateY(0) scale(0.99);
+}
+.artifact-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
+}
+.artifact-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.artifact-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+.artifact-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-path {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Single project-directory card (many files): wider, centered label. */
+.artifact-card-dir {
+  justify-content: center;
+  padding: 12px 14px;
+}
 .inline-card-head {
   display: flex;
   align-items: center;
@@ -1820,6 +1899,7 @@ body {
   #landing-cursor,
   .bubble.streaming::after,
   .bubble-row.status.pending .bubble.status,
+  .bubble-row.status.loading .bubble,
   .tool-row-status .spinner,
   .tool-row.pending .tool-row-summary::after,
   .tool-row-waiting .waiting-dots::after,
@@ -3408,6 +3488,16 @@ body {
   pointer-events: none;
   box-shadow: var(--shadow-md);
 }
+/* The toast itself must not intercept clicks (it floats over the composer),
+   but a clickable .path-link embedded in it (e.g. "stats exported → open")
+   needs pointer events restored so the global path-link delegation works. */
+#toast .path-link {
+  pointer-events: auto;
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 #toast.hidden {
   opacity: 0;
   transform: translateX(-50%) translateY(12px) scale(0.95);
@@ -4906,6 +4996,16 @@ select:focus-visible,
 .stats-list-item:hover {
   border-color: var(--border);
   color: var(--text);
+}
+/* File rows in the stats panel: double-click opens the file with the OS
+   default app — hint at it with an underline + accent on hover. */
+.stats-list-item-openable {
+  cursor: zoom-in;
+}
+.stats-list-item-openable:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+  text-decoration: underline dotted;
 }
 
 .stats-empty {
@@ -6692,4 +6792,18 @@ button svg,
   #boot-splash .boot-dots i,
   .boot-reveal #landing-content { animation: none; }
   #boot-splash { transition-duration: .01ms; }
+}
+
+/* Session-restore loading row (main.ts renderSessionMessages): shown while a
+   long transcript replays bubble-by-bubble, removed when the restore finishes.
+   Neutral tertiary color + a slow opacity pulse so it reads as "working"
+   without competing with real status bubbles. */
+.bubble-row.status.loading .bubble {
+  color: var(--text-tertiary);
+  font-style: italic;
+  animation: restorePulse 1.5s ease-in-out infinite;
+}
+@keyframes restorePulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
 }

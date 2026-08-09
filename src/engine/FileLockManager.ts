@@ -9,6 +9,9 @@ type LockType = 'read' | 'write';
 interface Waiter {
   type: LockType;
   resolve: () => void;
+  reject: (err: Error) => void;
+  onAbort?: () => void;
+  signal?: AbortSignal;
 }
 
 interface LockEntry {
@@ -21,12 +24,12 @@ interface LockEntry {
 export class FileLockManager {
   private locks = new Map<string, LockEntry>();
 
-  async acquireRead(path: string): Promise<void> {
-    return this.acquire(path, 'read');
+  async acquireRead(path: string, signal?: AbortSignal): Promise<void> {
+    return this.acquire(path, 'read', signal);
   }
 
-  async acquireWrite(path: string): Promise<void> {
-    return this.acquire(path, 'write');
+  async acquireWrite(path: string, signal?: AbortSignal): Promise<void> {
+    return this.acquire(path, 'write', signal);
   }
 
   release(path: string): void {
@@ -47,7 +50,10 @@ export class FileLockManager {
     }
   }
 
-  private async acquire(path: string, type: LockType): Promise<void> {
+  private async acquire(path: string, type: LockType, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      throw new Error(`Lock acquire aborted (${path})`);
+    }
     let entry = this.locks.get(path);
     if (!entry) {
       entry = { type, count: 0, queue: [], waitingWriters: 0 };
@@ -68,9 +74,22 @@ export class FileLockManager {
       return;
     }
 
-    return new Promise<void>(resolve => {
+    return new Promise<void>((resolve, reject) => {
+      const waiter: Waiter = { type, resolve, reject, signal };
       if (type === 'write') entry.waitingWriters++;
-      entry.queue.push({ type, resolve });
+      // Abort support: a cancelled turn must not leave a waiter parked in the
+      // queue forever (the lock owner may run for a long time). Remove it and
+      // reject so the caller's catch treats it like any other tool failure.
+      waiter.onAbort = () => {
+        const idx = entry.queue.indexOf(waiter);
+        if (idx >= 0) {
+          entry.queue.splice(idx, 1);
+          if (type === 'write') entry.waitingWriters--;
+        }
+        reject(new Error(`Lock acquire aborted (${path})`));
+      };
+      signal?.addEventListener('abort', waiter.onAbort, { once: true });
+      entry.queue.push(waiter);
     });
   }
 
@@ -89,6 +108,7 @@ export class FileLockManager {
       entry.waitingWriters--;
       entry.type = 'write';
       entry.count = 1;
+      if (head.signal && head.onAbort) head.signal.removeEventListener('abort', head.onAbort);
       head.resolve();
       return;
     }
@@ -99,6 +119,11 @@ export class FileLockManager {
     const granted = entry.queue.splice(0, n);
     entry.type = 'read';
     entry.count = granted.length;
-    for (const w of granted) w.resolve();
+    for (const w of granted) {
+      // The waiter won the lock — its abort listener must not fire later and
+      // reject an already-resolved promise (or worse, remove a granted waiter).
+      if (w.signal && w.onAbort) w.signal.removeEventListener('abort', w.onAbort);
+      w.resolve();
+    }
   }
 }

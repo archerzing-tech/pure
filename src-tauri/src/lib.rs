@@ -1114,31 +1114,40 @@ async fn web_search(
         }
     }
 
-    // Free HTML backends: CJK queries hit cn.bing.com FIRST (international
-    // Bing / DuckDuckGo return irrelevant results for Chinese), then
-    // DuckDuckGo, then www.bing.com. Non-CJK keeps the established
-    // DuckDuckGo → Bing order. A backend that errors OR returns nothing rolls
-    // over to the next one, so challenge pages and empty result sets degrade
-    // gracefully instead of failing the search.
-    let backends: &[&str] = if is_chinese_query(&query) {
-        &["cn.bing.com", "DuckDuckGo", "Bing"]
-    } else {
-        &["DuckDuckGo", "Bing"]
-    };
-    for backend in backends {
+    // Free HTML backends probed IN PARALLEL — the tool prompt advertises
+    // "probed in parallel" and the old serial fallback stacked every backend's
+    // timeout (cn.bing.com 8s → DuckDuckGo 8s → Bing 10s ≈ up to 26s for a
+    // Chinese query), the single biggest perceived web_search delay. All three
+    // probes run concurrently now (each bounded by its own request timeout)
+    // and the first non-empty winner is picked in the same priority order as
+    // before: cn.bing.com first for CJK (international backends return
+    // irrelevant results for Chinese), then DuckDuckGo, then www.bing.com.
+    let chinese = is_chinese_query(&query);
+    let (cn, ddg, bing) = tokio::join!(
+        async {
+            if chinese {
+                search_backend_bing_cn(&query, max).await
+            } else {
+                Err("cn.bing.com not probed for non-CJK queries".to_string())
+            }
+        },
+        search_backend_duckduckgo(&query, max),
+        search_backend_bing(&query, max),
+    );
+    let candidates: [(&str, Result<Vec<SearchResult>, String>); 3] = [
+        ("cn.bing.com", cn),
+        ("DuckDuckGo", ddg),
+        ("Bing", bing),
+    ];
+    for (name, attempt) in candidates {
         if !results.is_empty() { break; }
-        // Explicit arms only — a future backend added to the order list must
-        // name its fetch here instead of silently falling through to Bing.
-        let attempt: Result<Vec<SearchResult>, String> = match *backend {
-            "cn.bing.com" => search_backend_bing_cn(&query, max).await,
-            "DuckDuckGo" => search_backend_duckduckgo(&query, max).await,
-            "Bing" => search_backend_bing(&query, max).await,
-            _ => unreachable!("unknown web_search backend label: {}", backend),
-        };
+        // Non-CJK never consulted cn.bing.com (its probe is a no-op above);
+        // the synthetic error must not surface in the degraded-error message.
+        if !chinese && name == "cn.bing.com" { continue; }
         match attempt {
             Ok(r) if !r.is_empty() => results = r,
             Ok(_) => any_empty = true,
-            Err(e) => failed.push(format!("{}: {}", backend, e)),
+            Err(e) => failed.push(format!("{}: {}", name, e)),
         }
     }
 
@@ -2517,8 +2526,11 @@ fn save_paste_image(session_id: String, name: String, data_base64: String) -> Re
     write_paste_bytes(&dir, &name, &bytes)
 }
 
-const DROPPED_FILE_MAX_BYTES: u64 = 50 * 1024 * 1024;
-const DROPPED_IMAGE_MAX_BYTES: u64 = 25 * 1024 * 1024;
+// Upload limits: only text / images / document files may be imported (a
+// binary archive or executable is useless to the agent and only bloats the
+// session tmp dir). Per-file caps bound the IPC payload + tmp usage.
+const DROPPED_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const DROPPED_IMAGE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const DROPPED_TEXT_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 
 fn dropped_file_mime(name: &str, bytes: &[u8]) -> String {
@@ -2527,6 +2539,17 @@ fn dropped_file_mime(name: &str, bytes: &[u8]) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    // Binary-archive/executable extensions are rejected regardless of content:
+    // a ZIP header is valid UTF-8, so the UTF-8 fallback below would otherwise
+    // misclassify archives as text.
+    const BINARY_EXTENSIONS: &[&str] = &[
+        "zip", "rar", "7z", "gz", "tgz", "bz2", "xz", "tar", "zst",
+        "exe", "msi", "dmg", "pkg", "bin", "iso", "img", "so", "dll", "dylib",
+        "apk", "ipa", "deb", "rpm", "jar", "class", "wasm", "woff", "woff2", "ttf", "otf",
+    ];
+    if BINARY_EXTENSIONS.contains(&ext.as_str()) {
+        return "application/octet-stream".to_string();
+    }
     let known = match ext.as_str() {
         "png" => Some("image/png"),
         "jpg" | "jpeg" => Some("image/jpeg"),
@@ -2534,7 +2557,9 @@ fn dropped_file_mime(name: &str, bytes: &[u8]) -> String {
         "webp" => Some("image/webp"),
         "svg" => Some("image/svg+xml"),
         "pdf" => Some("application/pdf"),
-        "zip" => Some("application/zip"),
+        "doc" | "docx" | "rtf" | "odt" => Some("application/msword"),
+        "xls" | "xlsx" => Some("application/vnd.ms-excel"),
+        "ppt" | "pptx" => Some("application/vnd.ms-powerpoint"),
         "json" => Some("application/json"),
         "xml" => Some("application/xml"),
         "txt" | "log" | "md" | "csv" | "tsv" | "js" | "ts" | "jsx" | "tsx"
@@ -2552,7 +2577,7 @@ fn dropped_file_mime(name: &str, bytes: &[u8]) -> String {
 }
 
 fn dropped_file_kind(mime: &str) -> &'static str {
-    if mime.starts_with("image/") { "image" } else if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" { "text" } else { "binary" }
+    if mime.starts_with("image/") { "image" } else if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" { "text" } else if mime == "application/pdf" || mime.starts_with("application/vnd.") || mime == "application/msword" { "doc" } else { "binary" }
 }
 
 fn unique_tmp_file(dir: &std::path::Path, name: &str, attempt: u32) -> PathBuf {
@@ -2586,6 +2611,9 @@ fn import_dropped_file_inner(tmp_dir: &std::path::Path, source: &std::path::Path
     let kind = dropped_file_kind(&mime);
     if kind == "image" && bytes.len() as u64 > DROPPED_IMAGE_MAX_BYTES {
         return Err(format!("dropped image exceeds {} MB", DROPPED_IMAGE_MAX_BYTES / (1024 * 1024)));
+    }
+    if kind == "binary" {
+        return Err("binary files are not supported — attach text, images, or documents only".to_string());
     }
     fs::create_dir_all(tmp_dir).map_err(|e| format!("create dropped-file dir: {}", e))?;
 
@@ -3499,13 +3527,21 @@ fn load_session_stats(session_id: String) -> Result<Option<serde_json::Value>, S
 /// sidebar shows a per-session token/cost summary line and would otherwise do
 /// one invoke per row). Returns { sessionId: stats } for sessions that have a
 /// stats.json; sessions without one are simply absent from the map.
+///
+/// `session_ids` optionally narrows the read to a specific set of sessions:
+/// the sidebar only displays the 30 most recent ones, so passing its visible
+/// ids avoids stat-ing + reading every session's stats.json on every refresh
+/// (hundreds of files on a long-lived install). None = the full sweep (the
+/// "export all as ZIP" path needs every session).
 #[tauri::command]
-fn load_all_session_stats() -> Result<serde_json::Value, String> {
+fn load_all_session_stats(session_ids: Option<Vec<String>>) -> Result<serde_json::Value, String> {
     let dir = sessions_dir();
     let mut out = serde_json::Map::new();
     if !dir.exists() {
         return Ok(serde_json::Value::Object(out));
     }
+    let wanted: Option<std::collections::HashSet<String>> =
+        session_ids.map(|ids| ids.into_iter().collect());
     for entry in fs::read_dir(&dir).map_err(|e| format!("read dir: {}", e))? {
         let entry = match entry {
             Ok(e) => e,
@@ -3515,6 +3551,11 @@ fn load_all_session_stats() -> Result<serde_json::Value, String> {
             continue;
         }
         let session_id = entry.file_name().to_string_lossy().to_string();
+        if let Some(wanted) = &wanted {
+            if !wanted.contains(&session_id) {
+                continue;
+            }
+        }
         let stats_path = entry.path().join("stats.json");
         if !stats_path.exists() {
             continue;
@@ -4229,18 +4270,63 @@ mod import_dropped_file_tests {
     }
 
     #[test]
-    fn classifies_binary_and_directories() {
+    fn rejects_binary_files_and_accepts_directories() {
         let source_dir = temp_import_dir("binary-source");
         let tmp_dir = temp_import_dir("binary-dest");
+        // An archive / executable (invalid UTF-8, unknown extension) must be
+        // rejected, not attached.
         let source = source_dir.join("archive.bin");
         fs::write(&source, [0, 159, 146, 150]).unwrap();
-        let record = import_dropped_file_inner(&tmp_dir, &source).unwrap();
-        assert_eq!(record["kind"], "binary");
-        assert_eq!(record["content"], "");
+        let err = import_dropped_file_inner(&tmp_dir, &source).unwrap_err();
+        assert!(err.contains("binary"), "unexpected error: {err}");
         let folder = source_dir.join("folder");
         fs::create_dir_all(&folder).unwrap();
         let dir_record = import_dropped_file_inner(&tmp_dir, &folder).unwrap();
         assert_eq!(dir_record["isDirectory"], true);
+        let _ = fs::remove_dir_all(source_dir);
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
+
+    #[test]
+    fn rejects_archive_extensions() {
+        let source_dir = temp_import_dir("zip-source");
+        let tmp_dir = temp_import_dir("zip-dest");
+        for ext in ["zip", "rar", "7z", "gz", "tar", "exe", "dmg"] {
+            let source = source_dir.join(format!("pkg.{ext}"));
+            fs::write(&source, b"PK\x03\x04 some bytes").unwrap();
+            let result = import_dropped_file_inner(&tmp_dir, &source);
+            assert!(result.is_err(), "{ext} should be rejected: {result:?}");
+        }
+        let _ = fs::remove_dir_all(source_dir);
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
+
+    #[test]
+    fn imports_documents_without_parsing_content() {
+        let source_dir = temp_import_dir("doc-source");
+        let tmp_dir = temp_import_dir("doc-dest");
+        for (name, bytes) in [("report.pdf", b"%PDF-1.4 fake".as_slice()), ("plan.docx", b"PK\x03\x04 docx")] {
+            let source = source_dir.join(name);
+            fs::write(&source, bytes).unwrap();
+            let record = import_dropped_file_inner(&tmp_dir, &source).unwrap();
+            assert_eq!(record["kind"], "doc", "{name} should be a doc");
+            assert_eq!(record["content"], "");
+        }
+        let _ = fs::remove_dir_all(source_dir);
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
+
+    #[test]
+    fn rejects_files_over_the_size_limit() {
+        let source_dir = temp_import_dir("big-source");
+        let tmp_dir = temp_import_dir("big-dest");
+        let source = source_dir.join("huge.txt");
+        // A text file just over the 10 MB cap: must be rejected even though
+        // the kind would otherwise be text.
+        let big = vec![b'a'; (DROPPED_FILE_MAX_BYTES + 1) as usize];
+        fs::write(&source, &big).unwrap();
+        let err = import_dropped_file_inner(&tmp_dir, &source).unwrap_err();
+        assert!(err.contains("exceeds"), "unexpected error: {err}");
         let _ = fs::remove_dir_all(source_dir);
         let _ = fs::remove_dir_all(tmp_dir);
     }
@@ -4411,12 +4497,23 @@ mod session_stats_tests {
             let dir = sessions_dir().join("sess-no-stats");
             fs::create_dir_all(&dir).unwrap();
 
-            let all = load_all_session_stats().unwrap();
+            let all = load_all_session_stats(None).unwrap();
             let map = all.as_object().unwrap();
             assert_eq!(map.len(), 2);
             assert_eq!(map["sess-a"], stats_a);
             assert_eq!(map["sess-b"], stats_b);
             assert!(!map.contains_key("sess-no-stats"));
+
+            // 5) An allow-list narrows the read to exactly those sessions (the
+            // sidebar passes its visible ids; the full sweep stays the default).
+            let subset = load_all_session_stats(Some(vec!["sess-b".to_string()])).unwrap();
+            let sub_map = subset.as_object().unwrap();
+            assert_eq!(sub_map.len(), 1);
+            assert_eq!(sub_map["sess-b"], stats_b);
+            assert!(!sub_map.contains_key("sess-a"));
+            // A requested id without a stats file is simply absent, not fatal.
+            let missing = load_all_session_stats(Some(vec!["nope".to_string()])).unwrap();
+            assert_eq!(missing.as_object().unwrap().len(), 0);
         });
         let _ = fs::remove_dir_all(&home);
     }

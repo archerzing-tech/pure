@@ -7,7 +7,18 @@ import type { Message, LLMAdapter } from '../shared/types';
 export interface ContextEngineConfig {
   maxMessages: number;
   summaryThreshold?: number;
+  /** Token budget for the retained window (estimate: chars/4). When exceeded,
+   * the window is trimmed even if the message count is under maxMessages —
+   * long tool outputs inflate tokens far faster than message count. */
+  maxTokens?: number;
   llm?: LLMAdapter;
+}
+
+// Rough token estimate (chars/4), matching BudgetManager's estimator.
+function estimateTokens(messages: Message[]): number {
+  let sum = 0;
+  for (const m of messages) sum += Math.ceil((m.content?.length ?? 0) / 4);
+  return sum;
 }
 
 export class ContextEngine {
@@ -17,20 +28,28 @@ export class ContextEngine {
     this.config = {
       maxMessages: config.maxMessages,
       summaryThreshold: config.summaryThreshold ?? 40,
+      maxTokens: config.maxTokens,
       llm: config.llm,
     };
   }
 
   async trim(messages: Message[]): Promise<Message[]> {
-    if (messages.length <= this.config.maxMessages) return messages;
-
     const systemMsg = messages.filter(m => m.role === 'system');
     const nonSystem = messages.filter(m => m.role !== 'system');
 
+    const overTokenBudget =
+      this.config.maxTokens !== undefined &&
+      estimateTokens(nonSystem) > this.config.maxTokens;
+    if (nonSystem.length <= this.config.maxMessages && !overTokenBudget) {
+      return messages;
+    }
+
     // Start with the absolute latest message, then add older messages
-    // while respecting atomic tool pairs, up to maxMessages
+    // while respecting atomic tool pairs, up to maxMessages (and, when a token
+    // budget is set, until the budget is filled).
     const trimmed: Message[] = [];
     const targetCount = this.config.maxMessages;
+    let budget = this.config.maxTokens;
 
     // Walk backwards from the newest message
     const pairs = this.groupAtomicPairs(nonSystem);
@@ -39,6 +58,12 @@ export class ContextEngine {
     let taken = 0;
     for (let i = pairs.length - 1; i >= 0 && taken < targetCount; i--) {
       const pair = pairs[i];
+      // Honor the token budget too: stop adding pairs once it would be filled.
+      if (budget !== undefined) {
+        const pairTokens = estimateTokens(pair);
+        if (taken > 0 && budget - pairTokens < 0) break;
+        budget -= pairTokens;
+      }
       trimmed.unshift(...pair);
       taken += pair.length;
     }

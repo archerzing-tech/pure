@@ -209,7 +209,8 @@ export type MemoryType =
   | 'user_preference'
   | 'error_pattern'
   | 'successful_pattern'
-  | 'project_convention';
+  | 'project_convention'
+  | 'procedure';
 
 export interface MemoryLesson {
   symptom: string;

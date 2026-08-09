@@ -18,11 +18,12 @@ import {
   removeRecentWorkspace,
 } from './recentWorkspaces';
 import type { ChatController } from './chat';
+import { UPLOAD_LIMITS } from './pasteChip';
 import type { DroppedFileRecord, PasteChipManager } from './pasteChip';
 
 export interface WorkspaceDeps {
   chat: Pick<ChatController, 'getWorkspace' | 'setWorkspace' | 'getSessionId'>;
-  pasteChips: Pick<PasteChipManager, 'addImportedFile' | 'addDroppedFiles' | 'hasAttachments'>;
+  pasteChips: Pick<PasteChipManager, 'addImportedFile' | 'addDroppedFiles' | 'hasAttachments' | 'remainingSlots'>;
   /** After any workspace DOM refresh — refresh the status footer. */
   onWorkspaceChanged(): void;
   /** After attachments were added — re-evaluate the send buttons. */
@@ -264,6 +265,17 @@ export class WorkspaceController {
 
   private async handleDroppedPaths(paths: string[]): Promise<void> {
     const sessionId = this.chat.getSessionId();
+    // Pre-flight the batch cap BEFORE importing: Rust copies each dropped file
+    // into the session tmp dir, so importing 20 files just to reject 10 would
+    // copy 20 and spam toasts. Stop at the cap with a single notice.
+    if (isTauriRuntime()) {
+      const slots = this.pasteChips.remainingSlots();
+      if (slots <= 0) {
+        showToast(t('paste.tooManyAttachments').replace('{max}', String(UPLOAD_LIMITS.MAX_ATTACHMENTS)));
+        return;
+      }
+      paths = paths.slice(0, slots);
+    }
     for (const path of paths) {
       if (!path) continue;
       try {

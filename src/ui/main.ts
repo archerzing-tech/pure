@@ -12,19 +12,21 @@ import type { SettingsPanel } from './settings';
 import { getStoredThinkingSegments, type StoredMessage, type ToolExecMeta } from './store';
 import { estimateCostUsd, formatCostUsd, formatTokens } from '../shared/usage';
 import { escapeHtml } from '../shared/html';
+import { buildExportSavedToast } from './statsExportToast';
+import { stripUserTurnContext } from '../shared/promptLayers';
 import { checkForUpdatesSilently, fetchAppVersion } from './updater';
 import { t, updateLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { loadSessionList, loadSessionStatsForList, type SessionMeta, type SessionStats } from './store';
 import type { Language as I18nLanguage } from '../shared/i18n';
-import { showToast } from '../shared/toast';
+import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { providerLabel, providerDef, PROVIDERS, defaultModelFor, type ProviderId } from '../shared/providers';
 import { renderMarkdown, stripToolCallXml } from './markdown';
 import { createToolRow, finalizeToolRow } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
 import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned } from './scrollPin';
-import { initPathLinks, linkifyPaths } from './pathLink';
+import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { PasteChipManager, composeMessageWithAttachments } from './pasteChip';
 import { showConfirmModal } from './modal';
 import { WorkspaceController } from './workspace';
@@ -531,6 +533,16 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   // synchronous full-transcript layout at the end of the restore.
   wireScrollPin(chatEl);
   wireTranscriptPrune(chatEl);
+  // Loading notice while the transcript replays: a long session restores
+  // bubble-by-bubble with rAF yields (seconds), so without feedback the app
+  // looks frozen. Removed in the finally below on success or failure.
+  const loadingRow = document.createElement('div');
+  loadingRow.className = 'bubble-row status loading';
+  const loadingBubble = document.createElement('div');
+  loadingBubble.className = 'bubble status';
+  loadingBubble.textContent = t('session.restoring');
+  loadingRow.appendChild(loadingBubble);
+  chatEl.appendChild(loadingRow);
   const toolExecs: ToolExecMeta[] = [];
   // Restoring a long session must not block the GUI: each bubble's markdown
   // pass (marked parse + sanitize + hljs + linkify) is effectively synchronous
@@ -538,6 +550,7 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   // input processing instead of rendering the whole transcript in one burst.
   const yieldToUI = (): Promise<void> => new Promise(resolve => requestAnimationFrame(() => resolve()));
 
+  try {
   for (const m of messages) {
     if (m.role === 'tool' && m.toolExec) {
       toolExecs.push(m.toolExec);
@@ -575,7 +588,10 @@ async function renderSessionMessages(messages: StoredMessage[]) {
       wrapper.appendChild(label);
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
-      bubble.textContent = m.content;
+      // Per-request task context (<task_context> block, see promptLayers.ts) is
+      // for the model only — strip it so replay never shows it in the user's
+      // own bubble.
+      bubble.textContent = stripUserTurnContext(m.content);
       linkifyPaths(bubble);
       wrapper.appendChild(bubble);
       chatEl.appendChild(wrapper);
@@ -584,6 +600,9 @@ async function renderSessionMessages(messages: StoredMessage[]) {
     await yieldToUI();
   }
   flushToolExecs(toolExecs, chatEl);
+  } finally {
+    loadingRow.remove();
+  }
   // A session restore rebuilds the transcript from scratch, so it always
   // lands at the newest content — force the pin state the same way a fresh
   // stream would, then scroll through the shared coalesced helper.
@@ -1039,8 +1058,10 @@ function renderSessionStats() {
   setText('stat-cmd-count', String(stats.commands.length));
 
   renderStatsList('stat-search-list', stats.searches, (s) => s.query);
-  renderStatsList('stat-write-list', stats.fileWrites, (w) => (w.success ? '' : '✗ ') + w.path);
-  renderStatsList('stat-read-list', stats.fileReads, (r) => r.path);
+  // File write/read entries carry the path: double-clicking opens the file
+  // with the OS default app (via open_path). Commands/searches have no path.
+  renderStatsList('stat-write-list', stats.fileWrites, (w) => (w.success ? '' : '✗ ') + w.path, (w) => w.path);
+  renderStatsList('stat-read-list', stats.fileReads, (r) => r.path, (r) => r.path);
   renderStatsList('stat-cmd-list', stats.commands, (c) => (c.success ? '' : '✗ ') + c.command);
 }
 
@@ -1048,6 +1069,8 @@ function renderStatsList<T>(
   id: string,
   items: T[],
   label: (item: T) => string,
+  /** When given, each row becomes double-click-to-open with this path. */
+  pathFor?: (item: T) => string,
 ): void {
   const el = document.getElementById(id);
   if (!el) return;
@@ -1056,15 +1079,29 @@ function renderStatsList<T>(
     return;
   }
   // Newest first; cap the DOM so a long session can't flood the panel.
-  el.innerHTML = items
+  const rows = items
     .slice()
     .reverse()
     .slice(0, 20)
     .map((item) => {
       const text = label(item);
-      return `<div class="stats-list-item" title="${escapeHtml(text)}">${escapeHtml(text)}</div>`;
+      const path = pathFor ? pathFor(item) : '';
+      const cls = path ? 'stats-list-item stats-list-item-openable' : 'stats-list-item';
+      const title = path ? `${t('stats.dblclickOpen')} ${text}` : text;
+      const dataAttr = path ? ` data-path="${escapeHtml(path)}"` : '';
+      return `<div class="${cls}" title="${escapeHtml(title)}"${dataAttr}>${escapeHtml(text)}</div>`;
     })
     .join('');
+  el.innerHTML = rows;
+  if (!pathFor) return;
+  // Double-click a file row → open with the OS default app (relative paths
+  // resolve against the active workspace via openPathLink).
+  el.querySelectorAll('.stats-list-item-openable').forEach((row) => {
+    row.addEventListener('dblclick', () => {
+      const p = (row as HTMLElement).getAttribute('data-path') ?? '';
+      if (p) openPathLink(p);
+    });
+  });
 }
 
 // ── Stats export (导出: JSON / Markdown) ──
@@ -1400,7 +1437,7 @@ async function exportAllSessionStatsZip(): Promise<void> {
   const filename = `pure-stats-all-${new Date().toISOString().slice(0, 10)}.zip`;
   try {
     const savedTo = await saveStatsExportBinary(bytes, filename, 'application/zip');
-    if (savedTo) showToast(`${t('stats.export.done')}: ${savedTo}`);
+    if (savedTo) showToastHtml(buildExportSavedToast(savedTo));
   } catch {
     showToast(`${t('toast.sendFailed')}: ${t('stats.export')}`);
   }
@@ -1428,7 +1465,7 @@ async function exportSessionStats(format: 'json' | 'markdown' | 'csv'): Promise<
 
   try {
     const savedTo = await saveStatsExport(content, filename, ext);
-    if (savedTo) showToast(`${t('stats.export.done')}: ${savedTo}`);
+    if (savedTo) showToastHtml(buildExportSavedToast(savedTo));
   } catch {
     showToast(`${t('toast.sendFailed')}: ${t('stats.export')}`);
   }

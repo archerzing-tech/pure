@@ -31,7 +31,8 @@ import { ThinkingCard } from './cli-thinking';
 import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
 import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
 import { harvestUserPreferences } from './shared/memory';
-import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT } from './shared/agentBehavior';
+import { INCREMENTAL_BUILD_PROMPT } from './shared/agentBehavior';
+import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, FILE_TOOLS_CORE, composeUserTurn } from './shared/promptLayers';
 import { defaultModelFor } from './shared/providers';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
 
@@ -229,24 +230,15 @@ const DEFAULT_BUDGET: BudgetConfig = {
 // intentionally flipped.
 const DEFAULT_CLI_AUTO_APPROVE = true;
 
-const BASE_SYSTEM_PROMPT = `You are pure, a coding agent with file, search, web, and command tools.
+// Layered prompt assembly (L0 system core + L1 tools/behavior + L2 per-request
+// user context — see src/shared/promptLayers.ts). The immutable identity and
+// global operating contract come from the shared SYSTEM_CORE_PROMPT; the tool
+// lists and output style are application-layer; per-request fragments (traps,
+// artifact protocol) are composed into the USER message via composeUserTurn.
+const BASE_SYSTEM_PROMPT = `${SYSTEM_CORE_PROMPT}
 
-File tools:
-- read_file(path, startLine?, endLine?) — read file content
-- write_file(path, content) — create or overwrite a file
-- edit_file(path, oldString, newString, allowMultiple?) — string replacement in a file
-- list_files(path?, recursive?) — list directory contents
-- search_files(pattern, path?, filePattern?, maxResults?) — grep for text in files
-- glob_files(pattern, path?, maxResults?) — find files matching a glob pattern (e.g. "**/*.ts")
-- create_directory(path) — create a directory (and parents)
-- diff_files(pathA, pathB) — unified diff between two files
-- replace_files(files[], oldString, newString, allowMultiple?) — batch string replacement across multiple files
-
-Shell & Git:
-- execute_command(command) — run a shell command
-- git_diff(staged?, path?) — show git diff
-- git_log(maxCount?, oneline?) — recent commit history
-- git_status — working tree status
+<capabilities>
+${FILE_TOOLS_CORE}
 
 System:
 - sys_info() — timezone, language, current time, OS version, installed runtimes (node/bun/python3/rustc/git versions), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, a runtime version, a git capability, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data.
@@ -256,8 +248,13 @@ Web tools:
 - web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.
 
 For weather forecasts or other time-sensitive data, call web_search FIRST and use the returned forecast data; never invent future weather. If the user did not provide a location, ask for it or state the location assumption clearly. To show a weather trend in the GUI, include a fenced chart block with one numeric value per day (prefer average temperature; use "周一：25℃" or "周一 | 25") alongside the explanation.
+</capabilities>
 
 Work step by step. Read before you write. Verify after you change. Be concise.
+
+${WORKFLOW_PROMPT}
+
+${COMPLETION_PROMPT}
 
 Output style:
 - Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").
@@ -270,15 +267,9 @@ Tool-calling rules:
 - NEVER emit tool calls as XML or text (no <tool_calls>, <invoke name="...">, or JSON inside your reply). Tool calls are made ONLY through the function-calling interface, never as visible text.
 - Mirror the GUI's rule (chat.ts BASE_SYSTEM_PROMPT) so piped / non-interactive CLI runs don't regress to the old leak pattern if a model picks it up. The "no workspace → ask the user to set one" bullet is GUI-specific and omitted here — the CLI defaults workspace to '.' already.
 
-Smart typo tolerance: when the user's message contains obvious typos, pinyin / IME errors ('ji' mapped to the wrong hanzi, homophone slips, repeated/reordered/full-width-punctuation typos), infer their intended meaning, answer that, and briefly note your assumption at the top of the reply (e.g., "Assuming you meant …").
+${TYPO_TOLERANCE_PROMPT}
 
-Logical traps & approach switching:
-- Before acting, scan the user's request for logical traps: self-contradictory requirements ("不要X但又要X"), impossible constraints, mutually exclusive goals, or a trick premise. If the request as stated is logically impossible or self-contradictory, do NOT blindly follow it into a failure loop — state the trap briefly and solve the most reasonable interpretation (or explain why it is impossible and propose the closest achievable alternative).
-- If your FIRST attempt fails (verification failure, repeated tool errors, or the result keeps getting rejected), do NOT retry the same approach a second time. Re-read the ORIGINAL user request and question whether the premise itself is the problem. If it is, escape the trap by switching to a fundamentally different interpretation or method.
-
-${PROACTIVE_WORKFLOW_PROMPT}
-
-${COMPLETION_LESSON_PROMPT}`;
+${LOGICAL_TRAPS_PROMPT}`;
 
 // Lightweight environment context for the CLI, mirroring the GUI's
 // buildEnvironmentContext (chat.ts): a stable location/language pre-seed, with
@@ -687,7 +678,7 @@ function createHarness(args: CliArgs) {
     // G-3 fix: wire the ContextEngine (with LLM summarization fallback) into
     // the CLI too — long REPL sessions previously grew without bound because
     // the CLI's Harness never had a contextEngine configured.
-    contextEngine: new ContextEngine({ maxMessages: 20, llm: adapter }),
+    contextEngine: new ContextEngine({ maxMessages: 20, maxTokens: 32000, llm: adapter }),
     // P1-1 (async verification): the CLI uses the pure rule-based verifier
     // (non-empty-output check — a hard failure still triggers an in-engine
     // rewrite). The LLM re-check of the final answer is NOT run synchronously
@@ -875,13 +866,19 @@ async function runOneShot(args: CliArgs) {
     console.log(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}`);
   }
   printModeSwitch(analysis.mode);
-  const systemPrompt = buildSystemPrompt(analysis.mode) + formatTrapPrompt(traps) + (detectArtifactRequest(args.prompt) ? formatArtifactPrompt() : '');
+  const systemPrompt = buildSystemPrompt(analysis.mode);
+  // L2 per-request context (promptLayers.ts): traps + artifact protocol ride
+  // with the USER message, not the system prompt.
+  const userTurn = composeUserTurn(args.prompt, {
+    traps: traps.length > 0 ? formatTrapPrompt(traps) : undefined,
+    buildProtocol: detectArtifactRequest(args.prompt) ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,
+  });
 
   const streamMgr = new StreamManager(chunk => process.stdout.write(chunk), { flushIntervalMs: 16 });
   streamMgr.start();
 
   const startTime = Date.now();
-  const { turnCount, ok } = await consumeTurn(harness.run(systemPrompt, args.prompt), streamMgr);
+  const { turnCount, ok } = await consumeTurn(harness.run(systemPrompt, userTurn), streamMgr);
 
   process.stdout.write('\n');
   console.log(dim('─'.repeat(50)));
@@ -975,11 +972,17 @@ async function runRepl(args: CliArgs) {
       printModeSwitch(analysis.mode);
       lastMode = analysis.mode;
     }
-    const systemPrompt = buildSystemPrompt(analysis.mode) + formatTrapPrompt(traps) + (detectArtifactRequest(input) ? formatArtifactPrompt() : '');
+    const systemPrompt = buildSystemPrompt(analysis.mode);
+    // L2 per-request context (promptLayers.ts): traps + artifact protocol ride
+    // with the USER message, not the system prompt.
+    const userTurn = composeUserTurn(input, {
+      traps: traps.length > 0 ? formatTrapPrompt(traps) : undefined,
+      buildProtocol: detectArtifactRequest(input) ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,
+    });
 
     const events = firstTurn
-      ? harness.run(systemPrompt, input, currentAbort.signal)
-      : harness.continueTurn(systemPrompt, messages, input, currentAbort.signal);
+      ? harness.run(systemPrompt, userTurn, currentAbort.signal)
+      : harness.continueTurn(systemPrompt, messages, userTurn, currentAbort.signal);
 
     const result = await consumeTurn(events, streamMgr);
     const wasAborted = currentAbort.signal.aborted;

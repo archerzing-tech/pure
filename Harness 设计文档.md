@@ -814,7 +814,10 @@ export class Harness {
     const state = this.stateManager.getCurrentState();
     state.status = 'running';
 
-    // ── 记忆检索（Layer 2：会话开始时注入相关记忆）──
+    // ── 记忆检索（会话级上下文：经 PromptComposer 注入 system 消息的
+    // <session_memory> 段，见分层 prompt 架构 system-prompt.md 头部 ——
+    // L2 每请求碎片 trap/artifact/plan 不在此处，由 GUI/CLI 经
+    // composeUserTurn() 拼入 user 消息）──
     let systemPromptWithMemory = systemPrompt;
     if (this.config.memory) {
       const memories = await this.config.memory.search(userPrompt, { k: 5 });

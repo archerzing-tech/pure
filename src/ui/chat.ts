@@ -9,7 +9,8 @@ import { mergeTokenUsage } from '../shared/usage';
 import { LocalStorageMemoryStore } from '../adapter/memory/LocalStorageMemoryStore';
 import { WASMEmbeddingStore } from '../adapter/memory/WASMEmbeddingStore';
 import { harvestUserPreferences } from '../shared/memory';
-import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT } from '../shared/agentBehavior';
+import { INCREMENTAL_BUILD_PROMPT } from '../shared/agentBehavior';
+import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, FILE_TOOLS_CORE, composeUserTurn, stripUserTurnContext } from '../shared/promptLayers';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt, parsePlanJson } from '../coding-agent/Planner';
 import { sanitizeSkillName } from './skillHub';
@@ -31,6 +32,7 @@ import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapt
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
 import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { renderMarkdown, scheduleStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdown';
+import { renderArtifactCards, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
 import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, type ToolRowHandle } from './toolRow';
@@ -114,22 +116,9 @@ const WEB_TOOLS_PROMPT = `Web tools:
 - web_search(query, maxResults?) — web search. With a Serper or Tavily API key in Settings → Tools it uses the API backends first (Serper = real Google index, best for Chinese AND English); otherwise free backends are probed in parallel — Sogou + cn.bing.com + DuckDuckGo + Bing for Chinese queries. If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
 - web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.`;
 
-const FS_TOOLS_PROMPT = `File tools:
-- read_file(path, startLine?, endLine?) — read file content
-- write_file(path, content) — create or overwrite a file
-- edit_file(path, oldString, newString, allowMultiple?) — string replacement in a file
-- list_files(path?, recursive?) — list directory contents
-- search_files(pattern, path?, filePattern?, maxResults?) — grep for text in files
-- glob_files(pattern, path?, maxResults?) — find files matching a glob pattern (e.g. "**/*.ts")
-- create_directory(path) — create a directory (and parents)
-- diff_files(pathA, pathB) — unified diff between two files
-- replace_files(files[], oldString, newString, allowMultiple?) — batch string replacement across multiple files
-
-Shell & Git:
-- execute_command(command) — run a shell command
-- git_diff(staged?, path?) — show git diff
-- git_log(maxCount?, oneline?) — recent commit history
-- git_status — working tree status
+// File-tool list is shared with the CLI (FILE_TOOLS_CORE in promptLayers.ts);
+// the GUI appends its own path-resolution rule, which is GUI-specific.
+const FS_TOOLS_PROMPT = `${FILE_TOOLS_CORE}
 
 Path rule: pass file and directory paths relative to the selected workspace root (for example src/app.ts, not the workspace absolute path). The backend also accepts an absolute path only when it is inside the selected workspace; never invent or prepend the workspace twice.`;
 
@@ -305,22 +294,35 @@ function resolvePendingToolRows(refresh: Map<string, number>, ...maps: Map<strin
 const WEB_TOOL_DEFS: ToolDefinition[] = getWebToolDefs();
 const SYS_INFO_DEFS: ToolDefinition[] = getSysInfoToolDefs();
 
-const BASE_SYSTEM_PROMPT = (hasWorkspace: boolean, temporaryWorkspace = false): string => {
-  const persona = hasWorkspace
+// Layered prompt assembly (L0 system core + L1 tools/behavior + L2 per-request
+// user context — see src/shared/promptLayers.ts). The immutable identity,
+// operating principles, permission modes, runtime and response-format contract
+// come from the shared SYSTEM_CORE_PROMPT; the tools block and workspace
+// capability note are application-layer; per-request fragments (traps,
+// artifact protocol, approved plan) are composed into the USER message via
+// composeUserTurn at the run call, never appended to the system prompt.
+// Exported for the regression guard in chat.test.ts (asserts section headers
+// appear exactly once — a past splice bug doubled "Output style:").
+export const BASE_SYSTEM_PROMPT = (hasWorkspace: boolean, temporaryWorkspace = false): string => {
+  const workspaceNote = hasWorkspace
     ? temporaryWorkspace
-      ? 'You are pure, a coding agent with file, search, web, and command tools. No user workspace is selected, so file changes go to an isolated application temporary workspace for this session.'
-      : 'You are pure, a coding agent with file, search, web, and command tools.'
-    : 'You are pure, a coding assistant with web search, fetch, and system info. No local filesystem or shell access — open Settings → Tools to add a workspace.';
+      ? '\nWorkspace: no user workspace is selected, so file changes go to an isolated application temporary workspace for this session.'
+      : ''
+    : '\nWorkspace: none selected — no local filesystem or shell access. Open Settings → Tools to add a workspace.';
   const toolsBlock = hasWorkspace
     ? `${WEB_TOOLS_PROMPT}\n\n${FS_TOOLS_PROMPT}\n\n${SYS_INFO_PROMPT}`
     : `${WEB_TOOLS_PROMPT}\n\n${SYS_INFO_PROMPT}`;
-  return `${persona}\n\n${toolsBlock}
+  return `${SYSTEM_CORE_PROMPT}
 
-${PROACTIVE_WORKFLOW_PROMPT}
-
-${COMPLETION_LESSON_PROMPT}
+<capabilities>${workspaceNote}
+${toolsBlock}
+</capabilities>
 
 Work step by step. Read before you write. Verify after you change. Be concise.
+
+${WORKFLOW_PROMPT}
+
+${COMPLETION_PROMPT}
 
 Output style:
 - Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").
@@ -337,11 +339,9 @@ Tool-calling rules:
 - Tool calls are made ONLY through the function-calling interface, never as visible text.
 - If no user workspace is configured, use the isolated application temporary workspace provided for this session. Do not imply that those files were written into a user-selected project.
 
-Smart typo tolerance: when the user's message contains obvious typos, pinyin / IME errors ('ji' mapped to the wrong hanzi, homophone slips, repeated/reordered/full-width-punctuation typos), infer their intended meaning, answer that, and briefly note your assumption at the top of the reply (e.g., "Assuming you meant …").
+${TYPO_TOLERANCE_PROMPT}
 
-Logical traps & approach switching:
-- Before acting, scan the user's request for logical traps: self-contradictory requirements ("不要X但又要X"), impossible constraints, mutually exclusive goals, or a trick premise. If the request as stated is logically impossible or self-contradictory, do NOT blindly follow it into a failure loop — state the trap briefly and solve the most reasonable interpretation (or explain why it is impossible and propose the closest achievable alternative).
-- If your FIRST attempt fails (verification failure, repeated tool errors, or the result keeps getting rejected), do NOT retry the same approach a second time. Re-read the ORIGINAL user request and question whether the premise itself is the problem. If it is, escape the trap by switching to a fundamentally different interpretation or method.`;
+${LOGICAL_TRAPS_PROMPT}`;
 };
 
 // Cross-session memory store (IMemoryStore, localStorage-backed persistence
@@ -706,7 +706,7 @@ export class ChatController {
   loadFromStorage(stored: StoredMessage[]) {
     this.messages = stored.map(m => ({
       role: m.role as Message['role'],
-      content: m.content ?? '',
+      content: m.role === 'user' ? stripUserTurnContext(m.content ?? '') : (m.content ?? ''),
       toolCalls: m.tool_calls as Message['toolCalls'],
       toolCallId: m.tool_call_id,
       toolName: m.name,
@@ -797,6 +797,18 @@ export class ChatController {
     // own raw text for the final markdown pass on Completed.
     const assistantSegments: Array<{ el: HTMLDivElement; text: string }> = [];
     let currentSegment: { el: HTMLDivElement; text: string } | null = null;
+    // Files/dirs the agent actually wrote this turn (deduped). At Completed they
+    // surface as clickable cards after the final bubble — ≤MAX_CARD_FILES as one
+    // card per artifact, more as a single project-directory card. Collected from
+    // SUCCESSFUL write/edit/replace/create_directory tool results only.
+    const turnArtifacts: ArtifactItem[] = [];
+    const artifactSeen = new Set<string>();
+    const addArtifact = (path: string, kind: ArtifactItem['kind']): void => {
+      const key = `${kind}:${path}`;
+      if (artifactSeen.has(key)) return;
+      artifactSeen.add(key);
+      turnArtifacts.push({ path, kind });
+    };
     let toolRowSinceSegment = false;
     const createSegment = (): { el: HTMLDivElement; text: string } => {
       const el = this.addBubble('assistant', '');
@@ -940,7 +952,12 @@ export class ChatController {
       // promise resolves in ms after the first send; awaiting here guarantees
       // the first turn already carries the runtimes line in its prompt.
       await ensureRuntimesProbed();
-      let systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config);
+      const systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config);
+      // L2 per-request context (promptLayers.ts): task-specific fragments ride
+      // with the USER message via composeUserTurn, not the system prompt.
+      let userTraps: string | undefined;
+      let userBuildProtocol: string | undefined;
+      let userPlan: string | undefined;
 
       const llm = createLLMAdapter(config);
       const toolAdapter = createToolAdapter(effectiveWorkspace, config);
@@ -1038,12 +1055,16 @@ export class ChatController {
         config.taskMode && config.taskMode !== 'auto' ? config.taskMode : undefined;
       if (forcedMode) analysis.mode = forcedMode;
       if (analysis.traps.length > 0) {
-        systemPrompt += formatTrapPrompt(analysis.traps);
+        userTraps = formatTrapPrompt(analysis.traps);
       }
       // "写一个小游戏 / 做一个网页 / 开发一个工具" → build the artifact on disk
       // instead of printing the full source inline (see formatArtifactPrompt).
+      // Multi-file builds also get the incremental-build protocol (outline
+      // first, one verifiable step at a time, per-step report + verification,
+      // next-step recommendation) — composed into the user turn on artifact
+      // requests only, so plain Q&A turns don't carry its token cost.
       if (detectArtifactRequest(userText)) {
-        systemPrompt += formatArtifactPrompt();
+        userBuildProtocol = formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT;
       }
 
       // ── Plan review pre-flight (P1-6): complex tasks get a user-approved
@@ -1102,7 +1123,7 @@ export class ChatController {
             modeBubble.remove();
           } else {
             approvedPlan = planForReview;
-            systemPrompt += formatPlanForPrompt(planForReview);
+            userPlan = formatPlanForPrompt(planForReview);
             // Plan is ready + approved: the bubble no longer promises generation.
             modeBubble.textContent = t('plan.modeActive', '🧭 已切换为 {mode} 模式，按计划分步执行').replace('{mode}', modeLabel(analysis.mode));
           }
@@ -1185,9 +1206,10 @@ export class ChatController {
         }
       }
 
+      const userTurn = composeUserTurn(userText, { traps: userTraps, buildProtocol: userBuildProtocol, plan: userPlan });
       const events = this.hasHistory
-        ? codingAgent.continueTurn(systemPrompt, this.messages, userText, this.abortController.signal)
-        : codingAgent.run(systemPrompt, userText, this.abortController.signal);
+        ? codingAgent.continueTurn(systemPrompt, this.messages, userTurn, this.abortController.signal)
+        : codingAgent.run(systemPrompt, userTurn, this.abortController.signal);
 
       for await (const event of events) {
         // Session switched mid-stream (sidebar click / new chat): stop writing
@@ -1365,11 +1387,25 @@ export class ChatController {
               resultText: resultPreview,
             });
             // Feed the session's activity history (search / file / command records).
+            const resultArgs = (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args;
             this.recordToolActivity(
               toolName,
-              (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args,
+              resultArgs,
               event.payload.result.success,
             );
+            // Collect written artifacts for the end-of-turn file cards: only
+            // successful writes count (a failed write_file created nothing).
+            if (event.payload.result.success && resultArgs) {
+              if (toolName === 'write_file' || toolName === 'edit_file') {
+                if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) addArtifact(resultArgs.path, 'file');
+              } else if (toolName === 'replace_files' && Array.isArray(resultArgs.files)) {
+                for (const f of resultArgs.files) {
+                  if (typeof f === 'string' && f.trim()) addArtifact(f, 'file');
+                }
+              } else if (toolName === 'create_directory') {
+                if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) addArtifact(resultArgs.path, 'dir');
+              }
+            }
             // Finalize the matching pending row — keyed by toolCallId (the
             // engine's id-bearing TokenDelta ensures one row per call).
             const pending = pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName);
@@ -1482,6 +1518,18 @@ export class ChatController {
                 }
               })();
             }
+            // Smart artifact display: files the agent generated this turn become
+            // clickable cards after the final answer — one card per artifact when
+            // few (open with default app / reveal in file manager), collapsing to
+            // a single project-directory card when many. Skipped on stale
+            // generations (user switched sessions while the turn was streaming).
+            if (gen === this.generation && turnArtifacts.length > 0) {
+              const artifactRow = document.createElement('div');
+              artifactRow.className = 'bubble-row artifact-row';
+              chatEl.appendChild(artifactRow);
+              renderArtifactCards(artifactRow, turnArtifacts);
+              scrollChatToBottomIfPinned(chatEl);
+            }
             break;
           }
 
@@ -1504,23 +1552,35 @@ export class ChatController {
             if (event.payload.reason !== 'aborted') {
               // Keep the already-rendered content; surface the reason as a
               // separate status row instead of flattening a bubble to text.
+              // Runtime interrupt notices follow the UI language (were hard-
+              // coded English) — see chat.* keys in i18n.ts.
+              const interrupted = t('chat.interrupted', '⏹ Interrupted: {reason}').replace('{reason}', event.payload.reason);
               if (hasContent) {
-                this.addStatusBubble(`⏹ Interrupted: ${event.payload.reason}`);
+                this.addStatusBubble(interrupted);
               } else if (lastSeg) {
-                lastSeg.el.textContent = `⏹ Interrupted: ${event.payload.reason}`;
+                lastSeg.el.textContent = interrupted;
               } else {
                 const seg = createSegment();
                 seg.el.classList.remove('streaming');
-                seg.el.textContent = `⏹ Interrupted: ${event.payload.reason}`;
+                seg.el.textContent = interrupted;
               }
             } else if (!hasContent) {
+              const cancelled = t('chat.cancelled', '(cancelled)');
               if (lastSeg) {
-                lastSeg.el.textContent = '(cancelled)';
+                lastSeg.el.textContent = cancelled;
               } else {
                 const seg = createSegment();
                 seg.el.classList.remove('streaming');
-                seg.el.textContent = '(cancelled)';
+                seg.el.textContent = cancelled;
               }
+            }
+            // Files written before the interruption are still real artifacts —
+            // surface them the same way a completed turn would.
+            if (turnArtifacts.length > 0) {
+              const artifactRow = document.createElement('div');
+              artifactRow.className = 'bubble-row artifact-row';
+              chatEl.appendChild(artifactRow);
+              renderArtifactCards(artifactRow, turnArtifacts);
             }
             scrollChatToBottomIfPinned(chatEl);
             break;
@@ -1562,16 +1622,17 @@ export class ChatController {
       const lastSeg = assistantSegments.length ? assistantSegments[assistantSegments.length - 1] : null;
       if (err.name === 'AbortError') {
         if (lastSeg && !lastSeg.el.textContent && lastSeg.el.children.length === 0) {
-          lastSeg.el.textContent = '(cancelled)';
+          lastSeg.el.textContent = t('chat.cancelled', '(cancelled)');
         }
       } else if (lastSeg) {
-        lastSeg.el.textContent = `Error: ${err.message || err}`;
+        // Localized error prefix; the raw message is kept verbatim after it.
+        lastSeg.el.textContent = t('chat.error', 'Error: {msg}').replace('{msg}', err.message || err);
         lastSeg.el.classList.add('error');
       } else {
         // Failure before bubbles were created (e.g. plan review threw) — toast it.
         const toast = document.getElementById('toast');
         if (toast) {
-          toast.textContent = `Error: ${err?.message || err}`;
+          toast.textContent = t('chat.error', 'Error: {msg}').replace('{msg}', err?.message || err);
           toast.classList.remove('hidden');
           setTimeout(() => toast.classList.add('hidden'), 2500);
         }

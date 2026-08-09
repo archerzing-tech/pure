@@ -38,6 +38,12 @@ const translations: Record<Language, Record<string, string>> = {
     'path.copied': '路径已复制',
     'path.openFailed': '无法打开路径',
     'paste.openWithDefault': '用系统默认应用打开',
+    'paste.uploadRejected': '已拒绝 {name}：仅支持文本、图片和文档文件',
+    'paste.tooManyAttachments': '一次最多上传 {max} 个文件',
+    'artifacts.group': '生成的文件',
+    'artifacts.openFile': '用系统默认应用打开文件',
+    'artifacts.openDir': '在文件管理器中打开目录',
+    'artifacts.project': '项目目录',
     'diagram.openViewer': '打开图像查看器',
     'diagram.viewControls': '图形视图切换',
     'diagram.loading': '正在渲染图形…',
@@ -287,6 +293,12 @@ const translations: Record<Language, Record<string, string>> = {
     'toast.sessionsCleared': '已删除全部会话',
     'toast.deleteFailed': '删除失败',
 
+    // ── Chat transcript runtime bubbles ──
+    'chat.interrupted': '⏹ 已中断：{reason}',
+    'chat.cancelled': '（已取消）',
+    'chat.error': '错误：{msg}',
+    'session.restoring': '正在加载会话…',
+
     // ── Confirm dialogs ──
     'confirm.title': '确认',
     'confirm.cancel': '取消',
@@ -346,6 +358,7 @@ const translations: Record<Language, Record<string, string>> = {
     'stats.fileReads': '文件读取',
     'stats.commands': '命令执行',
     'stats.empty': '暂无记录',
+    'stats.dblclickOpen': '双击打开',
     'stats.export': '导出',
     'stats.export.title': '导出会话统计',
     'stats.export.json': '导出为 JSON',
@@ -421,6 +434,12 @@ const translations: Record<Language, Record<string, string>> = {
     'path.copied': 'Path copied',
     'path.openFailed': 'Could not open path',
     'paste.openWithDefault': 'Open with default app',
+    'paste.uploadRejected': 'Rejected {name}: only text, images, and documents are allowed',
+    'paste.tooManyAttachments': 'At most {max} files can be attached at once',
+    'artifacts.group': 'Generated files',
+    'artifacts.openFile': 'Open file with default app',
+    'artifacts.openDir': 'Reveal in file manager',
+    'artifacts.project': 'Project folder',
     'diagram.openViewer': 'Open image viewer',
     'diagram.viewControls': 'Diagram view controls',
     'diagram.loading': 'Rendering diagram…',
@@ -670,6 +689,12 @@ const translations: Record<Language, Record<string, string>> = {
     'toast.sessionsCleared': 'All sessions deleted',
     'toast.deleteFailed': 'Failed to delete',
 
+    // ── Chat transcript runtime bubbles ──
+    'chat.interrupted': '⏹ Interrupted: {reason}',
+    'chat.cancelled': '(cancelled)',
+    'chat.error': 'Error: {msg}',
+    'session.restoring': 'Loading session…',
+
     // ── Confirm dialogs ──
     'confirm.title': 'Confirm',
     'confirm.cancel': 'Cancel',
@@ -729,6 +754,7 @@ const translations: Record<Language, Record<string, string>> = {
     'stats.fileReads': 'File reads',
     'stats.commands': 'Commands',
     'stats.empty': 'No records yet',
+    'stats.dblclickOpen': 'Double-click to open',
     'stats.export': 'Export',
     'stats.export.title': 'Export session stats',
     'stats.export.json': 'Export as JSON',

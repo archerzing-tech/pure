@@ -22,7 +22,7 @@ export interface PasteAttachment {
   content: string;
   /** Absolute tmp path when persisted to disk ('' in browser/dev mode). */
   path: string;
-  kind: 'text' | 'image' | 'binary';
+  kind: 'text' | 'image' | 'doc' | 'binary';
   /** data: URL for image thumbnails/viewer ('' for text/binary). */
   dataUrl: string;
   mime?: string;
@@ -35,7 +35,7 @@ export interface DroppedFileRecord {
   name: string;
   path: string;
   size: number;
-  kind: 'text' | 'image' | 'binary';
+  kind: 'text' | 'image' | 'doc' | 'binary';
   content: string;
   dataUrl: string;
   mime: string;
@@ -48,6 +48,22 @@ export const PASTE_FILE_THRESHOLD = 64 * 1024;
 
 /** Images larger than this are rejected (bounds memory + the base64 IPC). */
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+
+// ── Upload limits (attach / drop / import) ──
+// Only text (code, logs, csv…), images, and document files (pdf/doc/docx/…)
+// may be attached. Archives and other binary payloads are rejected outright —
+// the agent can't read them and they only bloat the session tmp dir. Per-batch
+// count and per-file byte caps keep the composer + IPC sane.
+const MAX_ATTACHMENTS = 10;
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+/** Document-class extensions allowed to attach (kept as chips, not parsed). */
+const DOC_EXTENSIONS = new Set(['pdf', 'doc', 'docx', 'rtf', 'xls', 'xlsx', 'ppt', 'pptx', 'odt']);
+
+/** True when `name`'s extension is a document-class file. */
+export function isDocFileName(name: string): boolean {
+  return DOC_EXTENSIONS.has((name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? ''));
+}
 
 /** Viewer display cap — keeps a 50MB log from freezing the webview. */
 const VIEWER_MAX_CHARS = 2_000_000;
@@ -179,6 +195,12 @@ export class PasteChipManager {
     return this.attachments.length > 0;
   }
 
+  /** How many more files may be attached before the batch cap (for pre-flight
+   *  checks before an expensive import — e.g. the Tauri drop path). */
+  remainingSlots(): number {
+    return Math.max(0, MAX_ATTACHMENTS - this.attachments.length);
+  }
+
   remove(id: string): void {
     this.attachments = this.attachments.filter(a => a.id !== id);
     this.render();
@@ -244,10 +266,14 @@ export class PasteChipManager {
     const sessionId = this.getSessionId();
     for (const file of files) {
       const mime = file.type || mimeOfFileName(file.name);
-      const kind = mime.startsWith('image/') ? 'image' : isBrowserTextFile(file.name, mime) ? 'text' : 'binary';
-      if (kind === 'image' && file.size > MAX_IMAGE_BYTES) {
-        showToast(t('paste.imageTooLarge'));
+      const kind = classifyUploadFile(file.name, mime, file.size);
+      if (kind === null) {
+        showToast(t('paste.uploadRejected').replace('{name}', file.name));
         continue;
+      }
+      if (this.attachments.length >= MAX_ATTACHMENTS) {
+        showToast(t('paste.tooManyAttachments').replace('{max}', String(MAX_ATTACHMENTS)));
+        break;
       }
       const id = `drop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       const att: PasteAttachment = {
@@ -285,6 +311,16 @@ export class PasteChipManager {
   /** Add a file that the Tauri backend has copied into the application tmp directory. */
   addImportedFile(record: DroppedFileRecord): void {
     if (record.isDirectory) return;
+    // Belt-and-suspenders: never attach a binary the Rust import rejected-or
+    // classified as binary, and enforce the batch cap on the Tauri path too.
+    if (record.kind === 'binary') {
+      showToast(t('paste.uploadRejected').replace('{name}', record.name));
+      return;
+    }
+    if (this.attachments.length >= MAX_ATTACHMENTS) {
+      showToast(t('paste.tooManyAttachments').replace('{max}', String(MAX_ATTACHMENTS)));
+      return;
+    }
     const id = `drop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     this.attachments.push({
       id,
@@ -401,6 +437,11 @@ export class PasteChipManager {
 
   private openViewer(att: PasteAttachment): void {
     this.closeViewer();
+    // Documents are not viewable in-app — hand them to the OS default app.
+    if (att.kind === 'doc' && att.path) {
+      void this.openWithDefault(att.path);
+      return;
+    }
     const overlay = document.createElement('div');
     overlay.className = 'paste-viewer-overlay';
     overlay.setAttribute('role', 'dialog');
@@ -515,6 +556,17 @@ export class PasteChipManager {
     this.viewerEl = null;
     document.removeEventListener('keydown', this.onViewerKeydown);
   }
+
+  /** Hand a persisted attachment to the OS default app (docs, binaries). */
+  private async openWithDefault(path: string): Promise<void> {
+    if (!isTauriRuntime() || !path) return;
+    try {
+      const core = await loadTauriCore();
+      await core?.invoke('open_path', { path });
+    } catch (err) {
+      console.error('[pure] open attachment failed:', err);
+    }
+  }
 }
 
 /** Every image/* file the clipboard exposes (items first, then files). */
@@ -534,6 +586,23 @@ function isBrowserTextFile(name: string, mime: string): boolean {
   if (mime === 'application/json' || mime === 'application/xml' || mime === 'application/javascript') return true;
   return ['txt', 'md', 'csv', 'tsv', 'json', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'xml', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'sql', 'sh', 'log'].includes(name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '');
 }
+
+/**
+ * Classify a dropped/attached file into an attachable kind, or null when it
+ * must be REJECTED (binary archives/executables the agent can't read).
+ * Images are capped at MAX_IMAGE_BYTES, everything else at MAX_UPLOAD_BYTES.
+ */
+export function classifyUploadFile(name: string, mime: string, size: number): 'text' | 'image' | 'doc' | null {
+  if (size > MAX_UPLOAD_BYTES) return null;
+  if (mime.startsWith('image/')) return size > MAX_IMAGE_BYTES ? null : 'image';
+  if (isDocFileName(name) || mime === 'application/pdf' || mime.startsWith('application/vnd.')) return 'doc';
+  if (isBrowserTextFile(name, mime)) return 'text';
+  // Everything else (zip/rar/7z/tar/gz, exe, dmg, octet-stream binaries…) is
+  // binary — not attachable.
+  return null;
+}
+
+export const UPLOAD_LIMITS = { MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, MAX_IMAGE_BYTES } as const;
 
 function imageFilesOf(cd: DataTransfer | null): File[] {
   if (!cd) return [];

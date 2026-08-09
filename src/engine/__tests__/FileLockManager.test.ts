@@ -124,4 +124,41 @@ describe('FileLockManager', () => {
     const lm = new FileLockManager();
     expect(() => lm.release('never-held')).not.toThrow();
   });
+
+  it('rejects a queued waiter when its signal aborts (no hang on cancel)', async () => {
+    const lm = new FileLockManager();
+    await lm.acquireWrite('f'); // lock held by someone else
+    const ac = new AbortController();
+    const p = lm.acquireRead('f', ac.signal);
+    let settled = false;
+    p.catch(() => { settled = true; });
+    await flush();
+    expect(settled).toBe(false);
+    ac.abort();
+    await expect(p).rejects.toThrow(/aborted/i);
+    // The aborting waiter must be gone from the queue: releasing the lock now
+    // grants the next waiter (none left) and does not try to resolve the
+    // aborted one.
+    expect(() => lm.release('f')).not.toThrow();
+  });
+
+  it('rejects immediately when the signal is already aborted', async () => {
+    const lm = new FileLockManager();
+    await lm.acquireWrite('f');
+    const ac = new AbortController();
+    ac.abort();
+    await expect(lm.acquireRead('f', ac.signal)).rejects.toThrow(/aborted/i);
+  });
+
+  it('a granted waiter is not later rejected by its signal', async () => {
+    const lm = new FileLockManager();
+    await lm.acquireWrite('f');
+    const ac = new AbortController();
+    const p = lm.acquireRead('f', ac.signal);
+    lm.release('f'); // grant the waiter
+    await p; // resolves normally
+    // Aborting afterwards must not reject the resolved promise.
+    ac.abort();
+    await expect(p).resolves.toBeUndefined();
+  });
 });
