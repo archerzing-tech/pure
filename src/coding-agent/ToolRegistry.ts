@@ -314,7 +314,6 @@ export class ToolRegistry implements ToolAdapter {
         isRead: !isWrite,
         riskLevel: known.riskLevel ?? 'medium',
         serverName: known.serverName,
-        argsHash: !isWrite ? JSON.stringify(args) : undefined,
         path: preview?.path,
         contentPreview: preview?.contentPreview,
         signal,

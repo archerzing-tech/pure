@@ -817,6 +817,86 @@ fn diff_files(workspace: String, path_a: String, path_b: String) -> Result<Strin
 
 const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 
+// ── Charset-aware HTTP body decoding ──
+// `Response::text()` only honors a Content-Type charset when one is declared
+// and silently assumes UTF-8 otherwise — GBK/GB2312 pages (common on Chinese
+// sites) then decode as mojibake. The charset is resolved in priority order:
+// Content-Type header charset → HTML <meta> charset sniff → UTF-8. Mirrors
+// readResponseText in src/adapter/node/NodeToolAdapter.ts.
+
+/// Extract the charset parameter from a Content-Type header, if declared.
+fn charset_from_content_type(content_type: &str) -> Option<String> {
+    let lower = content_type.to_lowercase();
+    let idx = lower.find("charset")?;
+    // Skip whitespace around the `=` (nonstandard `charset = gb2312` headers)
+    // so the Rust parse mirrors the Node regex `charset\s*=\s*`.
+    let after_eq = lower[idx + "charset".len()..].trim_start().strip_prefix('=')?;
+    let mut rest = after_eq.trim_start();
+    if rest.starts_with('"') || rest.starts_with('\'') {
+        rest = &rest[1..];
+    }
+    let end = rest.find([';', '"', '\'']).unwrap_or(rest.len());
+    let label = rest[..end].trim();
+    if label.is_empty() { None } else { Some(label.to_string()) }
+}
+
+/// Sniff `<meta charset=…>` / `<meta http-equiv="Content-Type" content="…charset=…">`
+/// from the first bytes of an HTML page. The meta tag is ASCII, so scanning a
+/// lossily-UTF-8-decoded head slice is safe even when the body is GBK.
+fn sniff_html_charset(head: &[u8]) -> Option<String> {
+    let lower = String::from_utf8_lossy(head).to_lowercase();
+    let start = lower.find("<meta")?;
+    let tag_end = lower[start..].find('>')? + start;
+    let tag = &lower[start..tag_end];
+    let cs = tag.find("charset=")?;
+    let after = &tag[cs + "charset=".len()..];
+    let stop = after
+        .find(|c: char| c == '"' || c == '\'' || c == ' ' || c == ';' || c == '/')
+        .unwrap_or(after.len());
+    let label: String = after[..stop]
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if label.is_empty() { None } else { Some(label) }
+}
+
+/// Decode bytes with a resolved charset label, falling back to UTF-8.
+/// encoding_rs normalizes WHATWG labels (gb2312/gb_2312-80 → GBK), so the
+/// declared label is passed through; utf-8-family and latin1 labels (the
+/// common mislabel for actually-UTF-8 pages) skip re-decoding to avoid
+/// regressions. A leading BOM is stripped on both paths (mirrors the Node
+/// TextDecoder and the old reqwest .text() behavior).
+fn decode_bytes_with_label(bytes: &[u8], label: Option<&str>) -> String {
+    let encoding = label
+        .filter(|l| !is_utf8_family_label(l))
+        .and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()));
+    let (decoded, _) = match encoding {
+        Some(enc) => enc.decode_with_bom_removal(bytes),
+        None => encoding_rs::UTF_8.decode_with_bom_removal(bytes),
+    };
+    decoded.into_owned()
+}
+
+async fn response_text_with_charset(resp: reqwest::Response) -> Result<String, String> {
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = resp.bytes().await.map_err(|e| format!("read: {}", e))?;
+    let label = charset_from_content_type(&content_type)
+        .or_else(|| sniff_html_charset(&bytes[..bytes.len().min(2048)]));
+    Ok(decode_bytes_with_label(&bytes, label.as_deref()))
+}
+
+fn is_utf8_family_label(label: &str) -> bool {
+    matches!(
+        label.to_ascii_lowercase().as_str(),
+        "utf-8" | "utf8" | "us-ascii" | "ascii" | "iso-8859-1" | "iso8859-1" | "latin1" | "latin-1"
+    )
+}
+
 async fn fetch_search_page(url: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
@@ -832,7 +912,7 @@ async fn fetch_search_page(url: &str) -> Result<String, String> {
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
     }
-    resp.text().await.map_err(|e| format!("read: {}", e))
+    response_text_with_charset(resp).await
 }
 
 async fn search_backend_duckduckgo(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
@@ -1434,6 +1514,52 @@ mod web_search_tests {
     }
 
     #[test]
+    fn charset_from_content_type_extracts_declared_charset() {
+        // The Content-Type header charset is the first authority for decoding
+        // a fetched page — mirrors Node charsetFromContentType (including the
+        // `charset = x` spacing tolerance and quoted values).
+        assert_eq!(charset_from_content_type("text/html; charset=gb2312").as_deref(), Some("gb2312"));
+        assert_eq!(charset_from_content_type("text/html; charset = gb2312").as_deref(), Some("gb2312"));
+        assert_eq!(charset_from_content_type("text/html; charset=\"utf-8\"").as_deref(), Some("utf-8"));
+        assert_eq!(charset_from_content_type("text/html").as_deref(), None);
+    }
+
+    #[test]
+    fn sniff_html_charset_finds_meta_tag() {
+        // Pages without a header charset (very common on Chinese sites) are
+        // decoded via their <meta> tag — mirrors Node sniffHtmlCharset.
+        let head = br#"<html><head><meta http-equiv="Content-Type" content="text/html; charset=gb2312"></head>"#;
+        assert_eq!(sniff_html_charset(head).as_deref(), Some("gb2312"));
+        assert_eq!(sniff_html_charset(br"<meta charset=UTF-8>").as_deref(), Some("utf-8"));
+        assert_eq!(sniff_html_charset(b"<html><body>no meta</body></html>").as_deref(), None);
+    }
+
+    #[test]
+    fn gbk_body_decodes_to_chinese() {
+        // 中文 in GBK — the exact bytes a Sogou-style GBK page carries. UTF-8
+        // decoding these bytes is mojibake; the charset-aware decode must not
+        // be (this is the mechanism behind web_fetch / fetch_search_page).
+        let bytes: &[u8] = &[0xd6, 0xd0, 0xce, 0xc4];
+        assert_eq!(decode_bytes_with_label(bytes, Some("gb2312")), "中文");
+        // utf-8-family labels skip re-decoding (a latin1 mislabel must not
+        // garble an actually-UTF-8 page into windows-1252 mojibake).
+        assert_eq!(decode_bytes_with_label(bytes, Some("utf-8")), String::from_utf8_lossy(bytes));
+        assert!(is_utf8_family_label("utf-8"));
+        assert!(is_utf8_family_label("iso-8859-1"));
+        assert!(!is_utf8_family_label("gb2312"));
+        assert!(!is_utf8_family_label("big5"));
+    }
+
+    #[test]
+    fn utf8_bom_is_stripped_on_decode() {
+        // A UTF-8 BOM must not leak into the output — mirrors the Node
+        // TextDecoder (strips per spec) and the old reqwest .text() path.
+        let bytes: &[u8] = &[0xEF, 0xBB, 0xBF, b'h', b'i'];
+        assert_eq!(decode_bytes_with_label(bytes, None), "hi");
+        assert_eq!(decode_bytes_with_label(bytes, Some("utf-8")), "hi");
+    }
+
+    #[test]
     fn parses_serper_organic_results() {
         // Serper returns `organic[]` with title/link/snippet. Entries missing
         // a title or link are skipped; snippet may be empty and is kept.
@@ -1839,7 +1965,7 @@ async fn web_fetch(
         ));
     }
 
-    let html = resp.text().await.map_err(|e| format!("read: {}", e))?;
+    let html = response_text_with_charset(resp).await?;
     let text = strip_html_full(&html);
 
     let safe_end = text
@@ -3029,6 +3155,7 @@ async fn chat_stream(
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     let mut text = String::new();
+    let mut usage: Option<serde_json::Value> = None;
     let mut tc_map: BTreeMap<u32, serde_json::Value> = BTreeMap::new();
     // Last time a tool-call delta was forwarded to the WebView (throttle
     // below). Streaming a giant argument (e.g. write_file `content`, a whole
@@ -3077,6 +3204,23 @@ async fn chat_stream(
                 SseLine::Done => break 'stream,
                 SseLine::Data(v) => v,
             };
+
+            // Provider billing usage arrives on the final chunk before [DONE]
+            // (OpenAI-style `{"choices":[],"usage":{...}}`; DeepSeek adds
+            // prompt_cache_hit_tokens / prompt_cache_miss_tokens). Must be
+            // captured BEFORE the delta extraction below, which `continue`s on
+            // chunks without a delta (the usage frame has none). Forwarded to
+            // the WebView so the GUI can show per-session token totals, cache
+            // hit rate, and cost; also returned in the result below.
+            if let Some(u) = json.get("usage") {
+                if u.is_object() {
+                    usage = Some(u.clone());
+                    let chunk = serde_json::json!({ "type": "usage", "usage": u });
+                    if on_chunk.send(chunk.to_string()).is_err() {
+                        return Err("cancelled".into());
+                    }
+                }
+            }
 
             let delta = match json["choices"][0]["delta"].as_object() {
                 Some(d) => d.clone(),
@@ -3190,7 +3334,7 @@ async fn chat_stream(
         }
     }
 
-    Ok(serde_json::json!({ "text": text, "toolCalls": tool_calls }))
+    Ok(serde_json::json!({ "text": text, "toolCalls": tool_calls, "usage": usage }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3294,6 +3438,69 @@ fn load_session_workspace(session_id: &str) -> Result<String, String> {
     let raw = fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
     let data: SessionData = serde_json::from_str(&raw).map_err(|e| format!("parse: {}", e))?;
     Ok(data.workspace)
+}
+
+// ── Per-session usage stats (~/.pure/sessions/<id>/stats.json) ──
+// Written by the right panel's 统计 tab. Lives INSIDE the session directory so
+// delete_session / delete_all_sessions clean it up together with session.json.
+// The frontend keeps an in-memory mirror for synchronous reads; these commands
+// are the durable backing store (the browser-localStorage path is only used in
+// plain Vite dev where there is no filesystem).
+
+#[tauri::command]
+fn save_session_stats(session_id: String, stats: serde_json::Value) -> Result<(), String> {
+    let dir = sessions_dir().join(&session_id);
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
+    let path = dir.join("stats.json");
+    fs::write(&path, serde_json::to_string_pretty(&stats).unwrap_or_default())
+        .map_err(|e| format!("write: {}", e))
+}
+
+#[tauri::command]
+fn load_session_stats(session_id: String) -> Result<Option<serde_json::Value>, String> {
+    let path = sessions_dir().join(&session_id).join("stats.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|e| format!("parse: {}", e))
+}
+
+/// Bulk-load the stats of every session in one IPC round-trip (the session
+/// sidebar shows a per-session token/cost summary line and would otherwise do
+/// one invoke per row). Returns { sessionId: stats } for sessions that have a
+/// stats.json; sessions without one are simply absent from the map.
+#[tauri::command]
+fn load_all_session_stats() -> Result<serde_json::Value, String> {
+    let dir = sessions_dir();
+    let mut out = serde_json::Map::new();
+    if !dir.exists() {
+        return Ok(serde_json::Value::Object(out));
+    }
+    for entry in fs::read_dir(&dir).map_err(|e| format!("read dir: {}", e))? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let session_id = entry.file_name().to_string_lossy().to_string();
+        let stats_path = entry.path().join("stats.json");
+        if !stats_path.exists() {
+            continue;
+        }
+        let raw = match fs::read_to_string(&stats_path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            out.insert(session_id, v);
+        }
+    }
+    Ok(serde_json::Value::Object(out))
 }
 
 #[tauri::command]
@@ -3786,6 +3993,8 @@ pub fn run() {
             chat_stream, cancel_chat_stream,
             // Session persistence
             save_session, load_session, load_last_session, load_session_list, save_session_workspace, delete_session, delete_all_sessions,
+            // Per-session usage stats
+            save_session_stats, load_session_stats, load_all_session_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running pure");
@@ -4110,5 +4319,78 @@ mod tmp_cleanup_tests {
         let (deleted, _) = cleanup_paste_files_in(&dir, 1).unwrap();
         assert_eq!(deleted, 0);
         assert!(dir.join("pasted-today.txt").exists());
+    }
+}
+
+// ── Per-session stats persistence tests (~/.pure/sessions/<id>/stats.json) ──
+#[cfg(test)]
+mod session_stats_tests {
+    use super::*;
+
+    fn temp_home(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pure-stats-{}-{}", label, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Point HOME at a temp dir for the duration of the closure so
+    /// `sessions_dir()` resolves inside it.
+    fn with_temp_home<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let old = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir);
+        let result = f();
+        match old {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
+    // One test, three checks: `std::env::set_var("HOME", ...)` is process-global,
+    // so separate parallel tests would clobber each other's HOME. Run sequentially.
+    #[test]
+    fn stats_roundtrip_missing_and_delete() {
+        let home = temp_home("seq");
+        let _ = fs::create_dir_all(&home);
+        let stats = serde_json::json!({
+            "provider": "deepseek-openai",
+            "usage": { "promptTokens": 100, "completionTokens": 50, "cacheHitTokens": 30, "cacheMissTokens": 70 },
+            "searches": [{ "query": "rust", "ts": 1 }],
+            "fileWrites": [{ "path": "/a/b.ts", "ts": 2, "success": true }],
+            "fileReads": [{ "path": "/a/c.ts", "ts": 3 }],
+            "commands": [{ "command": "cargo test", "ts": 4, "success": false }],
+        });
+
+        with_temp_home(&home, || {
+            // 1) Missing file → None.
+            assert!(load_session_stats("sess-1".to_string()).unwrap().is_none());
+
+            // 2) Save then load round-trips verbatim, as a real file in the session dir.
+            save_session_stats("sess-1".to_string(), stats.clone()).unwrap();
+            let loaded = load_session_stats("sess-1".to_string()).unwrap().unwrap();
+            assert_eq!(loaded, stats);
+            assert!(sessions_dir().join("sess-1").join("stats.json").exists());
+
+            // 3) delete_session removes the stats file together with the directory.
+            delete_session("sess-1".to_string()).unwrap();
+            assert!(load_session_stats("sess-1".to_string()).unwrap().is_none());
+
+            // 4) Bulk load collects every session into a map keyed by id.
+            let stats_a = serde_json::json!({ "usage": { "promptTokens": 10 }, "searches": [] });
+            let stats_b = serde_json::json!({ "usage": { "promptTokens": 20 }, "commands": [] });
+            save_session_stats("sess-a".to_string(), stats_a.clone()).unwrap();
+            save_session_stats("sess-b".to_string(), stats_b.clone()).unwrap();
+            // A session dir WITHOUT stats.json must be skipped, not fatal.
+            let dir = sessions_dir().join("sess-no-stats");
+            fs::create_dir_all(&dir).unwrap();
+
+            let all = load_all_session_stats().unwrap();
+            let map = all.as_object().unwrap();
+            assert_eq!(map.len(), 2);
+            assert_eq!(map["sess-a"], stats_a);
+            assert_eq!(map["sess-b"], stats_b);
+            assert!(!map.contains_key("sess-no-stats"));
+        });
+        let _ = fs::remove_dir_all(&home);
     }
 }

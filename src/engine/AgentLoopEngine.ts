@@ -3,7 +3,8 @@
 // Fixes: BudgetWarning events, completedSteps/lastState tracking, note injection for recoverable errors,
 //        VERIFY_FAILED → loop back to THINK with reflection note instead of completing.
 
-import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord } from '../shared/types';
+import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage } from '../shared/types';
+import { mergeTokenUsage } from '../shared/usage';
 import { BudgetManager } from './BudgetManager';
 import { FileLockManager } from './FileLockManager';
 
@@ -48,6 +49,10 @@ export class AgentLoopEngine {
     let finalOutput: string | undefined;
     let interrupted = false;
     const failures: FailureRecord[] = [];
+    // Aggregated billing usage across every LLM call in this turn (each
+    // iteration's stream yields a `usage` chunk) — surfaced on Completed so
+    // the GUI can accumulate per-session token totals + cost.
+    let turnUsage: TokenUsage | undefined;
 
     while (true) {
       if (ctx.signal?.aborted) {
@@ -128,6 +133,9 @@ export class AgentLoopEngine {
               // keys its toasts by toolCallId, not toolName — parallel
               // same-name calls would otherwise collide on one toast.
               yield { type: 'TokenDelta', payload: { content: '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name, toolCallId: chunk.id }, timestamp: Date.now() };
+              break;
+            case 'usage':
+              turnUsage = mergeTokenUsage(turnUsage, chunk.usage);
               break;
             case 'done':
               content = chunk.content || content;
@@ -359,7 +367,7 @@ export class AgentLoopEngine {
 
     yield {
       type: 'Completed',
-      payload: { finalOutput, isComplete: !interrupted, interrupted, turnCount, messages },
+      payload: { finalOutput, isComplete: !interrupted, interrupted, turnCount, messages, usage: turnUsage },
       timestamp: Date.now(),
     };
   }

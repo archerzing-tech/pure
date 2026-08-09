@@ -612,7 +612,7 @@ export class NodeToolAdapter implements ToolAdapter {
                   signal: AbortSignal.timeout(8000),
                 });
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                return parseSogouResults(await resp.text(), maxResults);
+                return parseSogouResults(await readResponseText(resp), maxResults);
               },
             },
             {
@@ -624,7 +624,7 @@ export class NodeToolAdapter implements ToolAdapter {
                   signal: AbortSignal.timeout(8000),
                 });
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                return parseBingResults(await resp.text(), maxResults);
+                return parseBingResults(await readResponseText(resp), maxResults);
               },
             },
           ]
@@ -638,7 +638,7 @@ export class NodeToolAdapter implements ToolAdapter {
             signal: AbortSignal.timeout(8000),
           });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          return parseDuckDuckGoResults(await resp.text(), maxResults);
+          return parseDuckDuckGoResults(await readResponseText(resp), maxResults);
         },
       },
       {
@@ -650,7 +650,7 @@ export class NodeToolAdapter implements ToolAdapter {
             signal: AbortSignal.timeout(8000),
           });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          return parseBingResults(await resp.text(), maxResults);
+          return parseBingResults(await readResponseText(resp), maxResults);
         },
       },
     ];
@@ -713,33 +713,33 @@ export class NodeToolAdapter implements ToolAdapter {
 
     try {
       const resp = await fetch(url, {
-      headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9' },
+        headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9' },
         signal: abort.signal,
       });
 
-    if (!resp.ok) {
-      return this.fail(null!, start, `Fetch failed: HTTP ${resp.status}`);
-    }
+      if (!resp.ok) {
+        return this.fail(null!, start, `Fetch failed: HTTP ${resp.status}`);
+      }
 
-    const contentType = resp.headers.get('content-type') || '';
-    // Accept any text-ish media type (text/*, JSON, XML, JS, …) so repeated
-    // web_fetch calls don't keep hitting the same "unsupported content type"
-    // wall on common real-world pages; reject only clearly binary payloads.
-    // The error guides the model toward recovery instead of blind retries.
-    if (!isTextualContentType(contentType)) {
-      // Empty content-type never reaches this branch (helper returns true),
-      // so contentType is always a non-empty binary type here.
-      return this.fail(null!, start, `Unsupported content type: ${contentType} — the URL serves a non-text payload, so web_fetch cannot extract readable text from it. Do NOT retry web_fetch on this URL; instead use web_search to find a text/HTML page with the information, or pick a different URL.`);
-    }
+      const contentType = resp.headers.get('content-type') || '';
+      // Accept any text-ish media type (text/*, JSON, XML, JS, …) so repeated
+      // web_fetch calls don't keep hitting the same "unsupported content type"
+      // wall on common real-world pages; reject only clearly binary payloads.
+      // The error guides the model toward recovery instead of blind retries.
+      if (!isTextualContentType(contentType)) {
+        // Empty content-type never reaches this branch (helper returns true),
+        // so contentType is always a non-empty binary type here.
+        return this.fail(null!, start, `Unsupported content type: ${contentType} — the URL serves a non-text payload, so web_fetch cannot extract readable text from it. Do NOT retry web_fetch on this URL; instead use web_search to find a text/HTML page with the information, or pick a different URL.`);
+      }
 
-    const html = await resp.text();
-    // Decode HTML entities at the PIPELINE level (mirrors the Rust web_fetch
-    // path, whose strip_html_full html-decodes after stripping). NOT inside
-    // the shared stripHtml — that helper also feeds the DDG/Bing parsers,
-    // which decode AFTER stripping themselves; decoding there would
-    // double-decode (&amp;copy; → ©).
-    const text = extractReadableText(html);
-    const truncated = text.length > maxChars ? text.slice(0, maxChars) + '\n\n[truncated]' : text;
+      const html = await readResponseText(resp);
+      // Decode HTML entities at the PIPELINE level (mirrors the Rust web_fetch
+      // path, whose strip_html_full html-decodes after stripping). NOT inside
+      // the shared stripHtml — that helper also feeds the DDG/Bing parsers,
+      // which decode AFTER stripping themselves; decoding there would
+      // double-decode (&amp;copy; → ©).
+      const text = extractReadableText(html);
+      const truncated = text.length > maxChars ? text.slice(0, maxChars) + '\n\n[truncated]' : text;
 
       return {
         id: `tool_${Date.now()}`,
@@ -1018,6 +1018,56 @@ function formatCommandError(exitCode: number, output: string): string {
 // string, which surfaced as a wall of generic HTTP errors. A real browser UA
 // keeps both search backends and web_fetch targets responsive.
 const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
+// ── Charset-aware HTTP body decoding ──
+// `Response.text()` always decodes the body as UTF-8 (the Fetch spec mandates
+// it), so GBK/GB2312 pages — very common on Chinese sites (Sogou, many 门户
+// sites) — would otherwise come back as mojibake. The charset is resolved in
+// priority order: Content-Type header charset → HTML <meta> charset sniff →
+// UTF-8. Mirrors decode_response_with_charset in src-tauri/src/lib.rs.
+
+/** Extract the charset parameter from a Content-Type header, if declared. */
+export function charsetFromContentType(contentType: string): string | undefined {
+  const m = contentType.match(/charset\s*=\s*["']?([^;"'\s]+)/i);
+  return m?.[1];
+}
+
+/** Sniff `<meta charset=…>` / `<meta http-equiv="Content-Type" content="…charset=…">`
+ * from the first bytes of an HTML page. The meta tag is ASCII, so scanning a
+ * lossily-UTF-8-decoded head slice is safe even when the body is GBK. */
+export function sniffHtmlCharset(bytes: Uint8Array): string | undefined {
+  const head = new TextDecoder('utf-8').decode(bytes.slice(0, 2048));
+  const m = head.match(/<meta[^>]+charset\s*=\s*["']?\s*([a-zA-Z0-9_\-]+)/i);
+  return m?.[1];
+}
+
+/** Decode a response body with the resolved charset, falling back to UTF-8.
+ * `TextDecoder` itself normalizes WHATWG labels (GB2312/gb_2312-80 → GBK), so
+ * the declared label is passed through; utf-8-family and latin1 labels (the
+ * common mislabel for actually-UTF-8 pages) skip re-decoding to avoid
+ * regressions. */
+export async function readResponseText(resp: Response): Promise<string> {
+  const bytes = new Uint8Array(await resp.arrayBuffer());
+  const label = normalizeCharsetLabel(
+    charsetFromContentType(resp.headers.get('content-type') || '') ?? sniffHtmlCharset(bytes),
+  );
+  if (!label) return new TextDecoder('utf-8').decode(bytes);
+  try {
+    return new TextDecoder(label).decode(bytes);
+  } catch {
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+}
+
+function normalizeCharsetLabel(label: string | undefined): string | undefined {
+  if (!label) return undefined;
+  const l = label.trim().toLowerCase();
+  // UTF-8 family needs no re-decode; iso-8859-1/latin1 is the classic
+  // mislabel on pages that are actually UTF-8, so keep the UTF-8 behavior
+  // rather than windows-1252-decode them into mojibake.
+  if (!l || /^(utf-?8|us-ascii|ascii|iso-?8859-?1|latin-?1)$/.test(l)) return undefined;
+  return l;
+}
 
 // ── DuckDuckGo HTML result parser ──
 

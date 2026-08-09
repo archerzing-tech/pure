@@ -41,11 +41,26 @@ export type LLMChunk =
   | { type: 'reasoning'; content: string }
   | { type: 'tool_call_delta'; index: number; name?: string; arguments?: string }
   | { type: 'tool_call'; index: number; id: string; name: string; arguments: string }
+  // Billing usage reported by the provider (OpenAI-style `usage` on the final
+  // stream chunk; DeepSeek `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`).
+  // Yielded once per stream so the engine can aggregate per-turn totals.
+  | { type: 'usage'; usage: TokenUsage }
   | { type: 'done'; content: string; toolCalls: ToolCall[] };
+
+/** Normalized per-request token usage (provider fields mapped into one shape). */
+export interface TokenUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  /** Prompt tokens served from the provider's context cache (DeepSeek `prompt_cache_hit_tokens`). */
+  cacheHitTokens?: number;
+  /** Prompt tokens that missed the cache (DeepSeek `prompt_cache_miss_tokens`). */
+  cacheMissTokens?: number;
+}
 
 export interface LLMResponse {
   content: string;
   toolCalls?: ToolCall[];
+  usage?: TokenUsage;
 }
 
 export interface LLMAdapter {
@@ -254,5 +269,5 @@ export type EngineEvent =
   | { type: 'FailurePolicyDecision'; payload: { action: FailureAction; failure: FailureRecord; turnNumber: number }; timestamp: number }
   | { type: 'BudgetWarning'; payload: { exhausted: boolean; reason: string; remaining: { turns: number; tokens: number; time: number }; gracePeriodEnds: number }; timestamp: number }
   | { type: 'Error'; payload: { code: string; message: string; stateType: AgentStateType; recoverable: boolean; recoveryAction?: 'retry' | 'reflect' | 'skip' | 'terminate' }; timestamp: number }
-  | { type: 'Completed'; payload: { finalOutput?: string; isComplete: boolean; interrupted: boolean; turnCount: number; messages?: Message[] }; timestamp: number }
+  | { type: 'Completed'; payload: { finalOutput?: string; isComplete: boolean; interrupted: boolean; turnCount: number; messages?: Message[]; usage?: TokenUsage }; timestamp: number }
   | { type: 'Interrupted'; payload: { reason: string; lastState?: AgentStateType; completedSteps: string[]; messages?: Message[]; turnCount?: number }; timestamp: number };

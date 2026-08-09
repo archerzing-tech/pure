@@ -10,8 +10,12 @@ import { ChatController, bindAssistantBubbleCopy, wireTranscriptPrune } from './
 import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { getStoredThinkingSegments, type StoredMessage, type ToolExecMeta } from './store';
+import { estimateCostUsd, formatCostUsd, formatTokens } from '../shared/usage';
+import { escapeHtml } from '../shared/html';
 import { checkForUpdatesSilently, fetchAppVersion } from './updater';
 import { t, updateLanguage } from '../shared/i18n';
+import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { loadSessionList, loadSessionStatsForList, type SessionMeta, type SessionStats } from './store';
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -457,6 +461,9 @@ function deferToIdle(fn: () => void): void {
       workspace.init();
       sessionSidebar.init();
       initPathLinks();
+      // Stats panel: subscribe to per-session updates + draw the empty state.
+      chat.onSessionStatsChanged(() => renderSessionStats());
+      renderSessionStats();
       void fetchAppVersion().then((version) => {
         appVersion = version;
         const el = document.getElementById('landing-version');
@@ -605,6 +612,9 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   setPinnedToBottom(chatEl, true);
   scrollChatToBottomIfPinned(chatEl);
   updateContextPanelChanges();
+  // The restored session's stats belong to the same conversation id —
+  // re-render the 统计 tab so the panel matches the transcript.
+  renderSessionStats();
 }
 
 function flushToolExecs(execs: ToolExecMeta[], parent: HTMLElement) {
@@ -913,8 +923,483 @@ document.querySelectorAll<HTMLButtonElement>('[data-context-tab]').forEach((tab)
     document.querySelectorAll<HTMLElement>('[data-context-view]').forEach((view) => {
       view.classList.toggle('hidden', view.dataset.contextView !== selected);
     });
+    // Re-render the stats tab on open so it never shows stale numbers.
+    if (selected === 'stats') renderSessionStats();
   });
 });
+
+// Stats panel export menu (导出 → JSON / Markdown).
+initStatsExportMenu();
+
+// ── Per-session stats (右面板「统计」tab) ──
+// Renders the CURRENT conversation's aggregated token usage, cache hit rate,
+// estimated cost, and tool-activity history (searches / file reads+writes /
+// commands). Refreshed on every completed turn, session switch, and restore.
+
+function renderSessionStats() {
+  const stats = chat.getSessionStats();
+  const provider = stats.provider ?? loadConfig()?.provider ?? 'deepseek-openai';
+  const cost = estimateCostUsd(stats.usage, provider);
+  const setText = (id: string, v: string): void => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = v;
+  };
+
+  setText('stat-input', formatTokens(stats.usage?.promptTokens));
+  setText('stat-output', formatTokens(stats.usage?.completionTokens));
+  setText('stat-cost', formatCostUsd(cost));
+
+  const hit = stats.usage?.cacheHitTokens ?? 0;
+  const miss = stats.usage?.cacheMissTokens ?? Math.max(0, (stats.usage?.promptTokens ?? 0) - hit);
+  const total = hit + miss;
+  const rate = total > 0 ? Math.round((hit / total) * 100) : null;
+  setText('stat-cache-rate', rate === null ? '—' : `${rate}%`);
+  setText('stat-cache-hit', formatTokens(hit));
+  setText('stat-cache-miss', formatTokens(miss));
+  const bar = document.getElementById('stat-cache-bar');
+  if (bar) bar.style.width = rate === null ? '0%' : `${Math.max(2, Math.min(100, rate))}%`;
+
+  setText('stat-search-count', String(stats.searches.length));
+  setText('stat-write-count', String(stats.fileWrites.length));
+  setText('stat-read-count', String(stats.fileReads.length));
+  setText('stat-cmd-count', String(stats.commands.length));
+
+  renderStatsList('stat-search-list', stats.searches, (s) => s.query);
+  renderStatsList('stat-write-list', stats.fileWrites, (w) => (w.success ? '' : '✗ ') + w.path);
+  renderStatsList('stat-read-list', stats.fileReads, (r) => r.path);
+  renderStatsList('stat-cmd-list', stats.commands, (c) => (c.success ? '' : '✗ ') + c.command);
+}
+
+function renderStatsList<T>(
+  id: string,
+  items: T[],
+  label: (item: T) => string,
+): void {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (items.length === 0) {
+    el.innerHTML = `<div class="stats-empty">${t('stats.empty')}</div>`;
+    return;
+  }
+  // Newest first; cap the DOM so a long session can't flood the panel.
+  el.innerHTML = items
+    .slice()
+    .reverse()
+    .slice(0, 20)
+    .map((item) => {
+      const text = label(item);
+      return `<div class="stats-list-item" title="${escapeHtml(text)}">${escapeHtml(text)}</div>`;
+    })
+    .join('');
+}
+
+// ── Stats export (导出: JSON / Markdown) ──
+// Same save flow as markdown.ts code-block exports: native save dialog + the
+// save_file invoke in Tauri, File System Access API then a download anchor in
+// plain browser dev. Content builders are pure so they stay unit-testable.
+
+function formatTs(ts: number): string {
+  try {
+    return new Date(ts).toLocaleString();
+  } catch {
+    return String(ts);
+  }
+}
+
+function buildStatsExportJson(stats: SessionStats, provider: string, meta?: SessionMeta): string {
+  const cost = estimateCostUsd(stats.usage, provider);
+  const hit = stats.usage?.cacheHitTokens ?? 0;
+  const miss = stats.usage?.cacheMissTokens ?? Math.max(0, (stats.usage?.promptTokens ?? 0) - hit);
+  const total = hit + miss;
+  return JSON.stringify(
+    {
+      exportedAt: new Date().toISOString(),
+      sessionId: meta?.id,
+      title: meta?.title,
+      createdAt: meta?.createdAt,
+      provider,
+      usage: stats.usage ?? null,
+      totalTokens: (stats.usage?.promptTokens ?? 0) + (stats.usage?.completionTokens ?? 0),
+      cacheHitRate: total > 0 ? Math.round((hit / total) * 1000) / 10 : null,
+      costUsd: cost,
+      searches: stats.searches,
+      fileWrites: stats.fileWrites,
+      fileReads: stats.fileReads,
+      commands: stats.commands,
+    },
+    null,
+    2,
+  );
+}
+
+function buildStatsExportMarkdown(stats: SessionStats, provider: string, meta?: SessionMeta): string {
+  const cost = estimateCostUsd(stats.usage, provider);
+  const hit = stats.usage?.cacheHitTokens ?? 0;
+  const miss = stats.usage?.cacheMissTokens ?? Math.max(0, (stats.usage?.promptTokens ?? 0) - hit);
+  const total = hit + miss;
+  const rate = total > 0 ? `${Math.round((hit / total) * 100)}%` : '—';
+
+  const lines: string[] = [
+    '# 会话统计',
+    '',
+    // Archive header: the session title + first-message time make exported
+    // reports self-identifying when collected into a folder of reports.
+    ...(meta?.title ? [`> **${meta.title}**`] : []),
+    ...(meta?.createdAt ? [`> 创建于 ${formatTs(meta.createdAt)}`] : []),
+    ...(meta?.title || meta?.createdAt ? [''] : []),
+    `- **Provider**: \`${provider}\``,
+    `- **输入 tokens**: ${formatTokens(stats.usage?.promptTokens)}`,
+    `- **输出 tokens**: ${formatTokens(stats.usage?.completionTokens)}`,
+    `- **缓存命中**: ${formatTokens(hit)}（${rate}）`,
+    `- **缓存未命中**: ${formatTokens(miss)}`,
+    `- **总 tokens**: ${formatTokens((stats.usage?.promptTokens ?? 0) + (stats.usage?.completionTokens ?? 0))}`,
+    `- **估算花费**: ${formatCostUsd(cost)}`,
+    '',
+    '## 搜索历史',
+    ...(stats.searches.length
+      ? stats.searches.map((s) => `- ${formatTs(s.ts)} — ${s.query}`)
+      : ['暂无记录']),
+    '',
+    '## 文件写入',
+    ...(stats.fileWrites.length
+      ? stats.fileWrites.map((w) => `- ${formatTs(w.ts)} — ${w.success ? '✓' : '✗'} \`${w.path}\``)
+      : ['暂无记录']),
+    '',
+    '## 文件读取',
+    ...(stats.fileReads.length
+      ? stats.fileReads.map((r) => `- ${formatTs(r.ts)} — \`${r.path}\``)
+      : ['暂无记录']),
+    '',
+    '## 命令执行',
+    ...(stats.commands.length
+      ? stats.commands.map((c) => `- ${formatTs(c.ts)} — ${c.success ? '✓' : '✗'} \`${c.command}\``)
+      : ['暂无记录']),
+    '',
+  ];
+  return lines.join('\n');
+}
+
+/** Escape one CSV field per RFC 4180 (quotes doubled; commas/CRLF quoted). */
+function csvField(value: string): string {
+  if (/[",\r\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+/**
+ * Build a spreadsheet-friendly CSV (long format: one row per activity entry,
+ * prefixed by summary rows). The UTF-8 BOM makes Excel/Numbers detect the
+ * encoding correctly instead of showing mojibake for the CJK column names.
+ */
+function buildStatsExportCsv(stats: SessionStats, provider: string, meta?: SessionMeta): string {
+  const hit = stats.usage?.cacheHitTokens ?? 0;
+  const miss = stats.usage?.cacheMissTokens ?? Math.max(0, (stats.usage?.promptTokens ?? 0) - hit);
+  const total = hit + miss;
+  const cost = estimateCostUsd(stats.usage, provider);
+  const rows: string[] = [];
+  const header = ['category', 'time', 'status', 'detail'].map(csvField).join(',');
+
+  // Summary rows (category = summary; detail carries the value).
+  rows.push(header);
+  if (meta?.title) rows.push(['summary', 'session_title', '', meta.title].map(csvField).join(','));
+  if (meta?.createdAt) rows.push(['summary', 'session_created', '', formatTs(meta.createdAt)].map(csvField).join(','));
+  rows.push(['summary', 'provider', '', provider].map(csvField).join(','));
+  rows.push(['summary', 'input_tokens', '', String(stats.usage?.promptTokens ?? 0)].map(csvField).join(','));
+  rows.push(['summary', 'output_tokens', '', String(stats.usage?.completionTokens ?? 0)].map(csvField).join(','));
+  rows.push(['summary', 'cache_hit_tokens', '', String(hit)].map(csvField).join(','));
+  rows.push(['summary', 'cache_miss_tokens', '', String(miss)].map(csvField).join(','));
+  rows.push(['summary', 'cache_hit_rate', '', total > 0 ? `${Math.round((hit / total) * 100)}%` : ''].map(csvField).join(','));
+  rows.push(['summary', 'cost_usd', '', cost > 0 ? cost.toFixed(6) : ''].map(csvField).join(','));
+
+  const pushRows = <T,>(
+    category: string,
+    items: T[],
+    extract: (item: T) => { status: string; detail: string; ts: number },
+  ): void => {
+    for (const item of items) {
+      const { status, detail, ts } = extract(item);
+      rows.push([category, formatTs(ts), status, detail].map(csvField).join(','));
+    }
+  };
+
+  pushRows('search', stats.searches, (s) => ({ status: '', detail: s.query, ts: s.ts }));
+  pushRows('file_write', stats.fileWrites, (w) => ({ status: w.success ? 'ok' : 'fail', detail: w.path, ts: w.ts }));
+  pushRows('file_read', stats.fileReads, (r) => ({ status: '', detail: r.path, ts: r.ts }));
+  pushRows('command', stats.commands, (c) => ({ status: c.success ? 'ok' : 'fail', detail: c.command, ts: c.ts }));
+
+  // \uFEFF BOM + CRLF line endings (the most spreadsheet-compatible combo).
+  return `\uFEFF${rows.join('\r\n')}\r\n`;
+}
+
+/**
+ * Save text through the native save dialog (Tauri: plugin-dialog save + the
+ * dedicated save_file invoke) or the browser fallback (File System Access API
+ * → download anchor). Returns the path saved to, or null when cancelled.
+ */
+async function saveStatsExport(content: string, filename: string, ext: string): Promise<string | null> {
+  if (isTauriRuntime()) {
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    const path = await save({ defaultPath: filename, filters: [{ name: ext.toUpperCase(), extensions: [ext] }] });
+    if (!path) return null; // cancelled
+    const core = await loadTauriCore();
+    if (!core) throw new Error('Tauri core unavailable');
+    await core.invoke('save_file', { path, content });
+    return path;
+  }
+
+  // Browser dev mode: File System Access API (Chrome/Edge).
+  const w = window as unknown as {
+    showSaveFilePicker?: (opts: {
+      suggestedName?: string;
+      types?: Array<{ description: string; accept: Record<string, string[]> }>;
+    }) => Promise<{
+      createWritable(): Promise<{ write(d: Blob): Promise<void>; close(): Promise<void> }>;
+    }>;
+  };
+  if (typeof w.showSaveFilePicker === 'function') {
+    try {
+      const mime = ext === 'json' ? 'application/json' : ext === 'csv' ? 'text/csv' : 'text/markdown';
+      const handle = await w.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: ext.toUpperCase(), accept: { [mime]: [`.${ext}`] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+      await writable.close();
+      return filename;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return null; // cancelled
+      // Any other failure — fall through to the download fallback.
+    }
+  }
+
+  // Last-resort download (works everywhere).
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return null;
+}
+
+/**
+ * Save binary bytes (base64 over IPC in Tauri) via the native save dialog,
+ * mirroring markdown.ts's saveImageFile flow: Tauri → save_file_binary,
+ * browser File System Access API → download anchor fallback.
+ */
+async function saveStatsExportBinary(bytes: Uint8Array<ArrayBuffer>, filename: string, mime: string): Promise<string | null> {
+  if (isTauriRuntime()) {
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    const path = await save({ defaultPath: filename, filters: [{ name: 'ZIP', extensions: ['zip'] }] });
+    if (!path) return null; // cancelled
+    // Base64-encode the raw bytes for the save_file_binary IPC command.
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    const dataBase64 = btoa(binary);
+    const core = await loadTauriCore();
+    if (!core) throw new Error('Tauri core unavailable');
+    await core.invoke('save_file_binary', { path, dataBase64 });
+    return path;
+  }
+
+  // Browser dev mode: File System Access API (Chrome/Edge).
+  const w = window as unknown as {
+    showSaveFilePicker?: (opts: {
+      suggestedName?: string;
+      types?: Array<{ description: string; accept: Record<string, string[]> }>;
+    }) => Promise<{
+      createWritable(): Promise<{ write(d: Blob): Promise<void>; close(): Promise<void> }>;
+    }>;
+  };
+  if (typeof w.showSaveFilePicker === 'function') {
+    try {
+      const handle = await w.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: 'ZIP', accept: { [mime]: ['.zip'] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(new Blob([bytes], { type: mime }));
+      await writable.close();
+      return filename;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return null; // cancelled
+    }
+  }
+
+  // Last-resort download (works everywhere).
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return null;
+}
+
+/**
+ * Export EVERY session's stats as one ZIP archive: one JSON file per session
+ * (named by its title, fallback to session id), plus a human-readable
+ * README.md overview. Sessions without a stats.json are skipped.
+ */
+async function exportAllSessionStatsZip(): Promise<void> {
+  let list: SessionMeta[] = [];
+  try {
+    list = await loadSessionList();
+  } catch {
+    showToast(`${t('toast.sendFailed')}: ${t('stats.export')}`);
+    return;
+  }
+  if (list.length === 0) {
+    showToast(t('stats.export.zipEmpty'));
+    return;
+  }
+
+  const sessionIds = list.map((s) => s.id);
+  const statsMap = await loadSessionStatsForList(sessionIds);
+  const statsById = new Map(list.map((s) => [s.id, s]));
+  const provider = loadConfig()?.provider ?? 'deepseek-openai';
+
+  const { default: JSZip } = await import('jszip');
+  const zip = new JSZip();
+  const summary: Array<{ id: string; title: string; totalTokens: number; costUsd: number }> = [];
+  let exported = 0;
+
+  for (const session of list) {
+    const stats = statsMap.get(session.id);
+    if (!stats?.usage) continue; // no usage recorded → nothing worth archiving
+    const sessProvider = stats.provider ?? provider;
+    const content = buildStatsExportJson(stats, sessProvider, session);
+    const safeTitle = (session.title || session.id).replace(/[^\w\u4e00-\u9fa5-]+/g, '_').slice(0, 60);
+    zip.file(`${safeTitle}.json`, content);
+    summary.push({
+      id: session.id,
+      title: session.title,
+      totalTokens: (stats.usage.promptTokens ?? 0) + (stats.usage.completionTokens ?? 0),
+      costUsd: estimateCostUsd(stats.usage, sessProvider),
+    });
+    exported++;
+  }
+
+  if (exported === 0) {
+    showToast(t('stats.export.zipEmpty'));
+    return;
+  }
+
+  // Human-readable overview: a markdown table (by tokens, heaviest first)
+  // plus aggregate totals, so the archive reads without opening a single
+  // per-session file. Title pipes/backticks are escaped to keep the table
+  // well-formed.
+  const sorted = summary.sort((a, b) => b.totalTokens - a.totalTokens);
+  const mdTitle = (title: string): string => title.replace(/\|/g, '\|').replace(/`/g, '\`');
+  const totalTokens = sorted.reduce((n, s) => n + s.totalTokens, 0);
+  const totalCost = sorted.reduce((n, s) => n + s.costUsd, 0);
+  const readme = [
+    '# Pure 会话统计导出',
+    '',
+    `- **导出时间**: ${new Date().toLocaleString()}`,
+    `- **会话数**: ${exported}`,
+    `- **总 tokens**: ${formatTokens(totalTokens)}`,
+    `- **总花费**: ${formatCostUsd(totalCost)}`,
+    '',
+    '| # | 会话 | tokens | 花费 |',
+    '|---|------|-------:|-----:|',
+    ...sorted.map((s, i) => `| ${i + 1} | ${mdTitle(s.title || s.id)} | ${formatTokens(s.totalTokens)} | ${formatCostUsd(s.costUsd)} |`),
+    '',
+    '> 每个会话的完整统计见同名 JSON 文件。',
+    '',
+  ].join('\n');
+  zip.file('README.md', readme);
+
+  const generated = await zip.generateAsync({ type: 'uint8array' });
+  // Copy into a fresh ArrayBuffer-backed view — JSZip's returned view is
+  // typed ArrayBufferLike, which Blob/TS strictness rejects.
+  const bytes: Uint8Array<ArrayBuffer> = Uint8Array.from(generated);
+  const filename = `pure-stats-all-${new Date().toISOString().slice(0, 10)}.zip`;
+  try {
+    const savedTo = await saveStatsExportBinary(bytes, filename, 'application/zip');
+    if (savedTo) showToast(`${t('stats.export.done')}: ${savedTo}`);
+  } catch {
+    showToast(`${t('toast.sendFailed')}: ${t('stats.export')}`);
+  }
+}
+
+async function exportSessionStats(format: 'json' | 'markdown' | 'csv'): Promise<void> {
+  const stats = chat.getSessionStats();
+  const provider = stats.provider ?? loadConfig()?.provider ?? 'deepseek-openai';
+  // Session metadata (title / first-message time) for the report header —
+  // looked up from the session index so archives identify themselves.
+  const sessionId = chat.getSessionId();
+  let meta: SessionMeta | undefined;
+  try {
+    const list = await loadSessionList();
+    meta = list.find((s) => s.id === sessionId);
+  } catch { /* export still works without the meta line */ }
+
+  const ext = format === 'json' ? 'json' : format === 'csv' ? 'csv' : 'md';
+  const content = format === 'json'
+    ? buildStatsExportJson(stats, provider, meta)
+    : format === 'csv'
+      ? buildStatsExportCsv(stats, provider, meta)
+      : buildStatsExportMarkdown(stats, provider, meta);
+  const filename = `session-stats-${sessionId.replace(/[^\w-]/g, '')}.${ext}`;
+
+  try {
+    const savedTo = await saveStatsExport(content, filename, ext);
+    if (savedTo) showToast(`${t('stats.export.done')}: ${savedTo}`);
+  } catch {
+    showToast(`${t('toast.sendFailed')}: ${t('stats.export')}`);
+  }
+}
+
+function initStatsExportMenu(): void {
+  const btn = document.getElementById('stats-export-btn');
+  const menu = document.getElementById('stats-export-menu');
+  if (!btn || !menu) return;
+
+  const close = (): void => {
+    menu.classList.add('hidden');
+    btn.setAttribute('aria-expanded', 'false');
+  };
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isOpen = !menu.classList.contains('hidden');
+    close();
+    if (!isOpen) {
+      menu.classList.remove('hidden');
+      btn.setAttribute('aria-expanded', 'true');
+    }
+  });
+
+  menu.querySelectorAll<HTMLButtonElement>('[data-export-format]').forEach((item) => {
+    item.addEventListener('click', () => {
+      close();
+      const fmt = item.getAttribute('data-export-format');
+      if (fmt === 'zip') {
+        void exportAllSessionStatsZip();
+      } else if (fmt === 'json' || fmt === 'markdown' || fmt === 'csv') {
+        void exportSessionStats(fmt);
+      }
+    });
+  });
+
+  // Close on outside click / Escape.
+  document.addEventListener('click', (e) => {
+    if (!menu.contains(e.target as Node) && e.target !== btn) close();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') close();
+  });
+}
 
 // ── Confirm modal (destructive actions) ──
 // Session deletion / delete-all render in a centered MODAL overlay (see

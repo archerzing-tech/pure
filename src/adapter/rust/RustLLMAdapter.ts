@@ -15,8 +15,10 @@ import type {
   LLMResponse,
   Message,
   ToolCall,
+  TokenUsage,
   ToolDefinition,
 } from '../../shared/types';
+import { normalizeTokenUsage } from '../../shared/usage';
 import { buildChatParams } from '../openai/mapping';
 import { isTauriRuntime } from '../../shared/tauri';
 
@@ -196,6 +198,12 @@ export class RustLLMAdapter implements LLMAdapter {
             name: typeof payload.name === 'string' ? payload.name : undefined,
             arguments: typeof payload.arguments === 'string' ? payload.arguments : undefined,
           };
+        }
+        // Billing usage (OpenAI-style `usage`, DeepSeek cache-hit/miss) —
+        // normalized and yielded once per stream for session stats.
+        if (payload?.type === 'usage') {
+          const usage: TokenUsage | undefined = normalizeTokenUsage(payload.usage);
+          if (usage) yield { type: 'usage', usage };
         }
       }
 

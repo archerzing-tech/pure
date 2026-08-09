@@ -4,7 +4,8 @@
 
 import { loadConfig, hasConfiguredKey, type PureConfig } from './config';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily } from '../shared/providers';
-import { saveSession, loadLastSession, type StoredMessage, type ToolExecMeta } from './store';
+import { saveSession, loadLastSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, type StoredMessage, type ToolExecMeta, type SessionStats } from './store';
+import { mergeTokenUsage } from '../shared/usage';
 import { LocalStorageMemoryStore } from '../adapter/memory/LocalStorageMemoryStore';
 import { WASMEmbeddingStore } from '../adapter/memory/WASMEmbeddingStore';
 import { harvestUserPreferences } from '../shared/memory';
@@ -617,10 +618,16 @@ export class ChatController {
   // which would reset the "始终允许(本次会话)" cache after every turn. Hoisted
   // here so approvals last the whole chat session; cleared on new chat.
   private permissionManager: PermissionManager;
+  // Per-session usage stats (token totals, cost, search / file / command
+  // activity) for the right-panel 统计 tab. Reloaded on session switch,
+  // persisted to localStorage after every completed turn.
+  private sessionStats: SessionStats = { searches: [], fileWrites: [], fileReads: [], commands: [] };
+  private onStatsChanged?: (stats: SessionStats) => void;
 
   constructor() {
     this.sessionId = `session_${Date.now()}`;
     this.permissionManager = new PermissionManager();
+    this.sessionStats = loadSessionStats(this.sessionId);
   }
 
   onStreamingStateChange(fn: (streaming: boolean) => void) {
@@ -643,6 +650,56 @@ export class ChatController {
     // Loading a different session (sidebar click) is a new "本次会话": drop
     // approvals granted under the previous session so they don't leak across.
     this.permissionManager.clearCache();
+    // Switch the stats view to the loaded session and refresh the panel. The
+    // durable copy lives on disk (~/.pure/sessions/<id>/stats.json), so wait
+    // for the async read to land before re-rendering — otherwise the panel
+    // would briefly show the sync cache (possibly stale from a prior run).
+    this.sessionStats = loadSessionStats(id);
+    void refreshSessionStatsFromDisk(id).then(() => {
+      if (this.sessionId !== id) return; // session switched again meanwhile
+      this.sessionStats = loadSessionStats(id);
+      this.onStatsChanged?.(this.sessionStats);
+    });
+  }
+
+  /** Subscribe to per-session stats updates (right-panel 统计 tab). */
+  onSessionStatsChanged(fn: (stats: SessionStats) => void): void {
+    this.onStatsChanged = fn;
+  }
+
+  /** Current session's aggregated stats (token totals, cost, tool activity). */
+  getSessionStats(): SessionStats {
+    return this.sessionStats;
+  }
+
+  /** Record a tool execution into the session's activity history (capped). */
+  private recordToolActivity(toolName: string, args: Record<string, unknown> | undefined, success: boolean): void {
+    const ts = Date.now();
+    const s = this.sessionStats;
+    const push = <T,>(list: T[], item: T): void => {
+      list.push(item);
+      if (list.length > 50) list.shift();
+    };
+    if (toolName === 'web_search') {
+      const query = typeof args?.query === 'string' ? args.query : '';
+      if (query) push(s.searches, { query: query.slice(0, 200), ts });
+    } else if (toolName === 'read_file') {
+      const path = typeof args?.path === 'string' ? args.path : '';
+      if (path) push(s.fileReads, { path, ts });
+    } else if (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'replace_files') {
+      const path = typeof args?.path === 'string' ? args.path
+        : Array.isArray(args?.files) ? (args!.files as string[]).join(', ') : '';
+      if (path) push(s.fileWrites, { path, ts, success });
+    } else if (toolName === 'execute_command') {
+      const command = typeof args?.command === 'string' ? args.command : '';
+      if (command) push(s.commands, { command: command.slice(0, 300), ts, success });
+    }
+  }
+
+  /** Persist the current session's stats + notify the panel to re-render. */
+  private persistStats(): void {
+    saveSessionStats(this.sessionId, this.sessionStats);
+    this.onStatsChanged?.(this.sessionStats);
   }
 
   /** Load stored messages into the agent's internal state so subsequent turns use history. */
@@ -662,6 +719,7 @@ export class ChatController {
     const saved = await loadLastSession();
     if (!saved) return null;
     this.sessionId = saved.sessionId;
+    this.sessionStats = loadSessionStats(saved.sessionId);
     this.generation++;
     // Route through setWorkspace so the clickable-path resolver stays in sync,
     // then resolve the application tmp path when this session has no user
@@ -1306,6 +1364,12 @@ export class ChatController {
               resultItems,
               resultText: resultPreview,
             });
+            // Feed the session's activity history (search / file / command records).
+            this.recordToolActivity(
+              toolName,
+              (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args,
+              event.payload.result.success,
+            );
             // Finalize the matching pending row — keyed by toolCallId (the
             // engine's id-bearing TokenDelta ensures one row per call).
             const pending = pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName);
@@ -1384,6 +1448,13 @@ export class ChatController {
               this.messages = event.payload.messages;
               this.hasHistory = true;
             }
+            // Merge this turn's billing usage into the session totals, then
+            // persist + refresh the right-panel 统计 tab.
+            if (event.payload.usage) {
+              this.sessionStats.usage = mergeTokenUsage(this.sessionStats.usage, event.payload.usage);
+            }
+            this.sessionStats.provider = config.provider;
+            this.persistStats();
 
             // P1-1 (async verification): the LLM re-check of the answer runs
             // AFTER the stream — fire-and-forget so the UI flips back to Send
@@ -1525,6 +1596,9 @@ export class ChatController {
     this.sessionId = `session_${Date.now()}`;
     // New chat = a fresh session: drop any session-scoped tool approvals.
     this.permissionManager.clearCache();
+    // Fresh session → fresh stats view.
+    this.sessionStats = loadSessionStats(this.sessionId);
+    this.onStatsChanged?.(this.sessionStats);
     // New chat = a fresh session (new sessionId): mcpClient/fileWatcher are
     // left for GC here, and the next send() tears down + rebuilds MCP under the
     // new sessionId (see the session-identity check in send()).

@@ -1,7 +1,15 @@
 // src/ui/store.ts
-// v0.5.3 — Tauri-first session persistence with localStorage fallback.
+// v0.6 — Tauri-first session persistence with localStorage fallback.
 // Stores sessions to ~/.pure/sessions/ (FSStore-compatible) when running in Tauri,
 // falls back to browser localStorage for plain Vite dev.
+//
+// Per-session usage stats (token totals, cost, tool activity) are FILE-BACKED
+// in Tauri: ~/.pure/sessions/<id>/stats.json via the save_session_stats /
+// load_session_stats commands, so they live and die with the session. An
+// in-memory cache keeps reads synchronous; localStorage (`pure_stats:<id>`)
+// is only the fallback for plain Vite dev.
+
+import type { TokenUsage } from '../shared/types';
 
 export interface ToolExecMeta {
   toolName: string;
@@ -61,6 +69,26 @@ export interface SessionMeta {
   messageCount: number;
   /** Per-session workspace ('' = no workspace; sessions are fully independent). */
   workspace?: string;
+}
+
+/**
+ * Aggregated stats for ONE conversation (session id), shown in the right
+ * panel's 统计 tab. Token/cost data comes from the provider's billing usage
+ * (see src/shared/usage.ts); tool activity is recorded from tool executions.
+ */
+export interface SessionStats {
+  /** Provider id the session ran on (cost is priced per provider family). */
+  provider?: string;
+  /** Aggregated billing usage across every turn in this session. */
+  usage?: TokenUsage;
+  /** web_search history (query + timestamp). */
+  searches: Array<{ query: string; ts: number }>;
+  /** write_file / edit_file / replace_files history. */
+  fileWrites: Array<{ path: string; ts: number; success: boolean }>;
+  /** read_file history. */
+  fileReads: Array<{ path: string; ts: number }>;
+  /** execute_command history. */
+  commands: Array<{ command: string; ts: number; success: boolean }>;
 }
 
 // Runtime detection: previously this did `!!(await import('@tauri-apps/api/core')).invoke`,
@@ -252,17 +280,27 @@ export async function loadSessionList(): Promise<SessionMeta[]> {
 export async function deleteSession(sessionId: string): Promise<void> {
   if (tauriAvailable) {
     await tauriDelete(sessionId);
-    return;
+  } else {
+    lsDelete(sessionId);
   }
-  lsDelete(sessionId);
+  // Stats live in localStorage on BOTH backends — clear them either way so a
+  // deleted conversation never leaves orphaned usage data behind.
+  clearSessionStats(sessionId);
 }
 
 export async function deleteAllSessions(): Promise<void> {
   if (tauriAvailable) {
     await tauriDeleteAll();
-    return;
+  } else {
+    lsDeleteAll();
   }
-  lsDeleteAll();
+  // Wipe every per-session stats key (no list survives in Tauri mode, so
+  // sweep the prefix defensively) and drop the in-memory mirror.
+  statsCache.clear();
+  try {
+    const keys = Object.keys(localStorage).filter(k => k.startsWith(STATS_PREFIX));
+    for (const k of keys) localStorage.removeItem(k);
+  } catch { /* ignore */ }
 }
 
 function extractTitle(messages: StoredMessage[]): string {
@@ -271,4 +309,158 @@ function extractTitle(messages: StoredMessage[]): string {
     return firstUser.content.slice(0, 60);
   }
   return 'New chat';
+}
+
+// ── Per-session stats (file-backed in Tauri, localStorage fallback in dev) ──
+// Durable backing store is ~/.pure/sessions/<id>/stats.json (Rust commands),
+// so stats survive with the session itself and are deleted alongside it. An
+// in-memory cache keeps the synchronous API (chat.ts reads stats mid-turn);
+// writes go to disk (or localStorage in plain Vite dev) best-effort.
+
+const STATS_PREFIX = 'pure_stats:';
+
+/** In-memory mirror of every session's stats for synchronous reads. */
+const statsCache = new Map<string, SessionStats>();
+
+function emptyStats(): SessionStats {
+  return { searches: [], fileWrites: [], fileReads: [], commands: [] };
+}
+
+export function loadSessionStats(sessionId: string): SessionStats {
+  const cached = statsCache.get(sessionId);
+  if (cached) return cached;
+  let stats = emptyStats();
+  try {
+    const raw = localStorage.getItem(`${STATS_PREFIX}${sessionId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<SessionStats>;
+      stats = {
+        provider: parsed.provider,
+        usage: parsed.usage,
+        searches: parsed.searches ?? [],
+        fileWrites: parsed.fileWrites ?? [],
+        fileReads: parsed.fileReads ?? [],
+        commands: parsed.commands ?? [],
+      };
+    }
+  } catch {
+    // fall through to empty
+  }
+  statsCache.set(sessionId, stats);
+  // Kick off an async read of the durable file (Tauri only) so disk data wins
+  // over any stale localStorage entry; the sync path above returns instantly.
+  void refreshStatsFromDisk(sessionId);
+  return stats;
+}
+
+async function refreshStatsFromDisk(sessionId: string): Promise<void> {
+  if (!tauriAvailable) return;
+  try {
+    const data: any = await tauriInvoke('load_session_stats', { sessionId });
+    if (!data) return;
+    const stats = {
+      provider: data.provider,
+      usage: data.usage,
+      searches: data.searches ?? [],
+      fileWrites: data.fileWrites ?? [],
+      fileReads: data.fileReads ?? [],
+      commands: data.commands ?? [],
+    };
+    statsCache.set(sessionId, stats);
+  } catch {
+    // Disk read is best-effort; the cache/localStorage already has a value.
+  }
+}
+
+/**
+ * Re-read a session's stats from disk (Tauri only; no-op in browser dev) and
+ * update the in-memory cache. chat.ts awaits this after session switches so the
+ * stats panel re-renders with the durable numbers, not just the sync cache.
+ */
+export async function refreshSessionStatsFromDisk(sessionId: string): Promise<void> {
+  await refreshStatsFromDisk(sessionId);
+}
+
+/**
+ * Bulk-load stats for a batch of sessions (one IPC round-trip in Tauri; the
+ * in-memory cache + localStorage cover browser dev). Used by the session
+ * sidebar to render the per-session token/cost summary line. Missing entries
+ * are simply absent from the result map.
+ */
+export async function loadSessionStatsForList(sessionIds: string[]): Promise<Map<string, SessionStats>> {
+  const result = new Map<string, SessionStats>();
+  const uncached: string[] = [];
+  for (const id of sessionIds) {
+    const cached = statsCache.get(id);
+    if (cached) {
+      result.set(id, cached);
+    } else {
+      uncached.push(id);
+    }
+  }
+  if (uncached.length === 0) return result;
+
+  if (tauriAvailable) {
+    try {
+      const data: Record<string, any> = await tauriInvoke('load_all_session_stats');
+      for (const id of uncached) {
+        const raw = data?.[id];
+        if (!raw) continue;
+        const stats: SessionStats = {
+          provider: raw.provider,
+          usage: raw.usage,
+          searches: raw.searches ?? [],
+          fileWrites: raw.fileWrites ?? [],
+          fileReads: raw.fileReads ?? [],
+          commands: raw.commands ?? [],
+        };
+        statsCache.set(id, stats);
+        result.set(id, stats);
+      }
+      return result;
+    } catch {
+      // Fall through to the localStorage sweep below.
+    }
+  }
+
+  for (const id of uncached) {
+    try {
+      const raw = localStorage.getItem(`${STATS_PREFIX}${id}`);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw) as Partial<SessionStats>;
+      const stats: SessionStats = {
+        provider: parsed.provider,
+        usage: parsed.usage,
+        searches: parsed.searches ?? [],
+        fileWrites: parsed.fileWrites ?? [],
+        fileReads: parsed.fileReads ?? [],
+        commands: parsed.commands ?? [],
+      };
+      statsCache.set(id, stats);
+      result.set(id, stats);
+    } catch {
+      // skip unparseable entries
+    }
+  }
+  return result;
+}
+
+export function saveSessionStats(sessionId: string, stats: SessionStats): void {
+  statsCache.set(sessionId, stats);
+  if (tauriAvailable) {
+    // Durable copy: ~/.pure/sessions/<id>/stats.json. Fire-and-forget — the
+    // in-memory cache is authoritative for the current session.
+    void tauriInvoke('save_session_stats', { sessionId, stats }).catch(() => {});
+    return;
+  }
+  try {
+    localStorage.setItem(`${STATS_PREFIX}${sessionId}`, JSON.stringify(stats));
+  } catch {
+    // Quota / disabled storage — stats are best-effort, never break the chat.
+  }
+}
+
+function clearSessionStats(sessionId: string): void {
+  statsCache.delete(sessionId);
+  try { localStorage.removeItem(`${STATS_PREFIX}${sessionId}`); } catch { /* ignore */ }
 }

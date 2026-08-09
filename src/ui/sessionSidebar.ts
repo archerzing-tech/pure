@@ -9,12 +9,15 @@ import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { showToast } from '../shared/toast';
 import { workspaceBase } from '../shared/paths';
+import { estimateCostUsd, formatCostUsd, formatTokensCompact } from '../shared/usage';
 import {
   deleteAllSessions,
   deleteSession,
   loadSession,
   loadSessionList,
+  loadSessionStatsForList,
   type SessionMeta,
+  type SessionStats,
   type StoredMessage,
 } from './store';
 import type { ChatController } from './chat';
@@ -117,6 +120,20 @@ export class SessionSidebar {
 
       const sorted = [...list].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 30);
 
+      // Per-session token/cost summary line: bulk-load stats for every visible
+      // row (one IPC round-trip) and show a compact `1.2k · $0.01` line under
+      // the title. Sessions without usage data simply omit the line.
+      const statsMap = await loadSessionStatsForList(sorted.map(s => s.id));
+      const usageLine = (s: SessionMeta): string => {
+        const stats: SessionStats | undefined = statsMap.get(s.id);
+        if (!stats?.usage) return '';
+        const total =
+          (stats.usage.promptTokens ?? 0) + (stats.usage.completionTokens ?? 0);
+        const cost = estimateCostUsd(stats.usage, stats.provider ?? 'deepseek-openai');
+        const line = `${formatTokensCompact(total)} tok · ${formatCostUsd(cost)}`;
+        return `<span class="sidebar-session-item-usage">${line}</span>`;
+      };
+
       // Group sessions by their workspace (Claude Desktop style project
       // grouping): a sticky folder header per workspace, sessions beneath it.
       const groups = new Map<string, SessionMeta[]>();
@@ -145,6 +162,7 @@ export class SessionSidebar {
           return `<div class="sidebar-session-item" data-sid="${s.id}">
           <div class="sidebar-session-item-main">
             <span class="sidebar-session-item-title" title="${title}">${title}</span>
+            ${usageLine(s)}
           </div>
           <button class="sidebar-session-delete" data-sid="${s.id}" title="${t('sidebar.delete.title')}">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>

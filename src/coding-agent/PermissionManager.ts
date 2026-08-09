@@ -1,5 +1,5 @@
 // src/coding-agent/PermissionManager.ts
-// v0.2 — Manages tool execution permissions with risk levels and session caching.
+// v0.3 — Manages tool execution permissions with risk levels and session caching.
 // Wiring: ToolRegistry.execute() → askUser() → (UI) PermissionDialog.
 
 import type { PermissionMode, PermissionContext, PermissionDecision, PermissionRequestHandler, PermissionRequestInfo } from './types';
@@ -7,6 +7,15 @@ import type { PermissionMode, PermissionContext, PermissionDecision, PermissionR
 export class PermissionManager {
   private mode: PermissionMode;
   private cache = new Map<string, PermissionDecision>();
+  // In-flight user decisions keyed by cache key: when the engine fires the
+  // SAME tool twice in one parallel batch, both askUser calls share a single
+  // pending decision instead of stacking two confirmation cards. Cleared on
+  // clearCache() so a stale card from a previous session can never leak into
+  // the next session's cache.
+  private pending = new Map<string, Promise<PermissionDecision>>();
+  // Bumped by clearCache(): a card left open across a session switch captures
+  // the old epoch and drops its approval instead of seeding the new session.
+  private pendingEpoch = 0;
   private requestHandler?: PermissionRequestHandler;
 
   constructor(mode: PermissionMode = 'NORMAL', handler?: PermissionRequestHandler) {
@@ -58,6 +67,26 @@ export class PermissionManager {
       return cached;
     }
 
+    // Concurrent identical requests (same tool fired twice in one parallel
+    // batch) share ONE user decision instead of stacking a second card —
+    // without this, the GUI queues another permission card for the same tool
+    // even after the first was approved ("点了始终允许还是会问").
+    const inFlight = this.pending.get(cacheKey);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const epoch = this.pendingEpoch;
+    const decision = this.request(cacheKey, ctx, epoch);
+    this.pending.set(cacheKey, decision);
+    try {
+      return await decision;
+    } finally {
+      this.pending.delete(cacheKey);
+    }
+  }
+
+  private async request(cacheKey: string, ctx: PermissionContext, epoch: number): Promise<PermissionDecision> {
     // NORMAL: ask the user via request handler (UI dialog / CLI prompt)
     if (this.requestHandler) {
       const info: PermissionRequestInfo = {
@@ -75,7 +104,10 @@ export class PermissionManager {
 
       // "Always allow" caches the decision for the rest of the session — this
       // applies to high-risk tools too when the user explicitly chose it.
-      if (decision.allowed && decision.remember) {
+      // The epoch guard drops the write when clearCache() ran while the card
+      // was still open (session switch): that decision belongs to the OLD
+      // session and must not seed the new session's cache.
+      if (decision.allowed && decision.remember && epoch === this.pendingEpoch) {
         this.cache.set(cacheKey, decision);
       }
       return decision;
@@ -87,18 +119,24 @@ export class PermissionManager {
 
   clearCache(): void {
     this.cache.clear();
+    // A pending card belongs to the session being left — drop it (and bump
+    // the epoch so its late approval can't write into the new session) so the
+    // next session re-prompts instead of inheriting a stale decision.
+    this.pending.clear();
+    this.pendingEpoch++;
   }
 
   /**
-   * Cache key per design: `serverName?toolName:argsHash`.
-   * - Write tools: tool-level key (session "allow always" covers all uses of the tool).
-   * - Read tools: key includes an args/command hash so only identical calls are cached.
+   * Cache key: `serverName?tool` — a session-scoped "始终允许(本次会话)"
+   * approval covers ALL uses of that tool for the rest of the session, exactly
+   * as the button promises. Args are deliberately NOT part of the key: models
+   * re-emit the "same" call with subtly different JSON (key order, optional
+   * fields, an added parameter), which previously produced a different hash
+   * and re-prompted even after approval — MCP tools (the only medium-risk
+   * reads) hit this on nearly every call.
    */
   private buildCacheKey(ctx: PermissionContext): string {
-    const base = `${ctx.serverName ?? ''}:${ctx.tool}`;
-    if (!ctx.isRead) return base;
-    const argsHash = ctx.argsHash ?? 'any';
-    return `${base}:${argsHash}`;
+    return `${ctx.serverName ?? ''}:${ctx.tool}`;
   }
 
   private dangerLevel(ctx: PermissionContext): 'safe' | 'caution' | 'danger' {

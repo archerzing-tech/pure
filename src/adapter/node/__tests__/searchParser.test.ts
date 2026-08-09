@@ -16,6 +16,9 @@ import {
   serperSearch,
   tavilySearch,
   firstRelevantResult,
+  readResponseText,
+  charsetFromContentType,
+  sniffHtmlCharset,
 } from '../NodeToolAdapter';
 
 describe('Bing HTML result parser (mirrors Rust web_search_tests)', () => {
@@ -301,7 +304,6 @@ describe('Tavily API backend + parallel first-win (mirrors Rust lib.rs)', () => 
     delete process.env.TAVILY_API_KEY;
     await expect(tavilySearch('query', 10)).rejects.toThrow('TAVILY_API_KEY');
   });
-
   it('first-win: returns the first backend whose results pass the relevance gate', async () => {
     // The slow backend is the RELEVANT one (passes the gate); the fast one is
     // garbage. First-win must wait for the slow good result, not take the fast
@@ -341,5 +343,48 @@ describe('Tavily API backend + parallel first-win (mirrors Rust lib.rs)', () => 
     expect(outcome.irrelevant).toBe(1);
     expect(outcome.anyEmpty).toBe(true);
     expect(outcome.failed.some((f) => f.includes('failing'))).toBe(true);
+  });
+});
+
+describe('Charset-aware response decoding (mirrors Rust response_text_with_charset)', () => {
+  // 中文 in GBK — the exact bytes a Sogou-style page carries. `Response.text()`
+  // decodes UTF-8 only (per the Fetch spec), which turns these into mojibake.
+  const GBK_ZHONGWEN = new Uint8Array([0xd6, 0xd0, 0xce, 0xc4]);
+
+  it('decodes a GBK body when the Content-Type header declares the charset', async () => {
+    const resp = new Response(GBK_ZHONGWEN, {
+      headers: { 'Content-Type': 'text/html; charset=gb2312' },
+    });
+    expect(await readResponseText(resp)).toBe('中文');
+  });
+
+  it('decodes a GBK body via the <meta> charset sniff when no header charset is declared', async () => {
+    const ascii = '<html><head><meta charset=\'gb2312\'></head><body>';
+    const body = new Uint8Array([...new TextEncoder().encode(ascii), ...GBK_ZHONGWEN]);
+    const resp = new Response(body, { headers: { 'Content-Type': 'text/html' } });
+    expect(await readResponseText(resp)).toContain('中文');
+  });
+
+  it('keeps UTF-8 bodies intact when no charset is declared', async () => {
+    const resp = new Response('中文', { headers: { 'Content-Type': 'text/html' } });
+    expect(await readResponseText(resp)).toBe('中文');
+  });
+
+  it('does not re-decode a utf-8/latin1-labeled body (avoids mojibake regressions)', async () => {
+    // iso-8859-1 is the classic mislabel on pages that are actually UTF-8.
+    const resp = new Response('中文', { headers: { 'Content-Type': 'text/html; charset=iso-8859-1' } });
+    expect(await readResponseText(resp)).toBe('中文');
+  });
+
+  it('extracts the header charset parameter (mirrors Rust charset_from_content_type)', () => {
+    expect(charsetFromContentType('text/html; charset=gb2312')).toBe('gb2312');
+    expect(charsetFromContentType('text/html; charset="utf-8"')).toBe('utf-8');
+    expect(charsetFromContentType('text/html')).toBeUndefined();
+  });
+
+  it('sniffs the <meta> charset tag (mirrors Rust sniff_html_charset)', () => {
+    expect(sniffHtmlCharset(new TextEncoder().encode('<meta http-equiv="Content-Type" content="text/html; charset=GBK">'))).toBe('GBK');
+    expect(sniffHtmlCharset(new TextEncoder().encode('<meta charset=UTF-8>'))).toBe('UTF-8');
+    expect(sniffHtmlCharset(new TextEncoder().encode('<html><body>no meta</body></html>'))).toBeUndefined();
   });
 });

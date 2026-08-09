@@ -208,6 +208,7 @@
             <button id="context-tab-preview" class="context-tab active" type="button" role="tab" aria-selected="true" aria-controls="context-preview" data-context-tab="preview" data-i18n="context.tab.preview">预览</button>
             <button id="context-tab-changes" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-changes" data-context-tab="changes" data-i18n="context.tab.changes">变更</button>
             <button id="context-tab-structure" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-structure" data-context-tab="structure" data-i18n="context.tab.structure">结构</button>
+            <button id="context-tab-stats" class="context-tab" type="button" role="tab" aria-selected="false" aria-controls="context-stats" data-context-tab="stats" data-i18n="context.tab.stats">统计</button>
           </div>
           <div id="context-preview" class="context-panel-body" role="tabpanel" aria-labelledby="context-tab-preview" data-context-view="preview">
             <div class="preview-toolbar">
@@ -233,6 +234,49 @@
           <div id="context-structure" class="context-panel-body hidden" role="tabpanel" aria-labelledby="context-tab-structure" data-context-view="structure">
             <div class="context-section-heading"><span data-i18n="context.projectMap">项目结构</span><b data-i18n="context.status.ready">就绪</b></div>
             <div class="structure-tree"><div>⌄ <b id="context-workspace-name">workspace</b></div><div class="tree-child">◇ src</div><div class="tree-child">◇ package.json</div><div class="tree-child">◇ README.md</div></div>
+          </div>
+          <div id="context-stats" class="context-panel-body hidden" role="tabpanel" aria-labelledby="context-tab-stats" data-context-view="stats">
+            <div class="context-section-heading stats-heading">
+              <span data-i18n="stats.title">会话统计</span><b data-i18n="stats.subtitle">本会话用量</b>
+              <span class="stats-export-wrap">
+                <button id="stats-export-btn" class="stats-export-btn" type="button" data-i18n-title="stats.export.title" title="导出会话统计" aria-haspopup="menu" aria-expanded="false">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  <span data-i18n="stats.export">导出</span>
+                </button>
+                <div id="stats-export-menu" class="stats-export-menu hidden" role="menu" aria-label="导出会话统计">
+                  <button type="button" role="menuitem" data-export-format="json" data-i18n="stats.export.json">导出为 JSON</button>
+                  <button type="button" role="menuitem" data-export-format="markdown" data-i18n="stats.export.markdown">导出为 Markdown</button>
+                  <button type="button" role="menuitem" data-export-format="csv" data-i18n="stats.export.csv">导出为 CSV</button>
+                  <button type="button" role="menuitem" data-export-format="zip" data-i18n="stats.export.zip">导出全部为 ZIP</button>
+                </div>
+              </span>
+            </div>
+            <div class="stats-summary">
+              <div class="stat-cell"><span class="stat-cell-label" data-i18n="stats.input">输入</span><b id="stat-input">0</b><span class="stat-cell-sub">tokens</span></div>
+              <div class="stat-cell"><span class="stat-cell-label" data-i18n="stats.output">输出</span><b id="stat-output">0</b><span class="stat-cell-sub">tokens</span></div>
+              <div class="stat-cell"><span class="stat-cell-label" data-i18n="stats.cost">花费</span><b id="stat-cost">—</b></div>
+            </div>
+            <div class="stats-cache">
+              <div class="stats-cache-top"><span data-i18n="stats.cacheRate">缓存命中率</span><b id="stat-cache-rate">—</b></div>
+              <div class="stats-cache-track"><i id="stat-cache-bar"></i></div>
+              <div class="stats-cache-sub"><span data-i18n="stats.cacheHit">缓存命中</span><b id="stat-cache-hit">0</b><span data-i18n="stats.cacheMiss">未命中</span><b id="stat-cache-miss">0</b></div>
+            </div>
+            <div class="stats-list-section">
+              <div class="context-section-heading"><span data-i18n="stats.searches">搜索历史</span><b id="stat-search-count">0</b></div>
+              <div id="stat-search-list" class="stats-list"></div>
+            </div>
+            <div class="stats-list-section">
+              <div class="context-section-heading"><span data-i18n="stats.fileWrites">文件写入</span><b id="stat-write-count">0</b></div>
+              <div id="stat-write-list" class="stats-list"></div>
+            </div>
+            <div class="stats-list-section">
+              <div class="context-section-heading"><span data-i18n="stats.fileReads">文件读取</span><b id="stat-read-count">0</b></div>
+              <div id="stat-read-list" class="stats-list"></div>
+            </div>
+            <div class="stats-list-section">
+              <div class="context-section-heading"><span data-i18n="stats.commands">命令执行</span><b id="stat-cmd-count">0</b></div>
+              <div id="stat-cmd-list" class="stats-list"></div>
+            </div>
           </div>
           <div class="context-meta">
             <div class="context-meta-row"><span>MODEL</span><strong id="context-model">—</strong></div>

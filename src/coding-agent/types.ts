@@ -12,7 +12,7 @@ export interface PermissionContext {
   isRead: boolean;
   riskLevel?: 'low' | 'medium' | 'high';
   serverName?: string;
-  /** 只读工具的无副作用参数哈希,用于缓存键(argsHash)。 */
+  /** 只读工具的无副作用参数哈希(历史字段:缓存键已改为按工具名,不再使用)。 */
   argsHash?: string;
   /** 写工具的目标文件路径(用于确认弹窗的内容预览)。 */
   path?: string;

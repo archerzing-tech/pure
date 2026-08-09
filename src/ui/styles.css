@@ -418,6 +418,23 @@ body {
   opacity: 0.8;
 }
 
+/* Per-session token/cost summary line (统计 data, e.g. `1.2k tok · $0.01`). */
+.sidebar-session-item-usage {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.sidebar-session-item.active .sidebar-session-item-usage {
+  color: var(--accent);
+  opacity: 0.7;
+}
+
 .sidebar-session-delete {
   background: none;
   border: none;
@@ -4212,7 +4229,7 @@ select:focus-visible,
 }
 
 #chat {
-  max-width: 920px;
+  max-width: 940px;
   padding: 38px 32px 26px;
   gap: 20px;
 }
@@ -4307,12 +4324,12 @@ select:focus-visible,
   gap: 10px;
   padding: 12px 32px 16px;
   border-top: 1px solid var(--border);
-  /* Match the centered chat column (#chat is max-width 920px) so the
+  /* Match the centered chat column (#chat is max-width 940px) so the
      composer aligns with the transcript instead of spanning the whole
      window — same width + same 32px side padding means the folder button,
      input and send button line up exactly with the message column edges. */
   width: 100%;
-  max-width: 920px;
+  max-width: 940px;
   margin: 0 auto;
 }
 
@@ -4835,6 +4852,203 @@ select:focus-visible,
 .tree-child {
   padding-left: 21px;
   color: var(--text-tertiary);
+}
+
+/* ── Session stats (右面板「统计」tab) ── */
+
+/* Export button + dropdown menu in the stats heading row (导出 → JSON/MD). */
+.stats-heading {
+  position: relative;
+  gap: 6px;
+}
+
+.stats-export-wrap {
+  margin-left: auto;
+  position: relative;
+}
+
+.stats-export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  font: 10px var(--font-mono);
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.stats-export-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.stats-export-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  min-width: 150px;
+  padding: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  animation: popoverIn 0.18s var(--ease-out) both;
+}
+
+.stats-export-menu.hidden {
+  display: none;
+}
+
+.stats-export-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-secondary);
+  font: 11px var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.stats-export-menu button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.stats-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.stat-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-header) 55%, transparent);
+}
+
+.stat-cell-label {
+  color: var(--text-tertiary);
+  font: 8px var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.stat-cell b {
+  color: var(--text);
+  font: 600 15px var(--font-mono);
+  letter-spacing: -0.02em;
+}
+
+.stat-cell-sub {
+  color: var(--text-tertiary);
+  font: 9px var(--font-mono);
+}
+
+.stats-cache {
+  margin-bottom: 14px;
+  padding: 10px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-header) 55%, transparent);
+}
+
+.stats-cache-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.stats-cache-top b {
+  color: var(--text);
+  font: 600 12px var(--font-mono);
+}
+
+.stats-cache-track {
+  height: 5px;
+  margin: 8px 0 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--border-light);
+}
+
+.stats-cache-track i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #3E63DD, #7ED9FF);
+  transition: width 0.3s ease;
+}
+
+.stats-cache-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-tertiary);
+  font: 9px var(--font-mono);
+}
+
+.stats-cache-sub b {
+  margin-right: 6px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.stats-list-section {
+  margin-bottom: 14px;
+}
+
+.stats-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 150px;
+  margin-top: 8px;
+  overflow-y: auto;
+}
+
+.stats-list-item {
+  padding: 5px 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font: 10px/1.5 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats-list-item:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.stats-empty {
+  padding: 10px 8px;
+  color: var(--text-tertiary);
+  font-size: 10px;
 }
 
 .context-meta {

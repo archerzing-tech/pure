@@ -104,6 +104,84 @@ describe('PermissionManager write preview passthrough', () => {
     expect(handlerCalls).toBe(1);
   });
 
+  it('caches by tool name, not by args hash — same MCP call re-emitted with different JSON still hits the session cache', async () => {
+    let handlerCalls = 0;
+    const pm = new PermissionManager('NORMAL', async () => {
+      handlerCalls++;
+      return { allowed: true, remember: true };
+    });
+
+    // Models re-emit the "same" call with different JSON key order / optional
+    // fields. The args-hash cache key previously split these into two keys and
+    // re-prompted even after the user clicked 始终允许 — "点了还是问".
+    const ctxA: PermissionContext = {
+      tool: 'run',
+      serverName: 'shell',
+      description: 'MCP run',
+      isRead: true,
+      riskLevel: 'medium',
+      argsHash: '{"command":"ls","cwd":"/"}',
+    };
+    const ctxB: PermissionContext = {
+      ...ctxA,
+      argsHash: '{"cwd":"/","command":"ls"}',
+    };
+
+    const first = await pm.askUser(ctxA);
+    const second = await pm.askUser(ctxB);
+    expect(first.allowed).toBe(true);
+    expect(second.allowed).toBe(true);
+    expect(handlerCalls).toBe(1);
+  });
+
+  it('dedupes concurrent same-key requests — one card, one decision, both callers approved', async () => {
+    let handlerCalls = 0;
+    const pm = new PermissionManager('NORMAL', async () => {
+      handlerCalls++;
+      return { allowed: true, remember: true };
+    });
+
+    const ctx: PermissionContext = {
+      tool: 'execute_command',
+      command: 'ls',
+      description: 'Execute a shell command',
+      isRead: false,
+      riskLevel: 'high',
+    };
+
+    // Parallel batch: the engine fires the same tool twice concurrently.
+    const [a, b] = await Promise.all([pm.askUser(ctx), pm.askUser(ctx)]);
+    expect(a.allowed).toBe(true);
+    expect(b.allowed).toBe(true);
+    expect(handlerCalls).toBe(1);
+  });
+
+  it('clearCache during an open card prevents the stale decision from seeding the next session', async () => {
+    let resolveCard: (d: { allowed: boolean; remember: boolean }) => void = () => {};
+    const pm = new PermissionManager('NORMAL', () => new Promise((resolve) => { resolveCard = resolve; }));
+
+    const ctx: PermissionContext = {
+      tool: 'execute_command',
+      command: 'ls',
+      description: 'Execute a shell command',
+      isRead: false,
+      riskLevel: 'high',
+    };
+
+    const pending = pm.askUser(ctx);
+    // Session switch while the card is still open: cache + pending are dropped.
+    pm.clearCache();
+    // The user's late click on the OLD card must not leak into the NEW session.
+    resolveCard({ allowed: true, remember: true });
+    await pending;
+
+    let handlerCalls = 0;
+    pm.setRequestHandler(async () => { handlerCalls++; return { allowed: true, remember: true }; });
+    await pm.askUser(ctx);
+    // Fresh session re-asks (the old approval did not seed the new cache).
+    expect(handlerCalls).toBe(1);
+  });
+
   it('does not cache a one-shot "allow once" decision, even for high risk', async () => {
     let handlerCalls = 0;
     const pm = new PermissionManager('NORMAL', async () => {

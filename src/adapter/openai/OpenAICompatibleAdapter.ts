@@ -4,7 +4,8 @@
 // GLM uses extraBody { tool_stream: true } spread into params.
 
 import OpenAI from 'openai';
-import type { LLMAdapter, Message, ToolDefinition, LLMChunk, LLMResponse, ToolCall } from '../../shared/types';
+import type { LLMAdapter, Message, ToolDefinition, LLMChunk, LLMResponse, ToolCall, TokenUsage } from '../../shared/types';
+import { normalizeTokenUsage } from '../../shared/usage';
 import { buildChatParams } from './mapping';
 
 export interface OpenAICompatibleConfig {
@@ -47,8 +48,12 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
 
     const toolCallAccum: Map<number, { id: string; name: string; arguments: string }> = new Map();
     let content = '';
+    // Billing usage arrives on the FINAL stream chunk (choices may be empty,
+    // so capture it before the `!delta` skip below).
+    let rawUsage: unknown;
 
     for await (const chunk of stream) {
+      if (chunk.usage) rawUsage = chunk.usage;
       const delta = chunk.choices[0]?.delta;
       if (!delta) continue;
 
@@ -101,6 +106,8 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
         function: { name: acc.name, arguments: acc.arguments },
       }));
 
+    const usage: TokenUsage | undefined = normalizeTokenUsage(rawUsage);
+    if (usage) yield { type: 'usage', usage };
     yield { type: 'done', content, toolCalls };
   }
 
