@@ -10,7 +10,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { IMemoryStore, MemoryEntry, MemorySearchOptions } from './IMemoryStore';
 import { searchMemories } from './keywordSearch';
-import { applyHits, decayEntry, findSupersedeTarget, healthScore, lifecycleOf } from './evolution';
+import { applyHits, decayEntry, findSupersedeTarget, healthScore, lifecycleOf, type EvolutionConfig } from './evolution';
+import type { MemoryDecayInfo } from './LocalStorageMemoryStore';
 
 function projectHash(projectPath: string): string {
   return createHash('sha256').update(projectPath).digest('hex').slice(0, 16);
@@ -23,14 +24,24 @@ function newId(): string {
 export class FSMemoryStore implements IMemoryStore {
   private rootPath: string;
   private defaultProject: string;
+  // 进化阈值（Settings → Memory → 遗忘速度；CLI 经环境变量 PURE_MEMORY_*）。
+  // 静态快照 —— CLI 无 UI，进程启动时固定；GUI 用 LocalStorageMemoryStore。
+  private evolution?: Partial<EvolutionConfig>;
+  // 衰减运行信息缓存（meta.json 的读缓存；decay 后同步更新）。
+  private decayInfo: MemoryDecayInfo | null = null;
   // Per-project in-memory cache so search()/list() don't re-read + re-parse the
   // whole JSONL on every turn (a long session retrieves memory on EVERY turn).
   // Invalidated on add/forget/decay — the only mutating operations.
   private cache = new Map<string, MemoryEntry[]>();
 
-  constructor(rootPath = `${process.env.HOME || homedir()}/.pure/memories`, defaultProject = '') {
+  constructor(
+    rootPath = `${process.env.HOME || homedir()}/.pure/memories`,
+    defaultProject = '',
+    evolution?: Partial<EvolutionConfig>,
+  ) {
     this.rootPath = rootPath;
     this.defaultProject = defaultProject;
+    this.evolution = evolution;
   }
 
   private projectDir(projectPath: string): string {
@@ -64,6 +75,30 @@ export class FSMemoryStore implements IMemoryStore {
     return this.load(projectPath ?? this.defaultProject);
   }
 
+  /** 上次衰减运行信息（诊断用；非 IMemoryStore 接口成员）。返回拷贝，
+   *  调用方 mutate 不影响内部缓存（与 LocalStorageMemoryStore 每次
+   *  readMeta() 重新 parse 的"新鲜独立对象"语义一致）。 */
+  getLastDecayInfo(): MemoryDecayInfo {
+    if (this.decayInfo) return { ...this.decayInfo };
+    try {
+      const file = join(this.rootPath, 'meta.json');
+      if (!existsSync(file)) return {};
+      const parsed = JSON.parse(readFileSync(file, 'utf-8')) as MemoryDecayInfo;
+      this.decayInfo = parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      this.decayInfo = {};
+    }
+    return { ...this.decayInfo };
+  }
+
+  private writeDecayInfo(info: MemoryDecayInfo): void {
+    this.decayInfo = info;
+    try {
+      mkdirSync(this.rootPath, { recursive: true });
+      writeFileSync(join(this.rootPath, 'meta.json'), JSON.stringify(info), 'utf-8');
+    } catch { /* non-fatal */ }
+  }
+
   async add(entry: Omit<MemoryEntry, 'id'>): Promise<string> {
     const project = entry.projectPath || this.defaultProject;
     const entries = this.load(project);
@@ -79,7 +114,8 @@ export class FSMemoryStore implements IMemoryStore {
     const now = Date.now();
     // 进化：新策略/流程/偏好与同类型旧条目针对同一情境时，新条目取代旧条目 ——
     // 旧条目打 supersededBy 标记并立即降级，之后更快走完 降级→休眠→删除。
-    const target = findSupersedeTarget(entries, entry);
+    const cfg = this.evolution;
+    const target = findSupersedeTarget(entries, entry, cfg);
     const id = newId();
     const seeded: MemoryEntry = { ...entry, id, timestamp: entry.timestamp ?? now };
     if (target) {
@@ -88,15 +124,15 @@ export class FSMemoryStore implements IMemoryStore {
     }
     // 默认健康分按多维公式种子化；调用方显式给的 decayScore 优先（兼容
     // 语义注入），lifecycle 与存储分数保持一致。
-    const score = entry.decayScore ?? healthScore(seeded, now);
-    entries.push({ ...seeded, decayScore: score, lifecycle: entry.lifecycle ?? lifecycleOf(score) });
+    const score = entry.decayScore ?? healthScore(seeded, now, cfg);
+    entries.push({ ...seeded, decayScore: score, lifecycle: entry.lifecycle ?? lifecycleOf(score, cfg) });
     this.persist(project, entries);
     return id;
   }
 
   async search(query: string, opts?: MemorySearchOptions): Promise<MemoryEntry[]> {
     const project = opts?.projectPath ?? this.defaultProject;
-    const hits = searchMemories(this.load(project), query, { ...opts, projectPath: project });
+    const hits = searchMemories(this.load(project), query, { ...opts, projectPath: project }, this.evolution);
     // 使用频率信号：命中即 +1 并刷新 lastUsedAt（进内存缓存，decay 时落盘）。
     await this.recordHits(hits);
     return hits;
@@ -130,7 +166,10 @@ export class FSMemoryStore implements IMemoryStore {
     if (!existsSync(this.rootPath)) return;
     const now = Date.now();
     let changedAny = false;
+    let deleted = 0;
+    let updated = 0;
     for (const dir of readdirSync(this.rootPath)) {
+      if (dir === 'meta.json') continue; // 元信息文件不是项目记忆目录
       const file = join(this.rootPath, dir, 'memories.jsonl');
       if (!existsSync(file)) continue;
       const entries = this.loadFromFile(file);
@@ -153,9 +192,9 @@ export class FSMemoryStore implements IMemoryStore {
       const kept: MemoryEntry[] = [];
       let changed = mergedAny;
       for (const e of entries) {
-        const outcome = decayEntry(e, now, olderThan);
-        if (outcome === 'deleted') { changed = true; continue; }
-        if (outcome === 'updated') changed = true;
+        const outcome = decayEntry(e, now, olderThan, this.evolution);
+        if (outcome === 'deleted') { changed = true; deleted++; continue; }
+        if (outcome === 'updated') { changed = true; updated++; }
         kept.push(e);
       }
       if (changed) {
@@ -168,6 +207,7 @@ export class FSMemoryStore implements IMemoryStore {
     // otherwise a per-turn decay() (Harness schedules it at every run) would
     // clear the cache unconditionally and defeat the point of caching at all.
     if (changedAny) this.cache.clear();
+    this.writeDecayInfo({ lastDecayAt: now, lastDeleted: deleted, lastUpdated: updated });
   }
 
   /** 反向映射：hashed 目录 → 内存缓存列表（decay 合并命中数据用）。 */

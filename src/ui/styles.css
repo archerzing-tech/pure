@@ -3251,6 +3251,365 @@ body {
   margin: 12px 0 2px;
 }
 
+/* ── Memory Dashboard（智能进化记忆库可视化，Adapter Layer 设计文档 §12.9）──
+ * Read-only per-entry view of the cross-session memory store: type badge,
+ * lifecycle stage (active / degraded / dormant), supersession marker, health
+ * score bar, retrieval count, last-use time, and project. Color semantics:
+ * active = success green, degraded = amber, dormant = muted gray; superseded
+ * = danger red. All derived from theme tokens via color-mix so light & dark
+ * stay coherent. */
+
+.memory-disabled-hint {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  background: var(--bg-card);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.memory-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.memory-summary-count {
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.memory-summary-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+
+.memory-chip-active {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+.memory-chip-degraded {
+  color: #D97706;
+  background: color-mix(in srgb, #D97706 14%, transparent);
+}
+
+.memory-chip-dormant {
+  color: var(--text-tertiary);
+  background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
+}
+
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memory-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--transition), background var(--transition), transform var(--transition);
+}
+
+.memory-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: var(--bg-card);
+  transform: translateY(-1px);
+}
+
+.memory-card-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.memory-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+/* Type badges — one hue per memory kind. */
+.memory-badge-type {
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+}
+.memory-type-user_preference {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.memory-type-error_pattern {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.memory-type-successful_pattern {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+.memory-type-project_convention {
+  color: #2563EB;
+  background: color-mix(in srgb, #2563EB 12%, transparent);
+}
+.memory-type-procedure {
+  color: #D97706;
+  background: color-mix(in srgb, #D97706 14%, transparent);
+}
+
+/* Lifecycle badges — one hue per stage (score bars use .memory-bar-* below,
+   kept separate so a badge class never carries bar styling). */
+.memory-life-active {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+.memory-life-degraded {
+  color: #D97706;
+  background: color-mix(in srgb, #D97706 14%, transparent);
+}
+.memory-life-dormant {
+  color: var(--text-tertiary);
+  background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
+}
+
+.memory-badge-superseded {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
+.memory-content {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.memory-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.memory-score {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.memory-score-track {
+  display: inline-block;
+  width: 64px;
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-tertiary) 18%, transparent);
+  overflow: hidden;
+}
+
+.memory-score-bar {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.4s var(--ease-out);
+}
+
+.memory-score i.memory-bar-active {
+  background: var(--success);
+}
+.memory-score i.memory-bar-degraded {
+  background: #D97706;
+}
+.memory-score i.memory-bar-dormant {
+  background: var(--text-tertiary);
+}
+
+.memory-score b {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.memory-meta-item {
+  white-space: nowrap;
+}
+
+.memory-project {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-empty {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  padding: 24px 8px;
+  text-align: center;
+}
+
+.memory-capped {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-align: center;
+  margin-top: 10px;
+}
+
+/* ── Memory forgetting-speed fields（遗忘速度设置区）── */
+
+.memory-evo-input {
+  max-width: 220px;
+}
+
+.memory-evo-input .setting-input {
+  width: 92px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.memory-unit {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  min-width: 20px;
+}
+
+.memory-evo-reset-row {
+  justify-content: flex-end;
+  border-top: 1px solid var(--border-light);
+  margin-top: 2px;
+  padding-top: 10px;
+}
+
+/* ── Memory export / import（记忆页导出/导入）── */
+
+.memory-transfer-hint {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: -4px 0 10px;
+}
+
+.memory-transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.memory-transfer-actions .setting-btn {
+  margin: 0;
+}
+
+/* ── Memory runtime diagnostics（记忆页诊断区）── */
+
+.memory-diag {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.memory-diag-params {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 2px 18px;
+}
+
+.memory-diag-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border-light);
+}
+
+.memory-diag-key {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.memory-diag-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.memory-diag-custom {
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 1px 7px;
+  flex-shrink: 0;
+}
+
+.memory-diag-lastrun {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  padding-top: 2px;
+}
+
+.memory-diag-lastrun .memory-diag-key {
+  font-weight: 600;
+}
+
+/* Background decay timer badge (memoryDecayTimer.ts) — a small accent chip
+   showing decay runs on an idle timer, not only at session start. */
+.memory-diag-timer-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  padding-top: 6px;
+}
+.memory-diag-timer {
+  font-style: normal;
+  font-weight: 600;
+  font-size: 10.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: 999px;
+  padding: 2px 9px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
 /* ── Update Status ── */
 
 .update-status-row {
@@ -6029,8 +6388,9 @@ button svg,
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 30px;
   height: 30px;
-  padding: 0 12px;
+  padding: 0;
   border: 1px solid color-mix(in srgb, var(--border-light) 75%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--bg-card) 94%, transparent);
@@ -6038,7 +6398,6 @@ button svg,
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   color: var(--text-secondary);
-  font: 12px var(--font-sans);
   cursor: pointer;
   transition: color 140ms ease, background 140ms ease, border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
 }

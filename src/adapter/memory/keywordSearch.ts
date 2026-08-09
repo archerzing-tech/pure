@@ -5,7 +5,7 @@
 // (WASMEmbeddingStore) behind the same IMemoryStore interface.
 
 import type { MemoryEntry, MemorySearchOptions } from './IMemoryStore';
-import { EVOLUTION, healthScore } from './evolution';
+import { EVOLUTION, healthScore, type EvolutionConfig } from './evolution';
 
 /**
  * Split a query into lowercase keyword tokens. Handles CJK text by emitting
@@ -44,18 +44,22 @@ export function searchMemories(
   entries: MemoryEntry[],
   query: string,
   opts?: MemorySearchOptions,
+  cfg?: Partial<EvolutionConfig>,
 ): MemoryEntry[] {
   const tokens = tokenize(query);
   const projectPath = opts?.projectPath;
   const type = opts?.type;
   const k = opts?.k ?? 5;
   const now = Date.now();
+  const dormantMax = cfg?.dormantMax ?? EVOLUTION.DORMANT_MAX;
 
   return entries
     .filter(e => (projectPath === undefined || e.projectPath === projectPath))
     .filter(e => (type === undefined || e.type === type))
-    .filter(e => healthScore(e, now) >= EVOLUTION.DORMANT_MAX)
-    .map(e => ({ entry: e, score: matchScore(e.content, tokens) * (e.decayScore ?? 1) }))
+    .filter(e => healthScore(e, now, cfg) >= dormantMax)
+    // 排序与过滤用同一份实时健康分：存储的 decayScore 可能滞后于配置变更
+    // （改阈值后还没跑 decay），用实时分保证过滤与排序口径一致。
+    .map(e => ({ entry: e, score: matchScore(e.content, tokens) * healthScore(e, now, cfg) }))
     .filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score || b.entry.timestamp - a.entry.timestamp)
     .slice(0, k)

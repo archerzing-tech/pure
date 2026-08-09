@@ -28,6 +28,7 @@ import { appendStoredThinking } from './thinkingCard';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { PasteChipManager, composeMessageWithAttachments } from './pasteChip';
+import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { showConfirmModal } from './modal';
 import { WorkspaceController } from './workspace';
 import { SessionSidebar } from './sessionSidebar';
@@ -441,6 +442,10 @@ function deferToIdle(fn: () => void): void {
       workspace.init();
       sessionSidebar.init();
       initPathLinks();
+      // Background memory decay: Harness only decays at session start (1h
+      // throttle), so idle apps never forget. A timer re-runs decay after the
+      // throttle window elapses — see src/ui/memoryDecayTimer.ts.
+      startMemoryDecayTimer();
       // Stats panel: subscribe to per-session updates + draw the empty state.
       chat.onSessionStatsChanged(() => renderSessionStats());
       renderSessionStats();

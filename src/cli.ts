@@ -30,6 +30,7 @@ import { sanitizeForTerminal } from './termwidth';
 import { ThinkingCard } from './cli-thinking';
 import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
 import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
+import type { EvolutionConfig } from './adapter/memory/evolution';
 import { harvestUserPreferences } from './shared/memory';
 import { INCREMENTAL_BUILD_PROMPT } from './shared/agentBehavior';
 import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, FILE_TOOLS_CORE, composeUserTurn } from './shared/promptLayers';
@@ -105,9 +106,49 @@ function saveConfig(cfg: PureConfig): void {
 // external (package.json cli:build — onnxruntime-node can't be bundled), so
 // their runtime import always fails and they use keyword search; WASM recall
 // is active for repo/dev runs (`bun run cli`).
+
+// 进化阈值（对应 GUI 设置面板的"遗忘速度"）：CLI 无 UI，用环境变量配置。
+// 与引擎单位一致 —— 天数转毫秒、百分比转 0..1 小数，未设置的项用引擎默认。
+function cliEvolutionConfig(): Partial<EvolutionConfig> | undefined {
+  const cfg: Partial<EvolutionConfig> = {};
+  // days()/pct() 对空串（Number('') === 0）返回 NaN 而非 0 —— 半衰期/宽限为 0
+  // 会让 healthScore 除零、记忆整体静默失效，必须整体拒绝非法天数。
+  // 百分比边界与 GUI 设置面板的输入框 min/max 对齐（10-90 / 5-40 / 1-15 /
+  // 30-90），CLI 与 UI 的校验口径一致。
+  const days = (v: string | undefined) => {
+    if (v === undefined || v.trim() === '') return NaN;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n * 24 * 3600 * 1000 : NaN;
+  };
+  const pct = (v: string | undefined, min: number, max: number) => {
+    if (v === undefined || v.trim() === '') return NaN;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= min && n <= max ? n / 100 : NaN;
+  };
+  const half = days(process.env.PURE_MEMORY_HALF_LIFE_DAYS);
+  const grace = days(process.env.PURE_MEMORY_DORMANT_GRACE_DAYS);
+  const active = pct(process.env.PURE_MEMORY_ACTIVE_MIN, 10, 90);
+  const dormant = pct(process.env.PURE_MEMORY_DORMANT_MAX, 5, 40);
+  const floor = pct(process.env.PURE_MEMORY_DELETE_FLOOR, 1, 15);
+  const similarity = pct(process.env.PURE_MEMORY_SUPERSEDE_SIMILARITY, 30, 90);
+  if (!Number.isNaN(half)) cfg.recencyHalfLifeMs = half;
+  if (!Number.isNaN(grace)) cfg.dormantGraceMs = grace;
+  if (!Number.isNaN(active)) cfg.activeMin = active;
+  if (!Number.isNaN(dormant)) cfg.dormantMax = dormant;
+  if (!Number.isNaN(floor)) cfg.deleteFloor = floor;
+  if (!Number.isNaN(similarity)) cfg.supersedeSimilarity = similarity;
+  return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
+const evolutionCfg = cliEvolutionConfig();
 const memoryStore = process.env.PURE_MEMORY_KEYWORD
-  ? new FSMemoryStore(`${PURE_DIR}/memories`)
-  : new WASMEmbeddingStore({ store: new FSMemoryStore(`${PURE_DIR}/memories`) });
+  ? new FSMemoryStore(`${PURE_DIR}/memories`, '', evolutionCfg)
+  : new WASMEmbeddingStore({
+      store: new FSMemoryStore(`${PURE_DIR}/memories`, '', evolutionCfg),
+      // 包装层与内层 store 用同一份配置：WASM 检索路径的 dormant 过滤
+      // 必须跟随 PURE_MEMORY_DORMANT_MAX，否则语义检索时阈值静默失效。
+      getEvolution: () => evolutionCfg,
+    });
 
 function learnFromInput(text: string, sessionId: string, projectPath: string): Promise<unknown> {
   const entries = harvestUserPreferences(text, { sessionId, projectPath });

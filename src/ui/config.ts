@@ -7,6 +7,7 @@
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
 import type { ProviderId } from '../shared/providers';
+import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
 
 export interface PureConfig {
@@ -85,6 +86,13 @@ export interface PureConfig {
    * plan/build always run it.
    */
   taskMode: 'auto' | 'yolo' | 'plan' | 'build';
+  /**
+   * Memory evolution thresholds (Settings → Memory → 遗忘速度). Engine units:
+   * recencyHalfLifeMs / dormantGraceMs in milliseconds, scores in 0..1 — the
+   * settings panel converts days↔ms and percent↔fraction. Undefined (or
+   * partial) entries fall back to the engine defaults (EVOLUTION_DEFAULTS).
+   */
+  evolution?: Partial<EvolutionConfig>;
 }
 
 export const STORAGE_KEY = 'pure_config';

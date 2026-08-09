@@ -26,7 +26,8 @@
 
 import type { IMemoryStore, MemoryEntry, MemorySearchOptions } from './IMemoryStore';
 import { searchMemories } from './keywordSearch';
-import { EVOLUTION, healthScore } from './evolution';
+import { EVOLUTION, healthScore, type EvolutionConfig } from './evolution';
+import type { MemoryDecayInfo } from './LocalStorageMemoryStore';
 
 export type EmbedFunction = (text: string) => Promise<number[]>;
 export type EmbedBatchFunction = (texts: string[]) => Promise<number[][]>;
@@ -35,13 +36,21 @@ export interface WASMEmbeddingStoreOptions {
   /**
    * Inner persistence store. `add`/`forget`/`decay` delegate to it; `list()`
    * (a concrete-store extension, not part of IMemoryStore) feeds the search
-   * path with the entries to embed + rank.
+   * path with the entries to embed + rank. `getLastDecayInfo()` is the same
+   * kind of concrete-store extension (settings-panel diagnostics).
    */
-  store: IMemoryStore & { list(projectPath?: string): MemoryEntry[] };
+  store: IMemoryStore & {
+    list(projectPath?: string): MemoryEntry[];
+    getLastDecayInfo?(): MemoryDecayInfo;
+    importEntries?(entries: MemoryEntry[]): Promise<{ imported: number; skipped: number }>;
+  };
   /** Feature-extraction model id (default: all-MiniLM-L6-v2). */
   model?: string;
   /** Cosine-similarity threshold; entries below it are excluded (default 0.2). */
   minScore?: number;
+  /** 进化阈值读取器（Settings → Memory → 遗忘速度）。与内层 store 同源，
+   *  保证 WASM 路径的 dormant 过滤与持久化层的衰减使用同一份配置。 */
+  getEvolution?: () => Partial<EvolutionConfig> | undefined;
   /** Inject a single-text embedder (tests / custom backends). Defaults to
    * transformers.js. When only `embed` is provided, the batched path falls
    * back to sequential per-text calls (keeps the old API working). */
@@ -69,6 +78,7 @@ export class WASMEmbeddingStore implements IMemoryStore {
   private minScore: number;
   private customEmbed?: EmbedFunction;
   private customEmbedBatch?: EmbedBatchFunction;
+  private getEvolution?: () => Partial<EvolutionConfig> | undefined;
   private embedderPromise?: Promise<Embedder>;
   private vecCache = new Map<string, { content: string; vec: number[] }>();
 
@@ -78,6 +88,7 @@ export class WASMEmbeddingStore implements IMemoryStore {
     this.minScore = opts.minScore ?? 0.2;
     this.customEmbed = opts.embed;
     this.customEmbedBatch = opts.embedBatch;
+    this.getEvolution = opts.getEvolution;
   }
 
   async add(entry: Omit<MemoryEntry, 'id'>): Promise<string> {
@@ -98,6 +109,11 @@ export class WASMEmbeddingStore implements IMemoryStore {
     // memories to search (fresh installs stay zero-cost).
     if (all.length === 0) return [];
 
+    // 进化阈值（用户自定义遗忘速度）—— search 全程（含 fallback）共用一份，
+    // 避免对 getEvolution 的重复调用。
+    const cfg = this.getEvolution?.();
+    const dormantMax = cfg?.dormantMax ?? EVOLUTION.DORMANT_MAX;
+
     // Drop cache entries no longer in the current corpus before scanning:
     // decay()/forget() remove from the store, but the cache would otherwise
     // keep stale vectors + their cached content text alive indefinitely.
@@ -113,10 +129,10 @@ export class WASMEmbeddingStore implements IMemoryStore {
 
     // Embedder unavailable → keyword fallback keeps memory working offline.
     const embedder = await this.getEmbedder().catch(() => undefined);
-    if (!embedder) return this.fallbackSearch(all, query, opts);
+    if (!embedder) return this.fallbackSearch(all, query, opts, cfg);
 
     const queryVec = await embedder.embed(query).catch(() => undefined);
-    if (!queryVec) return this.fallbackSearch(all, query, opts);
+    if (!queryVec) return this.fallbackSearch(all, query, opts, cfg);
 
     // Embed every uncached (matching-type) entry in ONE batched WASM call —
     // transformers.js runs the whole batch through the model at once. The
@@ -127,7 +143,7 @@ export class WASMEmbeddingStore implements IMemoryStore {
     const uncached: MemoryEntry[] = [];
     for (const entry of all) {
       if (type !== undefined && entry.type !== type) continue;
-      if (healthScore(entry, nowForEmbed) < EVOLUTION.DORMANT_MAX) continue;
+      if (healthScore(entry, nowForEmbed, cfg) < dormantMax) continue;
       const cached = this.vecCache.get(entry.id);
       if (cached && cached.content === entry.content) continue;
       uncached.push(entry);
@@ -147,7 +163,7 @@ export class WASMEmbeddingStore implements IMemoryStore {
         // The batch embedder failed for the whole set (e.g. one pathological
         // entry). Fall back to keyword search instead of silently returning
         // no results — same recovery path as an unavailable embedder.
-        return this.fallbackSearch(all, query, opts);
+        return this.fallbackSearch(all, query, opts, cfg);
       }
     }
 
@@ -155,18 +171,18 @@ export class WASMEmbeddingStore implements IMemoryStore {
     const scored: Array<{ entry: MemoryEntry; score: number }> = [];
     for (const entry of all) {
       if (type !== undefined && entry.type !== type) continue;
-      // 休眠记忆不进检索（健康分 ≤ DORMANT_MAX）—— 也不付 embedding 的 WASM
+      // 休眠记忆不进检索（健康分 ≤ dormantMax）—— 也不付 embedding 的 WASM
       // 成本。与 keyword 路径的 dormant 过滤保持一致。
-      if (healthScore(entry, now) < EVOLUTION.DORMANT_MAX) continue;
+      if (healthScore(entry, now, cfg) < dormantMax) continue;
       // Entries whose embedding failed stay out of the cache → skipped,
       // mirroring the old per-entry `.catch(() => undefined)` semantics.
       const cached = this.vecCache.get(entry.id);
       if (!cached) continue;
       const sim = cosineSimilarity(queryVec, cached.vec);
-      // minScore gates the RELEVANCE (cosine) only; decayScore then sinks
-      // stale memories in the ranking but never drops them — mirroring the
-      // keyword fallback's semantics (filter by match, rank by decay).
-      if (sim >= this.minScore) scored.push({ entry, score: sim * (entry.decayScore ?? 1) });
+      // minScore gates the RELEVANCE (cosine) only; the live health score then
+      // sinks stale memories in the ranking but never drops them — mirroring
+      // the keyword fallback's semantics (filter by match, rank by health).
+      if (sim >= this.minScore) scored.push({ entry, score: sim * healthScore(entry, now, cfg) });
     }
 
     scored.sort((a, b) => b.score - a.score || b.entry.timestamp - a.entry.timestamp);
@@ -177,9 +193,15 @@ export class WASMEmbeddingStore implements IMemoryStore {
     return results;
   }
 
-  /** Keyword fallback（embedder 不可用/失败）—— 与语义路径一致地记录命中。 */
-  private async fallbackSearch(all: MemoryEntry[], query: string, opts?: MemorySearchOptions): Promise<MemoryEntry[]> {
-    const results = searchMemories(all, query, opts);
+  /** Keyword fallback（embedder 不可用/失败）—— 与语义路径一致地记录命中。
+   *   cfg 由 search() 解析一次传入，避免对 getEvolution 的重复调用。 */
+  private async fallbackSearch(
+    all: MemoryEntry[],
+    query: string,
+    opts?: MemorySearchOptions,
+    cfg?: Partial<EvolutionConfig>,
+  ): Promise<MemoryEntry[]> {
+    const results = searchMemories(all, query, opts, cfg);
     await this.recordHits(results);
     return results;
   }
@@ -195,6 +217,24 @@ export class WASMEmbeddingStore implements IMemoryStore {
 
   async recordHits(entries: MemoryEntry[]): Promise<void> {
     await this.store.recordHits(entries);
+  }
+
+  /** 枚举全部记忆（设置面板记忆库可视化用）。委托内层持久化 store；
+   *  非 IMemoryStore 接口成员，与 FSMemoryStore/LocalStorageMemoryStore
+   *  的 list() 扩展保持一致。 */
+  list(projectPath?: string): MemoryEntry[] {
+    return this.store.list(projectPath);
+  }
+
+  /** 上次衰减运行信息（设置面板诊断区）。委托内层持久化 store。 */
+  getLastDecayInfo(): MemoryDecayInfo {
+    return this.store.getLastDecayInfo?.() ?? {};
+  }
+
+  /** 批量导入（设置面板记忆页导出/导入，迁移到新机器）。委托内层 store。 */
+  importEntries(entries: MemoryEntry[]): Promise<{ imported: number; skipped: number }> {
+    if (!this.store.importEntries) return Promise.resolve({ imported: 0, skipped: entries.length });
+    return this.store.importEntries(entries);
   }
 
   /**

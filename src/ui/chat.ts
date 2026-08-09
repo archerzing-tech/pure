@@ -6,8 +6,7 @@ import { loadConfig, hasConfiguredKey, type PureConfig } from './config';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily } from '../shared/providers';
 import { saveSession, loadLastSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, type StoredMessage, type ToolExecMeta, type SessionStats } from './store';
 import { mergeTokenUsage } from '../shared/usage';
-import { LocalStorageMemoryStore } from '../adapter/memory/LocalStorageMemoryStore';
-import { WASMEmbeddingStore } from '../adapter/memory/WASMEmbeddingStore';
+import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
 import { INCREMENTAL_BUILD_PROMPT } from '../shared/agentBehavior';
 import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, FILE_TOOLS_CORE, composeUserTurn, stripUserTurnContext } from '../shared/promptLayers';
@@ -344,18 +343,9 @@ ${TYPO_TOLERANCE_PROMPT}
 ${LOGICAL_TRAPS_PROMPT}`;
 };
 
-// Cross-session memory store (IMemoryStore, localStorage-backed persistence
-// wrapped in WASMEmbeddingStore for local vector search per Adapter Layer
-// 设计文档 §12.7). The Harness searches it at session start — memories are
-// injected into the system prompt via PromptComposer — and writes a
-// successful_pattern when a session completes. The Memory skill toggle gates
-// both learning and injection (no store passed to CodingAgent = no memory).
-// Semantic search is lazy (transformers.js model loads on first search and
-// falls back to keyword matching when unavailable), so plain-chat users pay
-// no cost until memory is actually retrieved.
-const memoryStore = new WASMEmbeddingStore({
-  store: new LocalStorageMemoryStore(),
-});
+// The cross-session memory store singleton lives in ./memoryStore (own module
+// so the settings panel can render the memory dashboard without importing this
+// whole chat pipeline).
 
 // Lightweight environment context injected into every turn's system prompt.
 // Time/timezone intentionally stay OUT (they go stale immediately — the model

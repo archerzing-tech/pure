@@ -239,6 +239,27 @@ describe('FSMemoryStore 集成', () => {
     expect(reloaded[0].hitCount).toBe(1);
     expect(reloaded[0].decayScore).toBeCloseTo(0.7937005 * 0.72, 5);
   });
+
+  it('构造参数自定义阈值驱动 add 种子化与 decay 重算', async () => {
+    const fast = new FSMemoryStore(root, '', { recencyHalfLifeMs: 7 * DAY });
+    await fast.add({ type: 'user_preference', content: 'fast decay', timestamp: NOW - 14 * DAY, sessionId: 's1', projectPath: '/proj/f' });
+    await fast.decay(7 * DAY);
+    // 半衰期 7 天：闲置 14 天 → 2^(-2) × 0.72 = 0.18（add 时已按自定义阈值种子化）
+    expect(fast.list('/proj/f')[0].decayScore).toBeCloseTo(0.18, 5);
+  });
+
+  it('decay 记录运行信息（时间 + 删除/更新统计，meta.json）', async () => {
+    await store.add({ type: 'user_preference', content: 'stale', timestamp: NOW - 200 * DAY, sessionId: 's1', projectPath: '/proj/meta' });
+    await store.add({ type: 'user_preference', content: 'active', timestamp: NOW, sessionId: 's1', projectPath: '/proj/meta' });
+    await store.decay(7 * DAY);
+    const info = store.getLastDecayInfo();
+    expect(info.lastDecayAt).toBeGreaterThanOrEqual(NOW - 1);
+    // 200 天 → 跌破删除线删除；活跃条目闲置不足 → untouched
+    expect(info.lastDeleted).toBe(1);
+    expect(info.lastUpdated).toBe(0);
+    // 新实例也能从磁盘读回
+    expect(new FSMemoryStore(root).getLastDecayInfo().lastDeleted).toBe(1);
+  });
 });
 
 describe('LocalStorageMemoryStore 集成', () => {
@@ -266,5 +287,94 @@ describe('LocalStorageMemoryStore 集成', () => {
     const newEntry = fresh.find(e => e.id === newId)!;
     expect(newEntry.hitCount).toBe(1);
     expect(newEntry.lastUsedAt).toBeGreaterThanOrEqual(NOW - 1);
+  });
+
+  it('getConfig 注入的自定义阈值驱动 add 种子化与 decay 重算', async () => {
+    const store = new LocalStorageMemoryStore(() => ({ recencyHalfLifeMs: 7 * DAY }));
+    await store.add({ type: 'user_preference', content: 'fast decay', timestamp: NOW - 14 * DAY, sessionId: 's1', projectPath: '/p' });
+    await store.decay(7 * DAY);
+    const listed = store.list('/p');
+    // 半衰期 7 天：闲置 14 天 → 2^(-2) × 0.72 = 0.18
+    expect(listed[0].decayScore).toBeCloseTo(0.18, 5);
+    expect(listed[0].lifecycle).toBe('degraded');
+  });
+
+  it('decay 记录运行信息（时间 + 删除/更新统计）', async () => {
+    const store = new LocalStorageMemoryStore();
+    await store.add({ type: 'user_preference', content: 'stale', timestamp: NOW - 200 * DAY, sessionId: 's1', projectPath: '/p' });
+    await store.add({ type: 'user_preference', content: 'active', timestamp: NOW, sessionId: 's1', projectPath: '/p' });
+    await store.decay(7 * DAY);
+    const info = store.getLastDecayInfo();
+    expect(info.lastDecayAt).toBeGreaterThanOrEqual(NOW - 1);
+    expect(info.lastDeleted).toBe(1);
+    expect(info.lastUpdated).toBe(0);
+    // 新实例也从 localStorage 读回同一 meta
+    expect(new LocalStorageMemoryStore().getLastDecayInfo().lastDeleted).toBe(1);
+  });
+});
+
+describe('EvolutionConfig — 可配置进化阈值（遗忘速度）', () => {
+  it('自定义半衰期加速/减速时间衰减', () => {
+    const e = entry({ type: 'user_preference' });
+    const agedDefault = healthScore(e, NOW + 30 * DAY);          // 2^(-1) × 0.72 = 0.36
+    const agedSlow = healthScore(e, NOW + 30 * DAY, { recencyHalfLifeMs: 90 * DAY }); // 2^(-1/3) × 0.72
+    const agedFast = healthScore(e, NOW + 30 * DAY, { recencyHalfLifeMs: 10 * DAY }); // 2^(-3) × 0.72 = 0.09
+    expect(agedDefault).toBeCloseTo(0.36, 10);
+    expect(agedSlow).toBeGreaterThan(agedDefault);
+    expect(agedFast).toBeCloseTo(0.09, 10);
+    expect(agedFast).toBeLessThan(agedDefault);
+  });
+
+  it('自定义生命周期阈值重划阶段', () => {
+    expect(lifecycleOf(0.5, { activeMin: 0.6 })).toBe('degraded');
+    expect(lifecycleOf(0.2, { dormantMax: 0.25 })).toBe('dormant');
+    expect(lifecycleOf(0.2, { dormantMax: 0.1 })).toBe('degraded');
+  });
+
+  it('更严格的删除线把降级中的记忆直接删除', () => {
+    const e = entry({ type: 'user_preference', timestamp: NOW - 60 * DAY });
+    // 默认删除线 0.05：60 天 → 0.18 → updated（还在）
+    expect(decayEntry(e, NOW, 7 * DAY)).toBe('updated');
+    // 删除线提到 0.2：0.18 < 0.2 → deleted
+    const e2 = entry({ type: 'user_preference', timestamp: NOW - 60 * DAY });
+    expect(decayEntry(e2, NOW, 7 * DAY, { deleteFloor: 0.2 })).toBe('deleted');
+  });
+
+  it('自定义休眠宽限决定休眠记忆存活时间', () => {
+    // 70 天闲置的记忆重算后才是真休眠（≈0.143 ≤ 0.15）—— 40 天（≈0.286）
+    // 按默认阈值是 degraded，若手工标 dormant 属于不一致状态（会按“复活”处理）。
+    const mk = () => entry({ type: 'user_preference', timestamp: NOW - 70 * DAY, lifecycle: 'dormant', decayScore: 0.72 * Math.pow(2, -70 / 30) });
+    // 宽限 30 天：闲置 70 天 ≥ 30 且重算仍 dormant → 删除
+    expect(decayEntry(mk(), NOW, 7 * DAY, { dormantGraceMs: 30 * DAY })).toBe('deleted');
+    // 宽限 90 天：70 < 90 → 重算保留（不删）
+    const kept = decayEntry(mk(), NOW, 7 * DAY, { dormantGraceMs: 90 * DAY });
+    expect(kept).not.toBe('deleted');
+  });
+
+  it('取代覆盖率阈值越高越难触发取代', () => {
+    const old = entry({ type: 'user_preference', content: 'User prefers the TypeScript language' });
+    const next = entry({ type: 'user_preference', sessionId: 's2', content: 'User prefers the TypeScript language for backend' });
+    // 覆盖率 4/5 = 0.8 → 默认 0.55 触发取代；提到 0.85 则不触发
+    expect(findSupersedeTarget([old], next)?.id).toBe(old.id);
+    expect(findSupersedeTarget([old], next, { supersedeSimilarity: 0.85 })).toBeUndefined();
+  });
+
+  it('部分配置只覆盖对应维度（其余用默认）', () => {
+    const e = entry({ type: 'user_preference' });
+    // 只给 halfLife，其他默认 → 分数 = 2^(-30/90) × 0.72（默认可信度/饱和/惩罚不变）
+    expect(healthScore(e, NOW + 30 * DAY, { recencyHalfLifeMs: 90 * DAY }))
+      .toBeCloseTo(0.72 * Math.pow(2, -30 / 90), 10);
+  });
+
+  it('调低休眠线后“复活”的记忆不被宽限删除误杀', () => {
+    // 闲置 70 天、存储为 dormant（旧配置下 ≤0.15）、已超 60 天宽限的记忆。
+    const score70 = 0.72 * Math.pow(2, -70 / 30); // ≈ 0.143
+    // 默认休眠线 0.15：重算仍 dormant 且超宽限 → 删除
+    const e1 = entry({ type: 'user_preference', timestamp: NOW - 70 * DAY, lifecycle: 'dormant', decayScore: score70 });
+    expect(decayEntry(e1, NOW, 7 * DAY)).toBe('deleted');
+    // 休眠线降到 0.05：重算为 degraded（复活）→ 即使超宽限也不删，只更新
+    const e2 = entry({ type: 'user_preference', timestamp: NOW - 70 * DAY, lifecycle: 'dormant', decayScore: score70 });
+    expect(decayEntry(e2, NOW, 7 * DAY, { dormantMax: 0.05 })).toBe('updated');
+    expect(e2.lifecycle).toBe('degraded');
   });
 });

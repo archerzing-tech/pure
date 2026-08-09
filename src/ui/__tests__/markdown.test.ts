@@ -123,9 +123,13 @@ describe('diagramSlot', () => {
     expect(html).toContain('secret');
   });
 
-  it('renders a single 下载图片 button and no view/source toggle', () => {
+  it('renders a single icon-only download button and no view/source toggle', () => {
     const html = diagramSlot('svg', '<svg />', '<svg class="rendered" />');
-    expect(html).toContain('>下载图片</button>');
+    // The download action is icon-only: a download-arrow SVG inside the button,
+    // with the label carried by title/aria-label (no visible text).
+    expect(html).toContain('class="diagram-download-btn" title="下载图片" aria-label="下载图片"');
+    expect(html).toContain('polyline points="7 10 12 15 17 10"');
+    expect(html).not.toContain('>下载图片</button>');
     expect(html).toContain('class="diagram-preview svg-target"');
     // Source view is gone entirely: no toggle buttons, no format split.
     expect(html).not.toContain('data-diagram-view');
@@ -142,7 +146,7 @@ describe('diagramSlot', () => {
     expect(html).toContain(`data-raw="${encodeURIComponent(raw)}"`);
   });
 
-  it('gives every image kind the same single 下载图片 button with no source toggle', () => {
+  it('gives every image kind the same single icon-only download button with no source toggle', () => {
     const samples: Array<[DiagramKind, string]> = [
       ['svg', '<svg />'],
       ['chart', 'type: bar\nA 1\nB 2'],
@@ -151,7 +155,9 @@ describe('diagramSlot', () => {
     ];
     for (const [kind, source] of samples) {
       const html = diagramSlot(kind, source, '');
-      expect(html).toContain('>下载图片</button>');
+      expect(html).toContain('class="diagram-download-btn"');
+      expect(html).toContain('polyline points="7 10 12 15 17 10"');
+      expect(html).not.toContain('>下载图片</button>');
       expect(html).not.toContain('data-diagram-view');
       expect(html).not.toContain('data-diagram-download');
     }

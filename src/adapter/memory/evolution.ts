@@ -19,9 +19,51 @@ import type { MemoryEntry, MemoryType } from './IMemoryStore';
 
 export type MemoryLifecycle = 'active' | 'degraded' | 'dormant';
 
+/**
+ * 进化引擎阈值（Settings → Memory → 遗忘速度 可调）。全部可选：未提供的项
+ * 落到 EVOLUTION_DEFAULTS。单位遵循引擎语义（毫秒 / 0..1 小数）——UI 层负责
+ * 天↔毫秒、百分比↔小数的换算。
+ */
+export interface EvolutionConfig {
+  /** 时间维度：recency 半衰期（ms）。闲置满一个半衰期的记忆保留 50% 时间分量。 */
+  recencyHalfLifeMs: number;
+  /** 生命周期阈值：健康分 ≥ 此值 → active（活跃）。 */
+  activeMin: number;
+  /** 健康分 ≤ 此值 → dormant（休眠，不进检索，但保留等待宽限期删除）。 */
+  dormantMax: number;
+  /** 健康分 < 此值 → 直接删除。 */
+  deleteFloor: number;
+  /** 已休眠的记忆闲置超过此宽限期（ms）即使未跌破删除线也删除。 */
+  dormantGraceMs: number;
+  /** 进化：新条目有效 token 被旧条目覆盖达到此比例才判定同情境并取代。 */
+  supersedeSimilarity: number;
+  /** 进化状态维度：被取代的策略健康分 × 此惩罚，加速走完生命周期。 */
+  supersededPenalty: number;
+  /** 使用频率维度：检索命中多少次视为"高频使用"（达到即饱和）。 */
+  hitsForFullUsage: number;
+}
+
+/** 默认进化参数 —— 与 v1.5 的硬编码常量逐项一致。 */
+export const EVOLUTION_DEFAULTS: EvolutionConfig = {
+  recencyHalfLifeMs: 30 * 24 * 3600 * 1000,
+  activeMin: 0.45,
+  dormantMax: 0.15,
+  deleteFloor: 0.05,
+  dormantGraceMs: 60 * 24 * 3600 * 1000,
+  supersedeSimilarity: 0.55,
+  supersededPenalty: 0.4,
+  hitsForFullUsage: 4,
+};
+
+/** 部分配置 → 完整配置（缺省项用默认值）。 */
+export function resolveEvolutionConfig(partial?: Partial<EvolutionConfig>): EvolutionConfig {
+  return partial ? { ...EVOLUTION_DEFAULTS, ...partial } : EVOLUTION_DEFAULTS;
+}
+
+// 兼容导出：既有调用点/测试仍引用 EVOLUTION.* 常量（值恒等于默认配置）。
 export const EVOLUTION = {
   // ── 时间维度：recency 半衰期。闲置满一个半衰期的记忆保留 50% 的时间分量。──
-  RECENCY_HALF_LIFE_MS: 30 * 24 * 3600 * 1000,
+  RECENCY_HALF_LIFE_MS: EVOLUTION_DEFAULTS.recencyHalfLifeMs,
 
   // ── 可信度维度：按记忆类型的基础可信度（1.0 = 最高）。──
   CREDIBILITY: {
@@ -33,23 +75,23 @@ export const EVOLUTION = {
   } as Record<MemoryType, number>,
 
   // ── 使用频率维度：检索命中多少次视为"高频使用"（达到即饱和）。──
-  HITS_FOR_FULL_USAGE: 4,
+  HITS_FOR_FULL_USAGE: EVOLUTION_DEFAULTS.hitsForFullUsage,
 
   // ── 进化状态维度：被取代的策略健康分 × 此惩罚，加速走完生命周期。──
-  SUPERSEDED_PENALTY: 0.4,
+  SUPERSEDED_PENALTY: EVOLUTION_DEFAULTS.supersededPenalty,
 
   // ── 生命周期阈值（健康分 0..1）。──
-  ACTIVE_MIN: 0.45,   // ≥ 活跃；以下 → 降级
-  DORMANT_MAX: 0.15,  // ≤ 休眠 —— 不进检索（"睡着"，不是"没了"）
-  DELETE_FLOOR: 0.05, // < 直接删除
+  ACTIVE_MIN: EVOLUTION_DEFAULTS.activeMin,   // ≥ 活跃；以下 → 降级
+  DORMANT_MAX: EVOLUTION_DEFAULTS.dormantMax, // ≤ 休眠 —— 不进检索（"睡着"，不是"没了"）
+  DELETE_FLOOR: EVOLUTION_DEFAULTS.deleteFloor, // < 直接删除
 
   // 硬性兜底：已休眠的记忆即使健康分还没跌破删除线，闲置超过此宽限期也删除
   // （高频使用过的记忆降级很慢，可能永远悬在删除线之上）。
-  DORMANT_GRACE_MS: 60 * 24 * 3600 * 1000,
+  DORMANT_GRACE_MS: EVOLUTION_DEFAULTS.dormantGraceMs,
 
   // ── 进化：定向内容覆盖率阈值。新条目的有效 token 至少有此比例被旧条目
   //  覆盖，才判定为"同一情境的新版本"并取代旧条目。──
-  SUPERSEDE_SIMILARITY: 0.55,
+  SUPERSEDE_SIMILARITY: EVOLUTION_DEFAULTS.supersedeSimilarity,
   MIN_TOKENS_FOR_SUPERSEDE: 4,
 } as const;
 
@@ -80,21 +122,26 @@ const ln2 = Math.log(2);
 /**
  * 多维健康分（0..1）：recency × (0.55×credibility + 0.45×usage 饱和曲线) ×
  * superseded 惩罚。确定性 —— 同一 (entry, now) 永远给出同一分数，decay 反复
- * 执行只会收敛而非叠加。
+ * 执行只会收敛而非叠加。阈值（半衰期/饱和次数/惩罚）可经 cfg 覆盖。
  */
-export function healthScore(entry: MemoryEntry, now = Date.now()): number {
+export function healthScore(entry: MemoryEntry, now = Date.now(), cfg?: Partial<EvolutionConfig>): number {
+  const c = resolveEvolutionConfig(cfg);
   const lastUsed = entry.lastUsedAt ?? entry.timestamp;
-  const recency = Math.exp(-(Math.max(0, now - lastUsed) / EVOLUTION.RECENCY_HALF_LIFE_MS) * ln2);
+  // 防御：半衰期 ≤ 0（空环境变量 / 手输 0）会导致除零 → 全部分数 0 → 记忆
+  // 系统静默失效。下限 1ms 保证公式始终有限，坏配置最多让衰减极快而非崩溃。
+  const halfLife = Math.max(1, c.recencyHalfLifeMs);
+  const recency = Math.exp(-(Math.max(0, now - lastUsed) / halfLife) * ln2);
   const credibility = EVOLUTION.CREDIBILITY[entry.type] ?? 0.8;
-  const usage = Math.min(1, (entry.hitCount ?? 0) / EVOLUTION.HITS_FOR_FULL_USAGE);
-  const superseded = entry.supersededBy ? EVOLUTION.SUPERSEDED_PENALTY : 1;
+  const usage = Math.min(1, (entry.hitCount ?? 0) / c.hitsForFullUsage);
+  const superseded = entry.supersededBy ? c.supersededPenalty : 1;
   return recency * (0.55 * credibility + 0.45 * (0.5 + 0.5 * usage)) * superseded;
 }
 
-/** 健康分 → 生命周期阶段。 */
-export function lifecycleOf(score: number): MemoryLifecycle {
-  if (score >= EVOLUTION.ACTIVE_MIN) return 'active';
-  if (score > EVOLUTION.DORMANT_MAX) return 'degraded';
+/** 健康分 → 生命周期阶段（阈值可经 cfg 覆盖）。 */
+export function lifecycleOf(score: number, cfg?: Partial<EvolutionConfig>): MemoryLifecycle {
+  const c = resolveEvolutionConfig(cfg);
+  if (score >= c.activeMin) return 'active';
+  if (score > c.dormantMax) return 'degraded';
   return 'dormant';
 }
 
@@ -104,17 +151,30 @@ export type DecayOutcome = 'untouched' | 'updated' | 'deleted';
  * 对单条记忆执行一次衰减。最近 olderThan 毫秒内被使用过的记忆不处理（还在
  * 服务用户）；更旧的按绝对时间重算健康分 —— 确定性收敛，不叠加。
  */
-export function decayEntry(e: MemoryEntry, now: number, olderThan: number): DecayOutcome {
+export function decayEntry(
+  e: MemoryEntry,
+  now: number,
+  olderThan: number,
+  cfg?: Partial<EvolutionConfig>,
+): DecayOutcome {
+  const c = resolveEvolutionConfig(cfg);
   const lastUsed = e.lastUsedAt ?? e.timestamp;
   if (now - lastUsed < olderThan) return 'untouched';
-  const score = healthScore(e, now);
+  const score = healthScore(e, now, c);
+  const lifecycle = lifecycleOf(score, c);
+  // 宽限删除必须同时满足「重算后仍是 dormant」和「存储已是 dormant」：
+  //  - 重算仍是 dormant：用户调高 dormantMax 后分数跌破新线 -> 用新线判定，
+  //    避免用旧配置存的状态误删；
+  //  - 存储已是 dormant：本 pass 才首次进入休眠的记忆给一个周期缓冲（旧
+  //    行为），不会一跨线就被删；
+  // 若用户调低 dormantMax 使记忆"复活"（重算为 degraded/active），即使
+  // 闲置超过宽限也不删除 —— 记忆随新配置恢复检索。
   if (
-    score < EVOLUTION.DELETE_FLOOR ||
-    (e.lifecycle === 'dormant' && now - lastUsed >= EVOLUTION.DORMANT_GRACE_MS)
+    score < c.deleteFloor ||
+    (lifecycle === 'dormant' && e.lifecycle === 'dormant' && now - lastUsed >= c.dormantGraceMs)
   ) {
     return 'deleted';
   }
-  const lifecycle = lifecycleOf(score);
   // 用 epsilon 比较：两次 decay 之间 now 只前进毫秒，纯浮点漂移（~1e-13）不应
   // 触发无谓的重写 + 缓存清理（否则每个含旧条目的项目每小时都落盘一次）。
   if (Math.abs((e.decayScore ?? 0) - score) > 1e-9 || e.lifecycle !== lifecycle) {
@@ -170,7 +230,9 @@ export function similarityTokens(text: string): Set<string> {
 export function findSupersedeTarget(
   entries: MemoryEntry[],
   candidate: Omit<MemoryEntry, 'id'>,
+  cfg?: Partial<EvolutionConfig>,
 ): MemoryEntry | undefined {
+  const similarity = resolveEvolutionConfig(cfg).supersedeSimilarity;
   if (!SUPERSEDABLE_TYPES.has(candidate.type)) return undefined;
   const a = similarityTokens(comparisonText(candidate as MemoryEntry));
   if (a.size < EVOLUTION.MIN_TOKENS_FOR_SUPERSEDE) return undefined;
@@ -194,5 +256,5 @@ export function findSupersedeTarget(
       best = e;
     }
   }
-  return bestCoverage >= EVOLUTION.SUPERSEDE_SIMILARITY ? best : undefined;
+  return bestCoverage >= similarity ? best : undefined;
 }

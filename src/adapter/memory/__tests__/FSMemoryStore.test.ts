@@ -144,7 +144,7 @@ describe('FSMemoryStore.forget / decay', () => {
     await store.add(base({ content: 'old memory', timestamp: now - 10 * 24 * 3600 * 1000 }));
     await store.add(base({ content: 'fresh memory', timestamp: now }));
     await store.decay(7 * 24 * 3600 * 1000);
-    const file = join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl');
+    const file = join(root, (await import('node:fs')).readdirSync(root).filter(d => d !== 'meta.json')[0], 'memories.jsonl');
     const lines = readFileSync(file, 'utf-8').trim().split('\n');
     const old = lines.map(l => JSON.parse(l)).find(e => e.content === 'old memory');
     const fresh = lines.map(l => JSON.parse(l)).find(e => e.content === 'fresh memory');
@@ -159,9 +159,9 @@ describe('FSMemoryStore.forget / decay', () => {
     const now = Date.now();
     await store.add(base({ content: 'old', timestamp: now - 10 * 24 * 3600 * 1000 }));
     await store.decay(7 * 24 * 3600 * 1000);
-    const first = JSON.parse(readFileSync(join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl'), 'utf-8').trim());
+    const first = JSON.parse(readFileSync(join(root, (await import('node:fs')).readdirSync(root).filter(d => d !== 'meta.json')[0], 'memories.jsonl'), 'utf-8').trim());
     await store.decay(7 * 24 * 3600 * 1000);
-    const second = JSON.parse(readFileSync(join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl'), 'utf-8').trim());
+    const second = JSON.parse(readFileSync(join(root, (await import('node:fs')).readdirSync(root).filter(d => d !== 'meta.json')[0], 'memories.jsonl'), 'utf-8').trim());
     // 按绝对时间重算（≈0.5715），不叠加 —— 旧实现第二次会再减半到 0.25。
     expect(first.decayScore).toBeCloseTo(0.7937005 * 0.72, 5);
     expect(second.decayScore).toBeCloseTo(0.7937005 * 0.72, 5);
@@ -172,7 +172,7 @@ describe('FSMemoryStore.forget / decay', () => {
     // 200 天闲置、从未使用：recency 2^(-200/30) ≈ 0.0098 → 健康分 ≈ 0.007 < 0.05。
     await store.add(base({ content: 'very stale', timestamp: now - 200 * 24 * 3600 * 1000 }));
     await store.decay(7 * 24 * 3600 * 1000);
-    const file = join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl');
+    const file = join(root, (await import('node:fs')).readdirSync(root).filter(d => d !== 'meta.json')[0], 'memories.jsonl');
     expect(readFileSync(file, 'utf-8').trim()).toBe('');
     const hits = await store.search('very', {});
     expect(hits).toHaveLength(0);
@@ -184,12 +184,12 @@ describe('FSMemoryStore.forget / decay', () => {
     // 40 天 < 60 天宽限 → 首次 decay 后仍保留在文件里。
     await store.add(base({ content: 'retained', timestamp: now - 40 * 24 * 3600 * 1000, supersededBy: 'new' }));
     await store.decay(7 * 24 * 3600 * 1000);
-    let file = join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl');
+    let file = join(root, (await import('node:fs')).readdirSync(root).filter(d => d !== 'meta.json')[0], 'memories.jsonl');
     expect(readFileSync(file, 'utf-8').trim()).toContain('retained');
     // 65 天闲置 + 被取代：健康分 ≈ 0.069 → dormant，65 天 ≥ 60 天宽限 → 删除。
     await store.add(base({ content: 'purged', timestamp: now - 65 * 24 * 3600 * 1000, supersededBy: 'new' }));
     await store.decay(7 * 24 * 3600 * 1000);
-    file = join(root, (await import('node:fs')).readdirSync(root)[0], 'memories.jsonl');
+    file = join(root, (await import('node:fs')).readdirSync(root).filter(d => d !== 'meta.json')[0], 'memories.jsonl');
     const lines = readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean);
     expect(lines.some(l => l.includes('retained'))).toBe(true);
     expect(lines.some(l => l.includes('purged'))).toBe(false);

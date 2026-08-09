@@ -9,6 +9,12 @@ import { escapeHtml } from '../shared/html';
 import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { formatBytes } from './TauriToolAdapter';
+import { memoryStore } from './memoryStore';
+import { EVOLUTION_DEFAULTS, healthScore, lifecycleOf, resolveEvolutionConfig } from '../adapter/memory/evolution';
+import type { MemoryEntry } from '../adapter/memory/IMemoryStore';
+import { buildMemoryExportJson, buildMemoryExportMarkdown, parseMemoryImport } from './memoryTransfer';
+import { showToastHtml } from '../shared/toast';
+import { buildExportSavedToast } from './statsExportToast';
 import { defaultModelFor, providerDef } from '../shared/providers';
 import {
   STORAGE_KEY,
@@ -110,6 +116,10 @@ export class SettingsPanel {
     const navItem = document.querySelector(`.settings-nav-item[data-category="${category}"]`);
     const title = navItem?.querySelector('span')?.textContent || 'Settings';
     document.getElementById('settings-title')!.textContent = title;
+
+    // 记忆库是只读仪表盘：切换到该页时重新渲染，反映最新的进化状态
+    // （比如刚结束的会话刚写入新记忆 / 某条被取代降级）。
+    if (category === 'memory') this.renderMemoryDashboard();
   }
 
   // ── Config queries ──
@@ -445,7 +455,10 @@ export class SettingsPanel {
       '#cfg-tavily-key', '#cfg-serper-key',
       '#cfg-streaming-render',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
-      '.cfg-skill-toggle'
+      '.cfg-skill-toggle',
+      // Memory evolution thresholds (number inputs save on change/blur).
+      '#cfg-mem-half-life', '#cfg-mem-active-min', '#cfg-mem-dormant-max',
+      '#cfg-mem-delete-floor', '#cfg-mem-grace', '#cfg-mem-supersede-sim'
     ];
     autoSaveSelectors.forEach(sel => {
       document.querySelectorAll(sel).forEach(el => {
@@ -460,6 +473,81 @@ export class SettingsPanel {
           });
         }
       });
+    });
+
+    // ── Memory forgetting-speed: reset to engine defaults ──
+    document.getElementById('cfg-mem-reset-btn')?.addEventListener('click', () => {
+      this.loadEvolutionToForm();
+      this.autoSave();
+      this.toast(t('memory.resetDone'));
+      // The reset landed on the memory page — reflect it in the dashboard
+      // and diagnostics (custom markers clear).
+      this.renderMemoryDashboard();
+      this.renderMemoryDiagnostics();
+    });
+
+    // ── Memory diagnostics: run decay now（按当前阈值重算全部记忆）──
+    document.getElementById('cfg-mem-decay-btn')?.addEventListener('click', async () => {
+      const btn = document.getElementById('cfg-mem-decay-btn') as HTMLButtonElement | null;
+      if (btn) btn.disabled = true;
+      try {
+        // olderThan = 0：无视"闲置超过阈值才处理"的门槛，立即按当前生效的
+        // 遗忘速度重算全部记忆 —— 调整阈值后手动触发即可看到新分数落盘。
+        await memoryStore.decay(0);
+        this.toast(t('memory.diag.ran'));
+      } catch (err) {
+        console.error('[pure] manual memory decay failed:', err);
+        this.toast(t('memory.diag.runFailed'));
+      } finally {
+        if (btn) btn.disabled = false;
+        this.renderMemoryDiagnostics();
+        this.renderMemoryDashboard();
+      }
+    });
+
+    // ── Memory export/import（记忆页导出/导入，迁移到新机器）──
+    document.getElementById('cfg-mem-export-json')?.addEventListener('click', () => this.exportMemoryLibrary('json'));
+    document.getElementById('cfg-mem-export-md')?.addEventListener('click', () => this.exportMemoryLibrary('markdown'));
+    const importBtn = document.getElementById('cfg-mem-import');
+    const importFile = document.getElementById('cfg-mem-import-file') as HTMLInputElement | null;
+    importBtn?.addEventListener('click', () => importFile?.click());
+    // The hidden input persists across clicks — reset value so re-importing the
+    // SAME file after a change fires change() again (File inputs don't repeat
+    // on an identical selection otherwise).
+    importFile?.addEventListener('change', () => {
+      const file = importFile.files?.[0];
+      importFile.value = '';
+      if (file) void this.importMemoryLibrary(file);
+    });
+
+    // Memory threshold edits: out-of-range typed values snap back to the
+    // field's default (the spinner's min/max don't constrain typed input),
+    // and the dashboard above re-renders with the new thresholds so the
+    // health bars reflect the change immediately.
+    const MEM_EVO_IDS = ['cfg-mem-half-life', 'cfg-mem-active-min', 'cfg-mem-dormant-max', 'cfg-mem-delete-floor', 'cfg-mem-grace', 'cfg-mem-supersede-sim'];
+    for (const id of MEM_EVO_IDS) {
+      const el = document.getElementById(id) as HTMLInputElement | null;
+      if (!el) continue;
+      el.addEventListener('change', () => {
+        const v = parseFloat(el.value);
+        const min = el.min ? parseFloat(el.min) : -Infinity;
+        const max = el.max ? parseFloat(el.max) : Infinity;
+        if (!Number.isFinite(v) || v < min || v > max) {
+          this.loadEvolutionToForm(); // snap back to persisted/default value
+        }
+        this.renderMemoryDashboard();
+        this.renderMemoryDiagnostics(); // custom markers + effective params update
+      });
+    }
+
+    // Background memory decay (src/ui/memoryDecayTimer.ts) fires after the 1h
+    // throttle window even without a new chat session. When it runs while the
+    // memory page is open, refresh the diagnostics + dashboard so the last-run
+    // time / next-run estimate / health bars stay truthful.
+    document.addEventListener('pure:memory-decay-run', () => {
+      if (!this.visible) return;
+      this.renderMemoryDiagnostics();
+      this.renderMemoryDashboard();
     });
 
     // Keyboard: Esc to close
@@ -633,6 +721,16 @@ export class SettingsPanel {
     // enabled state when the panel reopens.
     this.renderInstalledHubSkills();
 
+    // Memory evolution thresholds (Settings → Memory → 遗忘速度) — fill the
+    // fields from the persisted (partial) config, defaulting to engine values.
+    this.loadEvolutionToForm();
+
+    // Memory dashboard: live health / lifecycle / supersession per entry.
+    this.renderMemoryDashboard();
+
+    // Runtime diagnostics: effective evolution params + last decay run info.
+    this.renderMemoryDiagnostics();
+
     document.querySelectorAll('.theme-option').forEach(el => {
       const active = el.getAttribute('data-theme') === cfg.theme;
       el.classList.toggle('active', active);
@@ -767,6 +865,372 @@ export class SettingsPanel {
     applyTranslations();
   }
 
+  // ── Memory evolution thresholds（遗忘速度设置区）──
+
+  private static readonly DAY_MS = 24 * 3600 * 1000;
+
+  /** 把（可能缺省的）evolution 配置填充进设置表单；缺省字段显示引擎默认值。 */
+  private loadEvolutionToForm(): void {
+    const evo = (loadConfig() ?? defaults()).evolution;
+    const D = EVOLUTION_DEFAULTS;
+    const set = (id: string, v: string): void => {
+      const el = document.getElementById(id) as HTMLInputElement | null;
+      if (el) el.value = v;
+    };
+    set('cfg-mem-half-life', String((evo?.recencyHalfLifeMs ?? D.recencyHalfLifeMs) / SettingsPanel.DAY_MS));
+    set('cfg-mem-grace', String((evo?.dormantGraceMs ?? D.dormantGraceMs) / SettingsPanel.DAY_MS));
+    set('cfg-mem-active-min', String((evo?.activeMin ?? D.activeMin) * 100));
+    set('cfg-mem-dormant-max', String((evo?.dormantMax ?? D.dormantMax) * 100));
+    set('cfg-mem-delete-floor', String((evo?.deleteFloor ?? D.deleteFloor) * 100));
+    set('cfg-mem-supersede-sim', String((evo?.supersedeSimilarity ?? D.supersedeSimilarity) * 100));
+  }
+
+  /** 从表单收集 evolution 配置：只保留与引擎默认不同的字段（用户未改动的项
+   *  不落盘，天然跟随升级后的默认值）。超出 min/max 的键入值（如手输 0 半衰
+   *  期）直接拒绝 —— 不持久化，回落引擎默认，防止除零类破坏。 */
+  private gatherEvolution(): PureConfig['evolution'] {
+    const num = (id: string): number | null => {
+      const el = document.getElementById(id) as HTMLInputElement | null;
+      if (!el) return null;
+      const v = parseFloat(el.value);
+      if (!Number.isFinite(v)) return null;
+      const min = el.min ? parseFloat(el.min) : -Infinity;
+      const max = el.max ? parseFloat(el.max) : Infinity;
+      if (v < min || v > max) return null;
+      // 输入框 step=1：取整避免 30.5 这类小数（引擎能处理，但 UI 口径是整数）。
+      return Math.round(v);
+    };
+    const D = EVOLUTION_DEFAULTS;
+    const DAY = SettingsPanel.DAY_MS;
+    const evo: NonNullable<PureConfig['evolution']> = {};
+    const half = num('cfg-mem-half-life');
+    const grace = num('cfg-mem-grace');
+    const active = num('cfg-mem-active-min');
+    const dormant = num('cfg-mem-dormant-max');
+    const floor = num('cfg-mem-delete-floor');
+    const sim = num('cfg-mem-supersede-sim');
+    if (half !== null && half * DAY !== D.recencyHalfLifeMs) evo.recencyHalfLifeMs = half * DAY;
+    if (grace !== null && grace * DAY !== D.dormantGraceMs) evo.dormantGraceMs = grace * DAY;
+    if (active !== null && active / 100 !== D.activeMin) evo.activeMin = active / 100;
+    if (dormant !== null && dormant / 100 !== D.dormantMax) evo.dormantMax = dormant / 100;
+    if (floor !== null && floor / 100 !== D.deleteFloor) evo.deleteFloor = floor / 100;
+    if (sim !== null && sim / 100 !== D.supersedeSimilarity) evo.supersedeSimilarity = sim / 100;
+    return Object.keys(evo).length > 0 ? evo : undefined;
+  }
+
+  // ── Memory runtime diagnostics（记忆页诊断区）──
+
+  /** 渲染生效的进化参数（合并用户自定义后）+ 上次衰减运行信息。 */
+  private renderMemoryDiagnostics(): void {
+    const el = document.getElementById('memory-diag');
+    if (!el) return;
+    const cfg = loadConfig() ?? defaults();
+    const evo = resolveEvolutionConfig(cfg.evolution);
+    const custom = cfg.evolution ?? {};
+    const DAY = SettingsPanel.DAY_MS;
+    const pct = (v: number) => `${Math.round(v * 100)}%`;
+    const day = (v: number) => `${v / DAY}${t('memory.unitDay')}`;
+    const rows: Array<[string, string, boolean]> = [
+      [t('memory.diag.halfLife'), day(evo.recencyHalfLifeMs), custom.recencyHalfLifeMs !== undefined],
+      [t('memory.diag.activeMin'), pct(evo.activeMin), custom.activeMin !== undefined],
+      [t('memory.diag.dormantMax'), pct(evo.dormantMax), custom.dormantMax !== undefined],
+      [t('memory.diag.deleteFloor'), pct(evo.deleteFloor), custom.deleteFloor !== undefined],
+      [t('memory.diag.grace'), day(evo.dormantGraceMs), custom.dormantGraceMs !== undefined],
+      [t('memory.diag.supersedeSim'), pct(evo.supersedeSimilarity), custom.supersedeSimilarity !== undefined],
+      [t('memory.diag.supersededPenalty'), pct(evo.supersededPenalty), custom.supersededPenalty !== undefined],
+      [t('memory.diag.hitsFull'), String(evo.hitsForFullUsage), custom.hitsForFullUsage !== undefined],
+    ];
+    const info = memoryStore.getLastDecayInfo();
+    const now = Date.now();
+    const parts: string[] = [];
+    if (info.lastDecayAt) parts.push(this.relativeTime(info.lastDecayAt, now));
+    const del = info.lastDeleted ?? 0;
+    const upd = info.lastUpdated ?? 0;
+    if (parts.length > 0 && (del > 0 || upd > 0)) {
+      parts.push(t('memory.diag.deleted').replace('{n}', String(del)));
+      parts.push(t('memory.diag.updated').replace('{n}', String(upd)));
+    }
+    const lastRunText = parts.length > 0 ? parts.join(' · ') : t('memory.diag.never');
+    // 下次自动衰减：后台定时器（memoryDecayTimer.ts）在节流窗（1h，与 Harness
+    // MEMORY_DECAY_INTERVAL_MS 一致）过后自动执行，即使没有新会话。上次运行 +
+    // 节流窗即下次触发点；节流窗已过 → 后台定时器立即补跑。
+    const AUTO_DECAY_INTERVAL = 60 * 60 * 1000;
+    let nextRunText: string;
+    if (info.lastDecayAt) {
+      const nextAt = info.lastDecayAt + AUTO_DECAY_INTERVAL;
+      if (nextAt > now) {
+        const diff = nextAt - now;
+        const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
+        const t0 = diff < MIN
+          ? t('memory.diag.inMin').replace('{n}', '1')
+          : diff < HOUR
+            ? t('memory.diag.inMin').replace('{n}', String(Math.floor(diff / MIN)))
+            : diff < DAY
+              ? t('memory.diag.inHour').replace('{n}', String(Math.floor(diff / HOUR)))
+              : t('memory.diag.inDay').replace('{n}', String(Math.floor(diff / DAY)));
+        nextRunText = t('memory.diag.nextRunIn').replace('{t}', t0);
+      } else {
+        nextRunText = t('memory.diag.nextRunSoon');
+      }
+    } else {
+      // 从未运行：后台定时器启动后立即补跑第一轮。
+      nextRunText = t('memory.diag.nextRunSoon');
+    }
+    // 后台定时器徽章：显示衰减由 idle 定时器守护，不依赖新会话触发。
+    const timerBadge = `<i class="memory-diag-timer">${t('memory.diag.timerEnabled')}</i>`;
+    el.innerHTML = `<div class="memory-diag-params">
+      ${rows.map(([label, value, isCustom]) => `<div class="memory-diag-row">
+        <span class="memory-diag-key">${escapeHtml(label)}</span>
+        <b class="memory-diag-value">${escapeHtml(value)}</b>
+        ${isCustom ? `<i class="memory-diag-custom">${t('memory.diag.custom')}</i>` : ''}
+      </div>`).join('')}
+    </div>
+    <div class="memory-diag-lastrun">
+      <span class="memory-diag-key">${t('memory.diag.lastRunLabel')}</span>
+      <span class="memory-diag-value">${escapeHtml(lastRunText)}</span>
+    </div>
+    <div class="memory-diag-lastrun">
+      <span class="memory-diag-key">${t('memory.diag.nextRunLabel')}</span>
+      <span class="memory-diag-value">${escapeHtml(nextRunText)}</span>
+    </div>
+    <div class="memory-diag-timer-row">${timerBadge} ${t('memory.diag.timerHint')}</div>`;
+  }
+
+  // ── Memory dashboard（智能进化记忆库可视化，Adapter Layer 设计文档 §12.9）──
+
+  // Type badge classes + i18n keys only exist for the five known kinds; the
+  // fallback text is escaped (entries are read from user-editable localStorage,
+  // so an unexpected `type` must never reach innerHTML unescaped).
+  private static readonly MEMORY_TYPES: ReadonlySet<string> = new Set([
+    'user_preference', 'error_pattern', 'successful_pattern', 'project_convention', 'procedure',
+  ]);
+
+  /** 相对时间标签：刚刚 / {n} 分钟前 / {n} 小时前 / {n} 天前。 */
+  private relativeTime(ts: number, now: number): string {
+    const diff = Math.max(0, now - ts);
+    const MIN = 60_000;
+    const HOUR = 3_600_000;
+    const DAY = 86_400_000;
+    if (diff < MIN) return t('memory.justNow');
+    if (diff < HOUR) return t('memory.minAgo').replace('{n}', String(Math.floor(diff / MIN)));
+    if (diff < DAY) return t('memory.hourAgo').replace('{n}', String(Math.floor(diff / HOUR)));
+    return t('memory.dayAgo').replace('{n}', String(Math.floor(diff / DAY)));
+  }
+
+  private truncateForMemory(text: string, n: number): string {
+    return text.length > n ? `${text.slice(0, n)}…` : text;
+  }
+
+  /** 渲染记忆库：汇总（总数 + 各生命周期计数）+ 逐条卡片（健康分进度条、
+   *  生命周期徽章、被取代标记、检索次数、上次使用、项目）。
+   *  在面板打开（loadToForm）与切到「记忆」页时刷新。
+   *  健康分取实时计算值（decayScore 是存储值，可能滞后一次衰减）。 */
+  private renderMemoryDashboard(): void {
+    const listEl = document.getElementById('memory-list');
+    if (!listEl) return;
+    const cfg = loadConfig() ?? defaults();
+    const enabled = cfg.skills?.memory ?? true;
+    const disabledHint = document.getElementById('memory-disabled-hint');
+    if (disabledHint) {
+      disabledHint.textContent = t('memory.disabled');
+      disabledHint.hidden = enabled;
+    }
+    // Memory skill off: show only the hint — no summary, no card list, so the
+    // page never mixes "disabled" with a populated dashboard.
+    if (!enabled) {
+      listEl.innerHTML = '';
+      const summaryEl = document.getElementById('memory-summary');
+      if (summaryEl) summaryEl.innerHTML = '';
+      const cappedEl = document.getElementById('memory-capped');
+      if (cappedEl) cappedEl.hidden = true;
+      return;
+    }
+
+    let entries: MemoryEntry[] = [];
+    try {
+      entries = memoryStore.list();
+    } catch (err) {
+      console.error('[pure] memory dashboard list failed:', err);
+    }
+
+    const now = Date.now();
+    const summaryEl = document.getElementById('memory-summary');
+    if (summaryEl) {
+      const counts = { active: 0, degraded: 0, dormant: 0 };
+      for (const e of entries) counts[lifecycleOf(healthScore(e, now, cfg.evolution), cfg.evolution)]++;
+      summaryEl.innerHTML = `<span class="memory-summary-count">${t('memory.summary').replace('{n}', String(entries.length))}</span>` +
+        (entries.length > 0
+          ? `<span class="memory-summary-chip memory-chip-active">${t('memory.lifecycle.active')} · ${counts.active}</span>` +
+            `<span class="memory-summary-chip memory-chip-degraded">${t('memory.lifecycle.degraded')} · ${counts.degraded}</span>` +
+            `<span class="memory-summary-chip memory-chip-dormant">${t('memory.lifecycle.dormant')} · ${counts.dormant}</span>`
+          : '');
+    }
+
+    const MAX_CARDS = 100;
+    const cappedEl = document.getElementById('memory-capped');
+    if (cappedEl) {
+      cappedEl.textContent = t('memory.capped').replace('{n}', String(MAX_CARDS));
+      cappedEl.hidden = entries.length <= MAX_CARDS;
+    }
+
+    if (entries.length === 0) {
+      listEl.innerHTML = `<div class="memory-empty">${t('memory.empty')}</div>`;
+      return;
+    }
+
+    // 被取代标记的悬浮提示解析出取代者的内容（更直观），找不到则回退到 id。
+    const byId = new Map(entries.map(e => [e.id, e]));
+    listEl.innerHTML = entries
+      .map(e => ({ e, score: healthScore(e, now, cfg.evolution) }))
+      .sort((a, b) => b.score - a.score || b.e.timestamp - a.e.timestamp)
+      .slice(0, MAX_CARDS)
+      .map(({ e, score }) => {
+        const lifecycle = lifecycleOf(score, cfg.evolution);
+        const pct = Math.min(100, Math.max(0, Math.round(score * 100)));
+        const superseded = e.supersededBy
+          ? (() => {
+              const replacer = byId.get(e.supersededBy!);
+              const tip = replacer
+                ? t('memory.supersededByTitle').replace('{content}', this.truncateForMemory(replacer.content, 120))
+                : t('memory.supersededByTitle').replace('{content}', e.supersededBy!);
+              return `<span class="memory-badge memory-badge-superseded" title="${escapeHtml(tip)}">${t('memory.superseded')}</span>`;
+            })()
+          : '';
+        const lastUsed = e.lastUsedAt ?? e.timestamp;
+        const project = e.projectPath || '';
+        const projectShort = project.split('/').filter(Boolean).pop() || project;
+        const knownType = SettingsPanel.MEMORY_TYPES.has(e.type) ? e.type : undefined;
+        const typeClass = knownType ? ` memory-type-${knownType}` : '';
+        const typeLabel = escapeHtml(knownType ? t(`memory.type.${knownType}`, knownType) : e.type);
+        return `<div class="memory-card">
+          <div class="memory-card-header">
+            <span class="memory-badge memory-badge-type${typeClass}">${typeLabel}</span>
+            <span class="memory-badge memory-badge-life memory-life-${lifecycle}">${t(`memory.lifecycle.${lifecycle}`, lifecycle)}</span>
+            ${superseded}
+          </div>
+          <div class="memory-content" title="${escapeHtml(e.content)}">${escapeHtml(this.truncateForMemory(e.content, 160))}</div>
+          <div class="memory-meta">
+            <span class="memory-score" title="${escapeHtml(t('memory.health'))}: ${pct}%">
+              <span class="memory-score-track"><i class="memory-score-bar memory-bar-${lifecycle}" style="width:${pct}%"></i></span>
+              <b>${pct}%</b>
+            </span>
+            <span class="memory-meta-item">${t('memory.hits').replace('{n}', String(e.hitCount ?? 0))}</span>
+            <span class="memory-meta-item">${t('memory.lastUsed').replace('{t}', this.relativeTime(lastUsed, now))}</span>
+            ${project ? `<span class="memory-meta-item memory-project" title="${escapeHtml(project)}">${escapeHtml(projectShort)}</span>` : ''}
+          </div>
+        </div>`;
+      })
+      .join('');
+  }
+
+  // ── Memory export / import（导出/导入，迁移到新机器）──
+
+  /** 导出记忆库：JSON（完整字段 + 实时健康分/生命周期）或 Markdown（报告）。
+   *  空库提示而非导出空文件。保存走与 stats 导出相同的 Tauri save_file /
+   *  browser fallback 流程。 */
+  private async exportMemoryLibrary(format: 'json' | 'markdown'): Promise<void> {
+    try {
+      const entries = memoryStore.list();
+      if (entries.length === 0) {
+        this.toast(t('memory.transfer.empty'));
+        return;
+      }
+      const cfg = (loadConfig() ?? defaults()).evolution;
+      const stamp = new Date().toISOString().slice(0, 10);
+      if (format === 'json') {
+        const content = buildMemoryExportJson(entries, cfg);
+        const savedTo = await this.saveTextFile(content, `pure-memories-${stamp}.json`, 'json');
+        if (savedTo) showToastHtml(buildExportSavedToast(savedTo));
+      } else {
+        const content = buildMemoryExportMarkdown(entries, cfg);
+        const savedTo = await this.saveTextFile(content, `pure-memories-${stamp}.md`, 'md');
+        if (savedTo) showToastHtml(buildExportSavedToast(savedTo));
+      }
+    } catch (err) {
+      console.error('[pure] memory export failed:', err);
+      this.toast(t('memory.transfer.exportFailed'));
+    }
+  }
+
+  /** 导入记忆库：读取 JSON 文件 → 解析校验 → 去重写入 → 刷新仪表盘。 */
+  private async importMemoryLibrary(file: File): Promise<void> {
+    try {
+      const text = await file.text();
+      const entries = parseMemoryImport(text);
+      if (entries.length === 0) {
+        this.toast(t('memory.transfer.noEntries'));
+        return;
+      }
+      const { imported, skipped } = await memoryStore.importEntries(entries);
+      this.toast(t('memory.transfer.imported')
+        .replace('{n}', String(imported))
+        .replace('{m}', String(skipped)));
+      this.renderMemoryDashboard();
+    } catch (err) {
+      console.error('[pure] memory import failed:', err);
+      const msg = (err as Error)?.message;
+      this.toast(msg === 'unsupported-envelope'
+        ? t('memory.transfer.invalidEnvelope')
+        : msg === 'unsupported-version'
+          ? t('memory.transfer.invalidVersion')
+          : msg === 'storage-full'
+            ? t('memory.transfer.storageFull')
+            : t('memory.transfer.invalidFile'));
+    }
+  }
+
+  /** 通过原生保存对话框写出文本（Tauri：plugin-dialog save + save_file
+   *  invoke；browser：File System Access API → download anchor 回退）。
+   *  返回保存路径；取消返回 null。镜像 main.ts 的 stats 导出流程。 */
+  private async saveTextFile(content: string, filename: string, ext: string): Promise<string | null> {
+    if (isTauriRuntime()) {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const path = await save({ defaultPath: filename, filters: [{ name: ext.toUpperCase(), extensions: [ext] }] });
+      if (!path) return null; // cancelled
+      const core = await loadTauriCore();
+      if (!core) throw new Error('Tauri core unavailable');
+      await core.invoke('save_file', { path, content });
+      return path;
+    }
+
+    // Browser dev mode: File System Access API (Chrome/Edge).
+    const w = window as unknown as {
+      showSaveFilePicker?: (opts: {
+        suggestedName?: string;
+        types?: Array<{ description: string; accept: Record<string, string[]> }>;
+      }) => Promise<{
+        createWritable(): Promise<{ write(d: Blob): Promise<void>; close(): Promise<void> }>;
+      }>;
+    };
+    if (typeof w.showSaveFilePicker === 'function') {
+      try {
+        const mime = ext === 'json' ? 'application/json' : 'text/markdown';
+        const handle = await w.showSaveFilePicker({
+          suggestedName: filename,
+          types: [{ description: ext.toUpperCase(), accept: { [mime]: [`.${ext}`] } }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+        await writable.close();
+        return filename;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return null; // cancelled
+        // Any other failure — fall through to the download fallback.
+      }
+    }
+
+    // Last-resort download (works everywhere).
+    const url = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    return null;
+  }
+
   // ── Gather form values ──
 
   private gatherForm(): PureConfig {
@@ -818,6 +1282,8 @@ export class SettingsPanel {
       // merged value is never undefined — keep the spread rather than a bare
       // constant so a future v3 bump survives the round-trip).
       configVersion: (loadConfig() ?? defaults()).configVersion,
+      // Memory evolution thresholds（遗忘速度）—— only non-default fields.
+      evolution: this.gatherEvolution(),
     };
   }
 

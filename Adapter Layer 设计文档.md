@@ -1062,3 +1062,27 @@ superseded   = 被取代 ? 0.4 : 1            // 被新策略取代的旧策略�
 - 旧条目不立即删除，而是带着惩罚因子走完 降级→休眠→删除 —— 「不合时宜的策略慢慢进化成最新最好用的」。
 
 **示例时序**（被取代的旧策略，40 天闲置）：健康分 0.775×0.4×2^(-40/30) ≈ 0.12 → dormant（第 1 次 decay）→ 40 天后仍保留；闲置到 ≥60 天 → 删除。
+
+**阈值可配置（遗忘速度）**
+
+所有进化阈值从硬编码常量升级为 `EvolutionConfig`（`evolution.ts`，默认值逐项等于上表），支持用户自定义遗忘速度：
+
+- **接口**：`healthScore(entry, now, cfg?)` / `lifecycleOf(score, cfg?)` / `decayEntry(…)` / `findSupersedeTarget(…)` / `searchMemories(…)` 均接受可选 `Partial<EvolutionConfig>`，缺省项回落 `EVOLUTION_DEFAULTS`；`resolveEvolutionConfig(partial)` 做合并。
+- **可调项**：`recencyHalfLifeMs`（半衰期）、`activeMin` / `dormantMax` / `deleteFloor`（活跃/休眠/删除线）、`dormantGraceMs`（休眠宽限）、`supersedeSimilarity`（取代覆盖率）、`supersededPenalty`、`hitsForFullUsage`。
+- **GUI**：Settings → Memory → 遗忘速度 六个输入框（半衰期/活跃线/休眠线/删除线/休眠宽限/取代覆盖率）+ 重置默认。配置存 `PureConfig.evolution`（仅非默认字段），面板做 天↔毫秒、百分比↔小数 换算。`memoryStore.ts` 把 `() => loadConfig()?.evolution` 注入 `LocalStorageMemoryStore` 与 `WASMEmbeddingStore`，每次 add/search/decay 读取最新值 —— 改动即时生效，无需重启。记忆库仪表盘的健康分/生命周期同样按用户配置实时计算。
+- **CLI**：无 UI，用环境变量 `PURE_MEMORY_HALF_LIFE_DAYS` / `PURE_MEMORY_ACTIVE_MIN` / `PURE_MEMORY_DORMANT_MAX` / `PURE_MEMORY_DELETE_FLOOR` / `PURE_MEMORY_DORMANT_GRACE_DAYS` / `PURE_MEMORY_SUPERSEDE_SIMILARITY`（百分比），进程启动时读取一次。
+
+**运行时诊断（记忆页）**
+
+- 记忆页新增「运行时诊断」区：显示**当前生效**的进化参数（`resolveEvolutionConfig(cfg.evolution)` 合并结果，自定义项带「已自定义」标记）+ **上次衰减运行信息**（时间 + 删除/更新条数）+ **下次自动衰减**（`上次衰减 + 1h 节流窗`，后台定时器到点自动执行，无需新会话）+ **后台定时器徽章**（「每 1 小时自动检查，即使没有新会话」）。
+- 存储层在衰减执行时记录运行信息（localStorage 用独立 `pure_memories_meta_v1` key；FS 写 `~/.pure/memories/meta.json`），`LocalStorageMemoryStore` / `FSMemoryStore` 暴露 `getLastDecayInfo()`（非接口成员，返回拷贝；WASMEmbeddingStore 委托透传），设置面板经 `memoryStore.getLastDecayInfo()` 读取。
+- 「立即执行衰减」按钮以 `decay(0)` 按当前阈值重算**全部**记忆（无视 Harness 的 14 天闲置门槛）——调整遗忘速度后手动触发，新分数即时落盘并刷新仪表盘。
+- 衰减调度语义：`MEMORY_DECAY_MS = 14 天`（闲置超过才处理）、`MEMORY_DECAY_INTERVAL_MS = 1 小时`（节流）。**GUI 后台定时器**（`src/ui/memoryDecayTimer.ts`，main.ts deferred init 启动）：按存储层 `lastDecayAt + 1h` 调度 `setTimeout`，到点执行 `decay(14 天)` 并派发 `pure:memory-decay-run` 事件（设置面板监听刷新诊断区/仪表盘）；Memory 技能关闭时跳过衰减但继续调度；`computeNextDecayDelayMs()` 纯函数可单测。CLI 仍由长驻 Harness 每轮触发。
+
+**导出 / 导入（记忆页）**
+
+- 记忆页新增「导出 / 导入」区（`src/ui/memoryTransfer.ts` 纯函数模块，可 headless 单测）：
+  - **导出 JSON**（`buildMemoryExportJson`）：信封 `{ app: 'pure', kind: 'memory-library', version: 1, exportedAt, entries }`。每条含**原始字段**（id / supersededBy / hitCount / lastUsedAt / decayScore / lifecycle / sessionId / projectPath / dedupeKey）——**保留原 id 使取代链（supersededBy → 新 id）迁移后依然成立**、使用频率信号不丢失——外加**实时健康分快照**（`healthScore` / `liveLifecycle`，导出时刻按当前生效阈值重算）。
+  - **导出 Markdown**（`buildMemoryExportMarkdown`）：人类可读报告，按生命周期分组（活跃/降级/休眠），每条含类型、内容、健康分进度、上次使用、检索次数与被取代标记。
+  - **导入**（`parseMemoryImport` + `LocalStorageMemoryStore.importEntries`）：接受本模块导出的 JSON 信封，也容忍裸 MemoryEntry 数组；逐条最小字段校验（type 合法、content 非空、timestamp 有限），不合法条目跳过，未知键（含快照字段 healthScore/liveLifecycle）不进库；`importEntries` 按 `id` 或 `(type, projectPath, content|dedupeKey)` 去重（与 `add()` 口径一致），保留原字段写入，返回 `{ imported, skipped }`。WASMEmbeddingStore 委托透传。
+  - 保存走与 stats 导出相同的流程（Tauri `plugin-dialog` save + `save_file` invoke；browser File System Access API → download anchor 回退）。

@@ -124,12 +124,17 @@ describe('WASMEmbeddingStore', () => {
       rmSync(dir, { recursive: true, force: true });
     });
 
-    it('decayScore sinks a memory in ranking', async () => {
+    it('stale memories sink in the ranking (live health score)', async () => {
+      // 排序与 dormant 过滤同口径使用实时健康分（而非存储的 decayScore ——
+      // 阈值变更后存储值会滞后一拍）。两条词袋余弦相似度相同（与查询各重叠
+      // 2/4 词），排序完全由时间维度决定：新条目排前、30 天闲置的沉底
+      // （30 天实时分 ≈0.36，高于休眠线 0.15，不会被 dormant 过滤剔除）。
       const { store } = makeStore();
-      await store.add(entry({ content: 'prefers pnpm over npm', decayScore: 1 }));
-      await store.add(entry({ content: 'prefers pnpm because faster', decayScore: 0.2 }));
+      await store.add(entry({ content: 'prefers pnpm over npm', timestamp: Date.now() }));
+      await store.add(entry({ content: 'prefers pnpm because faster', timestamp: Date.now() - 30 * 24 * 3600 * 1000 }));
       const results = await store.search('prefers pnpm');
-      expect(results[0].decayScore ?? 1).toBeGreaterThan(results[1].decayScore ?? 0);
+      expect(results).toHaveLength(2);
+      expect(results[0].timestamp).toBeGreaterThan(results[1].timestamp);
     });
 
     it('falls back to keyword search when the embedder fails', async () => {
