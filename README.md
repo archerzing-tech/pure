@@ -233,6 +233,65 @@ For CI/CD, the project includes a GitHub Actions workflow (`.github/workflows/re
 
 ---
 
+## Chart DSL
+
+In chat replies, a ```` ```chart ```` code block renders as a chart (bar, horizontal bar, line, or pie) using a tiny DSL:
+
+````markdown
+```chart
+type: line
+title: 北京 vs 上海气温
+unit: ℃
+周一 25 27
+周二 26 28
+周三 24 26
+```
+````
+
+Each non-`type:`/`title:`/`unit:` line is one data row: `label value` for single-series charts, or `label v1 v2 …` for multi-series.
+
+### Multi-series (header + multiple columns)
+
+Adding a header row with two or more numeric columns renders **one series per column** — first column is the x-axis label, the rest are series names. Hovering a category shows all series side-by-side in the tooltip (axis-linked).
+
+````markdown
+```chart
+type: line
+title: 三地气温对比
+unit: ℃
+日期 北京 上海 广州
+周一 25 27 30
+周二 26 28 31
+周三 24 29 32
+```
+````
+
+The same shape works as a **markdown table** (with optional `---` separator row), **CSV**, or **tab-separated** rows:
+
+````markdown
+```chart
+type: line
+| 月份 | 电商 | 门店 | 批发 |
+| --- | --- | --- | --- |
+| 一月 | 120 | 80 | 60 |
+| 二月 | 150 | 90 | 55 |
+```
+````
+
+Multi-series also works for `bar` and `hbar`; a `pie` chart always uses the first column as values (multiple series would overlap as donuts).
+
+### Rules & tips
+
+- **Types**: `bar`, `hbar`, `line`, `pie` — `type:` line or a bare first word; default `bar`.
+- **Series names**: taken from the header row; without a header they fall back to `系列1` / `系列2` / ….
+- **Numeric first column**: a leading numeric token is always kept as the x-axis label — `2024 10 20` means the year is the label, not a data value.
+- **Units**: `25℃`, `50%`, `1.2mm` are parsed and the unit is shown in tooltips/axis labels.
+- **JSON**: `{ "type": "pie", "data": [["a", 1], ["b", 2]] }` is also accepted.
+- **Interactions**: double-click any chart to open the fullscreen pan/zoom viewer; the floating download button exports PNG.
+- Charts render via a lazy-loaded echarts build (tree-shaken, SVG renderer) and follow the app's light/dark theme automatically.
+
+---
+
 ## Updater
 
 The GUI ships with Tauri's auto-updater. When a new version is published:
