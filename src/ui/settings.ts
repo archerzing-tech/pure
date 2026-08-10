@@ -8,14 +8,21 @@ import { fetchAndDisplayVersion, checkForUpdatesManual } from './updater';
 import { escapeHtml } from '../shared/html';
 import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
-import { formatBytes } from './TauriToolAdapter';
+import { formatBytes } from '../shared/format';
 import { memoryStore } from './memoryStore';
 import { EVOLUTION_DEFAULTS, healthScore, lifecycleOf, resolveEvolutionConfig } from '../adapter/memory/evolution';
 import type { MemoryEntry } from '../adapter/memory/IMemoryStore';
 import { buildMemoryExportJson, buildMemoryExportMarkdown, parseMemoryImport } from './memoryTransfer';
 import { showToastHtml } from '../shared/toast';
 import { buildExportSavedToast } from './statsExportToast';
-import { defaultModelFor, providerDef } from '../shared/providers';
+import {
+  customProviderFor,
+  defaultModelFor,
+  isCustomProviderId,
+  OLLAMA_PRESET,
+  providerDef,
+  type CustomProvider,
+} from '../shared/providers';
 import {
   STORAGE_KEY,
   defaults,
@@ -23,7 +30,9 @@ import {
   invalidateConfigCache,
   isDefaultMcpServer,
   loadConfig,
+  revokeCustomSecretFromRust,
   revokeSecretFromRust,
+  storeCustomSecretInRust,
   storeSecretInRust,
   type PureConfig,
 } from './config';
@@ -39,6 +48,7 @@ import {
 
 export class SettingsPanel {
   private onSave: () => void;
+  private toastTimer: ReturnType<typeof setTimeout> | undefined;
   private onOpen?: () => void;
   private onClose?: () => void;
   private currentCategory: string = 'general';
@@ -379,22 +389,42 @@ export class SettingsPanel {
       if (keyInput.value.trim()) keyInput.dataset.touched = '1';
     });
 
-    // Provider cards + hidden compatibility select share one source of truth.
-    document.querySelectorAll<HTMLButtonElement>('.provider-card').forEach(card => {
-      card.addEventListener('click', () => {
-        const provider = card.dataset.provider;
-        if (!provider) return;
-        const select = document.getElementById('cfg-provider') as HTMLSelectElement;
-        select.value = provider;
-        this.updateProviderPresentation(provider);
-        this.autoSave();
-      });
+    // Provider cards (built-in + dynamic custom) + hidden compatibility select
+    // share one source of truth. Delegated on the grid so cards rendered later
+    // (custom providers) work without rebinding.
+    document.getElementById('provider-card-grid')?.addEventListener('click', (event) => {
+      const card = (event.target as HTMLElement).closest<HTMLElement>('.provider-card');
+      const provider = card?.dataset.provider;
+      if (!provider) return;
+      const select = document.getElementById('cfg-provider') as HTMLSelectElement;
+      select.value = provider;
+      this.updateProviderPresentation(provider);
+      this.autoSave();
     });
 
     // Provider change → update the card presentation, model placeholder + auto-save.
     document.getElementById('cfg-provider')!.addEventListener('change', () => {
       const p = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
       this.updateProviderPresentation(p);
+      this.autoSave();
+    });
+
+    // ── Custom providers: add form, Ollama preset, delete, live name edit ──
+    document.getElementById('provider-add-custom')?.addEventListener('click', () => this.showCustomProviderForm());
+    document.getElementById('cfg-custom-save')?.addEventListener('click', () => this.addCustomProviderFromForm());
+    document.getElementById('cfg-custom-cancel')?.addEventListener('click', () => this.hideCustomProviderForm());
+    document.getElementById('provider-ollama-preset')?.addEventListener('click', () => this.addOllamaPreset());
+    document.getElementById('provider-delete-btn')?.addEventListener('click', () => this.removeSelectedCustomProvider());
+    const customNameEdit = document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null;
+    customNameEdit?.addEventListener('input', () => {
+      // Re-label the selected card as the user types the custom name.
+      const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+      if (!isCustomProviderId((loadConfig() ?? defaults()).customProviders, provider)) return;
+      const name = customNameEdit.value.trim();
+      if (name) {
+        const nameEl = document.querySelector<HTMLElement>('.provider-card.selected .provider-card-name');
+        if (nameEl) nameEl.textContent = name;
+      }
       this.autoSave();
     });
 
@@ -609,16 +639,18 @@ export class SettingsPanel {
   // ── Provider card presentation ──
 
   private updateProviderPresentation(provider: string): void {
-    const def = providerDef(provider);
-    if (!def) return;
     const cfg = loadConfig() ?? defaults();
-    const selectedLabel = t(def.i18nKey);
+    const customs = cfg.customProviders ?? [];
+    const custom = customProviderFor(customs, provider);
+    const def = providerDef(provider);
+    const selectedLabel = custom?.name ?? (def ? t(def.i18nKey) : provider);
     const modelInput = document.getElementById('cfg-model') as HTMLInputElement | null;
     const baseUrlInput = document.getElementById('cfg-baseurl') as HTMLInputElement | null;
     const currentModel = modelInput?.value.trim() || '';
     const currentBaseURL = baseUrlInput?.value.trim() || '';
     const previousDef = providerDef(cfg.provider);
-    const previousDefault = defaultModelFor(cfg.provider);
+    const previousCustom = customProviderFor(customs, cfg.provider);
+    const previousDefault = previousCustom?.defaultModel ?? defaultModelFor(cfg.provider);
 
     // Switching providers should not carry provider-specific defaults into the
     // next card, while deliberate custom model/endpoint values are preserved.
@@ -626,8 +658,15 @@ export class SettingsPanel {
       if (modelInput && (!currentModel || currentModel === previousDefault)) {
         modelInput.value = '';
       }
-      if (baseUrlInput && currentBaseURL && currentBaseURL === previousDef?.baseURL) {
+      const previousEndpoint = previousCustom?.baseURL ?? previousDef?.baseURL;
+      if (baseUrlInput && currentBaseURL && currentBaseURL === previousEndpoint) {
         baseUrlInput.value = '';
+      }
+      // Custom providers always carry a required base URL + default model —
+      // prefill the editable fields so the config card reads back their values.
+      if (custom) {
+        if (modelInput) modelInput.value = custom.defaultModel;
+        if (baseUrlInput) baseUrlInput.value = custom.baseURL;
       }
     }
 
@@ -639,19 +678,40 @@ export class SettingsPanel {
       const status = card.querySelector<HTMLElement>('[data-provider-status]');
       if (status) status.textContent = active ? t('llm.selected') : t('llm.chooseCard');
       const modelValue = card.querySelector<HTMLElement>('.provider-card-model-value');
+      const cardCustom = customProviderFor(customs, cardProvider);
       const cardDef = providerDef(cardProvider);
-      if (modelValue && cardDef) {
+      if (modelValue) {
         modelValue.textContent = active && modelInput?.value.trim()
           ? modelInput.value.trim()
-          : cardDef.defaultModel;
+          : (cardCustom?.defaultModel ?? cardDef?.defaultModel ?? '');
       }
     });
 
     const title = document.getElementById('provider-config-title');
     const endpoint = document.getElementById('provider-config-endpoint');
     if (title) title.textContent = selectedLabel;
-    if (endpoint) endpoint.textContent = baseUrlInput?.value.trim() || def.baseURL;
-    if (modelInput) modelInput.placeholder = def.defaultModel;
+    if (endpoint) endpoint.textContent = baseUrlInput?.value.trim() || custom?.baseURL || def?.baseURL || '';
+    if (modelInput) modelInput.placeholder = custom?.defaultModel ?? def?.defaultModel ?? '';
+
+    // Custom-only rows: name edit + delete. Keyless locals (Ollama) get a hint
+    // in the API-key field instead of the generic sk-... placeholder.
+    const isCustom = !!custom;
+    const nameRow = document.getElementById('cfg-custom-name-row');
+    const deleteRow = document.getElementById('cfg-custom-delete-row');
+    const nameEdit = document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null;
+    if (nameRow) nameRow.hidden = !isCustom;
+    if (deleteRow) deleteRow.hidden = !isCustom;
+    if (nameEdit) nameEdit.value = custom?.name ?? '';
+    const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement | null;
+    if (keyInput) {
+      if (isCustom && !custom.apiKey && !custom.hasApiKey) {
+        keyInput.removeAttribute('data-i18n-placeholder');
+        keyInput.placeholder = t('llm.custom.apiKeyOptional.hint');
+      } else {
+        keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.placeholder');
+        keyInput.placeholder = t('llm.apiKey.placeholder');
+      }
+    }
   }
 
   // ── Load config into form ──
@@ -660,12 +720,26 @@ export class SettingsPanel {
     // Re-apply translations for dynamic content
     applyTranslations();
     const cfg = loadConfig() || defaults();
+    const selectedCustom = customProviderFor(cfg.customProviders ?? [], cfg.provider);
 
+    // Custom provider cards are rendered dynamically — rebuild them before the
+    // presentation pass so selection styles apply to user-defined entries too.
+    this.renderCustomProviderCards();
     (document.getElementById('cfg-provider') as HTMLSelectElement).value = cfg.provider;
+    const modelEl = document.getElementById('cfg-model') as HTMLInputElement;
+    const baseUrlEl = document.getElementById('cfg-baseurl') as HTMLInputElement;
+    // Custom providers always carry a required base URL + default model in
+    // their entry — prefill the editable fields so edits write back correctly.
+    modelEl.value = cfg.model || selectedCustom?.defaultModel || '';
+    baseUrlEl.value = cfg.baseURL || selectedCustom?.baseURL || '';
     this.updateProviderPresentation(cfg.provider);
     const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
-    keyInput.value = cfg.apiKey;
-    if (isTauriRuntime() && cfg.hasApiKey) {
+    // Browser mode: a custom provider's key lives in its config entry — prefill
+    // the field so edits write back correctly and an unrelated autoSave never
+    // clobbers it with an empty value. Tauri mode: entry keys are always '' in
+    // storage (they live in Rust secrets), so this never leaks a secret.
+    keyInput.value = cfg.apiKey || selectedCustom?.apiKey || '';
+    if (isTauriRuntime() && (cfg.hasApiKey || selectedCustom?.hasApiKey)) {
       // Key is stored in Rust secrets — never pull it back into the WebView.
       // Show a masked placeholder; typing a new key replaces it, and clearing
       // a field the user actually edited revokes it.
@@ -676,9 +750,7 @@ export class SettingsPanel {
       keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.placeholder');
       keyInput.placeholder = t('llm.apiKey.placeholder');
     }
-    (document.getElementById('cfg-model') as HTMLInputElement).value = cfg.model;
-    (document.getElementById('cfg-model') as HTMLInputElement).placeholder = defaultModelFor(cfg.provider);
-    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = cfg.baseURL;
+    modelEl.placeholder = selectedCustom?.defaultModel ?? defaultModelFor(cfg.provider);
     this.updateProviderPresentation(cfg.provider);
     (document.getElementById('cfg-language') as HTMLSelectElement).value = cfg.language;
     const cityEl = document.getElementById('cfg-city') as HTMLInputElement | null;
@@ -1231,6 +1303,215 @@ export class SettingsPanel {
     return null;
   }
 
+  // ── Custom providers ──
+
+  /**
+   * (Re)render the user-defined provider cards into the grid. Called on every
+   * settings open and after add/delete so the grid mirrors the persisted list.
+   */
+  private renderCustomProviderCards(): void {
+    const grid = document.getElementById('provider-card-grid');
+    if (!grid) return;
+    const customs = (loadConfig() ?? defaults()).customProviders ?? [];
+    // Remove previously rendered custom cards (marked below) so re-opening the
+    // panel never duplicates them.
+    grid.querySelectorAll('.provider-card-custom').forEach(el => el.remove());
+    for (const c of customs) {
+      const keyless = !c.apiKey && !c.hasApiKey;
+      const markClass = c.id === 'ollama' ? 'provider-mark-ollama' : 'provider-mark-custom';
+      const mark = c.id === 'ollama' ? 'OL' : (c.name.slice(0, 2) || 'C').toUpperCase();
+
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'provider-card provider-card-custom';
+      card.dataset.provider = c.id;
+      card.setAttribute('role', 'option');
+      card.setAttribute('aria-selected', 'false');
+
+      const topLine = document.createElement('span');
+      topLine.className = 'provider-card-topline';
+      const markEl = document.createElement('span');
+      markEl.className = `provider-card-mark ${markClass}`;
+      markEl.textContent = mark;
+      const statusEl = document.createElement('span');
+      statusEl.className = 'provider-card-status';
+      statusEl.dataset.providerStatus = '';
+      statusEl.textContent = t('llm.chooseCard');
+      topLine.append(markEl, statusEl);
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'provider-card-name';
+      nameEl.textContent = c.name;
+
+      const metaEl = document.createElement('span');
+      metaEl.className = 'provider-card-meta';
+      const protoEl = document.createElement('span');
+      protoEl.textContent = 'OpenAI';
+      const dotEl = document.createElement('b');
+      dotEl.textContent = '·';
+      const modelEl = document.createElement('span');
+      modelEl.className = 'provider-card-model-value';
+      modelEl.textContent = c.defaultModel;
+      metaEl.append(protoEl, dotEl, modelEl);
+
+      card.append(topLine, nameEl, metaEl);
+      if (keyless) {
+        const badge = document.createElement('span');
+        badge.className = 'provider-card-keyless';
+        badge.textContent = t('llm.custom.noKeyBadge');
+        card.appendChild(badge);
+      }
+      grid.appendChild(card);
+    }
+    const count = document.getElementById('provider-section-count');
+    if (count) count.textContent = String(4 + customs.length);
+  }
+
+  /** Carry the custom-provider list through, applying the form's live edits. */
+  private gatherCustomProviders(): PureConfig['customProviders'] {
+    const prev = (loadConfig() ?? defaults()).customProviders ?? [];
+    const list = prev.map(p => ({ ...p }));
+    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const idx = list.findIndex(p => p.id === provider);
+    if (idx < 0) return list;
+    const entry = { ...list[idx] };
+    const name = (document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null)?.value.trim();
+    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim();
+    const model = (document.getElementById('cfg-model') as HTMLInputElement).value.trim();
+    if (name) entry.name = name;
+    if (baseURL) entry.baseURL = baseURL;
+    if (model) {
+      entry.defaultModel = model;
+      if (!entry.models.includes(model)) entry.models = [...entry.models, model];
+    }
+    // Raw key from the field; autoSave() scrubs/redirects it per platform.
+    entry.apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement).value.trim();
+    list[idx] = entry;
+    return list;
+  }
+
+  private showCustomProviderForm(): void {
+    const form = document.getElementById('provider-custom-form');
+    if (!form) return;
+    form.classList.remove('hidden');
+    (document.getElementById('cfg-custom-name') as HTMLInputElement).value = '';
+    (document.getElementById('cfg-custom-baseurl') as HTMLInputElement).value = '';
+    (document.getElementById('cfg-custom-models') as HTMLInputElement).value = '';
+    (document.getElementById('cfg-custom-apikey') as HTMLInputElement).value = '';
+    document.getElementById('cfg-custom-name')?.focus();
+    form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  private hideCustomProviderForm(): void {
+    document.getElementById('provider-custom-form')?.classList.add('hidden');
+  }
+
+  /** Stable slug for a new custom provider; appends -2/-3… on collisions. */
+  private uniqueCustomId(customs: CustomProvider[], name: string): string {
+    const base = name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-').replace(/^-+|-+$/g, '') || 'custom';
+    let id = base;
+    let n = 2;
+    while (customs.some(p => p.id === id)) id = `${base}-${n++}`;
+    return id;
+  }
+
+  private addCustomProviderFromForm(): void {
+    const name = (document.getElementById('cfg-custom-name') as HTMLInputElement).value.trim();
+    const baseURL = (document.getElementById('cfg-custom-baseurl') as HTMLInputElement).value.trim();
+    const models = (document.getElementById('cfg-custom-models') as HTMLInputElement).value
+      .split(',').map(s => s.trim()).filter(Boolean);
+    if (!name) { this.toast(t('llm.custom.err.name')); return; }
+    if (!baseURL) { this.toast(t('llm.custom.err.baseURL')); return; }
+    if (models.length === 0) { this.toast(t('llm.custom.err.models')); return; }
+
+    const prev = loadConfig() ?? defaults();
+    const customs = [...(prev.customProviders ?? [])];
+    if (customs.some(p => p.name === name)) { this.toast(t('llm.custom.err.dup')); return; }
+
+    const id = this.uniqueCustomId(customs, name);
+    const apiKey = (document.getElementById('cfg-custom-apikey') as HTMLInputElement).value.trim();
+    const entry: CustomProvider = {
+      id, name, baseURL, models,
+      defaultModel: models[0],
+      apiKey, hasApiKey: false,
+    };
+    customs.push(entry);
+
+    const cfg: PureConfig = { ...prev, customProviders: customs, provider: id, model: '', baseURL: '', apiKey: '' };
+    if (isTauriRuntime() && apiKey) {
+      void storeCustomSecretInRust(id, apiKey);
+      entry.apiKey = '';
+      entry.hasApiKey = true;
+    } else {
+      entry.hasApiKey = !!apiKey;
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    invalidateConfigCache();
+    this.renderCustomProviderCards();
+    (document.getElementById('cfg-provider') as HTMLSelectElement).value = id;
+    (document.getElementById('cfg-model') as HTMLInputElement).value = models[0];
+    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = baseURL;
+    this.updateProviderPresentation(id);
+    // A key stored to Rust secrets deserves the masked "saved securely"
+    // placeholder (only loadToForm would otherwise set it, on next open).
+    if (isTauriRuntime() && entry.hasApiKey) {
+      const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement | null;
+      if (keyInput) {
+        delete keyInput.dataset.touched;
+        keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.savedPlaceholder');
+        keyInput.placeholder = t('llm.apiKey.savedPlaceholder');
+      }
+    }
+    this.hideCustomProviderForm();
+    this.toast(t('llm.custom.added'));
+  }
+
+  private addOllamaPreset(): void {
+    const prev = loadConfig() ?? defaults();
+    const customs = [...(prev.customProviders ?? [])];
+    if (!customs.some(p => p.id === OLLAMA_PRESET.id)) {
+      customs.push({ ...OLLAMA_PRESET });
+    }
+    const cfg: PureConfig = {
+      ...prev,
+      customProviders: customs,
+      provider: OLLAMA_PRESET.id,
+      model: '', baseURL: '', apiKey: '',
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    invalidateConfigCache();
+    this.renderCustomProviderCards();
+    (document.getElementById('cfg-provider') as HTMLSelectElement).value = OLLAMA_PRESET.id;
+    (document.getElementById('cfg-model') as HTMLInputElement).value = OLLAMA_PRESET.defaultModel;
+    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = OLLAMA_PRESET.baseURL;
+    this.updateProviderPresentation(OLLAMA_PRESET.id);
+    this.toast(t('llm.custom.ollamaAdded'));
+  }
+
+  private removeSelectedCustomProvider(): void {
+    const prev = loadConfig() ?? defaults();
+    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const removed = customProviderFor(prev.customProviders ?? [], provider);
+    if (!removed) return;
+    if (isTauriRuntime() && removed.hasApiKey) {
+      void revokeCustomSecretFromRust(removed.id);
+    }
+    const cfg: PureConfig = {
+      ...prev,
+      customProviders: (prev.customProviders ?? []).filter(p => p.id !== provider),
+      provider: 'deepseek-openai',
+      model: '', baseURL: '', apiKey: '',
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    invalidateConfigCache();
+    this.renderCustomProviderCards();
+    (document.getElementById('cfg-provider') as HTMLSelectElement).value = 'deepseek-openai';
+    (document.getElementById('cfg-model') as HTMLInputElement).value = '';
+    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = '';
+    this.updateProviderPresentation('deepseek-openai');
+    this.toast(t('llm.custom.deleted'));
+  }
+
   // ── Gather form values ──
 
   private gatherForm(): PureConfig {
@@ -1251,6 +1532,7 @@ export class SettingsPanel {
 
     return {
       provider: (document.getElementById('cfg-provider') as HTMLSelectElement).value as PureConfig['provider'],
+      customProviders: this.gatherCustomProviders(),
       apiKey: (document.getElementById('cfg-apikey') as HTMLInputElement).value.trim(),
       model: (document.getElementById('cfg-model') as HTMLInputElement).value.trim(),
       baseURL: (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim(),
@@ -1294,25 +1576,47 @@ export class SettingsPanel {
     const cfg = this.gatherForm();
     cfg.hasApiKey = prev.hasApiKey;
 
-    if (!cfg.model) {
-      cfg.model = defaultModelFor(cfg.provider);
-    }
-
-    if (isTauriRuntime()) {
-      // Desktop: the key is owned by Rust secrets, never localStorage.
-      const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
-      if (cfg.apiKey) {
-        void storeSecretInRust(cfg.apiKey);
-        cfg.hasApiKey = true;
-      } else if (cfg.hasApiKey && keyInput.dataset.touched === '1') {
-        // User edited the field and cleared it → revoke the stored key.
-        void revokeSecretFromRust();
-        cfg.hasApiKey = false;
-        delete keyInput.dataset.touched;
+    const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
+    const selectedCustom = customProviderFor(cfg.customProviders ?? [], cfg.provider);
+    if (selectedCustom) {
+      // Custom provider: its key lives in its OWN Rust secret slot
+      // (llm.apiKey.<id>, desktop) or the config entry (browser). Keyless
+      // locals (Ollama) simply stay empty on both platforms.
+      if (isTauriRuntime()) {
+        if (selectedCustom.apiKey) {
+          void storeCustomSecretInRust(selectedCustom.id, selectedCustom.apiKey);
+          selectedCustom.hasApiKey = true;
+        } else if (selectedCustom.hasApiKey && keyInput.dataset.touched === '1') {
+          // User edited the field and cleared it → revoke the stored key.
+          void revokeCustomSecretFromRust(selectedCustom.id);
+          selectedCustom.hasApiKey = false;
+          delete keyInput.dataset.touched;
+        }
+        selectedCustom.apiKey = ''; // never persist the raw key
+      } else {
+        selectedCustom.hasApiKey = !!selectedCustom.apiKey;
       }
-      cfg.apiKey = ''; // never persist the raw key
+      cfg.apiKey = '';
+      cfg.hasApiKey = false;
     } else {
-      cfg.hasApiKey = !!cfg.apiKey;
+      if (!cfg.model) {
+        cfg.model = defaultModelFor(cfg.provider);
+      }
+      if (isTauriRuntime()) {
+        // Desktop: the key is owned by Rust secrets, never localStorage.
+        if (cfg.apiKey) {
+          void storeSecretInRust(cfg.apiKey);
+          cfg.hasApiKey = true;
+        } else if (cfg.hasApiKey && keyInput.dataset.touched === '1') {
+          // User edited the field and cleared it → revoke the stored key.
+          void revokeSecretFromRust();
+          cfg.hasApiKey = false;
+          delete keyInput.dataset.touched;
+        }
+        cfg.apiKey = ''; // never persist the raw key
+      } else {
+        cfg.hasApiKey = !!cfg.apiKey;
+      }
     }
 
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
@@ -1336,7 +1640,7 @@ export class SettingsPanel {
     const el = document.getElementById('toast')!;
     el.textContent = msg;
     el.classList.remove('hidden');
-    clearTimeout((this as any)._toastTimer);
-    (this as any)._toastTimer = setTimeout(() => el.classList.add('hidden'), 2000);
+    clearTimeout(this.toastTimer);
+    this.toastTimer = setTimeout(() => el.classList.add('hidden'), 2000);
   }
 }

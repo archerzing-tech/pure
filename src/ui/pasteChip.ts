@@ -8,7 +8,7 @@
 // rendered). On send the attachments ride along with the typed text (see
 // composeMessageWithAttachments, used by main.ts doSend).
 
-import { formatBytes } from './TauriToolAdapter';
+import { formatBytes } from '../shared/format';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { t } from '../shared/i18n';
 import { showToast } from '../shared/toast';

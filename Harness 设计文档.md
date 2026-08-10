@@ -24,7 +24,6 @@ Harness 的核心设计决策：
 - **MCP 协议**集成，支持 Server 自动发现。
 - **抽象 Storage Adapter**，可对接 SQLite / FS / S3。
 - **跨会话长期记忆**（`IMemoryStore`）：在会话开头检索用户偏好和项目惯例，在会话结束时写入新记忆。
-- **chokidar 文件变更监听**，触发上下文刷新。
 - **Subagent 超时 + 级联中断**机制。
 - **纯 TypeScript**，运行时无关。
 
@@ -82,16 +81,9 @@ Harness 的核心设计决策：
 │  └──────────────────────────────────────────────────────────────────────────────┘  │
 │                                                                                     │
 │  ┌──────────────────────────────────────────────────────────────────────────────┐  │
-│  │                     FileWatcher (文件变更监听)                               │  │
-│  │  ├── watch(patterns) → FileChangeEvent                                      │  │
-│  │  └── 触发: reevaluate → 上下文刷新 / 用户通知                               │  │
-│  └──────────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                     │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐  │
-│  │                     SubagentRegistry + EventBus (增强生命周期)                 │  │
+│  │                     SubagentRegistry (增强生命周期)                         │  │
 │  │  ├── spawn(parentId, task, signal) → SubagentHandle  (带超时)               │  │
 │  │  ├── cascadeInterrupt(sessionId) → void              (优雅停止)             │  │
-│  │  └── EventBus: emit/on/off/request                  (请求-响应模式)          │  │
 │  └──────────────────────────────────────────────────────────────────────────────┘  │
 │                                                                                     │
 │  ──────────────────────────────────────────────────────────────────────────────┐  │
@@ -157,11 +149,9 @@ export class StateManager {
   private checkpoints: Checkpoint[] = [];
   private current: AgentLoopState;
   private storage: IStateStore;
-  private eventBus: EventBus;
 
-  constructor(sessionId: string, storage: IStateStore, eventBus?: EventBus) {
+  constructor(sessionId: string, storage: IStateStore) {
     this.storage = storage;
-    this.eventBus = eventBus ?? new EventBus();
 
     const saved = storage.loadSession(sessionId);
     if (saved) {
@@ -190,11 +180,8 @@ export class StateManager {
       label,
     };
     this.checkpoints.push(cp);
-    this.storage.saveCheckpoint(this.current.sessionId, cp).catch(error => {
-      this.eventBus?.emit('error:occurred', {
-        code: 'PERSISTENCE_ERROR',
-        message: `Checkpoint ${label} 持久化失败: ${error.message}`,
-      });
+    this.storage.saveCheckpoint(this.current.sessionId, cp).catch(() => {
+      // 持久化失败不阻塞主流程
     });
     return cp;
   }
@@ -579,73 +566,7 @@ export class StreamManager {
 
 ---
 
-### 3.5 文件变更监听
-
-保持原设计。
-
-```typescript
-// [SPEC] FileChangeEvent 接口 ─── 必须精确实现
-// [EXAMPLE] FileWatcher 类 ─── 实现参考，可自由修改
-// src/harness/FileWatcher.ts
-
-import { promises as fs } from 'fs';
-
-export interface FileChangeEvent {
-  type: 'change' | 'create' | 'delete';
-  path: string;
-  timestamp: number;
-}
-
-export class FileWatcher {
-  private watchers: Map<string, FSWatcher> = new Map();
-
-  async watch(
-    rootPath: string,
-    patterns: string[],
-    callback: (event: FileChangeEvent) => void
-  ): Promise<void> {
-    const chokidar = await import('chokidar');
-    const ignored = [...this.getDefaultIgnored(), ...await this.getGitIgnored(rootPath)];
-    const watcher = chokidar.watch(rootPath, { ignored, ignoreInitial: true });
-
-    watcher.on('change', (path: string) => callback({ type: 'change', path, timestamp: Date.now() }));
-    watcher.on('add', (path: string) => callback({ type: 'create', path, timestamp: Date.now() }));
-    watcher.on('unlink', (path: string) => callback({ type: 'delete', path, timestamp: Date.now() }));
-
-    this.watchers.set(rootPath, watcher);
-  }
-
-  unwatch(rootPath: string): void {
-    const watcher = this.watchers.get(rootPath);
-    if (watcher) {
-      watcher.close();
-      this.watchers.delete(rootPath);
-    }
-  }
-
-  private getDefaultIgnored(): string[] {
-    return ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**', '**/.next/**'];
-  }
-
-  private async getGitIgnored(rootPath: string): Promise<string[]> {
-    try {
-      const gitignore = await fs.readFile(`${rootPath}/.gitignore`, 'utf-8');
-      return gitignore.split('\n').filter(l => l.trim() && !l.startsWith('#')).map(l => `**/${l}/**`);
-    } catch {
-      return [];
-    }
-  }
-
-  close(): void {
-    for (const watcher of this.watchers.values()) watcher.close();
-    this.watchers.clear();
-  }
-}
-```
-
----
-
-### 3.6 Subagent 注册表（带超时和优雅停止）
+### 3.5 Subagent 注册表（带超时和优雅停止）
 
 保持原设计。
 
@@ -725,43 +646,7 @@ export class SubagentRegistry {
 
 ---
 
-### 3.7 EventBus（Harness 扩展）
-
-保持原设计。
-
-```typescript
-// [SPEC] Harness 层的 EventMap 扩展 ─── 通过 declaration merging 添加事件类型
-// src/harness/EventBus.ts
-
-export { EventBus } from '../shared/EventBus';
-
-export type ErrorCode =
-  | 'PERSISTENCE_ERROR'
-  | 'MCP_CONNECT_ERROR'
-  | 'MCP_TOOL_ERROR'
-  | 'LLM_ERROR'
-  | 'TOOL_EXECUTION_ERROR'
-  | 'CONTEXT_COMPRESSION_ERROR'
-  | 'SUBAGENT_ERROR'
-  | 'INTERNAL_ERROR';
-
-declare module '../shared/EventBus' {
-  export interface EventMap {
-    'state:changed': { fromVersion: number; toVersion: number; label: string };
-    'context:compressed': { level: number; ratio: number };
-    'mcp:connected': { serverName: string; toolCount: number };
-    'mcp:toolcalled': { toolName: string; duration: number; success: boolean };
-    'file:changed': FileChangeEvent;
-    'subagent:completed': { sessionId: string; result: any };
-    'user:confirmed': { action: string };
-    'error:occurred': { code: ErrorCode; message: string };
-  }
-}
-```
-
----
-
-### 3.8 Harness 主入口（整合所有组件）
+### 3.6 Harness 主入口（整合所有组件）
 
 ```typescript
 // [SPEC] AgentResult 类型 ─── 必须精确实现
@@ -793,12 +678,9 @@ export class Harness {
   private contextEngine: ContextEngine;
   private streamManager: StreamManager;
   private mcpClient: MCPClient;
-  private fileWatcher: FileWatcher;
-  private eventBus: EventBus;
 
   constructor(private config: HarnessConfig) {
-    this.eventBus = new EventBus();
-    this.stateManager = new StateManager(config.sessionId, config.storage, this.eventBus);
+    this.stateManager = new StateManager(config.sessionId, config.storage);
     this.contextEngine = new ContextEngine({
       maxTokens: config.maxTokens ?? 128000,
       windowSize: config.windowSize ?? 20,
@@ -807,7 +689,6 @@ export class Harness {
     });
     this.streamManager = new StreamManager();
     this.mcpClient = new MCPClient();
-    this.fileWatcher = new FileWatcher();
   }
 
   async *run(systemPrompt: string, userPrompt: string, budgetConfig: BudgetConfig): AsyncGenerator<EngineEvent, void, void> {
@@ -834,11 +715,6 @@ export class Harness {
     for (const server of this.config.mcpServers ?? []) {
       await this.mcpClient.connect(server);
     }
-
-    // 启动文件监听
-    this.fileWatcher.watch('.', ['src/**/*'], (event) => {
-      this.eventBus.emit('file:changed', event);
-    });
 
     const engine = new AgentLoopEngine();
     const stream = engine.run({
@@ -882,7 +758,6 @@ export class Harness {
       }
     }
 
-    this.fileWatcher.close();
     await this.mcpClient.disconnectAll();
   }
 }

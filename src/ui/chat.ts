@@ -2,8 +2,8 @@
 // v0.6 — Uses CodingAgent/Harness instead of self-built ReAct loop.
 // Iterates over EngineEvents stream to update the UI reactively.
 
-import { loadConfig, hasConfiguredKey, type PureConfig } from './config';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily } from '../shared/providers';
+import { loadConfig, hasConfiguredKey, customSecretKey, type PureConfig } from './config';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless } from '../shared/providers';
 import { saveSession, loadLastSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, type StoredMessage, type ToolExecMeta, type SessionStats } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
@@ -40,7 +40,6 @@ import { copyTextToClipboard } from '../shared/clipboard';
 import { showToast } from '../shared/toast';
 import { t } from '../shared/i18n';
 import type { MCPClient } from '../harness/mcp/MCPClient';
-import type { FileWatcher } from '../harness/FileWatcher';
 import type {
   LLMAdapter,
   EngineEvent,
@@ -497,35 +496,45 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
   if (!config) {
     throw new Error('No configuration');
   }
+  const customs = config.customProviders ?? [];
+  const custom = customProviderFor(customs, config.provider);
+  // Custom providers resolve their own base URL / default model; built-ins
+  // fall back to the shared registry.
+  const baseURL = config.baseURL || customBaseURL(customs, config.provider);
+  const model = config.model || customDefaultModel(customs, config.provider);
   // DeepSeek reasoning models spend reasoning_content tokens from the SAME
   // output budget as content — at the shared 8192 default, complex tasks (e.g.
   // generating a full HTML animation) exhaust the budget on thinking and the
   // visible answer comes back EMPTY → verify failure → retry loop. Give
-  // DeepSeek a larger budget; Qwen/GLM keep the shared default.
-  const maxTokens = isDeepSeekFamily(config.provider)
+  // DeepSeek a larger budget; Qwen/GLM/custom keep the shared default.
+  const maxTokens = !custom && isDeepSeekFamily(config.provider)
     ? 32768
     : undefined;
+  // GLM's tool_stream extra applies to the built-in GLM provider only.
+  const extraBody = !custom && config.provider === 'glm' ? { tool_stream: true } : undefined;
   if (isTauriRuntime()) {
     // Desktop: the key lives in Rust secrets (~/.pure/secrets.json, 0600) and
     // is resolved inside `chat_stream` — it never passes through the WebView.
+    // Custom providers resolve their own named secret ('llm.apiKey.<id>');
+    // keyless ones resolve to nothing and Rust omits the Authorization header.
     return new RustLLMAdapter({
       provider: config.provider,
-      model: config.model || defaultModelFor(config.provider),
-      baseURL: config.baseURL || providerBaseURL(config.provider),
-      extraBody: config.provider === 'glm' ? { tool_stream: true } : undefined,
+      model,
+      baseURL,
+      secretKey: custom ? customSecretKey(custom.id) : undefined,
+      extraBody,
       maxTokens,
     });
   }
-  if (!config.apiKey) {
+  const apiKey = custom?.apiKey ?? config.apiKey;
+  if (!apiKey && !isCustomKeyless(customs, config.provider)) {
     throw new Error('No API key configured');
   }
-  const baseURL = config.baseURL || providerBaseURL(config.provider);
-  const model = config.model || defaultModelFor(config.provider);
   return new OpenAICompatibleAdapter({
     baseURL,
-    apiKey: config.apiKey,
+    apiKey: apiKey ?? '',
     model,
-    extraBody: config.provider === 'glm' ? { tool_stream: true } : undefined,
+    extraBody,
     maxTokens,
   });
 }
@@ -620,9 +629,7 @@ export class ChatController {
   private preCompactSessionId = '';
   private preCompactMessageCount = 0;
   private mcpClient?: MCPClient;
-  private fileWatcher?: FileWatcher;
   private deferredInitDone = false;
-  private watcherWorkspace = '';
   // Session identity + MCP config the current mcpClient was built with. MCP
   // stdio transports are session-bound (the Rust registry keys subprocesses by
   // sessionId), so a client must be torn down and rebuilt when either changes.
@@ -1016,23 +1023,19 @@ export class ChatController {
       this.permissionManager.setMode(mapPermissionMode(config.permissionMode));
       this.permissionManager.setRequestHandler(createPermissionHandler(config));
 
-      // Rebuild MCP + FileWatcher when the session identity, MCP config, or
-      // the filesystem-watching workspace changed since the last init.
-      // MCP transports are session-bound (the Rust subprocess registry keys
-      // them by sessionId), so reusing a client across sessions would leave
-      // subprocesses under a stale session AND ignore config edits made in
-      // Settings. disconnectAll() closes every transport, killing the spawned
-      // servers, before the next deferred init reconnects under the new
-      // sessionId/config. Only the filesystem watcher is workspace-bound.
+      // Rebuild MCP when the session identity or MCP config changed since the
+      // last init. MCP transports are session-bound (the Rust subprocess
+      // registry keys them by sessionId), so reusing a client across sessions
+      // would leave subprocesses under a stale session AND ignore config edits
+      // made in Settings. disconnectAll() closes every transport, killing the
+      // spawned servers, before the next deferred init reconnects under the
+      // new sessionId/config.
       if (this.deferredInitDone && (
-        this.watcherWorkspace !== effectiveWorkspace ||
         this.mcpSessionId !== sendSessionId ||
         this.mcpConfigSnapshot !== JSON.stringify(config.mcpServers ?? [])
       )) {
         this.mcpClient?.disconnectAll();
         this.mcpClient = undefined;
-        await this.fileWatcher?.stop();
-        this.fileWatcher = undefined;
         this.deferredInitDone = false;
       }
 
@@ -1054,9 +1057,7 @@ export class ChatController {
         memory: memoryEnabled ? memoryStore : undefined,
         projectPath: effectiveWorkspace || undefined,
         mcpClient: this.mcpClient,
-        fileWatcherInstance: this.fileWatcher,
         mcpServers: this.deferredInitDone ? undefined : (config.mcpServers ?? []),
-        fileWatcher: this.deferredInitDone ? undefined : (effectiveWorkspace ? { cwd: effectiveWorkspace } : undefined),
         permissionManager: this.permissionManager,
         // P1-1 (async verification): the engine's `verifier` stays PURELY
         // rule-based (non-empty-output check — a hard failure there must still
@@ -1218,14 +1219,12 @@ export class ChatController {
       // synchronous full-transcript layout).
       forceScrollToBottom(chatEl);
 
-      // ── Deferred init: boot MCP + FileWatcher on first use ──
+      // ── Deferred init: boot MCP on first use ──
       if (!this.deferredInitDone) {
         this.deferredInitDone = true;
         this.mcpSessionId = sendSessionId;
         this.mcpConfigSnapshot = JSON.stringify(config.mcpServers ?? []);
         this.mcpClient = codingAgent.mcpClient;
-        this.fileWatcher = codingAgent.fileWatcher;
-        this.watcherWorkspace = effectiveWorkspace;
 
         if (this.mcpClient) {
           // Await MCP connect so tools are registered before the first run builds
@@ -1238,11 +1237,6 @@ export class ChatController {
             }),
             new Promise(resolve => setTimeout(resolve, 1500)),
           ]);
-        }
-        if (this.fileWatcher) {
-          this.fileWatcher.start().catch((err: Error) => {
-            console.warn('[pure] FileWatcher start failed:', err.message);
-          });
         }
       }
 
@@ -1726,9 +1720,9 @@ export class ChatController {
     // Fresh session → fresh stats view.
     this.sessionStats = loadSessionStats(this.sessionId);
     this.onStatsChanged?.(this.sessionStats);
-    // New chat = a fresh session (new sessionId): mcpClient/fileWatcher are
-    // left for GC here, and the next send() tears down + rebuilds MCP under the
-    // new sessionId (see the session-identity check in send()).
+    // New chat = a fresh session (new sessionId): the mcpClient is left for GC
+    // here, and the next send() tears down + rebuilds MCP under the new
+    // sessionId (see the session-identity check in send()).
     const chatEl = document.getElementById('chat')!;
     chatEl.innerHTML = '';
   }

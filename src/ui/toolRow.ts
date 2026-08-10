@@ -7,7 +7,7 @@
 // render identically.
 
 import { linkifyPaths } from './pathLink';
-import { formatBytes } from './TauriToolAdapter';
+import { formatBytes } from '../shared/format';
 
 // Friendly display names + icons per tool (Claude Code uses short verbs).
 const TOOL_META: Record<string, { name: string; icon: string }> = {

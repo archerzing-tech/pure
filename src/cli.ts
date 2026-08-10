@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import * as readline from 'node:readline';
 import { Harness } from './harness/Harness';
 import { MockLLMAdapter } from './adapter/mock/MockLLMAdapter';
-import { createDeepSeekAdapter, createQwenAdapter, createGLMAdapter } from './adapter/openai/OpenAICompatibleAdapter';
+import { createDeepSeekAdapter, createQwenAdapter, createGLMAdapter, OpenAICompatibleAdapter } from './adapter/openai/OpenAICompatibleAdapter';
 import { DeepSeekAnthropicAdapter } from './adapter/deepseek/DeepSeekAnthropicAdapter';
 import { NodeToolAdapter, detectRuntimeVersions } from './adapter/node/NodeToolAdapter';
 import { StreamManager } from './harness/StreamManager';
@@ -28,19 +28,20 @@ import { createCliPermissionHandler } from './cli_permission';
 import { dim, bold, red, green, yellow, cyan, purple, frameGray } from './termcolors';
 import { sanitizeForTerminal } from './termwidth';
 import { ThinkingCard } from './cli-thinking';
+import { formatToolErrorLine, logoRowPlan, LOGO_WORDMARK_W } from './cli_toolrow';
 import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
 import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
 import type { EvolutionConfig } from './adapter/memory/evolution';
 import { harvestUserPreferences } from './shared/memory';
 import { INCREMENTAL_BUILD_PROMPT } from './shared/agentBehavior';
 import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, FILE_TOOLS_CORE, composeUserTurn } from './shared/promptLayers';
-import { defaultModelFor } from './shared/providers';
+import { customProviderFor, defaultModelFor, isCustomProviderId, OLLAMA_PRESET, type CustomProvider } from './shared/providers';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
 
 // Single source of truth for the CLI's displayed version (kept in sync with
 // package.json / src-tauri by the release flow; the CLI banner + startup line
 // both read from here).
-const CLI_VERSION = 'v1.3.1';
+const CLI_VERSION = 'v1.8.0';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
@@ -54,10 +55,16 @@ const CONFIG_PATH = `${PURE_DIR}/config.json`;
 // but stored on disk so the Node/Bun CLI can read them. The GUI's localStorage
 // config is browser-only and cannot be reached from the CLI.
 interface PureConfig {
-  provider: CliArgs['provider'];
+  provider: string;
   apiKey: string;
   model: string;
   workspace?: string;
+  /**
+   * User-defined OpenAI-compatible providers (mirror of the GUI's
+   * PureConfig.customProviders). Keyless local endpoints (Ollama / LM Studio)
+   * send without an Authorization header.
+   */
+  customProviders?: CustomProvider[];
   /**
    * Third-party skills installed via the GUI's Skill Hub (Settings → Skills →
    * Skill Hub). Enabled entries' SKILL.md bodies are injected into the CLI's
@@ -72,7 +79,9 @@ function loadConfig(): PureConfig | null {
     const raw = readFileSync(CONFIG_PATH, 'utf-8');
     if (!raw) return null;
     const cfg = JSON.parse(raw) as Partial<PureConfig>;
-    if (cfg && cfg.apiKey && cfg.provider) return cfg as PureConfig;
+    // Only the provider is required: keyless custom providers (Ollama / LM
+    // Studio) legitimately save with an empty apiKey.
+    if (cfg && cfg.provider) return cfg as PureConfig;
     return null;
   } catch {
     return null;
@@ -202,8 +211,11 @@ function renderLogo() {
     ' ╚══════╝ ',
   ];
 
-  // Shrink-to-fit so the box never wraps on narrow terminals (CI, ssh, narrow tmux panes).
-  // Default inner (76) yields exactly 80 cols including the leading 2-space indent.
+  // Shrink-to-fit keeps the box within the terminal down to 44 cols (CI, ssh,
+  // narrow tmux panes). Default inner (76) yields exactly 80 cols including
+  // the leading 2-space indent. The wordmark below is W=45 cols wide — when
+  // the box can't fit it (cols < 49) the wordmark rows are dropped for a
+  // compact fallback, so no line ever overflows the border (see logoRowPlan).
   const INDENT = 2;
   const WANT_INNER = 76;
   const cols = process.stdout.columns ?? 80;
@@ -213,8 +225,8 @@ function renderLogo() {
 
   // Each wordmark row: 4 letters (10 each) + 3 single-space gaps + 2 cols tail.
   // Row 5 substitutes the trailing whitespace slot with a purple · flush against E,
-  // keeping every row uniform at 45 visible cols.
-  const W = 10 * 4 + 3 + 2;
+  // keeping every row uniform at LOGO_WORDMARK_W visible cols.
+  const W = LOGO_WORDMARK_W;
   const lines: string[] = [];
   for (let i = 0; i < 6; i++) {
     const isLast = i === 5;
@@ -243,8 +255,20 @@ function renderLogo() {
   console.log('');
   console.log(`  ${F('╔' + border + '╗')}`);
   console.log(`  ${F('║')}${blank}${F('║')}`);
-  for (const row of lines) {
-    console.log(`  ${F('║')}${center(W, row)}${F('║')}`);
+  // Narrow terminals (inner < W, i.e. cols < 49): the 45-col wordmark would
+  // overflow the box border (center() clamps the negative padding, leaving the
+  // row wider than the frame — see logoRowPlan). Render a compact one-line
+  // PURE mark instead so every row stays within the box.
+  const rowPlan = logoRowPlan(inner);
+  for (let i = 0; i < rowPlan.length; i++) {
+    const plan = rowPlan[i];
+    if (plan === true) {
+      console.log(`  ${F('║')}${center(W, lines[i])}${F('║')}`);
+    } else if (plan === 'mark') {
+      console.log(`  ${F('║')}${center(4, `${PPR}PURE${RST}`)}${F('║')}`);
+    } else {
+      console.log(`  ${F('║')}${blank}${F('║')}`);
+    }
   }
   console.log(`  ${F('║')}${blank}${F('║')}`);
   console.log(`  ${F('║')}${center(tagline.length, dim(tagline))}${F('║')}`);
@@ -380,12 +404,15 @@ function printModeSwitch(mode: TaskMode): void {
 
 interface CliArgs {
   prompt: string;
-  provider: 'deepseek-openai' | 'deepseek-anthropic' | 'qwen' | 'glm' | 'mock';
+  /** Built-in id, 'mock', or a user-defined custom provider id (see customProviders). */
+  provider: string;
   model: string;
   apiKey: string;
   workspace: string;
   resume: string;
   stateDb: string;
+  /** User-defined custom providers from ~/.pure/config.json. */
+  customProviders?: CustomProvider[];
   /**
    * True when every tool call (read, write, execute_command, web_search, …)
    * should be approved without prompting. Defaults to true so a one-shot
@@ -434,16 +461,16 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
   // Precedence for provider: --flag > env (auto-detect) > config > default.
   const envProvider = autoDetectProvider();
   const provider = (flags.provider && flags.provider !== 'auto')
-    ? flags.provider as CliArgs['provider']
+    ? flags.provider
     : (hasAnyApiKeyEnv() ? envProvider : (fileCfg?.provider ?? envProvider));
 
-  const apiKey =
-    flags['api-key'] ??
-    envKeyForProvider(provider) ??
-    fileCfg?.apiKey ??
-    '';
+  // Custom providers own their key inside the custom entry (or none at all for
+  // keyless locals) — cloud-key env vars must never leak into their requests.
+  const isCustom = isCustomProviderId(fileCfg?.customProviders, provider);
+  const apiKey = flags['api-key'] ??
+    (isCustom ? '' : (envKeyForProvider(provider) ?? fileCfg?.apiKey ?? ''));
 
-  const model = flags.model ?? fileCfg?.model ?? resolveDefaultModel(provider);
+  const model = flags.model ?? fileCfg?.model ?? resolveDefaultModel(provider, fileCfg?.customProviders);
   const workspace =
     (flags.workspace && flags.workspace !== 'true') ? flags.workspace : (fileCfg?.workspace || '.');
   const resume = flags.resume && flags.resume !== 'true' ? flags.resume : '';
@@ -455,13 +482,17 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
   const autoApprove = DEFAULT_CLI_AUTO_APPROVE && flags['prompt-on-tool'] === undefined;
 
   return {
-    args: { prompt: promptParts.join(' '), provider, model, apiKey, workspace, resume, stateDb, autoApprove },
+    args: {
+      prompt: promptParts.join(' '),
+      provider, model, apiKey, workspace, resume, stateDb, autoApprove,
+      customProviders: fileCfg?.customProviders,
+    },
     command,
   };
 }
 
 /** Pick the right env var for a provider so we honor per-provider keys, not just any key. */
-function envKeyForProvider(provider: CliArgs['provider']): string | undefined {
+function envKeyForProvider(provider: string): string | undefined {
   switch (provider) {
     case 'deepseek-openai':
     case 'deepseek-anthropic':
@@ -475,12 +506,12 @@ function envKeyForProvider(provider: CliArgs['provider']): string | undefined {
   }
 }
 
-function resolveDefaultModel(provider: string): string {
+function resolveDefaultModel(provider: string, customs?: CustomProvider[]): string {
   // Shared provider registry (src/shared/providers.ts) is the single source
   // of truth for the GUI + CLI default models; only the CLI-only 'mock'
-  // provider keeps its special case here.
+  // provider keeps its special case here. Custom providers resolve their own.
   if (provider === 'mock') return 'mock';
-  return defaultModelFor(provider);
+  return customProviderFor(customs, provider)?.defaultModel ?? defaultModelFor(provider);
 }
 
 function autoDetectProvider(): CliArgs['provider'] {
@@ -500,6 +531,23 @@ function hasAnyApiKeyEnv(): boolean {
 function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
   if (args.provider === 'mock') {
     return { adapter: new MockLLMAdapter(), label: 'Mock (v0.1)' };
+  }
+
+  // User-defined OpenAI-compatible provider (Ollama / LM Studio / any
+  // /v1/chat/completions endpoint). Keyless entries send no Authorization
+  // header; keyed ones use their own key from the custom entry.
+  const custom = customProviderFor(args.customProviders, args.provider);
+  if (custom) {
+    if (!custom.baseURL) {
+      console.error(`${red('❌')} Custom provider ${cyan(custom.name)} is missing a base URL. Run ${bold('pure config')} to fix it.`);
+      process.exit(1);
+    }
+    const model = args.model || custom.defaultModel;
+    const apiKey = custom.apiKey || args.apiKey;
+    return {
+      adapter: new OpenAICompatibleAdapter({ baseURL: custom.baseURL, apiKey, model }),
+      label: `${custom.name} (${model})`,
+    };
   }
 
   if (!args.apiKey) {
@@ -642,8 +690,16 @@ async function consumeTurn(
         case 'ToolResult':
           endThinking();
           streamMgr.stop();
-          const status = event.payload.result.success ? green('✓') : red('✗');
+          const toolResult = event.payload.result;
+          const status = toolResult.success ? green('✓') : red('✗');
           process.stdout.write(`  ${purple(`🔧 ${event.payload.toolName}`)}: ${status} ${dim(`(${event.payload.duration}ms)`)}\n`);
+          // A failed tool used to be an opaque `✗` — the reason (missing path,
+          // command stderr, …) was only visible to the model. Print it for the
+          // terminal user too: sanitized, collapsed to one line, truncated.
+          if (!toolResult.success && toolResult.error) {
+            const reason = formatToolErrorLine(toolResult.error);
+            if (reason) process.stdout.write(`  ${dim('  ↳')} ${red(reason)}\n`);
+          }
           streamMgr.start();
           break;
         case 'Completed':
@@ -825,40 +881,87 @@ async function runConfig(): Promise<void> {
   };
 
   try {
-    // Provider
-    const providerKeys = Object.keys(PROVIDER_LABELS) as Array<Exclude<CliArgs['provider'], 'mock'>>;
+    // Provider list: built-ins + user-defined customs + an "add new" option.
+    const existingCustoms = existing?.customProviders ?? [];
+    const builtInKeys = Object.keys(PROVIDER_LABELS) as Array<Exclude<CliArgs['provider'], 'mock'>>;
+    const providerKeys: string[] = [...builtInKeys, ...existingCustoms.map(c => c.id), 'add-custom'];
     process.stdout.write(`  ${dim('Available providers:')}\n`);
     providerKeys.forEach((k, i) => {
+      const custom = customProviderFor(existingCustoms, k);
+      const label = k === 'add-custom'
+        ? 'Add custom provider (OpenAI-compatible, e.g. Ollama)'
+        : custom
+          ? `${custom.name}${custom.apiKey ? '' : ' (no key)'}`
+          : PROVIDER_LABELS[k as keyof typeof PROVIDER_LABELS];
       const marker = existing?.provider === k ? green(' ← current') : '';
-      process.stdout.write(`    ${cyan(String(i + 1))}) ${PROVIDER_LABELS[k]}${marker}\n`);
+      process.stdout.write(`    ${cyan(String(i + 1))}) ${label}${marker}\n`);
     });
     const currentIdx = existing && existing.provider !== 'mock' ? providerKeys.indexOf(existing.provider) : -1;
     const defaultHint = currentIdx >= 0 ? String(currentIdx + 1) : '1';
     const providerIdxRaw = await ask(`\n  ${bold('Choose provider')} ${dim(`[1-${providerKeys.length}]`)} ${dim(`(default ${defaultHint})`)}: `);
     let providerIdx = providerIdxRaw ? parseInt(providerIdxRaw, 10) - 1 : (currentIdx >= 0 ? currentIdx : 0);
     if (Number.isNaN(providerIdx) || providerIdx < 0 || providerIdx >= providerKeys.length) providerIdx = 0;
-    const provider = providerKeys[providerIdx];
 
-    // API key — raw-mode masked read so the user sees `*` per character and
-    // gets a post-paste confirmation like `✓ Captured 51 chars (sk-…XX)`.
-    // The key itself never appears in scrollback.
-    process.stdout.write(`\n  ${dim(`Get your key from the provider, then paste it below. Env var: ${PROVIDER_ENV_HINT[provider]}`)}\n`);
-    const apiKeyRaw = await askMasked(`  ${bold('API key')}${existing?.apiKey ? dim(' (Enter to keep current)') : ''}: `);
-    const apiKey = apiKeyRaw.trim();
-    if (apiKey && process.stdin.isTTY) {
-      // First 3 + last 2 chars (e.g. `sk-…XX`) so the user can verify they
-      // pasted the right key without seeing the whole secret.
-      const preview = apiKey.length > 5 ? `${apiKey.slice(0, 3)}…${apiKey.slice(-2)}` : '***';
-      process.stdout.write(`  ${green('✓')} Captured ${apiKey.length} chars (${preview})\n`);
+    // Custom-provider add flow: Ollama one-click preset or manual entry.
+    let finalCustoms = existingCustoms;
+    let provider: string;
+    if (providerKeys[providerIdx] === 'add-custom') {
+      const presetRaw = await ask(`\n  ${bold('Preset')} ${dim('[1] Ollama (local)  [2] Manual' + ']')} ${dim('(default 1)')}: `);
+      const preset = presetRaw.trim() === '2' ? 'manual' : 'ollama';
+      if (preset === 'ollama') {
+        if (!finalCustoms.some(p => p.id === OLLAMA_PRESET.id)) {
+          finalCustoms = [...finalCustoms, { ...OLLAMA_PRESET }];
+        }
+        provider = OLLAMA_PRESET.id;
+        process.stdout.write(`  ${green('✓')} Ollama preset: ${dim(OLLAMA_PRESET.baseURL)} ${dim(`(default model ${OLLAMA_PRESET.defaultModel})`)}\n`);
+      } else {
+        const name = (await ask(`\n  ${bold('Provider name')}: `)).trim();
+        if (!name) { process.stdout.write(`\n  ${red('❌ Name is required. Aborting.')}\n`); process.exit(1); }
+        const baseURL = (await ask(`  ${bold('Base URL')} ${dim('(OpenAI-compatible, e.g. http://localhost:11434/v1)')}: `)).trim();
+        if (!baseURL) { process.stdout.write(`\n  ${red('❌ Base URL is required. Aborting.')}\n`); process.exit(1); }
+        const modelsRaw = (await ask(`  ${bold('Models')} ${dim('(comma-separated, e.g. qwen2.5-coder:7b, llama3.1:8b)')}: `)).trim();
+        const models = modelsRaw.split(',').map(s => s.trim()).filter(Boolean);
+        if (models.length === 0) { process.stdout.write(`\n  ${red('❌ At least one model is required. Aborting.')}\n`); process.exit(1); }
+        process.stdout.write(`  ${dim('API key is optional — press Enter to skip for local endpoints.')}\n`);
+        const apiKeyRaw = await askMasked(`  ${bold('API key')} ${dim('(optional)')}: `);
+        const apiKey = apiKeyRaw.trim();
+        const id = name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-').replace(/^-+|-+$/g, '') || 'custom';
+        let uniqueId = id;
+        let n = 2;
+        while (finalCustoms.some(p => p.id === uniqueId)) uniqueId = `${id}-${n++}`;
+        finalCustoms = [...finalCustoms, { id: uniqueId, name, baseURL, models, defaultModel: models[0], apiKey, hasApiKey: false }];
+        provider = uniqueId;
+      }
+    } else {
+      provider = providerKeys[providerIdx];
     }
-    const finalKey = apiKey || existing?.apiKey || '';
-    if (!finalKey) {
-      process.stdout.write(`\n  ${red('❌ An API key is required. Aborting.')}\n`);
-      process.exit(1);
+
+    const chosenCustom = customProviderFor(finalCustoms, provider);
+    let finalKey = chosenCustom?.apiKey ?? '';
+    if (!chosenCustom) {
+      // Built-in providers require a key — raw-mode masked read so the user
+      // sees `*` per character and gets a post-paste confirmation like
+      // `✓ Captured 51 chars (sk-…XX)`. The key never appears in scrollback.
+      process.stdout.write(`\n  ${dim(`Get your key from the provider, then paste it below. Env var: ${PROVIDER_ENV_HINT[provider as keyof typeof PROVIDER_ENV_HINT]}`)}\n`);
+      const apiKeyRaw = await askMasked(`  ${bold('API key')}${existing?.apiKey ? dim(' (Enter to keep current)') : ''}: `);
+      const apiKey = apiKeyRaw.trim();
+      if (apiKey && process.stdin.isTTY) {
+        // First 3 + last 2 chars (e.g. `sk-…XX`) so the user can verify they
+        // pasted the right key without seeing the whole secret.
+        const preview = apiKey.length > 5 ? `${apiKey.slice(0, 3)}…${apiKey.slice(-2)}` : '***';
+        process.stdout.write(`  ${green('✓')} Captured ${apiKey.length} chars (${preview})\n`);
+      }
+      finalKey = apiKey || existing?.apiKey || '';
+      if (!finalKey) {
+        process.stdout.write(`\n  ${red('❌ An API key is required for this provider. Aborting.')}\n`);
+        process.exit(1);
+      }
+    } else if (!finalKey) {
+      process.stdout.write(`\n  ${dim('No API key — sending without Authorization (local endpoint).')}\n`);
     }
 
     // Model
-    const defaultModel = resolveDefaultModel(provider);
+    const defaultModel = resolveDefaultModel(provider, finalCustoms);
     const modelRaw = await ask(`\n  ${bold('Model')} ${dim(`(Enter for default: ${defaultModel})`)}: `);
     const model = modelRaw || existing?.model || defaultModel;
 
@@ -866,12 +969,14 @@ async function runConfig(): Promise<void> {
     const workspaceRaw = await ask(`  ${bold('Workspace')} ${dim('(Enter for current dir ".")')}: `);
     const workspace = workspaceRaw || existing?.workspace || '.';
 
-    const cfg: PureConfig = { provider, apiKey: finalKey, model, workspace };
+    const cfg: PureConfig = { provider, apiKey: finalKey, model, workspace, customProviders: finalCustoms };
     saveConfig(cfg);
 
+    const providerLabelOut = customProviderFor(finalCustoms, provider)?.name
+      ?? PROVIDER_LABELS[provider as keyof typeof PROVIDER_LABELS];
     console.log('');
     process.stdout.write(`  ${green('✅ Saved.')} ${dim('Config written to')} ${CONFIG_PATH}\n`);
-    process.stdout.write(`     ${dim('Provider:')} ${cyan(PROVIDER_LABELS[provider])}\n`);
+    process.stdout.write(`     ${dim('Provider:')} ${cyan(providerLabelOut)}\n`);
     process.stdout.write(`     ${dim('Model:')}    ${cyan(model)}\n`);
     process.stdout.write(`     ${dim('Workspace:')}${cyan(workspace)}\n`);
     process.stdout.write(`\n  ${dim('You can now run')} ${bold('pure')} ${dim('or')} ${bold('pure "your question"')} ${dim('.')}\n`);

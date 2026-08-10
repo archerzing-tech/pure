@@ -184,6 +184,19 @@ describe('parsePlanJson (LLM plan parsing)', () => {
     expect(plan?.steps).toHaveLength(1);
   });
 
+  it('repairs slightly-broken plan JSON (unquoted keys + single quotes + trailing commas)', () => {
+    const plan = parsePlanJson("[{action: 'Inspect', description: 'Read the auth module',},]");
+    expect(plan).not.toBeNull();
+    expect(plan!.steps).toHaveLength(1);
+    expect(plan!.steps[0]).toMatchObject({ action: 'Inspect', description: 'Read the auth module' });
+  });
+
+  it('repairs fenced plan JSON with full-width punctuation', () => {
+    const plan = parsePlanJson('```json\n[{"action": "A", "description": "d"，}]\n```');
+    expect(plan).not.toBeNull();
+    expect(plan!.steps).toHaveLength(1);
+  });
+
   it('returns null for malformed / empty / non-array input', () => {
     expect(parsePlanJson('')).toBeNull();
     expect(parsePlanJson('not json')).toBeNull();

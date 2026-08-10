@@ -464,7 +464,7 @@ interface IStateStore {
 
 **设计要点**：
 - `loadSession` 返回 `null` 表示新会话（StateManager 创建初始检查点）。
-- `saveCheckpoint` 是异步的，StateManager 通过 EventBus 通知持久化错误（不阻塞主流程）。
+- `saveCheckpoint` 是异步的，StateManager 的持久化失败不阻塞主流程。
 - `deleteSession` 用于会话清理。
 
 ### 5.2 SQLiteStore（已实现）

@@ -3,9 +3,11 @@
 // the agent actually wrote are surfaced at the END of the final assistant
 // bubble as clickable cards:
 //
-//   * ≤ MAX_CARD_FILES artifacts → one card per file/directory. Clicking a
-//     file opens it with the system's default app; clicking a directory
-//     reveals it in the file manager (both via the existing open_path chain).
+//   * ≤ MAX_CARD_FILES artifacts → one card per file/directory. Double-clicking
+//     a file opens it with the system's default app; double-clicking a
+//     directory reveals it in the file manager (both via the existing
+//     open_path chain). Hovering a card shows an open-icon hint so the
+//     double-click affordance is discoverable.
 //   * more than MAX_CARD_FILES (e.g. a scaffolded project) → collapse to a
 //     SINGLE directory card pointing at the common root of everything written,
 //     so the user can navigate straight to the project folder instead of
@@ -80,10 +82,42 @@ export function commonRootDir(items: ArtifactItem[]): string | null {
 
 // ── DOM rendering ──
 
+// Icons mirror the composer's paste chips: a tinted icon cell whose glyph AND
+// color follow the FILE FORMAT (code / image / doc / data / archive), so a
+// saved-file card reads like its upload counterpart.
 const FILE_ICON =
   '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M3 1.5h6l3.5 3.5v9a.5.5 0 0 1-.5.5h-9a.5.5 0 0 1-.5-.5v-12a.5.5 0 0 1 .5-.5z" fill="none" stroke="currentColor" stroke-linejoin="round"/><path d="M9 1.5V5h3.5" fill="none" stroke="currentColor" stroke-linejoin="round"/></svg>';
 const DIR_ICON =
   '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3.6l1.2 1.5h6.2a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1V4z" fill="none" stroke="currentColor" stroke-linejoin="round"/></svg>';
+const CODE_ICON =
+  '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 2.5 8 6 12.5"/><path d="M10 3.5 13.5 8 10 12.5"/></svg>';
+const IMAGE_ICON =
+  '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="5.5" cy="6.5" r="1.2"/><path d="M2.5 11.5 6 8l2.5 2.5 2-2 3 3"/></svg>';
+const DOC_ICON =
+  '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 2h6L13 5.5V13a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M9.5 2v3.5H13"/><path d="M5.5 8.5h5M5.5 11h5"/></svg>';
+const DATA_ICON =
+  '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M2.5 6.5h11M6 6.5V13"/></svg>';
+const ARCHIVE_ICON =
+  '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6 4 3.5h8l1 2.5v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6z"/><path d="M6.5 8h3"/></svg>';
+const OPEN_HINT_ICON =
+  '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5H3a.5.5 0 0 0-.5.5v9a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5v-3.5"/><path d="M9.5 2.5h4v4"/><path d="M13.5 2.5 8 8"/></svg>';
+
+/**
+ * Pick a format icon (glyph + tint class) for a file path so the card reads
+ * like the composer's paste chips. Unknown extensions fall back to the
+ * generic file glyph.
+ */
+function fileIconMeta(path: string): { svg: string; cls: string } {
+  const leaf = path.split(/[\\/]+/).pop() ?? '';
+  const dot = leaf.lastIndexOf('.');
+  const ext = dot > 0 ? leaf.slice(dot + 1).toLowerCase() : '';
+  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp', 'avif', 'heic'].includes(ext)) return { svg: IMAGE_ICON, cls: 'artifact-icon-img' };
+  if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'json', 'css', 'scss', 'sass', 'html', 'htm', 'py', 'rs', 'go', 'java', 'kt', 'c', 'h', 'cpp', 'hpp', 'cs', 'rb', 'php', 'sh', 'bash', 'zsh', 'zig', 'swift', 'vue', 'svelte'].includes(ext)) return { svg: CODE_ICON, cls: 'artifact-icon-code' };
+  if (['md', 'markdown', 'txt', 'pdf', 'doc', 'docx', 'rtf', 'tex', 'org'].includes(ext)) return { svg: DOC_ICON, cls: 'artifact-icon-doc' };
+  if (['csv', 'tsv', 'xlsx', 'xls', 'sql', 'db', 'sqlite', 'parquet'].includes(ext)) return { svg: DATA_ICON, cls: 'artifact-icon-data' };
+  if (['zip', 'tar', 'gz', 'tgz', '7z', 'rar', 'bz2', 'xz'].includes(ext)) return { svg: ARCHIVE_ICON, cls: 'artifact-icon-archive' };
+  return { svg: FILE_ICON, cls: '' };
+}
 
 /** Card title: the leaf name; secondary line: the path as written. */
 function splitNamePath(path: string): { name: string; rest: string } {
@@ -94,9 +128,46 @@ function splitNamePath(path: string): { name: string; rest: string } {
 }
 
 /**
+ * Build one file/directory card. DOUBLE-CLICKING opens the path (default app
+ * for files, file manager for directories); hovering reveals an open-icon
+ * hint so the double-click affordance is discoverable. Enter/Space on the
+ * focused card opens too (a11y).
+ */
+function createArtifactCard(item: ArtifactItem | null, dirPath: string | null): HTMLButtonElement | null {
+  const path = item ? item.path : dirPath;
+  if (!path) return null;
+  const isDir = item ? item.kind === 'dir' : true;
+  const meta = isDir ? { svg: DIR_ICON, cls: 'artifact-icon-dir' } : fileIconMeta(path);
+
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = isDir ? 'artifact-card artifact-card-dir' : 'artifact-card';
+  card.setAttribute('data-path', path);
+  card.title = t('artifacts.dblclickHint');
+  card.innerHTML =
+    `<span class="artifact-icon ${meta.cls}">${meta.svg}</span>` +
+    `<span class="artifact-text"><span class="artifact-name"></span><span class="artifact-path"></span></span>` +
+    `<span class="artifact-open-hint" aria-hidden="true">${OPEN_HINT_ICON}</span>`;
+  const nameEl = card.querySelector<HTMLElement>('.artifact-name')!;
+  const pathEl = card.querySelector<HTMLElement>('.artifact-path')!;
+  const { name, rest } = splitNamePath(path);
+  nameEl.textContent = name || path || t('artifacts.project');
+  pathEl.textContent = rest || (isDir ? path : '');
+  const open = () => openPathLink(path);
+  card.addEventListener('dblclick', open);
+  card.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') {
+      ev.preventDefault();
+      open();
+    }
+  });
+  return card;
+}
+
+/**
  * Append the artifact display (file cards or a single directory card) into
- * `host`. Clicking a card opens the path via openPathLink (default app for
- * files, file manager for directories).
+ * `host`. Double-clicking a card opens the path via openPathLink (default app
+ * for files, file manager for directories); the hover hint communicates it.
  */
 export function renderArtifactCards(host: HTMLElement, items: ArtifactItem[]): void {
   const plan = planArtifactDisplay(items);
@@ -109,39 +180,16 @@ export function renderArtifactCards(host: HTMLElement, items: ArtifactItem[]): v
 
   if (plan.mode === 'files') {
     for (const item of plan.items) {
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = 'artifact-card';
-      card.setAttribute('data-path', item.path);
-      card.title = item.kind === 'dir' ? t('artifacts.openDir') : t('artifacts.openFile');
-      card.innerHTML = `<span class="artifact-icon">${item.kind === 'dir' ? DIR_ICON : FILE_ICON}</span><span class="artifact-text"><span class="artifact-name"></span><span class="artifact-path"></span></span>`;
-      const nameEl = card.querySelector<HTMLElement>('.artifact-name')!;
-      const pathEl = card.querySelector<HTMLElement>('.artifact-path')!;
-      const { name, rest } = splitNamePath(item.path);
-      nameEl.textContent = name || item.path;
-      pathEl.textContent = rest;
-      card.addEventListener('click', () => openPathLink(item.path));
-      wrap.appendChild(card);
+      const card = createArtifactCard(item, null);
+      if (card) wrap.appendChild(card);
     }
   } else {
     // Project mode: a single card that opens the common root directory. If the
     // common root could not be resolved at all (nothing shared, not even the
     // first artifact's parent), skip rendering — a card that would open an
     // empty path is worse than no card.
-    if (!plan.dir) return;
-    const card = document.createElement('button');
-    card.type = 'button';
-    card.className = 'artifact-card artifact-card-dir';
-    card.setAttribute('data-path', plan.dir);
-    card.title = t('artifacts.openDir');
-    card.innerHTML = `<span class="artifact-icon">${DIR_ICON}</span><span class="artifact-text"><span class="artifact-name"></span><span class="artifact-path"></span></span>`;
-    const nameEl = card.querySelector<HTMLElement>('.artifact-name')!;
-    const pathEl = card.querySelector<HTMLElement>('.artifact-path')!;
-    const { name, rest } = splitNamePath(plan.dir);
-    nameEl.textContent = name || plan.dir || t('artifacts.project');
-    pathEl.textContent = rest || plan.dir;
-    card.addEventListener('click', () => openPathLink(plan.dir));
-    wrap.appendChild(card);
+    const card = createArtifactCard(null, plan.dir);
+    if (card) wrap.appendChild(card);
   }
 
   host.appendChild(wrap);

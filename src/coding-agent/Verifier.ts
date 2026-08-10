@@ -4,6 +4,7 @@
 // against the original task and returns a strict JSON verdict.
 
 import type { LLMAdapter, Message } from '../shared/types';
+import { repairJsonSource } from '../shared/parseRepair';
 
 export interface VerifierCheck {
   name: string;
@@ -119,6 +120,20 @@ or
 }
 
 /**
+ * Validate a parsed verdict object — must carry a boolean `passed`;
+ * `feedback` is optional and string-only. Returns null for anything else.
+ */
+function verdictFromObject(obj: unknown): { passed: boolean; feedback?: string } | null {
+  if (!obj || typeof obj !== 'object') return null;
+  const o = obj as { passed?: unknown; feedback?: unknown };
+  if (typeof o.passed !== 'boolean') return null;
+  return {
+    passed: o.passed,
+    feedback: typeof o.feedback === 'string' ? o.feedback : undefined,
+  };
+}
+
+/**
  * Parse a strict-format verdict, tolerating markdown fences and stray text.
  * Uses depth counting so braces inside string values (e.g. a feedback
  * mentioning a literal `}`) don't truncate the JSON. Returns null when the
@@ -156,15 +171,22 @@ export function parseVerdict(raw: string): { passed: boolean; feedback?: string 
     } else if (c === '}') {
       depth--;
       if (depth === 0 && start >= 0) {
+        const slice = text.slice(start, i + 1);
         try {
-          const obj = JSON.parse(text.slice(start, i + 1));
-          if (!obj || typeof obj.passed !== 'boolean') return null;
-          return {
-            passed: obj.passed,
-            feedback: typeof obj.feedback === 'string' ? obj.feedback : undefined,
-          };
+          const verdict = verdictFromObject(JSON.parse(slice));
+          return verdict ? verdict : null;
         } catch {
-          return null;
+          // Smart fault tolerance: a verdict with minor syntax errors (trailing
+          // comma, single quotes, unquoted keys) is repaired once before the
+          // caller fails open. Parse-gated — only accepted if it parses.
+          const repaired = repairJsonSource(slice);
+          if (!repaired.repaired) return null;
+          try {
+            const verdict = verdictFromObject(JSON.parse(repaired.source));
+            return verdict ? verdict : null;
+          } catch {
+            return null;
+          }
         }
       }
     }

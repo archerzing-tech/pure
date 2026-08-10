@@ -9,6 +9,45 @@
 
 export type ProviderId = 'deepseek-openai' | 'deepseek-anthropic' | 'qwen' | 'glm';
 
+/**
+ * A user-defined OpenAI-compatible provider (Settings → LLM → 添加自定义供应商).
+ * Unlike the built-in registry above, custom providers are persisted per-user
+ * (GUI: PureConfig.customProviders in localStorage; CLI: ~/.pure/config.json)
+ * and may be keyless — local endpoints like Ollama / LM Studio need no API key,
+ * in which case the Authorization header is omitted entirely.
+ */
+export interface CustomProvider {
+  /** Stable slug used as the provider id (e.g. 'ollama', 'openrouter'). */
+  id: string;
+  /** Display name (e.g. 'Ollama (local)'). */
+  name: string;
+  /** OpenAI-compatible base URL (e.g. http://localhost:11434/v1). */
+  baseURL: string;
+  /** Suggested models, comma-separated in the settings form. */
+  models: string[];
+  /** Default model used when config.model is empty. */
+  defaultModel: string;
+  /** API key when the endpoint requires one; empty = keyless (local). */
+  apiKey: string;
+  /** True when the key lives in Rust secrets (desktop) instead of storage. */
+  hasApiKey: boolean;
+}
+
+/**
+ * One-click Ollama preset (Settings → LLM → Ollama 一键预设). Uses the
+ * OpenAI-compatible endpoint of a local Ollama daemon (default port 11434) and
+ * a set of common coding-oriented tags — the user can edit models later.
+ */
+export const OLLAMA_PRESET: CustomProvider = {
+  id: 'ollama',
+  name: 'Ollama (local)',
+  baseURL: 'http://localhost:11434/v1',
+  models: ['qwen2.5-coder:7b', 'llama3.1:8b', 'deepseek-r1:8b'],
+  defaultModel: 'qwen2.5-coder:7b',
+  apiKey: '',
+  hasApiKey: false,
+};
+
 export interface ProviderDef {
   id: ProviderId;
   /** Short label for the sidebar / status bar / context panel. */
@@ -38,6 +77,61 @@ const PROVIDER_BY_ID = new Map<string, ProviderDef>(PROVIDERS.map((p) => [p.id, 
 /** True when `value` is a known provider id (narrows to ProviderId). */
 export function isProviderId(value: string): value is ProviderId {
   return PROVIDER_BY_ID.has(value);
+}
+
+// ── Custom-provider resolution (built-ins + user-defined, same lookups) ──
+
+/** Find a custom provider by id (undefined when absent). */
+export function customProviderFor(
+  customs: readonly CustomProvider[] | undefined | null,
+  id: string | undefined | null,
+): CustomProvider | undefined {
+  if (!customs || !id) return undefined;
+  return customs.find((p) => p.id === id);
+}
+
+/** True when `id` refers to a user-defined custom provider. */
+export function isCustomProviderId(
+  customs: readonly CustomProvider[] | undefined | null,
+  id: string | undefined | null,
+): boolean {
+  return !!customProviderFor(customs, id);
+}
+
+/** Display label for a provider id, resolving custom providers by name. */
+export function customProviderLabel(
+  customs: readonly CustomProvider[] | undefined | null,
+  id: string | undefined | null,
+): string {
+  return customProviderFor(customs, id)?.name ?? providerLabel(id);
+}
+
+/** Default model for a provider id, custom-aware; falls back to built-in. */
+export function customDefaultModel(
+  customs: readonly CustomProvider[] | undefined | null,
+  id: string | undefined | null,
+): string {
+  return customProviderFor(customs, id)?.defaultModel ?? defaultModelFor(id ?? '');
+}
+
+/** Base URL for a provider id, custom-aware; falls back to built-in. */
+export function customBaseURL(
+  customs: readonly CustomProvider[] | undefined | null,
+  id: string | undefined | null,
+): string {
+  return customProviderFor(customs, id)?.baseURL ?? baseURLFor(id ?? '');
+}
+
+/**
+ * True when the provider is a custom, keyless endpoint (Ollama / LM Studio):
+ * sending works without any API key — the Authorization header is omitted.
+ */
+export function isCustomKeyless(
+  customs: readonly CustomProvider[] | undefined | null,
+  id: string | undefined | null,
+): boolean {
+  const custom = customProviderFor(customs, id);
+  return !!custom && !custom.apiKey && !custom.hasApiKey;
 }
 
 export function providerDef(id: string | undefined | null): ProviderDef | undefined {

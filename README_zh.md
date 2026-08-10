@@ -101,11 +101,11 @@ bun run gui:build    # 生产构建 → src-tauri/target/release/bundle/
 │  LLM（DeepSeek/Qwen/GLM）· 工具 · 存储 · MCP     │
 ├─────────────────────────────────────────────────┤
 │  Rust / Tauri IPC（操作系统能力）                   │
-│  Shell PTY · 文件监听 · 密钥存储 · HTTP/2          │
+│  Shell PTY · 密钥存储 · HTTP/2                    │
 └─────────────────────────────────────────────────┘
 ```
 
-智能体核心使用 TypeScript 在 WebView 中运行。Rust（Tauri）提供操作系统级别的能力 — Shell PTY 流式输出、文件监听、密钥存储访问和 LLM API 中继（确保 API Key 不会进入 JS 上下文）。
+智能体核心使用 TypeScript 在 WebView 中运行。Rust（Tauri）提供操作系统级别的能力 — Shell PTY 流式输出、密钥存储访问和 LLM API 中继（确保 API Key 不会进入 JS 上下文）。
 
 ---
 
@@ -138,7 +138,7 @@ pure/
 │   │   ├── mcp/                  # MCP 传输层（stdio、HTTP）
 │   │   └── storage/              # FSStore + SQLiteStore
 │   ├── ui/                       # WebView 界面（聊天、设置、Markdown）
-│   └── shared/                   # 共享类型、EventBus、i18n、记忆
+│   └── shared/                   # 共享类型、i18n、记忆
 ├── src-tauri/                    # Rust / Tauri 后端
 │   ├── src/                      # IPC 命令、会话管理器
 │   └── tauri.conf.json           # 应用配置 + 更新密钥

@@ -15,6 +15,7 @@
 import type { MemoryEntry, MemoryType } from '../adapter/memory/IMemoryStore';
 import type { MemoryLifecycle } from '../shared/types';
 import { healthScore, lifecycleOf, type EvolutionConfig } from '../adapter/memory/evolution';
+import { repairJsonSource } from '../shared/parseRepair';
 
 export const MEMORY_EXPORT_APP = 'pure';
 export const MEMORY_EXPORT_KIND = 'memory-library';
@@ -161,13 +162,26 @@ export function buildMemoryExportMarkdown(
  *   2. 裸 MemoryEntry 数组（容忍旧格式/手工构造）。
  * 每条做最小字段校验（type 合法、content 为字符串、timestamp 为有限数），
  * 不合法条目跳过。整体不是有效 JSON / 信封类型不对 → throw（调用方 toast）。
+ * 容错：JSON 有小语法错误（尾逗号 / 单引号 / 未加引号键 / 代码围栏 / 全角标点）
+ * 时先智能修复再解析，仍失败才交给用户处理。
  */
 export function parseMemoryImport(text: string): MemoryEntry[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error('invalid-json');
+    // Smart fault tolerance: repair (parse-gated) before giving up, so a file
+    // exported by a tool that added trailing commas still imports.
+    // structuralOnly: entry CONTENT is user data — string values must never
+    // be altered by the repair (only syntax), so content-mutating fixers
+    // (full-width punctuation, JS constants) are excluded.
+    const repaired = repairJsonSource(text, { structuralOnly: true });
+    if (!repaired.repaired) throw new Error('invalid-json');
+    try {
+      parsed = JSON.parse(repaired.source);
+    } catch {
+      throw new Error('invalid-json');
+    }
   }
 
   const rawEntries: unknown[] = Array.isArray(parsed)

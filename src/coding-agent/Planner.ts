@@ -6,6 +6,7 @@
 //        approach after a failed round instead of repeating the same one.
 
 import type { AnalysisResult, TaskComplexity, TaskMode, Plan, PlanStep, TrapWarning } from './types';
+import { repairJsonSource } from '../shared/parseRepair';
 
 /** Upper bound on LLM-plan steps kept in the review card / system prompt. */
 const MAX_PLAN_STEPS = 10;
@@ -343,8 +344,10 @@ export function formatArtifactPrompt(): string {
  * of the plan-generation pre-flight call). Accepts a plain JSON array, a JSON
  * object with a `steps` array, or the same wrapped in ```json fences. Each
  * step must carry `action` (string) and `description` (string); `expectedOutcome`
- * is optional and defaults to the description. Returns null on any malformed
- * input so the caller can fall back to the heuristic generic plan.
+ * is optional and defaults to the description. Slightly-broken JSON (trailing
+ * commas, single quotes, unquoted keys, full-width punctuation) is repaired
+ * automatically before validation. Returns null on any malformed input so the
+ * caller can fall back to the heuristic generic plan.
  */
 export function parsePlanJson(text: string): Plan | null {
   if (!text) return null;
@@ -357,7 +360,17 @@ export function parsePlanJson(text: string): Plan | null {
   try {
     parsed = JSON.parse(cleaned);
   } catch {
-    return null;
+    // Smart fault tolerance: LLM plan JSON with minor syntax errors (trailing
+    // commas, single quotes, unquoted keys, full-width punctuation, prose
+    // wrappers) is repaired and re-parsed before falling back to the generic
+    // heuristic plan. Parse-gated — only accepted if it parses cleanly.
+    const repaired = repairJsonSource(cleaned);
+    if (!repaired.repaired) return null;
+    try {
+      parsed = JSON.parse(repaired.source);
+    } catch {
+      return null;
+    }
   }
 
   const rawSteps: unknown = Array.isArray(parsed) ? parsed : (parsed as { steps?: unknown })?.steps;

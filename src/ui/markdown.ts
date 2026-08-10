@@ -14,6 +14,7 @@ import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { showToast } from '../shared/toast';
 import { t } from '../shared/i18n';
 import { linkifyPaths } from './pathLink';
+import { repairJsonSource, repairMermaidSource, repairSvgSource } from '../shared/parseRepair';
 import hljs from 'highlight.js/lib/core';
 import 'highlight.js/styles/atom-one-light.css';
 // plantuml-encoder types come from src/shared/plantuml-encoder.d.ts.
@@ -114,6 +115,12 @@ const DIAGRAM_RENDER_TIMEOUT_MS = 15000;
 export type DiagramKind = 'mermaid' | 'svg' | 'chart' | 'puml';
 type DiagramState = 'loading' | 'preview' | 'error';
 const diagramRenderVersions = new WeakMap<HTMLElement, number>();
+
+// The repaired source behind each "已自动修复" badge, keyed by slot. Kept out
+// of the DOM on purpose: DOMPurify strips data-* attribute values containing
+// `-->` / `<!--` / `]>` (mermaid edge syntax), and the WeakMap entries GC with
+// the slot, so a removed bubble never leaks the source text.
+const repairedSources = new WeakMap<HTMLElement, string>();
 
 function nextDiagramRenderVersion(slot: HTMLElement): number {
   const version = (diagramRenderVersions.get(slot) ?? 0) + 1;
@@ -289,6 +296,249 @@ function setDiagramState(slot: HTMLElement, state: DiagramState, message = ''): 
         `<button type="button" class="diagram-retry">${esc(t('diagram.retry'))}</button>`
       : '';
   }
+  // The "已自动修复" badge is only valid while the CURRENT preview came from a
+  // repaired source — drop it whenever the slot leaves the preview state (a
+  // retry or a theme re-render may not need repair; a failed render must not
+  // keep implying the output was auto-fixed). Its stored source goes with it,
+  // so a stale entry can never be read by a later badge click.
+  if (state !== 'preview') {
+    slot.querySelector('.diagram-repaired')?.remove();
+    repairedSources.delete(slot);
+  }
+}
+
+/**
+ * Append a subtle "已自动修复" badge to a slot whose source was repaired by
+ * the fault-tolerance layer (see src/shared/parseRepair.ts). Positioned at the
+ * slot's top-left corner, opposite the hover download pill. Clicking the badge
+ * (or pressing Enter/Space on it) opens the original-vs-repaired diff viewer;
+ * the click is stopped from bubbling so it never also opens the diagram viewer.
+ */
+function markDiagramRepaired(slot: HTMLElement, repairedSource: string): void {
+  if (slot.querySelector('.diagram-repaired')) return;
+  repairedSources.set(slot, repairedSource);
+  const badge = document.createElement('span');
+  badge.className = 'diagram-repaired';
+  badge.textContent = t('diagram.repaired');
+  badge.title = t('diagram.repaired.hint');
+  badge.setAttribute('role', 'button');
+  badge.setAttribute('tabindex', '0');
+  badge.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openRepairDiff(slot);
+  });
+  badge.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    openRepairDiff(slot);
+  });
+  slot.appendChild(badge);
+}
+
+// ── Repair-diff viewer: original source vs repaired source ──
+
+/** A line-level diff entry for the repair-diff viewer's side-by-side panels. */
+export interface RepairDiffLine {
+  kind: 'same' | 'changed';
+  /** Original line — undefined for a pure addition. */
+  left?: string;
+  /** Repaired line — undefined for a pure removal. */
+  right?: string;
+}
+
+/**
+ * Line-level diff between the original and repaired sources: LCS alignment
+ * with a coalescing pass that pairs adjacent removed/added runs into aligned
+ * "changed" rows, so a replacement like an unclosed `]` reads as one row of
+ * red-left / green-right instead of two misaligned rows. Pure (no DOM) so the
+ * headless markdown tests can cover it directly.
+ */
+export function diffLines(original: string, repaired: string): RepairDiffLine[] {
+  const A = linesOf(original);
+  const B = linesOf(repaired);
+  const n = A.length;
+  const m = B.length;
+
+  // LCS length table (bottom-up). Diagram sources are tiny (typically < 200
+  // lines) so the O(n·m) table is a non-issue.
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  const raw: RepairDiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) {
+      raw.push({ kind: 'same', left: A[i], right: B[j] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      raw.push({ kind: 'changed', left: A[i] });
+      i++;
+    } else {
+      raw.push({ kind: 'changed', right: B[j] });
+      j++;
+    }
+  }
+  while (i < n) { raw.push({ kind: 'changed', left: A[i] }); i++; }
+  while (j < m) { raw.push({ kind: 'changed', right: B[j] }); j++; }
+
+  // Coalesce adjacent one-sided rows so replacements pair up per row.
+  const merged: RepairDiffLine[] = [];
+  let k = 0;
+  while (k < raw.length) {
+    if (raw[k].left !== undefined && raw[k].right !== undefined) {
+      merged.push(raw[k]);
+      k++;
+      continue;
+    }
+    const removals: string[] = [];
+    const additions: string[] = [];
+    while (k < raw.length && (raw[k].left === undefined || raw[k].right === undefined)) {
+      if (raw[k].right === undefined) removals.push(raw[k].left ?? '');
+      else additions.push(raw[k].right ?? '');
+      k++;
+    }
+    const rows = Math.max(removals.length, additions.length);
+    for (let r = 0; r < rows; r++) {
+      merged.push({ kind: 'changed', left: removals[r], right: additions[r] });
+    }
+  }
+  return merged;
+}
+
+/**
+ * Split source text into lines for the diff. split('\n') always appends one
+ * phantom empty element after a final newline (e.g. 'A\n' → ['A', '']); drop
+ * exactly that one so a mere trailing-newline difference between the two sides
+ * never renders a noise row. Any further trailing empties ('A\n\n' → ['A',''])
+ * are real blank lines and stay.
+ */
+function linesOf(s: string): string[] {
+  if (s === '') return [];
+  const parts = s.split('\n');
+  if (parts[parts.length - 1] === '') parts.pop();
+  return parts;
+}
+
+// One repair-diff viewer may be open at a time; track its cleanup so opening
+// another — or a diagram viewer, which must not stack overlays — releases the
+// previous one's document/window listeners (a leak when only `.remove()` ran).
+let activeRepairDiffCleanup: (() => void) | null = null;
+
+/**
+ * Open the original-vs-repaired source diff for a slot whose badge was
+ * clicked. Dismiss with the close button, backdrop click, or Escape; the
+ * overlay is a dark scrim matching the diagram viewer, with a scrollable
+ * side-by-side grid where changed lines get red-left / green-right tints.
+ */
+function openRepairDiff(slot: HTMLElement): void {
+  const repaired = repairedSources.get(slot);
+  const original = diagramRawOf(slot);
+  if (repaired === undefined || original === repaired) return;
+  const rows = diffLines(original, repaired);
+
+  // Never stack overlays: release an open diagram viewer, then any prior diff.
+  activeViewerCleanup?.();
+  activeRepairDiffCleanup?.();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'repair-diff-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', t('diagram.repaired.diffTitle'));
+
+  const panel = document.createElement('div');
+  panel.className = 'repair-diff-panel';
+
+  const head = document.createElement('div');
+  head.className = 'repair-diff-head';
+  const title = document.createElement('span');
+  title.className = 'repair-diff-title';
+  title.textContent = t('diagram.repaired.diffTitle');
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'mermaid-viewer-close repair-diff-close';
+  close.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+  close.title = t('diagram.repaired.close');
+  close.setAttribute('aria-label', t('diagram.repaired.close'));
+  close.addEventListener('click', cleanup);
+  head.append(title, close);
+
+  const scroll = document.createElement('div');
+  scroll.className = 'repair-diff-scroll';
+
+  // Sticky header row: empty gutter, 原始源码, empty gutter, 修复后 — the same
+  // 4-column grid as the rows below, so the labels always align with cells.
+  const headRow = document.createElement('div');
+  headRow.className = 'repair-diff-row repair-diff-head-row';
+  headRow.append(
+    document.createElement('span'),
+    labelSpan(t('diagram.repaired.original'), 'repair-diff-label-left'),
+    document.createElement('span'),
+    labelSpan(t('diagram.repaired.repairedLabel'), 'repair-diff-label-right'),
+  );
+  scroll.appendChild(headRow);
+
+  let lnA = 0;
+  let lnB = 0;
+  for (const row of rows) {
+    const rowEl = document.createElement('div');
+    rowEl.className = `repair-diff-row ${row.kind}`;
+    if (row.left !== undefined) lnA++;
+    if (row.right !== undefined) lnB++;
+    rowEl.append(
+      lineNum(row.left !== undefined ? lnA : ''),
+      cell(row.left, 'left'),
+      lineNum(row.right !== undefined ? lnB : ''),
+      cell(row.right, 'right'),
+    );
+    scroll.appendChild(rowEl);
+  }
+
+  panel.append(head, scroll);
+  overlay.appendChild(panel);
+
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') cleanup();
+  };
+  function cleanup(): void {
+    activeRepairDiffCleanup = null;
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+  }
+  document.addEventListener('keydown', onKey);
+  overlay.addEventListener('mousedown', (e) => {
+    if (e.target === overlay) cleanup();
+  });
+  document.body.appendChild(overlay);
+  activeRepairDiffCleanup = cleanup;
+}
+
+function labelSpan(text: string, className: string): HTMLElement {
+  const el = document.createElement('span');
+  el.className = className;
+  el.textContent = text;
+  return el;
+}
+
+function lineNum(text: number | ''): HTMLElement {
+  const el = document.createElement('span');
+  el.className = 'repair-diff-ln';
+  el.textContent = text === '' ? '' : String(text);
+  return el;
+}
+
+function cell(text: string | undefined, side: 'left' | 'right'): HTMLElement {
+  const el = document.createElement('pre');
+  el.className = `repair-diff-cell ${side}`;
+  el.textContent = text ?? '';
+  if (text === undefined) el.classList.add('empty');
+  return el;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs = DIAGRAM_RENDER_TIMEOUT_MS): Promise<T> {
@@ -346,6 +596,23 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
       setDiagramState(slot, 'preview');
     } catch (err) {
       if (!isCurrentDiagramRender(slot, version)) continue;
+      // Smart fault tolerance: a slightly-broken source (stray fence/backticks,
+      // leading prose before the diagram start line, HTML comments, a trailing
+      // line truncated mid-edge) is repaired and re-rendered once. Only the
+      // ORIGINAL error surfaces when the repaired source also fails, so the
+      // user always sees the real reason and can retry by hand.
+      const repaired = repairMermaidSource(raw);
+      if (repaired.repaired) {
+        try {
+          const retryId = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
+          const { svg } = await withTimeout(mermaid.render(retryId, repaired.source));
+          if (!isCurrentDiagramRender(slot, version)) continue;
+          target.innerHTML = svg;
+          markDiagramRepaired(slot, repaired.source);
+          setDiagramState(slot, 'preview');
+          continue;
+        } catch { /* repaired source also failed → show the original error */ }
+      }
       const msg = err instanceof Error ? err.message : String(err);
       setDiagramState(slot, 'error', msg);
     }
@@ -483,13 +750,27 @@ async function renderSvgNodes(container: HTMLElement): Promise<void> {
       setDiagramState(slot, 'error', '(empty SVG)');
       continue;
     }
-    const svg = sanitizeSvgSource(src);
+    let svg = sanitizeSvgSource(src);
+    let repairedSource: string | null = null;
+    if (!svg) {
+      // Smart fault tolerance: a fenced / prose-wrapped or truncated document
+      // is extracted or completed, then sanitized once more before giving up.
+      const repaired = repairSvgSource(src);
+      if (repaired.repaired) {
+        svg = sanitizeSvgSource(repaired.source);
+        if (svg) repairedSource = repaired.source;
+      }
+    }
     if (!svg) {
       setDiagramState(slot, 'error', 'SVG sanitization produced no output');
       continue;
     }
+    // Commit to this render BEFORE touching the DOM: a stale attempt (already
+    // superseded by a retry/theme re-render) must never append its repair
+    // badge to a preview that did not actually come from a repaired source.
     if (!isCurrentDiagramRender(slot, version)) continue;
     target.innerHTML = svg;
+    if (repairedSource) markDiagramRepaired(slot, repairedSource);
     setDiagramState(slot, 'preview');
   }
 }
@@ -542,36 +823,64 @@ export interface ChartSpec {
  * `系列1/系列2/…`. A JSON payload (`{ "type": "pie", "data": [["a",1],…] }`)
  * is also accepted. Throws on unparseable input.
  */
-export function parseChartSource(source: string): ChartSpec {
+/**
+ * Parse the JSON form of a chart payload into a ChartSpec. Throws 'chart …'
+ * errors for schema violations (missing data array, no numeric rows, bad row)
+ * so the caller can tell "not JSON" from "wrong chart schema".
+ */
+function chartSpecFromJson(raw: unknown): ChartSpec {
+  const arr = Array.isArray(raw) ? raw : (raw as { data?: unknown } | null)?.data;
+  if (!Array.isArray(arr)) throw new Error('chart JSON needs a data array');
+  const data: ChartSeries[] = arr.map((r, i) => {
+    if (Array.isArray(r)) {
+      return { label: String(r[0] ?? `#${i + 1}`), value: chartNumber(r[1]) };
+    }
+    if (r && typeof r === 'object') {
+      const row = r as { label?: unknown; value?: unknown };
+      return { label: String(row.label ?? `#${i + 1}`), value: chartNumber(row.value) };
+    }
+    throw new Error(`bad chart row: ${JSON.stringify(r)}`);
+  }).filter((row) => Number.isFinite(row.value));
+  if (data.length === 0) throw new Error('chart needs at least one data row');
+  const obj = raw as { type?: unknown; title?: unknown; unit?: unknown } | null;
+  const rawType = String(obj?.type ?? 'bar').toLowerCase();
+  return {
+    type: normalizeChartType(rawType),
+    title: String(obj?.title ?? ''),
+    unit: String(obj?.unit ?? ''),
+    data,
+  };
+}
+
+/**
+ * Core chart parser: JSON form (with smart repair) then the line DSL. The
+ * `meta` out-param reports whether a JSON repair was applied, so the rendered
+ * slot can show the "已自动修复" badge (see parseChartSourceWithMeta).
+ */
+function parseChartSourceCore(source: string, meta: { repaired: boolean; repairedSource?: string }): ChartSpec {
   const trimmed = source.trim();
   if (!trimmed) throw new Error('empty chart source');
 
-  // JSON form.
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+  // JSON form. The gate also admits ```-fenced and quote-led text so a fenced
+  // JSON payload reaches the repair path instead of falling straight to the
+  // line parser (which would fail with a confusing "no data rows" error).
+  if (/^[{["`]/.test(trimmed)) {
     try {
-      const raw = JSON.parse(trimmed);
-      const arr = Array.isArray(raw) ? raw : raw.data;
-      if (!Array.isArray(arr)) throw new Error('chart JSON needs a data array');
-      const data: ChartSeries[] = arr.map((r, i) => {
-        if (Array.isArray(r)) {
-          return { label: String(r[0] ?? `#${i + 1}`), value: chartNumber(r[1]) };
-        }
-        if (r && typeof r === 'object') {
-          return { label: String(r.label ?? `#${i + 1}`), value: chartNumber(r.value) };
-        }
-        throw new Error(`bad chart row: ${JSON.stringify(r)}`);
-      }).filter((row) => Number.isFinite(row.value));
-      if (data.length === 0) throw new Error('chart needs at least one data row');
-      const rawType = String(raw.type ?? 'bar').toLowerCase();
-      return {
-        type: normalizeChartType(rawType),
-        title: String(raw.title ?? ''),
-        unit: String(raw.unit ?? ''),
-        data,
-      };
-    } catch (err) {
-      // Not valid JSON → fall through to the line parser.
-      if (err instanceof Error && !err.message.startsWith('chart')) throw err;
+      return chartSpecFromJson(JSON.parse(trimmed));
+    } catch {
+      // Invalid JSON (or a schema-violating payload) — attempt a smart repair
+      // (trailing commas / single quotes / unquoted keys / code fences /
+      // full-width punctuation / prose wrappers / comments) before the line
+      // parser gets a shot. Parse-gated: only accepted if it parses cleanly.
+      const repaired = repairJsonSource(trimmed);
+      if (repaired.repaired) {
+        try {
+          const spec = chartSpecFromJson(JSON.parse(repaired.source));
+          meta.repaired = true;
+          meta.repairedSource = repaired.source;
+          return spec;
+        } catch { /* repaired payload still rejected → line parser below */ }
+      }
     }
   }
 
@@ -649,6 +958,46 @@ export function parseChartSource(source: string): ChartSpec {
 
   if (data.length === 0) throw new Error('chart needs at least one data row');
   return { type, title, unit, data };
+}
+
+/**
+ * Parse the ```chart DSL into a ChartSpec. See parseChartSourceWithMeta for
+ * the repair flag. Supported forms:
+ *
+ *   type: bar | hbar | line | pie        (default bar; `type:` or bare word)
+ *   title: …
+ *   unit: …
+ *   一月 120                              (one `label value` per line; also
+ *   二月 180                                accepts `label, 120`, `label:120`,
+ *                                           tab-separated, or CSV)
+ *
+ * Multi-series (line/bar/hbar): a header row plus rows with >=2 numeric
+ * columns renders one series per column — the first column is the x label:
+ *
+ *   日期 北京 上海
+ *   周一 25 27
+ *   周二 26 28
+ *
+ * The same shape works as a markdown table (`| 日期 | 北京 | 上海 |`), CSV,
+ * or tab-separated rows; without a header the series fall back to
+ * `系列1/系列2/…`. A JSON payload (`{ "type": "pie", "data": [["a",1],…] }`)
+ * is also accepted — slightly broken JSON (trailing commas, single quotes,
+ * unquoted keys, fences, full-width punctuation) is repaired automatically.
+ * Throws on unparseable input.
+ */
+export function parseChartSource(source: string): ChartSpec {
+  return parseChartSourceCore(source, { repaired: false });
+}
+
+/**
+ * Like parseChartSource, but also reports whether a JSON repair was applied
+ * and, when it was, the repaired source string (the badge's diff view needs
+ * both the original and the repaired payload).
+ */
+export function parseChartSourceWithMeta(source: string): { spec: ChartSpec; repaired: boolean; repairedSource?: string } {
+  const meta: { repaired: boolean; repairedSource?: string } = { repaired: false };
+  const spec = parseChartSourceCore(source, meta);
+  return { spec, repaired: meta.repaired, repairedSource: meta.repairedSource };
 }
 
 const CHART_BARE_TYPE_RE = /^(bar|hbar|horizontal\s*bar|line|pie|area|柱状图?|横向柱状图?|折线图?|饼图)$/i;
@@ -870,9 +1219,10 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
       continue;
     }
     try {
-      const spec = parseChartSource(diagramRawOf(slot));
+      const { spec, repaired, repairedSource } = parseChartSourceWithMeta(diagramRawOf(slot));
       mod.renderEchartInto(target, spec);
       if (!isCurrentDiagramRender(slot, version)) continue;
+      if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
       setDiagramState(slot, 'preview');
     } catch (err) {
       if (!isCurrentDiagramRender(slot, version)) continue;
@@ -1431,7 +1781,8 @@ function bindVectorPopup(container: HTMLElement): void {
 let activeViewerCleanup: (() => void) | null = null;
 
 function showDiagramViewer(el: HTMLElement): void {
-  // Remove any existing viewer
+  // Remove any existing viewer (and never stack a repair-diff on top of it)
+  activeRepairDiffCleanup?.();
   activeViewerCleanup?.();
   const existing = document.querySelector('.mermaid-viewer-overlay');
   if (existing) existing.remove();

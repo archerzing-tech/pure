@@ -34,11 +34,10 @@ also had Rust `SessionManager` owning a TypeScript `Harness`. That is impossible
 - **Agent core (Engine + Harness + Adapter + Coding Agent) runs in TypeScript inside the WebView (renderer).**
 - **Rust (Tauri) provides OS capabilities AND LLM transport**, exposed as async IPC commands:
   - `execute_command` (shell via PTY, streaming)
-  - `watch_files` (notify)
   - `secret_get` / `secret_set` (keyring)
   - `spawn_mcp` / `mcp_request` (subprocess transport)
   - **`chat_stream`** (LLM API relay via reqwest HTTP/2 + Tauri Channel, see §5.1)
-- Rust `SessionManager` manages **Rust-side resources** (PTY handles, subprocess PIDs, file watchers,
+- Rust `SessionManager` manages **Rust-side resources** (PTY handles, subprocess PIDs,
   reqwest connection pool) keyed by `sessionId`. It does **not** hold a `Harness` instance.
 - The TypeScript `ToolRegistry` dispatches: pure file ops run directly in Node; shell/PTY/MCP/keyring
   go through `invoke(...)` to Rust.
@@ -50,9 +49,9 @@ Desktop builds route LLM streaming through Rust via Tauri IPC, never exposing AP
 ```
 WebView (TS)                         Rust (Tauri)
 ─────────────                       ─────────────
-AgentLoopEngine  ──invoke──▶        execute_command / watch_files
+AgentLoopEngine  ──invoke──▶        execute_command
 Harness                              / secret_* / spawn_mcp
-ToolRegistry ──invoke──▶            (owns PTY, PIDs, watchers)
+ToolRegistry ──invoke──▶            (owns PTY, PIDs)
                                      
 ChatController ──Channel──▶         chat_stream
   │ onChunk.onmessage                │ reqwest HTTP/2 SSE
@@ -82,7 +81,7 @@ Desktop Shell (Tauri 2.x + React)   ← IPC (Channel / invoke)
   Harness           depends on Engine + Adapter        (stateful, per session; checkpoint-based)
   Agent-Event-Loop  pure TS, zero deps                 (stateless)
   Adapter Layer     LLM / tools / storage / MCP        (all I/O)
-  Shared Kernel     EventBus, types, VerifierAdapter
+  Shared Kernel     types, VerifierAdapter
 ```
 
 Engine is **stateless**: all mutable state lives in `LoopInputState`, which the engine mutates
@@ -202,13 +201,13 @@ Each phase must produce a **runnable** artifact, not "0 tests pass".
 
 | Phase | Build | Done when |
 |-------|-------|-----------|
-| 1 Shared Kernel | types, EventBus, VerifierAdapter | `tsc` clean; types importable |
+| 1 Shared Kernel | types, VerifierAdapter | `tsc` clean; types importable |
 | 2 Engine | BudgetManager, FailurePolicy, HookRouter, **AgentLoopEngine (all 5 state handlers)** | Unit test: a scripted mock LLM completes a 2-turn tool loop and sets `finalOutput` |
-| 3 Harness | StateManager (checkpoint-based), ContextEngine (wired), StreamManager (fixed merge), FileWatcher, MCPClient (wired to config) | Integration: Harness + Mock engine completes a task and checkpoints are restorable |
+| 3 Harness | StateManager (checkpoint-based), ContextEngine (wired), StreamManager (fixed merge), MCPClient (wired to config) | Integration: Harness + Mock engine completes a task and checkpoints are restorable |
 | 4 Adapter | LLMAdapter iface, Anthropic/OpenAI (**send tool defs, correct message mapping**), Mock, ToolRegistry (real tools), SQLiteStore | Adapter test: tool call round-trip; Anthropic/OpenAI shape-checked against a fixture |
 | 5 Coding Agent | system prompt (§1), flat ToolRegistry with tags, Planner/analyzeTask, PermissionManager (IPC round-trip), Verifier | E2E: a real prompt reads/edits a file and verifies |
 | 6 Frontend | IPC bridge, ChatPanel, Monaco, PermissionDialog, PlanReview | `vite` renders streamed tokens + tool results |
-| 7 Rust | Tauri IPC: execute_command(PTY), watch_files, secret_*, spawn_mcp; SessionManager owns Rust resources only | `tauri dev` launches; tools execute via Rust |
+| 7 Rust | Tauri IPC: execute_command(PTY), secret_*, spawn_mcp; SessionManager owns Rust resources only | `tauri dev` launches; tools execute via Rust |
 | 8 E2E | Playwright across the desktop app | Full prompt→edit→verify flow works |
 
 ---
@@ -222,11 +221,11 @@ Each phase must produce a **runnable** artifact, not "0 tests pass".
 - `StreamManager` preserves `stateId`/`isToolCall` on merge.
 - `StateManager` persists full checkpoints at key turn boundaries instead of per-version patch chains.
 - `MCPClient` connects servers from `HarnessConfig.mcpConfig` (was reading empty `discover({})`).
-- `ContextEngine`/`FileWatcher` actually called in `Harness.run`.
+- `ContextEngine` actually called in `Harness.run`.
 - Anthropic/OpenAI adapters send tool defs and use correct `tool_use`/`tool_result` blocks.
 - `ShellToolAdapter` glob/grep fixed; shell routed through Rust PTY.
 - `Planner`/`analyzeTask` specified (Coding Agent doc).
-- `PermissionManager` request-response designed as a Tauri IPC round-trip (not in-process EventBus).
+- `PermissionManager` request-response designed as a Tauri IPC round-trip.
 - Model names are placeholders (`claude-…`, `gpt-4o`); no fabricated version numbers.
 
 > End of pure master spec.

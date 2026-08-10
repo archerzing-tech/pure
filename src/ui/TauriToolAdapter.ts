@@ -5,190 +5,12 @@
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../shared/types';
 import type { Channel } from '@tauri-apps/api/core';
+import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../shared/toolDefs';
+import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
 
-// ── Tool definitions (mirrors src/ui/tools.ts TOOL_DEFS, only tools with Rust backend) ──
+// ── Tool definitions (single source of truth: shared/toolDefs.ts) ──
 
-const TOOL_DEFINITIONS: ToolDefinition[] = [
-  {
-    name: 'read_file',
-    description: 'Read a file from the workspace. Optionally specify startLine and endLine to read a range.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'File path relative to workspace root' },
-        startLine: { type: 'integer', description: 'Optional: first line to read (1-indexed)' },
-        endLine: { type: 'integer', description: 'Optional: last line to read (inclusive)' },
-      },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'write_file',
-    description: 'Create or overwrite a file in the workspace. Parent directories are created automatically.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'File path relative to workspace root' },
-        content: { type: 'string', description: 'File content to write' },
-      },
-      required: ['path', 'content'],
-    },
-  },
-  {
-    name: 'edit_file',
-    description: 'Replace a string in a file. Must provide exact oldString and newString.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'File path relative to workspace root' },
-        oldString: { type: 'string', description: 'Exact string to find and replace' },
-        newString: { type: 'string', description: 'Replacement string' },
-        allowMultiple: { type: 'boolean', description: 'Replace all occurrences' },
-      },
-      required: ['path', 'oldString', 'newString'],
-    },
-  },
-  {
-    name: 'search_files',
-    description: 'Search for a pattern in workspace files. Returns matching lines with file paths and line numbers.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        pattern: { type: 'string', description: 'Search pattern' },
-        path: { type: 'string', description: 'Directory to search (relative to workspace)' },
-        filePattern: { type: 'string', description: 'Glob filter, e.g. "*.ts"' },
-        maxResults: { type: 'integer', description: 'Max results (default 50)' },
-      },
-      required: ['pattern'],
-    },
-  },
-  {
-    name: 'list_files',
-    description: 'List files and directories in the workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Directory to list (relative to workspace)' },
-        recursive: { type: 'boolean', description: 'List recursively' },
-      },
-    },
-  },
-  {
-    name: 'execute_command',
-    description: 'Execute a shell command in the workspace directory. Returns stdout, stderr, and exit code.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', description: 'Shell command to execute' },
-      },
-      required: ['command'],
-    },
-  },
-  {
-    name: 'git_diff',
-    description: 'Show git diff (unstaged changes). Set staged=true for staged changes.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        staged: { type: 'boolean', description: 'Show staged changes' },
-        path: { type: 'string', description: 'Limit to a file path' },
-      },
-    },
-  },
-  {
-    name: 'git_log',
-    description: 'Show recent git commit history.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        maxCount: { type: 'integer', description: 'Max commits (default 10)' },
-        oneline: { type: 'boolean', description: 'One line per commit' },
-      },
-    },
-  },
-  {
-    name: 'git_status',
-    description: 'Show working tree status — modified, added, deleted, and untracked files.',
-    input_schema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'create_directory',
-    description: 'Create a directory (and any missing parent directories) in the workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Directory path relative to workspace root' },
-      },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'diff_files',
-    description: 'Show a unified diff between two files in the workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        pathA: { type: 'string', description: 'First file path relative to workspace' },
-        pathB: { type: 'string', description: 'Second file path relative to workspace' },
-      },
-      required: ['pathA', 'pathB'],
-    },
-  },
-  {
-    name: 'web_search',
-    description: 'Search the web and return results with titles, snippets, and URLs. With a Serper or Tavily API key configured (Settings → Tools) searches go through the API backends first (Serper = real Google index, best for Chinese and English); otherwise free backends are probed in parallel (cn.bing.com → DuckDuckGo → Bing for Chinese queries, DuckDuckGo → Bing otherwise; the first backend to return results wins).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Search query' },
-        maxResults: { type: 'number', description: 'Max results (default 10, max 20)' },
-      },
-      required: ['query'],
-    },
-  },    {
-      name: 'web_fetch',
-      description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles). Works on text/HTML/JSON pages; if it reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          url: { type: 'string', description: 'Full URL to fetch (https://...)' },
-          maxChars: { type: 'number', description: 'Max characters to return (default 20000)' },
-        },
-        required: ['url'],
-      },
-    },
-    {
-      name: 'glob_files',
-      description: 'Find files matching a glob pattern. Returns sorted file paths relative to workspace.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.ts"' },
-          path: { type: 'string', description: 'Directory to search within (default: workspace root)' },
-          maxResults: { type: 'number', description: 'Max results (default 200)' },
-        },
-        required: ['pattern'],
-      },
-    },
-    {
-      name: 'replace_files',
-      description: 'Batch string replacement across multiple files. Replaces oldString with newString in each file independently.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          files: { type: 'array', items: { type: 'string' }, description: 'Array of file paths (relative to workspace) to process' },
-          oldString: { type: 'string', description: 'Exact string to find and replace in each file' },
-          newString: { type: 'string', description: 'Replacement string' },
-          allowMultiple: { type: 'boolean', description: 'Replace all occurrences in each file. Default: false' },
-        },      required: ['files', 'oldString', 'newString'],
-    },
-  },
-  {
-    name: 'sys_info',
-    description: 'Get operating system information: timezone, language, current time, OS version, installed runtimes (node/bun/python3/rustc/git versions), and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
-    input_schema: { type: 'object', properties: {} },
-  },
-];
+const TOOL_DEFINITIONS: ToolDefinition[] = [...BUILT_IN_TOOL_DEFS];
 
 /** Web-only subset of TOOL_DEFINITIONS — exported so chat.ts can pin this
  * exact list as the LLM-visible toolsDef in plain-chat mode without
@@ -204,24 +26,6 @@ export function getSysInfoToolDefs(): ToolDefinition[] {
   return TOOL_DEFINITIONS.filter((t) => t.name === 'sys_info');
 }
 
-const TOOL_METADATA: Record<string, { sideEffects: boolean; isWrite: boolean }> = {
-  read_file: { sideEffects: false, isWrite: false },
-  write_file: { sideEffects: true, isWrite: true },
-  edit_file: { sideEffects: true, isWrite: true },
-  search_files: { sideEffects: false, isWrite: false },
-  list_files: { sideEffects: false, isWrite: false },
-  execute_command: { sideEffects: true, isWrite: true },
-  git_diff: { sideEffects: false, isWrite: false },
-  git_log: { sideEffects: false, isWrite: false },
-  git_status: { sideEffects: false, isWrite: false },
-  create_directory: { sideEffects: true, isWrite: true },
-  diff_files: { sideEffects: false, isWrite: false },
-  web_search: { sideEffects: false, isWrite: false },
-  web_fetch: { sideEffects: false, isWrite: false },
-  glob_files: { sideEffects: false, isWrite: false },
-  replace_files: { sideEffects: true, isWrite: true },
-  sys_info: { sideEffects: false, isWrite: false },
-};
 
 type InvokeFunction = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -510,10 +314,6 @@ export class TauriToolAdapter implements ToolAdapter {
   }
 }
 
-function safeParseArgs(raw: string): Record<string, unknown> {
-  try { return JSON.parse(raw); } catch { return {}; }
-}
-
 /** Pure arg builder for the web_search invoke. Exported so a unit test locks
  * the exact Tauri arg names (apiKey → Rust api_key, serperApiKey → Rust
  * serper_api_key) — a typo here would only fail at runtime in the packaged
@@ -558,14 +358,6 @@ export function buildCommandResult(
   return { result: output, success: true };
 }
 
-/** Human-readable byte size ("512 B", "12.3 KB", "1.5 MB") — used by the
- * write_file progress lines and the tool row's pending label. */
-export function formatBytes(n: number): string {
-  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${n} B`;
-}
-
 /** Format ONE write_file progress event (the exact protocol the Rust
  * write_file_stream command pushes over its Channel: `{ type: 'progress',
  * written, total }`) as the live tool-row line. Pure + exported so the
@@ -593,8 +385,3 @@ export function formatCommandOutput(lines: Array<{ kind: 'stdout' | 'stderr'; li
   return out.join('\n');
 }
 
-/** Build the error message for a failed command (non-zero exit code). */
-export function formatCommandError(exitCode: number, output: string): string {
-  const tail = output.trim() ? `:\n${output.trim()}` : '';
-  return `Command failed with exit code ${exitCode}${tail}`;
-}

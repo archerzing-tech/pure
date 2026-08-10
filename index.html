@@ -356,7 +356,7 @@
                     <h3 data-i18n="llm.choose">Choose a provider</h3>
                     <p data-i18n="llm.choose.hint">Your selected provider powers every new conversation.</p>
                   </div>
-                  <span class="provider-section-count">4</span>
+                  <span class="provider-section-count" id="provider-section-count">4</span>
                 </div>
                 <div id="provider-card-grid" class="provider-card-grid" role="listbox" data-i18n-aria-label="llm.choose" aria-label="Choose a provider">
                   <button class="provider-card" type="button" data-provider="deepseek-openai" role="option" aria-selected="false">
@@ -379,6 +379,39 @@
                     <span class="provider-card-name" data-i18n="provider.glm">智谱 GLM (Zhipu)</span>
                     <span class="provider-card-meta"><span data-i18n="llm.protocol.openai">OpenAI 兼容</span><b>·</b><span class="provider-card-model-value">glm-5.2</span></span>
                   </button>
+                  <!-- Custom providers (user-defined) are appended here by settings.ts -->
+                </div>
+                <div class="provider-custom-toolbar">
+                  <button id="provider-add-custom" class="setting-btn secondary" data-i18n="llm.custom.add">＋ 添加自定义供应商</button>
+                  <button id="provider-ollama-preset" class="setting-btn secondary" data-i18n="llm.custom.ollama">⚡ Ollama 一键预设</button>
+                </div>
+                <div id="provider-custom-form" class="provider-custom-form hidden">
+                  <div class="provider-custom-form-head">
+                    <span class="provider-custom-form-title" data-i18n="llm.custom.formTitle">新建自定义供应商（OpenAI 兼容）</span>
+                    <span class="provider-custom-form-hint" data-i18n="llm.custom.formTitle.hint">任意支持 /v1/chat/completions 的端点</span>
+                  </div>
+                  <div class="provider-custom-form-grid">
+                    <label class="provider-custom-field">
+                      <span class="provider-custom-label" data-i18n="llm.custom.name">供应商名称</span>
+                      <input id="cfg-custom-name" class="setting-input" type="text" data-i18n-placeholder="llm.custom.name.ph" placeholder="My OpenAI" />
+                    </label>
+                    <label class="provider-custom-field">
+                      <span class="provider-custom-label" data-i18n="llm.baseURL">Base URL</span>
+                      <input id="cfg-custom-baseurl" class="setting-input" type="text" placeholder="http://localhost:11434/v1" />
+                    </label>
+                    <label class="provider-custom-field provider-custom-field-wide">
+                      <span class="provider-custom-label" data-i18n="llm.custom.models">模型（逗号分隔）</span>
+                      <input id="cfg-custom-models" class="setting-input" type="text" data-i18n-placeholder="llm.custom.models.ph" placeholder="qwen2.5-coder:7b, llama3.1:8b" />
+                    </label>
+                    <label class="provider-custom-field provider-custom-field-wide">
+                      <span class="provider-custom-label" data-i18n="llm.custom.apiKeyOptional">API Key（可选）</span>
+                      <input id="cfg-custom-apikey" class="setting-input" type="password" placeholder="sk-..." />
+                    </label>
+                  </div>
+                  <div class="provider-custom-actions">
+                    <button id="cfg-custom-save" class="setting-btn primary" data-i18n="llm.custom.save">保存</button>
+                    <button id="cfg-custom-cancel" class="setting-btn secondary" data-i18n="llm.custom.cancel">取消</button>
+                  </div>
                 </div>
                 <div class="provider-config-card">
                   <div class="provider-config-header">
@@ -406,6 +439,14 @@
                       <div class="setting-info"><span class="setting-label" data-i18n="llm.baseURL">Base URL</span><span class="setting-hint" data-i18n="llm.baseURL.hint">Custom endpoint (optional)</span></div>
                       <input id="cfg-baseurl" class="setting-input" type="text" data-i18n-placeholder="llm.baseURL.placeholder" placeholder="Auto-detected" />
                     </div>
+                    <div class="setting-row" id="cfg-custom-name-row" hidden>
+                      <div class="setting-info"><span class="setting-label" data-i18n="llm.custom.name">供应商名称</span><span class="setting-hint" data-i18n="llm.custom.name.hint">显示在卡片与下拉框中的名称</span></div>
+                      <input id="cfg-custom-name-edit" class="setting-input" type="text" />
+                    </div>
+                    <div class="setting-row" id="cfg-custom-delete-row" hidden>
+                      <div class="setting-info"><span class="setting-label" data-i18n="llm.custom.delete">删除此供应商</span><span class="setting-hint" data-i18n="llm.custom.delete.hint">删除后需重新添加</span></div>
+                      <button id="provider-delete-btn" class="setting-btn danger" data-i18n="llm.custom.deleteBtn">删除</button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -432,11 +473,11 @@
                   </div>
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="tools.serper">Serper.dev Search API</span><span class="setting-hint" data-i18n="tools.serper.hint">Optional: Serper key for Google-index web search (2500 free queries at serper.dev) — falls back to Tavily / free backends when empty</span></div>
-                    <input id="cfg-serper-key" class="setting-input" type="password" placeholder="serper-..." autocomplete="off" style="max-width: 220px" />
+                    <input id="cfg-serper-key" class="setting-input" type="password" placeholder="serper-..." autocomplete="off" />
                   </div>
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="tools.tavily">Tavily Search API</span><span class="setting-hint" data-i18n="tools.tavily.hint">Optional: Tavily key for high-quality web search (free tier at tavily.com) — falls back to free backends when empty</span></div>
-                    <input id="cfg-tavily-key" class="setting-input" type="password" placeholder="tvly-..." autocomplete="off" style="max-width: 220px" />
+                    <input id="cfg-tavily-key" class="setting-input" type="password" placeholder="tvly-..." autocomplete="off" />
                   </div>
                 </div>
                 <h3 class="settings-section-title" data-i18n="tools.permissionSection">Permission &amp; approval</h3>

@@ -1,7 +1,7 @@
 // src/adapter/node/__tests__/NodeToolAdapter.test.ts
 
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeToolAdapter, detectRuntimeVersions } from '../NodeToolAdapter';
@@ -92,6 +92,73 @@ describe('NodeToolAdapter execute_command', () => {
         rmSync(join(workspace, 'linked'), { force: true });
       }
     }
+  });
+});
+
+describe('NodeToolAdapter list_files', () => {
+  let workspace: string;
+  let adapter: NodeToolAdapter;
+
+  beforeAll(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pure-list-files-'));
+    adapter = new NodeToolAdapter({ workspace });
+    // Seed: a root file + a subdirectory containing a file.
+    writeFileSync(join(workspace, 'b.ts'), '');
+    mkdirSync(join(workspace, 'src'));
+    writeFileSync(join(workspace, 'src', 'a.ts'), '');
+    // Symlink to a directory: statSync follows links, so listing must work.
+    symlinkSync('src', join(workspace, 'src-link'), 'dir');
+  });
+
+  afterAll(() => {
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  const call = (args: Record<string, unknown>): ToolCall => ({
+    id: 'call-list',
+    index: 0,
+    function: { name: 'list_files', arguments: JSON.stringify(args) },
+  });
+
+  it('lists the workspace root — regression: Bun.file().exists() on a directory returned false', async () => {
+    const r = await adapter.execute(call({}));
+    expect(r.success).toBe(true);
+    expect(r.error).toBeUndefined();
+    const out = String(r.result);
+    expect(out).toContain('src');
+    expect(out).toContain('b.ts');
+  });
+
+  it('lists a subdirectory path', async () => {
+    const r = await adapter.execute(call({ path: 'src' }));
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toContain('a.ts');
+  });
+
+  it('lists through a symlink to a directory (statSync follows links)', async () => {
+    const r = await adapter.execute(call({ path: 'src-link' }));
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toContain('a.ts');
+  });
+
+  it('lists with an explicit absolute path', async () => {
+    const r = await adapter.execute(call({ path: join(workspace, 'src') }));
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toContain('a.ts');
+  });
+
+  it('supports recursive listing', async () => {
+    const r = await adapter.execute(call({ path: '.', recursive: true }));
+    expect(r.success).toBe(true);
+    const out = String(r.result);
+    expect(out).toContain('src/a.ts');
+    expect(out).toContain('b.ts');
+  });
+
+  it('reports an explicit error for a missing directory', async () => {
+    const r = await adapter.execute(call({ path: 'nope' }));
+    expect(r.success).toBe(false);
+    expect(String(r.error)).toContain('Directory not found');
   });
 });
 

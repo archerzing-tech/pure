@@ -1472,39 +1472,75 @@ body {
   width: 100%;
 }
 .artifact-card {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
-  padding: 9px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-card);
+  min-height: 46px;
+  padding: 7px 10px 7px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-card) 88%, var(--accent-soft));
   color: var(--text);
   box-shadow: var(--shadow-sm);
   cursor: pointer;
+  user-select: none;
   text-align: left;
   font: inherit;
   transition: border-color var(--transition), background var(--transition),
     transform 0.12s var(--ease-out), box-shadow var(--transition);
 }
-.artifact-card:hover {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  background: color-mix(in srgb, var(--bg-card) 96%, var(--accent) 4%);
+.artifact-card:hover,
+.artifact-card:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--accent-soft);
   box-shadow: var(--shadow-md);
+  outline: none;
   transform: translateY(-1px);
 }
 .artifact-card:active {
   transform: translateY(0) scale(0.99);
 }
-.artifact-card:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
-  outline-offset: 2px;
-}
 .artifact-icon {
-  display: inline-flex;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
   flex-shrink: 0;
+  border-radius: 8px;
+  padding: 7px;
   color: var(--accent);
+  background: var(--accent-soft);
+}
+.artifact-icon svg {
+  display: block;
+}
+/* Format tints — mirror the paste-chip icon cells so a saved file card reads
+   like its upload counterpart (code / image / doc / data / archive). */
+.artifact-icon-code {
+  color: #4f7cff;
+  background: color-mix(in srgb, #4f7cff 14%, transparent);
+}
+.artifact-icon-img {
+  color: #22a06b;
+  background: color-mix(in srgb, #22a06b 14%, transparent);
+}
+.artifact-icon-doc {
+  color: #8b5cf6;
+  background: color-mix(in srgb, #8b5cf6 14%, transparent);
+}
+.artifact-icon-data {
+  color: #d97706;
+  background: color-mix(in srgb, #d97706 14%, transparent);
+}
+.artifact-icon-archive {
+  color: #b45309;
+  background: color-mix(in srgb, #b45309 14%, transparent);
+}
+.artifact-icon-dir {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 .artifact-text {
   display: flex;
@@ -1513,7 +1549,7 @@ body {
   gap: 1px;
 }
 .artifact-name {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text);
   overflow: hidden;
@@ -1522,16 +1558,38 @@ body {
 }
 .artifact-path {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 10px;
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Single project-directory card (many files): wider, centered label. */
+/* Double-click affordance: an open-icon hint that fades in on hover/focus. */
+.artifact-open-hint {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  color: var(--text-tertiary);
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity 0.18s var(--ease-out), transform 0.18s var(--ease-out),
+    color var(--transition), background var(--transition);
+}
+.artifact-card:hover .artifact-open-hint,
+.artifact-card:focus-visible .artifact-open-hint {
+  opacity: 1;
+  transform: scale(1);
+  color: var(--accent);
+  background: var(--bg);
+}
+/* Single project-directory card (many files): wider padding; the grid layout
+   keeps it aligned with the per-file cards (the old flex `justify-content:
+   center` is a no-op with a 1fr track and was dropped). */
 .artifact-card-dir {
-  justify-content: center;
-  padding: 12px 14px;
+  padding: 10px 14px;
 }
 .inline-card-head {
   display: flex;
@@ -6384,6 +6442,177 @@ button svg,
   transform: translateY(0);
   pointer-events: auto;
 }
+
+/* "已自动修复" badge — shown when the fault-tolerance layer repaired a
+   diagram source before rendering. Top-left corner, mirroring the hover
+   download pill at top-right; always visible in the preview state, but
+   pointer-events: none so the diagram below stays click-through. */
+.diagram-repaired {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  font: 10px var(--font-sans);
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--bg-card) 88%, var(--accent-soft));
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 999px;
+  padding: 2px 8px;
+  pointer-events: auto;
+  user-select: none;
+  cursor: pointer;
+  transition: all 0.15s var(--ease-out);
+}
+
+.diagram-repaired:hover,
+.diagram-repaired:focus-visible {
+  background: color-mix(in srgb, var(--bg-card) 70%, var(--accent-soft));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
+  outline: none;
+}
+
+/* A tiny arrow nudges the affordance: the badge is now a button (repair diff). */
+.diagram-repaired::after {
+  content: '↗';
+  margin-left: 4px;
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+/* ── Repair-diff viewer: original source vs repaired source ── */
+
+.repair-diff-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  animation: viewerIn 0.25s var(--ease-out) both;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px;
+}
+
+.repair-diff-panel {
+  width: min(1100px, 92vw);
+  max-height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.repair-diff-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.repair-diff-title {
+  font: 600 14px var(--font-sans);
+  color: var(--text);
+}
+
+.repair-diff-close {
+  position: static;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.repair-diff-close:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.repair-diff-scroll {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-input);
+  padding: 8px 0 12px;
+  font: 12px/1.6 var(--font-mono);
+}
+
+.repair-diff-row {
+  display: grid;
+  grid-template-columns: 3.2em minmax(0, 1fr) 3.2em minmax(0, 1fr);
+  align-items: stretch;
+}
+
+/* Sticky column labels stay visible while the diff scrolls vertically. The
+   row must stick at the scrollport top (top: 0); a negative offset would push
+   its top 8px outside the scrollport where it gets clipped. The row's own
+   opaque background covers the scroll container's 8px top padding. */
+.repair-diff-head-row {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+}
+
+.repair-diff-label-left,
+.repair-diff-label-right {
+  font: 600 11px var(--font-sans);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  padding: 6px 12px;
+}
+
+.repair-diff-label-right {
+  text-align: right;
+}
+
+.repair-diff-ln {
+  color: var(--text-tertiary);
+  text-align: right;
+  padding: 0 8px;
+  user-select: none;
+  background: color-mix(in srgb, var(--bg-card) 55%, transparent);
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.repair-diff-cell {
+  margin: 0;
+  padding: 0 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 1.6em;
+  color: var(--text);
+}
+
+.repair-diff-row.changed .repair-diff-cell.left {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: color-mix(in srgb, var(--danger) 80%, var(--text));
+}
+
+.repair-diff-row.changed .repair-diff-cell.right {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: color-mix(in srgb, var(--success) 75%, var(--text));
+}
+
+.repair-diff-cell.empty {
+  background: transparent;
+  color: var(--text-tertiary);
+}
 .diagram-download-btn {
   display: inline-flex;
   align-items: center;
@@ -7046,6 +7275,80 @@ button svg,
 .provider-config-fields { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .provider-config-fields .setting-row { min-height: 60px; padding: 11px 10px; }
 .provider-config-fields .setting-row:hover { background: var(--bg-hover); }
+
+/* ── Custom providers (user-defined / Ollama preset) ── */
+
+.provider-custom-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: -6px 0 16px;
+}
+
+.provider-custom-form {
+  margin: -6px 0 18px;
+  padding: 16px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--accent-soft) 26%, var(--bg-card));
+  animation: provider-form-in 0.22s ease;
+}
+
+@keyframes provider-form-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.provider-custom-form-head { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.provider-custom-form-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.provider-custom-form-hint { font-size: 11px; line-height: 1.5; color: var(--text-tertiary); }
+
+.provider-custom-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.provider-custom-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.provider-custom-field-wide { grid-column: 1 / -1; }
+.provider-custom-label { font-size: 11px; font-weight: 650; color: var(--text-secondary); }
+
+.provider-custom-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.provider-mark-custom { background: #e4f7ec; color: #2e8b5d; }
+[data-theme="dark"] .provider-mark-custom { background: #1d3b2c; color: #7fd6a4; }
+.provider-mark-ollama { background: #e8f1fe; color: #3f6fb5; }
+[data-theme="dark"] .provider-mark-ollama { background: #24344e; color: #9cc0f0; }
+
+.provider-card-keyless {
+  position: relative;
+  padding-left: 76px;
+  margin-top: 14px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+.provider-card-keyless::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 64px;
+  height: 1px;
+  background: var(--border-light);
+  transform: translateY(-50%);
+}
+
+@media (max-width: 720px) {
+  .provider-custom-form-grid { grid-template-columns: 1fr; }
+}
 
 .sr-only {
   position: absolute;

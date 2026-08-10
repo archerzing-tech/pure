@@ -21,7 +21,7 @@ import { loadSessionList, loadSessionStatsForList, type SessionMeta, type Sessio
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
-import { providerLabel, providerDef, PROVIDERS, defaultModelFor, type ProviderId } from '../shared/providers';
+import { providerLabel, providerDef, PROVIDERS, defaultModelFor, customProviderFor, type ProviderId } from '../shared/providers';
 import { renderMarkdown, stripToolCallXml } from './markdown';
 import { createToolRow, finalizeToolRow } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
@@ -105,6 +105,9 @@ function getSettingsPanel(): Promise<SettingsPanel> {
           },
           () => {
             document.getElementById('main')?.classList.remove('settings-mode');
+            // The open callback hides the edge toggle (see above); it must be
+            // restored here or the right-side button stays gone until reload.
+            if (contextPanelReopen) contextPanelReopen.hidden = false;
             setContextPanelCollapsed(contextCollapsedBeforeSettings);
             updateContextPanelStage();
             enableInputIfReady();
@@ -243,16 +246,21 @@ function populateModeSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
 
 function populateModelSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
   const provider = cfg.provider;
-  const model = cfg.model?.trim() || defaultModelFor(provider);
+  const customs = cfg.customProviders ?? [];
+  const custom = customProviderFor(customs, provider);
+  const model = cfg.model?.trim() || custom?.defaultModel || defaultModelFor(provider);
   // One option per known provider (its default model), labeled with the full
   // display name (t(i18nKey)) so the two DeepSeek entries — same label +
   // same default model, different API protocol — stay distinguishable. A
   // custom model typed into Settings is appended with a UNIQUE value
   // ("<provider>:custom") so the select can actually point at it; a plain
   // provider value would resolve to the first matching default option and
-  // silently display the wrong model.
+  // silently display the wrong model. Custom providers render one option per
+  // entry (their name · default model).
   sel.innerHTML = '';
-  const isCustom = !PROVIDERS.some((p) => p.id === provider && p.defaultModel === model);
+  const isCustomModel = custom
+    ? custom.defaultModel !== model
+    : !PROVIDERS.some((p) => p.id === provider && p.defaultModel === model);
   let selectedValue: string = provider;
   for (const p of PROVIDERS) {
     const opt = document.createElement('option');
@@ -261,13 +269,20 @@ function populateModelSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
     opt.textContent = `${t(p.i18nKey)} · ${p.defaultModel}`;
     sel.appendChild(opt);
   }
-  if (isCustom) {
+  for (const c of customs) {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.dataset.model = c.defaultModel;
+    opt.textContent = `${c.name} · ${c.defaultModel}`;
+    sel.appendChild(opt);
+  }
+  if (isCustomModel) {
     const opt = document.createElement('option');
     opt.value = `${provider}:custom`;
     opt.dataset.model = model;
     // Same label style as the default options (t(i18nKey)) so a custom model
     // stays visually consistent (e.g. "DeepSeek (OpenAI)" not "DeepSeek").
-    opt.textContent = `${t(providerDef(provider)?.i18nKey ?? provider)} · ${model}`;
+    opt.textContent = `${custom?.name ?? t(providerDef(provider)?.i18nKey ?? provider)} · ${model}`;
     sel.appendChild(opt);
     selectedValue = `${provider}:custom`;
   }
@@ -328,11 +343,17 @@ function wireComposerSelects(): void {
 
 // ── Context panel display ──
 
+/** Provider display label, resolving custom providers by their saved name. */
+function providerDisplayLabel(cfg: PureConfig | null): string {
+  if (!cfg) return '';
+  return customProviderFor(cfg.customProviders ?? [], cfg.provider)?.name ?? providerLabel(cfg.provider);
+}
+
 function updateContextPanelModel() {
   const cfg = loadConfig();
   const model = document.getElementById('context-model');
   if (!model) return;
-  model.textContent = cfg?.model ? `${providerLabel(cfg.provider)} · ${cfg.model}` : (cfg?.provider ? providerLabel(cfg.provider) : t('context.model.notConfigured'));
+  model.textContent = cfg?.model ? `${providerDisplayLabel(cfg)} · ${cfg.model}` : (cfg?.provider ? providerDisplayLabel(cfg) : t('context.model.notConfigured'));
 }
 
 /** Persistent status footer: workspace · model · live state · version. */
@@ -357,17 +378,23 @@ function updateStatusBar() {
   const model = document.getElementById('status-model');
   if (model) {
     model.textContent = cfg?.model
-      ? `${providerLabel(cfg.provider)} · ${cfg.model}`
-      : (cfg?.provider ? providerLabel(cfg.provider) : t('context.model.notConfigured'));
+      ? `${providerDisplayLabel(cfg)} · ${cfg.model}`
+      : (cfg?.provider ? providerDisplayLabel(cfg) : t('context.model.notConfigured'));
     model.title = cfg?.model ? cfg.model : '';
   }
 
-  // Live state dot + text (busy while the agent is generating).
+  // Live state dot + text (busy while the agent is generating). When no
+  // provider is configured the model badge already reads 未配置 — the state
+  // text must match instead of claiming 就绪 while the composer is disabled.
   const bar = document.getElementById('status-bar');
   const statusText = document.getElementById('status-text');
   const busy = chat.isStreaming();
   if (bar) bar.classList.toggle('busy', busy);
-  if (statusText) statusText.textContent = busy ? t('status.generating') : t('status.ready');
+  if (statusText) {
+    statusText.textContent = busy
+      ? t('status.generating')
+      : (cfg?.provider ? t('status.ready') : t('status.notConfigured'));
+  }
 
   // App version pill (right).
   const version = document.getElementById('status-version');
@@ -488,7 +515,7 @@ function updateSidebarModel() {
   const cfg = loadConfig();
   const el = document.getElementById('sidebar-model');
   if (!el) return;
-  el.textContent = cfg?.model ? `${providerLabel(cfg.provider)} · ${cfg.model}` : (cfg?.provider ? providerLabel(cfg.provider) : '');
+  el.textContent = cfg?.model ? `${providerDisplayLabel(cfg)} · ${cfg.model}` : (cfg?.provider ? providerDisplayLabel(cfg) : '');
   updateContextPanelModel();
   // updateContextPanelStage() already refreshes the status footer.
   updateContextPanelStage();

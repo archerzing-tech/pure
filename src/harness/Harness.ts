@@ -5,7 +5,6 @@
 import { AgentLoopEngine } from '../engine/AgentLoopEngine';
 import { StateManager } from './StateManager';
 import { ContextEngine } from './ContextEngine';
-import { FileWatcher, type FileChangeEvent } from './FileWatcher';
 import { PromptComposer } from '../adapter/memory/PromptComposer';
 import type {
   BudgetConfig,
@@ -46,7 +45,6 @@ export interface HarnessConfig {
   /** Project path used to isolate memories; defaults to process.cwd(). */
   projectPath?: string;
   contextEngine?: ContextEngine;
-  fileWatcher?: FileWatcher;
   /**
    * Verifier consulted by the engine's VERIFY phase. When omitted the phase
    * passes trivially (the LLM's final output is trusted as-is).
@@ -106,10 +104,6 @@ export class Harness {
   /** 上下文压缩引擎（GUI 在每轮完成后后台预压缩，避免下次发送时阻塞）。 */
   getContextEngine(): ContextEngine | undefined {
     return this.config.contextEngine;
-  }
-
-  getFileWatcher(): FileWatcher | undefined {
-    return this.config.fileWatcher;
   }
 
   async *run(

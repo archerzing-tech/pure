@@ -2877,68 +2877,6 @@ fn secret_list() -> Result<Vec<String>, String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  File Watching (notify crate + Channel)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Track active watchers globally so we can stop them
-type WatcherRegistry = StdMutex<BTreeMap<String, notify::RecommendedWatcher>>;
-
-#[tauri::command]
-async fn watch_files(
-    state: tauri::State<'_, WatcherRegistry>,
-    session_id: String,
-    on_event: Channel<String>,
-) -> Result<(), String> {
-    use notify::{EventKind, RecursiveMode, Watcher};
-
-    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-        if let Ok(event) = res {
-            let kind = match event.kind {
-                EventKind::Modify(_) => "change",
-                EventKind::Create(_) => "create",
-                EventKind::Remove(_) => "delete",
-                _ => return, // ignore other events
-            };
-
-            for path in &event.paths {
-                let payload = serde_json::json!({
-                    "type": kind,
-                    "path": path.to_string_lossy(),
-                    "timestamp": std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                });
-                let _ = on_event.send(payload.to_string());
-            }
-        }
-    })
-    .map_err(|e| format!("create watcher: {}", e))?;
-
-    watcher
-        .watch(
-            std::path::Path::new("."),
-            RecursiveMode::Recursive,
-        )
-        .map_err(|e| format!("watch: {}", e))?;
-
-    let mut registry = state.lock().map_err(|e| format!("lock: {}", e))?;
-    registry.insert(session_id, watcher);
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn unwatch_files(
-    state: tauri::State<'_, WatcherRegistry>,
-    session_id: String,
-) -> Result<(), String> {
-    let mut registry = state.lock().map_err(|e| format!("lock: {}", e))?;
-    registry.remove(&session_id);
-    Ok(())
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 //  LLM Transport (reqwest HTTP/2 SSE → Channel)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2952,6 +2890,8 @@ struct ChatStreamArgs {
     api_key: String,
     #[serde(default, rename = "baseUrl")]
     base_url: String,
+    #[serde(default, rename = "secretKey")]
+    secret_key: String,
     #[serde(default, rename = "extraBody")]
     extra_body: Option<serde_json::Value>,
     #[serde(default, rename = "maxTokens")]
@@ -3138,6 +3078,56 @@ mod chat_stream_tests {
         assert!(matches!(classify_sse_line(""), SseLine::NotData));
         assert!(matches!(classify_sse_line("data: not json {"), SseLine::NotData));
     }
+
+    #[test]
+    fn resolve_api_key_prefers_explicit_key() {
+        let secrets = serde_json::json!({"llm.apiKey": "from-secrets"});
+        assert_eq!(resolve_api_key(&secrets, "explicit", ""), "explicit");
+        assert_eq!(resolve_api_key(&secrets, "explicit", "llm.apiKey.ollama"), "explicit");
+    }
+
+    #[test]
+    fn resolve_api_key_reads_default_and_named_secrets() {
+        let secrets = serde_json::json!({
+            "llm.apiKey": "main-key",
+            "llm.apiKey.ollama": "ollama-key",
+        });
+        // Default key name when the caller doesn't specify one.
+        assert_eq!(resolve_api_key(&secrets, "", ""), "main-key");
+        // Custom providers look up their own named secret.
+        assert_eq!(resolve_api_key(&secrets, "", "llm.apiKey.ollama"), "ollama-key");
+        // Missing named secret → empty (keyless local provider path).
+        assert_eq!(resolve_api_key(&secrets, "", "llm.apiKey.missing"), "");
+    }
+
+    #[test]
+    fn resolve_api_key_allows_keyless_providers() {
+        // Empty secrets + empty args = no key, but NOT an error: the caller
+        // simply omits the Authorization header (Ollama / LM Studio).
+        let empty = serde_json::json!({});
+        assert_eq!(resolve_api_key(&empty, "", "llm.apiKey.ollama"), "");
+        assert_eq!(resolve_api_key(&empty, "", ""), "");
+    }
+}
+
+/// Resolve the API key for a chat_stream call: an explicitly passed key wins;
+/// otherwise read the named secret (default `llm.apiKey`, custom providers use
+/// `llm.apiKey.<id>`). May return EMPTY — keyless local endpoints (Ollama /
+/// LM Studio) intentionally send no Authorization header at all.
+fn resolve_api_key(secrets: &serde_json::Value, arg_key: &str, secret_key: &str) -> String {
+    if !arg_key.is_empty() {
+        return arg_key.to_string();
+    }
+    let key_name = if secret_key.is_empty() {
+        "llm.apiKey"
+    } else {
+        secret_key
+    };
+    secrets
+        .get(key_name)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -3147,19 +3137,11 @@ async fn chat_stream(
     on_chunk: Channel<String>,
 ) -> Result<serde_json::Value, String> {
     // The API key never travels through the WebView: when the frontend omits
-    // it, resolve from the secrets store (~/.pure/secrets.json, 0600).
-    let api_key = if args.api_key.is_empty() {
-        load_secrets()?
-            .get("llm.apiKey")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_default()
-    } else {
-        args.api_key
-    };
-    if api_key.is_empty() {
-        return Err("No API key configured. Set one in Settings.".into());
-    }
+    // it, resolve from the secrets store (~/.pure/secrets.json, 0600). Empty is
+    // allowed for keyless local providers (Ollama / LM Studio) — the
+    // Authorization header is simply omitted below.
+    let secrets = load_secrets()?;
+    let api_key = resolve_api_key(&secrets, &args.api_key, &args.secret_key);
 
     let base_url = if args.base_url.trim().is_empty() {
         "https://api.deepseek.com".to_string()
@@ -3196,15 +3178,19 @@ async fn chat_stream(
 
     // Timeout the whole send: with `Client::new()` a server that accepts the
     // connection but never sends headers would block here forever. 180s covers
-    // even long reasoning-model time-to-first-byte.
+    // even long reasoning-model time-to-first-byte. Keyless providers
+    // (Ollama / LM Studio) get NO Authorization header — some local servers
+    // reject `Bearer ` with an empty token.
+    let mut request = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&body);
+    if !api_key.is_empty() {
+        request = request.header("Authorization", format!("Bearer {}", api_key));
+    }
     let resp = tokio::time::timeout(
         std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
-        client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&body)
-            .send(),
+        request.send(),
     )
     .await
     .map_err(|_| {
@@ -4063,7 +4049,6 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(McpRegistry::new(BTreeMap::new()))
-        .manage(WatcherRegistry::new(BTreeMap::new()))
         .manage(CommandRegistry::new(BTreeMap::new()))
         .manage(ChatStreamRegistry::new(StdMutex::new(BTreeMap::new())))
         .invoke_handler(tauri::generate_handler![
@@ -4084,8 +4069,6 @@ pub fn run() {
             get_tmp_workspace, save_paste_file, save_paste_image, import_dropped_file,
             tmp_paste_usage, cleanup_tmp_pastes,
             secret_get, secret_set, secret_delete, secret_list,
-            // File watching
-            watch_files, unwatch_files,
             // Open path (clickable transcript paths)
             open_path,
             // LLM transport

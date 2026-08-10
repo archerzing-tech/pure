@@ -73,6 +73,14 @@ describe('parseVerdict', () => {
     });
   });
 
+  it('repairs a slightly-broken verdict (single quotes + trailing comma)', () => {
+    expect(parseVerdict("{'passed': true, 'feedback': 'ok',}")).toEqual({ passed: true, feedback: 'ok' });
+  });
+
+  it('repairs a verdict with full-width punctuation', () => {
+    expect(parseVerdict('{“passed”：true， “feedback”：”ok“}')).toEqual({ passed: true, feedback: 'ok' });
+  });
+
   it('returns null for non-verdict responses', () => {
     expect(parseVerdict('I cannot verify this.')).toBeNull();
     expect(parseVerdict('{"verdict": "pass"}')).toBeNull();

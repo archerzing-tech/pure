@@ -6,13 +6,20 @@
 
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
-import type { ProviderId } from '../shared/providers';
+import type { CustomProvider, ProviderId } from '../shared/providers';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
 
 export interface PureConfig {
   /** Provider id — typed from the registry so the two can never drift. */
-  provider: ProviderId;
+  provider: ProviderId | string;
+  /**
+   * User-defined OpenAI-compatible providers (Settings → LLM → 添加自定义供应商).
+   * Keyless local endpoints (Ollama / LM Studio) are send-ready without a key;
+   * desktop keys live in Rust secrets under `llm.apiKey.<id>` (see
+   * customSecretKey). Config v5.
+   */
+  customProviders: CustomProvider[];
   apiKey: string;
   /**
    * True when an API key is stored outside the WebView (Rust secrets in the
@@ -144,9 +151,10 @@ export function defaults(): PureConfig {
     skills: { 'code-review': true, 'web-research': true, memory: true, planning: true },
     hubSkills: [],
     mcpServers: [...DEFAULT_MCP_SERVERS],
+    customProviders: [],
     streamingRender: true,
     taskMode: 'auto',
-    configVersion: 4,
+    configVersion: 5,
   };
 }
 
@@ -156,21 +164,21 @@ export function defaults(): PureConfig {
  * via the settings form or the ?apikey= launch URL, store it with the Rust
  * backend and scrub it from the config object before it is persisted.
  */
-async function syncSecretToRust(value: string): Promise<void> {
+async function syncSecretToRust(key: string, value: string): Promise<void> {
   const core = await loadTauriCore();
   if (!core) return;
   try {
-    await core.invoke('secret_set', { key: SECRET_KEY, value });
+    await core.invoke('secret_set', { key, value });
   } catch (e) {
     console.warn('[pure] failed to store API key in Rust secrets:', e);
   }
 }
 
-async function deleteSecretFromRust(): Promise<void> {
+async function deleteSecretFromRust(key: string): Promise<void> {
   const core = await loadTauriCore();
   if (!core) return;
   try {
-    await core.invoke('secret_delete', { key: SECRET_KEY });
+    await core.invoke('secret_delete', { key });
   } catch (e) {
     console.warn('[pure] failed to remove API key from Rust secrets:', e);
   }
@@ -182,7 +190,14 @@ async function deleteSecretFromRust(): Promise<void> {
  * narrows `cfg` to a non-null PureConfig for the rest of the block.
  */
 export function hasConfiguredKey(cfg: PureConfig | null): cfg is PureConfig {
-  return !!(cfg && (cfg.apiKey || cfg.hasApiKey));
+  if (!cfg) return false;
+  if (cfg.apiKey || cfg.hasApiKey) return true;
+  // A custom provider is always send-ready: keyed ones carry their own key
+  // (entry, or Rust secrets via hasApiKey), keyless locals (Ollama / LM
+  // Studio) need none — the transport omits the Authorization header.
+  const custom = (cfg.customProviders ?? []).find((p) => p.id === cfg.provider);
+  if (custom) return true;
+  return false;
 }
 
 // Cached parse of the config: loadConfig() JSON.parses localStorage and is
@@ -213,7 +228,7 @@ export function loadConfig(): PureConfig | null {
     if (isTauriRuntime()) {
       // CLI-launched desktop flow passes the key via URL: store it in Rust
       // secrets (once) and drop it from the in-memory config.
-      void syncSecretToRust(cfg.apiKey);
+      void syncSecretToRust(SECRET_KEY, cfg.apiKey);
       cfg.hasApiKey = true;
       cfg.apiKey = '';
     }
@@ -259,10 +274,17 @@ export function loadConfig(): PureConfig | null {
         cfg.configVersion = 4;
         needsPersist = true;
       }
+      // Config v5 migration: custom providers (Settings → LLM → 添加自定义供应商)
+      // were added. Legacy configs start with an empty list.
+      if ((parsed.configVersion ?? 1) < 5) {
+        cfg.customProviders = Array.isArray(cfg.customProviders) ? cfg.customProviders : [];
+        cfg.configVersion = 5;
+        needsPersist = true;
+      }
       if (isTauriRuntime() && cfg.apiKey) {
         // Legacy migration: move a key previously persisted to localStorage
         // into Rust secrets, then scrub it.
-        void syncSecretToRust(cfg.apiKey);
+        void syncSecretToRust(SECRET_KEY, cfg.apiKey);
         cfg.hasApiKey = true;
         cfg.apiKey = '';
         needsPersist = true;
@@ -285,9 +307,22 @@ export function loadConfig(): PureConfig | null {
  * so the panel can hand the raw key to the backend without ever persisting it.
  */
 export async function storeSecretInRust(value: string): Promise<void> {
-  await syncSecretToRust(value);
+  await syncSecretToRust(SECRET_KEY, value);
 }
 
 export async function revokeSecretFromRust(): Promise<void> {
-  await deleteSecretFromRust();
+  await deleteSecretFromRust(SECRET_KEY);
+}
+
+/** Rust secrets key under which a custom provider's API key is stored. */
+export function customSecretKey(id: string): string {
+  return `llm.apiKey.${id}`;
+}
+
+export async function storeCustomSecretInRust(id: string, value: string): Promise<void> {
+  await syncSecretToRust(customSecretKey(id), value);
+}
+
+export async function revokeCustomSecretFromRust(id: string): Promise<void> {
+  await deleteSecretFromRust(customSecretKey(id));
 }

@@ -5,6 +5,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import type { LLMAdapter, Message, ToolDefinition, LLMChunk, LLMResponse, ToolCall } from '../../shared/types';
+import { safeParseArgs } from '../../shared/format';
 
 export interface DeepSeekAnthropicConfig {
   apiKey: string;
@@ -212,7 +213,11 @@ export function mapAnthropicMessages(
             type: 'tool_use',
             id: tc.id,
             name: tc.function.name,
-            input: safeParseJSON(tc.function.arguments),
+            // Keep the parse-failure diagnostic: malformed args silently
+            // become an empty {} tool_use input on the Anthropic API call, and
+            // the warn makes the LLM's broken JSON visible in the console.
+            input: safeParseArgs(tc.function.arguments, (raw) =>
+              console.warn(`[DeepSeekAnthropic] failed to parse tool arguments: ${raw.slice(0, 200)}`)),
           });
         }
       }
@@ -243,9 +248,3 @@ export function mapAnthropicMessages(
   return { system: systemParts.join('\n\n'), conversationMessages: convMessages };
 }
 
-function safeParseJSON(raw: string): Record<string, unknown> {
-  try { return JSON.parse(raw); } catch {
-    console.warn(`[DeepSeekAnthropic] failed to parse tool arguments: ${raw.slice(0, 200)}`);
-    return {};
-  }
-}

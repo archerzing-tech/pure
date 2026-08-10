@@ -6,7 +6,6 @@ import { Harness, type HarnessConfig } from '../harness/Harness';
 import { DefaultHookRouter } from '../engine/HookRouter';
 import { DefaultFailurePolicy } from '../engine/FailurePolicy';
 import { ContextEngine } from '../harness/ContextEngine';
-import { FileWatcher, type FileWatcherConfig } from '../harness/FileWatcher';
 import { DefaultSubagentRegistry } from '../harness/SubagentRegistry';
 import { Planner } from './Planner';
 import { PermissionManager } from './PermissionManager';
@@ -62,11 +61,8 @@ export interface CodingAgentConfig {
   failurePolicy?: FailurePolicy;
   subagents?: SubagentDefinition[];
   mcpServers?: MCPServerConfig[];
-  fileWatcher?: FileWatcherConfig;
   /** Pre-created MCPClient — if provided, mcpServers is ignored. */
   mcpClient?: MCPClient;
-  /** Pre-created FileWatcher — if provided, fileWatcher config is ignored. */
-  fileWatcherInstance?: FileWatcher;
 }
 
 export class CodingAgent {
@@ -79,7 +75,6 @@ export class CodingAgent {
   public readonly subagentOrchestrator: SubagentOrchestrator;
   public readonly subagentRegistry: DefaultSubagentRegistry;
   public readonly mcpClient?: MCPClient;
-  public readonly fileWatcher?: FileWatcher;
   private harness: Harness;
 
   constructor(config: CodingAgentConfig) {
@@ -135,13 +130,6 @@ export class CodingAgent {
       // Deferred connect: call mcpClient.connectAll() from the UI after construction
     }
 
-    // ── File Watcher ──
-    if (config.fileWatcherInstance) {
-      this.fileWatcher = config.fileWatcherInstance;
-    } else if (config.fileWatcher) {
-      this.fileWatcher = new FileWatcher(config.fileWatcher);
-    }
-
     // G-3 fix: pass the LLM so the summary fallback actually runs when a lot
     // of history gets evicted (previously `llm` was omitted → summarizeEvicted
     // was dead code and the summary path never triggered).
@@ -164,7 +152,6 @@ export class CodingAgent {
       memory: config.memory,
       projectPath: config.projectPath,
       contextEngine,
-      fileWatcher: this.fileWatcher,
       // VERIFY phase: run the built-in checks (or the caller's custom verifier)
       // against the final output before declaring completion.
       verifier: this.verifier,

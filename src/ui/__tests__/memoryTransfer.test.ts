@@ -141,6 +141,17 @@ describe('parseMemoryImport', () => {
     expect(() => parseMemoryImport('not json {')).toThrow();
   });
 
+  it('repairs slightly-broken JSON before importing (trailing comma + full-width punct)', () => {
+    const text = `{ "app": "pure", "kind": "memory-library", "version": 1, "entries": [{ "type": "user_preference", "content": "Prefers dark mode", "timestamp": ${NOW - DAY} }], }`;
+    const restored = parseMemoryImport(text);
+    expect(restored).toHaveLength(1);
+    expect(restored[0].content).toBe('Prefers dark mode');
+  });
+
+  it('still rejects text that no repair can fix', () => {
+    expect(() => parseMemoryImport('{a: }')).toThrow();
+  });
+
   it('throws on an unsupported envelope (wrong app/kind)', () => {
     expect(() => parseMemoryImport(JSON.stringify({ app: 'other', kind: 'memory-library', version: 1, entries: [] })))
       .toThrow('unsupported-envelope');

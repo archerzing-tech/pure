@@ -138,7 +138,7 @@ pure/
 │   │   ├── mcp/                  # MCP transport (stdio, HTTP)
 │   │   └── storage/              # FSStore + SQLiteStore
 │   ├── ui/                       # WebView UI (chat, settings, markdown)
-│   └── shared/                   # Shared types, EventBus, i18n, memory
+│   └── shared/                   # Shared types, i18n, memory
 ├── src-tauri/                    # Rust / Tauri backend
 │   ├── src/                      # IPC commands, session manager
 │   └── tauri.conf.json           # App config + updater keys

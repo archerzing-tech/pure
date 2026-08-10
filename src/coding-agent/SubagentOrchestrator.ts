@@ -4,6 +4,7 @@
 // AgentLoopEngine instance, runs it to completion, and returns the result.
 
 import { AgentLoopEngine } from '../engine/AgentLoopEngine';
+import { parseToolArguments } from '../shared/parseRepair';
 import type {
   BudgetConfig,
   EngineContext,
@@ -68,9 +69,9 @@ export class SubagentOrchestrator implements ToolAdapter {
 
     const startTime = Date.now();
 
-    // Parse args
-    let args: Record<string, unknown> = {};
-    try { args = JSON.parse(toolCall.function.arguments); } catch { /* keep {} */ }
+    // Parse args — slightly-broken LLM JSON is repaired first, so a single
+    // trailing comma or unquoted key no longer drops the whole prompt payload.
+    const args = parseToolArguments(toolCall.function.arguments);
 
     // Build combined signal: parent abort OR timeout
     const timeoutMs = def.defaultTimeoutMs;

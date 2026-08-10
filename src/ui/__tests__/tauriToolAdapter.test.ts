@@ -1,7 +1,8 @@
 // src/ui/__tests__/tauriToolAdapter.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { formatCommandOutput, formatCommandError, buildCommandResult, formatBytes, formatWriteProgress, buildWebSearchArgs } from '../TauriToolAdapter';
+import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs } from '../TauriToolAdapter';
+import { formatCommandError, formatBytes } from '../../shared/format';
 
 describe('formatCommandOutput', () => {
   it('joins plain stdout lines', () => {

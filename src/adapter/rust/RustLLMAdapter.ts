@@ -29,6 +29,13 @@ export interface RustLLMConfig {
   extraBody?: Record<string, unknown>;
   maxTokens?: number;
   temperature?: number;
+  /**
+   * Exact secrets-store key to resolve when `apiKey` is omitted (desktop).
+   * Defaults to 'llm.apiKey' (the main provider's key). Custom providers pass
+   * 'llm.apiKey.<id>' so each keeps its own key; keyless custom providers pass
+   * a key name that resolves to nothing → the Authorization header is omitted.
+   */
+  secretKey?: string;
 }
 
 export interface RustLLMDeps {
@@ -121,6 +128,7 @@ export class RustLLMAdapter implements LLMAdapter {
           model: params.model,
           apiKey: '',
           baseUrl: this.config.baseURL ?? '',
+          secretKey: this.config.secretKey ?? '',
           extraBody: this.config.extraBody,
           maxTokens: params.max_tokens,
           temperature: params.temperature,

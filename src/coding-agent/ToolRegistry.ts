@@ -2,10 +2,15 @@
 // v0.3 — Flat tagged tool registry implementing ToolAdapter.
 // Each tool carries tags for permission control, risk classification, and routing.
 // Subagent tools (Tags.AGENT) and MCP tools (Tags.MCP) are routed to separate executors.
+// Tool schemas/descriptions live in shared/toolDefs.ts (single source of truth
+// shared with the CLI/GUI adapters); this module only adds the permission-layer
+// tags + risk levels on top.
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../shared/types';
 import type { TaggedTool, PermissionContext } from './types';
 import type { PermissionManager } from './PermissionManager';
+import { BUILT_IN_TOOL_DEFS } from '../shared/toolDefs';
+import { safeParseArgs } from '../shared/format';
 
 // ── Tag constants ──
 
@@ -22,222 +27,37 @@ export const Tags = {
 } as const;
 
 // ── Built-in tool definitions with tags ──
+// The LLM-visible schema (name/description/input_schema) comes from the shared
+// BUILT_IN_TOOL_DEFS; only the permission annotations live here, keyed by tool
+// name so a new shared def can never silently run without its gate.
 
-export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze([
-  {
-    name: 'read_file',
-    description: 'Read a file from the workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'File path relative to workspace root' },
-        startLine: { type: 'number', description: 'First line to read (1-indexed)' },
-        endLine: { type: 'number', description: 'Last line to read (1-indexed)' },
-      },
-      required: ['path'],
-    },
-    tags: [Tags.FS, Tags.READ],
-    riskLevel: 'low',
-  },
-  {
-    name: 'write_file',
-    description: 'Create or overwrite a file in the workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'File path relative to workspace root' },
-        content: { type: 'string', description: 'File content to write' },
-      },
-      required: ['path', 'content'],
-    },
-    tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE],
-    riskLevel: 'medium',
-  },
-  {
-    name: 'edit_file',
-    description: 'Replace a string in a file.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'File path relative to workspace root' },
-        oldString: { type: 'string', description: 'Exact string to find and replace' },
-        newString: { type: 'string', description: 'Replacement string' },
-        allowMultiple: { type: 'boolean', description: 'Replace all occurrences' },
-      },
-      required: ['path', 'oldString', 'newString'],
-    },
-    tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE],
-    riskLevel: 'medium',
-  },
-  {
-    name: 'list_files',
-    description: 'List files and directories in the workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Directory to list' },
-        recursive: { type: 'boolean', description: 'List recursively' },
-      },
-    },
-    tags: [Tags.FS, Tags.READ],
-    riskLevel: 'low',
-  },
-  {
-    name: 'search_files',
-    description: 'Search for a pattern in files under the workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        pattern: { type: 'string', description: 'Text or regex pattern' },
-        path: { type: 'string', description: 'Directory to search' },
-        filePattern: { type: 'string', description: 'Glob filter, e.g. "*.ts"' },
-        maxResults: { type: 'number', description: 'Max results (default 50)' },
-      },
-      required: ['pattern'],
-    },
-    tags: [Tags.FS, Tags.READ, Tags.SEARCH],
-    riskLevel: 'low',
-  },
-  {
-    name: 'execute_command',
-    description: 'Execute a shell command in the workspace directory.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', description: 'Shell command to execute' },
-      },
-      required: ['command'],
-    },
-    tags: [Tags.SHELL, Tags.DESTRUCTIVE],
-    riskLevel: 'high',
-  },
-  {
-    name: 'git_diff',
-    description: 'Show git diff (unstaged changes). Set staged=true for staged changes.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        staged: { type: 'boolean', description: 'Show staged changes' },
-        path: { type: 'string', description: 'Limit to a file path' },
-      },
-    },
-    tags: [Tags.SHELL, Tags.READ],
-    riskLevel: 'low',
-  },
-  {
-    name: 'git_log',
-    description: 'Show recent git commit history.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        maxCount: { type: 'integer', description: 'Max commits (default 10)' },
-        oneline: { type: 'boolean', description: 'One line per commit' },
-      },
-    },
-    tags: [Tags.SHELL, Tags.READ],
-    riskLevel: 'low',
-  },
-  {
-    name: 'git_status',
-    description: 'Show working tree status.',
-    input_schema: { type: 'object', properties: {} },
-    tags: [Tags.SHELL, Tags.READ],
-    riskLevel: 'low',
-  },
-  {
-    name: 'sys_info',
-    description: 'Get operating system information: timezone, language, current time, and OS version.',
-    input_schema: { type: 'object', properties: {} },
-    tags: [Tags.READ],
-    riskLevel: 'low',
-  },
-  {
-    name: 'create_directory',
-    description: 'Create a directory (and any missing parent directories) in the workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Directory path relative to workspace root' },
-      },
-      required: ['path'],
-    },
-    tags: [Tags.FS, Tags.WRITE],
-    riskLevel: 'low',
-  },
-  {
-    name: 'diff_files',
-    description: 'Show a unified diff between two files in the workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        pathA: { type: 'string', description: 'First file path relative to workspace' },
-        pathB: { type: 'string', description: 'Second file path relative to workspace' },
-      },
-      required: ['pathA', 'pathB'],
-    },
-    tags: [Tags.FS, Tags.READ],
-    riskLevel: 'low',
-  },
-  {
-    name: 'web_search',
-    description: 'Search the web and return results with titles, snippets, and URLs. With a Serper or Tavily API key configured searches go through the API backends first (Serper = real Google index, best for Chinese and English); otherwise free backends are probed in parallel — the first backend to return relevant results wins.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Search query' },
-        maxResults: { type: 'number', description: 'Max results (default 10, max 20)' },
-      },
-      required: ['query'],
-    },
-    tags: [Tags.SEARCH, Tags.READ],
-    riskLevel: 'low',
-  },
-  {
-    name: 'web_fetch',
-    description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        url: { type: 'string', description: 'Full URL to fetch (https://...)' },
-        maxChars: { type: 'number', description: 'Max characters to return (default 20000)' },
-      },
-      required: ['url'],
-    },
-    tags: [Tags.READ],
-    riskLevel: 'low',
-  },
-  {
-    name: 'glob_files',
-    description: 'Find files matching a glob pattern (e.g. "**/*.ts", "src/**/*.test.*"). Returns sorted file paths relative to workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.ts" or "src/**/*.{js,ts}"' },
-        path: { type: 'string', description: 'Directory to search within (default: workspace root)' },
-        maxResults: { type: 'number', description: 'Max results (default 200)' },
-      },
-      required: ['pattern'],
-    },
-    tags: [Tags.FS, Tags.READ, Tags.SEARCH],
-    riskLevel: 'low',
-  },
-  {
-    name: 'replace_files',
-    description: 'Batch string replacement across multiple files. Replaces oldString with newString in each file listed. Each file is processed independently.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        files: { type: 'array', items: { type: 'string' }, description: 'Array of file paths (relative to workspace) to process' },
-        oldString: { type: 'string', description: 'Exact string to find and replace in each file' },
-        newString: { type: 'string', description: 'Replacement string' },
-        allowMultiple: { type: 'boolean', description: 'Replace all occurrences in each file. Default: false' },
-      },
-      required: ['files', 'oldString', 'newString'],
-    },
-    tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE],
-    riskLevel: 'medium',
-  },
-]);
+// Keyed by the exact tool-name union from BUILT_IN_TOOL_DEFS (`as const` in
+// toolDefs.ts): adding a tool there without a permission mapping here is a
+// compile error, so a new tool can never silently run un-gated.
+type BuiltinToolName = (typeof BUILT_IN_TOOL_DEFS)[number]['name'];
+
+const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | 'medium' | 'high' }> = {
+  read_file: { tags: [Tags.FS, Tags.READ], riskLevel: 'low' },
+  write_file: { tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE], riskLevel: 'medium' },
+  edit_file: { tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE], riskLevel: 'medium' },
+  list_files: { tags: [Tags.FS, Tags.READ], riskLevel: 'low' },
+  search_files: { tags: [Tags.FS, Tags.READ, Tags.SEARCH], riskLevel: 'low' },
+  execute_command: { tags: [Tags.SHELL, Tags.DESTRUCTIVE], riskLevel: 'high' },
+  git_diff: { tags: [Tags.SHELL, Tags.READ], riskLevel: 'low' },
+  git_log: { tags: [Tags.SHELL, Tags.READ], riskLevel: 'low' },
+  git_status: { tags: [Tags.SHELL, Tags.READ], riskLevel: 'low' },
+  sys_info: { tags: [Tags.READ], riskLevel: 'low' },
+  create_directory: { tags: [Tags.FS, Tags.WRITE], riskLevel: 'low' },
+  diff_files: { tags: [Tags.FS, Tags.READ], riskLevel: 'low' },
+  web_search: { tags: [Tags.SEARCH, Tags.READ], riskLevel: 'low' },
+  web_fetch: { tags: [Tags.READ], riskLevel: 'low' },
+  glob_files: { tags: [Tags.FS, Tags.READ, Tags.SEARCH], riskLevel: 'low' },
+  replace_files: { tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE], riskLevel: 'medium' },
+};
+
+export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze(
+  BUILT_IN_TOOL_DEFS.map((def) => ({ ...def, ...TOOL_TAGS[def.name] })),
+);
 
 // ── ToolRegistry ──
 
@@ -304,7 +124,7 @@ export class ToolRegistry implements ToolAdapter {
 
     // ── Permission gate: consult PermissionManager before executing ──
     if (this.permissionManager) {
-      const args = safeParseJSON(toolCall.function.arguments);
+      const args = safeParseArgs(toolCall.function.arguments);
       const isWrite = known.tags.includes(Tags.WRITE) || known.tags.includes(Tags.DESTRUCTIVE);
       const preview = buildWritePreview(toolCall.function.name, args);
       const ctx: PermissionContext = {
@@ -403,6 +223,3 @@ export function buildWritePreview(
   };
 }
 
-function safeParseJSON(raw: string): Record<string, unknown> {
-  try { return JSON.parse(raw); } catch { return {}; }
-}

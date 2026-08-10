@@ -5,6 +5,7 @@
 
 import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
+import { safeParseArgs } from '../shared/format';
 import { BudgetManager } from './BudgetManager';
 import { FileLockManager } from './FileLockManager';
 
@@ -397,7 +398,7 @@ export class AgentLoopEngine {
     // Execute reads in parallel
     const readResults = await Promise.all(reads.map(async tc => {
       try {
-        const args = safeParseJSON(tc.function.arguments);
+        const args = safeParseArgs(tc.function.arguments);
         const path = typeof args.path === 'string' ? args.path : '';
         const lm = ctx.lockManager ?? this.fileLock;
         if (path) await lm.acquireRead(path, ctx.signal);
@@ -418,7 +419,7 @@ export class AgentLoopEngine {
     // Execute writes sequentially
     for (const tc of writes) {
       try {
-        const args = safeParseJSON(tc.function.arguments);
+        const args = safeParseArgs(tc.function.arguments);
         const path = typeof args.path === 'string' ? args.path : '';
         const lm = ctx.lockManager ?? this.fileLock;
         if (path) await lm.acquireWrite(path, ctx.signal);
@@ -437,6 +438,3 @@ export class AgentLoopEngine {
   }
 }
 
-function safeParseJSON(raw: string): Record<string, unknown> {
-  try { return JSON.parse(raw); } catch { return {}; }
-}

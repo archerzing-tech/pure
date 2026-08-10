@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, parseChartSource, groupAdjacentSvgSlots, diagramSlot, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, diagramSlot, diffLines, type DiagramKind } from '../markdown';
 import { buildChartOption } from '../echartsChart';
 
 // ── ==text== highlight extension ──
@@ -240,6 +240,37 @@ unit: 万元
     expect(spec.type).toBe('pie');
     expect(spec.title).toBe('占比');
     expect(spec.data).toHaveLength(2);
+  });
+
+  it('repairs slightly-broken JSON payloads (unquoted keys + single quotes + trailing commas)', () => {
+    const spec = parseChartSource(`{ type: 'pie', data: [['A', 30], ['B', 70],], }`);
+    expect(spec.type).toBe('pie');
+    expect(spec.data).toEqual([
+      { label: 'A', value: 30 },
+      { label: 'B', value: 70 },
+    ]);
+  });
+
+  it('repairs a code-fenced JSON payload', () => {
+    const spec = parseChartSource('```json\n{ type: \'line\', data: [{ label: \'A\', value: 1 }] }\n```');
+    expect(spec.type).toBe('line');
+    expect(spec.data).toEqual([{ label: 'A', value: 1 }]);
+  });
+
+  it('reports the repair flag through parseChartSourceWithMeta', () => {
+    expect(parseChartSourceWithMeta('{ "type": "pie", "data": [["A", 1]], }')).toMatchObject({ repaired: true });
+    expect(parseChartSourceWithMeta('line\nA 1\nB 2')).toMatchObject({ repaired: false });
+  });
+
+  it('exposes the repaired JSON source for the diff view', () => {
+    // Trailing comma + unquoted key → repaired payload must be valid JSON.
+    const { spec, repaired, repairedSource } = parseChartSourceWithMeta('{ type: \'pie\', data: [[\'A\', 1]], }');
+    expect(repaired).toBe(true);
+    expect(spec.type).toBe('pie');
+    expect(repairedSource).toBeTruthy();
+    expect(() => JSON.parse(repairedSource!)).not.toThrow();
+    // A non-repaired parse carries no repaired source.
+    expect(parseChartSourceWithMeta('line\nA 1').repairedSource).toBeUndefined();
   });
 
   it('skips malformed lines and throws with no data rows', () => {
@@ -502,5 +533,70 @@ describe('buildChartOption multi-series', () => {
     expect(series).toHaveLength(2);
     expect(series[0].type).toBe('bar');
     expect(series[1].name).toBe('上海');
+  });
+});
+
+// ── diffLines (repair-diff viewer core — pure, no DOM) ──
+
+describe('diffLines (original vs repaired source)', () => {
+  it('returns per-line same rows for identical sources', () => {
+    expect(diffLines('A\nB\nC', 'A\nB\nC')).toEqual([
+      { kind: 'same', left: 'A', right: 'A' },
+      { kind: 'same', left: 'B', right: 'B' },
+      { kind: 'same', left: 'C', right: 'C' },
+    ]);
+  });
+
+  it('marks a pure trailing addition', () => {
+    expect(diffLines('A', 'A\nB')).toEqual([
+      { kind: 'same', left: 'A', right: 'A' },
+      { kind: 'changed', left: undefined, right: 'B' },
+    ]);
+  });
+
+  it('marks a pure removal', () => {
+    expect(diffLines('A\nB', 'A')).toEqual([
+      { kind: 'same', left: 'A', right: 'A' },
+      { kind: 'changed', left: 'B', right: undefined },
+    ]);
+  });
+
+  it('pairs adjacent removed/added runs into aligned changed rows', () => {
+    // `A X Y B` vs `A X2 B`: the X→X2 replacement and the Y removal read as
+    // one aligned block (red-left/green-right) instead of misaligned rows.
+    expect(diffLines('A\nX\nY\nB', 'A\nX2\nB')).toEqual([
+      { kind: 'same', left: 'A', right: 'A' },
+      { kind: 'changed', left: 'X', right: 'X2' },
+      { kind: 'changed', left: 'Y', right: undefined },
+      { kind: 'same', left: 'B', right: 'B' },
+    ]);
+  });
+
+  it('handles empty and one-sided inputs without phantom empty lines', () => {
+    expect(diffLines('', '')).toEqual([]);
+    expect(diffLines('A', '')).toEqual([{ kind: 'changed', left: 'A', right: undefined }]);
+    expect(diffLines('', 'A')).toEqual([{ kind: 'changed', left: undefined, right: 'A' }]);
+    // A trailing-newline difference alone must not render an empty diff row.
+    expect(diffLines('A\n', 'A')).toEqual([
+      { kind: 'same', left: 'A', right: 'A' },
+    ]);
+  });
+
+  it('keeps a real blank final line (source that ends with a newline)', () => {
+    expect(diffLines('A\n\n', 'A\n')).toEqual([
+      { kind: 'same', left: 'A', right: 'A' },
+      { kind: 'changed', left: '', right: undefined },
+    ]);
+  });
+
+  it('aligns a real-world mermaid repair: unclosed label closer', () => {
+    const original = 'graph TD\n  A[\"Server\"] --> B[\"DB\"]\n  B --query--> C[(db)'; // cut: label closer missing
+    const repaired = 'graph TD\n  A[\"Server\"] --> B[\"DB\"]\n  B --query--> C[(db)]';
+    const rows = diffLines(original, repaired);
+    expect(rows[0]).toEqual({ kind: 'same', left: 'graph TD', right: 'graph TD' });
+    const changed = rows.filter((r) => r.kind === 'changed');
+    expect(changed).toHaveLength(1);
+    expect(changed[0].left).toBe('  B --query--> C[(db)');
+    expect(changed[0].right).toBe('  B --query--> C[(db)]');
   });
 });

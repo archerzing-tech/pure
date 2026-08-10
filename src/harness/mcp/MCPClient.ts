@@ -6,6 +6,7 @@ import { StdioTransport } from '../../adapter/mcp/StdioTransport';
 import { HttpTransport } from '../../adapter/mcp/HttpTransport';
 import { TauriStdioTransport } from '../../adapter/mcp/TauriStdioTransport';
 import { isTauriRuntime } from '../../shared/tauri';
+import { parseToolArguments } from '../../shared/parseRepair';
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import type { TaggedTool } from '../../coding-agent/types';
 import { Tags } from '../../coding-agent/ToolRegistry';
@@ -201,12 +202,10 @@ export class MCPClient implements ToolAdapter {
     const mcpToolName = fullName.replace(`${serverName}__`, '');
 
     try {
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(toolCall.function.arguments);
-      } catch {
-        // empty/invalid args
-      }
+      // Parse args — slightly-broken LLM JSON is repaired first (trailing
+      // commas, single quotes, unquoted keys, fences), so a formatting slip
+      // no longer strips every argument from the MCP tool call.
+      const args = parseToolArguments(toolCall.function.arguments);
 
       const result = await state.transport.send('tools/call', {
         name: mcpToolName,

@@ -25,8 +25,15 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
   private extraBody?: Record<string, unknown>;
 
   constructor(config: OpenAICompatibleConfig) {
+    // The openai SDK constructor THROWS 'Missing credentials' on an empty
+    // apiKey — but keyless local endpoints (Ollama / LM Studio) don't need
+    // one and ignore the Authorization header anyway. A placeholder keeps the
+    // constructor happy; the emitted `Bearer ollama` header is never validated
+    // by these servers (matches the community standard for local LLMs). The
+    // Rust transport omits the header entirely for keyless providers.
+    const apiKey = config.apiKey || 'ollama';
     this.client = new OpenAI({
-      apiKey: config.apiKey,
+      apiKey,
       baseURL: config.baseURL,
       dangerouslyAllowBrowser: true,
     });
