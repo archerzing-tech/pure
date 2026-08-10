@@ -3,11 +3,10 @@
 // the agent actually wrote are surfaced at the END of the final assistant
 // bubble as clickable cards:
 //
-//   * ≤ MAX_CARD_FILES artifacts → one card per file/directory. Double-clicking
-//     a file opens it with the system's default app; double-clicking a
-//     directory reveals it in the file manager (both via the existing
-//     open_path chain). Hovering a card shows an open-icon hint so the
-//     double-click affordance is discoverable.
+//   * ≤ MAX_CARD_FILES artifacts → one card per file/directory. Clicking a
+//     file opens it with the system's default app; clicking a directory
+//     reveals it in the file manager (both via the existing open_path chain).
+//     Hovering a card surfaces the open affordance without changing layout.
 //   * more than MAX_CARD_FILES (e.g. a scaffolded project) → collapse to a
 //     SINGLE directory card pointing at the common root of everything written,
 //     so the user can navigate straight to the project folder instead of
@@ -20,6 +19,7 @@
 // unit-testable without a DOM.
 
 import { resolvePathForOpen, openPathLink } from './pathLink';
+import { isTauriRuntime, tauriInvoke } from '../shared/tauri';
 import { t } from '../shared/i18n';
 
 export interface ArtifactItem {
@@ -107,7 +107,40 @@ const OPEN_HINT_ICON =
  * like the composer's paste chips. Unknown extensions fall back to the
  * generic file glyph.
  */
-function fileIconMeta(path: string): { svg: string; cls: string } {
+const nativeIconCache = new Map<string, string | null>();
+const nativeIconRequests = new Map<string, Promise<string | null>>();
+
+async function nativeFileIcon(path: string): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const resolved = resolvePathForOpen(path);
+  if (!resolved) return null;
+  if (nativeIconCache.has(resolved)) return nativeIconCache.get(resolved) ?? null;
+  const pending = nativeIconRequests.get(resolved);
+  if (pending) return pending;
+  const request = tauriInvoke<string>('get_file_icon', { path: resolved })
+    .then((icon) => {
+      const value = icon.startsWith('data:image/') ? icon : null;
+      nativeIconCache.set(resolved, value);
+      return value;
+    })
+    .catch(() => {
+      nativeIconCache.set(resolved, null);
+      return null;
+    })
+    .finally(() => nativeIconRequests.delete(resolved));
+  nativeIconRequests.set(resolved, request);
+  return request;
+}
+
+export function artifactKindLabel(path: string, isDir = false): string {
+  if (isDir) return t('artifacts.folder');
+  const leaf = path.split(/[\\/]+/).pop() ?? '';
+  const dot = leaf.lastIndexOf('.');
+  const ext = dot > 0 ? leaf.slice(dot + 1).toUpperCase() : '';
+  return ext || t('artifacts.file');
+}
+
+export function fileIconMeta(path: string): { svg: string; cls: string } {
   const leaf = path.split(/[\\/]+/).pop() ?? '';
   const dot = leaf.lastIndexOf('.');
   const ext = dot > 0 ? leaf.slice(dot + 1).toLowerCase() : '';
@@ -128,10 +161,9 @@ function splitNamePath(path: string): { name: string; rest: string } {
 }
 
 /**
- * Build one file/directory card. DOUBLE-CLICKING opens the path (default app
- * for files, file manager for directories); hovering reveals an open-icon
- * hint so the double-click affordance is discoverable. Enter/Space on the
- * focused card opens too (a11y).
+ * Build one file/directory card. Clicking opens the path (default app for
+ * files, file manager for directories); the native button semantics provide
+ * Enter/Space activation and the hover hint makes the action discoverable.
  */
 function createArtifactCard(item: ArtifactItem | null, dirPath: string | null): HTMLButtonElement | null {
   const path = item ? item.path : dirPath;
@@ -141,33 +173,40 @@ function createArtifactCard(item: ArtifactItem | null, dirPath: string | null): 
 
   const card = document.createElement('button');
   card.type = 'button';
-  card.className = isDir ? 'artifact-card artifact-card-dir' : 'artifact-card';
+  card.className = `${isDir ? 'artifact-card artifact-card-dir' : 'artifact-card'} ${meta.cls}`;
   card.setAttribute('data-path', path);
-  card.title = t('artifacts.dblclickHint');
+  card.title = t('artifacts.clickHint');
+  card.setAttribute('aria-label', `${isDir ? t('artifacts.openDir') : t('artifacts.openFile')}: ${path}`);
   card.innerHTML =
-    `<span class="artifact-icon ${meta.cls}">${meta.svg}</span>` +
-    `<span class="artifact-text"><span class="artifact-name"></span><span class="artifact-path"></span></span>` +
+    `<span class="artifact-icon artifact-icon-loading ${meta.cls}">${meta.svg}</span>` +
+    `<span class="artifact-text"><span class="artifact-name"></span><span class="artifact-path"></span><span class="artifact-meta"><span class="artifact-kind"></span><span class="artifact-action"></span></span></span>` +
     `<span class="artifact-open-hint" aria-hidden="true">${OPEN_HINT_ICON}</span>`;
+  const iconEl = card.querySelector<HTMLElement>('.artifact-icon')!;
+  void nativeFileIcon(path).then((icon) => {
+    if (!icon || !iconEl.isConnected) return;
+    iconEl.classList.add('artifact-icon-native');
+    iconEl.innerHTML = '<img src="" alt="" aria-hidden="true">';
+    iconEl.querySelector<HTMLImageElement>('img')!.src = icon;
+  }).finally(() => {
+    iconEl.classList.remove('artifact-icon-loading');
+  });
   const nameEl = card.querySelector<HTMLElement>('.artifact-name')!;
   const pathEl = card.querySelector<HTMLElement>('.artifact-path')!;
+  const kindEl = card.querySelector<HTMLElement>('.artifact-kind')!;
+  const actionEl = card.querySelector<HTMLElement>('.artifact-action')!;
   const { name, rest } = splitNamePath(path);
   nameEl.textContent = name || path || t('artifacts.project');
   pathEl.textContent = rest || (isDir ? path : '');
-  const open = () => openPathLink(path);
-  card.addEventListener('dblclick', open);
-  card.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter' || ev.key === ' ') {
-      ev.preventDefault();
-      open();
-    }
-  });
+  kindEl.textContent = artifactKindLabel(path, isDir);
+  actionEl.textContent = t('artifacts.openAction');
+  card.addEventListener('click', () => openPathLink(path));
   return card;
 }
 
 /**
  * Append the artifact display (file cards or a single directory card) into
- * `host`. Double-clicking a card opens the path via openPathLink (default app
- * for files, file manager for directories); the hover hint communicates it.
+ * `host`. Clicking a card opens the path via openPathLink (default app for
+ * files, file manager for directories); the hover hint communicates it.
  */
 export function renderArtifactCards(host: HTMLElement, items: ArtifactItem[]): void {
   const plan = planArtifactDisplay(items);

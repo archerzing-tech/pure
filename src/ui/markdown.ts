@@ -162,7 +162,7 @@ export function diagramSlot(kind: DiagramKind, source: string, preview: string):
 
 // ── Custom renderer: route mermaid / puml code blocks away from hljs ──
 
-const renderer = new Renderer();
+export const renderer = new Renderer();
 
 // marked 18.x: renderer methods receive a single token object — we destructure.
 renderer.code = (token: { text: string; lang?: string }): string => {
@@ -206,6 +206,30 @@ renderer.code = (token: { text: string; lang?: string }): string => {
 renderer.html = (token: { text: string; block?: boolean }): string => {
   const text = esc(token.text);
   return token.block ? `<p class="md-raw-html">${text}</p>` : text;
+};
+
+// Images (```![alt](src)```) are allowed through with a strict scheme allowlist
+// (http/https/data/blob — never javascript: or file:), then WRAPPED so the
+// rendered picture becomes double-click-to-enlarge like every other diagram
+// (```svg code blocks, charts, mermaid, PlantUML). A plain <img> has no viewer
+// binding and double-clicking it silently did nothing — the exact gap the
+// "SVG 图片双击无法放大" report hit: the model emitted a markdown image, not a
+// fenced ```svg block. The wrapper carries `md-img-wrap`/`md-img` classes that
+// bindMdImagePopup + the assistant-bubble copy guard recognize.
+renderer.image = (token: { href: string; title?: string | null; text: string }): string => {
+  const src = (token.href ?? '').trim();
+  const alt = esc(token.text ?? '');
+  // Reject only when a scheme is present AND not in the safe list. Scheme-less
+  // relative paths (/img/x.png, ./pic.svg) and protocol-relative (//host/p.png)
+  // stay images — marked's previous default renderer + DOMPurify allowed them,
+  // and same-origin/workspace-relative images are a normal model output. Only
+  // javascript:/file:/data-text/html etc. become plain alt text, so a hostile
+  // URL can never turn into an executable attribute.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(src) && !/^(https?:|data:|blob:)/i.test(src)) {
+    return alt;
+  }
+  const title = token.title ? ` title="${attr(token.title)}"` : '';
+  return `<span class="md-img-wrap" data-viewer="img"><img class="md-img" src="${attr(src)}" alt="${alt}"${title} loading="lazy" /></span>`;
 };
 
 // Links are allowed through but restricted to http(s)/mailto/# and forced to
@@ -1352,6 +1376,7 @@ export async function renderMarkdown(text: string, container: HTMLElement): Prom
   bindMermaidPopup(container);
   bindPumlPopup(container);
   bindVectorPopup(container);
+  bindMdImagePopup(container);
 
   // 6) Add copy + save buttons to code blocks.
   addCodeBlockActions(container);
@@ -1772,6 +1797,24 @@ function bindVectorPopup(container: HTMLElement): void {
       const svg = target.querySelector('svg');
       return svg?.cloneNode(true) as HTMLElement | null;
     }, 'dblclick');
+  }
+}
+
+/**
+ * Inline markdown images (```![alt](src)```) get the same enlarged-viewer
+ * treatment as diagram slots: double-click (or Enter/Space) opens the image in
+ * the pan/zoom viewer. The activation target is the whole `.md-img-wrap`
+ * wrapper so a double-click anywhere on the picture — not just the <img>
+ * pixel box — opens the viewer.
+ */
+function bindMdImagePopup(container: HTMLElement): void {
+  const wraps = container.matches('.md-img-wrap')
+    ? [container]
+    : Array.from(container.querySelectorAll<HTMLElement>('.md-img-wrap'));
+  for (const wrap of wraps) {
+    const img = wrap.querySelector<HTMLImageElement>('.md-img');
+    if (!img) continue;
+    bindDiagramActivation(wrap, () => img.cloneNode(true) as HTMLElement, 'dblclick');
   }
 }
 

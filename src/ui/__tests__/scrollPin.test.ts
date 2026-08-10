@@ -6,7 +6,7 @@
 // the UI suite.
 
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
-import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned, forceScrollToBottom, isNearBottom } from '../scrollPin';
+import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned, forceScrollToBottom, isNearBottom, setScrollPinObservers } from '../scrollPin';
 
 // Deterministic rAF: collect callbacks and flush them on demand instead of
 // depending on real animation frames.
@@ -196,5 +196,64 @@ describe('scrollPin auto-scroll', () => {
     scrollChatToBottomIfPinned(el as unknown as HTMLElement);
     flushRaf();
     expect(el.scrollTop).toBe(SCROLL_HEIGHT);
+  });
+});
+
+describe('scrollPin observers (new-content-below hint)', () => {
+  afterEach(() => {
+    // The observers are module-level singletons — always clear them so no
+    // other test picks up a stale callback.
+    setScrollPinObservers({});
+  });
+
+  it('fires onUnpinnedNewContent when content arrives while the user scrolled away', () => {
+    const { el } = makeChatEl();
+    wireScrollPin(el as unknown as HTMLElement);
+    setPinnedToBottom(el as unknown as HTMLElement, false);
+    const calls: string[] = [];
+    setScrollPinObservers({ onUnpinnedNewContent: () => calls.push('new') });
+
+    scrollChatToBottomIfPinned(el as unknown as HTMLElement);
+    expect(calls).toEqual(['new']);
+    // No scroll is scheduled while unpinned — the UI hint replaces it.
+    expect(rafCallbacks.length).toBe(0);
+  });
+
+  it('does not fire onUnpinnedNewContent while pinned (auto-scroll runs instead)', () => {
+    const { el } = makeChatEl();
+    wireScrollPin(el as unknown as HTMLElement);
+    const calls: string[] = [];
+    setScrollPinObservers({ onUnpinnedNewContent: () => calls.push('new') });
+
+    scrollChatToBottomIfPinned(el as unknown as HTMLElement);
+    flushRaf();
+    expect(calls).toEqual([]);
+  });
+
+  it('fires onPinStateChange with the new pin state on a genuine user scroll', () => {
+    const { el, setTop } = makeChatEl();
+    wireScrollPin(el as unknown as HTMLElement);
+    const pins: boolean[] = [];
+    setScrollPinObservers({ onPinStateChange: (_el, p) => pins.push(p) });
+
+    setTop(200); // scroll away from the bottom (100px > 40px threshold)
+    el.dispatchEvent('scroll');
+    expect(pins).toEqual([false]);
+
+    setTop(300); // back at the bottom (0px away)
+    el.dispatchEvent('scroll');
+    expect(pins).toEqual([false, true]);
+  });
+
+  it('never fires onPinStateChange for programmatic self-scrolls', () => {
+    const { el } = makeChatEl();
+    wireScrollPin(el as unknown as HTMLElement);
+    const pins: boolean[] = [];
+    setScrollPinObservers({ onPinStateChange: (_el, p) => pins.push(p) });
+
+    scrollChatToBottomIfPinned(el as unknown as HTMLElement);
+    flushRaf(); // the self-scroll write leaves the marker for the scroll event
+    el.dispatchEvent('scroll');
+    expect(pins).toEqual([]);
   });
 });

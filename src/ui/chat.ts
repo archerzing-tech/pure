@@ -4,14 +4,14 @@
 
 import { loadConfig, hasConfiguredKey, customSecretKey, type PureConfig } from './config';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless } from '../shared/providers';
-import { saveSession, loadLastSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, type StoredMessage, type ToolExecMeta, type SessionStats } from './store';
+import { saveSession, loadLastSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, type StoredMessage, type ToolExecMeta, type SessionStats } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
 import { INCREMENTAL_BUILD_PROMPT } from '../shared/agentBehavior';
 import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, FILE_TOOLS_CORE, composeUserTurn, stripUserTurnContext } from '../shared/promptLayers';
 import { CodingAgent } from '../coding-agent/CodingAgent';
-import { formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt, parsePlanJson } from '../coding-agent/Planner';
+import { formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt, parsePlanJsonWithMeta } from '../coding-agent/Planner';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createLLMOnlyVerifier, createDefaultVerifier } from '../coding-agent/Verifier';
@@ -33,7 +33,7 @@ import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore } from '../sh
 import { renderMarkdown, scheduleStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdown';
 import { renderArtifactCards, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
-import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
+import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, type ToolRowHandle } from './toolRow';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, type ThinkingCardHandle } from './thinkingCard';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -75,6 +75,48 @@ const TOOL_CALL_REFRESH_MS = 120;
 // status bubbles) through one place. Idempotent like wireScrollPin.
 const MAX_TRANSCRIPT_ROWS = 300;
 const transcriptPruneState = new WeakMap<HTMLElement, MutationObserver>();
+
+// ── "New content below" hint ──
+// Auto-scroll pauses once the user scrolls up to re-read history. When new
+// content then arrives below, a small floating pill appears above the input
+// bar so the user knows the transcript is still growing (scrollPin fires
+// onUnpinnedNewContent for every content change while unpinned; the pill is
+// created once and stays until dismissed). Clicking it jumps back to the
+// bottom; scrolling back to the bottom or sending a new message hides it.
+let scrollHintBtn: HTMLButtonElement | null = null;
+
+function showNewContentHint(chatEl: HTMLElement): void {
+  if (scrollHintBtn && document.contains(scrollHintBtn)) return;
+  scrollHintBtn?.remove();
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'new-content-hint';
+  btn.textContent = t('chat.newContent');
+  btn.title = t('chat.newContentHint');
+  btn.setAttribute('aria-label', t('chat.newContentHint'));
+  btn.addEventListener('click', () => {
+    forceScrollToBottom(chatEl);
+    hideNewContentHint();
+  });
+  document.getElementById('chat-view')?.appendChild(btn);
+  scrollHintBtn = btn;
+}
+
+/** Remove the hint pill (exported for the fresh-turn path in send()). */
+export function hideNewContentHint(): void {
+  scrollHintBtn?.remove();
+  scrollHintBtn = null;
+}
+
+/** Idempotent per-transcript wiring: bridges scrollPin observers → hint UI. */
+function wireNewContentHint(chatEl: HTMLElement): void {
+  if (chatEl.dataset.newContentHintWired === '1') return;
+  chatEl.dataset.newContentHintWired = '1';
+  setScrollPinObservers({
+    onUnpinnedNewContent: (el) => { if (el === chatEl) showNewContentHint(el); },
+    onPinStateChange: (_el, pinned) => { if (pinned) hideNewContentHint(); },
+  });
+}
 
 /**
  * Resolve which message history a continuation turn should run on: the
@@ -192,7 +234,7 @@ export function assistantBubbleTextForCopy(bubble: HTMLElement): string {
 
 export function shouldCopyAssistantBubbleTarget(target: EventTarget | null): boolean {
   if (!target || typeof (target as { closest?: unknown }).closest !== 'function') return true;
-  return !(target as Element).closest('button, a, [role="button"], .svg-target, .chart-target, .mermaid-target');
+  return !(target as Element).closest('button, a, [role="button"], .svg-target, .chart-target, .mermaid-target, .md-img-wrap');
 }
 
 export async function copyAssistantBubbleText(
@@ -559,7 +601,7 @@ export async function generateTaskPlan(
   llm: LLMAdapter,
   userText: string,
   timeoutMs: number = PLAN_GENERATION_TIMEOUT_MS,
-): Promise<Plan | null> {
+): Promise<{ plan: Plan | null; repaired: boolean }> {
   try {
     const res = await Promise.race([
       llm.complete(
@@ -573,10 +615,10 @@ export async function generateTaskPlan(
         setTimeout(() => reject(new Error('plan generation timed out')), timeoutMs),
       ),
     ]);
-    return parsePlanJson(res.content);
+    return parsePlanJsonWithMeta(res.content);
   } catch (err) {
     console.warn('[pure] plan generation failed, falling back to heuristic plan:', (err as Error)?.message ?? err);
-    return null;
+    return { plan: null, repaired: false };
   }
 }
 
@@ -713,7 +755,7 @@ export class ChatController {
     } else if (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'replace_files') {
       const path = typeof args?.path === 'string' ? args.path
         : Array.isArray(args?.files) ? (args!.files as string[]).join(', ') : '';
-      if (path) push(s.fileWrites, { path, ts, success });
+      if (path) upsertFileWrite(s.fileWrites, { path, ts, success }, this.workspace);
     } else if (toolName === 'execute_command') {
       const command = typeof args?.command === 'string' ? args.command : '';
       if (command) push(s.commands, { command: command.slice(0, 300), ts, success });
@@ -755,6 +797,12 @@ export class ChatController {
 
   setWorkspace(path: string) {
     this.workspace = path;
+    const fileWrites = dedupeFileWrites(this.sessionStats.fileWrites, path);
+    if (fileWrites.length !== this.sessionStats.fileWrites.length || fileWrites.some((entry, index) => entry.path !== this.sessionStats.fileWrites[index]?.path)) {
+      this.sessionStats = { ...this.sessionStats, fileWrites };
+      saveSessionStats(this.sessionId, this.sessionStats);
+      this.onStatsChanged?.(this.sessionStats);
+    }
     // Keep the transcript's clickable-path resolver in sync with the session's
     // workspace so relative paths in bubbles/tool rows resolve correctly.
     setPathLinkWorkspace(path);
@@ -774,6 +822,7 @@ export class ChatController {
   async send(userText: string) {
     const chatEl = document.getElementById('chat')!;
     wireScrollPin(chatEl);
+    wireNewContentHint(chatEl);
     wireTranscriptPrune(chatEl);
     const config = loadConfig();
     if (!hasConfiguredKey(config)) return;
@@ -788,6 +837,7 @@ export class ChatController {
     const userBubble = this.addBubble('user', userText);
     linkifyPaths(userBubble);
     forceScrollToBottom(chatEl);
+    hideNewContentHint(); // a fresh user turn resumes following the newest content
 
     // Snapshot the user-selected workspace separately from the effective tool
     // workspace. An empty user workspace uses an application-owned tmp folder,
@@ -1148,7 +1198,7 @@ export class ChatController {
             userBubble.remove();
             return;
           }
-          if (llmPlan) planForReview = llmPlan;
+          if (llmPlan.plan) planForReview = llmPlan.plan;
           const decision = await requestPlanReview({ ...analysis, plan: planForReview, reasoning: planForReview.reasoning });
           if (decision === 'cancel') {
             // Cancelled pre-flight leaves no ghost bubbles: remove the
@@ -1161,7 +1211,15 @@ export class ChatController {
             modeBubble.remove();
           } else {
             approvedPlan = planForReview;
-            userPlan = formatPlanForPrompt(planForReview);
+            // Repaired plan text must NOT re-enter the LLM context window: it
+            // is a reconstruction of the model's broken output, and feeding it
+            // back as "the approved plan" would confuse the very model that
+            // emitted the broken JSON. The review card still shows the steps
+            // for the user; only the context injection is skipped. Injection is
+            // skipped only when the plan being injected IS the repaired LLM
+            // plan — a repaired-but-invalid payload falls back to the heuristic
+            // plan, which is not repaired content and injects as before.
+            if (!(llmPlan.plan && llmPlan.repaired)) userPlan = formatPlanForPrompt(planForReview);
             // Plan is ready + approved: the bubble no longer promises generation.
             modeBubble.textContent = t('plan.modeActive', '🧭 已切换为 {mode} 模式，按计划分步执行').replace('{mode}', modeLabel(analysis.mode));
           }
@@ -1216,8 +1274,10 @@ export class ChatController {
       // above the reply for the rest of the session). Route through the
       // rAF-coalesced helper so this first content growth joins the same frame
       // budget as every streamed token (a direct scrollTop write here forced a
-      // synchronous full-transcript layout).
+      // synchronous full-transcript layout). A fresh turn also dismisses any
+      // "new content below" pill left over from the previous turn.
       forceScrollToBottom(chatEl);
+      hideNewContentHint();
 
       // ── Deferred init: boot MCP on first use ──
       if (!this.deferredInitDone) {

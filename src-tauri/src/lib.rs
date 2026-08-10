@@ -15,6 +15,29 @@ use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command as TokioCommand};
 
+use base64::Engine as _;
+
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSDictionary, NSString};
+
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use png::{BitDepth, ColorType, Encoder};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Graphics::Gdi::{
+    DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+    BITMAPINFOHEADER, DIB_RGB_COLORS,
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
+
 // ── Silent child processes ──
 // A Windows GUI app has no attached console, so every console child (cmd,
 // git, node, powershell, …) spawns a fresh console window that flashes on
@@ -3978,6 +4001,271 @@ fn has_unsupported_uri_scheme(raw: &str) -> bool {
 /// files open with their default app. Absolute OS command paths are deliberate:
 /// Finder-launched Tauri apps inherit a minimal PATH that may not contain
 /// `/usr/bin`, so invoking `open` by name can silently fail in the packaged GUI.
+#[cfg(target_os = "linux")]
+fn decode_file_uri_path(value: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let raw = value.as_bytes();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' {
+            if i + 2 >= raw.len() { return None; }
+            let hex = |digit: u8| -> Option<u8> {
+                match digit {
+                    b'0'..=b'9' => Some(digit - b'0'),
+                    b'a'..=b'f' => Some(digit - b'a' + 10),
+                    b'A'..=b'F' => Some(digit - b'A' + 10),
+                    _ => None,
+                }
+            };
+            bytes.push(hex(raw[i + 1])? * 16 + hex(raw[i + 2])?);
+            i += 3;
+        } else {
+            bytes.push(raw[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_icon_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    let value = value.strip_prefix("GThemedIcon:").unwrap_or(value).trim();
+    let value = value.strip_prefix("GFileIcon:").unwrap_or(value).trim();
+    let value = value.split(',').next()?.trim().trim_matches(['[', ']', '(', ')', '"']);
+    if let Some(path) = value.strip_prefix("file://") {
+        let path = path.strip_prefix("localhost").unwrap_or(path);
+        return decode_file_uri_path(path);
+    }
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_theme_icon_path(name: &str) -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(PathBuf::from(home).join(".icons"));
+        roots.push(PathBuf::from(home).join(".local/share/icons"));
+    }
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        roots.push(PathBuf::from(data_home).join("icons"));
+    }
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
+    for root in data_dirs.split(':').filter(|root| !root.is_empty()) {
+        roots.push(PathBuf::from(root).join("icons"));
+    }
+    roots.push(PathBuf::from("/usr/share/pixmaps"));
+
+    let names = [name, "text-x-generic", "application-octet-stream"];
+    for root in roots {
+        if !root.is_dir() { continue; }
+        for entry in walkdir::WalkDir::new(&root).max_depth(6).into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() { continue; }
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else { continue; };
+            if !names.iter().any(|candidate| *candidate == stem) { continue; }
+            if matches!(path.extension().and_then(|value| value.to_str()), Some("png" | "svg" | "svgz")) {
+                return Some(path.to_path_buf());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn linux_icon_data(path: &str) -> Result<String, String> {
+    let output = std::process::Command::new("gio")
+        .args(["info", "--attributes=standard::icon", "--nofollow-symlinks", path])
+        .output()
+        .map_err(|e| format!("gio unavailable: {}", e))?;
+    if !output.status.success() {
+        return Err(format!("gio info failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let icon_name = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("standard::icon:"))
+        .and_then(parse_linux_icon_value)
+        .ok_or_else(|| "gio did not return a file icon".to_string())?;
+    let icon_path = if icon_name.starts_with('/') {
+        PathBuf::from(icon_name)
+    } else {
+        linux_theme_icon_path(&icon_name).ok_or_else(|| format!("icon theme entry not found: {}", icon_name))?
+    };
+    let bytes = fs::read(&icon_path).map_err(|e| format!("read icon: {}", e))?;
+    let mime = match icon_path.extension().and_then(|value| value.to_str()) {
+        Some("svg") | Some("svgz") => "image/svg+xml",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    };
+    Ok(format!("data:{};base64,{}", mime, base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_icon_data(path: &str) -> Result<String, String> {
+    let wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+    let mut info: SHFILEINFOW = unsafe { std::mem::zeroed() };
+    let result = unsafe { SHGetFileInfoW(wide.as_ptr(), 0, &mut info, std::mem::size_of::<SHFILEINFOW>() as u32, SHGFI_ICON | SHGFI_LARGEICON) };
+    if result == 0 || info.hIcon.is_null() { return Err("SHGetFileInfoW returned no icon".to_string()); }
+    let hicon = info.hIcon;
+    let mut icon_info: ICONINFO = unsafe { std::mem::zeroed() };
+    if unsafe { GetIconInfo(hicon, &mut icon_info) } == 0 {
+        unsafe { DestroyIcon(hicon); }
+        return Err("GetIconInfo failed".to_string());
+    }
+    let color_bitmap = icon_info.hbmColor;
+    let mask_bitmap = icon_info.hbmMask;
+    if color_bitmap.is_null() {
+        unsafe {
+            if !mask_bitmap.is_null() { DeleteObject(mask_bitmap); }
+            DestroyIcon(hicon);
+        }
+        return Err("GetIconInfo returned no color bitmap".to_string());
+    }
+    let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
+    let object_size = unsafe { GetObjectW(color_bitmap, std::mem::size_of::<BITMAP>() as i32, &mut bitmap as *mut BITMAP as *mut std::ffi::c_void) };
+    let width = bitmap.bmWidth;
+    let height = bitmap.bmHeight.abs();
+    if object_size == 0 || width <= 0 || height <= 0 {
+        unsafe { DeleteObject(color_bitmap); if !mask_bitmap.is_null() { DeleteObject(mask_bitmap); } DestroyIcon(hicon); }
+        return Err("invalid Windows icon bitmap".to_string());
+    }
+    let mut pixels = vec![0u8; width as usize * height as usize * 4];
+    let mut bitmap_info: BITMAPINFO = unsafe { std::mem::zeroed() };
+    bitmap_info.bmiHeader = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: width, biHeight: -height, biPlanes: 1, biBitCount: 32,
+        biCompression: 0, biSizeImage: 0, biXPelsPerMeter: 0, biYPelsPerMeter: 0,
+        biClrUsed: 0, biClrImportant: 0,
+    };
+    let hdc = unsafe { GetDC(std::ptr::null_mut()) };
+    if hdc.is_null() {
+        unsafe { DeleteObject(color_bitmap); if !mask_bitmap.is_null() { DeleteObject(mask_bitmap); } DestroyIcon(hicon); }
+        return Err("GetDC failed".to_string());
+    }
+    let copied = unsafe { GetDIBits(hdc, color_bitmap, 0, height as u32, pixels.as_mut_ptr() as *mut std::ffi::c_void, &mut bitmap_info, DIB_RGB_COLORS) };
+    unsafe {
+        ReleaseDC(std::ptr::null_mut(), hdc);
+        DeleteObject(color_bitmap);
+        DestroyIcon(hicon);
+    }
+    if copied == 0 {
+        unsafe { if !mask_bitmap.is_null() { DeleteObject(mask_bitmap); } }
+        return Err("GetDIBits could not read the icon bitmap".to_string());
+    }
+    let mut rgba = pixels;
+    let alpha_is_uniform = rgba.chunks_exact(4).all(|pixel| pixel[3] == 0)
+        || rgba.chunks_exact(4).all(|pixel| pixel[3] == 0xff);
+    if alpha_is_uniform && !mask_bitmap.is_null() {
+        let mut mask_bitmap_info: BITMAP = unsafe { std::mem::zeroed() };
+        let mask_object_size = unsafe {
+            GetObjectW(
+                mask_bitmap,
+                std::mem::size_of::<BITMAP>() as i32,
+                &mut mask_bitmap_info as *mut BITMAP as *mut std::ffi::c_void,
+            )
+        };
+        let mask_height = mask_bitmap_info.bmHeight.abs().min(height);
+        let mask_stride = ((width as usize + 31) / 32) * 4;
+        if mask_object_size != 0 && mask_height > 0 {
+            let mut mask_pixels = vec![0u8; mask_stride * mask_height as usize];
+            let mut mask_info: BITMAPINFO = unsafe { std::mem::zeroed() };
+            mask_info.bmiHeader = BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -(mask_height),
+                biPlanes: 1,
+                biBitCount: 1,
+                biCompression: 0,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            };
+            let mask_copied = unsafe {
+                let mask_dc = GetDC(std::ptr::null_mut());
+                if mask_dc.is_null() {
+                    0
+                } else {
+                    let copied = GetDIBits(
+                        mask_dc,
+                        mask_bitmap,
+                        0,
+                        mask_height as u32,
+                        mask_pixels.as_mut_ptr() as *mut std::ffi::c_void,
+                        &mut mask_info,
+                        DIB_RGB_COLORS,
+                    );
+                    ReleaseDC(std::ptr::null_mut(), mask_dc);
+                    copied
+                }
+            };
+            if mask_copied != 0 {
+                for y in 0..height as usize {
+                    for x in 0..width as usize {
+                        let mask_byte = y.min(mask_height as usize - 1) * mask_stride + x / 8;
+                        let transparent = (mask_pixels[mask_byte] & (0x80 >> (x % 8))) != 0;
+                        rgba[(y * width as usize + x) * 4 + 3] = if transparent { 0 } else { 0xff };
+                    }
+                }
+            }
+        }
+    }
+    unsafe { if !mask_bitmap.is_null() { DeleteObject(mask_bitmap); } }
+    for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+
+    let mut png = Vec::new();
+    {
+        let mut encoder = Encoder::new(&mut png, width as u32, height as u32);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| format!("PNG header: {}", e))?;
+        writer.write_image_data(&rgba).map_err(|e| format!("PNG data: {}", e))?;
+    }
+    Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
+}
+
+#[tauri::command]
+async fn get_file_icon(path: String) -> Result<String, String> {
+    let path = path.trim().to_string();
+    if path.is_empty() { return Err("get_file_icon: path is empty".to_string()); }
+    #[cfg(target_os = "macos")]
+    {
+        let path_string = NSString::from_str(&path);
+        let icon = NSWorkspace::sharedWorkspace().iconForFile(&path_string);
+        let tiff = icon.TIFFRepresentation().ok_or("icon has no TIFF representation")?;
+        let bitmap = NSBitmapImageRep::imageRepWithData(&tiff).ok_or("unable to decode icon")?;
+        let properties = NSDictionary::<NSString, AnyObject>::new();
+        let png = unsafe { bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties) }.ok_or("unable to encode icon")?;
+        return Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(unsafe { png.as_bytes_unchecked() })));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return tokio::task::spawn_blocking(move || linux_icon_data(&path)).await.map_err(|e| format!("linux icon task failed: {}", e))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return windows_icon_data(&path);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    { Err("native icons are unavailable on this platform".to_string()) }
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+mod linux_icon_tests {
+    use super::parse_linux_icon_value;
+    #[test]
+    fn parses_gio_icon_values() {
+        assert_eq!(parse_linux_icon_value("GThemedIcon: [text-x-generic, text-plain]"), Some("text-x-generic".to_string()));
+        assert_eq!(parse_linux_icon_value("GFileIcon: /usr/share/pixmaps/file.png"), Some("/usr/share/pixmaps/file.png".to_string()));
+        assert_eq!(parse_linux_icon_value("GFileIcon: file:///tmp/file%20name.png"), Some("/tmp/file name.png".to_string()));
+        assert_eq!(parse_linux_icon_value("GFileIcon: file://localhost/tmp/file.png"), Some("/tmp/file.png".to_string()));
+    }
+}
+
 #[tauri::command]
 async fn open_path(path: String) -> Result<(), String> {
     let raw = path.trim();

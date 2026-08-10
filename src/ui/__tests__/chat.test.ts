@@ -97,6 +97,7 @@ describe('assistant bubble copy target policy', () => {
     expect(shouldCopyAssistantBubbleTarget(target('a') as unknown as EventTarget)).toBe(false);
     expect(shouldCopyAssistantBubbleTarget(target('.svg-target') as unknown as EventTarget)).toBe(false);
     expect(shouldCopyAssistantBubbleTarget(target('.chart-target') as unknown as EventTarget)).toBe(false);
+    expect(shouldCopyAssistantBubbleTarget(target('.md-img-wrap') as unknown as EventTarget)).toBe(false);
   });
 });
 
@@ -139,21 +140,33 @@ describe('generateTaskPlan (LLM task-specific plan generation)', () => {
 
   it('returns a parsed plan when the LLM returns a JSON array', async () => {
     const llm = fakeLlm('[{"action":"Inspect","description":"Read auth module"},{"action":"Rewrite","description":"Replace token logic"}]');
-    const plan = await generateTaskPlan(llm, '重构认证模块');
-    expect(plan).not.toBeNull();
-    expect(plan!.steps).toHaveLength(2);
-    expect(plan!.steps[0]).toMatchObject({ action: 'Inspect', description: 'Read auth module' });
+    const result = await generateTaskPlan(llm, '重构认证模块');
+    expect(result.plan).not.toBeNull();
+    expect(result.repaired).toBe(false);
+    expect(result.plan!.steps).toHaveLength(2);
+    expect(result.plan!.steps[0]).toMatchObject({ action: 'Inspect', description: 'Read auth module' });
+  });
+
+  it('flags a repaired plan so callers can keep it out of the context window', async () => {
+    // Slightly-broken plan JSON: parseable only after repair. The plan is
+    // still returned (for the review card), but `repaired: true` tells the
+    // caller to skip re-injecting the reconstructed text into the LLM prompt.
+    const llm = fakeLlm("[{action: 'Inspect', description: 'Read auth module',},]");
+    const result = await generateTaskPlan(llm, '重构认证模块');
+    expect(result.plan).not.toBeNull();
+    expect(result.repaired).toBe(true);
+    expect(result.plan!.steps[0]).toMatchObject({ action: 'Inspect' });
   });
 
   it('returns null (fallback to heuristic) when the LLM returns malformed JSON', async () => {
     const llm = fakeLlm('sorry, I cannot plan that');
-    expect(await generateTaskPlan(llm, 'x')).toBeNull();
+    expect((await generateTaskPlan(llm, 'x')).plan).toBeNull();
   });
 
   it('returns null (fallback to heuristic) when the LLM call times out', async () => {
     // 10s > the 8s generation timeout — must resolve to null, not hang.
     const llm = fakeLlm('[]', 500);
-    expect(await generateTaskPlan(llm, 'x', 50)).toBeNull();
+    expect((await generateTaskPlan(llm, 'x', 50)).plan).toBeNull();
   });
 });
 

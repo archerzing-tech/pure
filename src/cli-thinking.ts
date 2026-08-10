@@ -1,25 +1,27 @@
 // src/cli-thinking.ts
 // Terminal "thinking" card for the CLI (see src/cli.ts consumeTurn).
 //
-// Presents the live reasoning stream as a BOXED CARD:
-//   ┌─ 💭 thinking ────────────────────────┐
-//   │ … 12 more lines                      │
-//   │ The user is asking for a travel plan │
-//   │ from Xi'an to Shanghai…              │
-//   └──────────────────────────────────────┘
+// Presents the live reasoning stream as a FLAT, BORDERLESS block:
+//   💭 thinking
+//     … 12 more lines
+//     The user is asking for a travel plan
+//     from Xi'an to Shanghai…
 //
 // Constraints from the product requirement:
-//  - Card form (box borders) instead of a bare `💭 thinking…` line.
+//  - A quiet flat form (header line + indented plain rows) instead of a boxed
+//    frame — box borders made the card look cluttered, and its width/height
+//    changes (content growth, terminal resize) were visually jarring as the
+//    frame visibly resized. A borderless block reads as a stream, not a frame.
 //  - Content too long → the window "scrolls": wrapped lines are capped and the
 //    card shows the MOST RECENT lines with a "… N more lines" truncation row
 //    at the top (the window follows the newest text).
-//  - Card height is capped (maxRows content rows + header + footer).
+//  - Card height is capped (header + maxRows content rows).
 //  - The thinking TEXT is rendered PLAIN — no bold, no color, no emphasis
 //    (a thought trace must never look like highlighted output).
 //
 // Redraws happen in place with ANSI cursor-up + erase-line sequences. Unlike
 // the old single-line `\r\x1b[2K` indicator, the card tracks its own drawn
-// height and clears every stale row, so a height change (3 → 6 rows) can never
+// height and clears every stale row, so a height change (2 → 6 rows) can never
 // leave ghost rows behind.
 
 import { displayWidth } from './termwidth';
@@ -93,13 +95,6 @@ export function padCols(s: string, width: number): string {
   return w >= width ? s : s + ' '.repeat(width - w);
 }
 
-const B_TL = '┌';
-const B_TR = '┐';
-const B_BL = '└';
-const B_BR = '┘';
-const B_H = '─';
-const B_V = '│';
-
 export class ThinkingCard {
   private text = '';
   private start = Date.now();
@@ -131,7 +126,7 @@ export class ThinkingCard {
     return Math.max(20, Math.min(this.maxWidth, cols - 6));
   }
 
-  /** Build the full card row set (header + content + footer). */
+  /** Build the full card row set (header + content — flat, no box borders). */
   buildRows(): string[] {
     const W = this.innerWidth();
 
@@ -142,29 +137,28 @@ export class ThinkingCard {
     }
 
     // Content rows: cap + tail-following scroll window with a truncation row.
-    const content: string[] = [];
+    let truncation: string | null = null;
+    let content: string[];
     if (wrapped.length > this.maxRows) {
       const hidden = wrapped.length - (this.maxRows - 1);
-      content.push(`… ${hidden} more line${hidden === 1 ? '' : 's'}`);
-      content.push(...wrapped.slice(wrapped.length - (this.maxRows - 1)));
+      truncation = `… ${hidden} more line${hidden === 1 ? '' : 's'}`;
+      content = wrapped.slice(wrapped.length - (this.maxRows - 1));
     } else {
-      content.push(...wrapped);
+      content = wrapped;
     }
     // Leading blank lines only eat card height — drop them.
     while (content.length > 0 && content[0].trim() === '') content.shift();
-    if (content.length === 0) content.push('thinking…');
+    if (content.length === 0) content = ['thinking…'];
     if (content.length > this.maxRows) content.length = this.maxRows;
 
     const rows: string[] = [];
-    // Header: ┌─ 💭 thinking ─────…──┐  (fixed prefix, ─-fill to the right edge)
-    const prefix = `${B_TL}${B_H} ${'💭 thinking'} `; // display width = 15
-    const fill = Math.max(0, W + 4 - displayWidth(prefix) - 1);
-    rows.push(`${prefix}${B_H.repeat(fill)}${B_TR}`);
-    // Content: │ <plain text> │ — plain color, no emphasis.
-    for (const line of content) {
-      rows.push(`${B_V} ${padCols(line, W)} ${B_V}`);
-    }
-    rows.push(`${B_BL}${B_H.repeat(W + 2)}${B_BR}`);
+    // Header: a single flat line. No box frame means a terminal resize or
+    // content growth never leaves a misaligned border behind.
+    rows.push('💭 thinking');
+    if (truncation) rows.push(`  ${truncation}`);
+    // Content: indented plain text — no color, no emphasis (a thought trace
+    // must never look like highlighted output).
+    for (const line of content) rows.push(`  ${line}`);
     return rows;
   }
 

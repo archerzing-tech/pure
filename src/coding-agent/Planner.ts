@@ -339,6 +339,14 @@ export function formatArtifactPrompt(): string {
   return `\n\n<artifact_output_rule>\nThis request asks you to BUILD a complete runnable artifact (a game, web page, app, tool, script, or small project). Write it to a file on disk — do NOT dump the full source code in your reply.\n- Single-file artifact (HTML page, single JS/CSS file, small script): write it as a new file in the workspace, e.g. index.html, game.html, app.py, or a sensible name derived from the request.\n- Multi-file project: create a directory and write the files into it (entry point + assets), e.g. ./mini-game/index.html.\nAfter writing, briefly tell the user the file path(s) and how to run/open the artifact (e.g. open the HTML in a browser). If no workspace is configured, say so and ask for one instead of printing the code.\n</artifact_output_rule>`;
 }
 
+/** Result of parsing an LLM plan payload, with a repair flag for callers that
+ *  must keep reconstructed text out of the LLM context window. */
+export interface PlanParseResult {
+  plan: Plan | null;
+  /** True when the plan JSON had to be repaired before it parsed. */
+  repaired: boolean;
+}
+
 /**
  * Parse + validate a task-specific plan the LLM returned as JSON (the output
  * of the plan-generation pre-flight call). Accepts a plain JSON array, a JSON
@@ -350,13 +358,28 @@ export function formatArtifactPrompt(): string {
  * caller can fall back to the heuristic generic plan.
  */
 export function parsePlanJson(text: string): Plan | null {
-  if (!text) return null;
+  return parsePlanJsonCore(text).plan;
+}
+
+/**
+ * Like parsePlanJson, but also reports whether the plan JSON was repaired.
+ * Repaired step text is a reconstruction of the model's broken output — it may
+ * be shown to the user for approval, but must NOT be re-injected into the LLM
+ * context window as "the approved plan" (see chat.ts's plan gate).
+ */
+export function parsePlanJsonWithMeta(text: string): PlanParseResult {
+  return parsePlanJsonCore(text);
+}
+
+function parsePlanJsonCore(text: string): PlanParseResult {
+  if (!text) return { plan: null, repaired: false };
   let cleaned = text.trim();
   // Strip ```json ... ``` fences (some models wrap structured output).
   const fence = cleaned.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
   if (fence) cleaned = fence[1].trim();
 
   let parsed: unknown;
+  let repaired = false;
   try {
     parsed = JSON.parse(cleaned);
   } catch {
@@ -364,17 +387,18 @@ export function parsePlanJson(text: string): Plan | null {
     // commas, single quotes, unquoted keys, full-width punctuation, prose
     // wrappers) is repaired and re-parsed before falling back to the generic
     // heuristic plan. Parse-gated — only accepted if it parses cleanly.
-    const repaired = repairJsonSource(cleaned);
-    if (!repaired.repaired) return null;
+    const repairedResult = repairJsonSource(cleaned);
+    if (!repairedResult.repaired) return { plan: null, repaired: false };
+    repaired = true;
     try {
-      parsed = JSON.parse(repaired.source);
+      parsed = JSON.parse(repairedResult.source);
     } catch {
-      return null;
+      return { plan: null, repaired: false };
     }
   }
 
   const rawSteps: unknown = Array.isArray(parsed) ? parsed : (parsed as { steps?: unknown })?.steps;
-  if (!Array.isArray(rawSteps) || rawSteps.length === 0) return null;
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) return { plan: null, repaired };
 
   const steps: PlanStep[] = [];
   for (const raw of rawSteps) {
@@ -389,7 +413,7 @@ export function parsePlanJson(text: string): Plan | null {
       expectedOutcome: typeof step.expectedOutcome === 'string' ? step.expectedOutcome.trim() : description || action,
     });
   }
-  if (steps.length === 0) return null;
+  if (steps.length === 0) return { plan: null, repaired };
   // Hard cap so a non-compliant model can't balloon the review card / system
   // prompt with dozens of micro-steps (the prompt asks for 4-8).
   const capped = steps.slice(0, MAX_PLAN_STEPS);
@@ -397,7 +421,10 @@ export function parsePlanJson(text: string): Plan | null {
   const indexed = capped.map((s, i) => ({ ...s, id: String(i + 1) }));
 
   return {
-    steps: indexed,
-    reasoning: `The task has been broken into ${indexed.length} concrete steps, each with a defined outcome.`,
+    plan: {
+      steps: indexed,
+      reasoning: `The task has been broken into ${indexed.length} concrete steps, each with a defined outcome.`,
+    },
+    repaired,
   };
 }

@@ -20,6 +20,9 @@ import {
   defaultModelFor,
   isCustomProviderId,
   OLLAMA_PRESET,
+  OPENAI_PRESET,
+  OPENROUTER_PRESET,
+  NVIDIA_PRESET,
   providerDef,
   type CustomProvider,
 } from '../shared/providers';
@@ -409,12 +412,20 @@ export class SettingsPanel {
       this.autoSave();
     });
 
-    // ── Custom providers: add form, Ollama preset, delete, live name edit ──
+    // ── Custom providers: add form, quick presets, delete, live name edit ──
     document.getElementById('provider-add-custom')?.addEventListener('click', () => this.showCustomProviderForm());
     document.getElementById('cfg-custom-save')?.addEventListener('click', () => this.addCustomProviderFromForm());
     document.getElementById('cfg-custom-cancel')?.addEventListener('click', () => this.hideCustomProviderForm());
-    document.getElementById('provider-ollama-preset')?.addEventListener('click', () => this.addOllamaPreset());
     document.getElementById('provider-delete-btn')?.addEventListener('click', () => this.removeSelectedCustomProvider());
+    // Quick-preset chips (OpenAI / OpenRouter / NVIDIA / Ollama): one click
+    // adds the provider, selects it and hides the form — the key (if any) is
+    // entered in the config card below, prompted by the toast.
+    document.querySelectorAll<HTMLElement>('.provider-preset-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const preset = this.customPresetFor(chip.dataset.preset || '');
+        if (preset) this.addCustomPreset(preset);
+      });
+    });
     const customNameEdit = document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null;
     customNameEdit?.addEventListener('input', () => {
       // Re-label the selected card as the user types the custom name.
@@ -704,9 +715,14 @@ export class SettingsPanel {
     if (nameEdit) nameEdit.value = custom?.name ?? '';
     const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement | null;
     if (keyInput) {
-      if (isCustom && !custom.apiKey && !custom.hasApiKey) {
+      // Keyless locals say "leave empty"; cloud presets without a key yet say
+      // "required" — the hint must not tell an OpenAI user the key is optional.
+      if (isCustom && custom?.local && !custom.apiKey && !custom.hasApiKey) {
         keyInput.removeAttribute('data-i18n-placeholder');
         keyInput.placeholder = t('llm.custom.apiKeyOptional.hint');
+      } else if (isCustom && !custom.apiKey && !custom.hasApiKey) {
+        keyInput.removeAttribute('data-i18n-placeholder');
+        keyInput.placeholder = t('llm.custom.apiKeyRequired.hint');
       } else {
         keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.placeholder');
         keyInput.placeholder = t('llm.apiKey.placeholder');
@@ -1317,7 +1333,11 @@ export class SettingsPanel {
     // panel never duplicates them.
     grid.querySelectorAll('.provider-card-custom').forEach(el => el.remove());
     for (const c of customs) {
-      const keyless = !c.apiKey && !c.hasApiKey;
+      // A cloud provider without a key yet (preset saved, key pending) must
+      // NOT be presented as keyless — only true locals (Ollama / LM Studio)
+      // advertise "no key needed".
+      const keyless = !!c.local && !c.apiKey && !c.hasApiKey;
+      const needsKey = !c.local && !c.apiKey && !c.hasApiKey;
       const markClass = c.id === 'ollama' ? 'provider-mark-ollama' : 'provider-mark-custom';
       const mark = c.id === 'ollama' ? 'OL' : (c.name.slice(0, 2) || 'C').toUpperCase();
 
@@ -1359,6 +1379,11 @@ export class SettingsPanel {
         const badge = document.createElement('span');
         badge.className = 'provider-card-keyless';
         badge.textContent = t('llm.custom.noKeyBadge');
+        card.appendChild(badge);
+      } else if (needsKey) {
+        const badge = document.createElement('span');
+        badge.className = 'provider-card-keyless provider-card-needs-key';
+        badge.textContent = t('llm.custom.needKeyBadge');
         card.appendChild(badge);
       }
       grid.appendChild(card);
@@ -1466,26 +1491,46 @@ export class SettingsPanel {
     this.toast(t('llm.custom.added'));
   }
 
-  private addOllamaPreset(): void {
+  /** Resolve a quick-preset chip by slug (openai / openrouter / nvidia / ollama). */
+  private customPresetFor(id: string): CustomProvider | undefined {
+    switch (id) {
+      case OPENAI_PRESET.id: return OPENAI_PRESET;
+      case OPENROUTER_PRESET.id: return OPENROUTER_PRESET;
+      case NVIDIA_PRESET.id: return NVIDIA_PRESET;
+      case OLLAMA_PRESET.id: return OLLAMA_PRESET;
+      default: return undefined;
+    }
+  }
+
+  /**
+   * One-click quick preset: add the provider entry (idempotent), select it and
+   * hide the add form. Keyless locals (Ollama) are ready to chat immediately;
+   * cloud presets (OpenAI / OpenRouter / NVIDIA) prompt for the API key in the
+   * config card below — autoSave redirects the typed key per platform.
+   */
+  private addCustomPreset(preset: CustomProvider): void {
     const prev = loadConfig() ?? defaults();
     const customs = [...(prev.customProviders ?? [])];
-    if (!customs.some(p => p.id === OLLAMA_PRESET.id)) {
-      customs.push({ ...OLLAMA_PRESET });
+    if (!customs.some(p => p.id === preset.id)) {
+      customs.push({ ...preset });
     }
     const cfg: PureConfig = {
       ...prev,
       customProviders: customs,
-      provider: OLLAMA_PRESET.id,
+      provider: preset.id,
       model: '', baseURL: '', apiKey: '',
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
+    this.hideCustomProviderForm();
     this.renderCustomProviderCards();
-    (document.getElementById('cfg-provider') as HTMLSelectElement).value = OLLAMA_PRESET.id;
-    (document.getElementById('cfg-model') as HTMLInputElement).value = OLLAMA_PRESET.defaultModel;
-    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = OLLAMA_PRESET.baseURL;
-    this.updateProviderPresentation(OLLAMA_PRESET.id);
-    this.toast(t('llm.custom.ollamaAdded'));
+    (document.getElementById('cfg-provider') as HTMLSelectElement).value = preset.id;
+    (document.getElementById('cfg-model') as HTMLInputElement).value = preset.defaultModel;
+    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = preset.baseURL;
+    this.updateProviderPresentation(preset.id);
+    this.toast(preset.local
+      ? t('llm.custom.presetAdded').replace('{name}', preset.name)
+      : t('llm.custom.presetAddedKey').replace('{name}', preset.name));
   }
 
   private removeSelectedCustomProvider(): void {

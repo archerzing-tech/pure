@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'bun:test';
 import {
+  CUSTOM_PRESETS,
+  NVIDIA_PRESET,
   OLLAMA_PRESET,
+  OPENAI_PRESET,
+  OPENROUTER_PRESET,
   customBaseURL,
   customDefaultModel,
   customProviderFor,
@@ -84,5 +88,38 @@ describe('OLLAMA_PRESET', () => {
     expect(OLLAMA_PRESET.defaultModel).toBe(OLLAMA_PRESET.models[0]);
     expect(OLLAMA_PRESET.apiKey).toBe('');
     expect(OLLAMA_PRESET.hasApiKey).toBe(false);
+    expect(OLLAMA_PRESET.local).toBe(true);
+  });
+});
+
+describe('cloud quick presets (OpenAI / OpenRouter / NVIDIA)', () => {
+  it('OPENAI_PRESET points at the official OpenAI-compatible endpoint', () => {
+    expect(OPENAI_PRESET.id).toBe('openai');
+    expect(OPENAI_PRESET.baseURL).toBe('https://api.openai.com/v1');
+    expect(OPENAI_PRESET.models.length).toBeGreaterThan(0);
+    expect(OPENAI_PRESET.defaultModel).toBe(OPENAI_PRESET.models[0]);
+    expect(OPENAI_PRESET.apiKey).toBe('');
+    expect(OPENAI_PRESET.local).toBeUndefined();
+  });
+
+  it('OPENROUTER_PRESET uses the /api/v1 endpoint and model-per-org naming', () => {
+    expect(OPENROUTER_PRESET.id).toBe('openrouter');
+    expect(OPENROUTER_PRESET.baseURL).toBe('https://openrouter.ai/api/v1');
+    expect(OPENROUTER_PRESET.defaultModel).toMatch(/^[a-z0-9-]+\//);
+  });
+
+  it('NVIDIA_PRESET uses the NIM integrate endpoint', () => {
+    expect(NVIDIA_PRESET.id).toBe('nvidia');
+    expect(NVIDIA_PRESET.baseURL).toBe('https://integrate.api.nvidia.com/v1');
+    expect(NVIDIA_PRESET.defaultModel).toMatch(/^[a-z0-9-]+\//);
+  });
+
+  it('CUSTOM_PRESETS lists all four chips with unique ids', () => {
+    expect(CUSTOM_PRESETS.map(p => p.id)).toEqual(['ollama', 'openai', 'openrouter', 'nvidia']);
+    expect(new Set(CUSTOM_PRESETS.map(p => p.id)).size).toBe(CUSTOM_PRESETS.length);
+    for (const p of CUSTOM_PRESETS) {
+      expect(p.baseURL).not.toBe('');
+      expect(p.models.length).toBeGreaterThan(0);
+    }
   });
 });

@@ -1467,129 +1467,185 @@ body {
 }
 .artifact-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 8px;
   width: 100%;
 }
 .artifact-card {
+  position: relative;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
-  min-height: 46px;
-  padding: 7px 10px 7px 8px;
+  min-height: 76px;
+  padding: 10px 12px 10px 10px;
   border: 1px solid var(--border-light);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--bg-card) 88%, var(--accent-soft));
+  border-radius: 10px;
+  background: var(--bg-card);
   color: var(--text);
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--border) 45%, transparent);
   cursor: pointer;
   user-select: none;
   text-align: left;
   font: inherit;
+  overflow: hidden;
   transition: border-color var(--transition), background var(--transition),
-    transform 0.12s var(--ease-out), box-shadow var(--transition);
+    transform 0.14s var(--ease-out), box-shadow var(--transition);
+}
+.artifact-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--artifact-tint, var(--accent));
+  opacity: 0.65;
+  transition: width 0.16s var(--ease-out), opacity 0.16s var(--ease-out);
 }
 .artifact-card:hover,
 .artifact-card:focus-visible {
-  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
-  background: var(--accent-soft);
-  box-shadow: var(--shadow-md);
+  border-color: color-mix(in srgb, var(--artifact-tint, var(--accent)) 42%, var(--border));
+  background: var(--bg-hover);
+  box-shadow: var(--shadow-sm);
   outline: none;
   transform: translateY(-1px);
 }
+.artifact-card:hover::before,
+.artifact-card:focus-visible::before {
+  width: 4px;
+  opacity: 1;
+}
+.artifact-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
+}
 .artifact-card:active {
-  transform: translateY(0) scale(0.99);
+  transform: translateY(0) scale(0.985);
+  background: var(--bg-card);
 }
 .artifact-icon {
+  position: relative;
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 40px;
+  height: 40px;
   flex-shrink: 0;
-  border-radius: 8px;
-  padding: 7px;
-  color: var(--accent);
-  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 9px;
+  padding: 8px;
+  color: var(--artifact-tint, var(--accent));
+  background: color-mix(in srgb, var(--artifact-tint, var(--accent)) 10%, var(--bg));
+  transition: background var(--transition), border-color var(--transition), transform 0.16s var(--ease-spring);
 }
-.artifact-icon svg {
+.artifact-card:hover .artifact-icon,
+.artifact-card:focus-visible .artifact-icon {
+  transform: scale(1.04);
+  background: color-mix(in srgb, var(--artifact-tint, var(--accent)) 16%, var(--bg));
+}
+.artifact-icon svg,
+.artifact-icon img {
   display: block;
+  width: 24px;
+  height: 24px;
 }
-/* Format tints — mirror the paste-chip icon cells so a saved file card reads
-   like its upload counterpart (code / image / doc / data / archive). */
-.artifact-icon-code {
-  color: #4f7cff;
-  background: color-mix(in srgb, #4f7cff 14%, transparent);
+.artifact-icon-native {
+  padding: 6px;
+  background: var(--bg);
 }
-.artifact-icon-img {
-  color: #22a06b;
-  background: color-mix(in srgb, #22a06b 14%, transparent);
+.artifact-icon-native img {
+  object-fit: contain;
+  image-rendering: auto;
 }
-.artifact-icon-doc {
-  color: #8b5cf6;
-  background: color-mix(in srgb, #8b5cf6 14%, transparent);
+.artifact-icon-loading::after {
+  content: '';
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  border: 2px solid color-mix(in srgb, var(--artifact-tint, var(--accent)) 18%, transparent);
+  border-top-color: var(--artifact-tint, var(--accent));
+  border-radius: 50%;
+  opacity: 0.45;
+  animation: artifactIconSpin 1.1s linear infinite;
 }
-.artifact-icon-data {
-  color: #d97706;
-  background: color-mix(in srgb, #d97706 14%, transparent);
+@keyframes artifactIconSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .artifact-icon-loading::after { animation: none; }
 }
-.artifact-icon-archive {
-  color: #b45309;
-  background: color-mix(in srgb, #b45309 14%, transparent);
-}
-.artifact-icon-dir {
-  color: var(--accent);
-  background: var(--accent-soft);
-}
+/* Format tints — the same semantic colors remain, but now drive the card edge,
+   icon cell, and hover feedback as one coherent visual signal. */
+.artifact-icon-code { --artifact-tint: #4f7cff; }
+.artifact-icon-img { --artifact-tint: #22a06b; }
+.artifact-icon-doc { --artifact-tint: #8b5cf6; }
+.artifact-icon-data { --artifact-tint: #d97706; }
+.artifact-icon-archive { --artifact-tint: #b45309; }
+.artifact-icon-dir { --artifact-tint: var(--accent); }
 .artifact-text {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  gap: 1px;
+  gap: 2px;
 }
 .artifact-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
+  min-width: 0;
   overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .artifact-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
   font-family: var(--font-mono);
   font-size: 10px;
-  color: var(--text-secondary);
-  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Double-click affordance: an open-icon hint that fades in on hover/focus. */
+.artifact-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font: 10px var(--font-sans);
+}
+.artifact-kind {
+  color: var(--artifact-tint, var(--accent));
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.artifact-action::before {
+  content: '·';
+  margin-right: 6px;
+  color: var(--border);
+}
 .artifact-open-hint {
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   flex-shrink: 0;
+  border: 1px solid transparent;
   border-radius: 7px;
   color: var(--text-tertiary);
-  opacity: 0;
-  transform: scale(0.7);
+  opacity: 0.35;
+  transform: translateX(3px);
   transition: opacity 0.18s var(--ease-out), transform 0.18s var(--ease-out),
-    color var(--transition), background var(--transition);
+    color var(--transition), background var(--transition), border-color var(--transition);
 }
 .artifact-card:hover .artifact-open-hint,
 .artifact-card:focus-visible .artifact-open-hint {
   opacity: 1;
-  transform: scale(1);
-  color: var(--accent);
-  background: var(--bg);
+  transform: translateX(0);
+  color: var(--artifact-tint, var(--accent));
+  background: color-mix(in srgb, var(--artifact-tint, var(--accent)) 10%, var(--bg));
+  border-color: color-mix(in srgb, var(--artifact-tint, var(--accent)) 22%, transparent);
 }
-/* Single project-directory card (many files): wider padding; the grid layout
-   keeps it aligned with the per-file cards (the old flex `justify-content:
-   center` is a no-op with a 1fr track and was dropped). */
 .artifact-card-dir {
-  padding: 10px 14px;
+  padding: 12px 16px;
+  min-height: 84px;
 }
 .inline-card-head {
   display: flex;
@@ -5410,6 +5466,62 @@ select:focus-visible,
   white-space: nowrap;
 }
 
+.stats-file-group {
+  display: flex;
+  cursor: pointer;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.stats-file-group-top,
+.stats-file-group-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.stats-file-group-top {
+  justify-content: space-between;
+}
+
+.stats-file-path {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats-file-group-meta {
+  color: var(--text-tertiary);
+  font: 9px/1.3 var(--font-mono);
+}
+
+.stats-file-status {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font: 9px var(--font-sans);
+  white-space: nowrap;
+}
+
+.stats-file-status.success {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+
+.stats-file-status.failure {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
 .stats-list-item:hover {
   border-color: var(--border);
   color: var(--text);
@@ -5417,10 +5529,22 @@ select:focus-visible,
 /* File rows in the stats panel: double-click opens the file with the OS
    default app — hint at it with an underline + accent on hover. */
 .stats-list-item-openable {
-  cursor: zoom-in;
+  cursor: pointer;
 }
 .stats-list-item-openable:hover {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+  text-decoration: underline dotted;
+}
+
+.stats-file-group:hover,
+.stats-file-group:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  outline-offset: 1px;
+}
+
+.stats-file-group:hover .stats-file-path {
   color: var(--accent);
   text-decoration: underline dotted;
 }
@@ -5985,6 +6109,31 @@ button svg,
   width: 100%;
   max-width: none;
   margin: 0;
+}
+
+/* ── Inline markdown images (![](src)) — double-click opens the viewer ── */
+.bubble .md-img-wrap {
+  display: inline-flex;
+  max-width: 100%;
+  margin: 4px 0;
+  border-radius: var(--radius-sm);
+  cursor: zoom-in;
+  line-height: 0;
+  vertical-align: middle;
+  outline: none;
+}
+.bubble .md-img-wrap:hover {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.bubble .md-img-wrap:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.bubble .md-img-wrap .md-img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  height: auto;
+  border-radius: calc(var(--radius-sm) - 1px);
 }
 
 /* ── Attachment chips and merged composer ── */
@@ -6612,6 +6761,38 @@ button svg,
 .repair-diff-cell.empty {
   background: transparent;
   color: var(--text-tertiary);
+}
+
+/* ── "New content below" pill — auto-scroll paused while reading history ── */
+
+.new-content-hint {
+  position: absolute;
+  bottom: 92px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 6px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-card) 92%, var(--accent-soft));
+  color: var(--accent);
+  font: 600 12px var(--font-sans);
+  cursor: pointer;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+  user-select: none;
+  animation: newContentIn 0.3s var(--ease-out) both;
+  transition: background 0.15s var(--ease-out), border-color 0.15s var(--ease-out), transform 0.15s var(--ease-out);
+}
+
+.new-content-hint:hover {
+  background: color-mix(in srgb, var(--bg-card) 78%, var(--accent-soft));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  transform: translateX(-50%) translateY(-1px);
+}
+
+@keyframes newContentIn {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
 }
 .diagram-download-btn {
   display: inline-flex;
@@ -7282,13 +7463,43 @@ button svg,
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 8px 10px;
   margin: -6px 0 16px;
+}
+
+.provider-preset-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-left: 2px;
+}
+
+.provider-preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.provider-preset-chip {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font: 600 11px var(--font-sans);
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease-out), color 0.15s var(--ease-out), background 0.15s var(--ease-out);
+}
+
+.provider-preset-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 22%, var(--bg-card));
 }
 
 .provider-custom-form {
   margin: -6px 0 18px;
-  padding: 16px;
+  padding: 12px 14px 14px;
   border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--border));
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--accent-soft) 26%, var(--bg-card));
@@ -7300,25 +7511,35 @@ button svg,
   to { opacity: 1; transform: translateY(0); }
 }
 
-.provider-custom-form-head { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+/* Compact form: a single row of head + actions, then the 2×2 field grid with
+   tighter gaps — the full-height labelled form the old design used read as a
+   heavy modal for what is at most four inputs. */
+.provider-custom-form-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 8px;
+  margin-bottom: 10px;
+}
 .provider-custom-form-title { font-size: 13px; font-weight: 700; color: var(--text); }
 .provider-custom-form-hint { font-size: 11px; line-height: 1.5; color: var(--text-tertiary); }
 
 .provider-custom-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px 10px;
 }
 
-.provider-custom-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.provider-custom-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .provider-custom-field-wide { grid-column: 1 / -1; }
 .provider-custom-label { font-size: 11px; font-weight: 650; color: var(--text-secondary); }
 
 .provider-custom-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
-  margin-top: 14px;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .provider-mark-custom { background: #e4f7ec; color: #2e8b5d; }
@@ -7345,6 +7566,13 @@ button svg,
   background: var(--border-light);
   transform: translateY(-50%);
 }
+
+/* Cloud preset awaiting its API key — same layout, accent-tinted text so the
+   "fill in the key below" state reads as a pending action, not "no key". */
+.provider-card-needs-key {
+  color: color-mix(in srgb, var(--accent) 72%, var(--text-secondary));
+}
+.provider-card-needs-key::before { background: color-mix(in srgb, var(--accent) 35%, var(--border-light)); }
 
 @media (max-width: 720px) {
   .provider-custom-form-grid { grid-template-columns: 1fr; }

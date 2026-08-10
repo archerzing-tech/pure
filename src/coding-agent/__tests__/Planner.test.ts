@@ -3,7 +3,7 @@
 // and the logical-trap detection that primes premise verification.
 
 import { describe, it, expect } from 'bun:test';
-import { Planner, formatTrapPrompt, parsePlanJson } from '../Planner';
+import { Planner, formatTrapPrompt, parsePlanJson, parsePlanJsonWithMeta } from '../Planner';
 
 describe('Planner', () => {
   it('classifies straightforward tasks as simple (no plan, yolo mode)', () => {
@@ -195,6 +195,24 @@ describe('parsePlanJson (LLM plan parsing)', () => {
     const plan = parsePlanJson('```json\n[{"action": "A", "description": "d"，}]\n```');
     expect(plan).not.toBeNull();
     expect(plan!.steps).toHaveLength(1);
+  });
+
+  it('parsePlanJsonWithMeta reports whether the plan JSON was repaired', () => {
+    // Clean JSON → no repair flag; the plan parses normally.
+    const clean = parsePlanJsonWithMeta('[{"action":"A","description":"d"}]');
+    expect(clean.repaired).toBe(false);
+    expect(clean.plan?.steps).toHaveLength(1);
+
+    // Broken-but-repairable JSON → flagged, so callers can keep the
+    // reconstructed plan text out of the LLM context window.
+    const repaired = parsePlanJsonWithMeta("[{action: 'A', description: 'd',},]");
+    expect(repaired.repaired).toBe(true);
+    expect(repaired.plan?.steps).toHaveLength(1);
+    expect(repaired.plan!.steps[0]).toMatchObject({ action: 'A' });
+
+    // Unfixable input → no plan, no repair flag.
+    expect(parsePlanJsonWithMeta('not json').plan).toBeNull();
+    expect(parsePlanJsonWithMeta('not json').repaired).toBe(false);
   });
 
   it('returns null for malformed / empty / non-array input', () => {

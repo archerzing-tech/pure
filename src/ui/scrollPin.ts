@@ -10,6 +10,26 @@
 
 const pinnedStates = new WeakMap<HTMLElement, boolean>();
 
+// Observers bridge scrollPin's policy to UI affordances (the "new content
+// below" pill in chat.ts). Module-level singletons: exactly one chat view
+// exists, and the wiring is registered once per transcript (idempotent).
+export interface ScrollPinObservers {
+  /** New content arrived while the user has scrolled away from the bottom
+   *  (auto-scroll was skipped) — the UI shows its "there is more below" hint. */
+  onUnpinnedNewContent?: (el: HTMLElement) => void;
+  /** A GENUINE user scroll produced this pin state — the UI hides the hint
+   *  when the user returns to the bottom. Programmatic self-scrolls never
+   *  fire this (the selfScrollWrites marker swallows their events). */
+  onPinStateChange?: (el: HTMLElement, pinned: boolean) => void;
+}
+
+let scrollPinObservers: ScrollPinObservers = {};
+
+/** (Re)register the scroll-pin observers (pass {} to clear). */
+export function setScrollPinObservers(obs: ScrollPinObservers): void {
+  scrollPinObservers = obs;
+}
+
 // A programmatic `scrollTop = scrollHeight` write ALSO fires a 'scroll' event.
 // If the content grows in the window between the write and the event dispatch
 // (a 100ms-throttled markdown pass, an async diagram render, or the session-
@@ -58,12 +78,19 @@ export function wireScrollPin(el: HTMLElement): void {
       selfScrollWrites.delete(el);
       return;
     }
-    setPinnedToBottom(el, isNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight, NEAR_BOTTOM_PX));
+    const pinned = isNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight, NEAR_BOTTOM_PX);
+    setPinnedToBottom(el, pinned);
+    scrollPinObservers.onPinStateChange?.(el, pinned);
   }, { passive: true });
 }
 
 export function scrollChatToBottomIfPinned(el: HTMLElement): void {
-  if (!isPinnedToBottom(el)) return;
+  if (!isPinnedToBottom(el)) {
+    // New content arrived while the user is reading history — the UI shows
+    // its "new content below" affordance instead of hijacking the scroll.
+    scrollPinObservers.onUnpinnedNewContent?.(el);
+    return;
+  }
   if (scrollFrames.has(el)) return;
   scrollFrames.set(el, requestAnimationFrame(() => {
     scrollFrames.delete(el);

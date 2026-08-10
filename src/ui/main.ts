@@ -9,7 +9,7 @@
 import { ChatController, bindAssistantBubbleCopy, wireTranscriptPrune } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
-import { getStoredThinkingSegments, type StoredMessage, type ToolExecMeta } from './store';
+import { getStoredThinkingSegments, groupFileWrites, type StoredMessage, type ToolExecMeta } from './store';
 import { estimateCostUsd, formatCostUsd, formatTokens } from '../shared/usage';
 import { escapeHtml } from '../shared/html';
 import { buildExportSavedToast } from './statsExportToast';
@@ -1083,17 +1083,74 @@ function renderSessionStats() {
   const bar = document.getElementById('stat-cache-bar');
   if (bar) bar.style.width = rate === null ? '0%' : `${Math.max(2, Math.min(100, rate))}%`;
 
+  const fileGroups = groupFileWrites(stats.fileWrites);
   setText('stat-search-count', String(stats.searches.length));
-  setText('stat-write-count', String(stats.fileWrites.length));
+  setText('stat-write-count', String(fileGroups.length));
   setText('stat-read-count', String(stats.fileReads.length));
   setText('stat-cmd-count', String(stats.commands.length));
 
   renderStatsList('stat-search-list', stats.searches, (s) => s.query);
-  // File write/read entries carry the path: double-clicking opens the file
-  // with the OS default app (via open_path). Commands/searches have no path.
-  renderStatsList('stat-write-list', stats.fileWrites, (w) => (w.success ? '' : '✗ ') + w.path, (w) => w.path);
+  // File writes are grouped by normalized path. Each row shows only the
+  // newest operation for that file, while retaining the path-open affordance.
+  renderFileWriteGroups('stat-write-list', fileGroups);
   renderStatsList('stat-read-list', stats.fileReads, (r) => r.path, (r) => r.path);
   renderStatsList('stat-cmd-list', stats.commands, (c) => (c.success ? '' : '✗ ') + c.command);
+}
+
+function renderFileWriteGroups(
+  id: string,
+  groups: Array<{ path: string; ts: number; success: boolean }>,
+): void {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (groups.length === 0) {
+    el.innerHTML = `<div class="stats-empty">${t('stats.empty')}</div>`;
+    return;
+  }
+  el.innerHTML = '';
+  for (const group of groups.slice(0, 20)) {
+    const row = document.createElement('div');
+    row.className = 'stats-file-group stats-list-item-openable';
+    row.title = `${t('stats.dblclickOpen')} ${group.path}`;
+    row.dataset.path = group.path;
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.setAttribute('aria-label', `${group.path} — ${group.success ? t('stats.write.success') : t('stats.write.failed')}`);
+
+    const top = document.createElement('div');
+    top.className = 'stats-file-group-top';
+    const path = document.createElement('span');
+    path.className = 'stats-file-path';
+    path.textContent = group.path;
+    top.appendChild(path);
+
+    const status = document.createElement('span');
+    status.className = `stats-file-status ${group.success ? 'success' : 'failure'}`;
+    status.textContent = group.success ? t('stats.write.success') : t('stats.write.failed');
+    top.appendChild(status);
+    row.appendChild(top);
+
+    const meta = document.createElement('div');
+    meta.className = 'stats-file-group-meta';
+    const latest = document.createElement('span');
+    latest.textContent = t('stats.write.latest');
+    const time = document.createElement('time');
+    const date = new Date(group.ts);
+    if (!Number.isNaN(date.getTime())) time.dateTime = date.toISOString();
+    time.textContent = formatTs(group.ts);
+    meta.append(latest, time);
+    row.appendChild(meta);
+
+    const open = () => openPathLink(group.path);
+    row.addEventListener('dblclick', open);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        open();
+      }
+    });
+    el.appendChild(row);
+  }
 }
 
 function renderStatsList<T>(

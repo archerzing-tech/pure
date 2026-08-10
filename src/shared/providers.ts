@@ -31,6 +31,8 @@ export interface CustomProvider {
   apiKey: string;
   /** True when the key lives in Rust secrets (desktop) instead of storage. */
   hasApiKey: boolean;
+  /** True for local endpoints (Ollama / LM Studio) that need no API key. */
+  local?: boolean;
 }
 
 /**
@@ -46,7 +48,52 @@ export const OLLAMA_PRESET: CustomProvider = {
   defaultModel: 'qwen2.5-coder:7b',
   apiKey: '',
   hasApiKey: false,
+  local: true,
 };
+
+/**
+ * Quick-add presets for popular OpenAI-compatible cloud endpoints (Settings →
+ * LLM → 快捷预设). Each is a plain CustomProvider the user can tweak before
+ * saving; keyed entries (OpenAI / OpenRouter / NVIDIA NIM) need an API key,
+ * local Ollama works keyless.
+ */
+export const OPENAI_PRESET: CustomProvider = {
+  id: 'openai',
+  name: 'OpenAI',
+  baseURL: 'https://api.openai.com/v1',
+  models: ['gpt-4o-mini', 'gpt-4o', 'o3-mini'],
+  defaultModel: 'gpt-4o-mini',
+  apiKey: '',
+  hasApiKey: false,
+};
+
+export const OPENROUTER_PRESET: CustomProvider = {
+  id: 'openrouter',
+  name: 'OpenRouter',
+  baseURL: 'https://openrouter.ai/api/v1',
+  models: ['openai/gpt-4o-mini', 'anthropic/claude-sonnet-4', 'deepseek/deepseek-r1'],
+  defaultModel: 'openai/gpt-4o-mini',
+  apiKey: '',
+  hasApiKey: false,
+};
+
+export const NVIDIA_PRESET: CustomProvider = {
+  id: 'nvidia',
+  name: 'NVIDIA NIM',
+  baseURL: 'https://integrate.api.nvidia.com/v1',
+  models: ['meta/llama-3.1-8b-instruct', 'deepseek-ai/deepseek-r1', 'mistralai/mixtral-8x7b-instruct'],
+  defaultModel: 'meta/llama-3.1-8b-instruct',
+  apiKey: '',
+  hasApiKey: false,
+};
+
+/** All one-click presets (Settings → LLM → 快捷预设), keyed by slug. */
+export const CUSTOM_PRESETS: readonly CustomProvider[] = [
+  OLLAMA_PRESET,
+  OPENAI_PRESET,
+  OPENROUTER_PRESET,
+  NVIDIA_PRESET,
+];
 
 export interface ProviderDef {
   id: ProviderId;

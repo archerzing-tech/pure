@@ -1,6 +1,6 @@
 // src/ui/__tests__/artifactCards.test.ts
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { planArtifactDisplay, commonRootDir, MAX_CARD_FILES, type ArtifactItem } from '../artifactCards';
+import { planArtifactDisplay, commonRootDir, MAX_CARD_FILES, artifactKindLabel, fileIconMeta, type ArtifactItem } from '../artifactCards';
 import { setPathLinkWorkspace } from '../pathLink';
 
 describe('planArtifactDisplay', () => {
@@ -77,5 +77,22 @@ describe('commonRootDir', () => {
 
   it('falls back to the first artifact parent when nothing is shared', () => {
     expect(commonRootDir([file('a/x.ts'), file('b/y.ts')])).toBe('a');
+  });
+});
+
+describe('artifactKindLabel', () => {
+  it('labels folders and extension-based file types', () => {
+    expect(artifactKindLabel('src', true)).toBe('文件夹');
+    expect(artifactKindLabel('src/app.ts')).toBe('TS');
+    expect(artifactKindLabel('README')).toBe('文件');
+  });
+});
+
+describe('fileIconMeta', () => {
+  it('keeps a format-specific fallback for browser/dev mode', () => {
+    expect(fileIconMeta('src/app.ts').cls).toBe('artifact-icon-code');
+    expect(fileIconMeta('docs/readme.md').cls).toBe('artifact-icon-doc');
+    expect(fileIconMeta('assets/photo.png').cls).toBe('artifact-icon-img');
+    expect(artifactKindLabel('archive.zip')).toBe('ZIP');
   });
 });

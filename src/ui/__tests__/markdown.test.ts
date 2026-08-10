@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, diagramSlot, diffLines, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, diagramSlot, diffLines, type DiagramKind } from '../markdown';
 import { buildChartOption } from '../echartsChart';
 
 // ── ==text== highlight extension ──
@@ -42,6 +42,47 @@ describe('highlightExt (==text== → <mark>)', () => {
     const html = md.parse('==<b>x</b>==') as string;
     expect(html).toContain('&lt;b&gt;x&lt;/b&gt;');
     expect(html).not.toContain('<b>x</b>');
+  });
+});
+
+describe('renderer.image (inline markdown images → double-clickable wrapper)', () => {
+  const md = new Marked({ gfm: true, breaks: true, renderer });
+
+  it('wraps an https image in .md-img-wrap with the .md-img class', () => {
+    const html = md.parse('![alt text](https://example.com/pic.svg)') as string;
+    expect(html).toContain('<span class="md-img-wrap" data-viewer="img">');
+    expect(html).toContain('<img class="md-img" src="https://example.com/pic.svg" alt="alt text"');
+  });
+
+  it('keeps data: (SVG/PNG) images wrappable', () => {
+    const html = md.parse('![svg](data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=)') as string;
+    expect(html).toContain('class="md-img-wrap"');
+    expect(html).toContain('src="data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="');
+  });
+
+  it('keeps scheme-less relative / protocol-relative images (no regression)', () => {
+    const rel = md.parse('![local](/img/arch.svg)') as string;
+    expect(rel).toContain('class="md-img-wrap"');
+    expect(rel).toContain('src="/img/arch.svg"');
+    const protoRel = md.parse('![cdn](//cdn.example/pic.png)') as string;
+    expect(protoRel).toContain('class="md-img-wrap"');
+    expect(protoRel).toContain('src="//cdn.example/pic.png"');
+  });
+
+  it('renders the alt text for disallowed schemes (never an executable src)', () => {
+    const html = md.parse('![bad](javascript:alert(1))') as string;
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('javascript:');
+    expect(html).toContain('bad');
+  });
+
+  it('escapes src and alt attributes (no attribute breakout from model output)', () => {
+    // Ampersands and angle brackets in a real image URL must be attribute-escaped.
+    const html = md.parse('![a<b>](https://x.test/pic?a=1&b=2)') as string;
+    expect(html).toContain('class="md-img-wrap"');
+    expect(html).toContain('alt="a&lt;b&gt;"');
+    expect(html).not.toContain('alt="a<b>"');
+    expect(html).toContain('&amp;b=2');
   });
 });
 

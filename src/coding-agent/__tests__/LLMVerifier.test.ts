@@ -73,12 +73,16 @@ describe('parseVerdict', () => {
     });
   });
 
-  it('repairs a slightly-broken verdict (single quotes + trailing comma)', () => {
-    expect(parseVerdict("{'passed': true, 'feedback': 'ok',}")).toEqual({ passed: true, feedback: 'ok' });
+  it('repairs a slightly-broken verdict but drops the feedback text (repaired content must not re-enter the context)', () => {
+    // The repaired feedback would be a reconstruction of the model's broken
+    // output — only the content-free `passed` boolean survives, flagged so the
+    // caller can substitute a system-authored note.
+    expect(parseVerdict("{'passed': true, 'feedback': 'ok',}")).toEqual({ passed: true, repaired: true });
+    expect(parseVerdict("{'passed': false, 'feedback': 'something wrong',}")).toEqual({ passed: false, repaired: true });
   });
 
-  it('repairs a verdict with full-width punctuation', () => {
-    expect(parseVerdict('{“passed”：true， “feedback”：”ok“}')).toEqual({ passed: true, feedback: 'ok' });
+  it('repairs a verdict with full-width punctuation but drops the feedback text', () => {
+    expect(parseVerdict('{“passed”：true， “feedback”：”ok“}')).toEqual({ passed: true, repaired: true });
   });
 
   it('returns null for non-verdict responses', () => {

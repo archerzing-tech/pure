@@ -383,7 +383,13 @@
                 </div>
                 <div class="provider-custom-toolbar">
                   <button id="provider-add-custom" class="setting-btn secondary" data-i18n="llm.custom.add">＋ 添加自定义供应商</button>
-                  <button id="provider-ollama-preset" class="setting-btn secondary" data-i18n="llm.custom.ollama">⚡ Ollama 一键预设</button>
+                  <span class="provider-preset-label" data-i18n="llm.custom.quickAdd">快捷预设</span>
+                  <div class="provider-preset-chips" role="group" data-i18n-aria-label="llm.custom.quickAdd" aria-label="快捷预设">
+                    <button type="button" class="provider-preset-chip" data-preset="openai" data-i18n="llm.custom.preset.openai">OpenAI</button>
+                    <button type="button" class="provider-preset-chip" data-preset="openrouter" data-i18n="llm.custom.preset.openrouter">OpenRouter</button>
+                    <button type="button" class="provider-preset-chip" data-preset="nvidia" data-i18n="llm.custom.preset.nvidia">NVIDIA NIM</button>
+                    <button type="button" class="provider-preset-chip" data-preset="ollama" data-i18n="llm.custom.preset.ollama">Ollama</button>
+                  </div>
                 </div>
                 <div id="provider-custom-form" class="provider-custom-form hidden">
                   <div class="provider-custom-form-head">

@@ -3,10 +3,44 @@
 **Pure** 是一个本地优先的 AI 编程助手，直接运行在你的机器上。它可以读取、写入和编辑文件，执行 Shell 命令，并编排多智能体工作流 — 这一切都通过快速的终端 CLI 或原生 macOS 桌面应用完成。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.10.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.8.1-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
+
+---
+
+## 更新日志
+
+### v1.8.1
+
+**体验与平台支持**
+
+- **跨平台原生文件图标** — 文件卡片在 macOS、Linux、Windows 上优先使用系统关联图标，不可用时安全降级为扩展名图标
+- **文件写入按文件分组** — 侧边栏按文件合并写入记录，并显示最近写入时间和成功/失败状态
+- **文件卡片细节优化** — 改进布局、文件类型语义配色、原生图标加载反馈、点击打开、键盘操作和减少动效支持
+
+---
+
+### v1.8.0
+
+**新功能**
+
+- **自定义供应商** — 可在 GUI 设置面板或 CLI `pure config` 中添加任意 OpenAI 兼容端点（Ollama、LM Studio、vLLM 等）；每个条目保存自己的 API Key，无密钥的本地端点完全不发送 `Authorization` 请求头
+- **智能容错解析层** — LLM 输出的 JSON / Mermaid / SVG 格式错误时自动修复（尾逗号、单引号、未加引号的键、全角标点、label 引号/括号不配对、混入散文等），修复后重试解析，仍失败才交由用户处理
+- **修复差异查看器** — 点击任意「已自动修复」徽章，可并排对比原始源码与修复后源码
+- **原生文件图标** — 文件卡片在 macOS、Linux、Windows 上优先使用系统关联图标；Linux 未安装桌面 `gio` 工具或图标主题不可用时会安全降级
+
+**改进**
+
+- 修复层接入引擎：`Planner` 计划、`Verifier` 裁决、`SubagentOrchestrator` / `MCPClient` 工具参数解析前都会先修复（工具调用保留参数，不再静默降级为 `{}`）
+- `repairJsonSource` 增加 BFS 候选预算（默认 200）——防御对抗性输入下修复队列膨胀
+
+**清理与内部**
+
+- 工具 schema 统一收拢到共享 `toolDefs` 模块（CLI / GUI / 引擎单一事实来源）
+- 删除死代码：`quickSort`、`EventBus`、`ui/tools`、半成品 `FileWatcher`
+- 修复 CLI 版本横幅（停留在 v1.3.1，现与发布版本同步）
 
 ---
 

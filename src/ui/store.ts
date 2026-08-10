@@ -83,12 +83,109 @@ export interface SessionStats {
   usage?: TokenUsage;
   /** web_search history (query + timestamp). */
   searches: Array<{ query: string; ts: number }>;
-  /** write_file / edit_file / replace_files history. */
+  /** One latest entry per normalized file path. */
   fileWrites: Array<{ path: string; ts: number; success: boolean }>;
   /** read_file history. */
   fileReads: Array<{ path: string; ts: number }>;
   /** execute_command history. */
   commands: Array<{ command: string; ts: number; success: boolean }>;
+}
+
+/** Normalize the spelling used as the identity key for a written file. */
+export function normalizeFileWritePath(path: string, workspace = ''): string {
+  const raw = path.trim().replaceAll('\\', '/').replace(/\/{2,}/g, '/');
+  if (!raw) return '';
+  const drive = raw.match(/^[A-Za-z]:\//)?.[0] ?? '';
+  const absolute = raw.startsWith('/') || !!drive;
+  const body = drive ? raw.slice(drive.length) : raw.replace(/^\//, '');
+  const parts: string[] = [];
+  for (const part of body.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..' && parts.length > 0 && parts[parts.length - 1] !== '..') {
+      parts.pop();
+    } else if (part !== '..' || !absolute) {
+      parts.push(part);
+    }
+  }
+  const normalized = parts.join('/');
+  const result = drive ? `${drive}${normalized}` : absolute ? `/${normalized}` : normalized;
+  const workspaceKey = workspace ? normalizeFileWritePath(workspace) : '';
+  if (workspaceKey && result !== workspaceKey && result.startsWith(`${workspaceKey}/`)) {
+    return result.slice(workspaceKey.length + 1);
+  }
+  return result;
+}
+
+/** Collapse legacy/repeated write entries to the latest state for each file. */
+export function dedupeFileWrites(
+  entries: Array<{ path: string; ts: number; success: boolean }>,
+  workspace = '',
+): Array<{ path: string; ts: number; success: boolean }> {
+  const unique = new Map<string, { path: string; ts: number; success: boolean }>();
+  for (const entry of entries) {
+    const key = normalizeFileWritePath(entry.path, workspace);
+    if (!key) continue;
+    const current = unique.get(key);
+    if (!current || entry.ts >= current.ts) {
+      unique.set(key, { path: key, ts: entry.ts, success: entry.success });
+    }
+  }
+  return [...unique.values()];
+}
+
+/** Group file-write activity by normalized path and expose each file's latest status. */
+export function groupFileWrites(
+  entries: Array<{ path: string; ts: number; success: boolean }>,
+  workspace = '',
+): Array<{ path: string; ts: number; success: boolean }> {
+  const latest = new Map<string, { path: string; ts: number; success: boolean }>();
+  for (const entry of entries) {
+    const key = normalizeFileWritePath(entry.path, workspace);
+    if (!key) continue;
+    const current = latest.get(key);
+    if (!current || entry.ts >= current.ts) {
+      latest.set(key, { path: key, ts: entry.ts, success: entry.success });
+    }
+  }
+  return [...latest.values()].sort((a, b) => b.ts - a.ts);
+}
+
+function normalizeStats(stats: SessionStats): SessionStats {
+  return { ...stats, fileWrites: dedupeFileWrites(stats.fileWrites ?? []) };
+}
+
+/** Update one file's activity without adding a duplicate sidebar row. */
+export function upsertFileWrite(
+  entries: Array<{ path: string; ts: number; success: boolean }>,
+  entry: { path: string; ts: number; success: boolean },
+  workspace = '',
+): void {
+  const key = normalizeFileWritePath(entry.path, workspace);
+  if (!key) return;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (normalizeFileWritePath(entries[i].path, workspace) === key) entries.splice(i, 1);
+  }
+  entries.push({ path: key, ts: entry.ts, success: entry.success });
+}
+
+function normalizeLoadedStats(data: Partial<SessionStats>): SessionStats {
+  return normalizeStats({
+    provider: data.provider,
+    usage: data.usage,
+    searches: data.searches ?? [],
+    fileWrites: data.fileWrites ?? [],
+    fileReads: data.fileReads ?? [],
+    commands: data.commands ?? [],
+  });
+}
+
+function fileWritesNeedMigration(raw: unknown, normalized: SessionStats['fileWrites']): boolean {
+  if (!Array.isArray(raw) || raw.length !== normalized.length) return Array.isArray(raw) || normalized.length > 0;
+  return raw.some((entry, index) => {
+    const item = entry as Partial<SessionStats['fileWrites'][number]> | null;
+    const current = normalized[index];
+    return !item || item.path !== current.path || item.ts !== current.ts || item.success !== current.success;
+  });
 }
 
 // Runtime detection: previously this did `!!(await import('@tauri-apps/api/core')).invoke`,
@@ -348,14 +445,10 @@ export function loadSessionStats(sessionId: string): SessionStats {
     const raw = localStorage.getItem(`${STATS_PREFIX}${sessionId}`);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<SessionStats>;
-      stats = {
-        provider: parsed.provider,
-        usage: parsed.usage,
-        searches: parsed.searches ?? [],
-        fileWrites: parsed.fileWrites ?? [],
-        fileReads: parsed.fileReads ?? [],
-        commands: parsed.commands ?? [],
-      };
+      stats = normalizeLoadedStats(parsed);
+      if (fileWritesNeedMigration(parsed.fileWrites, stats.fileWrites)) {
+        try { localStorage.setItem(`${STATS_PREFIX}${sessionId}`, JSON.stringify(stats)); } catch { /* ignore migration write */ }
+      }
     }
   } catch {
     // fall through to empty
@@ -372,15 +465,11 @@ async function refreshStatsFromDisk(sessionId: string): Promise<void> {
   try {
     const data: any = await tauriInvoke('load_session_stats', { sessionId });
     if (!data) return;
-    const stats = {
-      provider: data.provider,
-      usage: data.usage,
-      searches: data.searches ?? [],
-      fileWrites: data.fileWrites ?? [],
-      fileReads: data.fileReads ?? [],
-      commands: data.commands ?? [],
-    };
+    const stats = normalizeLoadedStats(data);
     cacheStats(sessionId, stats);
+    if (fileWritesNeedMigration(data.fileWrites, stats.fileWrites)) {
+      void tauriInvoke('save_session_stats', { sessionId, stats }).catch(() => {});
+    }
   } catch {
     // Disk read is best-effort; the cache/localStorage already has a value.
   }
@@ -422,16 +511,12 @@ export async function loadSessionStatsForList(sessionIds: string[]): Promise<Map
       for (const id of uncached) {
         const raw = data?.[id];
         if (!raw) continue;
-        const stats: SessionStats = {
-          provider: raw.provider,
-          usage: raw.usage,
-          searches: raw.searches ?? [],
-          fileWrites: raw.fileWrites ?? [],
-          fileReads: raw.fileReads ?? [],
-          commands: raw.commands ?? [],
-        };
+        const stats = normalizeLoadedStats(raw);
         cacheStats(id, stats);
         result.set(id, stats);
+        if (fileWritesNeedMigration(raw.fileWrites, stats.fileWrites)) {
+          void tauriInvoke('save_session_stats', { sessionId: id, stats }).catch(() => {});
+        }
       }
       return result;
     } catch {
@@ -444,16 +529,12 @@ export async function loadSessionStatsForList(sessionIds: string[]): Promise<Map
       const raw = localStorage.getItem(`${STATS_PREFIX}${id}`);
       if (!raw) continue;
       const parsed = JSON.parse(raw) as Partial<SessionStats>;
-      const stats: SessionStats = {
-        provider: parsed.provider,
-        usage: parsed.usage,
-        searches: parsed.searches ?? [],
-        fileWrites: parsed.fileWrites ?? [],
-        fileReads: parsed.fileReads ?? [],
-        commands: parsed.commands ?? [],
-      };
+      const stats = normalizeLoadedStats(parsed);
       cacheStats(id, stats);
       result.set(id, stats);
+      if (fileWritesNeedMigration(parsed.fileWrites, stats.fileWrites)) {
+        try { localStorage.setItem(`${STATS_PREFIX}${id}`, JSON.stringify(stats)); } catch { /* ignore migration write */ }
+      }
     } catch {
       // skip unparseable entries
     }
@@ -462,15 +543,16 @@ export async function loadSessionStatsForList(sessionIds: string[]): Promise<Map
 }
 
 export function saveSessionStats(sessionId: string, stats: SessionStats): void {
-  cacheStats(sessionId, stats);
+  const normalized = normalizeStats(stats);
+  cacheStats(sessionId, normalized);
   if (tauriAvailable) {
     // Durable copy: ~/.pure/sessions/<id>/stats.json. Fire-and-forget — the
     // in-memory cache is authoritative for the current session.
-    void tauriInvoke('save_session_stats', { sessionId, stats }).catch(() => {});
+    void tauriInvoke('save_session_stats', { sessionId, stats: normalized }).catch(() => {});
     return;
   }
   try {
-    localStorage.setItem(`${STATS_PREFIX}${sessionId}`, JSON.stringify(stats));
+    localStorage.setItem(`${STATS_PREFIX}${sessionId}`, JSON.stringify(normalized));
   } catch {
     // Quota / disabled storage — stats are best-effort, never break the chat.
   }

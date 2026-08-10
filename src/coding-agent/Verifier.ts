@@ -139,7 +139,11 @@ function verdictFromObject(obj: unknown): { passed: boolean; feedback?: string }
  * mentioning a literal `}`) don't truncate the JSON. Returns null when the
  * response is not a usable verdict (caller fails open).
  */
-export function parseVerdict(raw: string): { passed: boolean; feedback?: string } | null {
+/** A parsed verifier verdict. `repaired` is true when the verdict JSON had to
+ *  be repaired before it parsed — callers must treat the feedback TEXT as
+ *  untrusted (a reconstruction of the model's broken output) and keep it out
+ *  of the agent context window (see createLLMVerifyCheck). */
+export function parseVerdict(raw: string): { passed: boolean; feedback?: string; repaired?: boolean } | null {
   let text = raw.trim();
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) text = fence[1].trim();
@@ -183,7 +187,11 @@ export function parseVerdict(raw: string): { passed: boolean; feedback?: string 
           if (!repaired.repaired) return null;
           try {
             const verdict = verdictFromObject(JSON.parse(repaired.source));
-            return verdict ? verdict : null;
+            // Repaired text is a RECONSTRUCTION of the model's broken output:
+            // only the `passed` boolean survives (validated, content-free);
+            // the feedback TEXT is dropped so it can never re-enter the agent
+            // context window as if the model had written it.
+            return verdict ? { passed: verdict.passed, repaired: true } : null;
           } catch {
             return null;
           }
@@ -218,7 +226,15 @@ export function createLLMVerifyCheck(llm: LLMAdapter, options?: LLMVerifierOptio
       if (!verdict) {
         return { passed: true, feedback: 'verifier returned an unparseable verdict (failed open)' };
       }
-      return { passed: verdict.passed, feedback: verdict.feedback };
+      return {
+        passed: verdict.passed,
+        // Repaired verdict feedback is dropped in parseVerdict (reconstructed
+        // model text must not enter the context). Substitute a system-authored
+        // note on failure so the engine's "Verification failed: …" message
+        // stays honest; a passed verdict never reads feedback anyway.
+        feedback: verdict.feedback
+          ?? (verdict.repaired && !verdict.passed ? 'verifier verdict required auto-repair; its feedback is unavailable' : undefined),
+      };
     },
   };
 }

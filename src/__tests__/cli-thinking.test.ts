@@ -56,30 +56,28 @@ describe('ThinkingCard', () => {
     return { card, out };
   }
 
-  it('renders a boxed card with header and footer borders', () => {
+  it('renders a flat borderless card (header + indented plain content)', () => {
     const { card } = makeCard('thinking text');
     const rows = card.buildRows();
-    expect(rows.length).toBe(3); // header + 1 content + footer
-    expect(rows[0].startsWith('┌─ 💭 thinking')).toBe(true);
-    expect(rows[0].endsWith('┐')).toBe(true);
-    expect(rows[1].startsWith('│')).toBe(true);
-    expect(rows[1].endsWith('│')).toBe(true);
-    expect(rows[2].startsWith('└')).toBe(true);
-    expect(rows[2].endsWith('┘')).toBe(true);
+    expect(rows.length).toBe(2); // header + 1 content — no box borders
+    expect(rows[0]).toBe('💭 thinking');
+    expect(rows[0]).not.toMatch(/[┌┐└┘│─]/);
+    expect(rows[1]).toBe('  thinking text');
+    expect(rows[1]).not.toMatch(/[┌┐└┘│─]/);
   });
 
   it('caps content height and shows a truncation row when text overflows', () => {
     const { card } = makeCard('line1\nline2\nline3\nline4\nline5', 3);
     const rows = card.buildRows();
-    // header + 3 content + footer — the card height is capped
-    expect(rows.length).toBe(5);
-    expect(rows[1]).toContain('… 3 more lines');
+    // header + truncation row + 2 latest lines — the card height is capped
+    expect(rows.length).toBe(4);
+    expect(rows[1]).toBe('  … 3 more lines');
   });
 
   it('keeps the most recent lines in the tail-following scroll window', () => {
     const { card } = makeCard('a\nb\nc\nd\ne', 3);
     const rows = card.buildRows();
-    const content = rows.slice(1, -1).join('\n');
+    const content = rows.slice(1).join('\n');
     expect(content).toContain('d');
     expect(content).toContain('e');
   });
@@ -87,7 +85,7 @@ describe('ThinkingCard', () => {
   it('shows text verbatim — no bold/markdown/ANSI interpretation', () => {
     const { card } = makeCard('**bold** and `code` and ==hl==', 3);
     const rows = card.buildRows();
-    const body = rows.slice(1, -1).join('\n');
+    const body = rows.slice(1).join('\n');
     expect(body).toContain('**bold**');
     expect(body).toContain('`code`');
     expect(body).toContain('==hl==');
@@ -97,16 +95,16 @@ describe('ThinkingCard', () => {
     const { card, out } = makeCard('one');
     card.redraw();
     const firstPass = out.join('');
-    expect(firstPass.split('\x1b[2K').length - 1).toBe(3); // header+content+footer
+    expect(firstPass.split('\x1b[2K').length - 1).toBe(2); // header + content
 
-    // Height grows 3 → 5 rows: the second redraw must move up and erase
-    // 5 rows (the max of old/new height) so no stale row survives.
+    // Height grows 2 → 4 rows: the second redraw must move up and erase
+    // 4 rows (the max of old/new height) so no stale row survives.
     out.length = 0;
     card.append('\ntwo\nthree');
     card.redraw();
     const secondPass = out.join('');
-    expect(secondPass.includes('\r\x1b[2A')).toBe(true); // cursor up to old top
-    expect(secondPass.split('\x1b[2K').length - 1).toBe(5);
+    expect(secondPass.includes('\r\x1b[1A')).toBe(true); // cursor up to old top
+    expect(secondPass.split('\x1b[2K').length - 1).toBe(4);
   });
 
   it('clear() erases the card entirely and allows reuse', () => {
@@ -114,16 +112,16 @@ describe('ThinkingCard', () => {
     card.redraw();
     card.clear();
     const s = out.join('');
-    expect(s.split('\x1b[2K').length - 1).toBe(6); // 3 redraw + 3 clear
+    expect(s.split('\x1b[2K').length - 1).toBe(4); // 2 redraw + 2 clear
     // clear() must DELETE the card rows (DL = ESC[{n}M) after blanking them,
     // so no empty rows are left on screen when the summary replaces the card.
-    expect(s.includes('\x1b[3M')).toBe(true); // 3 rows deleted
-    expect(s.includes('\r\x1b[2A')).toBe(true); // cursor back to card top
+    expect(s.includes('\x1b[2M')).toBe(true); // 2 rows deleted
+    expect(s.includes('\r\x1b[1A')).toBe(true); // cursor back to card top
     // After clear the card can be redrawn from scratch without ghost rows.
     out.length = 0;
     card.append('y');
     card.redraw();
-    expect(out.join('').split('\x1b[2K').length - 1).toBe(3);
+    expect(out.join('').split('\x1b[2K').length - 1).toBe(2);
   });
 
   it('collapse() returns a one-line summary and clears the card', () => {

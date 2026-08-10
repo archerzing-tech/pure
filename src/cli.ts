@@ -35,13 +35,13 @@ import type { EvolutionConfig } from './adapter/memory/evolution';
 import { harvestUserPreferences } from './shared/memory';
 import { INCREMENTAL_BUILD_PROMPT } from './shared/agentBehavior';
 import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, FILE_TOOLS_CORE, composeUserTurn } from './shared/promptLayers';
-import { customProviderFor, defaultModelFor, isCustomProviderId, OLLAMA_PRESET, type CustomProvider } from './shared/providers';
+import { customProviderFor, defaultModelFor, isCustomProviderId, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider } from './shared/providers';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
 
 // Single source of truth for the CLI's displayed version (kept in sync with
 // package.json / src-tauri by the release flow; the CLI banner + startup line
 // both read from here).
-const CLI_VERSION = 'v1.8.0';
+const CLI_VERSION = 'v1.8.1';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
@@ -631,7 +631,7 @@ async function consumeTurn(
   // box over the streamed answer (engine emits reasoning strictly before
   // content per iteration, so this is purely defensive).
   let answered = false;
-  // Thinking renders as a BOXED CARD (see cli-thinking.ts): height-capped,
+  // Thinking renders as a FLAT CARD (see cli-thinking.ts): height-capped,
   // tail-following scroll window into the reasoning stream, content in PLAIN
   // non-highlighted text. On end it collapses to a one-line summary so the
   // transcript stays clean.
@@ -906,14 +906,19 @@ async function runConfig(): Promise<void> {
     let finalCustoms = existingCustoms;
     let provider: string;
     if (providerKeys[providerIdx] === 'add-custom') {
-      const presetRaw = await ask(`\n  ${bold('Preset')} ${dim('[1] Ollama (local)  [2] Manual' + ']')} ${dim('(default 1)')}: `);
-      const preset = presetRaw.trim() === '2' ? 'manual' : 'ollama';
-      if (preset === 'ollama') {
-        if (!finalCustoms.some(p => p.id === OLLAMA_PRESET.id)) {
-          finalCustoms = [...finalCustoms, { ...OLLAMA_PRESET }];
+      // Quick presets: 1-Ollama 2-OpenAI 3-OpenRouter 4-NVIDIA, then Manual.
+      const presetChoices = CUSTOM_PRESETS.map((p, i) => `[${i + 1}] ${p.name}${p.local ? ' (local)' : ''}`).join('  ');
+      const presetRaw = await ask(`\n  ${bold('Preset')} ${dim(`${presetChoices}  [${CUSTOM_PRESETS.length + 1}] Manual`)} ${dim('(default 1)')}: `);
+      const presetIdx = parseInt(presetRaw, 10) - 1;
+      const preset = presetRaw.trim() === '' || Number.isNaN(presetIdx) ? 0 : presetIdx;
+      if (preset >= 0 && preset < CUSTOM_PRESETS.length) {
+        const chosen = CUSTOM_PRESETS[preset];
+        if (!finalCustoms.some(p => p.id === chosen.id)) {
+          finalCustoms = [...finalCustoms, { ...chosen }];
         }
-        provider = OLLAMA_PRESET.id;
-        process.stdout.write(`  ${green('✓')} Ollama preset: ${dim(OLLAMA_PRESET.baseURL)} ${dim(`(default model ${OLLAMA_PRESET.defaultModel})`)}\n`);
+        provider = chosen.id;
+        process.stdout.write(`  ${green('✓')} ${chosen.name} preset: ${dim(chosen.baseURL)} ${dim(`(default model ${chosen.defaultModel})`)}\n`);
+        if (!chosen.local) process.stdout.write(`  ${dim('API key: paste it when prompted below, or set later with')} ${bold('pure config')}${dim('.')}\n`);
       } else {
         const name = (await ask(`\n  ${bold('Provider name')}: `)).trim();
         if (!name) { process.stdout.write(`\n  ${red('❌ Name is required. Aborting.')}\n`); process.exit(1); }
@@ -957,7 +962,24 @@ async function runConfig(): Promise<void> {
         process.exit(1);
       }
     } else if (!finalKey) {
-      process.stdout.write(`\n  ${dim('No API key — sending without Authorization (local endpoint).')}\n`);
+      if (chosenCustom && !chosenCustom.local) {
+        // Cloud presets (OpenAI / OpenRouter / NVIDIA) still need a key.
+        const apiKeyRaw = await askMasked(`  ${bold('API key')} ${dim('(required for this provider)')}: `);
+        const apiKey = apiKeyRaw.trim();
+        if (apiKey && process.stdin.isTTY) {
+          const preview = apiKey.length > 5 ? `${apiKey.slice(0, 3)}…${apiKey.slice(-2)}` : '***';
+          process.stdout.write(`  ${green('✓')} Captured ${apiKey.length} chars (${preview})\n`);
+        }
+        finalKey = apiKey;
+        if (!finalKey) {
+          process.stdout.write(`\n  ${red('❌ An API key is required for this provider. Aborting.')}\n`);
+          process.exit(1);
+        }
+        const entryIdx = finalCustoms.findIndex(p => p.id === chosenCustom.id);
+        if (entryIdx >= 0) finalCustoms[entryIdx] = { ...finalCustoms[entryIdx], apiKey: finalKey };
+      } else {
+        process.stdout.write(`\n  ${dim('No API key — sending without Authorization (local endpoint).')}\n`);
+      }
     }
 
     // Model
