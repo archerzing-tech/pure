@@ -150,7 +150,7 @@ describe('NodeToolAdapter list_files', () => {
   it('supports recursive listing', async () => {
     const r = await adapter.execute(call({ path: '.', recursive: true }));
     expect(r.success).toBe(true);
-    const out = String(r.result);
+    const out = String(r.result).replaceAll('\\', '/');
     expect(out).toContain('src/a.ts');
     expect(out).toContain('b.ts');
   });

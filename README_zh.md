@@ -3,7 +3,7 @@
 **Pure** 是一个本地优先的 AI 编程助手，核心只有两个坚持：**用一个不会轻易停下来的闭环完成任务，用会进化但不会无限膨胀的记忆延续经验**。它可以读取、写入和编辑文件，执行 Shell 命令，并在配置 verifier 时验证结果，再把紧凑的项目经验带到下一次会话 — 这一切都通过快速的终端 CLI 或原生 macOS 桌面应用完成。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.8.2-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.8.3-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -11,6 +11,12 @@
 ---
 
 ## 更新日志
+
+### v1.8.3
+
+**跨平台发布修复**
+
+- 统一递归文件列表测试中的 `/` 与 `\\` 路径分隔符，修复 Windows 发布 workflow 在测试阶段失败的问题。
 
 ### v1.8.2
 
