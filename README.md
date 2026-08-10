@@ -1,9 +1,9 @@
 # Pure
 
-**Pure** is a local-first AI coding agent that runs on your machine. It reads, writes, and edits files, executes shell commands, and orchestrates multi-agent workflows — all through a fast terminal CLI or a native macOS desktop app.
+**Pure** is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. It reads, writes, and edits files, executes shell commands, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.8.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.8.2-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -11,6 +11,12 @@
 ---
 
 ## Changelog
+
+### v1.8.2
+
+**SVG viewer polish**
+
+- **Reliable SVG zoom viewer** — generated SVG previews bind double-click activation before other diagram work completes, preserve embedded interactive shapes, and keep percentage-sized SVGs visible in the fullscreen viewer
 
 ### v1.8.1
 
@@ -44,30 +50,85 @@
 
 ---
 
-## Screenshots
+## Screenshots & architecture
 
 <p align="center">
   <img src="docs/screenshots/landing.png" alt="Pure landing page" width="720" />
   <br />
-  <em>Landing page — pick a workspace and describe your task</em>
+  <em>Current landing page — workspace picker, task composer, mode/model controls, and status bar</em>
   <br /><br />
-  <img src="docs/screenshots/chat.png" alt="Pure in action — the agent reads, edits, and tests your code" width="720" />
+  <img src="docs/screenshots/memory-settings.png" alt="Pure memory settings — forgetting speed, diagnostics, and export/import" width="720" />
   <br />
-  <em>Agent at work — file tools, shell output, and markdown answers rendered inline</em>
+  <em>Current memory workspace — forgetting speed, runtime diagnostics, and memory export/import controls</em>
+  <br /><br />
+  <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure Agent Loop and evolving project memory" width="720" />
+  <br />
+  <em>Architecture diagram — evidence-driven execution and evolving project memory</em>
 </p>
 
 ---
 
-## Features
+## Why Pure is different
+
+Most coding agents are described by the tools they can call. Pure is defined by **what happens after a tool call**:
+
+| | A basic tool-calling assistant | Pure |
+|---|---|---|
+| **Execution** | Prompt → tool → answer | A visible `THINK → ACT → OBSERVE → VERIFY` loop that can continue until the evidence supports completion |
+| **Failure** | Retry the same path or stop with an error | Escalating recovery: `retry → reflect → degrade → stop`, with repeated-error and logical-trap detection |
+| **Context** | Conversation history grows or is manually reset | Checkpoints, context trimming, and project-scoped memory keep the next turn focused |
+| **Learning** | Preferences are usually re-explained by the user | Compact lessons from successful work, failed tools, and harvested preferences are retrieved on similar tasks; explicit project conventions can also be stored or imported |
+| **Memory hygiene** | Old context accumulates indefinitely | Health scores, usage signals, superseding, and decay move stale lessons through `active → degraded → dormant → delete` |
+
+This is not a claim that every other agent behaves identically; it is Pure's design choice: **execution is a state machine, and experience is a maintained library**.
+
+### 1. The Agent Loop: evidence before completion
+
+Pure's engine is a streaming five-state event loop:
+
+```text
+THINK → ACT → OBSERVE ──┐
+  ↑                     │
+  └────────── VERIFY ←──┘
+              │
+          TERMINATE
+```
+
+- **THINK** — plan the next move with the current request, tools, budget, and relevant memory.
+- **ACT** — execute tool calls with permissions, file locks, parallel read-only work, and serialized writes.
+- **OBSERVE** — put tool results back into the working context as evidence, not as an invisible side effect.
+- **VERIFY** — when a verifier is configured, run it before calling the task complete. The built-in CodingAgent/CLI path includes rule-based checks; integrations can supply a custom verifier. A failed verification loops back to THINK with a reflection note.
+- **TERMINATE** — complete after configured verification passes, or stop safely when no verifier is configured or the budget, policy, or user signal requires it.
+
+The loop has explicit budget tracking (turns, tokens, tool calls, and time), lifecycle hooks, and failure recovery. Repeated identical failures are recognized as a dead end; the agent is told to change approach instead of grinding the same call.
+
+### 2. Memory that evolves with the project
+
+Pure's memory is not a second chat transcript. The Harness turns a completed session into compact, reusable entries such as:
+
+- **User preferences** — language, framework, tooling, or style choices extracted from what the user explicitly states.
+- **Procedures and successful patterns** — what worked, why it worked, and how it was verified; successful sessions write both a reusable lesson and a shorter procedure.
+- **Project conventions** — workspace rules that are explicitly captured or imported, stored with the project path rather than mixed into a global memory pool.
+- **Error patterns** — dead ends and recovery paths, including calls that should not be repeated.
+
+At the start of a similar task, Pure retrieves only the top relevant memories and injects them into a dedicated `<session_memory>` prompt section. GUI/CLI project isolation prevents one repository's conventions from silently leaking into another.
+
+Retrieval uses local WASM embeddings when available, with a keyword-search fallback when the model, network, or runtime is unavailable. Memory stays useful over time through a multi-dimensional health score (recency, credibility, usage, and superseded state): new lessons can supersede outdated ones, while idle entries decay from active to degraded to dormant and eventually disappear. The GUI exposes diagnostics, forgetting-speed controls, and JSON/Markdown export/import.
+
+> **The practical difference:** Pure can remember *"this project prefers X"* and *"that exact failed call is a dead end"* without replaying the entire previous session.
+
+### Features
 
 - **Terminal CLI** — One-shot prompts or interactive REPL with streaming output
 - **Desktop GUI** — Native macOS app (Tauri) with Notion-style sidebar and settings
-- **Multi-provider** — DeepSeek, Qwen (Tongyi), GLM (Zhipu), plus mock for testing
-- **ReAct Agent Loop** — THINK → ACT → OBSERVE → VERIFY → TERMINATE with budget control
+- **Multi-provider** — DeepSeek, Qwen (Tongyi), GLM (Zhipu), plus custom OpenAI-compatible endpoints
+- **Self-correcting Agent Loop** — THINK → ACT → OBSERVE → VERIFY → TERMINATE with budgets, hooks, locks, and recovery policy
+- **Evolving project memory** — Semantic retrieval, keyword fallback, decay, superseding, diagnostics, and export/import
 - **Subagent Orchestration** — Spawn file-pickers, code-searchers, web researchers in parallel
 - **MCP Protocol** — Connect Model Context Protocol servers for extensible tooling
 - **Permission System** — Four modes: YOLO (auto-approve), NORMAL (prompt per write), PLAN (read-only), DONT_ASK (silent block)
 - **Session Persistence** — Checkpoint-based state with resume support (`pure --resume`)
+- **Fault-tolerant parsing** — Repair malformed JSON, Mermaid, and SVG before surfacing an error
 - **Auto-updater** — GUI checks for updates via signed `.app.tar.gz` artifacts
 - **Multi-language UI** — English / Chinese interface
 

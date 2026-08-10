@@ -1467,9 +1467,24 @@ body {
 }
 .artifact-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   width: 100%;
+}
+@media (max-width: 960px) {
+  .artifact-cards {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 720px) {
+  .artifact-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 480px) {
+  .artifact-cards {
+    grid-template-columns: 1fr;
+  }
 }
 .artifact-card {
   position: relative;
@@ -6544,12 +6559,19 @@ button svg,
   background: conic-gradient(from 0deg, transparent 0deg, var(--accent) 300deg, transparent 360deg);
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
-  animation: diagramRing 1.1s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+  /* Keep the spinner on its own compositor layer: large SVG sanitization and
+     DOM insertion can occupy the main thread, but the loading affordance
+     should keep moving until the preview is committed. */
+  will-change: transform;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  animation: diagramRing 1.1s linear infinite;
 }
 .diagram-loading-label {
   font: 11px var(--font-sans);
   color: var(--text-muted);
   letter-spacing: 0.02em;
+  will-change: opacity;
   animation: diagramPulse 1.6s ease-in-out infinite;
 }
 @keyframes diagramRing {

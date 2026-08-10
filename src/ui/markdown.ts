@@ -180,7 +180,9 @@ renderer.code = (token: { text: string; lang?: string }): string => {
   }
 
   if (lang === 'svg') {
-    return diagramSlot('svg', code, '');
+    return splitTopLevelSvgSources(code)
+      .map((source) => diagramSlot('svg', source, ''))
+      .join('');
   }
 
   if (lang === 'chart' || lang === 'charts') {
@@ -681,6 +683,109 @@ function bindPumlFallbacks(container: HTMLElement): void {
 }
 
 // ── Inline SVG (```svg blocks) ──
+
+/**
+ * Split a fenced SVG source into independent top-level documents. Models often
+ * answer a "make two options" request with two root `<svg>` elements inside
+ * one ` ```svg ` block; keeping both roots in one preview makes each icon
+ * shrink into the same card. Nested SVGs stay inside their owning root.
+ * Malformed/unclosed input is returned as one source so the existing repair
+ * path can handle it instead of silently dropping part of the diagram.
+ */
+export function splitTopLevelSvgSources(source: string): string[] {
+  const trimmed = source.trim();
+  if (!trimmed) return [];
+
+  const tags = findSvgTags(trimmed);
+  const roots: Array<{ start: number; end: number }> = [];
+  let depth = 0;
+  let rootStart = -1;
+  for (const tag of tags) {
+    if (tag.closing) {
+      if (depth === 0) return [trimmed];
+      depth--;
+      if (depth === 0 && rootStart >= 0) {
+        roots.push({ start: rootStart, end: tag.end });
+        rootStart = -1;
+      }
+      continue;
+    }
+
+    if (depth === 0) rootStart = tag.start;
+    if (!tag.selfClosing) depth++;
+    if (depth === 0 && rootStart >= 0) {
+      roots.push({ start: rootStart, end: tag.end });
+      rootStart = -1;
+    }
+  }
+
+  // Keep incomplete, prose-wrapped, or comment-separated input intact so no
+  // source text is silently discarded and the existing repair path can handle it.
+  if (depth !== 0 || rootStart >= 0 || roots.length < 2) return [trimmed];
+  const first = roots[0];
+  const last = roots[roots.length - 1];
+  if (!isSvgSeparator(trimmed.slice(0, first.start)) || !isSvgSeparator(trimmed.slice(last.end))) {
+    return [trimmed];
+  }
+  for (let i = 1; i < roots.length; i++) {
+    if (!isSvgSeparator(trimmed.slice(roots[i - 1].end, roots[i].start))) return [trimmed];
+  }
+  return roots.map(({ start, end }) => trimmed.slice(start, end));
+}
+
+function isSvgSeparator(source: string): boolean {
+  return source.replace(/<!--[\s\S]*?-->/g, '').trim() === '';
+}
+
+interface SvgTag {
+  start: number;
+  end: number;
+  closing: boolean;
+  selfClosing: boolean;
+}
+
+function findSvgTags(source: string): SvgTag[] {
+  const tags: SvgTag[] = [];
+  for (let i = 0; i < source.length; i++) {
+    if (source.startsWith('<!--', i)) {
+      const end = source.indexOf('-->', i + 4);
+      i = end < 0 ? source.length : end + 2;
+      continue;
+    }
+    if (source.startsWith('<![CDATA[', i)) {
+      const end = source.indexOf(']]>', i + 9);
+      i = end < 0 ? source.length : end + 2;
+      continue;
+    }
+    if (source[i] !== '<') continue;
+    const remainder = source.slice(i);
+    const name = remainder.match(/^<\/?svg(?=[\s/>])/i);
+    if (!name) continue;
+
+    let quote: '"' | "'" | null = null;
+    let end = i + name[0].length;
+    for (; end < source.length; end++) {
+      const char = source[end];
+      if (quote) {
+        if (char === quote) quote = null;
+      } else if (char === '"' || char === "'") {
+        quote = char;
+      } else if (char === '>') {
+        break;
+      }
+    }
+    if (quote || end >= source.length) return tags;
+    const raw = source.slice(i, end + 1);
+    tags.push({
+      start: i,
+      end: end + 1,
+      closing: /^<\//.test(name[0]),
+      selfClosing: !/^<\//.test(name[0]) && /\/\s*>$/.test(raw),
+    });
+    i = end;
+  }
+  return tags;
+}
 
 /**
  * Sanitize a model-generated SVG string for inline display. DOMPurify strips
@@ -1341,6 +1446,10 @@ export async function renderMarkdown(text: string, container: HTMLElement): Prom
     // the PlantUML <img> and are not in DOMPurify's default allowed set.
     ADD_ATTR: ['target', 'loading', 'referrerpolicy'],
   });
+  // Bind image viewers immediately after DOM replacement. Waiting until after
+  // Mermaid/chart work below leaves an already-visible image with no dblclick
+  // handler while another diagram is still loading.
+  bindMdImagePopup(container);
   // Mark the bubble as fully-rendered markdown so CSS can collapse whitespace
   // (white-space:normal). marked emits newline characters BETWEEN block
   // elements (</p>\n<p>, </li>\n<li>, </pre>\n<ul>…); under the bubble's
@@ -1360,8 +1469,13 @@ export async function renderMarkdown(text: string, container: HTMLElement): Prom
   linkifyPaths(container);
 
   // 3) Inline SVG (```svg) + native charts (```chart) — both synchronous.
-  await renderSvgNodes(container);
+  // Group before awaiting sanitization so independent loading placeholders are
+  // already laid out as a gallery while their SVGs are being prepared.
   groupAdjacentSvgSlots(container);
+  await renderSvgNodes(container);
+  // SVG targets become visible before chart/Mermaid rendering can finish. Bind
+  // their double-click handler now, not at the end of the whole pipeline.
+  bindVectorPopup(container);
   await renderChartNodes(container);
 
   // Start PlantUML listeners before awaiting Mermaid so a slow Mermaid render
@@ -1419,7 +1533,11 @@ streamRenderer.link = function (
 streamRenderer.code = (token: { text: string; lang?: string }): string => {
   const lang = langOf(token.lang);
   if (lang === 'mermaid') return diagramSlot('mermaid', token.text, '');
-  if (lang === 'svg') return diagramSlot('svg', token.text, '');
+  if (lang === 'svg') {
+    return splitTopLevelSvgSources(token.text)
+      .map((source) => diagramSlot('svg', source, ''))
+      .join('');
+  }
   if (lang === 'chart' || lang === 'charts') return diagramSlot('chart', token.text, '');
   return `<pre><code class="hljs language-${attr(lang)}">${esc(token.text)}</code></pre>`;
 };
@@ -1703,7 +1821,11 @@ function bindDiagramActivation(
     const clicked = event?.target as Element | null;
     if (clicked && typeof clicked.closest === 'function') {
       const hit = clicked.closest('a[href], button, [role="button"]');
-      if (hit && hit !== target) return;
+      // A generated SVG may use links or role="button" on individual shapes.
+      // For the diagram's dblclick affordance the whole picture must remain
+      // enlargable; otherwise only those particular SVGs intermittently ignore
+      // the gesture depending on where the pointer lands.
+      if (hit && hit !== target && activation !== 'dblclick') return;
     }
     const diagram = getDiagram();
     if (diagram) showDiagramViewer(diagram);
@@ -1823,6 +1945,39 @@ function bindMdImagePopup(container: HTMLElement): void {
 // was called on the old overlay).
 let activeViewerCleanup: (() => void) | null = null;
 
+function normalizeViewerDiagramSize(el: HTMLElement): void {
+  const svg = el instanceof SVGSVGElement
+    ? el
+    : el.querySelector<SVGSVGElement>('svg');
+  if (!svg) return;
+
+  const viewBox = svg.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
+  const viewBoxWidth = viewBox && viewBox.length === 4 && Number.isFinite(viewBox[2]) && viewBox[2] > 0 ? viewBox[2] : null;
+  const viewBoxHeight = viewBox && viewBox.length === 4 && Number.isFinite(viewBox[3]) && viewBox[3] > 0 ? viewBox[3] : null;
+  const width = svg.getAttribute('width')?.trim().toLowerCase() ?? null;
+  const height = svg.getAttribute('height')?.trim().toLowerCase() ?? null;
+  const numericLength = (value: string | null): number | null => {
+    const match = value?.match(/^(\d+(?:\.\d+)?)(?:px)?$/);
+    return match ? Number(match[1]) : null;
+  };
+  const attrWidth = numericLength(width);
+  const attrHeight = numericLength(height);
+  const canvasWidth = viewBoxWidth ?? attrWidth ?? 800;
+  const canvasHeight = viewBoxHeight ?? attrHeight ?? 600;
+
+  // A standalone SVG with width/height="100%" relies on the preview's CSS
+  // containing block. Once moved into the fixed viewer that percentage can
+  // resolve to zero (or to the wrapper's shrink-to-fit width), leaving a blank
+  // overlay. Give percentage/auto dimensions a concrete canvas, while
+  // preserving numeric SVG dimensions when no viewBox is available.
+  if (!width || width === '100%' || width === 'auto') {
+    svg.style.width = `${canvasWidth}px`;
+  }
+  if (!height || height === '100%' || height === 'auto') {
+    svg.style.height = `${canvasHeight}px`;
+  }
+}
+
 function showDiagramViewer(el: HTMLElement): void {
   // Remove any existing viewer (and never stack a repair-diff on top of it)
   activeRepairDiffCleanup?.();
@@ -1852,6 +2007,7 @@ function showDiagramViewer(el: HTMLElement): void {
   // ── SVG wrapper ──
   const svgWrap = document.createElement('div');
   svgWrap.className = 'mermaid-viewer-svg-wrap';
+  normalizeViewerDiagramSize(el);
   svgWrap.appendChild(el);
   overlay.appendChild(svgWrap);
 

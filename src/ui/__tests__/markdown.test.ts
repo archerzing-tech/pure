@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, diagramSlot, diffLines, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, type DiagramKind } from '../markdown';
 import { buildChartOption } from '../echartsChart';
 
 // ── ==text== highlight extension ──
@@ -153,6 +153,50 @@ type FakeElement = {
   appendChild(child: FakeElement): FakeElement;
   insertBefore(child: FakeElement, reference: FakeElement): FakeElement;
 };
+
+describe('splitTopLevelSvgSources', () => {
+  it('splits two root SVGs emitted inside one fenced block', () => {
+    const sources = splitTopLevelSvgSources(`
+      <svg viewBox="0 0 100 100"><rect width="100" height="100" /></svg>
+      <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" /></svg>
+    `);
+    expect(sources).toHaveLength(2);
+    expect(sources[0]).toContain('<rect');
+    expect(sources[1]).toContain('<circle');
+  });
+
+  it('does not split nested SVG elements inside one root', () => {
+    const sources = splitTopLevelSvgSources(
+      '<svg><svg x="10" y="10" width="20" height="20"><path d="M0 0" /></svg></svg>',
+    );
+    expect(sources).toHaveLength(1);
+  });
+
+  it('handles uppercase roots, self-closing roots, and quoted greater-than signs', () => {
+    const sources = splitTopLevelSvgSources(
+      `<SVG data-label=">" />\n<svg><text>literal &lt;svg&gt;</text></svg>`,
+    );
+    expect(sources).toHaveLength(2);
+  });
+
+  it('does not split when prose separates the roots, but allows comments', () => {
+    expect(splitTopLevelSvgSources('<svg />\n说明\n<svg />')).toHaveLength(1);
+    expect(splitTopLevelSvgSources('<svg />\n<!-- option 2 -->\n<svg />')).toHaveLength(2);
+  });
+
+  it('keeps incomplete source intact for the SVG repair path', () => {
+    const source = '<svg><rect /></svg>\n<svg><circle />';
+    expect(splitTopLevelSvgSources(source)).toEqual([source]);
+  });
+
+  it('makes two independent slots when marked receives one svg fence', () => {
+    const md = new Marked({ gfm: true, breaks: true, renderer });
+    const html = md.parse('```svg\n<svg><rect /></svg>\n<svg><circle /></svg>\n```') as string;
+    expect((html.match(/class="diagram-slot svg-slot"/g) ?? [])).toHaveLength(2);
+    expect(html).toContain('&lt;rect');
+    expect(html).toContain('&lt;circle');
+  });
+});
 
 describe('diagramSlot', () => {
   it('starts with a ring loading placeholder and keeps the raw source for recovery', () => {

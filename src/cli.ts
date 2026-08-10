@@ -41,7 +41,7 @@ import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolA
 // Single source of truth for the CLI's displayed version (kept in sync with
 // package.json / src-tauri by the release flow; the CLI banner + startup line
 // both read from here).
-const CLI_VERSION = 'v1.8.1';
+const CLI_VERSION = 'v1.8.2';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
