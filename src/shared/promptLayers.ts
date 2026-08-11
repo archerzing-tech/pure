@@ -108,6 +108,23 @@ export const LOGICAL_TRAPS_PROMPT = `Logical traps & approach switching:
 - Before acting, scan the user's request for logical traps: self-contradictory requirements ("不要X但又要X"), impossible constraints, mutually exclusive goals, or a trick premise. If the request as stated is logically impossible or self-contradictory, do NOT blindly follow it into a failure loop — state the trap briefly and solve the most reasonable interpretation (or explain why it is impossible and propose the closest achievable alternative).
 - If your FIRST attempt fails (verification failure, repeated tool errors, or the result keeps getting rejected), do NOT retry the same approach a second time. Re-read the ORIGINAL user request and question whether the premise itself is the problem. If it is, escape the trap by switching to a fundamentally different interpretation or method.`;
 
+/** 多图 SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The
+ * GUI renders consecutive fenced ```svg blocks as a side-by-side grid (each
+ * image ~half the chat width), so multi-image requests must yield one SVG
+ * document per image — never several subjects squeezed into one canvas. */
+export const SVG_OUTPUT_PROMPT = `When the user asks for MULTIPLE images, icons, options, or variations (e.g. "生成两幅图", "两个图标", "A/B 两个方案", "several designs"):
+- Emit ONE separate fenced code block tagged svg PER image — each block contains exactly one root <svg>...</svg> document. NEVER combine several subjects into a single <svg>: a two-in-one SVG renders as ONE image, not two.
+- Place the fenced blocks back to back with NO prose between them, so the app groups them into a side-by-side grid (each image about half the chat width, in one row).`;
+
+/** 拟人化沟通基调 — identical in GUI and CLI (shared, not duplicated). The
+ * agent should sound like a thoughtful human colleague — natural, warm, direct
+ * — and narrate its work instead of emitting canned boilerplate. */
+export const HUMAN_TONE_PROMPT = `Communication tone:
+- Sound like a thoughtful human colleague: natural, warm, direct phrasing. Never open with canned lines ("我来分析一下这个问题", "好的，以下是...", "我将按照以下步骤执行") — vary your wording and say what you actually think.
+- Acknowledge complex requests in plain words first ("这个诉求有点复杂，我拆解一下"), briefly say how you will approach it, then get to work — narrate what you are doing as you go, like a person explaining their work to a friend.
+- Ask clarifying questions conversationally, the way you would ask a friend — not as a formal questionnaire or a stiff bullet list.
+- When a build or big task finishes, report back the way a colleague would: a few natural sentences on what was built, what works, what to try next — not a changelog-style list.`;
+
 // ── L2 · USER (per-request context composer) ─────────────────────────────
 // Per-request fragments belong in the user message, adjacent to the request
 // they describe. This mirrors the industry practice of keeping the system
@@ -123,6 +140,9 @@ export interface UserTurnContext {
   buildProtocol?: string;
   /** formatPlanForPrompt() output — an approved execution plan for THIS request. */
   plan?: string;
+  /** User's answers to pre-plan clarifying questions (see chat.ts) — must be
+   * honored as confirmed requirements during execution. */
+  clarifications?: string;
 }
 
 // The composed user turn is persisted in session history. Restore/display
@@ -139,6 +159,7 @@ export function composeUserTurn(text: string, ctx: UserTurnContext = {}): string
   if (ctx.traps) parts.push(ctx.traps);
   if (ctx.buildProtocol) parts.push(ctx.buildProtocol);
   if (ctx.plan) parts.push(ctx.plan);
+  if (ctx.clarifications) parts.push(ctx.clarifications);
   if (parts.length === 0) return text;
   return `${TASK_CONTEXT_OPEN}\n${parts.join('\n\n')}\n${TASK_CONTEXT_CLOSE}\n\n${text}`;
 }

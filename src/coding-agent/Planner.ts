@@ -56,7 +56,7 @@ export class Planner {
    * intent → build; complex otherwise → plan. */
   private detectMode(prompt: string, complexity: TaskComplexity): TaskMode {
     if (complexity !== 'complex') return 'yolo';
-    return detectArtifactRequest(prompt) ? 'build' : 'plan';
+    return detectProjectRequest(prompt) || detectArtifactRequest(prompt) ? 'build' : 'plan';
   }
 
   /**
@@ -155,10 +155,11 @@ export class Planner {
       /(?:怎么|如何|怎样|能否|能不能|是否|该不该|应不应该|为什么|吗|呢|什么(?!都|也|能))/.test(trimmed)
     );
 
-    // User explicitly asks for planning. 规划/设计 only count as a planning
-    // command when followed by a design target and NOT phrased as a question —
-    // a bare "怎么设计？"/"怎么规划？" mention is a question, not a plan.
-    if (/plan|先计划|think step by step|think through/i.test(prompt)) {
+    // User explicitly asks for planning. A request to write a project plan or
+    // documentation is a deliverable, not an instruction to plan the coding
+    // work, so keep that document intent out of the plan gate.
+    const documentationRequest = /(?:write|create|draft|生成|编写|写)\s+(?:a\s+)?(?:project\s+)?(?:plan|documentation|document|docs|summary|report|spec|tutorial|计划|文档|总结|报告|方案)/i.test(prompt);
+    if (!documentationRequest && /plan|先计划|think step by step|think through/i.test(prompt)) {
       return 'complex';
     }
     if (!cnQuestion && /(?:规划|设计)\s*(?:一个|一套|个|套|一下|一番)?\s*(?:工程|项目|系统|网站|应用|平台|框架|架构|方案|模块|功能|页面|界面)/i.test(prompt)) {
@@ -192,6 +193,14 @@ export class Planner {
     }
 
     // ── Chinese project-scale requests ──
+    // Any imperative request to create a project is a multi-step build, even
+    // when the user does not add words such as "完整" or "大型". A project is
+    // not equivalent to a one-file artifact: it needs structure, implementation
+    // phases, and verification before the agent should touch the workspace.
+    if (detectProjectRequest(prompt)) {
+      return 'complex';
+    }
+
     // A multi-phase build needs ALL THREE elements in one clause: an
     // imperative build verb + a scale word + a project noun ("制作一个大型工
     // 程", "搭建完整的全栈项目"). Requiring the scale word kills the old
@@ -245,31 +254,35 @@ export class Planner {
   }
 
   private generatePlan(prompt: string): Plan {
-    // Generate a generic plan based on task analysis
+    // Generic fallback plan shown when the LLM plan generation is skipped or
+    // fails. Steps are written in plain user-facing language (not internal
+    // labels like Understand/Plan/Implement/Verify) so the review card and
+    // progress card read naturally. This is the heuristic fallback — for real
+    // turns the LLM-generated plan (which follows the user's language) wins.
     const steps: PlanStep[] = [
       {
         id: '1',
-        action: 'Understand',
-        description: 'Read relevant files and understand the current codebase structure.',
-        expectedOutcome: 'Clear understanding of what needs to change.',
+        action: '了解需求',
+        description: '先弄清任务要达成什么目标，以及有哪些约束条件。',
+        expectedOutcome: '清楚知道要做什么、做到什么程度。',
       },
       {
         id: '2',
-        action: 'Plan',
-        description: 'Design the solution approach and identify files to modify.',
-        expectedOutcome: 'Concrete change plan with file-by-file details.',
+        action: '制定方案',
+        description: '规划实现思路，确定要新建或修改哪些文件。',
+        expectedOutcome: '有一份清晰的实施步骤清单。',
       },
       {
         id: '3',
-        action: 'Implement',
-        description: 'Execute changes across identified files.',
-        expectedOutcome: 'Working implementation matching the plan.',
+        action: '分步实现',
+        description: '按方案一步一步完成改动，每步都检查是否正常。',
+        expectedOutcome: '核心功能按计划完成。',
       },
       {
         id: '4',
-        action: 'Verify',
-        description: 'Run tests and verify the implementation works correctly.',
-        expectedOutcome: 'All tests pass, changes are validated.',
+        action: '验证结果',
+        description: '运行检查和测试，确认结果可用，并总结改了什么。',
+        expectedOutcome: '交付验证过的可用成果。',
       },
     ];
 
@@ -280,7 +293,8 @@ export class Planner {
   }
 
   private getComplexReasoning(prompt: string): string {
-    return `This task involves multiple files or significant changes. A structured approach with planning, implementation, and verification steps will ensure correctness.`;
+    // Shown above the plan review card — plain user-facing language.
+    return '这个任务涉及多文件或较大改动，按步骤推进并逐步验证，能保证结果正确可靠。';
   }
 }
 
@@ -298,7 +312,23 @@ export function formatTrapPrompt(traps: TrapWarning[]): string {
 }
 
 /**
+ * Detect whether the user is asking the agent to create a project rather than
+ * answer a question about one. Project requests always require a visible plan
+ * and incremental execution, even when the prompt is short ("帮我创建一个项目").
+ */
+export function detectProjectRequest(prompt: string): boolean {
+  const p = prompt.trim();
+  if (!p) return false;
+  const question = /^(?:如何|怎么|怎样|能否|能不能|是否|请问|为什么|what|how|can|could|should)\b/i.test(p)
+    || /(?:怎么|如何|怎样|吗|呢|what|how)\s*(?:创建|搭建|开发|做|build|create|scaffold|develop)/i.test(p);
+  if (question) return false;
+  const creation = /(?:请|帮我|麻烦你|给我)?\s*(?:创建|建立|搭建|构建|开发|制作|做|实现|编写|写|生成|create|build|scaffold|develop|make|implement)\s*(?:(?:一个|一套|个|整套|整个|完整的|全栈的|大型的|多文件的|多模块的|a|an|the)\s*)?(?:项目|工程|project|application|app|website|site)(?!\s*(?:的)?\s*(?:(?:技术|开发|产品|实施)\s*)?(?:总结|方案|文档|介绍|报告|说明|计划|清单|列表|简介|笔记|教程|plan|documentation|document|docs|summary|report|spec|tutorial))/i;
+  return creation.test(p.slice(0, 140));
+}
+
+/**
  * Detect whether a request asks for a COMPLETE runnable artifact — a game,
+
  * web page/site, app, tool, script, or small project — as opposed to a simple
  * question or a short code snippet. When true, the agent should write the
  * artifact to disk (an HTML file / a small project directory) by default
@@ -319,6 +349,7 @@ export function detectArtifactRequest(prompt: string): boolean {
   // Build verbs — the request must IMPERATIVELY create something. Keeping the
   // list explicit avoids matching questions or analysis-only requests.
   const buildVerb = /(?:请|帮我|麻烦你|给我)?(?:编写|编一个|写|写一个|写个|做|做一个|做个|开发|制作|创建|搭建|实现|搞一个|搞个|整一个|整个|设计|生成|做一个|给我写)/;
+  if (detectProjectRequest(p)) return true;
   // Artifact nouns that imply a runnable/complete deliverable.
   const artifact =
     /(?:小?游戏|网页|网站|页面|主页|首页|工具|脚本|程序|小程序|应用|app|工程|项目|组件|动画|演示|原型|demo|prototype|html\s*页面|web\s*app|web\s*page|mini[- ]?game|game|tool|script|app|project|prototype)/i;

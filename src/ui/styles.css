@@ -22,6 +22,8 @@
   --accent:       #7B6FF0;
   --accent-hover: #6A5DE0;
   --accent-soft:  #F1EFFC;
+  --selection-bg: #C9D4FF;
+  --selection-fg: #1E1A4A;
   --plan-bg:      #EEF3FB; /* planner surfaces (plan dialog / progress card) */
   --danger:       #E03E3E;
   --danger-soft:  #FDF2F2;
@@ -764,34 +766,42 @@ body {
  * A one-click folder icon beside the landing prompt: opens the native folder
  * picker to set the workspace directly (no popover round-trip). Ghost button
  * that tints accent when a workspace is active, mirroring the sidebar chip.
- */
+ */  .input-ws-btn,
+  .attach-btn,
+  .input-copy-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.2s var(--ease-out);
+    padding: 0;
+  }
 
-.input-ws-btn,
-.attach-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all 0.2s var(--ease-out);
-  padding: 0;
-}
+  .input-copy-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+    pointer-events: none;
+  }
+
 
 .input-ws-btn:hover,
-.attach-btn:hover {
+.attach-btn:hover,
+.input-copy-btn:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text);
   border-color: var(--text-tertiary);
 }
 
 .input-ws-btn:active,
-.attach-btn:active {
+.attach-btn:active,
+.input-copy-btn:active:not(:disabled) {
   transform: scale(0.92);
 }
 
@@ -929,31 +939,17 @@ body {
   display: flex;
   flex-direction: column;
   width: 100%;
-  /* The entrance animation is scoped to the newest row (:last-child below):
-     off-screen rows must stay animation-free so the content-visibility skip
-     can neither defer nor replay bubbleIn while scrolling history. */
+  /* Keep historical rows fully laid out. Skipping transcript rows with
+     content-visibility made restored/streaming diagrams and old messages
+     appear blank when the user scrolled upward. */
   animation: none;
-  /* Long conversations make #chat reflow every off-screen message on each
-     streamed token — that O(messages) main-thread work is what made typing
-     and sidebar toggles lag. content-visibility skips rendering for
-     off-screen rows entirely (O(visible) layout/paint); contain-intrinsic-
-     block-size keeps the scrollbar stable with a per-type estimate, and the
-     `auto` keyword caches each row's last rendered height. Safari < 17
-     lacks `auto`, so a plain estimate declaration comes first. */
-  content-visibility: auto;
-  contain-intrinsic-block-size: 140px;
-  contain-intrinsic-block-size: auto 140px;
 }
 .bubble-row:last-child {
   animation: bubbleIn 0.4s var(--ease-spring) both;
 }
-.bubble-row.status {
-  contain-intrinsic-block-size: 40px;
-  contain-intrinsic-block-size: auto 40px;
-}
+.bubble-row.status,
 .bubble-row.tool-grid {
-  contain-intrinsic-block-size: 100px;
-  contain-intrinsic-block-size: auto 100px;
+  animation: none;
 }
 @keyframes bubbleIn {
   from { opacity: 0; transform: translateY(12px) scale(0.97); }
@@ -1453,14 +1449,11 @@ body {
   padding: 10px 12px;
   background: var(--bg-card);
   box-shadow: var(--shadow-sm);
-}
+}/* ── Generated-file cards ──
+    Shown after a turn that wrote files as a wrapping grid. Folders are not
+    rendered in this result area. The row is plain transcript content (like tool
+    rows), not a floating overlay. */.bubble-row.artifact-row {
 
-/* ── Generated-file cards ──
-   Shown after a turn that wrote files: ≤ MAX_CARD_FILES artifacts render as a
-   grid of clickable cards (open with default app / reveal in file manager),
-   more collapse to a single project-directory card. The row is plain
-   transcript content (like tool rows), not a floating overlay. */
-.bubble-row.artifact-row {
   align-self: stretch;
   max-width: 100%;
   margin: 2px 0 6px;
@@ -1593,7 +1586,6 @@ body {
 .artifact-icon-doc { --artifact-tint: #8b5cf6; }
 .artifact-icon-data { --artifact-tint: #d97706; }
 .artifact-icon-archive { --artifact-tint: #b45309; }
-.artifact-icon-dir { --artifact-tint: var(--accent); }
 .artifact-text {
   display: flex;
   flex-direction: column;
@@ -1658,10 +1650,6 @@ body {
   background: color-mix(in srgb, var(--artifact-tint, var(--accent)) 10%, var(--bg));
   border-color: color-mix(in srgb, var(--artifact-tint, var(--accent)) 22%, transparent);
 }
-.artifact-card-dir {
-  padding: 12px 16px;
-  min-height: 84px;
-}
 .inline-card-head {
   display: flex;
   align-items: center;
@@ -1683,6 +1671,46 @@ body {
   padding: 5px 12px;
   font-size: 12px;
   border-radius: 7px;
+}
+
+/* ── Pre-plan clarifying questions card (Freebuff-style interview) ──
+ * Shown before the plan is generated when the request is ambiguous: one
+ * labeled textarea per question, submit (Cmd/Ctrl+Enter) or skip. */
+.clarify-question {
+  margin-bottom: 10px;
+}
+.clarify-question:last-child {
+  margin-bottom: 0;
+}
+.clarify-question-label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+  line-height: 1.45;
+}
+.clarify-input {
+  width: 100%;
+  min-height: 54px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.5;
+  transition: border-color 0.15s var(--ease-out), box-shadow 0.15s var(--ease-out);
+}
+.clarify-input::placeholder {
+  color: var(--text-tertiary);
+}
+.clarify-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 /* ── Confirm modal (destructive actions) ──
@@ -1790,6 +1818,131 @@ body {
   flex-shrink: 0;
   user-select: none;
 }
+
+/* Refining badge on the scaffold plan card — three bouncing dots + label tell
+   the user the LLM is still working out the real steps (the card upgrades in
+   place when the task-specific plan lands, dropping the badge). */
+.plan-progress-refining {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 999px;
+  padding: 2px 10px;
+  flex-shrink: 0;
+  user-select: none;
+  white-space: nowrap;
+}
+.plan-progress-refining .plan-refining-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  animation: plan-refining-bounce 1.2s ease-in-out infinite;
+}
+.plan-progress-refining .plan-refining-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.plan-progress-refining .plan-refining-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes plan-refining-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  30% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
+/* Rotating hint text: each new hint (workspace scan / analysis / plan draft)
+   fades in with a gentle rise so the wait feels alive, not flickery. */
+.plan-progress-refining .plan-refining-label-swap {
+  animation: plan-refining-label-in 0.25s ease-out;
+}
+@keyframes plan-refining-label-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .plan-progress-refining .plan-refining-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+  .plan-progress-refining .plan-refining-label-swap {
+    animation: none;
+  }
+}
+
+/* Plan-card handoff: when the LLM plan lands, the scaffold card fades/slides
+   out in place and the upgraded card fades/slides in exactly where it sat —
+   no abrupt swap. Steps inside the entering card cascade in one by one. */
+.plan-progress-row.plan-card-leaving {
+  animation: plan-card-leave 0.2s ease-in forwards;
+}
+@keyframes plan-card-leave {
+  to {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+}
+.plan-progress-row.plan-card-entering {
+  animation: plan-card-enter 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes plan-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.plan-progress-row.plan-card-entering .plan-progress-step {
+  /* `backwards` fill: the invisible from-state applies during each step's
+     stagger delay, and the step reverts to visible afterwards — so a skipped
+     animation can never leave steps stuck at opacity 0. */
+  animation: plan-step-enter 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+@keyframes plan-step-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.plan-progress-row.plan-card-entering .plan-progress-step:nth-child(1) { animation-delay: 0.04s; }
+.plan-progress-row.plan-card-entering .plan-progress-step:nth-child(2) { animation-delay: 0.08s; }
+.plan-progress-row.plan-card-entering .plan-progress-step:nth-child(3) { animation-delay: 0.12s; }
+.plan-progress-row.plan-card-entering .plan-progress-step:nth-child(4) { animation-delay: 0.16s; }
+.plan-progress-row.plan-card-entering .plan-progress-step:nth-child(5) { animation-delay: 0.2s; }
+.plan-progress-row.plan-card-entering .plan-progress-step:nth-child(6) { animation-delay: 0.24s; }
+.plan-progress-row.plan-card-entering .plan-progress-step:nth-child(7) { animation-delay: 0.28s; }
+.plan-progress-row.plan-card-entering .plan-progress-step:nth-child(8) { animation-delay: 0.32s; }
+@media (prefers-reduced-motion: reduce) {
+  .plan-progress-row.plan-card-leaving,
+  .plan-progress-row.plan-card-entering,
+  .plan-progress-row.plan-card-entering .plan-progress-step {
+    animation: none;
+  }
+}
 .plan-progress-steps {
   display: flex;
   flex-direction: column;
@@ -1852,6 +2005,36 @@ body {
 }
 .plan-progress-step.pending .plan-progress-step-num {
   opacity: 0.6;
+}
+
+/* Status line on checklist rows (quality-gate card: 进行中/通过/失败/无法验证). */
+.plan-progress-step-status {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  margin-top: 1px;
+}
+.plan-progress-step.active .plan-progress-step-status {
+  color: var(--accent);
+}
+.plan-progress-step.done .plan-progress-step-status {
+  color: var(--success);
+}
+.plan-progress-step.failed {
+  color: var(--text-secondary);
+}
+.plan-progress-step.failed .plan-progress-step-num {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.plan-progress-step.failed .plan-progress-step-status {
+  color: var(--danger);
+}
+.plan-progress-step.unavailable .plan-progress-step-num {
+  border-color: var(--text-tertiary);
+  color: var(--text-tertiary);
+}
+.plan-progress-step.unavailable .plan-progress-step-status {
+  color: var(--text-tertiary);
 }
 
 /* ── Thinking card (live reasoning stream) ──
@@ -4540,6 +4723,8 @@ body {
   --accent: #71e5ff;
   --accent-hover: #9df0ff;
   --accent-soft: #153c56;
+  --selection-bg: rgba(113, 229, 255, 0.38);
+  --selection-fg: #ffffff;
   --danger: #f3a2b5;
   --danger-soft: #3a2639;
   --success: #86f0c8;
@@ -4549,8 +4734,11 @@ body {
 }
 
 ::selection {
-  background: var(--accent-soft);
-  color: var(--text);
+  /* Visible selection: a saturated accent tint with dark text in light mode
+     and a light text on the cyan tint in dark mode, so selecting input text
+     is always easy to see. */
+  background: var(--selection-bg);
+  color: var(--selection-fg);
 }
 
 body {
@@ -4816,7 +5004,8 @@ select:focus-visible,
 }
 
 #landing-input-wrap .input-ws-btn,
-#landing-input-wrap .attach-btn {
+#landing-input-wrap .attach-btn,
+#landing-input-wrap .input-copy-btn {
   width: 34px;
   height: 34px;
   margin-left: 10px;
@@ -4951,7 +5140,8 @@ select:focus-visible,
 }
 
 #input-bar .input-ws-btn,
-#input-bar .attach-btn {
+#input-bar .attach-btn,
+#input-bar .input-copy-btn {
   width: 42px;
   height: 42px;
   border-radius: 12px;
@@ -5701,6 +5891,7 @@ button svg,
 
 #landing-input-wrap .input-ws-btn,
 #landing-input-wrap .attach-btn,
+#landing-input-wrap .input-copy-btn,
 #landing-send-btn {
   width: 36px;
   height: 36px;
@@ -5718,6 +5909,7 @@ button svg,
 
 #input-bar .input-ws-btn,
 #input-bar .attach-btn,
+#input-bar .input-copy-btn,
 #send-btn {
   width: 42px;
   height: 42px;
@@ -7014,9 +7206,10 @@ button svg,
   padding: 4px 8px 8px;
 }
 
-/* Attach + workspace: ghost icon buttons, no frame — hover gets a soft chip. */
+/* Attach + workspace + copy: ghost icon buttons, no frame — hover chip. */
 #composer-tool-row .input-ws-btn,
-#composer-tool-row .attach-btn {
+#composer-tool-row .attach-btn,
+#composer-tool-row .input-copy-btn {
   width: 30px;
   height: 30px;
   flex: 0 0 30px;
@@ -7028,13 +7221,15 @@ button svg,
 }
 
 #composer-tool-row .input-ws-btn:hover,
-#composer-tool-row .attach-btn:hover {
+#composer-tool-row .attach-btn:hover,
+#composer-tool-row .input-copy-btn:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text);
 }
 
 #composer-tool-row .input-ws-btn:active,
-#composer-tool-row .attach-btn:active {
+#composer-tool-row .attach-btn:active,
+#composer-tool-row .input-copy-btn:active:not(:disabled) {
   transform: scale(0.9);
 }
 
@@ -7153,7 +7348,8 @@ button svg,
 /* Ghost icon buttons inside the landing tool row (mirror the chat composer's
    frameless chips — borderless, hover gets a soft fill). */
 #landing-tool-row .input-ws-btn,
-#landing-tool-row .attach-btn {
+#landing-tool-row .attach-btn,
+#landing-tool-row .input-copy-btn {
   width: 30px;
   height: 30px;
   flex: 0 0 30px;
@@ -7166,7 +7362,8 @@ button svg,
 }
 
 #landing-tool-row .input-ws-btn:hover,
-#landing-tool-row .attach-btn:hover {
+#landing-tool-row .attach-btn:hover,
+#landing-tool-row .input-copy-btn:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text);
   opacity: 1;
@@ -7207,8 +7404,10 @@ button svg,
 
 #landing-input-wrap:focus-within #landing-tool-row .input-ws-btn,
 #landing-input-wrap:focus-within #landing-tool-row .attach-btn,
+#landing-input-wrap:focus-within #landing-tool-row .input-copy-btn,
 #landing-input-wrap.has-text #landing-tool-row .input-ws-btn,
-#landing-input-wrap.has-text #landing-tool-row .attach-btn {
+#landing-input-wrap.has-text #landing-tool-row .attach-btn,
+#landing-input-wrap.has-text #landing-tool-row .input-copy-btn {
   opacity: 1;
 }
 
@@ -7382,6 +7581,39 @@ button svg,
   transform: scale(1);
 }
 
+/* Per-card delete (×) for custom providers — hidden until hover/focus so
+   built-in cards stay uncluttered. Sits top-right, clear of the ✓ badge. */
+.provider-card-remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition), background var(--transition), color var(--transition), border-color var(--transition);
+}
+.provider-card:hover .provider-card-remove,
+.provider-card-remove:focus-visible {
+  opacity: 1;
+}
+.provider-card-remove:hover,
+.provider-card-remove:focus-visible {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .provider-card-topline {
   display: flex;
   align-items: center;
@@ -7517,51 +7749,27 @@ button svg,
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   color: var(--accent);
   background: color-mix(in srgb, var(--accent-soft) 22%, var(--bg-card));
+}/* Model auto-fetch button inside the config card (custom providers only). */
+.fetch-models-btn {
+  font-size: 10px;
+  padding: 3px 9px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: color 0.15s var(--ease-out), border-color 0.15s var(--ease-out), background 0.15s var(--ease-out);
 }
-
-.provider-custom-form {
-  margin: -6px 0 18px;
-  padding: 12px 14px 14px;
-  border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--border));
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--accent-soft) 26%, var(--bg-card));
-  animation: provider-form-in 0.22s ease;
+.fetch-models-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 18%, transparent);
 }
-
-@keyframes provider-form-in {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-/* Compact form: a single row of head + actions, then the 2×2 field grid with
-   tighter gaps — the full-height labelled form the old design used read as a
-   heavy modal for what is at most four inputs. */
-.provider-custom-form-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 2px 8px;
-  margin-bottom: 10px;
-}
-.provider-custom-form-title { font-size: 13px; font-weight: 700; color: var(--text); }
-.provider-custom-form-hint { font-size: 11px; line-height: 1.5; color: var(--text-tertiary); }
-
-.provider-custom-form-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 10px;
-}
-
-.provider-custom-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.provider-custom-field-wide { grid-column: 1 / -1; }
-.provider-custom-label { font-size: 11px; font-weight: 650; color: var(--text-secondary); }
-
-.provider-custom-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 10px;
+.fetch-models-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .provider-mark-custom { background: #e4f7ec; color: #2e8b5d; }
@@ -7596,9 +7804,15 @@ button svg,
 }
 .provider-card-needs-key::before { background: color-mix(in srgb, var(--accent) 35%, var(--border-light)); }
 
-@media (max-width: 720px) {
-  .provider-custom-form-grid { grid-template-columns: 1fr; }
+/* 未配置的自定义供应商：端点处醒目提示 + Base URL 输入框边框着色，
+   提醒用户填完地址再使用（否则会静默回落到内置默认端点）。 */
+.provider-config-card.provider-unconfigured .provider-config-endpoint {
+  color: var(--danger);
 }
+.provider-config-card .setting-row.provider-needs-url .setting-input {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
 
 .sr-only {
   position: absolute;

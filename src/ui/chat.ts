@@ -9,9 +9,9 @@ import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
 import { INCREMENTAL_BUILD_PROMPT } from '../shared/agentBehavior';
-import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, FILE_TOOLS_CORE, composeUserTurn, stripUserTurnContext } from '../shared/promptLayers';
+import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, SVG_OUTPUT_PROMPT, HUMAN_TONE_PROMPT, FILE_TOOLS_CORE, composeUserTurn, stripUserTurnContext } from '../shared/promptLayers';
 import { CodingAgent } from '../coding-agent/CodingAgent';
-import { formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt, parsePlanJsonWithMeta } from '../coding-agent/Planner';
+import { formatTrapPrompt, detectArtifactRequest, detectProjectRequest, formatArtifactPrompt, parsePlanJsonWithMeta } from '../coding-agent/Planner';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createLLMOnlyVerifier, createDefaultVerifier } from '../coding-agent/Verifier';
@@ -19,11 +19,14 @@ import { BUILT_IN_SUBAGENTS } from '../coding-agent/SubagentOrchestrator';
 import { requestPermission } from './permission';
 import {
   requestPlanReview,
+  requestClarifications,
   formatPlanForPrompt,
   createPlanCard,
+  clearPlanCardRefining,
   updatePlanCardPhase,
   finalizePlanCard,
   matchPlanPhaseMarker,
+  createQualityGateCard,
   type PlanCardHandle,
 } from './plan';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener } from './TauriToolAdapter';
@@ -36,6 +39,8 @@ import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, type ToolRowHandle } from './toolRow';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, type ThinkingCardHandle } from './thinkingCard';
+import { buildRepairPrompt, buildVerifyCommand, isVerificationCommand, qualityGateEvidence, qualityGateSummary, runProjectQualityGate, type ProjectQualityGateResult } from './projectQualityGate';
+import { repairJsonSource } from '../shared/parseRepair';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { showToast } from '../shared/toast';
 import { t } from '../shared/i18n';
@@ -67,14 +72,10 @@ const TRAP_TYPE_LABELS: Record<TrapWarning['type'], string> = {
 // Mirrors the 100ms streaming-render throttle (markdown.ts).
 const TOOL_CALL_REFRESH_MS = 120;
 
-// Transcript DOM cap: bounds #chat's row count so a long session can't grow
-// the WebView DOM without limit (every bubble, tool row and thinking card stays
-// in memory once appended). Sessions persist to disk, so pruning the oldest
-// rows never loses data — reloading the session restores the full history.
-// A childList observer funnels every append path (live streaming, restore,
-// status bubbles) through one place. Idempotent like wireScrollPin.
-const MAX_TRANSCRIPT_ROWS = 300;
-const transcriptPruneState = new WeakMap<HTMLElement, MutationObserver>();
+// Kept as a compatibility hook for the app shell. Transcript rows must not be
+// removed from the live DOM: deleting them made upward scrolling show missing
+// history and also raced session restore. Performance is handled by throttled
+// rendering instead of destructive transcript pruning.
 
 // ── "New content below" hint ──
 // Auto-scroll pauses once the user scrolls up to re-read history. When new
@@ -138,20 +139,8 @@ export function pickHistoryMessages(
     : messages;
 }
 
-export function wireTranscriptPrune(el: HTMLElement): void {
-  if (transcriptPruneState.has(el)) return;
-  const observer = new MutationObserver(() => {
-    const excess = el.childElementCount - MAX_TRANSCRIPT_ROWS;
-    if (excess <= 0) return;
-    let removed = 0;
-    for (const child of Array.from(el.children)) {
-      if (removed >= excess) break;
-      child.remove();
-      removed++;
-    }
-  });
-  transcriptPruneState.set(el, observer);
-  observer.observe(el, { childList: true });
+export function shouldCancelForEscape(key: string, streaming: boolean): boolean {
+  return streaming && key === 'Escape';
 }
 
 const DEFAULT_BUDGET: BudgetConfig = {
@@ -394,6 +383,10 @@ Output style:
 - COMPLETE runnable artifacts go to disk by default: when the user asks you to BUILD a full game, mini-game, web page/site, app, tool, script, or small project ("写一个小游戏", "做一个网页", "开发一个工具" — even without naming a path), WRITE it to a file instead of printing the whole source inline. Single-file artifact → a new file like index.html / game.html / app.py in the workspace; multi-file project → a new directory with the files. After writing, state the path(s) and how to run/open it.
 - When you do write a file, briefly state where it landed and confirm the user actually wanted persistence; the EXISTENCE of a workspace does NOT imply "save everything to disk".
 
+${SVG_OUTPUT_PROMPT}
+
+${HUMAN_TONE_PROMPT}
+
 Tool-calling rules:
 - NEVER emit tool calls as XML or text (no <tool_calls>, <invoke name="...">, or JSON inside your reply).
 - Tool calls are made ONLY through the function-calling interface, never as visible text.
@@ -593,32 +586,140 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
 // non-streaming call raced against a timeout; on failure/timeout the heuristic
 // plan from analyzeTask() stays as the fallback.
 const PLAN_GENERATION_TIMEOUT_MS = 8000;
-const PLAN_GENERATION_PROMPT = `You are a meticulous planner for an AI coding agent. Break the user's request into 4-8 concrete, ordered, independently verifiable steps that the agent will execute ONE BY ONE. Do NOT invent file contents; steps describe what to do and how success is checked. Respond with ONLY a JSON array — no prose, no code fences — in exactly this shape:
-[{"action": "short verb phrase", "description": "what this step does and why", "expectedOutcome": "how success is verified"}]
+const PLAN_GENERATION_PROMPT = `You are a meticulous planner for an AI coding agent. Break the user's request into 4-8 concrete, ordered steps that the agent will execute ONE BY ONE. Do NOT invent file contents. Write every step in plain language the USER will understand — use natural user-facing verbs and describe what gets done and why, never internal phrasing like "Understand/Plan/Implement/Verify" or "How to". Respond with ONLY a JSON array — no prose, no code fences — in exactly this shape:
+[{"action": "short user-facing label", "description": "what this step achieves, in plain words", "expectedOutcome": "how success looks to the user"}]
 Use the same language as the user's request.`;
 
 export async function generateTaskPlan(
   llm: LLMAdapter,
   userText: string,
   timeoutMs: number = PLAN_GENERATION_TIMEOUT_MS,
+  signal?: AbortSignal,
+  opts: { context?: string; clarifications?: string } = {},
 ): Promise<{ plan: Plan | null; repaired: boolean }> {
   try {
+    if (signal?.aborted) return { plan: null, repaired: false };
+    // Ground the plan in reality: the workspace scan makes steps reference
+    // real files, and the user's clarifying answers become hard constraints.
+    const grounding: string[] = [];
+    if (opts.context) grounding.push(`The current workspace (use real files to make steps concrete):\n${opts.context}`);
+    if (opts.clarifications) grounding.push(`The user confirmed these details — they are hard constraints for the plan:\n${opts.clarifications}`);
     const res = await Promise.race([
       llm.complete(
         [
           { role: 'system', content: PLAN_GENERATION_PROMPT },
-          { role: 'user', content: userText },
+          { role: 'user', content: grounding.length ? `${userText}\n\n${grounding.join('\n\n')}` : userText },
         ],
         [],
       ),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('plan generation timed out')), timeoutMs),
       ),
+      new Promise<never>((_, reject) => {
+        const abort = () => reject(new DOMException('plan generation aborted', 'AbortError'));
+        signal?.addEventListener('abort', abort, { once: true });
+      }),
     ]);
     return parsePlanJsonWithMeta(res.content);
   } catch (err) {
     console.warn('[pure] plan generation failed, falling back to heuristic plan:', (err as Error)?.message ?? err);
     return { plan: null, repaired: false };
+  }
+}
+
+// ── Pre-plan clarifying questions (Freebuff-style interview) ──
+// Ambiguous project requests get 1-3 short questions BEFORE the plan is
+// generated. The LLM decides whether the request is clear enough (returns []),
+// so well-specified requests pay one cheap completion and no dialog.
+const CLARIFY_TIMEOUT_MS = 6000;
+const CLARIFY_PROMPT = `You are the interviewer for an AI coding agent about to build a project. Read the user's request and the workspace context. If the request is missing details that would force you to GUESS and that could change the whole build — such as target platform or tech stack, scope boundaries (what to include or exclude), key constraints, or the deliverable form — ask 1-3 SHORT clarifying questions in the user's language. If the request is already clear enough to build correctly, return an empty array. Respond with ONLY a JSON array of question strings — no prose, no code fences.`;
+
+/** Parse the model's JSON array of question strings (fence-tolerant). */
+export function parseClarifyQuestions(text: string): string[] {
+  if (!text) return [];
+  let cleaned = text.trim();
+  const fence = cleaned.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+  if (fence) cleaned = fence[1].trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    const repaired = repairJsonSource(cleaned);
+    if (!repaired.repaired) return [];
+    try { parsed = JSON.parse(repaired.source); } catch { return []; }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter((q): q is string => typeof q === 'string' && q.trim().length > 0)
+    .map((q) => q.trim());
+}
+
+export async function generateClarifyingQuestions(
+  llm: LLMAdapter,
+  userText: string,
+  context: string,
+  timeoutMs: number = CLARIFY_TIMEOUT_MS,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  try {
+    if (signal?.aborted) return [];
+    const ctx = context ? `Workspace context:\n${context}` : '';
+    const res = await Promise.race([
+      llm.complete(
+        [
+          { role: 'system', content: CLARIFY_PROMPT },
+          { role: 'user', content: [userText, ctx].filter(Boolean).join('\n\n') },
+        ],
+        [],
+      ),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('clarify timed out')), timeoutMs),
+      ),
+      new Promise<never>((_, reject) => {
+        const abort = () => reject(new DOMException('clarify aborted', 'AbortError'));
+        signal?.addEventListener('abort', abort, { once: true });
+      }),
+    ]);
+    return parseClarifyQuestions(res.content).slice(0, 3);
+  } catch (err) {
+    console.warn('[pure] clarifying-question generation skipped:', (err as Error)?.message ?? err);
+    return [];
+  }
+}
+
+/** Build the user-visible Q/A block injected into the run's context. */
+export function formatClarificationBlock(questions: string[], answers: string[]): string {
+  const pairs = questions.map((q, i) => `- ${q} → ${answers[i] ?? '（未回答）'}`).join('\n');
+  return `<user_clarifications>\n以下是你对开工前澄清问题的回答，构建时必须遵守：\n${pairs}\n</user_clarifications>`;
+}
+
+/** Scan the workspace so plan generation and clarifying questions reference
+ * real files instead of guessing. Returns a compact context string, or ''
+ * when there is no workspace / the scan fails (callers degrade gracefully). */
+async function buildWorkspaceContext(workspace: string, config: PureConfig): Promise<string> {
+  if (!workspace) return '';
+  try {
+    const adapter = createToolAdapter(workspace, config);
+    const exec = (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
+      adapter.execute({
+        id: `wsctx_${name}_${Date.now()}`,
+        index: 0,
+        function: { name, arguments: JSON.stringify(args) },
+      });
+    const listing = await exec('list_files', { path: '.', recursive: false });
+    if (!listing.success) return '';
+    const parts: string[] = [`Structure of the workspace root:\n${String(listing.result ?? '').slice(0, 800)}`];
+    // Key manifests give the planner the real stack (scripts, deps, name).
+    const manifests = ['package.json', 'Cargo.toml', 'pyproject.toml', 'requirements.txt', 'README.md'] as const;
+    const reads = await Promise.all(manifests.map((m) => exec('read_file', { path: m })));
+    reads.forEach((r, i) => {
+      if (r.success && typeof r.result === 'string' && r.result.trim()) {
+        parts.push(`${manifests[i]}:\n${r.result.slice(0, 400)}`);
+      }
+    });
+    return parts.join('\n\n').slice(0, 2200);
+  } catch {
+    return '';
   }
 }
 
@@ -823,7 +924,6 @@ export class ChatController {
     const chatEl = document.getElementById('chat')!;
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
-    wireTranscriptPrune(chatEl);
     const config = loadConfig();
     if (!hasConfiguredKey(config)) return;
 
@@ -887,17 +987,16 @@ export class ChatController {
     // own raw text for the final markdown pass on Completed.
     const assistantSegments: Array<{ el: HTMLDivElement; text: string }> = [];
     let currentSegment: { el: HTMLDivElement; text: string } | null = null;
-    // Files/dirs the agent actually wrote this turn (deduped). At Completed they
-    // surface as clickable cards after the final bubble — ≤MAX_CARD_FILES as one
-    // card per artifact, more as a single project-directory card. Collected from
-    // SUCCESSFUL write/edit/replace/create_directory tool results only.
+    // Files the agent actually wrote this turn (deduped). Folders created for
+    // project scaffolding never become result cards. Collected from SUCCESSFUL
+    // write/edit/replace tool results only.
     const turnArtifacts: ArtifactItem[] = [];
     const artifactSeen = new Set<string>();
-    const addArtifact = (path: string, kind: ArtifactItem['kind']): void => {
-      const key = `${kind}:${path}`;
+    const addArtifact = (path: string): void => {
+      const key = path;
       if (artifactSeen.has(key)) return;
       artifactSeen.add(key);
-      turnArtifacts.push({ path, kind });
+      turnArtifacts.push({ path });
     };
     let toolRowSinceSegment = false;
     const createSegment = (): { el: HTMLDivElement; text: string } => {
@@ -1048,6 +1147,9 @@ export class ChatController {
       let userTraps: string | undefined;
       let userBuildProtocol: string | undefined;
       let userPlan: string | undefined;
+      // User's answers to pre-plan clarifying questions — injected into the
+      // run's context so the build honors them as confirmed requirements.
+      let userClarifications: string | undefined;
 
       const llm = createLLMAdapter(config);
       const toolAdapter = createToolAdapter(effectiveWorkspace, config);
@@ -1147,35 +1249,52 @@ export class ChatController {
       // first, one verifiable step at a time, per-step report + verification,
       // next-step recommendation) — composed into the user turn on artifact
       // requests only, so plain Q&A turns don't carry its token cost.
-      if (detectArtifactRequest(userText)) {
+      const projectRequest = detectProjectRequest(userText);
+      if (detectArtifactRequest(userText) || projectRequest) {
         userBuildProtocol = formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT;
       }
 
-      // ── Plan review pre-flight (P1-6): complex tasks get a user-approved
-      // plan before execution. It also applies in the application temporary
-      // workspace when the user has not selected a project directory. An
-      // approved plan becomes a live phase-progress card in the transcript
-      // (approvedPlan below) and the model is told to emit `## 阶段 n/m`
-      // markers so the card can track which phase is running.
+      // ── Plan pre-flight: complex tasks get a plan before execution. It also
+      // applies in the application temporary workspace when the user has not
+      // selected a project directory. An approved plan becomes a live
+      // phase-progress card in the transcript (planCard below) and the
+      // model is told to emit `## 阶段 n/m` markers so the card can track
+      // which phase is running.
       //
       // Smarter behavior: complex multi-step requests first get a CONCRETE
       // plan from the LLM (generateTaskPlan) — real per-task steps replace the
-      // generic heuristic template, so the review card and the live checkoff
-      // card show the actual work ahead. The mode switch (yolo → plan/build)
-      // is surfaced to the user as a status bubble.
-      let approvedPlan: Plan | null = null;
-      if (effectiveWorkspace && (config.skills?.planning ?? true)) {
+      // generic heuristic template, so the live checkoff card shows the actual
+      // work ahead. AUTO-DETECTED complex tasks are acknowledged with a
+      // human-style intro, the plan is listed and executed directly — no
+      // confirmation dialog. Only a plan/build mode the user FORCED keeps the
+      // review dialog (an explicit planning flow the user opted into).
+      // Phase tracker card: created right after the intro so the user sees the
+      // steps immediately (heuristic scaffold), then upgraded in place when the
+      // LLM-generated plan lands — no dead gap between the intro and the card.
+      // `as PlanCardHandle | null`: TS control-flow can't see assignments made
+      // inside the closures below (showPlanCard / discardPlanCard), so without
+      // the widening cast it keeps narrowing the variable to null and the
+      // handlers that read planCard.current would see type `never`.
+      let planCard: PlanCardHandle | null = null as PlanCardHandle | null;
+      const discardPlanCard = (): void => {
+        if (!planCard) return;
+        planCard.el.remove();
+        planCard = null;
+      };
+      if ((effectiveWorkspace && (config.skills?.planning ?? true)) || projectRequest) {
         // Plan review runs when: auto-detected complex task (has a heuristic
         // plan), OR the user forced plan/build mode from the composer. A forced
         // YOLO suppresses review even for complex tasks.
-        const wantsPlan = forcedMode
+        const wantsPlan = projectRequest || (forcedMode
           ? forcedMode === 'plan' || forcedMode === 'build'
-          : analysis.complexity === 'complex' && !!analysis.plan;
+          : analysis.complexity === 'complex' && !!analysis.plan);
         if (wantsPlan) {
+          // 检测到的复杂任务：拟人化开场（承认诉求复杂 → 说明会拆解 → 列计划 → 执行），
+          // 不弹确认框；用户强制指定的计划/构建模式保留原有确认流程。
           const modeBubble = this.addStatusBubble(
             forcedMode
               ? t('plan.modeForced', '🧭 已按你的选择进入 {mode} 模式，正在生成执行计划…').replace('{mode}', modeLabel(analysis.mode))
-              : t('plan.modeSwitch', '🧭 检测到复杂任务，切换为 {mode} 模式，正在生成执行计划…').replace('{mode}', modeLabel(analysis.mode)),
+              : t('plan.humanDetected', '🧭 你这次提的诉求比较复杂，我先把目标拆解成几步，列一份执行计划，然后一步步来做'),
           );
           // Upgrade the heuristic plan with an LLM-generated task-specific one;
           // keep the heuristic result when the generation call fails/times out.
@@ -1184,55 +1303,135 @@ export class ChatController {
           // review card always has steps to show.
           let planForReview: Plan = analysis.plan ?? {
             steps: [
-              { id: '1', action: 'Understand', description: 'Read relevant files and understand what needs to change.', expectedOutcome: 'Clear understanding of the task.' },
-              { id: '2', action: 'Plan', description: 'Design the solution approach and identify files to modify.', expectedOutcome: 'An executable step list.' },
-              { id: '3', action: 'Implement', description: 'Make the changes step by step and verify each one.', expectedOutcome: 'The core work is done.' },
-              { id: '4', action: 'Verify', description: 'Check the result and summarize what changed.', expectedOutcome: 'A verified, usable result.' },
+              { id: '1', action: '了解需求', description: '先弄清任务要达成什么目标，以及有哪些约束条件。', expectedOutcome: '清楚知道要做什么、做到什么程度。' },
+              { id: '2', action: '制定方案', description: '规划实现思路，确定要新建或修改哪些文件。', expectedOutcome: '有一份清晰的实施步骤清单。' },
+              { id: '3', action: '分步实现', description: '按方案一步一步完成改动，每步都检查是否正常。', expectedOutcome: '核心功能按计划完成。' },
+              { id: '4', action: '验证结果', description: '运行检查和测试，确认结果可用，并总结改了什么。', expectedOutcome: '交付验证过的可用成果。' },
             ],
-            reasoning: 'Plan mode was selected manually — working through generic steps.',
+            reasoning: '手动选择了计划模式，按通用步骤推进。',
           };
-          const llmPlan = await generateTaskPlan(llm, userText);
-          // The user may have switched sessions / started a new chat during the
-          // (up-to-8s) generation — abandon this turn before showing anything.
-          if (gen !== this.generation) {
+          // 立即渲染当前步骤（启发式骨架，卡头带「完善中…」动画徽标提示 LLM 正在细化步骤），
+          // LLM 专属计划就绪后原位升级（徽标消失），避免开场白与计划卡之间出现数秒空白等待。
+          // 升级走平滑过渡：旧骨架卡在原地淡出收起，新计划卡插入它原来的位置、淡入滑入，
+          // 而不是生硬替换（尊重系统减弱动态设置——此时直接替换、不做动画）。
+          const showPlanCard = (plan: Plan, refining = false): void => {
+            const old = planCard?.el;
+            planCard = createPlanCard(plan, analysis.mode, refining);
+            planCard.el.classList.add('plan-card-entering');
+            if (old) {
+              const anchor = old.nextSibling;
+              if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+                old.remove();
+              } else {
+                old.classList.add('plan-card-leaving');
+                const finish = (): void => { if (old.isConnected) old.remove(); };
+                old.addEventListener('animationend', finish, { once: true });
+                // Fallback (throttled tab / animation skipped): never leave a ghost.
+                setTimeout(finish, 260);
+              }
+              if (anchor) chatEl.insertBefore(planCard.el, anchor);
+              else chatEl.appendChild(planCard.el);
+            } else {
+              chatEl.appendChild(planCard.el);
+            }
+            scrollChatToBottomIfPinned(chatEl);
+          };
+          showPlanCard(planForReview, true);
+          // Freebuff-style interview: scan the workspace so the plan is
+          // grounded in real files, then ask 1-3 clarifying questions when the
+          // request is ambiguous. Answers constrain BOTH the plan and the run.
+          const wsContext = await buildWorkspaceContext(effectiveWorkspace, config);
+          if (gen !== this.generation || this.abortController?.signal.aborted) {
+            discardPlanCard();
             userBubble.remove();
             return;
           }
-          if (llmPlan.plan) planForReview = llmPlan.plan;
-          const decision = await requestPlanReview({ ...analysis, plan: planForReview, reasoning: planForReview.reasoning });
-          if (decision === 'cancel') {
-            // Cancelled pre-flight leaves no ghost bubbles: remove the
-            // immediately-rendered user bubble along with the mode notice.
+          const clarifyQuestions = await generateClarifyingQuestions(llm, userText, wsContext, CLARIFY_TIMEOUT_MS, this.abortController?.signal);
+          if (gen !== this.generation || this.abortController?.signal.aborted) {
+            discardPlanCard();
             userBubble.remove();
-            modeBubble.remove();
-            return; // finally resets streaming
+            return;
           }
-          if (decision === 'skip') {
-            modeBubble.remove();
+          if (clarifyQuestions.length > 0) {
+            const clarifyAnswers = await requestClarifications(clarifyQuestions);
+            if (gen !== this.generation || this.abortController?.signal.aborted) {
+              discardPlanCard();
+              userBubble.remove();
+              return;
+            }
+            if (clarifyAnswers && clarifyAnswers.length > 0) {
+              userClarifications = formatClarificationBlock(clarifyQuestions, clarifyAnswers);
+              this.addStatusBubble(`📋 已确认 ${clarifyAnswers.length} 个关键问题，正在生成执行计划…`, false, false);
+            }
+          }
+          const llmPlan = await generateTaskPlan(llm, userText, PLAN_GENERATION_TIMEOUT_MS, this.abortController?.signal, { context: wsContext, clarifications: userClarifications });
+          // The user may have switched sessions / started a new chat during the
+          // (up-to-8s) generation — abandon this turn before showing anything.
+          if (gen !== this.generation || this.abortController?.signal.aborted) {
+            discardPlanCard();
+            userBubble.remove();
+            return;
+          }
+          if (llmPlan.plan) {
+            planForReview = llmPlan.plan;
+            // 原位升级：换成任务专属计划，保持「开场白 → 步骤」的连续感。
+            showPlanCard(planForReview);
+          } else if (planCard) {
+            // 计划生成失败/超时回退到启发式骨架：卡片已是最终版，去掉「完善中…」
+            // 徽标，避免执行过程中一直声称还在细化步骤。
+            clearPlanCardRefining(planCard);
+          }
+          const approvePlan = () => {
+            // Inject the validated plan object, never the raw model response.
+            // This keeps repaired JSON out of context while still ensuring the
+            // approved project steps are the instructions the build follows.
+            userPlan = formatPlanForPrompt(planForReview, projectRequest);
+            // Plan is ready: the bubble no longer promises generation.
+            modeBubble.textContent = forcedMode
+              ? t('plan.modeActive', '🧭 已切换为 {mode} 模式，按计划分步执行').replace('{mode}', modeLabel(analysis.mode))
+              : t('plan.humanActive', '✅ 计划列好了，我们按这个顺序一步步来，做完一步打一个勾');
+          };
+          if (forcedMode) {
+            // 用户手动选择计划/构建模式：保留确认弹窗（用户明确进入了规划流程）。
+            const decision = await requestPlanReview(
+              { ...analysis, plan: planForReview, reasoning: planForReview.reasoning },
+              { allowSkip: !projectRequest },
+            );
+            if (decision === 'cancel') {
+              // Cancelled pre-flight leaves no ghost bubbles: remove the
+              // immediately-rendered user bubble, the mode notice and the
+              // scaffold plan card.
+              discardPlanCard();
+              userBubble.remove();
+              modeBubble.remove();
+              return; // finally resets streaming
+            }
+            if (decision === 'skip') {
+              discardPlanCard();
+              modeBubble.remove();
+            } else {
+              approvePlan();
+            }
           } else {
-            approvedPlan = planForReview;
-            // Repaired plan text must NOT re-enter the LLM context window: it
-            // is a reconstruction of the model's broken output, and feeding it
-            // back as "the approved plan" would confuse the very model that
-            // emitted the broken JSON. The review card still shows the steps
-            // for the user; only the context injection is skipped. Injection is
-            // skipped only when the plan being injected IS the repaired LLM
-            // plan — a repaired-but-invalid payload falls back to the heuristic
-            // plan, which is not repaired content and injects as before.
-            if (!(llmPlan.plan && llmPlan.repaired)) userPlan = formatPlanForPrompt(planForReview);
-            // Plan is ready + approved: the bubble no longer promises generation.
-            modeBubble.textContent = t('plan.modeActive', '🧭 已切换为 {mode} 模式，按计划分步执行').replace('{mode}', modeLabel(analysis.mode));
+            // 检测到的复杂任务：拟人化介绍 → 计划卡直接列出步骤 → 无需确认直接执行。
+            approvePlan();
           }
         }
       } else if (forcedMode === 'plan' || forcedMode === 'build') {
         // The plan gate needs a real filesystem root (and the Planning skill);
         // without it a forced plan/build would silently do nothing. Surface the
         // mismatch instead of ignoring the user's mode choice.
-        this.addStatusBubble(
-          effectiveWorkspace
-            ? t('plan.modeDisabled', '🧭 计划/构建模式已被禁用（设置 → Skills → Planning），本次按普通对话继续')
-            : t('plan.modeNoWorkspace', '🧭 计划/构建模式需要先选择工作区，本次按普通对话继续'),
-        );
+        if (!projectRequest) {
+          this.addStatusBubble(
+            effectiveWorkspace
+              ? t('plan.modeDisabled', '🧭 计划/构建模式已被禁用（设置 → Skills → Planning），本次按普通对话继续')
+              : t('plan.modeNoWorkspace', '🧭 计划/构建模式需要先选择工作区，本次按普通对话继续'),
+          );
+        }
+      }
+
+      if (projectRequest && !effectiveWorkspace) {
+        this.addStatusBubble(t('plan.modeNoWorkspace', '🧭 项目构建需要先选择工作区；计划已确认，本次暂不执行'));
       }
 
       // The user bubble was already rendered synchronously at send() start
@@ -1241,12 +1440,13 @@ export class ChatController {
       // Approved execution plan → a compact phase tracker in the transcript:
       // total phase count + which phase is currently running, updated live
       // from the model's `## 阶段 n/m` markers (see formatPlanForPrompt).
-      let planCard: PlanCardHandle | null = null;
-      const planTrack = { seg: null as { el: HTMLDivElement; text: string } | null, scanLen: 0 };
-      if (approvedPlan) {
-        planCard = createPlanCard(approvedPlan, analysis.mode);
-        chatEl.appendChild(planCard.el);
-      }
+  // The plan card was created during the plan gate (hoisted above) — no card
+  // creation here; the transcript already shows the steps.
+  // phaseVerifySeen[n] is true when the model ran a real verification command
+  // (typecheck/tests/build…) and it succeeded while phase n was active.
+  const planTrack = { seg: null as { el: HTMLDivElement; text: string } | null, scanLen: 0, sawPhaseMarker: false, sawVerification: false, phaseVerifySeen: [] as boolean[] };
+      let projectQualityResult: ProjectQualityGateResult | null = null;
+      if (projectRequest && !effectiveWorkspace) return;
       const trackPlanPhase = (seg: { el: HTMLDivElement; text: string }) => {
         if (!planCard) return;
         if (planTrack.seg !== seg) { planTrack.seg = seg; planTrack.scanLen = 0; }
@@ -1255,8 +1455,119 @@ export class ChatController {
         // split across token boundaries ("## 阶段 " + "2/4") is still seen whole.
         const tail = seg.text.slice(Math.max(0, planTrack.scanLen - 24));
         planTrack.scanLen = seg.text.length;
+        if (projectRequest && /验证|通过|测试|构建|检查|verify|verified|test|build|lint|pass(?:ed)?/i.test(tail)) {
+          planTrack.sawVerification = true;
+        }
         const phase = matchPlanPhaseMarker(tail);
-        if (phase) updatePlanCardPhase(planCard, phase);
+        if (phase) {
+          const before = planCard.current;
+          planTrack.sawPhaseMarker = true;
+          updatePlanCardPhase(planCard, phase);
+          // Per-phase verification guard: when the build advances without the
+          // model's own verification evidence for the finished phase, the
+          // automatic backstop runs the project's standard verify command.
+          if (planCard.current > before && projectRequest && !planTrack.phaseVerifySeen[before]) {
+            schedulePhaseBackstop(before);
+          }
+        }
+      };
+      // Phase-end verification backstop (Freebuff-style per-step verify): the
+      // model is told to verify each phase itself, but when it advances anyway
+      // without evidence, we run the stack's standard check once (debounced so
+      // an immediately-following model tool call wins). Failures surface here;
+      // the final delivery gate remains the hard block.
+      let phaseBackstopTimer: number | undefined;
+      const schedulePhaseBackstop = (finishedPhase: number): void => {
+        // Read-only verification commands only run under auto permission mode —
+        // in confirm mode silently executing commands would contradict the
+        // user's explicit choice (the final quality gate still prompts and
+        // blocks delivery there).
+        if (!projectRequest || !effectiveWorkspace || !config.toolCmd || config.permissionMode !== 'auto') return;
+        if (phaseBackstopTimer !== undefined) return; // one watchdog at a time
+        phaseBackstopTimer = window.setTimeout(() => {
+          phaseBackstopTimer = undefined;
+          if (gen !== this.generation || this.abortController?.signal.aborted || !planCard) return;
+          // The model may have run its own verification during the debounce.
+          if (planTrack.phaseVerifySeen[finishedPhase]) return;
+          // Skip if the model's own verification command is still running —
+          // avoid two concurrent test/typecheck runs on the same workspace.
+          for (const entry of pendingRows.values()) {
+            if (entry.toolName === 'execute_command' &&
+                isVerificationCommand(String(entry.args?.command ?? '')) &&
+                entry.row.details.classList.contains('pending')) {
+              return;
+            }
+          }
+          void (async () => {
+            try {
+              const adapter = createToolAdapter(effectiveWorkspace, config);
+              const res = await adapter.execute({
+                id: `phase_verify_${finishedPhase}_${Date.now()}`,
+                index: 0,
+                function: { name: 'execute_command', arguments: JSON.stringify({ command: buildVerifyCommand() }) },
+              }, this.abortController?.signal);
+              if (gen !== this.generation || this.abortController?.signal.aborted) return;
+              const out = String(res.result ?? '');
+              const ok = res.success && !out.includes('[verify-unavailable]') && !out.includes('[verify-not-applicable]');
+              this.addStatusBubble(
+                ok
+                  ? `✅ 阶段 ${finishedPhase} 自动验证通过`
+                  : `⛔ 阶段 ${finishedPhase} 自动验证未通过，最终交付检查将阻止交付`,
+                !ok, !ok,
+              );
+              scrollChatToBottomIfPinned(chatEl);
+            } catch {
+              // The backstop must never break the running turn.
+            }
+          })();
+        }, 1400);
+      };
+      const turnSignal = this.abortController.signal;
+      const runQualityRepair = async (
+        messages: Message[],
+        failedGate: ProjectQualityGateResult,
+      ): Promise<{ completed: boolean; messages: Message[]; output: string }> => {
+        const repairPrompt = buildRepairPrompt(failedGate);
+        this.addStatusBubble('🛠️ 修复阶段：agent 正在根据真实检查结果修复并重新验证…', true);
+        const repairSegment = createSegment();
+        const repairEvents = codingAgent.continueTurn(systemPrompt, messages, repairPrompt, turnSignal);
+        let output = '';
+        let latestMessages = messages;
+        let repairToolCount = 0;
+        for await (const repairEvent of repairEvents) {
+          if (gen !== this.generation || turnSignal.aborted) return { completed: false, messages: latestMessages, output };
+          if (repairEvent.type === 'TokenDelta' && !repairEvent.payload.isToolCall && repairEvent.payload.content) {
+            output += repairEvent.payload.content;
+            repairSegment.text = output;
+            if (streamingRenderEnabled) {
+              scheduleStreamingRender(output, repairSegment.el, () => scrollChatToBottomIfPinned(chatEl));
+            } else {
+              repairSegment.el.textContent = output;
+            }
+          } else if (repairEvent.type === 'ToolResult') {
+            repairToolCount++;
+            const ok = repairEvent.payload.result.success;
+            toolResults.set(repairEvent.payload.toolCallId, {
+              toolName: repairEvent.payload.toolName,
+              success: ok,
+              duration: repairEvent.payload.duration,
+              resultText: typeof repairEvent.payload.result.result === 'string' ? repairEvent.payload.result.result.slice(0, 800) : repairEvent.payload.result.error,
+            });
+            this.recordToolActivity(repairEvent.payload.toolName, undefined, ok);
+            this.addStatusBubble(`${ok ? '🔧✅' : '🔧⛔'} 修复工具 ${repairEvent.payload.toolName}：${ok ? '已完成' : repairEvent.payload.result.error ?? '失败'}`, !ok, !ok);
+            scrollChatToBottomIfPinned(chatEl);
+          } else if (repairEvent.type === 'Completed') {
+            latestMessages = repairEvent.payload.messages ?? latestMessages;
+            if (!output && repairEvent.payload.finalOutput) {
+              output = repairEvent.payload.finalOutput;
+              repairSegment.text = output;
+            }
+            return { completed: !repairEvent.payload.interrupted, messages: latestMessages, output };
+          } else if (repairEvent.type === 'Error' || repairEvent.type === 'Interrupted') {
+            return { completed: false, messages: latestMessages, output };
+          }
+        }
+        return { completed: false, messages: latestMessages, output };
       };
       // Surface detected logical traps as a neutral notice (not an error): the
       // agent will verify the premise before executing.
@@ -1265,7 +1576,10 @@ export class ChatController {
         this.addStatusBubble(`⚠️ 检测到请求中可能包含逻辑陷阱（${labels}）— 将先验证前提，若前提有误会换思路处理`);
       }
       // Eager thinking indicator: the user sees the animation while waiting
-      // for the first token; reasoning deltas upgrade it with live text.
+      // for the first token; reasoning deltas upgrade it with live text. Note
+      // this is the ONLY thinking card creation point for a turn — opening it
+      // again just before the engine loop (as well as in ReasoningDelta while
+      // it is still live) duplicated the "思考…" row.
       thinkingCard = openThinkingCard();
       // A new user turn is explicit intent to continue at the bottom: re-pin
       // even if the user had scrolled up to re-read history (the pin normally
@@ -1300,7 +1614,7 @@ export class ChatController {
         }
       }
 
-      const userTurn = composeUserTurn(userText, { traps: userTraps, buildProtocol: userBuildProtocol, plan: userPlan });
+      const userTurn = composeUserTurn(userText, { traps: userTraps, buildProtocol: userBuildProtocol, plan: userPlan, clarifications: userClarifications });
       // Hand the background pre-compacted window (when it matches the current
       // session + message state) to continueTurn instead of the full history:
       // the in-engine trim then short-circuits (already under threshold) and
@@ -1310,10 +1624,10 @@ export class ChatController {
         sendSessionId, this.messages,
       );
       const events = this.hasHistory
-        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, this.abortController.signal)
-        : codingAgent.run(systemPrompt, userTurn, this.abortController.signal);
-
+        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal)
+        : codingAgent.run(systemPrompt, userTurn, turnSignal);
       for await (const event of events) {
+
         // Session switched mid-stream (sidebar click / new chat): stop writing
         // into the new transcript immediately. The engine is aborted via
         // cancel() (main.ts loadAndDisplaySession), so no events remain — this
@@ -1490,6 +1804,15 @@ export class ChatController {
             });
             // Feed the session's activity history (search / file / command records).
             const resultArgs = (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args;
+            // Per-phase verification evidence: credit the phase that was active
+            // when the model's own verification command succeeded, so the
+            // automatic backstop knows the phase was really checked.
+            if (planCard && projectRequest && event.payload.toolName === 'execute_command') {
+              const cmd = String(resultArgs?.command ?? '');
+              if (isVerificationCommand(cmd) && event.payload.result.success) {
+                planTrack.phaseVerifySeen[planCard.current] = true;
+              }
+            }
             this.recordToolActivity(
               toolName,
               resultArgs,
@@ -1499,13 +1822,11 @@ export class ChatController {
             // successful writes count (a failed write_file created nothing).
             if (event.payload.result.success && resultArgs) {
               if (toolName === 'write_file' || toolName === 'edit_file') {
-                if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) addArtifact(resultArgs.path, 'file');
+                if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) addArtifact(resultArgs.path);
               } else if (toolName === 'replace_files' && Array.isArray(resultArgs.files)) {
                 for (const f of resultArgs.files) {
-                  if (typeof f === 'string' && f.trim()) addArtifact(f, 'file');
+                  if (typeof f === 'string' && f.trim()) addArtifact(f);
                 }
-              } else if (toolName === 'create_directory') {
-                if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) addArtifact(resultArgs.path, 'dir');
               }
             }
             // Finalize the matching pending row — keyed by toolCallId (the
@@ -1551,7 +1872,52 @@ export class ChatController {
 
           case 'Completed': {
             endThinking();
-            if (planCard) finalizePlanCard(planCard);
+            let completionMessages = event.payload.messages ?? this.messages;
+            let qualityRepairOutput = '';
+            let qualityRepairRan = false;
+            if (projectRequest && !event.payload.interrupted && gen === this.generation) {
+              // Keep the turn visibly interruptible while review/audit/tests run.
+              // The stop button and Escape both route to this same AbortSignal.
+              // The verification steps render as a live checklist card (review →
+              // audit → verify) so the user sees what will be tested/audited and
+              // watches each step get checked off as it completes.
+              const gateCard = createQualityGateCard();
+              chatEl.appendChild(gateCard.el);
+              const runGate = async (): Promise<ProjectQualityGateResult> => runProjectQualityGate(codingAgent.toolRegistry, {
+                signal: turnSignal,
+                onPhase: (phase, status, summary) => {
+                  if (gen !== this.generation || this.abortController?.signal.aborted) return;
+                  gateCard.set(phase, status, summary);
+                  scrollChatToBottomIfPinned(chatEl);
+                },
+              });
+              projectQualityResult = await runGate();
+              if (gen !== this.generation || this.abortController?.signal.aborted) return;
+              if (!projectQualityResult.passed && !turnSignal.aborted) {
+                const repair = await runQualityRepair(completionMessages, projectQualityResult);
+                qualityRepairRan = repair.completed;
+                completionMessages = repair.messages;
+                qualityRepairOutput = repair.output;
+                if (repair.completed && gen === this.generation) {
+                  this.addStatusBubble('🔁 复查阶段：修复完成，重新执行全部质量门禁…', true);
+                  gateCard.reset();
+                  projectQualityResult = await runGate();
+                  if (gen !== this.generation || this.abortController?.signal.aborted) return;
+                }
+              }
+              if (gen !== this.generation) return;
+              this.addStatusBubble(qualityGateEvidence(projectQualityResult, qualityRepairRan), !projectQualityResult.passed, !projectQualityResult.passed);
+              if (!projectQualityResult.passed) {
+                this.addStatusBubble(`⛔ 项目暂不交付：${qualityGateSummary(projectQualityResult)}`, false, true);
+              } else {
+                this.addStatusBubble('✅ 修复/复查完成：项目质量门禁全部通过', false, false);
+              }
+            }
+            if (projectQualityResult && completionMessages && gen === this.generation) {
+              completionMessages = [...completionMessages, { role: 'assistant', content: qualityGateEvidence(projectQualityResult, qualityRepairRan) }];
+            }
+            const qualityPassed = !projectRequest || (projectQualityResult?.passed === true && gen === this.generation);
+            if (planCard && qualityPassed && (!projectRequest || (planTrack.sawPhaseMarker && planTrack.sawVerification && planCard.current >= planCard.total))) finalizePlanCard(planCard);
             // Cancel any throttled streaming render on every segment so a
             // late-firing tick from before completion cannot race with the
             // final pipeline below.
@@ -1581,14 +1947,14 @@ export class ChatController {
                 scrollChatToBottomIfPinned(chatEl);
               });
             }
-            if (event.payload.messages) {
-              finalMessages = event.payload.messages;
-              this.messages = event.payload.messages;
+            if (completionMessages) {
+              finalMessages = completionMessages;
+              this.messages = completionMessages;
               this.hasHistory = true;
               // Background pre-compaction: trim + LLM-summarize the now-complete
               // transcript in the idle window so the next send is not blocked.
               this.preCompactedMessages = null;
-              this.preCompactInBackground(systemPrompt, event.payload.messages, gen, codingAgent);
+              this.preCompactInBackground(systemPrompt, completionMessages, gen, codingAgent);
             }
             // Merge this turn's billing usage into the session totals, then
             // persist + refresh the right-panel 统计 tab.
@@ -1604,10 +1970,12 @@ export class ChatController {
             // round-trip). A failed verdict does NOT rewrite the answer the
             // user just read; it only appends a neutral suggestion bubble.
             // Skipped on interrupted turns (user Stop) and stale generations.
-            const verifyOutput = event.payload.finalOutput ||
-              assistantSegments.map(s => s.text).filter(Boolean).join('\n\n');
+            const qualityEvidence = projectQualityResult ? qualityGateEvidence(projectQualityResult, qualityRepairRan) : '';
+            const verifyOutput = [event.payload.finalOutput, qualityRepairOutput, qualityEvidence, assistantSegments.map(s => s.text).filter(Boolean).join('\n\n')]
+              .filter(Boolean)
+              .join('\n\n');
             if (llmVerifyVerifier && verifyOutput && !event.payload.interrupted && gen === this.generation) {
-              const verifyCtx = event.payload.messages ?? this.messages;
+              const verifyCtx = completionMessages ?? this.messages;
               // Only append the suggestion while the transcript is still at the
               // completed answer: if the user has already sent a follow-up, a
               // late-arriving bubble would land out of chronological order.
@@ -1629,7 +1997,7 @@ export class ChatController {
             // few (open with default app / reveal in file manager), collapsing to
             // a single project-directory card when many. Skipped on stale
             // generations (user switched sessions while the turn was streaming).
-            if (gen === this.generation && turnArtifacts.length > 0) {
+            if (gen === this.generation && (!projectRequest || projectQualityResult?.passed === true) && turnArtifacts.length > 0) {
               const artifactRow = document.createElement('div');
               artifactRow.className = 'bubble-row artifact-row';
               chatEl.appendChild(artifactRow);

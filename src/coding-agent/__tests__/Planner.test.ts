@@ -3,7 +3,7 @@
 // and the logical-trap detection that primes premise verification.
 
 import { describe, it, expect } from 'bun:test';
-import { Planner, formatTrapPrompt, parsePlanJson, parsePlanJsonWithMeta } from '../Planner';
+import { Planner, detectProjectRequest, formatTrapPrompt, parsePlanJson, parsePlanJsonWithMeta } from '../Planner';
 
 describe('Planner', () => {
   it('classifies straightforward tasks as simple (no plan, yolo mode)', () => {
@@ -19,7 +19,18 @@ describe('Planner', () => {
     expect(r.mode).toBe('plan');
     expect(r.plan).toBeDefined();
     expect(r.plan!.steps.length).toBeGreaterThan(0);
-    expect(r.plan!.steps[0]).toMatchObject({ action: 'Understand' });
+    expect(r.plan!.steps[0]).toMatchObject({ action: '了解需求' });
+  });
+
+  it('writes heuristic plan steps in user-facing language, not internal labels', () => {
+    // The fallback plan shown in the review card must read like plain
+    // instructions for the user, never internal jargon (Understand/Plan/
+    // Implement/Verify, How to…).
+    const r = new Planner().analyzeTask('重构整个项目');
+    const all = r.plan!.steps.map((s) => `${s.action} ${s.description}`).join(' ');
+    expect(all).not.toMatch(/\b(Understand|Plan|Implement|Verify|How to)\b/i);
+    expect(r.plan!.steps[0].action).toBe('了解需求');
+    expect(r.plan!.steps.map((s) => s.action)).toEqual(['了解需求', '制定方案', '分步实现', '验证结果']);
   });
 
   it('classifies multi-file scope as complex', () => {
@@ -31,6 +42,22 @@ describe('Planner', () => {
   it('treats plain questions as simple even with file mentions', () => {
     const r = new Planner().analyzeTask('What does this file do?');
     expect(r.complexity).toBe('simple');
+  });
+
+  it('forces a plan for short explicit project-creation requests', () => {
+    expect(detectProjectRequest('帮我创建一个项目')).toBe(true);
+    expect(new Planner().analyzeTask('帮我创建一个项目').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('帮我创建一个项目').mode).toBe('build');
+    expect(detectProjectRequest('怎么创建一个项目？')).toBe(false);
+    expect(new Planner().analyzeTask('怎么创建一个项目？').complexity).toBe('simple');
+  });
+
+  it('recognizes English project creation while excluding questions and project docs', () => {
+    expect(new Planner().analyzeTask('Create a project for a habit tracker.').mode).toBe('build');
+    expect(new Planner().analyzeTask('Build a website for the team dashboard.').mode).toBe('build');
+    expect(new Planner().analyzeTask('How do I create a project?').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('Write a project plan document.').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('帮我创建一个项目的技术方案。').complexity).toBe('simple');
   });
 
   it('classifies Chinese large-project requests as complex', () => {

@@ -6,7 +6,7 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { ChatController, bindAssistantBubbleCopy, wireTranscriptPrune } from './chat';
+import { ChatController, bindAssistantBubbleCopy, shouldCancelForEscape } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { getStoredThinkingSegments, groupFileWrites, type StoredMessage, type ToolExecMeta } from './store';
@@ -554,7 +554,11 @@ function applySavedAppearance() {
     cfg.density === 'compact' ? '8px' : cfg.density === 'spacious' ? '16px' : '12px');
 }
 
+let sessionRestoreToken = 0;
+
 async function renderSessionMessages(messages: StoredMessage[]) {
+  const restoreToken = ++sessionRestoreToken;
+  const isCurrentRestore = (): boolean => restoreToken === sessionRestoreToken;
   enterChatMode();
   chat.loadFromStorage(messages);
 
@@ -564,7 +568,6 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   // one-shot restore scroll joins the shared rAF budget instead of forcing a
   // synchronous full-transcript layout at the end of the restore.
   wireScrollPin(chatEl);
-  wireTranscriptPrune(chatEl);
   // Loading notice while the transcript replays: a long session restores
   // bubble-by-bubble with rAF yields (seconds), so without feedback the app
   // looks frozen. Removed in the finally below on success or failure.
@@ -584,6 +587,7 @@ async function renderSessionMessages(messages: StoredMessage[]) {
 
   try {
   for (const m of messages) {
+    if (!isCurrentRestore()) return;
     if (m.role === 'tool' && m.toolExec) {
       toolExecs.push(m.toolExec);
       continue;
@@ -604,11 +608,13 @@ async function renderSessionMessages(messages: StoredMessage[]) {
       bindAssistantBubbleCopy(bubble);
       wrapper.appendChild(bubble);
       chatEl.appendChild(wrapper);
-      // Same leaked-<tool_calls> filter as live streaming; re-scroll once the
-      // async diagram pass settles so restored content is never hidden.
-      void renderMarkdown(stripToolCallXml(m.content), bubble).then(() => {
-        scrollChatToBottomIfPinned(chatEl);
-      });
+      // Render one assistant message at a time. Awaiting here prevents a long
+      // restore from starting many synchronous markdown/highlight passes in one
+      // call stack, which previously starved input and made older rows appear
+      // blank until the user scrolled.
+      await renderMarkdown(stripToolCallXml(m.content), bubble);
+      if (!isCurrentRestore()) return;
+      scrollChatToBottomIfPinned(chatEl);
     } else if (m.role === 'user' && m.content) {
       flushToolExecs(toolExecs, chatEl);
       toolExecs.length = 0;
@@ -630,11 +636,14 @@ async function renderSessionMessages(messages: StoredMessage[]) {
     }
     // Let the browser paint + process input between bubbles.
     await yieldToUI();
+    if (!isCurrentRestore()) return;
   }
+  if (!isCurrentRestore()) return;
   flushToolExecs(toolExecs, chatEl);
   } finally {
     loadingRow.remove();
   }
+  if (!isCurrentRestore()) return;
   // A session restore rebuilds the transcript from scratch, so it always
   // lands at the newest content — force the pin state the same way a fresh
   // stream would, then scroll through the shared coalesced helper.
@@ -811,9 +820,43 @@ function bindDraftDoubleClickCopy(input: HTMLTextAreaElement): void {
 bindDraftDoubleClickCopy(promptEl);
 bindDraftDoubleClickCopy(landingPrompt);
 
+// Explicit copy button in each composer's tool row: one click copies the whole
+// draft (no manual select-all needed). The button mirrors the attach button's
+// ghost-icon look and is disabled while the input is empty.
+function bindComposerCopyButton(btnId: string, input: HTMLTextAreaElement): void {
+  const btn = document.getElementById(btnId) as HTMLButtonElement | null;
+  if (!btn) return;
+  const sync = (): void => {
+    btn.disabled = !input.value.trim();
+  };
+  btn.addEventListener('click', async () => {
+    const text = input.value;
+    if (!text) return;
+    const copied = await copyTextToClipboard(text);
+    showToast(copied ? t('input.copied') : t('input.copyFailed'));
+    // Keep the textarea selection intact after copying so the user can see
+    // exactly what was copied.
+  });
+  input.addEventListener('input', sync);
+  input.addEventListener('keyup', sync);
+  sync();
+}
+
+bindComposerCopyButton('copy-btn', promptEl);
+bindComposerCopyButton('landing-copy-btn', landingPrompt);
+
 // Oversized pastes are intercepted here (both inputs) and become file chips.
 promptEl.addEventListener('paste', (e) => { pasteChips.consumePaste(e); });
 landingPrompt.addEventListener('paste', (e) => { pasteChips.consumePaste(e); });
+
+document.addEventListener('keydown', (e) => {
+  if (e.defaultPrevented || document.querySelector('.bubble-row.inline-card')) return;
+  if (shouldCancelForEscape(e.key, chat.isStreaming())) {
+    e.preventDefault();
+    queuedWhileStreaming = null;
+    chat.cancel();
+  }
+});
 
 promptEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {

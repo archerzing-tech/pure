@@ -1,7 +1,8 @@
 // src/ui/__tests__/chat.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, generateTaskPlan, pickHistoryMessages, BASE_SYSTEM_PROMPT } from '../chat';
+import { readFileSync } from 'node:fs';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, generateTaskPlan, parseClarifyQuestions, generateClarifyingQuestions, pickHistoryMessages, BASE_SYSTEM_PROMPT, shouldCancelForEscape } from '../chat';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 // Regression guard for the layered prompt (promptLayers.ts): a past splice
 // bug doubled the "Output style:" header in the composed GUI base prompt.
@@ -170,6 +171,68 @@ describe('generateTaskPlan (LLM task-specific plan generation)', () => {
   });
 });
 
+describe('Escape cancellation guard', () => {
+  it('only cancels a live turn for Escape', () => {
+    expect(shouldCancelForEscape('Escape', true)).toBe(true);
+    expect(shouldCancelForEscape('Enter', true)).toBe(false);
+    expect(shouldCancelForEscape('Escape', false)).toBe(false);
+  });
+
+  it('does not produce a plan after the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const llm = {
+      complete: async () => ({ content: '[{"action":"x","description":"x","expectedOutcome":"x"}]' }),
+    } as any;
+    expect((await generateTaskPlan(llm, 'build', 10, controller.signal)).plan).toBeNull();
+  });
+});
+
+describe('parseClarifyQuestions (pre-plan interview)', () => {
+  it('parses a plain JSON array of questions', () => {
+    expect(parseClarifyQuestions('["用什么技术栈？","覆盖哪些场馆？"]')).toEqual(['用什么技术栈？', '覆盖哪些场馆？']);
+  });
+
+  it('parses fenced output and drops empty entries', () => {
+    expect(parseClarifyQuestions('```json\n["Q1", "", "Q2"]\n```')).toEqual(['Q1', 'Q2']);
+  });
+
+  it('returns [] on garbage, non-array output, or empty input', () => {
+    expect(parseClarifyQuestions('sorry, the request is clear')).toEqual([]);
+    expect(parseClarifyQuestions('{"plan": []}')).toEqual([]);
+    expect(parseClarifyQuestions('')).toEqual([]);
+  });
+});
+
+describe('generateClarifyingQuestions (pre-plan interview)', () => {
+  function fakeLlm(content: string): LLMAdapter {
+    return {
+      async *stream() { yield { type: 'content', content } as any; },
+      async complete(): Promise<LLMResponse> { return { content, toolCalls: undefined }; },
+    } as LLMAdapter;
+  }
+
+  it('returns questions when the request is ambiguous', async () => {
+    const llm = fakeLlm('["目标平台是什么？","覆盖哪些场馆？"]');
+    expect(await generateClarifyingQuestions(llm, '创建一个保障项目', '')).toEqual(['目标平台是什么？', '覆盖哪些场馆？']);
+  });
+
+  it('returns [] when the request is clear enough (empty array)', async () => {
+    const llm = fakeLlm('[]');
+    expect(await generateClarifyingQuestions(llm, '写一个 hello world 网页', '')).toEqual([]);
+  });
+
+  it('returns [] on malformed output and on timeout (never blocks the turn)', async () => {
+    const bad = fakeLlm('no questions needed');
+    expect(await generateClarifyingQuestions(bad, 'x', '')).toEqual([]);
+    const hang: LLMAdapter = {
+      async *stream() { yield { type: 'content', content: '[]' } as any; },
+      complete: () => new Promise(() => {}),
+    } as LLMAdapter;
+    expect(await generateClarifyingQuestions(hang, 'x', '', 10)).toEqual([]);
+  });
+});
+
 describe('pickHistoryMessages (background pre-compaction reuse)', () => {
   const full: Message[] = [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }];
   const window: Message[] = [
@@ -192,5 +255,52 @@ describe('pickHistoryMessages (background pre-compaction reuse)', () => {
   it('falls back when the message count changed (new turn already appended)', () => {
     const grown: Message[] = [...full, { role: 'user', content: 'c' }];
     expect(pickHistoryMessages(window, 's1', 2, 's1', grown)).toBe(grown);
+  });
+});
+
+// Plan-gate timing contract (user-facing): on a detected complex task, the
+// scaffold plan-progress card must render SYNCHRONOUSLY right after the
+// humanized intro — before ANY LLM round-trip in the gate — so the transcript
+// never sits with an intro but no steps while the model generates the
+// task-specific plan. The card then upgrades in place when the plan lands.
+describe('plan-gate timing (scaffold card before LLM calls)', () => {
+  it('renders showPlanCard(planForReview) before the first await in the gate', () => {
+    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const scaffold = src.indexOf('showPlanCard(planForReview, true);');
+    const firstAwait = Math.min(
+      src.indexOf('await buildWorkspaceContext('),
+      src.indexOf('await generateClarifyingQuestions('),
+      src.indexOf('await generateTaskPlan('),
+    );
+    expect(scaffold).toBeGreaterThan(-1);
+    expect(firstAwait).toBeGreaterThan(-1);
+    expect(scaffold).toBeLessThan(firstAwait);
+  });
+
+  it('shows the refining badge on the scaffold card and drops it on the LLM upgrade', () => {
+    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    // The scaffold card is created with refining=true (LLM still generating the
+    // task-specific plan) and the in-place upgrade with refining=false.
+    const scaffoldCall = src.indexOf('showPlanCard(planForReview, true);');
+    expect(scaffoldCall).toBeGreaterThan(-1);
+    // Match the upgrade call exactly (the `;\n` disambiguates it from the
+    // prefix of the longer scaffold call above).
+    const upgrade = src.indexOf('showPlanCard(planForReview);\n');
+    expect(upgrade).toBeGreaterThan(scaffoldCall);
+    // createPlanCard must forward the flag so the badge renders.
+    expect(src).toMatch(/createPlanCard\(plan, analysis\.mode, refining\)/);
+  });
+
+  it('upgrades the card in place with a fade/slide handoff, not an abrupt swap', () => {
+    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    // Old scaffold animates out (plan-card-leaving), the new card animates in
+    // (plan-card-entering), and the new card is inserted exactly where the old
+    // one sat (old.nextSibling anchor) so the transcript order is preserved.
+    expect(src).toMatch(/plan-card-leaving/);
+    expect(src).toMatch(/plan-card-entering/);
+    expect(src).toMatch(/old\.nextSibling/);
+    // The old card is always removed (animationend or a timeout fallback), so
+    // the handoff can never leave a ghost card behind.
+    expect(src).toMatch(/if \(old\.isConnected\) old\.remove\(\);/);
   });
 });

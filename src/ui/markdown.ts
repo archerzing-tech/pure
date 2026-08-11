@@ -685,12 +685,14 @@ function bindPumlFallbacks(container: HTMLElement): void {
 // ── Inline SVG (```svg blocks) ──
 
 /**
- * Split a fenced SVG source into independent top-level documents. Models often
- * answer a "make two options" request with two root `<svg>` elements inside
- * one ` ```svg ` block; keeping both roots in one preview makes each icon
- * shrink into the same card. Nested SVGs stay inside their owning root.
- * Malformed/unclosed input is returned as one source so the existing repair
- * path can handle it instead of silently dropping part of the diagram.
+ * Split a fenced SVG source into independent top-level documents. The system
+ * prompt (SVG_OUTPUT_PROMPT) tells multi-image requests to emit one ```svg
+ * block per image; this splitter is the fallback for models that still answer
+ * a "make two options" request with two root `<svg>` elements inside one
+ * block — keeping both roots in one preview would shrink each into the same
+ * card. Nested SVGs stay inside their owning root. Malformed/unclosed input
+ * is returned as one source so the existing repair path can handle it
+ * instead of silently dropping part of the diagram.
  */
 export function splitTopLevelSvgSources(source: string): string[] {
   const trimmed = source.trim();
@@ -1432,6 +1434,13 @@ export function stripToolCallXml(text: string): string {
  * (hljs), inline mermaid diagrams, and inline `<img>` PlantUML diagrams.
  */
 export async function renderMarkdown(text: string, container: HTMLElement): Promise<void> {
+  // Yield before the expensive parse/sanitize/highlight pipeline. Without this
+  // first yield, a large completed answer can monopolize the WebView long enough
+  // to freeze buttons and make Escape appear ineffective.
+  await new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 0);
+  });
   // 1) Parse to HTML synchronously (renders fenced-code overrides inline).
   // marked always appends a trailing \n; trim it — with white-space:pre-wrap on
   // the bubble, that trailing newline would render as a visible blank line.

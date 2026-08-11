@@ -9,6 +9,8 @@ import {
   COMPLETION_PROMPT,
   TYPO_TOLERANCE_PROMPT,
   LOGICAL_TRAPS_PROMPT,
+  SVG_OUTPUT_PROMPT,
+  HUMAN_TONE_PROMPT,
   FILE_TOOLS_CORE,
   composeUserTurn,
   stripUserTurnContext,
@@ -41,6 +43,25 @@ describe('L1 behavior contracts', () => {
     expect(TYPO_TOLERANCE_PROMPT).toContain('Smart typo tolerance');
     expect(LOGICAL_TRAPS_PROMPT).toContain('Logical traps & approach switching');
   });
+
+  it('tells multi-image requests to emit one SVG per image (never a collage)', () => {
+    expect(SVG_OUTPUT_PROMPT).toContain('MULTIPLE images');
+    expect(SVG_OUTPUT_PROMPT).toContain('ONE separate fenced code block tagged svg PER image');
+    expect(SVG_OUTPUT_PROMPT).toContain('NEVER combine several subjects into a single <svg>');
+    expect(SVG_OUTPUT_PROMPT).toContain('NO prose between them');
+  });
+
+  it('asks for a human, conversational tone without canned boilerplate', () => {
+    expect(HUMAN_TONE_PROMPT).toContain('Communication tone');
+    expect(HUMAN_TONE_PROMPT).toContain('human colleague');
+    expect(HUMAN_TONE_PROMPT).toContain('canned');
+    expect(HUMAN_TONE_PROMPT).toContain('conversationally');
+  });
+
+  it('reports finished work like a colleague, not a changelog', () => {
+    expect(HUMAN_TONE_PROMPT).toContain('report back the way a colleague would');
+    expect(HUMAN_TONE_PROMPT).toContain('changelog-style list');
+  });
 });
 
 describe('composeUserTurn (L2)', () => {
@@ -67,6 +88,13 @@ describe('composeUserTurn (L2)', () => {
     const out = composeUserTurn('proceed', { plan: '## Execution plan\n1. Do' });
     expect(out).toContain('## Execution plan\n1. Do');
     expect(out.endsWith('proceed')).toBe(true);
+  });
+
+  it('includes clarifying answers as hard constraints before the request', () => {
+    const out = composeUserTurn('build it', { clarifications: '<user_clarifications>平台：Web</user_clarifications>' });
+    expect(out.startsWith('<task_context>')).toBe(true);
+    expect(out).toContain('<user_clarifications>平台：Web</user_clarifications>');
+    expect(out.endsWith('build it')).toBe(true);
   });
 
   it('ignores empty fragments', () => {

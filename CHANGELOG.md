@@ -1,0 +1,104 @@
+# Changelog
+
+All notable changes to **Pure**. Each release's section is shown as the GitHub
+release summary when publishing (see `.github/workflows/release.yml`).
+
+## v1.9.0
+
+**拟人化协作体验（像同事一样干活）**
+
+- 检测到复杂任务时不再弹确认框：拟人化开场（「你这次提的诉求比较复杂，我先把目标拆解成几步…」）→ 计划卡直接列出步骤 → 无需确认逐步执行，做完一步打一个勾；中途随时可 Esc / 停止中断
+- 全局拟人化沟通基调：像一位靠谱的同事一样自然交流，杜绝「我来分析一下这个问题」「好的，以下是…」式开场白套话；含糊诉求先用大白话承认再拆解，追问像问朋友一样自然
+- 项目构建完成时像同事一样汇报：用几句话讲清做了什么、能跑什么、接下来可以试什么，而不是列 changelog 式的清单
+
+**计划卡体验升级**
+
+- 计划卡零等待出现：开场白后立即渲染启发式骨架步骤（不依赖 LLM 往返），避免数秒空白等待
+- LLM 专属计划就绪后原位平滑升级：旧卡在原位置淡出收起、新步骤逐条淡入滑入，视觉连续不生硬
+- 「完善中…」徽标每 3 秒轮换提示文案：正在参考工作区文件 → 正在分析你的需求 → 正在生成专属执行计划，等待期更有信息量；定时器双重清理零泄漏
+- 计划生成失败/超时自动回退到骨架计划并移除完善中状态，不会误导
+
+**多图渲染**
+
+- 新增多 SVG 并排输出契约：要求模型「每张图一个独立 ```svg 代码块、禁止把多个主体塞进同一张图、代码块紧挨输出」；GUI 自动把相邻代码块收进并排网格，每张各占聊天宽度一半、一行排开
+
+**自定义供应商（上一版未发布，随本版一同发布）**
+
+- 「用户自定义」快捷预设：点击一键生成空白供应商卡片，与 OpenAI / OpenRouter / NVIDIA NIM / Ollama 并列展示；选中后在配置卡填写名称 / Base URL / 模型 / API Key
+- 模型列表一键自动获取（/v1/models），默认模型自动填入；未配置的供应商红色醒目提示「⚠ 未配置」
+- 供应商卡片悬停右上角出现删除 ×，可随时删除；删除当前选中的供应商自动回退默认配置
+
+**Freebuff 式项目构建流程（上一版未发布，随本版一同发布）**
+
+- 规划前澄清提问：含糊的项目需求先弹 1–3 个关键问题让用户确认，回答作为硬约束注入计划与构建上下文
+- 计划基于代码库生成：生成前扫描工作区目录结构与 package.json / Cargo.toml / README 等清单，步骤引用真实文件
+- 逐步构建强制验证：每个阶段真实运行验证命令并报告输出，验证缺失自动补跑（仅自动权限模式）
+- 交付前测试与审计清单卡：按 代码审查 → 依赖/安全审计 → 自动化验证 逐条打钩，失败进入修复→复查循环
+
+**发布流程**
+
+- 变更日志迁移到独立 CHANGELOG.md，GitHub Release 摘要自动提取对应版本章节 + 下载说明；README 不再维护 changelog
+
+## v1.8.5
+
+**自定义供应商交互改版**
+
+- 「用户自定义」成为快捷预设之一 —— 点击一键生成一张空白供应商卡片，与 OpenAI / OpenRouter / NVIDIA NIM / Ollama 并列展示
+- 选中卡片后直接在下方配置卡填写：供应商名称（实时同步卡片文字）、Base URL、模型、API Key，与知名供应商完全一致
+- 模型列表一键自动获取 —— 点击「⟳ 获取模型」从 Base URL 拉取 OpenAI 兼容的模型列表，默认模型自动填入，完整列表持久化到该供应商
+- 未配置的自定义供应商（还没填 Base URL）在配置卡端点处红色醒目提示「⚠ 未配置」，避免静默回落到内置默认端点
+- 移除旧的「＋ 添加自定义供应商」大表单，流程更简洁
+
+## v1.8.4
+
+**Freebuff 式项目构建流程**
+
+- **规划前澄清提问** —— 检测到项目需求后先由模型判断需求是否含糊，含糊则弹出 1–3 个问题让用户确认（目标、约束、技术栈），回答作为硬约束注入计划与构建上下文
+- **计划基于代码库生成** —— 生成计划前扫描工作区目录结构与 package.json / Cargo.toml / README 等清单，步骤引用真实文件
+- **逐步构建强制验证** —— 每个阶段必须真实运行验证命令并报告输出；模型推进到下一阶段时若缺少该阶段的验证证据，自动补跑标准验证（仅自动权限模式）
+- **交付前测试与审计清单卡** —— 构建完成后按 代码审查 → 依赖/安全审计 → 自动化验证 逐条打钩，与计划卡一致；失败进入修复→复查循环
+
+**自定义供应商**
+
+- 添加表单精简为紧凑样式（移除大虚线框）
+- 支持的供应商自带默认 Base URL；模型列表支持一键自动获取（/v1/models）
+
+## v1.8.3
+
+**Cross-platform release fix**
+
+- Normalize recursive file-listing assertions across `/` and `\` path separators so the Windows release workflow passes its test gate.
+
+## v1.8.2
+
+**SVG viewer polish**
+
+- **Reliable SVG zoom viewer** — generated SVG previews bind double-click activation before other diagram work completes, preserve embedded interactive shapes, and keep percentage-sized SVGs visible in the fullscreen viewer
+
+## v1.8.1
+
+**Polish & platform support**
+
+- **Cross-platform native file icons** — generated-file cards now use the associated macOS, Linux, or Windows system icon when available, with a safe extension-based fallback
+- **Grouped file-write activity** — the sidebar groups entries by file and shows the most recent write time and success/failure state
+- **Refined artifact cards** — improved layout, semantic file-type colors, native-icon loading feedback, click-to-open behavior, keyboard activation, and reduced-motion support
+
+## v1.8.0
+
+**New features**
+
+- **Custom providers** — add any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …) from the GUI Settings or `pure config` in the CLI; each entry keeps its own API key, and keyless local endpoints send no `Authorization` header at all
+- **Fault-tolerant parsing layer** — when the LLM outputs malformed JSON / Mermaid / SVG, the renderer auto-repairs (trailing commas, single quotes, unquoted keys, full-width punctuation, unbalanced label quotes/brackets, prose-wrapped output, …), retries, and only falls back to the user on failure
+- **Repair diff viewer** — click any "auto-repaired" badge to compare the original source against the repaired source side-by-side
+- **Native file icons** — artifact cards use the OS-associated icon on macOS, Linux, and Windows when available; Linux falls back safely when the desktop `gio` tool or icon theme is unavailable
+
+**Improvements**
+
+- Repair layer wired into the engine: `Planner` plans, `Verifier` verdicts, and `SubagentOrchestrator` / `MCPClient` tool arguments are all repaired before use (tool calls keep their arguments instead of silently degrading to `{}`)
+- `repairJsonSource` gains a BFS candidate budget (default 200) — a defensive cap against repair-queue explosion on adversarial input
+
+**Cleanup & internal**
+
+- Tool schemas consolidated into a single shared `toolDefs` module (single source of truth across CLI/GUI/engine)
+- Dead code removed: `quickSort`, `EventBus`, `ui/tools`, half-finished `FileWatcher`
+- CLI version banner fixed (was stuck at v1.3.1, now in sync with the release)

@@ -34,14 +34,14 @@ import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
 import type { EvolutionConfig } from './adapter/memory/evolution';
 import { harvestUserPreferences } from './shared/memory';
 import { INCREMENTAL_BUILD_PROMPT } from './shared/agentBehavior';
-import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, FILE_TOOLS_CORE, composeUserTurn } from './shared/promptLayers';
+import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, SVG_OUTPUT_PROMPT, HUMAN_TONE_PROMPT, FILE_TOOLS_CORE, composeUserTurn } from './shared/promptLayers';
 import { customProviderFor, defaultModelFor, isCustomProviderId, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider } from './shared/providers';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
 
 // Single source of truth for the CLI's displayed version (kept in sync with
 // package.json / src-tauri by the release flow; the CLI banner + startup line
 // both read from here).
-const CLI_VERSION = 'v1.8.3';
+const CLI_VERSION = 'v1.9.0';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
@@ -327,6 +327,10 @@ Output style:
 - A bare "generate X", "show me X", "give me X", "what does X look like", or any "write me code for…" without a path means inline output — never reach for write_file.
 - COMPLETE runnable artifacts go to disk by default: when the user asks you to BUILD a full game, mini-game, web page/site, app, tool, script, or small project ("写一个小游戏", "做一个网页", "开发一个工具" — even without naming a path), WRITE it to a file instead of printing the whole source inline. Single-file artifact → a new file like index.html / game.html / app.py in the workspace; multi-file project → a new directory with the files. After writing, state the path(s) and how to run/open it.
 - When you do write a file, briefly state where it landed and confirm the user actually wanted persistence; the EXISTENCE of a workspace does NOT imply "save everything to disk".
+
+${SVG_OUTPUT_PROMPT}
+
+${HUMAN_TONE_PROMPT}
 
 Tool-calling rules:
 - NEVER emit tool calls as XML or text (no <tool_calls>, <invoke name="...">, or JSON inside your reply). Tool calls are made ONLY through the function-calling interface, never as visible text.

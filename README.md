@@ -3,56 +3,10 @@
 **Pure** is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. It reads, writes, and edits files, executes shell commands, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.8.3-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.0-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
-
----
-
-## Changelog
-
-### v1.8.3
-
-**Cross-platform release fix**
-
-- Normalize recursive file-listing assertions across `/` and `\\` path separators so the Windows release workflow passes its test gate.
-
-### v1.8.2
-
-**SVG viewer polish**
-
-- **Reliable SVG zoom viewer** — generated SVG previews bind double-click activation before other diagram work completes, preserve embedded interactive shapes, and keep percentage-sized SVGs visible in the fullscreen viewer
-
-### v1.8.1
-
-**Polish & platform support**
-
-- **Cross-platform native file icons** — generated-file cards now use the associated macOS, Linux, or Windows system icon when available, with a safe extension-based fallback
-- **Grouped file-write activity** — the sidebar groups entries by file and shows the most recent write time and success/failure state
-- **Refined artifact cards** — improved layout, semantic file-type colors, native-icon loading feedback, click-to-open behavior, keyboard activation, and reduced-motion support
-
----
-
-### v1.8.0
-
-**New features**
-
-- **Custom providers** — add any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …) from the GUI Settings or `pure config` in the CLI; each entry keeps its own API key, and keyless local endpoints send no `Authorization` header at all
-- **Fault-tolerant parsing layer** — when the LLM outputs malformed JSON / Mermaid / SVG, the renderer auto-repairs (trailing commas, single quotes, unquoted keys, full-width punctuation, unbalanced label quotes/brackets, prose-wrapped output, …), retries, and only falls back to the user on failure
-- **Repair diff viewer** — click any "auto-repaired" badge to compare the original source against the repaired source side-by-side
-- **Native file icons** — artifact cards use the OS-associated icon on macOS, Linux, and Windows when available; Linux falls back safely when the desktop `gio` tool or icon theme is unavailable
-
-**Improvements**
-
-- Repair layer wired into the engine: `Planner` plans, `Verifier` verdicts, and `SubagentOrchestrator` / `MCPClient` tool arguments are all repaired before use (tool calls keep their arguments instead of silently degrading to `{}`)
-- `repairJsonSource` gains a BFS candidate budget (default 200) — a defensive cap against repair-queue explosion on adversarial input
-
-**Cleanup & internal**
-
-- Tool schemas consolidated into a single shared `toolDefs` module (single source of truth across CLI/GUI/engine)
-- Dead code removed: `quickSort`, `EventBus`, `ui/tools`, half-finished `FileWatcher`
-- CLI version banner fixed (was stuck at v1.3.1, now in sync with the release)
 
 ---
 

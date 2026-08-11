@@ -3,18 +3,14 @@
 // the agent actually wrote are surfaced at the END of the final assistant
 // bubble as clickable cards:
 //
-//   * ≤ MAX_CARD_FILES artifacts → one card per file/directory. Clicking a
-//     file opens it with the system's default app; clicking a directory
-//     reveals it in the file manager (both via the existing open_path chain).
-//     Hovering a card surfaces the open affordance without changing layout.
-//   * more than MAX_CARD_FILES (e.g. a scaffolded project) → collapse to a
-//     SINGLE directory card pointing at the common root of everything written,
-//     so the user can navigate straight to the project folder instead of
-//     staring at a wall of cards.
+//   * Every generated file is shown as a clickable card.
+//   * Folders are workspace scaffolding and are deliberately omitted from the
+//     result area; the project workspace remains available through the context
+//     panel and path links in the assistant reply.
 //
 // Artifacts are collected from successful write_file / edit_file /
-// replace_files / create_directory tool results during one send() turn — see
-// chat.ts's ToolResult handler. Rendering is deliberately declarative (the
+// replace_files tool results during one send() turn — see chat.ts's ToolResult
+// handler. Rendering is deliberately declarative (the
 // planArtifactDisplay decision is a pure function) so the threshold logic is
 // unit-testable without a DOM.
 
@@ -23,61 +19,17 @@ import { isTauriRuntime, tauriInvoke } from '../shared/tauri';
 import { t } from '../shared/i18n';
 
 export interface ArtifactItem {
-  /** Path as the tool received it (relative to workspace or absolute). */
+  /** Generated file path as the tool received it. */
   path: string;
-  kind: 'file' | 'dir';
 }
-
-/** Show one card per artifact up to this count; beyond it, show a directory card. */
-export const MAX_CARD_FILES = 4;
 
 export type ArtifactDisplay =
   | { mode: 'none' }
-  | { mode: 'files'; items: ArtifactItem[] }
-  | { mode: 'dir'; dir: string };
+  | { mode: 'files'; items: ArtifactItem[] };
 
-/**
- * Decide how to surface a turn's written artifacts. Pure — no DOM.
- * - 0 artifacts            → nothing to show
- * - ≤ MAX_CARD_FILES       → one card per file/directory
- * - more                   → a single directory card (common root of all paths)
- */
+/** Only generated files become result cards; workspace folders never do. */
 export function planArtifactDisplay(items: ArtifactItem[]): ArtifactDisplay {
-  if (items.length === 0) return { mode: 'none' };
-  if (items.length <= MAX_CARD_FILES) return { mode: 'files', items };
-  const dir = commonRootDir(items);
-  return { mode: 'dir', dir: dir ?? '' };
-}
-
-/**
- * Longest common directory prefix of a set of artifacts (the shared project
- * root). Paths may be relative or absolute. A FILE artifact contributes its
- * parent chain (the file's own name is not part of a directory root); a
- * DIRECTORY artifact keeps its own name (a created dir like `proj/src` IS the
- * root). When nothing is shared (files scattered across unrelated top-level
- * dirs), falls back to the first artifact's own parent (file) or itself (dir)
- * so the directory card always points at something real.
- */
-export function commonRootDir(items: ArtifactItem[]): string | null {
-  if (items.length === 0) return null;
-  const segsFor = (item: ArtifactItem): string[] => {
-    const segs = resolvePathForOpen(item.path).split(/[\\/]+/).filter(Boolean);
-    return item.kind === 'dir' ? segs : segs.slice(0, -1);
-  };
-  const dirs = items.map(segsFor);
-  const first = dirs[0];
-  let common = 0;
-  while (common < first.length) {
-    const seg = first[common];
-    if (!dirs.every((d) => d[common] === seg)) break;
-    common++;
-  }
-  if (common === 0) {
-    // Nothing shared (e.g. files in different top-level dirs): fall back to the
-    // first artifact's own parent directory (or the dir artifact itself).
-    return segsFor(items[0]).join('/') || null;
-  }
-  return first.slice(0, common).join('/');
+  return items.length === 0 ? { mode: 'none' } : { mode: 'files', items };
 }
 
 // ── DOM rendering ──
@@ -87,8 +39,6 @@ export function commonRootDir(items: ArtifactItem[]): string | null {
 // saved-file card reads like its upload counterpart.
 const FILE_ICON =
   '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M3 1.5h6l3.5 3.5v9a.5.5 0 0 1-.5.5h-9a.5.5 0 0 1-.5-.5v-12a.5.5 0 0 1 .5-.5z" fill="none" stroke="currentColor" stroke-linejoin="round"/><path d="M9 1.5V5h3.5" fill="none" stroke="currentColor" stroke-linejoin="round"/></svg>';
-const DIR_ICON =
-  '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3.6l1.2 1.5h6.2a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1V4z" fill="none" stroke="currentColor" stroke-linejoin="round"/></svg>';
 const CODE_ICON =
   '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 2.5 8 6 12.5"/><path d="M10 3.5 13.5 8 10 12.5"/></svg>';
 const IMAGE_ICON =
@@ -132,8 +82,7 @@ async function nativeFileIcon(path: string): Promise<string | null> {
   return request;
 }
 
-export function artifactKindLabel(path: string, isDir = false): string {
-  if (isDir) return t('artifacts.folder');
+export function artifactKindLabel(path: string): string {
   const leaf = path.split(/[\\/]+/).pop() ?? '';
   const dot = leaf.lastIndexOf('.');
   const ext = dot > 0 ? leaf.slice(dot + 1).toUpperCase() : '';
@@ -161,22 +110,20 @@ function splitNamePath(path: string): { name: string; rest: string } {
 }
 
 /**
- * Build one file/directory card. Clicking opens the path (default app for
- * files, file manager for directories); the native button semantics provide
+ * Build one generated-file card. The native button semantics provide
  * Enter/Space activation and the hover hint makes the action discoverable.
  */
-function createArtifactCard(item: ArtifactItem | null, dirPath: string | null): HTMLButtonElement | null {
-  const path = item ? item.path : dirPath;
+function createArtifactCard(item: ArtifactItem): HTMLButtonElement | null {
+  const path = item.path;
   if (!path) return null;
-  const isDir = item ? item.kind === 'dir' : true;
-  const meta = isDir ? { svg: DIR_ICON, cls: 'artifact-icon-dir' } : fileIconMeta(path);
+  const meta = fileIconMeta(path);
 
   const card = document.createElement('button');
   card.type = 'button';
-  card.className = `${isDir ? 'artifact-card artifact-card-dir' : 'artifact-card'} ${meta.cls}`;
+  card.className = `artifact-card ${meta.cls}`;
   card.setAttribute('data-path', path);
   card.title = t('artifacts.clickHint');
-  card.setAttribute('aria-label', `${isDir ? t('artifacts.openDir') : t('artifacts.openFile')}: ${path}`);
+  card.setAttribute('aria-label', `${t('artifacts.openFile')}: ${path}`);
   card.innerHTML =
     `<span class="artifact-icon artifact-icon-loading ${meta.cls}">${meta.svg}</span>` +
     `<span class="artifact-text"><span class="artifact-name"></span><span class="artifact-path"></span><span class="artifact-meta"><span class="artifact-kind"></span><span class="artifact-action"></span></span></span>` +
@@ -195,18 +142,17 @@ function createArtifactCard(item: ArtifactItem | null, dirPath: string | null): 
   const kindEl = card.querySelector<HTMLElement>('.artifact-kind')!;
   const actionEl = card.querySelector<HTMLElement>('.artifact-action')!;
   const { name, rest } = splitNamePath(path);
-  nameEl.textContent = name || path || t('artifacts.project');
-  pathEl.textContent = rest || (isDir ? path : '');
-  kindEl.textContent = artifactKindLabel(path, isDir);
+  nameEl.textContent = name || path;
+  pathEl.textContent = rest;
+  kindEl.textContent = artifactKindLabel(path);
   actionEl.textContent = t('artifacts.openAction');
   card.addEventListener('click', () => openPathLink(path));
   return card;
 }
 
 /**
- * Append the artifact display (file cards or a single directory card) into
- * `host`. Clicking a card opens the path via openPathLink (default app for
- * files, file manager for directories); the hover hint communicates it.
+ * Append generated-file cards into `host`. Folders are filtered before this
+ * function is called and again by planArtifactDisplay as a defensive boundary.
  */
 export function renderArtifactCards(host: HTMLElement, items: ArtifactItem[]): void {
   const plan = planArtifactDisplay(items);
@@ -217,17 +163,8 @@ export function renderArtifactCards(host: HTMLElement, items: ArtifactItem[]): v
   wrap.setAttribute('role', 'group');
   wrap.setAttribute('aria-label', t('artifacts.group'));
 
-  if (plan.mode === 'files') {
-    for (const item of plan.items) {
-      const card = createArtifactCard(item, null);
-      if (card) wrap.appendChild(card);
-    }
-  } else {
-    // Project mode: a single card that opens the common root directory. If the
-    // common root could not be resolved at all (nothing shared, not even the
-    // first artifact's parent), skip rendering — a card that would open an
-    // empty path is worse than no card.
-    const card = createArtifactCard(null, plan.dir);
+  for (const item of plan.items) {
+    const card = createArtifactCard(item);
     if (card) wrap.appendChild(card);
   }
 

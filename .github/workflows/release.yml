@@ -39,6 +39,28 @@ jobs:
       - name: Build CLI binary (macOS arm64)
         run: bun run cli:build
 
+      # ── Release summary: pull this version's section from CHANGELOG.md ──
+      # The changelog lives in CHANGELOG.md (not the README); each tag's
+      # section becomes the GitHub release body, plus the download note.
+      - name: Prepare release notes
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES="$(awk -v v="## v${VERSION}" 'BEGIN{f=0} $0==v{f=1; next} f && /^## v/{exit} f{print}' CHANGELOG.md)"
+          if [ -z "$NOTES" ]; then
+            NOTES="See the changelog: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md"
+          fi
+          NOTES="${NOTES}
+
+---
+
+Download the macOS DMG, the Windows installer (.exe), or the CLI binary (\`pure\` / \`pure.exe\`) below."
+          {
+            echo 'body<<EOF'
+            echo "$NOTES"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       # ── Build & publish GUI via Tauri's official action ──
       # Two variants, selected by whether the Apple signing secrets exist:
       #   * Signed   (APPLE_CERTIFICATE present)  → codesign + notarize
@@ -62,7 +84,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Pure v__VERSION__'
-          releaseBody: 'Download the macOS DMG, the Windows installer (.exe), or the CLI binary (`pure` / `pure.exe`) below.'
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
 
@@ -76,7 +98,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Pure v__VERSION__'
-          releaseBody: 'Download the macOS DMG, the Windows installer (.exe), or the CLI binary (`pure` / `pure.exe`) below.'
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
 
@@ -128,6 +150,28 @@ jobs:
       - name: Build CLI binary (Windows)
         run: bun run cli:build
 
+      # Same release-notes extraction as the macOS job (bash is available on
+      # Windows runners via Git Bash) so both jobs publish the same body.
+      - name: Prepare release notes
+        id: notes
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES="$(awk -v v="## v${VERSION}" 'BEGIN{f=0} $0==v{f=1; next} f && /^## v/{exit} f{print}' CHANGELOG.md)"
+          if [ -z "$NOTES" ]; then
+            NOTES="See the changelog: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md"
+          fi
+          NOTES="${NOTES}
+
+---
+
+Download the macOS DMG, the Windows installer (.exe), or the CLI binary (\`pure\` / \`pure.exe\`) below."
+          {
+            echo 'body<<EOF'
+            echo "$NOTES"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish GUI (Windows NSIS)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -137,7 +181,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Pure v__VERSION__'
-          releaseBody: 'Download the macOS DMG, the Windows installer (.exe), or the CLI binary (`pure` / `pure.exe`) below.'
+          releaseBody: ${{ steps.notes.outputs.body }}
           args: '--bundles nsis'
           releaseDraft: false
           prerelease: false

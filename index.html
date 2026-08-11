@@ -135,6 +135,9 @@
                     <button id="landing-attach-btn" class="attach-btn" type="button" data-i18n-title="input.attach.title" data-i18n-aria-label="input.attach.title" title="附加文件" aria-label="附加文件">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                     </button>
+                    <button id="landing-copy-btn" class="input-copy-btn" type="button" data-i18n-title="input.copy.title" data-i18n-aria-label="input.copy.title" title="复制输入" aria-label="复制输入" disabled>
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
                     <select id="landing-mode-select" class="composer-select" data-i18n-title="composer.mode.title" title="任务模式" aria-label="任务模式"></select>
                     <button id="landing-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
                       <svg class="wp-folder-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
@@ -163,6 +166,9 @@
               <div id="composer-tool-row">
                 <button id="attach-btn" class="attach-btn" type="button" data-i18n-title="input.attach.title" data-i18n-aria-label="input.attach.title" title="附加文件" aria-label="附加文件">
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                </button>
+                <button id="copy-btn" class="input-copy-btn" type="button" data-i18n-title="input.copy.title" data-i18n-aria-label="input.copy.title" title="复制输入" aria-label="复制输入" disabled>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
                 <select id="composer-mode-select" class="composer-select" data-i18n-title="composer.mode.title" title="任务模式" aria-label="任务模式"></select>
                 <button id="input-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
@@ -382,41 +388,13 @@
                   <!-- Custom providers (user-defined) are appended here by settings.ts -->
                 </div>
                 <div class="provider-custom-toolbar">
-                  <button id="provider-add-custom" class="setting-btn secondary" data-i18n="llm.custom.add">＋ 添加自定义供应商</button>
                   <span class="provider-preset-label" data-i18n="llm.custom.quickAdd">快捷预设</span>
                   <div class="provider-preset-chips" role="group" data-i18n-aria-label="llm.custom.quickAdd" aria-label="快捷预设">
+                    <button type="button" class="provider-preset-chip" data-preset="custom" data-i18n="llm.custom.preset.custom">用户自定义</button>
                     <button type="button" class="provider-preset-chip" data-preset="openai" data-i18n="llm.custom.preset.openai">OpenAI</button>
                     <button type="button" class="provider-preset-chip" data-preset="openrouter" data-i18n="llm.custom.preset.openrouter">OpenRouter</button>
                     <button type="button" class="provider-preset-chip" data-preset="nvidia" data-i18n="llm.custom.preset.nvidia">NVIDIA NIM</button>
                     <button type="button" class="provider-preset-chip" data-preset="ollama" data-i18n="llm.custom.preset.ollama">Ollama</button>
-                  </div>
-                </div>
-                <div id="provider-custom-form" class="provider-custom-form hidden">
-                  <div class="provider-custom-form-head">
-                    <span class="provider-custom-form-title" data-i18n="llm.custom.formTitle">新建自定义供应商（OpenAI 兼容）</span>
-                    <span class="provider-custom-form-hint" data-i18n="llm.custom.formTitle.hint">任意支持 /v1/chat/completions 的端点</span>
-                  </div>
-                  <div class="provider-custom-form-grid">
-                    <label class="provider-custom-field">
-                      <span class="provider-custom-label" data-i18n="llm.custom.name">供应商名称</span>
-                      <input id="cfg-custom-name" class="setting-input" type="text" data-i18n-placeholder="llm.custom.name.ph" placeholder="My OpenAI" />
-                    </label>
-                    <label class="provider-custom-field">
-                      <span class="provider-custom-label" data-i18n="llm.baseURL">Base URL</span>
-                      <input id="cfg-custom-baseurl" class="setting-input" type="text" placeholder="http://localhost:11434/v1" />
-                    </label>
-                    <label class="provider-custom-field provider-custom-field-wide">
-                      <span class="provider-custom-label" data-i18n="llm.custom.models">模型（逗号分隔）</span>
-                      <input id="cfg-custom-models" class="setting-input" type="text" data-i18n-placeholder="llm.custom.models.ph" placeholder="qwen2.5-coder:7b, llama3.1:8b" />
-                    </label>
-                    <label class="provider-custom-field provider-custom-field-wide">
-                      <span class="provider-custom-label" data-i18n="llm.custom.apiKeyOptional">API Key（可选）</span>
-                      <input id="cfg-custom-apikey" class="setting-input" type="password" placeholder="sk-..." />
-                    </label>
-                  </div>
-                  <div class="provider-custom-actions">
-                    <button id="cfg-custom-save" class="setting-btn primary" data-i18n="llm.custom.save">保存</button>
-                    <button id="cfg-custom-cancel" class="setting-btn secondary" data-i18n="llm.custom.cancel">取消</button>
                   </div>
                 </div>
                 <div class="provider-config-card">
@@ -439,7 +417,10 @@
                     </div>
                     <div class="setting-row">
                       <div class="setting-info"><span class="setting-label" data-i18n="llm.model">Model</span><span class="setting-hint" data-i18n="llm.model.hint">Model identifier</span></div>
-                      <input id="cfg-model" class="setting-input" type="text" placeholder="deepseek-v4-flash" />
+                      <div class="setting-input-group">
+                        <input id="cfg-model" class="setting-input" type="text" placeholder="deepseek-v4-flash" />
+                        <button id="cfg-fetch-models-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.fetch" title="从 API 获取模型列表" hidden>⟳ 获取模型</button>
+                      </div>
                     </div>
                     <div class="setting-row">
                       <div class="setting-info"><span class="setting-label" data-i18n="llm.baseURL">Base URL</span><span class="setting-hint" data-i18n="llm.baseURL.hint">Custom endpoint (optional)</span></div>

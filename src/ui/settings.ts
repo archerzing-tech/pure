@@ -396,6 +396,13 @@ export class SettingsPanel {
     // share one source of truth. Delegated on the grid so cards rendered later
     // (custom providers) work without rebinding.
     document.getElementById('provider-card-grid')?.addEventListener('click', (event) => {
+      // Per-card delete (×) takes precedence over card selection.
+      const removeBtn = (event.target as HTMLElement).closest<HTMLElement>('.provider-card-remove');
+      if (removeBtn) {
+        event.stopPropagation();
+        this.removeCustomProvider(removeBtn.dataset.removeProvider || '');
+        return;
+      }
       const card = (event.target as HTMLElement).closest<HTMLElement>('.provider-card');
       const provider = card?.dataset.provider;
       if (!provider) return;
@@ -412,17 +419,20 @@ export class SettingsPanel {
       this.autoSave();
     });
 
-    // ── Custom providers: add form, quick presets, delete, live name edit ──
-    document.getElementById('provider-add-custom')?.addEventListener('click', () => this.showCustomProviderForm());
-    document.getElementById('cfg-custom-save')?.addEventListener('click', () => this.addCustomProviderFromForm());
-    document.getElementById('cfg-custom-cancel')?.addEventListener('click', () => this.hideCustomProviderForm());
+    // ── Custom providers: quick presets, delete, live name edit ──
+    document.getElementById('cfg-fetch-models-btn')?.addEventListener('click', () => this.fetchProviderModels());
     document.getElementById('provider-delete-btn')?.addEventListener('click', () => this.removeSelectedCustomProvider());
-    // Quick-preset chips (OpenAI / OpenRouter / NVIDIA / Ollama): one click
-    // adds the provider, selects it and hides the form — the key (if any) is
-    // entered in the config card below, prompted by the toast.
+    // Quick-preset chips (用户自定义 / OpenAI / OpenRouter / NVIDIA / Ollama):
+    // one click adds the provider and selects it — the key (if any) is entered
+    // in the config card below, prompted by the toast.
     document.querySelectorAll<HTMLElement>('.provider-preset-chip').forEach(chip => {
       chip.addEventListener('click', () => {
-        const preset = this.customPresetFor(chip.dataset.preset || '');
+        const slug = chip.dataset.preset || '';
+        if (slug === 'custom') {
+          this.addBlankCustomProvider();
+          return;
+        }
+        const preset = this.customPresetFor(slug);
         if (preset) this.addCustomPreset(preset);
       });
     });
@@ -707,12 +717,23 @@ export class SettingsPanel {
     // Custom-only rows: name edit + delete. Keyless locals (Ollama) get a hint
     // in the API-key field instead of the generic sk-... placeholder.
     const isCustom = !!custom;
+    // 未配置的自定义供应商（还没有 Base URL）：端点处给出醒目标记，避免用户
+    // 以为已就绪就直接发送 —— 空地址会静默回落到内置默认端点。
+    const unconfigured = isCustom && !custom?.baseURL;
+    if (unconfigured && endpoint) endpoint.textContent = t('llm.custom.needURL');
+    const configCard = document.querySelector<HTMLElement>('.provider-config-card');
+    configCard?.classList.toggle('provider-unconfigured', unconfigured);
+    baseUrlInput?.closest('.setting-row')?.classList.toggle('provider-needs-url', unconfigured);
     const nameRow = document.getElementById('cfg-custom-name-row');
     const deleteRow = document.getElementById('cfg-custom-delete-row');
     const nameEdit = document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null;
     if (nameRow) nameRow.hidden = !isCustom;
     if (deleteRow) deleteRow.hidden = !isCustom;
     if (nameEdit) nameEdit.value = custom?.name ?? '';
+    // Model auto-fetch only makes sense for custom endpoints (the built-ins
+    // come with their own default model list).
+    const fetchBtn = document.getElementById('cfg-fetch-models-btn');
+    if (fetchBtn) fetchBtn.hidden = !isCustom;
     const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement | null;
     if (keyInput) {
       // Keyless locals say "leave empty"; cloud presets without a key yet say
@@ -1348,6 +1369,18 @@ export class SettingsPanel {
       card.setAttribute('role', 'option');
       card.setAttribute('aria-selected', 'false');
 
+      // Per-card delete (×): hover/focus to reveal. The grid's delegated click
+      // handler intercepts it before card selection. A <span role="button">
+      // keeps the card itself a single <button> (no nested buttons).
+      const removeEl = document.createElement('span');
+      removeEl.className = 'provider-card-remove';
+      removeEl.setAttribute('role', 'button');
+      removeEl.tabIndex = 0;
+      removeEl.dataset.removeProvider = c.id;
+      removeEl.setAttribute('aria-label', `${t('llm.custom.deleteBtn')} ${c.name}`);
+      removeEl.title = t('llm.custom.deleteBtn');
+      removeEl.textContent = '×';
+
       const topLine = document.createElement('span');
       topLine.className = 'provider-card-topline';
       const markEl = document.createElement('span');
@@ -1374,7 +1407,7 @@ export class SettingsPanel {
       modelEl.textContent = c.defaultModel;
       metaEl.append(protoEl, dotEl, modelEl);
 
-      card.append(topLine, nameEl, metaEl);
+      card.append(removeEl, topLine, nameEl, metaEl);
       if (keyless) {
         const badge = document.createElement('span');
         badge.className = 'provider-card-keyless';
@@ -1415,22 +1448,6 @@ export class SettingsPanel {
     return list;
   }
 
-  private showCustomProviderForm(): void {
-    const form = document.getElementById('provider-custom-form');
-    if (!form) return;
-    form.classList.remove('hidden');
-    (document.getElementById('cfg-custom-name') as HTMLInputElement).value = '';
-    (document.getElementById('cfg-custom-baseurl') as HTMLInputElement).value = '';
-    (document.getElementById('cfg-custom-models') as HTMLInputElement).value = '';
-    (document.getElementById('cfg-custom-apikey') as HTMLInputElement).value = '';
-    document.getElementById('cfg-custom-name')?.focus();
-    form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }
-
-  private hideCustomProviderForm(): void {
-    document.getElementById('provider-custom-form')?.classList.add('hidden');
-  }
-
   /** Stable slug for a new custom provider; appends -2/-3… on collisions. */
   private uniqueCustomId(customs: CustomProvider[], name: string): string {
     const base = name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-').replace(/^-+|-+$/g, '') || 'custom';
@@ -1440,55 +1457,106 @@ export class SettingsPanel {
     return id;
   }
 
-  private addCustomProviderFromForm(): void {
-    const name = (document.getElementById('cfg-custom-name') as HTMLInputElement).value.trim();
-    const baseURL = (document.getElementById('cfg-custom-baseurl') as HTMLInputElement).value.trim();
-    const models = (document.getElementById('cfg-custom-models') as HTMLInputElement).value
-      .split(',').map(s => s.trim()).filter(Boolean);
-    if (!name) { this.toast(t('llm.custom.err.name')); return; }
-    if (!baseURL) { this.toast(t('llm.custom.err.baseURL')); return; }
-    if (models.length === 0) { this.toast(t('llm.custom.err.models')); return; }
-
+  /**
+   * 用户自定义 chip：一键生成一张空白自定义供应商卡片（默认名，暂无地址），
+   * 并选中它 —— 与 OpenAI 等预设一致，名称 + Base URL 在下方配置卡填写。
+   */
+  private addBlankCustomProvider(): void {
     const prev = loadConfig() ?? defaults();
     const customs = [...(prev.customProviders ?? [])];
-    if (customs.some(p => p.name === name)) { this.toast(t('llm.custom.err.dup')); return; }
-
-    const id = this.uniqueCustomId(customs, name);
-    const apiKey = (document.getElementById('cfg-custom-apikey') as HTMLInputElement).value.trim();
-    const entry: CustomProvider = {
-      id, name, baseURL, models,
-      defaultModel: models[0],
-      apiKey, hasApiKey: false,
-    };
-    customs.push(entry);
-
-    const cfg: PureConfig = { ...prev, customProviders: customs, provider: id, model: '', baseURL: '', apiKey: '' };
-    if (isTauriRuntime() && apiKey) {
-      void storeCustomSecretInRust(id, apiKey);
-      entry.apiKey = '';
-      entry.hasApiKey = true;
+    // 幂等：已有未配置的空白卡片（默认名 + 无地址）就直接选中它，重复点击不新建。
+    const existing = customs.find(p => !p.baseURL && p.name === t('llm.custom.defaultName'));
+    let id: string;
+    if (existing) {
+      id = existing.id;
     } else {
-      entry.hasApiKey = !!apiKey;
+      id = this.uniqueCustomId(customs, 'custom');
+      const entry: CustomProvider = {
+        id,
+        name: t('llm.custom.defaultName'),
+        baseURL: '',
+        models: [],
+        defaultModel: '',
+        apiKey: '',
+        hasApiKey: false,
+      };
+      customs.push(entry);
     }
+    const cfg: PureConfig = { ...prev, customProviders: customs, provider: id, model: '', baseURL: '', apiKey: '' };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     this.renderCustomProviderCards();
     (document.getElementById('cfg-provider') as HTMLSelectElement).value = id;
-    (document.getElementById('cfg-model') as HTMLInputElement).value = models[0];
-    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = baseURL;
+    (document.getElementById('cfg-model') as HTMLInputElement).value = '';
+    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = '';
     this.updateProviderPresentation(id);
-    // A key stored to Rust secrets deserves the masked "saved securely"
-    // placeholder (only loadToForm would otherwise set it, on next open).
-    if (isTauriRuntime() && entry.hasApiKey) {
-      const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement | null;
-      if (keyInput) {
-        delete keyInput.dataset.touched;
-        keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.savedPlaceholder');
-        keyInput.placeholder = t('llm.apiKey.savedPlaceholder');
-      }
+    this.toast(t('llm.custom.addedBlank'));
+    document.getElementById('cfg-custom-name-edit')?.focus();
+  }
+
+  /** Fetch model list from the form's base URL via /v1/models (OpenAI-compatible
+   * standard). Fills the models input on success; toasts any error. */
+  /** Fetch the model list from the config card's Base URL via /v1/models
+   * (OpenAI-compatible standard). Fills the model field with the first model
+   * and persists the full list into the custom provider entry. */
+  private async fetchProviderModels(): Promise<void> {
+    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement)?.value.trim();
+    const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement)?.value.trim();
+    if (!baseURL) {
+      this.toast(t('llm.custom.fetchNoURL'));
+      return;
     }
-    this.hideCustomProviderForm();
-    this.toast(t('llm.custom.added'));
+    const btn = document.getElementById('cfg-fetch-models-btn') as HTMLButtonElement | null;
+    if (btn) btn.disabled = true;
+    try {
+      // Normalize: strip trailing slash, then try /v1/models first (the
+      // OpenAI-compatible standard); fall back to just /models for servers
+      // that serve the list at a different path.
+      const normalized = baseURL.replace(/\/+$/, '');
+      const candidates = normalized.endsWith('/v1')
+        ? [normalized + '/models', normalized.replace(/\/v1$/, '') + '/models']
+        : [normalized + '/models', normalized.replace(/\/v1\/?.*$/, '') + '/v1/models'];
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+      interface ModelsResponse { data?: Array<{ id: string }>; models?: Array<{ name: string }> }
+      let data: ModelsResponse | null = null;
+      for (const url of candidates) {
+        try {
+          const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
+          if (!res.ok) continue;
+          data = await res.json() as ModelsResponse;
+          if (data && ((Array.isArray(data.data) && data.data.length > 0) || (Array.isArray(data.models) && data.models.length > 0))) break;
+          data = null;
+        } catch { /* try next candidate */ }
+      }
+      if (!data) throw new Error('all endpoints returned empty or failed');
+      const ids: string[] = [];
+      if (Array.isArray(data.data)) ids.push(...data.data.map((m) => m.id));
+      if (Array.isArray(data.models)) ids.push(...data.models.map((m) => m.name));
+      if (ids.length === 0) throw new Error('no models in response');
+      // 默认模型取第一个；完整列表持久化到该自定义供应商条目。
+      const modelInput = document.getElementById('cfg-model') as HTMLInputElement | null;
+      if (modelInput) modelInput.value = ids[0];
+      const provider = (document.getElementById('cfg-provider') as HTMLSelectElement)?.value || '';
+      const prev = loadConfig() ?? defaults();
+      const entry = (prev.customProviders ?? []).find(p => p.id === provider);
+      if (entry) {
+        entry.models = ids.slice(0, 30);
+        entry.defaultModel = ids[0];
+        const cfg: PureConfig = { ...prev, customProviders: [...(prev.customProviders ?? [])] };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+        invalidateConfigCache();
+        this.renderCustomProviderCards();
+      }
+      this.updateProviderPresentation(provider);
+      this.autoSave();
+      this.toast(t('llm.custom.fetchOk').replace('{n}', String(Math.min(ids.length, 30))));
+    } catch (err) {
+      console.warn('[pure] fetch models failed:', err);
+      this.toast(t('llm.custom.fetchFail') + '：' + ((err as Error)?.message || ''));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   }
 
   /** Resolve a quick-preset chip by slug (openai / openrouter / nvidia / ollama). */
@@ -1522,7 +1590,6 @@ export class SettingsPanel {
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
-    this.hideCustomProviderForm();
     this.renderCustomProviderCards();
     (document.getElementById('cfg-provider') as HTMLSelectElement).value = preset.id;
     (document.getElementById('cfg-model') as HTMLInputElement).value = preset.defaultModel;
@@ -1534,26 +1601,36 @@ export class SettingsPanel {
   }
 
   private removeSelectedCustomProvider(): void {
+    this.removeCustomProvider((document.getElementById('cfg-provider') as HTMLSelectElement).value);
+  }
+
+  /** 按 id 删除自定义供应商卡片（卡片 × 与配置卡删除按钮共用）。若删除的是
+   *  当前选中的供应商，回退到 DeepSeek 默认配置；否则保持当前选择。 */
+  private removeCustomProvider(id: string): void {
     const prev = loadConfig() ?? defaults();
-    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
-    const removed = customProviderFor(prev.customProviders ?? [], provider);
+    const removed = customProviderFor(prev.customProviders ?? [], id);
     if (!removed) return;
     if (isTauriRuntime() && removed.hasApiKey) {
       void revokeCustomSecretFromRust(removed.id);
     }
+    const wasSelected = prev.provider === id;
     const cfg: PureConfig = {
       ...prev,
-      customProviders: (prev.customProviders ?? []).filter(p => p.id !== provider),
-      provider: 'deepseek-openai',
-      model: '', baseURL: '', apiKey: '',
+      customProviders: (prev.customProviders ?? []).filter(p => p.id !== id),
+      provider: wasSelected ? 'deepseek-openai' : prev.provider,
+      model: wasSelected ? '' : prev.model,
+      baseURL: wasSelected ? '' : prev.baseURL,
+      apiKey: wasSelected ? '' : prev.apiKey,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     this.renderCustomProviderCards();
-    (document.getElementById('cfg-provider') as HTMLSelectElement).value = 'deepseek-openai';
-    (document.getElementById('cfg-model') as HTMLInputElement).value = '';
-    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = '';
-    this.updateProviderPresentation('deepseek-openai');
+    (document.getElementById('cfg-provider') as HTMLSelectElement).value = cfg.provider;
+    if (wasSelected) {
+      (document.getElementById('cfg-model') as HTMLInputElement).value = '';
+      (document.getElementById('cfg-baseurl') as HTMLInputElement).value = '';
+    }
+    this.updateProviderPresentation(cfg.provider);
     this.toast(t('llm.custom.deleted'));
   }
 

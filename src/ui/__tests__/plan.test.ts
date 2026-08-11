@@ -3,7 +3,9 @@
 // fragment. (The dialog controller itself is DOM-bound and exercised manually.)
 
 import { describe, it, expect } from 'bun:test';
-import { formatPlanForPrompt, matchPlanPhaseMarker } from '../plan';
+import { readFileSync } from 'node:fs';
+import { formatPlanForPrompt, matchPlanPhaseMarker, QUALITY_GATE_STEPS } from '../plan';
+import { t } from '../../shared/i18n';
 import type { Plan } from '../../coding-agent/types';
 
 describe('formatPlanForPrompt', () => {
@@ -16,12 +18,16 @@ describe('formatPlanForPrompt', () => {
       ],
     };
     const out = formatPlanForPrompt(plan);
+    const projectOut = formatPlanForPrompt(plan, true);
     expect(out).toContain('Execution plan');
     expect(out).toContain('1. Understand: Read relevant files.');
     expect(out).toContain('2. Implement: Write the changes.');
     expect(out).toContain('Work through these steps in order');
-    // The phase-marker instruction is present so the UI can track progress.
-    expect(out).toContain('## 阶段 n/m');
+    expect(projectOut).toContain('execute phases strictly in order');
+    // Ordinary plans keep the concise step instruction; project builds add
+    // the stricter phase-marker protocol.
+    expect(out).not.toContain('## 阶段 n/m');
+    expect(projectOut).toContain('## 阶段 n/m');
   });
 });
 
@@ -46,5 +52,37 @@ describe('matchPlanPhaseMarker', () => {
     expect(matchPlanPhaseMarker('请按阶段 1/4 执行')).toBe(null);
     expect(matchPlanPhaseMarker('README 里写了一个"阶段 1/4"的示例')).toBe(null);
     expect(matchPlanPhaseMarker('普通文本')).toBe(null);
+  });
+});
+
+describe('QUALITY_GATE_STEPS (delivery checklist card)', () => {
+  it('lists the verification steps in gate execution order', () => {
+    expect(QUALITY_GATE_STEPS.map((s) => s.phase)).toEqual(['review', 'audit', 'verify']);
+  });
+
+  it('describes each step in user-facing language, not internal phrasing', () => {
+    for (const step of QUALITY_GATE_STEPS) {
+      expect(step.action.length).toBeGreaterThan(0);
+      expect(step.description.length).toBeGreaterThan(10);
+      expect(step.description).not.toMatch(/Understand|Plan|Implement|Verify|How to/i);
+    }
+  });
+});
+
+describe('plan refining badge (3s hint rotation)', () => {
+  it('rotates the hint every 3 seconds and self-cleans when the badge leaves the DOM', () => {
+    const src = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/setInterval\(\(\) =>/);
+    expect(src).toMatch(/3000\)/);
+    expect(src).toMatch(/!badge\.isConnected/);
+    expect(src).toMatch(/clearInterval\(timer\)/);
+  });
+
+  it('provides localized rotating hints', () => {
+    for (const key of ['plan.refining.files', 'plan.refining.analyzing', 'plan.refining.planning'] as const) {
+      const text = t(key);
+      expect(text).not.toBe(key);
+      expect(text.length).toBeGreaterThan(4);
+    }
   });
 });
