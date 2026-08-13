@@ -513,7 +513,9 @@ export class NodeToolAdapter implements ToolAdapter {
 
     const abort = createAbortController(signal, timeoutSeconds * 1000);
     try {
-      const proc = Bun.spawn(['rg', ...rgArgs], { cwd: this.workspace, stdout: 'pipe', stderr: 'pipe', signal: abort.signal });
+      const rgPath = Bun.which('rg');
+      if (!rgPath) return this.handleCodeSearcherFallback(query, searchDir, scope, args, start);
+      const proc = Bun.spawn([rgPath, ...rgArgs], { cwd: this.workspace, stdout: 'pipe', stderr: 'pipe', signal: abort.signal });
       const matches: Array<{ path: string; line: number; column?: number; text: string }> = [];
       const perFileCounts = new Map<string, number>();
       let truncated = false;
@@ -530,11 +532,7 @@ export class NodeToolAdapter implements ToolAdapter {
         const rawRelativePath = isAbsolute(rawPath) ? pathRelative(workspaceRoot, rawPath) : rawPath;
         const relativePath = rawRelativePath.startsWith('./') ? rawRelativePath.slice(2) : rawRelativePath;
         const count = perFileCounts.get(relativePath) ?? 0;
-        if (count >= perFile) {
-          truncated = true;
-          abort.abort();
-          return;
-        }
+        if (count >= perFile) return;
         perFileCounts.set(relativePath, count + 1);
         const submatch = Array.isArray(data.submatches) ? data.submatches[0] : undefined;
         matches.push({
@@ -602,10 +600,123 @@ export class NodeToolAdapter implements ToolAdapter {
           : `code_searcher timed out after ${timeoutSeconds}s`;
         return this.fail(null!, start, message, 'code_searcher');
       }
-      return this.fail(null!, start, error?.message ?? 'rg is unavailable; install ripgrep or use the legacy search tool', 'code_searcher');
+      if (isRipgrepUnavailable(error)) {
+        return this.handleCodeSearcherFallback(query, searchDir, scope, args, start);
+      }
+      return this.fail(null!, start, error?.message ?? 'code_searcher failed', 'code_searcher');
     } finally {
       abort.cleanup();
     }
+  }
+
+  private async handleCodeSearcherFallback(
+    query: string,
+    searchDir: string,
+    scope: string,
+    args: Record<string, unknown>,
+    start: number,
+  ): Promise<ToolResult> {
+    const flags = args.caseSensitive === false ? 'i' : '';
+    let matcher: RegExp;
+    try {
+      matcher = new RegExp(query, flags);
+    } catch (error: any) {
+      return this.fail(null!, start, `Invalid regular expression: ${error?.message ?? String(error)}`, 'code_searcher');
+    }
+    const perFile = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults)
+      ? Math.min(100, Math.max(1, Math.floor(args.maxResults)))
+      : 15;
+    const globalMax = typeof args.globalMaxResults === 'number' && Number.isFinite(args.globalMaxResults)
+      ? Math.min(1000, Math.max(1, Math.floor(args.globalMaxResults)))
+      : 250;
+    const globs = Array.isArray(args.globs)
+      ? args.globs.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      : [];
+    let globMatchers: Bun.Glob[];
+    try {
+      globMatchers = globs.map((pattern) => new Bun.Glob(pattern));
+    } catch (error: any) {
+      return this.fail(null!, start, `Invalid code_searcher glob: ${error?.message ?? String(error)}`, 'code_searcher');
+    }
+    const matches: Array<{ path: string; line: number; column?: number; text: string }> = [];
+    const workspaceRoot = realpathSync(this.workspace);
+    let truncated = false;
+
+    const searchFile = async (fullPath: string, entry: string): Promise<void> => {
+      if (truncated || matches.length >= globalMax) {
+        truncated = true;
+        return;
+      }
+      if (/(^|[\\/])(?:\.git|node_modules|dist|build|target)(?:[\\/]|$)/.test(entry)) return;
+      const globPath = pathRelative(workspaceRoot, fullPath) || entry;
+      if (globMatchers.length > 0 && !globMatchers.some((candidate) => candidate.match(entry) || candidate.match(globPath))) return;
+
+      let canonicalPath: string;
+      try {
+        const stat = lstatSync(fullPath, { throwIfNoEntry: false });
+        if (!stat?.isFile() || stat.isSymbolicLink()) return;
+        canonicalPath = realpathSync(fullPath);
+        if (!isWithin(workspaceRoot, canonicalPath)) return;
+      } catch {
+        return;
+      }
+
+      let text: string;
+      try {
+        const file = Bun.file(canonicalPath);
+        if (file.size > 8 * 1024 * 1024) return;
+        text = await file.text();
+      } catch {
+        return;
+      }
+
+      const relativePath = pathRelative(workspaceRoot, canonicalPath) || entry;
+      let fileMatches = 0;
+      for (const [index, line] of text.split(/\r?\n/).entries()) {
+        if (fileMatches >= perFile) break;
+        if (matches.length >= globalMax) {
+          truncated = true;
+          break;
+        }
+        const found = line.search(matcher);
+        if (found < 0) continue;
+        matches.push({ path: relativePath, line: index + 1, column: found + 1, text: line });
+        fileMatches++;
+        if (matches.length >= globalMax) truncated = true;
+      }
+    };
+
+    try {
+      const target = lstatSync(searchDir, { throwIfNoEntry: false });
+      if (target?.isFile()) {
+        await searchFile(searchDir, scope);
+      } else {
+        const glob = new Bun.Glob('**/*');
+        for await (const entry of glob.scan({ cwd: searchDir, absolute: false, onlyFiles: true, dot: true, followSymlinks: false })) {
+          if (truncated) break;
+          await searchFile(join(searchDir, entry), entry);
+        }
+      }
+    } catch (error: any) {
+      return this.fail(null!, start, error?.message ?? 'code_searcher fallback failed', 'code_searcher');
+    }
+
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'code_searcher',
+      result: JSON.stringify({
+        kind: 'code_search',
+        query,
+        scope,
+        matches,
+        truncated,
+        diagnostics: ['ripgrep unavailable; used the Bun filesystem fallback'],
+        fileSizeLimitBytes: 8 * 1024 * 1024,
+        searchedAt: new Date().toISOString(),
+      }),
+      success: true,
+      duration: Date.now() - start,
+    };
   }
 
   private async handleWebSearch(args: Record<string, unknown>, start: number): Promise<ToolResult> {
@@ -1202,6 +1313,11 @@ function findEditMatch(text: string, oldString: string): EditMatch | null {    c
     index: originalIndex,
     lineEnding,
   };
+}
+
+function isRipgrepUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\brg\b/i.test(message) && /(?:enoent|no such file|not found|executable|failed to spawn)/i.test(message);
 }
 
 function editStringNotFoundError(path: string, oldString: string): string {

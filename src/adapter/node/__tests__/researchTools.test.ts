@@ -79,4 +79,24 @@ describe('research tool migration', () => {
     expect(payload.matches).toHaveLength(3);
     expect(payload.truncated).toBe(true);
   });
+
+  it('uses the Bun fallback when rg is unavailable and preserves file scope', async () => {
+    const result = await (adapter as any).handleCodeSearcherFallback(
+      'needle',
+      join(workspace, 'many.ts'),
+      'many.ts',
+      { maxResults: 100, globalMaxResults: 3 },
+      Date.now(),
+    );
+    expect(result.success).toBe(true);
+    const payload = JSON.parse(String(result.result)) as {
+      matches: Array<{ path: string }>;
+      truncated: boolean;
+      diagnostics: string[];
+    };
+    expect(payload.matches).toHaveLength(3);
+    expect(payload.matches.every((match) => match.path === 'many.ts')).toBe(true);
+    expect(payload.truncated).toBe(true);
+    expect(payload.diagnostics).toContain('ripgrep unavailable; used the Bun filesystem fallback');
+  });
 });

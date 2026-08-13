@@ -14,6 +14,7 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - README、中文 README、Prompt/Engine/Harness/Adapter/Coding Agent/master spec 文档同步更新
 - 更新应用界面截图与截图引用
 - 新增共享自适应控制平面：按工作区、工具、时间、记忆和验证反馈动态选择探索/委派/恢复/验证策略，通过 `<adaptive_context>` 注入；只有真实验证过的结果才晋升为可复用 procedure
+- `code_searcher` 在 CI 或精简环境缺少 ripgrep 时自动回退到受工作区边界保护的 Bun 文件扫描，并保持单文件范围、隐藏文件、glob 和结果上限语义
 
 ## v1.9.2-beta5
 
