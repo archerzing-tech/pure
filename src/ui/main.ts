@@ -9,7 +9,7 @@
 import { ChatController, bindAssistantBubbleCopy, shouldCancelForEscape } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
-import { getStoredThinkingSegments, groupFileWrites, type StoredMessage, type ToolExecMeta } from './store';
+import { buildStoredToolExec, getStoredDisplayContent, getStoredThinkingSegments, getStoredToolCallInfos, groupFileWrites, type StoredMessage, type StoredToolCallInfo, type ToolExecMeta } from './store';
 import { estimateCostUsd, formatCostUsd, formatTokens } from '../shared/usage';
 import { escapeHtml } from '../shared/html';
 import { buildExportSavedToast } from './statsExportToast';
@@ -22,9 +22,10 @@ import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { providerLabel, providerDef, PROVIDERS, defaultModelFor, customProviderFor, type ProviderId } from '../shared/providers';
-import { renderMarkdown, stripToolCallXml } from './markdownLoader';  import { createToolRow, finalizeToolRow } from './toolRow';
+import { renderMarkdown, stripToolCallXml } from './markdownLoader';  import { createToolRow, finalizeToolRow, markToolRowStopped } from './toolRow';
   import { appendStoredThinking } from './thinkingCard';
   import { createAssessmentFlowCard } from './assessmentFlow';
+  import { renderArtifactCards } from './artifactCards';
   import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
@@ -664,6 +665,7 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   loadingRow.appendChild(loadingBubble);
   chatEl.appendChild(loadingRow);
   const toolExecs: ToolExecMeta[] = [];
+  const pendingToolCalls = new Map<string, StoredToolCallInfo>();
   // Restoring a long session must not block the GUI: each bubble's markdown
   // pass (marked parse + sanitize + hljs + linkify) is effectively synchronous
   // for plain content, so yield to the browser between bubbles for a paint and
@@ -673,14 +675,32 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   try {
   for (const m of messages) {
     if (!isCurrentRestore()) return;
-    if (m.role === 'tool' && m.toolExec) {
-      toolExecs.push(m.toolExec);
+    if (m.role === 'tool') {
+      const call = m.tool_call_id ? pendingToolCalls.get(m.tool_call_id) : undefined;
+      const storedExec = m.toolExec;
+      toolExecs.push(storedExec
+        ? {
+            ...storedExec,
+            toolName: storedExec.toolName || m.name || call?.toolName || 'tool',
+            args: storedExec.args ?? call?.args,
+            resultText: storedExec.resultText ?? (typeof m.content === 'string' ? m.content : undefined),
+          }
+        : buildStoredToolExec(m, call));
+      if (m.tool_call_id) pendingToolCalls.delete(m.tool_call_id);
       continue;
-    }      if (m.role === 'assistant') {
+    }
+    if (m.role === 'assistant') {
+        const derivedArtifacts = artifactsFromToolExecs(toolExecs);
         flushToolExecs(toolExecs, chatEl);
+        flushPendingToolCalls(pendingToolCalls, chatEl);
+        for (const call of getStoredToolCallInfos(m)) {
+          if (call.id) pendingToolCalls.set(call.id, call);
+        }
+        // Analysis is a separate preflight surface, so restore it explicitly
+        // before the reasoning phases and assistant answer.
+        if (m.analysis) appendStoredThinking(m.analysis, chatEl);
         for (const segment of getStoredThinkingSegments(m)) appendStoredThinking(segment, chatEl);
         toolExecs.length = 0;
-        if (!m.content) continue;
         // Rebuild the assessment card for a restored plan pause so the
         // "waiting for reply" flow survives session restore: intent/risk/gate
         // read as passed, the execute node waits for the user's next message.
@@ -689,38 +709,46 @@ async function renderSessionMessages(messages: StoredMessage[]) {
           flow.completePhase('gate');
           flow.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
           chatEl.appendChild(flow.el);
-          // The cancel shortcut needs this ref to flip the restored card out
-          // of the "等待你回复" state when the plan is cancelled.
           chat.registerPausedAssessment(flow);
         }
-        const wrapper = document.createElement('div');
-        wrapper.className = 'bubble-row assistant';
-      const label = document.createElement('span');
-      label.className = 'bubble-label';
-      label.textContent = t('context.role.pure');
-      wrapper.appendChild(label);
-      const bubble = document.createElement('div');
-      bubble.className = m.isPlanPause ? 'bubble plan-pause-message' : 'bubble';
-      bindAssistantBubbleCopy(bubble);
-      wrapper.appendChild(bubble);
-      chatEl.appendChild(wrapper);
-      // Render one assistant message at a time. Awaiting here prevents a long
-      // restore from starting many synchronous markdown/highlight passes in one
-      // call stack, which previously starved input and made older rows appear
-      // blank until the user scrolled.        await renderMarkdown(stripToolCallXml(m.content), bubble);
-        // Restored pause bubbles get the same continue/cancel shortcuts; the
-        // plan cursor was rehydrated by loadFromStorage, so both actions work.
-        if (m.isPlanPause) {
-          attachPlanPauseActions(
-            wrapper,
-            () => chat.continuePausedPlan(),
-            () => chat.cancelPausedPlan(),
-          );
+        const restoredContent = getStoredDisplayContent(m);
+        let wrapper: HTMLDivElement | null = null;
+        if (restoredContent) {
+          wrapper = document.createElement('div');
+          wrapper.className = 'bubble-row assistant';
+          const label = document.createElement('span');
+          label.className = 'bubble-label';
+          label.textContent = t('context.role.pure');
+          wrapper.appendChild(label);
+          const bubble = document.createElement('div');
+          bubble.className = m.isPlanPause ? 'bubble plan-pause-message' : 'bubble';
+          bindAssistantBubbleCopy(bubble);
+          wrapper.appendChild(bubble);
+          chatEl.appendChild(wrapper);
+          // Restore from the display snapshot when available. This preserves
+          // streamed chart/image fences even if an adapter's final message was
+          // empty or incomplete.
+          await renderMarkdown(stripToolCallXml(restoredContent), bubble);
+          if (m.isPlanPause) {
+            attachPlanPauseActions(
+              wrapper,
+              () => chat.continuePausedPlan(),
+              () => chat.cancelPausedPlan(),
+            );
+          }
+        }
+        const restoredArtifacts = m.artifacts?.length ? m.artifacts : derivedArtifacts;
+        if (restoredArtifacts.length) {
+          const artifactRow = document.createElement('div');
+          artifactRow.className = 'bubble-row artifact-row';
+          chatEl.appendChild(artifactRow);
+          renderArtifactCards(artifactRow, restoredArtifacts);
         }
         if (!isCurrentRestore()) return;
         scrollChatToBottomIfPinned(chatEl);
     } else if (m.role === 'user' && m.content) {
       flushToolExecs(toolExecs, chatEl);
+      flushPendingToolCalls(pendingToolCalls, chatEl);
       toolExecs.length = 0;
       const wrapper = document.createElement('div');
       wrapper.className = 'bubble-row user';
@@ -744,6 +772,7 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   }
   if (!isCurrentRestore()) return;
   flushToolExecs(toolExecs, chatEl);
+  flushPendingToolCalls(pendingToolCalls, chatEl);
   } catch (err) {
     // Remove the loading row on error and dismiss the overlay: a stale
     // restore can only reach catch when the newer restore also threw, so
@@ -770,6 +799,34 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   // The restored session's stats belong to the same conversation id —
   // re-render the 统计 tab so the panel matches the transcript.
   renderSessionStats();
+}
+
+function artifactsFromToolExecs(execs: ToolExecMeta[]): Array<{ path: string }> {
+  const paths = new Set<string>();
+  for (const exec of execs) {
+    if (!exec.success) continue;
+    if ((exec.toolName === 'write_file' || exec.toolName === 'edit_file') && typeof exec.args?.path === 'string' && exec.args.path.trim()) {
+      paths.add(exec.args.path);
+    } else if (exec.toolName === 'replace_files' && Array.isArray(exec.args?.files)) {
+      for (const file of exec.args.files) {
+        if (typeof file === 'string' && file.trim()) paths.add(file);
+      }
+    }
+  }
+  return [...paths].map(path => ({ path }));
+}
+
+function flushPendingToolCalls(calls: Map<string, StoredToolCallInfo>, parent: HTMLElement): void {
+  if (calls.size === 0) return;
+  const grid = document.createElement('div');
+  grid.className = 'bubble-row tool-grid';
+  for (const call of calls.values()) {
+    const row = createToolRow(call.toolName, call.args);
+    markToolRowStopped(row);
+    grid.appendChild(row.el);
+  }
+  parent.appendChild(grid);
+  calls.clear();
 }
 
 function flushToolExecs(execs: ToolExecMeta[], parent: HTMLElement) {
@@ -969,12 +1026,17 @@ promptEl.addEventListener('paste', (e) => { pasteChips.consumePaste(e); });
 landingPrompt.addEventListener('paste', (e) => { pasteChips.consumePaste(e); });
 
 document.addEventListener('keydown', (e) => {
-  if (e.defaultPrevented || document.querySelector('.bubble-row.inline-card')) return;
+  if (e.defaultPrevented) return;
+  // Stop must win over any inline permission/plan card. A stale card can remain
+  // in the transcript while a tool is already running; letting it short-circuit
+  // here made Escape appear broken even though the active turn was cancellable.
   if (shouldCancelForEscape(e.key, chat.isStreaming())) {
     e.preventDefault();
     queuedWhileStreaming = null;
     chat.cancel();
+    return;
   }
+  if (document.querySelector('.bubble-row.inline-card')) return;
 });
 
 promptEl.addEventListener('keydown', (e) => {

@@ -49,6 +49,13 @@ export interface StoredMessage {
   name?: string;
   /** Reasoning transcript shown in the GUI before this assistant message. */
   thinking?: string;
+  /** Text actually rendered in the assistant bubble. Kept separately from
+   * the model transcript because some adapters omit streamed final content. */
+  displayContent?: string;
+  /** Preflight task analysis shown before the first assistant response. */
+  analysis?: string;
+  /** Files shown as generated-artifact cards after this assistant response. */
+  artifacts?: Array<{ path: string }>;
   /** Assistant message that is a plan pause point ("已暂停，等待你回复") —
    * re-applies the waiting bubble style on session restore. */
   isPlanPause?: boolean;
@@ -74,6 +81,59 @@ export function getStoredThinkingSegments(message: Partial<StoredMessage>): stri
   if (message.thinkingPhases?.length) return message.thinkingPhases.map(phase => phase.text).filter(Boolean);
   if (message.thinkingSegments?.length) return message.thinkingSegments.filter(Boolean);
   return message.thinking ? [message.thinking] : [];
+}
+
+export function getStoredDisplayContent(message: Partial<StoredMessage>): string {
+  return message.displayContent ?? message.content ?? '';
+}
+
+export interface StoredToolCallInfo {
+  id: string;
+  toolName: string;
+  args: Record<string, unknown>;
+}
+
+function recordArgs(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+export function getStoredToolCallInfos(message: Partial<StoredMessage>): StoredToolCallInfo[] {
+  if (!Array.isArray(message.tool_calls)) return [];
+  return message.tool_calls.flatMap((raw): StoredToolCallInfo[] => {
+    if (!raw || typeof raw !== 'object') return [];
+    const call = raw as { id?: unknown; name?: unknown; function?: { name?: unknown; arguments?: unknown } };
+    const fn = call.function;
+    const id = typeof call.id === 'string' ? call.id : '';
+    const toolName = typeof fn?.name === 'string'
+      ? fn.name
+      : typeof call.name === 'string' ? call.name : '';
+    if (!toolName) return [];
+    let args: Record<string, unknown> = {};
+    const rawArgs = fn?.arguments;
+    if (typeof rawArgs === 'string') {
+      try { args = recordArgs(JSON.parse(rawArgs)); } catch { args = {}; }
+    } else {
+      args = recordArgs(rawArgs);
+    }
+    return [{ id, toolName, args }];
+  });
+}
+
+export function buildStoredToolExec(
+  message: Partial<StoredMessage>,
+  call?: StoredToolCallInfo,
+): ToolExecMeta {
+  const resultText = typeof message.content === 'string' ? message.content : '';
+  const toolName = message.name || call?.toolName || 'tool';
+  return {
+    toolName,
+    success: !/^Error:\s/i.test(resultText),
+    duration: 0,
+    args: call?.args,
+    resultText: resultText || undefined,
+  };
 }
 
 export interface SessionMeta {

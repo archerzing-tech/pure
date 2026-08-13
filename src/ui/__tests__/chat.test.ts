@@ -159,6 +159,16 @@ describe('generateTaskAnalysis (streamed LLM analysis + task-specific plan)', ()
     expect(result.plan!.steps[0]).toMatchObject({ action: '设计数据模型' });
   });
 
+  it('keeps machine-readable plan metadata out of the visible thinking trace', async () => {
+    const llm = fakeLlm('先确认数据是否真实可接入。\n```json\n[{"action":"接入数据","description":"d"}]```');
+    const deltas: string[] = [];
+    await generateTaskAnalysis(llm, '创建监控大屏', 200, undefined, { onThinking: (d) => deltas.push(d) });
+    const visible = deltas.join('');
+    expect(visible).toContain('先确认数据是否真实可接入');
+    expect(visible).not.toContain('```');
+    expect(visible).not.toContain('接入数据');
+  });
+
   it('parses a bare JSON array (no <analysis>/fence) for backward compatibility', async () => {
     const llm = fakeLlm('[{"action":"Inspect","description":"Read auth module"},{"action":"Rewrite","description":"Replace token logic"}]');
     const result = await generateTaskAnalysis(llm, '重构认证模块');
@@ -328,16 +338,13 @@ describe('Escape cancellation guard', () => {
   });
 });
 
-describe('TASK_ANALYSIS_PROMPT drives a staged thinking flow (restate → difficulty → approach)', () => {
-  it('requires the three analysis stages and puts key gaps into plan step 1', () => {
+describe('TASK_ANALYSIS_PROMPT keeps reasoning natural and task-specific', () => {
+  it('does not prescribe fixed headings or a fixed plan count', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 思考必须分三段真实输出：复述理解 → 难度/复杂度 → 准备怎么做，全部流式展示。
-    expect(src).toContain('【我理解的需求】');
-    expect(src).toContain('【难度与复杂度】');
-    expect(src).toContain('【我准备怎么做】');
-    // 新项目缺少技术栈/数据来源时，确认细节必须作为计划第一步、执行时自然提问。
-    expect(src).toContain('先确认关键细节');
-    expect(src).toContain('ask the user 1-2 natural questions IN CHAT');
+    expect(src).toContain('natural, conversational reasoning');
+    expect(src).toContain('Do not use prescribed headings, a fixed number of sections');
+    expect(src).toContain('Choose the number and granularity from the work itself');
+    expect(src).toContain('Do NOT invent file contents or claim that an external data source exists');
   });
 
   it('has no fixed pre-plan clarify card and no clarify interview round-trip', () => {
@@ -398,9 +405,8 @@ describe('LLM-informed risk calibration (P0: model judgment settles the safety c
   it('reopens the confirm gate when the model raises risk after the merge (no stale rules-only decision)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const merge = src.indexOf('effectiveIntent = mergeIntentAssessments(analysis.intent, llmAnalysis.llmIntent);');
-    // 确认门必须在 merge 之后用合并后的值重新计算，否则模型抬高的风险不会触发确认。
     const recheck = src.indexOf('riskReview = effectiveIntent.requiresConfirmation;', merge);
-    const gate = src.indexOf('if (riskReview || (needsDeliveryGate && forcedMode !== \'yolo\')', recheck);
+    const gate = src.indexOf('const needsInteractiveApproval = riskReview || forcedMode === \'plan\' || forcedMode === \'build\';', recheck);
     expect(merge).toBeGreaterThan(-1);
     expect(recheck).toBeGreaterThan(merge);
     expect(gate).toBeGreaterThan(recheck);
@@ -542,16 +548,16 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
     expect(oldReplace).toBe(-1);
   });
 
-  it('opens the thinking card before the first await in the gate', () => {
+  it('opens the thinking card before workspace probing and model analysis', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const thinking = src.indexOf('const analysisCard = openThinkingCard();');
-    const firstAwait = Math.min(
-      src.indexOf('await buildWorkspaceContext('),
-      src.indexOf('await generateTaskAnalysis('),
-    );
+    const thinking = src.indexOf('const earlyAnalysisCard = shouldRunTaskAnalysis ? openThinkingCard() : null;');
+    const firstProbe = src.indexOf('await discoverWorkspace(');
+    const firstContextRead = src.indexOf('await buildWorkspaceContext(');
+    const firstAnalysis = src.indexOf('await generateTaskAnalysis(');
     expect(thinking).toBeGreaterThan(-1);
-    expect(firstAwait).toBeGreaterThan(-1);
-    expect(thinking).toBeLessThan(firstAwait);
+    expect(firstProbe).toBeGreaterThan(thinking);
+    expect(firstContextRead).toBeGreaterThan(thinking);
+    expect(firstAnalysis).toBeGreaterThan(thinking);
   });
 
   it('renders the task-specific plan card only after the LLM analysis lands', () => {
@@ -582,21 +588,21 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
     expect(src.indexOf('已识别为 ${analysis.intent.intent} 请求')).toBe(-1);
   });
 
-  it('routes project builds through the explicit approval dialog before execution', () => {
+  it('does not force project builds through a generic approval dialog', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const gate = src.indexOf("if (riskReview || (needsDeliveryGate && forcedMode !== 'yolo') || forcedMode === 'plan' || forcedMode === 'build') {");
+    const gate = src.indexOf('const needsInteractiveApproval = riskReview || forcedMode === \'plan\' || forcedMode === \'build\';');
     const review = src.indexOf('await requestPlanReview(', gate);
-    const approved = src.indexOf('approvePlan(true);', review);
+    const autoStart = src.indexOf('approvePlan(true);', gate);
     expect(gate).toBeGreaterThan(-1);
     expect(review).toBeGreaterThan(gate);
-    expect(approved).toBeGreaterThan(review);
+    expect(autoStart).toBeGreaterThan(gate);
+    expect(src).not.toContain('needsDeliveryGate && forcedMode !== \'yolo\'');
   });
 
-  it('lets the forced-yolo mode bypass the build approval dialog', () => {
+  it('keeps explicit plan/build mode as the opt-in approval path', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // The composer's explicit "no gates" choice must win over the default
-    // project-build approval — forced yolo executes delivery requests directly.
-    expect(src).toContain("needsDeliveryGate && forcedMode !== 'yolo'");
+    expect(src).toContain("forcedMode === 'plan' || forcedMode === 'build'");
+    expect(src).not.toContain("needsDeliveryGate && forcedMode !== 'yolo'");
   });
 
   it('keeps the user message visible when the turn is paused mid-preflight (stop button)', () => {

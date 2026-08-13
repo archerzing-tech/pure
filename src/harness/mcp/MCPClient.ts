@@ -22,6 +22,7 @@ export interface MCPClientConfig {
   onToolDiscovered?: (tool: TaggedTool) => void;
   /** Session id — passed to the Rust subprocess registry in the desktop app. */
   sessionId?: string;
+  proxyUrl?: string;
 }
 
 interface ServerState {
@@ -77,9 +78,9 @@ export class MCPClient implements ToolAdapter {
         // servers through the Rust subprocess manager instead. Plain browser /
         // CLI keep the JS StdioTransport.
         ? (this.config.sessionId && isTauriRuntime()
-            ? new TauriStdioTransport(this.config.sessionId, config.name, config.command ?? [], config.env)
+            ? new TauriStdioTransport(this.config.sessionId, config.name, config.command ?? [], config.env, this.config.proxyUrl ?? '')
             : new StdioTransport(config.command ?? [], config.env))
-        : new HttpTransport(config.url ?? 'http://localhost:3000');
+        : new HttpTransport(config.url ?? 'http://localhost:3000', this.config.proxyUrl ?? '');
 
     const state: ServerState = { config, transport, tools: [], connected: false };
     this.servers.set(config.name, state);

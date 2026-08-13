@@ -17,6 +17,7 @@ export interface PlanOverviewHandle {
   update(plan: Plan, status?: PlanOverviewStatus, currentPlan?: number, currentTodo?: number, todoLabel?: string): void;
   setStatus(status: PlanOverviewStatus, activity?: string): void;
   setCurrent(planNumber: number, todoNumber?: number, todoLabel?: string): void;
+  setCollapsed(collapsed: boolean): void;
   clear(): void;
 }
 
@@ -29,6 +30,26 @@ export function createPlanOverview(): PlanOverviewHandle {
 
   const card = document.createElement('div');
   card.className = 'plan-overview-card';
+
+  const compact = document.createElement('button');
+  compact.type = 'button';
+  compact.className = 'plan-overview-compact';
+  compact.hidden = true;
+  compact.title = '展开执行大纲';
+  compact.setAttribute('aria-label', '展开执行大纲');
+  compact.setAttribute('aria-expanded', 'false');
+  const compactDot = document.createElement('span');
+  compactDot.className = 'plan-overview-compact-dot';
+  compactDot.setAttribute('aria-hidden', 'true');
+  const compactLabel = document.createElement('span');
+  compactLabel.className = 'plan-overview-compact-label';
+  const compactProgress = document.createElement('span');
+  compactProgress.className = 'plan-overview-compact-progress';
+  const compactChevron = document.createElement('span');
+  compactChevron.className = 'plan-overview-compact-chevron';
+  compactChevron.textContent = '‹';
+  compactChevron.setAttribute('aria-hidden', 'true');
+  compact.append(compactDot, compactLabel, compactProgress, compactChevron);
 
   const head = document.createElement('div');
   head.className = 'plan-overview-head';
@@ -45,7 +66,6 @@ export function createPlanOverview(): PlanOverviewHandle {
   close.title = '收起大纲';
   close.setAttribute('aria-label', '收起执行大纲');
   close.textContent = '×';
-  close.addEventListener('click', () => { el.hidden = true; });
   head.append(title, progress, close);
 
   const activity = document.createElement('div');
@@ -58,7 +78,19 @@ export function createPlanOverview(): PlanOverviewHandle {
   steps.setAttribute('role', 'list');
 
   card.append(head, activity, steps);
-  el.appendChild(card);
+  el.append(card, compact);
+
+  let collapsed = false;
+  function setCollapsed(next: boolean): void {
+    collapsed = next;
+    card.hidden = collapsed;
+    compact.hidden = !collapsed;
+    el.classList.toggle('is-collapsed', collapsed);
+    compact.setAttribute('aria-expanded', String(!collapsed));
+    if (plan) render();
+  }
+  close.addEventListener('click', () => setCollapsed(true));
+  compact.addEventListener('click', () => setCollapsed(false));
 
   const state = { currentPlan: 1, currentTodo: 1, todoLabel: '' };
   let plan: Plan | null = null;
@@ -95,8 +127,23 @@ export function createPlanOverview(): PlanOverviewHandle {
       steps.appendChild(row);
     });
     card.classList.remove('complete', 'awaiting', 'active');
-    if (status === 'complete') card.classList.add('complete');
-    else card.classList.add(status === 'waiting' ? 'awaiting' : 'active');
+    compact.classList.remove('complete', 'awaiting', 'active');
+    if (status === 'complete') {
+      card.classList.add('complete');
+      compact.classList.add('complete');
+      compactLabel.textContent = '执行完成';
+    } else if (status === 'waiting') {
+      card.classList.add('awaiting');
+      compact.classList.add('awaiting');
+      compactLabel.textContent = '等待回复';
+    } else {
+      card.classList.add('active');
+      compact.classList.add('active');
+      compactLabel.textContent = state.todoLabel ? `执行中：${state.todoLabel}` : '正在执行';
+    }
+    compactProgress.textContent = progress.textContent;
+    compact.title = collapsed ? '展开执行大纲' : '收起执行大纲';
+    compact.setAttribute('aria-label', compact.title);
   };
 
   const apply = (
@@ -146,8 +193,10 @@ export function createPlanOverview(): PlanOverviewHandle {
       render();
       activity.textContent = activityText(status);
     },
+    setCollapsed,
     clear: () => {
       plan = null;
+      setCollapsed(false);
       el.hidden = true;
     },
   };

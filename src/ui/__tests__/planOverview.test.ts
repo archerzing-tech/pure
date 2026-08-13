@@ -51,7 +51,8 @@ function installFakeDocument(): () => void {
       },
       append: (...items: any[]) => items.forEach((item) => { children.push(item); childNodes.push(item); }),
       appendChild: (item: any) => { children.push(item); childNodes.push(item); return item; },
-      addEventListener: () => {},
+      _listeners: {} as Record<string, () => void>,
+      addEventListener: (name: string, listener: () => void) => { element._listeners[name] = listener; },
       setAttribute: (name: string, value: string) => {
         element[name] = value;
         if (name.startsWith('data-')) element.dataset[name.slice(5)] = value;
@@ -103,6 +104,47 @@ describe('planOverview floating outline card', () => {
       expect(classes[1]).toContain('active');
       expect(classes[2]).toContain('pending');
       expect(cardOf(overview.el).className).toContain('active');
+    } finally {
+      restore();
+    }
+  });
+
+  it('collapses to an execution status chip and expands on click', () => {
+    const restore = installFakeDocument();
+    try {
+      const overview = createPlanOverview();
+      overview.show(samplePlan(), 'active', 2, 1, '实现功能');
+      const card = cardOf(overview.el);
+      const compact = overview.el.children[1] as any;
+      expect(card.hidden).toBe(false);
+      expect(compact.hidden).toBe(true);
+      expect(compact.children[1].textContent).toBe('执行中：实现功能');
+      expect(compact.children[2].textContent).toBe('1/3');
+
+      overview.setCollapsed(true);
+      expect(card.hidden).toBe(true);
+      expect(compact.hidden).toBe(false);
+      expect(compact.children[1].textContent).toBe('执行中：实现功能');
+      compact._listeners.click();
+      expect(card.hidden).toBe(false);
+      expect(compact.hidden).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps the collapsed status chip synchronized with waiting and completion', () => {
+    const restore = installFakeDocument();
+    try {
+      const overview = createPlanOverview();
+      overview.show(samplePlan(), 'active', 1, 1);
+      overview.setCollapsed(true);
+      overview.setStatus('waiting');
+      const compact = overview.el.children[1] as any;
+      expect(compact.children[1].textContent).toBe('等待回复');
+      overview.setStatus('complete');
+      expect(compact.children[1].textContent).toBe('执行完成');
+      expect(compact.children[2].textContent).toBe('3/3');
     } finally {
       restore();
     }

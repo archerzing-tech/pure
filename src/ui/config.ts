@@ -9,6 +9,8 @@ import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
 import type { CustomProvider, ProviderId } from '../shared/providers';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
+import type { ProxyConfig } from '../shared/proxy';
+import { normalizeProxyConfig } from '../shared/proxy';
 
 export interface PureConfig {
   /** Provider id — typed from the registry so the two can never drift. */
@@ -69,11 +71,14 @@ export interface PureConfig {
    */
   hubSkills: HubSkill[];
   mcpServers: Array<{ name: string; transport: 'stdio' | 'http'; command?: string[]; url?: string }>;
+  /** Network proxy used by desktop LLM and agent requests. It is opt-in; an empty or invalid URL means direct connection. LLM and tool traffic have independent switches. */
+  proxy: ProxyConfig;
   /**
    * Bumped when a config migration changes field semantics. v2: toolBrowser
    * became a functional gate (was a decorative no-op defaulting to false);
    * legacy configs that stored the old meaningless `false` are migrated to
-   * `true` so existing users keep web tools.
+   * `true` so existing users keep web tools. v7: proxy defaults and per-scope
+   * proxy switches were made explicit.
    */
   configVersion: number;
   /**
@@ -152,9 +157,10 @@ export function defaults(): PureConfig {
     hubSkills: [],
     mcpServers: [...DEFAULT_MCP_SERVERS],
     customProviders: [],
+    proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', bypassProviders: [], bypassModels: [] }),
     streamingRender: true,
     taskMode: 'auto',
-    configVersion: 5,
+    configVersion: 7,
   };
 }
 
@@ -280,6 +286,18 @@ export function loadConfig(): PureConfig | null {
         cfg.customProviders = Array.isArray(cfg.customProviders) ? cfg.customProviders : [];
         cfg.configVersion = 5;
         needsPersist = true;
+      }
+      if ((parsed.configVersion ?? 1) < 7) {
+        const legacyProxy = normalizeProxyConfig(parsed.proxy);
+        // v6 defaults accidentally persisted enabled=true with an empty URL.
+        // Treat that shape as the old default, not as an explicit opt-in; a
+        // configured proxy URL remains enabled during migration.
+        if (!String(parsed.proxy?.url ?? '').trim()) legacyProxy.enabled = false;
+        cfg.proxy = legacyProxy;
+        cfg.configVersion = 7;
+        needsPersist = true;
+      } else {
+        cfg.proxy = normalizeProxyConfig(cfg.proxy);
       }
       if (isTauriRuntime() && cfg.apiKey) {
         // Legacy migration: move a key previously persisted to localStorage

@@ -1342,6 +1342,16 @@ body {
   to { visibility: hidden; }
 }
 
+/* Once the first output arrives, the waiting row is replaced by this stable
+   progress line. It deliberately has no animation or cursor. */
+.tool-row-live-status {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 0 2px 4px;
+}
+
 /* Live output lines streamed into the Output panel while a command runs
    (execute_command_stream). Monospace console text; stderr tinted so the two
    streams stay distinguishable at a glance. */
@@ -2266,6 +2276,81 @@ body {
   background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
   color: var(--text);
 }
+.plan-overview-compact {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-card) 94%, var(--accent-soft));
+  box-shadow: var(--shadow-md);
+  color: var(--text);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  animation: plan-overview-compact-in 0.2s ease-out;
+  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+}
+.plan-overview-compact:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 48%, var(--bg-card));
+  box-shadow: var(--shadow-lg);
+}
+.plan-overview-compact-dot {
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent), 0 0 10px color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: plan-overview-compact-pulse 1.5s ease-in-out infinite;
+}
+.plan-overview-compact-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 650;
+}
+.plan-overview-compact-progress {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.plan-overview-compact-chevron {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: 18px;
+  line-height: 12px;
+}
+.plan-overview-compact.awaiting {
+  border-color: color-mix(in srgb, #d97706 48%, var(--border));
+}
+.plan-overview-compact.awaiting .plan-overview-compact-dot {
+  background: #d97706;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #d97706 16%, transparent);
+}
+.plan-overview-compact.complete {
+  border-color: color-mix(in srgb, var(--success) 48%, var(--border));
+}
+.plan-overview-compact.complete .plan-overview-compact-dot {
+  background: var(--success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
+  animation: none;
+}
+@keyframes plan-overview-compact-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes plan-overview-compact-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.86); }
+  50% { opacity: 1; transform: scale(1); }
+}
 .plan-overview-activity {
   padding: 0 10px 7px;
   color: var(--accent);
@@ -2348,8 +2433,14 @@ body {
   50% { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .plan-overview-card {
+  .plan-overview-card,
+  .plan-overview-compact {
     animation: none;
+  }
+  .plan-overview-compact-dot,
+  .plan-overview-compact.complete .plan-overview-compact-dot {
+    animation: none;
+    opacity: 0.85;
   }
   .plan-overview-step.awaiting .plan-overview-step-check {
     animation: none;

@@ -295,6 +295,10 @@
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
                 <span data-i18n="nav.tools">Tools</span>
               </button>
+              <button class="settings-nav-item" data-category="proxy">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .1V21a2 2 0 0 1-4 0v-1.5a1.65 1.65 0 0 0-1-.1 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0 .1-1H3a2 2 0 0 1 0-4h1.7a1.65 1.65 0 0 0-.1-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-.1V3a2 2 0 0 1 4 0v1.5a1.65 1.65 0 0 0 1 .1 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0-.1 1H21a2 2 0 0 1 0 4h-1.5a1.65 1.65 0 0 0-.1 1z"/></svg>
+                <span data-i18n="nav.proxy">Proxy</span>
+              </button>
               <button class="settings-nav-item" data-category="skills">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
                 <span data-i18n="nav.skills">Skills</span>
@@ -493,6 +497,37 @@
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="tools.perm.git">Auto-approve git</span><span class="setting-hint" data-i18n="tools.perm.git.hint">Git read operations</span></div>
                     <label class="toggle"><input type="checkbox" id="cfg-perm-git" checked /><span class="toggle-slider"></span></label>
+                  </div>
+                </div>
+              </div>
+              <!-- Proxy -->
+              <div class="settings-page" data-page="proxy">
+                <h2 class="settings-page-title" data-i18n="proxy.title">网络代理</h2>
+                <p class="settings-page-desc" data-i18n="proxy.desc">为大模型和 Agent 的网络访问配置统一代理</p>
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.enabled">启用代理</span><span class="setting-hint" data-i18n="proxy.enabled.hint">用于大模型、内置网络工具和桌面版 MCP</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-proxy-enabled" /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.llmEnabled">大模型请求走代理</span><span class="setting-hint" data-i18n="proxy.llmEnabled.hint">控制 LLM 的请求是否使用上面的代理</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-proxy-llm" /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.toolsEnabled">工具网络走代理</span><span class="setting-hint" data-i18n="proxy.toolsEnabled.hint">控制 Agent、网页工具、MCP 和命令行网络请求</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-proxy-tools" /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.url">代理地址</span><span class="setting-hint" data-i18n="proxy.url.hint">支持 http://、https://、socks5:// 或 socks5h://host:port</span></div>
+                    <input id="cfg-proxy-url" class="setting-input" type="text" data-i18n-placeholder="proxy.url.placeholder" placeholder="http://127.0.0.1:7890" autocomplete="off" />
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.bypassProviders">直连供应商</span><span class="setting-hint" data-i18n="proxy.bypassProviders.hint">供应商 ID，逗号或换行分隔；命中后 LLM 不走代理</span></div>
+                    <input id="cfg-proxy-bypass-providers" class="setting-input" type="text" data-i18n-placeholder="proxy.bypass.placeholder" placeholder="ollama, deepseek-openai" autocomplete="off" />
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.bypassModels">直连模型</span><span class="setting-hint" data-i18n="proxy.bypassModels.hint">模型 ID/名称，逗号或换行分隔；命中后 LLM 不走代理</span></div>
+                    <input id="cfg-proxy-bypass-models" class="setting-input" type="text" data-i18n-placeholder="proxy.bypass.placeholder" placeholder="qwen2.5-coder:7b" autocomplete="off" />
                   </div>
                 </div>
               </div>

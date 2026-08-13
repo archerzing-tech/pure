@@ -3,6 +3,7 @@
 
 import type { MCPTransport } from './MCPTransport';
 import { makeRequest } from './MCPTransport';
+import { isTauriRuntime, loadTauriCore } from '../../shared/tauri';
 
 interface PendingRequest {
   resolve: (v: unknown) => void;
@@ -17,13 +18,16 @@ export class HttpTransport implements MCPTransport {
   private eventSource: EventSource | null = null;
   private baseUrl: string;
   private closed = false;
+  private proxyUrl: string;
 
-  constructor(url: string) {
+  constructor(url: string, proxyUrl = '') {
     this.baseUrl = url.replace(/\/$/, '');
+    this.proxyUrl = proxyUrl;
   }
 
   private ensureConnected(): void {
     if (this.closed) throw new Error('Transport closed');
+    if (this.proxyUrl && isTauriRuntime()) return;
     if (this.eventSource && this.eventSource.readyState !== EventSource.CLOSED) return;
     this.eventSource = new EventSource(`${this.baseUrl}/sse`);
 
@@ -58,8 +62,11 @@ export class HttpTransport implements MCPTransport {
   async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
     if (this.closed) throw new Error('Transport closed');
 
-    this.ensureConnected();
     const request = makeRequest(method, params);
+    if (this.proxyUrl && isTauriRuntime()) {
+      return this.sendViaRust(request);
+    }
+    this.ensureConnected();
 
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -109,14 +116,48 @@ export class HttpTransport implements MCPTransport {
 
   async notify(method: string, params?: Record<string, unknown>): Promise<void> {
     if (this.closed) throw new Error('Transport closed');
-    this.ensureConnected();
     const notification = { jsonrpc: '2.0' as const, method, params };
+    if (this.proxyUrl && isTauriRuntime()) {
+      const core = await loadTauriCore();
+      if (!core) throw new Error('MCP proxy requires the Tauri runtime');
+      await core.invoke<string>('mcp_http_request', {
+        url: `${this.baseUrl}/message`,
+        method: 'POST',
+        body: JSON.stringify(notification),
+        proxyUrl: this.proxyUrl,
+      });
+      return;
+    }
+    this.ensureConnected();
     await fetch(`${this.baseUrl}/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(notification),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+  }
+
+  private async sendViaRust(request: { id: number; method: string; params?: Record<string, unknown> }): Promise<unknown> {
+    const core = await loadTauriCore();
+    if (!core) throw new Error('MCP proxy requires the Tauri runtime');
+    const body = await core.invoke<string>('mcp_http_request', {
+      url: `${this.baseUrl}/message`,
+      method: 'POST',
+      body: JSON.stringify(request),
+      proxyUrl: this.proxyUrl,
+    });
+    const text = String(body).trim();
+    const dataLine = text.split(/\r?\n/).find((line) => line.startsWith('data:'));
+    const payload = (dataLine ? dataLine.slice(5).trim() : text);
+    if (!payload) return undefined;
+    let msg: { result?: unknown; error?: { code?: number; message?: string } };
+    try {
+      msg = JSON.parse(payload) as typeof msg;
+    } catch {
+      throw new Error(`MCP invalid response: ${payload.slice(0, 200)}`);
+    }
+    if (msg.error) throw new Error(`MCP error ${msg.error.code}: ${msg.error.message}`);
+    return msg.result;
   }
 
   close(): void {

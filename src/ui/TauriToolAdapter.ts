@@ -74,17 +74,19 @@ export class TauriToolAdapter implements ToolAdapter {
   private tavilyApiKey: string;
   private serperApiKey: string;
   private location: string;
+  private proxyUrl: string;
   private sessionId: string;
   private invokeFn: InvokeFunction | null;
   private latestWriteBatch: WorkspaceSnapshotBatch | null = null;
   private snapshotSequence = 0;
   private readonly maxSnapshotBytes = 8 * 1024 * 1024;
 
-  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '') {
+  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '') {
     this.workspace = workspace;
     this.tavilyApiKey = tavilyApiKey;
     this.serperApiKey = serperApiKey;
     this.location = location;
+    this.proxyUrl = proxyUrl;
     this.invokeFn = invoke ?? null;
     this.sessionId = sessionId;
   }
@@ -241,6 +243,7 @@ export class TauriToolAdapter implements ToolAdapter {
                 id: toolCall.id,
                 workspace: ws,
                 command: String(args.command ?? ''),
+                proxyUrl: this.proxyUrl,
                 onOutput: channel,
               }) as number;
               if (cancelled) {
@@ -261,7 +264,7 @@ export class TauriToolAdapter implements ToolAdapter {
               signal?.removeEventListener('abort', onAbort);
             }
           }
-          const exec = await this.call('execute_command', { workspace: ws, command: String(args.command ?? '') }) as { exitCode: number; stdout: string; stderr: string };
+          const exec = await this.call('execute_command', { workspace: ws, command: String(args.command ?? ''), proxyUrl: this.proxyUrl }) as { exitCode: number; stdout: string; stderr: string };
           const execLines: Array<{ kind: 'stdout' | 'stderr'; line: string }> = [
             ...(exec.stdout ? [{ kind: 'stdout' as const, line: exec.stdout }] : []),
             ...(exec.stderr ? [{ kind: 'stderr' as const, line: exec.stderr }] : []),
@@ -298,7 +301,7 @@ export class TauriToolAdapter implements ToolAdapter {
         case 'researcher_web': {
           const prompt = String(args.prompt ?? args.query ?? '').trim();
           const limits = researchLimits(args);
-          const searchData = await this.call('web_search', buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey)) as string;
+          const searchData = await this.call('web_search', buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, this.proxyUrl)) as string;
           const rawSources = parseWebSearchText(searchData);
           const filteredSources = filterResearchSources(rawSources, args.allowedDomains);
           const filtered = rawSources.length - filteredSources.length;
@@ -308,7 +311,7 @@ export class TauriToolAdapter implements ToolAdapter {
           if (args.fetchContent !== false) {
             const enriched = await Promise.all(selected.map(async (source): Promise<ResearchSource> => {
               try {
-                const content = await this.call('web_fetch', { workspace: ws, url: source.url, maxChars: limits.maxCharsPerSource }) as string;
+                const content = await this.call('web_fetch', { workspace: ws, url: source.url, maxChars: limits.maxCharsPerSource, proxyUrl: this.proxyUrl }) as string;
                 return { ...source, content };
               } catch (error) {
                 failed.push(`${source.url}: ${error instanceof Error ? error.message : String(error)}`);
@@ -338,7 +341,7 @@ export class TauriToolAdapter implements ToolAdapter {
             return researchFailure(toolCall.id, name, start, 'researcher_docs requires both library and topic');
           }
           const limits = researchLimits(args);
-          const searchData = await this.call('web_search', buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey)) as string;
+          const searchData = await this.call('web_search', buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, this.proxyUrl)) as string;
           const rawSources = parseWebSearchText(searchData);
           const filteredSources = filterResearchSources(rawSources, args.allowedDomains);
           const filtered = rawSources.length - filteredSources.length;
@@ -348,7 +351,7 @@ export class TauriToolAdapter implements ToolAdapter {
           if (args.fetchContent !== false) {
             const enriched = await Promise.all(selected.map(async (source): Promise<ResearchSource> => {
               try {
-                const content = await this.call('web_fetch', { workspace: ws, url: source.url, maxChars: limits.maxCharsPerSource }) as string;
+                const content = await this.call('web_fetch', { workspace: ws, url: source.url, maxChars: limits.maxCharsPerSource, proxyUrl: this.proxyUrl }) as string;
                 return { ...source, content };
               } catch (error) {
                 failed.push(`${source.url}: ${error instanceof Error ? error.message : String(error)}`);
@@ -381,7 +384,7 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: raw, success: true, duration: Date.now() - start };
         }
         case 'web_search': {
-          const searchData = await this.call('web_search', buildWebSearchArgs(ws, args, this.tavilyApiKey, this.serperApiKey)) as string;
+          const searchData = await this.call('web_search', buildWebSearchArgs(ws, args, this.tavilyApiKey, this.serperApiKey, this.proxyUrl)) as string;
           return { id: toolCall.id, toolName: name, result: searchData, success: true, duration: Date.now() - start };
         }
         case 'web_fetch': {
@@ -389,6 +392,7 @@ export class TauriToolAdapter implements ToolAdapter {
             workspace: ws,
             url: String(args.url ?? ''),
             maxChars: args.maxChars ?? 20000,
+            proxyUrl: this.proxyUrl,
           }) as string;
           return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
         }
@@ -628,6 +632,7 @@ export function buildWebSearchArgs(
   args: Record<string, unknown>,
   tavilyApiKey: string,
   serperApiKey: string,
+  proxyUrl = '',
 ): Record<string, unknown> {
   return {
     workspace,
@@ -638,6 +643,7 @@ export function buildWebSearchArgs(
     // the free HTML backends otherwise.
     apiKey: tavilyApiKey,
     serperApiKey,
+    ...(proxyUrl ? { proxyUrl } : {}),
   };
 }
 

@@ -313,7 +313,8 @@ describe('live execution plan presentation', () => {
   it('renders two sibling plain-language lists instead of a nested card tree', () => {
     const src = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
     const css = readFileSync(new URL('../plain-text-plan.css', import.meta.url), 'utf8');
-    expect(src).toContain('我先把这件事拆开，按顺序来处理：');
+    expect(src).toContain('根据刚才的判断，接下来按这个顺序推进：');
+    expect(src).toContain('先从「${firstAction}」开始：');
     expect(src).toContain('plan-progress-text-plan');
     expect(src).toContain('plan-progress-text-todos');
     expect(src).toContain('el.appendChild(card)');

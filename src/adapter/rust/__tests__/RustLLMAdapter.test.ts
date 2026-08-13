@@ -91,6 +91,23 @@ describe('RustLLMAdapter', () => {
     expect(args.args.baseUrl).toBe('https://api.deepseek.com');
   });
 
+  it('passes proxy settings and provider identity to Rust without sending the API key', async () => {
+    const { deps, lastArgs } = makeDeps({ result: { text: 'ok', toolCalls: [] } });
+    const adapter = new RustLLMAdapter({
+      provider: 'ollama',
+      model: 'qwen2.5-coder:7b',
+      proxyUrl: 'socks5://127.0.0.1:1080',
+      proxyBypassProviders: ['ollama'],
+      proxyBypassModels: ['local-model'],
+    }, deps);
+    for await (const _chunk of adapter.stream(MSGS, [])) { /* drain */ }
+    expect(lastArgs().args.provider).toBe('ollama');
+    expect(lastArgs().args.proxyUrl).toBe('socks5://127.0.0.1:1080');
+    expect(lastArgs().args.proxyBypassProviders).toEqual(['ollama']);
+    expect(lastArgs().args.proxyBypassModels).toEqual(['local-model']);
+    expect(lastArgs().args.apiKey).toBe('');
+  });
+
   it('streams reasoning deltas as reasoning chunks, separate from content', async () => {
     const { deps } = makeDeps({
       deltas: [

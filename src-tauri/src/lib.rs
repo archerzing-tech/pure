@@ -9,6 +9,23 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 
+fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    if let Some(url) = proxy_url.map(str::trim).filter(|url| !url.is_empty()) {
+        if !valid_proxy_url(url) {
+            return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
+        }
+        let proxy = reqwest::Proxy::all(url).map_err(|e| format!("proxy: {}", e))?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|e| format!("client: {}", e))
+}
+
+fn valid_proxy_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    ["http://", "https://", "socks5://", "socks5h://"].iter().any(|prefix| lower.starts_with(prefix))
+}
+
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -857,7 +874,7 @@ fn glob_files(
 /// a failed command (non-zero exit) apart from a successful one instead of
 /// squashing everything into a `success: true` string.
 #[tauri::command]
-async fn execute_command(workspace: String, command: String) -> Result<serde_json::Value, String> {
+async fn execute_command(workspace: String, command: String, proxy_url: Option<String>) -> Result<serde_json::Value, String> {
     // Unix shells run `sh -c`, Windows runs `cmd /C` (no `sh` binary there).
     let output = {
         #[cfg(unix)]
@@ -869,8 +886,17 @@ async fn execute_command(workspace: String, command: String) -> Result<serde_jso
         #[cfg(windows)]
         cmd.arg("/C");
         cmd.arg(&command)
-            .current_dir(&workspace)
-            .output()
+            .current_dir(&workspace);
+        if let Some(url) = proxy_url.as_deref().filter(|url| !url.trim().is_empty()) {
+            if !valid_proxy_url(url) {
+                return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
+            }
+            cmd.env("HTTP_PROXY", url)
+                .env("HTTPS_PROXY", url)
+                .env("ALL_PROXY", url)
+                .env("NO_PROXY", "localhost,127.0.0.1,::1");
+        }
+        cmd.output()
             .await
             .map_err(|e| format!("execute_command: {}", e))?
     };
@@ -903,7 +929,7 @@ type ChatStreamRegistry = Arc<StdMutex<BTreeMap<String, tokio::sync::oneshot::Se
 /// Spawn `sh -c <command>` in its own process group (Unix) so a cancellation
 /// can kill the whole command tree. process_group(0) makes the child its own
 /// group leader (pgid == pid), which is what kill_process_group targets.
-fn spawn_shell_command(workspace: &str, command: &str) -> std::io::Result<Child> {
+fn spawn_shell_command(workspace: &str, command: &str, proxy_url: Option<&str>) -> std::io::Result<Child> {
     // Unix shells run `sh -c`, Windows runs `cmd /C` (no `sh` binary there).
     #[cfg(unix)]
     let mut cmd = {
@@ -924,6 +950,15 @@ fn spawn_shell_command(workspace: &str, command: &str) -> std::io::Result<Child>
     #[cfg(unix)]
     {
         cmd.process_group(0);
+    }
+    if let Some(url) = proxy_url.filter(|url| !url.trim().is_empty()) {
+        if !valid_proxy_url(url) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "proxy URL must start with http://, https://, socks5://, or socks5h://"));
+        }
+        cmd.env("HTTP_PROXY", url)
+            .env("HTTPS_PROXY", url)
+            .env("ALL_PROXY", url)
+            .env("NO_PROXY", "localhost,127.0.0.1,::1");
     }
     cmd.spawn()
 }
@@ -979,8 +1014,9 @@ async fn execute_command_stream_inner(
     workspace: &str,
     command: &str,
     on_output: &Channel<String>,
+    proxy_url: Option<&str>,
 ) -> Result<i32, String> {
-    let mut child = spawn_shell_command(workspace, command).map_err(|e| format!("spawn: {}", e))?;
+    let mut child = spawn_shell_command(workspace, command, proxy_url).map_err(|e| format!("spawn: {}", e))?;
 
     // Take the pipes BEFORE registering so an early return on a missing pipe
     // (practically impossible with Stdio::piped, but the API allows it) can't
@@ -1072,8 +1108,9 @@ async fn execute_command_stream(
     workspace: String,
     command: String,
     on_output: Channel<String>,
+    proxy_url: Option<String>,
 ) -> Result<i32, String> {
-    execute_command_stream_inner(&state, &id, &workspace, &command, &on_output).await
+    execute_command_stream_inner(&state, &id, &workspace, &command, &on_output, proxy_url.as_deref()).await
 }
 
 /// Kill a running command started via execute_command_stream. The GUI calls
@@ -1313,11 +1350,8 @@ fn is_utf8_family_label(label: &str) -> bool {
     )
 }
 
-async fn fetch_search_page(url: &str) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|e| format!("client: {}", e))?;
+async fn fetch_search_page(url: &str, proxy_url: Option<&str>) -> Result<String, String> {
+    let client = build_http_client(std::time::Duration::from_secs(8), proxy_url)?;
     let resp = client
         .get(url)
         .header("User-Agent", BROWSER_UA)
@@ -1331,19 +1365,19 @@ async fn fetch_search_page(url: &str) -> Result<String, String> {
     response_text_with_charset(resp).await
 }
 
-async fn search_backend_duckduckgo(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+async fn search_backend_duckduckgo(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
     let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
-    let html = fetch_search_page(&url).await?;
+    let html = fetch_search_page(&url, proxy_url).await?;
     Ok(parse_duckduckgo_results(&html, max))
 }
 
-async fn search_backend_bing(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+async fn search_backend_bing(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
     let url = format!(
         "https://www.bing.com/search?q={}&count={}",
         urlencoding(query),
         max
     );
-    let html = fetch_search_page(&url).await?;
+    let html = fetch_search_page(&url, proxy_url).await?;
     Ok(parse_bing_results(&html, max))
 }
 
@@ -1363,13 +1397,13 @@ fn is_chinese_query(query: &str) -> bool {
 
 /// China Bing: real Chinese results with the same b_algo markup as
 /// www.bing.com, so it reuses `parse_bing_results` unchanged.
-async fn search_backend_bing_cn(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+async fn search_backend_bing_cn(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
     let url = format!(
         "https://cn.bing.com/search?q={}&count={}",
         urlencoding(query),
         max
     );
-    let html = fetch_search_page(&url).await?;
+    let html = fetch_search_page(&url, proxy_url).await?;
     Ok(parse_bing_results(&html, max))
 }
 
@@ -1396,11 +1430,9 @@ async fn search_backend_serper(
     query: &str,
     max: usize,
     api_key: &str,
+    proxy_url: Option<&str>,
 ) -> Result<Vec<SearchResult>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("client: {}", e))?;
+    let client = build_http_client(std::time::Duration::from_secs(10), proxy_url)?;
     let (gl, hl) = if is_chinese_query(query) {
         ("cn", "zh-cn")
     } else {
@@ -1463,11 +1495,9 @@ async fn search_backend_tavily(
     query: &str,
     max: usize,
     api_key: &str,
+    proxy_url: Option<&str>,
 ) -> Result<Vec<SearchResult>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("client: {}", e))?;
+    let client = build_http_client(std::time::Duration::from_secs(10), proxy_url)?;
     let resp = client
         .post("https://api.tavily.com/search")
         .header("Authorization", format!("Bearer {}", api_key))
@@ -1535,6 +1565,7 @@ async fn web_search(
     max_results: Option<usize>,
     api_key: Option<String>,
     serper_api_key: Option<String>,
+    proxy_url: Option<String>,
 ) -> Result<String, String> {
     let max = max_results.unwrap_or(10).min(20);
 
@@ -1553,7 +1584,7 @@ async fn web_search(
     // bigram logic here isn't worth it. The free HTML backends below are
     // likewise ungated on the Rust side.
     if let Some(k) = serper_api_key.as_deref().filter(|k| !k.is_empty()) {
-        match search_backend_serper(&query, max, k).await {
+        match search_backend_serper(&query, max, k, proxy_url.as_deref()).await {
             Ok(r) if !r.is_empty() => results = r,
             Ok(_) => any_empty = true,
             Err(e) => failed.push(format!("Serper: {}", e)),
@@ -1561,7 +1592,7 @@ async fn web_search(
     }
     if results.is_empty() {
         if let Some(k) = api_key.as_deref().filter(|k| !k.is_empty()) {
-            match search_backend_tavily(&query, max, k).await {
+            match search_backend_tavily(&query, max, k, proxy_url.as_deref()).await {
                 Ok(r) if !r.is_empty() => results = r,
                 Ok(_) => any_empty = true,
                 Err(e) => failed.push(format!("Tavily: {}", e)),
@@ -1586,13 +1617,13 @@ async fn web_search(
         let chinese = is_chinese_query(&query);
         let mut cn = Box::pin(async {
             if chinese {
-                search_backend_bing_cn(&query, max).await
+                search_backend_bing_cn(&query, max, proxy_url.as_deref()).await
             } else {
                 Err("cn.bing.com not probed for non-CJK queries".to_string())
             }
         });
-        let mut ddg = Box::pin(search_backend_duckduckgo(&query, max));
-        let mut bing = Box::pin(search_backend_bing(&query, max));
+        let mut ddg = Box::pin(search_backend_duckduckgo(&query, max, proxy_url.as_deref()));
+        let mut bing = Box::pin(search_backend_bing(&query, max, proxy_url.as_deref()));
         let (mut cn_done, mut ddg_done, mut bing_done) = (false, false, false);
         while results.is_empty() {
             // A completed branch is guarded off (never re-polled) so the loop
@@ -2410,7 +2441,7 @@ mod execute_command_tests {
 
     #[tokio::test]
     async fn reports_success_with_zero_exit() {
-        let out = execute_command(".".to_string(), "echo hello".to_string())
+        let out = execute_command(".".to_string(), "echo hello".to_string(), None)
             .await
             .unwrap();
         assert_eq!(out["exitCode"], 0);
@@ -2419,7 +2450,7 @@ mod execute_command_tests {
 
     #[tokio::test]
     async fn reports_failure_with_nonzero_exit_and_stderr() {
-        let out = execute_command(".".to_string(), "echo boom >&2; exit 3".to_string())
+        let out = execute_command(".".to_string(), "echo boom >&2; exit 3".to_string(), None)
             .await
             .unwrap();
         assert_eq!(out["exitCode"], 3);
@@ -2428,7 +2459,7 @@ mod execute_command_tests {
 
     #[tokio::test]
     async fn keeps_stdout_even_when_command_fails() {
-        let out = execute_command(".".to_string(), "echo partial; exit 2".to_string())
+        let out = execute_command(".".to_string(), "echo partial; exit 2".to_string(), None)
             .await
             .unwrap();
         assert_eq!(out["exitCode"], 2);
@@ -2469,8 +2500,15 @@ mod command_cancel_tests {
     async fn stream_registers_then_unregisters_running_command() {
         let registry = StdMutex::new(BTreeMap::<String, u32>::new());
         let ch = Channel::new(|_: tauri::ipc::InvokeResponseBody| Ok(()));
-        let code = execute_command_stream_inner(&registry, "test-call-1", ".", "echo hello", &ch)
-            .await
+        let code = execute_command_stream_inner(
+            &registry,
+            "test-call-1",
+            ".",
+            "echo hello",
+            &ch,
+            None,
+        )
+        .await
             .unwrap();
         assert_eq!(code, 0);
         let reg = registry.lock().unwrap();
@@ -2489,7 +2527,7 @@ mod command_cancel_tests {
         let ch_for_task = ch.clone();
         let id_for_task = id.clone();
         let task = tokio::spawn(async move {
-            execute_command_stream_inner(&reg_for_task, &id_for_task, ".", "sleep 30", &ch_for_task)
+            execute_command_stream_inner(&reg_for_task, &id_for_task, ".", "sleep 30", &ch_for_task, None)
                 .await
                 .unwrap_or(-1)
         });
@@ -2529,13 +2567,11 @@ async fn web_fetch(
     _workspace: String,
     url: String,
     max_chars: Option<usize>,
+    proxy_url: Option<String>,
 ) -> Result<String, String> {
     let max = max_chars.unwrap_or(20000);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("client: {}", e))?;
+    let client = build_http_client(std::time::Duration::from_secs(30), proxy_url.as_deref())?;
 
     let resp = client
         .get(&url)
@@ -2954,6 +2990,33 @@ async fn spawn_mcp(
     registry.insert(key.clone(), Arc::new(handle));
 
     Ok(key)
+}
+
+#[tauri::command]
+async fn mcp_http_request(
+    url: String,
+    method: String,
+    body: Option<String>,
+    proxy_url: Option<String>,
+) -> Result<String, String> {
+    let client = build_http_client(std::time::Duration::from_secs(30), proxy_url.as_deref())?;
+    let mut request = match method.to_ascii_uppercase().as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        other => return Err(format!("unsupported MCP HTTP method: {}", other)),
+    };
+    if let Some(body) = body {
+        request = request
+            .header("Content-Type", "application/json")
+            .body(body);
+    }
+    let response = request.send().await.map_err(|e| format!("request: {}", e))?;
+    let status = response.status();
+    let text = response.text().await.map_err(|e| format!("read: {}", e))?;
+    if !status.is_success() {
+        return Err(format!("MCP HTTP {}: {}", status.as_u16(), text));
+    }
+    Ok(text)
 }
 
 #[tauri::command]
@@ -3536,6 +3599,8 @@ fn secret_list() -> Result<Vec<String>, String> {
 struct ChatStreamArgs {
     messages: Vec<serde_json::Value>,
     #[serde(default)]
+    provider: String,
+    #[serde(default)]
     tools: Vec<serde_json::Value>,
     model: String,
     #[serde(default, rename = "apiKey")]
@@ -3552,6 +3617,31 @@ struct ChatStreamArgs {
     temperature: Option<f64>,
     #[serde(default, rename = "requestId")]
     request_id: String,
+    #[serde(default, rename = "proxyUrl")]
+    proxy_url: String,
+    #[serde(default, rename = "proxyBypassProviders")]
+    proxy_bypass_providers: Vec<String>,
+    #[serde(default, rename = "proxyBypassModels")]
+    proxy_bypass_models: Vec<String>,
+}
+
+fn proxy_matches(value: &str, patterns: &[String]) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    !value.is_empty() && patterns.iter().any(|pattern| {
+        let pattern = pattern.trim().to_ascii_lowercase();
+        !pattern.is_empty() && (pattern == value || value.contains(&pattern))
+    })
+}
+
+fn llm_proxy_url(args: &ChatStreamArgs) -> Option<&str> {
+    if args.proxy_url.trim().is_empty()
+        || proxy_matches(&args.provider, &args.proxy_bypass_providers)
+        || proxy_matches(&args.model, &args.proxy_bypass_models)
+    {
+        None
+    } else {
+        Some(args.proxy_url.trim())
+    }
 }
 
 // Tool-call argument delta emit throttle (ms): forwarding the FULL accumulated
@@ -3622,13 +3712,54 @@ async fn cancel_chat_stream(
 }
 
 #[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_http_https_and_socks_proxy_schemes() {
+        assert!(valid_proxy_url("http://127.0.0.1:7890"));
+        assert!(valid_proxy_url("https://proxy.example:8443"));
+        assert!(valid_proxy_url("socks5://127.0.0.1:1080"));
+        assert!(valid_proxy_url("socks5h://127.0.0.1:1080"));
+        assert!(!valid_proxy_url("ftp://127.0.0.1:21"));
+    }
+
+    #[test]
+    fn provider_or_model_match_bypasses_llm_proxy() {
+        let mut args = ChatStreamArgs {
+            messages: Vec::new(),
+            provider: "ollama".to_string(),
+            tools: Vec::new(),
+            model: "qwen2.5-coder:7b".to_string(),
+            api_key: String::new(),
+            base_url: String::new(),
+            secret_key: String::new(),
+            extra_body: None,
+            max_tokens_override: None,
+            temperature: None,
+            request_id: String::new(),
+            proxy_url: "socks5://127.0.0.1:1080".to_string(),
+            proxy_bypass_providers: vec!["ollama".to_string()],
+            proxy_bypass_models: Vec::new(),
+        };
+        assert!(llm_proxy_url(&args).is_none());
+        args.provider = "qwen".to_string();
+        args.proxy_bypass_providers.clear();
+        args.proxy_bypass_models = vec!["qwen2.5-coder".to_string()];
+        assert!(llm_proxy_url(&args).is_none());
+        args.proxy_bypass_models.clear();
+        assert_eq!(llm_proxy_url(&args), Some("socks5://127.0.0.1:1080"));
+    }
+}
+
+#[cfg(test)]
 mod chat_cancel_tests {
     use super::*;
 
     #[tokio::test]
     async fn register_then_cancel_resolves_the_receiver_and_cleans_up() {
         let reg = ChatStreamRegistry::new(StdMutex::new(BTreeMap::new()));
-        let mut rx = register_chat_cancel(&reg, "req-1");
+        let rx = register_chat_cancel(&reg, "req-1");
         assert!(reg.lock().unwrap().contains_key("req-1"));
         assert!(
             cancel_chat_stream_inner(&reg, "req-1"),
@@ -3703,6 +3834,16 @@ fn classify_sse_line(line: &str) -> SseLine {
     }
 }
 
+/// Pull one complete SSE line from a byte buffer without decoding partial
+/// network chunks. UTF-8 characters may straddle reqwest byte chunks; decoding
+/// each chunk independently turns those boundaries into U+FFFD replacement
+/// characters before the JSON parser ever sees them.
+fn take_sse_line(buffer: &mut Vec<u8>) -> Option<String> {
+    let line_end = buffer.iter().position(|byte| *byte == b'\n')?;
+    let line_bytes: Vec<u8> = buffer.drain(..=line_end).collect();
+    Some(String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]).into_owned())
+}
+
 #[cfg(test)]
 mod chat_stream_tests {
     use super::*;
@@ -3744,6 +3885,55 @@ mod chat_stream_tests {
             classify_sse_line("data: not json {"),
             SseLine::NotData
         ));
+    }
+
+    #[test]
+    fn sse_utf8_survives_network_chunk_boundaries() {
+        let payload = "data: {\"choices\":[{\"delta\":{\"content\":\"西安天气\"}}]}\n";
+        let mut buffer = Vec::new();
+        let mut lines = Vec::new();
+        for byte in payload.as_bytes() {
+            buffer.push(*byte);
+            if let Some(line) = take_sse_line(&mut buffer) {
+                lines.push(line);
+            }
+        }
+
+        assert_eq!(lines.len(), 1);
+        match classify_sse_line(&lines[0]) {
+            SseLine::Data(value) => {
+                assert_eq!(value["choices"][0]["delta"]["content"], "西安天气");
+                assert!(!lines[0].contains('\u{FFFD}'));
+            }
+            _ => panic!("expected UTF-8 SSE data"),
+        }
+    }
+
+    #[test]
+    fn sse_line_buffer_keeps_incomplete_bytes_until_newline() {
+        let mut buffer = "data: 西".as_bytes().to_vec();
+        assert!(take_sse_line(&mut buffer).is_none());
+        buffer.extend_from_slice("安\n".as_bytes());
+        assert_eq!(take_sse_line(&mut buffer).as_deref(), Some("data: 西安"));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn sse_line_buffer_handles_crlf_empty_and_malformed_lines() {
+        let mut buffer = b"data: {\"ok\":true}\r\n\n".to_vec();
+        assert_eq!(
+            take_sse_line(&mut buffer).as_deref(),
+            Some("data: {\"ok\":true}\r")
+        );
+        assert_eq!(take_sse_line(&mut buffer).as_deref(), Some(""));
+        assert!(buffer.is_empty());
+
+        let mut malformed = b"data: ".to_vec();
+        malformed.extend_from_slice(&[0xff, b'\n']);
+        assert_eq!(
+            take_sse_line(&mut malformed).as_deref(),
+            Some("data: �")
+        );
     }
 
     #[test]
@@ -3822,8 +4012,10 @@ async fn chat_stream(
         args.base_url.trim_end_matches('/').to_string()
     };
     let url = format!("{}/chat/completions", base_url);
-
-    let client = reqwest::Client::new();
+    let client = build_http_client(
+        std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
+        llm_proxy_url(&args),
+    )?;
     let mut body = serde_json::json!({
         "model": args.model,
         "messages": args.messages,
@@ -3898,7 +4090,10 @@ async fn chat_stream(
     };
 
     let mut stream = resp.bytes_stream();
-    let mut buffer = String::new();
+    // Keep the SSE buffer as bytes until a full line is available. Decoding
+    // each reqwest chunk separately corrupts UTF-8 when a Chinese character
+    // is split across two network chunks.
+    let mut buffer: Vec<u8> = Vec::new();
     let mut text = String::new();
     let mut usage: Option<serde_json::Value> = None;
     let mut tc_map: BTreeMap<u32, serde_json::Value> = BTreeMap::new();
@@ -3938,11 +4133,9 @@ async fn chat_stream(
         };
         let Some(chunk_result) = item else { break };
         let chunk = chunk_result.map_err(|e| format!("stream: {}", e))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        buffer.extend_from_slice(&chunk);
 
-        while let Some(line_end) = buffer.find('\n') {
-            let line = buffer[..line_end].to_string();
-            buffer = buffer[line_end + 1..].to_string();
+        while let Some(line) = take_sse_line(&mut buffer) {
 
             let json = match classify_sse_line(&line) {
                 SseLine::NotData => continue,
@@ -4486,7 +4679,7 @@ fn update_sessions_index(
 /// ipinfo.io (HTTPS fallback) → ip-api.com (Chinese names; HTTP only, so the
 /// browser dev fallback skips it).
 #[tauri::command]
-async fn detect_location() -> Result<String, String> {
+async fn detect_location(proxy_url: Option<String>) -> Result<String, String> {
     let backends: &[&str] = &[
         "https://ipwho.is/",
         "https://ipinfo.io/json",
@@ -4494,10 +4687,7 @@ async fn detect_location() -> Result<String, String> {
     ];
     let mut failed: Vec<String> = Vec::new();
     for url in backends {
-        let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-        {
+        let client = match build_http_client(std::time::Duration::from_secs(8), proxy_url.as_deref()) {
             Ok(c) => c,
             Err(e) => {
                 failed.push(format!("{}: client: {}", url, e));
@@ -5216,6 +5406,7 @@ pub fn run() {
             // MCP subprocess
             spawn_mcp,
             mcp_request,
+            mcp_http_request,
             mcp_notify,
             mcp_shutdown,
             mcp_list,
