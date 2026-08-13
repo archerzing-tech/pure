@@ -70,4 +70,11 @@ describe('CLI proactive intent assessment', () => {
     expect(source).toContain('toolDefinitions: toolsDefs');
     expect(source).toContain("resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, DEFAULT_CLI_AUTO_APPROVE)");
   });
+
+  it('uses the shared workflow compiler and exposes unavailable-probe degradation', () => {
+    const source = readFileSync(new URL('../cli.ts', import.meta.url), 'utf8');
+    expect((source.match(/compileRequestWorkflow\(/g) ?? []).length).toBe(2);
+    expect(source).toContain('printWorkflowStage(workflow.stage)');
+    expect(source).toContain('workflow.probeRequired && !workflow.probeAvailable');
+  });
 });

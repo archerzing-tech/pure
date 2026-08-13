@@ -3,7 +3,7 @@
 **Pure** is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. It reads, writes, and edits files, executes shell commands, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.2--beta7-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.2-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -78,6 +78,26 @@ Before a coding request reaches the execution loop, `Planner` performs a lightwe
 
 This is a strategy layer, not a replacement for per-tool permissions. CLI and GUI may present the assessment differently, but both receive the same functional contract in the request context. A new high-risk follow-up also reopens the safety review instead of silently continuing an earlier plan.
 
+### 1.55 Unified request workflow: evidence before action
+
+The request lifecycle is compiled once by `src/shared/requestWorkflow.ts` and consumed by both GUI and CLI. The compiler combines the request, Planner assessment, explicit mode, active plan state, and available tools into a small dynamic decision: `direct`, `probe`, `plan`, or `confirm`. It also produces the request-scoped Prompt fragments instead of making each surface reconstruct them independently.
+
+```text
+intake → assess → [read-only probe when required and available]
+       → [task-specific plan when useful] → [approval when required]
+       → execute → verify → deliver
+```
+
+The workflow is deliberately a compiler, not a fixed task script: the LLM still chooses the concrete files, steps, delegation, and verification from workspace evidence. `probeRequired` and `probeAvailable` remain separate, so a missing workspace or disabled tool is reported as a capability limitation rather than silently pretending that discovery happened. After the GUI's task-specific LLM analysis, the final risk assessment is recompiled into the user-turn context before execution. The GUI may show this extra streamed analysis as a user-facing thinking card; the CLI intentionally skips a second preflight model round and lets the main execution LLM plan from the same compiled evidence, keeping latency and cost lower. Both surfaces retain the same conservative rule-based safety floor and per-tool permission gate.
+
+### 1.56 Adaptive runtime control: change the strategy, not the safety boundary
+
+The first-stage adaptive control plane lives in `src/shared/adaptiveControl.ts` and runs inside the shared Harness path used by CLI and GUI. Each turn compiles a strategy from live signals — workspace capability, available tools, verifier availability, local time, retrieved procedures, and recent failure/verification evidence — then injects it into a separate `<adaptive_context>` fragment.
+
+The strategy can change exploration depth, verification strength, delegation preference, recovery posture, and unattended-local autonomy. It is a recommendation, not a fixed task script: the model must revise it when new evidence disagrees. Permissions, path boundaries, destructive-operation confirmation, execution budgets, and verifier evidence remain programmatic invariants and cannot be weakened by adaptive context.
+
+A completed run records the selected strategy alongside its outcome. Only runs with real verification evidence promote the strategy note into reusable `procedure` memory; unverified output is retained as session information but cannot teach future runs to trust an unproven path. This makes the same request capable of taking different paths as the workspace, time, tools, memory, and evidence change without allowing self-improvement to bypass safety controls.
+
 ### 1.6 Context compaction: automatic, inspectable, reversible
 
 Context management is independent of task complexity. `ContextEngine` keeps the current system messages, folds older compaction summaries, retains complete assistant/tool-call groups, removes invalid dangling tool fragments, and trims older conversational groups by message and estimated-token budgets. LLM summarization is best-effort: if it fails, the bounded recent window still reaches the model and the UI reports that older messages were trimmed without a summary.
@@ -125,6 +145,8 @@ Retrieval uses local WASM embeddings when available, with a keyword-search fallb
 - **Subagent Orchestration** — Spawn file-pickers, code-searchers, web researchers in parallel
 - **MCP Protocol** — Connect Model Context Protocol servers for extensible tooling
 - **Proactive preflight** — Classify intent, impact, reversibility, and risk before acting; probe medium-risk work and require explicit confirmation for high-risk changes in both GUI and CLI (or use CLI `--prompt-on-tool` for every tool call)
+- **Unified request workflow** — Shared GUI/CLI intake, probe, plan, confirmation, execution, and verification decisions with dynamic request-scoped Prompt context
+- **Adaptive runtime control** — Environment- and evidence-aware exploration, delegation, recovery, verification, and unattended-local strategy selection shared by CLI, GUI, and Harness
 - **Permission System** — Four modes: YOLO (auto-approve), NORMAL (prompt per write), PLAN (read-only), DONT_ASK (silent block)
 - **Session Persistence** — Checkpoint-based state with resume support (`pure --resume`)
 - **Current-session undo** — CLI `/undo` and GUI ↶ restore the latest successful write batch; restores only when the workspace has not been changed afterward
@@ -238,6 +260,8 @@ pure/
 │   ├── ui/                       # WebView UI (chat, settings, markdown)
 │   └── shared/                   # Shared types, prompt assembly, observability, i18n, memory
 │       ├── PromptAssembler.ts    # Unified GUI / CLI / Harness prompt compiler
+│       ├── adaptiveControl.ts     # Runtime strategy selection from environment/evidence
+│       ├── requestWorkflow.ts     # Shared dynamic intake/probe/plan/confirm compiler
 │       ├── promptObservability.ts # Privacy-preserving trace model + collector
 │       └── FilePromptObservationStore.ts # Node-only JSONL trace sink
 │   ├── evaluation/               # Deterministic coding-task fixtures + real runner

@@ -86,6 +86,21 @@ describe('PromptAssembler', () => {
     expect(prompt).toContain('</session_memory>');
   });
 
+  it('injects a runtime adaptive strategy even when no long-term memory is available', () => {
+    const prompt = assembler.composeMemoryPrompt({
+      template: 'Base',
+      memory: {
+        preferences: [],
+        errorPatterns: [],
+        adaptiveStrategy: '<adaptive_strategy>night strategy</adaptive_strategy>',
+      },
+    });
+
+    expect(prompt).not.toContain('<session_memory>');
+    expect(prompt).toContain('<adaptive_context>');
+    expect(prompt).toContain('night strategy');
+  });
+
   it('omits low-priority fragments before required fragments when the model budget is tight', () => {
     const assembly = assembler.assemble({
       surface: 'cli',

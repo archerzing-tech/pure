@@ -3,7 +3,7 @@
 **Pure** 是一个本地优先的 AI 编程助手，核心只有两个坚持：**用一个不会轻易停下来的闭环完成任务，用会进化但不会无限膨胀的记忆延续经验**。它可以读取、写入和编辑文件，执行 Shell 命令，并在配置 verifier 时验证结果，再把紧凑的项目经验带到下一次会话 — 这一切都通过快速的终端 CLI 或原生 macOS 桌面应用完成。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.2--beta7-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.2-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -78,6 +78,26 @@ THINK → ACT → OBSERVE ──┐
 
 这是策略层，不替代具体工具的权限检查。CLI 和 GUI 的展示方式可以不同，但都会把同一份功能契约放入本轮请求上下文；已有复杂计划进行中时，如果新请求变成高风险操作，也会重新打开安全确认，不会静默沿用旧计划。
 
+### 1.55 统一用户诉求处理流程：先证据，再行动
+
+用户请求由 `src/shared/requestWorkflow.ts` 统一编译，GUI 和 CLI 共享同一套前置决策。编译器会把本轮请求、Planner 评估、用户选择的模式、正在进行的计划状态和当前可用工具合并为动态阶段：`direct`、`probe`、`plan` 或 `confirm`，同时生成本轮需要注入的 Prompt 上下文，避免两个界面各自复制规则。
+
+```text
+接收 → 评估 → [需要且可用时只读探针]
+     → [任务专属计划] → [必要时用户确认]
+     → 执行 → 验证 → 交付
+```
+
+这里的 workflow 是“编译器”，不是固定任务脚本：具体要读哪些文件、怎么拆步骤、是否调用子智能体、如何验证，仍由模型结合真实工作区证据决定。`probeRequired` 与 `probeAvailable` 分开记录，因此没有工作区或工具不可用时会诚实降级，不会假装已经完成探索。GUI 的任务专属 LLM 分析完成后，还会把最终合并后的风险判断重新编译进本轮 user context，再进入执行。GUI 可以把这轮额外分析显示为真实的思考卡；CLI 则有意不再额外发起一轮预分析模型请求，而是让主执行 LLM 基于同一份证据自行规划，以降低延迟和 Token 成本。两端仍共享同一个保守安全下限和具体工具权限闸门。
+
+### 1.56 自适应运行时控制：策略可变，安全边界不变
+
+第一阶段自适应控制平面位于 `src/shared/adaptiveControl.ts`，运行在 GUI、CLI 共用的 Harness 路径中。每一轮会根据实时信号编译策略：工作区能力、可用工具、verifier 是否存在、本地时间、检索到的已验证流程，以及最近的失败/验证证据；策略随后通过独立的 `<adaptive_context>` 片段动态注入本轮 Prompt。
+
+策略可以改变探索深度、验证强度、委派偏好、失败恢复方式和本地无人执行等级。它不是固定任务脚本，而是给模型的运行时建议：一旦新的工作区证据与建议冲突，模型必须重新调整。权限、路径边界、破坏性操作确认、预算和验证证据仍是程序级不变量，自适应上下文不能绕过或降低它们。
+
+任务完成后，系统会把本轮采用的策略与结果一起记录。只有拿到真实验证证据的运行，才会把策略沉淀为可复用的 `procedure` 记忆；没有验证的输出只能作为会话信息，不能教会未来运行去信任未经证实的路径。因此，同一个需求会随着工作区、时间、工具、记忆和证据变化而选择不同路径，同时不会把自我进化变成无约束地修改安全机制。
+
 ### 1.6 上下文压缩：自动、可观察、可保留历史
 
 上下文管理与任务复杂度无关。`ContextEngine` 会保留当前 system 消息、折叠旧的压缩摘要，完整保留 assistant/tool 调用组，清理不完整的悬空 tool 片段，再按消息数和估算 Token 预算裁剪较早的对话。LLM 摘要是尽力而为：摘要失败时仍会把有界的最近窗口交给模型，并明确提示较早消息未生成摘要。
@@ -125,6 +145,8 @@ Pure 的记忆不是第二份聊天记录。Harness 会把已完成会话压缩�
 - **子智能体编排** — 并行调度文件搜索、代码搜索、Web 研究等子智能体
 - **MCP 协议** — 接入 Model Context Protocol 服务器，扩展工具能力
 - **主动预检** — 执行前判断意图、影响、可逆性和风险；中风险先探针，GUI 和 CLI 都会对高风险先确认，CLI 还可用 `--prompt-on-tool` 对所有工具逐次确认
+- **统一用户诉求流程** — GUI/CLI 共用接收、探针、计划、确认、执行和验证决策，并动态注入本轮 Prompt 上下文
+- **自适应运行时控制** — GUI、CLI、Harness 共用基于环境和证据的探索、委派、恢复、验证与本地无人执行策略
 - **权限系统** — 四种模式：YOLO（自动批准）、NORMAL（写入时确认）、PLAN（只读）、DONT_ASK（静默阻止）
 - **会话持久化** — 基于检查点的状态管理，支持会话恢复（`pure --resume`）
 - **当前会话撤销** — CLI 使用 `/undo`、GUI 使用输入框旁的 ↶ 撤销最近一次成功写入；如果文件在写入后被外部修改，则拒绝覆盖
@@ -238,6 +260,8 @@ pure/
 │   ├── ui/                       # WebView 界面（聊天、设置、Markdown）
 │   └── shared/                   # 共享类型、Prompt 组装、observability、i18n、记忆
 │       ├── PromptAssembler.ts    # GUI / CLI / Harness 统一 Prompt 编译器
+│       ├── adaptiveControl.ts     # 从环境/证据选择运行时策略
+│       ├── requestWorkflow.ts     # 统一动态接收/探针/计划/确认编译器
 │       ├── promptObservability.ts # 隐私安全 trace 模型与收集器
 │       └── FilePromptObservationStore.ts # Node-only JSONL trace sink
 │   ├── evaluation/               # 确定性编码任务 fixture + 真实 runner

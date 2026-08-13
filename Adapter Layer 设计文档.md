@@ -1,6 +1,6 @@
 # Adapter Layer 设计文档
 
-> 对应实现：v1.9.2-beta7；Prompt observability 参考 `src/shared/promptObservability.ts` 与 `src/shared/FilePromptObservationStore.ts`，评测 runner 参考 `src/evaluation/`。
+> 对应实现：v1.9.2；Prompt observability 参考 `src/shared/promptObservability.ts` 与 `src/shared/FilePromptObservationStore.ts`，评测 runner 参考 `src/evaluation/`。
 
 > ⚠️ **PHASE 4 / REFERENCE DOCUMENT** — 本文档是 Adapter Layer（接入层）的完整实现参考。
 > 📗 核心规范请见 `pure Spec.md`（Prompt-Ready Implementation Guide）第 4-5 节。

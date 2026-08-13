@@ -111,7 +111,24 @@ Planner.analyzeTask
 - CLI 会把同一评估放入本轮 user context 并打印中/高风险提示；普通请求默认自动批准，高风险评估强制启用交互式权限处理器，`--prompt-on-tool` 可对所有请求逐工具交互确认，不能把安全性只建立在模型主动询问上。
 - 该层是策略前置，不替代 `PermissionManager` 对每一次具体工具调用的最终门控；工具风险和具体参数仍以权限系统为准。复杂度、计划粒度和 Todo 只是模型的工作建议：程序可以解析和展示结构化计划、恢复游标并消费可选进度标记，但不把固定步骤数量、每轮一个 Todo、固定标题或自动追加测试步骤当作安全规则。
 
-### 3.2 当前会话工作区撤销
+### 3.2 统一用户诉求工作流编译
+
+`src/shared/requestWorkflow.ts` 是 GUI 与 CLI 共用的 request preflight 编译器。它根据本轮请求、Planner 分析、显式模式、计划游标和能力状态产生：
+
+- `direct / probe / plan / confirm` 前置阶段；
+- `probeRequired`、`probeAvailable`、`needsProbe` 三个独立状态；
+- 交付闸门、计划审查和本轮 `UserTurnContext`。
+
+规范流程是：
+
+```text
+intake → assess → evidence probe? → task-specific plan? → approval?
+       → execute → verify → deliver
+```
+
+该编译器只决定前置策略和动态 Prompt 碎片，不固化任务步骤、Todo 数量、文件清单或子代理拓扑。模型必须根据实际工作区证据决定具体行动；GUI 的语义预分析完成后，必须以规则层和 LLM 判断中更保守的风险重新编译 assessment。能力不可用时必须保留“需要探针但探针不可用”的事实，不能将降级路径报告为已完成探索。
+
+### 3.3 当前会话工作区撤销
 
 CLI 与 GUI 的工具适配器都提供当前进程内的最近一次写入批次撤销能力。每次成功的 `write_file`、`edit_file`、`replace_files` 或新建目录操作会记录写入前状态和写入后内容；用户可通过 CLI `/undo` 或 GUI 输入框旁的撤销入口恢复。撤销前会比较写入后的内容，若文件已被外部修改则报告冲突而不覆盖。该能力不写入会话持久化，不替代跨重启 rewind，也不允许删除工作区根目录或工作区之外的路径。
 
@@ -125,6 +142,20 @@ CLI 与 GUI 的工具适配器都提供当前进程内的最近一次写入批�
 - LLM 摘要失败不能阻断执行；摘要只是被淘汰内容的辅助记忆，不替代原始可见 transcript。重复压缩会折叠旧的 `Earlier conversation summary:`，并把 system/summary 消息计入估算 Token；最新完整消息组若仍超过预算则标记 `overBudget`，但不拆分。
 - CLI REPL 的 `/compact` 与 GUI 的 `⌁` 只更新下一轮执行窗口，不删除用户可见历史；GUI 的自动预压缩使用同一个 `ContextEngine`。
 - 具体计划粒度、阶段数和验证方式仍由模型结合本轮任务决定，不能从本节推出固定复杂任务规则。
+
+### 3.35 自适应控制平面契约
+
+`src/shared/adaptiveControl.ts` 是跨 GUI、CLI、Harness 的运行时策略编译器。它读取当前时间/时区、工作区和工具能力、verifier 可用性、相关 procedure 记忆以及最近失败/验证证据，生成可变的探索、验证、委派、恢复和本地无人执行建议，并通过 `PromptAssembler` 注入 `<adaptive_context>`。
+
+约束如下：
+
+- 同一请求在不同时间、工作区、工具集合、记忆和反馈下可以选择不同策略；策略不得固化文件清单、步骤数量或 Todo 拓扑。
+- 新证据优先于旧策略；模型必须重新评估不匹配的 procedure，而不是盲目套用。
+- 权限、路径边界、破坏性操作确认、预算、工具 schema 和 verifier 是不可进化的安全不变量，动态 Prompt、记忆和模型输出不能降低它们。
+- 只有有真实验证证据的完成结果才能晋升为长期 `procedure`；未验证结果不得作为未来运行的成功策略。
+- `<adaptive_context>` 与长期 `<session_memory>` 分离，预算不足时按 fragment priority 省略自适应上下文，不得破坏用户请求和必需安全契约。
+
+第一阶段的控制器是可替换的保守运行时基线，不宣称已经完成模型级自我修改。后续可以在隔离评测中比较策略候选，再将通过验证的候选晋升为 procedure 或技能；不能直接让模型改写权限和执行内核。
 
 ### 3.4 Prompt observability 与真实编码评测契约
 

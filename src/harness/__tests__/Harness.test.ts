@@ -151,6 +151,22 @@ describe('Harness cross-session memory (v0.10)', () => {
     expect(llm.received[0][0].content).toContain('Use the shared assembler path');
   });
 
+  it('injects a runtime strategy through Harness even without a memory store', async () => {
+    const llm = recordingLLM('answer');
+    const harness = new Harness({
+      sessionId: 'sess-adaptive',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('BASE SYSTEM', 'inspect the project'));
+
+    expect(llm.received[0][0].content).toContain('<adaptive_strategy>');
+    expect(llm.received[0][0].content).toContain('Runtime-selected strategy');
+  });
+
   it('injects relevant memories into the system prompt at session start', async () => {
     const memStore = new FakeMemoryStore();
     await memStore.add({
@@ -210,6 +226,38 @@ describe('Harness cross-session memory (v0.10)', () => {
     expect(written[0].content).toContain('No project-level verification evidence was recorded');
     expect(written[0].lesson?.symptom).toContain('refactor auth module');
     expect(written[0].lesson?.verification).toContain('No project-level verification evidence was recorded');
+    expect(memStore.entries.filter(e => e.type === 'procedure')).toHaveLength(0);
+  });
+
+  it('promotes the adaptive strategy only when structured verification passes', async () => {
+    const memStore = new FakeMemoryStore();
+    const llm = recordingLLM('verified output');
+    const harness = new Harness({
+      sessionId: 'sess-verified-strategy',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      verifier: {
+        evaluate: async () => ({
+          passed: true,
+          evidence: [{
+            id: 'check-1',
+            checkName: 'focused check',
+            status: 'passed',
+            summary: 'focused check passed',
+            source: 'command',
+            timestamp: Date.now(),
+          }],
+        }),
+      },
+    });
+
+    await collect(harness.run('SYS', 'learn from the verified change'));
+
+    expect(memStore.entries.filter(e => e.type === 'procedure')).toHaveLength(1);
+    expect(memStore.entries.find(e => e.type === 'procedure')?.content).toContain('Runtime strategy selected from live signals');
   });
 
   it('does not duplicate a lesson when the same prompt is completed twice in one session', async () => {
@@ -241,8 +289,10 @@ describe('Harness cross-session memory (v0.10)', () => {
       budget: STD_BUDGET,
     });
     await collect(harness.run('SYS', 'hello'));
-    expect(llm.received[0][0].content).toBe('SYS');
-    expect(llm.received[0][0].content).not.toContain('<session_memory>');
+    expect(llm.received[0][0].content).toContain('SYS');
+    expect(llm.received[0][0].content).toContain('<adaptive_strategy>');
+    expect(llm.received[0][0].content).not.toContain('User prefers');
+    expect(llm.received[0][0].content).not.toContain('Known error patterns:');
   });
 
   it('throttles memory decay to once per interval even across turns (v0.13)', async () => {
@@ -523,7 +573,9 @@ describe('Harness resume (P1-7)', () => {
 
     const msgs = llm.received[0];
     // Current system prompt swapped in, history preserved, new prompt appended
-    expect(contents(msgs)).toEqual(['NEW SYSTEM', 'v1', 'a1', 'continue here']);
+    expect(contents(msgs)[0]).toContain('NEW SYSTEM');
+    expect(contents(msgs)[0]).toContain('<adaptive_strategy>');
+    expect(contents(msgs).slice(1)).toEqual(['v1', 'a1', 'continue here']);
   });
 
   it('runs fresh from [system, user] when no checkpoint exists', async () => {
@@ -540,7 +592,9 @@ describe('Harness resume (P1-7)', () => {
 
     expect(events.find(e => e.type === 'Completed')).toBeDefined();
     expect(llm.received).toHaveLength(1);
-    expect(contents(llm.received[0])).toEqual(['SYS', 'hello']);
+    expect(contents(llm.received[0])[0]).toContain('SYS');
+    expect(contents(llm.received[0])[0]).toContain('<adaptive_strategy>');
+    expect(contents(llm.received[0]).slice(1)).toEqual(['hello']);
   });
 
   it('replaces the checkpoint system message with the current systemPrompt', async () => {
@@ -570,7 +624,9 @@ describe('Harness resume (P1-7)', () => {
     await collect(harness.run('FRESH instructions + memory', 'next'));
 
     const msgs = llm.received[0];
-    expect(msgs[0]).toEqual({ role: 'system', content: 'FRESH instructions + memory' });
+    expect(msgs[0].role).toBe('system');
+    expect(msgs[0].content).toContain('FRESH instructions + memory');
+    expect(msgs[0].content).toContain('<adaptive_strategy>');
     expect(msgs[1]).toEqual({ role: 'user', content: 'v1' });
     // No stale system message remains anywhere in the history
     expect(contents(msgs).filter(c => c === 'STALE instructions')).toHaveLength(0);
@@ -603,8 +659,10 @@ describe('Harness resume (P1-7)', () => {
     await collect(harness.run('SYS v2', 'next'));
 
     const msgs = llm.received[0];
-    expect(msgs[0]).toEqual({ role: 'system', content: 'SYS v2' });
-    expect(contents(msgs)).toEqual(['SYS v2', 'v1', 'a1', 'next']);
+    expect(msgs[0].role).toBe('system');
+    expect(msgs[0].content).toContain('SYS v2');
+    expect(msgs[0].content).toContain('<adaptive_strategy>');
+    expect(contents(msgs).slice(1)).toEqual(['v1', 'a1', 'next']);
   });
 
   it('saves an interrupted checkpoint with live messages (P0 fix)', async () => {

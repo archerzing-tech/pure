@@ -49,6 +49,8 @@ export interface CodingAgentConfig {
   memory?: IMemoryStore;
   /** Project path for memory isolation; defaults to process.cwd(). */
   projectPath?: string;
+  /** Explicitly tells the Harness whether local workspace capability is available. */
+  workspaceAvailable?: boolean;
   /** Shared prompt compiler for application and Harness context assembly. */
   promptAssembler?: PromptAssembler;
   promptBudget?: PromptBudgetConfig;
@@ -165,6 +167,7 @@ export class CodingAgent {
       stateStore: config.stateStore,
       memory: config.memory,
       projectPath: config.projectPath,
+      workspaceAvailable: config.workspaceAvailable ?? Boolean(config.projectPath),
       promptAssembler: promptCompiler,
       promptBudget: config.promptBudget,
       observability: config.observability,

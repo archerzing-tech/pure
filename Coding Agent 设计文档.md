@@ -1,6 +1,6 @@
 # Coding Agent 设计文档（修订版）
 
-> 对应实现：v1.9.2-beta7。涉及运行时行为时，以 `src/coding-agent/Planner.ts`、`src/shared/PromptAssembler.ts`、`src/shared/promptObservability.ts`、`src/evaluation/`、`src/ui/chat.ts` 和 `src/cli.ts` 为准。
+> 对应实现：v1.9.2。涉及运行时行为时，以 `src/coding-agent/Planner.ts`、`src/shared/requestWorkflow.ts`、`src/shared/adaptiveControl.ts`、`src/shared/PromptAssembler.ts`、`src/shared/promptObservability.ts`、`src/evaluation/`、`src/ui/chat.ts` 和 `src/cli.ts` 为准。
 >
 > PHASE 5–8. 依赖 Harness / Engine / Adapter。原始草稿的 **Planner/analyzeTask 只有流程图无定义**、
 > **扁平工具列表示例不完整**、**权限用进程内 EventBus 做 request-response
@@ -44,6 +44,30 @@ Prompt observability 是组装层和 Harness 的外部观测能力，不是额�
 - 自定义 PromptAssembler 与 Harness 必须共享同一 observability sink；MCP/子代理动态注册后的 live tool definitions 必须参与最终 Prompt budget。
 
 真实编码任务基线位于 `src/evaluation/` 与 `evals/`：fixture 每次创建独立 workspace，验证命令决定 `verificationPassed`，只有 agent 正常完成且验证通过才计入 `passAt1`。control、fixture error、agent error 和 verification failure 不得混为成功率；报告至少携带 suite/fixture hash、provider/model、prompt version、runtime、revision、usage、耗时和成本。
+
+## 1.75 自适应控制平面（运行时策略，不固化任务流程）
+
+`src/shared/adaptiveControl.ts` 是 Harness 共享的第一阶段自适应控制平面。它把当前工作区能力、工具数量、verifier、时间、检索到的已验证流程和最近失败/验证证据编译为运行时策略，再由 `PromptAssembler` 注入 `<adaptive_context>`。
+
+策略可调整探索深度、验证强度、委派偏好、失败恢复方式和本地无人执行等级；它不生成固定文件清单、步骤数量或 Todo 拓扑。模型必须根据新的工作区证据修正策略，而不是机械遵循旧建议。权限、路径边界、破坏性操作确认、预算和 verifier 是不可进化的安全不变量。
+
+Harness 只把带有真实验证证据的结果晋升为可复用 `procedure`，避免“模型说完成了”污染长期策略。CLI 与 GUI 都通过 Harness 使用同一控制平面；GUI 的额外 LLM 任务分析只提供语义增强和展示，不复制安全决策。
+
+`src/shared/requestWorkflow.ts` 是 GUI 与 CLI 共用的前置工作流编译器。它不替模型拆分任务，而是把本轮输入和运行时能力编译成可执行的前置决策与 request-scoped Prompt context：
+
+```text
+intake → assess → probe? → plan? → confirm? → Harness/Engine → verify → deliver
+```
+
+编译结果包括：
+
+- `analysis`：Planner 的保守启发式意图、风险、复杂度和陷阱判断；GUI 随后用任务专属 LLM 分析做语义校准。
+- `stage`：`direct`、`probe`、`plan` 或 `confirm`，只表示前置策略，不表示固定的业务步骤。
+- `probeRequired / probeAvailable / needsProbe`：区分证据需求与当前能力，避免无工具时假装完成探索。
+- `needsDeliveryGate / requiresPlanReview`：决定是否建立交付契约、计划卡或确认闸门。
+- `userContext`：动态生成 traps、assessment、artifact/增量构建协议；工作区契约和已批准计划在探针/计划完成后再合并。
+
+CLI 与 GUI 只负责展示阶段、收集用户批准和消费事件；具体读取哪些文件、如何委派子智能体、如何修改和验证，仍由 LLM 依据实际证据决定。GUI 可以进行一轮流式任务预分析并在完成后重新编译 assessment；CLI 为降低额外延迟和 Token 成本，使用同一规则安全下限与动态上下文，直接让主执行 LLM 完成任务规划。规则层只允许抬高安全要求，不能降低它。这样吸收 Freebuff/Claude Code 的“先收集证据、隔离计划、最小授权、验证交付”原则，同时避免把步骤数量或任务类型固化成关键词脚本。
 
 ## 2. 任务分析：Planner / analyzeTask
 

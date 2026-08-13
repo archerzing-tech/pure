@@ -1,6 +1,6 @@
 # Agent-Event-Loop Engine 设计文档（修订版）
 
-> 对应实现：v1.9.2-beta7；观测由 `src/harness/Harness.ts` 与 `src/shared/promptObservability.ts` 收口，评测入口位于 `src/evaluation/`。
+> 对应实现：v1.9.2；观测由 `src/harness/Harness.ts` 与 `src/shared/promptObservability.ts` 收口，评测入口位于 `src/evaluation/`。
 
 > PHASE 2. 依赖 Shared Kernel 与 `pure Spec.md`。原始草稿的 `run`/`step` 参考实现
 > **缺失 7/9 个状态处理器、不累积对话消息、不向 LLM 发送工具定义、永不设置 finalOutput**——

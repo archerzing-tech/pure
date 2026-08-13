@@ -361,6 +361,13 @@ describe('proactive safety review gate', () => {
   it('does not force review for a low-risk turn when planning is disabled', () => {
     expect(shouldEnterPlanReview(false, false, false, false, false)).toBe(false);
   });
+
+  it('honors the shared workflow compiler without reopening ordinary plan continuations', () => {
+    expect(shouldEnterPlanReview(true, false, true, false, false, true)).toBe(false);
+    expect(shouldEnterPlanReview(false, false, true, false, false, true)).toBe(true);
+    expect(shouldEnterPlanReview(false, false, false, false, false, false)).toBe(false);
+    expect(shouldEnterPlanReview(true, false, false, false, true, false)).toBe(true);
+  });
 });
 
 describe('LLM-informed risk calibration (P0: model judgment settles the safety card)', () => {
@@ -374,6 +381,7 @@ describe('LLM-informed risk calibration (P0: model judgment settles the safety c
   it('merges the LLM assessment into effectiveIntent before the card appears', () => {
     const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
     const merge = src.indexOf('effectiveIntent = mergeIntentAssessments(analysis.intent, llmAnalysis.llmIntent);');
+    expect(src).toContain('userAssessment = formatIntentPrompt(effectiveIntent);');
     const call = src.indexOf('maybeShowAssessment();', merge);
     const card = src.indexOf('assessmentFlow = createAssessmentFlowCard(effectiveIntent);');
     const riskReview = src.indexOf('let riskReview = effectiveIntent.requiresConfirmation;');
@@ -624,6 +632,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
     expect(exploration).toBeGreaterThan(report);
     expect(contract).toBeGreaterThan(report);
     expect(src.indexOf('reportProbeFindings();')).toBeGreaterThan(-1);
+    expect(src).toContain('workflow.probeRequired && !workflow.probeAvailable');
     expect(src.indexOf('maybeShowAssessment();')).toBeGreaterThan(src.indexOf('await generateTaskAnalysis('));
   });
 

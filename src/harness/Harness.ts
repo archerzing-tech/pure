@@ -5,8 +5,9 @@
 import { AgentLoopEngine } from '../engine/AgentLoopEngine';
 import { StateManager } from './StateManager';
 import { ContextEngine, type ContextCompactionResult } from './ContextEngine';
-import { PromptAssembler, promptAssembler, resolvePromptBudget, type PromptBudgetConfig } from '../shared/PromptAssembler';
-import { promptObservability, type PromptObservability } from '../shared/promptObservability';
+import { PromptAssembler, promptAssembler, resolvePromptBudget, estimatePromptTokens, estimateToolDefinitionTokens, type PromptBudgetConfig } from '../shared/PromptAssembler';
+import { promptObservability, promptVersion, type PromptObservability } from '../shared/promptObservability';
+import { AdaptiveControlPlane, adaptiveControlPlane, type AdaptiveStrategy } from '../shared/adaptiveControl';
 import type {
   BudgetConfig,
   EngineContext,
@@ -50,8 +51,12 @@ export interface HarnessConfig {
   promptBudget?: PromptBudgetConfig;
   /** Local-first trace collector; records hashes/metadata, never raw prompts by default. */
   observability?: PromptObservability;
+  /** Runtime strategy selector; defaults to the shared adaptive control plane. */
+  adaptiveControlPlane?: AdaptiveControlPlane;
   /** Project path used to isolate memories; defaults to process.cwd(). */
   projectPath?: string;
+  /** Explicit capability signal; avoids treating a host cwd as a GUI workspace. */
+  workspaceAvailable?: boolean;
   contextEngine?: ContextEngine;
   /**
    * Verifier consulted by the engine's VERIFY phase. When omitted the phase
@@ -83,8 +88,11 @@ export class Harness {
   private writtenLessonKeys = new Set<string>();
   private lastDecayAt = 0;
   private verificationSummary = 'No project-level verification evidence was recorded.';
+  private verificationPassed = false;
   private readonly promptAssembler: PromptAssembler;
   private readonly observability: PromptObservability;
+  private readonly adaptiveControl: AdaptiveControlPlane;
+  private currentAdaptiveStrategy?: AdaptiveStrategy;
 
   constructor(config: HarnessConfig) {
     this.engine = new AgentLoopEngine();
@@ -95,6 +103,7 @@ export class Harness {
     this.observability = config.promptAssembler?.getObservability()
       ?? config.observability
       ?? promptObservability;
+    this.adaptiveControl = config.adaptiveControlPlane ?? adaptiveControlPlane;
     if (config.contextEngine && config.promptBudget) {
       config.contextEngine.configureBudget(
         resolvePromptBudget(config.promptBudget).availableInputTokens,
@@ -151,6 +160,7 @@ export class Harness {
     signal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
+    this.verificationPassed = false;
     this.scheduleMemoryDecay();
     let runningMessages: Message[] = [];
     let resumed = false;
@@ -166,10 +176,7 @@ export class Harness {
     // start, search the IMemoryStore with the user prompt and inject the
     // relevant preferences / error patterns into the system prompt's
     // <session_memory> section via PromptComposer.
-    let effectiveSystemPrompt = systemPrompt;
-    if (this.config.memory) {
-      effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, userPrompt);
-    }
+    const effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, userPrompt);
 
     // ── Resume (P1-7): feed the checkpoint as initial context ──
     // Previously the loaded messages were only used for checkpoint saving —
@@ -209,11 +216,7 @@ export class Harness {
         );
 
     const traceId = this.observability.startRun({
-      traceId: this.observability.findAssemblyTrace({
-        sessionId: this.config.sessionId,
-        systemPrompt,
-        userPrompt,
-      }),
+      traceId: this.recordRuntimeAssembly(effectiveSystemPrompt, userPrompt, systemPrompt),
       sessionId: this.config.sessionId,
       provider: this.config.promptBudget?.provider,
       model: this.config.promptBudget?.model,
@@ -338,13 +341,11 @@ export class Harness {
     signal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
+    this.verificationPassed = false;
     this.scheduleMemoryDecay();
     // Memory refresh on continuation: compose the current prompt with memories
     // relevant to the new follow-up (same layer as run()).
-    let effectiveSystemPrompt = systemPrompt;
-    if (this.config.memory) {
-      effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, newUserPrompt);
-    }
+    const effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, newUserPrompt);
 
     let msgs = messages[0]?.role === 'system'
       ? [{ role: 'system' as const, content: effectiveSystemPrompt }, ...messages.slice(1)]
@@ -366,11 +367,7 @@ export class Harness {
     );
 
     const traceId = this.observability.startRun({
-      traceId: this.observability.findAssemblyTrace({
-        sessionId: this.config.sessionId,
-        systemPrompt,
-        userPrompt: newUserPrompt,
-      }),
+      traceId: this.recordRuntimeAssembly(effectiveSystemPrompt, newUserPrompt, systemPrompt),
       sessionId: this.config.sessionId,
       provider: this.config.promptBudget?.provider,
       model: this.config.promptBudget?.model,
@@ -481,36 +478,92 @@ export class Harness {
     void this.config.memory.decay(Harness.MEMORY_DECAY_MS).catch(() => {});
   }
 
+  private recordRuntimeAssembly(systemPrompt: string, userPrompt: string, baseSystemPrompt: string): string {
+    const budget = resolvePromptBudget(this.config.promptBudget);
+    const toolDefinitions = this.currentToolsDefs();
+    const estimatedToolTokens = estimateToolDefinitionTokens(toolDefinitions);
+    const estimatedInputTokens = estimatePromptTokens(systemPrompt) + estimatePromptTokens(userPrompt) + estimatedToolTokens;
+    const includedFragmentIds = ['runtime_context'];
+    if (systemPrompt.includes('<adaptive_context>')) includedFragmentIds.push('adaptive_strategy');
+    if (systemPrompt.includes('<session_memory>')) includedFragmentIds.push('session_memory');
+    const omittedFragmentIds = systemPrompt.includes('<adaptive_context>') ? [] : ['adaptive_strategy'];
+    return this.observability.recordAssembly({
+      traceId: this.observability.findAssemblyTrace({
+        sessionId: this.config.sessionId,
+        systemPrompt: baseSystemPrompt,
+        userPrompt,
+      }),
+      sessionId: this.config.sessionId,
+      provider: budget.provider,
+      model: budget.model,
+      systemPrompt,
+      userPrompt,
+      promptVersion: promptVersion(systemPrompt),
+      budget: {
+        ...budget,
+        estimatedInputTokens,
+        estimatedToolTokens,
+        includedFragmentIds,
+        omittedFragmentIds,
+        overBudget: estimatedInputTokens > budget.availableInputTokens,
+      },
+    });
+  }
+
   /**
    * Search the IMemoryStore with the user prompt and inject the top relevant
    * preferences / error patterns into the system prompt. Never throws — a
    * memory failure degrades to the plain system prompt.
    */
   private async composeMemoryPrompt(systemPrompt: string, userPrompt: string): Promise<string> {
+    let memories = [] as Awaited<ReturnType<IMemoryStore['search']>>;
     try {
-      const memories = await this.config.memory!.search(userPrompt, {
-        k: 5,
-        projectPath: this.projectPath(),
-      });
-      const preferences = memories
-        .filter(m => m.type === 'user_preference')
-        .map(m => m.content);
-      const errorPatterns = memories
-        .filter(m => m.type === 'error_pattern')
-        .map(m => m.content);
-      const procedures = memories
-        .filter(m => m.type === 'procedure')
-        .map(m => m.content);
-      if (preferences.length === 0 && errorPatterns.length === 0 && procedures.length === 0) return systemPrompt;
-      return this.promptAssembler.composeMemoryPrompt({
-        template: systemPrompt,
-        memory: { preferences, errorPatterns, procedures, project: this.projectPath() },
-        budget: this.config.promptBudget,
-        toolDefinitions: this.currentToolsDefs(),
-      });
+      if (this.config.memory) {
+        memories = await this.config.memory.search(userPrompt, {
+          k: 8,
+          projectPath: this.projectPath(),
+        });
+      }
     } catch {
-      return systemPrompt;
+      memories = [];
     }
+
+    const preferences = memories
+      .filter(m => m.type === 'user_preference')
+      .map(m => m.content);
+    const errorPatterns = memories
+      .filter(m => m.type === 'error_pattern')
+      .map(m => m.content);
+    const procedures = memories
+      .filter(m => m.type === 'procedure')
+      .map(m => m.content);
+    const strategy = this.adaptiveControl.select({
+      prompt: userPrompt,
+      environment: {
+        now: Date.now(),
+        timezone: typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : undefined,
+        projectPath: this.projectPath(),
+        hasWorkspace: this.config.workspaceAvailable ?? Boolean(this.projectPath()),
+        toolCount: this.currentToolsDefs().length,
+        verifierAvailable: Boolean(this.config.verifier),
+        memoryAvailable: Boolean(this.config.memory),
+      },
+      learnedProcedures: procedures,
+      recentFailures: errorPatterns,
+    });
+    this.currentAdaptiveStrategy = strategy;
+    return this.promptAssembler.composeMemoryPrompt({
+      template: systemPrompt,
+      memory: {
+        preferences,
+        errorPatterns,
+        procedures,
+        project: this.config.memory ? this.projectPath() : undefined,
+        adaptiveStrategy: strategy.directive,
+      },
+      budget: this.config.promptBudget,
+      toolDefinitions: this.currentToolsDefs(),
+    });
   }
 
   /**
@@ -620,6 +673,9 @@ export class Harness {
       tools.length > 0 ? `Tools used: ${tools.join(', ')}` : 'Tools used: none recorded',
     ];
     if (finalOutput) parts.push(`Outcome: ${finalOutput.substring(0, 180)}`);
+    if (this.currentAdaptiveStrategy) {
+      parts.push(`Runtime strategy: ${this.currentAdaptiveStrategy.exploration} exploration, ${this.currentAdaptiveStrategy.verification} verification, ${this.currentAdaptiveStrategy.recovery} recovery`);
+    }
     await this.config.memory.add({
       type: 'successful_pattern',
       content: `Reusable lesson — ${parts.join('. ')}.`.slice(0, 900),
@@ -633,19 +689,26 @@ export class Harness {
     // the lesson — WHAT was achieved and the verified HOW — so future sessions
     // can apply the proven procedure instead of rediscovering it. Kept short
     // (the full lesson lives in the successful_pattern entry above).
-    const procedure = `When facing "${lesson.symptom}": apply the verified procedure — ${lesson.recoveryPath}. Verify via: ${lesson.verification}.${lesson.avoidNextTime.startsWith('Do not repeat') ? ` If it fails, ${lesson.avoidNextTime}` : ''}`;
-    await this.config.memory.add({
-      type: 'procedure',
-      content: procedure.slice(0, 600),
-      timestamp: Date.now(),
-      sessionId: this.config.sessionId,
-      projectPath: this.projectPath(),
-      dedupeKey: `procedure:${dedupeKey}`,
-    });
+    const strategyNote = this.currentAdaptiveStrategy
+      ? ` Runtime strategy selected from live signals: ${this.currentAdaptiveStrategy.exploration} exploration, ${this.currentAdaptiveStrategy.verification} verification, ${this.currentAdaptiveStrategy.recovery} recovery. Re-evaluate it against the next workspace evidence.`
+      : '';
+    const hasVerifiedEvidence = this.verificationPassed;
+    const procedure = `When facing "${lesson.symptom}": apply the verified procedure — ${lesson.recoveryPath}. Verify via: ${lesson.verification}.${strategyNote}${lesson.avoidNextTime.startsWith('Do not repeat') ? ` If it fails, ${lesson.avoidNextTime}` : ''}`;
+    if (hasVerifiedEvidence) {
+      await this.config.memory.add({
+        type: 'procedure',
+        content: procedure.slice(0, 600),
+        timestamp: Date.now(),
+        sessionId: this.config.sessionId,
+        projectPath: this.projectPath(),
+        dedupeKey: `procedure:${dedupeKey}`,
+      });
+    }
     this.writtenLessonKeys.add(dedupeKey);
   }
 
   private updateVerificationSummary(messages: Message[], verification?: VerificationSummary): void {
+    this.verificationPassed = Boolean(verification?.status === 'passed' && verification.evidence.length > 0);
     if (verification && verification.evidence.length > 0) {
       const evidence = verification.evidence
         .map((item) => `${item.status}: ${item.summary}${item.command ? ` (${item.command})` : ''}`)

@@ -18,7 +18,7 @@ import { FSStore } from './adapter/storage/FSStore';
 import { SQLiteStore } from './adapter/storage/SQLiteStore';
 import { ContextEngine } from './harness/ContextEngine';
 import { createDefaultVerifier } from './coding-agent/Verifier';
-import { Planner, formatTrapPrompt, formatIntentPrompt, detectArtifactRequest, detectProjectRequest, formatArtifactPrompt } from './coding-agent/Planner';
+import { compileRequestWorkflow, type RequestWorkflowStage } from './shared/requestWorkflow';
 import type { IntentAssessment, TaskMode } from './coding-agent/types';
 import { DefaultHookRouter } from './engine/HookRouter';
 import { DefaultFailurePolicy } from './engine/FailurePolicy';
@@ -34,10 +34,9 @@ import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
 import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
 import type { EvolutionConfig } from './adapter/memory/evolution';
 import { harvestUserPreferences } from './shared/memory';
-import { INCREMENTAL_BUILD_PROMPT } from './shared/agentBehavior';
 import { buildCliCapabilities, formatPromptBudgetDiagnostic, promptAssembler, resolvePromptBudget } from './shared/PromptAssembler';
 import { mergeTranscriptWithTurn } from './shared/conversation';
-import { formatCliIntentAssessment, resolveCliAutoApprove, shouldProbeCliWorkspace } from './cliIntent';
+import { formatCliIntentAssessment, resolveCliAutoApprove } from './cliIntent';
 import { customProviderFor, defaultModelFor, isCustomProviderId, promptBudgetForProvider, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider } from './shared/providers';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
@@ -351,6 +350,16 @@ function printModeSwitch(mode: TaskMode): void {
   if (mode === 'yolo') return;
   const label = mode === 'build' ? 'Build mode' : 'Plan mode';
   process.stdout.write(`  ${cyan('🧭')} ${cyan(label)} ${dim('— complex multi-step task, will execute in phases')}\n`);
+}
+
+function printWorkflowStage(stage: RequestWorkflowStage): void {
+  if (stage === 'direct') return;
+  const message = stage === 'probe'
+    ? '先做只读工作区探针，再决定具体修改范围'
+    : stage === 'plan'
+      ? '先形成任务专属执行计划，再按证据推进'
+      : '先完成安全确认，再允许写入或破坏性操作';
+  process.stdout.write(`  ${cyan('↳')} ${dim(message)}\n`);
 }
 
 function printIntentAssessment(assessment: IntentAssessment): void {
@@ -814,6 +823,7 @@ function createHarness(args: CliArgs) {
     stateStore: store,
     memory: memoryStore,
     projectPath,
+    workspaceAvailable: true,
     promptAssembler,      promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model),
     // G-3 fix: wire the ContextEngine (with LLM summarization fallback) into
     // the CLI too — long REPL sessions previously grew without bound because
@@ -1074,16 +1084,21 @@ async function runOneShot(args: CliArgs) {
   // Logical-trap pre-scan: if the request itself is contradictory/impossible,
   // warn the user and inject the trap notice into the system prompt so the
   // model verifies the premise instead of following it into a failure loop.
-  const analysis = new Planner().analyzeTask(args.prompt);
+  const workflow = compileRequestWorkflow(args.prompt, { hasTools });
+  const analysis = workflow.analysis;
   const traps = analysis.traps;
   if (traps.length > 0) {
     console.log(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}`);
   }
   printIntentAssessment(analysis.intent);
+  printWorkflowStage(workflow.stage);
+  if (workflow.probeRequired && !workflow.probeAvailable) {
+    process.stdout.write(`  ${yellow('⚠')} ${yellow('需要只读探针，但当前没有可用工作区工具，已诚实降级')}\n`);
+  }
   applyCliIntentPermission(tools, args, analysis.intent);
   printModeSwitch(analysis.mode);
-  const needsDeliveryGate = !!tools && (analysis.mode === 'build' || detectProjectRequest(args.prompt));
-  const needsIntentProbe = shouldProbeCliWorkspace(!!tools, analysis.intent);
+  const needsDeliveryGate = !!tools && workflow.needsDeliveryGate;
+  const needsIntentProbe = workflow.needsProbe;
   let workspaceProfile: WorkspaceProfile | undefined;
   let taskContract: TaskContract | undefined;
   if ((needsDeliveryGate || needsIntentProbe) && tools) {
@@ -1095,10 +1110,8 @@ async function runOneShot(args: CliArgs) {
   // Assemble system + user context together so tool schemas, priorities, and
   // the final budget report are computed against the same provider window.
   const assembly = assembleCliPrompt(analysis.mode, args, toolsDefs, args.prompt, {
-    traps: traps.length > 0 ? formatTrapPrompt(traps) : undefined,
-    buildProtocol: detectArtifactRequest(args.prompt) ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,
+    ...workflow.userContext,
     contract: taskContract ? formatTaskContract(taskContract) : undefined,
-    assessment: formatIntentPrompt(analysis.intent),
   });
   const systemPrompt = assembly.systemPrompt;
   const userTurn = assembly.userPrompt ?? args.prompt;
@@ -1254,12 +1267,17 @@ async function runRepl(args: CliArgs) {
 
     // Trap pre-scan per REPL turn (same as one-shot): surface the warning and
     // inject it into the system prompt so the model verifies the premise.
-    const analysis = new Planner().analyzeTask(input);
+    const workflow = compileRequestWorkflow(input, { hasTools: toolsDefs.length > 0 });
+    const analysis = workflow.analysis;
     const traps = analysis.traps;
     if (traps.length > 0) {
       process.stdout.write(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}\n`);
     }
     printIntentAssessment(analysis.intent);
+    printWorkflowStage(workflow.stage);
+    if (workflow.probeRequired && !workflow.probeAvailable) {
+      process.stdout.write(`  ${yellow('⚠')} ${yellow('需要只读探针，但当前没有可用工作区工具，已诚实降级')}\n`);
+    }
     applyCliIntentPermission(tools, args, analysis.intent);
     // Announce mode changes only (not every turn) so long complex sessions
     // stay quiet; the first complex turn switches from yolo and is announced.
@@ -1267,9 +1285,9 @@ async function runRepl(args: CliArgs) {
       printModeSwitch(analysis.mode);
       lastMode = analysis.mode;
     }
-    const needsDeliveryGate = !!tools && (analysis.mode === 'build' || detectProjectRequest(input));
+    const needsDeliveryGate = !!tools && workflow.needsDeliveryGate;
     let workspaceProfile: WorkspaceProfile | undefined;
-    const needsIntentProbe = shouldProbeCliWorkspace(!!tools, analysis.intent);
+    const needsIntentProbe = workflow.needsProbe;
     let taskContract: TaskContract | undefined;
     if ((needsDeliveryGate || needsIntentProbe) && tools) {
       workspaceProfile = await discoverWorkspace(tools);
@@ -1278,10 +1296,8 @@ async function runRepl(args: CliArgs) {
       if (needsDeliveryGate) process.stdout.write(`  ${dim('📋 Contract:')} ${dim(`${taskContract.acceptanceCriteria.length} 项验收标准，验证证据将决定是否交付`)}\\n`);
     }
     const assembly = assembleCliPrompt(analysis.mode, args, toolsDefs, input, {
-      traps: traps.length > 0 ? formatTrapPrompt(traps) : undefined,
-      buildProtocol: detectArtifactRequest(input) ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,
+      ...workflow.userContext,
       contract: taskContract ? formatTaskContract(taskContract) : undefined,
-      assessment: formatIntentPrompt(analysis.intent),
     });
     const systemPrompt = assembly.systemPrompt;
     const userTurn = assembly.userPrompt ?? input;

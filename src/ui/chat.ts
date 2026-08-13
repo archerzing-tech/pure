@@ -8,13 +8,13 @@ import { saveSession, loadLastSession, saveSessionStats, loadSessionStats, refre
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
-import { INCREMENTAL_BUILD_PROMPT } from '../shared/agentBehavior';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget } from '../shared/PromptAssembler';
+import { compileRequestWorkflow } from '../shared/requestWorkflow';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { ContextEngine, type ContextCompactionResult } from '../harness/ContextEngine';
 import { isGitMutationCommand } from '../coding-agent/ToolRegistry';
-import { formatTrapPrompt, formatIntentPrompt, detectArtifactRequest, detectProjectRequest, formatArtifactPrompt, parsePlanJsonWithMeta } from '../coding-agent/Planner';
+import { formatIntentPrompt, parsePlanJsonWithMeta } from '../coding-agent/Planner';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createLLMOnlyVerifier, createDefaultVerifier } from '../coding-agent/Verifier';
@@ -785,10 +785,12 @@ export function shouldEnterPlanReview(
   planningEnabled: boolean,
   needsDeliveryGate: boolean,
   requiresConfirmation: boolean,
+  workflowRequiresPlanReview = true,
 ): boolean {
-  return (!continuingPlan || requiresConfirmation)
+  return requiresConfirmation || (workflowRequiresPlanReview
+    && (!continuingPlan || requiresConfirmation)
     && (!planPauseRequested || requiresConfirmation)
-    && (planningEnabled || needsDeliveryGate || requiresConfirmation);
+    && (planningEnabled || needsDeliveryGate));
 }
 
 function createToolAdapter(workspace: string, config: PureConfig, sessionId = ''): ToolAdapter {
@@ -1481,6 +1483,7 @@ export class ChatController {
         // the Harness composes it into the system prompt at session start.
         memory: memoryEnabled ? memoryStore : undefined,
         projectPath: effectiveWorkspace || undefined,
+        workspaceAvailable: Boolean(effectiveWorkspace),
         promptAssembler,
         promptBudget: promptBudgetForProvider(config.customProviders, config.provider, config.model),
         mcpClient: this.mcpClient,
@@ -1515,22 +1518,25 @@ export class ChatController {
       // run and injected into the system prompt so the model verifies the
       // premise instead of following it into a failure loop. The same analysis
       // also drives the plan review below.
-      const analysis = codingAgent.analyzeTask(userText);
       // P0: 评估卡最终由「模型的分析判断 + 规则层保守兜底」合并落定（effectiveIntent）。
       // 规则启发式先支撑 prompt 注入与只读探针；LLM 三段式思考完成后，用它的语义判断
       // 校准风险/意图/可逆性——规则层只会抬高安全要求，永远不会把模型判断压得更低。
-      let effectiveIntent: IntentAssessment = analysis.intent;
-      // Manual mode override from the composer's mode selector (config.taskMode,
-      // persisted — Settings-independent). 'auto' keeps the Planner's per-task
-      // detection; a forced yolo/plan/build wins for this turn: it drives the
-      // plan-review gate below AND the label on the mode bubble / plan card.
+      // The shared compiler keeps this preflight identical between GUI and CLI.
       const forcedMode: TaskMode | undefined =
         config.taskMode && config.taskMode !== 'auto' ? config.taskMode : undefined;
-      if (forcedMode) analysis.mode = forcedMode;
-      if (analysis.traps.length > 0) {
-        userTraps = formatTrapPrompt(analysis.traps);
-      }
-      userAssessment = formatIntentPrompt(analysis.intent);
+      const continuingPlan = this.activeComplexPlan !== null && this.hasHistory && !forcedMode;
+      const planPauseRequested = this.activeComplexPlan !== null && !this.hasHistory && !forcedMode;
+      const workflow = compileRequestWorkflow(userText, {
+        forcedMode,
+        hasTools: !!effectiveWorkspace,
+        continuingPlan,
+        planPauseRequested,
+      });
+      const analysis = workflow.analysis;
+      let effectiveIntent: IntentAssessment = analysis.intent;
+      if (workflow.userContext.traps) userTraps = workflow.userContext.traps;
+      userAssessment = workflow.userContext.assessment;
+
       // 主动评估卡绝不在此刻同步弹出：这里只有规则启发式，还不是真实思考。卡片延后
       // 到 LLM 真正完成分析之后才出现（maybeShowAssessment）——thinking 卡先行展示
       // 模型对这项任务的推理，评估卡的意图/风险节点以那次分析（effectiveIntent）落定。
@@ -1541,7 +1547,13 @@ export class ChatController {
       // 空工作区换成诚实说明，不再输出“unknown/未发现验证入口”这类对全新项目无意义的内容。
       let probeFindingsReported = false;
       const reportProbeFindings = (): void => {
-        if (probeFindingsReported || !workspaceProfile || !taskContract) return;
+        if (probeFindingsReported) return;
+        if (workflow.probeRequired && !workflow.probeAvailable) {
+          probeFindingsReported = true;
+          this.addStatusBubble('⚠ 这项请求需要先做只读探针，但当前没有可用工作区工具，已降级为有限上下文执行。', false, false);
+          return;
+        }
+        if (!workspaceProfile || !taskContract) return;
         probeFindingsReported = true;
         if (isBareWorkspace(workspaceProfile)) {
           // “从零搭建”只在项目级构建语境下说；非构建请求没有可报告的探索结论。
@@ -1557,8 +1569,8 @@ export class ChatController {
         if (assessmentFlow) return;
         // 是否展示评估卡由合并后的判断（effectiveIntent）决定：LLM 分析把风险抬高到
         // 中/高时评估卡随之出现——规则层已不单独决定这件事，但永远不会压低模型判断。
-        const showAssessmentFlow = (effectiveIntent.riskLevel !== 'low'
-          || analysis.complexity === 'complex'
+        const showAssessmentFlow = (workflow.stage !== 'direct'
+          || effectiveIntent.riskLevel !== 'low'
           || analysis.traps.length > 0)
           && effectiveIntent.intent !== 'question';
         if (!showAssessmentFlow) return;
@@ -1579,13 +1591,13 @@ export class ChatController {
         reportProbeFindings();
       };
       // "写一个小游戏 / 做一个网页 / 开发一个工具" → build the artifact on disk
-      // instead of printing the full source inline (see formatArtifactPrompt).
+      // instead of printing the full source inline (see the compiled build protocol).
       // Multi-file builds also get the incremental-build protocol (outline
       // first, one verifiable step at a time, per-step report + verification,
       // next-step recommendation) — composed into the user turn on artifact
       // requests only, so plain Q&A turns don't carry its token cost.
-      const needsDeliveryGate = detectProjectRequest(userText) || analysis.mode === 'build';
-      const needsIntentProbe = analysis.intent.requiresProbe;
+      const needsDeliveryGate = workflow.needsDeliveryGate;
+      const needsIntentProbe = workflow.needsProbe;
       let workspaceProfile: WorkspaceProfile | undefined;
       // 探针本身只读、快速，照常先行（结果用于给 LLM 分析做 grounding）；但它的
       // 结论气泡不再此刻弹出——等 LLM 分析完成后由 reportProbeFindings() 统一呈现。
@@ -1603,11 +1615,9 @@ export class ChatController {
         keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
         return;
       }
-      const continuingPlan = this.activeComplexPlan !== null && this.hasHistory && !forcedMode;
       let pauseAfterPlanning = false;
-      const planPauseRequested = this.activeComplexPlan !== null && !this.hasHistory && !forcedMode;
-      if (detectArtifactRequest(userText) || needsDeliveryGate || continuingPlan || planPauseRequested) {
-        userBuildProtocol = formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT;
+      if (workflow.userContext.buildProtocol) {
+        userBuildProtocol = workflow.userContext.buildProtocol;
       }
 
       // ── Plan pre-flight: complex tasks get a plan before execution. It also
@@ -1666,6 +1676,7 @@ export class ChatController {
         Boolean(effectiveWorkspace && (config.skills?.planning ?? true)),
         needsDeliveryGate,
         effectiveIntent.requiresConfirmation,
+        workflow.requiresPlanReview,
       )) {
         // Plan review runs when: auto-detected complex task (has a heuristic
         // plan), OR the user forced plan/build mode from the composer. A forced
@@ -1778,6 +1789,9 @@ export class ChatController {
           // 意图/影响/建议以模型为准，风险/可逆性取两者更保守者，确认与探针要求
           // 任一 true 即 true（规则层只会抬高安全要求，不会压低模型判断）。
           effectiveIntent = mergeIntentAssessments(analysis.intent, llmAnalysis.llmIntent);
+          // Recompile the request-scoped assessment after semantic analysis so
+          // the final user prompt reflects the conservative merged judgment.
+          userAssessment = formatIntentPrompt(effectiveIntent);
           // LLM 分析后重算风险确认要求：若模型把风险抬高（规则漏判），确认门必须重新
           // 打开——不能用合并前的旧值决定“要不要向用户确认高风险操作”。
           riskReview = effectiveIntent.requiresConfirmation;

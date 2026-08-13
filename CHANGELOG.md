@@ -3,15 +3,17 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v1.9.2-beta7
+## v1.9.2
 
 **Prompt observability 与真实编码任务评测基线**
 
 - PromptAssembler / Harness 共享隐私安全 trace，记录预算、工具 schema、事件、usage、verification 和终态，不默认保存原始内容
+- GUI 与 CLI 共用 `requestWorkflow` 编译用户诉求前置流程；动态决定 direct/probe/plan/confirm，区分探针需求与探针能力，并在 GUI 语义分析后重新编译最终风险上下文
 - 新增显式 JSONL trace sink、损坏记录容错和跨 assembly/run trace 关联
 - 新增隔离 workspace 的 bugfix / feature / refactor 评测 fixture、control baseline、provider-backed CodingAgent executor 和 strict 退出码
 - README、中文 README、Prompt/Engine/Harness/Adapter/Coding Agent/master spec 文档同步更新
 - 更新应用界面截图与截图引用
+- 新增共享自适应控制平面：按工作区、工具、时间、记忆和验证反馈动态选择探索/委派/恢复/验证策略，通过 `<adaptive_context>` 注入；只有真实验证过的结果才晋升为可复用 procedure
 
 ## v1.9.2-beta5
 

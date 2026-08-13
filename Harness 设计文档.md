@@ -1,6 +1,6 @@
 # Harness 设计文档
 
-> 对应实现：v1.9.2-beta7；涉及 Prompt observability 与评测时，以 `src/harness/Harness.ts`、`src/shared/promptObservability.ts`、`src/evaluation/` 为准。
+> 对应实现：v1.9.2；涉及 Prompt observability 与评测时，以 `src/harness/Harness.ts`、`src/shared/promptObservability.ts`、`src/evaluation/` 为准。
 
 > ⚠️ **PHASE 3 / REFERENCE DOCUMENT** — 本文档是 Harness 层的实现参考。
 > 📗 核心规范请见 `pure Spec.md`（Prompt-Ready Implementation Guide）第 5 节。
@@ -766,6 +766,14 @@ export class Harness {
 ```
 
 ---
+
+## 3.65 自适应控制平面与策略记忆
+
+Harness 是运行时策略编译的统一边界：每次 `run()` / `continueTurn()` 都把当前工作区能力、工具数量、verifier、时间、检索到的 procedure 和最近失败/验证证据交给 `src/shared/adaptiveControl.ts`。控制平面返回探索、验证、委派、恢复和本地无人执行策略，由 `PromptAssembler` 注入独立的 `<adaptive_context>`。
+
+这不是固定任务流程，也不替代 Engine 的状态机。它只给模型提供可随证据调整的策略建议；权限、路径、破坏性操作确认、预算、工具 schema 和验证器仍是不可进化的程序不变量。运行完成后，只有包含真实验证证据的策略结果才可晋升为 `procedure`，无验证的结果不得污染长期策略记忆。
+
+CLI、GUI 和 Harness 共用同一控制平面。GUI 的额外任务分析可以改善语义输入，但不能复制或降低安全决策；无工作区或无工具时，策略必须显示能力边界而不是假装已完成探针。
 
 ## 3.7 Prompt observability 与 trace 生命周期
 

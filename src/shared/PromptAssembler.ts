@@ -82,6 +82,8 @@ export interface PromptMemoryContext {
   errorPatterns: string[];
   procedures?: string[];
   project?: string;
+  /** Runtime-selected strategy compiled from current environment and feedback. */
+  adaptiveStrategy?: string;
 }
 
 const GUI_WEB_TOOLS_PROMPT = `Web tools:
@@ -312,6 +314,7 @@ export class PromptAssembler {
       memory.preferences.length > 0
       || memory.errorPatterns.length > 0
       || (memory.procedures?.length ?? 0) > 0
+      || Boolean(memory.adaptiveStrategy?.trim())
     );
     if (!hasMemory) return input.template;
 
@@ -320,6 +323,7 @@ export class PromptAssembler {
       fragment('memory_preferences', memory?.preferences.length ? `User preferences:\n${memory.preferences.map((value) => `- ${value}`).join('\n')}` : '', 45),
       fragment('memory_errors', memory?.errorPatterns.length ? `Known error patterns:\n${memory.errorPatterns.map((value) => `- ${value}`).join('\n')}` : '', 55),
       fragment('memory_procedures', memory?.procedures?.length ? `Proven procedures (apply when the situation matches):\n${memory.procedures.map((value) => `- ${value}`).join('\n')}` : '', 40),
+      fragment('adaptive_strategy', memory?.adaptiveStrategy ?? '', 95),
     ].filter((item): item is PromptFragment => item !== null);
     const open = input.template.indexOf('<session_memory>');
     const close = open >= 0 ? input.template.indexOf('</session_memory>', open) : -1;
@@ -333,10 +337,19 @@ export class PromptAssembler {
       : Number.MAX_SAFE_INTEGER;
     const selection = selectFragments(memoryFragments, memoryLimit);
     if (selection.fragments.length === 0) return input.template;
-    const section = `<session_memory>\n${selection.fragments.map((item) => item.content).join('\n')}\n</session_memory>`;
+    const adaptive = selection.fragments.filter((item) => item.id === 'adaptive_strategy');
+    const retainedMemory = selection.fragments.filter((item) => item.id !== 'adaptive_strategy');
+    const sections = [
+      retainedMemory.length > 0
+        ? `<session_memory>\n${retainedMemory.map((item) => item.content).join('\n')}\n</session_memory>`
+        : '',
+      adaptive.length > 0
+        ? `<adaptive_context>\n${adaptive.map((item) => item.content).join('\n')}\n</adaptive_context>`
+        : '',
+    ].filter(Boolean).join('\n\n');
     return close >= 0
-      ? input.template.slice(0, open) + section + input.template.slice(close + '</session_memory>'.length)
-      : `${input.template}\n\n${section}`;
+      ? input.template.slice(0, open) + sections + input.template.slice(close + '</session_memory>'.length)
+      : `${input.template}\n\n${sections}`;
   }
 
   assembleMemory(input: { template: string; memory?: PromptMemoryContext; budget?: PromptBudgetConfig }): string {

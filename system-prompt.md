@@ -1,6 +1,6 @@
 # pure — Agent System Prompt
 
-> 对应实现：v1.9.2-beta7。运行时统一入口是 `src/shared/PromptAssembler.ts`；`src/shared/promptLayers.ts` 提供稳定片段，本文件是公开的人读契约镜像。Prompt observability 与编码任务评测属于运行时外部观测层，不向模型注入额外规则。
+> 对应实现：v1.9.2。运行时统一入口是 `src/shared/PromptAssembler.ts`；`src/shared/promptLayers.ts` 提供稳定片段，本文件是公开的人读契约镜像。Prompt observability 与编码任务评测属于运行时外部观测层，不向模型注入额外规则。
 
 > **Original prompt.** Not derived from any third-party leaked source; written to the public
 > behavior contract of an agentic coding assistant. Treat as the single source for the agent's
@@ -35,6 +35,27 @@ Prompt 不是单层文本，而是三个明确层级的组合（见 `src/shared/
 - **high**：先解释不可逆性和更窄的替代方案；GUI 在写入或执行破坏性命令前等待用户明确批准。
 
 这是执行前的策略层，不替代具体工具的 `PermissionManager` 权限检查。GUI 用计划/安全评估卡承载高风险确认；CLI 打印评估并执行只读探针，普通请求默认自动批准，但高风险评估会强制启用交互式权限处理器，不能只依赖模型主动询问。用户需要所有请求逐工具确认时使用 `--prompt-on-tool`。两端可以有不同的展示和门控方式，但必须共享同一份意图、影响、风险、可逆性和评估上下文契约。
+
+### 统一用户诉求流程（运行时编译）
+
+GUI 与 CLI 不各自决定一套任务流程，而是调用 `src/shared/requestWorkflow.ts` 编译本轮请求的动态阶段与 L2 上下文：
+
+```text
+intake → assess → probe（需要且可用时）→ plan（任务需要时）
+       → confirm（高风险时）→ execute → verify → deliver
+```
+
+`direct / probe / plan / confirm` 只是前置决策，不是固定的任务步骤。具体文件、子任务、步骤数量、委派策略和验证方式由模型根据工作区探针、任务契约、记忆、工具和用户回答决定。`probeRequired` 与 `probeAvailable` 必须分开：能力不可用时要暴露降级状态，不得把未执行的探索当成证据。GUI 的任务分析完成后，必须用合并后的语义风险重新编译本轮 assessment，再交给 Harness 执行。GUI 可以为用户展示这一轮额外的流式任务分析；CLI 为降低额外延迟和 Token 成本，不单独发起第二轮预分析，而是让主执行 LLM 基于同一份动态证据自主规划。两端的安全下限、探针语义和具体工具权限必须保持一致。
+
+### 自适应运行时控制（动态 L1/L2 上下文）
+
+`src/shared/adaptiveControl.ts` 在每轮运行前读取当前工作区能力、工具数量、verifier、时间、已检索流程和最近失败/验证证据，编译一个运行时策略，并由 Harness 通过 `PromptAssembler` 注入独立的 `<adaptive_context>`：
+
+- 策略可以改变探索深度、验证强度、委派偏好、恢复方式和本地无人执行等级；同一请求不保证在不同时间、工作区或证据下走同一路径。
+- 这是模型的动态建议，不是固定任务步骤。模型必须用新的工作区证据校正策略，不能机械服从过时的建议。
+- 权限、路径边界、破坏性操作确认、预算、工具 schema 和 verifier 是程序级安全不变量；任何动态 Prompt、记忆或模型输出都不能降低它们。
+- 运行结束时会记录策略与结果。只有有真实验证证据的运行才可把策略沉淀为可复用 `procedure`；没有证据的结果不得晋升为长期能力。
+- CLI、GUI 和 Harness 共享同一控制平面；GUI 的额外流式任务分析只是展示/语义增强，不得产生另一套安全规则。
 
 ### Prompt observability 与评测边界
 
