@@ -132,7 +132,10 @@ export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false): P
   head.className = 'plan-progress-head';
   const title = document.createElement('span');
   title.className = 'plan-progress-title';
-  title.textContent = '我先把这件事拆开，按顺序来处理：';
+  const firstAction = plan.steps[0]?.action?.trim();
+  title.textContent = plan.steps.length === 1 && firstAction
+    ? `先从「${firstAction}」开始：`
+    : '根据刚才的判断，接下来按这个顺序推进：';
   const count = document.createElement('span');
   count.className = 'plan-progress-count';
   count.textContent = `大概分成 ${plan.steps.length} 件事`;

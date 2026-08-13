@@ -26,6 +26,7 @@ import {
   providerDef,
   type CustomProvider,
 } from '../shared/providers';
+import { effectiveProxyUrl, normalizeProxyConfig, normalizeProxyList } from '../shared/proxy';
 import {
   STORAGE_KEY,
   defaults,
@@ -504,6 +505,7 @@ export class SettingsPanel {
       '#cfg-fontsize', '#cfg-density',
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
       '#cfg-tavily-key', '#cfg-serper-key',
+      '#cfg-proxy-enabled', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-url', '#cfg-proxy-bypass-providers', '#cfg-proxy-bypass-models',
       '#cfg-streaming-render',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle',
@@ -639,7 +641,8 @@ export class SettingsPanel {
   private async detectLocation(): Promise<string> {
     if (isTauriRuntime()) {
       const core = await loadTauriCore();
-      const loc = await core?.invoke<string>('detect_location');
+      const proxy = normalizeProxyConfig(loadConfig()?.proxy);
+      const loc = await core?.invoke<string>('detect_location', { proxyUrl: effectiveProxyUrl(proxy, 'tools') });
       if (!loc) throw new Error('empty location result');
       return loc;
     }
@@ -818,6 +821,19 @@ export class SettingsPanel {
     if (tavilyKeyEl) tavilyKeyEl.value = cfg.tavilyApiKey ?? '';
     const serperKeyEl = document.getElementById('cfg-serper-key') as HTMLInputElement | null;
     if (serperKeyEl) serperKeyEl.value = cfg.serperApiKey ?? '';
+    const proxy = normalizeProxyConfig(cfg.proxy);
+    const proxyEnabledEl = document.getElementById('cfg-proxy-enabled') as HTMLInputElement | null;
+    if (proxyEnabledEl) proxyEnabledEl.checked = proxy.enabled;
+    const proxyLlmEl = document.getElementById('cfg-proxy-llm') as HTMLInputElement | null;
+    if (proxyLlmEl) proxyLlmEl.checked = proxy.llmEnabled;
+    const proxyToolsEl = document.getElementById('cfg-proxy-tools') as HTMLInputElement | null;
+    if (proxyToolsEl) proxyToolsEl.checked = proxy.toolsEnabled;
+    const proxyUrlEl = document.getElementById('cfg-proxy-url') as HTMLInputElement | null;
+    if (proxyUrlEl) proxyUrlEl.value = proxy.url;
+    const proxyProvidersEl = document.getElementById('cfg-proxy-bypass-providers') as HTMLInputElement | null;
+    if (proxyProvidersEl) proxyProvidersEl.value = proxy.bypassProviders.join(', ');
+    const proxyModelsEl = document.getElementById('cfg-proxy-bypass-models') as HTMLInputElement | null;
+    if (proxyModelsEl) proxyModelsEl.value = proxy.bypassModels.join(', ');
 
     document.querySelectorAll('.cfg-skill-toggle').forEach(el => {
       const skill = el.getAttribute('data-skill');
@@ -1675,6 +1691,14 @@ export class SettingsPanel {
       toolBrowser: (document.getElementById('cfg-tool-browser') as HTMLInputElement).checked,
       tavilyApiKey: (document.getElementById('cfg-tavily-key') as HTMLInputElement | null)?.value.trim() ?? '',
       serperApiKey: (document.getElementById('cfg-serper-key') as HTMLInputElement | null)?.value.trim() ?? '',
+      proxy: normalizeProxyConfig({
+        enabled: (document.getElementById('cfg-proxy-enabled') as HTMLInputElement | null)?.checked ?? false,
+        llmEnabled: (document.getElementById('cfg-proxy-llm') as HTMLInputElement | null)?.checked ?? false,
+        toolsEnabled: (document.getElementById('cfg-proxy-tools') as HTMLInputElement | null)?.checked ?? false,
+        url: (document.getElementById('cfg-proxy-url') as HTMLInputElement | null)?.value ?? '',
+        bypassProviders: normalizeProxyList((document.getElementById('cfg-proxy-bypass-providers') as HTMLInputElement | null)?.value),
+        bypassModels: normalizeProxyList((document.getElementById('cfg-proxy-bypass-models') as HTMLInputElement | null)?.value),
+      }),
       skills,
       hubSkills,
       mcpServers: [...this.mcpServers],
@@ -1685,7 +1709,7 @@ export class SettingsPanel {
       // Preserve the current config version (defaults() always sets it, so the
       // merged value is never undefined — keep the spread rather than a bare
       // constant so a future v3 bump survives the round-trip).
-      configVersion: (loadConfig() ?? defaults()).configVersion,
+      configVersion: Math.max(7, (loadConfig() ?? defaults()).configVersion),
       // Memory evolution thresholds（遗忘速度）—— only non-default fields.
       evolution: this.gatherEvolution(),
     };

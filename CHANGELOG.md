@@ -3,6 +3,19 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.3
+
+**代理能力、会话回放与 GUI 执行体验**
+
+- 新增桌面端统一网络代理：支持 HTTP/HTTPS、SOCKS5/SOCKS5H，并覆盖大模型、内置网络工具、HTTP MCP、stdio MCP 和命令行网络环境
+- 代理默认全部关闭；总开关、模型请求和工具网络分别控制；代理地址为空或无效时安全直连；支持按供应商或模型豁免大模型代理
+- 修复历史会话恢复：完整保存并恢复思考、分析、Markdown 图表/图片、生成文件卡片、工具调用参数和工具输出，并兼容旧会话数据
+- 优化工具执行卡片：增加闪动终端光标、输出字节统计和文件写入进度；高频工具输出按帧批量刷新，避免阻塞输入、Esc、暂停和停止操作
+- 执行大纲支持右上角展开/收起，收起后保留带呼吸提示的执行状态胶囊
+- 优化任务分析与计划展示，减少固定模板、重复确认和界面空白
+- 修复设置页权限与审批布局和代理菜单结构
+- 修复 SSE 流式响应跨网络分块时的 UTF-8 字符损坏
+
 ## v1.9.2
 
 **Prompt observability 与真实编码任务评测基线**

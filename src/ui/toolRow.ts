@@ -212,6 +212,26 @@ function byteLength(s: string): number {
   }
 }
 
+export function formatLiveOutputStatus(toolName: string, bytes: number, latestLine = ''): string {
+  if (toolName === 'write_file' && latestLine.startsWith('正在写入 ')) return latestLine;
+  if (toolName === 'execute_command') return `已输出 ${formatBytes(bytes)}`;
+  return `已收到输出 ${formatBytes(bytes)}`;
+}
+
+function updateLiveOutputStatus(row: ToolRowHandle, kind: 'stdout' | 'stderr', line: string): void {
+  const previous = Number(row.resultEl.dataset.outputBytes ?? 0);
+  const bytes = previous + byteLength(line) + 1;
+  row.resultEl.dataset.outputBytes = String(bytes);
+  let status = row.resultEl.querySelector('.tool-row-live-status') as HTMLElement | null;
+  if (!status) {
+    status = document.createElement('div');
+    status.className = 'tool-row-live-status';
+    status.setAttribute('aria-live', 'polite');
+    row.resultEl.prepend(status);
+  }
+  status.textContent = formatLiveOutputStatus(row.toolName, bytes, kind === 'stderr' ? `错误输出 ${formatBytes(bytes)}` : line);
+}
+
 function displayArgValue(value: unknown): string {
   const s = typeof value === 'string' ? value : JSON.stringify(value);
   if (s.length <= MAX_FIELD_VALUE_CHARS) return s;
@@ -597,12 +617,13 @@ function appendHighlightSegments(parent: HTMLElement, line: string): void {
 }
 
 export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stderr', line: string): void {
-  row.resultEl.querySelector('.tool-row-waiting')?.remove();
   // Counter-based cap (not a per-line DOM scan): once the live preview stops
   // growing, later lines short-circuit immediately. The adapter still
   // collects every line for the full final result.
   const n = Number(row.resultEl.dataset.streamLines ?? 0);
   if (n >= MAX_LIVE_STREAM_LINES) return;
+  row.resultEl.querySelector('.tool-row-waiting')?.remove();
+  updateLiveOutputStatus(row, kind, line);
   row.resultEl.dataset.streamLines = String(n + 1);
   const div = document.createElement('div');
   div.className = kind === 'stderr' ? 'tool-row-stream-line stderr' : 'tool-row-stream-line';

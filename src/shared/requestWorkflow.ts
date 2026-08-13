@@ -49,7 +49,6 @@ export function compileRequestWorkflow(
   const requiresPlanReview = Boolean(
     options.continuingPlan
     || options.planPauseRequested
-    || needsDeliveryGate
     || analysis.intent.requiresConfirmation
     || options.forcedMode === 'plan'
     || options.forcedMode === 'build'

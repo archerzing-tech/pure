@@ -52,7 +52,7 @@ import { renderMarkdown, scheduleStreamingRender, cancelStreamingRender, stripTo
 import { renderArtifactCards, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, type ToolRowHandle } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, type ThinkingCardHandle } from './thinkingCard';
 import { buildRepairPrompt, buildVerifyCommand, hasRepairableQualityFindings, isVerificationCommand, qualityGateEvidence, qualityGateSummary, runProjectQualityGate, type ProjectQualityGateResult } from './projectQualityGate';
 import { buildTaskContract, discoverWorkspace, formatTaskContract, isBareWorkspace, workspaceProfileSummary, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
@@ -62,6 +62,7 @@ import { copyTextToClipboard } from '../shared/clipboard';
 import { showToast } from '../shared/toast';
 import { mergeTranscriptWithTurn } from '../shared/conversation';
 import { t } from '../shared/i18n';
+import { effectiveProxyUrl } from '../shared/proxy';
 import type { MCPClient } from '../harness/mcp/MCPClient';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import type {
@@ -503,6 +504,9 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
       model,
       baseURL,
       secretKey: custom ? customSecretKey(custom.id) : undefined,
+      proxyUrl: effectiveProxyUrl(config.proxy, 'llm'),
+      proxyBypassProviders: config.proxy?.bypassProviders ?? [],
+      proxyBypassModels: config.proxy?.bypassModels ?? [],
       extraBody,
       maxTokens,
     });
@@ -545,30 +549,19 @@ function limitMessageHistory(messages: Message[], max = MAX_MESSAGE_HISTORY): Me
 // vary by business and difficulty (a monitoring dashboard, a refactor, and a
 // full-stack app get different step lists), never a fixed template. The
 // heuristic plan from analyzeTask() is only a fallback when this call fails.
-const TASK_ANALYSIS_PROMPT = `You are a senior engineer thinking through a task before executing it. Write your reasoning FIRST, in the user's language, as plain prose with exactly these three sections (no JSON in this part):
+const TASK_ANALYSIS_PROMPT = `You are a senior engineer thinking through a task before executing it. Think about THIS request, not a generic software task. Write natural, conversational reasoning first in the user's language. Do not use prescribed headings, a fixed number of sections, or a canned sequence. Explain what you understood, what is still unknown, why the scope is easy or difficult, and what you would do next in the order that makes sense for this request. Refer to concrete details from the request. For a Shandong 5G monitoring dashboard, distinguish province-wide city drill-down, live data freshness, data-source availability, alert/diagnosis logic, and whether the workspace is an empty prototype or an existing system. If a missing decision blocks implementation, say so plainly and ask only the smallest useful question at the point where it matters; do not pretend an invented assumption is settled.
 
-【我理解的需求】Restate what the user actually wants IN YOUR OWN WORDS — concrete and specific, not a copy of their sentence. Name the object, the scope and the goal (e.g. for "山东省5G监控系统": a real-time dashboard monitoring 5G network status across every city in Shandong, drill-down per city, problem + risk analysis). If anything is genuinely ambiguous, say what you are assuming and that you will confirm it in the plan.
+Then output a JSON array of concrete, ordered steps tailored to THIS task for the application to track. Choose the number and granularity from the work itself; never pad the list to reach a target count. Include testing or meaningful verification when it matters. Use a visible Todo list only when it genuinely clarifies independently verifiable work (todosRequired=true); use false for an atomic step. Do NOT invent file contents or claim that an external data source exists. Write every plan and Todo in plain language the USER understands, in the same language as the user's request.
 
-【难度与复杂度】Judge the task 简单 / 中等 / 复杂 and say WHY — scope, data sources, real-time requirements, geographic spread, integrations, verification needs, unknowns. Be honest: a small single-file change is 简单; a new project build with live data is usually 复杂.
-
-【我准备怎么做】Describe how you will proceed: the key things you will do, in order. If this is a NEW PROJECT request and the user has NOT already stated the tech stack/platform AND the data source, make step 1 of your plan "先确认关键细节" — during execution you will ask the user 1-2 natural questions IN CHAT and wait for answers before writing code. Otherwise start with workspace exploration.
-
-Then offer an execution plan as a JSON array of concrete, ordered steps tailored to THIS task. Choose a useful level of detail rather than following a fixed step count. Include testing or another meaningful verification step when the task changes code and that evidence matters. Use a visible Todo list only when it genuinely improves clarity: set todosRequired=true and provide substeps when the work naturally has independently verifiable parts; use false for an atomic action. Do NOT invent file contents. Write every plan and Todo in plain language the USER understands, in the same language as the user's request.
-
-Reply with ONLY your analysis (the three sections above), then a fenced JSON plan block, then the intent_assessment JSON block below — no other text — in exactly this shape:
-<analysis>【我理解的需求】…
-【难度与复杂度】…
-【我准备怎么做】…</analysis>
+After the natural reasoning, output a fenced JSON plan block and one intent_assessment JSON block. These machine-readable blocks are application metadata and are not part of the user-facing reasoning:
 \`\`\`json
-[{"action":"top-level plan label","description":"what this plan achieves","expectedOutcome":"how success looks","todosRequired":true,"substeps":[{"action":"small action 1","description":"what this Todo does","expectedOutcome":"its result"}]},{"action":"atomic plan","description":"one indivisible action","expectedOutcome":"how success looks","todosRequired":false}]
+[{"action":"task-specific step","description":"what this step achieves","expectedOutcome":"how success looks","todosRequired":false}]
 \`\`\`
-
-After the plan JSON, output ONE more JSON block wrapped in <intent_assessment> tags (still no other text) — this feeds the GUI safety card, so judge by REAL impact, not wording:
 <intent_assessment>
-{"intent":"build","riskLevel":"medium","reversibility":"partially-reversible","impact":"新建多文件项目并写入磁盘","recommendation":"先做只读探针确认工作区结构，再小步构建并逐步验证。","requiresProbe":true,"requiresConfirmation":false}
+{"intent":"build","riskLevel":"medium","reversibility":"partially-reversible","impact":"一句话说明真实影响","recommendation":"一句话说明当前最合适的推进方式","requiresProbe":true,"requiresConfirmation":false}
 </intent_assessment>
 
-Rules for the assessment JSON: intent is one of question/research/add/modify/debug/refactor/migrate/delete/build. riskLevel is high when the change deletes or overwrites existing data/files/history or touches production; medium for auth/permission/database/migration/refactor/public-API changes; low for local isolated edits and pure Q&A. reversibility is irreversible for deletion/destruction, hard-to-reverse for migrations, partially-reversible for medium refactors, reversible otherwise. requiresConfirmation MUST be true when riskLevel is high (the GUI blocks writes until the user approves). requiresProbe is true when riskLevel is not low. impact and recommendation are one concise sentence each, in the user's language. Be honest and conservative: when uncertain, err toward higher risk and probe-first.`;
+Rules for the metadata: intent is one of question/research/add/modify/debug/refactor/migrate/delete/build. riskLevel is high when the change deletes or overwrites existing data/files/history or touches production; medium for auth/permission/database/migration/refactor/public-API changes; low for local isolated edits and pure Q&A. reversibility is irreversible for deletion/destruction, hard-to-reverse for migrations, partially-reversible for medium refactors, reversible otherwise. requiresConfirmation MUST be true when riskLevel is high (the GUI blocks writes until the user approves). requiresProbe is true when riskLevel is not low. impact and recommendation are concise and in the user's language. Be honest and conservative: when uncertain, err toward higher risk and probe-first.`;
 
 export interface TaskAnalysisResult {
   /** The model's reasoning about this task (shown in the thinking card). */
@@ -702,6 +695,7 @@ export async function generateTaskAnalysis(
     // generator, which would keep consuming the stream — and keep firing
     // onThinking into the transcript — after we have already given up.
     let text = '';
+    let visibleSent = 0;
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; }, timeoutMs);
     try {
@@ -709,7 +703,15 @@ export async function generateTaskAnalysis(
         if (timedOut || signal?.aborted) break;
         if (chunk.type === 'content') {
           text += chunk.content;
-          opts.onThinking?.(chunk.content);
+          // Keep machine metadata out of the visible thinking trace. The user
+          // should see the model's reasoning continuously, not JSON delimiters
+          // or an implementation-specific assessment payload.
+          const metadataStart = text.search(/```|<intent_assessment>|\[\s*\{/);
+          const visible = metadataStart >= 0 ? text.slice(0, metadataStart) : text;
+          if (visible.length > visibleSent) {
+            opts.onThinking?.(visible.slice(visibleSent));
+            visibleSent = visible.length;
+          }
         }
       }
     } finally {
@@ -794,7 +796,7 @@ export function shouldEnterPlanReview(
 }
 
 function createToolAdapter(workspace: string, config: PureConfig, sessionId = ''): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId);
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy, 'tools'));
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.
@@ -1064,7 +1066,9 @@ export class ChatController {
     const boundedStored = limitStoredMessages(stored);
     this.messages = boundedStored.map(m => ({
       role: m.role as Message['role'],
-      content: m.role === 'user' ? stripUserTurnContext(m.content ?? '') : (m.content ?? ''),
+      content: m.role === 'user'
+        ? stripUserTurnContext(m.content ?? '')
+        : (m.content || m.displayContent || ''),
       toolCalls: m.tool_calls as Message['toolCalls'],
       toolCallId: m.tool_call_id,
       toolName: m.name,
@@ -1146,6 +1150,13 @@ export class ChatController {
       config.tavilyApiKey,
       config.serperApiKey,
       config.city,
+      config.proxy?.enabled,
+      config.proxy?.llmEnabled,
+      config.proxy?.toolsEnabled,
+      effectiveProxyUrl(config.proxy, 'tools'),
+      effectiveProxyUrl(config.proxy, 'llm'),
+      ...(config.proxy?.bypassProviders ?? []),
+      ...(config.proxy?.bypassModels ?? []),
       config.toolBrowser,
       config.toolCmd,
       config.toolGit,
@@ -1247,6 +1258,9 @@ export class ChatController {
     const thinkingAssistantOffset = this.messages.filter(message => message.role === 'assistant').length;
     let assistantIteration = -1;
     const thinkingPhases: Array<{ text: string; assistantIndex: number }> = [];
+    // The preflight analysis card is separate from engine reasoning, but it is
+    // still user-visible transcript content and must survive session restore.
+    let taskAnalysisText = '';
     // Assistant output renders as ONE OR MORE bubbles in transcript order.
     // When text arrives AFTER tool rows have been appended, a new bubble is
     // started so the model's post-tool answer appears BELOW the tools the user
@@ -1301,6 +1315,37 @@ export class ChatController {
     // re-rendering the Input panel on every token freezes the UI mid-stream
     // ("stuck with only the blinking cursor"). See the TokenDelta handler.
     const toolCallRefresh = new Map<string, number>();
+    type LiveToolOutputLine = { kind: 'stdout' | 'stderr'; line: string };
+    const liveToolOutputQueue = new Map<string, LiveToolOutputLine[]>();
+    let liveToolOutputFrame: number | undefined;
+    const LIVE_OUTPUT_BATCH_SIZE = 24;
+    const flushLiveToolOutput = (): void => {
+      liveToolOutputFrame = undefined;
+      let rendered = false;
+      let hasMore = false;
+      for (const [toolCallId, lines] of liveToolOutputQueue) {
+        const entry = pendingRows.get(toolCallId);
+        if (!entry || !entry.row.details.classList.contains('pending')) {
+          liveToolOutputQueue.delete(toolCallId);
+          continue;
+        }
+        for (let i = 0; i < LIVE_OUTPUT_BATCH_SIZE && lines.length > 0; i++) {
+          const next = lines.shift()!;
+          appendToolStreamLine(entry.row, next.kind, next.line);
+          rendered = true;
+        }
+        if (lines.length > 0) hasMore = true;
+        else liveToolOutputQueue.delete(toolCallId);
+      }
+      if (rendered) scrollChatToBottomIfPinned(chatEl);
+      if (hasMore) scheduleLiveToolOutputFlush();
+    };
+    const scheduleLiveToolOutputFlush = (): void => {
+      if (liveToolOutputFrame !== undefined) return;
+      liveToolOutputFrame = typeof requestAnimationFrame === 'function'
+        ? requestAnimationFrame(flushLiveToolOutput)
+        : window.setTimeout(flushLiveToolOutput, 0);
+    };
     // Live bash output: lines the Rust backend streams while a command runs
     // (execute_command_stream) are appended to the matching pending tool row's
     // Output panel in real time — a long-running command shows progress rather
@@ -1312,8 +1357,15 @@ export class ChatController {
       if (gen !== this.generation) return;
       const entry = pendingRows.get(toolCallId);
       if (!entry || !entry.row.details.classList.contains('pending')) return;
-      appendToolStreamLine(entry.row, kind, line);
-      scrollChatToBottomIfPinned(chatEl);
+      if (Number(entry.row.resultEl.dataset.streamLines ?? 0) >= MAX_LIVE_STREAM_LINES) return;
+      const queued = liveToolOutputQueue.get(toolCallId) ?? [];
+      // The final ToolResult still carries the complete output. The live DOM
+      // only needs a bounded preview, so never let a chatty command build an
+      // unbounded queue that can starve keyboard and click events.
+      if (queued.length >= MAX_LIVE_STREAM_LINES) return;
+      queued.push({ kind, line });
+      liveToolOutputQueue.set(toolCallId, queued);
+      scheduleLiveToolOutputFlush();
     });
     // toolCallId → outcome, replayed as status rows (StoredMessage.toolExec)
     // when the session is restored from storage.
@@ -1459,7 +1511,7 @@ export class ChatController {
       // new sessionId/config.
       if (this.deferredInitDone && (
         this.mcpSessionId !== sendSessionId ||
-        this.mcpConfigSnapshot !== JSON.stringify(config.mcpServers ?? [])
+        this.mcpConfigSnapshot !== JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy, 'tools')])
       )) {
         this.mcpClient?.disconnectAll();
         this.mcpClient = undefined;
@@ -1488,6 +1540,7 @@ export class ChatController {
         promptBudget: promptBudgetForProvider(config.customProviders, config.provider, config.model),
         mcpClient: this.mcpClient,
         mcpServers: this.deferredInitDone ? undefined : (config.mcpServers ?? []),
+        proxyUrl: effectiveProxyUrl(config.proxy, 'tools'),
         permissionManager: this.permissionManager,
         // P1-1 (async verification): the engine's `verifier` stays PURELY
         // rule-based (non-empty-output check — a hard failure there must still
@@ -1569,9 +1622,11 @@ export class ChatController {
         if (assessmentFlow) return;
         // 是否展示评估卡由合并后的判断（effectiveIntent）决定：LLM 分析把风险抬高到
         // 中/高时评估卡随之出现——规则层已不单独决定这件事，但永远不会压低模型判断。
-        const showAssessmentFlow = (workflow.stage !== 'direct'
-          || effectiveIntent.riskLevel !== 'low'
-          || analysis.traps.length > 0)
+        // The normal build path already has a live reasoning trace and a
+        // task-specific plan. Reserve a separate assessment surface for a
+        // real safety boundary (or a concrete trap), rather than showing a
+        // fixed checklist for every non-trivial request.
+        const showAssessmentFlow = (effectiveIntent.requiresConfirmation || analysis.traps.length > 0)
           && effectiveIntent.intent !== 'question';
         if (!showAssessmentFlow) return;
         assessmentFlow = createAssessmentFlowCard(effectiveIntent);
@@ -1582,10 +1637,6 @@ export class ChatController {
         // 高风险仍保持等待，直到用户在确认卡上明确批准。
         if ((probeGateDone || !effectiveIntent.requiresProbe) && !effectiveIntent.requiresConfirmation) {
           assessmentFlow.completePhase('gate', '前置检查已通过，可以进入执行阶段。');
-        }
-        if (effectiveIntent.riskLevel !== 'low') {
-          const recoveryLabel = effectiveIntent.reversibility === 'irreversible' ? '不可逆' : effectiveIntent.reversibility === 'hard-to-reverse' ? '较难回滚' : '可部分回滚';
-          this.addStatusBubble(`🧭 主动评估：${riskLabelOf(effectiveIntent.riskLevel)} · ${recoveryLabel}。${effectiveIntent.recommendation}`, true, false);
         }
         // 探索/契约结论跟随评估卡一起呈现：先看到真实分析，再看到基于它的发现。
         reportProbeFindings();
@@ -1598,6 +1649,17 @@ export class ChatController {
       // requests only, so plain Q&A turns don't carry its token cost.
       const needsDeliveryGate = workflow.needsDeliveryGate;
       const needsIntentProbe = workflow.needsProbe;
+      const shouldRunTaskAnalysis = !continuingPlan && (
+        needsDeliveryGate
+        || effectiveIntent.requiresConfirmation
+        || forcedMode === 'plan'
+        || forcedMode === 'build'
+        || (analysis.complexity === 'complex' && !!analysis.plan)
+      );
+      // Open the live trace before any read-only workspace probe so a slow
+      // filesystem call never leaves the transcript visually idle.
+      const earlyAnalysisCard = shouldRunTaskAnalysis ? openThinkingCard() : null;
+      if (earlyAnalysisCard) setThinkingLabel(earlyAnalysisCard, '正在读取工作区，并结合你的目标判断…');
       let workspaceProfile: WorkspaceProfile | undefined;
       // 探针本身只读、快速，照常先行（结果用于给 LLM 分析做 grounding）；但它的
       // 结论气泡不再此刻弹出——等 LLM 分析完成后由 reportProbeFindings() 统一呈现。
@@ -1612,6 +1674,10 @@ export class ChatController {
       }
       // 探针期间用户点击「停止」：立即收尾，不再进入访谈（探针只读，无副作用）。
       if (this.abortController?.signal.aborted) {
+        if (earlyAnalysisCard) {
+          finalizeThinkingCard(earlyAnalysisCard);
+          earlyAnalysisCard.el.remove();
+        }
         keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
         return;
       }
@@ -1670,14 +1736,10 @@ export class ChatController {
         planCard = null;
         planOverview().clear();
       };
-      if (shouldEnterPlanReview(
-        continuingPlan,
-        planPauseRequested,
-        Boolean(effectiveWorkspace && (config.skills?.planning ?? true)),
-        needsDeliveryGate,
-        effectiveIntent.requiresConfirmation,
-        workflow.requiresPlanReview,
-      )) {
+      // Analysis is useful for a real build even when no approval is needed.
+      // Approval is a separate safety decision, not a consequence of the word
+      // “project” or the number of files involved.
+      if (shouldRunTaskAnalysis) {
         // Plan review runs when: auto-detected complex task (has a heuristic
         // plan), OR the user forced plan/build mode from the composer. A forced
         // YOLO suppresses review even for complex tasks.
@@ -1692,37 +1754,26 @@ export class ChatController {
           // 不再有“我先确认一下我理解的需求”这类未经 LLM 就宣称理解的开场白——
           // 理解与否由 thinking 卡里真实流式的分析来展示。用户强制指定的计划/构建
           // 模式保留原有确认流程。
-          const modeBubble = this.addStatusBubble(
-            forcedMode
-              ? t('plan.modeForced', '🧭 已按你的选择进入 {mode} 模式，正在生成执行计划…').replace('{mode}', modeLabel(analysis.mode))
-              : `🧭 我先分析这个任务：理解目标、评估难度与风险，然后根据任务本身安排具体步骤；每完成一项，我都会更新并划掉已完成的内容。`,
-          );
+          // The thinking trace is the introduction for an automatically
+          // detected task. Do not prepend a canned narration; an explicit
+          // composer mode may still get a small status marker.
+          const modeBubble = forcedMode
+            ? this.addStatusBubble(t('plan.modeForced', '已按你的选择进入 {mode} 模式，正在生成执行计划…').replace('{mode}', modeLabel(analysis.mode)))
+            : null;
           // Upgrade the heuristic plan with an LLM-generated task-specific one;
           // keep the heuristic result when the generation call fails/times out.
           // A forced plan/build on a simple task has no heuristic plan yet —
           // fall back to the generic scaffold (same shape as Planner's) so the
           // review card always has steps to show.
           let planForReview: Plan = analysis.plan ?? {
-            steps: [
-              { id: '1', action: '先摸清楚要做什么', description: '确认目标、范围和一些关键约束，心里有数再动手。', expectedOutcome: '明确要做成什么样、做到什么程度。', substeps: [
-                { id: '1', action: '查看现有结构', description: '读取相关目录和文件，了解当前基础。', expectedOutcome: '知道从哪里开始。' },
-                { id: '2', action: '确认实现边界', description: '明确本次要包含和不包含的内容。', expectedOutcome: '目标范围清楚。' },
-              ] },
-              { id: '2', action: '理清实现思路', description: '想清楚怎么搭：需要哪些文件、模块之间怎么配合。', expectedOutcome: '有一份清楚的搭建顺序。', substeps: [
-                { id: '1', action: '拆分功能模块', description: '把需求拆成可以独立完成的部分。', expectedOutcome: '模块边界明确。' },
-                { id: '2', action: '确定文件改动', description: '列出每个模块对应的文件和依赖。', expectedOutcome: '改动清单明确。' },
-              ] },
-              { id: '3', action: '一步步把功能做出来', description: '按顺序完成每一块，每做完一块都确认一下没有跑偏。', expectedOutcome: '核心功能都落地了。', substeps: [
-                { id: '1', action: '完成核心部分', description: '先实现当前计划的主要功能。', expectedOutcome: '核心路径可运行。' },
-                { id: '2', action: '接入现有流程', description: '把新功能接到项目原有入口。', expectedOutcome: '功能可以正常使用。' },
-                { id: '3', action: '补齐边界情况', description: '处理异常、空值和错误路径。', expectedOutcome: '功能更加稳定。' },
-              ] },
-              { id: '4', action: '检查验证再收尾', description: '跑一遍检查和测试，确认能正常用，再总结这轮改了什么。', expectedOutcome: '交出一个验证过、能跑的成果。', substeps: [
-                { id: '1', action: '运行针对性检查', description: '先验证本轮改动最相关的功能。', expectedOutcome: '核心检查通过。' },
-                { id: '2', action: '运行完整测试', description: '执行项目已有的类型检查和测试。', expectedOutcome: '没有发现回归问题。' },
-              ] },
-            ],
-            reasoning: '手动选择了计划模式，按通用步骤推进。',
+            steps: [{
+              id: '1',
+              action: '先建立一个可验证的起点',
+              description: '当前分析没有拿到完整的任务计划，先依据工作区和用户目标做最小范围的真实探查，再决定下一步。',
+              expectedOutcome: '得到足够证据后再继续，不用通用清单替代任务判断。',
+              todosRequired: false,
+            }],
+            reasoning: '实时计划生成未完成，先从最小证据开始。',
           };
           // 立即渲染当前步骤（启发式骨架，卡头带「完善中…」动画徽标提示 LLM 正在细化步骤），
           // LLM 专属计划就绪后原位升级（徽标消失），避免开场白与计划卡之间出现数秒空白等待。
@@ -1748,8 +1799,9 @@ export class ChatController {
           // 分析（业务领域、难度、风险）流式展示出来，分析完成后再渲染任务专属
           // 计划卡——步骤随业务与难度变化，而不是固定模板。固定骨架只在 LLM 分析
           // 失败/超时时作为明确标注的兜底。
-          const analysisCard = openThinkingCard();
-          // 诚实阶段标签：每进入一个真实阶段就更新一次，模型真实推理一旦流入即取代标签。
+          // The card was opened before the workspace probe; reuse it so the
+          // visible trace remains one continuous piece of feedback.
+          const analysisCard = earlyAnalysisCard ?? openThinkingCard();
           setThinkingLabel(analysisCard, '正在分析你的请求…');
           // Freebuff-style interview: scan the workspace so the plan is
           // grounded in real files, then ask 1-3 clarifying questions when the
@@ -1764,7 +1816,7 @@ export class ChatController {
             finalizeThinkingCard(analysisCard);
             analysisCard.el.remove();
             discardPlanCard();
-            modeBubble.remove();
+            modeBubble?.remove();
             keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
             return;
           }
@@ -1773,7 +1825,10 @@ export class ChatController {
           // 的关键细节由模型列为计划第一步，执行时自然提问——没有预制的澄清卡片。
           const llmAnalysis = await generateTaskAnalysis(llm, userText, PLAN_ANALYSIS_TIMEOUT_MS, this.abortController?.signal, {
             context: wsContext,
-            onThinking: (delta) => appendThinkingText(analysisCard, delta),
+            onThinking: (delta) => {
+              taskAnalysisText += delta;
+              appendThinkingText(analysisCard, delta);
+            },
           });
           finalizeThinkingCard(analysisCard);
           // The user may have switched sessions / started a new chat during the
@@ -1781,7 +1836,7 @@ export class ChatController {
           if (gen !== this.generation || this.abortController?.signal.aborted) {
             assessmentFlow?.cancel('本轮准备工作被中断，未执行任何改动。');
             discardPlanCard();
-            modeBubble.remove();
+            modeBubble?.remove();
             keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
             return;
           }
@@ -1836,17 +1891,21 @@ export class ChatController {
             // 下一条消息才开工”，否则引擎第一轮就空转完成，界面会直接从计划跳到交付。
             userPlan = formatPlanForPrompt(planForReview, needsDeliveryGate, !pauseAfterPlanning);
             // Plan is ready: the bubble no longer promises generation.
-            modeBubble.textContent = forcedMode
-              ? t('plan.modeActive', '🧭 已切换为 {mode} 模式，按计划分步执行').replace('{mode}', modeLabel(analysis.mode))
-              : t('plan.humanActive', '✅ 计划列好了，我们按这个顺序一步步来，做完一步打一个勾');
+            if (modeBubble) modeBubble.textContent = forcedMode
+              ? t('plan.modeActive', '已切换为 {mode} 模式，按方案执行').replace('{mode}', modeLabel(analysis.mode))
+              : t('plan.humanActive', '方案已经整理好，按实际进展继续推进。');
+            planCard?.setActivity(needsInteractiveApproval
+              ? '方案已经整理好，等待你确认后开始。'
+              : '方案已经整理好，马上从第一项开始验证。');
           };
           // 用户强制 yolo 时不做任何门控：即使请求是项目级构建，也直接放行执行
           // （forceMode 是用户明确的“不要问我”选择）。
-          if (riskReview || (needsDeliveryGate && forcedMode !== 'yolo') || forcedMode === 'plan' || forcedMode === 'build') {
+          const needsInteractiveApproval = riskReview || forcedMode === 'plan' || forcedMode === 'build';
+          if (needsInteractiveApproval) {
             if (riskReview) {
               assessmentFlow?.setPhase('gate', '高风险请求需要你的明确确认，尚未执行任何写入…');
             } else if (needsDeliveryGate) {
-              assessmentFlow?.setPhase('gate', '项目构建前需要你的确认：核对计划与影响范围后才会开始写入…');
+              assessmentFlow?.setPhase('gate', '这是你主动选择的执行模式，我先把方案停在这里，等你确认后开始…');
             }
             // 高风险 / 项目级构建 / 用户手动选择计划·构建模式：在任何写入或破坏性
             // 动作前保留明确的确认点——先展示影响与计划，用户批准后才开始构建。
@@ -1862,19 +1921,20 @@ export class ChatController {
               // 计划卡与模式提示属于本次流程，一并清理。
               discardPlanCard();
               keepOrDropUserBubble(stopped ? '⏸ 已暂停：你的请求已保留在对话中。' : '已取消本次执行计划，你的请求已保留在对话中。');
-              modeBubble.remove();
+              modeBubble?.remove();
               return; // finally resets streaming
             }
             if (decision === 'skip') {
               assessmentFlow?.skipPhase('gate', '你跳过了计划确认，继续按普通流程处理…');
               discardPlanCard();
-              modeBubble.remove();
+              modeBubble?.remove();
             } else {
               approvePlan(true);
             }
           } else {
-            // 检测到的复杂任务：拟人化介绍 → 计划卡列出步骤 → 暂停等待用户回复后开始。
-            approvePlan(false);
+            // Auto-detected work keeps moving. The plan is visible context,
+            // not a second confirmation prompt the user has to dismiss.
+            approvePlan(true);
           }
         } else if (continuingPlan && this.activeComplexPlan) {
             userPlan = formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate);
@@ -2170,7 +2230,7 @@ export class ChatController {
       if (!this.deferredInitDone) {
         this.deferredInitDone = true;
         this.mcpSessionId = sendSessionId;
-        this.mcpConfigSnapshot = JSON.stringify(config.mcpServers ?? []);
+        this.mcpConfigSnapshot = JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy, 'tools')]);
         this.mcpClient = codingAgent.mcpClient;
 
         if (this.mcpClient) {
@@ -2224,7 +2284,18 @@ export class ChatController {
         // 避免输入框恢复后看起来像流程悄悄停止了。
         this.addStatusBubble(`⏸ 已暂停在这里等你：直接回复即可开始第 1 项「${firstLabel}」。`, true, false);
         scrollChatToBottomIfPinned(chatEl);
-        await this.persistSession(pauseSnapshot, toolResults, thinkingPhases, sendSessionId, sendWorkspace, true, effectiveIntent);
+        await this.persistSession(
+          pauseSnapshot,
+          toolResults,
+          thinkingPhases,
+          sendSessionId,
+          sendWorkspace,
+          true,
+          effectiveIntent,
+          taskAnalysisText,
+          assistantSegments.map(segment => segment.text),
+          turnArtifacts,
+        );
         return;
       }
 
@@ -2501,6 +2572,7 @@ export class ChatController {
             }
             // Finalize the matching pending row — keyed by toolCallId (the
             // engine's id-bearing TokenDelta ensures one row per call).
+            liveToolOutputQueue.delete(event.payload.toolCallId);
             const pending = pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName);
             if (pending) {
               finalizeToolRow(pending.row, {
@@ -2833,7 +2905,18 @@ export class ChatController {
         // below, so doSend's finally (sidebar refresh / queued send) keeps its
         // ordering — only the visual streaming state flips early.
         this.setStreaming(false);
-        await this.persistSession(finalMessages, toolResults, thinkingPhases, sendSessionId, sendWorkspace);
+        await this.persistSession(
+          finalMessages,
+          toolResults,
+          thinkingPhases,
+          sendSessionId,
+          sendWorkspace,
+          false,
+          undefined,
+          taskAnalysisText,
+          assistantSegments.map(segment => segment.text),
+          turnArtifacts,
+        );
       }
     } catch (err: any) {
       if (assessmentFlow) {
@@ -2860,7 +2943,18 @@ export class ChatController {
         keepOrDropUserBubble(err?.name === 'AbortError' ? '⏸ 已暂停：你的请求已保留在对话中。' : '本轮处理未完成，你的请求已保留在对话中。');
       }
       if (interruptedMessages && gen === this.generation) {
-        await this.persistSession(interruptedMessages, toolResults, thinkingPhases, sendSessionId, sendWorkspace);
+        await this.persistSession(
+          interruptedMessages,
+          toolResults,
+          thinkingPhases,
+          sendSessionId,
+          sendWorkspace,
+          false,
+          undefined,
+          taskAnalysisText,
+          assistantSegments.map(segment => segment.text),
+          turnArtifacts,
+        );
       } else if (thinkingPhases.length > 0 && gen === this.generation) {
         const partialOutput = assistantSegments.map(segment => segment.text).filter(Boolean).join('\n\n');
         const interruptedSnapshot: Message[] = [
@@ -2868,7 +2962,18 @@ export class ChatController {
           { role: 'user', content: userText },
           { role: 'assistant', content: partialOutput },
         ];
-        await this.persistSession(interruptedSnapshot, toolResults, thinkingPhases, sendSessionId, sendWorkspace);
+        await this.persistSession(
+          interruptedSnapshot,
+          toolResults,
+          thinkingPhases,
+          sendSessionId,
+          sendWorkspace,
+          false,
+          undefined,
+          taskAnalysisText,
+          assistantSegments.map(segment => segment.text),
+          turnArtifacts,
+        );
       }
       const lastSeg = assistantSegments.length ? assistantSegments[assistantSegments.length - 1] : null;
       if (err.name === 'AbortError') {
@@ -2889,6 +2994,12 @@ export class ChatController {
         }
       }
     } finally {
+      if (liveToolOutputFrame !== undefined) {
+        if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(liveToolOutputFrame);
+        else clearTimeout(liveToolOutputFrame);
+      }
+      liveToolOutputFrame = undefined;
+      liveToolOutputQueue.clear();
       // Release the turn-scoped closure (pendingRows, toolResults, chatEl,
       // assistantSegments DOM nodes …) held by the module-level tool output
       // listener; otherwise it keeps the whole last turn alive until the next
@@ -2949,22 +3060,73 @@ export class ChatController {
     workspace = this.workspace,
     planPause = false,
     pauseAssessment?: IntentAssessment,
+    taskAnalysisText = '',
+    renderedAssistantTexts: string[] = [],
+    artifacts: Array<{ path: string }> = [],
   ) {
     if (messages.length <= 0) return;
     let assistantIndex = 0;
-    const storedMsgs: StoredMessage[] = messages.map((m) => {
-      const phase = m.role === 'assistant'
-        ? thinkingPhases.find(candidate => candidate.assistantIndex === assistantIndex++)
+    let renderedAssistantIndex = 0;
+    let analysisAttached = false;
+    const latestUserIndex = messages.reduce((latest, message, index) => message.role === 'user' ? index : latest, -1);
+    const lastAssistantIndex = messages.reduce((latest, message, index) => message.role === 'assistant' ? index : latest, -1);
+    const toolCallsById = new Map<string, { toolName: string; args: Record<string, unknown> }>();
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      for (const call of message.toolCalls ?? []) {
+        let args: Record<string, unknown> = {};
+        try {
+          const parsed = JSON.parse(call.function.arguments);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed as Record<string, unknown>;
+        } catch {}
+        toolCallsById.set(call.id, { toolName: call.function.name, args });
+      }
+    }
+    const storedMsgs: StoredMessage[] = messages.map((m, index) => {
+      const currentAssistantIndex = m.role === 'assistant' ? assistantIndex++ : -1;
+      const phase = currentAssistantIndex >= 0
+        ? thinkingPhases.find(candidate => candidate.assistantIndex === currentAssistantIndex)
+        : undefined;
+      const isCurrentTurnAssistant = m.role === 'assistant' && index > latestUserIndex;
+      const displayContent = isCurrentTurnAssistant && !m.toolCalls?.length
+        ? renderedAssistantTexts[renderedAssistantIndex++]
+        : undefined;
+      const analysis = isCurrentTurnAssistant && !analysisAttached && taskAnalysisText
+        ? (analysisAttached = true, taskAnalysisText)
         : undefined;
       const isPauseMessage = planPause && m.role === 'assistant' && m === messages[messages.length - 1];
+      const storedToolCall = m.toolCallId ? toolCallsById.get(m.toolCallId) : undefined;
+      const recordedToolExec = m.role === 'tool' && m.toolCallId
+        ? (() => {
+            const existing = toolResults.get(m.toolCallId);
+            if (existing) {
+              return {
+                ...existing,
+                toolName: existing.toolName || m.toolName || storedToolCall?.toolName || 'tool',
+                args: existing.args ?? storedToolCall?.args,
+                resultText: existing.resultText ?? (m.content || undefined),
+              };
+            }
+            return {
+              toolName: m.toolName || storedToolCall?.toolName || 'tool',
+              success: !/^Error:\s/i.test(m.content),
+              duration: 0,
+              args: storedToolCall?.args,
+              resultText: m.content || undefined,
+            } satisfies ToolExecMeta;
+          })()
+        : undefined;
       return {
         role: m.role,
         content: m.content ?? null,
+        displayContent: displayContent || undefined,
+        analysis,
+        artifacts: m.role === 'assistant' && index === lastAssistantIndex && artifacts.length > 0 ? artifacts : undefined,
         tool_call_id: m.toolCallId,
         name: m.toolName,
         tool_calls: m.toolCalls as unknown[] | undefined,
         thinkingPhases: phase?.text ? [phase] : undefined,
-        toolExec: (m.role === 'tool' && m.toolCallId) ? toolResults.get(m.toolCallId) : undefined,
+        toolExec: recordedToolExec,
         // The plan-pause bubble is the last assistant message of the handoff
         // snapshot; mark it so session restore re-applies the waiting style.
         // The intent assessment rides along so the assessment card can be

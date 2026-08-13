@@ -1,7 +1,7 @@
 // src/ui/__tests__/toolRow.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel } from '../toolRow';
+import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus } from '../toolRow';
 
 describe('tool row expansion policy', () => {
   it('expands every execution row by default', () => {
@@ -111,6 +111,21 @@ describe('final result truncation (MAX_LIVE_STREAM_LINES)', () => {
     const text = `${lines.join('\n')}\n`; // trailing newline → split yields an empty tail
     expect(truncateResultLines(text)).toBe(text);
     expect(truncateResultLines(text)).not.toContain('truncated');
+  });
+});
+
+describe('live output status', () => {
+  it('shows a stable byte count for command output after streaming starts', () => {
+    expect(formatLiveOutputStatus('execute_command', 2048)).toBe('已输出 2.0 KB');
+  });
+
+  it('shows the latest file write progress without a cursor state', () => {
+    expect(formatLiveOutputStatus('write_file', 12, '正在写入 dist/app.js — 50% (12 B/24 B)'))
+      .toBe('正在写入 dist/app.js — 50% (12 B/24 B)');
+  });
+
+  it('keeps a byte count for other streamed tools', () => {
+    expect(formatLiveOutputStatus('read_file', 3072)).toBe('已收到输出 3.0 KB');
   });
 });
 

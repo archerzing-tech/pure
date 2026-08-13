@@ -36,6 +36,9 @@ export interface RustLLMConfig {
    * a key name that resolves to nothing → the Authorization header is omitted.
    */
   secretKey?: string;
+  proxyUrl?: string;
+  proxyBypassProviders?: string[];
+  proxyBypassModels?: string[];
 }
 
 export interface RustLLMDeps {
@@ -125,6 +128,7 @@ export class RustLLMAdapter implements LLMAdapter {
         args: {
           messages: params.messages,
           tools: (params.tools as unknown[] | undefined) ?? [],
+          provider: this.config.provider,
           model: params.model,
           apiKey: '',
           baseUrl: this.config.baseURL ?? '',
@@ -133,6 +137,9 @@ export class RustLLMAdapter implements LLMAdapter {
           maxTokens: params.max_tokens,
           temperature: params.temperature,
           requestId,
+          proxyUrl: this.config.proxyUrl ?? '',
+          proxyBypassProviders: this.config.proxyBypassProviders ?? [],
+          proxyBypassModels: this.config.proxyBypassModels ?? [],
         },
         onChunk: channel,
       })

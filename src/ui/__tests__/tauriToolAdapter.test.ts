@@ -101,6 +101,11 @@ describe('buildWebSearchArgs (Rust web_search invoke arg lock)', () => {
       serperApiKey: '',
     });
   });
+
+  it('forwards a configured proxy only when one is enabled', () => {
+    expect(buildWebSearchArgs('/ws', { query: 'rust' }, '', '', 'socks5://127.0.0.1:1080').proxyUrl)
+      .toBe('socks5://127.0.0.1:1080');
+  });
 });
 
 describe('research tool argument contracts', () => {

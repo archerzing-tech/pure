@@ -21,6 +21,7 @@ export class TauriStdioTransport implements MCPTransport {
     private readonly name: string,
     private readonly command: string[],
     private readonly env?: Record<string, string>,
+    private readonly proxyUrl = '',
     requestTimeoutMs = REQUEST_TIMEOUT_MS,
   ) {
     this.requestTimeoutMs = requestTimeoutMs;
@@ -37,7 +38,14 @@ export class TauriStdioTransport implements MCPTransport {
       command: this.command[0] ?? '',
       args: this.command.slice(1),
     };
-    if (this.env) args.env = this.env;
+    const env = { ...(this.env ?? {}) };
+    if (this.proxyUrl) {
+      env.HTTP_PROXY = this.proxyUrl;
+      env.HTTPS_PROXY = this.proxyUrl;
+      env.ALL_PROXY = this.proxyUrl;
+      env.NO_PROXY = 'localhost,127.0.0.1,::1';
+    }
+    if (Object.keys(env).length > 0) args.env = env;
     await core.invoke<string>('spawn_mcp', args);
     this.spawned = true;
   }
