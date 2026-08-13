@@ -19,6 +19,8 @@ import hljs from 'highlight.js/lib/core';
 import 'highlight.js/styles/atom-one-light.css';
 // plantuml-encoder types come from src/shared/plantuml-encoder.d.ts.
 import plantumlEncoder from 'plantuml-encoder';
+import { stripToolCallXml } from './markdownCore';
+export { stripToolCallXml } from './markdownCore';
 
 // ── Languages registered for hljs (tree-shaken subset) ──
 // Importing `highlight.js` (the default entry) drags in ~190 language grammars
@@ -160,6 +162,11 @@ export function diagramSlot(kind: DiagramKind, source: string, preview: string):
     `</div>`;
 }
 
+function svgSourcesHtml(sources: string[]): string {
+  const slots = sources.map((source) => diagramSlot('svg', source, '')).join('');
+  return sources.length > 1 ? `<div class="svg-gallery">${slots}</div>` : slots;
+}
+
 // ── Custom renderer: route mermaid / puml code blocks away from hljs ──
 
 export const renderer = new Renderer();
@@ -180,9 +187,7 @@ renderer.code = (token: { text: string; lang?: string }): string => {
   }
 
   if (lang === 'svg') {
-    return splitTopLevelSvgSources(code)
-      .map((source) => diagramSlot('svg', source, ''))
-      .join('');
+    return svgSourcesHtml(splitTopLevelSvgSources(code));
   }
 
   if (lang === 'chart' || lang === 'charts') {
@@ -1380,54 +1385,6 @@ function highlightAll(container: HTMLElement): void {
 
 // ── Public API ──
 
-/**
- * Strip Claude-Code-style XML tool-call blocks out of assistant text for
- * DISPLAY only. Some models leak tool calls as literal text (`<tool_calls>`
- * / `<invoke name=...>`); the engine already parses real function calls, so
- * these blocks are never executed — hide them from the rendered bubble.
- * Handles both complete and stream-cut (unclosed) blocks.
- */
-export function stripToolCallXml(text: string): string {
-  // Fast path: the vast majority of streams never leak tool-call XML, and this
-  // runs on every TokenDelta over the full accumulated text — skipping the
-  // regex passes entirely keeps long streams O(n) instead of O(n²).
-  //
-  // NB: deliberately NO trim() here — during streaming the accumulator is a
-  // live growing prefix whose trailing whitespace is a work-in-progress
-  // boundary (e.g. between two code blocks); trimming it every token would
-  // strip the leading indent of the next block mid-stream, causing flicker.
-  // Trailing whitespace is handled once by renderMarkdown's trailing-newline
-  // cleanup at completion.
-  if (!/<tool_calls|<invoke\b|<parameter\b/i.test(text)) return text;
-  // Remove complete <tool_calls>…</tool_calls> blocks — but only when the
-  // block actually contains tool-call-shaped content (<invoke> or <parameter>),
-  // so a fenced code example or prose mention of the tag is not deleted.
-  let out = text.replace(/<tool_calls>([\s\S]*?)<\/tool_calls>/gi, (m, inner: string) => {
-    const body = inner.toLowerCase();
-    return /<invoke\b|<parameter\b/.test(body) ? '' : m;
-  });
-  // Stream-cut handling: a block can be cut mid-stream by throttling or
-  // completion, leaving an unclosed <tool_calls> marker. Only truncate when
-  // the marker is followed by tool-call-shaped content within a short window —
-  // a lone prose mention (e.g. "never use <tool_calls> in your reply") must
-  // not nuke the rest of the message.
-  const lower = out.toLowerCase();
-  // Use the LAST marker: any block after a closed one that still has an open
-  // <tool_calls> is the stream-cut one (earlier complete blocks were already
-  // removed or deliberately kept above), so truncating from the last marker
-  // preserves kept complete blocks while still hiding the cut leak.
-  const open = lower.lastIndexOf('<tool_calls>');
-  if (open !== -1) {
-    const afterOpen = lower.slice(open + '<tool_calls>'.length);
-    const hasClose = afterOpen.indexOf('</tool_calls>') !== -1;
-    if (!hasClose && /<invoke\b|<parameter\b/.test(afterOpen.slice(0, 500))) {
-      out = out.slice(0, open);
-    }
-  }
-  // Remove standalone <invoke …>…</invoke> invocations outside a wrapper.
-  out = out.replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, '');
-  return out.trim();
-}
 
 /**
  * Parse `text` as Markdown and render into `container` with syntax highlighting
@@ -1543,9 +1500,7 @@ streamRenderer.code = (token: { text: string; lang?: string }): string => {
   const lang = langOf(token.lang);
   if (lang === 'mermaid') return diagramSlot('mermaid', token.text, '');
   if (lang === 'svg') {
-    return splitTopLevelSvgSources(token.text)
-      .map((source) => diagramSlot('svg', source, ''))
-      .join('');
+    return svgSourcesHtml(splitTopLevelSvgSources(token.text));
   }
   if (lang === 'chart' || lang === 'charts') return diagramSlot('chart', token.text, '');
   return `<pre><code class="hljs language-${attr(lang)}">${esc(token.text)}</code></pre>`;
@@ -1585,7 +1540,16 @@ function streamStateFor(container: HTMLElement): StreamState {
  * one element, never disturbing adjacent closed fences, paragraphs, or hljs-tagged
  * code blocks.
  */
+function ungroupStreamingSvgGalleries(container: HTMLElement): void {
+  for (const gallery of Array.from(container.children)) {
+    if (!gallery.classList.contains('svg-gallery') || gallery.hasAttribute('data-md-raw')) continue;
+    while (gallery.firstElementChild) container.insertBefore(gallery.firstElementChild, gallery);
+    gallery.remove();
+  }
+}
+
 function diffStreaming(container: HTMLElement, text: string): void {
+  ungroupStreamingSvgGalleries(container);
   // During streaming, chat.ts sets `bubble.textContent = …` for instant raw
   // feedback; that leaves a plain text node that must NOT render next to the
   // highlighted blocks below (it would duplicate every message). Drop all
@@ -1667,6 +1631,10 @@ function diffStreaming(container: HTMLElement, text: string): void {
   while (container.children.length > childIdx) {
    container.removeChild(container.lastElementChild!);
   }
+  // Group adjacent SVG slots immediately in the streaming DOM. The next diff
+  // pass ungroups only these generated galleries, while a gallery representing
+  // one multi-root fence keeps its data-md-raw wrapper and remains stable.
+  groupAdjacentSvgSlots(container);
 }
 
 /**

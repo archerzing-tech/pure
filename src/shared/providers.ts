@@ -1,4 +1,6 @@
 // src/shared/providers.ts
+import type { ToolDefinition } from './types';
+
 // Declarative registry of supported LLM providers — the single source of
 // truth for provider ids, display labels and default models, shared by the
 // GUI (settings panel, sidebar, chat) and the CLI so the values never drift.
@@ -9,6 +11,96 @@
 
 export type ProviderId = 'deepseek-openai' | 'deepseek-anthropic' | 'qwen' | 'glm';
 
+export interface PromptBudgetConfig {
+  provider?: string;
+  model?: string;
+  contextWindowTokens?: number;
+  outputReserveTokens?: number;
+  safetyMarginTokens?: number;
+  /** Tokens already consumed by an assembled system prompt. */
+  usedInputTokens?: number;
+}
+
+export interface ResolvedPromptBudget {
+  provider?: string;
+  model?: string;
+  contextWindowTokens: number;
+  outputReserveTokens: number;
+  safetyMarginTokens: number;
+  availableInputTokens: number;
+  source: 'override' | 'provider-model' | 'fallback';
+}
+
+const PROMPT_BUDGET_FALLBACK = {
+  contextWindowTokens: 32_768,
+  outputReserveTokens: 4_096,
+  safetyMarginTokens: 1_024,
+};
+
+function promptBudgetDefaults(provider: string, model: string): { contextWindowTokens: number; outputReserveTokens: number } | undefined {
+  const id = provider.toLowerCase();
+  const name = model.toLowerCase();
+  if (id.includes('deepseek') || name.includes('deepseek')) return { contextWindowTokens: 64_000, outputReserveTokens: 32_768 };
+  if (id === 'qwen' || name.includes('qwen')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
+  if (id === 'glm' || name.includes('glm')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
+  if (name.includes('claude') || id.includes('anthropic')) return { contextWindowTokens: 200_000, outputReserveTokens: 8_192 };
+  if (name.includes('o1') || name.includes('o3') || name.includes('gpt-4o')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
+  if (id === 'ollama' || id === 'lmstudio' || name.includes('llama')) return { contextWindowTokens: 32_768, outputReserveTokens: 4_096 };
+  return undefined;
+}
+
+export function resolvePromptBudget(config: PromptBudgetConfig = {}): ResolvedPromptBudget {
+  const provider = config.provider?.trim() || undefined;
+  const model = config.model?.trim() || undefined;
+  const defaults = provider || model
+    ? promptBudgetDefaults(provider ?? '', model ?? '')
+    : undefined;
+  const hasOverride = config.contextWindowTokens !== undefined
+    || config.outputReserveTokens !== undefined
+    || config.safetyMarginTokens !== undefined;
+  const contextWindowTokens = Math.max(1, config.contextWindowTokens ?? defaults?.contextWindowTokens ?? PROMPT_BUDGET_FALLBACK.contextWindowTokens);
+  const outputReserveTokens = Math.max(0, Math.min(
+    config.outputReserveTokens ?? defaults?.outputReserveTokens ?? PROMPT_BUDGET_FALLBACK.outputReserveTokens,
+    contextWindowTokens,
+  ));
+  const safetyMarginTokens = Math.max(0, Math.min(
+    config.safetyMarginTokens ?? PROMPT_BUDGET_FALLBACK.safetyMarginTokens,
+    Math.max(0, contextWindowTokens - outputReserveTokens),
+  ));
+  const availableInputTokens = Math.max(
+    1,
+    contextWindowTokens - outputReserveTokens - safetyMarginTokens - Math.max(0, config.usedInputTokens ?? 0),
+  );
+  return {
+    provider,
+    model,
+    contextWindowTokens,
+    outputReserveTokens,
+    safetyMarginTokens,
+    availableInputTokens,
+    source: hasOverride ? 'override' : defaults ? 'provider-model' : 'fallback',
+  };
+}
+
+/** Fast, conservative estimate shared by prompt and history budgets. */
+export function estimatePromptTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Estimate the tokens sent outside the messages array for function/tool
+ * schemas. Providers serialize these definitions separately, so message-only
+ * accounting is not enough to protect a real context window.
+ */
+export function estimateToolDefinitionTokens(tools: readonly ToolDefinition[] = []): number {
+  if (tools.length === 0) return 0;
+  return estimatePromptTokens(JSON.stringify(tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.input_schema,
+  }))));
+}
+
 /**
  * A user-defined OpenAI-compatible provider (Settings → LLM → 添加自定义供应商).
  * Unlike the built-in registry above, custom providers are persisted per-user
@@ -17,6 +109,15 @@ export type ProviderId = 'deepseek-openai' | 'deepseek-anthropic' | 'qwen' | 'gl
  * in which case the Authorization header is omitted entirely.
  */
 export interface CustomProvider {
+  /** Optional provider/model-specific context metadata for custom endpoints. */
+  contextWindowTokens?: number;
+  outputReserveTokens?: number;
+  safetyMarginTokens?: number;
+  modelBudgets?: Record<string, {
+    contextWindowTokens?: number;
+    outputReserveTokens?: number;
+    safetyMarginTokens?: number;
+  }>;
   /** Stable slug used as the provider id (e.g. 'ollama', 'openrouter'). */
   id: string;
   /** Display name (e.g. 'Ollama (local)'). */
@@ -135,6 +236,24 @@ export function customProviderFor(
 ): CustomProvider | undefined {
   if (!customs || !id) return undefined;
   return customs.find((p) => p.id === id);
+}
+
+/** Build a budget input from persisted custom-provider metadata. */
+export function promptBudgetForProvider(
+  customs: readonly CustomProvider[] | undefined | null,
+  provider: string | undefined,
+  model: string | undefined,
+): PromptBudgetConfig {
+  const custom = customProviderFor(customs, provider);
+  const normalizedModel = model?.trim() || undefined;
+  const modelOverride = normalizedModel ? custom?.modelBudgets?.[normalizedModel] : undefined;
+  return {
+    provider,
+    model: normalizedModel,
+    contextWindowTokens: modelOverride?.contextWindowTokens ?? custom?.contextWindowTokens,
+    outputReserveTokens: modelOverride?.outputReserveTokens ?? custom?.outputReserveTokens,
+    safetyMarginTokens: modelOverride?.safetyMarginTokens ?? custom?.safetyMarginTokens,
+  };
 }
 
 /** True when `id` refers to a user-defined custom provider. */

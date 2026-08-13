@@ -28,11 +28,19 @@ export interface InlineCardOptions {
   focusIndex?: number;
   /** Esc resolves with this value. Omit to keep the card open on Esc. */
   escValue?: string;
+  /** When aborted (e.g. user pressed stop), resolves with the esc value and closes. */
+  signal?: AbortSignal;
 }
 
 export function showInlineCard(opts: InlineCardOptions): Promise<string> {
   return new Promise((resolve) => {
     const chatEl = document.getElementById('chat')!;
+    // Already-aborted signal: never render the card, resolve as cancelled so
+    // the awaiting caller (e.g. plan review) exits cleanly on a user stop.
+    if (opts.signal?.aborted) {
+      resolve(opts.escValue ?? 'cancel');
+      return;
+    }
     const row = document.createElement('div');
     row.className = `bubble-row inline-card ${opts.cardClass}`;
 
@@ -68,7 +76,11 @@ export function showInlineCard(opts: InlineCardOptions): Promise<string> {
       row.remove();
       watchdog.disconnect();
       document.removeEventListener('keydown', onKeydown);
+      opts.signal?.removeEventListener('abort', onAbort);
     };
+    // 用户点击「停止」时视为取消：关闭卡片并落定，避免 send() 永久挂起。
+    const onAbort = (): void => decide(opts.escValue ?? 'cancel');
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     const buttons: HTMLButtonElement[] = [];
     for (const a of opts.actions) {

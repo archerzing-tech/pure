@@ -18,11 +18,12 @@ import { FSStore } from './adapter/storage/FSStore';
 import { SQLiteStore } from './adapter/storage/SQLiteStore';
 import { ContextEngine } from './harness/ContextEngine';
 import { createDefaultVerifier } from './coding-agent/Verifier';
-import { Planner, formatTrapPrompt, detectArtifactRequest, formatArtifactPrompt } from './coding-agent/Planner';
-import type { TaskMode } from './coding-agent/types';
+import { Planner, formatTrapPrompt, formatIntentPrompt, detectArtifactRequest, detectProjectRequest, formatArtifactPrompt } from './coding-agent/Planner';
+import type { IntentAssessment, TaskMode } from './coding-agent/types';
 import { DefaultHookRouter } from './engine/HookRouter';
 import { DefaultFailurePolicy } from './engine/FailurePolicy';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
+import { SubagentOrchestrator, BUILT_IN_SUBAGENTS } from './coding-agent/SubagentOrchestrator';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler } from './cli_permission';
 import { dim, bold, red, green, yellow, cyan, purple, frameGray } from './termcolors';
@@ -34,14 +35,19 @@ import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
 import type { EvolutionConfig } from './adapter/memory/evolution';
 import { harvestUserPreferences } from './shared/memory';
 import { INCREMENTAL_BUILD_PROMPT } from './shared/agentBehavior';
-import { SYSTEM_CORE_PROMPT, WORKFLOW_PROMPT, COMPLETION_PROMPT, TYPO_TOLERANCE_PROMPT, LOGICAL_TRAPS_PROMPT, SVG_OUTPUT_PROMPT, HUMAN_TONE_PROMPT, FILE_TOOLS_CORE, composeUserTurn } from './shared/promptLayers';
-import { customProviderFor, defaultModelFor, isCustomProviderId, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider } from './shared/providers';
+import { buildCliCapabilities, formatPromptBudgetDiagnostic, promptAssembler, resolvePromptBudget } from './shared/PromptAssembler';
+import { mergeTranscriptWithTurn } from './shared/conversation';
+import { formatCliIntentAssessment, resolveCliAutoApprove, shouldProbeCliWorkspace } from './cliIntent';
+import { customProviderFor, defaultModelFor, isCustomProviderId, promptBudgetForProvider, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider } from './shared/providers';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
+import type { UserTurnContext } from './shared/promptLayers';
+import { buildTaskContract, discoverWorkspace, formatTaskContract, workspaceProfileSummary, type TaskContract, type WorkspaceProfile } from './shared/delivery';
+import { buildRepairPrompt, hasRepairableQualityFindings, qualityGateSummary, runProjectQualityGate, type ProjectQualityGateResult } from './ui/projectQualityGate';
 
 // Single source of truth for the CLI's displayed version (kept in sync with
 // package.json / src-tauri by the release flow; the CLI banner + startup line
 // both read from here).
-const CLI_VERSION = 'v1.9.0';
+const CLI_VERSION = 'v1.9.2-beta7';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
@@ -287,58 +293,13 @@ const DEFAULT_BUDGET: BudgetConfig = {
 };
 
 // Single source of truth for the CLI's permission stance. CLI is invoked by a
-// human who has already read the prompt — they own the consequences of any
-// tool call the agent makes, so we auto-approve by default. `--prompt-on-tool`
-// (handled in parseArgs) inverts this for users who want the original
-// interactive y/n/a flow. The `createCliPermissionHandler` function-level
-// default of `false` is unrelated — see its JSDoc for why the two are
-// intentionally flipped.
+// human who has already read the prompt — they own the consequences of ordinary
+// tool calls, so we auto-approve by default. `--prompt-on-tool` (handled in
+// parseArgs) inverts this for users who want the original interactive y/n/a flow.
+// High-risk assessments are always applied as an interactive override after
+// Planner runs; a model instruction must never be the only safeguard for a
+// destructive operation.
 const DEFAULT_CLI_AUTO_APPROVE = true;
-
-// Layered prompt assembly (L0 system core + L1 tools/behavior + L2 per-request
-// user context — see src/shared/promptLayers.ts). The immutable identity and
-// global operating contract come from the shared SYSTEM_CORE_PROMPT; the tool
-// lists and output style are application-layer; per-request fragments (traps,
-// artifact protocol) are composed into the USER message via composeUserTurn.
-const BASE_SYSTEM_PROMPT = `${SYSTEM_CORE_PROMPT}
-
-<capabilities>
-${FILE_TOOLS_CORE}
-
-System:
-- sys_info() — timezone, language, current time, OS version, installed runtimes (node/bun/python3/rustc/git versions), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, a runtime version, a git capability, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data.
-
-Web tools:
-- web_search(query, maxResults?) — web search (with SERPER_API_KEY set it uses the Serper Google-index API first — best for Chinese AND English; then TAVILY_API_KEY; otherwise free backends are probed in parallel — Sogou + cn.bing.com + DuckDuckGo + Bing for Chinese queries). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
-- web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.
-
-For weather forecasts or other time-sensitive data, call web_search FIRST and use the returned forecast data; never invent future weather. If the user did not provide a location, ask for it or state the location assumption clearly. To show a weather trend in the GUI, include a fenced chart block with one numeric value per day (prefer average temperature; use "周一：25℃" or "周一 | 25") alongside the explanation.
-</capabilities>
-
-Work step by step. Read before you write. Verify after you change. Be concise.
-
-${WORKFLOW_PROMPT}
-
-${COMPLETION_PROMPT}
-
-Output style:
-- Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").
-- Structure longer replies into clear sections — use Markdown headings (##) for each category, short paragraphs for each point, and lists where items fit. Wrap the KEY phrase(s) of each section in ==double equals== (e.g. ==西安到重庆==, ==3 小时 40 分==) so they render HIGHLIGHTED (the GUI renders ==...== as a highlighted mark); keep the surrounding prose plain so the highlighted-vs-plain contrast is visible.
-- A bare "generate X", "show me X", "give me X", "what does X look like", or any "write me code for…" without a path means inline output — never reach for write_file.
-- COMPLETE runnable artifacts go to disk by default: when the user asks you to BUILD a full game, mini-game, web page/site, app, tool, script, or small project ("写一个小游戏", "做一个网页", "开发一个工具" — even without naming a path), WRITE it to a file instead of printing the whole source inline. Single-file artifact → a new file like index.html / game.html / app.py in the workspace; multi-file project → a new directory with the files. After writing, state the path(s) and how to run/open it.
-- When you do write a file, briefly state where it landed and confirm the user actually wanted persistence; the EXISTENCE of a workspace does NOT imply "save everything to disk".
-
-${SVG_OUTPUT_PROMPT}
-
-${HUMAN_TONE_PROMPT}
-
-Tool-calling rules:
-- NEVER emit tool calls as XML or text (no <tool_calls>, <invoke name="...">, or JSON inside your reply). Tool calls are made ONLY through the function-calling interface, never as visible text.
-- Mirror the GUI's rule (chat.ts BASE_SYSTEM_PROMPT) so piped / non-interactive CLI runs don't regress to the old leak pattern if a model picks it up. The "no workspace → ask the user to set one" bullet is GUI-specific and omitted here — the CLI defaults workspace to '.' already.
-
-${TYPO_TOLERANCE_PROMPT}
-
-${LOGICAL_TRAPS_PROMPT}`;
 
 // Lightweight environment context for the CLI, mirroring the GUI's
 // buildEnvironmentContext (chat.ts): a stable location/language pre-seed, with
@@ -361,26 +322,23 @@ function buildRuntimesContext(): string {
   return `\nEnvironment runtimes (installed on this machine): ${cachedRuntimes}. Use the actual versions above when the task depends on a runtime or tool version (e.g. writing a package.json engines field, a requirements.txt, or a CI/git workflow), and assume a tool is NOT installed when it is absent from this list.`;
 }
 
-function buildSystemPrompt(mode: TaskMode): string {
-  // Memory is composed by the Harness at session start (PromptComposer + the
-  // IMemoryStore), so the base prompt stays clean here.
-  return `${BASE_SYSTEM_PROMPT}\n\n${buildEnvironmentContext()}${buildRuntimesContext()}${buildHubSkillsContext()}${modeFragment(mode)}`;
-}
-
-// Third-party skills installed via the GUI's Skill Hub are injected when
-// enabled — mirrors chat.ts buildHubSkillsContext so CLI and GUI sessions give
-// the model the same skill instructions.
-function buildHubSkillsContext(): string {
-  const skills = loadConfig()?.hubSkills ?? [];
-  const enabled = skills.filter((s) => s.enabled && s.body);
-  if (enabled.length === 0) return '';
-  return `\n\nInstalled skills (follow these when they apply):\n${enabled.map((s) => `\n<skill name="${sanitizePromptTag(s.name)}">\n${s.body}\n</skill>`).join('')}`;
-}
-
-/** Keep a hub-supplied skill id from breaking the `<skill name="…">` prompt
- * tag (mirrors sanitizeSkillName in src/ui/skillHub.ts). */
-function sanitizePromptTag(name: string): string {
-  return name.replace(/[^A-Za-z0-9_.\-/]/g, '_');
+function assembleCliPrompt(
+  mode: TaskMode,
+  args: CliArgs,
+  toolsDefs: ToolDefinition[],
+  userText: string,
+  context: UserTurnContext,
+) {
+  return promptAssembler.assemble({
+    surface: 'cli',
+    capabilities: buildCliCapabilities(),
+    toolDefinitions: toolsDefs,
+    environment: buildEnvironmentContext(),
+    runtimes: buildRuntimesContext(),
+    skills: loadConfig()?.hubSkills,
+    mode,
+    budget: promptBudgetForProvider(args.customProviders, args.provider, args.model),
+  }, userText, context);
 }
 
 // ── Task-mode integration (mirrors the GUI's yolo → plan/build switching) ──
@@ -388,20 +346,26 @@ function sanitizePromptTag(name: string): string {
 // explicit BUILD/PLAN mode: a mode line is printed to the terminal (so the user
 // sees the switch) AND a directive is injected into the system prompt so the
 // model structures its work into visible, step-by-step phases.
-function modeFragment(mode: TaskMode): string {
-  if (mode === 'yolo') return '';
-  const label = mode === 'build' ? 'BUILD' : 'PLAN';
-  const directive = mode === 'build'
-    ? 'Work through the request in clear phases; when you complete each phase, briefly state what was done and what remains.'
-    : 'Work through the request in ordered steps and verify after each change.';
-  return `\n\n<task_mode>\nOperating mode: ${label} — auto-detected from the user's request as a complex multi-step task. ${directive}\n</task_mode>`;
-}
-
 /** Print the yolo → plan/build switch for the current request (complex only). */
 function printModeSwitch(mode: TaskMode): void {
   if (mode === 'yolo') return;
   const label = mode === 'build' ? 'Build mode' : 'Plan mode';
   process.stdout.write(`  ${cyan('🧭')} ${cyan(label)} ${dim('— complex multi-step task, will execute in phases')}\n`);
+}
+
+function printIntentAssessment(assessment: IntentAssessment): void {
+  process.stdout.write(formatCliIntentAssessment(assessment));
+}
+
+/** Apply request-scoped CLI permissions after Planner has classified the turn. */
+function applyCliIntentPermission(
+  tools: ToolAdapter | undefined,
+  args: CliArgs,
+  assessment: IntentAssessment,
+): void {
+  if (!(tools instanceof ToolRegistry)) return;
+  const autoApprove = resolveCliAutoApprove(!args.autoApprove, DEFAULT_CLI_AUTO_APPROVE, assessment);
+  tools.setPermissionManager(new PermissionManager('NORMAL', createCliPermissionHandler(autoApprove)));
 }
 
 // ── Types ──
@@ -483,7 +447,7 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
   // a one-way opt-out (`--prompt-on-tool`) so users who want the original
   // interactive confirmation flow can still get it. No positive opt-in
   // flag is needed because the default already matches the common case.
-  const autoApprove = DEFAULT_CLI_AUTO_APPROVE && flags['prompt-on-tool'] === undefined;
+  const autoApprove = resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, DEFAULT_CLI_AUTO_APPROVE);
 
   return {
     args: {
@@ -579,7 +543,7 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
   }
 }
 
-function createTools(workspace: string, autoApprove = false): { tools?: ToolAdapter; toolsDefs: ToolDefinition[] } {
+function createTools(workspace: string, autoApprove = false, sessionId = ''): { tools?: ToolAdapter; toolsDefs: ToolDefinition[] } {
   if (!workspace) return { toolsDefs: [] };
 
   const resolved = workspace.startsWith('/') ? workspace : `${process.cwd()}/${workspace}`;
@@ -587,6 +551,7 @@ function createTools(workspace: string, autoApprove = false): { tools?: ToolAdap
   // sys_info() reports it as the location baseline, mirroring the GUI.
   const adapter = new NodeToolAdapter({
     workspace: resolved,
+    sessionId,
     location: process.env.PURE_LOCATION ?? process.env.PURE_CITY,
   });
 
@@ -748,6 +713,63 @@ async function consumeTurn(
   return { output: finalOutput, messages, turnCount, ok };
 }
 
+async function runCliDeliveryGate(
+  tools: ToolAdapter,
+  profile: WorkspaceProfile,
+): Promise<ProjectQualityGateResult> {
+  process.stdout.write(`\n  ${cyan('🧪')} ${cyan('Delivery gate')} ${dim('— review, audit, typecheck, test, lint, build')}\n`);
+  const result = await runProjectQualityGate(tools, {
+    profile,
+    onPhase: (phase, status, summary) => {
+      const icon = status === 'active' ? '●' : status === 'passed' ? '✓' : status === 'failed' ? '✗' : '!';
+      process.stdout.write(`  ${status === 'passed' ? green(icon) : status === 'failed' ? red(icon) : yellow(icon)} ${phase}: ${summary ?? status}\n`);
+    },
+    onCheck: (check) => {
+      if (check.output && check.status !== 'passed') {
+        const line = check.output.split(/\r?\n/).map((value) => value.trim()).filter(Boolean).at(-1);
+        if (line) process.stdout.write(`    ${dim('↳')} ${dim(line.slice(0, 240))}\n`);
+      }
+    },
+  });
+  process.stdout.write(result.passed
+    ? `  ${green('✅')} ${green('项目允许交付')}\n`
+    : `  ${red('⛔')} ${red('项目暂不交付')}: ${qualityGateSummary(result)}\n`);
+  return result;
+}
+
+const MAX_CLI_QUALITY_REPAIR_ROUNDS = 3;
+
+async function runCliDeliveryGateWithRepair(
+  tools: ToolAdapter,
+  profile: WorkspaceProfile,
+  harness: Harness,
+  systemPrompt: string,
+  messages: Message[],
+  streamMgr: StreamManager,
+  signal?: AbortSignal,
+): Promise<{ result: ProjectQualityGateResult; messages: Message[] }> {
+  let currentProfile = profile;
+  let currentMessages = messages;
+  let result = await runCliDeliveryGate(tools, currentProfile);
+  let rounds = 0;
+  while (!result.passed && rounds < MAX_CLI_QUALITY_REPAIR_ROUNDS && hasRepairableQualityFindings(result) && !signal?.aborted) {
+    rounds += 1;
+    process.stdout.write(`  ${yellow('↻')} ${yellow(`开始第 ${rounds}/${MAX_CLI_QUALITY_REPAIR_ROUNDS} 轮质量修复`)}\\n`);
+    const repairResult = await consumeTurn(
+      harness.continueTurn(systemPrompt, currentMessages, buildRepairPrompt(result), signal),
+      streamMgr,
+    );
+    if (repairResult.messages.length > 0) currentMessages = repairResult.messages;
+    if (!repairResult.ok) break;
+    currentProfile = await discoverWorkspace(tools);
+    result = await runCliDeliveryGate(tools, currentProfile);
+  }
+  if (!result.passed && rounds >= MAX_CLI_QUALITY_REPAIR_ROUNDS && hasRepairableQualityFindings(result)) {
+    process.stdout.write(`  ${red('⛔')} ${red(`质量修复达到 ${MAX_CLI_QUALITY_REPAIR_ROUNDS} 轮上限，项目暂不交付`)}\\n`);
+  }
+  return { result, messages: currentMessages };
+}
+
 // ── Storage factory ──
 
 function createStore(args: CliArgs): IStateStore | undefined {
@@ -759,8 +781,24 @@ function createStore(args: CliArgs): IStateStore | undefined {
 
 function createHarness(args: CliArgs) {
   const { adapter } = createAdapter(args);
-  const { tools, toolsDefs } = createTools(args.workspace, args.autoApprove);
   const sessionId = args.resume || `session_${Date.now()}`;
+  const createdTools = createTools(args.workspace, args.autoApprove, sessionId);
+  const tools = createdTools.tools;
+  let toolsDefs = createdTools.toolsDefs;
+  if (tools && tools instanceof ToolRegistry) {
+    const orchestrator = new SubagentOrchestrator({
+      llm: adapter,
+      parentTools: tools,
+      parentToolsDefsProvider: () => tools.getTools(),
+      defaultBudget: DEFAULT_BUDGET,
+    });
+    for (const def of BUILT_IN_SUBAGENTS) {
+      orchestrator.register(def);
+      tools.register(def);
+    }
+    tools.setSubagentExecutor(orchestrator);
+    toolsDefs = tools.getTools();
+  }
   const store = args.resume ? createStore(args) : undefined;
   // Project-scoped memory: resolved workspace (same as createTools uses).
   const projectPath = args.workspace
@@ -776,10 +814,16 @@ function createHarness(args: CliArgs) {
     stateStore: store,
     memory: memoryStore,
     projectPath,
+    promptAssembler,      promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model),
     // G-3 fix: wire the ContextEngine (with LLM summarization fallback) into
     // the CLI too — long REPL sessions previously grew without bound because
     // the CLI's Harness never had a contextEngine configured.
-    contextEngine: new ContextEngine({ maxMessages: 20, maxTokens: 32000, llm: adapter }),
+    contextEngine: new ContextEngine({
+      maxMessages: 20,
+      maxTokens: resolvePromptBudget(promptBudgetForProvider(args.customProviders, args.provider, args.model)).availableInputTokens,
+      toolsProvider: () => tools?.getTools() ?? toolsDefs,
+      llm: adapter,
+    }),
     // P1-1 (async verification): the CLI uses the pure rule-based verifier
     // (non-empty-output check — a hard failure still triggers an in-engine
     // rewrite). The LLM re-check of the final answer is NOT run synchronously
@@ -791,7 +835,7 @@ function createHarness(args: CliArgs) {
     failurePolicy: new DefaultFailurePolicy(),
   });
 
-  return { harness, toolsDefs, store, sessionId, projectPath };
+  return { harness, tools, toolsDefs, store, sessionId, projectPath };
 }
 
 // ── `pure config` — interactive one-time setup ──
@@ -1016,10 +1060,8 @@ async function runConfig(): Promise<void> {
 
 async function runOneShot(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
-  const { toolsDefs } = createTools(args.workspace, args.autoApprove);
+  const { harness, tools, sessionId, projectPath, toolsDefs } = createHarness(args);
   const hasTools = toolsDefs.length > 0;
-
-  const { harness, sessionId, projectPath } = createHarness(args);
   await learnFromInput(args.prompt, sessionId, projectPath);
 
   renderLogo();
@@ -1037,26 +1079,50 @@ async function runOneShot(args: CliArgs) {
   if (traps.length > 0) {
     console.log(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}`);
   }
+  printIntentAssessment(analysis.intent);
+  applyCliIntentPermission(tools, args, analysis.intent);
   printModeSwitch(analysis.mode);
-  const systemPrompt = buildSystemPrompt(analysis.mode);
-  // L2 per-request context (promptLayers.ts): traps + artifact protocol ride
-  // with the USER message, not the system prompt.
-  const userTurn = composeUserTurn(args.prompt, {
+  const needsDeliveryGate = !!tools && (analysis.mode === 'build' || detectProjectRequest(args.prompt));
+  const needsIntentProbe = shouldProbeCliWorkspace(!!tools, analysis.intent);
+  let workspaceProfile: WorkspaceProfile | undefined;
+  let taskContract: TaskContract | undefined;
+  if ((needsDeliveryGate || needsIntentProbe) && tools) {
+    workspaceProfile = await discoverWorkspace(tools);
+    taskContract = buildTaskContract(args.prompt, workspaceProfile);
+    process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(workspaceProfile))}\\n`);
+    if (needsDeliveryGate) process.stdout.write(`  ${dim('📋 Contract:')} ${dim(`${taskContract.acceptanceCriteria.length} 项验收标准，验证证据将决定是否交付`)}\\n`);
+  }
+  // Assemble system + user context together so tool schemas, priorities, and
+  // the final budget report are computed against the same provider window.
+  const assembly = assembleCliPrompt(analysis.mode, args, toolsDefs, args.prompt, {
     traps: traps.length > 0 ? formatTrapPrompt(traps) : undefined,
     buildProtocol: detectArtifactRequest(args.prompt) ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,
+    contract: taskContract ? formatTaskContract(taskContract) : undefined,
+    assessment: formatIntentPrompt(analysis.intent),
   });
+  const systemPrompt = assembly.systemPrompt;
+  const userTurn = assembly.userPrompt ?? args.prompt;
+  const budgetDiagnostic = formatPromptBudgetDiagnostic(assembly.budget);
+  if (budgetDiagnostic) process.stderr.write(`  ${yellow('⚠')} ${dim(budgetDiagnostic)}\\n`);
 
   const streamMgr = new StreamManager(chunk => process.stdout.write(chunk), { flushIntervalMs: 16 });
   streamMgr.start();
 
   const startTime = Date.now();
-  const { turnCount, ok } = await consumeTurn(harness.run(systemPrompt, userTurn), streamMgr);
+  const result = await consumeTurn(harness.run(systemPrompt, userTurn), streamMgr);
+  let ok = result.ok;
+  if (needsDeliveryGate && tools) {
+    const profile = workspaceProfile ?? await discoverWorkspace(tools);
+    if (!workspaceProfile) process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(profile))}\\n`);
+    const delivery = await runCliDeliveryGateWithRepair(tools, profile, harness, systemPrompt, result.messages, streamMgr);
+    ok = ok && delivery.result.passed;
+  }
 
   process.stdout.write('\n');
   console.log(dim('─'.repeat(50)));
   const emoji = ok ? green('✅') : red('❌');
   const time = dim(`${Date.now() - startTime}ms`);
-  const turn = dim(`| turn ${turnCount}`);
+  const turn = dim(`| turn ${result.turnCount}`);
   process.stdout.write(`  ${emoji} ${time} ${turn}\n`);
 }
 
@@ -1064,19 +1130,19 @@ async function runOneShot(args: CliArgs) {
 
 async function runRepl(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
-  const { toolsDefs } = createTools(args.workspace, args.autoApprove);
+  const { harness, tools, sessionId, projectPath, toolsDefs } = createHarness(args);
   const hasTools = toolsDefs.length > 0;
-
-  const { harness, sessionId, projectPath } = createHarness(args);
 
   renderLogo();
   process.stdout.write(`  ${bold('pure')}  ${dim(CLI_VERSION)} ${dim('—')} ${cyan(label)}\n`);
   if (hasTools) process.stdout.write(`  📁 ${dim(process.cwd())} ${dim(`| ${toolsDefs.length} tools`)}\n`);
   process.stdout.write(`  💾 ${dim(sessionId.slice(0, 12))}…\n`);
-  process.stdout.write(`  ${dim('/exit /quit — leave   /clear — reset context   Ctrl+C — cancel')}\n`);
+  process.stdout.write(`  ${dim('/exit /quit — leave   /clear — reset context   /compact — compact context   /undo — restore last write   Ctrl+C — cancel')}\n`);
   console.log('');
 
   let messages: Message[] = [];
+  let compactedHistory: Message[] | null = null;
+  let compactedTranscriptLength = 0;
   let turnNum = 1;
   let firstTurn = true;
   let lastMode: TaskMode = 'yolo';
@@ -1116,9 +1182,64 @@ async function runRepl(args: CliArgs) {
     if (!input) continue;
 
     if (input === '/exit' || input === '/quit') { process.stdout.write(`  ${dim('👋 Goodbye.')}\n`); break; }
+    if (input === '/undo') {
+      if (generating) {
+        process.stdout.write(`  ${yellow('⏳')} ${dim('请先等待当前执行结束。')}\n`);
+        continue;
+      }
+      const snapshot = tools?.getSnapshotPort?.();
+      try {
+      const result = snapshot
+        ? await snapshot.undoLastWriteBatch()
+        : { restored: false, restoredPaths: [], removedPaths: [], conflicts: [], message: '当前会话没有可撤销的写入。' };
+      process.stdout.write(`  ${result.restored ? green('↶') : yellow('!')} ${result.message}\n`);
+      } catch (error) {
+        process.stdout.write(`  ${red('!')} 撤销失败：${error instanceof Error ? error.message : String(error)}\n`);
+      }
+      continue;
+    }
+
     if (input === '/clear') {
-      messages = []; firstTurn = true; turnNum = 1;
+      messages = [];
+      compactedHistory = null;
+      compactedTranscriptLength = 0;
+      firstTurn = true; turnNum = 1;
       process.stdout.write(`  ${dim('🧹 Context cleared.')}\n`);
+      continue;
+    }
+
+    if (input === '/compact') {
+      if (generating) {
+        process.stdout.write(`  ${yellow('⏳')} ${dim('请先等待当前执行结束。')}\n`);
+        continue;
+      }
+      const contextEngine = harness.getContextEngine();
+      if (!contextEngine || messages.length === 0) {
+        process.stdout.write(`  ${yellow('!')} ${dim('当前会话没有可压缩的上下文。')}\n`);
+        continue;
+      }
+      try {
+        const compacted = await contextEngine.compact(messages, { force: true });
+        if (compacted.compacted) {
+          compactedHistory = compacted.messages;
+          compactedTranscriptLength = messages.length;
+        }
+        if (compacted.overBudget) {
+          const warning = compacted.oversizedNewestGroup
+            ? '最新消息过大，已保持完整；当前上下文仍超过 Token 预算。'
+            : '系统提示词或摘要本身已超过 Token 预算；已保持 provider 可接受的完整消息结构。';
+          process.stdout.write(`  ${yellow('!')} ${yellow(warning)}\n`);
+        } else if (!compacted.compacted) {
+          process.stdout.write(`  ${dim('✓ 当前上下文已在压缩范围内，无需改变。')}\n`);
+        } else {
+          const summary = compacted.summarized
+            ? '，已生成摘要'
+            : compacted.summaryUnavailable ? '，未调用摘要模型' : '';
+          process.stdout.write(`  ${green('✓')} ${dim(`上下文已压缩：淘汰 ${compacted.evictedMessages} 条消息${summary}，约 ${compacted.estimatedTokens} tokens`)}\n`);
+        }
+      } catch (error) {
+        process.stdout.write(`  ${red('!')} 上下文压缩失败：${error instanceof Error ? error.message : String(error)}\n`);
+      }
       continue;
     }
 
@@ -1138,38 +1259,83 @@ async function runRepl(args: CliArgs) {
     if (traps.length > 0) {
       process.stdout.write(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}\n`);
     }
+    printIntentAssessment(analysis.intent);
+    applyCliIntentPermission(tools, args, analysis.intent);
     // Announce mode changes only (not every turn) so long complex sessions
     // stay quiet; the first complex turn switches from yolo and is announced.
     if (analysis.mode !== lastMode) {
       printModeSwitch(analysis.mode);
       lastMode = analysis.mode;
     }
-    const systemPrompt = buildSystemPrompt(analysis.mode);
-    // L2 per-request context (promptLayers.ts): traps + artifact protocol ride
-    // with the USER message, not the system prompt.
-    const userTurn = composeUserTurn(input, {
+    const needsDeliveryGate = !!tools && (analysis.mode === 'build' || detectProjectRequest(input));
+    let workspaceProfile: WorkspaceProfile | undefined;
+    const needsIntentProbe = shouldProbeCliWorkspace(!!tools, analysis.intent);
+    let taskContract: TaskContract | undefined;
+    if ((needsDeliveryGate || needsIntentProbe) && tools) {
+      workspaceProfile = await discoverWorkspace(tools);
+      taskContract = buildTaskContract(input, workspaceProfile);
+      process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(workspaceProfile))}\\n`);
+      if (needsDeliveryGate) process.stdout.write(`  ${dim('📋 Contract:')} ${dim(`${taskContract.acceptanceCriteria.length} 项验收标准，验证证据将决定是否交付`)}\\n`);
+    }
+    const assembly = assembleCliPrompt(analysis.mode, args, toolsDefs, input, {
       traps: traps.length > 0 ? formatTrapPrompt(traps) : undefined,
       buildProtocol: detectArtifactRequest(input) ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,
+      contract: taskContract ? formatTaskContract(taskContract) : undefined,
+      assessment: formatIntentPrompt(analysis.intent),
     });
+    const systemPrompt = assembly.systemPrompt;
+    const userTurn = assembly.userPrompt ?? input;
 
+    const historyMessages = compactedHistory && compactedTranscriptLength === messages.length
+      ? compactedHistory
+      : messages;
     const events = firstTurn
       ? harness.run(systemPrompt, userTurn, currentAbort.signal)
-      : harness.continueTurn(systemPrompt, messages, userTurn, currentAbort.signal);
+      : harness.continueTurn(systemPrompt, historyMessages, userTurn, currentAbort.signal);
 
     const result = await consumeTurn(events, streamMgr);
+    let turnOk = result.ok;
+    let turnMessages = result.messages;
+    if (needsDeliveryGate && tools && !currentAbort.signal.aborted) {
+      const profile = workspaceProfile ?? await discoverWorkspace(tools);
+      if (!workspaceProfile) process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(profile))}\\n`);
+      const delivery = await runCliDeliveryGateWithRepair(tools, profile, harness, systemPrompt, result.messages, streamMgr, currentAbort.signal);
+      turnOk = turnOk && delivery.result.passed;
+      turnMessages = delivery.messages;
+    }
+    const automaticCompaction = harness.getLastContextCompactionResult();
+    if (automaticCompaction?.overBudget) {
+      const warning = automaticCompaction.oversizedNewestGroup
+        ? '自动上下文压缩保留了不可拆分的最新消息，但当前窗口仍超过 Token 预算。'
+        : '自动上下文压缩发现系统提示词或摘要基线已超过 Token 预算。';
+      process.stdout.write(`  ${yellow('!')} ${yellow(warning)}\n`);
+    }
     const wasAborted = currentAbort.signal.aborted;
     generating = false;
     currentAbort = null;
 
-    if (result.ok) {
+    if (turnOk) {
       process.stdout.write('\n');
       const time = dim(`${Date.now() - startTime}ms`);
       const turn = dim(`| turn ${turnNum}`);
       process.stdout.write(`  ${green('✅')} ${time} ${turn}\n`);
-      messages = result.messages.length > 0 ? result.messages : messages;
+      if (turnMessages.length > 0) {
+        messages = firstTurn
+          ? turnMessages
+          : mergeTranscriptWithTurn(messages, turnMessages, input);
+      }
+      compactedHistory = null;
+      compactedTranscriptLength = 0;
+      await harness.saveTranscriptCheckpoint(messages, result.turnCount);
       firstTurn = false;
       turnNum++;
     } else if (wasAborted) {
+      if (turnMessages.length > 0) {
+        messages = firstTurn
+          ? turnMessages
+          : mergeTranscriptWithTurn(messages, turnMessages, input);
+        await harness.saveTranscriptCheckpoint(messages, result.turnCount);
+      }
       process.stdout.write('\n');
       process.stdout.write(`  ${yellow('⏹')}  ${dim(`Cancelled (${Date.now() - startTime}ms)`)}\n`);
     } else {

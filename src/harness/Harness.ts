@@ -4,8 +4,9 @@
 
 import { AgentLoopEngine } from '../engine/AgentLoopEngine';
 import { StateManager } from './StateManager';
-import { ContextEngine } from './ContextEngine';
-import { PromptComposer } from '../adapter/memory/PromptComposer';
+import { ContextEngine, type ContextCompactionResult } from './ContextEngine';
+import { PromptAssembler, promptAssembler, resolvePromptBudget, type PromptBudgetConfig } from '../shared/PromptAssembler';
+import { promptObservability, type PromptObservability } from '../shared/promptObservability';
 import type {
   BudgetConfig,
   EngineContext,
@@ -20,6 +21,7 @@ import type {
   Message,
   ToolAdapter,
   ToolDefinition,
+  VerificationSummary,
 } from '../shared/types';
 
 export interface HarnessConfig {
@@ -42,6 +44,12 @@ export interface HarnessConfig {
    * session completes. When omitted the session runs without memory.
    */
   memory?: IMemoryStore;
+  /** Shared prompt compiler used for runtime context and retrieved memory. */
+  promptAssembler?: PromptAssembler;
+  /** Provider/model context budget used for memory injection and history sizing. */
+  promptBudget?: PromptBudgetConfig;
+  /** Local-first trace collector; records hashes/metadata, never raw prompts by default. */
+  observability?: PromptObservability;
   /** Project path used to isolate memories; defaults to process.cwd(). */
   projectPath?: string;
   contextEngine?: ContextEngine;
@@ -74,21 +82,39 @@ export class Harness {
   private stateMgr?: StateManager;
   private writtenLessonKeys = new Set<string>();
   private lastDecayAt = 0;
-  private verificationSummary = 'Engine VERIFY phase passed; no project-level command was recorded.';
+  private verificationSummary = 'No project-level verification evidence was recorded.';
+  private readonly promptAssembler: PromptAssembler;
+  private readonly observability: PromptObservability;
 
   constructor(config: HarnessConfig) {
     this.engine = new AgentLoopEngine();
     this.config = config;
+    this.promptAssembler = config.promptAssembler ?? promptAssembler;
+    // The compiler is the source of truth when callers provide both objects;
+    // this prevents assembly and run spans from landing in different sinks.
+    this.observability = config.promptAssembler?.getObservability()
+      ?? config.observability
+      ?? promptObservability;
+    if (config.contextEngine && config.promptBudget) {
+      config.contextEngine.configureBudget(
+        resolvePromptBudget(config.promptBudget).availableInputTokens,
+        () => this.currentToolsDefs(),
+      );
+    }
     if (config.stateStore) {
       this.stateMgr = new StateManager(config.stateStore, config.sessionId);
     }
+  }
+
+  private currentToolsDefs(): ToolDefinition[] {
+    return this.config.toolsDefsProvider ? this.config.toolsDefsProvider() : this.config.toolsDefs;
   }
 
   private buildContext(signal?: AbortSignal): EngineContext {
     return {
       llm: this.config.llm,
       tools: this.config.tools,
-      toolsDefs: this.config.toolsDefsProvider ? this.config.toolsDefsProvider() : this.config.toolsDefs,
+      toolsDefs: this.currentToolsDefs(),
       budget: this.config.budget,
       verifier: this.config.verifier,
       hooks: this.config.hooks,
@@ -106,12 +132,25 @@ export class Harness {
     return this.config.contextEngine;
   }
 
+  async saveTranscriptCheckpoint(messages: Message[], turnCount = 1): Promise<void> {
+    if (!this.stateMgr) return;
+    await this.stateMgr.saveCheckpoint('transcript', messages, turnCount);
+  }
+
+  getLastContextCompactionResult(): ContextCompactionResult | undefined {
+    return this.config.contextEngine?.getLastCompactionResult();
+  }
+
+  getObservability(): PromptObservability {
+    return this.observability;
+  }
+
   async *run(
     systemPrompt: string,
     userPrompt: string,
     signal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
-    this.verificationSummary = 'Engine VERIFY phase passed; no project-level command was recorded.';
+    this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.scheduleMemoryDecay();
     let runningMessages: Message[] = [];
     let resumed = false;
@@ -169,6 +208,23 @@ export class Harness {
           this.buildContext(signal),
         );
 
+    const traceId = this.observability.startRun({
+      traceId: this.observability.findAssemblyTrace({
+        sessionId: this.config.sessionId,
+        systemPrompt,
+        userPrompt,
+      }),
+      sessionId: this.config.sessionId,
+      provider: this.config.promptBudget?.provider,
+      model: this.config.promptBudget?.model,
+    });
+    let traceFinished = false;
+    const finishTrace = () => {
+      if (traceFinished) return;
+      traceFinished = true;
+      this.observability.finishRun(traceId);
+    };
+
     // §12.3: failures the policy chose to retry — if the session later
     // completes successfully they become error_pattern memories ("retry 且
     // 最终成功"). Reset per run() invocation.
@@ -184,7 +240,14 @@ export class Harness {
     const pendingRepeats = new Map<string, FailureRecord>();
     const recoveredRepeats = new Set<string>();
 
-    for await (const event of stream) {
+    try {
+      for await (const event of stream) {
+      this.observability.recordEvent(traceId, event);
+      if (event.type === 'Completed') {
+        finishTrace();
+      } else if (event.type === 'Error' && !event.payload.recoverable) {
+        finishTrace();
+      }
       yield event;
 
       // v0.12 — observe tool success: a repeated failure whose tool later
@@ -221,7 +284,7 @@ export class Harness {
       // Track messages for checkpoint saving
       if (event.type === 'Completed' && event.payload.messages) {
         runningMessages = event.payload.messages;
-        this.updateVerificationSummary(event.payload.messages);
+        this.updateVerificationSummary(event.payload.messages, event.payload.verification);
         if (this.stateMgr) {
           await this.stateMgr.saveCheckpoint('turn_completed', event.payload.messages, event.payload.turnCount);
         }
@@ -262,6 +325,9 @@ export class Harness {
           await this.stateMgr.saveCheckpoint('interrupted', snapshot, event.payload.turnCount ?? 0);
         } catch { /* persistence error is non-fatal */ }
       }
+      }
+    } finally {
+      finishTrace();
     }
   }
 
@@ -271,7 +337,7 @@ export class Harness {
     newUserPrompt: string,
     signal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
-    this.verificationSummary = 'Engine VERIFY phase passed; no project-level command was recorded.';
+    this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.scheduleMemoryDecay();
     // Memory refresh on continuation: compose the current prompt with memories
     // relevant to the new follow-up (same layer as run()).
@@ -299,6 +365,23 @@ export class Harness {
       this.buildContext(signal),
     );
 
+    const traceId = this.observability.startRun({
+      traceId: this.observability.findAssemblyTrace({
+        sessionId: this.config.sessionId,
+        systemPrompt,
+        userPrompt: newUserPrompt,
+      }),
+      sessionId: this.config.sessionId,
+      provider: this.config.promptBudget?.provider,
+      model: this.config.promptBudget?.model,
+    });
+    let traceFinished = false;
+    const finishTrace = () => {
+      if (traceFinished) return;
+      traceFinished = true;
+      this.observability.finishRun(traceId);
+    };
+
     // Same §12.3 error_pattern handling as run(): a stop in a continuation
     // turn is a real failure worth remembering too.
     const retriedFailures: FailureRecord[] = [];
@@ -308,7 +391,14 @@ export class Harness {
     const pendingRepeats = new Map<string, FailureRecord>();
     const recoveredRepeats = new Set<string>();
 
-    for await (const event of stream) {
+    try {
+      for await (const event of stream) {
+      this.observability.recordEvent(traceId, event);
+      if (event.type === 'Completed') {
+        finishTrace();
+      } else if (event.type === 'Error' && !event.payload.recoverable) {
+        finishTrace();
+      }
       yield event;
 
       // v0.12 — observe tool success (transient-fault exemption, same as run()).
@@ -338,7 +428,7 @@ export class Harness {
       }
 
       if (event.type === 'Completed' && event.payload.messages) {
-        this.updateVerificationSummary(event.payload.messages);
+        this.updateVerificationSummary(event.payload.messages, event.payload.verification);
         if (this.stateMgr) {
           await this.stateMgr.saveCheckpoint('turn_completed', event.payload.messages, event.payload.turnCount);
         }
@@ -370,6 +460,9 @@ export class Harness {
           await this.stateMgr.saveCheckpoint('interrupted', snapshot, event.payload.turnCount ?? 0);
         } catch { /* persistence error is non-fatal */ }
       }
+      }
+    } finally {
+      finishTrace();
     }
   }
 
@@ -409,10 +502,11 @@ export class Harness {
         .filter(m => m.type === 'procedure')
         .map(m => m.content);
       if (preferences.length === 0 && errorPatterns.length === 0 && procedures.length === 0) return systemPrompt;
-      return new PromptComposer().compose({
+      return this.promptAssembler.composeMemoryPrompt({
         template: systemPrompt,
-        memory: { preferences, errorPatterns, procedures },
-        project: this.projectPath(),
+        memory: { preferences, errorPatterns, procedures, project: this.projectPath() },
+        budget: this.config.promptBudget,
+        toolDefinitions: this.currentToolsDefs(),
       });
     } catch {
       return systemPrompt;
@@ -551,11 +645,19 @@ export class Harness {
     this.writtenLessonKeys.add(dedupeKey);
   }
 
-  private updateVerificationSummary(messages: Message[]): void {
+  private updateVerificationSummary(messages: Message[], verification?: VerificationSummary): void {
+    if (verification && verification.evidence.length > 0) {
+      const evidence = verification.evidence
+        .map((item) => `${item.status}: ${item.summary}${item.command ? ` (${item.command})` : ''}`)
+        .join(' | ')
+        .slice(0, 700);
+      this.verificationSummary = `Engine verification status: ${verification.status}. Evidence: ${evidence}`;
+      return;
+    }
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
       if (message.role === 'tool' && message.toolName === 'execute_command') {
-        this.verificationSummary = `Engine VERIFY phase passed; execute_command output was observed, but its purpose was not classified by the engine: ${message.content.slice(0, 180)}`;
+        this.verificationSummary = `An execute_command result was observed, but no structured verification evidence was recorded: ${message.content.slice(0, 180)}`;
         return;
       }
     }

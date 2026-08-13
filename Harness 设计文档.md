@@ -1,5 +1,7 @@
 # Harness 设计文档
 
+> 对应实现：v1.9.2-beta7；涉及 Prompt observability 与评测时，以 `src/harness/Harness.ts`、`src/shared/promptObservability.ts`、`src/evaluation/` 为准。
+
 > ⚠️ **PHASE 3 / REFERENCE DOCUMENT** — 本文档是 Harness 层的实现参考。
 > 📗 核心规范请见 `pure Spec.md`（Prompt-Ready Implementation Guide）第 5 节。
 >
@@ -764,6 +766,22 @@ export class Harness {
 ```
 
 ---
+
+## 3.7 Prompt observability 与 trace 生命周期
+
+Harness 是 agent run trace 的生命周期边界，但不保存原始 Prompt 内容：
+
+1. `PromptAssembler.assemble()` 先生成 system/user 消息，并在共享 sink 中记录预算、片段选择、工具 schema 成本和长度哈希。
+2. `Harness.run()` / `continueTurn()` 通过 system/user 哈希寻找同轮 assembly trace，复用其 `traceId`；没有匹配 assembly 时生成独立 run trace。
+3. Harness 对每个 `EngineEvent` 增加事件计数，记录工具名、成功状态、耗时、结果长度哈希、usage、verification 和终态。
+4. 正常 `Completed`、`Interrupted`、不可恢复 `Error`、预算终止和 generator 异常都必须进入幂等的 `finishRun()`；`try/finally` 是实现要求。
+5. 默认使用有界内存 sink；文件 JSONL sink 必须显式启用，并只保存结构化元数据与哈希。自定义 PromptAssembler 的 sink 优先于独立 Harness sink，避免 trace 分流。
+
+Observability 是外部诊断层，不得改变 Engine 的消息、工具权限、失败策略、预算判断或用户可见 transcript。
+
+## 3.8 真实编码任务评测边界
+
+`src/evaluation/codingTaskBaseline.ts` 为每个 fixture 建立独立临时 workspace，执行真实 verification command；`src/evaluation/codingAgentExecutor.ts` 可用 provider 创建真实 CodingAgent，并返回 usage、toolCalls 与 traceId。评测报告必须区分 control、fixture error、agent error、verification failure 和 passed，不能把“runner 正常返回”当成任务成功。评测默认不保存源代码和命令输出，只保留长度、哈希与可复现实验元数据。
 
 ## 4. 与 Engine 的上下文边界
 

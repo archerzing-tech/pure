@@ -89,6 +89,13 @@ describe('ContextEngine', () => {
     expect(result[result.length - 2].content).toBe('msg 18');
   });
 
+  it('keeps a contiguous recent suffix after a hard budget boundary', async () => {
+    const engine = new ContextEngine({ maxMessages: 2 });
+    const result = await engine.compact(makeMsgs(5));
+
+    expect(result.messages.map(message => message.content)).toEqual(['msg 3', 'msg 4']);
+  });
+
   // ═══ LLM summary fallback (G-3 fix) ═══
 
   it('summarizes evicted messages when llm is provided and threshold is exceeded', async () => {
@@ -139,5 +146,119 @@ describe('ContextEngine', () => {
 
     expect(result.length).toBeLessThanOrEqual(3);
     expect(result.some(m => m.content.startsWith('Earlier conversation summary:'))).toBe(false);
+  });
+
+  it('returns structured metadata for explicit compaction without mutating input', async () => {
+    const engine = new ContextEngine({ maxMessages: 2 });
+    const msgs = makeMsgs(5);
+    const result = await engine.compact(msgs, { force: true });
+
+    expect(result.compacted).toBe(true);
+    expect(result.evictedMessages).toBe(3);
+    expect(result.summarized).toBe(false);
+    expect(result.messages.map(message => message.content)).toEqual(['msg 3', 'msg 4']);
+    expect(msgs).toHaveLength(5);
+  });
+
+  it('reports when older messages were trimmed without a summarizer', async () => {
+    const engine = new ContextEngine({ maxMessages: 1, summaryThreshold: 1 });
+    const result = await engine.compact(makeMsgs(4));
+
+    expect(result.summaryUnavailable).toBe(true);
+    expect(result.summarized).toBe(false);
+  });
+
+  it('does not retain an orphan tool result or an incomplete tool pair', async () => {
+    const engine = new ContextEngine({ maxMessages: 10 });
+    const msgs: Message[] = [
+      { role: 'user', content: 'old' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'missing', index: 0, function: { name: 'read_file', arguments: '{}' } }] },
+      { role: 'tool', content: 'orphan', toolCallId: 'orphan', toolName: 'read_file' },
+      { role: 'user', content: 'latest' },
+    ];
+
+    const result = await engine.compact(msgs);
+
+    expect(result.messages.map(message => message.content)).toEqual(['old', 'latest']);
+    expect(result.evictedMessages).toBe(2);
+  });
+
+  it('keeps a newest atomic pair intact even when it exceeds the message window', async () => {
+    const engine = new ContextEngine({ maxMessages: 1 });
+    const pair: Message[] = [
+      { role: 'assistant', content: '', toolCalls: [{ id: 'call_1', index: 0, function: { name: 'read_file', arguments: '{}' } }] },
+      { role: 'tool', content: 'result', toolCallId: 'call_1', toolName: 'read_file' },
+    ];
+
+    const result = await engine.compact(pair);
+
+    expect(result.messages).toEqual(pair);
+    expect(result.messages).toHaveLength(2);
+    expect(result.compacted).toBe(true);
+  });
+
+  it('keeps all tool results for an assistant with parallel tool calls', async () => {
+    const engine = new ContextEngine({ maxMessages: 4 });
+    const msgs: Message[] = [
+      { role: 'user', content: 'inspect both files' },
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'call_a', index: 0, function: { name: 'read_file', arguments: '{"path":"a"}' } },
+          { id: 'call_b', index: 1, function: { name: 'read_file', arguments: '{"path":"b"}' } },
+        ],
+      },
+      { role: 'tool', content: 'a', toolCallId: 'call_a', toolName: 'read_file' },
+      { role: 'tool', content: 'b', toolCallId: 'call_b', toolName: 'read_file' },
+      { role: 'user', content: 'summarize' },
+    ];
+
+    const result = await engine.compact(msgs);
+
+    expect(result.messages.some(message => message.toolCallId === 'call_a')).toBe(true);
+    expect(result.messages.some(message => message.toolCallId === 'call_b')).toBe(true);
+    expect(result.messages.filter(message => message.role === 'assistant')).toHaveLength(1);
+  });
+
+  it('counts tool schemas outside messages toward the token budget', async () => {
+    const engine = new ContextEngine({
+      maxMessages: 10,
+      maxTokens: 100,
+      tools: [{
+        name: 'large_tool',
+        description: 'tool',
+        input_schema: { type: 'object', properties: { payload: { type: 'string', description: 'x'.repeat(800) } } },
+      }],
+    });
+    const result = await engine.compact([{ role: 'user', content: 'latest' }]);
+
+    expect(result.estimatedTokens).toBeGreaterThan(100);
+    expect(result.overBudget).toBe(true);
+  });
+
+  it('keeps the newest message when the token budget is smaller than its content', async () => {
+    const engine = new ContextEngine({ maxMessages: 10, maxTokens: 1 });
+    const msgs = makeMsgs(2);
+
+    const result = await engine.compact(msgs);
+
+    expect(result.messages.at(-1)?.content).toBe('msg 1');
+    expect(result.messages).toHaveLength(1);
+    expect(result.estimatedTokens).toBeGreaterThan(1);
+    expect(result.overBudget).toBe(true);
+    expect(result.oversizedNewestGroup).toBe(true);
+  });
+
+  it('distinguishes an over-budget system baseline from an oversized newest message', async () => {
+    const engine = new ContextEngine({ maxMessages: 10, maxTokens: 2 });
+    const result = await engine.compact([
+      { role: 'system', content: 'a system prompt that already exceeds the budget' },
+      { role: 'user', content: 'latest' },
+    ]);
+
+    expect(result.overBudget).toBe(true);
+    expect(result.oversizedNewestGroup).toBe(false);
+    expect(result.messages[0]?.role).toBe('system');
   });
 });

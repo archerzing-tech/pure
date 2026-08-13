@@ -30,11 +30,22 @@ export interface PermissionDecision {
   remember?: boolean;
 }
 
+export interface PlanSubstep {
+  id: string;
+  action: string;
+  description: string;
+  expectedOutcome: string;
+}
+
 export interface PlanStep {
   id: string;
   action: string;
   description: string;
   expectedOutcome: string;
+  /** Whether this plan needs a visible Todo list for clear progress feedback. */
+  todosRequired?: boolean;
+  /** Concrete (1)/(2)/(3) work items shown under the active top-level step. */
+  substeps?: PlanSubstep[];
 }
 
 export interface Plan {
@@ -53,6 +64,24 @@ export type TaskComplexity = 'simple' | 'complex';
  *     the user sees the agent switched into a structured build workflow.
  */
 export type TaskMode = 'yolo' | 'plan' | 'build';
+
+export type RequestIntent = 'question' | 'research' | 'add' | 'modify' | 'debug' | 'refactor' | 'migrate' | 'delete' | 'build';
+export type RiskLevel = 'low' | 'medium' | 'high';
+export type Reversibility = 'reversible' | 'partially-reversible' | 'hard-to-reverse' | 'irreversible';
+
+/** A pre-execution assessment that keeps the agent from mechanically applying
+ * a plausible-looking request without considering impact or recovery. */
+export interface IntentAssessment {
+  intent: RequestIntent;
+  riskLevel: RiskLevel;
+  reversibility: Reversibility;
+  impact: string;
+  recommendation: string;
+  /** A read-only workspace probe should happen before deciding the exact edit. */
+  requiresProbe: boolean;
+  /** The user must explicitly approve the proposed direction before execution. */
+  requiresConfirmation: boolean;
+}
 
 /**
  * A potential logical trap detected in the user's request — a premise that is
@@ -75,6 +104,8 @@ export interface AnalysisResult {
   reasoning: string;
   /** Potential logical traps in the prompt; empty when none were detected. */
   traps: TrapWarning[];
+  /** Freebuff-style intent, impact, reversibility, and next-action assessment. */
+  intent: IntentAssessment;
 }
 
 export interface TaggedTool extends ToolDefinition {

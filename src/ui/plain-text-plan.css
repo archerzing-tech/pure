@@ -1,0 +1,502 @@
+/* Plain-language progress lists: no card, border, shadow, tree connector, or nested menu. */
+.plan-text-progress-row {
+  gap: 2px;
+  margin: 2px 0 8px;
+}
+.plan-progress-text-plan,
+.plan-progress-text-todos {
+  width: 100%;
+  padding: 0 2px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+.plan-progress-text-plan .plan-progress-head {
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.plan-progress-text-plan .plan-progress-title {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.plan-progress-text-plan .plan-progress-count {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+.plan-progress-text-plan .plan-progress-activity {
+  margin: 0 0 6px 2px;
+  min-height: 17px;
+}
+.plan-progress-text-plan .plan-progress-steps,
+.plan-progress-text-todos {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.plan-progress-text-todos {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-light);
+}
+.plan-progress-todo-title {
+  margin-bottom: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step,
+.plan-progress-text-todos .plan-progress-todo-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--font-size);
+  line-height: 1.55;
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step-check,
+.plan-progress-text-todos .plan-progress-substep-check {
+  display: inline-flex;
+  flex: 0 0 16px;
+  width: 16px;
+  min-height: 1.55em;
+  align-items: center;
+  justify-content: center;
+  color: var(--success);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step-num,
+.plan-progress-text-todos .plan-progress-substep-num {
+  display: inline-flex;
+  flex: 0 0 26px;
+  width: 26px;
+  min-width: 26px;
+  min-height: 1.55em;
+  align-items: center;
+  color: var(--text-tertiary);
+  font-size: var(--font-size);
+  font-family: var(--font-mono);
+  line-height: 1;
+}
+.plan-progress-text-plan .plan-progress-step-body,
+.plan-progress-text-todos .plan-progress-substep-body {
+  display: block;
+  min-width: 0;
+}
+.plan-progress-text-plan .plan-progress-step-desc,
+.plan-progress-text-todos .plan-progress-substep-desc {
+  margin-left: 6px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step.active,
+.plan-progress-text-todos .plan-progress-substep.active {
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step.active .plan-progress-step-action,
+.plan-progress-text-todos .plan-progress-substep.active .plan-progress-substep-action {
+  color: var(--accent);
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step.done,
+.plan-progress-text-todos .plan-progress-substep.done {
+  opacity: 0.72;
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step.done .plan-progress-step-check,
+.plan-progress-text-todos .plan-progress-substep.done .plan-progress-substep-check {
+  color: var(--success);
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step.active .plan-progress-step-check,
+.plan-progress-text-todos .plan-progress-substep.active .plan-progress-substep-check {
+  color: var(--accent);
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step.pending .plan-progress-step-check,
+.plan-progress-text-todos .plan-progress-substep.pending .plan-progress-substep-check {
+  color: transparent;
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step.done .plan-progress-step-action,
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step.done .plan-progress-step-desc,
+.plan-progress-text-todos .plan-progress-substep.done .plan-progress-substep-action,
+.plan-progress-text-todos .plan-progress-substep.done .plan-progress-substep-desc {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+.plan-progress-text-plan .plan-progress-steps > .plan-progress-step.pending,
+.plan-progress-text-todos .plan-progress-substep.pending {
+  opacity: 0.78;
+}
+.plan-progress-text-todos.plan-progress-todo-hidden,
+.plan-progress-text-todos .plan-progress-todo-hidden {
+  display: none;
+}
+.plan-progress-text-plan .plan-progress-refining {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font-weight: 400;
+}
+@media (prefers-reduced-motion: reduce) {
+  .plan-progress-text-plan .plan-progress-refining .plan-refining-dot {
+    animation: none;
+    opacity: .6;
+  }
+}
+
+/* ── Plan-waiting state: the plan is complete but paused at the first Todo,
+   waiting for the user's reply. Reads as paused-and-ready (soft, calm pulse)
+   instead of silently stopped or actively running. ── */
+.plan-progress-text-plan .plan-progress-activity.is-waiting {
+  color: var(--text-secondary);
+}
+.plan-progress-text-plan .plan-progress-activity.is-waiting::before {
+  content: '⏸';
+  color: #a36f16;
+  font-size: 11px;
+  animation: plan-waiting-pulse 1.8s ease-in-out infinite;
+}
+@keyframes plan-waiting-pulse {
+  0%, 100% { opacity: .55; }
+  50% { opacity: 1; }
+}
+
+/* Pause-point assistant bubble: the "计划先列到这里…" message is a handoff
+   point, not a finished answer. A dashed accent edge + soft tint marks it as
+   a place where the flow is waiting for the user to continue. */
+.bubble.plan-pause-message {
+  border-left: 3px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-lg) 3px;
+  background: color-mix(in srgb, var(--accent-soft) 26%, transparent);
+}
+
+/* Continue/cancel shortcuts on the plan-pause bubble. The bar sits on the
+   bubble ROW (below the bubble), so the markdown render never touches it. */
+.plan-pause-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.plan-pause-actions .plan-pause-action {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 18%, transparent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 7px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease, opacity 0.15s ease;
+}
+
+.plan-pause-actions .plan-pause-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-soft) 32%, transparent);
+  border-color: var(--accent);
+}
+
+.plan-pause-actions .plan-pause-action:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.plan-pause-actions .plan-pause-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.plan-pause-actions .plan-pause-action-cancel {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 55%, transparent);
+  color: var(--danger);
+}
+
+.plan-pause-actions .plan-pause-action-cancel:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-soft) 85%, transparent);
+  border-color: var(--danger);
+}
+
+/* Active intent assessment: a compact flow map that keeps the safety decision
+   visible without competing with the assistant's answer. */
+.assessment-flow-row {
+  width: 100%;
+  margin: 2px 0 8px;
+}
+.assessment-flow-card {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-card) 92%, var(--accent-soft));
+  box-shadow: var(--shadow-sm);
+}
+.assessment-flow-card.risk-high {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
+}
+.assessment-flow-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 11px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.assessment-flow-summary::-webkit-details-marker {
+  display: none;
+}
+.assessment-flow-summary:hover {
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+}
+.assessment-flow-marker {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+}
+.assessment-flow-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+.assessment-flow-risk,
+.assessment-flow-summary-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.assessment-flow-risk.risk-low {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.assessment-flow-risk.risk-medium {
+  color: #a36f16;
+  background: color-mix(in srgb, #d97706 14%, var(--bg));
+}
+.assessment-flow-risk.risk-high {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.assessment-flow-summary-status {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.assessment-flow-chevron {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: 16px;
+  line-height: 1;
+  transition: transform var(--transition);
+}
+.assessment-flow-card[open] .assessment-flow-chevron {
+  transform: rotate(180deg);
+}
+.assessment-flow-body {
+  padding: 0 11px 11px;
+}
+.assessment-flow-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 0 2px 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.assessment-flow-impact {
+  min-width: 0;
+  flex: 1 1 60%;
+}
+.assessment-flow-recovery {
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.assessment-flow-activity {
+  min-height: 18px;
+  padding: 0 2px 8px;
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.assessment-flow-activity::before {
+  content: '›';
+  display: inline-block;
+  margin-right: 5px;
+  font-size: 14px;
+  font-weight: 700;
+}
+.assessment-flow-diagram {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+.assessment-flow-node {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+  min-height: 68px;
+  padding: 8px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  color: var(--text-tertiary);
+  transition: border-color var(--transition), background var(--transition), color var(--transition), transform var(--transition);
+}
+.assessment-flow-node:not(:last-child)::after {
+  content: '→';
+  position: absolute;
+  top: 50%;
+  right: -13px;
+  z-index: 1;
+  color: var(--border);
+  font-size: 13px;
+  transform: translateY(-50%);
+}
+.assessment-flow-node-icon {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 19px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+.assessment-flow-node-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.assessment-flow-node-label {
+  color: inherit;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.assessment-flow-node-description {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.assessment-flow-node-status {
+  margin-top: auto;
+  color: inherit;
+  font-size: 10px;
+  line-height: 1.3;
+}
+.assessment-flow-node.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg));
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+.assessment-flow-node.active .assessment-flow-node-icon {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+  animation: assessment-flow-pulse 1.5s ease-in-out infinite;
+}
+.assessment-flow-node.done {
+  border-color: color-mix(in srgb, var(--success) 28%, var(--border-light));
+  color: var(--success);
+}
+.assessment-flow-node.done .assessment-flow-node-label,
+.assessment-flow-node.done .assessment-flow-node-description {
+  color: var(--text-secondary);
+}
+.assessment-flow-node.skipped {
+  opacity: .62;
+}
+.assessment-flow-node.blocked,
+.assessment-flow-node.failed {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+  background: color-mix(in srgb, var(--danger-soft) 55%, var(--bg));
+  color: var(--danger);
+}
+.assessment-flow-card.complete .assessment-flow-summary-status {
+  color: var(--success);
+}
+.assessment-flow-card.cancelled .assessment-flow-summary-status,
+.assessment-flow-card.failed .assessment-flow-summary-status {
+  color: var(--danger);
+}
+@keyframes assessment-flow-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 10%, transparent); }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 18%, transparent); }
+}
+
+/* Awaiting state: the flow has reached a point where it needs the user's
+   reply (plan ready → execute). Calm pulse, no spinner — the system is
+   paused, not working. */
+.assessment-flow-node.awaiting {
+  border-color: color-mix(in srgb, #d97706 34%, var(--border));
+  background: color-mix(in srgb, #d97706 7%, var(--bg));
+  color: #a36f16;
+}
+.assessment-flow-node.awaiting .assessment-flow-node-icon {
+  border-color: color-mix(in srgb, #d97706 45%, var(--border));
+  animation: assessment-flow-await-pulse 1.8s ease-in-out infinite;
+}
+.assessment-flow-node.awaiting .assessment-flow-node-status {
+  color: #a36f16;
+  font-weight: 650;
+}
+@keyframes assessment-flow-await-pulse {
+  0%, 100% { opacity: .5; }
+  50% { opacity: 1; }
+}
+@media (max-width: 760px) {
+  .assessment-flow-summary-status {
+    display: none;
+  }
+  .assessment-flow-diagram {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .assessment-flow-node:not(:last-child)::after {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .assessment-flow-node,
+  .assessment-flow-chevron {
+    transition: none;
+  }
+  .assessment-flow-node.active .assessment-flow-node-icon {
+    animation: none;
+  }
+  .assessment-flow-node.awaiting .assessment-flow-node-icon,
+  .plan-progress-text-plan .plan-progress-activity.is-waiting::before {
+    animation: none;
+    opacity: .8;
+  }
+}

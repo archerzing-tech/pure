@@ -3,12 +3,37 @@
 // v0.2 adds the LLM-based check: the model itself compares the final output
 // against the original task and returns a strict JSON verdict.
 
-import type { LLMAdapter, Message } from '../shared/types';
+import type { LLMAdapter, Message, VerificationEvidence, VerificationStatus } from '../shared/types';
 import { repairJsonSource } from '../shared/parseRepair';
+
+export interface VerifierCheckResult {
+  passed: boolean;
+  feedback?: string;
+  evidence?: VerificationEvidence | VerificationEvidence[];
+}
 
 export interface VerifierCheck {
   name: string;
-  run(params: { output: string; context: Message[] }): Promise<{ passed: boolean; feedback?: string }>;
+  run(params: { output: string; context: Message[] }): Promise<VerifierCheckResult>;
+}
+
+function defaultEvidence(name: string, result: VerifierCheckResult): VerificationEvidence {
+  const status: VerificationStatus = result.passed ? 'passed' : 'failed';
+  return {
+    id: `verifier_${name}_${Date.now()}`,
+    checkName: name,
+    status,
+    summary: result.feedback ?? (result.passed
+      ? `${name} passed (engine output check; not project verification)`
+      : `${name} failed`),
+    source: 'engine',
+    timestamp: Date.now(),
+  };
+}
+
+function evidenceFor(name: string, result: VerifierCheckResult): VerificationEvidence[] {
+  if (!result.evidence) return [defaultEvidence(name, result)];
+  return Array.isArray(result.evidence) ? result.evidence : [result.evidence];
 }
 
 export class Verifier {
@@ -22,14 +47,16 @@ export class Verifier {
     this.checks.push(check);
   }
 
-  async evaluate(params: { output: string; context: Message[] }): Promise<{ passed: boolean; feedback?: string }> {
+  async evaluate(params: { output: string; context: Message[] }): Promise<{ passed: boolean; feedback?: string; evidence: VerificationEvidence[] }> {
+    const evidence: VerificationEvidence[] = [];
     for (const check of this.checks) {
       const result = await check.run(params);
+      evidence.push(...evidenceFor(check.name, result));
       if (!result.passed) {
-        return { passed: false, feedback: `[${check.name}] ${result.feedback ?? 'Check failed'}` };
+        return { passed: false, feedback: `[${check.name}] ${result.feedback ?? 'Check failed'}`, evidence };
       }
     }
-    return { passed: true };
+    return { passed: true, evidence };
   }
 }
 
@@ -220,14 +247,46 @@ export function createLLMVerifyCheck(llm: LLMAdapter, options?: LLMVerifierOptio
         const res = await llm.complete([{ role: 'user', content: prompt }], []);
         response = res.content ?? '';
       } catch (err) {
-        return { passed: true, feedback: `verifier LLM error: ${(err as Error).message}` };
+        const summary = `verifier LLM error: ${(err as Error).message}`;
+        return {
+          passed: true,
+          feedback: summary,
+          evidence: {
+            id: `verifier_llm_error_${Date.now()}`,
+            checkName: LLMVerifyCheckName,
+            status: 'incomplete',
+            summary,
+            source: 'engine',
+            timestamp: Date.now(),
+          },
+        };
       }
       const verdict = parseVerdict(response);
       if (!verdict) {
-        return { passed: true, feedback: 'verifier returned an unparseable verdict (failed open)' };
+        const summary = 'verifier returned an unparseable verdict (failed open)';
+        return {
+          passed: true,
+          feedback: summary,
+          evidence: {
+            id: `verifier_unparseable_${Date.now()}`,
+            checkName: LLMVerifyCheckName,
+            status: 'incomplete',
+            summary,
+            source: 'engine',
+            timestamp: Date.now(),
+          },
+        };
       }
       return {
         passed: verdict.passed,
+        evidence: {
+          id: `verifier_llm_${Date.now()}`,
+          checkName: LLMVerifyCheckName,
+          status: verdict.passed ? 'passed' : 'failed',
+          summary: verdict.feedback ?? (verdict.passed ? 'LLM verifier passed.' : 'LLM verifier failed.'),
+          source: 'engine',
+          timestamp: Date.now(),
+        },
         // Repaired verdict feedback is dropped in parseVerdict (reconstructed
         // model text must not enter the context). Substitute a system-authored
         // note on failure so the engine's "Verification failed: …" message

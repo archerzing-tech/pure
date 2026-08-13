@@ -15,6 +15,7 @@ import {
   composeUserTurn,
   stripUserTurnContext,
 } from '../promptLayers';
+import { INCREMENTAL_BUILD_PROMPT } from '../agentBehavior';
 
 describe('SYSTEM_CORE_PROMPT (L0)', () => {
   it('carries the immutable identity + operating contract', () => {
@@ -37,6 +38,12 @@ describe('L1 behavior contracts', () => {
   it('re-exports the always-on workflow + completion contracts', () => {
     expect(WORKFLOW_PROMPT).toContain('Proactive problem-solving workflow');
     expect(COMPLETION_PROMPT).toContain('Completion report');
+    expect(COMPLETION_PROMPT).toContain('本次完成了什么');
+    expect(COMPLETION_PROMPT).toContain('修复了什么');
+    expect(COMPLETION_PROMPT).toContain('验证结果');
+    expect(COMPLETION_PROMPT).toContain('通过');
+    expect(COMPLETION_PROMPT).toContain('不通过');
+    expect(COMPLETION_PROMPT).toContain('真实执行过的命令');
   });
 
   it('shares typo tolerance and logical-traps defense', () => {
@@ -97,6 +104,18 @@ describe('composeUserTurn (L2)', () => {
     expect(out.endsWith('build it')).toBe(true);
   });
 
+  it('includes the delivery contract beside the approved task context', () => {
+    const out = composeUserTurn('build it', { contract: '<delivery_contract>tests are required</delivery_contract>' });
+    expect(out).toContain('<delivery_contract>tests are required</delivery_contract>');
+    expect(out.endsWith('build it')).toBe(true);
+  });
+
+  it('includes the proactive intent assessment beside the request', () => {
+    const out = composeUserTurn('delete it', { assessment: '<intent_assessment>high risk</intent_assessment>' });
+    expect(out).toContain('<intent_assessment>high risk</intent_assessment>');
+    expect(out.endsWith('delete it')).toBe(true);
+  });
+
   it('ignores empty fragments', () => {
     expect(composeUserTurn('x', { traps: '', buildProtocol: undefined, plan: '' })).toBe('x');
   });
@@ -134,5 +153,24 @@ describe('FILE_TOOLS_CORE (L1 shared tool list)', () => {
     expect(FILE_TOOLS_CORE).toContain('replace_files(files[], oldString, newString, allowMultiple?)');
     expect(FILE_TOOLS_CORE).toContain('execute_command(command) — run a shell command');
     expect(FILE_TOOLS_CORE).toContain('git_status — working tree status');
+  });
+});
+
+describe('INCREMENTAL_BUILD_PROMPT (humanized build reporting)', () => {
+  it('uses natural step headings and plain-language reports, not labeled What/How sections', () => {
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('## 第 n 步');
+    // The old internal four-label report (做了什么/怎么做/结果/验证) is banned
+    // — the model must write flowing sentences instead.
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('做了什么 / 怎么做 / 结果 / 验证');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('flowing sentences');
+    expect(INCREMENTAL_BUILD_PROMPT).not.toContain('**做了什么 / What**');
+    expect(INCREMENTAL_BUILD_PROMPT).not.toContain('**怎么做 / How**');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('live plan card can reflect optional progress markers');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('overall plan context separate from any optional progress list');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('For other complex work');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('meaningful protection');
+    expect(INCREMENTAL_BUILD_PROMPT).not.toContain('dedicated test step');
+    expect(INCREMENTAL_BUILD_PROMPT).not.toContain('at least three rounds');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('concrete failing checks and evidence');
   });
 });

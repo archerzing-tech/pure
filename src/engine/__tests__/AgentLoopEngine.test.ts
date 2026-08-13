@@ -180,6 +180,7 @@ describe('AgentLoopEngine', () => {
     expect(completed).toBeDefined();
     expect(completed!.payload.finalOutput).toBe('Hello, world!');
     expect(completed!.payload.isComplete).toBe(true);
+    expect(completed!.payload.verification).toMatchObject({ status: 'not_run', evidence: [] });
     expect(tokens.length).toBeGreaterThan(0);
   });
 
@@ -374,6 +375,8 @@ describe('AgentLoopEngine', () => {
     expect(wasVerified).toBe(true);
     const completed = events.find(e => e.type === 'Completed');
     expect(completed).toBeDefined();
+    expect(completed!.payload.verification?.status).toBe('passed');
+    expect(completed!.payload.verification?.evidence[0].checkName).toBe('verifier');
   });
 
   it('emits VERIFY_FAILED error and loops back to THINK', async () => {
@@ -384,7 +387,7 @@ describe('AgentLoopEngine', () => {
       verifier: {
         evaluate: async () => {
           verifyCount++;
-          return { passed: false, feedback: 'missing null check' };
+          return { passed: false, feedback: 'missing null check', evidence: [{ id: 'check-1', checkName: 'null-check', status: 'failed', summary: 'missing null check', source: 'engine', timestamp: Date.now() }] };
         },
       },
     });
@@ -407,6 +410,8 @@ describe('AgentLoopEngine', () => {
     expect(completed).toBeDefined();
     // The loop should have tried verification > 1 time
     expect(verifyCount).toBeGreaterThan(1);
+    expect(completed!.payload.verification?.status).toBe('failed');
+    expect(completed!.payload.verification?.evidence[0].checkName).toBe('null-check');
   });
 
   it('handles verifier throwing', async () => {

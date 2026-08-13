@@ -3,7 +3,7 @@
 **Pure** is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. It reads, writes, and edits files, executes shell commands, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.2--beta7-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -13,6 +13,10 @@
 ## Screenshots & architecture
 
 <p align="center">
+  <img src="docs/screenshots/app-current.png" alt="Pure current application shell" width="720" />
+  <br />
+  <em>Current application shell — workspace state, task composer, task mode/model controls, and project context panel</em>
+  <br /><br />
   <img src="docs/screenshots/landing.png" alt="Pure landing page" width="720" />
   <br />
   <em>Current landing page — workspace picker, task composer, mode/model controls, and status bar</em>
@@ -62,6 +66,40 @@ THINK → ACT → OBSERVE ──┐
 
 The loop has explicit budget tracking (turns, tokens, tool calls, and time), lifecycle hooks, and failure recovery. Repeated identical failures are recognized as a dead end; the agent is told to change approach instead of grinding the same call.
 
+### 1.5 Proactive preflight: think before changing
+
+Before a coding request reaches the execution loop, `Planner` performs a lightweight intent and risk assessment. It considers what the user is asking, the likely blast radius, reversibility, and whether a read-only probe can reduce uncertainty:
+
+| Assessment | Default behavior |
+|---|---|
+| **Low risk** | Read the relevant content, execute directly, and verify the result. Small single-file artifacts stay on this path. |
+| **Medium risk** | Explore the workspace read-only first, then make a narrow change and verify it before expanding scope. |
+| **High risk** | Explain impact, reversibility, and a safer/narrower alternative; both GUI and CLI require explicit interactive approval before any write or destructive command. The CLI remains auto-approved by default for ordinary turns, while `--prompt-on-tool` adds interactive confirmation for every tool call. |
+
+This is a strategy layer, not a replacement for per-tool permissions. CLI and GUI may present the assessment differently, but both receive the same functional contract in the request context. A new high-risk follow-up also reopens the safety review instead of silently continuing an earlier plan.
+
+### 1.6 Context compaction: automatic, inspectable, reversible
+
+Context management is independent of task complexity. `ContextEngine` keeps the current system messages, folds older compaction summaries, retains complete assistant/tool-call groups, removes invalid dangling tool fragments, and trims older conversational groups by message and estimated-token budgets. LLM summarization is best-effort: if it fails, the bounded recent window still reaches the model and the UI reports that older messages were trimmed without a summary.
+
+Compaction does not encode a fixed number of plan steps, Todo items, or verification stages. Those remain model- and task-dependent. The CLI REPL exposes `/compact`; the GUI composer exposes `⌁`. Both actions prepare the next execution context without deleting the visible transcript. Automatic GUI pre-compaction uses the same engine during idle time, while the CLI and Harness invoke it before a continuation when needed.
+
+### 1.7 Prompt observability: inspect the agent without storing secrets
+
+Pure includes a local-first observability path for prompt assembly and agent runs. The compiler records fragment selection, provider/model budget, tool-schema cost, and trace correlation; the Harness records event counts, tool durations, usage, verification status, and terminal outcome. By default, observations retain lengths, hashes, and structured metadata — not raw prompts, tool arguments, command output, or final answers. An explicit JSONL sink is available for evaluation and debugging runs.
+
+### 1.8 Real coding-task evaluation baseline
+
+The repository includes three deterministic bugfix/feature/refactor fixtures, isolated per task in disposable workspaces and checked by real Bun verification commands. Run without `--agent` for the `0/3` control sanity baseline, or run the real CodingAgent executor against a provider:
+
+```bash
+bun run eval:baseline
+PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent deepseek-openai --strict --report evals/model.latest.json
+PURE_EVAL_TRACE=evals/traces.jsonl bun run eval:baseline -- --agent deepseek-openai
+```
+
+Reports separate agent completion from verification success and include fixture hash, runtime, provider/model, prompt version, usage, duration, and cost metadata. The baseline is a reproducible regression gate, not a replacement for SWE-bench or Terminal-Bench.
+
 ### 2. Memory that evolves with the project
 
 Pure's memory is not a second chat transcript. The Harness turns a completed session into compact, reusable entries such as:
@@ -86,8 +124,13 @@ Retrieval uses local WASM embeddings when available, with a keyword-search fallb
 - **Evolving project memory** — Semantic retrieval, keyword fallback, decay, superseding, diagnostics, and export/import
 - **Subagent Orchestration** — Spawn file-pickers, code-searchers, web researchers in parallel
 - **MCP Protocol** — Connect Model Context Protocol servers for extensible tooling
+- **Proactive preflight** — Classify intent, impact, reversibility, and risk before acting; probe medium-risk work and require explicit confirmation for high-risk changes in both GUI and CLI (or use CLI `--prompt-on-tool` for every tool call)
 - **Permission System** — Four modes: YOLO (auto-approve), NORMAL (prompt per write), PLAN (read-only), DONT_ASK (silent block)
 - **Session Persistence** — Checkpoint-based state with resume support (`pure --resume`)
+- **Current-session undo** — CLI `/undo` and GUI ↶ restore the latest successful write batch; restores only when the workspace has not been changed afterward
+- **Context compaction** — automatic bounded history plus CLI `/compact` and GUI `⌁`; tool-call pairs stay valid, provider/model-aware prompt budgets count message + tool/MCP schema tokens, omit low-priority fragments first, support custom model metadata, and emit diagnostics when content is omitted
+- **Prompt observability** — local trace correlation across PromptAssembler and Harness, privacy-preserving hashes, bounded memory storage, and opt-in versioned JSONL export
+- **Coding-task evaluation** — isolated real fixtures, control baseline, provider-backed CodingAgent runner, verification-only scoring, usage/cost metadata, and strict CI-friendly exit codes
 - **Fault-tolerant parsing** — Repair malformed JSON, Mermaid, and SVG before surfacing an error
 - **Auto-updater** — GUI checks for updates via signed `.app.tar.gz` artifacts
 - **Multi-language UI** — English / Chinese interface
@@ -144,7 +187,7 @@ bun run gui:build    # production build → src-tauri/target/release/bundle/
 │          (Tauri 2 · WebView · Vanilla TS)         │
 ├─────────────────────────────────────────────────┤
 │  Coding Agent                                    │
-│  Planner · Permission · Verifier · Subagents     │
+│  Planner · Intent · Permission · Verifier        │
 ├─────────────────────────────────────────────────┤
 │  Harness (stateful session manager)              │
 │  StateManager · ContextEngine · StreamManager     │
@@ -176,12 +219,12 @@ pure/
 │   │   └── FailurePolicy.ts      # Escalating recovery: retry → reflect → stop
 │   ├── harness/                  # Stateful session management
 │   │   ├── Harness.ts            # Session lifecycle + checkpoint persistence
-│   │   ├── ContextEngine.ts      # Context window trimming
+│   │   ├── ContextEngine.ts      # Automatic/manual context compaction
 │   │   ├── StateManager.ts       # Checkpoint save/restore
 │   │   └── StreamManager.ts      # Token streaming + UI rendering
 │   ├── coding-agent/             # Application layer
 │   │   ├── CodingAgent.ts        # Main agent assembler
-│   │   ├── Planner.ts            # Task analysis + plan generation
+│   │   ├── Planner.ts            # Intent/risk analysis + plan generation
 │   │   ├── ToolRegistry.ts       # Tool dispatch + permission gating
 │   │   ├── PermissionManager.ts  # YOLO / NORMAL / PLAN modes
 │   │   ├── Verifier.ts           # Output verification
@@ -193,7 +236,14 @@ pure/
 │   │   ├── mcp/                  # MCP transport (stdio, HTTP)
 │   │   └── storage/              # FSStore + SQLiteStore
 │   ├── ui/                       # WebView UI (chat, settings, markdown)
-│   └── shared/                   # Shared types, i18n, memory
+│   └── shared/                   # Shared types, prompt assembly, observability, i18n, memory
+│       ├── PromptAssembler.ts    # Unified GUI / CLI / Harness prompt compiler
+│       ├── promptObservability.ts # Privacy-preserving trace model + collector
+│       └── FilePromptObservationStore.ts # Node-only JSONL trace sink
+│   ├── evaluation/               # Deterministic coding-task fixtures + real runner
+│   │   ├── codingTaskBaseline.ts  # Fixtures, verification, reports
+│   │   └── codingAgentExecutor.ts # Provider-backed CodingAgent executor
+├── evals/                        # Evaluation protocol and baseline documentation
 ├── src-tauri/                    # Rust / Tauri backend
 │   ├── src/                      # IPC commands, session manager
 │   └── tauri.conf.json           # App config + updater keys
@@ -249,8 +299,28 @@ pure --provider qwen --model qwen3-coder-next "Write a React hook for form valid
 # REPL commands
 /exit       # leave
 /clear      # reset conversation context
+/compact    # compact the next execution context without deleting visible history
 Ctrl+C      # cancel current generation (press twice to force quit)
+/undo       # restore the latest successful write batch in this session
 ```
+
+The GUI exposes the same current-session undo action as ↶ beside the composer and a `⌁` context-compaction action. Compaction changes only the next execution window; it does not delete the visible transcript. Undo remains intentionally memory-only for the active process: it does not replace cross-session checkpoints or delete files outside the workspace.
+
+To add interactive confirmation before individual tool calls:
+
+```bash
+pure --prompt-on-tool "Run the migration"
+```
+
+### Coding-task evaluation
+
+```bash
+bun run eval:baseline                                      # control baseline (expected 0/3)
+PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent deepseek-openai --strict
+PURE_EVAL_TRACE=evals/traces.jsonl bun run eval:baseline -- --agent deepseek-openai
+```
+
+Supported executor providers are `deepseek-openai`, `deepseek-anthropic`, `qwen`, `glm`, `mock`, and custom OpenAI-compatible endpoints via `PURE_EVAL_BASE_URL`. Evaluation workspaces are isolated per task; reports contain hashes and metadata rather than source or command output.
 
 ---
 

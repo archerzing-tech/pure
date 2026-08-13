@@ -25,13 +25,13 @@ use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
 use objc2_foundation::{NSDictionary, NSString};
 
 #[cfg(target_os = "windows")]
-use std::os::windows::ffi::OsStrExt;
-#[cfg(target_os = "windows")]
 use png::{BitDepth, ColorType, Encoder};
 #[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::Graphics::Gdi::{
-    DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
-    BITMAPINFOHEADER, DIB_RGB_COLORS,
+    DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
+    DIB_RGB_COLORS,
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
@@ -108,16 +108,28 @@ async fn mcp_call_inner(handle: &McpHandle, request: &str) -> Result<String, Str
     // Write request to stdin
     {
         let mut stdin = handle.stdin.lock().await;
-        stdin.write_all(request.as_bytes()).await.map_err(|e| format!("write stdin: {}", e))?;
-        stdin.write_all(b"\n").await.map_err(|e| format!("write newline: {}", e))?;
-        stdin.flush().await.map_err(|e| format!("flush stdin: {}", e))?;
+        stdin
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| format!("write stdin: {}", e))?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|e| format!("write newline: {}", e))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| format!("flush stdin: {}", e))?;
     }
 
     // Read response from stdout (one line = one JSON-RPC response)
     let mut line = String::new();
     {
         let mut stdout = handle.stdout.lock().await;
-        stdout.read_line(&mut line).await.map_err(|e| format!("read stdout: {}", e))?;
+        stdout
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read stdout: {}", e))?;
     }
 
     Ok(line.trim().to_string())
@@ -141,8 +153,8 @@ fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
     if base.as_os_str().is_empty() {
         return Err("workspace is required".to_string());
     }
-    let base_canonical = fs::canonicalize(&base)
-        .map_err(|e| format!("invalid workspace '{}': {}", workspace, e))?;
+    let base_canonical =
+        fs::canonicalize(&base).map_err(|e| format!("invalid workspace '{}': {}", workspace, e))?;
     if !base_canonical.is_dir() {
         return Err(format!("workspace is not a directory: {}", workspace));
     }
@@ -157,8 +169,8 @@ fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
     } else {
         base_canonical.join(requested)
     };
-    let normalized = normalize_lexical(&candidate)
-        .map_err(|_| format!("path escapes workspace: {}", path))?;
+    let normalized =
+        normalize_lexical(&candidate).map_err(|_| format!("path escapes workspace: {}", path))?;
 
     // Canonicalize the deepest existing ancestor, then append the missing
     // components in reverse order. This resolves existing symlinks while still
@@ -184,8 +196,8 @@ fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
         }
     }
 
-    let canonical_existing = fs::canonicalize(&existing)
-        .map_err(|e| format!("resolve '{}': {}", path, e))?;
+    let canonical_existing =
+        fs::canonicalize(&existing).map_err(|e| format!("resolve '{}': {}", path, e))?;
     if !canonical_existing.starts_with(&base_canonical) {
         return Err(format!("path escapes workspace: {}", path));
     }
@@ -198,6 +210,28 @@ fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
         return Err(format!("path escapes workspace: {}", path));
     }
     Ok(resolved)
+}
+
+fn has_symlink_component(workspace: &str, path: &str) -> bool {
+    let Ok(base) = fs::canonicalize(workspace) else { return true };
+    let requested = PathBuf::from(path.trim());
+    let candidate = if requested.is_absolute() { requested } else { base.join(requested) };
+    let Ok(normalized) = normalize_lexical(&candidate) else { return true };
+    if !normalized.starts_with(&base) { return true; }
+    let Ok(relative) = normalized.strip_prefix(&base) else { return true; };
+    let mut current = base;
+    for component in relative.components() {
+        if let std::path::Component::Normal(value) = component {
+            current.push(value);
+            if fs::symlink_metadata(&current)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Lexically normalize `.` and `..` without touching the filesystem. The
@@ -236,6 +270,42 @@ fn normalize_lexical(path: &std::path::Path) -> Result<PathBuf, ()> {
 fn read_file(workspace: String, path: String) -> Result<String, String> {
     let full = resolve(&workspace, &path)?;
     fs::read_to_string(&full).map_err(|e| format!("read_file: {}", e))
+}
+
+#[tauri::command]
+fn path_info(workspace: String, path: String) -> Result<serde_json::Value, String> {
+    let full = resolve(&workspace, &path)?;
+    Ok(serde_json::json!({
+        "exists": full.exists(),
+        "isDirectory": full.is_dir(),
+        "size": full.metadata().map(|metadata| metadata.len()).unwrap_or(0),
+        "isSymlink": has_symlink_component(&workspace, &path),
+    }))
+}
+
+#[tauri::command]
+fn remove_path(workspace: String, path: String, recursive: Option<bool>) -> Result<String, String> {
+    if has_symlink_component(&workspace, &path) {
+        return Err(format!("refusing to remove a symlink path: {}", path));
+    }
+    let full = resolve(&workspace, &path)?;
+    let base = fs::canonicalize(&workspace).map_err(|e| format!("invalid workspace: {}", e))?;
+    if full == base {
+        return Err("refusing to remove the workspace root".to_string());
+    }
+    if !full.exists() {
+        return Ok(format!("Path already absent: {}", path));
+    }
+    if full.is_dir() {
+        if recursive.unwrap_or(false) {
+            fs::remove_dir_all(&full).map_err(|e| format!("remove_path: {}", e))?;
+        } else {
+            fs::remove_dir(&full).map_err(|e| format!("remove_path: {}", e))?;
+        }
+    } else {
+        fs::remove_file(&full).map_err(|e| format!("remove_path: {}", e))?;
+    }
+    Ok(format!("Removed: {}", path))
 }
 
 #[tauri::command]
@@ -287,7 +357,8 @@ async fn write_file_stream_inner(
     let mut written = 0usize;
     while written < total {
         let end = (written + CHUNK).min(total);
-        file.write_all(&bytes[written..end]).map_err(|e| format!("write: {}", e))?;
+        file.write_all(&bytes[written..end])
+            .map_err(|e| format!("write: {}", e))?;
         written = end;
         let evt = serde_json::json!({ "type": "progress", "written": written, "total": total });
         let _ = on_progress.send(evt.to_string());
@@ -339,27 +410,46 @@ fn edit_file(
     let full = resolve(&workspace, &path)?;
     let text = fs::read_to_string(&full).map_err(|e| format!("read: {}", e))?;
 
-    let _idx = text.find(&old_string).ok_or_else(|| {
-        format!(
-            "String not found in file: {}",
-            &old_string[..old_string.len().min(100)]
-        )
-    })?;
+    let crlf_file = text.contains("\r\n");
+    let normalized_old = old_string.replace("\r\n", "\n");
+    let line_ending_adjusted = crlf_file
+        && old_string.contains('\n')
+        && !old_string.contains("\r\n")
+        && text.replace("\r\n", "\n").contains(&normalized_old);
+    let old_for_match = if line_ending_adjusted {
+        normalized_old.replace('\n', "\r\n")
+    } else {
+        old_string.clone()
+    };
 
-    let occurrences = text.matches(&old_string).count();
+    if !text.contains(&old_for_match) {
+        let preview: String = old_string.chars().take(160).collect();
+        let preview = preview.replace('\r', "\\r").replace('\n', "\\n");
+        return Err(format!(
+            "String not found in file: {}. The file may have changed since it was read. Re-read {} and do not retry this identical edit; use a shorter exact context.",
+            preview, path
+        ));
+    }
+
+    let occurrences = text.matches(&old_for_match).count();
     let multi = allow_multiple.unwrap_or(false);
 
     if occurrences > 1 && !multi {
         return Err(format!(
-            "Found {} occurrences. Set allow_multiple:true to replace all, or provide more context.",
+            "Found {} occurrences. Set allow_multiple:true or provide more context.",
             occurrences
         ));
     }
 
-    let new_text = if multi {
-        text.replace(&old_string, &new_string)
+    let replacement = if crlf_file {
+        new_string.replace("\r\n", "\n").replace('\n', "\r\n")
     } else {
-        text.replacen(&old_string, &new_string, 1)
+        new_string.clone()
+    };
+    let new_text = if multi {
+        text.replace(&old_for_match, &replacement)
+    } else {
+        text.replacen(&old_for_match, &replacement, 1)
     };
 
     fs::write(&full, &new_text).map_err(|e| format!("write: {}", e))?;
@@ -430,22 +520,267 @@ fn search_files(
 }
 
 #[tauri::command]
-fn list_files(workspace: String, path: String, recursive: Option<bool>) -> Result<String, String> {
+async fn code_searcher(
+    workspace: String,
+    query: String,
+    path: Option<String>,
+    globs: Option<Vec<String>>,
+    case_sensitive: Option<bool>,
+    max_results: Option<usize>,
+    global_max_results: Option<usize>,
+    timeout_seconds: Option<u64>,
+) -> Result<String, String> {
+    let timeout = timeout_seconds.unwrap_or(10).clamp(1, 30);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(timeout),
+        code_searcher_inner(
+            workspace,
+            query,
+            path,
+            globs,
+            case_sensitive,
+            max_results,
+            global_max_results,
+            Some(timeout),
+        ),
+    )
+    .await
+    .map_err(|_| format!("code_searcher timed out after {}s", timeout))?
+}
+
+async fn code_searcher_inner(
+    workspace: String,
+    query: String,
+    path: Option<String>,
+    globs: Option<Vec<String>>,
+    case_sensitive: Option<bool>,
+    max_results: Option<usize>,
+    global_max_results: Option<usize>,
+    timeout_seconds: Option<u64>,
+) -> Result<String, String> {
+    let search_timeout = std::time::Duration::from_secs(timeout_seconds.unwrap_or(10).clamp(1, 30));
+    let deadline = Instant::now() + search_timeout;
+    let search_dir = match &path {
+        Some(p) if !p.is_empty() => resolve(&workspace, p)?,
+        _ => resolve(&workspace, ".")?,
+    };
+    let workspace_root =
+        fs::canonicalize(&workspace).map_err(|e| format!("invalid workspace: {}", e))?;
+    let expression = regex::RegexBuilder::new(&query)
+        .case_insensitive(!case_sensitive.unwrap_or(true))
+        .build()
+        .map_err(|e| format!("invalid regular expression: {}", e))?;
+    let per_file = max_results.unwrap_or(15).clamp(1, 100);
+    let global_max = global_max_results.unwrap_or(250).clamp(1, 1000);
+    let mut include_globs: Vec<glob::Pattern> = Vec::new();
+    let mut exclude_globs: Vec<glob::Pattern> = Vec::new();
+    for raw in globs.unwrap_or_default() {
+        let pattern = raw.trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        let (exclude, pattern) = pattern
+            .strip_prefix('!')
+            .map_or((false, pattern), |p| (true, p));
+        let compiled = glob::Pattern::new(pattern)
+            .map_err(|e| format!("invalid glob '{}': {}", pattern, e))?;
+        if exclude {
+            exclude_globs.push(compiled);
+        } else {
+            include_globs.push(compiled);
+        }
+    }
+
+    let scope = search_dir
+        .strip_prefix(&workspace_root)
+        .unwrap_or(&search_dir)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let scope = if scope.is_empty() {
+        ".".to_string()
+    } else {
+        scope
+    };
+    const MAX_SEARCH_FILE_BYTES: u64 = 8 * 1024 * 1024;
+    let mut matches: Vec<serde_json::Value> = Vec::new();
+    let mut diagnostics: Vec<String> = Vec::new();
+    let mut truncated = false;
+
+    for entry in walkdir::WalkDir::new(&search_dir)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
+        if Instant::now() >= deadline {
+            truncated = true;
+            break;
+        }
+        if matches.len() >= global_max {
+            truncated = true;
+            break;
+        }
+        let entry_path = entry.into_path();
+        if !entry_path.is_file() {
+            continue;
+        }
+        let relative = entry_path
+            .strip_prefix(&workspace_root)
+            .unwrap_or(&entry_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let metadata = match fs::metadata(&entry_path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.len() > MAX_SEARCH_FILE_BYTES {
+            truncated = true;
+            diagnostics.push(format!(
+                "Skipped {}: file exceeds the 8 MB search limit",
+                relative
+            ));
+            continue;
+        }
+        if relative
+            .split('/')
+            .any(|part| matches!(part, ".git" | "node_modules" | "dist" | "build" | "target"))
+        {
+            continue;
+        }
+        let matches_glob = |pattern: &glob::Pattern| {
+            pattern.matches(&relative)
+                || relative
+                    .rsplit('/')
+                    .next()
+                    .map_or(false, |name| pattern.matches(name))
+        };
+        if include_globs.iter().any(|pattern| !matches_glob(pattern))
+            || exclude_globs.iter().any(matches_glob)
+        {
+            continue;
+        }
+        let content = match tokio::fs::read_to_string(&entry_path).await {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let mut file_matches = 0usize;
+        for (line_no, line) in content.lines().enumerate() {
+            tokio::task::yield_now().await;
+            if Instant::now() >= deadline {
+                truncated = true;
+                break;
+            }
+            if let Some(found) = expression.find(line) {
+                if file_matches >= per_file {
+                    truncated = true;
+                    break;
+                }
+                matches.push(serde_json::json!({
+                    "path": relative,
+                    "line": line_no + 1,
+                    "column": found.start() + 1,
+                    "text": line,
+                }));
+                file_matches += 1;
+                if matches.len() >= global_max {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "kind": "code_search",
+        "query": query,
+        "scope": scope,
+        "matches": matches,
+        "truncated": truncated,
+        "diagnostics": diagnostics,
+        "fileSizeLimitBytes": MAX_SEARCH_FILE_BYTES,
+        "searchedAt": format!("{:?}", std::time::SystemTime::now()),
+    })
+    .to_string())
+}
+
+#[cfg(test)]
+mod code_searcher_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn returns_regex_matches_with_scope_and_global_cap() {
+        let workspace =
+            std::env::temp_dir().join(format!("pure-code-search-{}", std::process::id()));
+        fs::create_dir_all(&workspace).expect("create test workspace");
+        fs::write(
+            workspace.join("app.ts"),
+            "const answer = 1;\nconst answerAgain = 2;\nconst other = 3;\n",
+        )
+        .expect("write test file");
+
+        let result = code_searcher(
+            workspace.to_string_lossy().to_string(),
+            "answer".to_string(),
+            None,
+            None,
+            Some(true),
+            Some(10),
+            Some(1),
+            None,
+        )
+        .await
+        .expect("code search succeeds");
+        let payload: serde_json::Value = serde_json::from_str(&result).expect("valid result JSON");
+        assert_eq!(payload["matches"].as_array().map(Vec::len), Some(1));
+        assert_eq!(payload["matches"][0]["path"], "app.ts");
+        assert_eq!(payload["matches"][0]["line"], 1);
+        assert_eq!(payload["matches"][0]["column"], 7);
+        assert_eq!(payload["truncated"], true);
+
+        fs::remove_dir_all(&workspace).expect("remove test workspace");
+    }
+}
+
+#[tauri::command]
+fn list_files(
+    workspace: String,
+    path: String,
+    recursive: Option<bool>,
+    max_results: Option<usize>,
+) -> Result<String, String> {
+    const DEFAULT_MAX_LIST_RESULTS: usize = 2000;
+    const ABSOLUTE_MAX_LIST_RESULTS: usize = 5000;
     let dir = resolve(&workspace, &path)?;
     if !dir.is_dir() {
         return Err(format!("Not a directory: {}", path));
     }
 
+    let max = max_results
+        .unwrap_or(DEFAULT_MAX_LIST_RESULTS)
+        .clamp(1, ABSOLUTE_MAX_LIST_RESULTS);
     let mut items: Vec<String> = Vec::new();
+    let mut truncated = false;
 
     if recursive.unwrap_or(false) {
-        for entry in walkdir::WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if items.len() >= max {
+                truncated = true;
+                break;
+            }
             let rel = entry.path().strip_prefix(&dir).unwrap_or(entry.path());
             items.push(rel.to_string_lossy().to_string());
         }
     } else {
         let read_dir = fs::read_dir(&dir).map_err(|e| format!("read_dir: {}", e))?;
         for entry in read_dir {
+            if items.len() >= max {
+                truncated = true;
+                break;
+            }
             let entry = entry.map_err(|e| format!("entry: {}", e))?;
             items.push(entry.file_name().to_string_lossy().to_string());
         }
@@ -455,7 +790,15 @@ fn list_files(workspace: String, path: String, recursive: Option<bool>) -> Resul
     if items.is_empty() {
         Ok("(empty directory)".to_string())
     } else {
-        Ok(items.join("\n"))
+        let listing = items.join("\n");
+        if truncated {
+            Ok(format!(
+                "{}\n\n[截断] 仅显示前 {} 项；目录还有更多内容，请缩小 path 或使用 search_files/glob_files。",
+                listing, max
+            ))
+        } else {
+            Ok(listing)
+        }
     }
 }
 
@@ -597,7 +940,11 @@ fn kill_process_group(pid: i32) -> std::io::Result<()> {
         let err = std::io::Error::last_os_error();
         // ESRCH: the process already exited (normal race between command
         // completion and a kill arriving) — nothing to kill, treat as success.
-        if err.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(err) }
+        if err.kind() == std::io::ErrorKind::NotFound {
+            Ok(())
+        } else {
+            Err(err)
+        }
     }
 }
 
@@ -662,7 +1009,9 @@ async fn execute_command_stream_inner(
                 Ok(0) => break,
                 Ok(_) => {
                     let chunk = serde_json::json!({ "type": "stdout", "content": line.trim_end() });
-                    if ch_stdout.send(chunk.to_string()).is_err() { break; }
+                    if ch_stdout.send(chunk.to_string()).is_err() {
+                        break;
+                    }
                 }
                 Err(_) => break,
             }
@@ -678,7 +1027,9 @@ async fn execute_command_stream_inner(
                 Ok(0) => break,
                 Ok(_) => {
                     let chunk = serde_json::json!({ "type": "stderr", "content": line.trim_end() });
-                    if ch_stderr.send(chunk.to_string()).is_err() { break; }
+                    if ch_stderr.send(chunk.to_string()).is_err() {
+                        break;
+                    }
                 }
                 Err(_) => break,
             }
@@ -699,7 +1050,10 @@ async fn execute_command_stream_inner(
     }
 
     // Now get the exit code (on_output is still available since only clones were moved)
-    let exit_code = wait_result.map_err(|e| format!("wait: {}", e))?.code().unwrap_or(-1);
+    let exit_code = wait_result
+        .map_err(|e| format!("wait: {}", e))?
+        .code()
+        .unwrap_or(-1);
     let done = serde_json::json!({ "type": "exit", "code": exit_code });
     let _ = on_output.send(done.to_string());
 
@@ -727,10 +1081,7 @@ async fn execute_command_stream(
 /// as a process group so grandchildren don't survive as background orphans.
 /// No-op when the id is unknown (already exited or never registered).
 #[tauri::command]
-async fn kill_command(
-    state: tauri::State<'_, CommandRegistry>,
-    id: String,
-) -> Result<(), String> {
+async fn kill_command(state: tauri::State<'_, CommandRegistry>, id: String) -> Result<(), String> {
     let pid = {
         let mut reg = state.lock().map_err(|e| format!("lock: {}", e))?;
         reg.remove(&id)
@@ -756,11 +1107,7 @@ fn run_git(workspace: &str, args: &[String]) -> Result<String, String> {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
-        let msg = if stderr.is_empty() {
-            stdout
-        } else {
-            stderr
-        };
+        let msg = if stderr.is_empty() { stdout } else { stderr };
         return Err(format!("git failed: {}", msg.trim()));
     }
     Ok(if stdout.is_empty() { stderr } else { stdout })
@@ -829,7 +1176,12 @@ fn diff_files(workspace: String, path_a: String, path_b: String) -> Result<Strin
     // Windows ships no `diff` binary; fall back to `git diff --no-index` (Git
     // for Windows ships git.exe) which reports differences with the same
     // exit-code convention (0 identical / 1 differs).
-    let output = match silent_child(std::process::Command::new("diff")).arg("-u").arg(&full_a).arg(&full_b).output() {
+    let output = match silent_child(std::process::Command::new("diff"))
+        .arg("-u")
+        .arg(&full_a)
+        .arg(&full_b)
+        .output()
+    {
         Ok(o) => o,
         Err(_) => silent_child(std::process::Command::new("git"))
             .args(["diff", "--no-index", "--"])
@@ -845,7 +1197,11 @@ fn diff_files(workspace: String, path_a: String, path_b: String) -> Result<Strin
     match output.status.code() {
         Some(0) => Ok("(files are identical)".to_string()),
         Some(1) => Ok(if stdout.is_empty() { stderr } else { stdout }),
-        _ => Err(if stderr.is_empty() { "diff failed".to_string() } else { stderr }),
+        _ => Err(if stderr.is_empty() {
+            "diff failed".to_string()
+        } else {
+            stderr
+        }),
     }
 }
 
@@ -880,14 +1236,20 @@ fn charset_from_content_type(content_type: &str) -> Option<String> {
     let idx = lower.find("charset")?;
     // Skip whitespace around the `=` (nonstandard `charset = gb2312` headers)
     // so the Rust parse mirrors the Node regex `charset\s*=\s*`.
-    let after_eq = lower[idx + "charset".len()..].trim_start().strip_prefix('=')?;
+    let after_eq = lower[idx + "charset".len()..]
+        .trim_start()
+        .strip_prefix('=')?;
     let mut rest = after_eq.trim_start();
     if rest.starts_with('"') || rest.starts_with('\'') {
         rest = &rest[1..];
     }
     let end = rest.find([';', '"', '\'']).unwrap_or(rest.len());
     let label = rest[..end].trim();
-    if label.is_empty() { None } else { Some(label.to_string()) }
+    if label.is_empty() {
+        None
+    } else {
+        Some(label.to_string())
+    }
 }
 
 /// Sniff `<meta charset=…>` / `<meta http-equiv="Content-Type" content="…charset=…">`
@@ -907,7 +1269,11 @@ fn sniff_html_charset(head: &[u8]) -> Option<String> {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    if label.is_empty() { None } else { Some(label) }
+    if label.is_empty() {
+        None
+    } else {
+        Some(label)
+    }
 }
 
 /// Decode bytes with a resolved charset label, falling back to UTF-8.
@@ -972,7 +1338,11 @@ async fn search_backend_duckduckgo(query: &str, max: usize) -> Result<Vec<Search
 }
 
 async fn search_backend_bing(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
-    let url = format!("https://www.bing.com/search?q={}&count={}", urlencoding(query), max);
+    let url = format!(
+        "https://www.bing.com/search?q={}&count={}",
+        urlencoding(query),
+        max
+    );
     let html = fetch_search_page(&url).await?;
     Ok(parse_bing_results(&html, max))
 }
@@ -994,7 +1364,11 @@ fn is_chinese_query(query: &str) -> bool {
 /// China Bing: real Chinese results with the same b_algo markup as
 /// www.bing.com, so it reuses `parse_bing_results` unchanged.
 async fn search_backend_bing_cn(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
-    let url = format!("https://cn.bing.com/search?q={}&count={}", urlencoding(query), max);
+    let url = format!(
+        "https://cn.bing.com/search?q={}&count={}",
+        urlencoding(query),
+        max
+    );
     let html = fetch_search_page(&url).await?;
     Ok(parse_bing_results(&html, max))
 }
@@ -1004,8 +1378,12 @@ async fn search_backend_bing_cn(query: &str, max: usize) -> Result<Vec<SearchRes
 /// no-results guidance the model feeds back on.
 fn configured_backend_names(serper_api_key: &Option<String>, api_key: &Option<String>) -> String {
     let mut names: Vec<&str> = Vec::new();
-    if serper_api_key.as_deref().map_or(false, |k| !k.is_empty()) { names.push("Serper"); }
-    if api_key.as_deref().map_or(false, |k| !k.is_empty()) { names.push("Tavily"); }
+    if serper_api_key.as_deref().map_or(false, |k| !k.is_empty()) {
+        names.push("Serper");
+    }
+    if api_key.as_deref().map_or(false, |k| !k.is_empty()) {
+        names.push("Tavily");
+    }
     names.extend(["cn.bing.com", "DuckDuckGo", "Bing"]);
     names.join(", ")
 }
@@ -1014,12 +1392,20 @@ fn configured_backend_names(serper_api_key: &Option<String>, api_key: &Option<St
 /// a real Google index — excellent for BOTH Chinese and English, captcha-free.
 /// ~2500 free trial queries, then prepaid credits (~$0.3–1 per 1k). Mirrors
 /// the Node serperSearch() in NodeToolAdapter.ts.
-async fn search_backend_serper(query: &str, max: usize, api_key: &str) -> Result<Vec<SearchResult>, String> {
+async fn search_backend_serper(
+    query: &str,
+    max: usize,
+    api_key: &str,
+) -> Result<Vec<SearchResult>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("client: {}", e))?;
-    let (gl, hl) = if is_chinese_query(query) { ("cn", "zh-cn") } else { ("us", "en") };
+    let (gl, hl) = if is_chinese_query(query) {
+        ("cn", "zh-cn")
+    } else {
+        ("us", "en")
+    };
     let resp = client
         .post("https://google.serper.dev/search")
         .header("X-API-KEY", api_key)
@@ -1039,12 +1425,30 @@ fn parse_serper_results(body: &serde_json::Value, max: usize) -> Vec<SearchResul
     let mut out: Vec<SearchResult> = Vec::new();
     if let Some(organic) = body.get("organic").and_then(|v| v.as_array()) {
         for item in organic {
-            if out.len() >= max { break; }
-            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let link = item.get("link").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let snippet = item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if out.len() >= max {
+                break;
+            }
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let link = item
+                .get("link")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let snippet = item
+                .get("snippet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if !title.is_empty() && !link.is_empty() {
-                out.push(SearchResult { title, snippet, url: link });
+                out.push(SearchResult {
+                    title,
+                    snippet,
+                    url: link,
+                });
             }
         }
     }
@@ -1055,7 +1459,11 @@ fn parse_serper_results(body: &serde_json::Value, max: usize) -> Vec<SearchResul
 /// in the GUI, TAVILY_API_KEY in the CLI). The desktop app has been passing
 /// this key to web_search for a while but Rust never read the arg — now it is
 /// honored here, mirroring the Node tavilySearch() in NodeToolAdapter.ts.
-async fn search_backend_tavily(query: &str, max: usize, api_key: &str) -> Result<Vec<SearchResult>, String> {
+async fn search_backend_tavily(
+    query: &str,
+    max: usize,
+    api_key: &str,
+) -> Result<Vec<SearchResult>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -1084,12 +1492,30 @@ fn parse_tavily_results(body: &serde_json::Value, max: usize) -> Vec<SearchResul
     let mut out: Vec<SearchResult> = Vec::new();
     if let Some(results) = body.get("results").and_then(|v| v.as_array()) {
         for item in results {
-            if out.len() >= max { break; }
-            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let snippet = item.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if out.len() >= max {
+                break;
+            }
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = item
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let snippet = item
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if !title.is_empty() && !url.is_empty() {
-                out.push(SearchResult { title, snippet, url });
+                out.push(SearchResult {
+                    title,
+                    snippet,
+                    url,
+                });
             }
         }
     }
@@ -1410,9 +1836,13 @@ fn parse_bing_results(html: &str, max: usize) -> Vec<SearchResult> {
     let mut results: Vec<SearchResult> = Vec::new();
     let mut rest = html;
     while results.len() < max {
-        let Some(idx) = rest.find("<li class=\"b_algo") else { break };
+        let Some(idx) = rest.find("<li class=\"b_algo") else {
+            break;
+        };
         let tail = &rest[idx..];
-        let Some(li_end) = tail.find("</li>") else { break };
+        let Some(li_end) = tail.find("</li>") else {
+            break;
+        };
         let block = &tail[..li_end + "</li>".len()];
         if let Some(r) = parse_bing_block(block) {
             results.push(r);
@@ -1437,13 +1867,16 @@ fn parse_bing_block(block: &str) -> Option<SearchResult> {
     let title = strip_html_tags(&after_gt[..title_end]);
 
     // Snippet: first <p ...>…</p> in the block.
-    let snippet = block.find("<p").and_then(|p| {
-        let after_p = &block[p..];
-        let gt = after_p.find('>')?;
-        let content = &after_p[gt + 1..];
-        let end = content.find("</p>")?;
-        Some(strip_html_tags(&content[..end]))
-    }).unwrap_or_default();
+    let snippet = block
+        .find("<p")
+        .and_then(|p| {
+            let after_p = &block[p..];
+            let gt = after_p.find('>')?;
+            let content = &after_p[gt + 1..];
+            let end = content.find("</p>")?;
+            Some(strip_html_tags(&content[..end]))
+        })
+        .unwrap_or_default();
 
     // Decode → trim BEFORE the empty-check — same restructure as the DDG
     // parser: trims whitespace-only titles (skipping them, like the Node
@@ -1546,7 +1979,10 @@ mod web_search_tests {
         assert!(results[1].snippet.contains('·'));
         assert!(!results[1].snippet.contains("&#"));
         assert!(!results[1].snippet.contains("&ensp;"));
-        assert_eq!(results[1].url, "https://www.runoob.com/rust/rust-tutorial.html?a=1&b=2");
+        assert_eq!(
+            results[1].url,
+            "https://www.runoob.com/rust/rust-tutorial.html?a=1&b=2"
+        );
     }
 
     #[test]
@@ -1608,9 +2044,18 @@ mod web_search_tests {
         // The Content-Type header charset is the first authority for decoding
         // a fetched page — mirrors Node charsetFromContentType (including the
         // `charset = x` spacing tolerance and quoted values).
-        assert_eq!(charset_from_content_type("text/html; charset=gb2312").as_deref(), Some("gb2312"));
-        assert_eq!(charset_from_content_type("text/html; charset = gb2312").as_deref(), Some("gb2312"));
-        assert_eq!(charset_from_content_type("text/html; charset=\"utf-8\"").as_deref(), Some("utf-8"));
+        assert_eq!(
+            charset_from_content_type("text/html; charset=gb2312").as_deref(),
+            Some("gb2312")
+        );
+        assert_eq!(
+            charset_from_content_type("text/html; charset = gb2312").as_deref(),
+            Some("gb2312")
+        );
+        assert_eq!(
+            charset_from_content_type("text/html; charset=\"utf-8\"").as_deref(),
+            Some("utf-8")
+        );
         assert_eq!(charset_from_content_type("text/html").as_deref(), None);
     }
 
@@ -1620,8 +2065,14 @@ mod web_search_tests {
         // decoded via their <meta> tag — mirrors Node sniffHtmlCharset.
         let head = br#"<html><head><meta http-equiv="Content-Type" content="text/html; charset=gb2312"></head>"#;
         assert_eq!(sniff_html_charset(head).as_deref(), Some("gb2312"));
-        assert_eq!(sniff_html_charset(br"<meta charset=UTF-8>").as_deref(), Some("utf-8"));
-        assert_eq!(sniff_html_charset(b"<html><body>no meta</body></html>").as_deref(), None);
+        assert_eq!(
+            sniff_html_charset(br"<meta charset=UTF-8>").as_deref(),
+            Some("utf-8")
+        );
+        assert_eq!(
+            sniff_html_charset(b"<html><body>no meta</body></html>").as_deref(),
+            None
+        );
     }
 
     #[test]
@@ -1633,7 +2084,10 @@ mod web_search_tests {
         assert_eq!(decode_bytes_with_label(bytes, Some("gb2312")), "中文");
         // utf-8-family labels skip re-decoding (a latin1 mislabel must not
         // garble an actually-UTF-8 page into windows-1252 mojibake).
-        assert_eq!(decode_bytes_with_label(bytes, Some("utf-8")), String::from_utf8_lossy(bytes));
+        assert_eq!(
+            decode_bytes_with_label(bytes, Some("utf-8")),
+            String::from_utf8_lossy(bytes)
+        );
         assert!(is_utf8_family_label("utf-8"));
         assert!(is_utf8_family_label("iso-8859-1"));
         assert!(!is_utf8_family_label("gb2312"));
@@ -1704,13 +2158,24 @@ mod web_search_tests {
 
     #[test]
     fn configured_backend_names_reflects_api_keys() {
-        assert_eq!(configured_backend_names(&None, &None), "cn.bing.com, DuckDuckGo, Bing");
-        assert_eq!(configured_backend_names(&Some("k".into()), &None), "Serper, cn.bing.com, DuckDuckGo, Bing");
-        assert_eq!(configured_backend_names(&Some("k".into()), &Some("".into())), "Serper, cn.bing.com, DuckDuckGo, Bing");
-        assert_eq!(configured_backend_names(&Some("k".into()), &Some("t".into())), "Serper, Tavily, cn.bing.com, DuckDuckGo, Bing");
+        assert_eq!(
+            configured_backend_names(&None, &None),
+            "cn.bing.com, DuckDuckGo, Bing"
+        );
+        assert_eq!(
+            configured_backend_names(&Some("k".into()), &None),
+            "Serper, cn.bing.com, DuckDuckGo, Bing"
+        );
+        assert_eq!(
+            configured_backend_names(&Some("k".into()), &Some("".into())),
+            "Serper, cn.bing.com, DuckDuckGo, Bing"
+        );
+        assert_eq!(
+            configured_backend_names(&Some("k".into()), &Some("t".into())),
+            "Serper, Tavily, cn.bing.com, DuckDuckGo, Bing"
+        );
     }
 }
-
 
 #[cfg(test)]
 #[cfg(test)]
@@ -1718,13 +2183,28 @@ mod resolve_tests {
     use super::*;
 
     fn temp_workspace(name: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("pure-resolve-{}-{}", name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("pure-resolve-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         // resolve() canonicalizes the workspace base (macOS /var → /private/var);
         // the assertion must compare against the same canonical base.
         let canonical = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
         canonical.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn path_info_and_remove_path_are_safe_for_snapshot_restore() {
+        let ws = temp_workspace("snapshot");
+        let file = PathBuf::from(&ws).join("new.txt");
+        fs::write(&file, "agent").unwrap();
+        let info = path_info(ws.clone(), "new.txt".into()).unwrap();
+        assert_eq!(info["exists"], true);
+        assert_eq!(info["isDirectory"], false);
+        remove_path(ws.clone(), "new.txt".into(), Some(false)).unwrap();
+        assert!(!file.exists());
+        assert!(remove_path(ws.clone(), ".".into(), Some(true)).is_err());
+        fs::remove_dir_all(&ws).unwrap();
     }
 
     #[test]
@@ -1763,11 +2243,27 @@ mod resolve_tests {
         fs::remove_dir_all(&ws).unwrap();
     }
 
+    #[test]
+    fn list_files_caps_results_and_reports_truncation() {
+        let ws = temp_workspace("list-cap");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(PathBuf::from(&ws).join(name), "").unwrap();
+        }
+        let output = list_files(ws.clone(), ".".into(), Some(false), Some(2)).unwrap();
+        assert!(output.contains("[截断]"));
+        assert_eq!(
+            output.split("\n\n[截断]").next().unwrap().lines().count(),
+            2
+        );
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_new_files_through_a_symlink_outside_workspace() {
         let ws = temp_workspace("symlink");
-        let outside = std::env::temp_dir().join(format!("pure-resolve-outside-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("pure-resolve-outside-{}", std::process::id()));
         let _ = fs::remove_dir_all(&outside);
         fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, PathBuf::from(&ws).join("linked")).unwrap();
@@ -1807,9 +2303,7 @@ mod write_file_stream_tests {
     // Channel::send serializes the String payload as a JSON string, exactly
     // what the JS side receives (JSON.parse(raw)) — so the test callback
     // mirrors the adapter: deserialize to String, then parse the JSON.
-    fn capturing_channel(
-        events: &Arc<StdMutex<Vec<serde_json::Value>>>,
-    ) -> Channel<String> {
+    fn capturing_channel(events: &Arc<StdMutex<Vec<serde_json::Value>>>) -> Channel<String> {
         let events = Arc::clone(events);
         Channel::new(move |body| {
             if let Ok(s) = body.deserialize::<String>() {
@@ -1822,7 +2316,8 @@ mod write_file_stream_tests {
     }
 
     fn temp_workspace(name: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("pure-write-stream-{}-{}", name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("pure-write-stream-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         // resolve() canonicalizes the workspace base (macOS /var → /private/var);
@@ -1853,7 +2348,11 @@ mod write_file_stream_tests {
         assert_eq!(written.len(), content.len());
 
         let events = events.lock().unwrap();
-        assert!(events.len() >= 3, "expected ≥3 chunk events, got {}", events.len());
+        assert!(
+            events.len() >= 3,
+            "expected ≥3 chunk events, got {}",
+            events.len()
+        );
         let mut last = 0usize;
         for ev in events.iter() {
             assert_eq!(ev["type"], "progress");
@@ -1895,7 +2394,10 @@ mod write_file_stream_tests {
             .await
             .unwrap();
         assert_eq!(msg, "Wrote 0 bytes to empty.txt");
-        assert_eq!(fs::read_to_string(PathBuf::from(&workspace).join("empty.txt")).unwrap(), "");
+        assert_eq!(
+            fs::read_to_string(PathBuf::from(&workspace).join("empty.txt")).unwrap(),
+            ""
+        );
         // No chunks → no events (nothing to report for a zero-byte write).
         assert!(events.lock().unwrap().is_empty());
         fs::remove_dir_all(&workspace).unwrap();
@@ -1908,21 +2410,27 @@ mod execute_command_tests {
 
     #[tokio::test]
     async fn reports_success_with_zero_exit() {
-        let out = execute_command(".".to_string(), "echo hello".to_string()).await.unwrap();
+        let out = execute_command(".".to_string(), "echo hello".to_string())
+            .await
+            .unwrap();
         assert_eq!(out["exitCode"], 0);
         assert!(out["stdout"].as_str().unwrap().contains("hello"));
     }
 
     #[tokio::test]
     async fn reports_failure_with_nonzero_exit_and_stderr() {
-        let out = execute_command(".".to_string(), "echo boom >&2; exit 3".to_string()).await.unwrap();
+        let out = execute_command(".".to_string(), "echo boom >&2; exit 3".to_string())
+            .await
+            .unwrap();
         assert_eq!(out["exitCode"], 3);
         assert!(out["stderr"].as_str().unwrap().contains("boom"));
     }
 
     #[tokio::test]
     async fn keeps_stdout_even_when_command_fails() {
-        let out = execute_command(".".to_string(), "echo partial; exit 2".to_string()).await.unwrap();
+        let out = execute_command(".".to_string(), "echo partial; exit 2".to_string())
+            .await
+            .unwrap();
         assert_eq!(out["exitCode"], 2);
         assert!(out["stdout"].as_str().unwrap().contains("partial"));
     }
@@ -1949,13 +2457,10 @@ mod command_cancel_tests {
 
             kill_process_group(pid).unwrap();
 
-            let status = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                child.wait(),
-            )
-            .await
-            .expect("killed process should exit within the timeout")
-            .unwrap();
+            let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                .await
+                .expect("killed process should exit within the timeout")
+                .unwrap();
             assert!(!status.success(), "killed process must not report success");
         }
     }
@@ -1969,7 +2474,10 @@ mod command_cancel_tests {
             .unwrap();
         assert_eq!(code, 0);
         let reg = registry.lock().unwrap();
-        assert!(!reg.contains_key("test-call-1"), "registry must be cleaned up after the command finishes");
+        assert!(
+            !reg.contains_key("test-call-1"),
+            "registry must be cleaned up after the command finishes"
+        );
     }
 
     #[tokio::test]
@@ -1993,7 +2501,10 @@ mod command_cancel_tests {
             let reg = registry.lock().unwrap();
             reg.get(&id).copied()
         };
-        assert!(pid.is_some(), "running command must be registered while alive");
+        assert!(
+            pid.is_some(),
+            "running command must be registered while alive"
+        );
         kill_process_group(pid.unwrap() as i32).unwrap();
 
         let code = tokio::time::timeout(std::time::Duration::from_secs(5), task)
@@ -2003,7 +2514,10 @@ mod command_cancel_tests {
         assert_ne!(code, 0, "killed command must report a non-zero exit code");
 
         let reg = registry.lock().unwrap();
-        assert!(!reg.contains_key(&id), "registry must be cleaned up after the kill");
+        assert!(
+            !reg.contains_key(&id),
+            "registry must be cleaned up after the kill"
+        );
     }
 }
 
@@ -2123,7 +2637,10 @@ fn strip_html_full(html: &str) -> String {
         // <scripture> that merely START with "script" — matching the Node
         // side, which only enters skip mode for a real <script …> opening.
         if i + 6 < chars.len()
-            && chars[i..i + 7].iter().collect::<String>().eq_ignore_ascii_case("<script")
+            && chars[i..i + 7]
+                .iter()
+                .collect::<String>()
+                .eq_ignore_ascii_case("<script")
             && matches!(
                 chars.get(i + 7).copied(),
                 None | Some('>') | Some(' ') | Some('\t') | Some('\n') | Some('\r')
@@ -2132,7 +2649,10 @@ fn strip_html_full(html: &str) -> String {
             in_skip = true;
             skip_tag = "script".to_string();
         } else if i + 5 < chars.len()
-            && chars[i..i + 6].iter().collect::<String>().eq_ignore_ascii_case("<style")
+            && chars[i..i + 6]
+                .iter()
+                .collect::<String>()
+                .eq_ignore_ascii_case("<style")
             && matches!(
                 chars.get(i + 6).copied(),
                 None | Some('>') | Some(' ') | Some('\t') | Some('\n') | Some('\r')
@@ -2179,7 +2699,11 @@ fn strip_html_full(html: &str) -> String {
     }
 
     // Collapse whitespace
-    let lines: Vec<&str> = result.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = result
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
     html_decode(&lines.join("\n"))
 }
 
@@ -2207,10 +2731,12 @@ mod web_fetch_tests {
         assert_eq!(strip_html_full("Hello world"), "Hello world");
     }
 
-
     #[test]
     fn strips_tags_and_collapses_block_layout_to_lines() {
-        assert_eq!(strip_html_full("<h1>Title</h1><p>Hello world</p>"), "Title\nHello world");
+        assert_eq!(
+            strip_html_full("<h1>Title</h1><p>Hello world</p>"),
+            "Title\nHello world"
+        );
     }
 
     #[test]
@@ -2235,7 +2761,12 @@ mod web_fetch_tests {
         // Case-insensitive like the Node regexes (/gi) — <SCRIPT>/<ScRiPt>
         // and </STYLE> are stripped too, not kept as text.
         assert_eq!(strip_html_full("<SCRIPT>var x=1;</SCRIPT><p>Ok</p>"), "Ok");
-        assert_eq!(strip_html_full("<ScRiPt type=\"text/javascript\">var y=2;</ScRiPt><Style>.a{}</Style><p>Hi</p>"), "Hi");
+        assert_eq!(
+            strip_html_full(
+                "<ScRiPt type=\"text/javascript\">var y=2;</ScRiPt><Style>.a{}</Style><p>Hi</p>"
+            ),
+            "Hi"
+        );
     }
 
     #[test]
@@ -2406,7 +2937,9 @@ async fn spawn_mcp(
     let base_path = configured_path.or_else(|| std::env::var("PATH").ok());
     cmd.env("PATH", augmented_mcp_path(base_path.as_deref()));
 
-    let mut child = cmd.spawn().map_err(|e| format!("spawn {}: {}", command, e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn {}: {}", command, e))?;
 
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
@@ -2433,7 +2966,10 @@ async fn mcp_request(
     let key = mcp_key(&session_id, &name);
     let handle = {
         let registry = state.lock().await;
-        registry.get(&key).ok_or_else(|| format!("MCP not found: {}", key))?.clone()
+        registry
+            .get(&key)
+            .ok_or_else(|| format!("MCP not found: {}", key))?
+            .clone()
     };
     mcp_call_inner(&handle, &request).await
 }
@@ -2450,12 +2986,24 @@ async fn mcp_notify(
     let key = mcp_key(&session_id, &name);
     let handle = {
         let registry = state.lock().await;
-        registry.get(&key).ok_or_else(|| format!("MCP not found: {}", key))?.clone()
+        registry
+            .get(&key)
+            .ok_or_else(|| format!("MCP not found: {}", key))?
+            .clone()
     };
     let mut stdin = handle.stdin.lock().await;
-    stdin.write_all(request.as_bytes()).await.map_err(|e| format!("write stdin: {}", e))?;
-    stdin.write_all(b"\n").await.map_err(|e| format!("write newline: {}", e))?;
-    stdin.flush().await.map_err(|e| format!("flush stdin: {}", e))?;
+    stdin
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("write stdin: {}", e))?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|e| format!("write newline: {}", e))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|e| format!("flush stdin: {}", e))?;
     Ok(())
 }
 
@@ -2478,7 +3026,10 @@ async fn mcp_shutdown(
 }
 
 #[tauri::command]
-async fn mcp_list(state: tauri::State<'_, McpRegistry>, session_id: String) -> Result<Vec<String>, String> {
+async fn mcp_list(
+    state: tauri::State<'_, McpRegistry>,
+    session_id: String,
+) -> Result<Vec<String>, String> {
     let registry = state.lock().await;
     let keys: Vec<String> = registry
         .keys()
@@ -2501,7 +3052,11 @@ fn safe_session_component(session_id: &str) -> String {
     // Encode every byte instead of replacing punctuation with `_`; replacement
     // could make distinct session IDs map to the same temporary directory.
     let encoded: String = session_id.bytes().map(|b| format!("{:02x}", b)).collect();
-    if encoded.is_empty() { "session".to_string() } else { encoded }
+    if encoded.is_empty() {
+        "session".to_string()
+    } else {
+        encoded
+    }
 }
 
 #[tauri::command]
@@ -2570,7 +3125,11 @@ fn save_paste_file(session_id: String, name: String, content: String) -> Result<
 /// The GUI turns pasted screenshots/images (see pasteChip.ts) into a thumbnail
 /// chip and persists the raw bytes here under ~/.pure/tmp/<session-id>/.
 #[tauri::command]
-fn save_paste_image(session_id: String, name: String, data_base64: String) -> Result<String, String> {
+fn save_paste_image(
+    session_id: String,
+    name: String,
+    data_base64: String,
+) -> Result<String, String> {
     if session_id.trim().is_empty() {
         return Err("session id is required".to_string());
     }
@@ -2597,9 +3156,9 @@ fn dropped_file_mime(name: &str, bytes: &[u8]) -> String {
     // a ZIP header is valid UTF-8, so the UTF-8 fallback below would otherwise
     // misclassify archives as text.
     const BINARY_EXTENSIONS: &[&str] = &[
-        "zip", "rar", "7z", "gz", "tgz", "bz2", "xz", "tar", "zst",
-        "exe", "msi", "dmg", "pkg", "bin", "iso", "img", "so", "dll", "dylib",
-        "apk", "ipa", "deb", "rpm", "jar", "class", "wasm", "woff", "woff2", "ttf", "otf",
+        "zip", "rar", "7z", "gz", "tgz", "bz2", "xz", "tar", "zst", "exe", "msi", "dmg", "pkg",
+        "bin", "iso", "img", "so", "dll", "dylib", "apk", "ipa", "deb", "rpm", "jar", "class",
+        "wasm", "woff", "woff2", "ttf", "otf",
     ];
     if BINARY_EXTENSIONS.contains(&ext.as_str()) {
         return "application/octet-stream".to_string();
@@ -2616,8 +3175,8 @@ fn dropped_file_mime(name: &str, bytes: &[u8]) -> String {
         "ppt" | "pptx" => Some("application/vnd.ms-powerpoint"),
         "json" => Some("application/json"),
         "xml" => Some("application/xml"),
-        "txt" | "log" | "md" | "csv" | "tsv" | "js" | "ts" | "jsx" | "tsx"
-        | "html" | "css" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "sql" | "sh" => Some("text/plain"),
+        "txt" | "log" | "md" | "csv" | "tsv" | "js" | "ts" | "jsx" | "tsx" | "html" | "css"
+        | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "sql" | "sh" => Some("text/plain"),
         _ => None,
     };
     if let Some(mime) = known {
@@ -2631,7 +3190,18 @@ fn dropped_file_mime(name: &str, bytes: &[u8]) -> String {
 }
 
 fn dropped_file_kind(mime: &str) -> &'static str {
-    if mime.starts_with("image/") { "image" } else if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" { "text" } else if mime == "application/pdf" || mime.starts_with("application/vnd.") || mime == "application/msword" { "doc" } else { "binary" }
+    if mime.starts_with("image/") {
+        "image"
+    } else if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" {
+        "text"
+    } else if mime == "application/pdf"
+        || mime.starts_with("application/vnd.")
+        || mime == "application/msword"
+    {
+        "doc"
+    } else {
+        "binary"
+    }
 }
 
 fn unique_tmp_file(dir: &std::path::Path, name: &str, attempt: u32) -> PathBuf {
@@ -2639,35 +3209,66 @@ fn unique_tmp_file(dir: &std::path::Path, name: &str, attempt: u32) -> PathBuf {
     if attempt == 0 {
         return dir.join(safe);
     }
-    let stem = std::path::Path::new(&safe).file_stem().and_then(|s| s.to_str()).unwrap_or("dropped-file");
-    let ext = std::path::Path::new(&safe).extension().and_then(|s| s.to_str()).map(|s| format!(".{}", s)).unwrap_or_default();
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let stem = std::path::Path::new(&safe)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("dropped-file");
+    let ext = std::path::Path::new(&safe)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| format!(".{}", s))
+        .unwrap_or_default();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     dir.join(format!("{}-{}-{}{}", stem, stamp, attempt, ext))
 }
 
-fn import_dropped_file_inner(tmp_dir: &std::path::Path, source: &std::path::Path) -> Result<serde_json::Value, String> {
-    let metadata = fs::symlink_metadata(source).map_err(|e| format!("inspect dropped path: {}", e))?;
+fn import_dropped_file_inner(
+    tmp_dir: &std::path::Path,
+    source: &std::path::Path,
+) -> Result<serde_json::Value, String> {
+    let metadata =
+        fs::symlink_metadata(source).map_err(|e| format!("inspect dropped path: {}", e))?;
     if metadata.is_dir() {
-        return Ok(serde_json::json!({ "isDirectory": true, "name": source.file_name().and_then(|s| s.to_str()).unwrap_or("folder") }));
+        return Ok(
+            serde_json::json!({ "isDirectory": true, "name": source.file_name().and_then(|s| s.to_str()).unwrap_or("folder") }),
+        );
     }
     if !metadata.is_file() {
         return Err("dropped path is not a regular file".to_string());
     }
     if metadata.len() > DROPPED_FILE_MAX_BYTES {
-        return Err(format!("dropped file exceeds {} MB", DROPPED_FILE_MAX_BYTES / (1024 * 1024)));
+        return Err(format!(
+            "dropped file exceeds {} MB",
+            DROPPED_FILE_MAX_BYTES / (1024 * 1024)
+        ));
     }
-    let name = source.file_name().and_then(|s| s.to_str()).unwrap_or("dropped-file").to_string();
+    let name = source
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("dropped-file")
+        .to_string();
     let bytes = fs::read(source).map_err(|e| format!("read dropped file: {}", e))?;
     if bytes.len() as u64 > DROPPED_FILE_MAX_BYTES {
-        return Err(format!("dropped file exceeds {} MB", DROPPED_FILE_MAX_BYTES / (1024 * 1024)));
+        return Err(format!(
+            "dropped file exceeds {} MB",
+            DROPPED_FILE_MAX_BYTES / (1024 * 1024)
+        ));
     }
     let mime = dropped_file_mime(&name, &bytes);
     let kind = dropped_file_kind(&mime);
     if kind == "image" && bytes.len() as u64 > DROPPED_IMAGE_MAX_BYTES {
-        return Err(format!("dropped image exceeds {} MB", DROPPED_IMAGE_MAX_BYTES / (1024 * 1024)));
+        return Err(format!(
+            "dropped image exceeds {} MB",
+            DROPPED_IMAGE_MAX_BYTES / (1024 * 1024)
+        ));
     }
     if kind == "binary" {
-        return Err("binary files are not supported — attach text, images, or documents only".to_string());
+        return Err(
+            "binary files are not supported — attach text, images, or documents only".to_string(),
+        );
     }
     fs::create_dir_all(tmp_dir).map_err(|e| format!("create dropped-file dir: {}", e))?;
 
@@ -2676,7 +3277,11 @@ fn import_dropped_file_inner(tmp_dir: &std::path::Path, source: &std::path::Path
     let (destination, mut file) = (0..1000)
         .map(|attempt| unique_tmp_file(tmp_dir, &stored_name, attempt))
         .find_map(|candidate| {
-            match fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
                 Ok(file) => Some((candidate, file)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
                 Err(_) => None,
@@ -2700,10 +3305,18 @@ fn import_dropped_file_inner(tmp_dir: &std::path::Path, source: &std::path::Path
     });
     if kind == "image" {
         use base64::Engine as _;
-        let data_url = format!("data:{};base64,{}", record["mime"].as_str().unwrap_or("application/octet-stream"), base64::engine::general_purpose::STANDARD.encode(&bytes));
+        let data_url = format!(
+            "data:{};base64,{}",
+            record["mime"]
+                .as_str()
+                .unwrap_or("application/octet-stream"),
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        );
         record["dataUrl"] = serde_json::Value::String(data_url);
     } else if kind == "text" {
-        let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(DROPPED_TEXT_PREVIEW_BYTES)]).to_string();
+        let preview =
+            String::from_utf8_lossy(&bytes[..bytes.len().min(DROPPED_TEXT_PREVIEW_BYTES)])
+                .to_string();
         record["content"] = serde_json::Value::String(preview);
         record["truncated"] = serde_json::Value::Bool(bytes.len() > DROPPED_TEXT_PREVIEW_BYTES);
     }
@@ -2714,7 +3327,10 @@ fn import_dropped_file_inner(tmp_dir: &std::path::Path, source: &std::path::Path
 /// The source path comes from the OS drag/drop API, while the destination is
 /// always sanitized and collision-safe inside ~/.pure/tmp/<session-id>/.
 #[tauri::command]
-fn import_dropped_file(session_id: String, source_path: String) -> Result<serde_json::Value, String> {
+fn import_dropped_file(
+    session_id: String,
+    source_path: String,
+) -> Result<serde_json::Value, String> {
     if session_id.trim().is_empty() {
         return Err("session id is required".to_string());
     }
@@ -2743,7 +3359,9 @@ struct PasteFileInfo {
 /// ignored). Split out for unit testing.
 fn scan_paste_files_in(dir: &std::path::Path) -> Vec<PasteFileInfo> {
     let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(dir) else { return out };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if !PASTE_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
@@ -2753,8 +3371,14 @@ fn scan_paste_files_in(dir: &std::path::Path) -> Vec<PasteFileInfo> {
         if !meta.is_file() {
             continue;
         }
-        let modified = meta.modified().unwrap_or_else(|_| std::time::SystemTime::now());
-        out.push(PasteFileInfo { path: entry.path(), size: meta.len(), modified });
+        let modified = meta
+            .modified()
+            .unwrap_or_else(|_| std::time::SystemTime::now());
+        out.push(PasteFileInfo {
+            path: entry.path(),
+            size: meta.len(),
+            modified,
+        });
     }
     out
 }
@@ -2805,7 +3429,9 @@ fn cleanup_paste_files_in(dir: &std::path::Path, days: u64) -> Result<(u64, u64)
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_dir()
-                    && fs::read_dir(&p).map(|mut it| it.next().is_none()).unwrap_or(false)
+                    && fs::read_dir(&p)
+                        .map(|mut it| it.next().is_none())
+                        .unwrap_or(false)
                 {
                     let _ = fs::remove_dir(&p);
                 }
@@ -2869,7 +3495,10 @@ fn save_secrets(secrets: &serde_json::Value) -> Result<(), String> {
 #[tauri::command]
 fn secret_get(key: String) -> Result<Option<String>, String> {
     let secrets = load_secrets()?;
-    Ok(secrets.get(&key).and_then(|v| v.as_str()).map(|s| s.to_string()))
+    Ok(secrets
+        .get(&key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string()))
 }
 
 #[tauri::command]
@@ -3005,7 +3634,10 @@ mod chat_cancel_tests {
             cancel_chat_stream_inner(&reg, "req-1"),
             "a live stream must be cancellable"
         );
-        assert!(rx.await.is_ok(), "cancel must resolve the stream's receiver");
+        assert!(
+            rx.await.is_ok(),
+            "cancel must resolve the stream's receiver"
+        );
         assert!(
             reg.lock().unwrap().is_empty(),
             "the entry must be removed on cancel"
@@ -3081,7 +3713,10 @@ mod chat_stream_tests {
         // frame. The caller MUST break the outer read loop on it (labeled
         // break), never fall back into stream.next().
         assert!(matches!(classify_sse_line("data: [DONE]"), SseLine::Done));
-        assert!(matches!(classify_sse_line("data:  [DONE]  "), SseLine::Done));
+        assert!(matches!(
+            classify_sse_line("data:  [DONE]  "),
+            SseLine::Done
+        ));
     }
 
     #[test]
@@ -3096,17 +3731,29 @@ mod chat_stream_tests {
     fn sse_non_data_and_garbage_lines_are_ignored() {
         // Keep-alive comments, non-`data:` events, and malformed JSON all
         // fall through (old behavior: `continue` the line loop).
-        assert!(matches!(classify_sse_line(": keep-alive"), SseLine::NotData));
-        assert!(matches!(classify_sse_line("event: message"), SseLine::NotData));
+        assert!(matches!(
+            classify_sse_line(": keep-alive"),
+            SseLine::NotData
+        ));
+        assert!(matches!(
+            classify_sse_line("event: message"),
+            SseLine::NotData
+        ));
         assert!(matches!(classify_sse_line(""), SseLine::NotData));
-        assert!(matches!(classify_sse_line("data: not json {"), SseLine::NotData));
+        assert!(matches!(
+            classify_sse_line("data: not json {"),
+            SseLine::NotData
+        ));
     }
 
     #[test]
     fn resolve_api_key_prefers_explicit_key() {
         let secrets = serde_json::json!({"llm.apiKey": "from-secrets"});
         assert_eq!(resolve_api_key(&secrets, "explicit", ""), "explicit");
-        assert_eq!(resolve_api_key(&secrets, "explicit", "llm.apiKey.ollama"), "explicit");
+        assert_eq!(
+            resolve_api_key(&secrets, "explicit", "llm.apiKey.ollama"),
+            "explicit"
+        );
     }
 
     #[test]
@@ -3118,7 +3765,10 @@ mod chat_stream_tests {
         // Default key name when the caller doesn't specify one.
         assert_eq!(resolve_api_key(&secrets, "", ""), "main-key");
         // Custom providers look up their own named secret.
-        assert_eq!(resolve_api_key(&secrets, "", "llm.apiKey.ollama"), "ollama-key");
+        assert_eq!(
+            resolve_api_key(&secrets, "", "llm.apiKey.ollama"),
+            "ollama-key"
+        );
         // Missing named secret → empty (keyless local provider path).
         assert_eq!(resolve_api_key(&secrets, "", "llm.apiKey.missing"), "");
     }
@@ -3337,8 +3987,11 @@ async fn chat_stream(
             // (string, or an object with a text-part `content` array). The
             // reasoning text is intentionally NOT appended to `text`, so it
             // never leaks into the final answer or persisted messages.
-            let reasoning = delta.get("reasoning_content").and_then(|c| c.as_str()).map(|s| s.to_string()).or_else(|| {
-                match delta.get("reasoning") {
+            let reasoning = delta
+                .get("reasoning_content")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| match delta.get("reasoning") {
                     Some(r) => {
                         if let Some(s) = r.as_str() {
                             Some(s.to_string())
@@ -3349,14 +4002,17 @@ async fn chat_stream(
                                     acc.push_str(t);
                                 }
                             }
-                            if acc.is_empty() { None } else { Some(acc) }
+                            if acc.is_empty() {
+                                None
+                            } else {
+                                Some(acc)
+                            }
                         } else {
                             None
                         }
                     }
                     None => None,
-                }
-            });
+                });
             if let Some(rc) = reasoning {
                 let chunk = serde_json::json!({ "type": "reasoning", "content": rc });
                 if on_chunk.send(chunk.to_string()).is_err() {
@@ -3373,9 +4029,9 @@ async fn chat_stream(
             if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                 for tc in tool_calls {
                     let idx = tc["index"].as_u64().unwrap_or(0) as u32;
-                    let cur = tc_map.entry(idx).or_insert_with(|| {
-                        serde_json::json!({"id": "", "name": "", "arguments": ""})
-                    });
+                    let cur = tc_map.entry(idx).or_insert_with(
+                        || serde_json::json!({"id": "", "name": "", "arguments": ""}),
+                    );
                     // Only forward when this delta actually added something
                     // (name, or appended arguments) — a delta that merely
                     // carries the id must not re-send an identical buffer.
@@ -3498,8 +4154,11 @@ fn save_session(
     };
 
     let data_path = dir.join("session.json");
-    fs::write(&data_path, serde_json::to_string_pretty(&data).unwrap_or_default())
-        .map_err(|e| format!("write: {}", e))?;
+    fs::write(
+        &data_path,
+        serde_json::to_string_pretty(&data).unwrap_or_default(),
+    )
+    .map_err(|e| format!("write: {}", e))?;
 
     let title = extract_title(&data.messages);
     update_sessions_index(&session_id, &title, data.message_count, now, workspace)?;
@@ -3547,8 +4206,11 @@ fn save_session_stats(session_id: String, stats: serde_json::Value) -> Result<()
     let dir = sessions_dir().join(&session_id);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
     let path = dir.join("stats.json");
-    fs::write(&path, serde_json::to_string_pretty(&stats).unwrap_or_default())
-        .map_err(|e| format!("write: {}", e))
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&stats).unwrap_or_default(),
+    )
+    .map_err(|e| format!("write: {}", e))
 }
 
 #[tauri::command]
@@ -3660,10 +4322,14 @@ fn save_session_workspace(session_id: String, workspace: String) -> Result<(), S
     let data_path = dir.join("session.json");
     if data_path.exists() {
         let raw = fs::read_to_string(&data_path).map_err(|e| format!("read: {}", e))?;
-        let mut data: SessionData = serde_json::from_str(&raw).map_err(|e| format!("parse: {}", e))?;
+        let mut data: SessionData =
+            serde_json::from_str(&raw).map_err(|e| format!("parse: {}", e))?;
         data.workspace = workspace.clone();
-        fs::write(&data_path, serde_json::to_string_pretty(&data).unwrap_or_default())
-            .map_err(|e| format!("write: {}", e))?;
+        fs::write(
+            &data_path,
+            serde_json::to_string_pretty(&data).unwrap_or_default(),
+        )
+        .map_err(|e| format!("write: {}", e))?;
     }
 
     let index_path = sessions_dir().join("index.json");
@@ -3673,8 +4339,11 @@ fn save_session_workspace(session_id: String, workspace: String) -> Result<(), S
         if let Some(meta) = list.iter_mut().find(|s| s.id == session_id) {
             meta.workspace = workspace.clone();
         }
-        fs::write(&index_path, serde_json::to_string_pretty(&list).unwrap_or_default())
-            .map_err(|e| format!("write: {}", e))?;
+        fs::write(
+            &index_path,
+            serde_json::to_string_pretty(&list).unwrap_or_default(),
+        )
+        .map_err(|e| format!("write: {}", e))?;
     }
     Ok(())
 }
@@ -3694,8 +4363,11 @@ fn delete_session(session_id: String) -> Result<(), String> {
         let raw = fs::read_to_string(&index_path).unwrap_or_default();
         let mut list: Vec<SessionMeta> = serde_json::from_str(&raw).unwrap_or_default();
         list.retain(|s| s.id != session_id);
-        fs::write(&index_path, serde_json::to_string_pretty(&list).unwrap_or_default())
-            .map_err(|e| format!("write: {}", e))?;
+        fs::write(
+            &index_path,
+            serde_json::to_string_pretty(&list).unwrap_or_default(),
+        )
+        .map_err(|e| format!("write: {}", e))?;
     }
     Ok(())
 }
@@ -3778,9 +4450,7 @@ fn update_sessions_index(
     let meta = SessionMeta {
         id: session_id.to_string(),
         title: title.to_string(),
-        created_at: existing
-            .map(|i| list[i].created_at)
-            .unwrap_or(updated_at),
+        created_at: existing.map(|i| list[i].created_at).unwrap_or(updated_at),
         updated_at,
         message_count,
         workspace,
@@ -3792,8 +4462,11 @@ fn update_sessions_index(
         list.push(meta);
     }
 
-    fs::write(&index_path, serde_json::to_string_pretty(&list).unwrap_or_default())
-        .map_err(|e| format!("write: {}", e))?;
+    fs::write(
+        &index_path,
+        serde_json::to_string_pretty(&list).unwrap_or_default(),
+    )
+    .map_err(|e| format!("write: {}", e))?;
 
     Ok(())
 }
@@ -3826,7 +4499,10 @@ async fn detect_location() -> Result<String, String> {
             .build()
         {
             Ok(c) => c,
-            Err(e) => { failed.push(format!("{}: client: {}", url, e)); continue; }
+            Err(e) => {
+                failed.push(format!("{}: client: {}", url, e));
+                continue;
+            }
         };
         let body: serde_json::Value = match client
             .get(*url)
@@ -3836,10 +4512,19 @@ async fn detect_location() -> Result<String, String> {
         {
             Ok(r) if r.status().is_success() => match r.json().await {
                 Ok(v) => v,
-                Err(e) => { failed.push(format!("{}: read: {}", url, e)); continue; }
+                Err(e) => {
+                    failed.push(format!("{}: read: {}", url, e));
+                    continue;
+                }
             },
-            Ok(r) => { failed.push(format!("{}: HTTP {}", url, r.status())); continue; }
-            Err(e) => { failed.push(format!("{}: request: {}", url, e)); continue; }
+            Ok(r) => {
+                failed.push(format!("{}: HTTP {}", url, r.status()));
+                continue;
+            }
+            Err(e) => {
+                failed.push(format!("{}: request: {}", url, e));
+                continue;
+            }
         };
         // Normalize per-backend key differences (ipwho.is/ipinfo: city/region/
         // country; ip-api: city/regionName/country) and reject placeholder
@@ -3856,11 +4541,18 @@ async fn detect_location() -> Result<String, String> {
         };
         let Some(city) = get(&["city"]) else { continue };
         let mut parts: Vec<String> = vec![city];
-        if let Some(r) = get(&["region", "regionName"]) { parts.push(r); }
-        if let Some(c) = get(&["country", "country_name"]) { parts.push(c); }
+        if let Some(r) = get(&["region", "regionName"]) {
+            parts.push(r);
+        }
+        if let Some(c) = get(&["country", "country_name"]) {
+            parts.push(c);
+        }
         return Ok(parts.join(", "));
     }
-    Err(format!("all geolocation backends failed: {}", failed.join("; ")))
+    Err(format!(
+        "all geolocation backends failed: {}",
+        failed.join("; ")
+    ))
 }
 
 /// Probe installed runtime versions (Node.js, Python, Rust) for sys_info.
@@ -3884,9 +4576,17 @@ fn detect_runtime_versions() -> Vec<String> {
             .map(|o| {
                 // Collapse whitespace so multi-line banners cannot break out of
                 // the system-prompt sentence (mirrors the Node adapter).
-                let stdout = String::from_utf8_lossy(&o.stdout).trim().replace(char::is_whitespace, " ");
-                let stderr = String::from_utf8_lossy(&o.stderr).trim().replace(char::is_whitespace, " ");
-                if !stdout.is_empty() { stdout } else { stderr }
+                let stdout = String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .replace(char::is_whitespace, " ");
+                let stderr = String::from_utf8_lossy(&o.stderr)
+                    .trim()
+                    .replace(char::is_whitespace, " ");
+                if !stdout.is_empty() {
+                    stdout
+                } else {
+                    stderr
+                }
             })
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "not installed".to_string());
@@ -3927,7 +4627,11 @@ fn sys_info(_workspace: String, location: Option<String>) -> Result<String, Stri
         // Windows has no `date` binary; PowerShell formats the local time.
         #[cfg(windows)]
         let output = silent_child(std::process::Command::new("powershell"))
-            .args(["-NoProfile", "-Command", "Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'"])
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'",
+            ])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
@@ -3977,16 +4681,21 @@ fn sys_info(_workspace: String, location: Option<String>) -> Result<String, Stri
 /// WebView and must not become a generic URI launcher.
 fn is_external_open_url(raw: &str) -> bool {
     let lower = raw.to_ascii_lowercase();
-    lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("mailto:")
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
 }
 
 /// Reject unsupported URI schemes while allowing normal POSIX paths and
 /// Windows drive paths (`C:\\...`).
 fn has_unsupported_uri_scheme(raw: &str) -> bool {
-    let Some(colon) = raw.find(':') else { return false };
-    if colon == 1 && raw.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic()) {
+    let Some(colon) = raw.find(':') else {
+        return false;
+    };
+    if colon == 1
+        && raw
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_alphabetic())
+    {
         return false;
     }
     let scheme = &raw[..colon];
@@ -4008,7 +4717,9 @@ fn decode_file_uri_path(value: &str) -> Option<String> {
     let mut i = 0;
     while i < raw.len() {
         if raw[i] == b'%' {
-            if i + 2 >= raw.len() { return None; }
+            if i + 2 >= raw.len() {
+                return None;
+            }
             let hex = |digit: u8| -> Option<u8> {
                 match digit {
                     b'0'..=b'9' => Some(digit - b'0'),
@@ -4032,7 +4743,11 @@ fn parse_linux_icon_value(value: &str) -> Option<String> {
     let value = value.trim();
     let value = value.strip_prefix("GThemedIcon:").unwrap_or(value).trim();
     let value = value.strip_prefix("GFileIcon:").unwrap_or(value).trim();
-    let value = value.split(',').next()?.trim().trim_matches(['[', ']', '(', ')', '"']);
+    let value = value
+        .split(',')
+        .next()?
+        .trim()
+        .trim_matches(['[', ']', '(', ')', '"']);
     if let Some(path) = value.strip_prefix("file://") {
         let path = path.strip_prefix("localhost").unwrap_or(path);
         return decode_file_uri_path(path);
@@ -4059,13 +4774,28 @@ fn linux_theme_icon_path(name: &str) -> Option<PathBuf> {
 
     let names = [name, "text-x-generic", "application-octet-stream"];
     for root in roots {
-        if !root.is_dir() { continue; }
-        for entry in walkdir::WalkDir::new(&root).max_depth(6).into_iter().filter_map(Result::ok) {
-            if !entry.file_type().is_file() { continue; }
+        if !root.is_dir() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(&root)
+            .max_depth(6)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
             let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else { continue; };
-            if !names.iter().any(|candidate| *candidate == stem) { continue; }
-            if matches!(path.extension().and_then(|value| value.to_str()), Some("png" | "svg" | "svgz")) {
+            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !names.iter().any(|candidate| *candidate == stem) {
+                continue;
+            }
+            if matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("png" | "svg" | "svgz")
+            ) {
                 return Some(path.to_path_buf());
             }
         }
@@ -4076,11 +4806,19 @@ fn linux_theme_icon_path(name: &str) -> Option<PathBuf> {
 #[cfg(target_os = "linux")]
 fn linux_icon_data(path: &str) -> Result<String, String> {
     let output = std::process::Command::new("gio")
-        .args(["info", "--attributes=standard::icon", "--nofollow-symlinks", path])
+        .args([
+            "info",
+            "--attributes=standard::icon",
+            "--nofollow-symlinks",
+            path,
+        ])
         .output()
         .map_err(|e| format!("gio unavailable: {}", e))?;
     if !output.status.success() {
-        return Err(format!("gio info failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+        return Err(format!(
+            "gio info failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
     let icon_name = String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -4090,7 +4828,8 @@ fn linux_icon_data(path: &str) -> Result<String, String> {
     let icon_path = if icon_name.starts_with('/') {
         PathBuf::from(icon_name)
     } else {
-        linux_theme_icon_path(&icon_name).ok_or_else(|| format!("icon theme entry not found: {}", icon_name))?
+        linux_theme_icon_path(&icon_name)
+            .ok_or_else(|| format!("icon theme entry not found: {}", icon_name))?
     };
     let bytes = fs::read(&icon_path).map_err(|e| format!("read icon: {}", e))?;
     let mime = match icon_path.extension().and_then(|value| value.to_str()) {
@@ -4099,59 +4838,119 @@ fn linux_icon_data(path: &str) -> Result<String, String> {
         Some("webp") => "image/webp",
         _ => "image/png",
     };
-    Ok(format!("data:{};base64,{}", mime, base64::engine::general_purpose::STANDARD.encode(bytes)))
+    Ok(format!(
+        "data:{};base64,{}",
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 #[cfg(target_os = "windows")]
 fn windows_icon_data(path: &str) -> Result<String, String> {
-    let wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = std::ffi::OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let mut info: SHFILEINFOW = unsafe { std::mem::zeroed() };
-    let result = unsafe { SHGetFileInfoW(wide.as_ptr(), 0, &mut info, std::mem::size_of::<SHFILEINFOW>() as u32, SHGFI_ICON | SHGFI_LARGEICON) };
-    if result == 0 || info.hIcon.is_null() { return Err("SHGetFileInfoW returned no icon".to_string()); }
+    let result = unsafe {
+        SHGetFileInfoW(
+            wide.as_ptr(),
+            0,
+            &mut info,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if result == 0 || info.hIcon.is_null() {
+        return Err("SHGetFileInfoW returned no icon".to_string());
+    }
     let hicon = info.hIcon;
     let mut icon_info: ICONINFO = unsafe { std::mem::zeroed() };
     if unsafe { GetIconInfo(hicon, &mut icon_info) } == 0 {
-        unsafe { DestroyIcon(hicon); }
+        unsafe {
+            DestroyIcon(hicon);
+        }
         return Err("GetIconInfo failed".to_string());
     }
     let color_bitmap = icon_info.hbmColor;
     let mask_bitmap = icon_info.hbmMask;
     if color_bitmap.is_null() {
         unsafe {
-            if !mask_bitmap.is_null() { DeleteObject(mask_bitmap); }
+            if !mask_bitmap.is_null() {
+                DeleteObject(mask_bitmap);
+            }
             DestroyIcon(hicon);
         }
         return Err("GetIconInfo returned no color bitmap".to_string());
     }
     let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
-    let object_size = unsafe { GetObjectW(color_bitmap, std::mem::size_of::<BITMAP>() as i32, &mut bitmap as *mut BITMAP as *mut std::ffi::c_void) };
+    let object_size = unsafe {
+        GetObjectW(
+            color_bitmap,
+            std::mem::size_of::<BITMAP>() as i32,
+            &mut bitmap as *mut BITMAP as *mut std::ffi::c_void,
+        )
+    };
     let width = bitmap.bmWidth;
     let height = bitmap.bmHeight.abs();
     if object_size == 0 || width <= 0 || height <= 0 {
-        unsafe { DeleteObject(color_bitmap); if !mask_bitmap.is_null() { DeleteObject(mask_bitmap); } DestroyIcon(hicon); }
+        unsafe {
+            DeleteObject(color_bitmap);
+            if !mask_bitmap.is_null() {
+                DeleteObject(mask_bitmap);
+            }
+            DestroyIcon(hicon);
+        }
         return Err("invalid Windows icon bitmap".to_string());
     }
     let mut pixels = vec![0u8; width as usize * height as usize * 4];
     let mut bitmap_info: BITMAPINFO = unsafe { std::mem::zeroed() };
     bitmap_info.bmiHeader = BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-        biWidth: width, biHeight: -height, biPlanes: 1, biBitCount: 32,
-        biCompression: 0, biSizeImage: 0, biXPelsPerMeter: 0, biYPelsPerMeter: 0,
-        biClrUsed: 0, biClrImportant: 0,
+        biWidth: width,
+        biHeight: -height,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: 0,
+        biSizeImage: 0,
+        biXPelsPerMeter: 0,
+        biYPelsPerMeter: 0,
+        biClrUsed: 0,
+        biClrImportant: 0,
     };
     let hdc = unsafe { GetDC(std::ptr::null_mut()) };
     if hdc.is_null() {
-        unsafe { DeleteObject(color_bitmap); if !mask_bitmap.is_null() { DeleteObject(mask_bitmap); } DestroyIcon(hicon); }
+        unsafe {
+            DeleteObject(color_bitmap);
+            if !mask_bitmap.is_null() {
+                DeleteObject(mask_bitmap);
+            }
+            DestroyIcon(hicon);
+        }
         return Err("GetDC failed".to_string());
     }
-    let copied = unsafe { GetDIBits(hdc, color_bitmap, 0, height as u32, pixels.as_mut_ptr() as *mut std::ffi::c_void, &mut bitmap_info, DIB_RGB_COLORS) };
+    let copied = unsafe {
+        GetDIBits(
+            hdc,
+            color_bitmap,
+            0,
+            height as u32,
+            pixels.as_mut_ptr() as *mut std::ffi::c_void,
+            &mut bitmap_info,
+            DIB_RGB_COLORS,
+        )
+    };
     unsafe {
         ReleaseDC(std::ptr::null_mut(), hdc);
         DeleteObject(color_bitmap);
         DestroyIcon(hicon);
     }
     if copied == 0 {
-        unsafe { if !mask_bitmap.is_null() { DeleteObject(mask_bitmap); } }
+        unsafe {
+            if !mask_bitmap.is_null() {
+                DeleteObject(mask_bitmap);
+            }
+        }
         return Err("GetDIBits could not read the icon bitmap".to_string());
     }
     let mut rgba = pixels;
@@ -4213,44 +5012,71 @@ fn windows_icon_data(path: &str) -> Result<String, String> {
             }
         }
     }
-    unsafe { if !mask_bitmap.is_null() { DeleteObject(mask_bitmap); } }
-    for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+    unsafe {
+        if !mask_bitmap.is_null() {
+            DeleteObject(mask_bitmap);
+        }
+    }
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
 
     let mut png = Vec::new();
     {
         let mut encoder = Encoder::new(&mut png, width as u32, height as u32);
         encoder.set_color(ColorType::Rgba);
         encoder.set_depth(BitDepth::Eight);
-        let mut writer = encoder.write_header().map_err(|e| format!("PNG header: {}", e))?;
-        writer.write_image_data(&rgba).map_err(|e| format!("PNG data: {}", e))?;
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| format!("PNG header: {}", e))?;
+        writer
+            .write_image_data(&rgba)
+            .map_err(|e| format!("PNG data: {}", e))?;
     }
-    Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
+    Ok(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png)
+    ))
 }
 
 #[tauri::command]
 async fn get_file_icon(path: String) -> Result<String, String> {
     let path = path.trim().to_string();
-    if path.is_empty() { return Err("get_file_icon: path is empty".to_string()); }
+    if path.is_empty() {
+        return Err("get_file_icon: path is empty".to_string());
+    }
     #[cfg(target_os = "macos")]
     {
         let path_string = NSString::from_str(&path);
         let icon = NSWorkspace::sharedWorkspace().iconForFile(&path_string);
-        let tiff = icon.TIFFRepresentation().ok_or("icon has no TIFF representation")?;
+        let tiff = icon
+            .TIFFRepresentation()
+            .ok_or("icon has no TIFF representation")?;
         let bitmap = NSBitmapImageRep::imageRepWithData(&tiff).ok_or("unable to decode icon")?;
         let properties = NSDictionary::<NSString, AnyObject>::new();
-        let png = unsafe { bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties) }.ok_or("unable to encode icon")?;
-        return Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(unsafe { png.as_bytes_unchecked() })));
+        let png = unsafe {
+            bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
+        }
+        .ok_or("unable to encode icon")?;
+        return Ok(format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(unsafe { png.as_bytes_unchecked() })
+        ));
     }
     #[cfg(target_os = "linux")]
     {
-        return tokio::task::spawn_blocking(move || linux_icon_data(&path)).await.map_err(|e| format!("linux icon task failed: {}", e))?;
+        return tokio::task::spawn_blocking(move || linux_icon_data(&path))
+            .await
+            .map_err(|e| format!("linux icon task failed: {}", e))?;
     }
     #[cfg(target_os = "windows")]
     {
         return windows_icon_data(&path);
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    { Err("native icons are unavailable on this platform".to_string()) }
+    {
+        Err("native icons are unavailable on this platform".to_string())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -4259,10 +5085,22 @@ mod linux_icon_tests {
     use super::parse_linux_icon_value;
     #[test]
     fn parses_gio_icon_values() {
-        assert_eq!(parse_linux_icon_value("GThemedIcon: [text-x-generic, text-plain]"), Some("text-x-generic".to_string()));
-        assert_eq!(parse_linux_icon_value("GFileIcon: /usr/share/pixmaps/file.png"), Some("/usr/share/pixmaps/file.png".to_string()));
-        assert_eq!(parse_linux_icon_value("GFileIcon: file:///tmp/file%20name.png"), Some("/tmp/file name.png".to_string()));
-        assert_eq!(parse_linux_icon_value("GFileIcon: file://localhost/tmp/file.png"), Some("/tmp/file.png".to_string()));
+        assert_eq!(
+            parse_linux_icon_value("GThemedIcon: [text-x-generic, text-plain]"),
+            Some("text-x-generic".to_string())
+        );
+        assert_eq!(
+            parse_linux_icon_value("GFileIcon: /usr/share/pixmaps/file.png"),
+            Some("/usr/share/pixmaps/file.png".to_string())
+        );
+        assert_eq!(
+            parse_linux_icon_value("GFileIcon: file:///tmp/file%20name.png"),
+            Some("/tmp/file name.png".to_string())
+        );
+        assert_eq!(
+            parse_linux_icon_value("GFileIcon: file://localhost/tmp/file.png"),
+            Some("/tmp/file.png".to_string())
+        );
     }
 }
 
@@ -4280,7 +5118,6 @@ async fn open_path(path: String) -> Result<(), String> {
     }
 
     let is_url = is_external_open_url(raw);
-
 
     let mut expanded = raw.to_string();
     if expanded.starts_with("~/") {
@@ -4306,9 +5143,15 @@ async fn open_path(path: String) -> Result<(), String> {
     // Async so a slow launcher never blocks the main thread. Keep the command
     // path explicit for packaged apps launched from Finder.
     #[cfg(target_os = "macos")]
-    let status = TokioCommand::new("/usr/bin/open").arg(&target).status().await;
+    let status = TokioCommand::new("/usr/bin/open")
+        .arg(&target)
+        .status()
+        .await;
     #[cfg(target_os = "linux")]
-    let status = TokioCommand::new("/usr/bin/xdg-open").arg(&target).status().await;
+    let status = TokioCommand::new("/usr/bin/xdg-open")
+        .arg(&target)
+        .status()
+        .await;
     // explorer.exe is fire-and-forget and returns exit code 1 even on success,
     // so `cmd /C start "" <target>` is used instead: it hands files, folders
     // and URLs to the default app with a reliable exit code.
@@ -4341,30 +5184,69 @@ pub fn run() {
         .manage(ChatStreamRegistry::new(StdMutex::new(BTreeMap::new())))
         .invoke_handler(tauri::generate_handler![
             // File tools
-            read_file, write_file, write_file_stream, edit_file, search_files, list_files, create_directory, diff_files, glob_files, replace_files,
-            save_file, save_file_binary,
+            read_file,
+            path_info,
+            remove_path,
+            write_file,
+            write_file_stream,
+            edit_file,
+            search_files,
+            code_searcher,
+            list_files,
+            create_directory,
+            diff_files,
+            glob_files,
+            replace_files,
+            save_file,
+            save_file_binary,
             // System info
-            sys_info, detect_location,
+            sys_info,
+            detect_location,
             // Web tools
-            web_search, web_fetch,
+            web_search,
+            web_fetch,
             // Command execution
-            execute_command, execute_command_stream, kill_command,
+            execute_command,
+            execute_command_stream,
+            kill_command,
             // Git tools
-            git_diff, git_log, git_status,
+            git_diff,
+            git_log,
+            git_status,
             // MCP subprocess
-            spawn_mcp, mcp_request, mcp_notify, mcp_shutdown, mcp_list,
+            spawn_mcp,
+            mcp_request,
+            mcp_notify,
+            mcp_shutdown,
+            mcp_list,
             // Application temporary workspace + secret management
-            get_tmp_workspace, save_paste_file, save_paste_image, import_dropped_file,
-            tmp_paste_usage, cleanup_tmp_pastes,
-            secret_get, secret_set, secret_delete, secret_list,
+            get_tmp_workspace,
+            save_paste_file,
+            save_paste_image,
+            import_dropped_file,
+            tmp_paste_usage,
+            cleanup_tmp_pastes,
+            secret_get,
+            secret_set,
+            secret_delete,
+            secret_list,
             // Open path (clickable transcript paths)
             open_path,
             // LLM transport
-            chat_stream, cancel_chat_stream,
+            chat_stream,
+            cancel_chat_stream,
             // Session persistence
-            save_session, load_session, load_last_session, load_session_list, save_session_workspace, delete_session, delete_all_sessions,
+            save_session,
+            load_session,
+            load_last_session,
+            load_session_list,
+            save_session_workspace,
+            delete_session,
+            delete_all_sessions,
             // Per-session usage stats
-            save_session_stats, load_session_stats, load_all_session_stats,
+            save_session_stats,
+            load_session_stats,
+            load_all_session_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running pure");
@@ -4413,13 +5295,19 @@ mod mcp_subprocess_tests {
 
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
         let resp = mcp_call_inner(&handle, request).await.unwrap();
-        assert_eq!(resp, request, "call must round-trip the request line verbatim");
+        assert_eq!(
+            resp, request,
+            "call must round-trip the request line verbatim"
+        );
 
         // Notification path: write-only, must NOT block waiting for a
         // response line (the echo server sends nothing back for a notify).
         {
             let mut stdin = handle.stdin.lock().await;
-            stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"x\"}\n").await.unwrap();
+            stdin
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"x\"}\n")
+                .await
+                .unwrap();
             stdin.flush().await.unwrap();
         }
 
@@ -4433,8 +5321,16 @@ mod mcp_subprocess_tests {
         // path helper + env forwarding against a real child process.
         let home = std::env::var("HOME").unwrap_or_default();
         let path = augmented_mcp_path(Some("/custom/bin"));
-        assert!(path.starts_with(&format!("{}/.bun/bin", home)), "bun dir must be prepended: {}", path);
-        assert!(path.contains("/custom/bin"), "existing PATH must be preserved: {}", path);
+        assert!(
+            path.starts_with(&format!("{}/.bun/bin", home)),
+            "bun dir must be prepended: {}",
+            path
+        );
+        assert!(
+            path.contains("/custom/bin"),
+            "existing PATH must be preserved: {}",
+            path
+        );
 
         let mut cmd = TokioCommand::new("sh");
         cmd.arg("-c").arg("printf '%s' \"$PURE_TEST_VAR $PATH\"");
@@ -4442,8 +5338,16 @@ mod mcp_subprocess_tests {
         cmd.env("PATH", augmented_mcp_path(None));
         let out = cmd.output().await.unwrap();
         let text = String::from_utf8_lossy(&out.stdout).to_string();
-        assert!(text.starts_with("hello "), "env var must reach the child: {}", text);
-        assert!(text.contains(&format!("{}/.bun/bin", home)), "PATH augmentation missing: {}", text);
+        assert!(
+            text.starts_with("hello "),
+            "env var must reach the child: {}",
+            text
+        );
+        assert!(
+            text.contains(&format!("{}/.bun/bin", home)),
+            "PATH augmentation missing: {}",
+            text
+        );
     }
 }
 
@@ -4517,7 +5421,9 @@ mod save_paste_file_tests {
     fn save_file_binary_rejects_bad_base64_and_never_writes() {
         let dir = temp_paste_dir("save-file-binary-bad");
         let path = dir.join("bad.png");
-        assert!(save_file_binary(path.to_string_lossy().to_string(), "@@nope@@".to_string()).is_err());
+        assert!(
+            save_file_binary(path.to_string_lossy().to_string(), "@@nope@@".to_string()).is_err()
+        );
         assert!(!path.exists());
     }
 
@@ -4549,10 +5455,16 @@ mod import_dropped_file_tests {
         let record = import_dropped_file_inner(&tmp_dir, &source).unwrap();
         assert_eq!(record["kind"], "text");
         assert_eq!(record["content"], "hello dropped file");
-        assert_eq!(fs::read_to_string(record["path"].as_str().unwrap()).unwrap(), "hello dropped file");
+        assert_eq!(
+            fs::read_to_string(record["path"].as_str().unwrap()).unwrap(),
+            "hello dropped file"
+        );
         fs::write(tmp_dir.join("notes.txt"), "existing").unwrap();
         let second = import_dropped_file_inner(&tmp_dir, &source).unwrap();
-        assert_ne!(second["path"], tmp_dir.join("notes.txt").to_string_lossy().to_string());
+        assert_ne!(
+            second["path"],
+            tmp_dir.join("notes.txt").to_string_lossy().to_string()
+        );
         let _ = fs::remove_dir_all(source_dir);
         let _ = fs::remove_dir_all(tmp_dir);
     }
@@ -4565,8 +5477,14 @@ mod import_dropped_file_tests {
         fs::write(&source, [0x89, b'P', b'N', b'G']).unwrap();
         let record = import_dropped_file_inner(&tmp_dir, &source).unwrap();
         assert_eq!(record["kind"], "image");
-        assert!(record["dataUrl"].as_str().unwrap().starts_with("data:image/png;base64,"));
-        assert_eq!(fs::read(record["path"].as_str().unwrap()).unwrap(), [0x89, b'P', b'N', b'G']);
+        assert!(record["dataUrl"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        assert_eq!(
+            fs::read(record["path"].as_str().unwrap()).unwrap(),
+            [0x89, b'P', b'N', b'G']
+        );
         let _ = fs::remove_dir_all(source_dir);
         let _ = fs::remove_dir_all(tmp_dir);
     }
@@ -4607,7 +5525,10 @@ mod import_dropped_file_tests {
     fn imports_documents_without_parsing_content() {
         let source_dir = temp_import_dir("doc-source");
         let tmp_dir = temp_import_dir("doc-dest");
-        for (name, bytes) in [("report.pdf", b"%PDF-1.4 fake".as_slice()), ("plan.docx", b"PK\x03\x04 docx")] {
+        for (name, bytes) in [
+            ("report.pdf", b"%PDF-1.4 fake".as_slice()),
+            ("plan.docx", b"PK\x03\x04 docx"),
+        ] {
             let source = source_dir.join(name);
             fs::write(&source, bytes).unwrap();
             let record = import_dropped_file_inner(&tmp_dir, &source).unwrap();
@@ -4632,7 +5553,6 @@ mod import_dropped_file_tests {
         let _ = fs::remove_dir_all(source_dir);
         let _ = fs::remove_dir_all(tmp_dir);
     }
-
 }
 
 #[cfg(test)]
@@ -4641,7 +5561,8 @@ mod tmp_cleanup_tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn temp_cleanup_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("pure-cleanup-{}-{}", name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("pure-cleanup-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -4651,8 +5572,14 @@ mod tmp_cleanup_tests {
     #[cfg(unix)]
     fn backdate_file(path: &std::path::Path, days: i64) {
         use std::ffi::CString;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as libc::time_t;
-        let ts = libc::timespec { tv_sec: now - days * 86400, tv_nsec: 0 };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as libc::time_t;
+        let ts = libc::timespec {
+            tv_sec: now - days * 86400,
+            tv_nsec: 0,
+        };
         let times = [ts, ts];
         let cpath = CString::new(path.to_str().unwrap()).unwrap();
         unsafe {

@@ -117,9 +117,30 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (!id.includes('node_modules')) return undefined;
-          if (id.includes('/katex')) return 'katex';
-          if (id.includes('/highlight.js')) return 'highlight';
+          const normalizedId = id.replaceAll('\\\\', '/');
+          if (!normalizedId.includes('/node_modules/')) return undefined;
+
+          // Keep the initial app chunk focused on application code. These
+          // libraries are either used by the markdown renderer or only after a
+          // diagram/chart is requested, so stable vendor boundaries improve
+          // cache reuse and prevent unrelated UI changes from invalidating
+          // them.
+          if (normalizedId.includes('/echarts/') || normalizedId.includes('/zrender/')) {
+            return 'echarts-vendor';
+          }
+          if (normalizedId.includes('/@anthropic-ai/sdk/') || normalizedId.includes('/openai/')) {
+            return 'llm-vendor';
+          }
+          if (normalizedId.includes('/@tauri-apps/')) return 'tauri-vendor';
+          if (normalizedId.includes('/marked/')
+            || normalizedId.includes('/dompurify/')
+            || normalizedId.includes('/plantuml-encoder/')) {
+            return 'markdown-vendor';
+          }
+          if (normalizedId.includes('/@huggingface/transformers/')) return 'transformers-runtime';
+          if (normalizedId.includes('/onnxruntime-web/')) return 'onnxruntime-web';
+          if (normalizedId.includes('/katex/')) return 'katex';
+          if (normalizedId.includes('/highlight.js/')) return 'highlight';
           return undefined;
         },
       },

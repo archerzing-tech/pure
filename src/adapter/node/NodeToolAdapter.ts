@@ -5,21 +5,28 @@
 
 import { basename, dirname, isAbsolute, join, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
 import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
+import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
+import { isPublicToolName } from '../../shared/toolDefs';
+import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotEntry, WorkspaceSnapshotPort } from '../../shared/workspaceSnapshot';
 
 /** Windows has no POSIX shell (`sh`) or `diff` binary — cmd.exe / Git for
  * Windows provide the equivalents. Module-level so every handler branches
  * consistently. */
 const IS_WINDOWS = process.platform === 'win32';
+const DEFAULT_MAX_LIST_RESULTS = 2000;
+const ABSOLUTE_MAX_LIST_RESULTS = 5000;
 
 export interface NodeToolConfig {
   workspace: string;
+  sessionId?: string;
   commandTimeout?: number;
   maxFileSize?: number;
+  maxSnapshotBytes?: number;
   /**
    * User-configured location/city (CLI: PURE_LOCATION / PURE_CITY env var).
    * Reported by sys_info() as the location baseline for answers that depend
@@ -32,23 +39,36 @@ export class NodeToolAdapter implements ToolAdapter {
   private workspace: string;
   private commandTimeout: number;
   private maxFileSize: number;
+  private maxSnapshotBytes: number;
   private location: string;
+  private sessionId: string;
+  private latestWriteBatch: WorkspaceSnapshotBatch | null = null;
+  private snapshotSequence = 0;
 
   private tools: ToolDefinition[] = [...BUILT_IN_TOOL_DEFS];
 
   constructor(config: NodeToolConfig) {
     this.workspace = pathResolve(config.workspace);
+    this.sessionId = config.sessionId ?? '';
     this.commandTimeout = config.commandTimeout ?? 30000;
     this.maxFileSize = config.maxFileSize ?? 1_048_576; // 1MB
+    this.maxSnapshotBytes = config.maxSnapshotBytes ?? 8 * 1024 * 1024;
     this.location = (config.location ?? '').trim();
   }
 
   getTools(): ToolDefinition[] {
-    return this.tools;
+    return this.tools.filter((tool) => isPublicToolName(tool.name));
   }
 
   getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined {
     return TOOL_METADATA[toolName];
+  }
+
+  getSnapshotPort(): WorkspaceSnapshotPort {
+    return {
+      getLatestWriteBatch: () => this.latestWriteBatch,
+      undoLastWriteBatch: () => this.undoLastWriteBatch(),
+    };
   }
 
   async execute(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
@@ -65,6 +85,9 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'execute_command': return await this.handleExecuteCommand(args, signal, start);
         case 'create_directory': return await this.handleCreateDirectory(args, start);
         case 'diff_files': return await this.handleDiffFiles(args, start);
+        case 'researcher_web': return await this.handleResearcherWeb(args, signal, start);
+        case 'researcher_docs': return await this.handleResearcherDocs(args, signal, start);
+        case 'code_searcher': return await this.handleCodeSearcher(args, signal, start);
         case 'web_search': return await this.handleWebSearch(args, start);
         case 'web_fetch': return await this.handleWebFetch(args, signal, start);
         case 'glob_files': return await this.handleGlobFiles(args, start);
@@ -116,8 +139,10 @@ export class NodeToolAdapter implements ToolAdapter {
   }
 
   private async handleWriteFile(args: Record<string, unknown>, start: number): Promise<ToolResult> {
-    const path = this.resolve(String(args.path));
+    const pathArg = String(args.path);
+    const path = this.resolve(pathArg);
     const content = String(args.content);
+    const batch = await this.captureWriteBatch('write_file', [pathArg]);
 
     // Ensure parent directory exists
     const dir = dirname(path);
@@ -126,18 +151,20 @@ export class NodeToolAdapter implements ToolAdapter {
     }
 
     await Bun.write(path, content);
+    const undoAvailable = await this.tryFinishWriteBatch(batch, [pathArg]);
 
     return {
       id: `tool_${Date.now()}`,
       toolName: 'write_file',
-      result: `Wrote ${content.length} bytes to ${String(args.path)}`,
+      result: `Wrote ${content.length} bytes to ${String(args.path)}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`,
       success: true,
       duration: Date.now() - start,
     };
   }
 
   private async handleEditFile(args: Record<string, unknown>, start: number): Promise<ToolResult> {
-    const path = this.resolve(String(args.path));
+    const pathArg = String(args.path);
+    const path = this.resolve(pathArg);
     const oldStr = String(args.oldString);
     const newStr = String(args.newString);
     const allowMultiple = Boolean(args.allowMultiple);
@@ -148,23 +175,28 @@ export class NodeToolAdapter implements ToolAdapter {
     }
 
     const text = await file.text();
-    const idx = text.indexOf(oldStr);
-    if (idx === -1) {
-      return this.fail(null!, start, `String not found in file: ${oldStr.slice(0, 100)}`);
+    const match = findEditMatch(text, oldStr);
+    if (!match) {
+      return this.fail(null!, start, editStringNotFoundError(String(args.path), oldStr), 'edit_file');
     }
 
-    const occurrences = text.split(oldStr).length - 1;
+    const occurrences = match.normalizedText.split(match.normalizedOld).length - 1;
     if (occurrences > 1 && !allowMultiple) {
       return this.fail(null!, start, `Found ${occurrences} occurrences of the string. Set allowMultiple:true to replace all, or provide more context to narrow the match.`);
     }
 
-    const newText = allowMultiple ? text.replaceAll(oldStr, newStr) : text.replace(oldStr, newStr);
+    const replacement = match.lineEnding === 'crlf' ? newStr.replace(/\r?\n/g, '\r\n') : newStr.replace(/\r\n/g, '\n');
+    const newText = allowMultiple
+      ? match.text.replaceAll(match.old, replacement)
+      : match.text.slice(0, match.index) + replacement + match.text.slice(match.index + match.old.length);
+    const batch = await this.captureWriteBatch('edit_file', [pathArg]);
     await Bun.write(path, newText);
+    const undoAvailable = await this.tryFinishWriteBatch(batch, [pathArg]);
 
     return {
       id: `tool_${Date.now()}`,
       toolName: 'edit_file',
-      result: `Replaced ${allowMultiple ? occurrences : 1} occurrence(s) in ${String(args.path)}`,
+      result: `Replaced ${allowMultiple ? occurrences : 1} occurrence(s) in ${String(args.path)}${match.lineEnding === 'crlf' ? ' (matched CRLF line endings)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`,
       success: true,
       duration: Date.now() - start,
     };
@@ -222,17 +254,31 @@ export class NodeToolAdapter implements ToolAdapter {
       return this.fail(null!, start, `Directory not found: ${String(args.path || '.')}`);
     }
 
+    const requestedMax = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults)
+      ? Math.floor(args.maxResults)
+      : DEFAULT_MAX_LIST_RESULTS;
+    const maxResults = Math.min(Math.max(1, requestedMax), ABSOLUTE_MAX_LIST_RESULTS);
     const items: string[] = [];
     const glob = new Bun.Glob(recursive ? '**/*' : '*');
+    let truncated = false;
 
     for await (const entry of glob.scan({ cwd: dirPath, absolute: false, onlyFiles: false })) {
+      if (items.length >= maxResults) {
+        truncated = true;
+        break;
+      }
       items.push(entry);
     }
 
+    items.sort();
+    const listing = items.length > 0 ? items.join('\n') : '(empty directory)';
+    const result = truncated
+      ? `${listing}\n\n[截断] 仅显示前 ${maxResults} 项；目录还有更多内容，请缩小 path 或使用 search_files/glob_files。`
+      : listing;
     return {
       id: `tool_${Date.now()}`,
       toolName: 'list_files',
-      result: items.length > 0 ? items.sort().join('\n') : '(empty directory)',
+      result,
       success: true,
       duration: Date.now() - start,
     };
@@ -290,9 +336,12 @@ export class NodeToolAdapter implements ToolAdapter {
   }
 
   private async handleCreateDirectory(args: Record<string, unknown>, start: number): Promise<ToolResult> {
-    const dirPath = this.resolve(String(args.path));
+    const pathArg = String(args.path);
+    const dirPath = this.resolve(pathArg);
+    const batch = await this.captureWriteBatch('create_directory', [pathArg]);
 
     await mkdir(dirPath, { recursive: true });
+    if (!batch.entries[0]?.existed) await this.tryFinishWriteBatch(batch, [pathArg]);
 
     return {
       id: `tool_${Date.now()}`,
@@ -349,6 +398,214 @@ export class NodeToolAdapter implements ToolAdapter {
     }
 
     return this.fail(null!, start, stderr.trim() || `diff failed with exit code ${proc.exitCode}`);
+  }
+
+  private async handleResearcherWeb(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
+    const prompt = String(args.prompt ?? args.query ?? '').trim();
+    return this.runResearch(prompt, 'researcher_web', args, signal, start);
+  }
+
+  private async handleResearcherDocs(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
+    const library = String(args.library ?? '').trim();
+    const topic = String(args.topic ?? '').trim();
+    const version = typeof args.version === 'string' ? args.version.trim() : '';
+    const query = [library, topic, version, 'official documentation API reference'].filter(Boolean).join(' ');
+    return this.runResearch(query, 'researcher_docs', args, signal, start, { library, topic, version });
+  }
+
+  private async runResearch(
+    query: string,
+    kind: 'researcher_web' | 'researcher_docs',
+    args: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    start: number,
+    context: { library?: string; topic?: string; version?: string } = {},
+  ): Promise<ToolResult> {
+    if (!query) return this.fail(null!, start, 'Research prompt/query must not be empty', kind);
+    const requestedSources = typeof args.maxSources === 'number' && Number.isFinite(args.maxSources)
+      ? Math.min(8, Math.max(1, Math.floor(args.maxSources)))
+      : 5;
+    const maxChars = typeof args.maxCharsPerSource === 'number' && Number.isFinite(args.maxCharsPerSource)
+      ? Math.min(12000, Math.max(500, Math.floor(args.maxCharsPerSource)))
+      : 4000;
+    const allowedDomains = Array.isArray(args.allowedDomains)
+      ? args.allowedDomains.map(String).map((domain) => domain.trim().toLowerCase()).filter(Boolean)
+      : [];
+    const search = await this.handleWebSearch({ query, maxResults: Math.min(20, Math.max(requestedSources, requestedSources * 2)) }, start);
+    if (!search.success) return { ...search, toolName: kind };
+
+    const rawSources = parseWebSearchText(typeof search.result === 'string' ? search.result : '');
+    const filteredSources = filterResearchSources(rawSources, allowedDomains);
+    const filtered = rawSources.length - filteredSources.length;
+    let sources = filteredSources;
+    const failed: string[] = [];
+    const fetchContent = args.fetchContent !== false;
+    const selected = sources.slice(0, requestedSources);
+    if (fetchContent) {
+      const enriched = await Promise.all(selected.map(async (source): Promise<ResearchSource> => {
+        const page = await this.handleWebFetch({ url: source.url, maxChars }, signal, Date.now());
+        if (!page.success) {
+          failed.push(`${source.url}: ${page.error ?? 'fetch failed'}`);
+          return source;
+        }
+        return { ...source, content: typeof page.result === 'string' ? page.result : String(page.result ?? '') };
+      }))
+      .catch((error) => {
+        failed.push(error instanceof Error ? error.message : String(error));
+        return selected;
+      });
+      sources = enriched;
+    } else {
+      sources = selected;
+    }
+
+    if (sources.length === 0) {
+      const detail = allowedDomains.length > 0
+        ? `No usable research sources matched the allowed domains: ${allowedDomains.join(', ')}`
+        : 'No usable research sources were returned by the available search backends';
+      return this.fail(null!, start, `${detail}. Rephrase the query or broaden the allowed domain list; do not repeat the unchanged query.`, kind);
+    }
+
+    const result = makeResearchPayload(kind, query, sources, {
+      failed,
+      filtered,
+      officialVerified: kind === 'researcher_docs'
+        ? sources.some((source) => isOfficialDocumentationSource(context.library ?? '', source.url))
+        : undefined,
+      versionMatched: kind === 'researcher_docs' && context.version
+        ? sources.some((source) => `${source.url} ${source.snippet} ${source.content ?? ''}`.includes(context.version!))
+        : kind === 'researcher_docs',
+      truncated: filteredSources.length > selected.length,
+      ...context,
+    });
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: kind,
+      result,
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
+  private async handleCodeSearcher(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
+    const query = String(args.query ?? args.pattern ?? '').trim();
+    if (!query) return this.fail(null!, start, 'code_searcher query must not be empty', 'code_searcher');
+    const searchDir = this.resolve(String(args.path || '.'));
+    const workspaceRoot = realpathSync(this.workspace);
+    const scope = pathRelative(workspaceRoot, searchDir) || '.';
+    const perFile = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults)
+      ? Math.min(100, Math.max(1, Math.floor(args.maxResults)))
+      : 15;
+    const globalMax = typeof args.globalMaxResults === 'number' && Number.isFinite(args.globalMaxResults)
+      ? Math.min(1000, Math.max(1, Math.floor(args.globalMaxResults)))
+      : 250;
+    const timeoutSeconds = typeof args.timeoutSeconds === 'number' && Number.isFinite(args.timeoutSeconds)
+      ? Math.min(30, Math.max(1, args.timeoutSeconds))
+      : 10;
+    const rgArgs = ['--json', '--no-config', '--line-number', '--color', 'never', '--hidden', '--max-filesize', '8M', '--glob', '!.git/**', '--glob', '!node_modules/**', '--glob', '!dist/**', '--glob', '!build/**', '--glob', '!target/**'];
+    if (args.caseSensitive === false) rgArgs.push('--ignore-case');
+    if (Array.isArray(args.globs)) {
+      for (const glob of args.globs) {
+        if (typeof glob === 'string' && glob.trim()) rgArgs.push('--glob', glob.trim());
+      }
+    }
+    rgArgs.push('--', query, scope);
+
+    const abort = createAbortController(signal, timeoutSeconds * 1000);
+    try {
+      const proc = Bun.spawn(['rg', ...rgArgs], { cwd: this.workspace, stdout: 'pipe', stderr: 'pipe', signal: abort.signal });
+      const matches: Array<{ path: string; line: number; column?: number; text: string }> = [];
+      const perFileCounts = new Map<string, number>();
+      let truncated = false;
+      let buffer = '';
+      const decoder = new TextDecoder();
+      const consumeLine = (line: string): void => {
+        if (!line || truncated) return;
+        let event: any;
+        try { event = JSON.parse(line); } catch { return; }
+        if (event.type !== 'match') return;
+        const data = event.data ?? {};
+        const rawPath = typeof data.path?.text === 'string' ? data.path.text : '';
+        if (!rawPath) return;
+        const rawRelativePath = isAbsolute(rawPath) ? pathRelative(workspaceRoot, rawPath) : rawPath;
+        const relativePath = rawRelativePath.startsWith('./') ? rawRelativePath.slice(2) : rawRelativePath;
+        const count = perFileCounts.get(relativePath) ?? 0;
+        if (count >= perFile) {
+          truncated = true;
+          abort.abort();
+          return;
+        }
+        perFileCounts.set(relativePath, count + 1);
+        const submatch = Array.isArray(data.submatches) ? data.submatches[0] : undefined;
+        matches.push({
+          path: relativePath,
+          line: Number(data.line_number ?? 0),
+          ...(typeof submatch?.start === 'number' ? { column: submatch.start + 1 } : {}),
+          text: typeof data.lines?.text === 'string' ? data.lines.text.replace(/\n$/, '') : '',
+        });
+        if (matches.length >= globalMax) {
+          truncated = true;
+          abort.abort();
+        }
+      };
+
+      const reader = proc.stdout.getReader();
+      try {
+        while (!truncated) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) {
+            consumeLine(line);
+            if (truncated) break;
+          }
+        }
+        if (!truncated) {
+          buffer += decoder.decode();
+          consumeLine(buffer);
+        }
+      } catch (error: any) {
+        if (!truncated) throw error;
+      } finally {
+        reader.releaseLock();
+      }
+
+      const stderr = await new Response(proc.stderr).text();
+      await proc.exited;
+      const exitCode = proc.exitCode ?? -1;
+      if (!truncated && exitCode !== 0 && exitCode !== 1) {
+        return this.fail(null!, start, stderr.trim() || `rg failed with exit code ${exitCode}`, 'code_searcher');
+      }
+
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'code_searcher',
+        result: JSON.stringify({
+          kind: 'code_search',
+          query,
+          scope,
+          matches,
+          truncated,
+          diagnostics: [],
+          fileSizeLimitBytes: 8 * 1024 * 1024,
+          searchedAt: new Date().toISOString(),
+        }),
+        success: true,
+        duration: Date.now() - start,
+      };
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        const message = signal?.aborted
+          ? 'code_searcher cancelled by the caller'
+          : `code_searcher timed out after ${timeoutSeconds}s`;
+        return this.fail(null!, start, message, 'code_searcher');
+      }
+      return this.fail(null!, start, error?.message ?? 'rg is unavailable; install ripgrep or use the legacy search tool', 'code_searcher');
+    } finally {
+      abort.cleanup();
+    }
   }
 
   private async handleWebSearch(args: Record<string, unknown>, start: number): Promise<ToolResult> {
@@ -596,6 +853,7 @@ export class NodeToolAdapter implements ToolAdapter {
     const results: string[] = [];
     let totalOccurrences = 0;
     let errors = 0;
+    const batch = await this.captureWriteBatch('replace_files', files);
 
     for (const filePath of files) {
       try {
@@ -632,11 +890,12 @@ export class NodeToolAdapter implements ToolAdapter {
     }
 
     const summary = `${results.length} file(s) processed, ${totalOccurrences} replacement(s), ${errors} error(s)`;
+    const undoAvailable = totalOccurrences > 0 ? await this.tryFinishWriteBatch(batch, files) : false;
 
     return {
       id: `tool_${Date.now()}`,
       toolName: 'replace_files',
-      result: `${summary}\n${results.join('\n')}`,
+      result: `${summary}${totalOccurrences > 0 && !undoAvailable ? ' (当前写入未提供撤销快照)' : ''}\n${results.join('\n')}`,
       success: errors === 0,
       duration: Date.now() - start,
     };
@@ -705,6 +964,143 @@ export class NodeToolAdapter implements ToolAdapter {
     };
   }
 
+  private async captureWriteBatch(toolName: string, paths: string[]): Promise<WorkspaceSnapshotBatch> {
+    this.latestWriteBatch = null;
+    const entries: WorkspaceSnapshotEntry[] = [];
+    for (const path of [...new Set(paths)]) {
+      if (hasSymlinkComponent(this.workspace, path)) {
+        throw new Error(`Snapshot refuses symlink path: ${path}`);
+      }
+      const full = this.resolve(path);
+      if (!existsSync(full)) {
+        entries.push({ path, existed: false, kind: 'file' });
+        continue;
+      }
+      const stat = lstatSync(full);
+      if (stat.isDirectory()) {
+        entries.push({ path, existed: true, kind: 'directory' });
+      } else {
+        const content = await Bun.file(full).text();
+        if (new TextEncoder().encode(content).byteLength > this.maxSnapshotBytes) {
+          throw new Error(`Snapshot too large for ${path}; write was not performed.`);
+        }
+        entries.push({ path, existed: true, kind: 'file', content });
+      }
+    }
+    return {
+      id: `snapshot_${this.sessionId || 'session'}_${++this.snapshotSequence}`,
+      sessionId: this.sessionId,
+      workspace: this.workspace,
+      toolName,
+      createdAt: Date.now(),
+      entries,
+    };
+  }
+
+  private async finishWriteBatch(batch: WorkspaceSnapshotBatch, changedPaths: string[]): Promise<boolean> {
+    const changed = new Set(changedPaths);
+    const finished: WorkspaceSnapshotEntry[] = [];
+    for (const entry of batch.entries) {
+      if (!changed.has(entry.path)) continue;
+      const full = this.resolve(entry.path);
+      if (existsSync(full) && !lstatSync(full).isDirectory()) {
+        entry.afterContent = await Bun.file(full).text();
+        if (new TextEncoder().encode(entry.afterContent).byteLength > this.maxSnapshotBytes) continue;
+        if (!entry.existed || entry.afterContent !== entry.content) finished.push(entry);
+      } else if (!entry.existed && existsSync(full)) {
+        finished.push(entry);
+      }
+    }
+    batch.entries = finished;
+    if (finished.length > 0) this.latestWriteBatch = batch;
+    return finished.length > 0;
+  }
+
+  private async tryFinishWriteBatch(batch: WorkspaceSnapshotBatch, changedPaths: string[]): Promise<boolean> {
+    try {
+      return await this.finishWriteBatch(batch, changedPaths);
+    } catch {
+      return false;
+    }
+  }
+
+  private async undoLastWriteBatch(): Promise<WorkspaceRestoreResult> {
+    const batch = this.latestWriteBatch;
+    if (!batch) {
+      return { restored: false, restoredPaths: [], removedPaths: [], conflicts: [], message: '没有可撤销的写入。' };
+    }
+    this.latestWriteBatch = null;
+    const restoredPaths: string[] = [];
+    const removedPaths: string[] = [];
+    const conflicts: string[] = [];
+    for (const entry of [...batch.entries].reverse()) {
+      try {
+      if (hasSymlinkComponent(this.workspace, entry.path)) {
+        conflicts.push(entry.path);
+        continue;
+      }
+      let full: string;
+      try { full = this.resolve(entry.path); } catch { conflicts.push(entry.path); continue; }
+      const exists = existsSync(full);
+      const currentIsDirectory = exists && lstatSync(full).isDirectory();
+      if (!entry.existed) {
+        if (!exists) continue;
+        if ((entry.kind === 'directory') !== currentIsDirectory) {
+          conflicts.push(entry.path);
+          continue;
+        }
+        if (entry.kind === 'directory') {
+          try { await rm(full, { recursive: false }); removedPaths.push(entry.path); }
+          catch { conflicts.push(entry.path); }
+          continue;
+        }
+        if (entry.afterContent !== undefined && (await Bun.file(full).text()) !== entry.afterContent) {
+          conflicts.push(entry.path);
+          continue;
+        }
+        try { await rm(full); removedPaths.push(entry.path); } catch { conflicts.push(entry.path); }
+        continue;
+      }
+      if (entry.kind === 'directory') {
+        if (!exists || !currentIsDirectory) {
+          conflicts.push(entry.path);
+          continue;
+        }
+        await mkdir(full, { recursive: true });
+        restoredPaths.push(entry.path);
+        continue;
+      }
+      if (!exists || currentIsDirectory) {
+        conflicts.push(entry.path);
+        continue;
+      }
+      if (entry.afterContent !== undefined && (await Bun.file(full).text()) !== entry.afterContent) {
+        conflicts.push(entry.path);
+        continue;
+      }
+      await mkdir(dirname(full), { recursive: true });
+      await Bun.write(full, entry.content ?? '');
+      restoredPaths.push(entry.path);
+      } catch {
+        conflicts.push(entry.path);
+      }
+    }
+    this.latestWriteBatch = conflicts.length > 0
+      ? { ...batch, entries: batch.entries.filter((entry) => conflicts.includes(entry.path)) }
+      : null;
+    const restored = conflicts.length === 0;
+    return {
+      restored,
+      batchId: batch.id,
+      restoredPaths,
+      removedPaths,
+      conflicts,
+      message: restored
+        ? `已撤销最近一次写入：${[...restoredPaths, ...removedPaths].join('、') || '无文件变化'}`
+        : `撤销遇到并发修改，未覆盖：${conflicts.join('、')}`,
+    };
+  }
+
   // ── Helpers ──
 
   private resolve(filePath: string): string {
@@ -742,15 +1138,75 @@ export class NodeToolAdapter implements ToolAdapter {
     return safePath;
   }
 
-  private fail(toolCall: ToolCall | null, start: number, error: string): ToolResult {
+  private fail(toolCall: ToolCall | null, start: number, error: string, fallbackToolName?: string): ToolResult {
     return {
       id: `tool_${Date.now()}`,
-      toolName: toolCall?.function?.name ?? 'unknown',
+      toolName: toolCall?.function?.name ?? fallbackToolName ?? 'unknown',
       error,
       success: false,
       duration: Date.now() - start,
     };
   }
+}
+
+type EditMatch = {
+  text: string;
+  old: string;
+  normalizedText: string;
+  normalizedOld: string;
+  index: number;
+  lineEnding: 'lf' | 'crlf';
+};
+
+/** Match an exact edit first, then retry only for a line-ending difference.
+ * The fallback never changes whitespace or chooses an approximate snippet: it
+ * maps the normalized match back to the exact bytes currently on disk. */
+function findEditMatch(text: string, oldString: string): EditMatch | null {    const lineEnding = text.includes('\r\n') ? 'crlf' : 'lf';
+    const exactIndex = lineEnding === 'crlf' && oldString.includes('\n') && !oldString.includes('\r\n')
+      ? -1
+      : text.indexOf(oldString);
+  if (exactIndex >= 0) {
+    return {
+      text,
+      old: oldString,
+      normalizedText: text.replace(/\r\n/g, '\n'),
+      normalizedOld: oldString.replace(/\r\n/g, '\n'),
+      index: exactIndex,
+      lineEnding,
+    };
+  }
+
+  if (!oldString.includes('\n') && !oldString.includes('\r\n')) return null;
+  const normalizedText = text.replace(/\r\n/g, '\n');
+  const normalizedOld = oldString.replace(/\r\n/g, '\n');
+  const normalizedIndex = normalizedText.indexOf(normalizedOld);
+  if (normalizedIndex < 0) return null;
+
+  let normalizedOffset = 0;
+  let originalIndex = 0;
+  while (normalizedOffset < normalizedIndex) {
+    if (text.startsWith('\r\n', originalIndex)) {
+      originalIndex += 2;
+    } else {
+      originalIndex += 1;
+    }
+    normalizedOffset += 1;
+  }
+  const old = normalizedText.slice(normalizedIndex, normalizedIndex + normalizedOld.length)
+    .replace(/\n/g, lineEnding === 'crlf' ? '\r\n' : '\n');
+  return {
+    text,
+    old,
+    normalizedText,
+    normalizedOld,
+    index: originalIndex,
+    lineEnding,
+  };
+}
+
+function editStringNotFoundError(path: string, oldString: string): string {
+  const preview = oldString.replace(/\r?\n/g, '\\n').slice(0, 160);
+  return `String not found in file: ${preview}. The file may have changed since it was read. Re-read ${path}, do not retry this identical edit, then use a shorter exact context from the current file.`;
 }
 
 /** Probe installed runtime versions (node / bun / python3 / rustc / git --version),
@@ -792,8 +1248,26 @@ function isWithin(base: string, target: string): boolean {
   return !isAbsolute(rel);
 }
 
+function hasSymlinkComponent(base: string, filePath: string): boolean {
+  const candidate = pathResolve(base, filePath);
+  if (!isWithin(base, candidate)) return true;
+  const rel = pathRelative(base, candidate);
+  let current = base;
+  for (const component of rel.split(sep)) {
+    if (!component || component === '.') continue;
+    current = join(current, component);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return true;
+    } catch {
+      break;
+    }
+  }
+  return false;
+}
+
 function createAbortController(parent: AbortSignal | undefined, timeoutMs: number): {
   signal: AbortSignal;
+  abort: () => void;
   cleanup: () => void;
 } {
   const controller = new AbortController();
@@ -803,6 +1277,7 @@ function createAbortController(parent: AbortSignal | undefined, timeoutMs: numbe
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   return {
     signal: controller.signal,
+    abort: () => controller.abort(),
     cleanup: () => {
       clearTimeout(timer);
       parent?.removeEventListener('abort', onAbort);

@@ -6,6 +6,7 @@
   <title>pure</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
   <link rel="stylesheet" href="/src/ui/styles.css" />
+  <link rel="stylesheet" href="/src/ui/plain-text-plan.css" />
 </head>
 <body>
   <!-- ═══ Boot splash: branded startup transition shown from first paint while
@@ -138,11 +139,13 @@
                     <button id="landing-copy-btn" class="input-copy-btn" type="button" data-i18n-title="input.copy.title" data-i18n-aria-label="input.copy.title" title="复制输入" aria-label="复制输入" disabled>
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                     </button>
+                    <button id="landing-compact-btn" class="input-copy-btn compact-context-btn" type="button" data-i18n-title="context.compact.title" data-i18n-aria-label="context.compact.title" title="压缩上下文" aria-label="压缩上下文">⌁</button>
                     <select id="landing-mode-select" class="composer-select" data-i18n-title="composer.mode.title" title="任务模式" aria-label="任务模式"></select>
                     <button id="landing-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
                       <svg class="wp-folder-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                     </button>
                     <select id="landing-model-select" class="composer-select composer-select-model" data-i18n-title="composer.model.title" title="模型" aria-label="模型"></select>
+                    <button id="landing-undo-write-btn" class="input-copy-btn undo-write-btn" type="button" title="撤销最近一次写入" aria-label="撤销最近一次写入" hidden>↶</button>
                     <span class="composer-spacer"></span>
                     <button id="landing-send-btn" data-i18n-title="input.send.title" data-i18n-aria-label="input.send.title" aria-label="发送">
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
@@ -170,11 +173,13 @@
                 <button id="copy-btn" class="input-copy-btn" type="button" data-i18n-title="input.copy.title" data-i18n-aria-label="input.copy.title" title="复制输入" aria-label="复制输入" disabled>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
+                <button id="compact-btn" class="input-copy-btn compact-context-btn" type="button" data-i18n-title="context.compact.title" data-i18n-aria-label="context.compact.title" title="压缩上下文" aria-label="压缩上下文">⌁</button>
                 <select id="composer-mode-select" class="composer-select" data-i18n-title="composer.mode.title" title="任务模式" aria-label="任务模式"></select>
                 <button id="input-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
                   <svg class="wp-folder-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 </button>
                 <select id="composer-model-select" class="composer-select composer-select-model" data-i18n-title="composer.model.title" title="模型" aria-label="模型"></select>
+                <button id="undo-write-btn" class="input-copy-btn undo-write-btn" type="button" title="撤销最近一次写入" aria-label="撤销最近一次写入" hidden>↶</button>
                 <span class="composer-spacer"></span>
                 <button id="send-btn" data-i18n-title="input.send.title" data-i18n-aria-label="input.send.title" aria-label="发送" disabled>
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
@@ -240,17 +245,17 @@
               <div class="context-section-heading"><span data-i18n="stats.searches">搜索历史</span><b id="stat-search-count">0</b></div>
               <div id="stat-search-list" class="stats-list"></div>
             </div>
-            <div class="stats-list-section">
+            <div class="stats-list-section stats-write-section">
               <div class="context-section-heading"><span data-i18n="stats.fileWrites">文件写入</span><b id="stat-write-count">0</b></div>
-              <div id="stat-write-list" class="stats-list"></div>
+              <div id="stat-write-list" class="stats-list" role="region" data-i18n-aria-label="stats.fileWrites" aria-label="文件写入" aria-live="polite" tabindex="0"></div>
             </div>
             <div class="stats-list-section">
               <div class="context-section-heading"><span data-i18n="stats.fileReads">文件读取</span><b id="stat-read-count">0</b></div>
               <div id="stat-read-list" class="stats-list"></div>
             </div>
-            <div class="stats-list-section">
+            <div class="stats-list-section stats-command-section">
               <div class="context-section-heading"><span data-i18n="stats.commands">命令执行</span><b id="stat-cmd-count">0</b></div>
-              <div id="stat-cmd-list" class="stats-list"></div>
+              <div id="stat-cmd-list" class="stats-list" role="region" data-i18n-aria-label="stats.commands" aria-label="命令执行" aria-live="polite" tabindex="0"></div>
             </div>
           </div>
           <div class="context-meta">
@@ -676,24 +681,63 @@
        display:none SVG, which rendered the logo blank in the desktop app. -->
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
     <defs>
-      <linearGradient id="icn-bg" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#7ED9FF"/>
-        <stop offset="100%" stop-color="#3E63DD"/>
+      <linearGradient id="icn-bg" x1="0" y1="0" x2="0.9" y2="1">
+        <stop offset="0%" stop-color="#6A5DE0"/>
+        <stop offset="55%" stop-color="#7B6FF0"/>
+        <stop offset="100%" stop-color="#9A8FFF"/>
       </linearGradient>
-      <linearGradient id="icn-accent" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="#C2F1FF"/>
-        <stop offset="100%" stop-color="#8FD9FF"/>
+      <radialGradient id="icn-halo" cx="50%" cy="45%" r="58%">
+        <stop offset="0%" stop-color="#D2CCFF" stop-opacity="0.24"/>
+        <stop offset="65%" stop-color="#A89BFF" stop-opacity="0.08"/>
+        <stop offset="100%" stop-color="#A89BFF" stop-opacity="0"/>
+      </radialGradient>
+      <linearGradient id="icn-crown" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#FFFFFF"/>
+        <stop offset="42%" stop-color="#E8E5FF"/>
+        <stop offset="100%" stop-color="#9E94FF"/>
+      </linearGradient>
+      <linearGradient id="icn-crown-shadow" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#D0CAFF"/>
+        <stop offset="100%" stop-color="#7167D8"/>
+      </linearGradient>
+      <linearGradient id="icn-pavilion-left" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#F0EEFF"/>
+        <stop offset="100%" stop-color="#A49BFF"/>
+      </linearGradient>
+      <linearGradient id="icn-pavilion-right" x1="1" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#D7D2FF"/>
+        <stop offset="100%" stop-color="#665BD0"/>
+      </linearGradient>
+      <linearGradient id="icn-star" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#FFFFFF"/>
+        <stop offset="55%" stop-color="#F5F3FF"/>
+        <stop offset="100%" stop-color="#C9C3FF"/>
       </linearGradient>
       <symbol id="icon-gem" viewBox="0 0 1024 1024">
         <rect width="1024" height="1024" rx="224" fill="url(#icn-bg)"/>
-        <rect x="12" y="12" width="1000" height="1000" rx="212" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="4"/>
-
-        <!-- Minimalist geometric gem: trapezoidal crown above, lit/shadow pavilion below -->
-        <g stroke="rgba(255,255,255,0.25)" stroke-width="2" stroke-linejoin="round">
-          <polygon points="320,200 704,200 864,400 160,400" fill="url(#icn-accent)"/>
-          <polygon points="416,200 608,200 512,400" fill="rgba(255,255,255,0.85)"/>
-          <polygon points="160,400 512,400 512,840" fill="rgba(255,255,255,0.7)"/>
-          <polygon points="512,400 864,400 512,840" fill="rgba(255,255,255,0.5)"/>
+        <rect width="1024" height="1024" rx="224" fill="url(#icn-halo)"/>
+        <rect x="14" y="14" width="996" height="996" rx="210" fill="none" stroke="#BFEFFF" stroke-opacity="0.2" stroke-width="5"/>
+        <g transform="translate(512 512) scale(1.1) translate(-512 -512)">
+        <ellipse cx="512" cy="855" rx="248" ry="28" fill="#D2CCFF" fill-opacity="0.16"/>
+        <g stroke="#F5F3FF" stroke-opacity="0.42" stroke-width="5" stroke-linejoin="round">
+          <polygon points="214,356 326,184 698,184 810,356 512,474" fill="url(#icn-crown)"/>
+          <polygon points="214,356 326,184 512,356" fill="#FFFFFF" fill-opacity="0.42"/>
+          <polygon points="326,184 698,184 512,356" fill="#FFFFFF" fill-opacity="0.78"/>
+          <polygon points="698,184 810,356 512,356" fill="url(#icn-crown-shadow)"/>
+          <polygon points="214,356 512,356 512,474" fill="#FFFFFF" fill-opacity="0.78"/>
+          <polygon points="512,356 810,356 512,474" fill="#8FD8FF" fill-opacity="0.72"/>
+          <polygon points="214,356 512,474 512,850" fill="url(#icn-pavilion-left)"/>
+          <polygon points="214,356 512,474 366,598" fill="#FFFFFF" fill-opacity="0.48"/>
+          <polygon points="512,474 810,356 658,598" fill="url(#icn-pavilion-right)"/>
+          <polygon points="512,474 658,598 512,850" fill="#5147B8" fill-opacity="0.66"/>
+          <polygon points="366,598 512,474 512,850" fill="#DED9FF" fill-opacity="0.34"/>
+        </g>
+        <g fill="url(#icn-star)">
+          <path d="M814 126 L829 178 L881 193 L829 208 L814 260 L799 208 L747 193 L799 178 Z"/>
+          <path d="M192 252 L202 286 L236 296 L202 306 L192 340 L182 306 L148 296 L182 286 Z" opacity="0.86"/>
+          <path d="M742 714 L750 740 L776 748 L750 756 L742 782 L734 756 L708 748 L734 740 Z" opacity="0.74"/>
+        </g>
+        <path d="M286 320 L360 220" stroke="#FFFFFF" stroke-opacity="0.86" stroke-width="10" stroke-linecap="round"/>
         </g>
       </symbol>
     </defs>

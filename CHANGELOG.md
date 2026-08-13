@@ -3,6 +3,26 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.2-beta7
+
+**Prompt observability 与真实编码任务评测基线**
+
+- PromptAssembler / Harness 共享隐私安全 trace，记录预算、工具 schema、事件、usage、verification 和终态，不默认保存原始内容
+- 新增显式 JSONL trace sink、损坏记录容错和跨 assembly/run trace 关联
+- 新增隔离 workspace 的 bugfix / feature / refactor 评测 fixture、control baseline、provider-backed CodingAgent executor 和 strict 退出码
+- README、中文 README、Prompt/Engine/Harness/Adapter/Coding Agent/master spec 文档同步更新
+- 更新应用界面截图与截图引用
+
+## v1.9.2-beta5
+
+**主动意图评估与风险前置**
+
+- 每轮请求先由 Planner 判断意图、影响范围、风险等级和可逆性，不再只按“简单/复杂”机械执行
+- 低风险任务直接处理；中风险任务先进行只读工作区探针，再小步修改并验证；高风险删除、覆盖和破坏性迁移先解释影响与更窄替代方案，并在 GUI/CLI 写入前要求明确确认；CLI 普通请求默认自动放行，`--prompt-on-tool` 提供所有工具的逐次交互确认
+- 主动评估通过 `<intent_assessment>` 进入 GUI/CLI 的本轮 user context；两端可以有不同展示方式，但共享同一功能契约
+- 高风险后续请求不会绕过正在进行或暂停中的复杂计划，安全评估会重新打开确认流程
+- 新增 Planner、prompt composer 和 GUI 计划门控回归测试；最终 Bun 833/833、TypeScript 类型检查和生产构建通过
+
 ## v1.9.0
 
 **拟人化协作体验（像同事一样干活）**

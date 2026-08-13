@@ -13,6 +13,8 @@ import { Verifier, createDefaultVerifier } from './Verifier';
 import { ToolRegistry } from './ToolRegistry';
 import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, type SubagentOrchestratorConfig } from './SubagentOrchestrator';
 import { MCPClient, type MCPClientConfig } from '../harness/mcp/MCPClient';
+import { PromptAssembler, resolvePromptBudget, type PromptBudgetConfig } from '../shared/PromptAssembler';
+import type { PromptObservability } from '../shared/promptObservability';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import type {
   BudgetConfig,
@@ -47,6 +49,11 @@ export interface CodingAgentConfig {
   memory?: IMemoryStore;
   /** Project path for memory isolation; defaults to process.cwd(). */
   projectPath?: string;
+  /** Shared prompt compiler for application and Harness context assembly. */
+  promptAssembler?: PromptAssembler;
+  promptBudget?: PromptBudgetConfig;
+  /** Optional local trace collector shared by prompt assembly and Harness runs. */
+  observability?: PromptObservability;
   permissionMode?: PermissionMode;
   permissionHandler?: PermissionRequestHandler;
   /** Pre-built PermissionManager to reuse (e.g. a session-scoped instance so
@@ -133,7 +140,14 @@ export class CodingAgent {
     // G-3 fix: pass the LLM so the summary fallback actually runs when a lot
     // of history gets evicted (previously `llm` was omitted → summarizeEvicted
     // was dead code and the summary path never triggered).
-    const contextEngine = new ContextEngine({ maxMessages: 20, maxTokens: 32000, llm: config.llm });
+    const contextEngine = new ContextEngine({
+      maxMessages: 20,
+      maxTokens: resolvePromptBudget(config.promptBudget).availableInputTokens,
+      toolsProvider: () => this.toolRegistry.getTools(),
+      llm: config.llm,
+    });
+
+    const promptCompiler = config.promptAssembler ?? new PromptAssembler(config.observability);
 
     this.harness = new Harness({
       sessionId: config.sessionId,
@@ -151,6 +165,9 @@ export class CodingAgent {
       stateStore: config.stateStore,
       memory: config.memory,
       projectPath: config.projectPath,
+      promptAssembler: promptCompiler,
+      promptBudget: config.promptBudget,
+      observability: config.observability,
       contextEngine,
       // VERIFY phase: run the built-in checks (or the caller's custom verifier)
       // against the final output before declaring completion.

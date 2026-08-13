@@ -766,7 +766,12 @@ body {
  * A one-click folder icon beside the landing prompt: opens the native folder
  * picker to set the workspace directly (no popover round-trip). Ghost button
  * that tints accent when a workspace is active, mirroring the sidebar chip.
- */  .input-ws-btn,
+ */
+.undo-write-btn[hidden] {
+  display: none !important;
+}
+
+.input-ws-btn,
   .attach-btn,
   .input-copy-btn {
     display: flex;
@@ -1999,9 +2004,33 @@ body {
 .plan-progress-step.done {
   color: var(--text-secondary);
 }
+.plan-progress-step.done .plan-progress-step-action,
+.plan-progress-step.done .plan-progress-step-desc {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, currentColor 65%, transparent);
+}
 .plan-progress-step.done .plan-progress-step-num {
   border-color: var(--success);
+  color: var(--text-tertiary);
+}
+.plan-progress-step-check {
+  display: inline-flex;
+  flex: 0 0 16px;
+  width: 16px;
+  min-height: 18px;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+.plan-progress-step.done .plan-progress-step-check {
   color: var(--success);
+}
+.plan-progress-step.active .plan-progress-step-check {
+  color: var(--accent);
 }
 .plan-progress-step.pending .plan-progress-step-num {
   opacity: 0.6;
@@ -2018,6 +2047,16 @@ body {
 }
 .plan-progress-step.done .plan-progress-step-status {
   color: var(--success);
+}
+.plan-progress-step.degraded {
+  color: var(--text-secondary);
+}
+.plan-progress-step.degraded .plan-progress-step-num {
+  border-color: #c58a22;
+  color: #c58a22;
+}
+.plan-progress-step.degraded .plan-progress-step-status {
+  color: #a36f16;
 }
 .plan-progress-step.failed {
   color: var(--text-secondary);
@@ -2149,6 +2188,173 @@ body {
   font-size: 12.5px;
   letter-spacing: 0.01em;
   color: var(--text);
+}
+
+/* ── Floating execution overview (right-edge outline card) ──
+   Mirrors the in-chat plan card so the outline stays visible while scrolling.
+   Positioned inside #view-container; offsets avoid #context-panel. */
+.plan-overview {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 40;
+  width: 252px;
+  max-width: calc(100% - 24px);
+}
+/* When the 316px context panel is open, keep the outline left of it. */
+#main:not(.context-collapsed) .plan-overview {
+  right: 328px;
+}
+/* Panel collapsed (or hidden): hug the chat area's right edge. */
+#main.context-collapsed .plan-overview,
+#main:has(#context-panel[hidden]) .plan-overview {
+  right: 12px;
+}
+.plan-overview-card {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-card) 94%, var(--accent-soft));
+  box-shadow: var(--shadow-md);
+  font-size: 12px;
+  animation: plan-overview-in 0.22s ease-out;
+}
+.plan-overview-card.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.plan-overview-card.awaiting {
+  border-color: color-mix(in srgb, #d97706 40%, var(--border));
+}
+.plan-overview-card.complete {
+  border-color: color-mix(in srgb, var(--success) 40%, var(--border));
+}
+@keyframes plan-overview-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.plan-overview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 6px;
+}
+.plan-overview-title {
+  font-weight: 650;
+  font-size: 12px;
+  color: var(--text);
+}
+.plan-overview-progress {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.plan-overview-close {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.plan-overview-close:hover {
+  background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+  color: var(--text);
+}
+.plan-overview-activity {
+  padding: 0 10px 7px;
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.plan-overview-card.awaiting .plan-overview-activity {
+  color: #a36f16;
+}
+.plan-overview-card.complete .plan-overview-activity {
+  color: var(--success);
+}
+.plan-overview-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 8px 8px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.plan-overview-step {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 4px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
+.plan-overview-step-check {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 700;
+}
+.plan-overview-step.done .plan-overview-step-check {
+  border-color: var(--success);
+  color: var(--success);
+}
+.plan-overview-step.active {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text);
+}
+.plan-overview-step.active .plan-overview-step-check {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.plan-overview-step.awaiting {
+  background: color-mix(in srgb, #d97706 9%, transparent);
+  color: var(--text);
+}
+.plan-overview-step.awaiting .plan-overview-step-check {
+  border-color: color-mix(in srgb, #d97706 55%, var(--border));
+  color: #a36f16;
+  animation: plan-overview-await-pulse 1.8s ease-in-out infinite;
+}
+.plan-overview-step.pending {
+  opacity: 0.72;
+}
+.plan-overview-step-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plan-overview-step.done .plan-overview-step-label {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+}
+@keyframes plan-overview-await-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .plan-overview-card {
+    animation: none;
+  }
+  .plan-overview-step.awaiting .plan-overview-step-check {
+    animation: none;
+    opacity: 0.85;
+  }
 }
 
 /* Down-arrow affordance — hints the compact chip is expandable; flips up
@@ -4908,6 +5114,36 @@ select:focus-visible,
   box-shadow: var(--shadow-md);
 }
 
+/* ── Corner chrome reveal: the top-left sidebar toggle and top-right settings
+   button are hidden while the pointer is outside the app window and fade in
+   the moment it moves inside (wired in main.ts via the `window-hover` class).
+   Opacity only — never `display: none` — so the existing fade transitions
+   stay smooth, and the buttons remain keyboard-focusable / screen-reader
+   visible. `#main` is the app shell, so scoping the reveal to it keeps the
+   buttons hidden during boot splash and session restore overlays. */
+#main:not(.window-hover) #sidebar-toggle,
+#main:not(.window-hover) #right-settings-btn {
+  opacity: 0;
+  pointer-events: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+/* Keyboard users: focus must still be visible even while the pointer is
+   outside the window — otherwise Tab reaches an invisible, unseeable button. */
+#main:not(.window-hover) #sidebar-toggle:focus-visible,
+#main:not(.window-hover) #right-settings-btn:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  border-color: var(--border);
+}
+
+#main.window-hover #sidebar-toggle,
+#main.window-hover #right-settings-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 #landing {
   overflow: hidden;
   background:
@@ -6317,6 +6553,16 @@ button svg,
   max-width: none;
   margin: 0;
 }
+/* Keep multi-image placeholders in the same two-column geometry as their
+   finished previews. The generic loading rule below is intentionally square
+   for a lone diagram, but must not widen each gallery child to a full card. */
+.bubble .svg-gallery .svg-slot[data-state="loading"] {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 0;
+  aspect-ratio: 1;
+}
 
 /* ── Inline markdown images (![](src)) — double-click opens the viewer ── */
 .bubble .md-img-wrap {
@@ -6575,6 +6821,10 @@ button svg,
   .bubble .svg-gallery {
     grid-template-columns: 1fr;
     gap: 12px;
+  }
+  .bubble .svg-gallery .svg-slot[data-state="loading"] {
+    aspect-ratio: auto;
+    min-height: 160px;
   }
   .paste-chip {
     max-width: 100%;
@@ -7918,6 +8168,9 @@ button svg,
   #boot-splash .boot-dots i,
   .boot-reveal #landing-content { animation: none; }
   #boot-splash { transition-duration: .01ms; }
+  #session-loading-overlay { transition-duration: .01ms; }
+  #session-loading-overlay .session-loading-ring,
+  #chat.session-transition-fade { animation: none; }
 }
 
 /* Session-restore loading row (main.ts renderSessionMessages): shown while a
@@ -7932,4 +8185,402 @@ button svg,
 @keyframes restorePulse {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 1; }
+}
+
+/* Session-loading overlay (main.ts showSessionLoading): shown the instant a
+   historical session card is clicked, covering only the chat content area
+   with a translucent backdrop + spinning ring + label, then faded out and
+   removed when the restore completes. Purely visual — never blocks the
+   sidebar, composer, or the underlying scroll. */
+#session-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 14px;
+  background: color-mix(in srgb, var(--bg-chat) 62%, transparent);
+  backdrop-filter: blur(2px);
+  opacity: 0;
+  transition: opacity .18s ease;
+  pointer-events: none;
+}
+#session-loading-overlay.visible { opacity: 1; }
+#session-loading-overlay .session-loading-ring {
+  width: 26px;
+  height: 26px;
+  border: 3px solid color-mix(in srgb, var(--text-tertiary) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: session-loading-spin .8s linear infinite;
+}
+@keyframes session-loading-spin { to { transform: rotate(360deg); } }
+#session-loading-overlay .session-loading-label {
+  color: var(--text-secondary);
+  font-size: 13px;
+  letter-spacing: .02em;
+}
+
+/* Restored transcript fade-in: the chat list fades up smoothly when the
+   session finishes loading, bridging the overlay hand-off. */
+#chat.session-transition-fade { animation: session-transition-fade-in .24s ease both; }
+@keyframes session-transition-fade-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Flat live execution plan: the plan stays mounted for the whole turn and
+   updates its existing rows instead of swapping thick cards in the transcript. */
+.plan-progress-card.plan-progress-flat {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px 14px;
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+}
+.plan-progress-card.plan-progress-flat .plan-progress-step {
+  padding: 5px 8px;
+  border-radius: 7px;
+}
+.plan-progress-activity {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 18px;
+  margin: -1px 0 9px 2px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.plan-progress-activity::before {
+  content: '›';
+  color: var(--accent);
+  font-size: 16px;
+  line-height: 1;
+}
+.plan-progress-card:not(.quality-gate-card) .plan-progress-step.active {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.plan-progress-card:not(.quality-gate-card) .plan-progress-step.done {
+  opacity: 0.82;
+}
+.plan-progress-card:not(.quality-gate-card) .plan-progress-step.pending {
+  opacity: 0.75;
+}
+.plan-progress-substeps {
+  display: none;
+  flex-direction: column;
+  gap: 3px;
+  margin: 7px 0 1px 4px;
+  padding-left: 12px;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.plan-progress-substep {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  transition: background 0.18s var(--ease-out), color 0.18s var(--ease-out), opacity 0.18s var(--ease-out);
+}
+.plan-progress-substep-check {
+  display: inline-flex;
+  flex: 0 0 16px;
+  width: 16px;
+  min-height: 1.4em;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+.plan-progress-substep.done .plan-progress-substep-check {
+  color: var(--success);
+}
+.plan-progress-substep.active .plan-progress-substep-check {
+  color: var(--accent);
+}
+.plan-progress-substep-num {
+  flex: 0 0 25px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: center;
+}
+.plan-progress-substep-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 7px;
+  min-width: 0;
+}
+.plan-progress-substep-action {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.plan-progress-substep-desc {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.plan-progress-substep.active {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text);
+}
+.plan-progress-substep.active .plan-progress-substep-num,
+.plan-progress-substep.active .plan-progress-substep-action {
+  color: var(--accent);
+}
+.plan-progress-substep.done {
+  opacity: 0.72;
+}
+.plan-progress-substep.done .plan-progress-substep-action {
+  color: var(--text-tertiary);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.plan-progress-step.active .plan-progress-substeps {
+  display: flex;
+}
+.plan-progress-step.done .plan-progress-substeps {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .plan-progress-substep {
+    transition: none;
+  }
+}
+
+/* Quality-gate feedback: the audit can wait on a reviewer or a test command,
+   so the card visibly proves that work is still alive and names the action. */
+.quality-gate-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--accent);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.quality-gate-live-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.quality-gate-live.active .quality-gate-live-dot { animation: quality-gate-pulse 1.25s ease-out infinite; }
+.quality-gate-live.complete,
+.quality-gate-live.failed,
+.quality-gate-live.cancelled { color: var(--text-tertiary); }
+.quality-gate-live.complete .quality-gate-live-dot { background: var(--success); box-shadow: none; }
+.quality-gate-live.failed .quality-gate-live-dot { background: var(--danger); box-shadow: none; }
+.quality-gate-live.cancelled .quality-gate-live-dot { background: var(--text-tertiary); box-shadow: none; }
+.quality-gate-activity {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -2px 0 8px 2px;
+  min-height: 18px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.quality-gate-activity::before {
+  content: '›';
+  color: var(--accent);
+  font-size: 16px;
+  line-height: 1;
+  animation: quality-gate-activity-nudge 1.1s ease-in-out infinite;
+}
+.quality-gate-evidence {
+  margin-top: 5px;
+  border-top: 1px solid var(--border-light);
+  padding-top: 4px;
+}
+.quality-gate-evidence summary {
+  width: fit-content;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-size: 10px;
+  user-select: none;
+}
+.quality-gate-evidence summary:hover {
+  color: var(--accent);
+}
+.quality-gate-evidence-body {
+  max-height: 180px;
+  margin-top: 5px;
+  overflow: auto;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg) 72%, var(--accent-soft));
+  color: var(--text-secondary);
+  font: 10px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.quality-gate-card .plan-progress-step.active { position: relative; overflow: hidden; }
+.quality-gate-card .plan-progress-step.active::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent 20%, color-mix(in srgb, var(--accent) 9%, transparent) 50%, transparent 80%);
+  transform: translateX(-100%);
+  animation: quality-gate-sweep 2.4s ease-in-out infinite;
+}
+@keyframes quality-gate-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent); }
+  70% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent); }
+}
+@keyframes quality-gate-activity-nudge {
+  0%, 100% { transform: translateX(0); opacity: .55; }
+  50% { transform: translateX(3px); opacity: 1; }
+}
+@keyframes quality-gate-sweep {
+  0% { transform: translateX(-100%); }
+  65%, 100% { transform: translateX(100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .quality-gate-live.active .quality-gate-live-dot,
+  .quality-gate-activity::before,
+  .quality-gate-card .plan-progress-step.active::after { animation: none; }
+}
+
+/* The stats panel gives the potentially long file-write and command histories
+   their own scroll windows; other stats lists retain their compact presentation. */
+#context-panel #stat-write-list {
+  max-height: min(28vh, 260px);
+  min-height: 64px;
+  padding: 2px 4px 4px 0;
+  gap: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary)) transparent;
+}
+#context-panel #stat-write-list::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+  display: block;
+}
+#context-panel #stat-write-list::-webkit-scrollbar-track { background: transparent; }
+#context-panel #stat-write-list::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary));
+}
+#context-panel #stat-write-list::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+#context-panel #stat-write-list .stats-file-group {
+  flex: 0 0 auto;
+  min-height: 54px;
+  overflow: visible;
+}
+
+#context-panel #stat-cmd-list {
+  max-height: min(38vh, 360px);
+  min-height: 72px;
+  padding: 2px 4px 4px 0;
+  gap: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary)) transparent;
+}
+#context-panel #stat-cmd-list::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+  display: block;
+}
+#context-panel #stat-cmd-list::-webkit-scrollbar-track { background: transparent; }
+#context-panel #stat-cmd-list::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary));
+}
+#context-panel #stat-cmd-list::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+#context-panel #stat-cmd-list .stats-list-item {
+  flex: 0 0 auto;
+  min-height: 42px;
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--bg-card) 82%, var(--accent-soft));
+  font-size: 11px;
+  line-height: 1.6;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+/* Right-sidebar 「命令执行」 list: each executed command renders as a black
+   console chip (same surface as the terminal panels inside transcript rows),
+   so the sidebar's command history reads like a terminal log. */
+#context-panel #stat-cmd-list .stats-list-item {
+  position: relative;
+  padding-top: 34px; /* reserve the top-right copy button's footprint */
+  padding-right: 34px; /* room for the hover-revealed copy button */
+  background: var(--term-bg);
+  border-color: var(--term-border);
+  color: var(--term-ink);
+}
+#context-panel #stat-cmd-list .stats-list-item:hover {
+  border-color: var(--term-accent);
+  background: var(--term-soft);
+  color: var(--term-ink);
+}
+
+/* Command-row copy button: hidden until the row is hovered/focused, then a
+   slim ghost icon pinned to the row's right edge. On click it flips to a
+   checkmark, then reverts via the copied class. */
+#context-panel #stat-cmd-list .stats-cmd-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  transform: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--term-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .14s var(--ease-out), color .14s var(--ease-out), background .14s var(--ease-out), border-color .14s var(--ease-out);
+}
+#context-panel #stat-cmd-list .stats-list-item:hover .stats-cmd-copy,
+#context-panel #stat-cmd-list .stats-list-item:focus-within .stats-cmd-copy {
+  opacity: 1;
+}
+#context-panel #stat-cmd-list .stats-cmd-copy:hover,
+#context-panel #stat-cmd-list .stats-cmd-copy:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--term-accent) 65%, transparent);
+  outline-offset: 1px;
+  color: var(--term-accent);
+  background: var(--term-soft);
+  border-color: var(--term-border);
+}
+#context-panel #stat-cmd-list .stats-cmd-copy.copied {
+  color: #7cc97f;
+  border-color: color-mix(in srgb, #7cc97f 45%, transparent);
+  background: color-mix(in srgb, #7cc97f 12%, transparent);
+}
+#context-panel #stat-cmd-list .stats-cmd-copy svg { display: block; }
+#context-panel #stat-cmd-list .stats-cmd-copy.copied svg path:last-child,
+#context-panel #stat-cmd-list .stats-cmd-copy.copied svg rect {
+  display: none; /* hide the copy glyph, leaving only the check stroke */
 }

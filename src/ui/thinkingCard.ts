@@ -26,6 +26,19 @@ export interface ThinkingCardHandle {
   textEl: HTMLElement;          // .thinking-text (reasoning content)
 }
 
+// Honest live label for pre-flight phases (workspace probe, clarifying
+// interview, task analysis, first-token wait). chat.ts sets the label the
+// moment a REAL phase starts, so the card states what is actually happening
+// instead of pretending. The first streamed reasoning token then replaces the
+// waiting text with real content. There is deliberately no fake "what I'm
+// doing" rotation: cycling claims of work that isn't happening reads as
+// theater, and the animated dots already keep the card alive while waiting.
+export function setThinkingLabel(handle: ThinkingCardHandle, text: string): void {
+  const label = handle.card.querySelector<HTMLElement>('.thinking-label');
+  if (!label) return;
+  label.textContent = text;
+}
+
 export function createThinkingCard(): ThinkingCardHandle {
   const el = document.createElement('div');
   el.className = 'bubble-row thinking-row';
@@ -109,5 +122,7 @@ export function appendThinkingText(handle: ThinkingCardHandle, text: string): vo
 export function finalizeThinkingCard(handle: ThinkingCardHandle): void {
   handle.card.classList.remove('thinking');
   handle.card.classList.add('complete');
+  const label = handle.card.querySelector<HTMLElement>('.thinking-label');
+  if (label) label.textContent = t('thinking.done');
   handle.card.querySelector('.thinking-dots')?.remove();
 }

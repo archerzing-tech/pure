@@ -148,6 +148,12 @@ describe('pendingActionLabel', () => {
     expect(shouldUseTerminalPanel('web_researcher')).toBe(false);
   });
 
+  it('shows a distinct project audit identity and pending state', () => {
+    expect(toolDisplayName('project_auditor')).toBe('Project Audit');
+    expect(toolIcon('project_auditor')).toBe('🛡️');
+    expect(pendingActionLabel('project_auditor', {})).toBe('正在审计项目安全与交付风险…');
+  });
+
   it('counts CJK content as its UTF-8 bytes, not chars', () => {
     const label = pendingActionLabel('write_file', { path: 'a.txt', content: '中文'.repeat(512) });
     // 2 chars × 3 bytes = 6 bytes per repeat × 512 = 3072 bytes = 3.0 KB

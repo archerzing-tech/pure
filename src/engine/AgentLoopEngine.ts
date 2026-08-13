@@ -3,7 +3,7 @@
 // Fixes: BudgetWarning events, completedSteps/lastState tracking, note injection for recoverable errors,
 //        VERIFY_FAILED → loop back to THINK with reflection note instead of completing.
 
-import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage } from '../shared/types';
+import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
 import { safeParseArgs } from '../shared/format';
 import { BudgetManager } from './BudgetManager';
@@ -54,6 +54,7 @@ export class AgentLoopEngine {
     // iteration's stream yields a `usage` chunk) — surfaced on Completed so
     // the GUI can accumulate per-session token totals + cost.
     let turnUsage: TokenUsage | undefined;
+    let verification: VerificationSummary = { status: 'not_run', evidence: [] };
 
     while (true) {
       if (ctx.signal?.aborted) {
@@ -296,6 +297,24 @@ export class AgentLoopEngine {
       if (ctx.verifier) {
         try {
           const result = await ctx.verifier.evaluate({ output: content, context: messages });
+          const evidence = result.evidence ?? [{
+            id: `verifier_round_${turnCount}`,
+            checkName: 'verifier',
+            status: result.passed ? 'passed' : 'failed',
+            summary: result.feedback ?? (result.passed ? 'Engine verifier passed.' : 'Engine verifier failed.'),
+            source: 'engine' as const,
+            timestamp: Date.now(),
+          }];
+          const hasFailedEvidence = evidence.some((item) => item.status === 'failed');
+          const hasIncompleteEvidence = evidence.some((item) => item.status === 'incomplete' || item.status === 'not_run');
+          verification = {
+            status: !result.passed || hasFailedEvidence
+              ? 'failed'
+              : hasIncompleteEvidence
+                ? 'incomplete'
+                : 'passed',
+            evidence,
+          };
           if (!result.passed) {
             verifyPassed = false;
             failures.push({ type: 'verify_failure', message: result.feedback ?? 'Verification failed', turnNumber: turnCount });
@@ -337,6 +356,17 @@ export class AgentLoopEngine {
             continue;
           }
         } catch (err: any) {
+          verification = {
+            status: 'incomplete',
+            evidence: [{
+              id: `verifier_error_${turnCount}`,
+              checkName: 'verifier',
+              status: 'incomplete',
+              summary: err?.message ?? String(err),
+              source: 'engine',
+              timestamp: Date.now(),
+            }],
+          };
           yield {
             type: 'Error',
             payload: { code: 'VERIFIER_ERROR', message: err?.message ?? String(err), stateType: 'VERIFY', recoverable: true, recoveryAction: 'skip' },
@@ -368,7 +398,7 @@ export class AgentLoopEngine {
 
     yield {
       type: 'Completed',
-      payload: { finalOutput, isComplete: !interrupted, interrupted, turnCount, messages, usage: turnUsage },
+      payload: { finalOutput, isComplete: !interrupted, interrupted, turnCount, messages, usage: turnUsage, verification },
       timestamp: Date.now(),
     };
   }

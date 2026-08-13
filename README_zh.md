@@ -3,7 +3,7 @@
 **Pure** 是一个本地优先的 AI 编程助手，核心只有两个坚持：**用一个不会轻易停下来的闭环完成任务，用会进化但不会无限膨胀的记忆延续经验**。它可以读取、写入和编辑文件，执行 Shell 命令，并在配置 verifier 时验证结果，再把紧凑的项目经验带到下一次会话 — 这一切都通过快速的终端 CLI 或原生 macOS 桌面应用完成。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.2--beta7-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -13,6 +13,10 @@
 ## 界面截图与架构图
 
 <p align="center">
+  <img src="docs/screenshots/app-current.png" alt="Pure 当前应用界面" width="720" />
+  <br />
+  <em>当前应用界面 — 工作区状态、任务输入、模式/模型控制和项目上下文面板</em>
+  <br /><br />
   <img src="docs/screenshots/landing.png" alt="Pure 首页" width="720" />
   <br />
   <em>当前首页 — 工作区选择、任务输入框、模式/模型控制和状态栏</em>
@@ -62,6 +66,40 @@ THINK → ACT → OBSERVE ──┐
 
 循环内置轮次、Token、工具调用次数和时间预算，支持生命周期 Hook 与失败恢复。相同调用连续失败会被识别为死路，智能体会被要求换方法，而不是重复撞同一面墙。
 
+### 1.5 主动预检：先想清楚再修改
+
+用户输入 coding 请求后，Planner 会先做一层轻量的意图与风险评估：判断用户要做什么、可能影响哪些范围、是否容易回滚，以及只读探针能否减少不确定性。
+
+| 评估结果 | 默认行为 |
+|---|---|
+| **低风险** | 读取相关内容后直接处理，并验证结果。单文件小游戏等小型产物仍走这条路径。 |
+| **中风险** | 先只读探索工作区结构和依赖，再做窄范围修改；当前修改验证通过后才扩大范围。 |
+| **高风险** | 先解释影响、可逆性和更安全/更窄的替代方案；GUI 和 CLI 都会在任何写入或破坏性命令前要求明确确认。CLI 仅对普通请求默认自动放行，需要逐工具交互确认时使用 `--prompt-on-tool`。 |
+
+这是策略层，不替代具体工具的权限检查。CLI 和 GUI 的展示方式可以不同，但都会把同一份功能契约放入本轮请求上下文；已有复杂计划进行中时，如果新请求变成高风险操作，也会重新打开安全确认，不会静默沿用旧计划。
+
+### 1.6 上下文压缩：自动、可观察、可保留历史
+
+上下文管理与任务复杂度无关。`ContextEngine` 会保留当前 system 消息、折叠旧的压缩摘要，完整保留 assistant/tool 调用组，清理不完整的悬空 tool 片段，再按消息数和估算 Token 预算裁剪较早的对话。LLM 摘要是尽力而为：摘要失败时仍会把有界的最近窗口交给模型，并明确提示较早消息未生成摘要。
+
+压缩不会固化计划步骤数量、Todo 数量或验证阶段；这些仍由模型结合具体任务决定。CLI REPL 提供 `/compact`，GUI 输入框工具栏提供 `⌁`。两者都只准备下一轮执行上下文，不删除用户可见的对话记录。GUI 会在空闲时自动预压缩，CLI 与 Harness 则在继续会话前按需裁剪。
+
+### 1.7 Prompt observability：可观察但不保存秘密
+
+Pure 增加了本地优先的 observability 链路，用于观察 Prompt 组装和 agent 运行过程。编译器记录片段选择、provider/model 预算、工具 schema 成本和 trace 关联；Harness 记录事件数量、工具耗时、usage、验证状态和最终结果。默认只保留长度、哈希和结构化元数据，不保存原始 prompt、工具参数、命令输出或最终回答；评测和调试时可以显式启用 JSONL sink。
+
+### 1.8 真实编码任务评测基线
+
+仓库内置三个确定性的 bugfix/feature/refactor 任务，每个任务都在独立临时工作区中执行，并通过真实 Bun 验证命令评分。不带 `--agent` 时运行 `0/3` control sanity baseline；也可以使用真实 CodingAgent executor 连接 provider：
+
+```bash
+bun run eval:baseline
+PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent deepseek-openai --strict --report evals/model.latest.json
+PURE_EVAL_TRACE=evals/traces.jsonl bun run eval:baseline -- --agent deepseek-openai
+```
+
+报告会区分 agent 是否完成和验证是否通过，并记录 fixture hash、运行时、provider/model、Prompt 版本、usage、耗时和成本元数据。这是一套可重复的回归基线，不替代 SWE-bench 或 Terminal-Bench。
+
 ### 2. 会进化的项目记忆
 
 Pure 的记忆不是第二份聊天记录。Harness 会把已完成会话压缩为可复用的记忆条目，例如：
@@ -86,8 +124,13 @@ Pure 的记忆不是第二份聊天记录。Harness 会把已完成会话压缩�
 - **进化项目记忆** — 语义检索、关键词回退、衰减、取代、诊断和导入导出
 - **子智能体编排** — 并行调度文件搜索、代码搜索、Web 研究等子智能体
 - **MCP 协议** — 接入 Model Context Protocol 服务器，扩展工具能力
+- **主动预检** — 执行前判断意图、影响、可逆性和风险；中风险先探针，GUI 和 CLI 都会对高风险先确认，CLI 还可用 `--prompt-on-tool` 对所有工具逐次确认
 - **权限系统** — 四种模式：YOLO（自动批准）、NORMAL（写入时确认）、PLAN（只读）、DONT_ASK（静默阻止）
 - **会话持久化** — 基于检查点的状态管理，支持会话恢复（`pure --resume`）
+- **当前会话撤销** — CLI 使用 `/undo`、GUI 使用输入框旁的 ↶ 撤销最近一次成功写入；如果文件在写入后被外部修改，则拒绝覆盖
+- **上下文压缩** — 自动限制历史窗口，也支持 CLI `/compact` 与 GUI `⌁`；按 provider/model 自适应 Prompt 预算，同时计算消息和工具/MCP schema Token，先省略低优先级片段，支持自定义模型元数据，超预算时输出诊断，保持工具调用成组有效且不影响可见对话记录
+- **Prompt observability** — PromptAssembler 与 Harness 的本地 trace 关联、隐私安全哈希、有界内存存储和可选版本化 JSONL 导出
+- **编码任务评测** — 独立真实 fixture、control baseline、provider-backed CodingAgent runner、只按验证结果评分、usage/成本元数据和适合 CI 的 strict 退出码
 - **智能容错解析** — 在报错前自动修复 JSON、Mermaid 和 SVG
 - **自动更新** — GUI 通过签名的 `.app.tar.gz` 产物检查并安装更新
 - **多语言界面** — 支持英文 / 中文
@@ -144,7 +187,7 @@ bun run gui:build    # 生产构建 → src-tauri/target/release/bundle/
 │          (Tauri 2 · WebView · Vanilla TS)         │
 ├─────────────────────────────────────────────────┤
 │  Coding Agent（编程智能体）                        │
-│  Planner · Permission · Verifier · Subagents     │
+│  Planner · Intent · Permission · Verifier        │
 ├─────────────────────────────────────────────────┤
 │  Harness（有状态会话管理器）                        │
 │  StateManager · ContextEngine · StreamManager     │
@@ -176,12 +219,12 @@ pure/
 │   │   └── FailurePolicy.ts      # 递进式恢复策略：重试 → 反思 → 停止
 │   ├── harness/                  # 有状态会话管理
 │   │   ├── Harness.ts            # 会话生命周期 + 检查点持久化
-│   │   ├── ContextEngine.ts      # 上下文窗口裁剪
+│   │   ├── ContextEngine.ts      # 自动/手动上下文压缩
 │   │   ├── StateManager.ts       # 检查点保存/恢复
 │   │   └── StreamManager.ts      # Token 流式输出 + UI 渲染
 │   ├── coding-agent/             # 应用层
 │   │   ├── CodingAgent.ts        # 智能体装配器
-│   │   ├── Planner.ts            # 任务分析 + 计划生成
+│   │   ├── Planner.ts            # 意图/风险分析 + 计划生成
 │   │   ├── ToolRegistry.ts       # 工具调度 + 权限门控
 │   │   ├── PermissionManager.ts  # YOLO / NORMAL / PLAN 权限模式
 │   │   ├── Verifier.ts           # 输出验证
@@ -193,7 +236,14 @@ pure/
 │   │   ├── mcp/                  # MCP 传输层（stdio、HTTP）
 │   │   └── storage/              # FSStore + SQLiteStore
 │   ├── ui/                       # WebView 界面（聊天、设置、Markdown）
-│   └── shared/                   # 共享类型、i18n、记忆
+│   └── shared/                   # 共享类型、Prompt 组装、observability、i18n、记忆
+│       ├── PromptAssembler.ts    # GUI / CLI / Harness 统一 Prompt 编译器
+│       ├── promptObservability.ts # 隐私安全 trace 模型与收集器
+│       └── FilePromptObservationStore.ts # Node-only JSONL trace sink
+│   ├── evaluation/               # 确定性编码任务 fixture + 真实 runner
+│   │   ├── codingTaskBaseline.ts  # fixture、验证和报告
+│   │   └── codingAgentExecutor.ts # provider-backed CodingAgent executor
+├── evals/                        # 评测协议与基线文档
 ├── src-tauri/                    # Rust / Tauri 后端
 │   ├── src/                      # IPC 命令、会话管理器
 │   └── tauri.conf.json           # 应用配置 + 更新密钥
@@ -249,8 +299,28 @@ pure --provider qwen --model qwen3-coder-next "写一个 React 表单验证 Hook
 # REPL 命令
 /exit       # 退出
 /clear      # 清空对话上下文
+/compact    # 压缩下一轮执行上下文，不删除可见历史
 Ctrl+C      # 取消当前生成（再按一次强制退出）
+/undo       # 恢复本次会话最近一次成功的写入批次
 ```
+
+GUI 输入框旁也提供同一项当前会话撤销操作（↶）和上下文压缩操作（⌁）。压缩只影响下一轮执行窗口，不删除可见历史；撤销只保留在当前进程内，不替代跨会话检查点，也不会删除工作区之外的文件。
+
+如果希望在具体工具调用前逐次确认：
+
+```bash
+pure --prompt-on-tool "执行这次迁移"
+```
+
+### 编码任务评测
+
+```bash
+bun run eval:baseline                                      # control baseline（预期 0/3）
+PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent deepseek-openai --strict
+PURE_EVAL_TRACE=evals/traces.jsonl bun run eval:baseline -- --agent deepseek-openai
+```
+
+支持的 executor provider 包括 `deepseek-openai`、`deepseek-anthropic`、`qwen`、`glm`、`mock`，也支持通过 `PURE_EVAL_BASE_URL` 接入自定义 OpenAI 兼容端点。每个任务使用独立工作区；报告只保存哈希和元数据，不保存源码或命令输出。
 
 ---
 

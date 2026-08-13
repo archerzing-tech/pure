@@ -15,7 +15,7 @@
 // Installed skills are stored in the PureConfig `hubSkills` array (name +
 // description + source + the SKILL.md body) and surface as toggle cards next
 // to the built-in skills. When enabled, the body is injected into the system
-// prompt (chat.ts buildSystemPrompt / cli.ts buildEnvironmentContext), so the
+// prompt (shared PromptAssembler), so the
 // agent behaves per the skill's instructions.
 
 export interface HubSkill {

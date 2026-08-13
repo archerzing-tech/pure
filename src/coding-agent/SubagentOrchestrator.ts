@@ -189,6 +189,33 @@ Be concise. Structure your review with clear sections.${filesHint}`;
     defaultTimeoutMs: 120_000,
   },
   {
+    name: 'project_auditor',
+    description: 'Audit a project for dependency vulnerabilities, unsafe configuration, exposed secrets, and reproducible verification evidence. Uses read-only checks and returns a structured AUDIT: PASS or AUDIT: FAIL verdict.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'The project audit scope and delivery constraints' },
+        files: { type: 'string', description: 'Project manifests, lockfiles, configuration, and source paths to inspect' },
+      },
+      required: ['prompt'],
+    },
+    tags: [Tags.AGENT, Tags.READ],
+    riskLevel: 'low',
+    createSystemPrompt: (input: Record<string, unknown>) => {
+      const filesHint = typeof input.files === 'string' ? `\nPrioritize these paths: ${input.files}` : '';
+      return `You are a project security and delivery auditor. Perform a read-only audit using the available filesystem and command tools.
+
+Check:
+1. Dependency manifests and lockfiles for known vulnerabilities using the project's existing audit tool when available. Never run npm audit fix, cargo update, or other mutating remediation.
+2. Secret exposure in tracked and untracked source/config files, including common API-key and private-key patterns. Avoid printing full secrets; report only the file and line context needed to fix them.
+3. Unsafe scripts, shell injection surfaces, permissive configuration, and missing validation around external input.
+4. Whether the project's documented typecheck, test, lint, and build commands are reproducible and whether their real output supports the conclusion.
+
+Distinguish a vulnerability/finding from an unavailable audit tool, missing lockfile, network failure, or inconclusive result. Do not call an unavailable check a pass. Report evidence under concise headings, then end with exactly one line: AUDIT: PASS when no blocking finding remains and all required checks have evidence, otherwise AUDIT: FAIL.${filesHint}`;
+    },
+    defaultTimeoutMs: 120_000,
+  },
+  {
     name: 'web_researcher',
     description: 'Research a topic online and summarize findings. Use for documentation lookup, API references, or technical research.',
     input_schema: {

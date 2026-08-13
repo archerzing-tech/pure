@@ -10,6 +10,7 @@
 // is only the fallback for plain Vite dev.
 
 import type { TokenUsage } from '../shared/types';
+import type { IntentAssessment, Plan } from '../coding-agent/types';
 
 export interface ToolExecMeta {
   toolName: string;
@@ -48,11 +49,25 @@ export interface StoredMessage {
   name?: string;
   /** Reasoning transcript shown in the GUI before this assistant message. */
   thinking?: string;
+  /** Assistant message that is a plan pause point ("已暂停，等待你回复") —
+   * re-applies the waiting bubble style on session restore. */
+  isPlanPause?: boolean;
+  /** The intent assessment snapshot for a plan-pause message, so the
+   * assessment card can be rebuilt in its "waiting for reply" state on
+   * session restore. */
+  assessment?: IntentAssessment;
   /** Reasoning phases mapped to their assistant iteration for ordered replay. */
   thinkingPhases?: Array<{ text: string; assistantIndex: number }>;
   /** Legacy live/replay segments retained for older in-progress sessions. */
   thinkingSegments?: string[];
   toolExec?: ToolExecMeta;
+  /** Cross-turn complex-task cursor, stored on the latest message. */
+  planState?: {
+    plan: Plan;
+    planNumber: number;
+    todoNumber: number;
+    started: boolean;
+  };
 }
 
 export function getStoredThinkingSegments(message: Partial<StoredMessage>): string[] {
@@ -76,6 +91,55 @@ export interface SessionMeta {
  * panel's 统计 tab. Token/cost data comes from the provider's billing usage
  * (see src/shared/usage.ts); tool activity is recorded from tool executions.
  */
+export const MAX_PERSISTED_MESSAGES = 400;
+
+/** Keep complete user turns so assistant tool calls never detach from their results. */
+export function limitConversationMessages<T extends { role: string }>(messages: T[], max = MAX_PERSISTED_MESSAGES): T[] {
+  if (messages.length <= max) return messages;
+  const system = messages[0]?.role === 'system' ? [messages[0]] : [];
+  const body = messages.slice(system.length);
+  const turns: T[][] = [];
+  let current: T[] = [];
+  for (const message of body) {
+    if (message.role === 'user' && current.length > 0) {
+      turns.push(current);
+      current = [];
+    }
+    current.push(message);
+  }
+  if (current.length > 0) turns.push(current);
+
+  const budget = Math.max(1, max - system.length);
+  const selected: T[][] = [];
+  let count = 0;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const turn = turns[i];
+    if (count + turn.length > budget) {
+      if (selected.length === 0) {
+        // A single pathological turn may exceed the bound. Keep only its user
+        // message rather than splitting an assistant/tool round into the next
+        // context window. The persisted plan cursor is also mirrored onto the
+        // latest user message by chat.ts, so it remains recoverable here.
+        selected.unshift(turn.slice(0, 1));
+      }
+      break;
+    }
+    selected.unshift(turn);
+    count += turn.length;
+  }
+  return system.concat(selected.flat()).slice(0, max);
+}
+
+export function limitStoredMessages(messages: StoredMessage[], max = MAX_PERSISTED_MESSAGES): StoredMessage[] {
+  const bounded = limitConversationMessages(messages, max);
+  const latestPlanState = [...messages].reverse().find((message) => message.planState)?.planState;
+  if (!latestPlanState || bounded.some((message) => message.planState === latestPlanState)) return bounded;
+  if (bounded.length === 0) return bounded;
+  const last = bounded.length - 1;
+  bounded[last] = { ...bounded[last], planState: latestPlanState };
+  return bounded;
+}
+
 export interface SessionStats {
   /** Provider id the session ran on (cost is priced per provider family). */
   provider?: string;
@@ -209,13 +273,13 @@ async function tauriSaveWorkspace(sessionId: string, workspace: string): Promise
 async function tauriLoadLast(): Promise<{ sessionId: string; messages: StoredMessage[]; workspace: string } | null> {
   const data: any = await tauriInvoke('load_last_session');
   if (!data) return null;
-  return { sessionId: data.sessionId, messages: data.messages ?? [], workspace: data.workspace ?? '' };
+  return { sessionId: data.sessionId, messages: limitStoredMessages(data.messages ?? []), workspace: data.workspace ?? '' };
 }
 
 async function tauriLoad(sessionId: string): Promise<{ messages: StoredMessage[]; workspace: string } | null> {
   const data: any = await tauriInvoke('load_session', { sessionId });
   if (!data) return null;
-  return { messages: data.messages ?? [], workspace: data.workspace ?? '' };
+  return { messages: limitStoredMessages(data.messages ?? []), workspace: data.workspace ?? '' };
 }
 
 async function tauriLoadList(): Promise<SessionMeta[]> {
@@ -246,17 +310,18 @@ const LAST_SESSION_KEY = 'pure_last_session';
 function lsSave(sessionId: string, messages: StoredMessage[], workspace: string) {
   // Store the workspace exactly as passed ('' clears a previous override), so
   // the localStorage fallback behaves identically to the Tauri path.
-  const data = { messages, updatedAt: Date.now(), messageCount: messages.length, workspace };
+  const boundedMessages = limitStoredMessages(messages);
+  const data = { messages: boundedMessages, updatedAt: Date.now(), messageCount: boundedMessages.length, workspace };
   localStorage.setItem(`pure_session:${sessionId}`, JSON.stringify(data));
 
   const list = lsLoadList();
   const existing = list.findIndex(s => s.id === sessionId);
   const meta: SessionMeta = {
     id: sessionId,
-    title: extractTitle(messages),
+    title: extractTitle(boundedMessages),
     createdAt: existing >= 0 ? list[existing].createdAt : Date.now(),
     updatedAt: Date.now(),
-    messageCount: messages.length,
+    messageCount: boundedMessages.length,
     workspace,
   };
   if (existing >= 0) {
@@ -288,7 +353,7 @@ function lsLoad(sessionId: string): { messages: StoredMessage[]; workspace: stri
   try {
     const data = JSON.parse(raw);
     if (!data.messages) return null;
-    return { messages: data.messages, workspace: data.workspace ?? '' };
+    return { messages: limitStoredMessages(data.messages, MAX_PERSISTED_MESSAGES), workspace: data.workspace ?? '' };
   } catch {
     return null;
   }
@@ -331,10 +396,11 @@ function lsDeleteAll() {
 // ── Unified public API ──
 
 export async function saveSession(sessionId: string, messages: StoredMessage[], workspace = ''): Promise<void> {
+  const boundedMessages = limitStoredMessages(messages);
   if (tauriAvailable) {
-    try { await tauriSave(sessionId, messages, workspace); return; } catch {}
+    try { await tauriSave(sessionId, boundedMessages, workspace); return; } catch {}
   }
-  lsSave(sessionId, messages, workspace);
+  lsSave(sessionId, boundedMessages, workspace);
 }
 
 /**

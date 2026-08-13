@@ -1,5 +1,7 @@
 # Agent-Event-Loop Engine 设计文档（修订版）
 
+> 对应实现：v1.9.2-beta7；观测由 `src/harness/Harness.ts` 与 `src/shared/promptObservability.ts` 收口，评测入口位于 `src/evaluation/`。
+
 > PHASE 2. 依赖 Shared Kernel 与 `pure Spec.md`。原始草稿的 `run`/`step` 参考实现
 > **缺失 7/9 个状态处理器、不累积对话消息、不向 LLM 发送工具定义、永不设置 finalOutput**——
 > 本修订版给出可运行的核心循环。带 `[SPEC]` 的必须实现；带 `[REF]` 的是参考实现。
@@ -424,6 +426,17 @@ Engine 在失败时调用 `ctx.failurePolicy?.decide(recentFailures)`：
 - `retry` / `reflect` → 将 hint 作为 `note` 注入 messages，回到 THINK
 - `degrade` → 切换到备选模型或降低任务复杂度
 - `stop` → yield `Interrupted` 并终止会话
+
+## 6.4 Observability 事件边界
+
+Engine 不保存原始 Prompt，也不直接写观测文件；它只通过既有 `EngineEvent` 向 Harness 暴露可观测事实。Harness 负责把事件映射到 run trace：
+
+- `StateChange`、`BudgetWarning`、`FailurePolicyDecision`、`Error`、`Interrupted`、`Completed` 计入事件统计。
+- `ToolResult` 记录工具名、成功状态、耗时和结果长度哈希；不得把完整工具参数或结果写入默认 trace。
+- `Completed` 携带 provider usage、verification summary 和终态；`Interrupted`、不可恢复 `Error`、预算终止和 generator 异常也必须结束 trace。
+- 观测是旁路能力，不能改变 Engine 的状态转移、失败策略、预算、权限或消息序列。
+
+真实编码任务评测在 Engine 之上运行：评测器只信任隔离 workspace 中 verification command 的退出状态，不信任模型自述；control、agent error、fixture error 和 verification failure 要分别报告。
 
 ## 7. 单元测试（必须能跑通，而非 0 测试）
 

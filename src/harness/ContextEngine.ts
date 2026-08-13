@@ -1,153 +1,218 @@
 // src/harness/ContextEngine.ts
-// v0.5 — sliding window context compression with tool_call atomic pair constraint.
-// Fixes: atomic pair pullback no longer causes trimmed messages to exceed maxMessages.
+// v0.6 — context compaction with tool-call atomicity and explicit results.
 
-import type { Message, LLMAdapter } from '../shared/types';
+import { estimateToolDefinitionTokens } from '../shared/providers';
+import type { Message, LLMAdapter, ToolDefinition } from '../shared/types';
 
 export interface ContextEngineConfig {
   maxMessages: number;
   summaryThreshold?: number;
-  /** Token budget for the retained window (estimate: chars/4). When exceeded,
-   * the window is trimmed even if the message count is under maxMessages —
-   * long tool outputs inflate tokens far faster than message count. */
+  /** Token budget for messages plus the provider's output reserve. */
   maxTokens?: number;
+  /** Tool schemas are sent outside messages and must count toward the same window. */
+  tools?: ToolDefinition[];
+  toolsProvider?: () => ToolDefinition[];
   llm?: LLMAdapter;
 }
 
-// Rough token estimate (chars/4), matching BudgetManager's estimator.
+export interface ContextCompactionOptions {
+  /** Re-run compaction even when the current window is already within limits. */
+  force?: boolean;
+}
+
+export interface ContextCompactionResult {
+  messages: Message[];
+  compacted: boolean;
+  summarized: boolean;
+  summaryUnavailable: boolean;
+  evictedMessages: number;
+  estimatedTokens: number;
+  overBudget: boolean;
+  oversizedNewestGroup: boolean;
+}
+
+interface MessageGroup {
+  messages: Message[];
+  retainable: boolean;
+}
+
 function estimateTokens(messages: Message[]): number {
   let sum = 0;
-  for (const m of messages) sum += Math.ceil((m.content?.length ?? 0) / 4);
+  for (const message of messages) sum += Math.ceil((message.content?.length ?? 0) / 4);
   return sum;
 }
 
 export class ContextEngine {
   private config: ContextEngineConfig;
+  private lastCompactionResult?: ContextCompactionResult;
 
   constructor(config: ContextEngineConfig) {
     this.config = {
-      maxMessages: config.maxMessages,
+      maxMessages: Math.max(1, config.maxMessages),
       summaryThreshold: config.summaryThreshold ?? 40,
       maxTokens: config.maxTokens,
+      tools: config.tools,
+      toolsProvider: config.toolsProvider,
       llm: config.llm,
     };
   }
 
   async trim(messages: Message[]): Promise<Message[]> {
-    const systemMsg = messages.filter(m => m.role === 'system');
-    const nonSystem = messages.filter(m => m.role !== 'system');
-
-    const overTokenBudget =
-      this.config.maxTokens !== undefined &&
-      estimateTokens(nonSystem) > this.config.maxTokens;
-    if (nonSystem.length <= this.config.maxMessages && !overTokenBudget) {
-      return messages;
-    }
-
-    // Start with the absolute latest message, then add older messages
-    // while respecting atomic tool pairs, up to maxMessages (and, when a token
-    // budget is set, until the budget is filled).
-    const trimmed: Message[] = [];
-    const targetCount = this.config.maxMessages;
-    let budget = this.config.maxTokens;
-
-    // Walk backwards from the newest message
-    const pairs = this.groupAtomicPairs(nonSystem);
-
-    // Take from the end (newest) up to targetCount, respecting atomic pairs
-    let taken = 0;
-    for (let i = pairs.length - 1; i >= 0 && taken < targetCount; i--) {
-      const pair = pairs[i];
-      // Honor the token budget too: stop adding pairs once it would be filled.
-      if (budget !== undefined) {
-        const pairTokens = estimateTokens(pair);
-        if (taken > 0 && budget - pairTokens < 0) break;
-        budget -= pairTokens;
-      }
-      trimmed.unshift(...pair);
-      taken += pair.length;
-    }
-
-    // Enforce hard limit: if we still exceed targetCount (unlikely but defensive), trim from front
-    while (trimmed.length > targetCount) {
-      const first = trimmed[0];
-      // If first item is an assistant with toolCalls, remove the pair
-      if (first.role === 'assistant' && first.toolCalls?.length) {
-        const ids = new Set(first.toolCalls.map(tc => tc.id));
-        // Remove the assistant and all following tool messages that belong to it
-        let removed = 0;
-        for (const m of [...trimmed]) {
-          if (removed === 0 && m === first) {
-            trimmed.shift();
-            removed++;
-          } else if (m.role === 'tool' && m.toolCallId && ids.has(m.toolCallId)) {
-            trimmed.splice(trimmed.indexOf(m), 1);
-          } else {
-            break;
-          }
-        }
-      } else {
-        trimmed.shift();
-      }
-    }
-
-    // Safety guard: keep at least the latest atomic pair if everything was evicted
-    if (trimmed.length === 0 && pairs.length > 0) {
-      trimmed.push(...pairs[pairs.length - 1]);
-    }
-
-    // Build the evicted list (everything we didn't keep)
-    const evicted = nonSystem.slice(0, nonSystem.length - trimmed.length);
-
-    // Optional LLM summarization of evicted content
-    const threshold = this.config.summaryThreshold;
-    if (this.config.llm && threshold !== undefined && evicted.length > threshold) {
-      try {
-        const summaryPrompt = `Summarize the key information from this conversation. Include any decisions made, code patterns discussed, file paths mentioned, and user preferences:\n\n${evicted.map(m => `${m.role}: ${m.content.slice(0, 500)}`).join('\n')}`;
-        const summary = await this.config.llm!.complete(
-          [{ role: 'user', content: summaryPrompt }],
-          []
-        );
-        // Per Harness 设计文档 §4 toEngineMessages, the summary is a `system`
-        // message ("Earlier conversation summary: …") — NOT a user turn, which
-        // the model would mistake for fresh user input.
-        const summaryMsg: Message = {
-          role: 'system',
-          content: `Earlier conversation summary: ${String(summary.content)}`,
-        };
-        return [...systemMsg, summaryMsg, ...trimmed];
-      } catch {
-        // summarization failed, continue without summary
-      }
-    }
-
-    return [...systemMsg, ...trimmed];
+    return (await this.compact(messages)).messages;
   }
 
-  /**
-   * Group messages into atomic pairs: assistant (with toolCalls) + following tool messages.
-   * Messages without toolCalls are their own single-element group.
-   */
-  private groupAtomicPairs(messages: Message[]): Message[][] {
-    const groups: Message[][] = [];
-    let i = 0;
+  getLastCompactionResult(): ContextCompactionResult | undefined {
+    return this.lastCompactionResult;
+  }
 
-    while (i < messages.length) {
-      const msg = messages[i];
-      if (msg.role === 'assistant' && msg.toolCalls?.length) {
-        const toolCallIds = new Set(msg.toolCalls.map(tc => tc.id));
-        const pair: Message[] = [msg];
-        i++;
-        // Collect all tool messages that belong to this assistant
-        while (i < messages.length && messages[i].role === 'tool' && messages[i].toolCallId && toolCallIds.has(messages[i].toolCallId!)) {
-          pair.push(messages[i]);
-          i++;
-        }
-        groups.push(pair);
-      } else {
-        groups.push([msg]);
-        i++;
+  async compact(
+    messages: Message[],
+    options: ContextCompactionOptions = {},
+  ): Promise<ContextCompactionResult> {
+    const allSystemMessages = messages.filter(message => message.role === 'system');
+    const baseSystemMessages = allSystemMessages.filter(message => !this.isCompactionSummary(message));
+    const priorSummaries = allSystemMessages.filter(message => this.isCompactionSummary(message));
+    const priorSummary = priorSummaries.at(-1);
+    const systemMessages = priorSummary ? [...baseSystemMessages, priorSummary] : baseSystemMessages;
+    const nonSystem = messages.filter(message => message.role !== 'system');
+    const toolTokens = estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools);
+    const currentTokens = estimateTokens([...systemMessages, ...nonSystem]) + toolTokens;
+    const overMessageBudget = nonSystem.length > this.config.maxMessages;
+    const overTokenBudget = this.config.maxTokens !== undefined && currentTokens > this.config.maxTokens;
+
+    const groups = this.groupAtomicPairs(nonSystem);
+    const hasInvalidFragments = groups.some(group => !group.retainable);
+    const hasCollapsedSummaries = priorSummaries.length > 1;
+    if (!options.force && !overMessageBudget && !overTokenBudget && !hasInvalidFragments && !hasCollapsedSummaries) {
+      return this.remember({
+        messages,
+        compacted: false,
+        summarized: false,
+        summaryUnavailable: false,
+        evictedMessages: 0,
+        estimatedTokens: currentTokens,
+        overBudget: false,
+        oversizedNewestGroup: false,
+      });
+    }
+
+    const kept = new Set<MessageGroup>();
+    let keptCount = 0;
+    let remainingTokens = this.config.maxTokens === undefined
+      ? undefined
+      : this.config.maxTokens - estimateTokens(systemMessages) - toolTokens;
+
+    for (let index = groups.length - 1; index >= 0; index--) {
+      const group = groups[index];
+      if (!group.retainable) continue;
+
+      const groupTokens = estimateTokens(group.messages);
+      const exceedsCount = keptCount > 0 && keptCount + group.messages.length > this.config.maxMessages;
+      const exceedsTokens = remainingTokens !== undefined && keptCount > 0 && remainingTokens - groupTokens < 0;
+      if (exceedsCount || exceedsTokens) break;
+
+      kept.add(group);
+      keptCount += group.messages.length;
+      if (remainingTokens !== undefined) remainingTokens -= groupTokens;
+
+      // A complete newest tool pair stays intact even if that pair itself is
+      // larger than the configured window; splitting it would make the next
+      // provider request invalid. The same rule applies to a newest user
+      // message, whose content is never silently truncated by the compactor.
+    }
+
+    const retained: Message[] = [];
+    const evicted: Message[] = [];
+    for (const group of groups) {
+      if (kept.has(group)) retained.push(...group.messages);
+      else evicted.push(...group.messages);
+    }
+
+    // An interrupted checkpoint may contain an incomplete tool call. Never
+    // feed that dangling assistant/tool fragment back to a provider.
+    const ordered = [...systemMessages, ...retained];
+    const newestRetained = [...groups].reverse().find(group => kept.has(group));
+    const systemTokens = estimateTokens(systemMessages) + toolTokens;
+    const oversizedNewestGroup = this.config.maxTokens !== undefined &&
+      systemTokens <= this.config.maxTokens &&
+      newestRetained !== undefined &&
+      estimateTokens(newestRetained.messages) > this.config.maxTokens - systemTokens;
+    let summarized = false;
+    if (this.config.llm && this.config.summaryThreshold !== undefined && evicted.length > this.config.summaryThreshold) {
+      try {
+        const summaryInput = priorSummary ? [priorSummary, ...evicted] : evicted;
+        const summaryPrompt = `Summarize the key information from this conversation. Include decisions made, code patterns discussed, file paths mentioned, user preferences, and unresolved work. Do not invent facts.\n\n${summaryInput.map(message => `${message.role}: ${message.content.slice(0, 500)}`).join('\n')}`;
+        const summary = await this.config.llm.complete([{ role: 'user', content: summaryPrompt }], []);
+        if (priorSummary) ordered.splice(baseSystemMessages.length, 1);
+        ordered.splice(baseSystemMessages.length, 0, {
+          role: 'system',
+          content: `Earlier conversation summary: ${String(summary.content)}`,
+        });
+        summarized = true;
+      } catch {
+        // A failed summary must never prevent the bounded recent window.
       }
+    }
+
+    const summaryUnavailable = evicted.length > 0 && !summarized;
+    const estimatedTokens = estimateTokens(ordered) + toolTokens;
+
+    return this.remember({
+      messages: ordered,
+      compacted: overMessageBudget || overTokenBudget || evicted.length > 0 || ordered.length !== messages.length,
+      summarized,
+      summaryUnavailable,
+      evictedMessages: evicted.length,
+      estimatedTokens,
+      overBudget: this.config.maxTokens !== undefined && estimatedTokens > this.config.maxTokens,
+      oversizedNewestGroup,
+    });
+  }
+
+  /** Keep a caller-provided ContextEngine aligned with the resolved provider budget. */
+  configureBudget(maxTokens: number, toolsProvider?: () => ToolDefinition[]): void {
+    this.config.maxTokens = Math.max(1, maxTokens);
+    if (toolsProvider) this.config.toolsProvider = toolsProvider;
+  }
+
+  private remember(result: ContextCompactionResult): ContextCompactionResult {
+    this.lastCompactionResult = result;
+    return result;
+  }
+
+  private isCompactionSummary(message: Message): boolean {
+    return message.role === 'system' && message.content.startsWith('Earlier conversation summary:');
+  }
+
+  private groupAtomicPairs(messages: Message[]): MessageGroup[] {
+    const groups: MessageGroup[] = [];
+    let index = 0;
+
+    while (index < messages.length) {
+      const message = messages[index];
+      if (message.role === 'assistant' && message.toolCalls?.length) {
+        const expectedIds = new Set(message.toolCalls.map(toolCall => toolCall.id));
+        const pair: Message[] = [message];
+        index++;
+        while (
+          index < messages.length &&
+          messages[index].role === 'tool' &&
+          messages[index].toolCallId &&
+          expectedIds.has(messages[index].toolCallId!)
+        ) {
+          pair.push(messages[index]);
+          index++;
+        }
+        const receivedIds = new Set(pair.slice(1).map(tool => tool.toolCallId));
+        groups.push({ messages: pair, retainable: receivedIds.size === expectedIds.size });
+        continue;
+      }
+
+      // An orphan tool result has no valid provider context without its
+      // assistant tool call, so it is evicted together with other invalid
+      // fragments instead of being retained as a standalone tail message.
+      groups.push({ messages: [message], retainable: message.role !== 'tool' });
+      index++;
     }
 
     return groups;

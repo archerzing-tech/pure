@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { Harness } from '../Harness';
+import { PromptAssembler } from '../../shared/PromptAssembler';
 import { DefaultHookRouter } from '../../engine/HookRouter';
 import { DefaultFailurePolicy } from '../../engine/FailurePolicy';
 import type {
@@ -116,6 +117,40 @@ class FakeMemoryStore implements IMemoryStore {
 }
 
 describe('Harness cross-session memory (v0.10)', () => {
+  it('uses the shared PromptAssembler for retrieved context', async () => {
+    const memStore = new FakeMemoryStore();
+    await memStore.add({
+      type: 'user_preference',
+      content: 'Use the shared assembler path',
+      timestamp: Date.now(),
+      sessionId: 'old-session',
+      projectPath: '/ws',
+    });
+    class RecordingAssembler extends PromptAssembler {
+      calls = 0;
+      override composeMemoryPrompt(input: Parameters<PromptAssembler['composeMemoryPrompt']>[0]): string {
+        this.calls++;
+        return super.composeMemoryPrompt(input);
+      }
+    }
+    const assembler = new RecordingAssembler();
+    const llm = recordingLLM('answer');
+    const harness = new Harness({
+      sessionId: 'sess-shared-assembler',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      promptAssembler: assembler,
+    });
+
+    await collect(harness.run('BASE SYSTEM', 'use the shared assembler path'));
+
+    expect(assembler.calls).toBe(1);
+    expect(llm.received[0][0].content).toContain('Use the shared assembler path');
+  });
+
   it('injects relevant memories into the system prompt at session start', async () => {
     const memStore = new FakeMemoryStore();
     await memStore.add({
@@ -172,9 +207,9 @@ describe('Harness cross-session memory (v0.10)', () => {
     expect(written[0].projectPath).toBe('/ws');
     expect(written[0].sessionId).toBe('sess-mem2');
     expect(written[0].content).toContain('refactor auth module');
-    expect(written[0].content).toContain('Engine VERIFY phase passed');
+    expect(written[0].content).toContain('No project-level verification evidence was recorded');
     expect(written[0].lesson?.symptom).toContain('refactor auth module');
-    expect(written[0].lesson?.verification).toContain('no project-level command');
+    expect(written[0].lesson?.verification).toContain('No project-level verification evidence was recorded');
   });
 
   it('does not duplicate a lesson when the same prompt is completed twice in one session', async () => {
@@ -636,6 +671,35 @@ describe('Harness resume (P1-7)', () => {
     const last = cp!.state.messages[cp!.state.messages.length - 1];
     // No trailing assistant message with dangling toolCalls survived the trim.
     expect(last.role === 'assistant' && !!last.toolCalls?.length).toBe(false);
+  });
+
+  it('can replace a compacted engine checkpoint with the full transcript', async () => {
+    const store = new MemoryStore();
+    const harness = new Harness({
+      sessionId: 'sess-transcript-checkpoint',
+      llm: recordingLLM('answer'),
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      stateStore: store,
+    });
+
+    const compacted: Message[] = [
+      { role: 'system', content: 'SYS' },
+      { role: 'system', content: 'Earlier conversation summary: old' },
+      { role: 'user', content: 'next' },
+      { role: 'assistant', content: 'answer' },
+    ];
+    const fullTranscript: Message[] = [
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: 'old' },
+      { role: 'assistant', content: 'old answer' },
+      ...compacted.slice(2),
+    ];
+
+    await harness.saveTranscriptCheckpoint(compacted, 2);
+    await harness.saveTranscriptCheckpoint(fullTranscript, 2);
+
+    expect(store.loadSession('sess-transcript-checkpoint')?.state.messages).toEqual(fullTranscript);
   });
 
   it('saves a turn_completed checkpoint on completion', async () => {

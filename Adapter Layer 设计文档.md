@@ -1,5 +1,7 @@
 # Adapter Layer 设计文档
 
+> 对应实现：v1.9.2-beta7；Prompt observability 参考 `src/shared/promptObservability.ts` 与 `src/shared/FilePromptObservationStore.ts`，评测 runner 参考 `src/evaluation/`。
+
 > ⚠️ **PHASE 4 / REFERENCE DOCUMENT** — 本文档是 Adapter Layer（接入层）的完整实现参考。
 > 📗 核心规范请见 `pure Spec.md`（Prompt-Ready Implementation Guide）第 4-5 节。
 >
@@ -859,6 +861,15 @@ describe('security', () => {
 | **VerifierAdapter** 接口 | `src/shared/VerifierAdapter.ts` | `src/coding-agent/Verifier.ts`（Coding Agent） | Engine（VERIFY 阶段） |
 
 ---
+
+## 11.5 Prompt observability sink（本地优先）
+
+Prompt observability 不改变 `LLMAdapter`、`ToolAdapter` 或权限契约，只提供运行链路的结构化诊断：
+
+- `PromptObservability` 保存 prompt assembly 与 agent run observation，默认使用有界内存 store。
+- 观测数据只包含长度、哈希、fragment/budget 元数据、工具名/耗时、usage、verification 状态和终态；原始 prompt、工具参数、命令输出和最终回答不进入默认记录。
+- Node 侧 `FilePromptObservationStore` 提供显式 opt-in 的版本化 JSONL sink，能够忽略损坏行并通过临时文件替换保持报告完整性；GUI bundle 不依赖 Node filesystem API。
+- sink 可注入 PromptAssembler/CodingAgent/Harness；自定义 assembler 的 sink 优先，确保 assembly/run trace 不分流。
 
 ## 12. Memory Adapter（IMemoryStore）
 

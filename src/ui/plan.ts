@@ -7,14 +7,17 @@ import type { AnalysisResult, Plan, TaskMode } from '../coding-agent/types';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { showInlineCard } from './inlineCard';
-import { scrollChatToBottomIfPinned } from './scrollPin';
-import type { QualityGatePhase, QualityGateStatus } from './projectQualityGate';
+import type { QualityGateCheck, QualityGatePhase, QualityGateStatus } from './projectQualityGate';
 
 export type PlanReviewDecision = 'approve' | 'skip' | 'cancel';
 
 export interface PlanReviewOptions {
   /** Project builds must be approved; ordinary complex tasks may be skipped. */
   allowSkip?: boolean;
+  /** This review is a safety checkpoint for a destructive request. */
+  riskReview?: boolean;
+  /** When aborted (user pressed stop), the dialog resolves as 'cancel' and closes. */
+  signal?: AbortSignal;
 }
 
 // Serialize concurrent plan reviews (mirrors the permission dialog queue).
@@ -33,14 +36,48 @@ export function requestPlanReview(
  * Also instructs the model to write a `## 阶段 n/m` heading at the start of
  * each phase — the chat UI scans for that marker to show which phase of the
  * plan is currently executing. */
-export function formatPlanForPrompt(plan: Plan, projectBuild = false): string {
+export function formatPlanForPrompt(plan: Plan, projectBuild = false, approved = false): string {
   const steps = plan.steps
-    .map((s, i) => `${i + 1}. ${s.action}: ${s.description}`)
+    .map((s, i) => {
+      const substeps = s.todosRequired === false ? '' : (s.substeps ?? [])
+        .map((sub, j) => `\n   (${j + 1}) ${sub.action}: ${sub.description}`)
+        .join('');
+      const todoRule = s.todosRequired === false ? ' [atomic step — no Todo list supplied]' : ' [show a Todo list only when it helps clarify the work]';
+      return `${i + 1}. ${s.action}: ${s.description}${todoRule}${substeps}`;
+    })
     .join('\n');
-  const execution = projectBuild
-    ? 'This is a project build: execute phases strictly in order. Never create or modify files for a later phase early. At the start of each phase, write a heading exactly like `## 阶段 n/m`. Within a phase, make only the files needed for that phase, then RUN THE PROJECT\'S ACTUAL verification command (e.g. `npm run typecheck && npm test`, `cargo test`) and report its real output before starting the next phase — never claim a check you did not run. Do not batch the whole project into one tool burst. If verification fails, stop advancing, fix the current phase, and report the failure and retry.'
-    : 'Work through these steps in order and report the result of each step before moving on.';
-  return `\n\n## Execution plan (approved by user)\n${steps}\n${execution} The UI uses these markers to display the active phase — always include the total count. Finish by summarizing what changed.`;
+  // approved=true means the user has already approved the execution direction,
+  // so the first response should begin useful work rather than wait for a second
+  // approval. approved=false keeps the planning pause used by auto-detected plans.
+  const execution = approved
+    ? 'Use the approved plan as a flexible guide. Keep the overall plan and any active Todo list visibly separate. The user has already approved this plan, so start executing immediately. Briefly restate the user request, show the complete top-level plan list once and show a separate Todo list below the plan list for plan 1, then begin the most appropriate next action with real tool calls in this response when execution is approved; do not wait for another approval. Verify the result. When a plan card is active, report meaningful phase/completion progress with the supported markers so the UI can synchronize; markers describe progress only and do not dictate execution granularity. If the task needs information, ask one natural question and pause until the user answers. In later responses, continue with the next appropriate work, verify meaningful results. When a plan card is active, use the supported progress markers so the UI can synchronize; they do not dictate execution granularity. Emit `## 计划 n 已完成` when the plan work has actually been completed and verified' + (projectBuild ? ' (for a project, run the actual project verification command).' : '.') + ' The UI may reflect the completed plan in the separate plan list and activate the next plan. Before the next plan starts, show the updated plan context and continue with the next appropriate work when the execution context allows it. When todosRequired=false, treat the step as atomic unless the task itself reveals a reason to split it. Do not claim a plan or work item is complete without relevant verification evidence. Never claim a work item or plan is complete before its real verification. Use plain language and natural colleague-like sentences around the required markers.'
+    : 'Use the approved plan as a flexible guide. Keep the overall plan and any active Todo list visibly separate. First, briefly restate the user request in your own words and say naturally that you will think it through before planning. Then show the complete top-level plan list once and show a separate Todo list below the plan list for plan 1. IMPORTANT: this first planning response is a pause point — do not call tools or change files yet; end by telling the user what you recommend starting with. Only after the user sends the next message may you begin execution. If the task needs information, ask one natural question and pause until the user answers. In continuation responses, continue with the next appropriate work, verify meaningful results. When a plan card is active, use the supported progress markers so the UI can synchronize; they do not dictate execution granularity. Emit `## 计划 n 已完成` when the plan work has actually been completed and verified' + (projectBuild ? ' (for a project, run the actual project verification command).' : '.') + ' The UI may reflect the completed plan in the separate plan list and activate the next plan. Before the next plan starts, show the updated plan context and continue with the next appropriate work when the execution context allows it. When todosRequired=false, treat the step as atomic unless the task itself reveals a reason to split it; respect the current execution context. Do not claim a plan or work item is complete without relevant verification evidence. Never claim a work item or plan is complete before its real verification. Use plain language and natural colleague-like sentences around the required markers.';
+  const firstTurn = approved
+    ? 'The plan is already approved, so do NOT wait for another go-ahead: restate the request, show the relevant plan context, then start the next appropriate work with real tool calls in this same response. End by reporting what you did and what remains.'
+    : 'On the first response after this plan is approved, introduce the relevant plan context without executing tools; end by saying what you recommend starting with.';
+  return `\n\n## 整体安排\n${steps}\n${execution} Begin each active plan with an explicit line \"## 计划 n：<正在做什么>\" and close it with \"## 计划 n 已完成\" (for example, \"## 计划 1 已完成\"); keep the numbering consistent with the list above. Keep the plan list and the active Todo list as two separate plain-text lists. The UI uses present markers to reflect progress while keeping the plan context visible; markers are presentation/state signals, not execution rules. Do not use a card, tree menu, or nested plan structure. ${firstTurn} In later responses, continue with the work that remains and verify it where appropriate. Use completion markers only when they accurately describe the progress. If the current work requires an answer, ask one conversational question and pause without claiming completion. Finish by summarizing what changed.`;
+}
+
+/** Build the assistant-side history entry for the first planning pause. */
+export function formatPlanPauseMessage(plan: Plan): string {
+  const planLines = plan.steps.map((step, index) => `□ ${index + 1}. ${step.action}：${step.description}`).join('\n');
+  const first = plan.steps[0];
+  const todoLines = (first?.substeps ?? []).map((todo, index) => `□ ${index + 1}. ${todo.action}：${todo.description}`).join('\n');
+  return `我仔细分析了一下你的需求。这不是一件适合一口气做完的事，我会先把范围和顺序理清，再逐步推进。\n\n📋 我先列出整体安排：\n${planLines}\n\n当前先处理第 1 项「${first?.action ?? '当前阶段'}」。${todoLines ? `\n\n这一阶段的 Todos：\n${todoLines}` : ''}\n\n计划先列到这里。你回复后，我会根据实际依赖继续推进；如果 Todo 列表有帮助，再用“✓ + 删除线”同步真实进度。`;
+}
+
+/** Context for a later user turn that continues an already-approved complex plan. */
+export function formatPlanContinuation(plan: Plan, currentPlan: number, currentTodo: number, projectBuild = false): string {
+  const planLines = plan.steps.map((step, index) => {
+    const done = index + 1 < currentPlan;
+    return `${done ? '✓ ~~' : '□ '}${index + 1}. ${step.action}${done ? '~~ [已完成]' : index + 1 === currentPlan ? ' 👈 当前阶段' : ''}`;
+  }).join('\n');
+  const active = plan.steps[currentPlan - 1];
+  const todos = (active?.substeps ?? []).map((todo, index) => {
+    const done = index + 1 < currentTodo;
+    return `${done ? '✓ ~~' : '□ '}${index + 1}. ${todo.action}${done ? '~~ [已完成]' : index + 1 === currentTodo ? ' 👈 建议从这里继续' : ''}`;
+  }).join('\n');
+  return `\n\n<plan_continuation>\n这是一个已经开始的复杂任务，不要重新生成计划，也不要从头开始。\n\n当前总计划：\n${planLines}\n\n当前阶段 Todos（阶段 ${currentPlan}）：\n${todos || '当前阶段没有拆分 Todo，请直接处理这一阶段。'}\n\n继续规则：把这里的计划和 Todo 当作当前上下文，根据实际依赖选择下一步工作；可以合并紧密相关的小项，也可以在需要信息时先提问并暂停。完成后用自然语言说明真实进展，并在有帮助时使用完成标记。${projectBuild ? '项目级交付仍需提供真实验证证据。' : ''}\n</plan_continuation>`;
 }
 
 // ── Live plan-progress card (transcript) ──
@@ -51,12 +88,31 @@ export function formatPlanForPrompt(plan: Plan, projectBuild = false): string {
 
 export interface PlanCardHandle {
   el: HTMLElement;
-  stepEls: HTMLElement[]; // phase rows
-  numEls: HTMLElement[];  // phase number chips (swapped for ✓ when done)
+  stepEls: HTMLElement[]; // top-level plan rows
+  numEls: HTMLElement[];  // top-level number labels
+  checkEls: HTMLElement[]; // independent completion marks for top-level plans
+  substepEls: HTMLElement[][]; // (1)/(2)/(3) rows in each independent Todo list
+  substepNumEls: HTMLElement[][];
+  /** One independent Todo list per top-level plan; never nested inside plan rows. */
+  todoLists: HTMLElement[];
+  planLabels: string[];
+  todoTitleEl: HTMLElement;
+  todosRequired: boolean[];
   total: number;
   current: number;
+  currentSubstep: number;
+  /** Whether the active plan intentionally renders a Todo list. */
+  currentTodosRequired: boolean;
+  /** True once the model has explicitly reported the active substep. */
+  substepStarted: boolean;
   /** Refining badge element, present while the LLM is still generating the plan. */
   refiningEl: HTMLElement | null;
+  /** Human-readable live activity, kept visible while the transcript grows. */
+  setActivity(message: string): void;
+  /** Switch the card into an explicit "waiting for your reply" state — used at
+   * the first-Todo pause point so the card reads as paused-and-ready instead
+   * of silently stopped or actively running. */
+  setWaiting(planNumber: number, todoLabel: string): void;
 }
 
 // Refining-badge text-rotation timers, keyed by the badge element. The hint
@@ -65,40 +121,22 @@ export interface PlanCardHandle {
 // the DOM (card upgraded / discarded), so a timer can never outlive its badge.
 const refiningTimers = new WeakMap<HTMLElement, number>();
 
-// Short chip label for the auto-selected task mode (shown in the progress-card
-// head so the user sees the yolo → plan/build switch). Defined here (not in
-// chat.ts) to avoid a circular import.
-function modeChipLabel(mode: TaskMode | undefined): string | null {
-  switch (mode) {
-    case 'build': return t('plan.mode.build');
-    case 'plan': return t('plan.mode.plan');
-    default: return null;
-  }
-}
-
 export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false): PlanCardHandle {
   const el = document.createElement('div');
-  el.className = 'bubble-row plan-progress-row';
+  el.className = 'bubble-row plan-progress-row plan-text-progress-row';
 
   const card = document.createElement('div');
-  card.className = 'plan-progress-card';
+  card.className = 'plan-progress-text-plan';
 
   const head = document.createElement('div');
   head.className = 'plan-progress-head';
   const title = document.createElement('span');
   title.className = 'plan-progress-title';
-  title.textContent = t('plan.progress.title', '📋 执行计划');
+  title.textContent = '我先把这件事拆开，按顺序来处理：';
   const count = document.createElement('span');
   count.className = 'plan-progress-count';
-  count.textContent = t('plan.progress.phases', '共 {n} 个阶段').replace('{n}', String(plan.steps.length));
-  const chipLabel = modeChipLabel(mode);
+  count.textContent = `大概分成 ${plan.steps.length} 件事`;
   const headParts: HTMLElement[] = [title];
-  if (chipLabel) {
-    const chip = document.createElement('span');
-    chip.className = 'plan-mode-chip';
-    chip.textContent = chipLabel;
-    headParts.push(chip);
-  }
   if (refining) {
     // Scaffold period: the LLM is still working out the real steps. Animated
     // dots + label tell the user the card is live and being refined, instead
@@ -115,15 +153,14 @@ export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false): P
       badge.appendChild(dot);
     }
     const label = document.createElement('span');
-    label.className = 'plan-refining-label';
-    label.textContent = t('plan.refining', '完善中…');
+    label.className = 'plan-refining-label';      label.textContent = '我先想清楚每一步…';
     badge.appendChild(label);
     headParts.push(badge);
     // 3s hint rotation; self-cleaning via the isConnected guard (see above).
     const hints = [
       t('plan.refining.files', '正在参考工作区文件…'),
       t('plan.refining.analyzing', '正在分析你的需求…'),
-      t('plan.refining.planning', '正在生成专属执行计划…'),
+      '正在把事情理顺…',
     ];
     let hintIndex = 0;
     const timer = window.setInterval(() => {
@@ -144,13 +181,28 @@ export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false): P
   headParts.push(count);
   head.append(...headParts);
 
+  const activity = document.createElement('div');
+  activity.className = 'plan-progress-activity';
+  activity.setAttribute('role', 'status');
+  activity.setAttribute('aria-live', 'polite');
+  activity.textContent = refining ? '正在整理执行步骤…' : '等待开始执行…';
+
   const steps = document.createElement('div');
   steps.className = 'plan-progress-steps';
+  const todoLists: HTMLElement[] = [];
+  const todoTitleEls: HTMLElement[] = [];
   const stepEls: HTMLElement[] = [];
   const numEls: HTMLElement[] = [];
+  const checkEls: HTMLElement[] = [];
+  const substepEls: HTMLElement[][] = [];
+  const substepNumEls: HTMLElement[][] = [];
   plan.steps.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = 'plan-progress-step pending';
+    const check = document.createElement('span');
+    check.className = 'plan-progress-step-check';
+    check.setAttribute('aria-hidden', 'true');
+    check.textContent = '';
     const num = document.createElement('span');
     num.className = 'plan-progress-step-num';
     num.textContent = String(i + 1);
@@ -166,25 +218,121 @@ export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false): P
       desc.textContent = s.description;
       body.appendChild(desc);
     }
-    row.append(num, body);
+    const nestedRows: HTMLElement[] = [];
+    const nestedNums: HTMLElement[] = [];
+    for (const [j, sub] of (s.substeps ?? []).entries()) {
+      const subRow = document.createElement('div');
+      subRow.className = 'plan-progress-substep plan-progress-todo-row pending';
+      const subCheck = document.createElement('span');
+      subCheck.className = 'plan-progress-substep-check';
+      subCheck.setAttribute('aria-hidden', 'true');
+      subCheck.textContent = '';
+      const subNum = document.createElement('span');
+      subNum.className = 'plan-progress-substep-num';
+      subNum.textContent = `(${j + 1})`;
+      const subBody = document.createElement('div');
+      subBody.className = 'plan-progress-substep-body';
+      const subAction = document.createElement('span');
+      subAction.className = 'plan-progress-substep-action';
+      subAction.textContent = sub.action;
+      subBody.appendChild(subAction);
+      if (sub.description) {
+        const subDesc = document.createElement('span');
+        subDesc.className = 'plan-progress-substep-desc';
+        subDesc.textContent = sub.description;
+        subBody.appendChild(subDesc);
+      }
+      subRow.append(subCheck, subNum, subBody);
+      nestedRows.push(subRow);
+      nestedNums.push(subNum);
+    }
+    row.append(check, num, body);
     steps.appendChild(row);
+    const todoList = document.createElement('div');
+    todoList.className = 'plan-progress-text-todos plan-progress-todo-hidden';
+    const todoTitle = document.createElement('div');
+    todoTitle.className = 'plan-progress-todo-title';
+    todoTitle.setAttribute('role', 'status');
+    todoTitle.setAttribute('aria-live', 'polite');
+    todoTitle.textContent = `这一步的 Todos：${s.action}`;
+    todoList.append(todoTitle, ...nestedRows);
+    todoLists.push(todoList);
+    todoTitleEls.push(todoTitle);
     stepEls.push(row);
     numEls.push(num);
+    checkEls.push(check);
+    substepEls.push(nestedRows);
+    substepNumEls.push(nestedNums);
   });
 
-  card.append(head, steps);
+  card.append(head, activity, steps);
   el.appendChild(card);
+  for (const todoList of todoLists) el.appendChild(todoList);
 
   const handle: PlanCardHandle = {
     el,
     stepEls,
     numEls,
+    checkEls,
+    substepEls,
+    substepNumEls,
+    todoLists,
+    planLabels: plan.steps.map((step) => step.action),
+    todoTitleEl: todoTitleEls[0] ?? document.createElement('div'),
+    todosRequired: plan.steps.map((step) => step.todosRequired !== false),
     total: plan.steps.length,
     current: 1,
+    currentSubstep: 1,
+    currentTodosRequired: plan.steps[0]?.todosRequired !== false,
+    substepStarted: false,
     refiningEl: refining ? head.querySelector('.plan-progress-refining') : null,
+    setActivity: (message: string): void => {
+      activity.classList.remove('is-waiting');
+      activity.textContent = message;
+    },
+    setWaiting: (planNumber: number, todoLabel: string): void => {
+      activity.classList.add('is-waiting');
+      activity.textContent = `⏸ 已暂停：正在等你回复后开始第 ${planNumber} 项「${todoLabel}」`;
+    },
   };
   setPlanPhase(handle, 1);
   return handle;
+}
+
+/** Update the existing plan card in place. The outer transcript row stays
+ * mounted, so task progress remains visible throughout the turn instead of
+ * looking like a one-time list that disappears during plan refinement. */
+export function updatePlanCard(h: PlanCardHandle, plan: Plan, mode?: TaskMode, refining = false): void {
+  const previousPhase = h.current;
+  const previousSubstep = h.currentSubstep;
+  const previousSubstepStarted = h.substepStarted;
+  const previousTodosRequired = h.currentTodosRequired;
+  const previousActivity = h.el.querySelector<HTMLElement>('.plan-progress-activity')?.textContent;
+  clearPlanCardRefining(h);
+  const fresh = createPlanCard(plan, mode, refining);
+  h.el.replaceChildren(...Array.from(fresh.el.childNodes));
+  h.stepEls = fresh.stepEls;
+  h.numEls = fresh.numEls;
+  h.checkEls = fresh.checkEls;
+  h.substepEls = fresh.substepEls;
+  h.substepNumEls = fresh.substepNumEls;
+  h.todoLists = fresh.todoLists;
+  h.planLabels = fresh.planLabels;
+  h.todoTitleEl = fresh.todoTitleEl;
+  h.todosRequired = fresh.todosRequired;
+  h.total = fresh.total;
+  h.current = 1;
+  h.currentSubstep = 1;
+  h.currentTodosRequired = fresh.currentTodosRequired;
+  h.substepStarted = false;
+  h.refiningEl = fresh.refiningEl;
+  h.setActivity = fresh.setActivity;
+  setPlanPhase(h, Math.max(1, Math.min(previousPhase, h.total)));
+  if (previousPhase === h.current && previousTodosRequired === h.currentTodosRequired && previousSubstepStarted) {
+    h.substepStarted = true;
+    setPlanSubstep(h, previousSubstep);
+  }
+  if (previousActivity) h.setActivity(previousActivity);
 }
 
 /** Remove the "完善中…" refining badge in place — used when plan generation
@@ -209,8 +357,14 @@ export interface QualityGateCardHandle {
   el: HTMLElement;
   /** Update one step's row: 'active' while running, final status when done. */
   set(phase: QualityGatePhase, status: QualityGateStatus | 'active', summary?: string): void;
+  /** Attach the actual tool/command output to the completed step. */
+  setEvidence(check: QualityGateCheck): void;
   /** Put every step back to pending (repair → full re-run cycle). */
   reset(): void;
+  /** Update the live explanation while the gate is waiting on a tool. */
+  setActivity(message: string): void;
+  /** Stop the live elapsed-time heartbeat when the gate run is over. */
+  dispose(outcome: 'passed' | 'failed' | 'cancelled'): void;
 }
 
 // User-facing verification steps, in the order the gate runs them. Kept as
@@ -226,27 +380,41 @@ export function createQualityGateCard(): QualityGateCardHandle {
   el.className = 'bubble-row plan-progress-row';
 
   const card = document.createElement('div');
-  card.className = 'plan-progress-card';
+  card.className = 'plan-progress-card quality-gate-card';
 
   const head = document.createElement('div');
   head.className = 'plan-progress-head';
   const title = document.createElement('span');
   title.className = 'plan-progress-title';
   title.textContent = '🧪 交付前测试与审计';
+  const live = document.createElement('span');
+  live.className = 'quality-gate-live';
+  live.setAttribute('role', 'status');
+  live.setAttribute('aria-live', 'polite');
+  live.innerHTML = '<i class="quality-gate-live-dot" aria-hidden="true"></i><span class="quality-gate-live-text">后台运行中 · 已用时 0s</span>';
   const count = document.createElement('span');
   count.className = 'plan-progress-count';
   count.textContent = `共 ${QUALITY_GATE_STEPS.length} 步`;
-  head.append(title, count);
+  head.append(title, live, count);
+
+  const activity = document.createElement('div');
+  activity.className = 'quality-gate-activity';
+  activity.setAttribute('aria-live', 'polite');
+  activity.textContent = '正在准备交付检查…';
 
   const steps = document.createElement('div');
   steps.className = 'plan-progress-steps';
   const numEls: HTMLElement[] = [];
   const statusEls: HTMLElement[] = [];
-  const byPhase = new Map<QualityGatePhase, { row: HTMLElement; num: HTMLElement; status: HTMLElement; index: number }>();
+  const byPhase = new Map<QualityGatePhase, { row: HTMLElement; check: HTMLElement; num: HTMLElement; status: HTMLElement; evidence: HTMLDetailsElement; evidenceBody: HTMLElement; index: number }>();
 
   QUALITY_GATE_STEPS.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = 'plan-progress-step pending';
+    const check = document.createElement('span');
+    check.className = 'plan-progress-step-check';
+    check.setAttribute('aria-hidden', 'true');
+    check.textContent = '';
     const num = document.createElement('span');
     num.className = 'plan-progress-step-num';
     num.textContent = String(i + 1);
@@ -260,87 +428,395 @@ export function createQualityGateCard(): QualityGateCardHandle {
     desc.textContent = s.description;
     const status = document.createElement('span');
     status.className = 'plan-progress-step-status';
-    body.append(action, desc, status);
-    row.append(num, body);
+    const evidence = document.createElement('details');
+    evidence.className = 'quality-gate-evidence';
+    const evidenceSummary = document.createElement('summary');
+    evidenceSummary.textContent = '查看检查反馈';
+    const evidenceBody = document.createElement('pre');
+    evidenceBody.className = 'quality-gate-evidence-body';
+    evidenceBody.textContent = '等待检查结果…';
+    evidence.append(evidenceSummary, evidenceBody);
+    body.append(action, desc, status, evidence);
+    row.append(check, num, body);
     steps.appendChild(row);
     numEls.push(num);
     statusEls.push(status);
-    byPhase.set(s.phase, { row, num, status, index: i });
+    byPhase.set(s.phase, { row, check, num, status, evidence, evidenceBody, index: i });
   });
 
-  card.append(head, steps);
+  card.append(head, activity, steps);
   el.appendChild(card);
 
+  const startedAt = Date.now();
+  let timer: number | undefined;
+  let disposed = false;
+  const phaseLabels: Record<QualityGatePhase, string> = {
+    review: '代码审查',
+    audit: '依赖/安全审计',
+    verify: '自动化验证',
+  };
+  const phaseActivities: Record<QualityGatePhase, string> = {
+    review: '正在调用代码审查工具，检查当前工作区的代码与配置…',
+    audit: '正在扫描依赖清单与安全审计结果…',
+    verify: '正在运行类型检查与自动化测试…',
+  };
+  const elapsed = (): string => {
+    const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    return `${seconds}s`;
+  };
+  const refreshLive = (): void => {
+    if (disposed) return;
+    if (!el.isConnected) {
+      disposed = true;
+      if (timer !== undefined) {
+        window.clearInterval(timer);
+        timer = undefined;
+      }
+      return;
+    }
+    const liveText = live.querySelector('.quality-gate-live-text');
+    if (liveText) liveText.textContent = `后台运行中 · 已用时 ${elapsed()}`;
+  };
+  const startHeartbeat = (): void => {
+    if (timer === undefined) timer = window.setInterval(refreshLive, 1000);
+    refreshLive();
+  };
   const set = (phase: QualityGatePhase, status: QualityGateStatus | 'active', summary?: string): void => {
     const entry = byPhase.get(phase);
     if (!entry) return;
-    const { row, num, status: statusEl, index } = entry;
+    const { row, check, num, status: statusEl, evidence, evidenceBody, index } = entry;
     row.classList.remove('pending', 'active', 'done', 'failed', 'unavailable');
     if (status === 'active') {
       row.classList.add('active');
+      check.textContent = '';
       num.textContent = String(index + 1);
       statusEl.textContent = '进行中…';
+      evidence.open = false;
+      evidenceBody.textContent = '检查正在运行，结果会显示在这里…';
+      activity.textContent = `${phaseActivities[phase]} · 已用时 ${elapsed()}`;
+      live.classList.add('active');
+      startHeartbeat();
     } else if (status === 'passed') {
       row.classList.add('done');
-      num.textContent = '✓';
+      check.textContent = '✓';
+      num.textContent = String(index + 1);
       statusEl.textContent = summary ?? '通过';
+      activity.textContent = `${phaseLabels[phase]}已完成：${summary ?? '通过'} · 总耗时 ${elapsed()}`;
+    } else if (status === 'degraded') {
+      row.classList.add('degraded');
+      check.textContent = '△';
+      num.textContent = String(index + 1);
+      statusEl.textContent = summary ?? '降级完成';
+      activity.textContent = `${phaseLabels[phase]}已降级完成：${summary ?? '完整工具未完成'}`;
     } else if (status === 'unavailable') {
       row.classList.add('unavailable');
-      num.textContent = '!';
+      check.textContent = '!';
+      num.textContent = String(index + 1);
       statusEl.textContent = summary ?? '无法验证';
+      activity.textContent = `${phaseLabels[phase]}无法形成证据：${summary ?? '无法验证'}`;
     } else {
       row.classList.add('failed');
-      num.textContent = '✗';
+      check.textContent = '✗';
+      num.textContent = String(index + 1);
       statusEl.textContent = summary ?? '未通过';
+      activity.textContent = `${phaseLabels[phase]}未通过：${summary ?? '未通过'}`;
     }
+  };
+
+  const setActivity = (message: string): void => {
+    if (disposed) return;
+    activity.textContent = `${message} · 已用时 ${elapsed()}`;
+    live.classList.add('active');
+    startHeartbeat();
+  };
+
+  const setEvidence = (check: QualityGateCheck): void => {
+    const entry = byPhase.get(check.phase);
+    if (!entry) return;
+    set(check.phase, check.status, check.summary);
+    const output = check.output?.trim();
+    entry.evidenceBody.textContent = output || '该检查没有返回可展示的详细输出。';
+    entry.evidence.hidden = false;
+    entry.evidence.open = Boolean(output);
   };
 
   const reset = (): void => {
+    // A failed gate may enter a repair → full re-run cycle. The first run's
+    // dispose() stops its heartbeat, so reset must explicitly revive the card
+    // before the second run starts; otherwise the UI would say the task ended
+    // while the retry was still working.
+    disposed = false;
     for (const entry of byPhase.values()) {
-      entry.row.classList.remove('active', 'done', 'failed', 'unavailable');
+      entry.row.classList.remove('active', 'done', 'degraded', 'failed', 'unavailable');
       entry.row.classList.add('pending');
+      entry.check.textContent = '';
       entry.num.textContent = String(entry.index + 1);
       entry.status.textContent = '';
+      entry.evidence.hidden = false;
+      entry.evidence.open = false;
+      entry.evidenceBody.textContent = '等待重新检查结果…';
     }
+    activity.textContent = '正在重新执行全部交付检查…';
+    live.classList.remove('complete', 'failed', 'cancelled');
+    live.classList.add('active');
+    startHeartbeat();
   };
 
-  return { el, set, reset };
+  const dispose = (outcome: 'passed' | 'failed' | 'cancelled'): void => {
+    disposed = true;
+    if (timer !== undefined) {
+      window.clearInterval(timer);
+      timer = undefined;
+    }
+    live.classList.remove('active', 'complete', 'failed', 'cancelled');
+    live.classList.add(outcome === 'passed' ? 'complete' : outcome);
+    const outcomeText = outcome === 'passed' ? '检查通过' : outcome === 'cancelled' ? '检查已取消' : '检查未通过';
+    const liveText = live.querySelector('.quality-gate-live-text');
+    if (liveText) liveText.textContent = `${outcomeText} · 总耗时 ${elapsed()}`;
+  };
+
+  // Do not start the timer here: the card is not attached to the transcript
+  // until createQualityGateCard() returns. The first onPhase/onActivity call
+  // starts it after the card is mounted; starting earlier would trigger the
+  // detached-card guard and permanently mark the handle disposed.
+  return { el, set, setEvidence, reset, setActivity, dispose };
+}
+
+function setPlanSubstep(h: PlanCardHandle, n: number): void {
+  const rows = h.substepEls[h.current - 1] ?? [];
+  const checks = h.substepEls[h.current - 1].map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
+
+  if (rows.length === 0) {
+    h.currentSubstep = 0;
+    h.substepStarted = false;
+    return;
+  }
+  h.currentSubstep = n;
+  rows.forEach((row, i) => {
+    row.classList.remove('done', 'active', 'pending');
+    if (i + 1 < n) {
+      row.classList.add('done');
+      if (checks[i]) checks[i]!.textContent = '✓';
+    } else if (i + 1 === n && n <= rows.length) {
+      row.classList.add('active');
+      if (checks[i]) checks[i]!.textContent = '';
+    } else {
+      row.classList.add('pending');
+      if (checks[i]) checks[i]!.textContent = '';
+    }
+  });
+  if (n > rows.length) {
+    rows.forEach((row, i) => {
+      row.classList.remove('active', 'pending');
+      row.classList.add('done');
+      if (checks[i]) checks[i]!.textContent = '✓';
+    });
+  }
 }
 
 function setPlanPhase(h: PlanCardHandle, n: number): void {
   h.current = n;
+  h.currentTodosRequired = h.todosRequired[n - 1] !== false;
+  h.substepStarted = false;
+  const currentRows = h.substepEls[n - 1] ?? [];
+  h.todoLists.forEach((todoList, planIndex) => {
+    if (planIndex === n - 1 && h.currentTodosRequired && currentRows.length > 0) todoList.classList.remove('plan-progress-todo-hidden');
+    else todoList.classList.add('plan-progress-todo-hidden');
+  });
+  if (n > h.total) {
+    h.todoTitleEl.textContent = '所有安排都完成了，我再确认一遍结果。';
+  } else if (!h.currentTodosRequired || currentRows.length === 0) {
+    h.todoTitleEl.textContent = `现在先处理「${h.planLabels[n - 1] ?? '这一件事'}」，这一步可以直接完成。`;
+  } else {
+    h.todoTitleEl.textContent = `现在先处理「${h.planLabels[n - 1] ?? '这一件事'}」的 Todos：`;
+  }
   h.stepEls.forEach((el, i) => {
     el.classList.remove('done', 'active', 'pending');
     if (i + 1 < n) {
       el.classList.add('done');
-      h.numEls[i].textContent = '✓';
+      h.checkEls[i].textContent = '✓';
     } else if (i + 1 === n) {
       el.classList.add('active');
       h.numEls[i].textContent = String(i + 1);
+      h.checkEls[i].textContent = '';
     } else {
       el.classList.add('pending');
       h.numEls[i].textContent = String(i + 1);
+      h.checkEls[i].textContent = '';
     }
+  });
+  if (n <= h.total) setPlanSubstep(h, 1);
+}
+
+/** Advance the card to a later top-level plan (never moves backwards).
+ * A plan cannot be skipped while its visible substeps are still pending. */
+/** Restore a plan card from a cross-turn progress cursor. */
+export function restorePlanCardProgress(h: PlanCardHandle, currentPlan: number, currentTodo: number): void {
+  if (h.total === 0) return;
+  const phase = Math.max(1, Math.min(currentPlan, h.total));
+  setPlanPhase(h, phase);
+  const rows = h.substepEls[phase - 1] ?? [];
+  if (rows.length > 0 && currentTodo > 1) {
+    h.substepStarted = true;
+    h.currentSubstep = Math.min(currentTodo, rows.length + 1);
+    setPlanSubstep(h, h.currentSubstep);
+  }
+}
+
+export function updatePlanCardPhase(h: PlanCardHandle, n: number): void {
+  const clamped = Math.max(1, Math.min(n, h.total));
+  if (clamped !== h.current + 1) return;
+  const currentSubsteps = h.substepEls[h.current - 1] ?? [];
+  if (h.currentTodosRequired && currentSubsteps.length > 0 && h.currentSubstep <= currentSubsteps.length) return;
+  setPlanPhase(h, clamped);
+}
+
+/** Advance the numbered substeps inside the active top-level plan.
+ * Markers must be sequential: a later marker cannot skip an unseen substep. */
+export function updatePlanCardSubstep(h: PlanCardHandle, n: number): void {
+  const rows = h.substepEls[h.current - 1] ?? [];
+  if (!h.currentTodosRequired || rows.length === 0) return;
+  const clamped = Math.max(1, Math.min(n, rows.length));
+  // A start marker only activates the next Todo. Completion is a separate
+  // explicit marker so the previous Todo is crossed out at the real moment it
+  // finishes, rather than merely when the model mentions the next one.
+  if (clamped === h.currentSubstep && !h.substepStarted) {
+    h.substepStarted = true;
+    setPlanSubstep(h, clamped);
+  }
+}
+
+/** Mark one explicitly reported Todo complete, then activate the next Todo. */
+export function completePlanCardSubstep(h: PlanCardHandle, n: number): void {
+  const rows = h.substepEls[h.current - 1] ?? [];
+  const checks = h.substepEls[h.current - 1].map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
+
+  if (!h.currentTodosRequired || rows.length === 0) return;
+  const index = n - 1;
+  if (index < 0 || index >= rows.length || n !== h.currentSubstep) return;
+  // A natural-language completion line may be the first marker the UI sees;
+  // treat it as an implicit start of the current Todo instead of requiring the
+  // model to emit a redundant "开始子步骤" line first.
+  if (!h.substepStarted) {
+    h.substepStarted = true;
+    setPlanSubstep(h, n);
+  }
+  rows[index].classList.remove('active', 'pending');
+  rows[index].classList.add('done');
+  const check = rows[index].querySelector<HTMLElement>('.plan-progress-substep-check');
+  if (check) check.textContent = '✓';
+  h.substepStarted = true;
+  if (n < rows.length) {
+    h.currentSubstep = n + 1;
+    setPlanSubstep(h, h.currentSubstep);
+  } else {
+    h.currentSubstep = rows.length + 1;
+  }
+}
+
+/** Return true only after every visible substep has been explicitly entered. */
+export function canCompletePlanCardSubsteps(h: PlanCardHandle): boolean {
+  const rows = h.substepEls[h.current - 1] ?? [];
+  return !h.currentTodosRequired || rows.length === 0 || (h.substepStarted && h.currentSubstep > rows.length);
+}
+
+/** Check off every substep in the active top-level plan before moving on. */
+export function completePlanCardSubsteps(h: PlanCardHandle): void {
+  if (!canCompletePlanCardSubsteps(h)) return;
+  const rows = h.substepEls[h.current - 1] ?? [];
+  const checks = h.substepEls[h.current - 1].map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
+
+  rows.forEach((row, i) => {
+    row.classList.remove('active', 'pending');
+    row.classList.add('done');
+    if (checks[i]) checks[i]!.textContent = '✓';
+  });
+  if (rows.length > 0) h.currentSubstep = rows.length + 1;
+  h.substepStarted = true;
+}
+
+// A top-level marker is `## 第 2 步…`; a substep marker is `### 子步骤 2/3…`
+// The explicit form avoids treating ordinary numbered prose or examples as
+// execution progress.
+const PLAN_PHASE_START_MARKER_RE = /(?:^|[\n#>])\s*(?:计划|Plan)\s*(\d+)\s*(?=[:：])/gi;
+const PLAN_PHASE_DONE_MARKER_RE = /(?:^|[\n#>])\s*(?:计划|Plan)\s*(\d+)\s*(?:完成|已完成|done)(?=\s|$|[.!?,，。！？])/gi;
+const PLAN_SUBSTEP_DONE_MARKER_RE = /(?:^|[\n#>])\s*(?:(?:子步骤|小步骤|子任务)\s*(\d+)(?:\s*(?:\/|of)\s*\d+)?\s*(?:[:：]\s*)?(?:完成|已完成)|(?:完成子步骤|子步骤完成|Todo\s+done)\s*(\d+)(?:\s*(?:\/|of)\s*\d+)?)/gi;
+const PLAN_SUBSTEP_MARKER_RE = /(?:^|[\n#>])\s*(?:子步骤|小步骤|子任务|[Ss]ubstep)\s*(\d+)(?:\s*(?:\/|of)\s*\d+)?(?!\s*(?:[:：]\s*)?(?:完成|已完成)|\s*\/)/g;
+
+export type PlanProgressMarker =
+  | { kind: 'phase'; number: number; index: number; end: number }
+  | { kind: 'phaseDone'; number: number; index: number; end: number }
+  | { kind: 'substep'; number: number; index: number; end: number }
+  | { kind: 'substepDone'; number: number; index: number; end: number };
+
+export function matchPlanProgressMarkers(text: string): PlanProgressMarker[] {
+  const markers: PlanProgressMarker[] = [];
+  PLAN_PHASE_MARKER_RE.lastIndex = 0;
+  let phase: RegExpExecArray | null;
+  while ((phase = PLAN_PHASE_MARKER_RE.exec(text)) !== null) {
+    const n = Number(phase[1] ?? phase[3] ?? phase[4] ?? phase[6]);
+    if (Number.isFinite(n)) markers.push({ kind: 'phase', number: n, index: phase.index, end: phase.index + phase[0].length });
+  }
+  PLAN_PHASE_START_MARKER_RE.lastIndex = 0;
+  let phaseStart: RegExpExecArray | null;
+  while ((phaseStart = PLAN_PHASE_START_MARKER_RE.exec(text)) !== null) {
+    const n = Number(phaseStart[1] ?? phaseStart[2]);
+    if (Number.isFinite(n)) markers.push({ kind: 'phase', number: n, index: phaseStart.index, end: phaseStart.index + phaseStart[0].length });
+  }
+  PLAN_PHASE_DONE_MARKER_RE.lastIndex = 0;
+  let phaseDone: RegExpExecArray | null;
+  while ((phaseDone = PLAN_PHASE_DONE_MARKER_RE.exec(text)) !== null) {
+    const n = Number(phaseDone[1] ?? phaseDone[2]);
+    if (Number.isFinite(n)) markers.push({ kind: 'phaseDone', number: n, index: phaseDone.index, end: phaseDone.index + phaseDone[0].length });
+  }
+  PLAN_SUBSTEP_DONE_MARKER_RE.lastIndex = 0;
+  let done: RegExpExecArray | null;
+  while ((done = PLAN_SUBSTEP_DONE_MARKER_RE.exec(text)) !== null) {
+    const n = Number(done[1] ?? done[2] ?? done[3]);
+    if (Number.isFinite(n)) markers.push({ kind: 'substepDone', number: n, index: done.index, end: done.index + done[0].length });
+  }
+  PLAN_SUBSTEP_MARKER_RE.lastIndex = 0;
+  let substep: RegExpExecArray | null;
+  while ((substep = PLAN_SUBSTEP_MARKER_RE.exec(text)) !== null) {
+    const n = Number(substep[1] ?? substep[2]);
+    if (Number.isFinite(n)) markers.push({ kind: 'substep', number: n, index: substep.index, end: substep.index + substep[0].length });
+  }
+  return markers
+    .sort((a, b) => a.index - b.index)
+    .filter((marker, index, all) => marker.kind !== 'substep' || !all.slice(0, index).some((previous) => previous.kind === 'substepDone' && previous.index <= marker.index && previous.end >= marker.end));
+}
+
+export function matchPlanSubstepMarkers(text: string): number[] {
+  return matchPlanProgressMarkers(text)
+    .filter((marker): marker is Extract<PlanProgressMarker, { kind: 'substep' }> => marker.kind === 'substep')
+    .map((marker) => marker.number);
+}
+
+export function matchPlanSubstepMarker(text: string): number | null {
+  const markers = matchPlanSubstepMarkers(text);
+  return markers.length > 0 ? Math.max(...markers) : null;
+}
+
+/** Mark every top-level plan and its substeps complete (called on run completion). */
+export function finalizePlanCard(h: PlanCardHandle): void {
+  setPlanPhase(h, h.total + 1);
+  h.substepEls.forEach((rows, planIndex) => {
+      const checks = rows.map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
+    rows.forEach((row, i) => {
+      row.classList.remove('active', 'pending');
+      row.classList.add('done');
+      if (checks[i]) checks[i]!.textContent = '✓';
+    });
   });
 }
 
-/** Advance the card to a later phase (never moves backwards). */
-export function updatePlanCardPhase(h: PlanCardHandle, n: number): void {
-  const clamped = Math.max(1, Math.min(n, h.total));
-  if (clamped > h.current) setPlanPhase(h, clamped);
-}
-
-/** Mark every phase complete (called on run completion). */
-export function finalizePlanCard(h: PlanCardHandle): void {
-  setPlanPhase(h, h.total + 1);
-}
-
-// Phase-marker regex: `## 阶段 1/4`, `步骤 2/4`, `Step 2 of 4` / `Step 2/4`,
-// `Phase 2 of 4` / `Phase 2/4`. Anchored to a line start (^, newline, `#`, or
-// `>`) because the model is told to write the marker as a heading line — a
-// mid-line "阶段 1/4" is usually quoted/sample content, not a real phase
-// transition. Groups 1/2 = Chinese, 3/4 = Step, 5/6 = Phase.
-const PLAN_PHASE_MARKER_RE = /(?:^|[\n#>])\s*(?:阶段|步骤)\s*(\d+)\s*\/\s*(\d+)|(?:^|[\n#>])\s*[Ss]tep\s+(\d+)\s*(?:of|\/)\s*(\d+)|(?:^|[\n#>])\s*[Pp]hase\s+(\d+)\s*(?:of|\/)\s*(\d+)/g;
+// Phase-marker regex: `## 阶段 1/4`, `步骤 2/4`, `## 第 1 步：搭建骨架`, `Step
+// 2 of 4` / `Step 2/4`, `Phase 2 of 4` / `Phase 2/4`. Anchored to a line start
+// (^, newline, `#`, or `>`) because the model is told to write the marker as a
+// heading line — a mid-line "阶段 1/4" is usually quoted/sample content, not a
+// real phase transition. Groups 1/2 = 阶段/步骤 n/m, 3 = 第 n 步, 4/5 = Step,
+// 6/7 = Phase.
+const PLAN_PHASE_MARKER_RE = /(?:^|[\n#>])\s*(?:阶段|步骤)\s*(\d+)\s*\/\s*(\d+)|(?:^|[\n#>])\s*第\s*(\d+)\s*步|(?:^|[\n#>])\s*[Ss]tep\s+(\d+)\s*(?:of|\/)\s*(\d+)|(?:^|[\n#>])\s*[Pp]hase\s+(\d+)\s*(?:of|\/)\s*(\d+)/g;
 
 /** Find the highest phase number mentioned in a chunk of assistant text. */
 export function matchPlanPhaseMarker(text: string): number | null {
@@ -348,112 +824,10 @@ export function matchPlanPhaseMarker(text: string): number | null {
   PLAN_PHASE_MARKER_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = PLAN_PHASE_MARKER_RE.exec(text)) !== null) {
-    const n = Number(m[1] ?? m[3] ?? m[5]);
+    const n = Number(m[1] ?? m[3] ?? m[4] ?? m[6]);
     if (Number.isFinite(n) && (best === null || n > best)) best = n;
   }
   return best;
-}
-
-// ── Pre-plan clarifying questions (Freebuff-style interview) ──
-// Before the plan is generated, ambiguous project requests get a short
-// question card: the user answers 1-3 key questions (platform/stack, scope,
-// constraints), and the answers feed BOTH the plan generation and the run's
-// user context (see chat.ts formatClarificationBlock).
-
-/**
- * Ask the user to answer the given clarifying questions inline in the chat
- * transcript. Resolves with the filled-in answers (aligned to the question
- * order, empty answers dropped) or null when the user skips / Esc / the card
- * is removed externally.
- */
-export function requestClarifications(questions: string[]): Promise<string[] | null> {
-  return new Promise((resolve) => {
-    const chatEl = document.getElementById('chat')!;
-    const row = document.createElement('div');
-    row.className = 'bubble-row inline-card clarify-card';
-
-    const card = document.createElement('div');
-    card.className = 'inline-card-box';
-
-    const head = document.createElement('div');
-    head.className = 'inline-card-head';
-    const title = document.createElement('span');
-    title.className = 'inline-card-title';
-    title.textContent = '📋 开工前先确认几个问题';
-    head.appendChild(title);
-    card.appendChild(head);
-
-    const body = document.createElement('div');
-    body.className = 'inline-card-body';
-    const inputs: HTMLTextAreaElement[] = [];
-    questions.forEach((q, i) => {
-      const wrap = document.createElement('div');
-      wrap.className = 'clarify-question';
-      const label = document.createElement('span');
-      label.className = 'clarify-question-label';
-      label.textContent = `${i + 1}. ${q}`;
-      const ta = document.createElement('textarea');
-      ta.className = 'clarify-input';
-      ta.placeholder = '你的回答…（可留空跳过）';
-      ta.setAttribute('rows', '2');
-      inputs.push(ta);
-      wrap.append(label, ta);
-      body.appendChild(wrap);
-    });
-    card.appendChild(body);
-
-    const actions = document.createElement('div');
-    actions.className = 'inline-card-actions';
-    let decided = false;
-    const cleanup = (): void => {
-      row.remove();
-      watchdog.disconnect();
-      document.removeEventListener('keydown', onKeydown);
-    };
-    const finish = (answers: string[] | null): void => {
-      if (decided) return;
-      decided = true;
-      cleanup();
-      resolve(answers);
-    };
-    const skipBtn = document.createElement('button');
-    skipBtn.className = 'setting-btn secondary';
-    skipBtn.textContent = '跳过提问';
-    skipBtn.addEventListener('click', () => finish(null));
-    const submitBtn = document.createElement('button');
-    submitBtn.className = 'setting-btn primary';
-    submitBtn.textContent = '提交回答';
-    submitBtn.addEventListener('click', () => {
-      const answers = inputs.map((ta) => ta.value.trim()).filter(Boolean);
-      finish(answers.length ? answers : null);
-    });
-    actions.append(skipBtn, submitBtn);
-    card.appendChild(actions);
-
-    row.appendChild(card);
-    chatEl.appendChild(row);
-
-    // Fail-safe: external removal (chat clear / session switch) resolves null
-    // so the awaiting send() can never hang.
-    const watchdog = new MutationObserver(() => {
-      if (!row.isConnected) finish(null);
-    });
-    watchdog.observe(chatEl, { childList: true });
-
-    const onKeydown = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        finish(null);
-      } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        submitBtn.click();
-      }
-    };
-    document.addEventListener('keydown', onKeydown);
-
-    submitBtn.focus();
-    scrollChatToBottomIfPinned(chatEl);
-  });
 }
 
 function showPlanDialog(analysis: AnalysisResult, options: PlanReviewOptions): Promise<PlanReviewDecision> {
@@ -473,15 +847,21 @@ function showPlanDialog(analysis: AnalysisResult, options: PlanReviewOptions): P
     { label: t('plan.approve'), value: 'approve' as const, kind: 'primary' as const },
   ];
 
+  const intent = analysis.intent;
+  const riskSummary = intent
+    ? `<div class="plan-risk-summary"><strong>${intent.requiresConfirmation ? '⚠️ 高风险操作' : '🧭 主动评估'}</strong><br><span>影响：${escapeHtml(intent.impact)}</span><br><span>可逆性：${escapeHtml(intent.reversibility)}</span><br><span>建议：${escapeHtml(intent.recommendation)}</span></div>`
+    : '';
   return showInlineCard({
-    cardClass: 'plan',
-    title: t('plan.title'),
+    cardClass: options.riskReview ? 'plan risk-review' : 'plan',
+    title: options.riskReview ? '执行前确认：先看影响再决定' : t('plan.title'),
     bodyHTML:
-      `<span class="plan-complexity-badge">${t('plan.complex')}</span>` +
+      `<span class="plan-complexity-badge">${options.riskReview ? '高风险变更' : t('plan.complex')}</span>` +
+      riskSummary +
       `<div class="plan-reasoning">${escapeHtml(analysis.reasoning)}</div>` +
       `<div class="plan-steps">${steps}</div>`,
     actions,
     focusIndex: actions.length - 1,
     escValue: 'cancel',
+    signal: options.signal,
   }) as Promise<PlanReviewDecision>;
 }

@@ -8,8 +8,9 @@
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../shared/types';
 import type { TaggedTool, PermissionContext } from './types';
+import type { WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import type { PermissionManager } from './PermissionManager';
-import { BUILT_IN_TOOL_DEFS } from '../shared/toolDefs';
+import { BUILT_IN_TOOL_DEFS, isPublicToolName } from '../shared/toolDefs';
 import { safeParseArgs } from '../shared/format';
 
 // ── Tag constants ──
@@ -49,6 +50,9 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   sys_info: { tags: [Tags.READ], riskLevel: 'low' },
   create_directory: { tags: [Tags.FS, Tags.WRITE], riskLevel: 'low' },
   diff_files: { tags: [Tags.FS, Tags.READ], riskLevel: 'low' },
+  researcher_web: { tags: [Tags.SEARCH, Tags.READ], riskLevel: 'low' },
+  researcher_docs: { tags: [Tags.SEARCH, Tags.READ], riskLevel: 'low' },
+  code_searcher: { tags: [Tags.FS, Tags.READ, Tags.SEARCH], riskLevel: 'low' },
   web_search: { tags: [Tags.SEARCH, Tags.READ], riskLevel: 'low' },
   web_fetch: { tags: [Tags.READ], riskLevel: 'low' },
   glob_files: { tags: [Tags.FS, Tags.READ, Tags.SEARCH], riskLevel: 'low' },
@@ -61,11 +65,17 @@ export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze(
 
 // ── ToolRegistry ──
 
+/** Return true for shell commands that mutate Git repository state. */
+export function isGitMutationCommand(command: string): boolean {
+  return /\bgit(?:\s+(?:-C\s+\S+|--git-dir(?:=|\s+)\S+|--work-tree(?:=|\s+)\S+))*\s+(?:init|add|commit|reset|clean|checkout|switch|restore|push|pull|config|stash|tag|mv|rm|rebase|merge)\b/i.test(command);
+}
+
 export class ToolRegistry implements ToolAdapter {
   private tools: TaggedTool[] = [...BUILT_IN_TOOLS];
   private subagentExecutor?: ToolAdapter;
   private mcpExecutor?: ToolAdapter;
   private permissionManager?: PermissionManager;
+  private commandGuard?: (command: string) => string | null;
 
   constructor(private delegate: ToolAdapter) {}
 
@@ -84,6 +94,11 @@ export class ToolRegistry implements ToolAdapter {
     this.permissionManager = pm;
   }
 
+  /** Temporarily reject dangerous command patterns for a scoped workflow. */
+  setCommandGuard(guard?: (command: string) => string | null): void {
+    this.commandGuard = guard;
+  }
+
   /** Register an MCP or custom tool. */
   register(tool: TaggedTool): void {
     const existing = this.tools.findIndex(t => t.name === tool.name);
@@ -95,7 +110,13 @@ export class ToolRegistry implements ToolAdapter {
   }
 
   getTools(): ToolDefinition[] {
-    return this.tools.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
+    return this.tools
+      .filter(({ name }) => isPublicToolName(name))
+      .map(({ name, description, input_schema }) => ({ name, description, input_schema }));
+  }
+
+  getSnapshotPort(): WorkspaceSnapshotPort | undefined {
+    return this.delegate.getSnapshotPort?.();
   }
 
   getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined {
@@ -120,6 +141,21 @@ export class ToolRegistry implements ToolAdapter {
         success: false,
         duration: 0,
       };
+    }
+
+    if (toolCall.function.name === 'execute_command' && this.commandGuard) {
+      const args = safeParseArgs(toolCall.function.arguments);
+      const command = typeof args.command === 'string' ? args.command : '';
+      const blocked = this.commandGuard(command);
+      if (blocked) {
+        return {
+          id: toolCall.id,
+          toolName: toolCall.function.name,
+          error: blocked,
+          success: false,
+          duration: 0,
+        };
+      }
     }
 
     // ── Permission gate: consult PermissionManager before executing ──

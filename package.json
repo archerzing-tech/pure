@@ -1,6 +1,6 @@
 {
   "name": "pure",
-  "version": "1.9.0",
+  "version": "1.9.2-beta7",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
     "toolchain:check": "bash scripts/check-toolchain.sh",
     "toolchain:setup": "bash scripts/setup-mac-toolchain.sh",
     "test": "bun test",
+    "eval:baseline": "bun run scripts/run-evals.ts",
     "typecheck": "bun run --no-run tsc --noEmit",
     "build": "bun run typecheck && npx vite build && bun run cli:build",
     "build:cli": "bun run cli:build",

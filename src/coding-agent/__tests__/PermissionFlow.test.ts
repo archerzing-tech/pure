@@ -3,9 +3,34 @@
 // and passthrough of path/contentPreview to the request handler.
 
 import { describe, it, expect } from 'bun:test';
-import { buildWritePreview } from '../ToolRegistry';
+import { buildWritePreview, isGitMutationCommand, ToolRegistry } from '../ToolRegistry';
+import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { PermissionManager } from '../PermissionManager';
 import type { PermissionContext, PermissionRequestInfo } from '../types';
+
+describe('ToolRegistry command guard', () => {
+  it('rejects guarded Git mutations without delegating to the shell', async () => {
+    let executed = false;
+    const tools: ToolDefinition[] = [{ name: 'execute_command', description: 'run', input_schema: { type: 'object' } }];
+    const delegate: ToolAdapter = {
+      getTools: () => tools,
+      getMetadata: () => ({ sideEffects: true }),
+      execute: async (): Promise<ToolResult> => {
+        executed = true;
+        return { id: 'delegated', toolName: 'execute_command', success: true, duration: 1 };
+      },
+    };
+    const registry = new ToolRegistry(delegate);
+    registry.setCommandGuard((command) => isGitMutationCommand(command) ? 'blocked' : null);
+    for (const command of ['git init', 'git -C /tmp/demo init', 'command git add .', 'env GIT_DIR=x git commit -m x', "sh -c 'git reset --hard'"]) {
+      const call: ToolCall = { id: `guarded-${command}`, index: 0, function: { name: 'execute_command', arguments: JSON.stringify({ command }) } };
+      const result = await registry.execute(call);
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('blocked');
+    }
+    expect(executed).toBe(false);
+  });
+});
 
 describe('buildWritePreview', () => {
   it('builds a full-content preview for write_file', () => {

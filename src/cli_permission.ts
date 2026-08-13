@@ -72,11 +72,9 @@ export function nonTtyDecision(info: PermissionRequestInfo): PermissionDecision 
  * The function-level default is `false` (interactive prompt / non-tty
  * safe-reads-only fallback) — deliberately the *safer* path, so a future
  * caller who forgets to pass the arg will be asked instead of silently
- * approving. The CLI itself inverts this at the call site via the
- * `DEFAULT_CLI_AUTO_APPROVE` constant at the top of `cli.ts` — flipping
- * *that* constant (or adding a `--prompt-on-tool` flag) is the documented
- * knob to switch the CLI between auto-approve and interactive flows. Do not
- * "fix" the function-level default here to match.
+ * approving. The CLI passes `true` for ordinary requests when its default
+ * auto-approve policy is active, but the request-scoped Planner policy keeps
+ * high-risk turns on this interactive path even without `--prompt-on-tool`.
  */
 export function createCliPermissionHandler(autoApprove = false): PermissionRequestHandler {
   return async (info: PermissionRequestInfo): Promise<PermissionDecision> => {
@@ -85,10 +83,11 @@ export function createCliPermissionHandler(autoApprove = false): PermissionReque
     // the auto-approve shortcut so Ctrl+C still cancels an in-flight tool call.
     if (info.signal?.aborted) return { allowed: false, reason: 'aborted by user' };
 
-    // CLI default — trust the operator's prompt, approve every tool call.
-    // Replaces both the TTY y/n/a prompt and the non-TTY safe-reads-only
-    // fallback. Use `--prompt-on-tool` (handled in cli.ts parseArgs) to opt
-    // back into the interactive confirmation flow.
+    // Ordinary CLI requests may trust the operator's prompt and approve every
+    // tool call. High-risk turns never reach this branch with autoApprove=true:
+    // cli.ts applies the request-scoped Planner policy before execution. Use
+    // `--prompt-on-tool` (handled in cli.ts parseArgs) to opt into the
+    // interactive confirmation flow for every request.
     if (autoApprove) {
       return { allowed: true, autoApproved: true, reason: 'CLI auto-approve (operator reviewed the prompt)' };
     }

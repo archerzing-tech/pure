@@ -21,6 +21,25 @@ import type { ChatController } from './chat';
 import { UPLOAD_LIMITS } from './pasteChip';
 import type { DroppedFileRecord, PasteChipManager } from './pasteChip';
 
+type DialogModule = typeof import('@tauri-apps/plugin-dialog');
+let dialogModulePromise: Promise<DialogModule> | null = null;
+
+function getDialogModule(): Promise<DialogModule> {
+  if (!dialogModulePromise) {
+    dialogModulePromise = import('@tauri-apps/plugin-dialog').catch((err) => {
+      // A transient plugin/chunk failure must not poison every later picker
+      // attempt; clear the cache so the next click can retry the import.
+      dialogModulePromise = null;
+      throw err;
+    });
+  }
+  return dialogModulePromise;
+}
+
+// Start loading the native dialog bridge as soon as the UI module is evaluated
+// so the first click does not wait for a lazy chunk or plugin initialization.
+if (isTauriRuntime()) void getDialogModule().catch(() => {});
+
 export interface WorkspaceDeps {
   chat: Pick<ChatController, 'getWorkspace' | 'setWorkspace' | 'getSessionId'>;
   pasteChips: Pick<PasteChipManager, 'addImportedFile' | 'addDroppedFiles' | 'hasAttachments' | 'remainingSlots'>;
@@ -40,6 +59,7 @@ export class WorkspaceController {
   private onAttachmentsChanged: WorkspaceDeps['onAttachmentsChanged'];
   private onCommitted: WorkspaceDeps['onCommitted'];
   private attachFileInput: HTMLInputElement | null = null;
+  private initialized = false;
 
   constructor(deps: WorkspaceDeps) {
     this.chat = deps.chat;
@@ -134,7 +154,7 @@ export class WorkspaceController {
     if (isTauriRuntime()) {
       try {
         const importStart = performance.now();
-        const { open } = await import('@tauri-apps/plugin-dialog');
+        const { open } = await getDialogModule();
         const importMs = performance.now() - importStart;
         const dialogStart = performance.now();
         const selected = await open({ directory: true, multiple: false, title: t('workspace.browseTitle') });
@@ -376,7 +396,7 @@ export class WorkspaceController {
   async attachFiles(): Promise<void> {
     if (isTauriRuntime()) {
       try {
-        const { open } = await import('@tauri-apps/plugin-dialog');
+        const { open } = await getDialogModule();
         const selected = await open({ multiple: true, directory: false, title: t('input.attach.title') });
         const paths = Array.isArray(selected) ? selected : (typeof selected === 'string' && selected ? [selected] : []);
         if (paths.length > 0) await this.handleDroppedPaths(paths);
@@ -391,13 +411,8 @@ export class WorkspaceController {
   // ── Init: bind all workspace-owned DOM events ──
 
   init(): void {
-    // Warm the native dialog module during startup: it is otherwise lazily
-    // imported on the first click (folder picker and both save dialogs share
-    // the same chunk), so the first workspace dialog opens immediately
-    // instead of paying module load on top of the native panel init.
-    if (isTauriRuntime()) {
-      void import('@tauri-apps/plugin-dialog').catch(() => {});
-    }
+    if (this.initialized) return;
+    this.initialized = true;
     const workspacePickerBtn = document.getElementById('workspace-picker-btn');
     workspacePickerBtn?.addEventListener('click', (e) => {
       e.stopPropagation();

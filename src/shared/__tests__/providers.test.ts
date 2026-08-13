@@ -10,6 +10,8 @@ import {
   customProviderFor,
   customProviderLabel,
   defaultModelFor,
+  promptBudgetForProvider,
+  resolvePromptBudget,
   isCustomKeyless,
   isCustomProviderId,
   type CustomProvider,
@@ -26,6 +28,43 @@ const KEYED: CustomProvider = {
   apiKey: 'sk-test',
   hasApiKey: false,
 };
+
+describe('resolvePromptBudget', () => {
+  it('adapts the input budget to provider/model families', () => {
+    const deepseek = resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-v4-flash' });
+    const qwen = resolvePromptBudget({ provider: 'qwen', model: 'qwen3-coder-next' });
+    expect(deepseek.contextWindowTokens).toBe(64_000);
+    expect(deepseek.outputReserveTokens).toBe(32_768);
+    expect(qwen.contextWindowTokens).toBe(128_000);
+    expect(qwen.availableInputTokens).toBeGreaterThan(deepseek.availableInputTokens);
+  });
+
+  it('uses explicit limits for unknown/custom models and accounts for consumed input', () => {
+    const budget = resolvePromptBudget({
+      provider: 'custom-local',
+      model: 'my-model',
+      contextWindowTokens: 1_000,
+      outputReserveTokens: 200,
+      safetyMarginTokens: 50,
+      usedInputTokens: 100,
+    });
+    expect(budget.source).toBe('override');
+    expect(budget.availableInputTokens).toBe(650);
+  });
+  it('uses persisted custom provider/model metadata before family fallbacks', () => {
+    const custom: CustomProvider = {
+      ...OLLAMA,
+      contextWindowTokens: 48_000,
+      outputReserveTokens: 6_000,
+      modelBudgets: { 'tiny-coder': { contextWindowTokens: 16_000, outputReserveTokens: 2_000 } },
+    };
+    const input = promptBudgetForProvider([custom], 'ollama', 'tiny-coder');
+    const budget = resolvePromptBudget(input);
+    expect(budget.contextWindowTokens).toBe(16_000);
+    expect(budget.outputReserveTokens).toBe(2_000);
+    expect(budget.source).toBe('override');
+  });
+});
 
 describe('customProviderFor', () => {
   it('finds a custom provider by id', () => {

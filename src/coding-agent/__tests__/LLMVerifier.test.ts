@@ -96,6 +96,8 @@ describe('createLLMVerifier', () => {
     const v = createLLMVerifier(verdictLLM('{"passed": true, "feedback": "matches request"}'));
     const result = await v.evaluate({ output: 'function rev(s){...}', context: CTX });
     expect(result.passed).toBe(true);
+    expect(result.evidence).toHaveLength(2);
+    expect(result.evidence[0].status).toBe('passed');
   });
 
   it('fails with the model feedback when the verdict is failed', async () => {
@@ -104,6 +106,8 @@ describe('createLLMVerifier', () => {
     expect(result.passed).toBe(false);
     expect(result.feedback).toContain(`[${LLMVerifyCheckName}]`);
     expect(result.feedback).toContain('empty input not handled');
+    expect(result.evidence[0].status).toBe('passed');
+    expect(result.evidence[1].status).toBe('failed');
   });
 
   it('fails open (passes) on an unparseable verdict so the agent is not trapped', async () => {

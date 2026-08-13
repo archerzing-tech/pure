@@ -24,10 +24,14 @@ const TOOL_META: Record<string, { name: string; icon: string }> = {
   git_diff:         { name: 'Git Diff',      icon: '⑂' },
   git_log:          { name: 'Git Log',       icon: '⑂' },
   git_status:       { name: 'Git Status',    icon: '⑂' },
+  researcher_web:  { name: 'Web Research',  icon: '🧭' },
+  researcher_docs: { name: 'Docs Research', icon: '📚' },
+  code_searcher:   { name: 'Code Search',   icon: '🔍' },
   web_search:       { name: 'Web Search',    icon: '🌐' },
   web_fetch:        { name: 'Fetch',         icon: '📡' },
   web_researcher:   { name: 'Web Research',  icon: '🧭' },
   planner:          { name: 'Plan',          icon: '📋' },
+  project_auditor:  { name: 'Project Audit', icon: '🛡️' },
   sys_info:         { name: 'System Info',   icon: 'ℹ️' },
 };
 
@@ -45,12 +49,19 @@ export function formatToolArgsSummary(toolName: string, args: Record<string, unk
   if (!args) return '';
   const v = (k: string) => args[k];
   switch (toolName) {
+    case 'researcher_web':
+    case 'web_researcher':
+      return typeof v('prompt') === 'string' ? `prompt="${String(v('prompt'))}"` : '';
+    case 'researcher_docs':
+      return typeof v('library') === 'string' && typeof v('topic') === 'string'
+        ? `${String(v('library'))}: ${String(v('topic'))}`
+        : '';
+    case 'code_searcher':
+      return typeof v('query') === 'string' ? `query="${String(v('query'))}"` : '';
     case 'web_search':
       return typeof v('query') === 'string' ? `query="${String(v('query'))}"` : '';
     case 'web_fetch':
       return typeof v('url') === 'string' ? `url="${String(v('url'))}"` : '';
-    case 'web_researcher':
-      return typeof v('prompt') === 'string' ? `prompt="${String(v('prompt'))}"` : '';
     case 'read_file':
     case 'write_file':
     case 'edit_file':
@@ -108,6 +119,7 @@ export function shouldUseTerminalPanel(toolName: string): boolean {
     case 'list_files':
     case 'search_files':
     case 'glob_files':
+    case 'code_searcher':
     case 'execute_command':
     case 'git_diff':
     case 'git_log':
@@ -167,6 +179,12 @@ export function pendingActionLabel(toolName: string, args: Record<string, unknow
       return '正在替换文件内容…';
     case 'execute_command':
       return '正在执行命令…';
+    case 'researcher_web':
+      return '正在研究网页资料…';
+    case 'researcher_docs':
+      return '正在检索官方文档…';
+    case 'code_searcher':
+      return '正在搜索代码库…';
     case 'web_search':
       return '正在搜索…';
     case 'web_fetch':
@@ -175,6 +193,8 @@ export function pendingActionLabel(toolName: string, args: Record<string, unknow
       return '正在研究网页资料…';
     case 'planner':
       return '正在制定执行计划…';
+    case 'project_auditor':
+      return '正在审计项目安全与交付风险…';
     case 'create_directory':
       return '正在创建目录…';
     default:
@@ -228,7 +248,7 @@ function fillInputSection(section: HTMLElement, args: Record<string, unknown>): 
 // built-in web_search / web_fetch: light-blue card, read-only permission
 // class, browser-toggle gate and workspace independence. web_researcher is
 // excluded here — it is a subagent tool, not a plain web read.
-const WEB_TOOL_BASE_NAMES = new Set(['web_search', 'web_fetch', 'web-search', 'web-fetch', 'search', 'fetch']);
+const WEB_TOOL_BASE_NAMES = new Set(['web_search', 'web_fetch', 'researcher_web', 'researcher_docs', 'web-search', 'web-fetch', 'search', 'fetch']);
 
 export function isWebSearchLike(toolName: string): boolean {
   const base = toolName.includes('__') ? toolName.slice(toolName.lastIndexOf('__') + 2) : toolName;
@@ -414,6 +434,8 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
       // line. Session replay (main.ts) goes through here too, so restored
       // Bash rows render identically.
       appendHighlightedResult(pre, meta.resultText);
+    } else if (row.toolName === 'code_searcher') {
+      pre.textContent = formatCodeSearchPreview(meta.resultText);
     } else {
       pre.textContent = meta.resultText;
     }
@@ -435,6 +457,20 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
 // preview (and the same lines the user watched stream in) — so a 5000-line
 // build log can't balloon the DOM; the cut tail becomes a single dimmed
 // truncation notice line. Empty lines skip the wrapper span entirely.
+function formatCodeSearchPreview(text: string): string {
+  try {
+    const payload = JSON.parse(text) as { matches?: Array<{ path?: string; line?: number; column?: number; text?: string }>; truncated?: boolean };
+    if (!Array.isArray(payload.matches)) return text;
+    const lines = payload.matches.slice(0, 120).map((match) =>
+      `${match.path ?? '?'}:${match.line ?? 0}${match.column ? `:${match.column}` : ''}: ${match.text ?? ''}`,
+    );
+    if (payload.truncated) lines.push('… results truncated; refine query or scope');
+    return lines.join('\n') || '(no matches)';
+  } catch {
+    return text;
+  }
+}
+
 function appendHighlightedResult(pre: HTMLElement, text: string): void {
   const capped = truncateResultLines(text);
   const truncated = capped !== text;

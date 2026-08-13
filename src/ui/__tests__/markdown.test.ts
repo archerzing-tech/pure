@@ -5,6 +5,7 @@
 //    (marked parses headlessly; no document/window required)
 
 import { describe, it, expect } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
 import { suggestFilename, highlightExt, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, type DiagramKind } from '../markdown';
 import { buildChartOption } from '../echartsChart';
@@ -195,6 +196,25 @@ describe('splitTopLevelSvgSources', () => {
     expect((html.match(/class="diagram-slot svg-slot"/g) ?? [])).toHaveLength(2);
     expect(html).toContain('&lt;rect');
     expect(html).toContain('&lt;circle');
+    expect(html).toContain('<div class="svg-gallery">');
+    expect(html.indexOf('<div class="svg-gallery">')).toBeLessThan(html.indexOf('class="diagram-slot svg-slot"'));
+  });
+});
+
+describe('multi-SVG placeholder layout', () => {
+  it('keeps loading slots in the two-column gallery before rendering completes', () => {
+    const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+    expect(css).toContain('.bubble .svg-gallery .svg-slot[data-state="loading"]');
+    expect(css).toContain('width: 100%;');
+    expect(css).toContain('min-width: 0;');
+    expect(css).toContain('min-height: 0;');
+    expect(css).toContain('aspect-ratio: 1;');
+  });
+
+  it('groups independent SVG slots during streaming before the final render pass', () => {
+    const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+    expect(src).toContain('return svgSourcesHtml(splitTopLevelSvgSources(token.text));');
+    expect(src).toContain('groupAdjacentSvgSlots(container);');
   });
 });
 

@@ -5,11 +5,12 @@
 //        can verify them before execution and escape the trap by switching
 //        approach after a failed round instead of repeating the same one.
 
-import type { AnalysisResult, TaskComplexity, TaskMode, Plan, PlanStep, TrapWarning } from './types';
+import type { AnalysisResult, IntentAssessment, RequestIntent, TaskComplexity, TaskMode, Plan, PlanStep, TrapWarning } from './types';
 import { repairJsonSource } from '../shared/parseRepair';
 
 /** Upper bound on LLM-plan steps kept in the review card / system prompt. */
 const MAX_PLAN_STEPS = 10;
+const MAX_PLAN_SUBSTEPS = 8;
 
 export interface PlannerConfig {
   /** Threshold for 'complex': > this many file ops triggers planning. */
@@ -30,17 +31,20 @@ export class Planner {
   analyzeTask(prompt: string): AnalysisResult {
     const complexity = this.detectComplexity(prompt);
     const traps = this.detectTraps(prompt);
+    const intent = assessIntent(prompt);
+    const needsSafetyPlan = intent.requiresConfirmation;
 
-    if (complexity === 'complex') {
+    if (complexity === 'complex' || needsSafetyPlan) {
       return {
         complexity,
         // Build intent ("写一个小游戏", "搭建全栈项目") switches the agent into
-        // build mode; anything else complex gets plan mode. Both run the same
-        // plan-review → live-todo-checkoff flow, only the label differs.
-        mode: this.detectMode(prompt, complexity),
+        // build mode; a destructive request always uses plan mode so it cannot
+        // inherit the direct-build path by accident.
+        mode: needsSafetyPlan ? 'plan' : this.detectMode(prompt, complexity),
         plan: this.generatePlan(prompt),
-        reasoning: this.getComplexReasoning(prompt),
+        reasoning: needsSafetyPlan ? intent.recommendation : this.getComplexReasoning(prompt),
         traps,
+        intent,
       };
     }
 
@@ -49,6 +53,7 @@ export class Planner {
       mode: 'yolo',
       reasoning: 'Task appears straightforward — direct execution is appropriate.',
       traps,
+      intent,
     };
   }
 
@@ -254,40 +259,30 @@ export class Planner {
   }
 
   private generatePlan(prompt: string): Plan {
-    // Generic fallback plan shown when the LLM plan generation is skipped or
-    // fails. Steps are written in plain user-facing language (not internal
-    // labels like Understand/Plan/Implement/Verify) so the review card and
-    // progress card read naturally. This is the heuristic fallback — for real
-    // turns the LLM-generated plan (which follows the user's language) wins.
-    const steps: PlanStep[] = [
-      {
-        id: '1',
-        action: '了解需求',
-        description: '先弄清任务要达成什么目标，以及有哪些约束条件。',
-        expectedOutcome: '清楚知道要做什么、做到什么程度。',
-      },
-      {
-        id: '2',
-        action: '制定方案',
-        description: '规划实现思路，确定要新建或修改哪些文件。',
-        expectedOutcome: '有一份清晰的实施步骤清单。',
-      },
-      {
-        id: '3',
-        action: '分步实现',
-        description: '按方案一步一步完成改动，每步都检查是否正常。',
-        expectedOutcome: '核心功能按计划完成。',
-      },
-      {
-        id: '4',
-        action: '验证结果',
-        description: '运行检查和测试，确认结果可用，并总结改了什么。',
-        expectedOutcome: '交付验证过的可用成果。',
-      },
-    ];
-
+    // Minimal fallback only. Task-specific decomposition, step count, and Todo
+    // granularity belong to the LLM analysis; this keeps the UI usable when
+    // that analysis is unavailable without prescribing a workflow.
     return {
-      steps,
+      steps: [
+        {
+          id: '1',
+          action: '确认范围',
+          description: '查看与请求直接相关的内容，确认目标和约束。',
+          expectedOutcome: '改动范围和关键未知点清楚。',
+        },
+        {
+          id: '2',
+          action: '完成改动',
+          description: '根据已确认的范围选择合适的实现方式。',
+          expectedOutcome: '请求中的核心结果已经实现。',
+        },
+        {
+          id: '3',
+          action: '验证结果',
+          description: '根据实际风险运行相关检查，并说明仍存在的限制。',
+          expectedOutcome: '有真实证据支持交付或继续处理。',
+        },
+      ],
       reasoning: this.getComplexReasoning(prompt),
     };
   }
@@ -299,12 +294,54 @@ export class Planner {
 }
 
 /**
- * Render detected logical traps into a system-prompt fragment the LLM must
- * honor: verify the premise before executing, and if the request is
- * self-contradictory / impossible as stated, escape the trap by stating it
- * and solving the most reasonable interpretation instead of blindly following
- * contradictory instructions. Returns '' when there are no traps.
+ * Assess the user's intent before execution. This is deliberately heuristic:
+ * it does not reject a request, it chooses how much evidence and user control
+ * should come before changing the workspace.
  */
+export function assessIntent(prompt: string): IntentAssessment {
+  const text = prompt.trim();
+  const lower = text.toLowerCase();
+  const chinese = /[\u4e00-\u9fff]/.test(text);
+  const isQuestion = /^(?:如何|怎么|怎样|能否|能不能|是否|为什么|请问|what|how|can|could|should|why)\b/i.test(text)
+    || /(?:吗|呢|怎么|如何|怎样|为什么)\s*[？?]?$/.test(text);
+  const destructive = /(?:删除|移除|清理|销毁|永久|不可逆|drop\s+(?:table|database)|destroy|rm\s+-rf|reset\s+--hard|force\s+push|delete\s+(?:all|the|entire)|remove\s+(?:all|the|entire))/i.test(lower);
+  const migration = /(?:迁移|升级依赖|替换底层|切换框架|schema|database migration|migrat|upgrade dependencies|breaking change)/i.test(lower);
+  const refactor = /(?:重构|重写|大规模修改|全量修改|refactor|rewrite|rewrite the whole|across the project)/i.test(lower);
+  const projectBuild = detectProjectRequest(text);
+  const artifactBuild = detectArtifactRequest(text);
+  const research = /(?:研究|调研|搜索|查找|解释|分析|介绍|research|search|explain|summarize|compare)/i.test(lower);
+  const debug = /(?:修复|排查|调试|报错|失败|bug|fix|debug|broken|failing)/i.test(lower);
+  const add = /(?:新增|添加|增加|实现|开发|implement|add|feature|create)/i.test(lower);
+  const modify = /(?:修改|改成|更新|调整|change|update|modify)/i.test(lower);
+
+  const intent: RequestIntent = isQuestion || research ? (research ? 'research' : 'question')
+    : destructive ? 'delete'
+      : migration ? 'migrate'
+        : refactor ? 'refactor'
+          : (projectBuild || artifactBuild) ? 'build'
+            : debug ? 'debug'
+              : add ? 'add'
+                : modify ? 'modify'
+                  : 'question';
+  // A new single-file artifact is normally reversible; a project-scale build
+  // needs a probe because it can affect existing structure and dependencies.
+  const riskLevel = destructive ? 'high' : (migration || refactor || projectBuild || /(?:认证|权限|数据库|生产|公共 API|auth|permission|database|production|public api)/i.test(lower)) ? 'medium' : 'low';
+  const reversibility = destructive ? 'irreversible' : (migration || /(?:数据库|生产|public api|database|production)/i.test(lower)) ? 'hard-to-reverse' : riskLevel === 'medium' ? 'partially-reversible' : 'reversible';
+  const requiresProbe = riskLevel !== 'low';
+  const requiresConfirmation = riskLevel === 'high';
+  const impact = chinese
+    ? (destructive ? '可能删除或覆盖现有数据、文件或历史状态，影响范围需要先确认。' : riskLevel === 'medium' ? '可能波及多个模块、依赖关系或现有行为，直接改动可能造成回归。' : '预计只影响当前问题相关的局部内容。')
+    : (destructive ? 'This may delete or overwrite existing data, files, or history; the exact blast radius must be confirmed first.' : riskLevel === 'medium' ? 'This may affect multiple modules, dependencies, or existing behavior and could introduce regressions.' : 'The likely impact is limited to the content directly related to the request.');
+  const recommendation = chinese
+    ? (destructive ? '不要直接执行：先做只读检查并列出受影响对象，给出可恢复或更窄的替代方案，确认后再动手。' : riskLevel === 'medium' ? '先做最小只读探针，确认真实结构和依赖，再用小步修改并立即验证，不要一次性扩大范围。' : '可以直接处理；先读取相关内容，完成后做针对性验证。')
+    : (destructive ? 'Do not execute directly: inspect read-only first, list affected targets, propose a recoverable or narrower alternative, then ask for approval.' : riskLevel === 'medium' ? 'Run a minimal read-only probe first, confirm the real structure and dependencies, then make a small change and verify it before expanding scope.' : 'Direct execution is reasonable: read the relevant content first and run a focused verification afterward.');
+  return { intent, riskLevel, reversibility, impact, recommendation, requiresProbe, requiresConfirmation };
+}
+
+export function formatIntentPrompt(assessment: IntentAssessment): string {
+  return `<intent_assessment>\nIntent: ${assessment.intent}\nRisk: ${assessment.riskLevel}\nReversibility: ${assessment.reversibility}\nImpact: ${assessment.impact}\nRecommended approach: ${assessment.recommendation}\nBefore acting, follow this assessment. If a read-only probe can reduce uncertainty, do that first. Do not broaden the change beyond the confirmed impact. If the operation is high risk, wait for explicit user approval before any write or destructive command.\n</intent_assessment>`;
+}
+
 export function formatTrapPrompt(traps: TrapWarning[]): string {
   if (traps.length === 0) return '';
   const bullets = traps.map(t => `- [${t.type}] ${t.description}`).join('\n');
@@ -322,7 +359,13 @@ export function detectProjectRequest(prompt: string): boolean {
   const question = /^(?:如何|怎么|怎样|能否|能不能|是否|请问|为什么|what|how|can|could|should)\b/i.test(p)
     || /(?:怎么|如何|怎样|吗|呢|what|how)\s*(?:创建|搭建|开发|做|build|create|scaffold|develop)/i.test(p);
   if (question) return false;
-  const creation = /(?:请|帮我|麻烦你|给我)?\s*(?:创建|建立|搭建|构建|开发|制作|做|实现|编写|写|生成|create|build|scaffold|develop|make|implement)\s*(?:(?:一个|一套|个|整套|整个|完整的|全栈的|大型的|多文件的|多模块的|a|an|the)\s*)?(?:项目|工程|project|application|app|website|site)(?!\s*(?:的)?\s*(?:(?:技术|开发|产品|实施)\s*)?(?:总结|方案|文档|介绍|报告|说明|计划|清单|列表|简介|笔记|教程|plan|documentation|document|docs|summary|report|spec|tutorial))/i;
+  // The deliverable noun may follow a project NAME, not just a quantifier —
+  // e.g. "创建一个5G保障大屏监控项目" puts "5G保障大屏监控" between the verb
+  // and "项目". A short name-like run is allowed in between, but doc-style
+  // words in that run (介绍/说明/文档…) are rejected so "写一段介绍项目的文字"
+  // stays a writing task instead of a build. The lookahead after the noun
+  // still excludes "项目的技术方案/说明文档" style doc requests.
+  const creation = /(?:请|帮我|麻烦你|给我)?\s*(?:创建|建立|搭建|构建|开发|制作|做|实现|编写|写|生成|create|build|scaffold|develop|make|implement)\s*(?:(?:一个|一套|个|整套|整个|完整的|全栈的|大型的|多文件的|多模块的|a|an|the)\s*)?(?![^，。；、,.!?？：:]{0,32}(?:介绍|说明|文档|方案|总结|报告|教程|README|计划|清单|笔记|心得|简介|描述|演示|思路))[^，。；、,.!?？：:]{0,32}?(?:项目|工程|平台|系统|应用|程序|网站|大屏|dashboard|project|application|app|website|site|system|platform)(?!\s*(?:的)?\s*(?:(?:技术|开发|产品|实施)\s*)?(?:总结|方案|文档|介绍|报告|说明|计划|清单|列表|简介|笔记|教程|plan|documentation|document|docs|summary|report|spec|tutorial))/i;
   return creation.test(p.slice(0, 140));
 }
 
@@ -363,7 +406,7 @@ export function detectArtifactRequest(prompt: string): boolean {
 /**
  * System-prompt fragment injected when detectArtifactRequest() fires: tells
  * the model to persist the artifact to disk instead of dumping code inline.
- * Pairs with the same rule baked into BASE_SYSTEM_PROMPT — the injection makes
+ * Pairs with the same rule assembled by PromptAssembler — the injection makes
  * the instruction explicit for this particular request.
  */
 export function formatArtifactPrompt(): string {
@@ -402,6 +445,24 @@ export function parsePlanJsonWithMeta(text: string): PlanParseResult {
   return parsePlanJsonCore(text);
 }
 
+function normalizePlanSubsteps(raw: unknown): NonNullable<PlanStep['substeps']> {
+  if (!Array.isArray(raw)) return [];
+  const substeps = raw.flatMap((item, index) => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as { action?: unknown; description?: unknown; expectedOutcome?: unknown };
+    const action = typeof value.action === 'string' ? value.action.trim() : '';
+    const description = typeof value.description === 'string' ? value.description.trim() : '';
+    if (!action && !description) return [];
+    return [{
+      id: String(index + 1),
+      action: action || description,
+      description: description || action,
+      expectedOutcome: typeof value.expectedOutcome === 'string' ? value.expectedOutcome.trim() : description || action,
+    }];
+  }).slice(0, MAX_PLAN_SUBSTEPS);
+  return substeps;
+}
+
 function parsePlanJsonCore(text: string): PlanParseResult {
   if (!text) return { plan: null, repaired: false };
   let cleaned = text.trim();
@@ -433,15 +494,21 @@ function parsePlanJsonCore(text: string): PlanParseResult {
 
   const steps: PlanStep[] = [];
   for (const raw of rawSteps) {
-    const step = raw as { action?: unknown; description?: unknown; expectedOutcome?: unknown };
+    const step = raw as { action?: unknown; description?: unknown; expectedOutcome?: unknown; todosRequired?: unknown; substeps?: unknown };
     const action = typeof step.action === 'string' ? step.action.trim() : '';
     const description = typeof step.description === 'string' ? step.description.trim() : '';
     if (!action && !description) continue;
+    const normalizedSubsteps = normalizePlanSubsteps(step.substeps);
+    const todosRequired = typeof step.todosRequired === 'boolean'
+      ? step.todosRequired
+      : normalizedSubsteps.length > 0;
     steps.push({
       id: String(steps.length + 1),
       action: action || description,
       description: description || action,
       expectedOutcome: typeof step.expectedOutcome === 'string' ? step.expectedOutcome.trim() : description || action,
+      todosRequired,
+      substeps: todosRequired ? normalizedSubsteps : undefined,
     });
   }
   if (steps.length === 0) return { plan: null, repaired };

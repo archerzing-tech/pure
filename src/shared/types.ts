@@ -72,10 +72,13 @@ export interface LLMAdapter {
   complete(messages: Message[], tools: ToolDefinition[]): Promise<LLMResponse>;
 }
 
+import type { WorkspaceSnapshotPort } from './workspaceSnapshot';
+
 export interface ToolAdapter {
   execute(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResult>;
   getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined;
   getTools(): ToolDefinition[];
+  getSnapshotPort?(): WorkspaceSnapshotPort | undefined;
 }
 
 export type AgentStateType = 'THINK' | 'ACT' | 'OBSERVE' | 'VERIFY' | 'TERMINATE';
@@ -110,11 +113,31 @@ export interface RunContinueInput {
   budget: BudgetConfig;
 }
 
+export type VerificationStatus = 'passed' | 'failed' | 'incomplete' | 'not_run';
+
+export interface VerificationEvidence {
+  id: string;
+  checkName: string;
+  status: VerificationStatus;
+  summary: string;
+  command?: string;
+  exitCode?: number;
+  durationMs?: number;
+  output?: string;
+  source: 'engine' | 'command' | 'quality_gate';
+  timestamp: number;
+}
+
+export interface VerificationSummary {
+  status: VerificationStatus;
+  evidence: VerificationEvidence[];
+}
+
 export interface EngineContext {
   llm: LLMAdapter;
   tools?: ToolAdapter;
   toolsDefs: ToolDefinition[];
-  verifier?: { evaluate(params: { output: string; context: Message[] }): Promise<{ passed: boolean; feedback?: string }> };
+  verifier?: { evaluate(params: { output: string; context: Message[] }): Promise<{ passed: boolean; feedback?: string; evidence?: VerificationEvidence[] }> };
   budget: BudgetConfig;
   signal?: AbortSignal;
   hooks?: HookRouter;
@@ -181,6 +204,7 @@ export interface AgentResult {
   interrupted: boolean;
   turnCount: number;
   messages: Message[];
+  verification?: VerificationSummary;
 }
 
 // ── v0.4: Persistence types ──
@@ -293,5 +317,5 @@ export type EngineEvent =
   | { type: 'FailurePolicyDecision'; payload: { action: FailureAction; failure: FailureRecord; turnNumber: number }; timestamp: number }
   | { type: 'BudgetWarning'; payload: { exhausted: boolean; reason: string; remaining: { turns: number; tokens: number; time: number }; gracePeriodEnds: number }; timestamp: number }
   | { type: 'Error'; payload: { code: string; message: string; stateType: AgentStateType; recoverable: boolean; recoveryAction?: 'retry' | 'reflect' | 'skip' | 'terminate' }; timestamp: number }
-  | { type: 'Completed'; payload: { finalOutput?: string; isComplete: boolean; interrupted: boolean; turnCount: number; messages?: Message[]; usage?: TokenUsage }; timestamp: number }
+  | { type: 'Completed'; payload: { finalOutput?: string; isComplete: boolean; interrupted: boolean; turnCount: number; messages?: Message[]; usage?: TokenUsage; verification?: VerificationSummary }; timestamp: number }
   | { type: 'Interrupted'; payload: { reason: string; lastState?: AgentStateType; completedSteps: string[]; messages?: Message[]; turnCount?: number }; timestamp: number };

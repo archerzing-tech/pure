@@ -1,6 +1,6 @@
 // src/shared/promptLayers.ts
-// Layered prompt architecture (system / application / user), shared by GUI
-// (chat.ts) and CLI (cli.ts) so the two surfaces never drift.
+// Layered prompt fragments (system / application / user), compiled by the
+// shared PromptAssembler for GUI, CLI, and Harness so the surfaces do not drift.
 //
 //   L0 SYSTEM   — immutable core: identity, safety, permission modes, runtime,
 //                 response format. Rendered from system-prompt.md; changes only
@@ -87,8 +87,8 @@ export const FILE_TOOLS_CORE = `File tools:
 - read_file(path, startLine?, endLine?) — read file content
 - write_file(path, content) — create or overwrite a file
 - edit_file(path, oldString, newString, allowMultiple?) — string replacement in a file
-- list_files(path?, recursive?) — list directory contents
-- search_files(pattern, path?, filePattern?, maxResults?) — grep for text in files
+- list_files(path?, recursive?, maxResults?) — list directory contents; large listings are capped and report when truncated
+- code_searcher(query, path?, globs?, caseSensitive?, maxResults?, globalMaxResults?) — regex-aware repository search with file/line evidence
 - glob_files(pattern, path?, maxResults?) — find files matching a glob pattern (e.g. "**/*.ts")
 - create_directory(path) — create a directory (and parents)
 - diff_files(pathA, pathB) — unified diff between two files
@@ -143,6 +143,10 @@ export interface UserTurnContext {
   /** User's answers to pre-plan clarifying questions (see chat.ts) — must be
    * honored as confirmed requirements during execution. */
   clarifications?: string;
+  /** Structured delivery contract discovered for THIS request/workspace. */
+  contract?: string;
+  /** Freebuff-style intent/risk assessment for THIS request. */
+  assessment?: string;
 }
 
 // The composed user turn is persisted in session history. Restore/display
@@ -160,6 +164,8 @@ export function composeUserTurn(text: string, ctx: UserTurnContext = {}): string
   if (ctx.buildProtocol) parts.push(ctx.buildProtocol);
   if (ctx.plan) parts.push(ctx.plan);
   if (ctx.clarifications) parts.push(ctx.clarifications);
+  if (ctx.contract) parts.push(ctx.contract);
+  if (ctx.assessment) parts.push(ctx.assessment);
   if (parts.length === 0) return text;
   return `${TASK_CONTEXT_OPEN}\n${parts.join('\n\n')}\n${TASK_CONTEXT_CLOSE}\n\n${text}`;
 }

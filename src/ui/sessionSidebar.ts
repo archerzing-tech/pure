@@ -30,6 +30,8 @@ export interface SessionSidebarDeps {
   renderMessages(messages: StoredMessage[]): Promise<void>;
   /** Move keyboard focus into the composer (main.ts owns the input). */
   focusPrompt(): void;
+  /** Show the chat-area loading overlay while a session restores (main.ts). */
+  showSessionLoading(): void;
   /** After a session was activated — its workspace may have changed. */
   onSessionActivated(): void;
   /** After the active session was cleared/deleted — back to landing. */
@@ -99,6 +101,9 @@ export class SessionSidebar {
     // independent, so there is no global-default fallback. Set it BEFORE
     // rendering so clickable relative paths in the transcript resolve against
     // the restored workspace.
+    // The loading overlay shows the moment the session card is clicked —
+    // feedback before the disk read and bubble-by-bubble render complete.
+    this.deps.showSessionLoading();
     this.deps.chat.setWorkspace(loaded.workspace || '');
     await this.deps.chat.syncEffectiveWorkspace();
     await this.deps.renderMessages(loaded.messages);

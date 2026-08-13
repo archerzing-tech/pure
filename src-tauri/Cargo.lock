@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "pure"
-version = "1.9.0"
+version = "1.9.2-beta7"
 dependencies = [
  "base64 0.21.7",
  "encoding_rs",
@@ -2588,6 +2588,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "png 0.17.16",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

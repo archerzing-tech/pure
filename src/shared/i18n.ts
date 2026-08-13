@@ -69,6 +69,7 @@ const translations: Record<Language, Record<string, string>> = {
 
     // ── Thinking card ──
     'thinking.thinking': '思考',
+    'thinking.done': '思考完成',
     'thinking.show': '查看思考过程',
 
     // ── Code block actions ──
@@ -125,6 +126,13 @@ const translations: Record<Language, Record<string, string>> = {
     'context.model.notConfigured': '未配置',
     'context.role.you': '你',
     'context.role.pure': 'pure',
+    'context.compact.title': '压缩上下文',
+    'context.compact.done': '上下文已压缩：淘汰 {n} 条消息{summary}',
+    'context.compact.none': '当前上下文已在压缩范围内',
+    'context.compact.empty': '当前没有可压缩的上下文',
+    'context.compact.overBudget': '最新消息过大，已保持完整，当前窗口仍超过 Token 预算',
+    'context.compact.contextOverBudget': '系统提示词或摘要本身已超过 Token 预算，当前窗口仍保持 provider 可接受的完整消息结构',
+    'context.compact.noSummary': '未调用摘要模型，较早消息仅按窗口裁剪',
 
     // ── Status footer ──
     'status.ready': '就绪',
@@ -436,6 +444,7 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.newContent': '↓ 有新内容',
     'chat.newContentHint': '有新内容到达，点击回到最新',
     'session.restoring': '正在加载会话…',
+    'session.loading.history': '正在调取历史记录…',
 
     // ── Confirm dialogs ──
     'confirm.title': '确认',
@@ -505,6 +514,8 @@ const translations: Record<Language, Record<string, string>> = {
     'stats.commands': '命令执行',
     'stats.empty': '暂无记录',
     'stats.dblclickOpen': '双击打开',
+    'stats.commandCopy': '复制命令',
+    'stats.commandCopied': '命令已复制',
     'stats.export': '导出',
     'stats.export.title': '导出会话统计',
     'stats.export.json': '导出为 JSON',
@@ -611,6 +622,7 @@ const translations: Record<Language, Record<string, string>> = {
 
     // ── Thinking card ──
     'thinking.thinking': 'Thinking',
+    'thinking.done': 'Thinking complete',
     'thinking.show': 'Show thinking',
 
     // ── Code block actions ──
@@ -667,6 +679,13 @@ const translations: Record<Language, Record<string, string>> = {
     'context.model.notConfigured': 'Not configured',
     'context.role.you': 'You',
     'context.role.pure': 'pure',
+    'context.compact.title': 'Compact context',
+    'context.compact.done': 'Context compacted: evicted {n} message(s){summary}',
+    'context.compact.none': 'Context is already within the compaction window',
+    'context.compact.empty': 'There is no context to compact',
+    'context.compact.overBudget': 'The newest message is too large to split; the window remains over the token budget',
+    'context.compact.contextOverBudget': 'The system prompt or summary baseline already exceeds the token budget; the provider-safe message structure was preserved',
+    'context.compact.noSummary': 'No summarizer was available; older messages were trimmed to the bounded window',
 
     // ── Status footer ──
     'status.ready': 'Ready',
@@ -974,6 +993,7 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.newContent': '↓ New content',
     'chat.newContentHint': 'New content arrived — click to return to the latest',
     'session.restoring': 'Loading session…',
+    'session.loading.history': 'Loading history…',
 
     // ── Confirm dialogs ──
     'confirm.title': 'Confirm',
@@ -1043,6 +1063,8 @@ const translations: Record<Language, Record<string, string>> = {
     'stats.commands': 'Commands',
     'stats.empty': 'No records yet',
     'stats.dblclickOpen': 'Double-click to open',
+    'stats.commandCopy': 'Copy command',
+    'stats.commandCopied': 'Command copied',
     'stats.export': 'Export',
     'stats.export.title': 'Export session stats',
     'stats.export.json': 'Export as JSON',

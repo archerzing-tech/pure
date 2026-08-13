@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { buildRepairPrompt, buildVerifyCommand, isVerificationCommand, parseCodeReviewVerdict, qualityGateEvidence, qualityGateSummary, runProjectQualityGate } from '../projectQualityGate';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { NodeToolAdapter } from '../../adapter/node/NodeToolAdapter';
+import { buildAuditCommand, buildLocalReviewCommand, buildRepairPrompt, buildVerifyCommand, hasRepairableQualityFindings, isVerificationCommand, parseCodeReviewVerdict, parseProjectAuditResult, qualityGateEvidence, qualityGateSummary, runProjectQualityGate } from '../projectQualityGate';
 import type { ToolAdapter, ToolCall, ToolDefinition, ToolResult } from '../../shared/types';
 
 const REVIEW_TOOL: ToolDefinition = {
@@ -36,28 +40,124 @@ describe('project quality gate', () => {
     expect(parseCodeReviewVerdict('looks good')).toEqual({ status: 'unavailable', summary: '代码审查未返回可验证的 PASS/FAIL 结论' });
   });
 
+  it('reports the concrete backend action while each phase is waiting', async () => {
+    const activities: string[] = [];
+    await runProjectQualityGate(adapter('VERDICT: PASS', [
+      { success: true, result: '[audit-tool] bun audit --json\n{}\n[audit-exit] 0' },
+      { success: true, result: 'tests passed' },
+    ]), { onActivity: (_phase, message) => activities.push(message) });
+    expect(activities).toEqual([
+      '正在调用代码审查工具，等待审查结论…',
+      '正在执行只读依赖/安全审计（不修改依赖），等待审计输出…',
+      '正在执行类型检查与自动化测试，等待验证结果…',
+    ]);
+  });
+
+  it('parses audit evidence without confusing vulnerabilities with unavailable infrastructure', () => {
+    expect(parseProjectAuditResult('[audit-tool] bun audit --json\n{}\n[audit-exit] 0')).toEqual({ status: 'passed', summary: '依赖/安全审计通过，未发现达到门禁阈值的问题' });
+    expect(parseProjectAuditResult('[audit-tool] npm audit --json\n{"vulnerabilities":{"x":{"severity":"high"}},"metadata":{"vulnerabilities":{"high":1}}}\n[audit-exit] 1')).toEqual({ status: 'failed', summary: '依赖/安全审计发现漏洞或安全策略问题' });
+    expect(parseProjectAuditResult('npm ERR! code EAI_AGAIN\n[audit-exit] 1')).toEqual({ status: 'unavailable', summary: '依赖/安全审计未完成（退出码 1，疑似网络或环境问题）' });
+    expect(parseProjectAuditResult('[audit-unavailable] package.json has no lockfile for a reproducible audit').status).toBe('unavailable');
+    expect(parseProjectAuditResult('[audit-exit] 1').status).toBe('unavailable');
+  });
+
+  it('builds a local review command that works inside and outside Git', () => {
+    const command = buildLocalReviewCommand();
+    expect(command).toContain('git rev-parse --show-toplevel');
+    expect(command).toContain('not a standalone git repository; skipping Git diff/status checks');
+    expect(command).toContain('find . -type f');
+    expect(command).not.toContain('git init');
+  });
+
+  it.skipIf(process.platform === 'win32')('actually completes local review in a non-Git workspace', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'pure-quality-non-git-'));
+    try {
+      writeFileSync(join(workspace, 'index.html'), '<!doctype html>');
+      const tools = new NodeToolAdapter({ workspace, commandTimeout: 10_000 });
+      const result = await tools.execute({
+        id: 'local-review-non-git',
+        index: 0,
+        function: { name: 'execute_command', arguments: JSON.stringify({ command: buildLocalReviewCommand() }) },
+      });
+      expect(result.success).toBe(true);
+      expect(String((result.result as { stdout?: string })?.stdout ?? result.result)).toContain('not a standalone git repository');
+      expect(String((result.result as { stdout?: string })?.stdout ?? result.result)).not.toContain('Not a git repository. Use --no-index');
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('builds read-only lockfile-aware audit commands', () => {
+    const command = buildAuditCommand();
+    expect(command).toContain('bun audit --json');
+    expect(command).toContain('npm audit --json --audit-level=moderate --ignore-scripts');
+    expect(command).toContain('cargo audit --json');
+    expect(command).not.toContain('audit fix');
+    expect(command).not.toContain('cargo update');
+  });
+
   it('runs review, audit, and verification in order before passing', async () => {
     const phases: string[] = [];
     const result = await runProjectQualityGate(adapter('VERDICT: PASS', [
-      { success: true, result: 'audit clean' },
+      { success: true, result: '[audit-tool] bun audit --json\n{}\n[audit-exit] 0' },
       { success: true, result: 'tests passed' },
     ]), { onPhase: (phase, status) => phases.push(`${phase}:${status}`) });
     expect(result.passed).toBe(true);
     expect(result.checks.map((check) => check.phase)).toEqual(['review', 'audit', 'verify']);
+    expect(result.evidence.map((entry) => entry.status)).toEqual(['passed', 'passed', 'passed']);
+    expect(result.evidence.map((entry) => entry.phase)).toEqual(['review', 'audit', 'verify']);
     expect(phases).toEqual(['review:active', 'review:passed', 'audit:active', 'audit:passed', 'verify:active', 'verify:passed']);
     expect(qualityGateSummary(result)).toContain('全部通过');
     expect(qualityGateEvidence(result, false)).toContain('项目允许交付');
   });
 
-  it('stops at the first failed gate and creates a repair prompt', async () => {
+  it('does not send audit infrastructure failures into the code repair loop', async () => {
     const result = await runProjectQualityGate(adapter('VERDICT: PASS', [
-      { success: false, error: 'high severity vulnerability' },
+      { success: false, error: 'audit tool unavailable' },
       { success: true, result: 'should not run' },
     ]));
     expect(result.passed).toBe(false);
     expect(result.checks.map((check) => check.phase)).toEqual(['review', 'audit']);
-    expect(buildRepairPrompt(result)).toContain('high severity vulnerability');
+    expect(result.checks[1].status).toBe('unavailable');
+    expect(hasRepairableQualityFindings(result)).toBe(false);
+  });
+
+  it('creates a constrained repair prompt only for actual audit findings', async () => {
+    const result = await runProjectQualityGate(adapter('VERDICT: PASS', [
+      { success: true, result: '[audit-tool] npm audit --json\n{"vulnerabilities":{"x":{"severity":"high"}}}\n[audit-exit] 1' },
+    ]));
+    expect(result.passed).toBe(false);
+    expect(hasRepairableQualityFindings(result)).toBe(true);
     expect(buildRepairPrompt(result)).toContain('修复阶段');
+    expect(buildRepairPrompt(result)).toContain('禁止执行 git init');
+    expect(buildRepairPrompt(result)).toContain('测试、类型检查或审计命令');
+    expect(buildRepairPrompt(result)).not.toContain('git add .');
+  });
+
+  it('does not make a vague auditor FAIL repairable without finding evidence', async () => {
+    const tools = adapter('VERDICT: PASS', []);
+    tools.execute = async (call: ToolCall): Promise<ToolResult> => {
+      if (call.function.name === 'code_reviewer') return { id: call.id, toolName: call.function.name, result: 'VERDICT: PASS', success: true, duration: 1 };
+      if (call.function.name === 'project_auditor') return { id: call.id, toolName: call.function.name, result: '检查未完成\nAUDIT: FAIL', success: true, duration: 1 };
+      return { id: call.id, toolName: call.function.name, result: '[audit-unavailable] tool unavailable', success: true, duration: 1 };
+    };
+    const result = await runProjectQualityGate(tools);
+    expect(result.passed).toBe(false);
+    expect(result.checks[1].status).toBe('unavailable');
+    expect(hasRepairableQualityFindings(result)).toBe(false);
+  });
+
+  it('does not trust an auditor PASS when the report contains an actionable finding', async () => {
+    const tools = adapter('VERDICT: PASS', []);
+    tools.getTools = () => [REVIEW_TOOL, COMMAND_TOOL, { name: 'project_auditor', description: 'Audit project', input_schema: { type: 'object' } }];
+    tools.execute = async (call: ToolCall): Promise<ToolResult> => {
+      if (call.function.name === 'code_reviewer') return { id: call.id, toolName: call.function.name, result: 'VERDICT: PASS', success: true, duration: 1 };
+      if (call.function.name === 'project_auditor') return { id: call.id, toolName: call.function.name, result: 'critical vulnerability remains\nAUDIT: PASS', success: true, duration: 1 };
+      return { id: call.id, toolName: call.function.name, result: '[audit-unavailable] tool unavailable', success: true, duration: 1 };
+    };
+    const result = await runProjectQualityGate(tools);
+    expect(result.passed).toBe(false);
+    expect(result.checks[1]).toMatchObject({ status: 'failed', repairable: true });
   });
 
   it('blocks projects without a standard verification manifest', async () => {
@@ -68,6 +168,41 @@ describe('project quality gate', () => {
     expect(result.checks[1].status).toBe('unavailable');
   });
 
+  it('records repair rounds and concrete issue history in delivery evidence', async () => {
+    const result = await runProjectQualityGate(adapter('VERDICT: PASS', [
+      { success: true, result: '[audit-tool] npm audit --json\\n{"vulnerabilities":{"x":{"severity":"high"}}}\\n[audit-exit] 1' },
+    ]));
+    const evidence = qualityGateEvidence(result, true, 3, ['第 1 轮发现：依赖问题', '第 2 轮发现：测试失败', '第 3 轮后仍未通过：审查失败']);
+    expect(evidence).toContain('自动修复与复查 3 轮');
+    expect(evidence).toContain('第 3 轮后仍未通过');
+  });
+
+  it('does not mark an auditor environment failure as code-repairable', async () => {
+    const result = await runProjectQualityGate(adapter('VERDICT: PASS', []));
+    expect(result.passed).toBe(false);
+    expect(result.checks[1]?.repairable).not.toBe(true);
+  });
+
+  it('does not send verification environment failures into the code repair loop', async () => {
+    const result = await runProjectQualityGate(adapter('VERDICT: PASS', [
+      { success: true, result: '[audit-tool] bun audit --json\n{}\n[audit-exit] 0' },
+      { success: false, error: 'Command failed with exit code 127: npm: command not found' },
+    ]));
+    expect(result.passed).toBe(false);
+    expect(result.checks[2].status).toBe('unavailable');
+    expect(result.checks[2].failureKind).toBe('tool_unavailable');
+    expect(result.checks[2].repairable).not.toBe(true);
+  });
+
+  it('records permission blocks as environment evidence instead of code failures', async () => {
+    const result = await runProjectQualityGate(adapter('VERDICT: PASS', [
+      { success: true, result: '[audit-tool] bun audit --json\n{}\n[audit-exit] 0' },
+      { success: false, error: 'Permission denied by the active permission policy' },
+    ]));
+    expect(result.passed).toBe(false);
+    expect(result.checks[2]).toMatchObject({ status: 'unavailable', failureKind: 'permission_blocked', repairable: false });
+  });
+
   it('stops when the quality gate is aborted', async () => {
     const controller = new AbortController();
     controller.abort();
@@ -76,18 +211,109 @@ describe('project quality gate', () => {
     expect(result.checks[0].summary).toContain('已取消');
   });
 
-  it('blocks a review tool that does not provide a machine-checkable verdict', async () => {
-    const result = await runProjectQualityGate(adapter('I think it is fine', []));
+  it('falls back to a local static review without claiming a full review PASS', async () => {
+    const result = await runProjectQualityGate(adapter('I think it is fine', [
+      { success: true, result: '[local-review] git diff --check\n[local-review] no credential pattern found' },
+      { success: true, result: '[audit-tool] bun audit --json\n{}\n[audit-exit] 0' },
+      { success: true, result: 'tests passed' },
+    ]));
     expect(result.passed).toBe(false);
-    expect(result.checks[0].status).toBe('unavailable');
+    expect(result.checks).toHaveLength(3);
+    expect(result.checks[0].status).toBe('degraded');
+    expect(result.checks[0].summary).toContain('不能替代完整代码审查');
+    expect(result.checks[0].output).toContain('no credential pattern found');
+  });
+
+  it('shows a failed reviewer error in the fallback evidence without claiming review PASS', async () => {
+    const result = await runProjectQualityGate(adapter('', [
+      { success: false, error: 'local review command failed' },
+    ]));
+    expect(result.passed).toBe(false);
+    expect(result.checks[0].status).toBe('failed');
+    expect(result.checks[0].summary).toContain('本地静态审查也失败');
+    expect(hasRepairableQualityFindings(result)).toBe(false);
+  });
+
+  it('stops and blocks delivery when the audit command ignores cancellation and times out', async () => {
+    const tools = adapter('VERDICT: PASS', []);
+    tools.execute = async (call: ToolCall): Promise<ToolResult> => {
+      if (call.function.name === 'code_reviewer') return { id: call.id, toolName: call.function.name, result: 'VERDICT: PASS', success: true, duration: 1 };
+      return await new Promise(() => {});
+    };
+    const result = await runProjectQualityGate(tools, { commandTimeoutMs: 5 });
+    expect(result.passed).toBe(false);
+    expect(result.checks).toHaveLength(2);
+    expect(result.checks[1].status).toBe('unavailable');
+    expect(result.checks[1].summary).toContain('超时');
+  });
+
+  it('does not hang when the reviewer ignores cancellation and times out', async () => {
+    let commandRan = false;
+    const tools = adapter('never returned', [
+      { success: true, result: '[local-review] diff check passed\n[local-review] no credential pattern found' },
+      { success: true, result: '[audit-tool] bun audit --json\n{}\n[audit-exit] 0' },
+      { success: true, result: 'tests passed' },
+    ]);
+    const originalExecute = tools.execute;
+    tools.execute = async (call: ToolCall, signal?: AbortSignal): Promise<ToolResult> => {
+      if (call.function.name === 'code_reviewer') return await new Promise(() => {});
+      commandRan = true;
+      return originalExecute(call, signal);
+    };
+    const result = await runProjectQualityGate(tools, { reviewTimeoutMs: 5 });
+    expect(result.passed).toBe(false);
+    expect(result.checks[0].summary).toContain('完整代码审查');
+    expect(result.checks[0].status).toBe('degraded');
+    expect(result.checks[0].reviewMode).toBe('local');
+    expect(commandRan).toBe(true);
   });
 });
 
 describe('verification command helpers', () => {
   it('buildVerifyCommand covers npm, cargo, and Python stacks', () => {
     expect(buildVerifyCommand()).toContain('npm run typecheck');
+    expect(buildVerifyCommand()).toContain('verify-missing-tests');
+    expect(buildVerifyCommand()).toContain('hasTestFile');
+    expect(buildVerifyCommand()).toContain('node_modules');
     expect(buildVerifyCommand()).toContain('cargo test');
     expect(buildVerifyCommand()).toContain('pytest');
+  });
+
+  it.skipIf(process.platform === 'win32')('preserves a profile verification failure instead of echoing completion', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'pure-quality-verify-'));
+    try {
+      writeFileSync(join(workspace, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(2)"' } }));
+      const profile = {
+        projectType: 'node' as const,
+        packageManager: 'npm' as const,
+        manifests: ['package.json', 'package-lock.json'],
+        scripts: { test: 'node -e "process.exit(2)"' },
+        testFilesFound: true,
+        gitRepository: false,
+        relevantFiles: ['package.json'],
+        verification: [],
+      };
+      const tools = new NodeToolAdapter({ workspace, commandTimeout: 10_000 });
+      const result = await tools.execute({
+        id: 'profile-verify-failure',
+        index: 0,
+        function: { name: 'execute_command', arguments: JSON.stringify({ command: buildVerifyCommand(profile) }) },
+      });
+      expect(result.success).toBe(false);
+      expect(String((result.result as { stdout?: string; stderr?: string })?.stdout ?? result.result)).not.toContain('[verify-complete]');
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a missing package test script as a repairable verification failure', async () => {
+    const result = await runProjectQualityGate(adapter('VERDICT: PASS', [
+      { success: true, result: '[audit-tool] bun audit --json\n{}\n[audit-exit] 0' },
+      { success: true, result: '[verify-missing-tests] package.json has no executable test script' },
+    ]));
+    expect(result.passed).toBe(false);
+    expect(result.checks[2]).toMatchObject({ status: 'failed', repairable: true });
+    expect(result.checks[2].summary).toContain('没有可执行的自动化测试入口');
   });
 
   it('isVerificationCommand recognizes check commands', () => {

@@ -41,6 +41,17 @@ describe('DefaultFailurePolicy repeated-error detection (v0.11)', () => {
     }
   });
 
+  it('tells edit_file recovery to re-read instead of repeating a stale replacement', () => {
+    const policy = new DefaultFailurePolicy();
+    const action = policy.decide([toolError('edit_file', 'String not found in file: function renderList(). The file may have changed since it was read.')]);
+    expect(action.kind).toBe('retry');
+    if (action.kind === 'retry') {
+      expect(action.hint).toContain('Re-read the current file');
+      expect(action.hint).toContain('Do NOT repeat the same edit_file call');
+      expect(action.hint).toContain('shorter exact context');
+    }
+  });
+
   it('stops on the 3rd identical repeat instead of waiting for 6 failures', () => {
     const policy = new DefaultFailurePolicy();
     const action = policy.decide([

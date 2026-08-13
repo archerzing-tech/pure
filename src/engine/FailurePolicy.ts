@@ -8,7 +8,7 @@
 // v0.12 — web_search recovery guidance: when the failing tool is web_search,
 //        retry/reflect hints append explicit "rephrase, don't repeat" guidance
 //        (a dead-end query or a down backend must not be retried verbatim).
-//        Mirrors the adapters' error text and the CLI/GUI BASE_SYSTEM_PROMPT
+//        Mirrors the adapters' error text and the shared PromptAssembler contract
 //        so the policy reinforces it even when the raw error message does not.
 
 import type { FailureRecord, FailureAction, FailurePolicy } from '../shared/types';
@@ -24,11 +24,18 @@ const TRAP_ESCAPE_HINT =
 // identical-repeat stop reason) when the failing tool is web_search. Repeating
 // the same or a near-identical query is the classic web_search failure loop —
 // the fix is to rephrase, not retry verbatim. Wording mirrors the adapters'
-// empty/failed-search messages and the CLI's BASE_SYSTEM_PROMPT. Starts with
+// empty/failed-search messages and the shared PromptAssembler contract. Starts with
 // "Do NOT" (no "if" hedge): the webHint guard already guarantees the failing
 // tool is web_search, so the appended sentence can state the rule directly.
 const WEB_SEARCH_RECOVERY_HINT =
   ' Do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.';
+
+const EDIT_MISMATCH_RECOVERY_HINT =
+  ' The edit_file target no longer matches the current file. Do NOT repeat the same edit_file call. First call read_file on the target path, compare the current contents with the intended change, then use a shorter exact context or write a complete corrected file only when justified. If the requested change is already present, verify it and move on.';
+
+function isEditMismatch(failure: FailureRecord): boolean {
+  return failure.toolName === 'edit_file' && /String not found in file|file may have changed|target no longer matches/i.test(failure.message);
+}
 
 /**
  * Default escalating failure policy:
@@ -67,7 +74,10 @@ export class DefaultFailurePolicy implements FailurePolicy {
     const toolLabel = last.toolName ? ` (tool: ${last.toolName})` : '';
     // Web-search recovery guidance only applies when the failing call is a
     // web_search — for other tools it would be noise.
-    const webHint = last.toolName === 'web_search' ? WEB_SEARCH_RECOVERY_HINT : '';
+    const webHint = ['web_search', 'researcher_web', 'researcher_docs'].includes(last.toolName ?? '')
+      ? WEB_SEARCH_RECOVERY_HINT
+      : '';
+    const editHint = isEditMismatch(last) ? EDIT_MISMATCH_RECOVERY_HINT : '';
 
     // Same call failed 3+ times with the same error: the model is looping.
     // Stop now instead of grinding through the generic 6-failure ceiling.
@@ -96,7 +106,7 @@ export class DefaultFailurePolicy implements FailurePolicy {
       const trapNote = count === 2 ? TRAP_ESCAPE_HINT : '';
       return {
         kind: 'retry',
-        hint: `Attempt ${count}: ${last.message}. Please retry with a simpler approach.${webHint}${trapNote}`,
+        hint: `Attempt ${count}: ${last.message}. ${isEditMismatch(last) ? 'Re-read the current file before making any further edit.' : 'Please retry with a simpler approach.'}${webHint}${editHint}${trapNote}`,
       };
     }
 
@@ -108,7 +118,7 @@ export class DefaultFailurePolicy implements FailurePolicy {
       return {
         kind: 'reflect',
         hint: `${count} consecutive failures${toolHints ? ' involving ' + toolHints : ''}. ` +
-          `Last error: ${last.message}. Reflect deeply on what went wrong and try a fundamentally different approach.${webHint}${TRAP_ESCAPE_HINT}`,
+          `Last error: ${last.message}. Reflect deeply on what went wrong and try a fundamentally different approach.${webHint}${editHint}${TRAP_ESCAPE_HINT}`,
       };
     }
 

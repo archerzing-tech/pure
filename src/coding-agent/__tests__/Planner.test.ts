@@ -3,7 +3,7 @@
 // and the logical-trap detection that primes premise verification.
 
 import { describe, it, expect } from 'bun:test';
-import { Planner, detectProjectRequest, formatTrapPrompt, parsePlanJson, parsePlanJsonWithMeta } from '../Planner';
+import { Planner, assessIntent, detectProjectRequest, formatIntentPrompt, formatTrapPrompt, parsePlanJson, parsePlanJsonWithMeta } from '../Planner';
 
 describe('Planner', () => {
   it('classifies straightforward tasks as simple (no plan, yolo mode)', () => {
@@ -11,6 +11,44 @@ describe('Planner', () => {
     expect(r.complexity).toBe('simple');
     expect(r.mode).toBe('yolo');
     expect(r.plan).toBeUndefined();
+    expect(r.intent.riskLevel).toBe('low');
+    expect(r.intent.requiresProbe).toBe(false);
+  });
+
+  it('assesses destructive requests before execution', () => {
+    const assessment = assessIntent('删除整个项目');
+    expect(assessment.intent).toBe('delete');
+    expect(assessment.riskLevel).toBe('high');
+    expect(assessment.reversibility).toBe('irreversible');
+    expect(assessment.requiresProbe).toBe(true);
+    expect(assessment.requiresConfirmation).toBe(true);
+    const result = new Planner().analyzeTask('删除整个项目');
+    expect(result.mode).toBe('plan');
+    expect(result.plan).toBeDefined();
+  });
+
+  it('recommends a read-only probe for broad but recoverable changes', () => {
+    const assessment = assessIntent('把认证模块重构成新的实现');
+    expect(assessment.intent).toBe('refactor');
+    expect(assessment.riskLevel).toBe('medium');
+    expect(assessment.reversibility).toBe('partially-reversible');
+    expect(assessment.requiresProbe).toBe(true);
+    expect(assessment.requiresConfirmation).toBe(false);
+  });
+
+  it('keeps a small new artifact on the direct path', () => {
+    const assessment = assessIntent('帮我写一个打地鼠小游戏');
+    expect(assessment.intent).toBe('build');
+    expect(assessment.riskLevel).toBe('low');
+    expect(assessment.requiresProbe).toBe(false);
+    expect(assessment.requiresConfirmation).toBe(false);
+  });
+
+  it('formats the assessment as an execution contract', () => {
+    const text = formatIntentPrompt(assessIntent('删除整个项目'));
+    expect(text).toContain('<intent_assessment>');
+    expect(text).toContain('Do not broaden the change');
+    expect(text).toContain('wait for explicit user approval');
   });
 
   it('classifies explicit planning requests as complex and generates a plan', () => {
@@ -19,7 +57,8 @@ describe('Planner', () => {
     expect(r.mode).toBe('plan');
     expect(r.plan).toBeDefined();
     expect(r.plan!.steps.length).toBeGreaterThan(0);
-    expect(r.plan!.steps[0]).toMatchObject({ action: '了解需求' });
+    expect(r.plan!.steps[0]).toMatchObject({ action: '确认范围' });
+    expect(r.plan!.steps[0].substeps).toBeUndefined();
   });
 
   it('writes heuristic plan steps in user-facing language, not internal labels', () => {
@@ -29,8 +68,10 @@ describe('Planner', () => {
     const r = new Planner().analyzeTask('重构整个项目');
     const all = r.plan!.steps.map((s) => `${s.action} ${s.description}`).join(' ');
     expect(all).not.toMatch(/\b(Understand|Plan|Implement|Verify|How to)\b/i);
-    expect(r.plan!.steps[0].action).toBe('了解需求');
-    expect(r.plan!.steps.map((s) => s.action)).toEqual(['了解需求', '制定方案', '分步实现', '验证结果']);
+    expect(r.plan!.steps[0].action).toBe('确认范围');
+    expect(r.plan!.steps.map((s) => s.action)).toEqual(['确认范围', '完成改动', '验证结果']);
+    expect(r.plan!.steps.at(-1)).toMatchObject({ action: '验证结果' });
+    expect(r.plan!.steps.every((step) => step.todosRequired !== true)).toBe(true);
   });
 
   it('classifies multi-file scope as complex', () => {
@@ -50,6 +91,20 @@ describe('Planner', () => {
     expect(new Planner().analyzeTask('帮我创建一个项目').mode).toBe('build');
     expect(detectProjectRequest('怎么创建一个项目？')).toBe(false);
     expect(new Planner().analyzeTask('怎么创建一个项目？').complexity).toBe('simple');
+  });
+
+  it('detects project requests with a project name between the verb and the noun', () => {
+    // The deliverable noun may follow a NAME, not just a quantifier — e.g.
+    // "创建一个5G保障大屏监控项目" (this regression previously missed the
+    // plan gate entirely, so the run jumped straight to phase markers).
+    expect(detectProjectRequest('创建一个5G保障大屏监控项目，这个项目是浙江杭州市的5G监控运行保障大屏')).toBe(true);
+    expect(detectProjectRequest('开发一个监控大屏系统')).toBe(true);
+    expect(detectProjectRequest('帮我做一个客户信息管理系统')).toBe(true);
+    expect(detectProjectRequest('创建一个智能的城市交通管理系统')).toBe(true);
+    // Doc-style requests stay writing tasks, not builds.
+    expect(detectProjectRequest('写一段介绍项目的文字')).toBe(false);
+    expect(detectProjectRequest('帮我写一个介绍项目的文档')).toBe(false);
+    expect(detectProjectRequest('创建成功，项目已就绪')).toBe(false);
   });
 
   it('recognizes English project creation while excluding questions and project docs', () => {
@@ -197,6 +252,8 @@ describe('parsePlanJson (LLM plan parsing)', () => {
     expect(plan).not.toBeNull();
     expect(plan!.steps).toHaveLength(2);
     expect(plan!.steps[0]).toMatchObject({ action: 'Inspect', description: 'Read the auth module' });
+    expect(plan!.steps[0].todosRequired).toBe(false);
+    expect(plan!.steps[0].substeps).toBeUndefined();
     // expectedOutcome defaults to the description when absent
     expect(plan!.steps[1].expectedOutcome).toBe('Replace the token logic');
   });
@@ -204,6 +261,12 @@ describe('parsePlanJson (LLM plan parsing)', () => {
   it('accepts an object with a steps array', () => {
     const plan = parsePlanJson('{"steps":[{"action":"A","description":"d"}]}');
     expect(plan?.steps).toHaveLength(1);
+  });
+
+  it('preserves the planner decision to omit Todos for an atomic plan', () => {
+    const plan = parsePlanJson('{"steps":[{"action":"A","description":"d","todosRequired":false,"substeps":[{"action":"noise","description":"should not render"}]}]}');
+    expect(plan?.steps[0].todosRequired).toBe(false);
+    expect(plan?.steps[0].substeps).toBeUndefined();
   });
 
   it('accepts ```json fences', () => {
@@ -216,6 +279,20 @@ describe('parsePlanJson (LLM plan parsing)', () => {
     expect(plan).not.toBeNull();
     expect(plan!.steps).toHaveLength(1);
     expect(plan!.steps[0]).toMatchObject({ action: 'Inspect', description: 'Read the auth module' });
+    expect(plan!.steps[0].todosRequired).toBe(false);
+    expect(plan!.steps[0].substeps).toBeUndefined();
+  });
+
+  it('only renders Todos when the model explicitly supplies substeps', () => {
+    const atomic = parsePlanJson('[{"action":"Rename file","description":"Update one filename"}]');
+    const composite = parsePlanJson('[{"action":"Implement and verify","description":"Update the module, then run tests"}]');
+    const explicitSubsteps = parsePlanJson('[{"action":"Integrate","description":"Connect the pieces","substeps":[{"action":"Wire API","description":"Connect the endpoint"},{"action":"Run tests","description":"Check the result"}]}]');
+    expect(atomic?.steps[0].todosRequired).toBe(false);
+    expect(atomic?.steps[0].substeps).toBeUndefined();
+    expect(composite?.steps[0].todosRequired).toBe(false);
+    expect(composite?.steps[0].substeps).toBeUndefined();
+    expect(explicitSubsteps?.steps[0].todosRequired).toBe(true);
+    expect(explicitSubsteps?.steps[0].substeps).toHaveLength(2);
   });
 
   it('repairs fenced plan JSON with full-width punctuation', () => {

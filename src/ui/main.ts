@@ -22,9 +22,10 @@ import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { providerLabel, providerDef, PROVIDERS, defaultModelFor, customProviderFor, type ProviderId } from '../shared/providers';
-import { renderMarkdown, stripToolCallXml } from './markdown';
-import { createToolRow, finalizeToolRow } from './toolRow';
-import { appendStoredThinking } from './thinkingCard';
+import { renderMarkdown, stripToolCallXml } from './markdownLoader';  import { createToolRow, finalizeToolRow } from './toolRow';
+  import { appendStoredThinking } from './thinkingCard';
+  import { createAssessmentFlowCard } from './assessmentFlow';
+  import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { PasteChipManager, composeMessageWithAttachments } from './pasteChip';
@@ -73,6 +74,7 @@ sessionSidebar = new SessionSidebar({
   pasteChips,
   confirm: confirmDialog,
   renderMessages: renderSessionMessages,
+  showSessionLoading,
   focusPrompt: focusPromptCaretEnd,
   onSessionActivated: () => {
     queuedWhileStreaming = null;
@@ -150,6 +152,9 @@ let queuedWhileStreaming: string | null = null;
 // ── Streaming state → update both send buttons ──
 
 chat.onStreamingStateChange((streaming) => {
+  document.querySelectorAll<HTMLButtonElement>('.undo-write-btn, .compact-context-btn').forEach((button) => {
+    button.disabled = streaming;
+  });
   const sendBtn = document.getElementById('send-btn') as HTMLButtonElement;
   const promptEl = document.getElementById('prompt') as HTMLTextAreaElement;
   const landingSend = document.getElementById('landing-send-btn') as HTMLButtonElement;
@@ -456,6 +461,40 @@ function deferToIdle(fn: () => void): void {
   wireComposerSelects();
   checkLandingState();
   enableInputIfReady();
+  // Corner chrome reveal (CSS): the top-left sidebar toggle and top-right
+  // settings button are hidden while the pointer is outside the app window
+  // and fade in when it enters. `mousemove` inside the window shows them;
+  // `mouseleave` on the root document schedules a delayed hide (fires when
+  // the pointer leaves the webview). The delay lets a quick departure — e.g.
+  // overshooting toward the corner buttons themselves — keep the buttons
+  // visible instead of blinking them out and back under the cursor, which is
+  // where accidental clicks come from. classList is idempotent, so the
+  // high-frequency mousemove is safe — it only ever adds, never churns the
+  // DOM.
+  const CHROME_HIDE_DELAY_MS = 1000;
+  const appShell = document.getElementById('main');
+  if (appShell) {
+    let hideChromeTimer: ReturnType<typeof setTimeout> | undefined;
+    document.addEventListener('mousemove', () => {
+      if (hideChromeTimer) {
+        clearTimeout(hideChromeTimer);
+        hideChromeTimer = undefined;
+      }
+      appShell.classList.add('window-hover');
+    }, { passive: true });
+    document.documentElement.addEventListener('mouseleave', () => {
+      if (!hideChromeTimer) {
+        hideChromeTimer = setTimeout(() => {
+          hideChromeTimer = undefined;
+          appShell.classList.remove('window-hover');
+        }, CHROME_HIDE_DELAY_MS);
+      }
+    });
+  }
+  // Bind folder buttons on the critical path. The native dialog bridge is
+  // preloaded by workspace.ts, so a first click can open the macOS picker
+  // immediately instead of waiting for the idle bootstrap callback.
+  workspace.init();
   dismissBootSplash();
 
   deferToIdle(() => {
@@ -466,7 +505,6 @@ function deferToIdle(fn: () => void): void {
       updateSidebarModel();
       updateContextPanelStage();
       sessionSidebar.refresh();
-      workspace.init();
       sessionSidebar.init();
       initPathLinks();
       // Background memory decay: Harness only decays at session start (1h
@@ -475,6 +513,15 @@ function deferToIdle(fn: () => void): void {
       startMemoryDecayTimer();
       // Stats panel: subscribe to per-session updates + draw the empty state.
       chat.onSessionStatsChanged(() => renderSessionStats());
+      chat.onWorkspaceSnapshotChanged((available) => {
+        document.querySelectorAll<HTMLButtonElement>('.undo-write-btn').forEach((button) => {
+          button.hidden = !available;
+          button.disabled = chat.isStreaming();
+        });
+        document.querySelectorAll<HTMLButtonElement>('.compact-context-btn').forEach((button) => {
+          button.disabled = chat.isStreaming();
+        });
+      });
       renderSessionStats();
       void fetchAppVersion().then((version) => {
         appVersion = version;
@@ -556,6 +603,44 @@ function applySavedAppearance() {
 
 let sessionRestoreToken = 0;
 
+// ── Session-loading transition ──
+// Opening a historical conversation can take a moment (disk read + one bubble
+// per rAF yield), so the content area shows a semi-transparent loading
+// overlay the instant a session card is clicked, then fades it out and fades
+// the restored transcript in when the restore completes. The overlay lives in
+// #chat-view and never blocks the sidebar or composer.
+let sessionLoadingEl: HTMLElement | null = null;
+
+function showSessionLoading(): void {
+  if (sessionLoadingEl) return; // already visible
+  const host = document.getElementById('chat-view');
+  if (!host) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'session-loading-overlay';
+  overlay.setAttribute('role', 'status');
+  overlay.setAttribute('aria-live', 'polite');
+  overlay.innerHTML =
+    `<span class="session-loading-ring" aria-hidden="true"></span>` +
+    `<span class="session-loading-label">${t('session.loading.history')}</span>`;
+  sessionLoadingEl = overlay;
+  host.appendChild(overlay);
+  // One frame later the element is in the DOM, so the opacity transition from
+  // 0 → 1 actually animates (a same-frame class toggle would jump instantly).
+  requestAnimationFrame(() => overlay.classList.add('visible'));
+}
+
+function hideSessionLoading(): void {
+  const overlay = sessionLoadingEl;
+  sessionLoadingEl = null;
+  if (!overlay) return;
+  overlay.classList.remove('visible');
+  // Wait for the fade-out before removing the node so the transition is
+  // visible; the fallback timer covers reduced-motion / stalled frames.
+  const remove = () => overlay.remove();
+  overlay.addEventListener('transitionend', remove, { once: true });
+  setTimeout(remove, 220);
+}
+
 async function renderSessionMessages(messages: StoredMessage[]) {
   const restoreToken = ++sessionRestoreToken;
   const isCurrentRestore = (): boolean => restoreToken === sessionRestoreToken;
@@ -591,30 +676,49 @@ async function renderSessionMessages(messages: StoredMessage[]) {
     if (m.role === 'tool' && m.toolExec) {
       toolExecs.push(m.toolExec);
       continue;
-    }
-    if (m.role === 'assistant') {
-      flushToolExecs(toolExecs, chatEl);
-      for (const segment of getStoredThinkingSegments(m)) appendStoredThinking(segment, chatEl);
-      toolExecs.length = 0;
-      if (!m.content) continue;
-      const wrapper = document.createElement('div');
-      wrapper.className = 'bubble-row assistant';
+    }      if (m.role === 'assistant') {
+        flushToolExecs(toolExecs, chatEl);
+        for (const segment of getStoredThinkingSegments(m)) appendStoredThinking(segment, chatEl);
+        toolExecs.length = 0;
+        if (!m.content) continue;
+        // Rebuild the assessment card for a restored plan pause so the
+        // "waiting for reply" flow survives session restore: intent/risk/gate
+        // read as passed, the execute node waits for the user's next message.
+        if (m.isPlanPause && m.assessment) {
+          const flow = createAssessmentFlowCard(m.assessment);
+          flow.completePhase('gate');
+          flow.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
+          chatEl.appendChild(flow.el);
+          // The cancel shortcut needs this ref to flip the restored card out
+          // of the "等待你回复" state when the plan is cancelled.
+          chat.registerPausedAssessment(flow);
+        }
+        const wrapper = document.createElement('div');
+        wrapper.className = 'bubble-row assistant';
       const label = document.createElement('span');
       label.className = 'bubble-label';
       label.textContent = t('context.role.pure');
       wrapper.appendChild(label);
       const bubble = document.createElement('div');
-      bubble.className = 'bubble';
+      bubble.className = m.isPlanPause ? 'bubble plan-pause-message' : 'bubble';
       bindAssistantBubbleCopy(bubble);
       wrapper.appendChild(bubble);
       chatEl.appendChild(wrapper);
       // Render one assistant message at a time. Awaiting here prevents a long
       // restore from starting many synchronous markdown/highlight passes in one
       // call stack, which previously starved input and made older rows appear
-      // blank until the user scrolled.
-      await renderMarkdown(stripToolCallXml(m.content), bubble);
-      if (!isCurrentRestore()) return;
-      scrollChatToBottomIfPinned(chatEl);
+      // blank until the user scrolled.        await renderMarkdown(stripToolCallXml(m.content), bubble);
+        // Restored pause bubbles get the same continue/cancel shortcuts; the
+        // plan cursor was rehydrated by loadFromStorage, so both actions work.
+        if (m.isPlanPause) {
+          attachPlanPauseActions(
+            wrapper,
+            () => chat.continuePausedPlan(),
+            () => chat.cancelPausedPlan(),
+          );
+        }
+        if (!isCurrentRestore()) return;
+        scrollChatToBottomIfPinned(chatEl);
     } else if (m.role === 'user' && m.content) {
       flushToolExecs(toolExecs, chatEl);
       toolExecs.length = 0;
@@ -640,14 +744,29 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   }
   if (!isCurrentRestore()) return;
   flushToolExecs(toolExecs, chatEl);
-  } finally {
+  } catch (err) {
+    // Remove the loading row on error and dismiss the overlay: a stale
+    // restore can only reach catch when the newer restore also threw, so
+    // hiding here is always safe (the next successful restore re-shows it).
     loadingRow.remove();
+    hideSessionLoading();
+    throw err;
   }
+  // Only the CURRENT restore may dismiss the overlay: a stale restore (user
+  // already clicked a newer session) must not hide the newer session's
+  // loading feedback.
+  if (!isCurrentRestore()) return;
+  hideSessionLoading();
+  loadingRow.remove();
   if (!isCurrentRestore()) return;
   // A session restore rebuilds the transcript from scratch, so it always
   // lands at the newest content — force the pin state the same way a fresh
   // stream would, then scroll through the shared coalesced helper.
   forceScrollToBottom(chatEl);
+  // Fade the restored transcript in so the swap from loading overlay to
+  // content reads as one smooth transition instead of an abrupt cut.
+  chatEl.classList.add('session-transition-fade');
+  chatEl.addEventListener('animationend', () => chatEl.classList.remove('session-transition-fade'), { once: true });
   // The restored session's stats belong to the same conversation id —
   // re-render the 统计 tab so the panel matches the transcript.
   renderSessionStats();
@@ -882,6 +1001,56 @@ promptEl.addEventListener('keydown', (e) => {
 
 sendBtn.addEventListener('click', handleSendOrStop);
 landingSend.addEventListener('click', handleLandingSendOrStop);
+
+function bindUndoWriteButton(id: string): void {
+  const button = document.getElementById(id) as HTMLButtonElement | null;
+  if (!button) return;
+  button.addEventListener('click', async () => {
+    if (chat.isStreaming()) return;
+    button.disabled = true;
+    try {
+      const result = await chat.undoLastWriteBatch();
+      showToast(result.message);
+      renderSessionStats();
+      updateContextPanelStage();
+    } catch (error) {
+      showToast(`撤销失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+}
+
+function bindCompactContextButton(id: string): void {
+  const button = document.getElementById(id) as HTMLButtonElement | null;
+  if (!button) return;
+  button.addEventListener('click', async () => {
+    if (chat.isStreaming()) return;
+    button.disabled = true;
+    try {
+      const result = await chat.compactContext();
+      if (result.overBudget) {
+        showToast(t(result.oversizedNewestGroup ? 'context.compact.overBudget' : 'context.compact.contextOverBudget'));
+      } else if (result.evictedMessages > 0) {
+        const summary = result.summarized
+          ? '，已生成摘要'
+          : result.summaryUnavailable ? `，${t('context.compact.noSummary')}` : '';
+        showToast(t('context.compact.done').replace('{n}', String(result.evictedMessages)).replace('{summary}', summary));
+      } else if (result.messages.length === 0) {
+        showToast(t('context.compact.empty'));
+      } else {
+        showToast(t('context.compact.none'));
+      }
+    } catch (error) {
+      showToast(`上下文压缩失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      button.disabled = chat.isStreaming();
+    }
+  });
+}
+
+bindUndoWriteButton('undo-write-btn');
+bindUndoWriteButton('landing-undo-write-btn');
+bindCompactContextButton('compact-btn');
+bindCompactContextButton('landing-compact-btn');
 
 function handleSendOrStop() {
   if (chat.isStreaming()) {
@@ -1137,7 +1306,9 @@ function renderSessionStats() {
   // newest operation for that file, while retaining the path-open affordance.
   renderFileWriteGroups('stat-write-list', fileGroups);
   renderStatsList('stat-read-list', stats.fileReads, (r) => r.path, (r) => r.path);
-  renderStatsList('stat-cmd-list', stats.commands, (c) => (c.success ? '' : '✗ ') + c.command);
+  // Command rows are copyable: a hover-revealed copy button copies the raw
+  // command (without the ✗ failure prefix shown in the label).
+  renderStatsList('stat-cmd-list', stats.commands, (c) => (c.success ? '' : '✗ ') + c.command, undefined, (c) => c.command);
 }
 
 function renderFileWriteGroups(
@@ -1202,6 +1373,8 @@ function renderStatsList<T>(
   label: (item: T) => string,
   /** When given, each row becomes double-click-to-open with this path. */
   pathFor?: (item: T) => string,
+  /** When given, each row gets a hover-revealed copy button copying this value. */
+  copyValueFor?: (item: T) => string,
 ): void {
   const el = document.getElementById(id);
   if (!el) return;
@@ -1217,13 +1390,43 @@ function renderStatsList<T>(
     .map((item) => {
       const text = label(item);
       const path = pathFor ? pathFor(item) : '';
+      const copyValue = copyValueFor ? copyValueFor(item) : '';
       const cls = path ? 'stats-list-item stats-list-item-openable' : 'stats-list-item';
       const title = path ? `${t('stats.dblclickOpen')} ${text}` : text;
       const dataAttr = path ? ` data-path="${escapeHtml(path)}"` : '';
-      return `<div class="${cls}" title="${escapeHtml(title)}"${dataAttr}>${escapeHtml(text)}</div>`;
+      // data-command is the RAW value (label may carry a status prefix like
+      // "✗ "); copying the row text would include that prefix.
+      const copyBtn = copyValue
+        ? `<button type="button" class="stats-cmd-copy" data-command="${escapeHtml(copyValue)}" title="${t('stats.commandCopy')}" aria-label="${t('stats.commandCopy')}">` +
+          `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>` +
+          `</button>`
+        : '';
+      return `<div class="${cls}" title="${escapeHtml(title)}"${dataAttr}>${escapeHtml(text)}${copyBtn}</div>`;
     })
     .join('');
   el.innerHTML = rows;
+  // One delegated listener per list (not per row): the list survives session
+  // re-renders (only innerHTML changes), so handlers are never duplicated.
+  if (copyValueFor && !el.dataset.copyBound) {
+    el.dataset.copyBound = '1';
+    el.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('.stats-cmd-copy');
+      if (!btn) return;
+      const command = btn.dataset.command ?? '';
+      if (!command) return;
+      const copied = await copyTextToClipboard(command);
+      btn.classList.toggle('copied', copied);
+      btn.setAttribute('aria-label', copied ? t('stats.commandCopied') : t('codeBlock.copyError'));
+      btn.setAttribute('title', copied ? t('stats.commandCopied') : t('codeBlock.copyError'));
+      // Swap the icon to a check briefly, then restore the copy glyph.
+      if (copied) {
+        const restore = () => btn.classList.remove('copied');
+        btn.addEventListener('transitionend', restore, { once: true });
+        setTimeout(restore, 1400);
+      }
+      showToast(copied ? t('stats.commandCopied') : t('codeBlock.copyError'));
+    });
+  }
   if (!pathFor) return;
   // Double-click a file row → open with the OS default app (relative paths
   // resolve against the active workspace via openPathLink).

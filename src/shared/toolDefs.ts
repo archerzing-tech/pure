@@ -39,7 +39,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'edit_file',
-    description: 'Replace a string in a file. Must provide exact oldString and newString to locate the replacement target.',
+    description: 'Replace an exact string in a file. Read the current file first; if the target is not found, re-read it and use shorter exact context instead of repeating the same edit. Line-ending differences are handled safely; approximate or fuzzy replacement is never used.',
     input_schema: {
       type: 'object',
       properties: {
@@ -67,12 +67,13 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'list_files',
-    description: 'List files and directories in the workspace.',
+    description: 'List files and directories in the workspace. Large results are capped and report when truncated.',
     input_schema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Directory to list (relative to workspace). Default: workspace root' },
         recursive: { type: 'boolean', description: 'List recursively. Default: false' },
+        maxResults: { type: 'number', description: 'Maximum entries to return (default 2000, hard max 5000)' },
       },
       required: [],
     },
@@ -112,8 +113,57 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: 'researcher_web',
+    description: 'Research a web question using search plus readable source evidence. Return cited sources, snippets, optional page content, retrieval time, and partial failures; prefer authoritative pages and do not repeat an unchanged query after a failure.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'Natural-language research question to verify on the web' },
+        maxSources: { type: 'number', description: 'Maximum cited sources (default 5, max 8)' },
+        fetchContent: { type: 'boolean', description: 'Fetch readable content from the top sources (default true)' },
+        maxCharsPerSource: { type: 'number', description: 'Maximum extracted characters per source (default 4000)' },
+        allowedDomains: { type: 'array', items: { type: 'string' }, description: 'Optional host allowlist for returned sources' },
+      },
+      required: ['prompt'],
+    },
+  },
+  {
+    name: 'researcher_docs',
+    description: 'Research an API or library from documentation-focused web sources. Include the library, topic, optional version, source URLs, exact evidence snippets, partial failures, and conservative official/version evidence status; do not rely on an unversioned guess when a version is supplied.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        library: { type: 'string', description: 'Library, framework, SDK, or tool name' },
+        topic: { type: 'string', description: 'Specific API, feature, error, or implementation question' },
+        version: { type: 'string', description: 'Optional installed or required version' },
+        maxSources: { type: 'number', description: 'Maximum cited documentation sources (default 5, max 8)' },
+        fetchContent: { type: 'boolean', description: 'Fetch readable content from the top documentation sources (default true)' },
+        maxCharsPerSource: { type: 'number', description: 'Maximum extracted characters per source (default 4000)' },
+        allowedDomains: { type: 'array', items: { type: 'string' }, description: 'Optional host allowlist; official domains are preferred by the query' },
+      },
+      required: ['library', 'topic'],
+    },
+  },
+  {
+    name: 'code_searcher',
+    description: 'Search repository source and configuration with ripgrep-style regex matching. Returns structured file paths, 1-indexed lines, columns, snippets, truncation state, and diagnostics. Respects gitignore while including relevant hidden project configuration.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Literal or regular-expression query' },
+        path: { type: 'string', description: 'Directory or file scope relative to workspace (default workspace root)' },
+        globs: { type: 'array', items: { type: 'string' }, description: 'Optional include/exclude globs, e.g. ["*.ts", "!*.test.ts"]' },
+        caseSensitive: { type: 'boolean', description: 'Whether matching is case-sensitive (default true)' },
+        maxResults: { type: 'number', description: 'Maximum matches per file (default 15, max 100)' },
+        globalMaxResults: { type: 'number', description: 'Maximum matches across all files (default 250, max 1000)' },
+        timeoutSeconds: { type: 'number', description: 'Hard search timeout in seconds (default 10, max 30)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'web_search',
-    description: 'Search the web and return results with titles, snippets, and URLs. With a Serper or Tavily API key configured (Settings → Tools, or the SERPER_API_KEY / TAVILY_API_KEY env vars in the CLI) searches go through the API backends first (Serper = real Google index, best for Chinese and English); otherwise free HTML backends are probed in parallel — the first backend to return relevant results wins, and the exact backend set varies by platform and query language. If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.',
+    description: 'Legacy compatibility alias for researcher_web. Hidden from new model tool lists.',
     input_schema: {
       type: 'object',
       properties: {
@@ -125,7 +175,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'web_fetch',
-    description: 'Fetch a URL and extract readable text content (strips HTML, scripts, and styles). Works on text/HTML/JSON pages; if it reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.',
+    description: 'Legacy compatibility tool for fetching readable page text. Hidden from new model tool lists.',
     input_schema: {
       type: 'object',
       properties: {
@@ -198,6 +248,17 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
 
 /** Side-effect / write classification per tool (same table the CLI and GUI
  * adapters used to maintain independently). */
+export const PUBLIC_TOOL_NAMES = new Set([
+  'read_file', 'write_file', 'edit_file', 'list_files', 'execute_command',
+  'create_directory', 'diff_files', 'researcher_web', 'researcher_docs',
+  'code_searcher', 'glob_files', 'replace_files', 'git_diff', 'git_log',
+  'git_status', 'sys_info',
+]);
+
+export function isPublicToolName(name: string): boolean {
+  return PUBLIC_TOOL_NAMES.has(name);
+}
+
 export const TOOL_METADATA: Readonly<Record<string, { sideEffects: boolean; isWrite: boolean }>> = {
   read_file: { sideEffects: false, isWrite: false },
   write_file: { sideEffects: true, isWrite: true },
@@ -210,6 +271,9 @@ export const TOOL_METADATA: Readonly<Record<string, { sideEffects: boolean; isWr
   git_status: { sideEffects: false, isWrite: false },
   create_directory: { sideEffects: true, isWrite: true },
   diff_files: { sideEffects: false, isWrite: false },
+  researcher_web: { sideEffects: false, isWrite: false },
+  researcher_docs: { sideEffects: false, isWrite: false },
+  code_searcher: { sideEffects: false, isWrite: false },
   web_search: { sideEffects: false, isWrite: false },
   web_fetch: { sideEffects: false, isWrite: false },
   glob_files: { sideEffects: false, isWrite: false },

@@ -1,7 +1,8 @@
 // src/ui/__tests__/tauriToolAdapter.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs } from '../TauriToolAdapter';
+import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs, buildCodeSearchArgs, filterResearchSources, researchLimits, TauriToolAdapter } from '../TauriToolAdapter';
+import type { ToolCall } from '../../shared/types';
 import { formatCommandError, formatBytes } from '../../shared/format';
 
 describe('formatCommandOutput', () => {
@@ -99,6 +100,118 @@ describe('buildWebSearchArgs (Rust web_search invoke arg lock)', () => {
       apiKey: '',
       serperApiKey: '',
     });
+  });
+});
+
+describe('research tool argument contracts', () => {
+  it('forwards the full code search contract to Rust', () => {
+    expect(buildCodeSearchArgs('/ws', {
+      query: 'useActionState',
+      path: 'src',
+      globs: ['*.ts', '!*.test.ts'],
+      caseSensitive: false,
+      maxResults: 7,
+      globalMaxResults: 19,
+      timeoutSeconds: 4,
+    })).toEqual({
+      workspace: '/ws',
+      query: 'useActionState',
+      path: 'src',
+      globs: ['*.ts', '!*.test.ts'],
+      caseSensitive: false,
+      maxResults: 7,
+      globalMaxResults: 19,
+      timeoutSeconds: 4,
+    });
+  });
+
+  it('filters sources by hostname and clamps research limits', () => {
+    const sources = [
+      { title: 'Docs', snippet: 'x', url: 'https://docs.example.com/api' },
+      { title: 'Other', snippet: 'y', url: 'https://other.example.net' },
+    ];
+    expect(filterResearchSources(sources, ['example.com'])).toEqual([sources[0]]);
+    expect(researchLimits({ maxSources: 99, maxCharsPerSource: 1 })).toEqual({ maxSources: 8, maxCharsPerSource: 500 });
+  });
+});
+
+function toolCall(name: string, args: Record<string, unknown>): ToolCall {
+  return { id: `test_${name}`, index: 0, function: { name, arguments: JSON.stringify(args) } };
+}
+
+describe('Tauri researcher execution paths', () => {
+  it('reports empty web research as a failed tool result', async () => {
+    const invoke = async (command: string) => command === 'web_search' ? 'No results found' : '';
+    const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(toolCall('researcher_web', { prompt: 'missing' }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('No usable research sources');
+  });
+
+  it('fetches documentation evidence and preserves the structured payload', async () => {
+    const calls: string[] = [];
+    const invoke = async (command: string) => {
+      calls.push(command);
+      if (command === 'web_search') return ['1. React docs', '   API reference', '   https://docs.example.com/react'].join('\n');
+      if (command === 'web_fetch') return 'useActionState reference';
+      throw new Error(`unexpected command: ${command}`);
+    };
+    const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(toolCall('researcher_docs', {
+      library: 'React',
+      topic: 'useActionState',
+      maxSources: 1,
+    }));
+    expect(result.success).toBe(true);
+    expect(calls).toEqual(['web_search', 'web_fetch']);
+    const payload = JSON.parse(String(result.result)) as { sources: Array<{ content?: string }>; officialVerified?: boolean };
+    expect(payload.sources[0].content).toBe('useActionState reference');
+    expect(payload.officialVerified).toBe(false);
+  });
+});
+
+describe('Tauri workspace snapshots', () => {
+  it('captures and restores a write through the IPC contract', async () => {
+    let exists = true;
+    let content = 'before';
+    const invoke = async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
+      if (command === 'path_info') return { exists, isDirectory: false };
+      if (command === 'read_file') return content;
+      if (command === 'write_file') {
+        exists = true;
+        content = String(args?.content ?? '');
+        return `Wrote ${content.length} bytes`;
+      }
+      if (command === 'remove_path') {
+        exists = false;
+        return 'Removed';
+      }
+      throw new Error(`unexpected command: ${command}`);
+    };
+    const adapter = new TauriToolAdapter('/ws', '', '', '', invoke, 'session-tauri');
+    const changed = await adapter.execute(toolCall('write_file', { path: 'app.ts', content: 'after' }));
+    expect(changed.success).toBe(true);
+    expect(adapter.getSnapshotPort().getLatestWriteBatch()?.sessionId).toBe('session-tauri');
+    const restored = await adapter.getSnapshotPort().undoLastWriteBatch();
+    expect(restored.restored).toBe(true);
+    expect(content).toBe('before');
+  });
+
+  it('does not restore over a newer external value', async () => {
+    let exists = false;
+    let content = '';
+    const invoke = async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
+      if (command === 'path_info') return { exists, isDirectory: false };
+      if (command === 'read_file') return content;
+      if (command === 'write_file') { exists = true; content = String(args?.content ?? ''); return 'Wrote'; }
+      if (command === 'remove_path') { exists = false; return 'Removed'; }
+      throw new Error(`unexpected command: ${command}`);
+    };
+    const adapter = new TauriToolAdapter('/ws', '', '', '', invoke);
+    await adapter.execute(toolCall('write_file', { path: 'new.ts', content: 'agent' }));
+    content = 'user';
+    const result = await adapter.getSnapshotPort().undoLastWriteBatch();
+    expect(result.restored).toBe(false);
+    expect(result.conflicts).toEqual(['new.ts']);
+    expect(content).toBe('user');
   });
 });
 
