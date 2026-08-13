@@ -50,11 +50,7 @@ jobs:
           if [ -z "$NOTES" ]; then
             NOTES="See the changelog: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md"
           fi
-          NOTES="${NOTES}
-
----
-
-Download the macOS DMG, the Windows installer (.exe), or the CLI binary (\`pure\` / \`pure.exe\`) below."
+          NOTES="${NOTES}"$'\n\n---\n\nDownload the macOS DMG, the Windows installer (.exe), or the CLI binary (`pure` / `pure.exe`) below.'
           {
             echo 'body<<EOF'
             echo "$NOTES"
@@ -161,11 +157,7 @@ Download the macOS DMG, the Windows installer (.exe), or the CLI binary (\`pure\
           if [ -z "$NOTES" ]; then
             NOTES="See the changelog: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md"
           fi
-          NOTES="${NOTES}
-
----
-
-Download the macOS DMG, the Windows installer (.exe), or the CLI binary (\`pure\` / \`pure.exe\`) below."
+          NOTES="${NOTES}"$'\n\n---\n\nDownload the macOS DMG, the Windows installer (.exe), or the CLI binary (`pure` / `pure.exe`) below.'
           {
             echo 'body<<EOF'
             echo "$NOTES"
