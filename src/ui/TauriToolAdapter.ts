@@ -147,7 +147,7 @@ export class TauriToolAdapter implements ToolAdapter {
           // "等待输出" wait for the whole (possibly large) write to finish.
           // Progress lines go to the live tool-output listener only — the LLM
           // still gets the single "Wrote N bytes" result, not the noise.
-          if (tauriChannel) {
+          if (tauriChannel && !this.invokeFn) {
             const channel = new tauriChannel<string>();
             channel.onmessage = (raw: string) => {
               let parsed: { type?: string; written?: number; total?: number } | null = null;
@@ -204,7 +204,7 @@ export class TauriToolAdapter implements ToolAdapter {
           // Stream the command's output as it is produced so a long-running
           // command (bundle, install, test) shows live progress in the tool
           // row instead of waiting silently for the full buffered result.
-          if (tauriChannel) {
+          if (tauriChannel && !this.invokeFn) {
             const channel = new tauriChannel<string>();
             // Collected lines keep their stream identity (stdout vs stderr) so
             // the final result can label stderr sections — the LLM needs to

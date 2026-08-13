@@ -5,6 +5,10 @@ import { readFileSync } from 'node:fs';
 import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, generateTaskAnalysis, parseTaskAnalysisText, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, parseIntentAssessmentBlock, mergeIntentAssessments } from '../chat';
 import { limitStoredMessages, MAX_PERSISTED_MESSAGES } from '../store';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
+
+function readSource(url: URL): string {
+  return readFileSync(url, 'utf8').replace(/\r\n/g, '\n');
+}
 // Regression guard for the layered prompt (promptLayers.ts): a past splice
 // bug doubled the "Output style:" header in the composed GUI base prompt.
 // Each section header must appear EXACTLY once in every persona variant.
@@ -326,7 +330,7 @@ describe('Escape cancellation guard', () => {
 
 describe('TASK_ANALYSIS_PROMPT drives a staged thinking flow (restate → difficulty → approach)', () => {
   it('requires the three analysis stages and puts key gaps into plan step 1', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     // 思考必须分三段真实输出：复述理解 → 难度/复杂度 → 准备怎么做，全部流式展示。
     expect(src).toContain('【我理解的需求】');
     expect(src).toContain('【难度与复杂度】');
@@ -337,7 +341,7 @@ describe('TASK_ANALYSIS_PROMPT drives a staged thinking flow (restate → diffic
   });
 
   it('has no fixed pre-plan clarify card and no clarify interview round-trip', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     // 用户要求：不再在思考前弹固定的“开工前先确认几个问题”卡——问题由模型在
     // 执行语境中自然提出。
     expect(src.indexOf('requestClarifications(')).toBe(-1);
@@ -372,14 +376,14 @@ describe('proactive safety review gate', () => {
 
 describe('LLM-informed risk calibration (P0: model judgment settles the safety card)', () => {
   it('asks the model for an <intent_assessment> block after the plan JSON', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     expect(src.indexOf('TASK_ANALYSIS_PROMPT')).toBeGreaterThan(-1);
     expect(src.indexOf('<intent_assessment>')).toBeGreaterThan(-1);
     expect(src.indexOf('requiresConfirmation MUST be true when riskLevel is high')).toBeGreaterThan(-1);
   });
 
   it('merges the LLM assessment into effectiveIntent before the card appears', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     const merge = src.indexOf('effectiveIntent = mergeIntentAssessments(analysis.intent, llmAnalysis.llmIntent);');
     expect(src).toContain('userAssessment = formatIntentPrompt(effectiveIntent);');
     const call = src.indexOf('maybeShowAssessment();', merge);
@@ -392,7 +396,7 @@ describe('LLM-informed risk calibration (P0: model judgment settles the safety c
   });
 
   it('reopens the confirm gate when the model raises risk after the merge (no stale rules-only decision)', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     const merge = src.indexOf('effectiveIntent = mergeIntentAssessments(analysis.intent, llmAnalysis.llmIntent);');
     // 确认门必须在 merge 之后用合并后的值重新计算，否则模型抬高的风险不会触发确认。
     const recheck = src.indexOf('riskReview = effectiveIntent.requiresConfirmation;', merge);
@@ -405,7 +409,7 @@ describe('LLM-informed risk calibration (P0: model judgment settles the safety c
 
 describe('send feedback timing', () => {
   it('paints the user bubble before send-time DOM and workspace work', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     const bubble = src.indexOf("const userBubble = this.addBubble('user', userText);");
     const paint = src.indexOf('await yieldToNextPaint();', bubble);
     const secondFrame = src.indexOf('requestAnimationFrame(() => requestAnimationFrame', src.indexOf('function yieldToNextPaint'));
@@ -419,7 +423,7 @@ describe('send feedback timing', () => {
   });
 
   it('deduplicates overlapping plan-marker scans by absolute stream position', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     expect(src).toContain('consumedMarkers: new Set<string>()');
     expect(src).toContain('planTrack.consumedMarkers.clear()');
     expect(src).toContain('const markerKey = `${marker.kind}:${marker.number}:${tailStart + marker.index}`;');
@@ -427,7 +431,7 @@ describe('send feedback timing', () => {
   });
 
   it('keeps background pre-compaction cancellable and idle-scheduled', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     const precompact = src.indexOf('private preCompactInBackground');
     const idle = src.indexOf('requestIdleCallback', precompact);
     const cancelInPrecompact = src.indexOf('this.cancelBackgroundPreCompaction();', precompact);
@@ -529,7 +533,7 @@ describe('pickHistoryMessages (background pre-compaction reuse)', () => {
 // ONLY as the failure/timeout fallback, never as the first thing shown.
 describe('plan-gate timing (thinking card before LLM calls)', () => {
   it('updates the existing plan list instead of replacing it after LLM refinement', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false): void => {');
     const update = src.indexOf('updatePlanCard(planCard, plan, analysis.mode, refining);', show);
     const oldReplace = src.indexOf('old.classList.add(\'plan-card-leaving\')', show);
@@ -539,7 +543,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('opens the thinking card before the first await in the gate', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     const thinking = src.indexOf('const analysisCard = openThinkingCard();');
     const firstAwait = Math.min(
       src.indexOf('await buildWorkspaceContext('),
@@ -551,7 +555,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('renders the task-specific plan card only after the LLM analysis lands', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     const analysisCall = src.indexOf('await generateTaskAnalysis(');
     const planRender = src.indexOf('showPlanCard(planForReview);\n');
     expect(analysisCall).toBeGreaterThan(-1);
@@ -565,7 +569,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('shows the assessment card only after the first LLM round-trip (real thinking first)', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     // The assessment card must never be created synchronously from the
     // heuristic before any model interaction — it appears only after the LLM
     // analysis has streamed (thinking card) and the interview ran.
@@ -579,7 +583,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('routes project builds through the explicit approval dialog before execution', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     const gate = src.indexOf("if (riskReview || (needsDeliveryGate && forcedMode !== 'yolo') || forcedMode === 'plan' || forcedMode === 'build') {");
     const review = src.indexOf('await requestPlanReview(', gate);
     const approved = src.indexOf('approvePlan(true);', review);
@@ -589,14 +593,14 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('lets the forced-yolo mode bypass the build approval dialog', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     // The composer's explicit "no gates" choice must win over the default
     // project-build approval — forced yolo executes delivery requests directly.
     expect(src).toContain("needsDeliveryGate && forcedMode !== 'yolo'");
   });
 
   it('keeps the user message visible when the turn is paused mid-preflight (stop button)', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     // 停止/取消时用户消息必须留在对话里（这是发送记录，不是幽灵气泡）：所有预检
     // 中止分支走 keepOrDropUserBubble，仅在切换到其他会话时才移除气泡。
     expect(src).toContain('const keepOrDropUserBubble = (pausedText: string): void => {');
@@ -606,13 +610,13 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('wires the abort signal into the plan-review dialog', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     // 停止按钮在计划确认显示期间必须生效，否则 send() 会永久挂起。
     expect(src).toContain('riskReview, signal: this.abortController?.signal }');
   });
 
   it('runs the delivery gate only when the turn did real tool work, never on a question-only turn', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     // 模型提问/确认轮（无 tool 消息）不是交付完成：不触发“交付前测试与审计”卡，
     // 评估卡保持执行等待而不是跳到验证结果。
     expect(src).toContain("const hasToolWork = (event.payload.messages ?? []).some((m) => m.role === 'tool');");
@@ -622,7 +626,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('presents probe findings only after the LLM analysis, never before thinking', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     // 探针结论（探索/契约气泡）只能在 reportProbeFindings 内出现，而它由
     // maybeShowAssessment 调用——后者只在 LLM 分析（thinking 卡）完成后触发。
     const report = src.indexOf('const reportProbeFindings = (): void => {');
@@ -637,7 +641,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('never shows a fake "I understood" intro bubble before the LLM speaks', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     // 开场白必须诚实：不得出现“我先确认一下我理解的需求：<echo>”这种未经 LLM
     // 就宣称理解需求的硬编码模板（原实现用 understoodText 插值拼出）——理解与否
     // 由 thinking 卡里真实流式的分析来展示。
@@ -646,8 +650,8 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('labels the thinking card with honest phase text instead of rotating fake hints', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
-    const cardSrc = readFileSync(new URL('../thinkingCard.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const cardSrc = readSource(new URL('../thinkingCard.ts', import.meta.url));
     // 伪轮播（正在理解你的需求→正在评估影响范围→正在准备好执行计划）已删除：
     // 没有那几件事在发生，就不许循环宣称。
     expect(cardSrc).not.toContain('startThinkingHints');
@@ -660,7 +664,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('passes explicit approval into the plan prompt so execution starts immediately', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     // 本轮无需等待“开工”消息（确认卡已批准 / forced-yolo 直接放行）时，模型第一轮
     // 必须立即执行——否则模型第一轮不调用工具，引擎空转完成，计划卡还停在第一步
     // 就突然出现“交付前测试与审计”卡、评估卡跳到“验证结果”。
@@ -668,7 +672,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   });
 
   it('keeps one flat plan row mounted while refining updates its contents', () => {
-    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const src = readSource(new URL('../chat.ts', import.meta.url));
     const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false): void => {');
     const update = src.indexOf('updatePlanCard(planCard, plan, analysis.mode, refining);', show);
     const oldReplace = src.indexOf('old.classList.add(\'plan-card-leaving\')', show);
@@ -676,7 +680,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
     expect(update).toBeGreaterThan(show);
     expect(oldReplace).toBe(-1);
     expect(src).toContain('updatePlanCard(planCard, plan, analysis.mode, refining);');
-    const planSrc = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
+    const planSrc = readSource(new URL('../plan.ts', import.meta.url));
     expect(planSrc).toContain('export function updatePlanCard');
   });
 });
