@@ -4282,6 +4282,211 @@ async fn chat_stream(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  Image Generation (OpenAI-compatible /images/generations)
+// ═══════════════════════════════════════════════════════════════════════════════
+// The GUI's generate_image tool (see IMAGE_GEN_TOOL_DEF in shared/toolDefs.ts)
+// calls this command when the connected provider advertises text-to-image
+// support. The API key is resolved from the secrets store like chat_stream — it
+// never travels through the WebView. Images are returned as base64 data URLs to
+// the frontend (which renders them as <img> cards); only compact metadata is
+// ever fed back into the LLM context.
+
+const IMAGE_GEN_TIMEOUT_SECS: u64 = 120;
+
+#[derive(Deserialize)]
+struct GenerateImageArgs {
+    #[serde(default)]
+    provider: String,
+    model: String,
+    #[serde(default, rename = "apiKey")]
+    api_key: String,
+    #[serde(default, rename = "baseUrl")]
+    base_url: String,
+    #[serde(default, rename = "secretKey")]
+    secret_key: String,
+    prompt: String,
+    #[serde(default)]
+    n: Option<u32>,
+    #[serde(default)]
+    size: String,
+    #[serde(default, rename = "proxyUrl")]
+    proxy_url: String,
+    #[serde(default, rename = "proxyBypassProviders")]
+    proxy_bypass_providers: Vec<String>,
+    #[serde(default, rename = "proxyBypassModels")]
+    proxy_bypass_models: Vec<String>,
+}
+
+fn image_proxy_url(args: &GenerateImageArgs) -> Option<&str> {
+    if args.proxy_url.trim().is_empty()
+        || proxy_matches(&args.provider, &args.proxy_bypass_providers)
+        || proxy_matches(&args.model, &args.proxy_bypass_models)
+    {
+        None
+    } else {
+        Some(args.proxy_url.trim())
+    }
+}
+
+fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else {
+        "image/png"
+    }
+}
+
+/// Generate images via the provider's OpenAI-compatible `/images/generations`
+/// endpoint and return base64 data URLs for the UI. Mirror of chat_stream's
+/// key resolution + proxy handling; the raw payload never enters the LLM
+/// context (the frontend keeps it out of ToolResult.result).
+#[tauri::command]
+async fn generate_image(args: GenerateImageArgs) -> Result<serde_json::Value, String> {
+    let prompt = args.prompt.trim();
+    if prompt.is_empty() {
+        return Err("generate_image: prompt is required".to_string());
+    }
+    let n = args.n.unwrap_or(1).clamp(1, 4);
+
+    let secrets = load_secrets()?;
+    let api_key = resolve_api_key(&secrets, &args.api_key, &args.secret_key);
+
+    let base_url = if args.base_url.trim().is_empty() {
+        "https://api.openai.com/v1".to_string()
+    } else {
+        args.base_url.trim_end_matches('/').to_string()
+    };
+    let url = format!("{}/images/generations", base_url);
+    let client = build_http_client(
+        std::time::Duration::from_secs(IMAGE_GEN_TIMEOUT_SECS),
+        image_proxy_url(&args),
+    )?;
+
+    // dall-e-2/3 accept response_format: b64_json; gpt-image-1 REJECTS it
+    // (400) and returns base64 by default — so the field is only sent for
+    // legacy models. Providers that answer with a URL are still handled below
+    // (the frontend renders the https URL as the <img> src).
+    let is_gpt_image = args.model.trim().to_ascii_lowercase().starts_with("gpt-image");
+    let mut body = serde_json::json!({ "model": args.model, "prompt": prompt, "n": n });
+    if !is_gpt_image {
+        body["response_format"] = serde_json::json!("b64_json");
+    }
+    if !args.size.trim().is_empty() {
+        body["size"] = serde_json::json!(args.size.trim());
+    }
+
+    let mut request = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&body);
+    if !api_key.is_empty() {
+        request = request.header("Authorization", format!("Bearer {}", api_key));
+    }
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(IMAGE_GEN_TIMEOUT_SECS),
+        request.send(),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "generate_image: the image API did not respond within {}s (network or server issue) — try again or fall back to SVG.",
+            IMAGE_GEN_TIMEOUT_SECS
+        )
+    })?
+    .map_err(|e| format!("generate_image: request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "generate_image: HTTP {} {}: {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or(""),
+            text
+        ));
+    }
+    let payload: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("generate_image: parse response: {}", e))?;
+
+    let items = payload["data"].as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        return Err("generate_image: the image API returned no images".to_string());
+    }
+
+    let mut images: Vec<serde_json::Value> = Vec::new();
+    for item in items {
+        let mime_hint = item
+            .get("mime_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(b64) = item.get("b64_json").and_then(|v| v.as_str()) {
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let mime = mime_hint.unwrap_or_else(|| sniff_image_mime(&bytes).to_string());
+            images.push(serde_json::json!({
+                "dataUrl": format!("data:{};base64,{}", mime, b64),
+                "mimeType": mime,
+                "sizeBytes": bytes.len(),
+            }));
+        } else if let Some(url) = item.get("url").and_then(|v| v.as_str()) {
+            let mime = mime_hint.unwrap_or_else(|| "image/png".to_string());
+            images.push(serde_json::json!({ "dataUrl": url, "mimeType": mime, "sizeBytes": 0 }));
+        }
+    }
+    if images.is_empty() {
+        return Err("generate_image: the image API returned no usable images".to_string());
+    }
+    Ok(serde_json::json!({ "images": images }))
+}
+
+#[cfg(test)]
+mod generate_image_tests {
+    use super::*;
+
+    #[test]
+    fn sniff_detects_png_jpeg_gif_webp() {
+        assert_eq!(sniff_image_mime(b"\x89PNG\r\n\x1a\n...."), "image/png");
+        assert_eq!(sniff_image_mime(b"\xff\xd8\xff\xe0...."), "image/jpeg");
+        assert_eq!(sniff_image_mime(b"GIF89a...."), "image/gif");
+        assert_eq!(sniff_image_mime(b"RIFF....WEBP...."), "image/webp");
+        assert_eq!(sniff_image_mime(b"not an image"), "image/png");
+    }
+
+    #[test]
+    fn proxy_bypass_matches_provider_or_model() {
+        let args = GenerateImageArgs {
+            provider: "openai".to_string(),
+            model: "gpt-image-1".to_string(),
+            api_key: String::new(),
+            base_url: String::new(),
+            secret_key: String::new(),
+            prompt: "a puppy".to_string(),
+            n: Some(1),
+            size: String::new(),
+            proxy_url: "socks5://127.0.0.1:1080".to_string(),
+            proxy_bypass_providers: vec!["openai".to_string()],
+            proxy_bypass_models: Vec::new(),
+        };
+        assert!(image_proxy_url(&args).is_none());
+        let mut args2 = GenerateImageArgs { proxy_bypass_providers: Vec::new(), ..args };
+        assert_eq!(image_proxy_url(&args2), Some("socks5://127.0.0.1:1080"));
+        args2.proxy_bypass_providers = Vec::new();
+        args2.proxy_bypass_models = vec!["gpt-image".to_string()];
+        assert!(image_proxy_url(&args2).is_none());
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  Session Persistence (~/.pure/sessions/)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -5426,6 +5631,8 @@ pub fn run() {
             // LLM transport
             chat_stream,
             cancel_chat_stream,
+            // Text-to-image (OpenAI-compatible /images/generations)
+            generate_image,
             // Session persistence
             save_session,
             load_session,

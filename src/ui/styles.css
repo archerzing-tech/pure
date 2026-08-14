@@ -918,12 +918,12 @@ body {
 #chat {
   flex: 1;
   overflow-y: auto;
-  /* Layout containment: streaming tokens, image loads, and diagram renders
-     all reflow inside this scroll box — long conversations stop relaying out
-     the input bar, sidebars, and status footer on every update. Mirrors the
-     sidebars' containment; safe because both fixed overlays (mermaid viewer,
-     paste viewer) are mounted on document.body, not inside #chat. */
-  contain: layout;
+  /* No layout containment on the transcript scroll box. `contain: layout`
+     on an overflow:auto container has caused already-painted rows to go blank
+     after the user scrolls back up in WKWebView — the same symptom class as
+     the earlier content-visibility bug on .bubble-row. Streaming reflows stay
+     inside this box anyway; fixed overlays (mermaid viewer, paste viewer)
+     are mounted on document.body, not inside #chat. */
   padding: 48px 48px 20px;
   display: none;
   flex-direction: column;
@@ -949,8 +949,12 @@ body {
      appear blank when the user scrolled upward. */
   animation: none;
 }
+/* `forwards`, not `both`: the fill `both`/`backwards` frame starts at
+     opacity:0 and WebKit can keep that first composited frame cached after the
+     animation is removed (the moment the NEXT message makes this row no longer
+     :last-child), leaving the newest bubble invisible until a forced repaint. */
 .bubble-row:last-child {
-  animation: bubbleIn 0.4s var(--ease-spring) both;
+  animation: bubbleIn 0.4s var(--ease-spring) forwards;
 }
 .bubble-row.status,
 .bubble-row.tool-grid {
@@ -1447,6 +1451,81 @@ body {
 }
 .tool-row-section.terminal-panel .search-result-item {
   border-bottom-color: var(--term-border);
+}
+
+/* ── Structured (JSON/YAML) syntax highlighting in tool rows ──
+   Tool input/output that detected as JSON/YAML is rendered with hljs token
+   spans (.hljs-*) inside the same terminal panels / web surfaces. Colors are
+   scoped per surface: the dark console gets a dark-theme palette, the
+   pale-blue web surface gets the light one. Multi-line formatted values need
+   pre-wrap (the plain .tool-row-field-value collapses whitespace). */
+.tool-row-field-structured {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tool-row-section.terminal-panel .hljs-keyword,
+.tool-row-section.terminal-panel .hljs-selector-tag,
+.tool-row-section.terminal-panel .hljs-built_in,
+.tool-row-section.terminal-panel .hljs-literal {
+  color: #79c0ff;
+}
+.tool-row-section.terminal-panel .hljs-string,
+.tool-row-section.terminal-panel .hljs-attr,
+.tool-row-section.terminal-panel .hljs-symbol {
+  color: #7ee787;
+}
+.tool-row-section.terminal-panel .hljs-number,
+.tool-row-section.terminal-panel .hljs-regexp,
+.tool-row-section.terminal-panel .hljs-title,
+.tool-row-section.terminal-panel .hljs-title.function_,
+.tool-row-section.terminal-panel .hljs-title.class_ {
+  color: #d2a8ff;
+}
+.tool-row-section.terminal-panel .hljs-comment,
+.tool-row-section.terminal-panel .hljs-quote,
+.tool-row-section.terminal-panel .hljs-punctuation,
+.tool-row-section.terminal-panel .hljs-bullet,
+.tool-row-section.terminal-panel .hljs-meta {
+  color: #8b949e;
+  font-style: italic;
+}
+.tool-row-section.terminal-panel .hljs-bullet,
+.tool-row-section.terminal-panel .hljs-punctuation,
+.tool-row-section.terminal-panel .hljs-meta {
+  font-style: normal;
+}
+/* Light surfaces (web-tool cards, fetch previews) stay readable on pale blue. */
+.tool-row-section:not(.terminal-panel) .hljs-keyword,
+.tool-row-section:not(.terminal-panel) .hljs-selector-tag,
+.tool-row-section:not(.terminal-panel) .hljs-built_in,
+.tool-row-section:not(.terminal-panel) .hljs-literal {
+  color: #0550ae;
+}
+.tool-row-section:not(.terminal-panel) .hljs-string,
+.tool-row-section:not(.terminal-panel) .hljs-attr,
+.tool-row-section:not(.terminal-panel) .hljs-symbol {
+  color: #0a3069;
+}
+.tool-row-section:not(.terminal-panel) .hljs-number,
+.tool-row-section:not(.terminal-panel) .hljs-regexp,
+.tool-row-section:not(.terminal-panel) .hljs-title,
+.tool-row-section:not(.terminal-panel) .hljs-title.function_,
+.tool-row-section:not(.terminal-panel) .hljs-title.class_ {
+  color: #8250df;
+}
+.tool-row-section:not(.terminal-panel) .hljs-comment,
+.tool-row-section:not(.terminal-panel) .hljs-quote,
+.tool-row-section:not(.terminal-panel) .hljs-punctuation,
+.tool-row-section:not(.terminal-panel) .hljs-bullet,
+.tool-row-section:not(.terminal-panel) .hljs-meta {
+  color: #6e7781;
+  font-style: italic;
+}
+.tool-row-section:not(.terminal-panel) .hljs-bullet,
+.tool-row-section:not(.terminal-panel) .hljs-punctuation,
+.tool-row-section:not(.terminal-panel) .hljs-meta {
+  font-style: normal;
 }
 
 /* ── Inline action cards (permission / plan review / confirm) ──
@@ -2228,6 +2307,14 @@ body {
   box-shadow: var(--shadow-md);
   font-size: 12px;
   animation: plan-overview-in 0.22s ease-out;
+  /* The whole card (and the compact circle) is a drag surface: grab cursor +
+     touch-action none so pointer drags never start a native scroll/selection. */
+  cursor: grab;
+  touch-action: none;
+}
+.plan-overview.dragging .plan-overview-card,
+.plan-overview.dragging .plan-overview-compact {
+  cursor: grabbing;
 }
 .plan-overview-card.active {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
@@ -2276,92 +2363,74 @@ body {
   background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
   color: var(--text);
 }
+.plan-overview.is-collapsed {
+  width: 52px;
+  max-width: none;
+}
 .plan-overview-compact {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  min-height: 34px;
-  padding: 7px 10px;
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  min-height: 48px;
+  padding: 0;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
   background: color-mix(in srgb, var(--bg-card) 94%, var(--accent-soft));
-  box-shadow: var(--shadow-md);
+  box-shadow: 0 3px 12px color-mix(in srgb, var(--accent) 24%, transparent);
   color: var(--text);
-  font-size: 11px;
-  text-align: left;
-  cursor: pointer;
-  animation: plan-overview-compact-in 0.2s ease-out;
-  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+  cursor: grab;
+  touch-action: none;
+  animation: plan-overview-compact-in 0.2s ease-out, plan-overview-ring-colors 2.4s linear infinite;
+  transition: transform var(--transition), background var(--transition), box-shadow var(--transition);
 }
 .plan-overview-compact:hover {
-  border-color: var(--accent);
+  transform: scale(1.08);
   background: color-mix(in srgb, var(--accent-soft) 48%, var(--bg-card));
-  box-shadow: var(--shadow-lg);
+  box-shadow: 0 4px 18px color-mix(in srgb, var(--accent) 38%, transparent);
 }
-.plan-overview-compact-dot {
-  flex: 0 0 7px;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent), 0 0 10px color-mix(in srgb, var(--accent) 55%, transparent);
-  animation: plan-overview-compact-pulse 1.5s ease-in-out infinite;
+.plan-overview-compact[hidden] {
+  display: none;
 }
-.plan-overview-compact-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 650;
-}
-.plan-overview-compact-progress {
-  margin-left: auto;
-  color: var(--text-tertiary);
-  font-size: 10px;
+.plan-overview-compact-step {
+  position: relative;
+  z-index: 1;
+  font-size: 17px;
+  font-weight: 750;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.plan-overview-compact-chevron {
-  flex: 0 0 auto;
-  color: var(--text-tertiary);
-  font-size: 18px;
-  line-height: 12px;
 }
 .plan-overview-compact.awaiting {
-  border-color: color-mix(in srgb, #d97706 48%, var(--border));
-}
-.plan-overview-compact.awaiting .plan-overview-compact-dot {
-  background: #d97706;
-  box-shadow: 0 0 0 3px color-mix(in srgb, #d97706 16%, transparent);
+  border-color: #d97706;
+  box-shadow: 0 3px 12px color-mix(in srgb, #d97706 24%, transparent);
+  animation: plan-overview-compact-in 0.2s ease-out;
 }
 .plan-overview-compact.complete {
-  border-color: color-mix(in srgb, var(--success) 48%, var(--border));
-}
-.plan-overview-compact.complete .plan-overview-compact-dot {
-  background: var(--success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
-  animation: none;
+  border-color: var(--success);
+  box-shadow: 0 3px 12px color-mix(in srgb, var(--success) 24%, transparent);
+  animation: plan-overview-compact-in 0.2s ease-out;
 }
 @keyframes plan-overview-compact-in {
-  from { opacity: 0; transform: translateX(8px); }
-  to { opacity: 1; transform: translateX(0); }
+  from { opacity: 0; transform: translateX(8px) scale(0.86); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
 }
-@keyframes plan-overview-compact-pulse {
-  0%, 100% { opacity: 0.55; transform: scale(0.86); }
-  50% { opacity: 1; transform: scale(1); }
-}
-.plan-overview-activity {
-  padding: 0 10px 7px;
-  color: var(--accent);
-  font-size: 11px;
-  line-height: 1.4;
-}
-.plan-overview-card.awaiting .plan-overview-activity {
-  color: #a36f16;
-}
-.plan-overview-card.complete .plan-overview-activity {
-  color: var(--success);
+@keyframes plan-overview-ring-colors {
+  0% {
+    border-color: #38bdf8;
+    box-shadow: 0 3px 12px rgba(56, 189, 248, 0.28);
+  }
+  33% {
+    border-color: #a78bfa;
+    box-shadow: 0 3px 15px rgba(167, 139, 250, 0.34);
+  }
+  66% {
+    border-color: #34d399;
+    box-shadow: 0 3px 15px rgba(52, 211, 153, 0.34);
+  }
+  100% {
+    border-color: #38bdf8;
+    box-shadow: 0 3px 12px rgba(56, 189, 248, 0.28);
+  }
 }
 .plan-overview-steps {
   display: flex;
@@ -2437,8 +2506,7 @@ body {
   .plan-overview-compact {
     animation: none;
   }
-  .plan-overview-compact-dot,
-  .plan-overview-compact.complete .plan-overview-compact-dot {
+  .plan-overview-compact {
     animation: none;
     opacity: 0.85;
   }
@@ -7918,6 +7986,13 @@ button svg,
 }
 
 .provider-card.selected::after {
+  opacity: 0;
+  transform: scale(0.7);
+}
+
+/* The ✓ badge marks the ACTIVE provider only — an unconfigured card that is
+   merely open for editing gets the highlight border but no checkmark. */
+.provider-card.provider-card-active::after {
   opacity: 1;
   transform: scale(1);
 }
@@ -7987,6 +8062,7 @@ button svg,
 
 .provider-card-status { color: var(--text-tertiary); font-size: 11px; font-weight: 600; }
 .provider-card.selected .provider-card-status { color: var(--accent); }
+.provider-card.provider-card-active .provider-card-status { color: var(--accent); }
 
 .provider-card-name {
   display: block;
@@ -8046,6 +8122,32 @@ button svg,
   color: var(--accent);
   font-size: 10px;
   font-weight: 700;
+}
+
+/* Editing a card that is NOT the active LLM: de-emphasized badge. */
+.provider-config-badge-inactive {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+/* Explicit "make this the active provider" button, shown when the config card
+   is open for a provider that isn't active yet. */
+.provider-config-activate {
+  flex-shrink: 0;
+  padding: 5px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: 700 10px var(--font-sans);
+  cursor: pointer;
+  transition: background 0.15s var(--ease-out), border-color 0.15s var(--ease-out), color 0.15s var(--ease-out);
+}
+.provider-config-activate:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
 }
 
 .provider-config-fields { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
@@ -8674,4 +8776,129 @@ button svg,
 #context-panel #stat-cmd-list .stats-cmd-copy.copied svg path:last-child,
 #context-panel #stat-cmd-list .stats-cmd-copy.copied svg rect {
   display: none; /* hide the copy glyph, leaving only the check stroke */
+}
+
+/* ── Generated-image gallery (generate_image tool) ──
+ * ChatGPT/Gemini-style picture cards in the tool row's Output panel: images
+ * render as real <img> elements (NOT SVG), side by side for multiple results,
+ * with a hover download button and click-to-enlarge lightbox. */
+.tool-row-result .image-gallery {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+  padding: 2px 0;
+  max-height: none;
+}
+.tool-row-result .image-gallery.single {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 420px;
+}
+.tool-row-result .image-card {
+  position: relative;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--surface);
+}
+.tool-row-result .generated-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 360px;
+  object-fit: contain;
+  background:
+    repeating-conic-gradient(color-mix(in srgb, var(--text-secondary) 7%, transparent) 0% 25%, transparent 0% 50%) 0 0 / 18px 18px;
+  cursor: zoom-in;
+}
+.tool-row-result .image-card:hover .generated-image {
+  filter: brightness(0.98);
+}
+.tool-row-result .image-download-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .14s var(--ease-out), background .14s var(--ease-out);
+}
+.tool-row-result .image-card:hover .image-download-btn,
+.tool-row-result .image-card:focus-within .image-download-btn {
+  opacity: 1;
+}
+.tool-row-result .image-download-btn:hover {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+.tool-row-result .image-download-btn svg { display: block; }
+.tool-row-result .image-card-meta {
+  padding: 4px 8px;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+/* The Output panel's monospace/pre-wrap default would flatten the gallery;
+   restore normal font rules for the cards themselves. */
+.tool-row-result .image-gallery * { white-space: normal; font-family: inherit; }
+
+/* ── Generated-image lightbox ── */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: color-mix(in srgb, #000 72%, transparent);
+  backdrop-filter: blur(2px);
+  animation: lightboxFade .16s var(--ease-out);
+}
+@keyframes lightboxFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.image-lightbox-img {
+  max-width: min(92vw, 1400px);
+  max-height: 90vh;
+  border-radius: 10px;
+  box-shadow: 0 18px 60px rgb(0 0 0 / .45);
+  background:
+    repeating-conic-gradient(#e8e8e8 0% 25%, #f5f5f5 0% 50%) 0 0 / 20px 20px;
+}
+.image-lightbox-close {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / .22);
+  border-radius: 50%;
+  background: rgb(0 0 0 / .45);
+  color: #fff;
+  cursor: pointer;
+  transition: background .14s var(--ease-out);
+}
+.image-lightbox-close:hover { background: rgb(0 0 0 / .7); }
+.image-lightbox-close svg { display: block; }
+/* Generated-image rows get a taller Output panel (default 240px would crop
+   portrait pictures); the class is set by finalizeToolRow's image branch. */
+.tool-row.image-result .tool-row-result {
+  max-height: 520px;
 }

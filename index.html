@@ -413,7 +413,8 @@
                       <h3 id="provider-config-title">DeepSeek (OpenAI)</h3>
                       <p id="provider-config-endpoint">https://api.deepseek.com</p>
                     </div>
-                    <span class="provider-config-badge" data-i18n="llm.active">当前使用</span>
+                    <span class="provider-config-badge" id="provider-config-badge" data-i18n="llm.active">当前使用</span>
+                    <button type="button" class="provider-config-activate" id="provider-activate-btn" hidden data-i18n="llm.custom.enableBtn">启用此供应商</button>
                   </div>
                   <select id="cfg-provider" class="sr-only" data-i18n-options="deepseek-openai:provider.deepseek-openai,deepseek-anthropic:provider.deepseek-anthropic,qwen:provider.qwen,glm:provider.glm" tabindex="-1" aria-hidden="true"><option value="deepseek-openai">DeepSeek (OpenAI)</option><option value="deepseek-anthropic">DeepSeek (Anthropic)</option><option value="qwen">Qwen (Tongyi)</option><option value="glm">GLM (Zhipu)</option></select>
                   <div class="provider-config-fields">
@@ -438,6 +439,13 @@
                     <div class="setting-row" id="cfg-custom-name-row" hidden>
                       <div class="setting-info"><span class="setting-label" data-i18n="llm.custom.name">供应商名称</span><span class="setting-hint" data-i18n="llm.custom.name.hint">显示在卡片与下拉框中的名称</span></div>
                       <input id="cfg-custom-name-edit" class="setting-input" type="text" />
+                    </div>
+                    <div class="setting-row" id="cfg-imagegen-row" hidden>
+                      <div class="setting-info"><span class="setting-label" data-i18n="llm.custom.imageGen">图片生成（文生图）</span><span class="setting-hint" data-i18n="llm.custom.imageGen.hint">该供应商支持 OpenAI 兼容的 /images/generations 图片接口时开启；开启后图片请求会调用 generate_image 并直接渲染为真实图片，不再输出 SVG（失败时自动回退 SVG）</span></div>
+                      <div class="setting-input-group">
+                        <input id="cfg-imagegen-model" class="setting-input" type="text" placeholder="gpt-image-1" aria-label="Image model" />
+                        <label class="toggle"><input type="checkbox" id="cfg-imagegen" /><span class="toggle-slider"></span></label>
+                      </div>
                     </div>
                     <div class="setting-row" id="cfg-custom-delete-row" hidden>
                       <div class="setting-info"><span class="setting-label" data-i18n="llm.custom.delete">删除此供应商</span><span class="setting-hint" data-i18n="llm.custom.delete.hint">删除后需重新添加</span></div>

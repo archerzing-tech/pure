@@ -43,6 +43,27 @@ describe('PromptAssembler', () => {
     expect(cli).toContain('researcher_web(prompt');
   });
 
+  it('tells the CLI to emit mermaid/puml and explains the wireframe rendering', () => {
+    const cli = assembler.buildSystemPrompt({
+      surface: 'cli',
+      capabilities: buildCliCapabilities(),
+    });
+    // Output style directs diagram blocks at the CLI renderer…
+    expect(cli).toContain('fenced code block tagged mermaid');
+    expect(cli).toContain('puml');
+    expect(cli).toContain('wireframe');
+    // …and the capabilities section states the terminal wireframe contract.
+    expect(cli).toContain('Diagram rendering:');
+    expect(cli).toContain('WIREFRAME');
+    expect(cli).toContain('mermaid for process/flow diagrams');
+    // The GUI surface keeps its original diagram contract (no wireframe talk).
+    const gui = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: buildGuiCapabilities(true),
+    });
+    expect(gui).not.toContain('wireframe');
+  });
+
   it('injects runtime state, skills, and task mode at assembly time', () => {
     const prompt = assembler.buildSystemPrompt({
       surface: 'cli',
@@ -155,5 +176,38 @@ describe('PromptAssembler', () => {
     expect(prompt).toContain('Workspace: none selected');
     expect(prompt).not.toContain('write_file(path, content)');
     expect(prompt).toContain('web_search(query');
+  });
+
+  it('keeps the SVG output contract when image generation is off (default)', () => {
+    const prompt = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: buildGuiCapabilities(true),
+    });
+    expect(prompt).toContain('fenced code block tagged svg');
+    expect(prompt).not.toContain('generate_image(');
+    expect(prompt).not.toContain('NEVER emit fenced svg code blocks');
+  });
+
+  it('swaps SVG for generate_image when the provider supports text-to-image', () => {
+    const prompt = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: buildGuiCapabilities(true, false, { imageGeneration: true }),
+      imageGeneration: true,
+    });
+    expect(prompt).toContain('generate_image(prompt, n?, size?)');
+    expect(prompt).toContain('NEVER emit fenced svg code blocks for image requests');
+    expect(prompt).toContain('fall back to svg code blocks');
+    // The SVG-only multi-image contract must NOT be present at the same time.
+    expect(prompt).not.toContain('ONE separate fenced code block tagged svg PER image');
+    // The output-style line also routes pictures through the tool.
+    expect(prompt).toContain('call generate_image');
+    // Plain-chat mode with image generation still skips filesystem tools.
+    const plain = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: buildGuiCapabilities(false, false, { imageGeneration: true }),
+      imageGeneration: true,
+    });
+    expect(plain).toContain('generate_image(prompt');
+    expect(plain).not.toContain('write_file(path, content)');
   });
 });

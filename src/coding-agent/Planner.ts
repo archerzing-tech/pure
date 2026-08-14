@@ -35,13 +35,14 @@ export class Planner {
     const needsSafetyPlan = intent.requiresConfirmation;
 
     if (complexity === 'complex' || needsSafetyPlan) {
+      const mode: TaskMode = needsSafetyPlan ? 'plan' : this.detectMode(prompt, complexity);
       return {
         complexity,
         // Build intent ("写一个小游戏", "搭建全栈项目") switches the agent into
         // build mode; a destructive request always uses plan mode so it cannot
         // inherit the direct-build path by accident.
-        mode: needsSafetyPlan ? 'plan' : this.detectMode(prompt, complexity),
-        plan: this.generatePlan(prompt),
+        mode,
+        plan: this.generatePlan(prompt, mode),
         reasoning: needsSafetyPlan ? intent.recommendation : this.getComplexReasoning(prompt),
         traps,
         intent,
@@ -258,10 +259,58 @@ export class Planner {
     return 'simple';
   }
 
-  private generatePlan(prompt: string): Plan {
+  private generatePlan(prompt: string, mode: TaskMode): Plan {
     // Minimal fallback only. Task-specific decomposition, step count, and Todo
     // granularity belong to the LLM analysis; this keeps the UI usable when
     // that analysis is unavailable without prescribing a workflow.
+    //
+    // A genuine from-scratch build (creating a NEW project/artifact — NOT a
+    // refactor/rewrite/migration of an existing codebase) follows the natural
+    // build arc: understand the need, scaffold, implement module by module,
+    // integrate and verify, deliver. A brand-new requirement must never read as
+    // an edit of existing code ("确认范围/完成改动/验证结果"). Positive
+    // creation signals gate this so a rebuild request ("重构整个项目") or a
+    // trailing question ("…怎么做性能优化？") keeps the generic template.
+    const isFreshBuild = mode === 'build'
+      && /(?:创建|搭建|制作|开发|实现|构建|生成|新建|从零|从头|新建一个|构建一个|开发一个|生成一个|写一个|做一个|create|build|make|develop|implement|construct|generate|set up|scaffold|from scratch)/i.test(prompt);
+    if (isFreshBuild) {
+      return {
+        steps: [
+          {
+            id: '1',
+            action: '理解与分析需求',
+            description: '拆解这个需求的目标、数据来源、使用场景与约束，明确缺失的关键信息。',
+            expectedOutcome: '对要交付的东西有清楚、无歧义的理解。',
+          },
+          {
+            id: '2',
+            action: '搭建项目骨架',
+            description: '确定技术栈与目录结构，建立可运行的起点。',
+            expectedOutcome: '项目可启动，结构清晰。',
+          },
+          {
+            id: '3',
+            action: '分模块实现核心功能',
+            description: '按功能拆分逐块实现，每完成一块保持可运行。',
+            expectedOutcome: '核心功能逐一落地。',
+          },
+          {
+            id: '4',
+            action: '联调集成与验证',
+            description: '把模块连起来运行真实场景，检查关键流程是否可用。',
+            expectedOutcome: '整体可用，关键路径验证通过。',
+          },
+          {
+            id: '5',
+            action: '收尾与交付',
+            description: '补齐必要说明，指出仍存在的限制。',
+            expectedOutcome: '交付物完整，使用方式清楚。',
+          },
+        ],
+        reasoning: '这是从零构建的任务：先理解清楚要做什么，再搭骨架、逐模块实现，最后联调验证，保证结果可用。',
+      };
+    }
+
     return {
       steps: [
         {

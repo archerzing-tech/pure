@@ -121,7 +121,7 @@ export interface PlanCardHandle {
 // the DOM (card upgraded / discarded), so a timer can never outlive its badge.
 const refiningTimers = new WeakMap<HTMLElement, number>();
 
-export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false): PlanCardHandle {
+export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false, fallback = false): PlanCardHandle {
   const el = document.createElement('div');
   el.className = 'bubble-row plan-progress-row plan-text-progress-row';
 
@@ -133,9 +133,14 @@ export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false): P
   const title = document.createElement('span');
   title.className = 'plan-progress-title';
   const firstAction = plan.steps[0]?.action?.trim();
-  title.textContent = plan.steps.length === 1 && firstAction
-    ? `先从「${firstAction}」开始：`
-    : '根据刚才的判断，接下来按这个顺序推进：';
+  // A fallback card (real-time analysis failed/timed out) must not claim the
+  // steps came from a judgment that never happened — say plainly that these
+  // are generic steps and execution will adapt.
+  title.textContent = fallback
+    ? '当前为通用步骤（实时分析未完成），执行中会结合实际情况调整：'
+    : plan.steps.length === 1 && firstAction
+      ? `先从「${firstAction}」开始：`
+      : '根据刚才的判断，接下来按这个顺序推进：';
   const count = document.createElement('span');
   count.className = 'plan-progress-count';
   count.textContent = `大概分成 ${plan.steps.length} 件事`;
@@ -305,14 +310,14 @@ export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false): P
 /** Update the existing plan card in place. The outer transcript row stays
  * mounted, so task progress remains visible throughout the turn instead of
  * looking like a one-time list that disappears during plan refinement. */
-export function updatePlanCard(h: PlanCardHandle, plan: Plan, mode?: TaskMode, refining = false): void {
+export function updatePlanCard(h: PlanCardHandle, plan: Plan, mode?: TaskMode, refining = false, fallback = false): void {
   const previousPhase = h.current;
   const previousSubstep = h.currentSubstep;
   const previousSubstepStarted = h.substepStarted;
   const previousTodosRequired = h.currentTodosRequired;
   const previousActivity = h.el.querySelector<HTMLElement>('.plan-progress-activity')?.textContent;
   clearPlanCardRefining(h);
-  const fresh = createPlanCard(plan, mode, refining);
+  const fresh = createPlanCard(plan, mode, refining, fallback);
   h.el.replaceChildren(...Array.from(fresh.el.childNodes));
   h.stepEls = fresh.stepEls;
   h.numEls = fresh.numEls;

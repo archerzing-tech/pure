@@ -134,6 +134,19 @@ export interface CustomProvider {
   hasApiKey: boolean;
   /** True for local endpoints (Ollama / LM Studio) that need no API key. */
   local?: boolean;
+  /**
+   * True when this provider exposes an OpenAI-compatible text-to-image API
+   * (`/images/generations`). When enabled, the GUI registers a generate_image
+   * tool and tells the model to use it for image requests instead of ```svg
+   * blocks (which remain the automatic fallback when disabled / unavailable).
+   */
+  imageGen?: boolean;
+  /**
+   * The provider's text-to-image model id (e.g. 'gpt-image-1', 'dall-e-3').
+   * When unset but imageGen is true, the chat model itself is used if its name
+   * looks like an image model, otherwise 'gpt-image-1'.
+   */
+  imageGenModel?: string;
 }
 
 /**
@@ -166,6 +179,11 @@ export const OPENAI_PRESET: CustomProvider = {
   defaultModel: 'gpt-4o-mini',
   apiKey: '',
   hasApiKey: false,
+  // The OpenAI API key also authorizes the Images API, so the preset ships
+  // with text-to-image enabled (gpt-image-1) — image requests then render as
+  // real <img> cards instead of SVG. Users can turn it off or pick dall-e-3.
+  imageGen: true,
+  imageGenModel: 'gpt-image-1',
 };
 
 export const OPENROUTER_PRESET: CustomProvider = {
@@ -262,6 +280,57 @@ export function isCustomProviderId(
   id: string | undefined | null,
 ): boolean {
   return !!customProviderFor(customs, id);
+}
+
+// ── Text-to-image capability (generate_image tool) ──
+// The GUI exposes an image-generation tool only when the connected provider /
+// model actually supports it. Detection is (1) an explicit per-provider
+// setting, or (2) an image-capable model name (gpt-image-*, dall-e-*, cogview*,
+// flux*, gemini-*-image, …). When it is OFF — the default for DeepSeek / Qwen /
+// GLM and most custom endpoints — models answer image requests with ```svg
+// blocks (the SVG output contract), which stays the universal fallback.
+
+/** Model-name patterns that indicate the model itself can generate images. */
+const IMAGE_MODEL_PATTERN =
+  /(?:gpt-image|dall-e|dall_e|image-1|cogview|flux|sdxl|stable-diffusion|nano-banana|imagen|gemini-[0-9.]+-[a-z-]*image|imagegen)/i;
+
+/** True when a model id looks like a text-to-image model. */
+export function isImageModelName(model: string | undefined | null): boolean {
+  return !!model && IMAGE_MODEL_PATTERN.test(model.trim());
+}
+
+/**
+ * True when the connected provider/model should expose the generate_image
+ * tool: the custom provider explicitly enables it, or the active model name
+ * matches an image-capable model. Built-in providers (deepseek/qwen/glm) only
+ * light up via the model-name rule (e.g. cogview / flux names).
+ */
+export function imageGenEnabled(
+  customs: readonly CustomProvider[] | undefined | null,
+  provider: string | undefined | null,
+  model: string | undefined | null,
+): boolean {
+  const custom = customProviderFor(customs, provider);
+  if (custom?.imageGen === true) return true;
+  if (custom?.imageGenModel?.trim()) return true;
+  return isImageModelName(model);
+}
+
+/**
+ * The text-to-image model id used by generate_image: the provider's explicit
+ * imageGenModel, else the chat model itself when it is image-capable, else the
+ * provider default ('gpt-image-1'). Only meaningful when imageGenEnabled().
+ */
+export function imageGenModelFor(
+  customs: readonly CustomProvider[] | undefined | null,
+  provider: string | undefined | null,
+  model: string | undefined | null,
+): string {
+  const custom = customProviderFor(customs, provider);
+  const explicit = custom?.imageGenModel?.trim();
+  if (explicit) return explicit;
+  if (isImageModelName(model)) return model!.trim();
+  return 'gpt-image-1';
 }
 
 /** Display label for a provider id, resolving custom providers by name. */

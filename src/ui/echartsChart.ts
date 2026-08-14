@@ -10,11 +10,23 @@
 // ResizeObserver so sidebar toggles / window resizes re-fit the chart).
 
 import * as echarts from 'echarts/core';
-import { BarChart, LineChart, PieChart } from 'echarts/charts';
+import {
+  BarChart,
+  CandlestickChart,
+  LineChart,
+  PieChart,
+  RadarChart,
+  ScatterChart,
+  SunburstChart,
+  TreeChart,
+  TreemapChart,
+} from 'echarts/charts';
 import {
   AxisPointerComponent,
+  DataZoomComponent,
   GridComponent,
   LegendComponent,
+  RadarComponent,
   TitleComponent,
   TooltipComponent,
 } from 'echarts/components';
@@ -24,11 +36,19 @@ import type { ChartSpec } from './markdown';
 
 echarts.use([
   BarChart,
+  CandlestickChart,
   LineChart,
   PieChart,
+  RadarChart,
+  ScatterChart,
+  SunburstChart,
+  TreeChart,
+  TreemapChart,
   GridComponent,
   AxisPointerComponent,
+  DataZoomComponent,
   LegendComponent,
+  RadarComponent,
   TitleComponent,
   TooltipComponent,
   SVGRenderer,
@@ -118,6 +138,203 @@ export function buildChartOption(spec: ChartSpec, dark: boolean): EChartsOption 
       ? { text: title, left: 4, top: 8, textStyle: { fontSize: 14, fontWeight: 600, color: theme.text } }
       : undefined,
   };
+
+  if (spec.type === 'scatter') {
+    const scatterSeries = spec.scatter ?? [{
+      name: '数据',
+      points: data.map((d, i) => ({ name: d.label, value: [i, d.value] as [number, number] })),
+    }];
+    const valueAxis = {
+      type: 'value' as const,
+      axisLabel: { color: theme.subtext, fontSize: 11, formatter: (v: number) => fmtNum(v) },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: { lineStyle: { color: theme.grid, type: 'dashed' } },
+    };
+    return {
+      ...base,
+      legend: scatterSeries.length > 1
+        ? { top: title ? 44 : 8, left: 'center', itemWidth: 14, itemHeight: 10, textStyle: { color: theme.subtext, fontSize: 11 } }
+        : undefined,
+      grid: {
+        left: 8, right: 20, top: title ? (scatterSeries.length > 1 ? 84 : 48) : 20, bottom: 4,
+        outerBoundsMode: 'same',
+        outerBoundsContain: 'axisLabel',
+      },
+      tooltip: {
+        ...tooltipBase,
+        trigger: 'item',
+        formatter: (params: { seriesName?: string; name: string; value: number[] }): string => {
+          const series = params.seriesName && scatterSeries.length > 1 ? ` (${params.seriesName})` : '';
+          return `${params.name}${series}: (${fmtNum(params.value[0])}, ${fmtNum(params.value[1])})${unit}`;
+        },
+      },
+      xAxis: valueAxis,
+      yAxis: valueAxis,
+      series: scatterSeries.map((s, i) => ({
+        name: s.name,
+        type: 'scatter',
+        symbolSize: 10,
+        data: s.points.map((p) => ({ value: p.value, name: p.name })),
+        itemStyle: { color: theme.palette[i % theme.palette.length] },
+        emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.25)' } },
+      })),
+    } as EChartsOption;
+  }
+
+  if (spec.type === 'kline') {
+    const ohlc = spec.ohlc ?? [];
+    const withZoom = ohlc.length > 20;
+    return {
+      ...base,
+      grid: {
+        left: 8, right: 20, top: title ? 48 : 20, bottom: withZoom ? 44 : 4,
+        outerBoundsMode: 'same',
+        outerBoundsContain: 'axisLabel',
+      },
+      tooltip: {
+        ...tooltipBase,
+        trigger: 'axis',
+        axisPointer: { type: 'cross', lineStyle: { color: theme.axisLine } },
+        formatter: (params: Array<{ name: string; value: number | number[] }>): string => {
+          const p = params[0];
+          if (!p) return '';
+          const [open, close, low, high] = Array.isArray(p.value) ? p.value : [];
+          const color = close >= open ? '#ef4444' : '#10b981';
+          const lines = [
+            p.name,
+            `开盘: <span style="color:${color}">${fmtNum(open)}</span>`,
+            `收盘: <span style="color:${color}">${fmtNum(close)}</span>`,
+            `最低: ${fmtNum(low)}`,
+            `最高: ${fmtNum(high)}`,
+          ];
+          return lines.join('\n');
+        },
+      },
+      xAxis: {
+        type: 'category',
+        data: ohlc.map((r) => r.date),
+        axisLabel: { color: theme.subtext, fontSize: 11, interval: 'auto' },
+        axisLine: { lineStyle: { color: theme.axisLine } },
+        axisTick: { show: false },
+      },
+      yAxis: {
+        type: 'value', scale: true,
+        axisLabel: { color: theme.subtext, fontSize: 11, formatter: (v: number) => fmtNum(v) },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { lineStyle: { color: theme.grid, type: 'dashed' } },
+      },
+      dataZoom: withZoom
+        ? [{ type: 'inside' as const, start: 0, end: 100 }, { type: 'slider' as const, height: 20, bottom: 0, borderColor: theme.axisLine }]
+        : undefined,
+      series: [{
+        type: 'candlestick',
+        data: ohlc.map((r) => r.value),
+        itemStyle: {
+          color: '#ef4444', color0: '#10b981',
+          borderColor: '#ef4444', borderColor0: '#10b981',
+        },
+      }],
+    } as EChartsOption;
+  }
+
+  if (spec.type === 'radar') {
+    const values = spec.radarData ?? [];
+    const names = spec.indicators ?? [];
+    const maxes = names.map((_, i) => Math.max(1, ...values.map((r) => r.value[i] ?? 0)));
+    return {
+      ...base,
+      legend: values.length > 1
+        ? { top: title ? 44 : 8, left: 'center', itemWidth: 14, itemHeight: 10, textStyle: { color: theme.subtext, fontSize: 11 } }
+        : undefined,
+      tooltip: { ...tooltipBase, trigger: 'item' },
+      radar: {
+        indicator: names.map((name, i) => ({ name, max: maxes[i] * 1.15 })),
+        radius: '62%',
+        splitNumber: 4,
+        axisName: { color: theme.text, fontSize: 11 },
+        splitArea: { areaStyle: { color: [withAlpha(theme.palette[0], 0.06), 'transparent'] } },
+        splitLine: { lineStyle: { color: theme.grid } },
+        axisLine: { lineStyle: { color: theme.grid } },
+      },
+      series: [{
+        type: 'radar',
+        data: values.map((r, i) => ({
+          name: r.name,
+          value: r.value,
+          itemStyle: { color: theme.palette[i % theme.palette.length] },
+          lineStyle: { color: theme.palette[i % theme.palette.length], width: 2 },
+          areaStyle: { opacity: 0.12 },
+        })),
+      }],
+    } as EChartsOption;
+  }
+
+  if (spec.type === 'tree') {
+    return {
+      ...base,
+      tooltip: { ...tooltipBase, trigger: 'item', triggerOn: 'mousemove' },
+      series: [{
+        type: 'tree',
+        data: spec.tree ? [spec.tree] : [],
+        top: title ? 44 : 8,
+        left: '8%',
+        right: '10%',
+        bottom: 8,
+        symbol: 'circle',
+        symbolSize: 7,
+        expandAndCollapse: true,
+        initialTreeDepth: 3,
+        label: { color: theme.text, fontSize: 11, position: 'left', verticalAlign: 'middle' },
+        leaves: { label: { position: 'right' } },
+        itemStyle: { color: theme.palette[0], borderWidth: 1 },
+        lineStyle: { color: theme.axisLine, width: 1.2 },
+        emphasis: { focus: 'descendant' },
+      }],
+    } as EChartsOption;
+  }
+
+  if (spec.type === 'treemap' || spec.type === 'sunburst') {
+    const tooltipFormatter = (params: { name: string; value: number; treePathInfo?: Array<{ name: string }> }): string => {
+      const path = (params.treePathInfo ?? []).map((p) => p.name).filter(Boolean).join(' / ');
+      return `${path}\n${fmtNum(params.value)}${unit}`;
+    };
+    if (spec.type === 'treemap') {
+      return {
+        ...base,
+        color: theme.palette,
+        tooltip: { ...tooltipBase, formatter: tooltipFormatter },
+        series: [{
+          type: 'treemap',
+          data: spec.tree ? [spec.tree] : [],
+          left: 8, right: 8, top: title ? 44 : 8, bottom: 8,
+          breadcrumb: {
+            show: true,
+            itemStyle: { color: theme.tooltipBg, borderColor: theme.axisLine, textStyle: { color: theme.text, fontSize: 11 } },
+          },
+          label: { color: theme.text, fontSize: 11 },
+          itemStyle: { borderColor: theme.tooltipBg, borderWidth: 1, gapWidth: 1 },
+          emphasis: { itemStyle: { shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.2)' } },
+        }],
+      } as EChartsOption;
+    }
+    return {
+      ...base,
+      color: theme.palette,
+      tooltip: { ...tooltipBase, formatter: tooltipFormatter },
+      series: [{
+        type: 'sunburst',
+        data: spec.tree ? [spec.tree] : [],
+        radius: ['12%', '78%'],
+        center: ['50%', '55%'],
+        sort: 'desc',
+        label: { color: theme.text, fontSize: 11 },
+        itemStyle: { borderColor: theme.tooltipBg, borderWidth: 1 },
+        emphasis: { focus: 'ancestor' },
+      }],
+    } as EChartsOption;
+  }
 
   if (spec.type === 'pie') {
     const total = data.reduce((s, d) => s + Math.max(0, d.value), 0);

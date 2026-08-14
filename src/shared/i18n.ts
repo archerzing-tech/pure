@@ -70,6 +70,8 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Thinking card ──
     'thinking.thinking': '思考',
     'thinking.done': '思考完成',
+    'thinking.failed': '分析未完成',
+    'thinking.failedNote': '\n（实时分析未返回内容，已回退到通用步骤；执行中会结合实际情况调整。）',
     'thinking.show': '查看思考过程',
 
     // ── Code block actions ──
@@ -223,6 +225,8 @@ const translations: Record<Language, Record<string, string>> = {
     'llm.custom.delete': '删除此供应商',
     'llm.custom.delete.hint': '删除后需重新添加',
     'llm.custom.deleteBtn': '删除',
+    'llm.custom.imageGen': '图片生成（文生图）',
+    'llm.custom.imageGen.hint': '该供应商支持 OpenAI 兼容的 /images/generations 图片接口时开启；开启后图片请求调用 generate_image 并直接渲染为真实图片，不再输出 SVG（失败时自动回退 SVG）',
     'llm.custom.noKeyBadge': '无需 Key',
     'llm.custom.needKeyBadge': '待填 Key',
     'llm.custom.apiKeyRequired.hint': '必填：填入该供应商的 API Key',
@@ -238,6 +242,12 @@ const translations: Record<Language, Record<string, string>> = {
     'llm.custom.presetAdded': '{name} 预设已启用（免密钥，可直接对话）',
     'llm.custom.presetAddedKey': '{name} 已启用，请在下方配置卡填写 API Key',
     'llm.custom.deleted': '供应商已删除',
+    'llm.custom.editing': '配置中',
+    'llm.custom.notEnabled': '未启用',
+    'llm.custom.enableBtn': '启用此供应商',
+    'llm.custom.configureFirst': '请先填写名称与 Base URL，配置完成后再点击卡片启用',
+    'llm.custom.enabledToast': '已启用 {name}',
+    'llm.custom.addedConfig': '{name} 已添加 — 点击卡片即可启用',
 
     // ── Provider options ──
     'provider.deepseek-openai': 'DeepSeek (OpenAI)',
@@ -640,6 +650,8 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Thinking card ──
     'thinking.thinking': 'Thinking',
     'thinking.done': 'Thinking complete',
+    'thinking.failed': 'Analysis incomplete',
+    'thinking.failedNote': '\n(Real-time analysis returned no content; fell back to generic steps. Execution will adapt to what it finds.)',
     'thinking.show': 'Show thinking',
 
     // ── Code block actions ──
@@ -793,6 +805,8 @@ const translations: Record<Language, Record<string, string>> = {
     'llm.custom.delete': 'Delete this provider',
     'llm.custom.delete.hint': 'The provider will be removed',
     'llm.custom.deleteBtn': 'Delete',
+    'llm.custom.imageGen': 'Image generation',
+    'llm.custom.imageGen.hint': 'Enable when this provider exposes an OpenAI-compatible /images/generations endpoint; image requests then call generate_image and render as real pictures instead of SVG (SVG is the automatic fallback on failure)',
     'llm.custom.noKeyBadge': 'No key',
     'llm.custom.needKeyBadge': 'Key needed',
     'llm.custom.apiKeyRequired.hint': 'Required: enter this provider\'s API key',
@@ -804,6 +818,12 @@ const translations: Record<Language, Record<string, string>> = {
     'llm.custom.presetAdded': '{name} preset enabled — keyless, ready to chat',
     'llm.custom.presetAddedKey': '{name} enabled — enter your API key in the config card below',
     'llm.custom.deleted': 'Provider removed',
+    'llm.custom.editing': 'Configuring',
+    'llm.custom.notEnabled': 'Not enabled',
+    'llm.custom.enableBtn': 'Enable this provider',
+    'llm.custom.configureFirst': 'Fill in the name and Base URL first, then click the card to enable it',
+    'llm.custom.enabledToast': '{name} enabled',
+    'llm.custom.addedConfig': '{name} added — click the card to enable it',
 
     // ── Provider options ──
     'provider.deepseek-openai': 'DeepSeek (OpenAI)',

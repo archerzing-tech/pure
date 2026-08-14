@@ -61,6 +61,16 @@ export class SettingsPanel {
   private mcpServers: PureConfig['mcpServers'] = [];
   /** Bound in the constructor; refreshes the paste-file footprint on open. */
   private refreshTmpUsage: () => Promise<void> = async () => {};
+  /**
+   * Provider card being edited whose activation is pending an explicit user
+   * action (card click or "启用此供应商"). While set, autoSave keeps the
+   * previous active provider, so merely typing a Base URL / model never
+   * promotes the card to the active LLM.
+   */
+  private pendingActivation: string | null = null;
+  /** Last card the config panel rendered for — field prefill only runs on a
+   *  real card switch, never on live keystrokes in the same card. */
+  private presentedProvider: string | null = null;
 
   constructor(onSave: () => void, onOpen?: () => void, onClose?: () => void) {
     this.onSave = onSave;
@@ -407,17 +417,20 @@ export class SettingsPanel {
       const card = (event.target as HTMLElement).closest<HTMLElement>('.provider-card');
       const provider = card?.dataset.provider;
       if (!provider) return;
-      const select = document.getElementById('cfg-provider') as HTMLSelectElement;
-      select.value = provider;
-      this.updateProviderPresentation(provider);
-      this.autoSave();
+      this.selectProvider(provider);
+    });
+
+    // "Enable this provider" button — explicit activation for a card whose
+    // config is open but which isn't the active LLM yet.
+    document.getElementById('provider-activate-btn')?.addEventListener('click', () => {
+      const id = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+      this.selectProvider(id);
     });
 
     // Provider change → update the card presentation, model placeholder + auto-save.
     document.getElementById('cfg-provider')!.addEventListener('change', () => {
       const p = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
-      this.updateProviderPresentation(p);
-      this.autoSave();
+      this.selectProvider(p);
     });
 
     // ── Custom providers: quick presets, delete, live name edit ──
@@ -500,6 +513,7 @@ export class SettingsPanel {
     // Auto-save on all input/select/checkbox changes
     const autoSaveSelectors = [
       '#cfg-provider', '#cfg-apikey', '#cfg-model', '#cfg-baseurl',
+      '#cfg-imagegen', '#cfg-imagegen-model',
       '#cfg-language',
       '#cfg-city',
       '#cfg-fontsize', '#cfg-density',
@@ -662,6 +676,45 @@ export class SettingsPanel {
 
   // ── Provider card presentation ──
 
+  /**
+   * A provider is "configured" when it can serve requests out of the box:
+   * built-ins always count (they carry their own endpoint/model), custom
+   * providers need a Base URL + at least one model. An unconfigured custom
+   * card must NEVER become the active LLM on its own.
+   */
+  private isProviderConfigured(provider: string): boolean {
+    const customs = (loadConfig() ?? defaults()).customProviders ?? [];
+    const custom = customProviderFor(customs, provider);
+    if (custom) return !!custom.baseURL && !!custom.defaultModel;
+    return !!providerDef(provider);
+  }
+
+  /**
+   * Select a card: open its config for editing and, only when it is fully
+   * configured, make it the active LLM. A bare "用户自定义" card is opened for
+   * editing WITHOUT switching providers — the user configures it first and
+   * clicks it again (or the "启用此供应商" button) to activate it.
+   */
+  private selectProvider(id: string): void {
+    const prevActive = (loadConfig() ?? defaults()).provider;
+    const select = document.getElementById('cfg-provider') as HTMLSelectElement;
+    select.value = id;
+    this.updateProviderPresentation(id);
+    if (!this.isProviderConfigured(id)) {
+      this.pendingActivation = id;
+      this.toast(t('llm.custom.configureFirst'));
+      return;
+    }
+    this.pendingActivation = null;
+    this.autoSave();
+    this.updateProviderPresentation(id);
+    if (id !== prevActive) {
+      const nameEl = document.querySelector<HTMLElement>(`.provider-card[data-provider="${id}"] .provider-card-name`);
+      const name = nameEl?.textContent ?? id;
+      this.toast(t('llm.custom.enabledToast').replace('{name}', name));
+    }
+  }
+
   private updateProviderPresentation(provider: string): void {
     const cfg = loadConfig() ?? defaults();
     const customs = cfg.customProviders ?? [];
@@ -676,9 +729,12 @@ export class SettingsPanel {
     const previousCustom = customProviderFor(customs, cfg.provider);
     const previousDefault = previousCustom?.defaultModel ?? defaultModelFor(cfg.provider);
 
-    // Switching providers should not carry provider-specific defaults into the
-    // next card, while deliberate custom model/endpoint values are preserved.
-    if (cfg.provider !== provider) {
+    // Switching to a DIFFERENT card should not carry provider-specific defaults
+    // into the next card, while deliberate custom model/endpoint values are
+    // preserved. Running on every keystroke of the SAME card would clobber what
+    // the user is typing (e.g. an unconfigured card still being edited), so the
+    // prefill only fires when the panel actually switches which card it shows.
+    if (provider !== this.presentedProvider) {
       if (modelInput && (!currentModel || currentModel === previousDefault)) {
         modelInput.value = '';
       }
@@ -697,10 +753,16 @@ export class SettingsPanel {
     document.querySelectorAll<HTMLElement>('.provider-card').forEach(card => {
       const cardProvider = card.dataset.provider;
       const active = cardProvider === provider;
+      const isActive = cardProvider === cfg.provider;
       card.classList.toggle('selected', active);
-      card.setAttribute('aria-selected', String(active));
+      card.classList.toggle('provider-card-active', isActive);
+      card.setAttribute('aria-selected', String(isActive));
       const status = card.querySelector<HTMLElement>('[data-provider-status]');
-      if (status) status.textContent = active ? t('llm.selected') : t('llm.chooseCard');
+      if (status) {
+        status.textContent = isActive ? t('llm.selected')
+          : active ? t('llm.custom.editing')
+          : t('llm.chooseCard');
+      }
       const modelValue = card.querySelector<HTMLElement>('.provider-card-model-value');
       const cardCustom = customProviderFor(customs, cardProvider);
       const cardDef = providerDef(cardProvider);
@@ -727,12 +789,38 @@ export class SettingsPanel {
     const configCard = document.querySelector<HTMLElement>('.provider-config-card');
     configCard?.classList.toggle('provider-unconfigured', unconfigured);
     baseUrlInput?.closest('.setting-row')?.classList.toggle('provider-needs-url', unconfigured);
+    // Badge + explicit activation: the badge says "当前使用" only for the ACTIVE
+    // LLM; any other card being edited shows "未启用" and reveals the enable
+    // button so a card never becomes the active model without a user action.
+    const editingIsActive = provider === cfg.provider;
+    const badge = document.getElementById('provider-config-badge');
+    const activateBtn = document.getElementById('provider-activate-btn');
+    if (badge) {
+      if (editingIsActive) {
+        badge.textContent = t('llm.active');
+        badge.dataset.i18n = 'llm.active';
+        badge.classList.remove('provider-config-badge-inactive');
+      } else {
+        badge.textContent = t('llm.custom.notEnabled');
+        delete badge.dataset.i18n;
+        badge.classList.add('provider-config-badge-inactive');
+      }
+    }
+    if (activateBtn) activateBtn.hidden = editingIsActive;
     const nameRow = document.getElementById('cfg-custom-name-row');
     const deleteRow = document.getElementById('cfg-custom-delete-row');
     const nameEdit = document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null;
     if (nameRow) nameRow.hidden = !isCustom;
     if (deleteRow) deleteRow.hidden = !isCustom;
     if (nameEdit) nameEdit.value = custom?.name ?? '';
+    // 文生图配置只对自定义供应商开放（内置 DeepSeek/Qwen/GLM 无图片 API）：
+    // 开启后该供应商的图片请求走 generate_image 工具，渲染为真实图片而非 SVG。
+    const imageGenRow = document.getElementById('cfg-imagegen-row');
+    if (imageGenRow) imageGenRow.hidden = !isCustom;
+    const imageGenToggle = document.getElementById('cfg-imagegen') as HTMLInputElement | null;
+    const imageGenModel = document.getElementById('cfg-imagegen-model') as HTMLInputElement | null;
+    if (imageGenToggle) imageGenToggle.checked = custom?.imageGen === true;
+    if (imageGenModel) imageGenModel.value = custom?.imageGenModel ?? '';
     // Model auto-fetch only makes sense for custom endpoints (the built-ins
     // come with their own default model list).
     const fetchBtn = document.getElementById('cfg-fetch-models-btn');
@@ -752,6 +840,7 @@ export class SettingsPanel {
         keyInput.placeholder = t('llm.apiKey.placeholder');
       }
     }
+    this.presentedProvider = provider;
   }
 
   // ── Load config into form ──
@@ -761,6 +850,10 @@ export class SettingsPanel {
     applyTranslations();
     const cfg = loadConfig() || defaults();
     const selectedCustom = customProviderFor(cfg.customProviders ?? [], cfg.provider);
+    // (Re)opening the panel always lands on the ACTIVE provider — nothing is
+    // pending activation and the presented card resets to the active one.
+    this.pendingActivation = null;
+    this.presentedProvider = null;
 
     // Custom provider cards are rendered dynamically — rebuild them before the
     // presentation pass so selection styles apply to user-defined entries too.
@@ -1366,6 +1459,18 @@ export class SettingsPanel {
     const grid = document.getElementById('provider-card-grid');
     if (!grid) return;
     const customs = (loadConfig() ?? defaults()).customProviders ?? [];
+    // Keep the hidden provider select in sync with the custom entries so
+    // select.value stays the editing provider even for non-built-in ids
+    // (a <select> returns '' when its value matches no <option>).
+    const select = document.getElementById('cfg-provider') as HTMLSelectElement | null;
+    select?.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+    for (const c of customs) {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name;
+      opt.dataset.custom = '1';
+      select?.appendChild(opt);
+    }
     // Remove previously rendered custom cards (marked below) so re-opening the
     // panel never duplicates them.
     grid.querySelectorAll('.provider-card-custom').forEach(el => el.remove());
@@ -1458,6 +1563,12 @@ export class SettingsPanel {
       entry.defaultModel = model;
       if (!entry.models.includes(model)) entry.models = [...entry.models, model];
     }
+    // 文生图开关 + 图片模型名（仅自定义供应商表单里存在这些字段）。
+    const imageGenToggle = document.getElementById('cfg-imagegen') as HTMLInputElement | null;
+    const imageGenModel = (document.getElementById('cfg-imagegen-model') as HTMLInputElement | null)?.value.trim();
+    entry.imageGen = imageGenToggle?.checked === true;
+    if (imageGenModel) entry.imageGenModel = imageGenModel;
+    else delete entry.imageGenModel;
     // Raw key from the field; autoSave() scrubs/redirects it per platform.
     entry.apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement).value.trim();
     list[idx] = entry;
@@ -1475,7 +1586,8 @@ export class SettingsPanel {
 
   /**
    * 用户自定义 chip：一键生成一张空白自定义供应商卡片（默认名，暂无地址），
-   * 并选中它 —— 与 OpenAI 等预设一致，名称 + Base URL 在下方配置卡填写。
+   * 并打开它的配置卡 —— 名称 + Base URL 在下方填写。卡片不会自动启用；
+   * 配置完成后用户点击卡片（或"启用此供应商"）才成为活动大模型。
    */
   private addBlankCustomProvider(): void {
     const prev = loadConfig() ?? defaults();
@@ -1498,13 +1610,17 @@ export class SettingsPanel {
       };
       customs.push(entry);
     }
-    const cfg: PureConfig = { ...prev, customProviders: customs, provider: id, model: '', baseURL: '', apiKey: '' };
+    // Do NOT activate the blank card: the active provider stays unchanged until
+    // the user fills in name + Base URL and clicks the card (or 启用此供应商).
+    const cfg: PureConfig = { ...prev, customProviders: customs };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     this.renderCustomProviderCards();
+    this.pendingActivation = id;
     (document.getElementById('cfg-provider') as HTMLSelectElement).value = id;
     (document.getElementById('cfg-model') as HTMLInputElement).value = '';
     (document.getElementById('cfg-baseurl') as HTMLInputElement).value = '';
+    (document.getElementById('cfg-apikey') as HTMLInputElement).value = '';
     this.updateProviderPresentation(id);
     this.toast(t('llm.custom.addedBlank'));
     document.getElementById('cfg-custom-name-edit')?.focus();
@@ -1587,10 +1703,10 @@ export class SettingsPanel {
   }
 
   /**
-   * One-click quick preset: add the provider entry (idempotent), select it and
-   * hide the add form. Keyless locals (Ollama) are ready to chat immediately;
-   * cloud presets (OpenAI / OpenRouter / NVIDIA) prompt for the API key in the
-   * config card below — autoSave redirects the typed key per platform.
+   * One-click quick preset: add the provider entry (idempotent) and open its
+   * config card. The provider does NOT become the active LLM on add — the
+   * fields are prefilled, then the user clicks the card (or 启用此供应商) to
+   * activate it, so a card is only ever active after the user acts on it.
    */
   private addCustomPreset(preset: CustomProvider): void {
     const prev = loadConfig() ?? defaults();
@@ -1598,22 +1714,16 @@ export class SettingsPanel {
     if (!customs.some(p => p.id === preset.id)) {
       customs.push({ ...preset });
     }
-    const cfg: PureConfig = {
-      ...prev,
-      customProviders: customs,
-      provider: preset.id,
-      model: '', baseURL: '', apiKey: '',
-    };
+    const cfg: PureConfig = { ...prev, customProviders: customs };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     this.renderCustomProviderCards();
+    this.pendingActivation = preset.id;
     (document.getElementById('cfg-provider') as HTMLSelectElement).value = preset.id;
     (document.getElementById('cfg-model') as HTMLInputElement).value = preset.defaultModel;
     (document.getElementById('cfg-baseurl') as HTMLInputElement).value = preset.baseURL;
     this.updateProviderPresentation(preset.id);
-    this.toast(preset.local
-      ? t('llm.custom.presetAdded').replace('{name}', preset.name)
-      : t('llm.custom.presetAddedKey').replace('{name}', preset.name));
+    this.toast(t('llm.custom.addedConfig').replace('{name}', preset.name));
   }
 
   private removeSelectedCustomProvider(): void {
@@ -1621,7 +1731,8 @@ export class SettingsPanel {
   }
 
   /** 按 id 删除自定义供应商卡片（卡片 × 与配置卡删除按钮共用）。若删除的是
-   *  当前选中的供应商，回退到 DeepSeek 默认配置；否则保持当前选择。 */
+   *  当前选中的供应商，回退到 DeepSeek 默认配置；否则保持当前选择。删除后
+   *  表单回填新活动供应商的配置，避免残留被删卡片的字段值被后续保存误写。 */
   private removeCustomProvider(id: string): void {
     const prev = loadConfig() ?? defaults();
     const removed = customProviderFor(prev.customProviders ?? [], id);
@@ -1641,11 +1752,17 @@ export class SettingsPanel {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     this.renderCustomProviderCards();
-    (document.getElementById('cfg-provider') as HTMLSelectElement).value = cfg.provider;
-    if (wasSelected) {
-      (document.getElementById('cfg-model') as HTMLInputElement).value = '';
-      (document.getElementById('cfg-baseurl') as HTMLInputElement).value = '';
-    }
+    const select = document.getElementById('cfg-provider') as HTMLSelectElement;
+    select.value = cfg.provider;
+    const nextCustom = customProviderFor(cfg.customProviders ?? [], cfg.provider);
+    const nextDef = providerDef(cfg.provider);
+    (document.getElementById('cfg-model') as HTMLInputElement).value =
+      cfg.model || nextCustom?.defaultModel || nextDef?.defaultModel || '';
+    (document.getElementById('cfg-baseurl') as HTMLInputElement).value =
+      cfg.baseURL || nextCustom?.baseURL || nextDef?.baseURL || '';
+    const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
+    keyInput.value = cfg.apiKey || nextCustom?.apiKey || '';
+    delete keyInput.dataset.touched;
     this.updateProviderPresentation(cfg.provider);
     this.toast(t('llm.custom.deleted'));
   }
@@ -1668,12 +1785,27 @@ export class SettingsPanel {
       if (!isNaN(idx) && hubSkills[idx]) hubSkills[idx] = { ...hubSkills[idx], enabled: el.checked };
     });
 
+    // Decouple "whose config the panel edits" (the hidden select, target of the
+    // form fields) from "the active LLM" (cfg.provider). A card is only active
+    // once it is fully configured AND the user explicitly selected it
+    // (pendingActivation is null); while editing a card that is pending
+    // activation the active provider and its model/baseURL/apiKey survive.
+    const prev = loadConfig() ?? defaults();
+    const editing = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const active = this.pendingActivation === editing
+      ? prev.provider
+      : (this.isProviderConfigured(editing) ? editing : prev.provider);
+    const editingActive = editing === active;
+    const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement).value.trim();
+    const model = (document.getElementById('cfg-model') as HTMLInputElement).value.trim();
+    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim();
+
     return {
-      provider: (document.getElementById('cfg-provider') as HTMLSelectElement).value as PureConfig['provider'],
+      provider: active as PureConfig['provider'],
       customProviders: this.gatherCustomProviders(),
-      apiKey: (document.getElementById('cfg-apikey') as HTMLInputElement).value.trim(),
-      model: (document.getElementById('cfg-model') as HTMLInputElement).value.trim(),
-      baseURL: (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim(),
+      apiKey: editingActive ? apiKey : prev.apiKey,
+      model: editingActive ? model : prev.model,
+      baseURL: editingActive ? baseURL : prev.baseURL,
       language: (document.getElementById('cfg-language') as HTMLSelectElement).value as PureConfig['language'],
       city: (document.getElementById('cfg-city') as HTMLInputElement | null)?.value.trim() ?? '',
       theme: (document.querySelector('.theme-option.active')?.getAttribute('data-theme') || 'light') as PureConfig['theme'],
