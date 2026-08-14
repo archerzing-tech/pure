@@ -1,6 +1,6 @@
 [package]
 name = "pure"
-version = "1.9.3-beta5"
+version = "1.9.4"
 edition = "2021"
 
 [lib]
