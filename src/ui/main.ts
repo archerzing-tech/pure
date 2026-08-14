@@ -6,7 +6,7 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { ChatController, bindAssistantBubbleCopy, shouldCancelForEscape } from './chat';
+import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, shouldCancelForEscape } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { buildStoredToolExec, getStoredDisplayContent, getStoredThinkingSegments, getStoredToolCallInfos, groupFileWrites, type StoredMessage, type StoredToolCallInfo, type ToolExecMeta } from './store';
@@ -762,6 +762,7 @@ async function renderSessionMessages(messages: StoredMessage[]) {
       // for the model only — strip it so replay never shows it in the user's
       // own bubble.
       bubble.textContent = stripUserTurnContext(m.content);
+      bindUserBubbleSelectAll(bubble);
       linkifyPaths(bubble);
       wrapper.appendChild(bubble);
       chatEl.appendChild(wrapper);

@@ -33,6 +33,18 @@ export interface ToolDefinition {
   input_schema: Record<string, unknown>;
 }
 
+/**
+ * A generated image delivered to the UI by the generate_image tool. `dataUrl`
+ * is either a base64 `data:image/...;base64,...` payload or an https URL the
+ * provider returned; it renders in the tool row as an <img> card. The LLM
+ * never sees these — only the compact metadata summary in ToolResult.result.
+ */
+export interface GeneratedImage {
+  dataUrl: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
 export type LLMChunk =
   | { type: 'content'; content: string }
   // Model-internal reasoning/chain-of-thought streamed separately from the

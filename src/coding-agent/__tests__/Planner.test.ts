@@ -128,6 +128,24 @@ describe('Planner', () => {
     expect(new Planner().analyzeTask('Implement a new feature across multiple files in the project.').mode).toBe('plan');
   });
 
+  it('gives a NEW project the from-scratch build fallback, not the edit template', () => {
+    // The heuristic fallback for a brand-new build must read like building
+    // from zero (understand → scaffold → implement → integrate → deliver),
+    // never like an edit of existing code (确认范围/完成改动/验证结果).
+    const r = new Planner().analyzeTask('创建一个5G的监控大屏项目，可以实时监控省市的实时网络现状，给出告警和分析。');
+    expect(r.mode).toBe('build');
+    expect(r.plan!.steps.map((s) => s.action)).toEqual([
+      '理解与分析需求', '搭建项目骨架', '分模块实现核心功能', '联调集成与验证', '收尾与交付',
+    ]);
+    expect(r.plan!.steps.every((s) => s.todosRequired !== true)).toBe(true);
+  });
+
+  it('keeps the edit template for rebuilds of an existing codebase', () => {
+    const r = new Planner().analyzeTask('重构整个项目');
+    expect(r.mode).toBe('build');
+    expect(r.plan!.steps.map((s) => s.action)).toEqual(['确认范围', '完成改动', '验证结果']);
+  });
+
   it('classifies Chinese full-stack / multi-file builds as complex', () => {
     expect(new Planner().analyzeTask('搭建一个完整的全栈项目。').complexity).toBe('complex');
     expect(new Planner().analyzeTask('从零开始构建一个多文件系统。').complexity).toBe('complex');

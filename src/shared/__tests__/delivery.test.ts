@@ -65,6 +65,20 @@ describe('delivery workspace discovery', () => {
     expect(specs.map((spec) => spec.command)).toEqual(['cargo check', 'cargo test', 'cargo build']);
   });
 
+  it('stops waiting when workspace discovery is aborted', async () => {
+    const controller = new AbortController();
+    const hanging: ToolAdapter = {
+      getTools: () => [],
+      getMetadata: () => undefined,
+      execute: async () => new Promise<ToolResult>(() => {}),
+    };
+    const pending = discoverWorkspace(hanging, controller.signal);
+    setTimeout(() => controller.abort(), 5);
+    const profile = await pending;
+    expect(profile.projectType).toBe('unknown');
+    expect(profile.explorationComplete).toBe(false);
+  });
+
   it('flags an empty workspace as bare so from-scratch builds get honest copy', async () => {
     const bare = await discoverWorkspace(adapter(''));
     expect(isBareWorkspace(bare)).toBe(true);

@@ -14,6 +14,7 @@ import { createDeepSeekAdapter, createQwenAdapter, createGLMAdapter, OpenAICompa
 import { DeepSeekAnthropicAdapter } from './adapter/deepseek/DeepSeekAnthropicAdapter';
 import { NodeToolAdapter, detectRuntimeVersions } from './adapter/node/NodeToolAdapter';
 import { StreamManager } from './harness/StreamManager';
+import { CliWireframeStream } from './shared/cliDiagram';
 import { FSStore } from './adapter/storage/FSStore';
 import { SQLiteStore } from './adapter/storage/SQLiteStore';
 import { ContextEngine } from './harness/ContextEngine';
@@ -591,6 +592,12 @@ async function consumeTurn(
   let turnCount = 1;
   let ok = true;
 
+  // Diagram wireframe conversion: mermaid/puml fenced blocks from the model
+  // stream as raw source; the converter holds open diagram fences until they
+  // complete and then emits a box-drawing wireframe instead. Everything else
+  // streams through unchanged (streamMgr keeps the 16ms token batching).
+  const wireframe = new CliWireframeStream(chunk => streamMgr.feed({ type: 'TokenDelta', timestamp: Date.now(), payload: { content: chunk, stateId: `wf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, isToolCall: false } }));
+
   // ── Thinking indicator ──
   // The CLI never waits silently: a `💭 thinking…` line is printed the moment
   // the turn starts (so the user isn't staring at a frozen cursor while the
@@ -655,7 +662,8 @@ async function consumeTurn(
             endThinking();
             if (!event.payload.isToolCall) answered = true;
           }
-          streamMgr.feed(event);
+          if (event.payload.content) wireframe.feed(event.payload.content);
+          else streamMgr.feed(event);
           break;
         case 'ReasoningDelta':
           if (event.payload.content) {
@@ -716,7 +724,10 @@ async function consumeTurn(
     // Every path — normal completion, engine Error/Interrupted, or an adapter
     // throwing — commits the thinking line so the shell prompt never prints
     // onto a dangling `💭 thinking…` cursor. Idempotent (guarded by `thinking`).
+    // Also flush the wireframe converter so a trailing open diagram fence
+    // degrades to its raw source instead of being dropped.
     endThinking();
+    wireframe.flush();
     streamMgr.stop();
   }
   return { output: finalOutput, messages, turnCount, ok };

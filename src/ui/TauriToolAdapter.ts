@@ -3,7 +3,7 @@
 // For Vite dev (no Tauri runtime), falls back to returning no available tools.
 // Built-in schemas stay shared with the CLI; researcher tools wrap the Rust web/file primitives while legacy names remain execution-compatible but hidden from new model tool lists.
 
-import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../shared/types';
+import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition, GeneratedImage } from '../shared/types';
 import type { Channel } from '@tauri-apps/api/core';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA, isPublicToolName } from '../shared/toolDefs';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../shared/research';
@@ -69,6 +69,50 @@ export function setToolOutputListener(fn: ToolOutputListener | null): void {
   toolOutputListener = fn;
 }
 
+// ── Generated-image side channel ──
+// generate_image's ToolResult.result carries ONLY compact metadata (the engine
+// JSON-serializes it back into the LLM's tool message, so base64 image payloads
+// must never ride there). The full data URLs are cached here by toolCallId and
+// claimed by chat.ts when the ToolResult event arrives (takeGeneratedImages),
+// then rendered as <img> cards and persisted for session replay.
+
+const MAX_GENERATED_IMAGE_CACHE = 200;
+const generatedImageCache = new Map<string, GeneratedImage[]>();
+
+/** Claim (and remove) the generated images for a tool call id. Returns
+ * undefined when nothing was cached — e.g. a non-image tool or an aborted call.
+ * Bounded: the Map only ever holds in-flight tool calls plus a small tail. */
+export function takeGeneratedImages(toolCallId: string): GeneratedImage[] | undefined {
+  const images = generatedImageCache.get(toolCallId);
+  generatedImageCache.delete(toolCallId);
+  return images;
+}
+
+function cacheGeneratedImages(toolCallId: string, images: GeneratedImage[]): void {
+  if (images.length === 0) return;
+  generatedImageCache.set(toolCallId, images);
+  while (generatedImageCache.size > MAX_GENERATED_IMAGE_CACHE) {
+    const oldest = generatedImageCache.keys().next().value;
+    if (oldest === undefined) break;
+    generatedImageCache.delete(oldest);
+  }
+}
+
+export interface ImageGenContext {
+  /** Provider id (used for proxy-bypass matching). */
+  provider: string;
+  /** The provider's text-to-image model id (e.g. 'gpt-image-1'). */
+  model: string;
+  /** Base URL of the OpenAI-compatible endpoint (images API lives under it). */
+  baseURL: string;
+  /** Rust secrets key for the provider's API key (custom: 'llm.apiKey.<id>'). */
+  secretKey?: string;
+  /** LLM-scoped proxy URL; generate_image hits the provider's image API. */
+  proxyUrl?: string;
+  proxyBypassProviders?: string[];
+  proxyBypassModels?: string[];
+}
+
 export class TauriToolAdapter implements ToolAdapter {
   private workspace: string;
   private tavilyApiKey: string;
@@ -80,8 +124,9 @@ export class TauriToolAdapter implements ToolAdapter {
   private latestWriteBatch: WorkspaceSnapshotBatch | null = null;
   private snapshotSequence = 0;
   private readonly maxSnapshotBytes = 8 * 1024 * 1024;
+  private readonly imageGen?: ImageGenContext;
 
-  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '') {
+  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext) {
     this.workspace = workspace;
     this.tavilyApiKey = tavilyApiKey;
     this.serperApiKey = serperApiKey;
@@ -89,6 +134,7 @@ export class TauriToolAdapter implements ToolAdapter {
     this.proxyUrl = proxyUrl;
     this.invokeFn = invoke ?? null;
     this.sessionId = sessionId;
+    this.imageGen = imageGen;
   }
 
   private call(command: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -433,6 +479,57 @@ export class TauriToolAdapter implements ToolAdapter {
           // trip — the Rust command treats it as optional.
           const info = await this.call('sys_info', { workspace: ws, location: this.location }) as string;
           return { id: toolCall.id, toolName: name, result: info, success: true, duration: Date.now() - start };
+        }
+        case 'generate_image': {
+          if (!this.imageGen) {
+            return {
+              id: toolCall.id,
+              toolName: name,
+              error: 'generate_image is not configured — the connected provider has no text-to-image model enabled. Fall back to SVG.',
+              success: false,
+              duration: Date.now() - start,
+            };
+          }
+          const prompt = String(args.prompt ?? '').trim();
+          if (!prompt) {
+            return { id: toolCall.id, toolName: name, error: 'generate_image: prompt is required', success: false, duration: Date.now() - start };
+          }
+          const n = typeof args.n === 'number' && Number.isFinite(args.n)
+            ? Math.min(4, Math.max(1, Math.floor(args.n)))
+            : 1;
+          const size = typeof args.size === 'string' ? args.size.trim() : '';
+          const payload = await this.call('generate_image', {
+            provider: this.imageGen.provider,
+            model: this.imageGen.model,
+            baseUrl: this.imageGen.baseURL,
+            secretKey: this.imageGen.secretKey ?? '',
+            apiKey: '',
+            prompt,
+            n,
+            size,
+            proxyUrl: this.imageGen.proxyUrl ?? '',
+            proxyBypassProviders: this.imageGen.proxyBypassProviders ?? [],
+            proxyBypassModels: this.imageGen.proxyBypassModels ?? [],
+          }) as { images: GeneratedImage[] };
+          const images = Array.isArray(payload?.images) ? payload.images : [];
+          if (images.length === 0) {
+            return { id: toolCall.id, toolName: name, error: 'generate_image: no images returned', success: false, duration: Date.now() - start };
+          }
+          // Full payloads go to the UI via the side channel; the LLM sees only
+          // the compact summary (never megabytes of base64 in its context).
+          cacheGeneratedImages(toolCall.id, images);
+          return {
+            id: toolCall.id,
+            toolName: name,
+            result: {
+              prompt,
+              count: images.length,
+              images: images.map((img) => ({ mimeType: img.mimeType, sizeBytes: img.sizeBytes })),
+              summary: `Generated ${images.length} image(s) for prompt "${prompt.slice(0, 120)}" — rendered in the chat UI for the user.`,
+            },
+            success: true,
+            duration: Date.now() - start,
+          };
         }
         default:
           return {

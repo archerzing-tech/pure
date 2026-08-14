@@ -9,7 +9,7 @@
 // in-memory cache keeps reads synchronous; localStorage (`pure_stats:<id>`)
 // is only the fallback for plain Vite dev.
 
-import type { TokenUsage } from '../shared/types';
+import type { TokenUsage, GeneratedImage } from '../shared/types';
 import type { IntentAssessment, Plan } from '../coding-agent/types';
 
 export interface ToolExecMeta {
@@ -24,10 +24,11 @@ export interface ToolExecMeta {
   args?: Record<string, unknown>;
   /**
    * Tag for special result renderers. `'search'` triggers the URL/title/snippet
-   * parser; `'fetch'` shows a snippet of the de-noised page text; `undefined`
-   * (or anything else) renders the raw `resultText` in a `<pre>` body.
+   * parser; `'fetch'` shows a snippet of the de-noised page text; `'image'`
+   * renders the generated images as <img> cards; `undefined` (or anything
+   * else) renders the raw `resultText` in a `<pre>` body.
    */
-  resultKind?: 'search' | 'fetch';
+  resultKind?: 'search' | 'fetch' | 'image';
   /**
    * Parsed result for `resultKind: 'search'`. Each item is a search hit the
    * web_search backends returned (cn.bing.com → DuckDuckGo → Bing; see
@@ -39,6 +40,13 @@ export interface ToolExecMeta {
    * the raw fallback when `resultItems` is missing.
    */
   resultText?: string;
+  /**
+   * Generated images for `resultKind: 'image'` (the generate_image tool).
+   * Data URLs are persisted with the session so session replay renders the
+   * same <img> cards; desktop sessions are file-backed (~/.pure/sessions/),
+   * so the payload size is a non-issue there.
+   */
+  resultImages?: GeneratedImage[];
 }
 
 export interface StoredMessage {

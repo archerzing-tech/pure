@@ -116,6 +116,29 @@ export const SVG_OUTPUT_PROMPT = `When the user asks for MULTIPLE images, icons,
 - Emit ONE separate fenced code block tagged svg PER image — each block contains exactly one root <svg>...</svg> document. NEVER combine several subjects into a single <svg>: a two-in-one SVG renders as ONE image, not two.
 - Place the fenced blocks back to back with NO prose between them, so the app groups them into a side-by-side grid (each image about half the chat width, in one row).`;
 
+/** 文生图契约 — REPLACES the SVG output contract when the connected provider
+ * exposes an OpenAI-compatible text-to-image API (imageGenEnabled). Image
+ * requests then go through the generate_image tool and render as real <img>
+ * cards (PNG/JPEG) instead of hand-drawn SVG; SVG stays only for diagrams and
+ * as the automatic fallback when the image tool is unavailable or fails. */
+export const IMAGE_GEN_OUTPUT_PROMPT = `When the user asks for images, icons, illustrations, photos, posters, or variations (e.g. "创作一个小狗图标", "生成一张 xxx 图片", "两个图标", "A/B 两个方案"):
+- Call the generate_image(prompt, n?, size?) tool — the connected model supports text-to-image, and generated images render as real pictures in the chat. Pass n > 1 (up to 4) for multiple images or variations instead of making repeated calls.
+- NEVER emit fenced svg code blocks for image requests while generate_image is available — SVG is only for hand-drawn diagrams (flowcharts, architecture sketches) you construct yourself.
+- If generate_image FAILS (provider error, unsupported endpoint), fall back to svg code blocks as before so the user still gets a picture.`;
+
+/** ```chart DSL contract — identical in GUI and CLI (shared, not duplicated).
+ * The GUI renders fenced ```chart blocks inline as echarts charts (bar/hbar/
+ * line/pie/scatter/kline/radar/tree/treemap/sunburst). The CLI renders the
+ * block as plain code. The closing rule matters beyond syntax: charts and
+ * pictures are DELIVERED as fenced blocks — never as a script that draws them. */
+export const CHART_DSL_PROMPT = `To SHOW data as a chart, emit a fenced code block tagged chart. Put type: on its own line (default bar), then optional title: and unit: lines, then the data rows. Supported types:
+- bar | hbar | line | pie — one \`label value\` row per line (e.g. 一月 120); a header row plus >=2 numeric columns renders one series per column.
+- scatter — one point per line: \`name x y\` (e.g. 小明 170 65).
+- kline — a header \`日期 开盘 收盘 最低 最高\` then \`date open close low high\` rows (that OHLC order is required).
+- radar — \`indicators: 维度1 维度2 …\` (or a header row of axis names), then one series per line: \`名称 v1 v2 …\`.
+- tree | treemap | sunburst — indentation defines the hierarchy (2 spaces per level), the first line is the root; for treemap/sunburst end a line with a number to set its value (\`  电子 500\`).
+A JSON payload (\`{ "type": "tree", "data": [...] }\`) is accepted for every type. NEVER write a Python/matplotlib or other script to draw a chart or picture — the fenced chart / svg / mermaid / puml block IS the deliverable and renders inline as the image.`;
+
 /** 拟人化沟通基调 — identical in GUI and CLI (shared, not duplicated). The
  * agent should sound like a thoughtful human colleague — natural, warm, direct
  * — and narrate its work instead of emitting canned boilerplate. */

@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, type PureConfig } from './config';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, promptBudgetForProvider } from '../shared/providers';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, promptBudgetForProvider, imageGenEnabled, imageGenModelFor } from '../shared/providers';
 import { saveSession, loadLastSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, limitStoredMessages, MAX_PERSISTED_MESSAGES, type StoredMessage, type ToolExecMeta, type SessionStats } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
@@ -13,7 +13,8 @@ import { compileRequestWorkflow } from '../shared/requestWorkflow';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { ContextEngine, type ContextCompactionResult } from '../harness/ContextEngine';
-import { isGitMutationCommand } from '../coding-agent/ToolRegistry';
+import { isGitMutationCommand, Tags } from '../coding-agent/ToolRegistry';
+import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { formatIntentPrompt, parsePlanJsonWithMeta } from '../coding-agent/Planner';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
@@ -41,9 +42,9 @@ import {
   createQualityGateCard,
   type PlanCardHandle,
 } from './plan';
-import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener } from './TauriToolAdapter';
+import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
-import { planOverview, type PlanOverviewStatus } from './planOverview';
+import { planOverview, setOverviewPositionSession, type PlanOverviewStatus } from './planOverview';
 import { attachPlanPauseActions } from './planPauseActions';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
@@ -74,6 +75,7 @@ import type {
   ToolDefinition,
   Message,
   BudgetConfig,
+  GeneratedImage,
 } from '../shared/types';
 import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, TaskMode, IntentAssessment } from '../coding-agent/types';
 
@@ -247,6 +249,25 @@ export function bindAssistantBubbleCopy(bubble: HTMLElement): void {
   });
 }
 
+/** Double-click a user bubble to select ALL of its text at once. User messages
+ * are raw text (a browser double-click would only select one word), so this
+ * mirrors the assistant copy shortcut: live bubbles (addBubble) and restored
+ * bubbles (main.ts session replay) both bind it. */
+export function bindUserBubbleSelectAll(bubble: HTMLElement): void {
+  if (bubble.dataset.userSelectAllBound === '1') return;
+  bubble.dataset.userSelectAllBound = '1';
+  bubble.addEventListener('dblclick', (event) => {
+    // Keep linkified paths (and any future interactive children) clickable.
+    const target = event.target as Element | null;
+    if (target?.closest?.('a, button, [role="button"]')) return;
+    const range = document.createRange();
+    range.selectNodeContents(bubble);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
+}
+
 export function parseToolCallBuffer(buf: string | undefined): { name?: string; args?: Record<string, unknown> } {
   const trimmed = (buf ?? '').trim();
   if (!trimmed) return {};
@@ -356,15 +377,61 @@ function buildEnvironmentContext(config: PureConfig | null): string {
   return `Environment: reply in ${lang}; user location is ${city} (configured in Settings → General → Environment). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.`;
 }
 
-function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null, toolDefinitions: ToolDefinition[] = []): string {
+function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null, toolDefinitions: ToolDefinition[] = [], imageGeneration = false): string {
   return promptAssembler.buildSystemPrompt({
     surface: 'gui',
-    capabilities: buildGuiCapabilities(hasWorkspace, temporaryWorkspace),
+    capabilities: buildGuiCapabilities(hasWorkspace, temporaryWorkspace, { imageGeneration }),
+    imageGeneration,
     toolDefinitions,
     environment: buildEnvironmentContext(config),
     runtimes: buildRuntimesContext(),
     skills: config?.hubSkills,
     budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model),
+  });
+}
+
+function makeAbortError(message: string): Error {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+function makeTimeoutError(message: string): Error {
+  const error = new Error(message);
+  error.name = 'TimeoutError';
+  return error;
+}
+
+/** Race preflight work against the active turn's AbortSignal. The underlying
+ * IPC promise may finish later, but the UI never waits for an uncancellable
+ * native call before releasing the composer and stop controls. */
+function withAbortTimeout<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(makeAbortError(`${label} aborted`)));
+    timer = setTimeout(() => finish(() => reject(makeTimeoutError(`${label} timed out`))), timeoutMs);
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
   });
 }
 
@@ -380,22 +447,28 @@ let runtimesProbe: Promise<string> | null = null;
 
 /** Kick off the one-shot runtime probe (idempotent). Callers await the same
  * promise so the first send doesn't race the probe. */
-export function ensureRuntimesProbed(): Promise<string> {
-  if (runtimesProbe) return runtimesProbe;
-  runtimesProbe = (async () => {
-    try {
-      const core = await loadTauriCore();
-      if (!core) return '';
-      const raw = await core.invoke<string>('sys_info', { workspace: '', location: null }) ?? '';
+export function ensureRuntimesProbed(signal?: AbortSignal): Promise<string> {
+  if (!runtimesProbe) {
+    runtimesProbe = (async () => {
+      try {
+        const core = await loadTauriCore();
+        if (!core) return '';
+        const raw = await withAbortTimeout(
+          core.invoke<string>('sys_info', { workspace: '', location: null }),
+          undefined,
+          8_000,
+          'runtime probe',
+        ) ?? '';
       // sys_info output: "runtimes:  node: v22.x.x  bun: 1.3.x  python3: 3.x.x  rustc: …"
-      const m = raw.match(/^runtimes:\s*(.+)$/m);
-      cachedRuntimes = m?.[1]?.trim() ?? '';
-    } catch {
-      cachedRuntimes = '';
-    }
-    return cachedRuntimes;
-  })();
-  return runtimesProbe;
+        const m = raw.match(/^runtimes:\s*(.+)$/m);
+        cachedRuntimes = m?.[1]?.trim() ?? '';
+      } catch {
+        cachedRuntimes = '';
+      }
+      return cachedRuntimes;
+    })();
+  }
+  return withAbortTimeout(runtimesProbe, signal, 8_500, 'runtime probe');
 }
 
 function buildRuntimesContext(): string {
@@ -689,18 +762,24 @@ export async function generateTaskAnalysis(
       { role: 'user', content: grounding.length ? `${userText}\n\n${grounding.join('\n\n')}` : userText },
     ];
     // Stream so the user sees the model reason about THIS task in real time;
-    // the accumulated text is parsed after the stream ends. The timeout is
-    // enforced INSIDE the loop (flag + break) rather than racing a separate
-    // promise: withTimeoutAndAbort rejects but never closes an abandoned async
-    // generator, which would keep consuming the stream — and keep firing
-    // onThinking into the transcript — after we have already given up.
+    // each pending iterator read is raced against the remaining deadline and
+    // the active AbortSignal. A timer that only flips a flag cannot interrupt
+    // an async generator waiting on a network response, which used to leave
+    // the GUI in streaming state forever.
     let text = '';
     let visibleSent = 0;
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; }, timeoutMs);
+    const linkedController = new AbortController();
+    const forwardAbort = (): void => linkedController.abort();
+    signal?.addEventListener('abort', forwardAbort, { once: true });
+    const iterator = llm.stream(messages, [], linkedController.signal)[Symbol.asyncIterator]();
+    const deadline = Date.now() + timeoutMs;
     try {
-      for await (const chunk of llm.stream(messages, [], signal)) {
-        if (timedOut || signal?.aborted) break;
+      while (true) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw makeTimeoutError('task analysis timed out');
+        const next = await withAbortTimeout(iterator.next(), linkedController.signal, remaining, 'task analysis');
+        if (next.done) break;
+        const chunk = next.value;
         if (chunk.type === 'content') {
           text += chunk.content;
           // Keep machine metadata out of the visible thinking trace. The user
@@ -715,9 +794,10 @@ export async function generateTaskAnalysis(
         }
       }
     } finally {
-      clearTimeout(timer);
+      signal?.removeEventListener('abort', forwardAbort);
+      linkedController.abort();
+      void iterator.return?.();
     }
-    if (timedOut) throw new Error('task analysis timed out');
     return parseTaskAnalysisText(text, userText);
   } catch (err) {
     console.warn('[pure] task analysis failed, falling back to heuristic plan:', (err as Error)?.message ?? err);
@@ -733,16 +813,21 @@ export async function generateTaskAnalysis(
 /** Scan the workspace so plan generation and clarifying questions reference
  * real files instead of guessing. Returns a compact context string, or ''
  * when there is no workspace / the scan fails (callers degrade gracefully). */
-async function buildWorkspaceContext(workspace: string, config: PureConfig): Promise<string> {
+async function buildWorkspaceContext(workspace: string, config: PureConfig, signal?: AbortSignal): Promise<string> {
   if (!workspace) return '';
   try {
     const adapter = createToolAdapter(workspace, config);
     const exec = (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
-      adapter.execute({
-        id: `wsctx_${name}_${Date.now()}`,
-        index: 0,
-        function: { name, arguments: JSON.stringify(args) },
-      });
+      withAbortTimeout(
+        adapter.execute({
+          id: `wsctx_${name}_${Date.now()}`,
+          index: 0,
+          function: { name, arguments: JSON.stringify(args) },
+        }, signal),
+        signal,
+        8_000,
+        `workspace ${name}`,
+      );
     const listing = await exec('list_files', { path: '.', recursive: false });
     if (!listing.success) return '';
     const parts: string[] = [`Structure of the workspace root:\n${String(listing.result ?? '').slice(0, 800)}`];
@@ -795,13 +880,38 @@ export function shouldEnterPlanReview(
     && (planningEnabled || needsDeliveryGate));
 }
 
+/**
+ * Resolve the text-to-image context for the connected provider: undefined when
+ * the provider/model has no image-generation support (SVG stays the fallback),
+ * otherwise the image model id + endpoint + secrets key the generate_image
+ * tool needs. Mirrors createLLMAdapter's resolution (same base URL / key).
+ */
+function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
+  const customs = config.customProviders ?? [];
+  if (!imageGenEnabled(customs, config.provider, config.model)) return undefined;
+  const custom = customProviderFor(customs, config.provider);
+  return {
+    provider: config.provider,
+    model: imageGenModelFor(customs, config.provider, config.model),
+    baseURL: config.baseURL || customBaseURL(customs, config.provider),
+    secretKey: custom ? customSecretKey(custom.id) : undefined,
+    // Image generation hits the provider's LLM-family API — route it through
+    // the same proxy scope (and bypass rules) as chat traffic.
+    proxyUrl: effectiveProxyUrl(config.proxy, 'llm'),
+    proxyBypassProviders: config.proxy?.bypassProviders ?? [],
+    proxyBypassModels: config.proxy?.bypassModels ?? [],
+  };
+}
+
 function createToolAdapter(workspace: string, config: PureConfig, sessionId = ''): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy, 'tools'));
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy, 'tools'), imageGenContextFor(config));
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.
+  // generate_image is workspace-independent (it calls the provider's image
+  // API), so it stays available in plain-chat mode like the web tools.
   const available = (name: string): boolean =>
-    isToolEnabled(name, config) && (!!workspace || isWebTool(name) || name === 'sys_info');
+    isToolEnabled(name, config) && (!!workspace || isWebTool(name) || name === 'sys_info' || name === 'generate_image');
   return {
     getTools: () => inner.getTools().filter((t) => available(t.name)),
     getMetadata: (name) => (available(name) ? inner.getMetadata(name) : undefined),
@@ -821,12 +931,27 @@ function createToolAdapter(workspace: string, config: PureConfig, sessionId = ''
  * content before continuing with send-time setup or other expensive work. A
  * single rAF callback runs before its frame paints; the second callback proves
  * that at least the intervening frame was presented. */
-function yieldToNextPaint(): Promise<void> {
+function yieldToNextPaint(signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    timer = setTimeout(finish, 250);
+    if (signal?.aborted) {
+      finish();
+      return;
+    }
+    signal?.addEventListener('abort', finish, { once: true });
     if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      requestAnimationFrame(() => requestAnimationFrame(finish));
     } else {
-      setTimeout(resolve, 0);
+      finish();
     }
   });
 }
@@ -889,6 +1014,8 @@ export class ChatController {
 
   constructor() {
     this.sessionId = `session_${Date.now()}`;
+    // The outline's position memory follows the active session.
+    setOverviewPositionSession(this.sessionId);
     this.permissionManager = new PermissionManager();
     this.sessionStats = loadSessionStats(this.sessionId);
   }
@@ -910,6 +1037,8 @@ export class ChatController {
     // A different conversation starts without the previous plan's outline.
     planOverview().clear();
     this.sessionId = id;
+    // Re-apply this session's remembered outline position.
+    setOverviewPositionSession(id);
     this.contextEngine = undefined;
     this.preCompactedMessages = null;
     this.preCompactSourceMessages = null;
@@ -1105,6 +1234,7 @@ export class ChatController {
     const saved = await loadLastSession();
     if (!saved) return null;
     this.sessionId = saved.sessionId;
+    setOverviewPositionSession(saved.sessionId);
     this.sessionStats = loadSessionStats(saved.sessionId);
     this.generation++;
     // Route through setWorkspace so the clickable-path resolver stays in sync,
@@ -1198,24 +1328,58 @@ export class ChatController {
 
     this.cancel();
     const gen = ++this.generation;
+    // Create the turn controller before any preflight await. Previously the
+    // controller and streaming state were installed only after workspace
+    // resolution, so Stop/Escape could not interrupt a slow startup probe.
+    const turnController = new AbortController();
+    this.abortController = turnController;
+    this.setStreaming(true);
+    const releaseSupersededTurn = (): void => {
+      if (this.abortController !== turnController) return;
+      this.setStreaming(false);
+      this.abortController = null;
+    };
     // Do not let path-linkification, scrolling, workspace resolution, or any
     // other preflight work run in the same event turn as the user's click.
     // Long transcripts make even small DOM/layout work visible; yielding here
     // guarantees the new bubble gets a browser paint first.
-    await yieldToNextPaint();
+    await yieldToNextPaint(turnController.signal);
     if (gen !== this.generation) {
       userBubble.remove();
+      releaseSupersededTurn();
       return;
     }
     linkifyPaths(userBubble);
     forceScrollToBottom(chatEl);
     hideNewContentHint(); // a fresh user turn resumes following the newest content
 
-    const effectiveWorkspace = sendWorkspace || await getApplicationTmpWorkspace(sendSessionId);
+    const effectiveWorkspace = sendWorkspace || await withAbortTimeout(
+      getApplicationTmpWorkspace(sendSessionId),
+      turnController.signal,
+      5_000,
+      'workspace resolution',
+    ).catch((error: Error) => {
+      if (error.name === 'AbortError') return '';
+      console.warn('[pure] workspace resolution timed out; continuing without a workspace:', error.message);
+      return '';
+    });
     if (gen !== this.generation) {
       // The immediately-rendered user bubble belongs to the superseded
       // transcript — drop it so no ghost message appears in the new session.
       userBubble.remove();
+      releaseSupersededTurn();
+      return;
+    }
+    if (turnController.signal.aborted) {
+      this.addStatusBubble('⏸ 已暂停：你的请求已保留在对话中。', true, false);
+      void this.persistSession(
+        [...this.messages, { role: 'user', content: userText }],
+        new Map(),
+        [],
+        sendSessionId,
+        sendWorkspace,
+      );
+      releaseSupersededTurn();
       return;
     }
     if (effectiveWorkspace) setPathLinkWorkspace(effectiveWorkspace);
@@ -1235,9 +1399,6 @@ export class ChatController {
         toolResults, thinkingPhases, sendSessionId, sendWorkspace,
       );
     };
-
-    this.setStreaming(true);
-    this.abortController = new AbortController();
 
     // Generation guard: if the user navigates to another session / starts a
     // new chat while this turn streams, the switch bumps `generation` and this
@@ -1448,6 +1609,10 @@ export class ChatController {
     // reads see type `never` (same pattern as planCard below).
     let assessmentFlow: AssessmentFlowHandle | null = null as AssessmentFlowHandle | null;
     try {
+      if (turnController.signal.aborted) {
+        keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
+        return;
+      }
       // All setup that could throw synchronously (adapter creation, agent construction)
       // Memory skill toggle: when disabled, skip learning + memory injection.
       const memoryEnabled = config.skills?.memory ?? true;
@@ -1465,7 +1630,7 @@ export class ChatController {
       // One-shot runtime probe (node/bun/python3/rustc/git versions) — the cached
       // promise resolves in ms after the first send; awaiting here guarantees
       // the first turn already carries the runtimes line in its prompt.
-      await ensureRuntimesProbed();
+      await ensureRuntimesProbed(this.abortController?.signal);
       let systemPrompt = '';
       // L2 per-request context (promptLayers.ts): task-specific fragments ride
       // with the USER message via composeUserTurn, not the system prompt.
@@ -1518,6 +1683,13 @@ export class ChatController {
         this.deferredInitDone = false;
       }
 
+      // Text-to-image capability for this turn: true when the connected
+      // provider/model exposes an OpenAI-compatible images API (explicit
+      // provider setting or image-capable model name). When true the model
+      // gets the generate_image tool and image requests render as <img> cards;
+      // when false (DeepSeek/Qwen/GLM default) SVG remains the output path.
+      const imageGen = imageGenEnabled(config.customProviders, config.provider, config.model);
+
       const codingAgent = new CodingAgent({
         sessionId: this.sessionId,
         llm,
@@ -1526,9 +1698,13 @@ export class ChatController {
         // With either a user workspace or an application temporary workspace,
         // defer to the live ToolRegistry so filesystem tools, subagents, and
         // MCP tools registered after construction are visible to the LLM.
+        // generate_image joins the tool list when the provider supports
+        // text-to-image (imageGen flag below) — otherwise models answer image
+        // requests with ```svg blocks as before.
         toolsDefs: effectiveWorkspace ? undefined : [
           ...(config.toolBrowser ? WEB_TOOL_DEFS : []),
           ...SYS_INFO_DEFS,
+          ...(imageGen ? [IMAGE_GEN_TOOL_DEF] : []),
         ],
         budget: DEFAULT_BUDGET,
         // Cross-session memory: passed only when the Memory skill is enabled;
@@ -1550,13 +1726,22 @@ export class ChatController {
         // suggestion bubble instead of rewriting the displayed answer.
         verifier: createDefaultVerifier(),
       });
+      // Text-to-image support: computed once per send from the connected
+      // provider/model (see imageGenContextFor). When enabled, register the
+      // generate_image tool with the live registry so the LLM sees it in
+      // workspace mode too, and the prompt contracts switch from SVG to
+      // image-generation (SVG stays the automatic fallback on tool failure).
+      if (imageGen) {
+        codingAgent.toolRegistry.register({ ...IMAGE_GEN_TOOL_DEF, tags: [Tags.READ], riskLevel: 'low' });
+      }
       const promptTools = effectiveWorkspace
         ? codingAgent.toolRegistry.getTools()
         : [
             ...(config.toolBrowser ? WEB_TOOL_DEFS : []),
             ...SYS_INFO_DEFS,
+            ...(imageGen ? [IMAGE_GEN_TOOL_DEF] : []),
           ];
-      systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools);
+      systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen);
       this.contextEngine = codingAgent.getHarness().getContextEngine();
 
       // LLM-only verifier for the post-Completed async check (P1-1). Created
@@ -1664,7 +1849,7 @@ export class ChatController {
       // 探针本身只读、快速，照常先行（结果用于给 LLM 分析做 grounding）；但它的
       // 结论气泡不再此刻弹出——等 LLM 分析完成后由 reportProbeFindings() 统一呈现。
       if (effectiveWorkspace && (needsDeliveryGate || needsIntentProbe || analysis.complexity === 'complex')) {
-        workspaceProfile = await discoverWorkspace(codingAgent.toolRegistry);
+        workspaceProfile = await discoverWorkspace(codingAgent.toolRegistry, this.abortController?.signal);
         taskContract = buildTaskContract(userText, workspaceProfile);
         if (needsIntentProbe) {
           probeGateDone = true;
@@ -1717,8 +1902,14 @@ export class ChatController {
       // Keep the right-edge floating outline in step with the in-chat card.
       const syncPlanOverview = (status: PlanOverviewStatus = 'active'): void => {
         const overview = planOverview();
-        if (!planCard || !this.activeComplexPlan) {
+        if (!planCard) {
           overview.clear();
+          return;
+        }
+        if (!this.activeComplexPlan) {
+          // The cursor advanced past the last plan (marker path): keep the
+          // last state visible instead of clearing it mid-stream — the final
+          // completion call flips it to the complete state.
           return;
         }
         const plan = this.activeComplexPlan;
@@ -1779,15 +1970,15 @@ export class ChatController {
           // LLM 专属计划就绪后原位升级（徽标消失），避免开场白与计划卡之间出现数秒空白等待。
           // 升级走平滑过渡：旧骨架卡在原地淡出收起，新计划卡插入它原来的位置、淡入滑入，
           // 而不是生硬替换（尊重系统减弱动态设置——此时直接替换、不做动画）。
-          const showPlanCard = (plan: Plan, refining = false): void => {
+          const showPlanCard = (plan: Plan, refining = false, fallback = false): void => {
             if (planCard) {
               // Keep one stable, flat progress list in the transcript. Updating
               // its contents in place preserves the user's visual anchor and
               // makes later phase changes visible instead of replacing the
               // only plan card that appeared at the start.
-              updatePlanCard(planCard, plan, analysis.mode, refining);
+              updatePlanCard(planCard, plan, analysis.mode, refining, fallback);
             } else {
-              planCard = createPlanCard(plan, analysis.mode, refining);
+              planCard = createPlanCard(plan, analysis.mode, refining, fallback);
               chatEl.appendChild(planCard.el);
             }
             // Right-edge outline: mirror the (possibly refining) plan card.
@@ -1809,7 +2000,7 @@ export class ChatController {
           const wsContext = [
             workspaceProfile ? (isBareWorkspace(workspaceProfile) ? '当前工作区为空或尚未建立项目结构。' : workspaceProfileSummary(workspaceProfile)) : '',
             taskContract ? formatTaskContract(taskContract) : '',
-            await buildWorkspaceContext(effectiveWorkspace, config),
+            await buildWorkspaceContext(effectiveWorkspace, config, this.abortController?.signal),
           ].filter(Boolean).join('\n\n');
           if (gen !== this.generation || this.abortController?.signal.aborted) {
             assessmentFlow?.cancel('本轮准备工作被中断，未执行任何改动。');
@@ -1831,6 +2022,13 @@ export class ChatController {
             },
           });
           finalizeThinkingCard(analysisCard);
+          // 实时分析没有返回任何内容时，思考卡不能假装“已经想清楚”：明确标注分析
+          // 未完成并说明接下来按通用步骤推进，而不是留一张空卡误导用户（“思考完
+          // 成”却什么都没想，正是用户这次反馈的困惑点）。
+          if (!llmAnalysis.analysis) {
+            setThinkingLabel(analysisCard, t('thinking.failed', '分析未完成'));
+            appendThinkingText(analysisCard, t('thinking.failedNote', '\n（实时分析未返回内容，已回退到通用步骤；执行中会结合实际情况调整。）'));
+          }
           // The user may have switched sessions / started a new chat during the
           // analysis — abandon this turn before showing anything.
           if (gen !== this.generation || this.abortController?.signal.aborted) {
@@ -1859,7 +2057,7 @@ export class ChatController {
             showPlanCard(planForReview);
           } else {
             // LLM 分析失败/超时 → 回退启发式骨架，并明确告知这是通用步骤而非专属计划。
-            showPlanCard(planForReview);
+            showPlanCard(planForReview, false, true);
             this.addStatusBubble('⚠️ 实时分析未完成，已回退到通用步骤；执行中会按实际情况调整。', false, false);
           }
           const approvePlan = (explicitlyApproved = false) => {
@@ -2238,12 +2436,17 @@ export class ChatController {
           // its toolsDefs (toolsDefsProvider reads them live) — but never block
           // the first send: race against a short timeout, then proceed without
           // MCP tools if a server is slow. They'll appear on the next turn.
-          await Promise.race([
+          await withAbortTimeout(
             this.mcpClient.connectAll().catch((err: Error) => {
               console.warn('[pure] MCP connection failed:', err.message);
             }),
-            new Promise(resolve => setTimeout(resolve, 1500)),
-          ]);
+            this.abortController?.signal,
+            1_500,
+            'MCP initialization',
+          ).catch((err: Error) => {
+            if (err.name === 'AbortError') throw err;
+            console.warn('[pure] MCP initialization skipped:', err.message);
+          });
         }
       }
 
@@ -2310,7 +2513,8 @@ export class ChatController {
         : promptTools;
       const assembly = promptAssembler.assemble({
         surface: 'gui',
-        capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace),
+        capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen }),
+        imageGeneration: imageGen,
         toolDefinitions: finalPromptTools,
         environment: buildEnvironmentContext(config),
         runtimes: buildRuntimesContext(),
@@ -2485,14 +2689,32 @@ export class ChatController {
             const status = event.payload.result.success ? '✓' : '✗';
             const toolName = event.payload.toolName;
             const duration = event.payload.duration;
-            const resultText = String(event.payload.result.result ?? '');
+            const rawResult = event.payload.result.result;
+            // generate_image returns a structured summary (the LLM must never
+            // see megabytes of base64): pull the human text out of the object.
+            const resultText = rawResult && typeof rawResult === 'object' && 'summary' in rawResult
+              ? String((rawResult as { summary?: unknown }).summary ?? '')
+              : String(rawResult ?? '');
             // Special-parse web_search / web_fetch results for rich body
-            // rendering. Other tools fall back to a raw preview in <pre>.
-            let resultKind: 'search' | 'fetch' | undefined;
+            // rendering; generated images render as <img> cards. Other tools
+            // fall back to a raw preview in <pre>.
+            let resultKind: 'search' | 'fetch' | 'image' | undefined;
             let resultItems: Array<{ title: string; snippet: string; url: string }> | undefined;
+            let resultImages: GeneratedImage[] | undefined;
             let resultPreview = '';
             if (event.payload.result.success) {
-              if (toolName === 'web_search' || toolName === 'researcher_web' || toolName === 'researcher_docs') {
+              if (toolName === 'generate_image') {
+                // The full base64 payloads never ride in ToolResult.result
+                // (they would be JSON-serialized back into the LLM context);
+                // they are claimed from the adapter's side channel here.
+                resultImages = takeGeneratedImages(event.payload.toolCallId);
+                if (resultImages?.length) {
+                  resultKind = 'image';
+                  resultPreview = resultText;
+                } else {
+                  resultPreview = resultText || '图片已生成（数据未送达界面）。';
+                }
+              } else if (toolName === 'web_search' || toolName === 'researcher_web' || toolName === 'researcher_docs') {
                 resultKind = 'search';
                 resultItems = parseResearchResult(resultText);
                 resultPreview = resultText.slice(0, 800);
@@ -2522,6 +2744,7 @@ export class ChatController {
               args: (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args,
               resultKind,
               resultItems,
+              resultImages,
               resultText: resultPreview,
             });
             // Feed the session's activity history (search / file / command records).
@@ -2580,6 +2803,7 @@ export class ChatController {
                 duration,
                 resultKind,
                 resultItems,
+                resultImages,
                 resultText: resultPreview,
               });
               pendingRows.delete(event.payload.toolCallId);
@@ -2729,10 +2953,19 @@ export class ChatController {
               completionMessages = [...completionMessages, { role: 'assistant', content: qualityGateEvidence(projectQualityResult, qualityRepairRan, qualityRepairRounds, qualityRepairIssues) }];
             }
             const qualityPassed = !needsDeliveryGate || (projectQualityResult?.passed === true && gen === this.generation);
-            if (planCard && qualityPassed && !this.activeComplexPlan) {
+            // 计划完成的收尾不能只依赖模型的 `## 计划 n 已完成` 标记：模型漏发时
+            // 大纲会永远停在第一步。只要回合正常结束、本轮真实执行过工具（与上方
+            // hasToolWork 同一约定：提问/确认轮没有 tool 消息）、末句不是提问、且
+            // 没有显式暂停，就按完成收尾——标记仍负责执行中的逐步推进。
+            const finalAnswer = String(event.payload.finalOutput ?? '').trim();
+            const turnAsksForInput = finalAnswer.length > 0 && /[?？]\s*$/.test(finalAnswer);
+            const planFinished = planCard && qualityPassed && hasToolWork && !event.payload.interrupted
+              && !turnAsksForInput && gen === this.generation && !this.pausePlanCard;
+            if (planFinished && planCard) {
               finalizePlanCard(planCard);
+              if (this.activeComplexPlan) syncActivePlanCursor(planCard);
               planCard.setActivity('计划中的所有步骤已完成，交付检查也已结束。');
-              syncPlanOverview('complete');
+              planOverview().setStatus('complete');
             }
             // Cancel any throttled streaming render on every segment so a
             // late-firing tick from before completion cannot race with the
@@ -3036,6 +3269,8 @@ export class ChatController {
     this.preCompactSessionId = '';
     this.preCompactMessageCount = 0;
     this.sessionId = `session_${Date.now()}`;
+    // A fresh session has no saved outline position: reset to the default corner.
+    setOverviewPositionSession(this.sessionId);
     // New chat = a fresh session: drop any session-scoped tool approvals.
     this.permissionManager.clearCache();
     // Fresh session → fresh stats view.
@@ -3233,9 +3468,14 @@ export class ChatController {
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     // Assistant bubbles start empty: they get markdown-rendered at the
-    // `Completed` event (see send()); user bubbles stay as raw escaped text.
-    if (role === 'user') bubble.textContent = content;
-    else bindAssistantBubbleCopy(bubble);
+    // `Completed` event (see send()); user bubbles stay as raw escaped text
+    // and gain the double-click select-all shortcut.
+    if (role === 'user') {
+      bubble.textContent = content;
+      bindUserBubbleSelectAll(bubble);
+    } else {
+      bindAssistantBubbleCopy(bubble);
+    }
     wrapper.appendChild(bubble);
     chatEl.appendChild(wrapper);
     return bubble;

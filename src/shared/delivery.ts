@@ -77,9 +77,34 @@ function call(toolName: string, args: Record<string, unknown>): ToolCall {
   };
 }
 
-async function execute(tools: ToolAdapter, toolName: string, args: Record<string, unknown>): Promise<ToolResult | null> {
+const DISCOVERY_TOOL_TIMEOUT_MS = 8_000;
+
+async function execute(
+  tools: ToolAdapter,
+  toolName: string,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<ToolResult | null> {
+  if (signal?.aborted) return null;
   try {
-    return await tools.execute(call(toolName, args));
+    return await new Promise<ToolResult | null>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const onAbort = (): void => finish(null);
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const finish = (value: ToolResult | null): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+      timer = setTimeout(() => finish(null), DISCOVERY_TOOL_TIMEOUT_MS);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      tools.execute(call(toolName, args), signal).then(finish, () => finish(null));
+    });
   } catch {
     return null;
   }
@@ -161,13 +186,13 @@ export function buildVerificationPlan(profile: Omit<WorkspaceProfile, 'verificat
   return specs;
 }
 
-export async function discoverWorkspace(tools: ToolAdapter): Promise<WorkspaceProfile> {
-  const listingResult = await execute(tools, 'list_files', { path: '.', recursive: true });
+export async function discoverWorkspace(tools: ToolAdapter, signal?: AbortSignal): Promise<WorkspaceProfile> {
+  const listingResult = await execute(tools, 'list_files', { path: '.', recursive: true }, signal);
   const rawListing = resultString(listingResult).slice(0, 40_000);
   const listing = projectListing(rawListing);
   const manifests = ['package.json', 'bun.lock', 'bun.lockb', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'Cargo.toml', 'Cargo.lock', 'pyproject.toml', 'requirements.txt', 'go.mod']
     .filter((name) => listing.split(/\r?\n/).some((entry) => entry.trim() === name || entry.trim().endsWith(`/${name}`)));
-  const packageJson = manifests.includes('package.json') ? resultString(await execute(tools, 'read_file', { path: 'package.json' })) : '';
+  const packageJson = manifests.includes('package.json') ? resultString(await execute(tools, 'read_file', { path: 'package.json' }, signal)) : '';
   const scripts = parseScripts(packageJson);
   const projectType: WorkspaceProjectType = manifests.includes('Cargo.toml')
     ? 'rust'

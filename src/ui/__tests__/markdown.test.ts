@@ -641,6 +641,171 @@ describe('buildChartOption multi-series', () => {
   });
 });
 
+// ── Scatter / kline / radar / hierarchy chart families ──
+
+describe('parseChartSource new families', () => {
+  it('parses scatter `name x y` rows into points', () => {
+    const spec = parseChartSource(`type: scatter
+title: 身高体重
+小明 170 65
+小红 160 50`);
+    expect(spec.type).toBe('scatter');
+    expect(spec.scatter).toEqual([
+      {
+        name: '数据',
+        points: [
+          { name: '小明', value: [170, 65] },
+          { name: '小红', value: [160, 50] },
+        ],
+      },
+    ]);
+  });
+
+  it('maps 散点图 / k线 / 雷达图 / 矩形树图 / 旭日图 shorthand to the right type', () => {
+    expect(parseChartSource('散点图\nA 1 2\nB 3 4').type).toBe('scatter');
+    expect(parseChartSource('k线图\nD 1 2 0 3\nE 2 3 1 4').type).toBe('kline');
+    expect(parseChartSource('雷达图\n速度 攻击\nA 80 90').type).toBe('radar');
+    expect(parseChartSource('矩形树图\nA 1\nB 2').type).toBe('treemap');
+    expect(parseChartSource('旭日图\nA 1\nB 2').type).toBe('sunburst');
+    expect(parseChartSource('树\n公司\n  技术部').type).toBe('tree');
+  });
+
+  it('parses kline rows as open/close/low/high candles', () => {
+    const spec = parseChartSource(`kline
+日期 开盘 收盘 最低 最高
+2026-08-01 10 12 9 13
+2026-08-02 12 11 10 12`);
+    expect(spec.type).toBe('kline');
+    expect(spec.ohlc).toEqual([
+      { date: '2026-08-01', value: [10, 12, 9, 13] },
+      { date: '2026-08-02', value: [12, 11, 10, 12] },
+    ]);
+  });
+
+  it('parses radar indicators + per-row series values', () => {
+    const spec = parseChartSource(`type: radar
+indicators: 速度 攻击 防御
+A 80 90 70
+B 60 70 80`);
+    expect(spec.type).toBe('radar');
+    expect(spec.indicators).toEqual(['速度', '攻击', '防御']);
+    expect(spec.radarData).toEqual([
+      { name: 'A', value: [80, 90, 70] },
+      { name: 'B', value: [60, 70, 80] },
+    ]);
+  });
+
+  it('parses indentation-based tree DSL', () => {
+    const spec = parseChartSource(`type: tree
+公司
+  技术部
+    前端
+    后端
+  市场部`);
+    expect(spec.tree).toEqual({
+      name: '公司',
+      children: [
+        { name: '技术部', children: [{ name: '前端' }, { name: '后端' }] },
+        { name: '市场部' },
+      ],
+    });
+  });
+
+  it('parses treemap DSL with values and sums missing parent values', () => {
+    const spec = parseChartSource(`type: treemap
+销售
+  电子 500
+    手机 300
+    电脑 200
+  家电 300`);
+    expect(spec.tree).toEqual({
+      name: '销售',
+      children: [
+        { name: '电子', value: 500, children: [{ name: '手机', value: 300 }, { name: '电脑', value: 200 }] },
+        { name: '家电', value: 300 },
+      ],
+      value: 800,
+    });
+  });
+
+  it('accepts JSON for all new families', () => {
+    const scatter = parseChartSource(JSON.stringify({
+      type: 'scatter', data: [['A', 1, 2], ['B', 3, 4]],
+    }));
+    expect(scatter.scatter?.[0].points).toContainEqual({ name: 'A', value: [1, 2] });
+
+    const kline = parseChartSource(JSON.stringify({
+      type: 'kline', data: [['D1', 10, 12, 9, 13]],
+    }));
+    expect(kline.ohlc).toEqual([{ date: 'D1', value: [10, 12, 9, 13] }]);
+
+    const radar = parseChartSource(JSON.stringify({
+      type: 'radar', indicators: ['速度'], data: [['A', 80]],
+    }));
+    expect(radar.indicators).toEqual(['速度']);
+    expect(radar.radarData).toEqual([{ name: 'A', value: [80] }]);
+
+    const tree = parseChartSource(JSON.stringify({
+      type: 'tree', data: { name: '根', children: [{ name: '子' }] },
+    }));
+    expect(tree.tree).toEqual({ name: '根', children: [{ name: '子' }] });
+
+    const sunburst = parseChartSource(JSON.stringify({
+      type: 'sunburst', data: [['A', 1], ['B', 2]],
+    }));
+    expect(sunburst.tree?.children).toHaveLength(2);
+    expect(sunburst.tree?.value).toBe(3);
+  });
+});
+
+describe('buildChartOption new families', () => {
+  it('scatter maps points to value axes and a scatter series', () => {
+    const option = buildChartOption(parseChartSource('scatter\nA 1 2\nB 3 4'), false);
+    const series = option.series as Array<{ type?: string; data?: Array<{ value: number[]; name: string }> }>;
+    expect(series[0].type).toBe('scatter');
+    expect(series[0].data).toEqual([{ value: [1, 2], name: 'A' }, { value: [3, 4], name: 'B' }]);
+    expect((option.xAxis as { type?: string }).type).toBe('value');
+    expect((option.yAxis as { type?: string }).type).toBe('value');
+  });
+
+  it('kline renders a candlestick series with scale on the value axis', () => {
+    const option = buildChartOption(parseChartSource('kline\nD1 10 12 9 13\nD2 12 11 10 12'), false);
+    const series = option.series as Array<{ type?: string; data?: number[][] }>;
+    expect(series[0].type).toBe('candlestick');
+    expect(series[0].data).toEqual([[10, 12, 9, 13], [12, 11, 10, 12]]);
+    expect((option.yAxis as { scale?: boolean }).scale).toBe(true);
+  });
+
+  it('radar renders a radar series with indicators and a legend', () => {
+    const option = buildChartOption(parseChartSource('radar\nindicators: 速度 攻击\nA 80 90\nB 60 70'), false);
+    const series = option.series as Array<{ type?: string; data?: Array<{ name: string; value: number[] }> }>;
+    expect(series[0].type).toBe('radar');
+    expect(series[0].data?.map((r) => ({ name: r.name, value: r.value }))).toEqual([
+      { name: 'A', value: [80, 90] },
+      { name: 'B', value: [60, 70] },
+    ]);
+    expect((option.radar as { indicator?: Array<{ name: string; max: number }> }).indicator?.map((i) => i.name)).toEqual(['速度', '攻击']);
+    // Each axis max scales above its largest data value so shapes never clip.
+    const indicatorMax = (option.radar as { indicator?: Array<{ name: string; max: number }> }).indicator ?? [];
+    expect(indicatorMax[0].max).toBeGreaterThan(80);
+    expect(indicatorMax[1].max).toBeGreaterThan(90);
+  });
+
+  it('tree renders a tree series carrying the root node', () => {
+    const option = buildChartOption(parseChartSource('tree\n公司\n  技术部'), false);
+    const series = option.series as Array<{ type?: string; data?: Array<Record<string, unknown>> }>;
+    expect(series[0].type).toBe('tree');
+    expect(series[0].data).toEqual([{ name: '公司', children: [{ name: '技术部' }] }]);
+  });
+
+  it('treemap and sunburst render with their series types', () => {
+    const tm = buildChartOption(parseChartSource('treemap\n销售\n  电子 500'), false);
+    expect((tm.series as Array<{ type?: string }>)[0].type).toBe('treemap');
+    const sb = buildChartOption(parseChartSource('sunburst\n销售\n  电子 500'), false);
+    expect((sb.series as Array<{ type?: string }>)[0].type).toBe('sunburst');
+  });
+});
+
 // ── diffLines (repair-diff viewer core — pure, no DOM) ──
 
 describe('diffLines (original vs repaired source)', () => {

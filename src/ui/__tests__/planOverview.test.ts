@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { createPlanOverview } from '../planOverview';
+import { createPlanOverview, restoreStoredPosition, setOverviewPositionSession } from '../planOverview';
 import type { Plan } from '../../coding-agent/types';
 
 function installFakeDocument(): () => void {
@@ -53,6 +53,16 @@ function installFakeDocument(): () => void {
       appendChild: (item: any) => { children.push(item); childNodes.push(item); return item; },
       _listeners: {} as Record<string, () => void>,
       addEventListener: (name: string, listener: () => void) => { element._listeners[name] = listener; },
+      // Drag support: geometry + pointer-capture spy (real DOM would resolve
+      // offsetLeft against the positioned #view-container host).
+      parentElement: null,
+      style: {} as Record<string, string>,
+      offsetLeft: 0,
+      offsetTop: 0,
+      offsetWidth: 0,
+      offsetHeight: 0,
+      getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+      setPointerCapture: () => { element._captureCount = (element._captureCount ?? 0) + 1; },
       setAttribute: (name: string, value: string) => {
         element[name] = value;
         if (name.startsWith('data-')) element.dataset[name.slice(5)] = value;
@@ -78,14 +88,14 @@ function samplePlan(): Plan {
 }
 
 // The fake document's appendChild returns the child, and createPlanOverview
-// builds aside > .plan-overview-card > (head, activity, steps). Step rows live
-// under the card's third child (.plan-overview-steps).
+// builds aside > .plan-overview-card > (head, steps). Step rows live under
+// the card's second child (.plan-overview-steps).
 function cardOf(root: any): any {
   return root?.children?.[0];
 }
 
 function stepsOf(root: any): any[] {
-  return cardOf(root)?.children?.[2]?.children ?? [];
+  return cardOf(root)?.children?.[1]?.children ?? [];
 }
 
 function stepClasses(root: any): string[] {
@@ -118,13 +128,13 @@ describe('planOverview floating outline card', () => {
       const compact = overview.el.children[1] as any;
       expect(card.hidden).toBe(false);
       expect(compact.hidden).toBe(true);
-      expect(compact.children[1].textContent).toBe('执行中：实现功能');
-      expect(compact.children[2].textContent).toBe('1/3');
+      expect(compact.children[0].textContent).toBe('2');
+      expect(compact.className).toContain('active');
 
       overview.setCollapsed(true);
       expect(card.hidden).toBe(true);
       expect(compact.hidden).toBe(false);
-      expect(compact.children[1].textContent).toBe('执行中：实现功能');
+      expect(compact.children[0].textContent).toBe('2');
       compact._listeners.click();
       expect(card.hidden).toBe(false);
       expect(compact.hidden).toBe(true);
@@ -141,10 +151,11 @@ describe('planOverview floating outline card', () => {
       overview.setCollapsed(true);
       overview.setStatus('waiting');
       const compact = overview.el.children[1] as any;
-      expect(compact.children[1].textContent).toBe('等待回复');
+      expect(compact.children[0].textContent).toBe('1');
+      expect(compact.className).toContain('awaiting');
       overview.setStatus('complete');
-      expect(compact.children[1].textContent).toBe('执行完成');
-      expect(compact.children[2].textContent).toBe('3/3');
+      expect(compact.children[0].textContent).toBe('3');
+      expect(compact.className).toContain('complete');
     } finally {
       restore();
     }
@@ -175,8 +186,6 @@ describe('planOverview floating outline card', () => {
       const card = cardOf(overview.el);
       expect(card.className).toContain('active');
       expect(card.className).not.toContain('awaiting');
-      const activity = card?.children?.[1];
-      expect(activity.textContent).toBe('正在执行：开始第一个 Todo');
     } finally {
       restore();
     }
@@ -220,6 +229,344 @@ describe('planOverview floating outline card', () => {
       expect(classes[1]).toContain('active');
     } finally {
       restore();
+    }
+  });
+});
+
+describe('planOverview drag to reposition', () => {
+  // Minimal event dispatch with bubbling up through parentElement, mirroring
+  // how a pointerdown on a child (close) reaches the card's drag listener.
+  function dispatch(el: any, type: string, init: Record<string, unknown> = {}): void {
+    const event = {
+      type,
+      pointerId: init.pointerId ?? 1,
+      button: init.button ?? 0,
+      clientX: init.clientX ?? 0,
+      clientY: init.clientY ?? 0,
+      preventDefault: () => {},
+    };
+    let node = el;
+    while (node) {
+      node._listeners?.[type]?.(event);
+      node = node.parentElement;
+    }
+  }
+
+  function setupHost(overview: any): void {
+    // Mirrors the singleton anchor (#view-container, position: relative).
+    overview.el.parentElement = { getBoundingClientRect: () => ({ width: 800, height: 600 }) };
+    overview.el.offsetWidth = 252;
+    overview.el.offsetHeight = 200;
+    overview.el.offsetLeft = 12;
+    overview.el.offsetTop = 12;
+  }
+
+  it('drags the expanded card to a clamped position inside the host', () => {
+    const restore = installFakeDocument();
+    try {
+      const overview = createPlanOverview();
+      overview.show(samplePlan(), 'active', 2, 1);
+      setupHost(overview);
+      const card = cardOf(overview.el);
+      dispatch(card, 'pointerdown', { clientX: 100, clientY: 100 });
+      dispatch(card, 'pointermove', { clientX: 160, clientY: 140 });
+      expect(overview.el.style.left).toBe('72px');
+      expect(overview.el.style.top).toBe('52px');
+      expect(overview.el.style.right).toBe('auto');
+      expect(overview.el.classList.contains('dragging')).toBe(true);
+      // Over-drag past the host edge clamps to the host bounds.
+      dispatch(card, 'pointermove', { clientX: 2000, clientY: 2000 });
+      expect(overview.el.style.left).toBe('548px'); // 800 - 252
+      expect(overview.el.style.top).toBe('400px'); // 600 - 200
+      dispatch(card, 'pointerup', { clientX: 2000, clientY: 2000 });
+      expect(overview.el.classList.contains('dragging')).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('drags the compact circle once collapsed', () => {
+    const restore = installFakeDocument();
+    try {
+      const overview = createPlanOverview();
+      overview.show(samplePlan(), 'active', 2, 1);
+      setupHost(overview);
+      overview.setCollapsed(true);
+      const compact = overview.el.children[1] as any;
+      expect(compact.hidden).toBe(false);
+      dispatch(compact, 'pointerdown', { clientX: 20, clientY: 20 });
+      dispatch(compact, 'pointermove', { clientX: 70, clientY: 35 });
+      expect(overview.el.style.left).toBe('62px');
+      expect(overview.el.style.top).toBe('27px');
+      dispatch(compact, 'pointerup', { clientX: 70, clientY: 35 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('toggles the compact circle on click but not after a real drag', () => {
+    const restore = installFakeDocument();
+    try {
+      const overview = createPlanOverview();
+      overview.show(samplePlan(), 'active', 2, 1);
+      const card = cardOf(overview.el);
+      const compact = overview.el.children[1] as any;
+      overview.setCollapsed(true);
+      // Plain click (no movement) expands.
+      dispatch(compact, 'pointerdown', { clientX: 10, clientY: 10 });
+      dispatch(compact, 'pointerup', { clientX: 10, clientY: 10 });
+      dispatch(compact, 'click', {});
+      expect(card.hidden).toBe(false);
+      // Drag then release: the trailing click must NOT re-collapse.
+      overview.setCollapsed(true);
+      dispatch(compact, 'pointerdown', { clientX: 10, clientY: 10 });
+      dispatch(compact, 'pointermove', { clientX: 60, clientY: 60 });
+      dispatch(compact, 'pointerup', { clientX: 60, clientY: 60 });
+      dispatch(compact, 'click', {});
+      expect(card.hidden).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps the close button clickable after pointer interactions', () => {
+    const restore = installFakeDocument();
+    try {
+      const overview = createPlanOverview();
+      overview.show(samplePlan(), 'active', 2, 1);
+      const card = cardOf(overview.el);
+      const close = card.children[0].children[2];
+      // A click on × goes through card pointerdown/pointerup (bubbled) then
+      // its own click — the collapse must still fire.
+      dispatch(card, 'pointerdown', { clientX: 30, clientY: 30 });
+      dispatch(card, 'pointerup', { clientX: 30, clientY: 30 });
+      dispatch(close, 'click', {});
+      expect(card.hidden).toBe(true);
+      expect((overview.el.children[1] as any).hidden).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('engages pointer capture only once a drag actually starts', () => {
+    const restore = installFakeDocument();
+    try {
+      const overview = createPlanOverview();
+      overview.show(samplePlan(), 'active', 2, 1);
+      overview.setCollapsed(true);
+      const compact = overview.el.children[1] as any;
+      // Plain press: no capture, so the subsequent click keeps its target.
+      dispatch(compact, 'pointerdown', { clientX: 5, clientY: 5 });
+      expect(compact._captureCount ?? 0).toBe(0);
+      // Crossing the 4px threshold engages capture for the real drag.
+      dispatch(compact, 'pointermove', { clientX: 30, clientY: 5 });
+      expect(compact._captureCount).toBe(1);
+      expect(overview.el.classList.contains('dragging')).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('planOverview dragged-position persistence', () => {
+  function installFakeStorage(): () => void {
+    const previous = (globalThis as any).localStorage;
+    const store = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => { store.set(key, value); },
+      removeItem: (key: string) => { store.delete(key); },
+    };
+    return () => { (globalThis as any).localStorage = previous; };
+  }
+
+  function dispatch(el: any, type: string, init: Record<string, unknown> = {}): void {
+    const event = {
+      type,
+      pointerId: init.pointerId ?? 1,
+      button: init.button ?? 0,
+      clientX: init.clientX ?? 0,
+      clientY: init.clientY ?? 0,
+      preventDefault: () => {},
+    };
+    let node = el;
+    while (node) {
+      node._listeners?.[type]?.(event);
+      node = node.parentElement;
+    }
+  }
+
+  function setupHost(overview: any): void {
+    overview.el.parentElement = { getBoundingClientRect: () => ({ width: 800, height: 600 }) };
+    overview.el.offsetWidth = 252;
+    overview.el.offsetHeight = 200;
+    overview.el.offsetLeft = 12;
+    overview.el.offsetTop = 12;
+  }
+
+  it('saves the dragged position so the next launch restores it', () => {
+    const restoreDoc = installFakeDocument();
+    const restoreStorage = installFakeStorage();
+    try {
+      const overview = createPlanOverview();
+      overview.show(samplePlan(), 'active', 2, 1);
+      setupHost(overview);
+      const card = cardOf(overview.el);
+      dispatch(card, 'pointerdown', { clientX: 100, clientY: 100 });
+      dispatch(card, 'pointermove', { clientX: 160, clientY: 140 });
+      dispatch(card, 'pointerup', { clientX: 160, clientY: 140 });
+      const saved = JSON.parse((globalThis as any).localStorage.getItem('pure_plan_overview_pos'));
+      expect(saved).toEqual({ left: 72, top: 52 });
+    } finally {
+      restoreDoc();
+      restoreStorage();
+    }
+  });
+
+  it('restores the stored position on launch and clamps it to the current host', () => {
+    const restoreDoc = installFakeDocument();
+    const restoreStorage = installFakeStorage();
+    try {
+      (globalThis as any).localStorage.setItem('pure_plan_overview_pos', JSON.stringify({ left: 5000, top: -20 }));
+      const overview = createPlanOverview();
+      const el = overview.el as any;
+      el.parentElement = { getBoundingClientRect: () => ({ width: 800, height: 600 }) };
+      el.offsetWidth = 252;
+      el.offsetHeight = 200;
+      restoreStoredPosition(el);
+      expect(el.style.right).toBe('auto');
+      expect(el.style.left).toBe('548px'); // 800 - 252
+      expect(el.style.top).toBe('0px');
+    } finally {
+      restoreDoc();
+      restoreStorage();
+    }
+  });
+
+  it('ignores corrupt stored positions without touching the default corner', () => {
+    const restoreDoc = installFakeDocument();
+    const restoreStorage = installFakeStorage();
+    try {
+      (globalThis as any).localStorage.setItem('pure_plan_overview_pos', '{not json');
+      const overview = createPlanOverview();
+      const el = overview.el as any;
+      restoreStoredPosition(el);
+      expect(el.style.left ?? '').toBe('');
+      expect(el.style.top ?? '').toBe('');
+      // A plain click without movement never writes anything to storage.
+      const card = cardOf(overview.el);
+      dispatch(card, 'pointerdown', { clientX: 5, clientY: 5 });
+      dispatch(card, 'pointerup', { clientX: 5, clientY: 5 });
+      expect((globalThis as any).localStorage.getItem('pure_plan_overview_pos')).toBe('{not json');
+    } finally {
+      restoreDoc();
+      restoreStorage();
+    }
+  });
+});
+
+describe('planOverview per-session position memory', () => {
+  function installFakeStorage(): () => void {
+    const previous = (globalThis as any).localStorage;
+    const store = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => { store.set(key, value); },
+      removeItem: (key: string) => { store.delete(key); },
+    };
+    return () => { (globalThis as any).localStorage = previous; };
+  }
+
+  function dispatch(el: any, type: string, init: Record<string, unknown> = {}): void {
+    const event = {
+      type,
+      pointerId: init.pointerId ?? 1,
+      button: init.button ?? 0,
+      clientX: init.clientX ?? 0,
+      clientY: init.clientY ?? 0,
+      preventDefault: () => {},
+    };
+    let node = el;
+    while (node) {
+      node._listeners?.[type]?.(event);
+      node = node.parentElement;
+    }
+  }
+
+  function setupHost(overview: any): void {
+    overview.el.parentElement = { getBoundingClientRect: () => ({ width: 800, height: 600 }) };
+    overview.el.offsetWidth = 252;
+    overview.el.offsetHeight = 200;
+    overview.el.offsetLeft = 12;
+    overview.el.offsetTop = 12;
+  }
+
+  it('saves the dragged position under the active session key', () => {
+    const restoreDoc = installFakeDocument();
+    const restoreStorage = installFakeStorage();
+    setOverviewPositionSession('s1');
+    try {
+      const overview = createPlanOverview();
+      overview.show(samplePlan(), 'active', 2, 1);
+      setupHost(overview);
+      const card = cardOf(overview.el);
+      dispatch(card, 'pointerdown', { clientX: 100, clientY: 100 });
+      dispatch(card, 'pointermove', { clientX: 160, clientY: 140 });
+      dispatch(card, 'pointerup', { clientX: 160, clientY: 140 });
+      const saved = JSON.parse((globalThis as any).localStorage.getItem('pure_plan_overview_pos:s1'));
+      expect(saved).toEqual({ left: 72, top: 52 });
+      // The global key stays untouched for other sessions.
+      expect((globalThis as any).localStorage.getItem('pure_plan_overview_pos')).toBeNull();
+    } finally {
+      setOverviewPositionSession(null);
+      restoreDoc();
+      restoreStorage();
+    }
+  });
+
+  it('restores each session\'s own remembered position', () => {
+    const restoreDoc = installFakeDocument();
+    const restoreStorage = installFakeStorage();
+    setOverviewPositionSession('s1');
+    try {
+      (globalThis as any).localStorage.setItem('pure_plan_overview_pos:s1', JSON.stringify({ left: 30, top: 40 }));
+      (globalThis as any).localStorage.setItem('pure_plan_overview_pos:s2', JSON.stringify({ left: 200, top: 300 }));
+      const overview = createPlanOverview();
+      const el = overview.el as any;
+      restoreStoredPosition(el, 's1');
+      expect(el.style.left).toBe('30px');
+      expect(el.style.top).toBe('40px');
+      // Switching sessions re-reads that session's key.
+      restoreStoredPosition(el, 's2');
+      expect(el.style.left).toBe('200px');
+      expect(el.style.top).toBe('300px');
+    } finally {
+      setOverviewPositionSession(null);
+      restoreDoc();
+      restoreStorage();
+    }
+  });
+
+  it('resets to the default corner for a session that never had a position', () => {
+    const restoreDoc = installFakeDocument();
+    const restoreStorage = installFakeStorage();
+    setOverviewPositionSession('s1');
+    try {
+      (globalThis as any).localStorage.setItem('pure_plan_overview_pos:s1', JSON.stringify({ left: 30, top: 40 }));
+      const overview = createPlanOverview();
+      const el = overview.el as any;
+      restoreStoredPosition(el, 's1');
+      expect(el.style.left).toBe('30px');
+      // s2 never had a position: inline placement must be cleared so the CSS
+      // default (top-right corner) takes over — never the previous session's.
+      restoreStoredPosition(el, 's2');
+      expect(el.style.left ?? '').toBe('');
+      expect(el.style.top ?? '').toBe('');
+      expect(el.style.right ?? '').toBe('');
+    } finally {
+      setOverviewPositionSession(null);
+      restoreDoc();
+      restoreStorage();
     }
   });
 });

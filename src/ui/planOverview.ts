@@ -15,7 +15,7 @@ export interface PlanOverviewHandle {
   show(plan: Plan, status?: PlanOverviewStatus, currentPlan?: number, currentTodo?: number, todoLabel?: string): void;
   /** In-place refresh with the same plan (LLM upgrade) — keeps progress. */
   update(plan: Plan, status?: PlanOverviewStatus, currentPlan?: number, currentTodo?: number, todoLabel?: string): void;
-  setStatus(status: PlanOverviewStatus, activity?: string): void;
+  setStatus(status: PlanOverviewStatus): void;
   setCurrent(planNumber: number, todoNumber?: number, todoLabel?: string): void;
   setCollapsed(collapsed: boolean): void;
   clear(): void;
@@ -38,18 +38,11 @@ export function createPlanOverview(): PlanOverviewHandle {
   compact.title = '展开执行大纲';
   compact.setAttribute('aria-label', '展开执行大纲');
   compact.setAttribute('aria-expanded', 'false');
-  const compactDot = document.createElement('span');
-  compactDot.className = 'plan-overview-compact-dot';
-  compactDot.setAttribute('aria-hidden', 'true');
-  const compactLabel = document.createElement('span');
-  compactLabel.className = 'plan-overview-compact-label';
-  const compactProgress = document.createElement('span');
-  compactProgress.className = 'plan-overview-compact-progress';
-  const compactChevron = document.createElement('span');
-  compactChevron.className = 'plan-overview-compact-chevron';
-  compactChevron.textContent = '‹';
-  compactChevron.setAttribute('aria-hidden', 'true');
-  compact.append(compactDot, compactLabel, compactProgress, compactChevron);
+  const compactStep = document.createElement('span');
+  compactStep.className = 'plan-overview-compact-step';
+  compactStep.setAttribute('aria-live', 'polite');
+  compactStep.setAttribute('aria-label', '当前步骤');
+  compact.append(compactStep);
 
   const head = document.createElement('div');
   head.className = 'plan-overview-head';
@@ -68,16 +61,11 @@ export function createPlanOverview(): PlanOverviewHandle {
   close.textContent = '×';
   head.append(title, progress, close);
 
-  const activity = document.createElement('div');
-  activity.className = 'plan-overview-activity';
-  activity.setAttribute('role', 'status');
-  activity.setAttribute('aria-live', 'polite');
-
   const steps = document.createElement('div');
   steps.className = 'plan-overview-steps';
   steps.setAttribute('role', 'list');
 
-  card.append(head, activity, steps);
+  card.append(head, steps);
   el.append(card, compact);
 
   let collapsed = false;
@@ -89,8 +77,95 @@ export function createPlanOverview(): PlanOverviewHandle {
     compact.setAttribute('aria-expanded', String(!collapsed));
     if (plan) render();
   }
-  close.addEventListener('click', () => setCollapsed(true));
-  compact.addEventListener('click', () => setCollapsed(false));
+
+  // ── Drag to reposition ──
+  // The floating widget can be grabbed (the card body or the compact circle)
+  // and moved anywhere inside the chat window. Pointer events cover mouse +
+  // touch; a real drag (>4px) suppresses the click that would otherwise
+  // collapse/expand the card, so dragging the circle never misfires a toggle.
+  let dragState: { pointerId: number; handle: HTMLElement; startX: number; startY: number; origLeft: number; origTop: number; moved: boolean } | null = null;
+  let justDragged = false;
+  let lastDragPos: { left: number; top: number } | null = null;
+
+  const clampDrag = (left: number, top: number): { left: number; top: number } => {
+    // Clamp inside the anchor host (#view-container) so the card can't be
+    // flung off-screen; without a host (unit tests) pass raw values through.
+    const hostRect = el.parentElement?.getBoundingClientRect?.();
+    if (!hostRect) return { left, top };
+    const maxLeft = Math.max(0, hostRect.width - el.offsetWidth);
+    const maxTop = Math.max(0, hostRect.height - el.offsetHeight);
+    return {
+      left: Math.min(Math.max(0, left), maxLeft),
+      top: Math.min(Math.max(0, top), maxTop),
+    };
+  };
+
+  const startDrag = (ev: PointerEvent, handle: HTMLElement): void => {
+    if (ev.button !== 0 || dragState) return;
+    justDragged = false;
+    dragState = {
+      pointerId: ev.pointerId,
+      handle,
+      startX: ev.clientX,
+      startY: ev.clientY,
+      origLeft: el.offsetLeft,
+      origTop: el.offsetTop,
+      moved: false,
+    };
+    // Drop the CSS right-edge anchoring once the user takes manual control.
+    el.style.right = 'auto';
+    ev.preventDefault();
+  };
+
+  const moveDrag = (ev: PointerEvent): void => {
+    const s = dragState;
+    if (!s || ev.pointerId !== s.pointerId) return;
+    const dx = ev.clientX - s.startX;
+    const dy = ev.clientY - s.startY;
+    if (!s.moved && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) {
+      s.moved = true;
+      // Engage pointer capture only once the drag is real. A plain click on
+      // the close button or the compact circle never captures, so its click
+      // keeps its natural target — capturing on every pointerdown would
+      // retarget the × click onto the card and kill the collapse button.
+      el.classList.add('dragging');
+      s.handle.setPointerCapture?.(ev.pointerId);
+    }
+    if (s.moved) {
+      const clamped = clampDrag(s.origLeft + dx, s.origTop + dy);
+      lastDragPos = clamped;
+      el.style.left = `${clamped.left}px`;
+      el.style.top = `${clamped.top}px`;
+    }
+  };
+
+  const endDrag = (ev: PointerEvent): void => {
+    const s = dragState;
+    if (!s || ev.pointerId !== s.pointerId) return;
+    dragState = null;
+    justDragged = s.moved;
+    el.classList.remove('dragging');
+    if (s.moved && lastDragPos) {
+      try {
+        const key = positionSession ? `${OVERVIEW_POS_KEY}:${positionSession}` : OVERVIEW_POS_KEY;
+        localStorage.setItem(key, JSON.stringify(lastDragPos));
+      } catch {
+        // Storage unavailable (private mode): the position just isn't remembered.
+      }
+    }
+  };
+
+  const bindDrag = (handle: HTMLElement): void => {
+    handle.addEventListener('pointerdown', (ev) => startDrag(ev, handle));
+    handle.addEventListener('pointermove', moveDrag);
+    handle.addEventListener('pointerup', endDrag);
+    handle.addEventListener('pointercancel', endDrag);
+  };
+  bindDrag(card);
+  bindDrag(compact);
+
+  close.addEventListener('click', () => { if (!justDragged) setCollapsed(true); });
+  compact.addEventListener('click', () => { if (!justDragged) setCollapsed(false); });
 
   const state = { currentPlan: 1, currentTodo: 1, todoLabel: '' };
   let plan: Plan | null = null;
@@ -128,21 +203,24 @@ export function createPlanOverview(): PlanOverviewHandle {
     });
     card.classList.remove('complete', 'awaiting', 'active');
     compact.classList.remove('complete', 'awaiting', 'active');
+    const currentStep = status === 'complete'
+      ? total
+      : Math.max(1, Math.min(state.currentPlan, total));
+    compactStep.textContent = String(currentStep);
+    compactStep.setAttribute('aria-label', `当前第 ${currentStep} 步，共 ${total} 步`);
     if (status === 'complete') {
       card.classList.add('complete');
       compact.classList.add('complete');
-      compactLabel.textContent = '执行完成';
     } else if (status === 'waiting') {
       card.classList.add('awaiting');
       compact.classList.add('awaiting');
-      compactLabel.textContent = '等待回复';
     } else {
       card.classList.add('active');
       compact.classList.add('active');
-      compactLabel.textContent = state.todoLabel ? `执行中：${state.todoLabel}` : '正在执行';
     }
-    compactProgress.textContent = progress.textContent;
-    compact.title = collapsed ? '展开执行大纲' : '收起执行大纲';
+    compact.title = collapsed
+      ? `展开执行大纲（当前第 ${currentStep} 步，共 ${total} 步）`
+      : '收起执行大纲';
     compact.setAttribute('aria-label', compact.title);
   };
 
@@ -162,28 +240,17 @@ export function createPlanOverview(): PlanOverviewHandle {
     el.hidden = false;
   };
 
-  const activityText = (s: PlanOverviewStatus): string => (
-    s === 'complete' ? '全部步骤已完成'
-      : s === 'waiting' ? '已暂停，等待你的回复'
-        : state.todoLabel
-          ? `正在执行：${state.todoLabel}`
-          : '正在按计划执行…'
-  );
-
   return {
     el,
     show: (next, nextStatus = 'active', currentPlan = 1, currentTodo = 1, todoLabel = '') => {
       apply(next, nextStatus, currentPlan, currentTodo, todoLabel);
-      activity.textContent = activityText(nextStatus);
     },
     update: (next, nextStatus = 'active', currentPlan = 1, currentTodo = 1, todoLabel = '') => {
       apply(next, nextStatus, currentPlan, currentTodo, todoLabel);
-      activity.textContent = activityText(nextStatus);
     },
-    setStatus: (next, text) => {
+    setStatus: (next) => {
       status = next;
       render();
-      activity.textContent = text ?? activityText(next);
       el.hidden = false;
     },
     setCurrent: (planNumber, todoNumber, todoLabel) => {
@@ -191,7 +258,6 @@ export function createPlanOverview(): PlanOverviewHandle {
       if (todoNumber !== undefined) state.currentTodo = todoNumber;
       if (todoLabel !== undefined) state.todoLabel = todoLabel;
       render();
-      activity.textContent = activityText(status);
     },
     setCollapsed,
     clear: () => {
@@ -204,6 +270,60 @@ export function createPlanOverview(): PlanOverviewHandle {
 
 let overview: PlanOverviewHandle | null = null;
 
+// ── Dragged-position persistence ──
+// The floating widget is a global singleton; once the user parks it somewhere,
+// that spot is remembered per conversation (keyed by sessionId) and restored
+// on the next open / session switch, clamped to the current host size so a
+// shrunken window can't leave it off-screen. Sessions without a saved position
+// fall back to the default corner.
+const OVERVIEW_POS_KEY = 'pure_plan_overview_pos';
+
+let positionSession: string | null = null;
+
+/** Point the outline's position memory at a session. Call on session switch so
+ * the widget re-applies that session's remembered spot (or resets to the
+ * default corner when the session never had one). */
+export function setOverviewPositionSession(sessionId: string | null): void {
+  positionSession = sessionId;
+  if (overview) restoreStoredPosition(overview.el, sessionId);
+}
+
+export function restoreStoredPosition(el: HTMLElement, sessionId?: string | null): void {
+  // Reset any inline placement first: switching to a session without a saved
+  // position must return the widget to its default corner, never inherit the
+  // previous session's spot.
+  el.style.left = '';
+  el.style.top = '';
+  el.style.right = '';
+  let raw: string | null = null;
+  try {
+    const key = sessionId ? `${OVERVIEW_POS_KEY}:${sessionId}` : OVERVIEW_POS_KEY;
+    raw = localStorage.getItem(key);
+  } catch {
+    return; // storage unavailable — keep the default corner
+  }
+  if (!raw) return;
+  let pos: { left?: unknown; top?: unknown };
+  try {
+    pos = JSON.parse(raw) as { left?: unknown; top?: unknown };
+  } catch {
+    return; // corrupt entry must never break the outline
+  }
+  if (typeof pos.left !== 'number' || typeof pos.top !== 'number') return;
+  const hostRect = el.parentElement?.getBoundingClientRect?.();
+  let left = pos.left;
+  let top = pos.top;
+  if (hostRect) {
+    const maxLeft = Math.max(0, hostRect.width - el.offsetWidth);
+    const maxTop = Math.max(0, hostRect.height - el.offsetHeight);
+    left = Math.min(Math.max(0, left), maxLeft);
+    top = Math.min(Math.max(0, top), maxTop);
+  }
+  el.style.right = 'auto';
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+}
+
 /** Get (and lazily create) the singleton floating overview card. */
 export function planOverview(): PlanOverviewHandle {
   if (overview) return overview;
@@ -211,6 +331,8 @@ export function planOverview(): PlanOverviewHandle {
   // Anchor it to the app shell so it outlives per-transcript DOM clears.
   const host = document.getElementById('view-container') ?? document.body;
   host.appendChild(handle.el);
+  // Remember where the user parked the widget across launches / sessions.
+  restoreStoredPosition(handle.el, positionSession);
   overview = handle;
   return handle;
 }

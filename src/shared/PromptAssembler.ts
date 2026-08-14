@@ -8,9 +8,11 @@ import {
 import type { ToolDefinition } from './types';
 import { promptObservability, promptVersion, type PromptObservability } from './promptObservability';
 import {
+  CHART_DSL_PROMPT,
   COMPLETION_PROMPT,
   FILE_TOOLS_CORE,
   HUMAN_TONE_PROMPT,
+  IMAGE_GEN_OUTPUT_PROMPT,
   LOGICAL_TRAPS_PROMPT,
   SVG_OUTPUT_PROMPT,
   SYSTEM_CORE_PROMPT,
@@ -36,6 +38,13 @@ export interface PromptAssemblyContext {
   /** Definitions sent in the provider's separate tools payload. They are
    * counted by the compiler but are not duplicated into the system text. */
   toolDefinitions?: ToolDefinition[];
+  /**
+   * True when the connected provider exposes text-to-image (generate_image).
+   * Swaps the SVG output contract for the image-generation contract: image
+   * requests must call the tool instead of emitting ```svg blocks (SVG
+   * remains the automatic fallback when the tool is unavailable or fails).
+   */
+  imageGeneration?: boolean;
   environment?: string;
   runtimes?: string;
   skills?: PromptSkill[];
@@ -98,9 +107,14 @@ const CLI_CAPABILITIES_PROMPT = `System:
 
 Web tools:
 - researcher_web(prompt, maxSources?, fetchContent?) — research a web question and return cited sources, extracted evidence, retrieval time, and partial failures. Do not repeat an unchanged query after a failure.
-- researcher_docs(library, topic, version?, maxSources?, fetchContent?) — research version-aware official documentation and return cited evidence.`;
+- researcher_docs(library, topic, version?, maxSources?, fetchContent?) — research version-aware official documentation and return cited evidence.
 
-export function buildGuiCapabilities(hasWorkspace: boolean, temporaryWorkspace = false): string {
+Diagram rendering:
+- The CLI renders \`\`\`mermaid graph/flowchart and \`\`\`puml / \`\`\`plantuml blocks as a terminal WIREFRAME (boxes + connecting lines drawn with box-drawing characters) — no browser, no image. Prefer mermaid for process/flow diagrams, puml for activity/sequence. Emit them as normal fenced blocks; the client converts them.`;
+
+const GUI_IMAGE_GEN_PROMPT = `\n\nImage generation:\n- generate_image(prompt, n?, size?) — text-to-image with the connected provider's image model. Use it for image/icon/illustration/photo/poster requests ("创作一个小狗图标", "生成一张 xxx 图片"); the result renders as a real picture in the chat. Pass n > 1 (up to 4) for multiple images or variations. NEVER emit fenced svg code blocks for image requests while this tool is available — SVG is only for hand-drawn diagrams, and the fallback when generate_image fails.`;
+
+export function buildGuiCapabilities(hasWorkspace: boolean, temporaryWorkspace = false, options: { imageGeneration?: boolean } = {}): string {
   const workspaceNote = hasWorkspace
     ? temporaryWorkspace
       ? '\nWorkspace: no user workspace is selected, so file changes go to an isolated application temporary workspace for this session.'
@@ -110,17 +124,20 @@ export function buildGuiCapabilities(hasWorkspace: boolean, temporaryWorkspace =
   const tools = hasWorkspace
     ? `${GUI_WEB_TOOLS_PROMPT}\n\n${fileTools}\n\n${GUI_SYS_INFO_PROMPT}`
     : `${GUI_WEB_TOOLS_PROMPT}\n\n${GUI_SYS_INFO_PROMPT}`;
-  return `${workspaceNote}\n${tools}`;
+  const imageGen = options.imageGeneration ? GUI_IMAGE_GEN_PROMPT : '';
+  return `${workspaceNote}\n${tools}${imageGen}`;
 }
 
 export function buildCliCapabilities(): string {
   return `${FILE_TOOLS_CORE}\n\n${CLI_CAPABILITIES_PROMPT}`;
 }
 
-function buildOutputStyle(surface: PromptSurface): string {
+function buildOutputStyle(surface: PromptSurface, imageGeneration = false): string {
   const visualOutput = surface === 'gui'
-    ? '- To SHOW a picture/diagram, emit it as a fenced code block tagged svg containing complete standalone SVG — the app renders it inline as an image (diagrams render too: mermaid for flowchart/gantt/sequence, puml for PlantUML).\n- To SHOW data as a chart, emit a fenced code block tagged chart: put type: bar|line|pie on its own line (default bar), optional title: and unit: lines, then one label value row per line (e.g. 一月 120, 二月 180). The app renders bar/line/pie charts inline.'
-    : '- For diagrams, images, or charts, use fenced markdown blocks with the appropriate language; keep the response readable in a terminal.';
+    ? imageGeneration
+      ? `- To SHOW a picture/icon/illustration/photo, call generate_image — the app renders the result as a real image. For hand-drawn diagrams (flowcharts, architecture, sequence), still emit fenced code blocks tagged svg / mermaid / puml.\n- ${CHART_DSL_PROMPT}`
+      : `- To SHOW a picture/diagram, emit it as a fenced code block tagged svg containing complete standalone SVG — the app renders it inline as an image (diagrams render too: mermaid for flowchart/gantt/sequence, puml for PlantUML).\n- ${CHART_DSL_PROMPT}`
+    : '- For diagrams (processes, flows, architecture, sequences), emit a fenced code block tagged mermaid (graph/flowchart: A --> B) or puml/plantuml (activity: :step; --> / sequence: Alice -> Bob: message) — the CLI renders these as a wireframe with boxes and connecting lines. Keep the response readable in a terminal.';
   return `Output style:
 - Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").
 - Structure longer replies into clear sections — use Markdown headings (##) for each category, short paragraphs for each point, and lists where items fit. Wrap the KEY phrase(s) of each section in ==double equals== (e.g. ==西安到重庆==, ==3 小时 40 分==) so they render HIGHLIGHTED; keep the surrounding prose plain so the highlighted-vs-plain contrast is visible.
@@ -229,8 +246,10 @@ export class PromptAssembler {
       fragment('work_invariant', 'Work step by step. Read before you write. Verify after you change. Be concise.', 110, true),
       fragment('workflow', WORKFLOW_PROMPT, 90),
       fragment('completion', COMPLETION_PROMPT, 80),
-      fragment('output_style', buildOutputStyle(context.surface), 65),
-      fragment('svg_output', SVG_OUTPUT_PROMPT, 50),
+      fragment('output_style', buildOutputStyle(context.surface, context.imageGeneration === true), 65),
+      // Image requests follow ONE contract: the generate_image tool when the
+      // provider supports it, otherwise the multi-SVG grid contract. Never both.
+      fragment(context.imageGeneration === true ? 'image_gen' : 'svg_output', context.imageGeneration === true ? IMAGE_GEN_OUTPUT_PROMPT : SVG_OUTPUT_PROMPT, 50),
       fragment('human_tone', HUMAN_TONE_PROMPT, 35),
       fragment('tool_calling', buildToolCallingRules(context.surface), 115, true),
       fragment('typo_tolerance', TYPO_TOLERANCE_PROMPT, 55),

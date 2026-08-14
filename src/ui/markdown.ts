@@ -928,13 +928,35 @@ export interface ChartMultiSeries {
   data: ChartSeries[];
 }
 
+/** One node of a hierarchical chart (tree / treemap / sunburst). */
+export interface ChartNode {
+  name: string;
+  value?: number;
+  children?: ChartNode[];
+}
+
+export type ChartType =
+  | 'bar' | 'hbar' | 'line' | 'pie'
+  | 'scatter' | 'kline' | 'radar'
+  | 'tree' | 'treemap' | 'sunburst';
+
 export interface ChartSpec {
-  type: 'bar' | 'hbar' | 'line' | 'pie';
+  type: ChartType;
   title: string;
   unit: string;
   data: ChartSeries[];
   /** Present when the source carries a header plus >=2 numeric columns: one entry per column. */
   series?: ChartMultiSeries[];
+  /** scatter points, grouped into named series (single series for the line DSL). */
+  scatter?: Array<{ name: string; points: Array<{ name: string; value: [number, number] }> }>;
+  /** kline candles, one per date; value order is [open, close, low, high]. */
+  ohlc?: Array<{ date: string; value: [number, number, number, number] }>;
+  /** radar axis names (indicators). */
+  indicators?: string[];
+  /** radar series: one entry per named row. */
+  radarData?: Array<{ name: string; value: number[] }>;
+  /** Root node for tree / treemap / sunburst hierarchical charts. */
+  tree?: ChartNode;
 }
 
 /**
@@ -965,8 +987,84 @@ export interface ChartSpec {
  * so the caller can tell "not JSON" from "wrong chart schema".
  */
 function chartSpecFromJson(raw: unknown): ChartSpec {
-  const arr = Array.isArray(raw) ? raw : (raw as { data?: unknown } | null)?.data;
+  const obj = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw as Record<string, unknown> : {};
+  const rawType = String(obj.type ?? 'bar').toLowerCase();
+  const type = normalizeChartType(rawType);
+  const title = String(obj.title ?? '');
+  const unit = String(obj.unit ?? '');
+  const dataValue = Array.isArray(raw) ? raw : obj.data;
+
+  // Hierarchy charts accept `data` as a single root node object as well as an
+  // array, so the array gate below is skipped for them.
+  if (type === 'tree' || type === 'treemap' || type === 'sunburst') {
+    const root = Array.isArray(dataValue) ? hierarchyFromJson(dataValue, title) : hierarchyNodeFromJson(dataValue);
+    if (!root) throw new Error('chart needs at least one data row');
+    if (type !== 'tree') fillHierarchyValues(root);
+    return { type, title, unit, data: [], tree: root };
+  }
+
+  const arr = dataValue;
   if (!Array.isArray(arr)) throw new Error('chart JSON needs a data array');
+
+  if (type === 'scatter') {
+    // Optional multi-series form: { type, series: [{ name, data: [[x,y],…] }] }.
+    const seriesRows = Array.isArray(obj.series) ? obj.series : null;
+    if (seriesRows) {
+      const scatter = seriesRows.map((s) => {
+        const row = (s && typeof s === 'object') ? s as Record<string, unknown> : {};
+        const points = Array.isArray(row.data) ? parseJsonScatterPoints(row.data) : [];
+        return { name: String(row.name ?? '系列'), points };
+      }).filter((s) => s.points.length > 0);
+      if (scatter.length === 0) throw new Error('chart needs at least one data row');
+      return { type, title, unit, data: scatter.flatMap((s) => s.points.map((p) => ({ label: p.name, value: p.value[1] }))), scatter };
+    }
+    const points = parseJsonScatterPoints(arr);
+    if (points.length === 0) throw new Error('chart needs at least one data row');
+    return {
+      type, title, unit,
+      data: points.map((p) => ({ label: p.name, value: p.value[1] })),
+      scatter: [{ name: '数据', points }],
+    };
+  }
+
+  if (type === 'kline') {
+    // Each row is [date, open, close, low, high] (or an object with those keys).
+    const rows = arr.map((r) => {
+      if (Array.isArray(r)) {
+        const nums = r.slice(1, 5).map((v) => chartNumber(v));
+        return nums.every(Number.isFinite) ? { date: String(r[0] ?? ''), value: [nums[0], nums[1], nums[2], nums[3]] as [number, number, number, number] } : null;
+      }
+      if (r && typeof r === 'object') {
+        const row = r as Record<string, unknown>;
+        const nums = [row.open, row.close, row.low, row.high].map((v) => chartNumber(v));
+        return nums.every(Number.isFinite) ? { date: String(row.date ?? row.label ?? ''), value: [nums[0], nums[1], nums[2], nums[3]] as [number, number, number, number] } : null;
+      }
+      return null;
+    }).filter((r): r is NonNullable<typeof r> => r !== null && r.date !== '');
+    if (rows.length === 0) throw new Error('chart needs at least one data row');
+    return { type, title, unit, data: rows.map((r) => ({ label: r.date, value: r.value[3] })), ohlc: rows };
+  }
+
+  if (type === 'radar') {
+    const indicators = Array.isArray(obj.indicators) ? obj.indicators.map((v) => String(v)).filter(Boolean) : [];
+    const rows = arr.map((r, i) => {
+      if (Array.isArray(r)) {
+        const values = r.slice(1).map((v) => chartNumber(v));
+        return values.some(Number.isFinite) ? { name: String(r[0] ?? `#${i + 1}`), value: values } : null;
+      }
+      if (r && typeof r === 'object') {
+        const row = r as Record<string, unknown>;
+        const values = Array.isArray(row.value) ? row.value.map((v) => chartNumber(v)) : [];
+        return values.some(Number.isFinite) ? { name: String(row.name ?? `#${i + 1}`), value: values } : null;
+      }
+      return null;
+    }).filter((r): r is NonNullable<typeof r> => r !== null);
+    if (rows.length === 0) throw new Error('chart needs at least one data row');
+    const len = Math.max(...rows.map((r) => r.value.length));
+    const finalIndicators = indicators.length >= len ? indicators.slice(0, len) : Array.from({ length: len }, (_, i) => indicators[i] ?? `维度${i + 1}`);
+    return { type, title, unit, data: rows.map((r) => ({ label: r.name, value: r.value[0] ?? 0 })), indicators: finalIndicators, radarData: rows };
+  }
+
   const data: ChartSeries[] = arr.map((r, i) => {
     if (Array.isArray(r)) {
       return { label: String(r[0] ?? `#${i + 1}`), value: chartNumber(r[1]) };
@@ -978,14 +1076,90 @@ function chartSpecFromJson(raw: unknown): ChartSpec {
     throw new Error(`bad chart row: ${JSON.stringify(r)}`);
   }).filter((row) => Number.isFinite(row.value));
   if (data.length === 0) throw new Error('chart needs at least one data row');
-  const obj = raw as { type?: unknown; title?: unknown; unit?: unknown } | null;
-  const rawType = String(obj?.type ?? 'bar').toLowerCase();
-  return {
-    type: normalizeChartType(rawType),
-    title: String(obj?.title ?? ''),
-    unit: String(obj?.unit ?? ''),
-    data,
-  };
+  return { type, title, unit, data };
+}
+
+/** Parse JSON scatter points: `[x, y]`, `[name, x, y]`, or `{ name, x, y }`. */
+function parseJsonScatterPoints(arr: unknown[]): Array<{ name: string; value: [number, number] }> {
+  const points: Array<{ name: string; value: [number, number] }> = [];
+  arr.forEach((r, i) => {
+    if (Array.isArray(r)) {
+      const nums = r.map((v) => chartNumber(v));
+      const pair = nums.length === 2 && nums.every(Number.isFinite)
+        ? [nums[0], nums[1]]
+        : nums.length >= 3 && nums.slice(1, 3).every(Number.isFinite)
+          ? [nums[1], nums[2]]
+          : null;
+      if (pair) points.push({ name: nums.length >= 3 ? String(r[0]) : `#${i + 1}`, value: [pair[0], pair[1]] });
+    } else if (r && typeof r === 'object') {
+      const row = r as Record<string, unknown>;
+      const x = chartNumber(row.x);
+      const y = chartNumber(row.y);
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        points.push({ name: String(row.name ?? `#${i + 1}`), value: [x, y] });
+      }
+    }
+  });
+  return points;
+}
+
+/**
+ * Build a single ChartNode from a JSON value (object `{name, value?, children?}`
+ * or pair `[name, value]`). Returns null when nothing parseable is present.
+ */
+function hierarchyNodeFromJson(r: unknown): ChartNode | null {
+  if (Array.isArray(r)) {
+    const value = chartNumber(r[1]);
+    if (!Number.isFinite(value)) return null;
+    return { name: String(r[0] ?? ''), value };
+  }
+  if (r && typeof r === 'object') {
+    const row = r as Record<string, unknown>;
+    const name = String(row.name ?? '');
+    if (!name) return null;
+    const node: ChartNode = { name };
+    const value = chartNumber(row.value);
+    if (Number.isFinite(value)) node.value = value;
+    if (Array.isArray(row.children)) {
+      const children = row.children.map(hierarchyNodeFromJson).filter((c): c is ChartNode => c !== null);
+      if (children.length > 0) node.children = children;
+    }
+    return node;
+  }
+  return null;
+}
+
+/**
+ * Build a ChartNode from a JSON data array: either a single root node object or
+ * an array of nodes / `[name, value]` pairs (wrapped under a synthetic root).
+ * Returns null when nothing parseable is present.
+ */
+function hierarchyFromJson(arr: unknown[], title: string): ChartNode | null {
+  if (arr.length === 0) return null;
+  // A single object entry that is not a pair is treated as the root node itself.
+  if (arr.length === 1 && !Array.isArray(arr[0]) && arr[0] && typeof arr[0] === 'object') {
+    return hierarchyNodeFromJson(arr[0]);
+  }
+  const nodes = arr.map(hierarchyNodeFromJson).filter((n): n is ChartNode => n !== null);
+  if (nodes.length === 0) return null;
+  return { name: title || '数据', children: nodes };
+}
+
+/**
+ * Post-order pass that fills missing values: a parent without a value becomes
+ * the sum of its children (leaves without a value default to 1). Needed by
+ * treemap / sunburst, which size slices from values.
+ */
+function fillHierarchyValues(node: ChartNode): number {
+  const children = node.children ?? [];
+  if (children.length === 0) {
+    if (node.value === undefined) node.value = 1;
+    return node.value;
+  }
+  let sum = 0;
+  for (const child of children) sum += fillHierarchyValues(child);
+  if (node.value === undefined) node.value = sum;
+  return node.value;
 }
 
 /**
@@ -1024,6 +1198,9 @@ function parseChartSourceCore(source: string, meta: { repaired: boolean; repaire
   let title = '';
   let unit = '';
   const lines: string[] = [];
+  // Untrimmed counterpart of `lines` — the hierarchy parser needs leading
+  // whitespace to recover the tree structure (indentation = depth).
+  const rawLines: string[] = [];
 
   for (const rawLine of trimmed.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -1046,9 +1223,23 @@ function parseChartSourceCore(source: string, meta: { repaired: boolean; repaire
       continue;
     }
     lines.push(line);
+    rawLines.push(rawLine);
   }
 
   if (lines.length === 0) throw new Error('chart needs at least one data row');
+
+  // New chart families have their own line shapes, routed before the generic
+  // single/multi-series logic (which would misread e.g. kline's 4 OHLC columns
+  // as four separate series).
+  if (type === 'scatter') return parseScatterLines(type, title, unit, lines);
+  if (type === 'kline') return parseKlineLines(type, title, unit, lines);
+  if (type === 'radar') return parseRadarLines(type, title, unit, lines);
+  if (type === 'tree' || type === 'treemap' || type === 'sunburst') {
+    const root = parseHierarchyLines(rawLines, type !== 'tree');
+    if (!root) throw new Error('chart needs at least one data row');
+    if (type !== 'tree') fillHierarchyValues(root);
+    return { type, title, unit, data: [], tree: root };
+  }
 
   // Multi-series: at least two rows with >=2 numeric columns (after the label)
   // render as one series per column — `日期 北京 上海` header + `周一 25 27` rows.
@@ -1136,7 +1327,7 @@ export function parseChartSourceWithMeta(source: string): { spec: ChartSpec; rep
   return { spec, repaired: meta.repaired, repairedSource: meta.repairedSource };
 }
 
-const CHART_BARE_TYPE_RE = /^(bar|hbar|horizontal\s*bar|line|pie|area|柱状图?|横向柱状图?|折线图?|饼图)$/i;
+const CHART_BARE_TYPE_RE = /^(bar|hbar|horizontal\s*bar|line|pie|area|scatter|散点图?|kline|candlestick|candle|k线图?|蜡烛图?|radar|雷达图?|tree|树(形)?图?|treemap|矩形树图?|sunburst|旭日图?|柱状图?|横向柱状图?|折线图?|饼图)$/i;
 
 function isNumericToken(token: string): boolean {
   return Number.isFinite(chartNumber(token));
@@ -1256,6 +1447,135 @@ function parseMultiSeries(
     })),
   };
 }
+
+// ── Scatter / kline / radar / hierarchy line-DSL parsers ──
+
+/** Split a DSL line into cells (pipes, commas, colons, tabs, or whitespace). */
+function chartCells(line: string): string[] {
+  if (line.includes('|')) return line.split('|').map((c) => c.trim()).filter(Boolean);
+  return line.split(/[\t,，:：\s]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Scatter DSL: one point per line as `name x y` (or bare `x y`). Multi-series
+ * scatter uses the JSON form. Points get an auto `#n` name when absent.
+ */
+function parseScatterLines(type: ChartSpec['type'], title: string, unit: string, lines: string[]): ChartSpec {
+  const points: Array<{ name: string; value: [number, number] }> = [];
+  for (const rawLine of lines) {
+    if (CHART_BARE_TYPE_RE.test(rawLine)) continue;
+    const cells = chartCells(rawLine);
+    const nums = cells.map((c) => chartNumber(c));
+    const x = nums[nums.length - 2];
+    const y = nums[nums.length - 1];
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const name = cells.slice(0, -2).join(' ').trim() || `#${points.length + 1}`;
+    points.push({ name, value: [x, y] });
+  }
+  if (points.length === 0) throw new Error('chart needs at least one data row');
+  return {
+    type, title, unit,
+    data: points.map((p) => ({ label: p.name, value: p.value[1] })),
+    scatter: [{ name: '数据', points }],
+  };
+}
+
+/**
+ * K-line DSL: a header (`日期 开盘 收盘 最低 最高`) plus one OHLC row per date.
+ * Column order is OPEN CLOSE LOW HIGH to match echarts candlestick data items.
+ */
+function parseKlineLines(type: ChartSpec['type'], title: string, unit: string, lines: string[]): ChartSpec {
+  const rows: Array<{ date: string; value: [number, number, number, number] }> = [];
+  for (const rawLine of lines) {
+    if (CHART_BARE_TYPE_RE.test(rawLine)) continue;
+    const cells = chartCells(rawLine);
+    if (cells.length < 5) continue;
+    const nums = cells.slice(1, 5).map((c) => chartNumber(c));
+    if (!nums.every(Number.isFinite)) continue; // header / separator rows
+    rows.push({ date: cells[0], value: [nums[0], nums[1], nums[2], nums[3]] });
+  }
+  if (rows.length === 0) throw new Error('chart needs at least one data row');
+  return {
+    type, title, unit,
+    data: rows.map((r) => ({ label: r.date, value: r.value[3] })),
+    ohlc: rows,
+  };
+}
+
+/**
+ * Radar DSL: optional `indicators: 速度 攻击 防御` line (or a header row of
+ * indicator names) plus one series row per line: `名称 v1 v2 v3 …`.
+ */
+function parseRadarLines(type: ChartSpec['type'], title: string, unit: string, lines: string[]): ChartSpec {
+  let indicators: string[] = [];
+  const rows: Array<{ name: string; value: number[] }> = [];
+  for (const rawLine of lines) {
+    if (CHART_BARE_TYPE_RE.test(rawLine)) continue;
+    const im = rawLine.match(/^indicators\s*[:=：]\s*(.+)$/i);
+    if (im) {
+      indicators = chartCells(im[1]);
+      continue;
+    }
+    const cells = chartCells(rawLine);
+    const nums = cells.slice(1).map((c) => chartNumber(c));
+    if (nums.length > 0 && nums.every(Number.isFinite)) {
+      rows.push({ name: cells[0] || `#${rows.length + 1}`, value: nums });
+      continue;
+    }
+    // Header row: >=2 cells, no numeric cells → indicator names (if not set yet).
+    if (indicators.length === 0 && cells.length >= 2 && cells.every((c) => !Number.isFinite(chartNumber(c)))) {
+      indicators = cells;
+    }
+  }
+  if (rows.length === 0) throw new Error('chart needs at least one data row');
+  const len = Math.max(...rows.map((r) => r.value.length));
+  const finalIndicators = indicators.length >= len ? indicators.slice(0, len) : Array.from({ length: len }, (_, i) => indicators[i] ?? `维度${i + 1}`);
+  return {
+    type, title, unit,
+    data: rows.map((r) => ({ label: r.name, value: r.value[0] ?? 0 })),
+    indicators: finalIndicators,
+    radarData: rows,
+  };
+}
+
+/**
+ * Hierarchical DSL (tree / treemap / sunburst): indentation defines depth —
+ * each 2-space indent (or a `- ` / `* ` bullet) drops one level. The first
+ * line is the root. For treemap / sunburst a trailing number on a line becomes
+ * the node's value (`  电子 500`). Returns the root node, or null when empty.
+ */
+function parseHierarchyLines(lines: string[], withValues: boolean): ChartNode | null {
+  const stack: Array<{ node: ChartNode; depth: number }> = [];
+  let root: ChartNode | null = null;
+  for (const rawLine of lines) {
+    if (CHART_BARE_TYPE_RE.test(rawLine) && stack.length === 0) continue;
+    const indent = rawLine.match(/^\s*/)?.[0].length ?? 0;
+    const depth = Math.round(indent / 2);
+    let text = rawLine.trim().replace(/^[-*•]\s*/, '');
+    if (!text) continue;
+    let node: ChartNode = { name: text };
+    if (withValues) {
+      const m = text.match(/^(.*?)[\s,:，：|]+([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*$/);
+      if (m) {
+        const value = Number(m[2]);
+        if (Number.isFinite(value)) {
+          node = { name: m[1].trim() || text, value };
+        }
+      }
+    }
+    if (!root) {
+      root = node;
+      stack.push({ node, depth });
+      continue;
+    }
+    while (stack.length > 0 && stack[stack.length - 1].depth >= depth) stack.pop();
+    const parent = stack.length > 0 ? stack[stack.length - 1].node : root;
+    (parent.children ??= []).push(node);
+    stack.push({ node, depth });
+  }
+  return root;
+}
+
 function chartNumber(value: unknown): number {
   if (typeof value === 'number') return Number.isFinite(value) ? value : Number.NaN;
   if (typeof value !== 'string') return Number.NaN;
@@ -1295,6 +1615,12 @@ function normalizeChartType(t: string): ChartSpec['type'] {
   if (/^(hbar|horizontal|横向柱状|条形)/i.test(t)) return 'hbar';
   if (/^(line|折线)/i.test(t)) return 'line';
   if (/^(pie|饼)/i.test(t)) return 'pie';
+  if (/^(scatter|散点)/i.test(t)) return 'scatter';
+  if (/^(kline|candle|k线|蜡烛)/i.test(t)) return 'kline';
+  if (/^(radar|雷达)/i.test(t)) return 'radar';
+  if (/^(treemap|矩形树图)/i.test(t)) return 'treemap';
+  if (/^(sunburst|旭日)/i.test(t)) return 'sunburst';
+  if (/^(tree|树)/i.test(t)) return 'tree';
   return 'bar';
 }
 

@@ -10,6 +10,9 @@ import {
   customProviderFor,
   customProviderLabel,
   defaultModelFor,
+  imageGenEnabled,
+  imageGenModelFor,
+  isImageModelName,
   promptBudgetForProvider,
   resolvePromptBudget,
   isCustomKeyless,
@@ -139,6 +142,10 @@ describe('cloud quick presets (OpenAI / OpenRouter / NVIDIA)', () => {
     expect(OPENAI_PRESET.defaultModel).toBe(OPENAI_PRESET.models[0]);
     expect(OPENAI_PRESET.apiKey).toBe('');
     expect(OPENAI_PRESET.local).toBeUndefined();
+    // Ships with text-to-image enabled (gpt-image-1) so image requests render
+    // as real pictures instead of SVG.
+    expect(OPENAI_PRESET.imageGen).toBe(true);
+    expect(OPENAI_PRESET.imageGenModel).toBe('gpt-image-1');
   });
 
   it('OPENROUTER_PRESET uses the /api/v1 endpoint and model-per-org naming', () => {
@@ -160,5 +167,49 @@ describe('cloud quick presets (OpenAI / OpenRouter / NVIDIA)', () => {
       expect(p.baseURL).not.toBe('');
       expect(p.models.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('text-to-image capability detection', () => {
+  it('detects image-capable model names', () => {
+    expect(isImageModelName('gpt-image-1')).toBe(true);
+    expect(isImageModelName('dall-e-3')).toBe(true);
+    expect(isImageModelName('cogview-4')).toBe(true);
+    expect(isImageModelName('flux-dev')).toBe(true);
+    expect(isImageModelName('gemini-2.5-flash-image')).toBe(true);
+    expect(isImageModelName('deepseek-v4-flash')).toBe(false);
+    expect(isImageModelName('gpt-4o-mini')).toBe(false);
+    expect(isImageModelName('')).toBe(false);
+    expect(isImageModelName(undefined)).toBe(false);
+  });
+
+  it('enables via the explicit custom-provider flag', () => {
+    const openai: CustomProvider = { ...OPENAI_PRESET };
+    expect(imageGenEnabled([openai], 'openai', 'gpt-4o-mini')).toBe(true);
+    expect(imageGenModelFor([openai], 'openai', 'gpt-4o-mini')).toBe('gpt-image-1');
+  });
+
+  it('enables via an image-capable chat model name even without the flag', () => {
+    expect(imageGenEnabled([], 'openai', 'gpt-image-1')).toBe(true);
+    expect(imageGenModelFor([], 'openai', 'gpt-image-1')).toBe('gpt-image-1');
+    // Built-in providers light up the same way (e.g. a cogview model on GLM).
+    expect(imageGenEnabled([], 'glm', 'cogview-4')).toBe(true);
+  });
+
+  it('prefers the explicit image model over the chat model', () => {
+    const custom: CustomProvider = { ...OPENAI_PRESET, imageGenModel: 'dall-e-3' };
+    expect(imageGenModelFor([custom], 'openai', 'gpt-4o-mini')).toBe('dall-e-3');
+  });
+
+  it('stays disabled for plain chat models without the flag', () => {
+    expect(imageGenEnabled([], 'deepseek-openai', 'deepseek-v4-flash')).toBe(false);
+    expect(imageGenEnabled([OLLAMA], 'ollama', 'qwen2.5-coder:7b')).toBe(false);
+    expect(imageGenEnabled([], 'qwen', 'qwen3-coder-next')).toBe(false);
+    expect(imageGenEnabled([], 'glm', 'glm-5.2')).toBe(false);
+  });
+
+  it('falls back to gpt-image-1 as the default image model', () => {
+    const custom: CustomProvider = { ...OLLAMA, imageGen: true };
+    expect(imageGenModelFor([custom], 'ollama', 'qwen2.5-coder:7b')).toBe('gpt-image-1');
   });
 });

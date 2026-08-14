@@ -1,7 +1,94 @@
 // src/ui/__tests__/toolRow.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus } from '../toolRow';
+import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow } from '../toolRow';
+import type { GeneratedImage } from '../../shared/types';
+
+// Minimal fake DOM sufficient for createToolRow + finalizeToolRow's image
+// gallery branch. linkifyPaths (called inside fillInputSection) is neutralized
+// by a tree-walker stub that finds no text nodes.
+function installFakeDocument(): () => void {
+  const previous = (globalThis as any).document;
+  const createElement = (tag: string): any => {
+    const classes = new Set<string>();
+    const children: any[] = [];
+    const el: any = {
+      tagName: tag.toUpperCase(),
+      children,
+      childNodes: children,
+      dataset: {},
+      style: {},
+      _listeners: {} as Record<string, (ev?: any) => void>,
+      className: '',
+      textContent: '',
+      _innerHTML: '',
+      hidden: false,
+      open: false,
+      type: '',
+      title: '',
+      alt: '',
+      src: '',
+      loading: '',
+      value: '',
+      parentNode: null,
+      parentElement: null,
+      set innerHTML(value: string) {
+        this._innerHTML = value;
+        if (value === '') {
+          children.length = 0;
+        }
+      },
+      get innerHTML(): string { return this._innerHTML; },
+      _sync: () => { el.className = [...classes].join(' '); },
+      classList: {
+        add: (...names: string[]) => { names.forEach((n) => classes.add(n)); el._sync(); },
+        remove: (...names: string[]) => { names.forEach((n) => classes.delete(n)); el._sync(); },
+        contains: (n: string) => classes.has(n),
+        toggle: (n: string, force?: boolean) => {
+          const on = force ?? !classes.has(n);
+          if (on) classes.add(n); else classes.delete(n);
+          el._sync();
+          return on;
+        },
+      },
+      append: (...items: any[]) => items.forEach((item) => { children.push(item); item.parentNode = el; }),
+      appendChild: (item: any) => { children.push(item); item.parentNode = el; return item; },
+      remove: () => {
+        const parent = el.parentNode;
+        if (parent?.children) {
+          const i = parent.children.indexOf(el);
+          if (i >= 0) parent.children.splice(i, 1);
+        }
+        el.parentNode = null;
+      },
+      setAttribute: (name: string, value: string) => { el[name] = value; if (name.startsWith('data-')) el.dataset[name.slice(5)] = value; },
+      getAttribute: (name: string) => el[name] ?? null,
+      addEventListener: (name: string, listener: (ev?: any) => void) => { el._listeners[name] = listener; },
+      removeEventListener: () => {},
+      querySelector: (): any => null,
+      querySelectorAll: (): any[] => [],
+      closest: (): any => null,
+      click: () => { el._listeners?.click?.(); },
+    };
+    return el;
+  };
+  (globalThis as any).NodeFilter = { SHOW_TEXT: 4 };
+  (globalThis as any).document = {
+    createElement,
+    createTextNode: (text: string) => ({ textContent: text, nodeType: 3, parentNode: null }),
+    createDocumentFragment: () => ({ appendChild: () => {}, childNodes: [] }),
+    createTreeWalker: () => ({ nextNode: () => null }),
+    body: createElement('body'),
+    _listeners: {} as Record<string, (ev?: any) => void>,
+    addEventListener: (name: string, listener: (ev?: any) => void) => { (globalThis as any).document._listeners[name] = listener; },
+    removeEventListener: () => {},
+  };
+  return () => { (globalThis as any).document = previous; };
+}
+
+function image(dataUrl: string, mimeType = 'image/png', sizeBytes = 1024): GeneratedImage {
+  return { dataUrl, mimeType, sizeBytes };
+}
 
 describe('tool row expansion policy', () => {
   it('expands every execution row by default', () => {
@@ -129,6 +216,50 @@ describe('live output status', () => {
   });
 });
 
+describe('structured text formatting (JSON/YAML in tool input/output)', () => {
+  it('pretty-prints JSON output with 2-space indent', () => {
+    const r = formatStructuredText('{"a":1,"b":[1,2],"c":"x"}');
+    expect(r?.language).toBe('json');
+    expect(r?.formatted).toBe('{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ],\n  "c": "x"\n}');
+  });
+
+  it('accepts already-pretty JSON and top-level arrays', () => {
+    expect(formatStructuredText('{\n  "a": 1\n}')?.language).toBe('json');
+    expect(formatStructuredText('[1,2,3]')?.language).toBe('json');
+  });
+
+  it('detects multi-line YAML documents (mapping entries)', () => {
+    const r = formatStructuredText('services:\n  app:\n    image: nginx\n    ports:\n      - "8080:80"');
+    expect(r?.language).toBe('yaml');
+    expect(r?.formatted).toBe('services:\n  app:\n    image: nginx\n    ports:\n      - "8080:80"');
+  });
+
+  it('detects YAML with a document marker and comments', () => {
+    expect(formatStructuredText('---\n# comment\napiVersion: v1\nkind: List')?.language).toBe('yaml');
+  });
+
+  it('rejects terminal noise and single-line query strings', () => {
+    // ls-style listing: dash-prefixed perms + 12:00 timestamp must not parse.
+    expect(formatStructuredText('-rw-r--r-- 1 user group 123 Jan 1 12:00 file.txt')).toBeNull();
+    // git log line: hex prefix + message, no mapping entry.
+    expect(formatStructuredText('abc1234 commit message here')).toBeNull();
+    // Single-line "key: value" (e.g. a query arg) is not a YAML document.
+    expect(formatStructuredText('node: 22')).toBeNull();
+    // env-style output has no mapping colons.
+    expect(formatStructuredText('PATH=/usr/bin:/bin\nHOME=/root')).toBeNull();
+    // plain multi-line prose.
+    expect(formatStructuredText('hello world\nsecond line')).toBeNull();
+  });
+
+  it('rejects text past the format cap', () => {
+    expect(formatStructuredText('{"a":' + '1'.repeat(MAX_STRUCTURED_FORMAT_CHARS) + '}')).toBeNull();
+  });
+
+  it('rejects malformed JSON that only starts with a brace', () => {
+    expect(formatStructuredText('{not json}')).toBeNull();
+  });
+});
+
 describe('pendingActionLabel', () => {
   it('shows the target path and content size for write_file once args arrive', () => {
     const label = pendingActionLabel('write_file', { path: 'src/foo.ts', content: 'x'.repeat(2048) });
@@ -173,5 +304,117 @@ describe('pendingActionLabel', () => {
     const label = pendingActionLabel('write_file', { path: 'a.txt', content: '中文'.repeat(512) });
     // 2 chars × 3 bytes = 6 bytes per repeat × 512 = 3072 bytes = 3.0 KB
     expect(label).toContain('3.0 KB');
+  });
+});
+
+describe('generate_image tool row identity', () => {
+  it('has a distinct Generate Image identity', () => {
+    expect(toolDisplayName('generate_image')).toBe('Generate Image');
+    expect(toolIcon('generate_image')).toBe('🎨');
+    expect(formatToolArgsSummary('generate_image', { prompt: 'a cute puppy icon' }))
+      .toBe('prompt="a cute puppy icon"');
+    expect(pendingActionLabel('generate_image', {})).toBe('正在生成图片…');
+    // Image cards live on the non-terminal surface (like web lookups).
+    expect(shouldUseTerminalPanel('generate_image')).toBe(false);
+  });
+});
+
+describe('generated image filename helpers', () => {
+  it('maps mime types to file extensions', () => {
+    expect(imageExtension('image/png')).toBe('png');
+    expect(imageExtension('image/jpeg')).toBe('jpg');
+    expect(imageExtension('image/webp')).toBe('webp');
+    expect(imageExtension('image/gif')).toBe('gif');
+    expect(imageExtension('')).toBe('png');
+  });
+
+  it('builds a slugged name with the index and correct extension', () => {
+    const name = imageDefaultName('一只小狗图标', 1, 'image/png');
+    expect(name.startsWith('一只小狗图标-2-')).toBe(true);
+    expect(name.endsWith('.png')).toBe(true);
+    const jpg = imageDefaultName('puppy/icon: cute!', 3, 'image/jpeg');
+    expect(jpg.startsWith('puppy_icon_cute-4-')).toBe(true);
+    expect(jpg.endsWith('.jpg')).toBe(true);
+    expect(imageDefaultName(undefined, 0, 'image/webp').startsWith('generated-image-1-')).toBe(true);
+  });
+});
+
+describe('tool row renders generated images as <img> cards', () => {
+  it('finalizeToolRow renders an image gallery instead of raw text', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('generate_image', { prompt: 'a puppy' });
+      finalizeToolRow(row, {
+        success: true,
+        duration: 1500,
+        resultKind: 'image',
+        resultImages: [image('data:image/png;base64,AAA'), image('data:image/png;base64,BBB', 'image/jpeg', 2048)],
+        resultText: 'Generated 2 image(s)…',
+      });
+      expect(row.statusEl.textContent).toBe('✓ 1.5s');
+      const gallery = Array.from(row.resultEl.children).find((c: any) => c.className.includes('image-gallery')) as any;
+      expect(gallery).toBeDefined();
+      expect(gallery.className).toBe('image-gallery'); // 2 images → multi-card grid
+      expect(gallery.children.length).toBe(2);
+      const first = gallery.children[0];
+      expect(first.className).toBe('image-card');
+      const img = first.children[0];
+      expect(img.tagName).toBe('IMG');
+      expect(img.src).toBe('data:image/png;base64,AAA');
+      // The summary text (which embeds the prompt) becomes the alt caption.
+      expect(img.alt).toContain('Generated 2 image(s)…');
+      expect(img.alt).toContain('图 1');
+      // Download button + caption metadata ride on the card.
+      const download = first.children[1];
+      expect(download.className).toBe('image-download-btn');
+      expect(first.children[2].className).toBe('image-card-meta');
+      expect(first.children[2].textContent).toContain('PNG');
+    } finally {
+      restore();
+    }
+  });
+
+  it('a single image renders in the single-card geometry', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('generate_image', { prompt: 'logo' });
+      finalizeToolRow(row, {
+        success: true,
+        duration: 900,
+        resultKind: 'image',
+        resultImages: [image('data:image/png;base64,ONE')],
+        resultText: 'Generated 1 image(s)…',
+      });
+      const gallery = Array.from(row.resultEl.children).find((c: any) => c.className.includes('image-gallery')) as any;
+      expect(gallery.className).toBe('image-gallery single');
+      expect(gallery.children.length).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('clicking a generated image opens the lightbox overlay', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('generate_image', { prompt: 'puppy' });
+      finalizeToolRow(row, {
+        success: true,
+        duration: 1000,
+        resultKind: 'image',
+        resultImages: [image('data:image/png;base64,CLICK')],
+        resultText: 'ok',
+      });
+      const gallery = Array.from(row.resultEl.children).find((c: any) => c.className.includes('image-gallery')) as any;
+      const img = gallery.children[0].children[0];
+      img._listeners.click({ target: img });
+      const overlay = (globalThis as any).document.body.children.find((c: any) => c.className === 'image-lightbox');
+      expect(overlay).toBeDefined();
+      expect(overlay.children[0].src).toBe('data:image/png;base64,CLICK');
+      // Escape dismisses the overlay.
+      (globalThis as any).document._listeners.keydown({ key: 'Escape' });
+      expect((globalThis as any).document.body.children.length).toBe(0);
+    } finally {
+      restore();
+    }
   });
 });

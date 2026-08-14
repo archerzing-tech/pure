@@ -384,7 +384,7 @@ For CI/CD, the project includes a GitHub Actions workflow (`.github/workflows/re
 
 ## Chart DSL
 
-In chat replies, a ```` ```chart ```` code block renders as a chart (bar, horizontal bar, line, or pie) using a tiny DSL:
+In chat replies, a ```` ```chart ```` code block renders as a chart (bar, horizontal bar, line, pie, scatter, kline, radar, tree, treemap, sunburst) using a tiny DSL:
 
 ````markdown
 ```chart
@@ -429,15 +429,67 @@ type: line
 
 Multi-series also works for `bar` and `hbar`; a `pie` chart always uses the first column as values (multiple series would overlap as donuts).
 
+### Other chart families
+
+```chart blocks cover more of ECharts' chart library, each with its own data shape:
+
+- **scatter** — one point per line: `name x y`.
+
+````markdown
+```chart
+type: scatter
+title: 身高体重分布
+小明 170 65
+小红 160 50
+```
+````
+
+- **kline** — a header `日期 开盘 收盘 最低 最高` then `date open close low high` rows (that OHLC order is required).
+
+````markdown
+```chart
+type: kline
+日期 开盘 收盘 最低 最高
+2026-08-01 10 12 9 13
+2026-08-02 12 11 10 12
+```
+````
+
+- **radar** — `indicators: 维度1 维度2 …` (or a header row of axis names), then one series per line: `名称 v1 v2 …`.
+
+````markdown
+```chart
+type: radar
+title: 团队技能
+indicators: 速度 攻击 防御
+团队A 80 90 70
+团队B 60 70 80
+```
+````
+
+- **tree / treemap / sunburst** — indentation defines the hierarchy (2 spaces per level), the first line is the root; for treemap/sunburst end a line with a number to set its value.
+
+````markdown
+```chart
+type: treemap
+销售
+  电子 500
+    手机 300
+    电脑 200
+  家电 300
+```
+````
+
 ### Rules & tips
 
-- **Types**: `bar`, `hbar`, `line`, `pie` — `type:` line or a bare first word; default `bar`.
+- **Types**: `bar`, `hbar`, `line`, `pie`, `scatter`, `kline`, `radar`, `tree`, `treemap`, `sunburst` — `type:` line or a bare first word (Chinese shorthands like `散点图` / `雷达图` work too); default `bar`.
 - **Series names**: taken from the header row; without a header they fall back to `系列1` / `系列2` / ….
 - **Numeric first column**: a leading numeric token is always kept as the x-axis label — `2024 10 20` means the year is the label, not a data value.
 - **Units**: `25℃`, `50%`, `1.2mm` are parsed and the unit is shown in tooltips/axis labels.
-- **JSON**: `{ "type": "pie", "data": [["a", 1], ["b", 2]] }` is also accepted.
+- **JSON**: `{ "type": "pie", "data": [["a", 1], ["b", 2]] }` is also accepted; hierarchy charts take `{ "type": "tree", "data": { "name": "root", "children": [...] } }`.
 - **Interactions**: double-click any chart to open the fullscreen pan/zoom viewer; the floating download button exports PNG.
 - Charts render via a lazy-loaded echarts build (tree-shaken, SVG renderer) and follow the app's light/dark theme automatically.
+- To draw a chart or picture, emit the ```chart / ```svg block directly — never a Python/matplotlib script or other intermediate code in place of the final image.
 
 ---
 

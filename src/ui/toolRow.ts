@@ -8,6 +8,17 @@
 
 import { linkifyPaths } from './pathLink';
 import { formatBytes } from '../shared/format';
+import { isTauriRuntime } from '../shared/tauri';
+import type { GeneratedImage } from '../shared/types';
+// Structured (JSON/YAML) highlighting reuses the same tree-shaken hljs core
+// as markdown.ts — re-registering the grammars here is idempotent and keeps
+// toolRow.ts self-contained (it is imported by chat.ts, main.ts and tests).
+import hljs from 'highlight.js/lib/core';
+import jsonGrammar from 'highlight.js/lib/languages/json';
+import yamlGrammar from 'highlight.js/lib/languages/yaml';
+
+hljs.registerLanguage('json', jsonGrammar);
+hljs.registerLanguage('yaml', yamlGrammar);
 
 // Friendly display names + icons per tool (Claude Code uses short verbs).
 const TOOL_META: Record<string, { name: string; icon: string }> = {
@@ -33,6 +44,7 @@ const TOOL_META: Record<string, { name: string; icon: string }> = {
   planner:          { name: 'Plan',          icon: '📋' },
   project_auditor:  { name: 'Project Audit', icon: '🛡️' },
   sys_info:         { name: 'System Info',   icon: 'ℹ️' },
+  generate_image:   { name: 'Generate Image', icon: '🎨' },
 };
 
 export function toolDisplayName(toolName: string): string {
@@ -71,6 +83,8 @@ export function formatToolArgsSummary(toolName: string, args: Record<string, unk
       return typeof v('path') === 'string' ? `path="${String(v('path'))}"` : '';
     case 'execute_command':
       return typeof v('command') === 'string' ? `$ ${String(v('command')).slice(0, 100)}` : '';
+    case 'generate_image':
+      return typeof v('prompt') === 'string' ? `prompt="${String(v('prompt')).slice(0, 80)}"` : '';
     case 'search_files':
     case 'glob_files':
       return typeof v('pattern') === 'string' ? `pattern="${String(v('pattern'))}"` : '';
@@ -82,8 +96,10 @@ export function formatToolArgsSummary(toolName: string, args: Record<string, unk
 export interface ToolRowResultMeta {
   success: boolean;
   duration: number;
-  resultKind?: 'search' | 'fetch';
+  resultKind?: 'search' | 'fetch' | 'image';
   resultItems?: Array<{ title: string; snippet: string; url: string }>;
+  /** Generated images (data URLs) rendered as <img> cards, ChatGPT/Gemini style. */
+  resultImages?: GeneratedImage[];
   resultText?: string;
 }
 
@@ -159,6 +175,73 @@ export function truncateResultLines(text: string, maxLines = MAX_LIVE_STREAM_LIN
   return `${lines.slice(0, maxLines).join('\n')}\n… (${cut.toLocaleString()} lines truncated)`;
 }
 
+// ── Structured (JSON/YAML) detection + formatting ──
+// Tool input/output that happens to be JSON or YAML (cat package.json in
+// Bash, read_file of a config, a web_fetch API payload, a JSON-typed arg) is
+// pretty-printed and syntax-highlighted instead of dumped as raw text.
+// JSON is re-serialized with 2-space indent; YAML is only highlighted (no
+// YAML parser is bundled, so re-indenting would risk corrupting the text).
+
+export type StructuredLanguage = 'json' | 'yaml';
+
+export interface StructuredText {
+  language: StructuredLanguage;
+  /** Pretty-printed (JSON) or original (YAML) text, ready to highlight. */
+  formatted: string;
+}
+
+// Cap for attempting structured parsing — beyond this the text is left as-is
+// (a giant log dump is not worth JSON.parsing + re-serializing for display).
+export const MAX_STRUCTURED_FORMAT_CHARS = 100_000;
+
+// Conservative YAML sniff: every non-empty line must look like a mapping entry
+// (simple/letter-led key, quoted key), a list item, a comment, or a document
+// marker; at least TWO such lines with at least ONE real mapping entry. This
+// rejects terminal noise (`-rw-r--r-- … 12:00 file`, `abc1234 commit msg`,
+// `KEY=value` env lines, single-line query strings like `node: 22`) while
+// accepting real YAML documents (compose/k8s configs, .yml files).
+function looksLikeYaml(text: string): boolean {
+  const lines = text.split('\n');
+  if (lines.length < 2) return false;
+  let structure = 0;
+  let mappings = 0;
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, '');
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (/^---$|^\.\.\.$/.test(trimmed) || trimmed.startsWith('#')) { structure++; continue; }
+    if (/^\s*- /.test(line)) { structure++; continue; }
+    if (/^\s*(?:[\w@][\w.@\/-]*|"[^"]*"|'[^']*')\s*:(\s|$)/.test(line)) { structure++; mappings++; continue; }
+    return false;
+  }
+  return structure >= 2 && mappings >= 1;
+}
+
+/** Detect JSON/YAML in a tool input or output string. Returns null for plain
+ * text (callers then render it verbatim). */
+export function formatStructuredText(text: string): StructuredText | null {
+  if (!text || text.length > MAX_STRUCTURED_FORMAT_CHARS) return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  if (trimmed[0] === '{' || trimmed[0] === '[') {
+    try {
+      return { language: 'json', formatted: JSON.stringify(JSON.parse(trimmed), null, 2) };
+    } catch { /* not JSON — fall through to YAML */ }
+  }
+  if (looksLikeYaml(trimmed)) return { language: 'yaml', formatted: text };
+  return null;
+}
+
+// Render pretty text with hljs token spans. hljs escapes the source before
+// wrapping tokens, so innerHTML is safe; the fallback degrades to textContent.
+function renderStructured(container: HTMLElement, language: StructuredLanguage, text: string): void {
+  try {
+    container.innerHTML = hljs.highlight(text, { language }).value;
+  } catch {
+    container.textContent = text;
+  }
+}
+
 // ── Pending-state label ──
 // What the row is DOING while it runs, shown in place of the generic
 // "等待输出" placeholder so a write that hasn't emitted its first progress
@@ -191,6 +274,8 @@ export function pendingActionLabel(toolName: string, args: Record<string, unknow
       return '正在获取页面…';
     case 'web_researcher':
       return '正在研究网页资料…';
+    case 'generate_image':
+      return '正在生成图片…';
     case 'planner':
       return '正在制定执行计划…';
     case 'project_auditor':
@@ -247,7 +332,23 @@ function makeFieldRow(key: string, value: unknown): HTMLElement {
   k.textContent = key;
   const val = document.createElement('span');
   val.className = 'tool-row-field-value';
-  val.textContent = displayArgValue(value);
+  // JSON-typed args (a config document being written, an API payload) render
+  // pretty-printed + highlighted like tool output; everything else stays the
+  // plain one-line value.
+  const structured = formatStructuredText(typeof value === 'string' ? value : JSON.stringify(value));
+  if (structured) {
+    val.classList.add('tool-row-field-structured');
+    // Same display cap as plain values, applied AFTER pretty-printing so a
+    // formatted document still fits the row.
+    let display = structured.formatted;
+    if (display.length > MAX_FIELD_VALUE_CHARS) {
+      const cut = display.length - MAX_FIELD_VALUE_CHARS;
+      display = `${display.slice(0, MAX_FIELD_VALUE_CHARS)}\n… (${cut.toLocaleString()} chars truncated)`;
+    }
+    renderStructured(val, structured.language, display);
+  } else {
+    val.textContent = displayArgValue(value);
+  }
   field.append(k, val);
   return field;
 }
@@ -444,20 +545,32 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
       more.textContent = `+${meta.resultItems.length - 8} more results`;
       row.resultEl.appendChild(more);
     }
+  } else if (meta.resultKind === 'image' && meta.resultImages?.length) {
+    // Image cards need room: the default 240px Output cap would crop a
+    // portrait image. The row-level class lifts the cap for this result.
+    row.details.classList.add('image-result');
+    row.resultEl.appendChild(renderImageGallery(meta.resultImages, meta.resultText));
   } else if (meta.resultText) {
     const pre = document.createElement('pre');
     pre.className = meta.resultKind === 'fetch' ? 'fetch-preview' : 'tool-result-preview';
-    if (row.toolName === 'execute_command') {
-      // Terminal output keeps its live highlight in the final result so the
-      // panel doesn't flatten to monochrome the moment the command finishes —
-      // same tokenizer + step detection as the streaming lines, applied per
-      // line. Session replay (main.ts) goes through here too, so restored
-      // Bash rows render identically.
-      appendHighlightedResult(pre, meta.resultText);
-    } else if (row.toolName === 'code_searcher') {
+    if (row.toolName === 'code_searcher') {
       pre.textContent = formatCodeSearchPreview(meta.resultText);
     } else {
-      pre.textContent = meta.resultText;
+      // JSON/YAML output (cat package.json, read_file of a config, an API
+      // payload) renders pretty-printed + highlighted. Bash output that is
+      // NOT structured keeps its live stream highlight so the panel doesn't
+      // flatten to monochrome the moment the command finishes — same
+      // tokenizer + step detection as the streaming lines, applied per line.
+      // Session replay (main.ts) goes through here too, so restored rows
+      // render identically.
+      const structured = formatStructuredText(meta.resultText);
+      if (structured) {
+        renderStructured(pre, structured.language, structured.formatted);
+      } else if (row.toolName === 'execute_command') {
+        appendHighlightedResult(pre, meta.resultText);
+      } else {
+        pre.textContent = meta.resultText;
+      }
     }
     row.resultEl.appendChild(pre);
     // File paths in tool output (search hits, git status, listings) open on click.
@@ -632,6 +745,130 @@ export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stder
   if (kind === 'stdout' && isStepHeaderLine(line)) div.classList.add('stream-step');
   appendHighlightSegments(div, line);
   row.resultEl.appendChild(div);
+}
+
+// ── Generated-image gallery (generate_image tool results) ──
+// ChatGPT/Gemini-style picture cards: each image renders as an <img> with a
+// download button and click-to-enlarge lightbox. One image fills the row; two
+// or more sit side by side (mirroring the SVG gallery grid).
+
+export function imageExtension(mimeType: string): string {
+  if (mimeType === 'image/jpeg') return 'jpg';
+  if (mimeType === 'image/webp') return 'webp';
+  if (mimeType === 'image/gif') return 'gif';
+  return 'png';
+}
+
+export function imageDefaultName(prompt: string | undefined, index: number, mimeType: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const base = (prompt ?? 'generated-image')
+    .slice(0, 40)
+    .replace(/[^\w\u4e00-\u9fa5-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    || 'generated-image';
+  return `${base}-${index + 1}-${stamp}.${imageExtension(mimeType)}`;
+}
+
+/** Download one generated image: native save dialog in Tauri (plugin-dialog +
+ * save_file_binary), browser anchor download otherwise. */
+async function downloadImage(image: GeneratedImage, index: number, prompt?: string): Promise<void> {
+  const name = imageDefaultName(prompt, index, image.mimeType);
+  if (isTauriRuntime()) {
+    try {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const path = await save({
+        defaultPath: name,
+        filters: [{ name: 'Image', extensions: [imageExtension(image.mimeType)] }],
+      });
+      if (!path) return;
+      const comma = image.dataUrl.indexOf(',');
+      if (comma > 0 && image.dataUrl.startsWith('data:')) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('save_file_binary', { path, dataBase64: image.dataUrl.slice(comma + 1) });
+        return;
+      }
+      // https URL payload — let the WebView download it directly.
+    } catch {
+      /* fall through to the anchor path */
+    }
+  }
+  const a = document.createElement('a');
+  a.href = image.dataUrl;
+  a.download = name;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// One lightbox at a time; releasing the previous overlay's listeners prevents
+// leaks when images are enlarged repeatedly.
+let activeImageLightboxCleanup: (() => void) | null = null;
+
+function openImageLightbox(dataUrl: string, alt: string): void {
+  activeImageLightboxCleanup?.();
+  const overlay = document.createElement('div');
+  overlay.className = 'image-lightbox';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', alt);
+  const img = document.createElement('img');
+  img.className = 'image-lightbox-img';
+  img.src = dataUrl;
+  img.alt = alt;
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'image-lightbox-close';
+  close.title = '关闭';
+  close.setAttribute('aria-label', '关闭');
+  close.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+  overlay.append(img, close);
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') cleanup();
+  };
+  function cleanup(): void {
+    activeImageLightboxCleanup = null;
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+  }
+  close.addEventListener('click', cleanup);
+  overlay.addEventListener('mousedown', (e) => {
+    if (e.target === overlay) cleanup();
+  });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(overlay);
+  activeImageLightboxCleanup = cleanup;
+}
+
+function renderImageGallery(images: GeneratedImage[], prompt?: string): HTMLElement {
+  const gallery = document.createElement('div');
+  gallery.className = images.length > 1 ? 'image-gallery' : 'image-gallery single';
+  images.forEach((image, index) => {
+    const card = document.createElement('figure');
+    card.className = 'image-card';
+    const img = document.createElement('img');
+    img.className = 'generated-image';
+    img.src = image.dataUrl;
+    img.alt = prompt ? `${prompt}（图 ${index + 1}）` : `生成图片 ${index + 1}`;
+    img.loading = 'lazy';
+    img.addEventListener('click', () => openImageLightbox(image.dataUrl, img.alt));
+    const download = document.createElement('button');
+    download.type = 'button';
+    download.className = 'image-download-btn';
+    download.title = '下载图片';
+    download.setAttribute('aria-label', '下载图片');
+    download.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+    download.addEventListener('click', (e) => {
+      e.stopPropagation();
+      void downloadImage(image, index, prompt);
+    });
+    const caption = document.createElement('figcaption');
+    caption.className = 'image-card-meta';
+    caption.textContent = `${image.mimeType.replace('image/', '').toUpperCase()} · ${formatBytes(image.sizeBytes || 0)}`;
+    card.append(img, download, caption);
+    gallery.appendChild(card);
+  });
+  return gallery;
 }
 
 function formatDuration(ms: number): string {

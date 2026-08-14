@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, generateTaskAnalysis, parseTaskAnalysisText, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, parseIntentAssessmentBlock, mergeIntentAssessments } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, generateTaskAnalysis, parseTaskAnalysisText, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, parseIntentAssessmentBlock, mergeIntentAssessments } from '../chat';
 import { limitStoredMessages, MAX_PERSISTED_MESSAGES } from '../store';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 
@@ -336,6 +336,19 @@ describe('Escape cancellation guard', () => {
     } as any;
     expect((await generateTaskAnalysis(llm, 'build', 10, controller.signal)).plan).toBeNull();
   });
+
+  it('returns from a stalled analysis stream at the timeout instead of hanging the GUI', async () => {
+    const started = Date.now();
+    const llm = {
+      async *stream() {
+        await new Promise<void>(() => {});
+        yield { type: 'content', content: 'never arrives' };
+      },
+    } as any;
+    const result = await generateTaskAnalysis(llm, 'build', 20);
+    expect(result.plan).toBeNull();
+    expect(Date.now() - started).toBeLessThan(500);
+  });
 });
 
 describe('TASK_ANALYSIS_PROMPT keeps reasoning natural and task-specific', () => {
@@ -417,10 +430,10 @@ describe('send feedback timing', () => {
   it('paints the user bubble before send-time DOM and workspace work', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const bubble = src.indexOf("const userBubble = this.addBubble('user', userText);");
-    const paint = src.indexOf('await yieldToNextPaint();', bubble);
+    const paint = src.indexOf('await yieldToNextPaint(turnController.signal);', bubble);
     const secondFrame = src.indexOf('requestAnimationFrame(() => requestAnimationFrame', src.indexOf('function yieldToNextPaint'));
     const linkify = src.indexOf('linkifyPaths(userBubble);', bubble);
-    const resolveWorkspace = src.indexOf('await getApplicationTmpWorkspace(sendSessionId);', bubble);
+    const resolveWorkspace = src.indexOf('getApplicationTmpWorkspace(sendSessionId)', bubble);
     expect(bubble).toBeGreaterThan(-1);
     expect(paint).toBeGreaterThan(bubble);
     expect(secondFrame).toBeGreaterThan(-1);
@@ -540,8 +553,8 @@ describe('pickHistoryMessages (background pre-compaction reuse)', () => {
 describe('plan-gate timing (thinking card before LLM calls)', () => {
   it('updates the existing plan list instead of replacing it after LLM refinement', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false): void => {');
-    const update = src.indexOf('updatePlanCard(planCard, plan, analysis.mode, refining);', show);
+    const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false, fallback = false): void => {');
+    const update = src.indexOf('updatePlanCard(planCard, plan, analysis.mode, refining, fallback);', show);
     const oldReplace = src.indexOf('old.classList.add(\'plan-card-leaving\')', show);
     expect(show).toBeGreaterThan(-1);
     expect(update).toBeGreaterThan(show);
@@ -571,7 +584,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
     // the user sees.
     const fallback = src.indexOf('实时分析未完成，已回退到通用步骤');
     expect(fallback).toBeGreaterThan(analysisCall);
-    expect(src).toMatch(/createPlanCard\(plan, analysis\.mode, refining\)/);
+    expect(src).toMatch(/createPlanCard\(plan, analysis\.mode, refining, fallback\)/);
   });
 
   it('shows the assessment card only after the first LLM round-trip (real thinking first)', () => {
@@ -679,14 +692,183 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
 
   it('keeps one flat plan row mounted while refining updates its contents', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false): void => {');
-    const update = src.indexOf('updatePlanCard(planCard, plan, analysis.mode, refining);', show);
+    const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false, fallback = false): void => {');
+    const update = src.indexOf('updatePlanCard(planCard, plan, analysis.mode, refining, fallback);', show);
     const oldReplace = src.indexOf('old.classList.add(\'plan-card-leaving\')', show);
     expect(show).toBeGreaterThan(-1);
     expect(update).toBeGreaterThan(show);
     expect(oldReplace).toBe(-1);
-    expect(src).toContain('updatePlanCard(planCard, plan, analysis.mode, refining);');
+    expect(src).toContain('updatePlanCard(planCard, plan, analysis.mode, refining, fallback);');
     const planSrc = readSource(new URL('../plan.ts', import.meta.url));
     expect(planSrc).toContain('export function updatePlanCard');
+  });
+});
+
+describe('user bubble double-click select-all', () => {
+  function installSelectionDom(): () => void {
+    const prevDocument = (globalThis as any).document;
+    const prevWindow = (globalThis as any).window;
+    const selection = {
+      ranges: [] as any[],
+      removeAllRanges() { this.ranges = []; },
+      addRange(range: any) { this.ranges.push(range); },
+    };
+    (globalThis as any).document = {
+      createRange: (): any => ({
+        selectNodeContents(node: any) { this.startContainer = node; this.endContainer = node; },
+      }),
+    };
+    (globalThis as any).window = { getSelection: () => selection };
+    return () => {
+      (globalThis as any).document = prevDocument;
+      (globalThis as any).window = prevWindow;
+    };
+  }
+
+  function fakeBubble(): any {
+    const bubble: any = {
+      dataset: {},
+      _listeners: {} as Record<string, (ev: any) => void>,
+      addEventListener: (name: string, listener: (ev: any) => void) => { bubble._listeners[name] = listener; },
+    };
+    return bubble;
+  }
+
+  it('selects the entire bubble contents on double-click', () => {
+    const restore = installSelectionDom();
+    try {
+      const bubble = fakeBubble();
+      bindUserBubbleSelectAll(bubble);
+      bubble._listeners.dblclick({ target: bubble });
+      const ranges = (globalThis as any).window.getSelection().ranges;
+      expect(ranges.length).toBe(1);
+      expect(ranges[0].startContainer).toBe(bubble);
+      expect(ranges[0].endContainer).toBe(bubble);
+    } finally {
+      restore();
+    }
+  });
+
+  it('binds only once even when called repeatedly', () => {
+    const restore = installSelectionDom();
+    try {
+      const bubble = fakeBubble();
+      bindUserBubbleSelectAll(bubble);
+      bindUserBubbleSelectAll(bubble);
+      bubble._listeners.dblclick({ target: bubble });
+      const ranges = (globalThis as any).window.getSelection().ranges;
+      expect(ranges.length).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('leaves double-clicks on links and buttons alone', () => {
+    const restore = installSelectionDom();
+    try {
+      const bubble = fakeBubble();
+      bindUserBubbleSelectAll(bubble);
+      bubble._listeners.dblclick({ target: { closest: () => ({}) } });
+      const ranges = (globalThis as any).window.getSelection().ranges;
+      expect(ranges.length).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('binds user bubbles in live chat and session replay', () => {
+    const chatSrc = readSource(new URL('../chat.ts', import.meta.url));
+    const mainSrc = readSource(new URL('../main.ts', import.meta.url));
+    expect(chatSrc).toContain('export function bindUserBubbleSelectAll(bubble: HTMLElement): void {');
+    expect(chatSrc).toContain('bindUserBubbleSelectAll(bubble);');
+    expect(mainSrc).toContain('bindUserBubbleSelectAll(bubble);');
+  });
+});
+
+describe('plan overview completion state', () => {
+  it('finalizes the floating outline on completion without depending on phase markers', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 完成收尾的证据来自本轮真实工具执行 + 正常结束（hasToolWork 与提问轮约定
+    // 一致），而不是模型是否恰好发出了 `## 计划 n 已完成` 标记——漏发时大纲
+    // 不能永远停在第一步。
+    const planFinished = src.indexOf('const planFinished = planCard && qualityPassed && hasToolWork');
+    const finalize = src.indexOf('finalizePlanCard(planCard);', planFinished);
+    const setComplete = src.indexOf("planOverview().setStatus('complete');", planFinished);
+    expect(planFinished).toBeGreaterThan(-1);
+    expect(finalize).toBeGreaterThan(planFinished);
+    expect(setComplete).toBeGreaterThan(finalize);
+    // 提问/确认轮（末句以问号结尾）不能误判为完成。
+    expect(src).toContain('const turnAsksForInput = finalAnswer.length > 0 && /[?？]\\s*$/.test(finalAnswer);');
+    expect(src).toContain('&& !turnAsksForInput && gen === this.generation && !this.pausePlanCard;');
+  });
+
+  it('keeps the last outline state instead of clearing it mid-stream after the final plan', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 标记把游标推进到末尾后 activeComplexPlan 会置空；此时 syncPlanOverview
+    // 必须保留最后状态（由完成调用翻转为 complete），而不是把大纲清掉。
+    const guard = src.indexOf('const syncPlanOverview = (status: PlanOverviewStatus = \'active\'): void => {');
+    expect(guard).toBeGreaterThan(-1);
+    const planCardGuard = src.indexOf('if (!planCard) {', guard);
+    const planNullGuard = src.indexOf('if (!this.activeComplexPlan) {', guard);
+    const clearAt = src.indexOf('overview.clear();', guard);
+    expect(planCardGuard).toBeGreaterThan(guard);
+    expect(planNullGuard).toBeGreaterThan(planCardGuard);
+    // clear() 只属于 planCard 消失的分支（位于 planNullGuard 之前）；
+    // 计划完成的置空分支必须直接 return，保留最后状态。
+    expect(clearAt).toBeGreaterThan(-1);
+    expect(clearAt).toBeLessThan(planNullGuard);
+    expect(src.indexOf('return;', planNullGuard)).toBeGreaterThan(planNullGuard);
+  });
+
+  it('syncs the outline position memory with the active session', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 大纲位置按会话记忆：构造函数、setSessionId（切会话）、restoreLastSession、
+    // clear()（新建会话）四处都要同步当前 session，切换后重新套用该会话的位置。
+    expect(src).toContain("import { planOverview, setOverviewPositionSession, type PlanOverviewStatus } from './planOverview';");
+    const hooks = src.split('setOverviewPositionSession(').length - 1;
+    expect(hooks).toBe(4);
+    const ctor = src.indexOf('setOverviewPositionSession(this.sessionId);');
+    const setSession = src.indexOf('setOverviewPositionSession(id);');
+    const restore = src.indexOf('setOverviewPositionSession(saved.sessionId);');
+    const clear = src.indexOf('setOverviewPositionSession(this.sessionId);', setSession);
+    expect(ctor).toBeGreaterThan(-1);
+    expect(setSession).toBeGreaterThan(-1);
+    expect(restore).toBeGreaterThan(-1);
+    expect(clear).toBeGreaterThan(-1);
+  });
+});
+
+describe('generate_image text-to-image wiring', () => {
+  it('registers the image tool and swaps the SVG contract when the provider supports it', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // Capability is computed per send from provider + model + custom settings.
+    expect(src).toContain('const imageGen = imageGenEnabled(config.customProviders, config.provider, config.model);');
+    // The tool joins the live registry in workspace mode…
+    expect(src).toContain("codingAgent.toolRegistry.register({ ...IMAGE_GEN_TOOL_DEF, tags: [Tags.READ], riskLevel: 'low' });");
+    // …and the plain toolsDef list otherwise.
+    expect(src).toContain('...(imageGen ? [IMAGE_GEN_TOOL_DEF] : [])');
+    // Both prompt surfaces (early base + final assembly) get the flag.
+    expect(src).toContain('buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen)');
+    expect(src).toContain('capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen })');
+    expect(src).toContain('imageGeneration: imageGen,');
+    // generate_image is workspace-independent (available in plain-chat mode).
+    expect(src).toContain("|| name === 'generate_image'");
+  });
+
+  it('keeps base64 images out of the LLM context via the side channel', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // ToolResult.result stays compact (summary object); the data URLs are
+    // claimed from the adapter cache and rendered as <img> cards.
+    expect(src).toContain("resultImages = takeGeneratedImages(event.payload.toolCallId);");
+    expect(src).toContain("resultKind = 'image';");
+    expect(src).toContain('resultImages,');
+    // The row finalizer receives the images, and replay persists them.
+    const adapterSrc = readSource(new URL('../TauriToolAdapter.ts', import.meta.url));
+    expect(adapterSrc).toContain('cacheGeneratedImages(toolCall.id, images);');
+    expect(adapterSrc).toContain('summary: `Generated ${images.length} image(s)');
+    const storeSrc = readSource(new URL('../store.ts', import.meta.url));
+    expect(storeSrc).toContain('resultImages?: GeneratedImage[];');
+    const toolRowSrc = readSource(new URL('../toolRow.ts', import.meta.url));
+    expect(toolRowSrc).toContain("resultKind === 'image' && meta.resultImages?.length");
   });
 });

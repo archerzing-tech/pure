@@ -4,12 +4,14 @@
 
 import { describe, it, expect } from 'bun:test';
 import {
+  CHART_DSL_PROMPT,
   SYSTEM_CORE_PROMPT,
   WORKFLOW_PROMPT,
   COMPLETION_PROMPT,
   TYPO_TOLERANCE_PROMPT,
   LOGICAL_TRAPS_PROMPT,
   SVG_OUTPUT_PROMPT,
+  IMAGE_GEN_OUTPUT_PROMPT,
   HUMAN_TONE_PROMPT,
   FILE_TOOLS_CORE,
   composeUserTurn,
@@ -56,6 +58,27 @@ describe('L1 behavior contracts', () => {
     expect(SVG_OUTPUT_PROMPT).toContain('ONE separate fenced code block tagged svg PER image');
     expect(SVG_OUTPUT_PROMPT).toContain('NEVER combine several subjects into a single <svg>');
     expect(SVG_OUTPUT_PROMPT).toContain('NO prose between them');
+  });
+
+  it('replaces the SVG contract with generate_image when the model supports text-to-image', () => {
+    expect(IMAGE_GEN_OUTPUT_PROMPT).toContain('generate_image(prompt, n?, size?)');
+    expect(IMAGE_GEN_OUTPUT_PROMPT).toContain('创作一个小狗图标');
+    expect(IMAGE_GEN_OUTPUT_PROMPT).toContain('NEVER emit fenced svg code blocks for image requests');
+    // SVG stays as the automatic fallback when the tool fails / is unavailable.
+    expect(IMAGE_GEN_OUTPUT_PROMPT).toContain('fall back to svg code blocks');
+  });
+
+  it('documents every chart family in the chart DSL and bans script-drawn charts', () => {
+    expect(CHART_DSL_PROMPT).toContain('type:');
+    expect(CHART_DSL_PROMPT).toContain('scatter');
+    expect(CHART_DSL_PROMPT).toContain('kline');
+    expect(CHART_DSL_PROMPT).toContain('radar');
+    expect(CHART_DSL_PROMPT).toContain('treemap');
+    expect(CHART_DSL_PROMPT).toContain('sunburst');
+    expect(CHART_DSL_PROMPT).toContain('tree');
+    // Charts/pictures are delivered as fenced blocks — never a script that draws them.
+    expect(CHART_DSL_PROMPT).toContain('NEVER write a Python/matplotlib');
+    expect(CHART_DSL_PROMPT).toContain('IS the deliverable');
   });
 
   it('asks for a human, conversational tone without canned boilerplate', () => {

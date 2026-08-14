@@ -252,8 +252,29 @@ export const PUBLIC_TOOL_NAMES = new Set([
   'read_file', 'write_file', 'edit_file', 'list_files', 'execute_command',
   'create_directory', 'diff_files', 'researcher_web', 'researcher_docs',
   'code_searcher', 'glob_files', 'replace_files', 'git_diff', 'git_log',
-  'git_status', 'sys_info',
+  'git_status', 'sys_info', 'generate_image',
 ]);
+
+/**
+ * Text-to-image tool schema. NOT part of BUILT_IN_TOOL_DEFS: it is only
+ * advertised to the model when the connected provider/model supports image
+ * generation (see imageGenEnabled / imageGenModelFor in providers.ts). When
+ * unavailable, models answer image requests with ```svg blocks instead — the
+ * SVG output contract is the automatic fallback (see promptLayers.ts).
+ */
+export const IMAGE_GEN_TOOL_DEF: ToolDefinition = {
+  name: 'generate_image',
+  description: 'Generate an image (PNG/JPEG) with the connected provider\'s text-to-image model and render it in the chat. Use this for icon/logo/illustration/photo/poster requests ("创作一个小狗图标", "生成一张 xxx 图片"). Never emit ```svg blocks for image requests while this tool is available — SVG is only for hand-drawn diagrams (flowcharts, architecture), and for falling back when this tool fails.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string', description: 'Detailed description of the image to generate. Describe subject, style, colors, composition, text to include, and aspect ratio as precisely as the user asked' },
+      n: { type: 'integer', description: 'Number of images to generate (default 1, max 4)' },
+      size: { type: 'string', description: 'Output size, e.g. 1024x1024, 1024x1792, 1792x1024 (provider-dependent; default 1024x1024)' },
+    },
+    required: ['prompt'],
+  },
+};
 
 export function isPublicToolName(name: string): boolean {
   return PUBLIC_TOOL_NAMES.has(name);
@@ -279,4 +300,6 @@ export const TOOL_METADATA: Readonly<Record<string, { sideEffects: boolean; isWr
   glob_files: { sideEffects: false, isWrite: false },
   replace_files: { sideEffects: true, isWrite: true },
   sys_info: { sideEffects: false, isWrite: false },
+  // Image generation hits a paid provider API but never touches the workspace.
+  generate_image: { sideEffects: false, isWrite: false },
 };
