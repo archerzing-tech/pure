@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
-const index = readFileSync(new URL('../../../index.html', import.meta.url), 'utf8');
-const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+const index = readFileSync(new URL('../../../index.html', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 
 function sectionBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
