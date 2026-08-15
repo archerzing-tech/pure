@@ -62,6 +62,14 @@ export interface WASMEmbeddingStoreOptions {
 
 const DEFAULT_MODEL = 'Xenova/all-MiniLM-L6-v2';
 
+/**
+ * Cooldown between embedder load attempts after a failure. The model is an
+ * ~80MB download, so a persistent outage (offline, missing cache) must not
+ * re-attempt it on every search; a transient network blip resolves within
+ * this window and semantic search comes back on the next retry.
+ */
+const EMBEDDER_RETRY_COOLDOWN_MS = 60_000;
+
 interface Embedder {
   embed: EmbedFunction;
   embedBatch: EmbedBatchFunction;
@@ -80,6 +88,8 @@ export class WASMEmbeddingStore implements IMemoryStore {
   private customEmbedBatch?: EmbedBatchFunction;
   private getEvolution?: () => Partial<EvolutionConfig> | undefined;
   private embedderPromise?: Promise<Embedder>;
+  /** When the last embedder load attempt started (retry-cooldown clock). */
+  private lastEmbedderAttempt = 0;
   private vecCache = new Map<string, { content: string; vec: number[] }>();
 
   constructor(opts: WASMEmbeddingStoreOptions) {
@@ -239,9 +249,10 @@ export class WASMEmbeddingStore implements IMemoryStore {
 
   /**
    * Lazy transformers.js pipeline. First call imports the package and loads
-   * the model; subsequent calls reuse the promise. Any failure (network,
-   * missing cache, unsupported runtime) rejects — search() catches and
-   * falls back to keyword matching.
+   * the model; subsequent calls reuse the promise. A FAILED load clears the
+   * cached promise (see loadEmbedder) so the next search retries instead of
+   * permanently degrading to keyword matching; the retry cooldown paces how
+   * often a persistent failure re-attempts the ~80MB download.
    */
   private getEmbedder(): Promise<Embedder> {
     if (this.customEmbed || this.customEmbedBatch) {
@@ -257,44 +268,69 @@ export class WASMEmbeddingStore implements IMemoryStore {
       });
     }
     if (!this.embedderPromise) {
-      this.embedderPromise = (async () => {
-        const transformers = await import('@huggingface/transformers');
-        // The browser build otherwise defaults to the asyncify runtime (~23MB).
-        // Configure the standard SIMD runtime (~13MB) before creating a session;
-        // Vite emits both files as cacheable, lazy assets.
-        if (typeof window !== 'undefined') {
-          const { configureTransformersWasm } = await import('./wasmRuntime');
-          configureTransformersWasm(transformers.env);
-        }
-        const extractor = await transformers.pipeline('feature-extraction', this.model);
-        return {
-          embed: async (text: string): Promise<number[]> => {
-            const out = await extractor(text, { pooling: 'mean', normalize: true });
-            return Array.from(out.data as Float32Array);
-          },
-          embedBatch: async (texts: string[]): Promise<number[][]> => {
-            // Batched inference: ONE WASM call for the whole array instead of
-            // N sequential extractor() invocations — the ~10-50× speedup that
-            // makes full-corpus recall feel instant. The model returns a
-            // [batch, dim] tensor; slice it back into per-text vectors.
-            if (texts.length === 1) {
-              const out = await extractor(texts[0], { pooling: 'mean', normalize: true });
-              return [Array.from(out.data as Float32Array)];
-            }
-            const out = await extractor(texts, { pooling: 'mean', normalize: true });
-            const data = out.data as Float32Array;
-            const dims = out.dims as number[] | undefined;
-            const dim = dims?.[1] ?? (data.length > 0 ? data.length / texts.length : 0);
-            const result: number[][] = [];
-            for (let i = 0; i < texts.length; i++) {
-              result.push(Array.from(data.slice(i * dim, (i + 1) * dim)));
-            }
-            return result;
-          },
-        };
-      })();
+      const now = Date.now();
+      if (now - this.lastEmbedderAttempt < EMBEDDER_RETRY_COOLDOWN_MS) {
+        // The previous load failed less than the cooldown ago — pace retries
+        // instead of hammering the network on every search. search() catches
+        // this rejection and uses the keyword fallback for now.
+        return Promise.reject(new Error('embedder load failed recently; retry pending'));
+      }
+      this.lastEmbedderAttempt = now;
+      this.embedderPromise = this.loadEmbedder();
     }
     return this.embedderPromise;
+  }
+
+  /**
+   * Import transformers.js + load the model pipeline. On ANY failure the
+   * cached embedderPromise is cleared so the next getEmbedder() call retries
+   * the load (a transient network blip no longer bricks semantic search for
+   * the rest of the session) — the caller still receives the rejection now.
+   */
+  private async loadEmbedder(): Promise<Embedder> {
+    try {
+      const transformers = await import('@huggingface/transformers');
+      // The browser build otherwise defaults to the asyncify runtime (~23MB).
+      // Configure the standard SIMD runtime (~13MB) before creating a session;
+      // Vite emits both files as cacheable, lazy assets.
+      if (typeof window !== 'undefined') {
+        const { configureTransformersWasm } = await import('./wasmRuntime');
+        configureTransformersWasm(transformers.env);
+      }
+      const extractor = await transformers.pipeline('feature-extraction', this.model);
+      return {
+        embed: async (text: string): Promise<number[]> => {
+          const out = await extractor(text, { pooling: 'mean', normalize: true });
+          return Array.from(out.data as Float32Array);
+        },
+        embedBatch: async (texts: string[]): Promise<number[][]> => {
+          // Batched inference: ONE WASM call for the whole array instead of
+          // N sequential extractor() invocations — the ~10-50× speedup that
+          // makes full-corpus recall feel instant. The model returns a
+          // [batch, dim] tensor; slice it back into per-text vectors.
+          if (texts.length === 1) {
+            const out = await extractor(texts[0], { pooling: 'mean', normalize: true });
+            return [Array.from(out.data as Float32Array)];
+          }
+          const out = await extractor(texts, { pooling: 'mean', normalize: true });
+          const data = out.data as Float32Array;
+          const dims = out.dims as number[] | undefined;
+          const dim = dims?.[1] ?? (data.length > 0 ? data.length / texts.length : 0);
+          const result: number[][] = [];
+          for (let i = 0; i < texts.length; i++) {
+            result.push(Array.from(data.slice(i * dim, (i + 1) * dim)));
+          }
+          return result;
+        },
+      };
+    } catch (err) {
+      // Transient failure (network / missing cache / unsupported runtime):
+      // drop the cached rejection so the next search retries the model load
+      // instead of staying on keyword matching until the app restarts. The
+      // retry cooldown in getEmbedder paces how often that retry can happen.
+      this.embedderPromise = undefined;
+      throw err;
+    }
   }
 }
 

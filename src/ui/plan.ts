@@ -318,6 +318,14 @@ export function updatePlanCard(h: PlanCardHandle, plan: Plan, mode?: TaskMode, r
   const previousActivity = h.el.querySelector<HTMLElement>('.plan-progress-activity')?.textContent;
   clearPlanCardRefining(h);
   const fresh = createPlanCard(plan, mode, refining, fallback);
+  // The step list is replaced in place; instead of an abrupt cut (old steps
+  // vanish, new steps pop in), cascade the FRESH steps in with the same
+  // stagger the initial card uses. The children are brand-new nodes, so the
+  // animation fires exactly once per update; the remove→add cycle keeps the
+  // row's class state clean across repeated upgrades. No card-level fade —
+  // the frame is already on screen, only the steps are new.
+  h.el.classList.remove('plan-card-updating');
+  h.el.classList.add('plan-card-updating');
   h.el.replaceChildren(...Array.from(fresh.el.childNodes));
   h.stepEls = fresh.stepEls;
   h.numEls = fresh.numEls;

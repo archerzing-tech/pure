@@ -23,11 +23,15 @@ export interface ConfirmModalOptions {
 export function showConfirmModal(opts: ConfirmModalOptions): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
+    // Remember where focus was before the overlay — closing restores it so
+    // the next Tab/Space can't fire a stray click on the first body element.
+    const focusBeforeOpen = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const close = (result: boolean) => {
       if (settled) return;
       settled = true;
       document.removeEventListener('keydown', onKey);
       overlay.remove();
+      if (focusBeforeOpen?.isConnected) focusBeforeOpen.focus();
       resolve(result);
     };
 
@@ -77,6 +81,27 @@ export function showConfirmModal(opts: ConfirmModalOptions): Promise<boolean> {
       if (e.key === 'Escape') {
         e.preventDefault();
         close(false);
+        return;
+      }
+      // Tab trap: keep focus cycling inside the dialog (only the action
+      // buttons are focusable) so Tab can never escape to the page behind the
+      // overlay. Wraps at both ends, and also catches the case where focus is
+      // still on the previously-focused element behind the modal.
+      if (e.key === 'Tab') {
+        const focusables = [...dialog.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        )].filter(el => !el.hasAttribute('disabled') && el.offsetParent !== null);
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (e.shiftKey && (active === first || !dialog.contains(active))) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && (active === last || !dialog.contains(active))) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     };
     document.addEventListener('keydown', onKey);

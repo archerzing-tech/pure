@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { createPlanOverview, restoreStoredPosition, setOverviewPositionSession } from '../planOverview';
+import { createPlanOverview, fitOverviewToHost, restoreStoredPosition, setOverviewPositionSession } from '../planOverview';
 import type { Plan } from '../../coding-agent/types';
 
 function installFakeDocument(): () => void {
@@ -329,17 +329,39 @@ describe('planOverview drag to reposition', () => {
     }
   });
 
+  it('fits an already-positioned overview back inside the host after a resize', () => {
+    const restore = installFakeDocument();
+    try {
+      const overview = createPlanOverview();
+      setupHost(overview);
+      overview.el.style.left = '700px';
+      overview.el.style.top = '500px';
+      (overview.el as any).offsetLeft = 700;
+      (overview.el as any).offsetTop = 500;
+      fitOverviewToHost(overview.el);
+      expect(overview.el.style.left).toBe('548px');
+      expect(overview.el.style.top).toBe('400px');
+    } finally {
+      restore();
+    }
+  });
+
   it('keeps the close button clickable after pointer interactions', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
       overview.show(samplePlan(), 'active', 2, 1);
+      setupHost(overview);
+      overview.el.style.right = '12px';
       const card = cardOf(overview.el);
       const close = card.children[0].children[2];
       // A click on × goes through card pointerdown/pointerup (bubbled) then
-      // its own click — the collapse must still fire.
+      // its own click — the collapse must still fire without switching the
+      // right-anchored widget into a new left/top position.
       dispatch(card, 'pointerdown', { clientX: 30, clientY: 30 });
       dispatch(card, 'pointerup', { clientX: 30, clientY: 30 });
+      expect(overview.el.style.right).toBe('12px');
+      expect(overview.el.style.left ?? '').toBe('');
       dispatch(close, 'click', {});
       expect(card.hidden).toBe(true);
       expect((overview.el.children[1] as any).hidden).toBe(false);

@@ -9,8 +9,68 @@
 // in-memory cache keeps reads synchronous; localStorage (`pure_stats:<id>`)
 // is only the fallback for plain Vite dev.
 
-import type { TokenUsage, GeneratedImage } from '../shared/types';
+import type { Message, TokenUsage, GeneratedImage } from '../shared/types';
 import type { IntentAssessment, Plan } from '../coding-agent/types';
+
+export const SESSION_SNAPSHOT_VERSION = 2;
+
+export interface TranscriptEntry {
+  id: string;
+  modelMessageIndex: number;
+  role: 'user' | 'assistant' | 'tool';
+  content: string | null;
+  displayOverride?: boolean;
+  toolCallId?: string;
+  toolName?: string;
+  toolCalls?: StoredToolCallInfo[];
+  analysis?: string;
+  thinking?: string;
+  thinkingPhases?: Array<{ text: string; assistantIndex: number }>;
+  artifacts?: Array<{ path: string }>;
+  isPlanPause?: boolean;
+  assessment?: IntentAssessment;
+  toolExec?: ToolExecMeta;
+}
+
+export interface SessionUiState {
+  planState?: PlanState | null;
+}
+
+export interface PlanState {
+  plan: Plan;
+  planNumber: number;
+  todoNumber: number;
+  started: boolean;
+}
+
+export interface TranscriptDraft {
+  message: Message;
+  modelMessageIndex: number;
+  content?: string | null;
+  displayOverride?: boolean;
+  analysis?: string;
+  thinking?: string;
+  thinkingPhases?: Array<{ text: string; assistantIndex: number }>;
+  artifacts?: Array<{ path: string }>;
+  isPlanPause?: boolean;
+  assessment?: IntentAssessment;
+  toolExec?: ToolExecMeta;
+  planState?: PlanState | null;
+}
+
+export interface SessionSnapshotV2 {
+  version: 2;
+  modelContext: {
+    messages: Message[];
+  };
+  transcript: TranscriptEntry[];
+  uiState: SessionUiState;
+}
+
+export interface LoadedSession {
+  snapshot: SessionSnapshotV2;
+  workspace: string;
+}
 
 export interface ToolExecMeta {
   toolName: string;
@@ -93,6 +153,199 @@ export function getStoredThinkingSegments(message: Partial<StoredMessage>): stri
 
 export function getStoredDisplayContent(message: Partial<StoredMessage>): string {
   return message.displayContent ?? message.content ?? '';
+}
+
+export function getTranscriptThinkingSegments(message: Partial<TranscriptEntry>): string[] {
+  if (message.thinkingPhases?.length) return message.thinkingPhases.map(phase => phase.text).filter(Boolean);
+  return message.thinking ? [message.thinking] : [];
+}
+
+export function getTranscriptContent(message: Partial<TranscriptEntry>): string {
+  return message.content ?? '';
+}
+
+export function buildTranscriptToolExec(
+  message: Partial<TranscriptEntry>,
+): ToolExecMeta {
+  const resultText = typeof message.content === 'string' ? message.content : '';
+  return {
+    toolName: message.toolName || message.toolExec?.toolName || 'tool',
+    success: message.toolExec?.success ?? !/^Error:\s/i.test(resultText),
+    duration: message.toolExec?.duration ?? 0,
+    args: message.toolExec?.args ?? message.toolCalls?.[0]?.args,
+    resultText: message.toolExec?.resultText ?? (resultText || undefined),
+    resultKind: message.toolExec?.resultKind,
+    resultItems: message.toolExec?.resultItems,
+    resultImages: message.toolExec?.resultImages,
+  };
+}
+
+function modelMessageFromStored(message: StoredMessage): Message {
+  return {
+    role: message.role as Message['role'],
+    content: typeof message.content === 'string' ? message.content : '',
+    toolCalls: message.tool_calls as Message['toolCalls'],
+    toolCallId: message.tool_call_id,
+    toolName: message.name,
+  };
+}
+
+function stableMessageId(message: Message, occurrence: number): string {
+  const source = `${JSON.stringify(message)}:${occurrence}`;
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index++) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `message-${(hash >>> 0).toString(16)}`;
+}
+
+function messageToolCallInfos(message: Message): StoredToolCallInfo[] {
+  return (message.toolCalls ?? []).flatMap(call => {
+    try {
+      const args = JSON.parse(call.function.arguments);
+      return [{ id: call.id, toolName: call.function.name, args: recordArgs(args) }];
+    } catch {
+      return [{ id: call.id, toolName: call.function.name, args: {} }];
+    }
+  });
+}
+
+function legacyToTranscriptDrafts(messages: StoredMessage[]): TranscriptDraft[] {
+  return messages.flatMap((message, index): TranscriptDraft[] => {
+    if (message.role !== 'user' && message.role !== 'assistant' && message.role !== 'tool') return [];
+    const modelMessage = modelMessageFromStored(message);
+    return [{
+      message: modelMessage,
+      modelMessageIndex: index,
+      content: message.role === 'assistant' ? getStoredDisplayContent(message) : message.content,
+      displayOverride: message.role === 'assistant' && !!message.displayContent,
+      analysis: message.analysis,
+      thinking: message.thinking,
+      thinkingPhases: message.thinkingPhases,
+      artifacts: message.artifacts,
+      isPlanPause: message.isPlanPause,
+      assessment: message.assessment,
+      toolExec: message.toolExec,
+      planState: message.planState,
+    }];
+  });
+}
+
+export function createSessionSnapshot(
+  modelMessages: Message[],
+  source: TranscriptDraft[] | StoredMessage[],
+): SessionSnapshotV2 {
+  const drafts = source.length > 0 && 'message' in source[0]
+    ? source as TranscriptDraft[]
+    : legacyToTranscriptDrafts(source as StoredMessage[]);
+  const occurrences = new Map<string, number>();
+  const transcript = drafts.map((draft): TranscriptEntry => {
+    const message = draft.message;
+    const occurrenceKey = JSON.stringify(message);
+    const occurrence = occurrences.get(occurrenceKey) ?? 0;
+    occurrences.set(occurrenceKey, occurrence + 1);
+    const calls = messageToolCallInfos(message);
+    return {
+      id: stableMessageId(message, occurrence),
+      modelMessageIndex: draft.modelMessageIndex,
+      role: message.role as TranscriptEntry['role'],
+      content: draft.content ?? message.content,
+      displayOverride: draft.displayOverride,
+      toolCallId: message.toolCallId,
+      toolName: message.toolName,
+      toolCalls: calls.length > 0 ? calls : undefined,
+      analysis: draft.analysis,
+      thinking: draft.thinking,
+      thinkingPhases: draft.thinkingPhases,
+      artifacts: draft.artifacts,
+      isPlanPause: draft.isPlanPause,
+      assessment: draft.assessment,
+      toolExec: draft.toolExec,
+    };
+  });
+  const latestPlanState = [...drafts].reverse().find(draft => draft.planState !== undefined)?.planState;
+  return {
+    version: SESSION_SNAPSHOT_VERSION,
+    modelContext: { messages: modelMessages },
+    transcript,
+    uiState: { planState: latestPlanState ?? null },
+  };
+}
+
+export function createSessionSnapshotFromLegacy(messages: StoredMessage[]): SessionSnapshotV2 {
+  return createSessionSnapshot(messages.map(modelMessageFromStored), messages);
+}
+
+export function mergeSessionSnapshotMetadata(
+  previous: SessionSnapshotV2 | null,
+  next: SessionSnapshotV2,
+): SessionSnapshotV2 {
+  if (!previous) return next;
+  const previousById = new Map(previous.transcript.map(entry => [entry.id, entry]));
+  const transcript = next.transcript.map(entry => {
+    const prior = previousById.get(entry.id);
+    if (!prior || prior.role !== entry.role) return entry;
+    return {
+      ...entry,
+      content: entry.displayOverride ? entry.content : (prior.content || entry.content),
+      displayOverride: entry.displayOverride || prior.displayOverride,
+      analysis: entry.analysis ?? prior.analysis,
+      thinking: entry.thinking ?? prior.thinking,
+      thinkingPhases: entry.thinkingPhases ?? prior.thinkingPhases,
+      artifacts: entry.artifacts ?? prior.artifacts,
+      isPlanPause: entry.isPlanPause ?? prior.isPlanPause,
+      assessment: entry.assessment ?? prior.assessment,
+      toolExec: entry.toolExec ?? prior.toolExec,
+      toolCalls: entry.toolCalls ?? prior.toolCalls,
+    };
+  });
+  return { ...next, transcript, uiState: next.uiState };
+}
+
+function normalizeSessionSnapshot(raw: unknown): SessionSnapshotV2 {
+  if (raw && typeof raw === 'object') {
+    const candidate = raw as Partial<SessionSnapshotV2> & { messages?: unknown };
+    if (candidate.version === SESSION_SNAPSHOT_VERSION && candidate.modelContext && Array.isArray(candidate.transcript)) {
+      return {
+        version: SESSION_SNAPSHOT_VERSION,
+        modelContext: { messages: (candidate.modelContext.messages ?? []) as Message[] },
+        transcript: candidate.transcript as TranscriptEntry[],
+        uiState: candidate.uiState ?? {},
+      };
+    }
+    if (Array.isArray(candidate.messages)) {
+      return createSessionSnapshotFromLegacy(candidate.messages as StoredMessage[]);
+    }
+  }
+  return createSessionSnapshotFromLegacy([]);
+}
+
+/**
+ * Preserve stored-only transcript metadata across re-persists. persistSession
+ * rebuilds the entire stored transcript from the in-memory Message[] on every
+ * turn, and in-memory messages never carry these fields (analysis, thinking
+ * phases, the rendered display snapshot) — so without this merge a follow-up
+ * turn would silently wipe the preflight analysis and reasoning trace of every
+ * earlier turn. Messages are matched by position (the transcript is a
+ * monotonic sequence, trimmed identically on both sides by limitStoredMessages)
+ * and only when the role agrees; the current turn's values always win.
+ */
+export function mergeStoredMetadata(prev: StoredMessage[], next: StoredMessage[]): StoredMessage[] {
+  const prevByIndex = new Map<number, StoredMessage>();
+  prev.forEach((message, index) => prevByIndex.set(index, message));
+  return next.map((message, index) => {
+    const prior = prevByIndex.get(index);
+    if (!prior || prior.role !== message.role) return message;
+    return {
+      ...message,
+      analysis: message.analysis ?? prior.analysis,
+      thinkingPhases: message.thinkingPhases ?? prior.thinkingPhases,
+      thinking: message.thinking ?? prior.thinking,
+      thinkingSegments: message.thinkingSegments ?? prior.thinkingSegments,
+      displayContent: message.displayContent ?? prior.displayContent,
+    };
+  });
 }
 
 export interface StoredToolCallInfo {
@@ -326,28 +579,30 @@ function fileWritesNeedMigration(raw: unknown, normalized: SessionStats['fileWri
 // would try to call window.__TAURI_INTERNALS__ (undefined) and throw. isTauriRuntime()
 // checks for the actual __TAURI_INTERNALS__ global instead.
 import { isTauriRuntime, tauriInvoke } from '../shared/tauri';
+import { t } from '../shared/i18n';
+import { showToast } from '../shared/toast';
 const tauriAvailable = isTauriRuntime();
 
 // ── Tauri backend (filesystem via Rust commands) ──
 
-async function tauriSave(sessionId: string, messages: StoredMessage[], workspace: string): Promise<void> {
-  await tauriInvoke('save_session', { sessionId, messages, workspace });
+async function tauriSave(sessionId: string, snapshot: SessionSnapshotV2, workspace: string): Promise<void> {
+  await tauriInvoke('save_session', { sessionId, snapshot, workspace });
 }
 
 async function tauriSaveWorkspace(sessionId: string, workspace: string): Promise<void> {
   await tauriInvoke('save_session_workspace', { sessionId, workspace });
 }
 
-async function tauriLoadLast(): Promise<{ sessionId: string; messages: StoredMessage[]; workspace: string } | null> {
+async function tauriLoadLast(): Promise<{ sessionId: string; snapshot: SessionSnapshotV2; workspace: string } | null> {
   const data: any = await tauriInvoke('load_last_session');
   if (!data) return null;
-  return { sessionId: data.sessionId, messages: limitStoredMessages(data.messages ?? []), workspace: data.workspace ?? '' };
+  return { sessionId: data.sessionId, snapshot: normalizeSessionSnapshot(data.snapshot ?? data), workspace: data.workspace ?? '' };
 }
 
-async function tauriLoad(sessionId: string): Promise<{ messages: StoredMessage[]; workspace: string } | null> {
+async function tauriLoad(sessionId: string): Promise<LoadedSession | null> {
   const data: any = await tauriInvoke('load_session', { sessionId });
   if (!data) return null;
-  return { messages: limitStoredMessages(data.messages ?? []), workspace: data.workspace ?? '' };
+  return { snapshot: normalizeSessionSnapshot(data.snapshot ?? data), workspace: data.workspace ?? '' };
 }
 
 async function tauriLoadList(): Promise<SessionMeta[]> {
@@ -375,21 +630,32 @@ async function tauriDeleteAll(): Promise<void> {
 const SESSIONS_KEY = 'pure_sessions';
 const LAST_SESSION_KEY = 'pure_last_session';
 
-function lsSave(sessionId: string, messages: StoredMessage[], workspace: string) {
+function limitSessionSnapshot(snapshot: SessionSnapshotV2): SessionSnapshotV2 {
+  const messages = limitConversationMessages(snapshot.modelContext.messages);
+  const maxModelIndex = snapshot.modelContext.messages.length - messages.length;
+  const transcript = snapshot.transcript.filter(entry => entry.modelMessageIndex >= maxModelIndex);
+  return {
+    ...snapshot,
+    modelContext: { messages },
+    transcript,
+  };
+}
+
+function lsSave(sessionId: string, snapshot: SessionSnapshotV2, workspace: string) {
   // Store the workspace exactly as passed ('' clears a previous override), so
   // the localStorage fallback behaves identically to the Tauri path.
-  const boundedMessages = limitStoredMessages(messages);
-  const data = { messages: boundedMessages, updatedAt: Date.now(), messageCount: boundedMessages.length, workspace };
+  const boundedSnapshot = limitSessionSnapshot(snapshot);
+  const data = { snapshot: boundedSnapshot, updatedAt: Date.now(), messageCount: boundedSnapshot.modelContext.messages.length, workspace };
   localStorage.setItem(`pure_session:${sessionId}`, JSON.stringify(data));
 
   const list = lsLoadList();
   const existing = list.findIndex(s => s.id === sessionId);
   const meta: SessionMeta = {
     id: sessionId,
-    title: extractTitle(boundedMessages),
+    title: extractTitle(boundedSnapshot.modelContext.messages),
     createdAt: existing >= 0 ? list[existing].createdAt : Date.now(),
     updatedAt: Date.now(),
-    messageCount: boundedMessages.length,
+    messageCount: boundedSnapshot.modelContext.messages.length,
     workspace,
   };
   if (existing >= 0) {
@@ -404,7 +670,7 @@ function lsSave(sessionId: string, messages: StoredMessage[], workspace: string)
 function lsSaveWorkspace(sessionId: string, workspace: string) {
   const prev = lsLoad(sessionId);
   if (!prev) return;
-  const data = { messages: prev.messages, updatedAt: Date.now(), messageCount: prev.messages.length, workspace };
+  const data = { snapshot: prev.snapshot, updatedAt: Date.now(), messageCount: prev.snapshot.modelContext.messages.length, workspace };
   localStorage.setItem(`pure_session:${sessionId}`, JSON.stringify(data));
 
   const list = lsLoadList();
@@ -415,23 +681,24 @@ function lsSaveWorkspace(sessionId: string, workspace: string) {
   }
 }
 
-function lsLoad(sessionId: string): { messages: StoredMessage[]; workspace: string } | null {
+function lsLoad(sessionId: string): LoadedSession | null {
   const raw = localStorage.getItem(`pure_session:${sessionId}`);
   if (!raw) return null;
   try {
     const data = JSON.parse(raw);
-    if (!data.messages) return null;
-    return { messages: limitStoredMessages(data.messages, MAX_PERSISTED_MESSAGES), workspace: data.workspace ?? '' };
+    const snapshot = normalizeSessionSnapshot(data.snapshot ?? data);
+    if (snapshot.modelContext.messages.length === 0) return null;
+    return { snapshot: limitSessionSnapshot(snapshot), workspace: data.workspace ?? '' };
   } catch {
     return null;
   }
 }
 
-function lsLoadLast(): { sessionId: string; messages: StoredMessage[]; workspace: string } | null {
+function lsLoadLast(): { sessionId: string; snapshot: SessionSnapshotV2; workspace: string } | null {
   const id = localStorage.getItem(LAST_SESSION_KEY);
   if (!id) return null;
   const loaded = lsLoad(id);
-  if (!loaded || loaded.messages.length === 0) return null;
+  if (!loaded || loaded.snapshot.modelContext.messages.length === 0) return null;
   return { sessionId: id, ...loaded };
 }
 
@@ -463,12 +730,33 @@ function lsDeleteAll() {
 
 // ── Unified public API ──
 
-export async function saveSession(sessionId: string, messages: StoredMessage[], workspace = ''): Promise<void> {
-  const boundedMessages = limitStoredMessages(messages);
+// Throttle the disk-save failure toast: a persistently failing disk must not
+// spam the user on every message — at most one warning per 30s window.
+let lastDiskSaveWarning = 0;
+
+/**
+ * Persist a session. On the desktop the canonical copy lives on disk via the
+ * Rust save_session command; a write failure (permissions, disk full, I/O
+ * error) falls back to browser localStorage so the conversation survives
+ * mid-session — but unlike the old silent catch, the user is told the save
+ * was NOT durable, so a restart losing the session is not a surprise.
+ */
+export async function saveSession(sessionId: string, snapshot: SessionSnapshotV2, workspace = ''): Promise<void> {
+  const boundedSnapshot = limitSessionSnapshot(snapshot);
   if (tauriAvailable) {
-    try { await tauriSave(sessionId, boundedMessages, workspace); return; } catch {}
+    try {
+      await tauriSave(sessionId, boundedSnapshot, workspace);
+      return;
+    } catch (err) {
+      console.error('[pure] save_session failed, fell back to localStorage:', err);
+      const now = Date.now();
+      if (now - lastDiskSaveWarning > 30_000) {
+        lastDiskSaveWarning = now;
+        showToast(t('toast.saveDiskFailed'), 6000);
+      }
+    }
   }
-  lsSave(sessionId, boundedMessages, workspace);
+  lsSave(sessionId, boundedSnapshot, workspace);
 }
 
 /**
@@ -484,14 +772,14 @@ export async function saveSessionWorkspace(sessionId: string, workspace: string)
   lsSaveWorkspace(sessionId, workspace);
 }
 
-export async function loadLastSession(): Promise<{ sessionId: string; messages: StoredMessage[]; workspace: string } | null> {
+export async function loadLastSession(): Promise<{ sessionId: string; snapshot: SessionSnapshotV2; workspace: string } | null> {
   if (tauriAvailable) {
     try { return await tauriLoadLast(); } catch {}
   }
   return lsLoadLast();
 }
 
-export async function loadSession(sessionId: string): Promise<{ messages: StoredMessage[]; workspace: string } | null> {
+export async function loadSession(sessionId: string): Promise<LoadedSession | null> {
   if (tauriAvailable) {
     try { return await tauriLoad(sessionId); } catch {}
   }
@@ -534,7 +822,7 @@ export async function deleteAllSessions(): Promise<void> {
   } catch { /* ignore */ }
 }
 
-function extractTitle(messages: StoredMessage[]): string {
+function extractTitle(messages: Message[]): string {
   const firstUser = messages.find(m => m.role === 'user' && m.content);
   if (firstUser?.content) {
     return firstUser.content.slice(0, 60);

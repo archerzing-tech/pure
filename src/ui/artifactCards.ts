@@ -3,7 +3,12 @@
 // the agent actually wrote are surfaced at the END of the final assistant
 // bubble as clickable cards:
 //
-//   * Every generated file is shown as a clickable card.
+//   * A single final deliverable is shown as a clickable card.
+//   * Multiple office/text files are shown as cards only when there are at most
+//     MAX_FILE_CARDS of them; helper scripts are omitted unless explicitly
+//     requested as the deliverable.
+//   * A multi-file project is represented by one clickable workspace-directory
+//     link, so a generated project never floods the transcript with cards.
 //   * Folders are workspace scaffolding and are deliberately omitted from the
 //     result area; the project workspace remains available through the context
 //     panel and path links in the assistant reply.
@@ -23,9 +28,17 @@ export interface ArtifactItem {
   path: string;
 }
 
+export const MAX_FILE_CARDS = 10;
+
+export interface ArtifactDisplayOptions {
+  /** The user's request for this turn, used to hide implementation byproducts. */
+  userRequest?: string;
+}
+
 export type ArtifactDisplay =
   | { mode: 'none' }
-  | { mode: 'files'; items: ArtifactItem[] };
+  | { mode: 'files'; items: ArtifactItem[] }
+  | { mode: 'project'; items: ArtifactItem[] };
 
 /**
  * True when a written file is an INTERMEDIATE byproduct of an information
@@ -74,15 +87,112 @@ export function isDataDumpPair(path: string, allPaths: string[]): boolean {
   });
 }
 
-/** Only generated files become result cards; workspace folders never do. */
-export function planArtifactDisplay(items: ArtifactItem[]): ArtifactDisplay {
+const CARD_FRIENDLY_EXTENSIONS = new Set([
+  // Office and plain-text documents.
+  'md', 'markdown', 'txt', 'pdf', 'doc', 'docx', 'rtf', 'odt', 'tex', 'org',
+  'ppt', 'pptx', 'odp', 'xls', 'xlsx', 'ods', 'csv', 'tsv',
+  // Standalone HTML and shell/script documents explicitly intended for direct
+  // opening. General source files stay project-level when there is more than
+  // one artifact, avoiding a card wall for coding projects.
+  'html', 'htm', 'sh', 'bash', 'zsh', 'bat', 'cmd', 'ps1',
+]);
+
+const FINAL_DELIVERABLE_EXTENSIONS = new Set([
+  'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'avif', 'heic',
+  'md', 'markdown', 'txt', 'pdf', 'doc', 'docx', 'rtf', 'odt', 'tex', 'org',
+  'ppt', 'pptx', 'odp', 'xls', 'xlsx', 'ods', 'csv', 'tsv', 'html', 'htm',
+]);
+
+const SCRIPT_OR_SOURCE_EXTENSIONS = new Set([
+  'js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx', 'py', 'rb', 'php', 'rs', 'go', 'java',
+  'kt', 'c', 'h', 'cpp', 'hpp', 'cs', 'css', 'scss', 'sass', 'sh', 'bash', 'zsh',
+  'bat', 'cmd', 'ps1', 'json', 'yaml', 'yml', 'xml', 'sql', 'vue', 'svelte',
+]);
+
+export function isCardFriendlyArtifact(path: string): boolean {
+  const leaf = path.split(/[\\/]+/).pop() ?? path;
+  const dot = leaf.lastIndexOf('.');
+  return dot > 0 && CARD_FRIENDLY_EXTENSIONS.has(leaf.slice(dot + 1).toLowerCase());
+}
+
+function artifactExtension(path: string): string {
+  const leaf = path.split(/[\\/]+/).pop() ?? path;
+  const dot = leaf.lastIndexOf('.');
+  return dot > 0 ? leaf.slice(dot + 1).toLowerCase() : '';
+}
+
+export function isFinalDeliverableArtifact(path: string): boolean {
+  return FINAL_DELIVERABLE_EXTENSIONS.has(artifactExtension(path));
+}
+
+function isScriptOrSourceArtifact(path: string): boolean {
+  return SCRIPT_OR_SOURCE_EXTENSIONS.has(artifactExtension(path));
+}
+
+function requestLooksLikeProject(request: string): boolean {
+  return /(?:项目|工程|网站|网页应用|应用|app|dashboard|系统|project|coding)/i.test(request);
+}
+
+function requestLooksLikeFinalVisualOrDocument(request: string): boolean {
+  return /(?:画|绘制|图片|图像|插画|海报|封面|文档|报告|word|ppt|excel|表格|pdf|markdown|文本)/i.test(request);
+}
+
+function requestExplicitlyRequestsScript(request: string): boolean {
+  if (requestLooksLikeFinalVisualOrDocument(request) && !/(?:脚本|python|javascript|typescript|shell|bash)\s*(?:文件|脚本)?\s*(?:本身|代码|程序)/i.test(request)) return false;
+  return /(?:写|编写|生成|创建|实现|开发).{0,18}(?:python|javascript|typescript|js|jsx|ts|tsx|脚本|shell|bash|powershell)/i.test(request);
+}
+
+function compactArtifactFiles(items: ArtifactItem[]): ArtifactDisplay {
+  if (items.length === 0) return { mode: 'none' };
+  if (items.length === 1 || (items.length <= MAX_FILE_CARDS && items.every(item => isCardFriendlyArtifact(item.path)))) {
+    return { mode: 'files', items };
+  }
+  return { mode: 'project', items };
+}
+
+/** Choose a compact end-of-turn presentation without exposing implementation files. */
+export function planArtifactDisplay(items: ArtifactItem[], options: ArtifactDisplayOptions = {}): ArtifactDisplay {
   const all = items.map((item) => item.path);
   const kept = items.filter((item) => {
     if (isIntermediateArtifact(item.path)) return false;
     if (isDataDumpPair(item.path, all)) return false;
     return true;
   });
-  return kept.length === 0 ? { mode: 'none' } : { mode: 'files', items: kept };
+  if (kept.length === 0) return { mode: 'none' };
+
+  const request = options.userRequest?.trim() ?? '';
+  const explicitScript = request.length > 0 && requestExplicitlyRequestsScript(request);
+  const projectRequest = request.length > 0 && requestLooksLikeProject(request);
+  const finalDeliverables = kept.filter(item => isFinalDeliverableArtifact(item.path));
+  const hasImplementationFiles = kept.some(item => isScriptOrSourceArtifact(item.path));
+
+  // For visual/document tasks, implementation files are working material. Only
+  // the requested final files remain visible; if none survived, show nothing.
+  if (!explicitScript && requestLooksLikeFinalVisualOrDocument(request) && finalDeliverables.length > 0) {
+    return compactArtifactFiles(finalDeliverables);
+  }
+  if (!explicitScript && requestLooksLikeFinalVisualOrDocument(request) && hasImplementationFiles) {
+    return { mode: 'none' };
+  }
+
+  // A coding/project request is represented by its directory, never by a wall
+  // of source/config cards. This takes precedence even when README/index.html
+  // is also present in the generated project.
+  if (!explicitScript && projectRequest && hasImplementationFiles) {
+    return { mode: 'project', items: kept };
+  }
+
+  // Without request context (legacy snapshots), a final document/image next to
+  // source files is still safely reduced to the user-facing deliverables.
+  if (!explicitScript && finalDeliverables.length > 0 && finalDeliverables.length < kept.length) {
+    return compactArtifactFiles(finalDeliverables);
+  }
+
+  if (!explicitScript && hasImplementationFiles && kept.every(item => isScriptOrSourceArtifact(item.path))) {
+    return kept.length === 1 ? { mode: 'none' } : { mode: 'project', items: kept };
+  }
+
+  return compactArtifactFiles(kept);
 }
 
 // ── DOM rendering ──
@@ -104,6 +214,8 @@ const ARCHIVE_ICON =
   '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6 4 3.5h8l1 2.5v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6z"/><path d="M6.5 8h3"/></svg>';
 const OPEN_HINT_ICON =
   '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5H3a.5.5 0 0 0-.5.5v9a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5v-3.5"/><path d="M9.5 2.5h4v4"/><path d="M13.5 2.5 8 8"/></svg>';
+const PROJECT_ICON =
+  '<svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.5h4l1.5 1.8h7.5v7.2a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/><path d="M2.5 5.5v-1a1 1 0 0 1 1-1h3l1.5 1.8h5.5"/></svg>';
 
 /**
  * Pick a format icon (glyph + tint class) for a file path so the card reads
@@ -203,22 +315,53 @@ function createArtifactCard(item: ArtifactItem): HTMLButtonElement | null {
   return card;
 }
 
+/** Render one project-directory link instead of expanding a project into file cards. */
+function createProjectDirectoryLink(projectPath: string): HTMLButtonElement {
+  const target = projectPath.trim() || '.';
+  const resolved = resolvePathForOpen(target).replace(/[\\/]\.$/, '') || target;
+  const link = document.createElement('button');
+  link.type = 'button';
+  link.className = 'artifact-project-link';
+  link.title = `${t('artifacts.openDir')}: ${resolved}`;
+  link.setAttribute('aria-label', `${t('artifacts.openDir')}: ${resolved}`);
+  link.innerHTML =
+    `<span class="artifact-project-icon">${PROJECT_ICON}</span>` +
+    `<span class="artifact-project-text"><span class="artifact-project-label"></span><span class="artifact-project-path"></span><span class="artifact-project-count"></span></span>` +
+    `<span class="artifact-open-hint" aria-hidden="true">${OPEN_HINT_ICON}</span>`;
+  link.querySelector<HTMLElement>('.artifact-project-label')!.textContent = t('artifacts.project');
+  link.querySelector<HTMLElement>('.artifact-project-path')!.textContent = resolved;
+  link.querySelector<HTMLElement>('.artifact-project-count')!.textContent = t('artifacts.projectContents');
+  link.addEventListener('click', () => openPathLink(target));
+  return link;
+}
+
 /**
- * Append generated-file cards into `host`. Folders are filtered before this
- * function is called and again by planArtifactDisplay as a defensive boundary.
+ * Append the compact generated-result presentation into `host`. Folders are
+ * filtered before this function is called and again by planArtifactDisplay as
+ * a defensive boundary. `projectPath` is absolute for live turns when known;
+ * '.' resolves through the active session workspace during replay.
  */
-export function renderArtifactCards(host: HTMLElement, items: ArtifactItem[]): void {
-  const plan = planArtifactDisplay(items);
+export function renderArtifactCards(
+  host: HTMLElement,
+  items: ArtifactItem[],
+  projectPath = '.',
+  options: ArtifactDisplayOptions = {},
+): void {
+  const plan = planArtifactDisplay(items, options);
   if (plan.mode === 'none') return;
 
   const wrap = document.createElement('div');
-  wrap.className = 'artifact-cards';
+  wrap.className = plan.mode === 'project' ? 'artifact-project' : 'artifact-cards';
   wrap.setAttribute('role', 'group');
-  wrap.setAttribute('aria-label', t('artifacts.group'));
+  wrap.setAttribute('aria-label', plan.mode === 'project' ? t('artifacts.project') : t('artifacts.group'));
 
-  for (const item of plan.items) {
-    const card = createArtifactCard(item);
-    if (card) wrap.appendChild(card);
+  if (plan.mode === 'project') {
+    wrap.appendChild(createProjectDirectoryLink(projectPath));
+  } else {
+    for (const item of plan.items) {
+      const card = createArtifactCard(item);
+      if (card) wrap.appendChild(card);
+    }
   }
 
   host.appendChild(wrap);

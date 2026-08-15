@@ -76,6 +76,7 @@ export function createPlanOverview(): PlanOverviewHandle {
     el.classList.toggle('is-collapsed', collapsed);
     compact.setAttribute('aria-expanded', String(!collapsed));
     if (plan) render();
+    fitOverviewToHost(el);
   }
 
   // ── Drag to reposition ──
@@ -112,9 +113,6 @@ export function createPlanOverview(): PlanOverviewHandle {
       origTop: el.offsetTop,
       moved: false,
     };
-    // Drop the CSS right-edge anchoring once the user takes manual control.
-    el.style.right = 'auto';
-    ev.preventDefault();
   };
 
   const moveDrag = (ev: PointerEvent): void => {
@@ -129,7 +127,9 @@ export function createPlanOverview(): PlanOverviewHandle {
       // keeps its natural target — capturing on every pointerdown would
       // retarget the × click onto the card and kill the collapse button.
       el.classList.add('dragging');
+      el.style.right = 'auto';
       s.handle.setPointerCapture?.(ev.pointerId);
+      ev.preventDefault();
     }
     if (s.moved) {
       const clamped = clampDrag(s.origLeft + dx, s.origTop + dy);
@@ -238,6 +238,7 @@ export function createPlanOverview(): PlanOverviewHandle {
     state.todoLabel = todoLabel;
     render();
     el.hidden = false;
+    fitOverviewToHost(el);
   };
 
   return {
@@ -252,12 +253,14 @@ export function createPlanOverview(): PlanOverviewHandle {
       status = next;
       render();
       el.hidden = false;
+      fitOverviewToHost(el);
     },
     setCurrent: (planNumber, todoNumber, todoLabel) => {
       state.currentPlan = planNumber;
       if (todoNumber !== undefined) state.currentTodo = todoNumber;
       if (todoLabel !== undefined) state.todoLabel = todoLabel;
       render();
+      fitOverviewToHost(el);
     },
     setCollapsed,
     clear: () => {
@@ -279,6 +282,34 @@ let overview: PlanOverviewHandle | null = null;
 const OVERVIEW_POS_KEY = 'pure_plan_overview_pos';
 
 let positionSession: string | null = null;
+
+export function fitOverviewToHost(el: HTMLElement): void {
+  const host = el.parentElement;
+  const hostRect = host?.getBoundingClientRect?.();
+  if (!hostRect || !Number.isFinite(hostRect.width) || !Number.isFinite(hostRect.height)) return;
+  if (!el.offsetWidth || !el.offsetHeight) return;
+
+  const maxLeft = Math.max(0, hostRect.width - el.offsetWidth);
+  const maxTop = Math.max(0, hostRect.height - el.offsetHeight);
+  const left = Math.min(Math.max(0, el.offsetLeft), maxLeft);
+  const top = Math.min(Math.max(0, el.offsetTop), maxTop);
+  const needsInlinePosition = el.style.left !== '' || el.style.right === 'auto'
+    || left !== el.offsetLeft || top !== el.offsetTop;
+  if (needsInlinePosition) {
+    el.style.right = 'auto';
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+  }
+
+  const card = el.querySelector<HTMLElement>('.plan-overview-card');
+  const steps = el.querySelector<HTMLElement>('.plan-overview-steps');
+  if (!card || card.hidden || !steps) return;
+  const availableHeight = Math.max(0, hostRect.height - top - 12);
+  card.style.maxHeight = `${availableHeight}px`;
+  const head = el.querySelector<HTMLElement>('.plan-overview-head');
+  const headHeight = head?.offsetHeight ?? 0;
+  steps.style.maxHeight = `${Math.max(0, availableHeight - headHeight - 14)}px`;
+}
 
 /** Point the outline's position memory at a session. Call on session switch so
  * the widget re-applies that session's remembered spot (or resets to the
@@ -333,6 +364,14 @@ export function planOverview(): PlanOverviewHandle {
   host.appendChild(handle.el);
   // Remember where the user parked the widget across launches / sessions.
   restoreStoredPosition(handle.el, positionSession);
+  const fit = () => fitOverviewToHost(handle.el);
+  if (typeof window !== 'undefined') window.addEventListener('resize', fit);
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(fit);
+    observer.observe(host);
+    const chatView = document.getElementById('chat-view');
+    if (chatView) observer.observe(chatView);
+  }
   overview = handle;
   return handle;
 }

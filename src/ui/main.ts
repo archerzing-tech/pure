@@ -9,7 +9,8 @@
 import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, shouldCancelForEscape } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
-import { buildStoredToolExec, getStoredDisplayContent, getStoredThinkingSegments, getStoredToolCallInfos, groupFileWrites, type StoredMessage, type StoredToolCallInfo, type ToolExecMeta } from './store';
+import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
+import { projectTranscript } from './transcriptProjection';
 import { estimateCostUsd, formatCostUsd, formatTokens } from '../shared/usage';
 import { escapeHtml } from '../shared/html';
 import { buildExportSavedToast } from './statsExportToast';
@@ -34,6 +35,7 @@ import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { showConfirmModal } from './modal';
 import { WorkspaceController } from './workspace';
 import { SessionSidebar } from './sessionSidebar';
+import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
 
 const chat = new ChatController();
 
@@ -642,11 +644,12 @@ function hideSessionLoading(): void {
   setTimeout(remove, 220);
 }
 
-async function renderSessionMessages(messages: StoredMessage[]) {
+async function renderSessionMessages(snapshot: SessionSnapshotV2) {
+  const blocks = projectTranscript(snapshot.transcript);
   const restoreToken = ++sessionRestoreToken;
   const isCurrentRestore = (): boolean => restoreToken === sessionRestoreToken;
   enterChatMode();
-  chat.loadFromStorage(messages);
+  chat.loadFromStorage(snapshot);
 
   const chatEl = document.getElementById('chat')!;
   chatEl.innerHTML = '';
@@ -664,116 +667,98 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   loadingBubble.textContent = t('session.restoring');
   loadingRow.appendChild(loadingBubble);
   chatEl.appendChild(loadingRow);
-  const toolExecs: ToolExecMeta[] = [];
-  const pendingToolCalls = new Map<string, StoredToolCallInfo>();
-  // Restoring a long session must not block the GUI: each bubble's markdown
-  // pass (marked parse + sanitize + hljs + linkify) is effectively synchronous
-  // for plain content, so yield to the browser between bubbles for a paint and
-  // input processing instead of rendering the whole transcript in one burst.
+  const replayTools: Array<{ exec: ToolExecMeta; stopped: boolean }> = [];
+  const flushReplayTools = (): void => {
+    if (replayTools.length === 0) return;
+    const grid = document.createElement('div');
+    grid.className = 'bubble-row tool-grid';
+    for (const item of replayTools) {
+      const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
+      if (item.stopped) markToolRowStopped(row);
+      else finalizeToolRow(row, item.exec);
+      grid.appendChild(row.el);
+    }
+    chatEl.appendChild(grid);
+    replayTools.length = 0;
+  };
+  // Restoring a long session must not block the GUI. Render a small batch in
+  // one turn, then yield for a paint and input processing. Waiting after every
+  // block made a 400-message session spend several seconds in artificial rAF
+  // gaps; a batch keeps the UI responsive without serializing every bubble.
   const yieldToUI = (): Promise<void> => new Promise(resolve => requestAnimationFrame(() => resolve()));
+  let blocksSinceYield = 0;
+  const yieldIfNeeded = async (): Promise<void> => {
+    blocksSinceYield++;
+    if (!shouldYieldAfterRestoreBlock(blocksSinceYield)) return;
+    blocksSinceYield = 0;
+    await yieldToUI();
+  };
 
   try {
-  for (const m of messages) {
-    if (!isCurrentRestore()) return;
-    if (m.role === 'tool') {
-      const call = m.tool_call_id ? pendingToolCalls.get(m.tool_call_id) : undefined;
-      const storedExec = m.toolExec;
-      toolExecs.push(storedExec
-        ? {
-            ...storedExec,
-            toolName: storedExec.toolName || m.name || call?.toolName || 'tool',
-            args: storedExec.args ?? call?.args,
-            resultText: storedExec.resultText ?? (typeof m.content === 'string' ? m.content : undefined),
-          }
-        : buildStoredToolExec(m, call));
-      if (m.tool_call_id) pendingToolCalls.delete(m.tool_call_id);
-      continue;
-    }
-    if (m.role === 'assistant') {
-        const derivedArtifacts = artifactsFromToolExecs(toolExecs);
-        flushToolExecs(toolExecs, chatEl);
-        flushPendingToolCalls(pendingToolCalls, chatEl);
-        for (const call of getStoredToolCallInfos(m)) {
-          if (call.id) pendingToolCalls.set(call.id, call);
-        }
-        // Analysis is a separate preflight surface, so restore it explicitly
-        // before the reasoning phases and assistant answer.
-        if (m.analysis) appendStoredThinking(m.analysis, chatEl);
-        for (const segment of getStoredThinkingSegments(m)) appendStoredThinking(segment, chatEl);
-        toolExecs.length = 0;
-        // Rebuild the assessment card for a restored plan pause so the
-        // "waiting for reply" flow survives session restore: intent/risk/gate
-        // read as passed, the execute node waits for the user's next message.
-        if (m.isPlanPause && m.assessment) {
-          const flow = createAssessmentFlowCard(m.assessment);
-          flow.completePhase('gate');
-          flow.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
-          chatEl.appendChild(flow.el);
-          chat.registerPausedAssessment(flow);
-        }
-        const restoredContent = getStoredDisplayContent(m);
-        let wrapper: HTMLDivElement | null = null;
-        if (restoredContent) {
-          wrapper = document.createElement('div');
-          wrapper.className = 'bubble-row assistant';
-          const label = document.createElement('span');
-          label.className = 'bubble-label';
-          label.textContent = t('context.role.pure');
-          wrapper.appendChild(label);
-          const bubble = document.createElement('div');
-          bubble.className = m.isPlanPause ? 'bubble plan-pause-message' : 'bubble';
-          bindAssistantBubbleCopy(bubble);
-          wrapper.appendChild(bubble);
-          chatEl.appendChild(wrapper);
-          // Restore from the display snapshot when available. This preserves
-          // streamed chart/image fences even if an adapter's final message was
-          // empty or incomplete.
-          await renderMarkdown(stripToolCallXml(restoredContent), bubble);
-          if (m.isPlanPause) {
-            attachPlanPauseActions(
-              wrapper,
-              () => chat.continuePausedPlan(),
-              () => chat.cancelPausedPlan(),
-            );
-          }
-        }
-        const restoredArtifacts = m.artifacts?.length ? m.artifacts : derivedArtifacts;
-        if (restoredArtifacts.length) {
-          const artifactRow = document.createElement('div');
-          artifactRow.className = 'bubble-row artifact-row';
-          chatEl.appendChild(artifactRow);
-          renderArtifactCards(artifactRow, restoredArtifacts);
-        }
+    for (const block of blocks) {
+      if (!isCurrentRestore()) return;
+      if (block.type === 'tool') {
+        replayTools.push(block);
+        await yieldIfNeeded();
         if (!isCurrentRestore()) return;
-        scrollChatToBottomIfPinned(chatEl);
-    } else if (m.role === 'user' && m.content) {
-      flushToolExecs(toolExecs, chatEl);
-      flushPendingToolCalls(pendingToolCalls, chatEl);
-      toolExecs.length = 0;
-      const wrapper = document.createElement('div');
-      wrapper.className = 'bubble-row user';
-      const label = document.createElement('span');
-      label.className = 'bubble-label';
-      label.textContent = t('context.role.you');
-      wrapper.appendChild(label);
-      const bubble = document.createElement('div');
-      bubble.className = 'bubble';
-      // Per-request task context (<task_context> block, see promptLayers.ts) is
-      // for the model only — strip it so replay never shows it in the user's
-      // own bubble.
-      bubble.textContent = stripUserTurnContext(m.content);
-      bindUserBubbleSelectAll(bubble);
-      linkifyPaths(bubble);
-      wrapper.appendChild(bubble);
-      chatEl.appendChild(wrapper);
+        continue;
+      }
+      flushReplayTools();
+
+      if (block.type === 'user') {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'bubble-row user';
+        const label = document.createElement('span');
+        label.className = 'bubble-label';
+        label.textContent = t('context.role.you');
+        wrapper.appendChild(label);
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = stripUserTurnContext(block.content);
+        bindUserBubbleSelectAll(bubble);
+        linkifyPaths(bubble);
+        wrapper.appendChild(bubble);
+        chatEl.appendChild(wrapper);
+      } else if (block.type === 'analysis' || block.type === 'thinking') {
+        appendStoredThinking(block.text, chatEl);
+      } else if (block.type === 'assessment') {
+        const flow = createAssessmentFlowCard(block.assessment);
+        flow.completePhase('gate');
+        flow.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
+        chatEl.appendChild(flow.el);
+        chat.registerPausedAssessment(flow);
+      } else if (block.type === 'assistant') {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'bubble-row assistant';
+        const label = document.createElement('span');
+        label.className = 'bubble-label';
+        label.textContent = t('context.role.pure');
+        wrapper.appendChild(label);
+        const bubble = document.createElement('div');
+        bubble.className = block.isPlanPause ? 'bubble plan-pause-message' : 'bubble';
+        bindAssistantBubbleCopy(bubble);
+        wrapper.appendChild(bubble);
+        chatEl.appendChild(wrapper);
+        await renderMarkdown(stripToolCallXml(block.content), bubble, { yieldBeforeParse: false });
+        if (block.isPlanPause) {
+          attachPlanPauseActions(
+            wrapper,
+            () => chat.continuePausedPlan(),
+            () => chat.cancelPausedPlan(),
+          );
+        }
+      } else if (block.type === 'artifact') {
+        const artifactRow = document.createElement('div');
+        artifactRow.className = 'bubble-row artifact-row';
+        chatEl.appendChild(artifactRow);
+        renderArtifactCards(artifactRow, block.items, chat.getWorkspace() || '.', { userRequest: block.userRequest });
+      }
+
+      await yieldIfNeeded();
+      if (!isCurrentRestore()) return;
     }
-    // Let the browser paint + process input between bubbles.
-    await yieldToUI();
     if (!isCurrentRestore()) return;
-  }
-  if (!isCurrentRestore()) return;
-  flushToolExecs(toolExecs, chatEl);
-  flushPendingToolCalls(pendingToolCalls, chatEl);
+    flushReplayTools();
   } catch (err) {
     // Remove the loading row on error and dismiss the overlay: a stale
     // restore can only reach catch when the newer restore also threw, so
@@ -800,51 +785,6 @@ async function renderSessionMessages(messages: StoredMessage[]) {
   // The restored session's stats belong to the same conversation id —
   // re-render the 统计 tab so the panel matches the transcript.
   renderSessionStats();
-}
-
-function artifactsFromToolExecs(execs: ToolExecMeta[]): Array<{ path: string }> {
-  const paths = new Set<string>();
-  for (const exec of execs) {
-    if (!exec.success) continue;
-    if ((exec.toolName === 'write_file' || exec.toolName === 'edit_file') && typeof exec.args?.path === 'string' && exec.args.path.trim()) {
-      paths.add(exec.args.path);
-    } else if (exec.toolName === 'replace_files' && Array.isArray(exec.args?.files)) {
-      for (const file of exec.args.files) {
-        if (typeof file === 'string' && file.trim()) paths.add(file);
-      }
-    }
-  }
-  return [...paths].map(path => ({ path }));
-}
-
-function flushPendingToolCalls(calls: Map<string, StoredToolCallInfo>, parent: HTMLElement): void {
-  if (calls.size === 0) return;
-  const grid = document.createElement('div');
-  grid.className = 'bubble-row tool-grid';
-  for (const call of calls.values()) {
-    const row = createToolRow(call.toolName, call.args);
-    markToolRowStopped(row);
-    grid.appendChild(row.el);
-  }
-  parent.appendChild(grid);
-  calls.clear();
-}
-
-function flushToolExecs(execs: ToolExecMeta[], parent: HTMLElement) {
-  if (execs.length === 0) return;
-  // Restored sessions render each round's tool calls in the same horizontal
-  // grid as live streaming (chat.ts appendToolRow), so parallel batches (two
-  // web_search calls, a search + list, …) read as parallel instead of a
-  // vertical stack of identical rows. Each flush batch == one LLM iteration
-  // (flushToolExecs is called at assistant-message boundaries).
-  const grid = document.createElement('div');
-  grid.className = 'bubble-row tool-grid';
-  for (const te of execs) {
-    const row = createToolRow(te.toolName, te.args ?? {});
-    finalizeToolRow(row, te);
-    grid.appendChild(row.el);
-  }
-  parent.appendChild(grid);
 }
 
 // ── Input handling ──
@@ -1028,6 +968,11 @@ landingPrompt.addEventListener('paste', (e) => { pasteChips.consumePaste(e); });
 
 document.addEventListener('keydown', (e) => {
   if (e.defaultPrevented) return;
+  // A confirm modal owns Escape while it is open: the modal's own keydown
+  // handler (src/ui/modal.ts) closes it. Skipping the stream-cancel path here
+  // keeps Esc from ALSO aborting an in-flight turn behind the dialog — two
+  // document-level Escape handlers would otherwise both fire.
+  if (document.querySelector('.modal-overlay')) return;
   // Stop must win over any inline permission/plan card. A stale card can remain
   // in the transcript while a tool is already running; letting it short-circuit
   // here made Escape appear broken even though the active turn was cancellable.

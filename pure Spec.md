@@ -11,7 +11,7 @@
 
 ## 1. Document set & reading order
 
-There are **five** design documents plus this spec and the system prompt. Read in this order:
+There are **five** core design documents plus this spec, the system prompt, and one GUI session-persistence implementation note. Read in this order:
 
 | # | File | What it defines |
 |---|------|-----------------|
@@ -22,6 +22,7 @@ There are **five** design documents plus this spec and the system prompt. Read i
 | 4 | `Harness 设计文档.md` | Stateful session management |
 | 5 | `Coding Agent 设计文档.md` | Application layer (tools, planner, permission, verifier) |
 | 6 | `三层依赖关系总结.md` | Architecture summary + project config |
+| 7 | `docs/session-persistence-and-transcript.md` | GUI V2 session snapshot, transcript projection, migration, and replay constraints |
 
 > **Note on the system prompt:** The system prompt in `system-prompt.md` is **original**.
 > Do not use any leaked third-party source code; write to the public behavior contract only.
@@ -142,6 +143,28 @@ CLI 与 GUI 的工具适配器都提供当前进程内的最近一次写入批�
 - LLM 摘要失败不能阻断执行；摘要只是被淘汰内容的辅助记忆，不替代原始可见 transcript。重复压缩会折叠旧的 `Earlier conversation summary:`，并把 system/summary 消息计入估算 Token；最新完整消息组若仍超过预算则标记 `overBudget`，但不拆分。
 - CLI REPL 的 `/compact` 与 GUI 的 `⌁` 只更新下一轮执行窗口，不删除用户可见历史；GUI 的自动预压缩使用同一个 `ContextEngine`。
 - 具体计划粒度、阶段数和验证方式仍由模型结合本轮任务决定，不能从本节推出固定复杂任务规则。
+
+### 3.31 GUI 会话快照与界面转录契约
+
+GUI 的可见历史与模型执行上下文是两个投影，不得互相替代。V2 会话快照的实现细节见 [`docs/session-persistence-and-transcript.md`](docs/session-persistence-and-transcript.md)。
+
+```text
+SessionSnapshotV2
+├── modelContext.messages  → 下一次 LLM 请求和上下文压缩
+├── transcript             → transcriptProjection() → UI replay blocks
+└── uiState                → 计划游标、暂停状态等 UI 运行状态
+```
+
+契约如下：
+
+- `modelContext.messages` 是继续对话的唯一输入；`analysis`、`thinking`、`toolExec`、`artifacts`、`assessment` 和 `planState` 不得混入 `Message`。
+- `transcript` 是界面恢复投影的数据，不是第二份 LLM memory；`displayContent` 等 V1 展示字段不得回填空的模型消息。
+- `uiState` 保存界面运行状态，计划取消必须通过明确的 `planState: null` 持久化。
+- 历史恢复先加载 `modelContext`，再将 `transcript` 投影为 UI 块；工具调用通过 `toolCallId` 关联，不能依赖数组相邻位置猜测。
+- 上下文压缩只改变下一次 provider 请求的消息窗口；可见转录可以保持完整，但持久化仍受会话消息上限约束。
+- V1 `StoredMessage[]` 只能作为读取迁移输入。任何版本迁移都必须保证展示元数据不会进入新的模型上下文。
+
+当前实现仍保留 `modelMessageIndex` 作为裁剪和兼容字段。下一版优先考虑稳定 `modelMessageId`、带顺序的 `TranscriptEvent[]`、运行时 schema 校验以及真实 WebView 回放测试；这些优化不得破坏上述边界。
 
 ### 3.35 自适应控制平面契约
 

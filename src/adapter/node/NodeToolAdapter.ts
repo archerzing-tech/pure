@@ -84,7 +84,7 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'list_files': return await this.handleListFiles(args, start);
         case 'execute_command': return await this.handleExecuteCommand(args, signal, start);
         case 'create_directory': return await this.handleCreateDirectory(args, start);
-        case 'diff_files': return await this.handleDiffFiles(args, start);
+        case 'diff_files': return await this.handleDiffFiles(args, signal, start);
         case 'researcher_web': return await this.handleResearcherWeb(args, signal, start);
         case 'researcher_docs': return await this.handleResearcherDocs(args, signal, start);
         case 'code_searcher': return await this.handleCodeSearcher(args, signal, start);
@@ -352,52 +352,79 @@ export class NodeToolAdapter implements ToolAdapter {
     };
   }
 
-  private async handleDiffFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+  private async handleDiffFiles(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
     const pathA = this.resolve(String(args.pathA));
     const pathB = this.resolve(String(args.pathB));
+    // Diff can hang on huge files or network-mounted workspaces (a stuck NFS
+    // read blocks forever) — bound it with the same timeout/abort treatment as
+    // the other subprocess tools instead of stalling the whole agent loop.
+    const abort = createAbortController(signal, this.commandTimeout);
 
-    // Windows ships no `diff`; fall back to `git diff --no-index` (Git for
-    // Windows ships git.exe) with the same exit-code convention.
-    let proc;
     try {
-      proc = Bun.spawn(['diff', '-u', pathA, pathB], {
-        cwd: this.workspace,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-    } catch {
-      proc = Bun.spawn(['git', 'diff', '--no-index', '--', pathA, pathB], {
-        cwd: this.workspace,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
+      // Windows ships no `diff`; fall back to `git diff --no-index` (Git for
+      // Windows ships git.exe) with the same exit-code convention.
+      let proc;
+      try {
+        proc = Bun.spawn(['diff', '-u', pathA, pathB], {
+          cwd: this.workspace,
+          stdout: 'pipe',
+          stderr: 'pipe',
+          signal: abort.signal,
+        });
+      } catch {
+        proc = Bun.spawn(['git', 'diff', '--no-index', '--', pathA, pathB], {
+          cwd: this.workspace,
+          stdout: 'pipe',
+          stderr: 'pipe',
+          signal: abort.signal,
+        });
+      }
+
+      const stdout = await new Response(proc.stdout).text();
+      const stderr = await new Response(proc.stderr).text();
+      await proc.exited;
+
+      // A killed process may exit non-zero without throwing AbortError —
+      // report the real reason (timeout vs caller cancel) explicitly.
+      if (abort.signal.aborted) {
+        const message = signal?.aborted
+          ? 'diff_files cancelled by the caller'
+          : `diff_files timed out after ${this.commandTimeout}ms`;
+        return this.fail(null!, start, message);
+      }
+
+      if (proc.exitCode === 0) {
+        return {
+          id: `tool_${Date.now()}`,
+          toolName: 'diff_files',
+          result: '(files are identical)',
+          success: true,
+          duration: Date.now() - start,
+        };
+      }
+
+      if (proc.exitCode === 1) {
+        return {
+          id: `tool_${Date.now()}`,
+          toolName: 'diff_files',
+          result: stdout.trim() || '(files differ)',
+          success: true,
+          duration: Date.now() - start,
+        };
+      }
+
+      return this.fail(null!, start, stderr.trim() || `diff failed with exit code ${proc.exitCode}`);
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        const message = signal?.aborted
+          ? 'diff_files cancelled by the caller'
+          : `diff_files timed out after ${this.commandTimeout}ms`;
+        return this.fail(null!, start, message);
+      }
+      return this.fail(null!, start, err?.message ?? 'diff failed');
+    } finally {
+      abort.cleanup();
     }
-
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-    await proc.exited;
-
-    if (proc.exitCode === 0) {
-      return {
-        id: `tool_${Date.now()}`,
-        toolName: 'diff_files',
-        result: '(files are identical)',
-        success: true,
-        duration: Date.now() - start,
-      };
-    }
-
-    if (proc.exitCode === 1) {
-      return {
-        id: `tool_${Date.now()}`,
-        toolName: 'diff_files',
-        result: stdout.trim() || '(files differ)',
-        success: true,
-        duration: Date.now() - start,
-      };
-    }
-
-    return this.fail(null!, start, stderr.trim() || `diff failed with exit code ${proc.exitCode}`);
   }
 
   private async handleResearcherWeb(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
@@ -530,7 +557,10 @@ export class NodeToolAdapter implements ToolAdapter {
         const rawPath = typeof data.path?.text === 'string' ? data.path.text : '';
         if (!rawPath) return;
         const rawRelativePath = isAbsolute(rawPath) ? pathRelative(workspaceRoot, rawPath) : rawPath;
-        const relativePath = rawRelativePath.startsWith('./') ? rawRelativePath.slice(2) : rawRelativePath;
+        // Strip a leading ./ or .\ (ripgrep on Windows reports paths as .\app.ts)
+        // and normalize to POSIX separators so the LLM sees subdir/app.ts on
+        // every platform (no backslash JSON-escaping in tool output).
+        const relativePath = rawRelativePath.replace(/^\.(?:[\\/])/, '').replace(/\\/g, '/');
         const count = perFileCounts.get(relativePath) ?? 0;
         if (count >= perFile) return;
         perFileCounts.set(relativePath, count + 1);
@@ -670,7 +700,9 @@ export class NodeToolAdapter implements ToolAdapter {
         return;
       }
 
-      const relativePath = pathRelative(workspaceRoot, canonicalPath) || entry;
+      // pathRelative() keeps the platform separator on Windows (subdir\app.ts);
+      // normalize to POSIX so path fields stay consistent across platforms.
+      const relativePath = (pathRelative(workspaceRoot, canonicalPath) || entry).replace(/\\/g, '/');
       let fileMatches = 0;
       for (const [index, line] of text.split(/\r?\n/).entries()) {
         if (fileMatches >= perFile) break;

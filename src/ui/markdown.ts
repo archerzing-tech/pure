@@ -1716,14 +1716,20 @@ function highlightAll(container: HTMLElement): void {
  * Parse `text` as Markdown and render into `container` with syntax highlighting
  * (hljs), inline mermaid diagrams, and inline `<img>` PlantUML diagrams.
  */
-export async function renderMarkdown(text: string, container: HTMLElement): Promise<void> {
-  // Yield before the expensive parse/sanitize/highlight pipeline. Without this
-  // first yield, a large completed answer can monopolize the WebView long enough
-  // to freeze buttons and make Escape appear ineffective.
-  await new Promise<void>((resolve) => {
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
-    else setTimeout(resolve, 0);
-  });
+export async function renderMarkdown(
+  text: string,
+  container: HTMLElement,
+  options: { yieldBeforeParse?: boolean } = {},
+): Promise<void> {
+  // Yield before the expensive parse/sanitize/highlight pipeline during live
+  // completion. Session replay already slices work into batches, so it opts
+  // out here to avoid a second artificial frame gap for every assistant block.
+  if (options.yieldBeforeParse !== false) {
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+      else setTimeout(resolve, 0);
+    });
+  }
   // 1) Parse to HTML synchronously (renders fenced-code overrides inline).
   // marked always appends a trailing \n; trim it — with white-space:pre-wrap on
   // the bubble, that trailing newline would render as a visible blank line.

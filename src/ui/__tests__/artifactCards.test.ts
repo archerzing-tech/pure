@@ -1,6 +1,6 @@
 // src/ui/__tests__/artifactCards.test.ts
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { planArtifactDisplay, isIntermediateArtifact, isDataDumpPair, artifactKindLabel, fileIconMeta, type ArtifactItem } from '../artifactCards';
+import { planArtifactDisplay, isIntermediateArtifact, isDataDumpPair, artifactKindLabel, fileIconMeta, MAX_FILE_CARDS, isCardFriendlyArtifact, type ArtifactItem } from '../artifactCards';
 import { setPathLinkWorkspace } from '../pathLink';
 
 describe('planArtifactDisplay', () => {
@@ -12,19 +12,55 @@ describe('planArtifactDisplay', () => {
     expect(planArtifactDisplay([])).toEqual({ mode: 'none' });
   });
 
-  it('shows one card per artifact up to the threshold', () => {
-    const items = [file('a.ts'), file('b.ts'), file('c.ts')];
+  it('hides a lone implementation file when there is no final deliverable context', () => {
+    const items = [file('src/main.ts')];
+    expect(planArtifactDisplay(items)).toEqual({ mode: 'none' });
+  });
+
+  it('shows an explicitly requested script as a file card', () => {
+    const items = [file('tools/report.py')];
+    expect(planArtifactDisplay(items, { userRequest: '请写一个 Python 脚本' })).toEqual({ mode: 'files', items });
+  });
+
+  it('shows up to ten office/text documents as cards', () => {
+    const items = ['brief.md', 'notes.txt', 'proposal.docx', 'slides.pptx', 'budget.xlsx', 'table.csv', 'page.html', 'readme.pdf', 'memo.rtf', 'summary.odt'].map(file);
+    expect(items).toHaveLength(MAX_FILE_CARDS);
     expect(planArtifactDisplay(items)).toEqual({ mode: 'files', items });
   });
 
-  it('keeps every generated file and has no folder-card input type', () => {
-    const items = [file('src/main.ts'), file('src/app.ts')];
-    expect(planArtifactDisplay(items)).toEqual({ mode: 'files', items });
+  it('uses one project-directory link for a multi-file coding project', () => {
+    const items = [file('src/main.ts'), file('src/app.ts'), file('package.json'), file('src/app.css')];
+    expect(planArtifactDisplay(items, { userRequest: '生成一个 coding 项目' })).toEqual({ mode: 'project', items });
   });
 
-  it('shows all generated files in a project', () => {
-    const items = Array.from({ length: 5 }, (_, i) => file(`f${i}.ts`));
-    expect(planArtifactDisplay(items)).toEqual({ mode: 'files', items });
+  it('hides helper scripts when the final purpose is an image', () => {
+    const items = [file('tools/draw.py'), file('output.png')];
+    expect(planArtifactDisplay(items, { userRequest: '画一幅风景画' })).toEqual({
+      mode: 'files',
+      items: [file('output.png')],
+    });
+  });
+
+  it('hides helper scripts when the final purpose is a document', () => {
+    const items = [file('tools/build_report.py'), file('report.docx')];
+    expect(planArtifactDisplay(items, { userRequest: '写一份项目报告' })).toEqual({
+      mode: 'files',
+      items: [file('report.docx')],
+    });
+  });
+
+  it('shows nothing when an image/document task only leaves helper scripts', () => {
+    expect(planArtifactDisplay([file('tools/render.js')], { userRequest: '制作一张海报' })).toEqual({ mode: 'none' });
+  });
+
+  it('uses the project-directory link when card-friendly files exceed ten', () => {
+    const items = Array.from({ length: MAX_FILE_CARDS + 1 }, (_, i) => file(`notes-${i}.md`));
+    expect(planArtifactDisplay(items)).toEqual({ mode: 'project', items });
+  });
+
+  it('uses the project-directory link for mixed documents and project files', () => {
+    const items = [file('README.md'), file('index.html'), file('src/main.ts')];
+    expect(planArtifactDisplay(items, { userRequest: '生成一个网页项目' })).toEqual({ mode: 'project', items });
   });
 
   it('shows nothing when no files were generated', () => {
@@ -49,6 +85,16 @@ describe('planArtifactDisplay', () => {
     expect(planArtifactDisplay([file('weather_raw.js'), file('weather.js')])).toEqual({ mode: 'none' });
     expect(planArtifactDisplay([file('raw_data.json')])).toEqual({ mode: 'none' });
     expect(planArtifactDisplay([file('config.tmp')])).toEqual({ mode: 'none' });
+  });
+});
+
+describe('isCardFriendlyArtifact', () => {
+  it('accepts office/text/script documents but not general project files', () => {
+    expect(isCardFriendlyArtifact('README.md')).toBe(true);
+    expect(isCardFriendlyArtifact('deploy.sh')).toBe(true);
+    expect(isCardFriendlyArtifact('slides.pptx')).toBe(true);
+    expect(isCardFriendlyArtifact('src/main.ts')).toBe(false);
+    expect(isCardFriendlyArtifact('package.json')).toBe(false);
   });
 });
 

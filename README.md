@@ -3,7 +3,7 @@
 **Pure** is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. It reads, writes, and edits files, executes shell commands, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.2-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.5--beta4-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -103,6 +103,14 @@ A completed run records the selected strategy alongside its outcome. Only runs w
 Context management is independent of task complexity. `ContextEngine` keeps the current system messages, folds older compaction summaries, retains complete assistant/tool-call groups, removes invalid dangling tool fragments, and trims older conversational groups by message and estimated-token budgets. LLM summarization is best-effort: if it fails, the bounded recent window still reaches the model and the UI reports that older messages were trimmed without a summary.
 
 Compaction does not encode a fixed number of plan steps, Todo items, or verification stages. Those remain model- and task-dependent. The CLI REPL exposes `/compact`; the GUI composer exposes `⌁`. Both actions prepare the next execution context without deleting the visible transcript. Automatic GUI pre-compaction uses the same engine during idle time, while the CLI and Harness invoke it before a continuation when needed.
+
+### 1.65 Session memory and UI transcript are separate
+
+The GUI does not treat everything visible on screen as LLM memory. V2 session snapshots have three explicit layers: `modelContext.messages` contains the canonical messages sent to the next LLM request; `transcript` stores UI-only analysis, reasoning phases, tool parameters/results, rich Markdown, and artifact cards; `uiState` stores UI runtime state such as the plan cursor and paused-plan status.
+
+History restore first loads `modelContext.messages` back into the agent, then `src/ui/transcriptProjection.ts` projects `transcript` into user messages, analysis cards, thinking phases, tool rows, assistant replies, assessment cards, and artifact cards for the UI renderer. Legacy `displayContent`-style fields never backfill an empty model message, so presentation data cannot contaminate the next LLM request; context compaction changes only the model window and does not delete the visible transcript.
+
+Legacy `StoredMessage[]` data is migrated to V2 on read. Tool calls are paired by `toolCallId`; unreturned calls replay as stopped rows; older sessions without `toolExec` recover tool metadata from the tool message and its preceding call. See [`docs/session-persistence-and-transcript.md`](docs/session-persistence-and-transcript.md) for the field contract, save/restore flow, compatibility rules, and optimization roadmap.
 
 ### 1.7 Prompt observability: inspect the agent without storing secrets
 

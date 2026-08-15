@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { NodeToolAdapter } from '../../adapter/node/NodeToolAdapter';
-import { buildAuditCommand, buildLocalReviewCommand, buildRepairPrompt, buildVerifyCommand, hasRepairableQualityFindings, isVerificationCommand, parseCodeReviewVerdict, parseProjectAuditResult, qualityGateEvidence, qualityGateSummary, runProjectQualityGate } from '../projectQualityGate';
+import { buildAuditCommand, buildLocalReviewCommand, buildRepairPrompt, buildVerifyCommand, hasRepairableQualityFindings, isVerificationCommand, parseCodeReviewVerdict, parseProjectAuditResult, projectCdPrefix, projectDirectoryFor, qualityGateEvidence, qualityGateSummary, runProjectQualityGate } from '../projectQualityGate';
 import type { ToolAdapter, ToolCall, ToolDefinition, ToolResult } from '../../shared/types';
 
 const REVIEW_TOOL: ToolDefinition = {
@@ -58,6 +58,8 @@ describe('project quality gate', () => {
     expect(parseProjectAuditResult('[audit-tool] npm audit --json\n{"vulnerabilities":{"x":{"severity":"high"}},"metadata":{"vulnerabilities":{"high":1}}}\n[audit-exit] 1')).toEqual({ status: 'failed', summary: '依赖/安全审计发现漏洞或安全策略问题' });
     expect(parseProjectAuditResult('npm ERR! code EAI_AGAIN\n[audit-exit] 1')).toEqual({ status: 'unavailable', summary: '依赖/安全审计未完成（退出码 1，疑似网络或环境问题）' });
     expect(parseProjectAuditResult('[audit-unavailable] package.json has no lockfile for a reproducible audit').status).toBe('unavailable');
+    expect(parseProjectAuditResult('[audit-not-applicable] package.json has no third-party dependencies to audit').status).toBe('passed');
+    expect(parseProjectAuditResult('[audit-not-applicable] no supported dependency manifest').status).toBe('passed');
     expect(parseProjectAuditResult('[audit-exit] 1').status).toBe('unavailable');
   });
 
@@ -160,12 +162,12 @@ describe('project quality gate', () => {
     expect(result.checks[1]).toMatchObject({ status: 'failed', repairable: true });
   });
 
-  it('blocks projects without a standard verification manifest', async () => {
+  it('accepts an audit-not-applicable workspace as a vacuous pass', async () => {
     const result = await runProjectQualityGate(adapter('VERDICT: PASS', [
       { success: true, result: '[audit-not-applicable]' },
     ]));
-    expect(result.passed).toBe(false);
-    expect(result.checks[1].status).toBe('unavailable');
+    expect(result.passed).toBe(true);
+    expect(result.checks[1].status).toBe('passed');
   });
 
   it('records repair rounds and concrete issue history in delivery evidence', async () => {
@@ -211,27 +213,84 @@ describe('project quality gate', () => {
     expect(result.checks[0].summary).toContain('已取消');
   });
 
-  it('falls back to a local static review without claiming a full review PASS', async () => {
+  it('passes a clean local static review with limitation messaging instead of hard-failing', async () => {
     const result = await runProjectQualityGate(adapter('I think it is fine', [
       { success: true, result: '[local-review] git diff --check\n[local-review] no credential pattern found' },
       { success: true, result: '[audit-tool] bun audit --json\n{}\n[audit-exit] 0' },
       { success: true, result: 'tests passed' },
     ]));
-    expect(result.passed).toBe(false);
+    // A clean local scan (the only review available in this app without the
+    // LLM reviewer) counts as a passing review-with-limitations, never as a
+    // full PASS — the summary still says so.
+    expect(result.passed).toBe(true);
     expect(result.checks).toHaveLength(3);
     expect(result.checks[0].status).toBe('degraded');
+    expect(result.checks[0].reviewMode).toBe('local');
     expect(result.checks[0].summary).toContain('不能替代完整代码审查');
     expect(result.checks[0].output).toContain('no credential pattern found');
+    expect(qualityGateSummary(result)).toContain('交付带有限制');
+    expect(qualityGateEvidence(result, false)).toContain('仍有审查限制');
   });
 
-  it('shows a failed reviewer error in the fallback evidence without claiming review PASS', async () => {
-    const result = await runProjectQualityGate(adapter('', [
-      { success: false, error: 'local review command failed' },
+  it('passes the gate when only the local review is available (no code_reviewer tool)', async () => {
+    const tools = adapter('unused', [
+      { success: true, result: '[local-review] not a standalone git repository; skipping Git diff/status checks\n[local-review] no credential pattern found' },
+      { success: true, result: '[audit-tool] bun audit --json\n{}\n[audit-exit] 0' },
+      { success: true, result: 'tests passed' },
+    ]);
+    tools.getTools = () => [COMMAND_TOOL];
+    const result = await runProjectQualityGate(tools);
+    expect(result.passed).toBe(true);
+    expect(result.checks[0].status).toBe('degraded');
+  });
+
+  it('treats whitespace findings in the local review as non-blocking notes', () => {
+    const command = buildLocalReviewCommand();
+    // git diff --check failures must not exit 1 — the scan continues to the
+    // credential check and the review still completes as a degraded pass.
+    expect(command).toContain("else echo '[local-review] diff check found whitespace issues (non-blocking)'");
+    expect(command).not.toMatch(/diff check failed'; exit 1/);
+  });
+
+  it('classifies an empty-output local review failure as an environment limitation', async () => {
+    const result = await runProjectQualityGate(adapter('unused', [
+      { success: false, error: 'Command failed with exit code 1' },
+    ]));
+    expect(result.passed).toBe(false);
+    expect(result.checks[0].status).toBe('unavailable');
+    expect(result.checks[0].summary).toContain('环境限制');
+    expect(result.checks[0].summary).not.toContain('本地静态审查也失败');
+    expect(hasRepairableQualityFindings(result)).toBe(false);
+  });
+
+  it('still reports a real credential finding as a review failure', async () => {
+    const result = await runProjectQualityGate(adapter('unused', [
+      { success: false, error: 'Command failed with exit code 1:\n[local-review] possible credential pattern found' },
     ]));
     expect(result.passed).toBe(false);
     expect(result.checks[0].status).toBe('failed');
     expect(result.checks[0].summary).toContain('本地静态审查也失败');
-    expect(hasRepairableQualityFindings(result)).toBe(false);
+  });
+
+  it('audits and verifies inside the discovered project directory', async () => {
+    expect(projectDirectoryFor({ projectType: 'node', packageManager: 'npm', manifests: ['my-app/package.json'], scripts: {}, testFilesFound: false, gitRepository: false, relevantFiles: ['my-app/package.json'], verification: [] })).toBe('my-app');
+    expect(projectDirectoryFor({ projectType: 'node', packageManager: 'npm', manifests: ['package.json'], scripts: {}, testFilesFound: false, gitRepository: false, relevantFiles: ['package.json'], verification: [] })).toBe('.');
+    expect(projectCdPrefix('my-app')).toContain("cd 'my-app'");
+    expect(projectCdPrefix('.')).toBe('');
+    const commands: string[] = [];
+    const tools = adapter('VERDICT: PASS', []);
+    tools.execute = async (call: ToolCall): Promise<ToolResult> => {
+      if (call.function.name === 'code_reviewer') return { id: call.id, toolName: call.function.name, result: 'VERDICT: PASS', success: true, duration: 1 };
+      const command = String(JSON.parse(call.function.arguments).command ?? '');
+      commands.push(command);
+      if (call.function.name === 'execute_command' && command.includes('audit-tool')) return { id: call.id, toolName: call.function.name, result: '[audit-tool] bun audit --json\n{}\n[audit-exit] 0', success: true, duration: 1 };
+      return { id: call.id, toolName: call.function.name, result: 'tests passed', success: true, duration: 1 };
+    };
+    const profile = { projectType: 'node' as const, packageManager: 'npm' as const, manifests: ['my-app/package.json'], scripts: { test: 'node --test' } as Record<string, string>, testFilesFound: true, gitRepository: false, relevantFiles: ['my-app/package.json'], verification: [] };
+    const result = await runProjectQualityGate(tools, { profile });
+    expect(result.passed).toBe(true);
+    expect(commands.some((c) => c.includes("cd 'my-app'") && c.includes('audit-tool'))).toBe(true);
+    expect(commands.some((c) => c.includes("cd 'my-app'") && c.includes('verify-step'))).toBe(true);
   });
 
   it('stops and blocks delivery when the audit command ignores cancellation and times out', async () => {
@@ -261,7 +320,9 @@ describe('project quality gate', () => {
       return originalExecute(call, signal);
     };
     const result = await runProjectQualityGate(tools, { reviewTimeoutMs: 5 });
-    expect(result.passed).toBe(false);
+    // The hung reviewer times out into the local scan; a clean local scan is a
+    // passing review-with-limitations (see the degraded acceptance rule).
+    expect(result.passed).toBe(true);
     expect(result.checks[0].summary).toContain('完整代码审查');
     expect(result.checks[0].status).toBe('degraded');
     expect(result.checks[0].reviewMode).toBe('local');

@@ -3,6 +3,26 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.5-beta4
+
+**本地 beta4 构建：结果展示与历史会话体验优化**
+
+- 生成图片、文档等最终交付物时隐藏 Agent 为完成任务临时生成的 Python、JavaScript、Shell 等辅助脚本；明确要求脚本时仍显示脚本卡片
+- Coding 项目不再逐个铺开源码和配置文件，改为显示可点击的项目目录入口；实时生成和历史会话恢复使用同一展示规则
+- 历史会话恢复改为分批渲染，减少逐条让帧和 Markdown 重复等待，提升长会话打开速度
+- 工具卡片支持放大到整行，避免并行工具卡片分列时内容被挤压
+- 修复执行大纲点击收起按钮时误触拖拽导致位置移动
+
+## v1.9.5-beta2
+
+**本地 beta2 构建：会话上下文与界面转录分离**
+
+- V2 会话快照严格拆分 `modelContext`、`transcript` 和 `uiState`
+- 历史会话通过独立转录投影恢复分析、思考、工具调用、计划评估和产物卡片
+- 补充会话持久化与界面转录架构文档及兼容性优化路线
+- 优化 beta2 前端生产构建：macOS WebView target 调整为 Safari 14，消除 Transformers.js / ONNX Runtime 的 BigInt target 警告；ECharts 按图表类型拆包，最大 ECharts chunk 从约 582KB 降至约 331KB；Mermaid parser 保持独立懒加载 chunk
+- 完整 Bun 回归测试通过：67 个测试文件、1080 个测试全部通过，0 失败，共 3218 个断言
+
 ## v1.9.5-beta
 
 **1.9.5 首个 beta 预览（发布流程验证）**

@@ -4,7 +4,7 @@
 
 import { loadConfig, hasConfiguredKey, customSecretKey, type PureConfig } from './config';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, promptBudgetForProvider, imageGenEnabled, imageGenModelFor } from '../shared/providers';
-import { saveSession, loadLastSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, limitStoredMessages, MAX_PERSISTED_MESSAGES, type StoredMessage, type ToolExecMeta, type SessionStats } from './store';
+import { saveSession, loadLastSession, loadSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionStats } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
@@ -1007,6 +1007,11 @@ function yieldToNextPaint(signal?: AbortSignal): Promise<void> {
 export class ChatController {
   private streaming = false;
   private abortController: AbortController | null = null;
+  /** Abort controller for the fire-and-forget LLM verification (P1-1) launched
+   *  after a turn completes. Cancelled alongside the turn controller so a new
+   *  send / session switch / Stop stops the verifier LLM call (and its token
+   *  burn) instead of letting it run to completion. */
+  private verifierAbort: AbortController | null = null;
   private onStreamingChange?: (streaming: boolean) => void;
   private workspace: string = '';
   private sessionId: string = '';
@@ -1110,6 +1115,28 @@ export class ChatController {
       this.sessionStats = loadSessionStats(id);
       this.onStatsChanged?.(this.sessionStats);
     });
+    // Session-bound MCP must not outlive its session: actively close every
+    // stdio transport (killing the spawned subprocesses) instead of leaving
+    // them running until the next send() notices the sessionId changed.
+    this.disconnectMcpClient();
+  }
+
+  /**
+   * Tear down the current MCP client synchronously: disconnectAll() closes
+   * every stdio transport, killing the spawned servers. Also clears the
+   * deferred-init marker so the next send() reconnects under the new
+   * sessionId/config. Safe to call when no client exists. Used on session
+   * switches / new chat (MCP transports are session-bound — the Rust registry
+   * keys subprocesses by sessionId) and from the send() identity check.
+   */
+  private disconnectMcpClient(): void {
+    if (this.mcpClient) {
+      this.mcpClient.disconnectAll();
+      this.mcpClient = undefined;
+    }
+    this.deferredInitDone = false;
+    this.mcpSessionId = '';
+    this.mcpConfigSnapshot = '';
   }
 
   /** Subscribe to per-session stats updates (right-panel 统计 tab). */
@@ -1237,18 +1264,10 @@ export class ChatController {
   }
 
   /** Load stored messages into the agent's internal state so subsequent turns use history. */
-  loadFromStorage(stored: StoredMessage[]) {
-    const boundedStored = limitStoredMessages(stored);
-    this.messages = boundedStored.map(m => ({
-      role: m.role as Message['role'],
-      content: m.role === 'user'
-        ? stripUserTurnContext(m.content ?? '')
-        : (m.content || m.displayContent || ''),
-      toolCalls: m.tool_calls as Message['toolCalls'],
-      toolCallId: m.tool_call_id,
-      toolName: m.name,
-    }));
-    const savedPlanState = [...boundedStored].reverse().find((message) => message.planState)?.planState;
+  loadFromStorage(snapshot: SessionSnapshotV2) {
+    const boundedMessages = limitConversationMessages(snapshot.modelContext.messages);
+    this.messages = boundedMessages.map(m => ({ ...m }));
+    const savedPlanState = snapshot.uiState.planState;
     if (savedPlanState) {
       this.activeComplexPlan = savedPlanState.plan;
       this.activePlanNumber = savedPlanState.planNumber;
@@ -1276,7 +1295,7 @@ export class ChatController {
   }
 
   /** Restore last session for view-only display. Messages are NOT loaded into CodingAgent. */
-  async restoreLastSession(): Promise<StoredMessage[] | null> {
+  async restoreLastSession(): Promise<SessionSnapshotV2 | null> {
     const saved = await loadLastSession();
     if (!saved) return null;
     this.sessionId = saved.sessionId;
@@ -1288,7 +1307,7 @@ export class ChatController {
     // workspace selected.
     this.setWorkspace(saved.workspace ?? '');
     await this.syncEffectiveWorkspace();
-    return saved.messages;
+    return saved.snapshot;
   }
 
   setWorkspace(path: string) {
@@ -1724,9 +1743,7 @@ export class ChatController {
         this.mcpSessionId !== sendSessionId ||
         this.mcpConfigSnapshot !== JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy, 'tools')])
       )) {
-        this.mcpClient?.disconnectAll();
-        this.mcpClient = undefined;
-        this.deferredInitDone = false;
+        this.disconnectMcpClient();
       }
 
       // Text-to-image capability for this turn: true when the connected
@@ -3003,14 +3020,19 @@ export class ChatController {
             // 大纲会永远停在第一步。只要回合正常结束、本轮真实执行过工具（与上方
             // hasToolWork 同一约定：提问/确认轮没有 tool 消息）、末句不是提问、且
             // 没有显式暂停，就按完成收尾——标记仍负责执行中的逐步推进。
+            // 交付门禁的结果不参与收尾判定：步骤确实执行完了，计划卡与漂浮大纲卡
+            // 就该推进到完成态（否则门禁一旦未通过，大纲会永远停在最后一步，和对话
+            // 窗口内已经完成的步骤不一致）；门禁是否通过单独用气泡展示。
             const finalAnswer = String(event.payload.finalOutput ?? '').trim();
             const turnAsksForInput = finalAnswer.length > 0 && /[?？]\s*$/.test(finalAnswer);
-            const planFinished = planCard && qualityPassed && hasToolWork && !event.payload.interrupted
+            const planFinished = planCard && hasToolWork && !event.payload.interrupted
               && !turnAsksForInput && gen === this.generation && !this.pausePlanCard;
             if (planFinished && planCard) {
               finalizePlanCard(planCard);
               if (this.activeComplexPlan) syncActivePlanCursor(planCard);
-              planCard.setActivity('计划中的所有步骤已完成，交付检查也已结束。');
+              planCard.setActivity(qualityPassed
+                ? '计划中的所有步骤已完成，交付检查也已结束。'
+                : '计划中的所有步骤已完成，但交付检查未通过，项目暂不交付。');
               planOverview().setStatus('complete');
             }
             // Cancel any throttled streaming render on every segment so a
@@ -3039,6 +3061,11 @@ export class ChatController {
               // Same XML filter as streaming, then re-scroll once the async diagram pass
               // has changed the bubble height.
               void renderMarkdown(stripToolCallXml(finalText), seg.el).then(() => {
+                // The async diagram pass can resolve AFTER a session switch: the
+                // bubble may already be detached and the transcript re-rendered
+                // with another session's messages. Guard on the generation so a
+                // stale render never scrolls the wrong transcript.
+                if (gen !== this.generation) return;
                 scrollChatToBottomIfPinned(chatEl);
               });
             }
@@ -3077,14 +3104,22 @@ export class ChatController {
               // late-arriving bubble would land out of chronological order.
               const msgCountAtComplete = this.messages.length;
               void (async () => {
+                // A dedicated controller lets cancel() interrupt the verifier's
+                // LLM call (new send / session switch / Stop) instead of
+                // burning tokens to completion — the turn controller is already
+                // released by the time this async check runs.
+                const verifierAbort = new AbortController();
+                this.verifierAbort = verifierAbort;
                 try {
-                  const verdict = await llmVerifyVerifier.evaluate({ output: verifyOutput, context: verifyCtx });
+                  const verdict = await llmVerifyVerifier.evaluate({ output: verifyOutput, context: verifyCtx, signal: verifierAbort.signal });
+                  if (this.verifierAbort === verifierAbort) this.verifierAbort = null;
                   if (!verdict.passed && gen === this.generation && this.messages.length <= msgCountAtComplete) {
                     this.addStatusBubble(`🔎 验证建议: ${verdict.feedback ?? ''}`, true);
                     scrollChatToBottomIfPinned(chatEl);
                   }
                 } catch {
                   // A broken verifier call must never break the session.
+                  if (this.verifierAbort === verifierAbort) this.verifierAbort = null;
                 }
               })();
             }
@@ -3097,7 +3132,7 @@ export class ChatController {
               const artifactRow = document.createElement('div');
               artifactRow.className = 'bubble-row artifact-row';
               chatEl.appendChild(artifactRow);
-              renderArtifactCards(artifactRow, turnArtifacts);
+              renderArtifactCards(artifactRow, turnArtifacts, effectiveWorkspace, { userRequest: userText });
               scrollChatToBottomIfPinned(chatEl);
             }
             if (assessmentFlow && !event.payload.interrupted && (!needsDeliveryGate || (hasToolWork && projectQualityResult?.passed === true))) {
@@ -3165,7 +3200,7 @@ export class ChatController {
               const artifactRow = document.createElement('div');
               artifactRow.className = 'bubble-row artifact-row';
               chatEl.appendChild(artifactRow);
-              renderArtifactCards(artifactRow, turnArtifacts);
+              renderArtifactCards(artifactRow, turnArtifacts, effectiveWorkspace, { userRequest: userText });
             }
             scrollChatToBottomIfPinned(chatEl);
             break;
@@ -3265,12 +3300,11 @@ export class ChatController {
         lastSeg.el.classList.add('error');
       } else {
         // Failure before bubbles were created (e.g. plan review threw) — toast it.
-        const toast = document.getElementById('toast');
-        if (toast) {
-          toast.textContent = t('chat.error', 'Error: {msg}').replace('{msg}', err?.message || err);
-          toast.classList.remove('hidden');
-          setTimeout(() => toast.classList.add('hidden'), 2500);
-        }
+        // Route through the shared toast helper (one module-level timer — an
+        // inline setTimeout here could hide a NEWER toast early) and keep the
+        // message up for 8s: actionable failures like an invalid API key must
+        // not scroll out of sight in 2.5s.
+        showToast(t('chat.error', 'Error: {msg}').replace('{msg}', err?.message || err), 8000);
       }
     } finally {
       if (liveToolOutputFrame !== undefined) {
@@ -3284,8 +3318,14 @@ export class ChatController {
       // listener; otherwise it keeps the whole last turn alive until the next
       // send (and, after a chat.clear(), detached bubbles stay in memory).
       setToolOutputListener(null);
-      this.setStreaming(false);
-      this.abortController = null;
+      // Release the streaming state ONLY if this turn still owns the
+      // controller. An unconditional setStreaming(false) here could run AFTER
+      // a newer send has already installed its own turn controller + set
+      // streaming(true) — the abort is processed asynchronously, so the old
+      // turn's finally can land mid-stream of the new turn and flicker the UI
+      // back to "not generating". releaseSupersededTurn() is idempotent for
+      // the already-released early-return paths.
+      releaseSupersededTurn();
     }
   }
 
@@ -3322,15 +3362,19 @@ export class ChatController {
     // Fresh session → fresh stats view.
     this.sessionStats = loadSessionStats(this.sessionId);
     this.onStatsChanged?.(this.sessionStats);
-    // New chat = a fresh session (new sessionId): the mcpClient is left for GC
-    // here, and the next send() tears down + rebuilds MCP under the new
-    // sessionId (see the session-identity check in send()).
+    // New chat = a fresh session (new sessionId): MCP transports are
+    // session-bound, so actively close every stdio subprocess now instead of
+    // leaving it running until the next send().
+    this.disconnectMcpClient();
     const chatEl = document.getElementById('chat')!;
     chatEl.innerHTML = '';
   }
 
   cancel() {
     this.abortController?.abort();
+    // Also stop any in-flight async verification: the turn's stream already
+    // finished, so only this controller can interrupt the verifier's LLM call.
+    this.verifierAbort?.abort();
   }
 
   private async persistSession(
@@ -3351,6 +3395,11 @@ export class ChatController {
     let analysisAttached = false;
     const latestUserIndex = messages.reduce((latest, message, index) => message.role === 'user' ? index : latest, -1);
     const lastAssistantIndex = messages.reduce((latest, message, index) => message.role === 'assistant' ? index : latest, -1);
+    const canonicalMessages = messages.map((message, index) => {
+      if (message.role !== 'assistant' || message.toolCalls?.length || index <= latestUserIndex) return message;
+      const rendered = renderedAssistantTexts[renderedAssistantIndex++];
+      return !message.content && rendered ? { ...message, content: rendered } : message;
+    });
     const toolCallsById = new Map<string, { toolName: string; args: Record<string, unknown> }>();
     for (const message of messages) {
       if (message.role !== 'assistant') continue;
@@ -3363,19 +3412,17 @@ export class ChatController {
         toolCallsById.set(call.id, { toolName: call.function.name, args });
       }
     }
-    const storedMsgs: StoredMessage[] = messages.map((m, index) => {
+    const transcriptDrafts: TranscriptDraft[] = canonicalMessages.flatMap((m, index): TranscriptDraft[] => {
+      if (m.role === 'system') return [];
       const currentAssistantIndex = m.role === 'assistant' ? assistantIndex++ : -1;
       const phase = currentAssistantIndex >= 0
         ? thinkingPhases.find(candidate => candidate.assistantIndex === currentAssistantIndex)
         : undefined;
       const isCurrentTurnAssistant = m.role === 'assistant' && index > latestUserIndex;
-      const displayContent = isCurrentTurnAssistant && !m.toolCalls?.length
-        ? renderedAssistantTexts[renderedAssistantIndex++]
-        : undefined;
       const analysis = isCurrentTurnAssistant && !analysisAttached && taskAnalysisText
         ? (analysisAttached = true, taskAnalysisText)
         : undefined;
-      const isPauseMessage = planPause && m.role === 'assistant' && m === messages[messages.length - 1];
+      const isPauseMessage = planPause && m.role === 'assistant' && index === messages.length - 1;
       const storedToolCall = m.toolCallId ? toolCallsById.get(m.toolCallId) : undefined;
       const recordedToolExec = m.role === 'tool' && m.toolCallId
         ? (() => {
@@ -3397,32 +3444,36 @@ export class ChatController {
             } satisfies ToolExecMeta;
           })()
         : undefined;
-      return {
-        role: m.role,
-        content: m.content ?? null,
-        displayContent: displayContent || undefined,
+      const planState = index === messages.length - 1 && this.activeComplexPlan
+        ? { plan: this.activeComplexPlan, planNumber: this.activePlanNumber, todoNumber: this.activeTodoNumber, started: this.activePlanStarted }
+        : m === messages[messages.length - 1] ? null : undefined;
+      return [{
+        message: m,
+        modelMessageIndex: index,
+        content: m.content,
         analysis,
         artifacts: m.role === 'assistant' && index === lastAssistantIndex && artifacts.length > 0 ? artifacts : undefined,
-        tool_call_id: m.toolCallId,
-        name: m.toolName,
-        tool_calls: m.toolCalls as unknown[] | undefined,
         thinkingPhases: phase?.text ? [phase] : undefined,
         toolExec: recordedToolExec,
-        // The plan-pause bubble is the last assistant message of the handoff
-        // snapshot; mark it so session restore re-applies the waiting style.
-        // The intent assessment rides along so the assessment card can be
-        // rebuilt in its "waiting for reply" state on restore.
-        isPlanPause: isPauseMessage ? true : undefined,
+        isPlanPause: isPauseMessage || undefined,
         assessment: isPauseMessage ? pauseAssessment : undefined,
-        planState: m === messages[messages.length - 1] && this.activeComplexPlan ? {
-          plan: this.activeComplexPlan,
-          planNumber: this.activePlanNumber,
-          todoNumber: this.activeTodoNumber,
-          started: this.activePlanStarted,
-        } : undefined,
-      };
+        planState,
+      }];
     });
-    await saveSession(sessionId, limitStoredMessages(storedMsgs), workspace);
+    // Merge with the previously saved transcript before writing: in-memory
+    // messages never carry stored-only fields (analysis, thinking phases,
+    // display snapshot), so a plain rebuild would wipe the preflight analysis
+    // and reasoning trace of every earlier turn on the next persist — the
+    // "analysis shows live but disappears from history" bug. Load the last
+    // saved session and carry those fields over by message position.
+    const nextSnapshot = createSessionSnapshot(canonicalMessages, transcriptDrafts);
+    let previousSnapshot: SessionSnapshotV2 | null = null;
+    try {
+      previousSnapshot = (await loadSession(sessionId))?.snapshot ?? null;
+    } catch {
+      // No previous session (or storage failure) — nothing to merge.
+    }
+    await saveSession(sessionId, mergeSessionSnapshotMetadata(previousSnapshot, nextSnapshot), workspace);
   }
 
   /** Cancel a queued idle pre-compaction pass before a new user turn. */

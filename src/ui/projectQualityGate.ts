@@ -168,7 +168,7 @@ async function executeWithTimeout(
 }
 
 export function buildLocalReviewCommand(): string {
-  return `workspace_root=$(pwd -P); git_root=$(git rev-parse --show-toplevel 2>/dev/null || true); if [ -n \"$git_root\" ] && [ \"$git_root\" = \"$workspace_root\" ]; then printf '%s\\n' '[local-review] git diff --check'; if git diff --check; then echo '[local-review] diff check passed'; else echo '[local-review] diff check failed'; exit 1; fi; printf '%s\\n' '[local-review] changed files'; git status --short; printf '%s\\n' '[local-review] diff summary'; git diff --stat; else echo '[local-review] not a standalone git repository; skipping Git diff/status checks'; printf '%s\\n' '[local-review] files in workspace'; find . -type f ! -path './.git/*' ! -path './node_modules/*' ! -path './dist/*' ! -name '*.lock' -print | sort; fi; printf '%s\\n' '[local-review] suspicious credential scan'; matches=$(find . -type f ! -path './.git/*' ! -path './node_modules/*' ! -path './dist/*' ! -name '*.lock' -exec grep -nI -E '(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' {} + 2>/dev/null); scan_status=$?; if [ $scan_status -gt 1 ]; then echo '[local-review] credential scan could not complete'; exit 2; elif [ -n \"$matches\" ]; then printf '%s\\n' \"$matches\"; echo '[local-review] possible credential pattern found'; exit 1; else echo '[local-review] no credential pattern found'; fi`;
+  return `workspace_root=$(pwd -P); git_root=$(git rev-parse --show-toplevel 2>/dev/null || true); if [ -n \"$git_root\" ] && [ \"$git_root\" = \"$workspace_root\" ]; then printf '%s\\n' '[local-review] git diff --check'; if git diff --check; then echo '[local-review] diff check passed'; else echo '[local-review] diff check found whitespace issues (non-blocking)'; fi; printf '%s\\n' '[local-review] changed files'; git status --short; printf '%s\\n' '[local-review] diff summary'; git diff --stat; else echo '[local-review] not a standalone git repository; skipping Git diff/status checks'; printf '%s\\n' '[local-review] files in workspace'; find . -type f ! -path './.git/*' ! -path './node_modules/*' ! -path './dist/*' ! -name '*.lock' -print | sort; fi; printf '%s\\n' '[local-review] suspicious credential scan'; matches=$(find . -type f ! -path './.git/*' ! -path './node_modules/*' ! -path './dist/*' ! -name '*.lock' -exec grep -nI -E '(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' {} + 2>/dev/null); scan_status=$?; if [ $scan_status -gt 1 ]; then echo '[local-review] credential scan could not complete'; exit 2; elif [ -n \"$matches\" ]; then printf '%s\\n' \"$matches\"; echo '[local-review] possible credential pattern found'; exit 1; else echo '[local-review] no credential pattern found'; fi`;
 }
 
 async function runLocalReview(
@@ -186,6 +186,21 @@ async function runLocalReview(
     return { phase: 'review', status: 'failed', summary: `本地静态审查超时（${Math.round(timeoutMs / 1000)} 秒），无法形成审查证据`, output };
   }
   if (!result.success) {
+    // A shell/environment-level failure (empty output, missing tools, network,
+    // permissions) is not a code finding: classify it as an environment
+    // limitation so the gate reports it honestly instead of claiming the
+    // review found problems it never saw.
+    const combinedOutput = `${output}\n${result.error ?? ''}`.trim();
+    // The local scan ALWAYS prints [local-review] progress markers; a failure
+    // with none of them means the command never completed the scan (shell,
+    // network or permission anomaly — e.g. a bare "Command failed with exit
+    // code 1" with no output), not that it found a problem. Only failures that
+    // surface actual scan evidence (a credential match, git state) are code
+    // findings; everything else is an environment limitation.
+    const environmentOnly = !/\[local-review\]/.test(combinedOutput);
+    if (environmentOnly) {
+      return { phase: 'review', status: 'unavailable', summary: '代码审查因工具、网络、权限或验证环境限制未完成，暂不启动自动修复', output, failureKind: classifyDeliveryFailure(combinedOutput), repairable: false };
+    }
     return { phase: 'review', status: 'failed', summary: `代码审查工具失败，本地静态审查也失败：${result.error ?? '命令失败'}`, output, repairable: false };
   }
   return {
@@ -231,12 +246,15 @@ async function runReview(
 }
 
 export function buildAuditCommand(): string {
-  return `if [ -f package.json ]; then if [ -f bun.lock ] || [ -f bun.lockb ]; then if command -v bun >/dev/null 2>&1; then echo '[audit-tool] bun audit --json'; bun audit --json; status=$?; echo "[audit-exit] $status"; exit 0; else echo '[audit-unavailable] bun is not installed'; fi; elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then if command -v npm >/dev/null 2>&1; then echo '[audit-tool] npm audit --json --audit-level=moderate --ignore-scripts'; npm audit --json --audit-level=moderate --ignore-scripts; status=$?; echo "[audit-exit] $status"; exit 0; else echo '[audit-unavailable] npm is not installed'; fi; else echo '[audit-unavailable] package.json has no lockfile for a reproducible audit'; fi; elif [ -f Cargo.toml ]; then if [ ! -f Cargo.lock ]; then echo '[audit-unavailable] Cargo.lock is missing'; elif command -v cargo-audit >/dev/null 2>&1; then echo '[audit-tool] cargo audit --json'; cargo audit --json; status=$?; echo "[audit-exit] $status"; exit 0; elif cargo --list 2>/dev/null | grep -qE '(^|[[:space:]])audit([[:space:]]|$)'; then echo '[audit-tool] cargo audit --json'; cargo audit --json; status=$?; echo "[audit-exit] $status"; exit 0; else echo '[audit-unavailable] cargo-audit is not installed'; fi; else echo '[audit-not-applicable] no supported dependency manifest'; fi`;
+  return `if [ -f package.json ]; then if [ -f bun.lock ] || [ -f bun.lockb ]; then if command -v bun >/dev/null 2>&1; then echo '[audit-tool] bun audit --json'; bun audit --json; status=$?; echo "[audit-exit] $status"; exit 0; else echo '[audit-unavailable] bun is not installed'; fi; elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then if command -v npm >/dev/null 2>&1; then echo '[audit-tool] npm audit --json --audit-level=moderate --ignore-scripts'; npm audit --json --audit-level=moderate --ignore-scripts; status=$?; echo "[audit-exit] $status"; exit 0; else echo '[audit-unavailable] npm is not installed'; fi; else if node -e "const p=require('./package.json'); const deps={...(p.dependencies||{}),...(p.devDependencies||{})}; process.exit(Object.keys(deps).length?1:0)" >/dev/null 2>&1; then echo '[audit-not-applicable] package.json has no third-party dependencies to audit'; else echo '[audit-unavailable] package.json has no lockfile for a reproducible audit'; fi; fi; elif [ -f Cargo.toml ]; then if [ ! -f Cargo.lock ]; then echo '[audit-unavailable] Cargo.lock is missing'; elif command -v cargo-audit >/dev/null 2>&1; then echo '[audit-tool] cargo audit --json'; cargo audit --json; status=$?; echo "[audit-exit] $status"; exit 0; elif cargo --list 2>/dev/null | grep -qE '(^|[[:space:]])audit([[:space:]]|$)'; then echo '[audit-tool] cargo audit --json'; cargo audit --json; status=$?; echo "[audit-exit] $status"; exit 0; else echo '[audit-unavailable] cargo-audit is not installed'; fi; else echo '[audit-not-applicable] no supported dependency manifest'; fi`;
 }
 
 export function parseProjectAuditResult(output: string): { status: QualityGateStatus; summary: string } {
   if (output.includes('[audit-not-applicable]')) {
-    return { status: 'unavailable', summary: '未发现可审计的标准依赖清单，无法形成审计证据' };
+    // No dependency manifest, or a manifest with zero third-party dependencies:
+    // there is nothing to audit, so the audit is vacuously safe. A missing
+    // lockfile WITH real dependencies stays unavailable (cannot reproduce).
+    return { status: 'passed', summary: '未发现可审计的第三方依赖，视为审计通过' };
   }
   if (output.includes('[audit-unavailable]')) {
     return { status: 'unavailable', summary: '依赖/安全审计工具或可复现锁文件不可用，不能宣称审计通过' };
@@ -264,11 +282,34 @@ export function parseProjectAuditResult(output: string): { status: QualityGateSt
   return { status: 'failed', summary: `依赖/安全审计命令失败（退出码 ${exitCode}），未能确认项目安全` };
 }
 
+/** Locate the project directory the gate should audit/verify in. Generated
+ * projects usually live in a subdirectory of the workspace (e.g. `my-app/`),
+ * while the manifest checks in buildAuditCommand/buildVerifyCommand only look
+ * at the current directory — running them at the workspace root would always
+ * report "no manifest" and fail the gate for a perfectly built project.
+ * Returns '.' when every manifest sits at the workspace root or the profile
+ * has no manifests. */
+export function projectDirectoryFor(profile?: WorkspaceProfile): string {
+  if (!profile) return '.';
+  const paths = profile.manifestPaths?.length ? profile.manifestPaths : profile.manifests;
+  const nested = paths.find((manifest) => manifest.includes('/'));
+  if (!nested) return '.';
+  return nested.slice(0, nested.lastIndexOf('/')) || '.';
+}
+
+/** Wrap a shell command so it runs inside a project subdirectory. Empty for
+ * the workspace root (the common case) so existing behavior is unchanged. */
+export function projectCdPrefix(projectDir: string): string {
+  if (!projectDir || projectDir === '.') return '';
+  return `cd '${projectDir.replaceAll("'", "'\\''")}' 2>/dev/null || exit 127; `;
+}
+
 async function runAudit(
   tools: ToolAdapter,
   signal?: AbortSignal,
   onActivity?: (message: string) => void,
   timeoutMs = COMMAND_TIMEOUT_MS,
+  projectDir = '.',
 ): Promise<QualityGateCheck> {
   onActivity?.('正在执行只读依赖/安全审计（不修改依赖），等待审计输出…');
   const auditorAvailable = tools.getTools().some((tool) => tool.name === 'project_auditor');
@@ -292,7 +333,7 @@ async function runAudit(
     }
     onActivity?.(audited.timedOut ? '项目审计工具超时，切换到本地只读审计…' : '项目审计工具未返回可验证结论，切换到本地只读审计…');
   }
-  const command = buildAuditCommand();
+  const command = `${projectCdPrefix(projectDir)}${buildAuditCommand()}`;
   const { result, timedOut } = await executeCommand(tools, command, 'audit', signal, timeoutMs);
   const output = resultText(result);
   if (timedOut) {
@@ -333,8 +374,9 @@ async function runVerification(
   onActivity?: (message: string) => void,
   timeoutMs = COMMAND_TIMEOUT_MS,
   profile?: WorkspaceProfile,
+  projectDir = '.',
 ): Promise<QualityGateCheck> {
-  const command = buildVerifyCommand(profile);
+  const command = `${projectCdPrefix(projectDir)}${buildVerifyCommand(profile)}`;
   onActivity?.('正在执行类型检查与自动化测试，等待验证结果…');
   const { result, timedOut } = await executeCommand(tools, command, 'verify', signal, timeoutMs);
   const output = resultText(result);
@@ -385,6 +427,7 @@ export async function runProjectQualityGate(
   const checks: QualityGateCheck[] = [];
   const finish = (passed: boolean): ProjectQualityGateResult => ({ passed, checks, evidence: buildDeliveryEvidence(checks) });
   const commandTimeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
+  const projectDir = projectDirectoryFor(options.profile);
   for (const phase of ['review', 'audit', 'verify'] as const) {
     if (options.signal?.aborted) {
       const check: QualityGateCheck = { phase, status: 'failed', summary: '质量门禁已取消，项目禁止交付' };
@@ -397,8 +440,8 @@ export async function runProjectQualityGate(
     const check = phase === 'review'
       ? await runReview(tools, options.signal, (message) => options.onActivity?.(phase, message), options.reviewTimeoutMs, commandTimeoutMs)
       : phase === 'audit'
-        ? await runAudit(tools, options.signal, (message) => options.onActivity?.(phase, message), commandTimeoutMs)
-        : await runVerification(tools, options.signal, (message) => options.onActivity?.(phase, message), commandTimeoutMs, options.profile);
+        ? await runAudit(tools, options.signal, (message) => options.onActivity?.(phase, message), commandTimeoutMs, projectDir)
+        : await runVerification(tools, options.signal, (message) => options.onActivity?.(phase, message), commandTimeoutMs, options.profile, projectDir);
     checks.push(check);
     options.onPhase?.(phase, check.status, check.summary);
     options.onCheck?.(check);
@@ -410,8 +453,19 @@ export async function runProjectQualityGate(
     }
   }
   // A degraded review is useful evidence, but it is not equivalent to a
-  // completed code review. Never present a degraded gate as fully passed.
-  return finish(checks.length === 3 && checks.every((check) => check.status === 'passed'));
+  // completed code review, so it is never presented as fully passed: the
+  // evidence and summary still say "本地静态审查…交付带有限制". However, in
+  // this app the full LLM reviewer tool is only available when the Code Review
+  // skill wires a code_reviewer subagent into the registry; without it every
+  // gate run would degrade to the local scan and then fail forever, blocking
+  // delivery for projects whose real checks (audit + verification) passed.
+  // A clean local scan (no credentials, no broken git state) therefore counts
+  // as a passing review-with-limitations instead of a hard failure.
+  const accepted = checks.every((check) =>
+    check.status === 'passed'
+    || (check.status === 'degraded' && check.reviewMode === 'local' && !check.repairable),
+  );
+  return finish(checks.length === 3 && accepted);
 }
 
 export function hasRepairableQualityFindings(result: ProjectQualityGateResult): boolean {

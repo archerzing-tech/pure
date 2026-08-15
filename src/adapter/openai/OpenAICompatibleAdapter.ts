@@ -121,9 +121,11 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
   async complete(
     messages: Message[],
     tools: ToolDefinition[],
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
     const response = await this.client.chat.completions.create(
       this.buildParams(messages, tools, false),
+      signal ? { signal } : undefined,
     );
 
     const choice = response.choices[0]?.message;

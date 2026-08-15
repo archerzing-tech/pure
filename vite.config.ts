@@ -111,9 +111,16 @@ export default defineConfig({
   },
   envPrefix: ['VITE_', 'TAURI_ENV_*'],
   build: {
-    target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
+    // Transformers.js 4 uses BigInt64Array and bigint literals in its browser
+    // runtime. Safari 13 cannot parse those modules; Safari 14 is the first
+    // macOS WebKit target that matches the dependency's actual baseline.
+    target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari14',
     minify: !process.env.TAURI_ENV_DEBUG,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    // Mermaid's parser is a lazy, upstream-generated module that is roughly
+    // 680KB by itself; keep the warning threshold just above that known lazy
+    // boundary while the application entry and eager chunks stay much smaller.
+    chunkSizeWarningLimit: 700,
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -125,9 +132,12 @@ export default defineConfig({
           // diagram/chart is requested, so stable vendor boundaries improve
           // cache reuse and prevent unrelated UI changes from invalidating
           // them.
-          if (normalizedId.includes('/echarts/') || normalizedId.includes('/zrender/')) {
-            return 'echarts-vendor';
-          }
+          if (normalizedId.includes('/zrender/')) return 'zrender-vendor';
+          const chartMatch = normalizedId.match(/\/echarts\/lib\/chart\/([^/]+)/);
+          if (chartMatch) return `echarts-chart-${chartMatch[1]}`;
+          if (normalizedId.includes('/echarts/lib/component/')) return 'echarts-components';
+          if (normalizedId.includes('/echarts/lib/core/')) return 'echarts-core';
+          if (normalizedId.includes('/echarts/')) return 'echarts-vendor';
           if (normalizedId.includes('/@anthropic-ai/sdk/') || normalizedId.includes('/openai/')) {
             return 'llm-vendor';
           }
@@ -138,6 +148,7 @@ export default defineConfig({
             return 'markdown-vendor';
           }
           if (normalizedId.includes('/@huggingface/transformers/')) return 'transformers-runtime';
+          if (normalizedId.includes('/@mermaid-js/parser/')) return 'mermaid-parser';
           if (normalizedId.includes('/onnxruntime-web/')) return 'onnxruntime-web';
           if (normalizedId.includes('/katex/')) return 'katex';
           if (normalizedId.includes('/highlight.js/')) return 'highlight';

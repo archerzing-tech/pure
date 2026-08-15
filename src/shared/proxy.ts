@@ -44,7 +44,7 @@ export function shouldBypassProxy(
 
 export type ProxyScope = 'llm' | 'tools';
 
-function isUsableProxyUrl(url: string): boolean {
+export function isUsableProxyUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     return ['http:', 'https:', 'socks5:', 'socks5h:'].includes(parsed.protocol) && Boolean(parsed.hostname);

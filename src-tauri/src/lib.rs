@@ -4492,7 +4492,10 @@ mod generate_image_tests {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct SessionData {
+    #[serde(default)]
     messages: Vec<serde_json::Value>,
+    #[serde(default)]
+    snapshot: Option<serde_json::Value>,
     #[serde(rename = "updatedAt")]
     updated_at: u64,
     #[serde(rename = "messageCount")]
@@ -4526,7 +4529,7 @@ fn sessions_dir() -> PathBuf {
 #[tauri::command]
 fn save_session(
     session_id: String,
-    messages: Vec<serde_json::Value>,
+    snapshot: serde_json::Value,
     workspace: Option<String>,
 ) -> Result<(), String> {
     let dir = sessions_dir().join(&session_id);
@@ -4544,11 +4547,18 @@ fn save_session(
         None => load_session_workspace(&session_id).unwrap_or_default(),
     };
 
+    let messages = snapshot
+        .get("modelContext")
+        .and_then(|context| context.get("messages"))
+        .and_then(|messages| messages.as_array())
+        .cloned()
+        .unwrap_or_default();
     let data = SessionData {
         message_count: messages.len(),
         updated_at: now,
         workspace: workspace.clone(),
         messages,
+        snapshot: Some(snapshot),
     };
 
     let data_path = dir.join("session.json");
@@ -4572,9 +4582,13 @@ fn load_session(session_id: String) -> Result<Option<serde_json::Value>, String>
     }
     let raw = fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
     let data: SessionData = serde_json::from_str(&raw).map_err(|e| format!("parse: {}", e))?;
+    let snapshot = data.snapshot.unwrap_or_else(|| serde_json::json!({
+        "version": 1,
+        "messages": data.messages,
+    }));
     Ok(Some(serde_json::json!({
         "sessionId": session_id,
-        "messages": data.messages,
+        "snapshot": snapshot,
         "updatedAt": data.updated_at,
         "messageCount": data.message_count,
         "workspace": data.workspace,
@@ -4883,6 +4897,40 @@ fn update_sessions_index(
 /// is deliberately NOT first. Order: ipwho.is (HTTPS, no key, no challenge) →
 /// ipinfo.io (HTTPS fallback) → ip-api.com (Chinese names; HTTP only, so the
 /// browser dev fallback skips it).
+/// Connectivity check for the proxy config (Settings → 网络代理 → 测试连接).
+/// Builds the exact client the LLM / tool paths use and probes small endpoints
+/// through it — a malformed URL (bad scheme) or a dead proxy is caught HERE
+/// instead of silently failing every subsequent request. Returns the first
+/// reachable endpoint + latency, or the aggregated failure reasons.
+#[tauri::command]
+async fn test_proxy(proxy_url: String) -> Result<String, String> {
+    let client = match build_http_client(std::time::Duration::from_secs(6), Some(&proxy_url)) {
+        Ok(c) => c,
+        Err(e) => return Err(format!("proxy config invalid: {}", e)),
+    };
+    let probes: &[&str] = &[
+        "https://www.google.com/generate_204",
+        "https://api.deepseek.com",
+        "https://ipwho.is/",
+    ];
+    let mut failed: Vec<String> = Vec::new();
+    for url in probes {
+        let start = Instant::now();
+        let status = match client.get(*url).header("User-Agent", BROWSER_UA).send().await {
+            Ok(r) => r.status(),
+            Err(e) => {
+                failed.push(format!("{}: {}", url, e));
+                continue;
+            }
+        };
+        if status.is_success() || status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(format!("{} ({}ms)", url, start.elapsed().as_millis()));
+        }
+        failed.push(format!("{}: HTTP {}", url, status));
+    }
+    Err(format!("all probes failed through the proxy: {}", failed.join(" | ")))
+}
+
 #[tauri::command]
 async fn detect_location(proxy_url: Option<String>) -> Result<String, String> {
     let backends: &[&str] = &[
@@ -5597,6 +5645,7 @@ pub fn run() {
             // System info
             sys_info,
             detect_location,
+            test_proxy,
             // Web tools
             web_search,
             web_fetch,
