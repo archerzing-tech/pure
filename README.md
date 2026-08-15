@@ -3,7 +3,7 @@
 **Pure** is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. It reads, writes, and edits files, executes shell commands, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.5--beta5-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.5-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>

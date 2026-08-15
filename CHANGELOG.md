@@ -3,9 +3,9 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v1.9.5-beta5
+## v1.9.5
 
-**本地 beta5 构建：多模型配置、工作区响应与资源生命周期优化**
+**正式版：多模型配置、工作区响应与资源生命周期优化**
 
 - LLM 设置页正式采用方案 4：默认突出当前供应商和默认模型，供应商列表、模型库与连接字段按需展开，减少配置页面的视觉负担
 - 一个供应商可维护多个模型，支持添加、删除、设置默认模型；切换供应商时同步切换对应模型库
