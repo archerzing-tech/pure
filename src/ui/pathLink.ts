@@ -167,8 +167,9 @@ export function openPathLink(rawPath: string): void {
       }
     })();
   } else {
-    navigator.clipboard
-      ?.writeText(rawPath)
+    const clipboard = navigator.clipboard;
+    if (!clipboard) return;
+    void clipboard.writeText(rawPath)
       .then(() => toast(t('path.copied')))
       .catch(() => { /* clipboard unavailable — ignore */ });
   }

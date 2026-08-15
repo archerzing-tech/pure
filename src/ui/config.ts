@@ -6,7 +6,7 @@
 
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
-import type { CustomProvider, ProviderId } from '../shared/providers';
+import { customProviderFor, defaultModelFor, type CustomProvider, type ProviderId } from '../shared/providers';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
 import type { ProxyConfig } from '../shared/proxy';
@@ -22,6 +22,8 @@ export interface PureConfig {
    * customSecretKey). Config v5.
    */
   customProviders: CustomProvider[];
+  /** Model lists for built-in providers; custom-provider lists stay on their provider entry for compatibility. */
+  providerModels: Record<string, string[]>;
   apiKey: string;
   /**
    * True when an API key is stored outside the WebView (Rust secrets in the
@@ -157,10 +159,11 @@ export function defaults(): PureConfig {
     hubSkills: [],
     mcpServers: [...DEFAULT_MCP_SERVERS],
     customProviders: [],
+    providerModels: {},
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', bypassProviders: [], bypassModels: [] }),
     streamingRender: true,
     taskMode: 'auto',
-    configVersion: 7,
+    configVersion: 8,
   };
 }
 
@@ -188,6 +191,41 @@ async function deleteSecretFromRust(key: string): Promise<void> {
   } catch (e) {
     console.warn('[pure] failed to remove API key from Rust secrets:', e);
   }
+}
+
+const MAX_PROVIDER_MODELS = 30;
+
+export function uniqueModels(models: readonly unknown[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of models) {
+    if (typeof value !== 'string') continue;
+    const model = value.trim();
+    if (!model || seen.has(model)) continue;
+    seen.add(model);
+    result.push(model);
+    if (result.length >= MAX_PROVIDER_MODELS) break;
+  }
+  return result;
+}
+
+export function normalizeProviderModels(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const result: Record<string, string[]> = {};
+  for (const [provider, models] of Object.entries(raw as Record<string, unknown>)) {
+    const normalized = uniqueModels(Array.isArray(models) ? models : []);
+    if (normalized.length > 0) result[provider] = normalized;
+  }
+  return result;
+}
+
+/** Return the models shown for one provider, with built-ins retaining a usable fallback. */
+export function modelListForProvider(cfg: PureConfig, provider: string): string[] {
+  const custom = customProviderFor(cfg.customProviders ?? [], provider);
+  const stored = custom ? custom.models : cfg.providerModels?.[provider];
+  const current = provider === cfg.provider ? cfg.model?.trim() : '';
+  const fallback = custom?.defaultModel?.trim() || defaultModelFor(provider);
+  return uniqueModels([...(stored ?? []), current, fallback]);
 }
 
 /**
@@ -298,6 +336,21 @@ export function loadConfig(): PureConfig | null {
         needsPersist = true;
       } else {
         cfg.proxy = normalizeProxyConfig(cfg.proxy);
+      }
+      // Config v8: built-in providers gained the same multi-model editor as
+      // custom providers. Seed the active provider from the old single model
+      // field so existing configurations keep their selected model.
+      if ((parsed.configVersion ?? 1) < 8) {
+        const lists = normalizeProviderModels(parsed.providerModels);
+        const activeModel = typeof cfg.model === 'string' ? cfg.model.trim() : '';
+        if (activeModel && !customProviderFor(cfg.customProviders, cfg.provider)) {
+          lists[cfg.provider] = uniqueModels([activeModel, ...(lists[cfg.provider] ?? [])]);
+        }
+        cfg.providerModels = lists;
+        cfg.configVersion = 8;
+        needsPersist = true;
+      } else {
+        cfg.providerModels = normalizeProviderModels(cfg.providerModels);
       }
       if (isTauriRuntime() && cfg.apiKey) {
         // Legacy migration: move a key previously persisted to localStorage

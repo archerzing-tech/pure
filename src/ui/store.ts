@@ -283,8 +283,15 @@ export function mergeSessionSnapshotMetadata(
 ): SessionSnapshotV2 {
   if (!previous) return next;
   const previousById = new Map(previous.transcript.map(entry => [entry.id, entry]));
+  const previousByIndex = new Map<number, TranscriptEntry>();
+  for (const entry of previous.transcript) {
+    if (!previousByIndex.has(entry.modelMessageIndex)) previousByIndex.set(entry.modelMessageIndex, entry);
+  }
   const transcript = next.transcript.map(entry => {
-    const prior = previousById.get(entry.id);
+    const priorById = previousById.get(entry.id);
+    const prior = priorById && priorById.role === entry.role
+      ? priorById
+      : previousByIndex.get(entry.modelMessageIndex);
     if (!prior || prior.role !== entry.role) return entry;
     return {
       ...entry,

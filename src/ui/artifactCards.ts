@@ -130,7 +130,7 @@ function isScriptOrSourceArtifact(path: string): boolean {
 }
 
 function requestLooksLikeProject(request: string): boolean {
-  return /(?:项目|工程|网站|网页应用|应用|app|dashboard|系统|project|coding)/i.test(request);
+  return /(?:项目|工程|网站|网页应用|web\s*app|website|应用|app|dashboard|系统|project|coding)/i.test(request);
 }
 
 function requestLooksLikeFinalVisualOrDocument(request: string): boolean {
@@ -139,7 +139,7 @@ function requestLooksLikeFinalVisualOrDocument(request: string): boolean {
 
 function requestExplicitlyRequestsScript(request: string): boolean {
   if (requestLooksLikeFinalVisualOrDocument(request) && !/(?:脚本|python|javascript|typescript|shell|bash)\s*(?:文件|脚本)?\s*(?:本身|代码|程序)/i.test(request)) return false;
-  return /(?:写|编写|生成|创建|实现|开发).{0,18}(?:python|javascript|typescript|js|jsx|ts|tsx|脚本|shell|bash|powershell)/i.test(request);
+  return /(?:写|编写|生成|创建|实现|开发|write|create|generate|build|implement).{0,24}(?:python|javascript|typescript|js|jsx|ts|tsx|脚本|shell|bash|powershell|script)/i.test(request);
 }
 
 function compactArtifactFiles(items: ArtifactItem[]): ArtifactDisplay {
@@ -153,9 +153,15 @@ function compactArtifactFiles(items: ArtifactItem[]): ArtifactDisplay {
 /** Choose a compact end-of-turn presentation without exposing implementation files. */
 export function planArtifactDisplay(items: ArtifactItem[], options: ArtifactDisplayOptions = {}): ArtifactDisplay {
   const all = items.map((item) => item.path);
+  const seen = new Set<string>();
   const kept = items.filter((item) => {
-    if (isIntermediateArtifact(item.path)) return false;
-    if (isDataDumpPair(item.path, all)) return false;
+    const path = item.path.trim();
+    if (!path) return false;
+    const key = path.trim().toLowerCase().replaceAll('\\', '/').replace(/^\.\//, '');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    if (isIntermediateArtifact(path)) return false;
+    if (isDataDumpPair(path, all)) return false;
     return true;
   });
   if (kept.length === 0) return { mode: 'none' };
@@ -224,22 +230,40 @@ const PROJECT_ICON =
  */
 const nativeIconCache = new Map<string, string | null>();
 const nativeIconRequests = new Map<string, Promise<string | null>>();
+const MAX_NATIVE_ICON_CACHE = 128;
+
+function cacheNativeIcon(path: string, icon: string | null): void {
+  // Keep this cache bounded: a long session can surface many generated paths,
+  // and native icon data URLs are held as full strings rather than tiny handles.
+  nativeIconCache.delete(path);
+  nativeIconCache.set(path, icon);
+  while (nativeIconCache.size > MAX_NATIVE_ICON_CACHE) {
+    const oldest = nativeIconCache.keys().next().value;
+    if (oldest === undefined) break;
+    nativeIconCache.delete(oldest);
+  }
+}
 
 async function nativeFileIcon(path: string): Promise<string | null> {
   if (!isTauriRuntime()) return null;
   const resolved = resolvePathForOpen(path);
   if (!resolved) return null;
-  if (nativeIconCache.has(resolved)) return nativeIconCache.get(resolved) ?? null;
+  if (nativeIconCache.has(resolved)) {
+    const value = nativeIconCache.get(resolved) ?? null;
+    // LRU touch so frequently revisited artifacts remain cheap to render.
+    cacheNativeIcon(resolved, value);
+    return value;
+  }
   const pending = nativeIconRequests.get(resolved);
   if (pending) return pending;
   const request = tauriInvoke<string>('get_file_icon', { path: resolved })
     .then((icon) => {
       const value = icon.startsWith('data:image/') ? icon : null;
-      nativeIconCache.set(resolved, value);
+      cacheNativeIcon(resolved, value);
       return value;
     })
     .catch(() => {
-      nativeIconCache.set(resolved, null);
+      cacheNativeIcon(resolved, null);
       return null;
     })
     .finally(() => nativeIconRequests.delete(resolved));

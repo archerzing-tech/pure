@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>pure</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
-  <link rel="stylesheet" href="/src/ui/styles.css" />
+  <link rel="stylesheet" href="/src/ui/critical.css" />
   <link rel="stylesheet" href="/src/ui/plain-text-plan.css" />
 </head>
 <body>
@@ -366,14 +366,38 @@
               <div class="settings-page" data-page="llm">
                 <h2 class="settings-page-title" data-i18n="llm.title">LLM Provider</h2>
                 <p class="settings-page-desc" data-i18n="llm.desc">Configure your AI model provider</p>
-                <div class="provider-section-heading">
-                  <div>
-                    <h3 data-i18n="llm.choose">Choose a provider</h3>
-                    <p data-i18n="llm.choose.hint">Your selected provider powers every new conversation.</p>
+                <div class="provider-v4-shell" id="provider-v4-shell">
+                  <div class="provider-v4-summary">
+                    <div class="provider-v4-summary-copy">
+                      <span class="provider-v4-kicker" data-i18n="llm.provider.currentKicker">当前供应商</span>
+                      <strong id="provider-v4-current-name">DeepSeek (OpenAI)</strong>
+                      <span id="provider-v4-current-endpoint">https://api.deepseek.com</span>
+                    </div>
+                    <div class="provider-v4-summary-actions">
+                      <span class="provider-v4-connection-status" id="provider-v4-connection-status" data-state="active" data-i18n="llm.connection.connected">已连接</span>
+                      <button type="button" class="provider-v4-test-btn" id="provider-v4-test-btn" data-i18n="llm.connection.test">测试连接</button>
+                      <button type="button" class="provider-v4-provider-btn" data-open-provider aria-expanded="false" data-i18n="llm.provider.chooseButton">选择供应商</button>
+                    </div>
                   </div>
-                  <span class="provider-section-count" id="provider-section-count">4</span>
-                </div>
-                <div id="provider-card-grid" class="provider-card-grid" role="listbox" data-i18n-aria-label="llm.choose" aria-label="Choose a provider">
+                  <div class="provider-v4-provider-drawer" id="provider-v4-provider-drawer" hidden>
+                    <div class="provider-v4-drawer-head">
+                      <div>
+                        <strong data-i18n="llm.provider.chooseButton">选择供应商</strong>
+                        <span data-i18n="llm.provider.chooseHint">切换后会同步切换该供应商的默认模型和模型库</span>
+                      </div>
+                      <div class="provider-v4-drawer-head-actions">
+                        <button type="button" class="provider-v4-add-provider provider-preset-chip" data-preset="custom" data-i18n="llm.provider.add">＋ 添加供应商</button>
+                        <button type="button" class="provider-v4-close-btn" data-close-provider aria-label="Close">×</button>
+                      </div>
+                    </div>
+                    <div class="provider-section-heading">
+                      <div>
+                        <h3 data-i18n="llm.choose">Choose a provider</h3>
+                        <p data-i18n="llm.choose.hint">Your selected provider powers every new conversation.</p>
+                      </div>
+                      <span class="provider-section-count" id="provider-section-count">4</span>
+                    </div>
+                    <div id="provider-card-grid" class="provider-card-grid" role="listbox" data-i18n-aria-label="llm.choose" aria-label="Choose a provider">
                   <button class="provider-card" type="button" data-provider="deepseek-openai" role="option" aria-selected="false">
                     <span class="provider-card-topline"><span class="provider-card-mark provider-mark-deepseek">DS</span><span class="provider-card-status" data-provider-status>选择</span></span>
                     <span class="provider-card-name" data-i18n="provider.deepseek-openai">DeepSeek (OpenAI)</span>
@@ -399,13 +423,36 @@
                 <div class="provider-custom-toolbar">
                   <span class="provider-preset-label" data-i18n="llm.custom.quickAdd">快捷预设</span>
                   <div class="provider-preset-chips" role="group" data-i18n-aria-label="llm.custom.quickAdd" aria-label="快捷预设">
-                    <button type="button" class="provider-preset-chip" data-preset="custom" data-i18n="llm.custom.preset.custom">用户自定义</button>
                     <button type="button" class="provider-preset-chip" data-preset="openai" data-i18n="llm.custom.preset.openai">OpenAI</button>
                     <button type="button" class="provider-preset-chip" data-preset="openrouter" data-i18n="llm.custom.preset.openrouter">OpenRouter</button>
                     <button type="button" class="provider-preset-chip" data-preset="nvidia" data-i18n="llm.custom.preset.nvidia">NVIDIA NIM</button>
                     <button type="button" class="provider-preset-chip" data-preset="ollama" data-i18n="llm.custom.preset.ollama">Ollama</button>
                   </div>
                 </div>
+                  </div>
+                  <div class="provider-v4-current-model" id="provider-v4-current-model">
+                    <div class="provider-v4-current-model-topline">
+                      <span class="provider-v4-kicker" data-i18n="llm.model.defaultKicker">默认模型</span>
+                      <span class="provider-v4-active-badge" data-i18n="llm.model.inUse">正在使用</span>
+                    </div>
+                    <strong class="provider-v4-current-model-name" id="provider-v4-current-model-name">deepseek-v4-flash</strong>
+                    <span class="provider-v4-current-model-hint" data-i18n="llm.model.newChatHint">新对话会自动使用这个模型</span>
+                    <button type="button" class="provider-v4-manage-btn" data-open-models aria-expanded="false"><span data-i18n="llm.model.manage">管理模型库</span><span aria-hidden="true">→</span></button>
+                  </div>
+                  <div class="provider-v4-model-drawer" id="provider-v4-model-drawer" hidden>
+                    <div class="provider-v4-drawer-head">
+                      <div>
+                        <strong data-i18n="llm.model.library">模型库</strong>
+                        <span id="provider-v4-model-count">· 1 个模型</span>
+                      </div>
+                      <button type="button" class="provider-v4-close-btn" data-close-models aria-label="Close">×</button>
+                    </div>
+                    <div id="provider-v4-model-editor"></div>
+                  </div>
+                  <div class="provider-v4-connection-drawer" id="provider-v4-connection-drawer">
+                    <button type="button" class="provider-v4-connection-toggle" data-open-connection aria-expanded="false">
+                      <span data-i18n="llm.connection.settings">连接设置</span><span aria-hidden="true">⌄</span>
+                    </button>
                 <div class="provider-config-card">
                   <div class="provider-config-header">
                     <div>
@@ -433,7 +480,7 @@
                           <button id="cfg-add-model-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.addModel" data-i18n-title="llm.custom.addModelTitle" title="将输入框中的模型加入列表并设为默认" hidden>＋ 添加</button>
                           <button id="cfg-fetch-models-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.fetch" title="从 API 获取模型列表" hidden>⟳ 获取模型</button>
                         </div>
-                        <div id="cfg-model-list" class="provider-model-list" hidden></div>
+                        <div id="cfg-model-list" class="provider-model-list" role="list" hidden></div>
                       </div>
                     </div>
                     <div class="setting-row provider-baseurl-row">
@@ -455,6 +502,8 @@
                       <div class="setting-info"><span class="setting-label" data-i18n="llm.custom.delete">删除此供应商</span><span class="setting-hint" data-i18n="llm.custom.delete.hint">删除后需重新添加</span></div>
                       <button id="provider-delete-btn" class="setting-btn danger" data-i18n="llm.custom.deleteBtn">删除</button>
                     </div>
+                  </div>
+                </div>
                   </div>
                 </div>
               </div>

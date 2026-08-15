@@ -22,6 +22,16 @@ describe('planArtifactDisplay', () => {
     expect(planArtifactDisplay(items, { userRequest: '请写一个 Python 脚本' })).toEqual({ mode: 'files', items });
   });
 
+  it('recognizes an explicitly requested English script as a deliverable', () => {
+    const items = [file('tools/report.py')];
+    expect(planArtifactDisplay(items, { userRequest: 'Write a Python script to build the report' })).toEqual({ mode: 'files', items });
+  });
+
+  it('deduplicates repeated writes of the same path before applying the card limit', () => {
+    const items = [file('README.md'), file('./README.md'), file('README.MD')];
+    expect(planArtifactDisplay(items)).toEqual({ mode: 'files', items: [file('README.md')] });
+  });
+
   it('shows up to ten office/text documents as cards', () => {
     const items = ['brief.md', 'notes.txt', 'proposal.docx', 'slides.pptx', 'budget.xlsx', 'table.csv', 'page.html', 'readme.pdf', 'memo.rtf', 'summary.odt'].map(file);
     expect(items).toHaveLength(MAX_FILE_CARDS);

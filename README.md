@@ -3,7 +3,7 @@
 **Pure** is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. It reads, writes, and edits files, executes shell commands, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.5--beta4-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.5--beta5-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -300,6 +300,8 @@ Supported providers:
 | DeepSeek (Anthropic API) | `--provider deepseek-anthropic` | `DEEPSEEK_API_KEY` |
 | Qwen / DashScope | `--provider qwen` | `DASHSCOPE_API_KEY` |
 | GLM / Zhipu | `--provider glm` | `ZHIPU_API_KEY` |
+
+The GUI Settings → LLM page supports multiple models per provider. The compact default view shows the active provider and model; use **Choose provider** to switch provider and its model library, **Manage model library** to add/remove models or set the default, and **Test connection** to probe the selected endpoint. API key and Base URL fields remain available under Connection settings.
 
 ### Permission Modes
 

@@ -38,6 +38,9 @@ import {
   revokeSecretFromRust,
   storeCustomSecretInRust,
   storeSecretInRust,
+  modelListForProvider,
+  normalizeProviderModels,
+  uniqueModels,
   type PureConfig,
 } from './config';
 import {
@@ -411,8 +414,38 @@ export class SettingsPanel {
     // Provider cards (built-in + dynamic custom) + hidden compatibility select
     // share one source of truth. Delegated on the grid so cards rendered later
     // (custom providers) work without rebinding.
+    const providerV4Shell = document.getElementById('provider-v4-shell');
+    providerV4Shell?.addEventListener('click', (event) => {
+      const target = event.target as HTMLElement;
+      const openProvider = target.closest<HTMLElement>('[data-open-provider]');
+      if (openProvider) {
+        event.preventDefault();
+        this.setProviderV4Drawer('provider', true);
+        return;
+      }
+      if (target.closest('[data-close-provider]')) {
+        this.setProviderV4Drawer('provider', false);
+        return;
+      }
+      const openModels = target.closest<HTMLElement>('[data-open-models]');
+      if (openModels) {
+        event.preventDefault();
+        this.setProviderV4Drawer('models', true);
+        return;
+      }
+      if (target.closest('[data-close-models]')) {
+        this.setProviderV4Drawer('models', false);
+        return;
+      }
+      const openConnection = target.closest<HTMLElement>('[data-open-connection]');
+      if (openConnection) {
+        event.preventDefault();
+        this.setProviderV4Drawer('connection');
+      }
+    });
+
     document.getElementById('provider-card-grid')?.addEventListener('click', (event) => {
-      // Per-card delete (×) takes precedence over card selection.
+      // Per-card delete (×) takes precedence.
       const removeBtn = (event.target as HTMLElement).closest<HTMLElement>('.provider-card-remove');
       if (removeBtn) {
         event.stopPropagation();
@@ -438,22 +471,24 @@ export class SettingsPanel {
       this.selectProvider(p);
     });
 
+    document.getElementById('provider-v4-test-btn')?.addEventListener('click', () => void this.testProviderConnection());
+
     // ── Multi-model editor (custom providers): add / remove / set-default ──
     // Enter in the model input (or the ＋ 添加 button) commits the typed model
     // into the provider's model list and makes it the default. Clicking a chip
     // switches the default; the × on a chip removes that model.
-    document.getElementById('cfg-add-model-btn')?.addEventListener('click', () => this.addCustomModel());
+    document.getElementById('cfg-add-model-btn')?.addEventListener('click', () => this.addModel());
     (document.getElementById('cfg-model') as HTMLInputElement | null)?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        this.addCustomModel();
+        this.addModel();
       }
     });
     document.getElementById('cfg-model-list')?.addEventListener('click', (e) => {
       const remove = (e.target as HTMLElement).closest<HTMLElement>('.provider-model-chip-remove');
       if (remove) {
         e.stopPropagation();
-        this.removeCustomModel(remove.getAttribute('data-remove') || '');
+        this.removeModel(remove.getAttribute('data-remove') || '');
         return;
       }
       const chip = (e.target as HTMLElement).closest<HTMLElement>('.provider-model-chip');
@@ -653,12 +688,124 @@ export class SettingsPanel {
       this.renderMemoryDashboard();
     });
 
+    // Keep the model editor in the dedicated v4 model drawer while preserving
+    // the existing field IDs and event handlers used by persistence.
+    this.mountV4ModelEditor();
+
     // Keyboard: Esc to close
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.visible) {
         this.close();
       }
     });
+  }
+
+  // ── Provider v4 drawers ──
+
+  private setProviderV4Drawer(kind: 'provider' | 'models' | 'connection', open?: boolean): void {
+    const shell = document.getElementById('provider-v4-shell');
+    if (!shell) return;
+    const ids: Record<'provider' | 'models' | 'connection', string> = {
+      provider: 'provider-v4-provider-drawer',
+      models: 'provider-v4-model-drawer',
+      connection: 'provider-v4-connection-drawer',
+    };
+    const drawer = document.getElementById(ids[kind]);
+    if (!drawer) return;
+    const nextOpen = kind === 'connection'
+      ? (open ?? !shell.classList.contains('connection-drawer-open'))
+      : (open ?? drawer.hasAttribute('hidden'));
+    if (kind === 'provider' || kind === 'models') {
+      drawer.toggleAttribute('hidden', !nextOpen);
+      shell.classList.toggle(`${kind}-drawer-open`, nextOpen);
+      drawer.querySelector<HTMLElement>('[data-open-provider], [data-open-models]')?.setAttribute('aria-expanded', String(nextOpen));
+      if (kind === 'provider') {
+        shell.querySelectorAll<HTMLElement>('[data-open-provider]').forEach(el => el.setAttribute('aria-expanded', String(nextOpen)));
+      }
+      if (kind === 'models') {
+        shell.querySelectorAll<HTMLElement>('[data-open-models]').forEach(el => el.setAttribute('aria-expanded', String(nextOpen)));
+      }
+      return;
+    }
+    shell.classList.toggle('connection-drawer-open', nextOpen);
+    shell.querySelector<HTMLElement>('[data-open-connection]')?.setAttribute('aria-expanded', String(nextOpen));
+  }
+
+  private mountV4ModelEditor(): void {
+    const target = document.getElementById('provider-v4-model-editor');
+    const row = document.querySelector<HTMLElement>('.provider-config-card .provider-model-row');
+    if (target && row && !target.contains(row)) target.appendChild(row);
+  }
+
+  /** Test the currently selected provider's endpoint without changing the
+   * active provider. Any HTTP response proves the endpoint is reachable;
+   * authentication errors are reported as reachable-but-not-authorized rather
+   * than falsely treating a working server as offline. */
+  private async testProviderConnection(): Promise<void> {
+    const btn = document.getElementById('provider-v4-test-btn') as HTMLButtonElement | null;
+    const status = document.getElementById('provider-v4-connection-status');
+    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement | null)?.value || '';
+    const cfg = loadConfig() ?? defaults();
+    const custom = customProviderFor(cfg.customProviders ?? [], provider);
+    const def = providerDef(provider);
+    const baseURL = ((document.getElementById('cfg-baseurl') as HTMLInputElement | null)?.value.trim()
+      || custom?.baseURL
+      || def?.baseURL
+      || '').replace(/\/+$/, '');
+    if (!baseURL) {
+      if (status) {
+        status.textContent = t('llm.connection.notConfigured');
+        status.dataset.state = 'error';
+      }
+      this.toast(t('llm.custom.needURL'));
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = t('llm.connection.testing');
+    }
+    if (status) {
+      status.textContent = t('llm.connection.testing');
+      status.dataset.state = 'testing';
+    }
+    const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() || '';
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const candidates = [`${baseURL}/models`, baseURL];
+    const started = performance.now();
+    let lastError = 'network error';
+    try {
+      for (const url of candidates) {
+        try {
+          const response = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(8000) });
+          const elapsed = Math.max(0, Math.round(performance.now() - started));
+          if (response.status < 500 || response.status === 401 || response.status === 403) {
+            if (status) {
+              status.textContent = t('llm.connection.testOk').replace('{ms}', String(elapsed));
+              status.dataset.state = 'active';
+            }
+            this.toast(t('llm.connection.testOk').replace('{ms}', String(elapsed)));
+            return;
+          }
+          lastError = `HTTP ${response.status}`;
+        } catch (err) {
+          lastError = (err as Error)?.message || String(err);
+        }
+      }
+      throw new Error(lastError);
+    } catch (err) {
+      console.warn('[pure] provider connection test failed:', err);
+      if (status) {
+        status.textContent = t('llm.connection.testFailed');
+        status.dataset.state = 'error';
+      }
+      this.toast(`${t('llm.connection.testFailed')}：${(err as Error)?.message || String(err)}`);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = t('llm.connection.test');
+      }
+    }
   }
 
   // ── Proxy connection test ──
@@ -785,6 +932,8 @@ export class SettingsPanel {
     this.updateProviderPresentation(id);
     if (!this.isProviderConfigured(id)) {
       this.pendingActivation = id;
+      this.setProviderV4Drawer('provider', false);
+      this.setProviderV4Drawer('connection', true);
       this.toast(t('llm.custom.configureFirst'));
       return;
     }
@@ -796,6 +945,7 @@ export class SettingsPanel {
       const name = nameEl?.textContent ?? id;
       this.toast(t('llm.custom.enabledToast').replace('{name}', name));
     }
+    this.setProviderV4Drawer('provider', false);
   }
 
   private updateProviderPresentation(provider: string): void {
@@ -830,11 +980,15 @@ export class SettingsPanel {
       if (custom) {
         if (modelInput) modelInput.value = custom.defaultModel;
         if (baseUrlInput) baseUrlInput.value = custom.baseURL;
+      } else if (modelInput) {
+        const providerModels = modelListForProvider(cfg, provider);
+        modelInput.value = provider === cfg.provider
+          ? (cfg.model.trim() || providerModels[0] || defaultModelFor(provider))
+          : (cfg.providerModels?.[provider]?.[0] || providerModels[0] || defaultModelFor(provider));
       }
-      // Refresh the model chips only on a real card switch — never on live
-      // keystrokes inside the same card (they re-render from persisted state
-      // and would churn the DOM on every keypress).
-      this.renderModelChips(provider);
+      // Refresh the model list only on a real card switch — never on live
+      // keystrokes inside the same card (it would churn the DOM while typing).
+      this.renderModelList(provider);
     }
 
     document.querySelectorAll<HTMLElement>('.provider-card').forEach(card => {
@@ -854,9 +1008,10 @@ export class SettingsPanel {
       const cardCustom = customProviderFor(customs, cardProvider);
       const cardDef = providerDef(cardProvider);
       if (modelValue) {
+        const cardModels = modelListForProvider(cfg, cardProvider || '');
         modelValue.textContent = active && modelInput?.value.trim()
           ? modelInput.value.trim()
-          : (cardCustom?.defaultModel ?? cardDef?.defaultModel ?? '');
+          : (cardCustom?.defaultModel || (cardProvider === cfg.provider ? cfg.model.trim() : cfg.providerModels?.[cardProvider || '']?.[0]) || cardModels[0] || cardDef?.defaultModel || '');
       }
     });
 
@@ -917,6 +1072,26 @@ export class SettingsPanel {
     const fetchBtn = document.getElementById('cfg-fetch-models-btn');
     if (fetchBtn) fetchBtn.hidden = !isCustom;
     const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement | null;
+    const v4Name = document.getElementById('provider-v4-current-name');
+    const v4Endpoint = document.getElementById('provider-v4-current-endpoint');
+    const v4Model = document.getElementById('provider-v4-current-model-name');
+    const v4Status = document.getElementById('provider-v4-connection-status');
+    const v4Count = document.getElementById('provider-v4-model-count');
+    if (v4Name) v4Name.textContent = selectedLabel;
+    if (v4Endpoint) v4Endpoint.textContent = baseUrlInput?.value.trim() || custom?.baseURL || def?.baseURL || t('llm.connection.notConfigured');
+    const selectedModels = modelListForProvider(cfg, provider);
+    const selectedDefault = modelInput?.value.trim() || custom?.defaultModel || selectedModels[0] || t('llm.custom.err.models');
+    if (v4Model) v4Model.textContent = selectedDefault;
+    if (v4Count) v4Count.textContent = t('llm.model.count').replace('{n}', String(selectedModels.length));
+    if (v4Status && v4Status.dataset.state !== 'testing') {
+      const hasProviderCredential = isCustom
+        ? !!custom?.local || !!custom?.apiKey || custom?.hasApiKey === true
+        : !!cfg.apiKey || cfg.hasApiKey === true;
+      const ready = provider === cfg.provider && hasProviderCredential;
+      v4Status.textContent = ready ? t('llm.connection.connected') : t('llm.connection.notConfigured');
+      v4Status.dataset.state = ready ? 'active' : 'error';
+    }
+
     if (keyInput) {
       // Keyless locals say "leave empty"; cloud presets without a key yet say
       // "required" — the hint must not tell an OpenAI user the key is optional.
@@ -1637,6 +1812,17 @@ export class SettingsPanel {
     if (count) count.textContent = String(4 + customs.length);
   }
 
+  private gatherProviderModels(): Record<string, string[]> {
+    const cfg = loadConfig() ?? defaults();
+    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement | null)?.value || '';
+    const result = normalizeProviderModels(cfg.providerModels);
+    const custom = customProviderFor(cfg.customProviders ?? [], provider);
+    // Typing a model edits the single default field; only the explicit Add
+    // action grows a provider's list. This keeps the default one-model setup
+    // compact instead of turning every partial input into a new row.
+    return result;
+  }
+
   /** Carry the custom-provider list through, applying the form's live edits. */
   private gatherCustomProviders(): PureConfig['customProviders'] {
     const prev = (loadConfig() ?? defaults()).customProviders ?? [];
@@ -1713,6 +1899,8 @@ export class SettingsPanel {
     (document.getElementById('cfg-baseurl') as HTMLInputElement).value = '';
     (document.getElementById('cfg-apikey') as HTMLInputElement).value = '';
     this.updateProviderPresentation(id);
+    this.setProviderV4Drawer('provider', false);
+    this.setProviderV4Drawer('connection', true);
     this.toast(t('llm.custom.addedBlank'));
     document.getElementById('cfg-custom-name-edit')?.focus();
   }
@@ -1771,7 +1959,7 @@ export class SettingsPanel {
         invalidateConfigCache();
         this.renderCustomProviderCards();
       }
-      this.renderModelChips(provider);
+      this.renderModelList(provider);
       this.updateProviderPresentation(provider);
       this.autoSave();
       this.toast(t('llm.custom.fetchOk').replace('{n}', String(Math.min(ids.length, 30))));
@@ -1783,67 +1971,65 @@ export class SettingsPanel {
     }
   }
 
-  // ── Multi-model editor: chip list + add / remove / set-default ──
+  // ── Multi-model editor: compact list + add / remove / set-default ──
 
-  /** Render the provider's model library as chips under the model input.
-   *  Custom providers get the full editor (add button + chips); built-ins have
-   *  no persisted model list and only show the single model input. The chips
-   *  re-read persisted state, so they stay correct across card switches. */
-  private renderModelChips(provider: string): void {
+  private renderModelList(provider: string): void {
     const list = document.getElementById('cfg-model-list');
     const addBtn = document.getElementById('cfg-add-model-btn');
     if (!list) return;
-    const customs = (loadConfig() ?? defaults()).customProviders ?? [];
-    const custom = customProviderFor(customs, provider);
-    const models = custom?.models ?? [];
-    const def = custom?.defaultModel ?? '';
-    if (!custom) {
-      // Built-in provider: no persisted model library — single input only.
-      list.hidden = true;
-      list.innerHTML = '';
-      if (addBtn) addBtn.hidden = true;
-      return;
-    }
-    // Custom provider: always show the add button (even with zero models so
-    // the first one can be entered); the chip list appears once models exist.
+    const cfg = loadConfig() ?? defaults();
+    const custom = customProviderFor(cfg.customProviders ?? [], provider);
+    const models = modelListForProvider(cfg, provider);
+    const defaultModel = custom?.defaultModel
+      || (provider === cfg.provider ? cfg.model.trim() : cfg.providerModels?.[provider]?.[0])
+      || models[0]
+      || '';
+
+    // Every provider uses the same editor. The fetch button remains custom-only,
+    // but manually entered model IDs work for built-in and custom providers.
     if (addBtn) addBtn.hidden = false;
     list.hidden = models.length === 0;
-    if (models.length === 0) {
-      list.innerHTML = '';
-      return;
-    }
-    list.innerHTML = models.map(m => {
-      const isDef = m === def;
-      return `<button type="button" class="provider-model-chip${isDef ? ' provider-model-chip-default' : ''}" data-model="${escapeHtml(m)}" title="${isDef ? t('llm.custom.chipIsDefault') : t('llm.custom.chipSetDefault')}">
-        <span class="provider-model-chip-name">${escapeHtml(m)}</span>
-        ${isDef ? `<span class="provider-model-chip-badge" data-i18n="llm.custom.defaultBadge">默认</span>` : ''}
-        <span class="provider-model-chip-remove" data-remove="${escapeHtml(m)}" title="${t('llm.custom.removeModel')}">×</span>
-      </button>`;
+    list.innerHTML = models.map(model => {
+      const isDefault = model === defaultModel;
+      const canRemove = models.length > 1;
+      return `<div class="provider-model-chip${isDefault ? ' provider-model-chip-default' : ''}" data-model="${escapeHtml(model)}" title="${isDefault ? t('llm.custom.chipIsDefault') : t('llm.custom.chipSetDefault')}" role="listitem">
+        <button type="button" class="provider-model-chip-select" data-model="${escapeHtml(model)}" aria-pressed="${String(isDefault)}">
+          <span class="provider-model-chip-radio" aria-hidden="true"></span>
+          <span class="provider-model-chip-name">${escapeHtml(model)}</span>
+        </button>
+        ${isDefault ? `<span class="provider-model-chip-badge" data-i18n="llm.custom.defaultBadge">默认</span>` : ''}
+        ${canRemove ? `<button type="button" class="provider-model-chip-remove" data-remove="${escapeHtml(model)}" title="${t('llm.custom.removeModel')}" aria-label="${t('llm.custom.removeModel')}">×</button>` : ''}
+      </div>`;
     }).join('');
     applyTranslations();
   }
 
-  /** Commit the model typed in the input: add it to the list and make it the
-   *  default (no-op for built-in providers). Re-uses the persisted entry so
-   *  the chips and the autoSave write path stay in agreement. */
-  private addCustomModel(): void {
+  private addModel(): void {
     const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
     const prev = loadConfig() ?? defaults();
-    const entry = (prev.customProviders ?? []).find(p => p.id === provider);
-    if (!entry) return; // built-in provider: no model library
+    const custom = customProviderFor(prev.customProviders ?? [], provider);
     const input = document.getElementById('cfg-model') as HTMLInputElement;
     const model = input.value.trim();
     if (!model) {
       this.toast(t('llm.custom.err.models'));
       return;
     }
-    const exists = entry.models.includes(model);
-    entry.models = exists ? entry.models : [...entry.models, model];
-    entry.defaultModel = model;
-    const cfg: PureConfig = { ...prev, customProviders: [...(prev.customProviders ?? [])] };
+    let cfg: PureConfig;
+    let exists: boolean;
+    if (custom) {
+      const nextEntry = { ...custom, models: uniqueModels([...(custom.models ?? []), model]), defaultModel: model };
+      cfg = { ...prev, customProviders: (prev.customProviders ?? []).map(p => p.id === provider ? nextEntry : p) };
+      exists = custom.models.includes(model);
+    } else {
+      const existing = modelListForProvider(prev, provider);
+      const nextModels = uniqueModels([model, ...existing.filter(m => m !== model)]);
+      cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: nextModels } };
+      exists = existing.includes(model);
+      if (provider === prev.provider) cfg.model = model;
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
-    this.renderModelChips(provider);
+    this.renderModelList(provider);
     this.updateProviderPresentation(provider);
     this.autoSave();
     this.toast(exists
@@ -1851,39 +2037,52 @@ export class SettingsPanel {
       : t('llm.custom.addModelDone').replace('{m}', model));
   }
 
-  /** Remove a model from the provider's library. If it was the default, the
-   *  first remaining model takes over; removing the last one empties the list. */
-  private removeCustomModel(model: string): void {
+  private removeModel(model: string): void {
     const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
     const prev = loadConfig() ?? defaults();
-    const entry = (prev.customProviders ?? []).find(p => p.id === provider);
-    if (!entry || !entry.models.includes(model)) return;
-    entry.models = entry.models.filter(m => m !== model);
-    if (entry.defaultModel === model) entry.defaultModel = entry.models[0] ?? '';
-    const cfg: PureConfig = { ...prev, customProviders: [...(prev.customProviders ?? [])] };
+    const custom = customProviderFor(prev.customProviders ?? [], provider);
+    const models = modelListForProvider(prev, provider);
+    if (models.length <= 1 || !models.includes(model)) return;
+    let cfg: PureConfig;
+    const remaining = models.filter(m => m !== model);
+    if (custom) {
+      const defaultModel = custom.defaultModel === model ? remaining[0] : custom.defaultModel;
+      const nextEntry = { ...custom, models: remaining, defaultModel };
+      cfg = { ...prev, customProviders: (prev.customProviders ?? []).map(p => p.id === provider ? nextEntry : p) };
+    } else {
+      cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: remaining } };
+      if (provider === prev.provider && prev.model === model) cfg.model = remaining[0];
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     const input = document.getElementById('cfg-model') as HTMLInputElement;
-    input.value = entry.defaultModel || '';
-    this.renderModelChips(provider);
+    input.value = custom ? (cfg.customProviders.find(p => p.id === provider)?.defaultModel ?? remaining[0]) : (provider === cfg.provider ? cfg.model : remaining[0]);
+    this.renderModelList(provider);
     this.updateProviderPresentation(provider);
     this.autoSave();
     this.toast(t('llm.custom.removedModel').replace('{m}', model));
   }
 
-  /** Click a chip → that model becomes the provider's default. When the edited
-   *  provider is the active LLM, autoSave also switches the live model. */
   private setDefaultModel(model: string): void {
     const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
     const prev = loadConfig() ?? defaults();
-    const entry = (prev.customProviders ?? []).find(p => p.id === provider);
-    if (!entry || !entry.models.includes(model) || entry.defaultModel === model) return;
-    entry.defaultModel = model;
-    const cfg: PureConfig = { ...prev, customProviders: [...(prev.customProviders ?? [])] };
+    const custom = customProviderFor(prev.customProviders ?? [], provider);
+    const models = modelListForProvider(prev, provider);
+    if (!models.includes(model)) return;
+    let cfg: PureConfig;
+    if (custom) {
+      if (custom.defaultModel === model) return;
+      const nextEntry = { ...custom, defaultModel: model };
+      cfg = { ...prev, customProviders: (prev.customProviders ?? []).map(p => p.id === provider ? nextEntry : p) };
+    } else {
+      const nextModels = [model, ...models.filter(m => m !== model)];
+      cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: nextModels } };
+      if (provider === prev.provider) cfg.model = model;
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     (document.getElementById('cfg-model') as HTMLInputElement).value = model;
-    this.renderModelChips(provider);
+    this.renderModelList(provider);
     this.updateProviderPresentation(provider);
     this.autoSave();
     this.toast(t('llm.custom.defaultChanged').replace('{m}', model));
@@ -1921,6 +2120,8 @@ export class SettingsPanel {
     (document.getElementById('cfg-model') as HTMLInputElement).value = preset.defaultModel;
     (document.getElementById('cfg-baseurl') as HTMLInputElement).value = preset.baseURL;
     this.updateProviderPresentation(preset.id);
+    this.setProviderV4Drawer('provider', false);
+    this.setProviderV4Drawer('connection', true);
     this.toast(t('llm.custom.addedConfig').replace('{name}', preset.name));
   }
 
@@ -2001,6 +2202,7 @@ export class SettingsPanel {
     return {
       provider: active as PureConfig['provider'],
       customProviders: this.gatherCustomProviders(),
+      providerModels: this.gatherProviderModels(),
       apiKey: editingActive ? apiKey : prev.apiKey,
       model: editingActive ? model : prev.model,
       baseURL: editingActive ? baseURL : prev.baseURL,
@@ -2039,7 +2241,7 @@ export class SettingsPanel {
       // Preserve the current config version (defaults() always sets it, so the
       // merged value is never undefined — keep the spread rather than a bare
       // constant so a future v3 bump survives the round-trip).
-      configVersion: Math.max(7, (loadConfig() ?? defaults()).configVersion),
+      configVersion: Math.max(8, (loadConfig() ?? defaults()).configVersion),
       // Memory evolution thresholds（遗忘速度）—— only non-default fields.
       evolution: this.gatherEvolution(),
     };

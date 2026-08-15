@@ -858,6 +858,12 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('return;', planNullGuard)).toBeGreaterThan(planNullGuard);
   });
 
+  it('persists every reasoning phase for the matching assistant message', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    expect(src).toContain('thinkingPhases.filter(candidate => candidate.assistantIndex === currentAssistantIndex && candidate.text)');
+    expect(src).toContain('thinkingPhases: phases.length > 0 ? phases : undefined');
+  });
+
   it('syncs the outline position memory with the active session', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 大纲位置按会话记忆：构造函数、setSessionId（切会话）、restoreLastSession、
