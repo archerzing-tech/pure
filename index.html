@@ -447,7 +447,39 @@
                       </div>
                       <button type="button" class="provider-v4-close-btn" data-close-models aria-label="Close">×</button>
                     </div>
-                    <div id="provider-v4-model-editor"></div>
+                    <div id="provider-v4-model-editor">
+                      <div class="setting-row provider-model-row">
+                        <div class="setting-info"><span class="setting-label" data-i18n="llm.model">Model</span><span class="setting-hint" data-i18n="llm.model.hint">模型标识符（可添加多个，点击芯片设为默认）</span></div>
+                        <div class="provider-model-editor">
+                          <section class="provider-model-editor-section provider-model-default-section">
+                            <div class="provider-model-section-copy">
+                              <span class="provider-model-section-kicker" data-i18n="llm.model.defaultKicker">默认模型</span>
+                              <span class="provider-model-section-hint" data-i18n="llm.model.editorDefaultHint">新对话优先使用此模型；点击列表项可切换</span>
+                            </div>
+                            <div class="provider-model-default-value">
+                              <input id="cfg-model" type="hidden" />
+                              <strong id="cfg-default-model-name">—</strong>
+                              <span class="provider-v4-active-badge" data-i18n="llm.model.inUse">正在使用</span>
+                            </div>
+                          </section>
+                          <section class="provider-model-editor-section provider-model-library-section">
+                            <div class="provider-model-library-heading">
+                              <div class="provider-model-section-copy">
+                                <span class="provider-model-section-kicker" data-i18n="llm.model.editorListTitle">模型库</span>
+                                <span class="provider-model-section-hint" data-i18n="llm.model.editorAddHint">输入模型 ID 添加到列表；点击列表项切换默认模型</span>
+                              </div>
+                              <button id="cfg-clear-models-btn" class="provider-model-clear-btn" type="button" data-i18n="llm.custom.clearModels" data-i18n-title="llm.custom.clearModelsTitle" title="删除除默认模型外的所有模型">全部删除</button>
+                            </div>
+                            <div class="setting-input-group provider-model-input-group">
+                              <input id="cfg-model-add" class="setting-input" type="text" data-i18n-placeholder="llm.custom.addModelPlaceholder" placeholder="输入模型 ID，例如 deepseek-reasoner" />
+                              <button id="cfg-add-model-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.addModel" data-i18n-title="llm.custom.addModelTitle" title="将输入框中的模型加入列表，不改变当前默认模型" hidden>＋ 添加</button>
+                              <button id="cfg-fetch-models-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.fetch" title="从 API 获取模型列表" hidden>⟳ 获取模型</button>
+                            </div>
+                            <div id="cfg-model-list" class="provider-model-list" role="list" hidden></div>
+                          </section>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                   <div class="provider-v4-connection-drawer" id="provider-v4-connection-drawer">
                     <button type="button" class="provider-v4-connection-toggle" data-open-connection aria-expanded="false">
@@ -470,17 +502,6 @@
                       <div class="setting-input-group">
                         <input id="cfg-apikey" class="setting-input" type="password" data-i18n-placeholder="llm.apiKey.placeholder" placeholder="sk-..." />
                         <button id="cfg-toggle-key" class="setting-icon-btn" data-i18n-title="llm.apiKey.toggle" title="Toggle visibility"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
-                      </div>
-                    </div>
-                    <div class="setting-row provider-model-row">
-                      <div class="setting-info"><span class="setting-label" data-i18n="llm.model">Model</span><span class="setting-hint" data-i18n="llm.model.hint">模型标识符（可添加多个，点击芯片设为默认）</span></div>
-                      <div class="provider-model-editor">
-                        <div class="setting-input-group provider-model-input-group">
-                          <input id="cfg-model" class="setting-input" type="text" placeholder="deepseek-v4-flash" />
-                          <button id="cfg-add-model-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.addModel" data-i18n-title="llm.custom.addModelTitle" title="将输入框中的模型加入列表并设为默认" hidden>＋ 添加</button>
-                          <button id="cfg-fetch-models-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.fetch" title="从 API 获取模型列表" hidden>⟳ 获取模型</button>
-                        </div>
-                        <div id="cfg-model-list" class="provider-model-list" role="list" hidden></div>
                       </div>
                     </div>
                     <div class="setting-row provider-baseurl-row">

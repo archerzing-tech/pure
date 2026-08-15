@@ -478,7 +478,8 @@ export class SettingsPanel {
     // into the provider's model list and makes it the default. Clicking a chip
     // switches the default; the × on a chip removes that model.
     document.getElementById('cfg-add-model-btn')?.addEventListener('click', () => this.addModel());
-    (document.getElementById('cfg-model') as HTMLInputElement | null)?.addEventListener('keydown', (e) => {
+    document.getElementById('cfg-clear-models-btn')?.addEventListener('click', () => this.clearModels());
+    (document.getElementById('cfg-model-add') as HTMLInputElement | null)?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
         this.addModel();
@@ -688,10 +689,6 @@ export class SettingsPanel {
       this.renderMemoryDashboard();
     });
 
-    // Keep the model editor in the dedicated v4 model drawer while preserving
-    // the existing field IDs and event handlers used by persistence.
-    this.mountV4ModelEditor();
-
     // Keyboard: Esc to close
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.visible) {
@@ -729,12 +726,6 @@ export class SettingsPanel {
     }
     shell.classList.toggle('connection-drawer-open', nextOpen);
     shell.querySelector<HTMLElement>('[data-open-connection]')?.setAttribute('aria-expanded', String(nextOpen));
-  }
-
-  private mountV4ModelEditor(): void {
-    const target = document.getElementById('provider-v4-model-editor');
-    const row = document.querySelector<HTMLElement>('.provider-config-card .provider-model-row');
-    if (target && row && !target.contains(row)) target.appendChild(row);
   }
 
   /** Test the currently selected provider's endpoint without changing the
@@ -977,6 +968,8 @@ export class SettingsPanel {
       }
       // Custom providers always carry a required base URL + default model —
       // prefill the editable fields so the config card reads back their values.
+      const modelAddInput = document.getElementById('cfg-model-add') as HTMLInputElement | null;
+      if (modelAddInput) modelAddInput.value = '';
       if (custom) {
         if (modelInput) modelInput.value = custom.defaultModel;
         if (baseUrlInput) baseUrlInput.value = custom.baseURL;
@@ -1126,7 +1119,9 @@ export class SettingsPanel {
     this.renderCustomProviderCards();
     (document.getElementById('cfg-provider') as HTMLSelectElement).value = cfg.provider;
     const modelEl = document.getElementById('cfg-model') as HTMLInputElement;
+    const modelAddEl = document.getElementById('cfg-model-add') as HTMLInputElement | null;
     const baseUrlEl = document.getElementById('cfg-baseurl') as HTMLInputElement;
+    if (modelAddEl) modelAddEl.value = '';
     // Custom providers always carry a required base URL + default model in
     // their entry — prefill the editable fields so edits write back correctly.
     modelEl.value = cfg.model || selectedCustom?.defaultModel || '';
@@ -1976,6 +1971,8 @@ export class SettingsPanel {
   private renderModelList(provider: string): void {
     const list = document.getElementById('cfg-model-list');
     const addBtn = document.getElementById('cfg-add-model-btn');
+    const clearBtn = document.getElementById('cfg-clear-models-btn') as HTMLButtonElement | null;
+    const defaultName = document.getElementById('cfg-default-model-name');
     if (!list) return;
     const cfg = loadConfig() ?? defaults();
     const custom = customProviderFor(cfg.customProviders ?? [], provider);
@@ -1988,6 +1985,8 @@ export class SettingsPanel {
     // Every provider uses the same editor. The fetch button remains custom-only,
     // but manually entered model IDs work for built-in and custom providers.
     if (addBtn) addBtn.hidden = false;
+    if (clearBtn) clearBtn.disabled = models.length <= 1;
+    if (defaultName) defaultName.textContent = defaultModel || '—';
     list.hidden = models.length === 0;
     list.innerHTML = models.map(model => {
       const isDefault = model === defaultModel;
@@ -2008,7 +2007,7 @@ export class SettingsPanel {
     const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
     const prev = loadConfig() ?? defaults();
     const custom = customProviderFor(prev.customProviders ?? [], provider);
-    const input = document.getElementById('cfg-model') as HTMLInputElement;
+    const input = document.getElementById('cfg-model-add') as HTMLInputElement;
     const model = input.value.trim();
     if (!model) {
       this.toast(t('llm.custom.err.models'));
@@ -2017,24 +2016,52 @@ export class SettingsPanel {
     let cfg: PureConfig;
     let exists: boolean;
     if (custom) {
-      const nextEntry = { ...custom, models: uniqueModels([...(custom.models ?? []), model]), defaultModel: model };
+      const existing = uniqueModels(custom.models ?? []);
+      const currentDefault = custom.defaultModel?.trim() || existing[0] || model;
+      const nextEntry = { ...custom, models: uniqueModels([...existing, model]), defaultModel: currentDefault };
       cfg = { ...prev, customProviders: (prev.customProviders ?? []).map(p => p.id === provider ? nextEntry : p) };
-      exists = custom.models.includes(model);
+      exists = existing.includes(model);
     } else {
       const existing = modelListForProvider(prev, provider);
-      const nextModels = uniqueModels([model, ...existing.filter(m => m !== model)]);
+      const nextModels = uniqueModels([...existing, model]);
       cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: nextModels } };
       exists = existing.includes(model);
-      if (provider === prev.provider) cfg.model = model;
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     this.renderModelList(provider);
     this.updateProviderPresentation(provider);
     this.autoSave();
+    input.value = '';
     this.toast(exists
-      ? t('llm.custom.defaultChanged').replace('{m}', model)
+      ? t('llm.custom.modelExists').replace('{m}', model)
       : t('llm.custom.addModelDone').replace('{m}', model));
+  }
+
+  private clearModels(): void {
+    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const prev = loadConfig() ?? defaults();
+    const custom = customProviderFor(prev.customProviders ?? [], provider);
+    const models = modelListForProvider(prev, provider);
+    if (models.length <= 1) return;
+    const keep = custom?.defaultModel?.trim()
+      || (provider === prev.provider ? prev.model.trim() : '')
+      || models[0];
+    let cfg: PureConfig;
+    if (custom) {
+      const nextEntry = { ...custom, models: [keep], defaultModel: keep };
+      cfg = { ...prev, customProviders: (prev.customProviders ?? []).map(p => p.id === provider ? nextEntry : p) };
+    } else {
+      cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: [keep] } };
+      if (provider === prev.provider) cfg.model = keep;
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    invalidateConfigCache();
+    (document.getElementById('cfg-model') as HTMLInputElement).value = keep;
+    this.renderModelList(provider);
+    this.updateProviderPresentation(provider);
+    this.autoSave();
+    this.toast(t('llm.custom.clearModelsDone'));
   }
 
   private removeModel(model: string): void {
