@@ -3,6 +3,12 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.5-beta
+
+**1.9.5 首个 beta 预览（发布流程验证）**
+
+- 版本号升级至 1.9.5-beta，验证 beta 标签的发布流水线与更新链路
+
 ## v1.9.4
 
 **执行大纲交互升级、文生图与 GUI 可靠性加固**
