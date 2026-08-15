@@ -27,9 +27,62 @@ export type ArtifactDisplay =
   | { mode: 'none' }
   | { mode: 'files'; items: ArtifactItem[] };
 
+/**
+ * True when a written file is an INTERMEDIATE byproduct of an information
+ * query rather than a user-facing deliverable — e.g. data the model fetched
+ * and stashed to disk mid-task (weather_raw.js, raw_*.json, *.raw), or
+ * editor/tool scratch files (*.tmp, *.bak, ~). Such files are stripped from
+ * the end-of-turn result cards so the transcript only surfaces artifacts the
+ * user actually asked for.
+ */
+export function isIntermediateArtifact(path: string): boolean {
+  const leaf = path.split(/[\\/]+/).pop() ?? path;
+  const lower = leaf.toLowerCase();
+  // Raw-data dump naming the model invents while answering lookups
+  // (weather_raw.js, raw_data.json, result.raw, *_raw.sql …).
+  if (lower.includes('_raw') || lower.includes('.raw') || lower.startsWith('raw_')) return true;
+  // Common scratch / temp-file suffixes.
+  if (/(?:^|\.)(tmp|temp|bak|swp|part|crdownload|orig)$/.test(lower)) return true;
+  if (lower.endsWith('~')) return true;
+  return false;
+}
+
+// Data-like extensions that pair with a `*_raw.*` sibling.
+const DATA_EXTENSIONS = new Set(['js', 'mjs', 'cjs', 'json', 'txt', 'csv', 'tsv', 'yaml', 'yml', 'xml', 'sql', 'md', 'markdown']);
+
+/**
+ * True when `path` is the "tidy" sibling of a raw-data dump written in the
+ * same turn: models commonly stash BOTH `{topic}_raw.<ext>` (raw fetch) and
+ * `{topic}.js` / `{topic}.json` (processed copy) while answering a lookup.
+ * When the pair appears together, neither is a user-facing deliverable.
+ * Real artifacts (game.html, index.html, …) are never matched — the sibling
+ * must be a data-like extension and the raw twin must share the exact stem.
+ */
+export function isDataDumpPair(path: string, allPaths: string[]): boolean {
+  const leaf = path.split(/[\\/]+/).pop() ?? path;
+  const dot = leaf.lastIndexOf('.');
+  if (dot <= 0) return false;
+  const ext = leaf.slice(dot + 1).toLowerCase();
+  if (!DATA_EXTENSIONS.has(ext)) return false;
+  const stem = leaf.slice(0, dot).toLowerCase();
+  return allPaths.some((other) => {
+    if (other === path) return false;
+    const otherLeaf = (other.split(/[\\/]+/).pop() ?? other).toLowerCase();
+    const otherDot = otherLeaf.lastIndexOf('.');
+    if (otherDot <= 0) return false;
+    return otherLeaf.slice(0, otherDot) === `${stem}_raw`;
+  });
+}
+
 /** Only generated files become result cards; workspace folders never do. */
 export function planArtifactDisplay(items: ArtifactItem[]): ArtifactDisplay {
-  return items.length === 0 ? { mode: 'none' } : { mode: 'files', items };
+  const all = items.map((item) => item.path);
+  const kept = items.filter((item) => {
+    if (isIntermediateArtifact(item.path)) return false;
+    if (isDataDumpPair(item.path, all)) return false;
+    return true;
+  });
+  return kept.length === 0 ? { mode: 'none' } : { mode: 'files', items: kept };
 }
 
 // ── DOM rendering ──
