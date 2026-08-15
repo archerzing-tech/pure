@@ -25,6 +25,7 @@ export class MockLLMAdapter implements LLMAdapter {
   async complete(
     _messages: Message[],
     _tools: ToolDefinition[],
+    _signal?: AbortSignal,
   ): Promise<LLMResponse> {
     return { content: this.response, toolCalls: [] };
   }

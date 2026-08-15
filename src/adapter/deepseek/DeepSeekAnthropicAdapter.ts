@@ -124,6 +124,7 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
   async complete(
     messages: Message[],
     tools: ToolDefinition[],
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
     const { system, conversationMessages } = this.splitSystemMessage(messages);
 
@@ -134,7 +135,7 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
       tools: tools.length > 0 ? this.mapTools(tools) : undefined,
       max_tokens: this.maxTokens,
       temperature: this.temperature,
-    });
+    }, signal ? { signal } : undefined);
 
     const textBlocks = response.content.filter(b => b.type === 'text');
     const toolBlocks = response.content.filter(b => b.type === 'tool_use');

@@ -26,7 +26,7 @@ import {
   providerDef,
   type CustomProvider,
 } from '../shared/providers';
-import { effectiveProxyUrl, normalizeProxyConfig, normalizeProxyList } from '../shared/proxy';
+import { effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList } from '../shared/proxy';
 import {
   STORAGE_KEY,
   defaults,
@@ -71,6 +71,8 @@ export class SettingsPanel {
   /** Last card the config panel rendered for — field prefill only runs on a
    *  real card switch, never on live keystrokes in the same card. */
   private presentedProvider: string | null = null;
+  /** Pending debounced save (text-input keystrokes only). */
+  private autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(onSave: () => void, onOpen?: () => void, onClose?: () => void) {
     this.onSave = onSave;
@@ -105,6 +107,9 @@ export class SettingsPanel {
 
   close() {
     if (!this.visible) return;
+    // Flush any pending debounced save first — the last keystrokes in a text
+    // field must not be lost when the panel closes within the debounce window.
+    this.flushAutoSave();
     this.visible = false;
     const settingsView = document.getElementById('settings-view')!;
     const chatView = document.getElementById('chat-view')!;
@@ -433,6 +438,28 @@ export class SettingsPanel {
       this.selectProvider(p);
     });
 
+    // ── Multi-model editor (custom providers): add / remove / set-default ──
+    // Enter in the model input (or the ＋ 添加 button) commits the typed model
+    // into the provider's model list and makes it the default. Clicking a chip
+    // switches the default; the × on a chip removes that model.
+    document.getElementById('cfg-add-model-btn')?.addEventListener('click', () => this.addCustomModel());
+    (document.getElementById('cfg-model') as HTMLInputElement | null)?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.addCustomModel();
+      }
+    });
+    document.getElementById('cfg-model-list')?.addEventListener('click', (e) => {
+      const remove = (e.target as HTMLElement).closest<HTMLElement>('.provider-model-chip-remove');
+      if (remove) {
+        e.stopPropagation();
+        this.removeCustomModel(remove.getAttribute('data-remove') || '');
+        return;
+      }
+      const chip = (e.target as HTMLElement).closest<HTMLElement>('.provider-model-chip');
+      if (chip) this.setDefaultModel(chip.getAttribute('data-model') || '');
+    });
+
     // ── Custom providers: quick presets, delete, live name edit ──
     document.getElementById('cfg-fetch-models-btn')?.addEventListener('click', () => this.fetchProviderModels());
     document.getElementById('provider-delete-btn')?.addEventListener('click', () => this.removeSelectedCustomProvider());
@@ -460,7 +487,7 @@ export class SettingsPanel {
         const nameEl = document.querySelector<HTMLElement>('.provider-card.selected .provider-card-name');
         if (nameEl) nameEl.textContent = name;
       }
-      this.autoSave();
+      this.debouncedAutoSave();
     });
 
     // Theme selector
@@ -510,6 +537,10 @@ export class SettingsPanel {
       document.getElementById('mcp-form-url-row')?.classList.toggle('hidden', isStdio);
     });
 
+    // ── Proxy: test the configured URL before relying on it — a malformed
+    // address must not silently break every subsequent LLM / tool request. ──
+    document.getElementById('cfg-proxy-test-btn')?.addEventListener('click', () => void this.testProxyConnection());
+
     // Auto-save on all input/select/checkbox changes
     const autoSaveSelectors = [
       '#cfg-provider', '#cfg-apikey', '#cfg-model', '#cfg-baseurl',
@@ -536,7 +567,12 @@ export class SettingsPanel {
               const provider = (document.getElementById('cfg-provider') as HTMLSelectElement | null)?.value;
               if (provider) this.updateProviderPresentation(provider);
             }
-            this.autoSave();
+            // Per-keystroke writes are debounced: autoSave() rebuilds the
+            // whole form + writes localStorage (+ calls the Rust secret store
+            // when a key is present), so a burst of typing must coalesce into
+            // one save after the user pauses. Discrete actions (change / click
+            // / select) still autoSave() immediately; close() flushes.
+            this.debouncedAutoSave();
           });
         }
       });
@@ -623,6 +659,53 @@ export class SettingsPanel {
         this.close();
       }
     });
+  }
+
+  // ── Proxy connection test ──
+
+  /**
+   * Validate the proxy URL format locally, then (desktop) ask Rust to build
+   * the real client and probe endpoints through it. The Rust side enforces
+   * the same scheme allowlist and reports dead proxies / unreachable hosts
+   * with the actual error — instead of the user discovering later that every
+   * LLM call fails through a broken address.
+   */
+  private async testProxyConnection(): Promise<void> {
+    const btn = document.getElementById('cfg-proxy-test-btn') as HTMLButtonElement | null;
+    const url = (document.getElementById('cfg-proxy-url') as HTMLInputElement).value.trim();
+    if (!url) {
+      this.toast(t('proxy.test.empty'));
+      return;
+    }
+    // Local format check: catch bad schemes (e.g. `socks5:localhost:1080`
+    // without //) before any network call — mirrors the Rust allowlist.
+    if (!isUsableProxyUrl(url)) {
+      this.toast(t('proxy.test.invalid'));
+      return;
+    }
+    if (!isTauriRuntime()) {
+      // Browser fetch cannot route through a proxy — only the desktop app
+      // exercises the real client. Be honest instead of pretending success.
+      this.toast(t('proxy.test.browserOnly'));
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = t('proxy.testing');
+    }
+    try {
+      const core = await loadTauriCore();
+      const reached = await core?.invoke<string>('test_proxy', { proxyUrl: url });
+      this.toast(t('proxy.test.ok') + (reached ? `：${reached}` : ''));
+    } catch (err) {
+      console.warn('[pure] proxy test failed:', err);
+      this.toast(t('proxy.test.fail') + '：' + ((err as Error)?.message || String(err)));
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = t('proxy.test');
+      }
+    }
   }
 
   // ── Theme ──
@@ -748,6 +831,10 @@ export class SettingsPanel {
         if (modelInput) modelInput.value = custom.defaultModel;
         if (baseUrlInput) baseUrlInput.value = custom.baseURL;
       }
+      // Refresh the model chips only on a real card switch — never on live
+      // keystrokes inside the same card (they re-render from persisted state
+      // and would churn the DOM on every keypress).
+      this.renderModelChips(provider);
     }
 
     document.querySelectorAll<HTMLElement>('.provider-card').forEach(card => {
@@ -777,7 +864,11 @@ export class SettingsPanel {
     const endpoint = document.getElementById('provider-config-endpoint');
     if (title) title.textContent = selectedLabel;
     if (endpoint) endpoint.textContent = baseUrlInput?.value.trim() || custom?.baseURL || def?.baseURL || '';
-    if (modelInput) modelInput.placeholder = custom?.defaultModel ?? def?.defaultModel ?? '';
+    if (modelInput) {
+      modelInput.placeholder = custom
+        ? (custom.defaultModel || t('llm.model.addPlaceholder'))
+        : (def?.defaultModel ?? '');
+    }
 
     // Custom-only rows: name edit + delete. Keyless locals (Ollama) get a hint
     // in the API-key field instead of the generic sk-... placeholder.
@@ -1559,10 +1650,10 @@ export class SettingsPanel {
     const model = (document.getElementById('cfg-model') as HTMLInputElement).value.trim();
     if (name) entry.name = name;
     if (baseURL) entry.baseURL = baseURL;
-    if (model) {
-      entry.defaultModel = model;
-      if (!entry.models.includes(model)) entry.models = [...entry.models, model];
-    }
+    // 模型库由下方芯片管理（添加/移除/设默认）；输入框只承载当前默认模型，
+    // 不再把每次击键的中间值追加进 models 列表。空输入时回退到列表首项。
+    if (model) entry.defaultModel = model;
+    else if (!entry.models.includes(entry.defaultModel)) entry.defaultModel = entry.models[0] ?? '';
     // 文生图开关 + 图片模型名（仅自定义供应商表单里存在这些字段）。
     const imageGenToggle = document.getElementById('cfg-imagegen') as HTMLInputElement | null;
     const imageGenModel = (document.getElementById('cfg-imagegen-model') as HTMLInputElement | null)?.value.trim();
@@ -1680,6 +1771,7 @@ export class SettingsPanel {
         invalidateConfigCache();
         this.renderCustomProviderCards();
       }
+      this.renderModelChips(provider);
       this.updateProviderPresentation(provider);
       this.autoSave();
       this.toast(t('llm.custom.fetchOk').replace('{n}', String(Math.min(ids.length, 30))));
@@ -1689,6 +1781,112 @@ export class SettingsPanel {
     } finally {
       if (btn) btn.disabled = false;
     }
+  }
+
+  // ── Multi-model editor: chip list + add / remove / set-default ──
+
+  /** Render the provider's model library as chips under the model input.
+   *  Custom providers get the full editor (add button + chips); built-ins have
+   *  no persisted model list and only show the single model input. The chips
+   *  re-read persisted state, so they stay correct across card switches. */
+  private renderModelChips(provider: string): void {
+    const list = document.getElementById('cfg-model-list');
+    const addBtn = document.getElementById('cfg-add-model-btn');
+    if (!list) return;
+    const customs = (loadConfig() ?? defaults()).customProviders ?? [];
+    const custom = customProviderFor(customs, provider);
+    const models = custom?.models ?? [];
+    const def = custom?.defaultModel ?? '';
+    if (!custom) {
+      // Built-in provider: no persisted model library — single input only.
+      list.hidden = true;
+      list.innerHTML = '';
+      if (addBtn) addBtn.hidden = true;
+      return;
+    }
+    // Custom provider: always show the add button (even with zero models so
+    // the first one can be entered); the chip list appears once models exist.
+    if (addBtn) addBtn.hidden = false;
+    list.hidden = models.length === 0;
+    if (models.length === 0) {
+      list.innerHTML = '';
+      return;
+    }
+    list.innerHTML = models.map(m => {
+      const isDef = m === def;
+      return `<button type="button" class="provider-model-chip${isDef ? ' provider-model-chip-default' : ''}" data-model="${escapeHtml(m)}" title="${isDef ? t('llm.custom.chipIsDefault') : t('llm.custom.chipSetDefault')}">
+        <span class="provider-model-chip-name">${escapeHtml(m)}</span>
+        ${isDef ? `<span class="provider-model-chip-badge" data-i18n="llm.custom.defaultBadge">默认</span>` : ''}
+        <span class="provider-model-chip-remove" data-remove="${escapeHtml(m)}" title="${t('llm.custom.removeModel')}">×</span>
+      </button>`;
+    }).join('');
+    applyTranslations();
+  }
+
+  /** Commit the model typed in the input: add it to the list and make it the
+   *  default (no-op for built-in providers). Re-uses the persisted entry so
+   *  the chips and the autoSave write path stay in agreement. */
+  private addCustomModel(): void {
+    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const prev = loadConfig() ?? defaults();
+    const entry = (prev.customProviders ?? []).find(p => p.id === provider);
+    if (!entry) return; // built-in provider: no model library
+    const input = document.getElementById('cfg-model') as HTMLInputElement;
+    const model = input.value.trim();
+    if (!model) {
+      this.toast(t('llm.custom.err.models'));
+      return;
+    }
+    const exists = entry.models.includes(model);
+    entry.models = exists ? entry.models : [...entry.models, model];
+    entry.defaultModel = model;
+    const cfg: PureConfig = { ...prev, customProviders: [...(prev.customProviders ?? [])] };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    invalidateConfigCache();
+    this.renderModelChips(provider);
+    this.updateProviderPresentation(provider);
+    this.autoSave();
+    this.toast(exists
+      ? t('llm.custom.defaultChanged').replace('{m}', model)
+      : t('llm.custom.addModelDone').replace('{m}', model));
+  }
+
+  /** Remove a model from the provider's library. If it was the default, the
+   *  first remaining model takes over; removing the last one empties the list. */
+  private removeCustomModel(model: string): void {
+    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const prev = loadConfig() ?? defaults();
+    const entry = (prev.customProviders ?? []).find(p => p.id === provider);
+    if (!entry || !entry.models.includes(model)) return;
+    entry.models = entry.models.filter(m => m !== model);
+    if (entry.defaultModel === model) entry.defaultModel = entry.models[0] ?? '';
+    const cfg: PureConfig = { ...prev, customProviders: [...(prev.customProviders ?? [])] };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    invalidateConfigCache();
+    const input = document.getElementById('cfg-model') as HTMLInputElement;
+    input.value = entry.defaultModel || '';
+    this.renderModelChips(provider);
+    this.updateProviderPresentation(provider);
+    this.autoSave();
+    this.toast(t('llm.custom.removedModel').replace('{m}', model));
+  }
+
+  /** Click a chip → that model becomes the provider's default. When the edited
+   *  provider is the active LLM, autoSave also switches the live model. */
+  private setDefaultModel(model: string): void {
+    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const prev = loadConfig() ?? defaults();
+    const entry = (prev.customProviders ?? []).find(p => p.id === provider);
+    if (!entry || !entry.models.includes(model) || entry.defaultModel === model) return;
+    entry.defaultModel = model;
+    const cfg: PureConfig = { ...prev, customProviders: [...(prev.customProviders ?? [])] };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    invalidateConfigCache();
+    (document.getElementById('cfg-model') as HTMLInputElement).value = model;
+    this.renderModelChips(provider);
+    this.updateProviderPresentation(provider);
+    this.autoSave();
+    this.toast(t('llm.custom.defaultChanged').replace('{m}', model));
   }
 
   /** Resolve a quick-preset chip by slug (openai / openrouter / nvidia / ollama). */
@@ -1848,6 +2046,25 @@ export class SettingsPanel {
   }
 
   // ── Auto-save (silent, no close, no toast) ──
+
+  /** Debounced variant for text-input keystrokes (see the input listener in
+   *  bindActions): trailing edge, ~300ms after typing pauses. */
+  private debouncedAutoSave(): void {
+    if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
+    this.autoSaveTimer = setTimeout(() => {
+      this.autoSaveTimer = undefined;
+      this.autoSave();
+    }, 300);
+  }
+
+  /** Flush a pending debounced save synchronously (panel close, so the last
+   *  keystrokes are never lost). */
+  private flushAutoSave(): void {
+    if (!this.autoSaveTimer) return;
+    clearTimeout(this.autoSaveTimer);
+    this.autoSaveTimer = undefined;
+    this.autoSave();
+  }
 
   private autoSave() {
     const prev = loadConfig() ?? defaults();

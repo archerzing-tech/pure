@@ -282,6 +282,52 @@ describe('NodeToolAdapter workspace snapshots', () => {
   });
 });
 
+describe('NodeToolAdapter diff_files', () => {
+  let workspace: string;
+  let adapter: NodeToolAdapter;
+
+  beforeAll(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pure-diff-files-'));
+    adapter = new NodeToolAdapter({ workspace, commandTimeout: 10000 });
+  });
+
+  afterAll(() => {
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  const diffCall = (pathA: string, pathB: string): ToolCall => ({
+    id: `diff-${Date.now()}`,
+    index: 0,
+    function: { name: 'diff_files', arguments: JSON.stringify({ pathA, pathB }) },
+  });
+
+  it('reports identical files as a success with no diff', async () => {
+    writeFileSync(join(workspace, 'same-a.txt'), 'alpha\nbeta\n');
+    writeFileSync(join(workspace, 'same-b.txt'), 'alpha\nbeta\n');
+    const r = await adapter.execute(diffCall('same-a.txt', 'same-b.txt'));
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toContain('files are identical');
+  });
+
+  it('returns the unified diff when the files differ', async () => {
+    writeFileSync(join(workspace, 'diff-a.txt'), 'alpha\nbeta\n');
+    writeFileSync(join(workspace, 'diff-b.txt'), 'alpha\ngamma\n');
+    const r = await adapter.execute(diffCall('diff-a.txt', 'diff-b.txt'));
+    expect(r.success).toBe(true);
+    const out = String(r.result);
+    expect(out).toContain('beta');
+    expect(out).toContain('gamma');
+  });
+
+  it.skipIf(shOnly)('fails cleanly when a path is missing instead of hanging', async () => {
+    // POSIX diff exits 2 for missing paths; the Windows fallback (git diff
+    // --no-index) reports the same condition on stderr with a different code.
+    const r = await adapter.execute(diffCall('present.txt', 'missing.txt'));
+    expect(r.success).toBe(false);
+    expect(r.error).toBeTruthy();
+  });
+});
+
 describe('detectRuntimeVersions', () => {
   it('reports node, bun, python3, rustc and git entries in a stable order', () => {
     const out = detectRuntimeVersions();

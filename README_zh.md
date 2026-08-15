@@ -3,7 +3,7 @@
 **Pure** 是一个本地优先的 AI 编程助手，核心只有两个坚持：**用一个不会轻易停下来的闭环完成任务，用会进化但不会无限膨胀的记忆延续经验**。它可以读取、写入和编辑文件，执行 Shell 命令，并在配置 verifier 时验证结果，再把紧凑的项目经验带到下一次会话 — 这一切都通过快速的终端 CLI 或原生 macOS 桌面应用完成。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.2-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.5--beta4-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -103,6 +103,14 @@ THINK → ACT → OBSERVE ──┐
 上下文管理与任务复杂度无关。`ContextEngine` 会保留当前 system 消息、折叠旧的压缩摘要，完整保留 assistant/tool 调用组，清理不完整的悬空 tool 片段，再按消息数和估算 Token 预算裁剪较早的对话。LLM 摘要是尽力而为：摘要失败时仍会把有界的最近窗口交给模型，并明确提示较早消息未生成摘要。
 
 压缩不会固化计划步骤数量、Todo 数量或验证阶段；这些仍由模型结合具体任务决定。CLI REPL 提供 `/compact`，GUI 输入框工具栏提供 `⌁`。两者都只准备下一轮执行上下文，不删除用户可见的对话记录。GUI 会在空闲时自动预压缩，CLI 与 Harness 则在继续会话前按需裁剪。
+
+### 1.65 会话记忆与界面转录分离
+
+GUI 会话不会把“界面显示内容”直接当作 LLM 记忆。V2 会话快照明确拆分为三层：`modelContext.messages` 是下一轮真正发送给 LLM 的 canonical 消息；`transcript` 保存分析、思考、工具参数/结果、Markdown 富媒体和文件卡片等界面转录；`uiState` 保存计划游标和暂停状态等界面运行状态。
+
+历史恢复先把 `modelContext.messages` 加载回 Agent，再通过 `src/ui/transcriptProjection.ts` 将 `transcript` 投影为用户消息、分析卡、思考阶段、工具行、助手回复、评估卡和产物卡片，最后由 UI 渲染。`displayContent` 等旧版展示字段不会回填空的模型消息，因此界面信息不会污染下一次 LLM 请求；上下文压缩也只影响模型窗口，不删除可见转录。
+
+旧版 `StoredMessage[]` 会在读取时迁移到 V2。工具调用通过 `toolCallId` 配对，未返回的调用显示为 stopped，旧会话缺少 `toolExec` 时会从工具消息补全。详细字段、保存/恢复链路和后续优化方向见 [`docs/session-persistence-and-transcript.md`](docs/session-persistence-and-transcript.md)。
 
 ### 1.7 Prompt observability：可观察但不保存秘密
 

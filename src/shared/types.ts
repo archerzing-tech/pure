@@ -81,7 +81,7 @@ export interface LLMAdapter {
     tools: ToolDefinition[],
     signal?: AbortSignal,
   ): AsyncGenerator<LLMChunk, void, void>;
-  complete(messages: Message[], tools: ToolDefinition[]): Promise<LLMResponse>;
+  complete(messages: Message[], tools: ToolDefinition[], signal?: AbortSignal): Promise<LLMResponse>;
 }
 
 import type { WorkspaceSnapshotPort } from './workspaceSnapshot';

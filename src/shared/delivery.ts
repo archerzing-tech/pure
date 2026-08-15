@@ -30,6 +30,10 @@ export interface WorkspaceProfile {
   projectType: WorkspaceProjectType;
   packageManager: PackageManager;
   manifests: string[];
+  /** Actual manifest paths found in the listing (may be nested, e.g.
+   * `my-app/package.json`) — used to locate the project directory the
+   * delivery gate should audit and verify inside. */
+  manifestPaths?: string[];
   scripts: Record<string, string>;
   testFilesFound: boolean;
   gitRepository: boolean;
@@ -190,38 +194,46 @@ export async function discoverWorkspace(tools: ToolAdapter, signal?: AbortSignal
   const listingResult = await execute(tools, 'list_files', { path: '.', recursive: true }, signal);
   const rawListing = resultString(listingResult).slice(0, 40_000);
   const listing = projectListing(rawListing);
-  const manifests = ['package.json', 'bun.lock', 'bun.lockb', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'Cargo.toml', 'Cargo.lock', 'pyproject.toml', 'requirements.txt', 'go.mod']
-    .filter((name) => listing.split(/\r?\n/).some((entry) => entry.trim() === name || entry.trim().endsWith(`/${name}`)));
-  const packageJson = manifests.includes('package.json') ? resultString(await execute(tools, 'read_file', { path: 'package.json' }, signal)) : '';
+  const manifestNames = ['package.json', 'bun.lock', 'bun.lockb', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'Cargo.toml', 'Cargo.lock', 'pyproject.toml', 'requirements.txt', 'go.mod'];
+  const listingLines = listing.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean);
+  const manifestPaths = listingLines.filter((entry) => manifestNames.includes(entry.split('/').pop() ?? ''));
+  const manifests = manifestNames.filter((name) => manifestPaths.some((entry) => entry === name || entry.endsWith(`/${name}`)));
+  // The manifest may live at the workspace root OR inside a generated project
+  // subdirectory (e.g. `my-app/package.json`). Read scripts from wherever the
+  // manifest actually is so a nested project gets a real verification plan.
+  const hasManifest = (name: string): boolean => manifests.some((entry) => entry === name || entry.endsWith(`/${name}`));
+  const packageJsonPath = manifestPaths.find((entry) => entry === 'package.json' || entry.endsWith('/package.json'));
+  const packageJson = packageJsonPath ? resultString(await execute(tools, 'read_file', { path: packageJsonPath }, signal)) : '';
   const scripts = parseScripts(packageJson);
-  const projectType: WorkspaceProjectType = manifests.includes('Cargo.toml')
+  const projectType: WorkspaceProjectType = hasManifest('Cargo.toml')
     ? 'rust'
-    : manifests.includes('pyproject.toml') || manifests.includes('requirements.txt')
+    : hasManifest('pyproject.toml') || hasManifest('requirements.txt')
       ? 'python'
-      : manifests.includes('go.mod')
+      : hasManifest('go.mod')
         ? 'go'
-        : manifests.includes('bun.lock') || manifests.includes('bun.lockb')
+        : hasManifest('bun.lock') || hasManifest('bun.lockb')
           ? 'bun'
-          : manifests.includes('package.json')
+          : hasManifest('package.json')
             ? 'node'
             : 'unknown';
   const packageManager: PackageManager = projectType === 'rust'
     ? 'cargo'
     : projectType === 'python'
       ? 'pip'
-      : manifests.includes('bun.lock') || manifests.includes('bun.lockb')
+      : hasManifest('bun.lock') || hasManifest('bun.lockb')
         ? 'bun'
-        : manifests.includes('pnpm-lock.yaml')
+        : hasManifest('pnpm-lock.yaml')
           ? 'pnpm'
-          : manifests.includes('yarn.lock')
+          : hasManifest('yarn.lock')
             ? 'yarn'
-            : manifests.includes('package.json')
+            : hasManifest('package.json')
               ? 'npm'
               : 'unknown';
   const profile: Omit<WorkspaceProfile, 'verification'> = {
     projectType,
     packageManager,
     manifests,
+    manifestPaths,
     scripts,
     testFilesFound: hasTestFile(listing),
     gitRepository: hasAny(rawListing, ['.git']),

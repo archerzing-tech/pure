@@ -829,7 +829,7 @@ describe('plan overview completion state', () => {
     // 完成收尾的证据来自本轮真实工具执行 + 正常结束（hasToolWork 与提问轮约定
     // 一致），而不是模型是否恰好发出了 `## 计划 n 已完成` 标记——漏发时大纲
     // 不能永远停在第一步。
-    const planFinished = src.indexOf('const planFinished = planCard && qualityPassed && hasToolWork');
+    const planFinished = src.indexOf('const planFinished = planCard && hasToolWork');
     const finalize = src.indexOf('finalizePlanCard(planCard);', planFinished);
     const setComplete = src.indexOf("planOverview().setStatus('complete');", planFinished);
     expect(planFinished).toBeGreaterThan(-1);

@@ -280,7 +280,20 @@ export function isPublicToolName(name: string): boolean {
   return PUBLIC_TOOL_NAMES.has(name);
 }
 
-export const TOOL_METADATA: Readonly<Record<string, { sideEffects: boolean; isWrite: boolean }>> = {
+export interface ToolSideEffectMetadata {
+  sideEffects: boolean;
+  isWrite: boolean;
+}
+
+/**
+ * Per-tool side-effect metadata (drives the pre-write snapshot). The
+ * `satisfies` guard makes completeness a COMPILE error: adding a built-in
+ * tool to BUILT_IN_TOOL_DEFS without its entry here (or vice versa) fails
+ * typecheck, mirroring the enforcement TOOL_TAGS already gets from
+ * Record<BuiltinToolName, …> in ToolRegistry.ts. The export stays widened to
+ * Record<string, …> so runtime lookups for MCP / dynamic tool names work.
+ */
+const TOOL_METADATA_TABLE = {
   read_file: { sideEffects: false, isWrite: false },
   write_file: { sideEffects: true, isWrite: true },
   edit_file: { sideEffects: true, isWrite: true },
@@ -302,4 +315,6 @@ export const TOOL_METADATA: Readonly<Record<string, { sideEffects: boolean; isWr
   sys_info: { sideEffects: false, isWrite: false },
   // Image generation hits a paid provider API but never touches the workspace.
   generate_image: { sideEffects: false, isWrite: false },
-};
+} satisfies Readonly<Record<(typeof BUILT_IN_TOOL_DEFS)[number]['name'], ToolSideEffectMetadata>>;
+
+export const TOOL_METADATA: Readonly<Record<string, ToolSideEffectMetadata>> = TOOL_METADATA_TABLE;

@@ -18,7 +18,7 @@ import {
   loadSessionStatsForList,
   type SessionMeta,
   type SessionStats,
-  type StoredMessage,
+  type SessionSnapshotV2,
 } from './store';
 import type { ChatController } from './chat';
 
@@ -27,7 +27,7 @@ export interface SessionSidebarDeps {
   pasteChips: { clear(): void };
   confirm(message: string): Promise<boolean>;
   /** Render a loaded session's transcript (main.ts owns the chat DOM). */
-  renderMessages(messages: StoredMessage[]): Promise<void>;
+  renderMessages(snapshot: SessionSnapshotV2): Promise<void>;
   /** Move keyboard focus into the composer (main.ts owns the input). */
   focusPrompt(): void;
   /** Show the chat-area loading overlay while a session restores (main.ts). */
@@ -59,6 +59,15 @@ export class SessionSidebar {
   private currentActiveId: string | null = null;
   private collapsedGroups = loadCollapsedGroups();
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Monotonic load-request counter. Rapid clicks on two sessions start two
+   * overlapping loads; without a guard the FIRST disk read to complete wins
+   * even when the user's LAST click is still pending — the transcript ends up
+   * showing the wrong session. Every in-flight load checks its captured
+   * sequence against this counter after each await and bails out when a newer
+   * click superseded it.
+   */
+  private loadSequence = 0;
 
   constructor(deps: SessionSidebarDeps) {
     this.deps = deps;
@@ -88,8 +97,12 @@ export class SessionSidebar {
 
   /** Load a session's transcript and switch the active state to it. */
   async load(id: string): Promise<void> {
+    const seq = ++this.loadSequence;
     const loaded = await loadSession(id);
-    if (!loaded || loaded.messages.length === 0) return;
+    // A newer load request superseded this one (rapid session clicking): the
+    // latest click owns the transcript — drop this stale result entirely,
+    // including its tail effects (cancel / setSessionId / render / focus).
+    if (this.isLoadStale(seq) || !loaded || loaded.snapshot.modelContext.messages.length === 0) return;
     // Abort any in-flight generation first: the old send() loop must not keep
     // appending to (or persisting into) the session we're about to switch to.
     // chat.setSessionId also bumps the generation guard, which is the second
@@ -106,10 +119,19 @@ export class SessionSidebar {
     this.deps.showSessionLoading();
     this.deps.chat.setWorkspace(loaded.workspace || '');
     await this.deps.chat.syncEffectiveWorkspace();
-    await this.deps.renderMessages(loaded.messages);
+    // A newer click may have landed while we resolved the workspace — its
+    // load owns the transcript from here on.
+    if (this.isLoadStale(seq)) return;
+    await this.deps.renderMessages(loaded.snapshot);
+    if (this.isLoadStale(seq)) return;
     this.setActive(id);
     this.deps.onSessionActivated();
     this.deps.focusPrompt();
+  }
+
+  /** True when a load captured at `seq` has been superseded by a newer click. */
+  private isLoadStale(seq: number): boolean {
+    return seq !== this.loadSequence;
   }
 
   // ── Session list rendering ──

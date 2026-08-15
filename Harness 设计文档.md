@@ -356,6 +356,27 @@ export class ContextEngine {
 
 ---
 
+### 3.2.4 GUI 会话快照：模型上下文与界面转录分离
+
+Harness/Engine 使用的 `Message[]` 是模型执行上下文；GUI 为了完整回放分析、思考、工具输出和计划卡片，另外维护 V2 会话快照。两者不能视为同一份历史：
+
+```text
+modelContext.messages ──→ 下一轮 LLM 请求 / 上下文压缩
+          │
+          ├── transcript ──→ projectTranscript() ──→ UI replay blocks
+          └── uiState ──────→ 计划总览 / 暂停状态
+```
+
+V2 快照的实现与恢复契约见 [`docs/session-persistence-and-transcript.md`](docs/session-persistence-and-transcript.md)。这里需要特别遵守：
+
+- `analysis`、`thinking`、`toolExec`、`artifacts`、`assessment` 和 `planState` 不得进入 canonical `Message`。
+- 上下文压缩可以裁剪模型窗口，但不能把界面专用字段拼进下一次 provider 请求。
+- GUI 恢复时先调用 `ChatController.loadFromStorage(snapshot)` 加载 `modelContext`，再由 `transcriptProjection.ts` 渲染界面转录。
+- V1 `StoredMessage[]` 只作为读取迁移输入；`displayContent` 不得回填空模型消息。
+- 工具恢复以 `toolCallId` 为关联键，计划取消用明确的 `uiState.planState = null` 表达。
+
+后续可以用稳定 `modelMessageId` 替代位置索引，并把 message-shaped transcript 演进为带顺序的事件序列；这属于兼容性增强，不改变模型上下文与界面转录分离的边界。
+
 ### 3.3 MCP Client
 
 保持原设计，但在 `Coding Agent` 层增加权限拦截（详见 `Coding Agent 设计文档.md`）。

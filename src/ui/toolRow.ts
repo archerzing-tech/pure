@@ -110,6 +110,7 @@ export interface ToolRowHandle {
   argsEl: HTMLElement;
   inputSection: HTMLElement;
   resultEl: HTMLElement;
+  expandButton: HTMLButtonElement;
   toolName: string;
 }
 
@@ -411,7 +412,22 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   // which is where the user actually looks for the result.
   statusEl.innerHTML = '<span class="spinner"></span>';
 
-  summary.append(icon, name, argsEl, statusEl);
+  const expandButton = document.createElement('button');
+  expandButton.type = 'button';
+  expandButton.className = 'tool-row-expand-btn';
+  expandButton.setAttribute('aria-pressed', 'false');
+  setToolRowExpandedLabel(expandButton, false);
+  const stopSummaryToggle = (event: Event): void => {
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  expandButton.addEventListener('pointerdown', stopSummaryToggle);
+  expandButton.addEventListener('click', (event) => {
+    stopSummaryToggle(event);
+    setToolRowExpanded(handle, !handle.el.classList.contains('tool-row-expanded'));
+  });
+
+  summary.append(icon, name, argsEl, statusEl, expandButton);
 
   const body = document.createElement('div');
   body.className = 'tool-row-body';
@@ -479,7 +495,27 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   // input/output as it executes; clicking the summary still toggles it.
   if (shouldExpandToolRowInitially(toolName)) details.open = true;
 
-  return { el: wrapper, details, statusEl, argsEl, inputSection, resultEl, toolName };
+  const handle: ToolRowHandle = { el: wrapper, details, statusEl, argsEl, inputSection, resultEl, expandButton, toolName };
+  return handle;
+}
+
+function setToolRowExpandedLabel(button: HTMLButtonElement, expanded: boolean): void {
+  const label = expanded ? '还原卡片大小' : '放大到整行';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.setAttribute('aria-pressed', String(expanded));
+  button.innerHTML = expanded
+    ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 3H3v6M3 3l6 6M15 21h6v-6M21 21l-6-6"/></svg>'
+    : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 9V3h6M3 3l6 6M21 15v6h-6M21 21l-6-6"/></svg>';
+}
+
+export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void {
+  row.el.classList.toggle('tool-row-expanded', expanded);
+  setToolRowExpandedLabel(row.expandButton, expanded);
+}
+
+export function isToolRowExpanded(row: ToolRowHandle): boolean {
+  return row.el.classList.contains('tool-row-expanded');
 }
 
 export function updateToolRowArgs(
@@ -509,6 +545,11 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
   row.details.classList.remove('pending');
   row.details.classList.add(meta.success ? 'success' : 'failure');
   row.statusEl.textContent = `${meta.success ? '✓' : '✗'} ${formatDuration(meta.duration)}`;
+  // Failed rows carry the reason as a hover tooltip so the error is readable
+  // even when the row is collapsed (the Output panel stays expandable).
+  if (!meta.success && meta.resultText) {
+    row.details.title = meta.resultText.slice(0, 300);
+  }
 
   // Result body (clear first so double-invocation never duplicates output)
   row.resultEl.innerHTML = '';

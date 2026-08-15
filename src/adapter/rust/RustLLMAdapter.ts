@@ -253,10 +253,10 @@ export class RustLLMAdapter implements LLMAdapter {
     }
   }
 
-  async complete(messages: Message[], tools: ToolDefinition[]): Promise<LLMResponse> {
+  async complete(messages: Message[], tools: ToolDefinition[], signal?: AbortSignal): Promise<LLMResponse> {
     let content = '';
     let toolCalls: ToolCall[] = [];
-    for await (const chunk of this.stream(messages, tools)) {
+    for await (const chunk of this.stream(messages, tools, signal)) {
       if (chunk.type === 'content') {
         content += chunk.content;
       } else if (chunk.type === 'done') {

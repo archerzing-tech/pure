@@ -14,7 +14,7 @@ export interface VerifierCheckResult {
 
 export interface VerifierCheck {
   name: string;
-  run(params: { output: string; context: Message[] }): Promise<VerifierCheckResult>;
+  run(params: { output: string; context: Message[]; signal?: AbortSignal }): Promise<VerifierCheckResult>;
 }
 
 function defaultEvidence(name: string, result: VerifierCheckResult): VerificationEvidence {
@@ -47,7 +47,7 @@ export class Verifier {
     this.checks.push(check);
   }
 
-  async evaluate(params: { output: string; context: Message[] }): Promise<{ passed: boolean; feedback?: string; evidence: VerificationEvidence[] }> {
+  async evaluate(params: { output: string; context: Message[]; signal?: AbortSignal }): Promise<{ passed: boolean; feedback?: string; evidence: VerificationEvidence[] }> {
     const evidence: VerificationEvidence[] = [];
     for (const check of this.checks) {
       const result = await check.run(params);
@@ -239,12 +239,12 @@ export function createLLMVerifyCheck(llm: LLMAdapter, options?: LLMVerifierOptio
   const maxTask = options?.maxTaskChars ?? DEFAULT_MAX_TASK;
   return {
     name: LLMVerifyCheckName,
-    run: async ({ output, context }) => {
+    run: async ({ output, context, signal }) => {
       const task = extractUserTask(context).slice(0, maxTask);
       const prompt = buildVerifyPrompt(task, output.slice(0, maxOutput));
       let response: string;
       try {
-        const res = await llm.complete([{ role: 'user', content: prompt }], []);
+        const res = await llm.complete([{ role: 'user', content: prompt }], [], signal);
         response = res.content ?? '';
       } catch (err) {
         const summary = `verifier LLM error: ${(err as Error).message}`;

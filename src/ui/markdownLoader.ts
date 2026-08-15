@@ -26,9 +26,13 @@ export function stripToolCallXml(text: string): string {
   return stripToolCallXmlCore(text);
 }
 
-export function renderMarkdown(text: string, container: HTMLElement): Promise<void> {
+export function renderMarkdown(
+  text: string,
+  container: HTMLElement,
+  options?: { yieldBeforeParse?: boolean },
+): Promise<void> {
   return loadMarkdown()
-    .then((module) => module.renderMarkdown(text, container))
+    .then((module) => module.renderMarkdown(text, container, options))
     .catch(() => {
       // Keep the assistant message readable if the optional renderer chunk is
       // unavailable; the next completed message can retry the import.

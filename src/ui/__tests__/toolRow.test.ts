@@ -1,7 +1,7 @@
 // src/ui/__tests__/toolRow.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow } from '../toolRow';
+import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded } from '../toolRow';
 import type { GeneratedImage } from '../../shared/types';
 
 // Minimal fake DOM sufficient for createToolRow + finalizeToolRow's image
@@ -68,7 +68,7 @@ function installFakeDocument(): () => void {
       querySelector: (): any => null,
       querySelectorAll: (): any[] => [],
       closest: (): any => null,
-      click: () => { el._listeners?.click?.(); },
+      click: () => { el._listeners?.click?.({ preventDefault: () => {}, stopPropagation: () => {} }); },
     };
     return el;
   };
@@ -99,6 +99,29 @@ describe('tool row expansion policy', () => {
     expect(shouldExpandToolRowInitially('web_search')).toBe(true);
   });
 
+});
+
+describe('tool row focus layout', () => {
+  it('expands one card to the full grid row and restores it without toggling details', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('execute_command', { command: 'bun test' });
+      expect(isToolRowExpanded(row)).toBe(false);
+      expect(row.expandButton.title).toBe('放大到整行');
+
+      row.expandButton.click();
+      expect(isToolRowExpanded(row)).toBe(true);
+      expect(row.el.classList.contains('tool-row-expanded')).toBe(true);
+      expect(row.expandButton.getAttribute('aria-pressed')).toBe('true');
+      expect(row.expandButton.title).toBe('还原卡片大小');
+
+      row.expandButton.click();
+      expect(isToolRowExpanded(row)).toBe(false);
+      expect(row.expandButton.getAttribute('aria-pressed')).toBe('false');
+    } finally {
+      restore();
+    }
+  });
 });
 
 describe('tool row web presentation policy', () => {
@@ -413,6 +436,31 @@ describe('tool row renders generated images as <img> cards', () => {
       // Escape dismisses the overlay.
       (globalThis as any).document._listeners.keydown({ key: 'Escape' });
       expect((globalThis as any).document.body.children.length).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a failed tool row gets the failure class and a hover tooltip with the error', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('read_file', { path: 'a.txt' });
+      finalizeToolRow(row, {
+        success: false,
+        duration: 800,
+        resultText: 'Path escapes workspace: a.txt',
+      });
+      // The row carries the failure marker (CSS red-tints the frame + summary)
+      // and the status flips to a red ✗.
+      expect(row.details.classList.contains('failure')).toBe(true);
+      expect(row.details.classList.contains('pending')).toBe(false);
+      expect(row.statusEl.textContent).toBe('✗ 800ms');
+      // The reason is readable on hover even when the row is collapsed.
+      expect(row.details.title).toContain('Path escapes workspace');
+      // The error text renders in the Output panel.
+      const output = Array.from(row.resultEl.children).find((c: any) => c.className.includes('tool-result-preview')) as any;
+      expect(output).toBeDefined();
+      expect(output.textContent).toContain('Path escapes workspace');
     } finally {
       restore();
     }

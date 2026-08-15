@@ -186,4 +186,20 @@ describe('createLLMOnlyVerifier (P1-1 async verification)', () => {
     const result = await v.evaluate({ output: 'output', context: CTX });
     expect(result.passed).toBe(true);
   });
+
+  it('forwards the abort signal to the verifier LLM call so Stop can cancel it', async () => {
+    let seenSignal: AbortSignal | undefined;
+    const signalAware: LLMAdapter = {
+      complete: async (_messages, _tools, signal) => {
+        seenSignal = signal;
+        return { content: '{"passed": true}', toolCalls: [] };
+      },
+      stream: async function* () {},
+    };
+    const v = createLLMOnlyVerifier(signalAware);
+    const controller = new AbortController();
+    const result = await v.evaluate({ output: 'answer', context: CTX, signal: controller.signal });
+    expect(result.passed).toBe(true);
+    expect(seenSignal).toBe(controller.signal);
+  });
 });

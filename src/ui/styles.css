@@ -1115,6 +1115,12 @@ body {
   margin: 0;
   min-width: 0;
 }
+/* A focused tool row spans the complete grid width. Because grid placement
+   follows the original DOM order, earlier cards stay above it and later cards
+   flow below it without reordering the tool trace. */
+.bubble-row.tool-grid > .bubble-row.tool-row-row.tool-row-expanded {
+  grid-column: 1 / -1;
+}
 
 .tool-row {
   background: transparent;
@@ -1218,6 +1224,31 @@ body {
   animation: toolRowSpin 0.7s linear infinite;
   vertical-align: -2px;
 }
+.tool-row-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 3px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s var(--ease-out), background 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
+}
+.tool-row-expand-btn:hover,
+.tool-row-expand-btn:focus-visible {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--border);
+  outline: none;
+}
+.tool-row-expanded .tool-row-expand-btn {
+  color: var(--accent);
+}
 @keyframes toolRowSpin {
   to { transform: rotate(360deg); }
 }
@@ -1264,6 +1295,12 @@ body {
 .tool-row-scroll {
   max-height: 320px;
   overflow-y: auto;
+}
+.tool-row-expanded .tool-row-scroll {
+  max-height: min(62vh, 560px);
+}
+.tool-row-expanded .tool-row-result {
+  max-height: min(48vh, 440px);
 }
 .tool-row-section + .tool-row-section {
   border-top: 0;
@@ -1552,11 +1589,14 @@ body {
   max-width: 100%;
   margin: 2px 0 6px;
 }
+.artifact-cards,
+.artifact-project {
+  width: 100%;
+}
 .artifact-cards {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
-  width: 100%;
 }
 @media (max-width: 960px) {
   .artifact-cards {
@@ -1624,6 +1664,99 @@ body {
 .artifact-card:active {
   transform: translateY(0) scale(0.985);
   background: var(--bg-card);
+}
+.artifact-project-link {
+  position: relative;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 76px;
+  padding: 10px 12px 10px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent-soft) 38%, var(--bg-card));
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  user-select: none;
+  text-align: left;
+  font: inherit;
+  overflow: hidden;
+  transition: border-color var(--transition), background var(--transition),
+    transform 0.14s var(--ease-out), box-shadow var(--transition);
+}
+.artifact-project-link::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--accent);
+  opacity: 0.75;
+}
+.artifact-project-link:hover,
+.artifact-project-link:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 58%, var(--bg-card));
+  box-shadow: var(--shadow-md);
+  outline: none;
+  transform: translateY(-1px);
+}
+.artifact-project-link:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
+}
+.artifact-project-link:active {
+  transform: translateY(0) scale(0.985);
+}
+.artifact-project-icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  border-radius: 9px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+}
+.artifact-project-icon svg {
+  width: 24px;
+  height: 24px;
+}
+.artifact-project-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+.artifact-project-label {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-project-path {
+  overflow: hidden;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-project-count {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.artifact-project-link:hover .artifact-open-hint,
+.artifact-project-link:focus-visible .artifact-open-hint {
+  opacity: 1;
+  transform: translateX(0);
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .artifact-icon {
   position: relative;
@@ -2027,6 +2160,19 @@ body {
 .plan-progress-row.plan-card-entering .plan-progress-step:nth-child(3) { animation-delay: 0.12s; }
 .plan-progress-row.plan-card-entering .plan-progress-step:nth-child(4) { animation-delay: 0.16s; }
 .plan-progress-row.plan-card-entering .plan-progress-step:nth-child(5) { animation-delay: 0.2s; }
+
+/* In-place step replacement (updatePlanCard — heuristic skeleton upgraded to
+   the task-specific LLM plan): the card frame is already on screen, so only
+   the FRESH steps cascade in with the same stagger, instead of the old list
+   vanishing and the new one popping in on the same frame. */
+.plan-progress-row.plan-card-updating .plan-progress-step {
+  animation: plan-step-enter 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+.plan-progress-row.plan-card-updating .plan-progress-step:nth-child(1) { animation-delay: 0.04s; }
+.plan-progress-row.plan-card-updating .plan-progress-step:nth-child(2) { animation-delay: 0.08s; }
+.plan-progress-row.plan-card-updating .plan-progress-step:nth-child(3) { animation-delay: 0.12s; }
+.plan-progress-row.plan-card-updating .plan-progress-step:nth-child(4) { animation-delay: 0.16s; }
+.plan-progress-row.plan-card-updating .plan-progress-step:nth-child(5) { animation-delay: 0.2s; }
 .plan-progress-row.plan-card-entering .plan-progress-step:nth-child(6) { animation-delay: 0.24s; }
 .plan-progress-row.plan-card-entering .plan-progress-step:nth-child(7) { animation-delay: 0.28s; }
 .plan-progress-row.plan-card-entering .plan-progress-step:nth-child(8) { animation-delay: 0.32s; }
@@ -2284,10 +2430,10 @@ body {
    Positioned inside #view-container; offsets avoid #context-panel. */
 .plan-overview {
   position: absolute;
-  top: 12px;
+  top: 56px;
   right: 12px;
   z-index: 40;
-  width: 252px;
+  width: min(252px, calc(100% - 24px));
   max-width: calc(100% - 24px);
 }
 /* When the 316px context panel is open, keep the outline left of it. */
@@ -2301,9 +2447,9 @@ body {
 }
 .plan-overview-card {
   overflow: hidden;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
   border-radius: var(--radius);
-  background: color-mix(in srgb, var(--bg-card) 94%, var(--accent-soft));
+  background: color-mix(in srgb, var(--bg-card) 84%, transparent);
   box-shadow: var(--shadow-md);
   font-size: 12px;
   animation: plan-overview-in 0.22s ease-out;
@@ -2364,8 +2510,8 @@ body {
   color: var(--text);
 }
 .plan-overview.is-collapsed {
-  width: 52px;
-  max-width: none;
+  display: flex;
+  justify-content: flex-end;
 }
 .plan-overview-compact {
   display: grid;
@@ -2374,9 +2520,10 @@ body {
   height: 48px;
   min-height: 48px;
   padding: 0;
+  margin-left: auto;
   border: 2px solid var(--accent);
   border-radius: 50%;
-  background: color-mix(in srgb, var(--bg-card) 94%, var(--accent-soft));
+  background: color-mix(in srgb, var(--bg-card) 84%, transparent);
   box-shadow: 0 3px 12px color-mix(in srgb, var(--accent) 24%, transparent);
   color: var(--text);
   cursor: grab;
@@ -7044,6 +7191,26 @@ button svg,
   border-bottom: 0;
 }
 
+/* A failed tool must read as failed at a glance — even when its row is
+   collapsed, where the small ✗ status alone is easy to miss. Red-tint the
+   frame and summary so the failure is part of the row itself, not just the
+   plan-card activity line. Wins over the web-tool frame tint (a failed web
+   tool shows red, not blue). */
+.tool-row.tool-row.failure {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 5%, transparent);
+}
+.tool-row.failure .tool-row-summary,
+.tool-row.failure .tool-row-summary:hover {
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+.tool-row.failure .tool-row-name {
+  color: var(--danger);
+}
+.tool-row.failure .tool-row-args {
+  color: color-mix(in srgb, var(--danger) 80%, var(--text-secondary));
+}
+
 .tool-row.web-tool {
   border-color: #cfe8f8;
   border-radius: 10px;
@@ -8153,6 +8320,94 @@ button svg,
 .provider-config-fields { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .provider-config-fields .setting-row { min-height: 60px; padding: 11px 10px; }
 .provider-config-fields .setting-row:hover { background: var(--bg-hover); }
+
+/* Multi-model editor: the model row stacks the add-input and the chip list
+   vertically, and the Base URL row stretches its input so long endpoints are
+   readable instead of a cramped 180px box. */
+.provider-config-fields .setting-row.provider-model-row {
+  align-items: flex-start;
+}
+.provider-model-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: 1 1 auto;
+  min-width: 260px;
+  max-width: 100%;
+}
+.provider-model-input-group .setting-input {
+  flex: 1 1 auto;
+  min-width: 160px;
+}
+.provider-model-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.provider-model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 8px 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font: 600 11px var(--font-sans);
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease-out), color 0.15s var(--ease-out), background 0.15s var(--ease-out);
+}
+.provider-model-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+}
+.provider-model-chip-default {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 20%, var(--bg-card));
+}
+.provider-model-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provider-model-chip-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+.provider-model-chip-remove {
+  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.provider-model-chip-remove:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.provider-config-fields .setting-row.provider-baseurl-row .setting-input {
+  flex: 1 1 320px;
+  min-width: 260px;
+  max-width: 100%;
+}
+
+/* Proxy URL row: stretch the input so long endpoints stay readable and keep
+   the test-connection button beside it. */
+.setting-row.proxy-url-row .setting-input-group {
+  flex: 1 1 auto;
+}
+.setting-row.proxy-url-row .setting-input {
+  flex: 1 1 auto;
+  min-width: 220px;
+}
 
 /* ── Custom providers (user-defined / Ollama preset) ── */
 
