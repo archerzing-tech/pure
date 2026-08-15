@@ -1,6 +1,6 @@
 // src/ui/__tests__/artifactCards.test.ts
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { planArtifactDisplay, artifactKindLabel, fileIconMeta, type ArtifactItem } from '../artifactCards';
+import { planArtifactDisplay, isIntermediateArtifact, isDataDumpPair, artifactKindLabel, fileIconMeta, type ArtifactItem } from '../artifactCards';
 import { setPathLinkWorkspace } from '../pathLink';
 
 describe('planArtifactDisplay', () => {
@@ -29,6 +29,69 @@ describe('planArtifactDisplay', () => {
 
   it('shows nothing when no files were generated', () => {
     expect(planArtifactDisplay([])).toEqual({ mode: 'none' });
+  });
+
+  it('drops intermediate data dumps (weather_raw + weather pair) from the result cards', () => {
+    // The model stashed fetched weather data mid-answer as weather_raw.js +
+    // weather.js; only the real artifact the user asked for survives.
+    const items = [
+      file('weather_raw.js'),
+      file('weather.js'),
+      file('game.html'),
+    ];
+    expect(planArtifactDisplay(items)).toEqual({
+      mode: 'files',
+      items: [file('game.html')],
+    });
+  });
+
+  it('hides a turn whose only writes were intermediate dumps', () => {
+    expect(planArtifactDisplay([file('weather_raw.js'), file('weather.js')])).toEqual({ mode: 'none' });
+    expect(planArtifactDisplay([file('raw_data.json')])).toEqual({ mode: 'none' });
+    expect(planArtifactDisplay([file('config.tmp')])).toEqual({ mode: 'none' });
+  });
+});
+
+describe('isIntermediateArtifact', () => {
+  it('flags raw-data dump names', () => {
+    expect(isIntermediateArtifact('weather_raw.js')).toBe(true);
+    expect(isIntermediateArtifact('raw_data.json')).toBe(true);
+    expect(isIntermediateArtifact('notes.raw')).toBe(true);
+    expect(isIntermediateArtifact('src/result_raw.sql')).toBe(true);
+  });
+
+  it('flags scratch / temp suffixes', () => {
+    expect(isIntermediateArtifact('config.tmp')).toBe(true);
+    expect(isIntermediateArtifact('config.bak')).toBe(true);
+    expect(isIntermediateArtifact('index.html~')).toBe(true);
+    expect(isIntermediateArtifact('report.orig')).toBe(true);
+  });
+
+  it('keeps real deliverables', () => {
+    expect(isIntermediateArtifact('game.html')).toBe(false);
+    expect(isIntermediateArtifact('weather.html')).toBe(false);
+    expect(isIntermediateArtifact('src/app.ts')).toBe(false);
+  });
+});
+
+describe('isDataDumpPair', () => {
+  it('matches a tidy data file next to its raw sibling', () => {
+    const all = ['weather_raw.js', 'weather.js'];
+    expect(isDataDumpPair('weather.js', all)).toBe(true);
+    expect(isDataDumpPair('weather.json', ['weather_raw.js', 'weather.json'])).toBe(true);
+    expect(isDataDumpPair('report.md', ['report_raw.md', 'report.md'])).toBe(true);
+  });
+
+  it('never matches html/py/etc deliverables even with a raw sibling', () => {
+    const all = ['weather_raw.js', 'weather.html'];
+    expect(isDataDumpPair('weather.html', all)).toBe(false);
+    const code = ['data_raw.json', 'app.py'];
+    expect(isDataDumpPair('app.py', code)).toBe(false);
+  });
+
+  it('is false without a raw sibling', () => {
+    expect(isDataDumpPair('weather.js', ['weather.js'])).toBe(false);
+    expect(isDataDumpPair('data.json', ['data.json', 'chart.ts'])).toBe(false);
   });
 });
 

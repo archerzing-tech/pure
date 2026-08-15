@@ -226,6 +226,44 @@ describe('generateTaskAnalysis (streamed LLM analysis + task-specific plan)', ()
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(performance.now() - before).toBeLessThan(100);
   });
+
+  it('surfaces analysis + plan from streamed reasoning when content is empty (reasoning-first models)', async () => {
+    // DeepSeek/Qwen reasoning models put the natural analysis into
+    // `reasoning_content` and can leave `content` empty. The analysis must
+    // still reach the user (thinking card + persisted replay), not degrade to
+    // the "分析未完成" fallback.
+    const analysisProse = '<analysis>这是一个山东省5G监控系统，需要接入各省市现网数据，难度高。</analysis>';
+    const llm: LLMAdapter = {
+      async *stream() {
+        yield { type: 'reasoning', content: '好的，我来分析这个请求。' } as any;
+        yield { type: 'reasoning', content: analysisProse } as any;
+        yield { type: 'reasoning', content: '```json\n[{"action":"设计数据模型","description":"定义省市与网络状态数据"},{"action":"搭建监控大屏","description":"实现地图可视化和城市下钻"}]\n```' } as any;
+      },
+      complete: async () => ({ content: '', toolCalls: undefined }),
+    } as LLMAdapter;
+    const deltas: string[] = [];
+    const result = await generateTaskAnalysis(llm, '创建山东省5G监控系统', 200, undefined, { onThinking: (d) => deltas.push(d) });
+    expect(result.analysis).toContain('山东省5G监控系统');
+    expect(result.plan).not.toBeNull();
+    expect(result.plan!.steps).toHaveLength(2);
+    expect(deltas.join('')).toContain('我来分析这个请求');
+    expect(deltas.join('')).toContain('山东省5G监控系统');
+  });
+
+  it('merges analysis from reasoning with a plan delivered in content', async () => {
+    // Reasoning-first model that still emits the JSON plan in `content`: each
+    // field takes its first usable source instead of forcing the fallback.
+    const llm: LLMAdapter = {
+      async *stream() {
+        yield { type: 'reasoning', content: '<analysis>先确认数据源是否真实可接入，再决定架构。</analysis>' } as any;
+        yield { type: 'content', content: '```json\n[{"action":"接入数据","description":"建立数据接入管道"}]```' } as any;
+      },
+      complete: async () => ({ content: '', toolCalls: undefined }),
+    } as LLMAdapter;
+    const result = await generateTaskAnalysis(llm, '创建监控大屏', 200);
+    expect(result.analysis).toContain('数据源');
+    expect(result.plan?.steps[0].action).toBe('接入数据');
+  });
 });
 
 describe('parseTaskAnalysisText (analysis + plan extraction)', () => {

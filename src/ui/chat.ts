@@ -608,7 +608,15 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
 // list. The task-specific steps replace the fixed heuristic template (了解需
 // 求/制定方案/分步实现) and vary by business and difficulty. The heuristic plan
 // from analyzeTask() stays only as a fallback when the streaming analysis fails.
-const PLAN_ANALYSIS_TIMEOUT_MS = 20000;
+// Total ceiling for one task-analysis stream. DeepSeek-style reasoning models
+// take tens of seconds to think through the request before emitting the plan,
+// so a tight deadline turns every request into a forced heuristic fallback.
+// The per-chunk idle clock below is the real safety valve for stalled streams.
+const PLAN_ANALYSIS_TIMEOUT_MS = 60000;
+/** Idle timeout while streaming a task analysis: as long as the model keeps
+ * yielding chunks (even a long reasoning pass), the clock resets; only a
+ * genuinely dead connection trips the bail-out before the total ceiling. */
+const PLAN_ANALYSIS_IDLE_TIMEOUT_MS = 30000;
 const MAX_MESSAGE_HISTORY = MAX_PERSISTED_MESSAGES;
 
 function limitMessageHistory(messages: Message[], max = MAX_MESSAGE_HISTORY): Message[] {
@@ -762,35 +770,62 @@ export async function generateTaskAnalysis(
       { role: 'user', content: grounding.length ? `${userText}\n\n${grounding.join('\n\n')}` : userText },
     ];
     // Stream so the user sees the model reason about THIS task in real time;
-    // each pending iterator read is raced against the remaining deadline and
-    // the active AbortSignal. A timer that only flips a flag cannot interrupt
-    // an async generator waiting on a network response, which used to leave
-    // the GUI in streaming state forever.
-    let text = '';
+    // each pending iterator read is raced against the remaining budget and the
+    // active AbortSignal. A timer that only flips a flag cannot interrupt an
+    // async generator waiting on a network response, which used to leave the
+    // GUI in streaming state forever.
+    //
+    // Two streams are collected separately: `content` is the model's final,
+    // user-facing output, while `reasoning` carries the thinking chain that
+    // DeepSeek/Qwen reasoning models emit as `reasoning_content`. Those models
+    // routinely put the whole natural analysis into `reasoning` and leave
+    // `content` nearly empty — which used to make the analysis look like it
+    // "never happened". The reasoning stream is therefore also surfaced as
+    // visible thinking and used as a parse fallback when content comes back
+    // empty.
+    let contentText = '';
+    let reasoningText = '';
+    let visibleText = '';
     let visibleSent = 0;
     const linkedController = new AbortController();
     const forwardAbort = (): void => linkedController.abort();
     signal?.addEventListener('abort', forwardAbort, { once: true });
     const iterator = llm.stream(messages, [], linkedController.signal)[Symbol.asyncIterator]();
+    // Total deadline + idle clock: every chunk resets the idle timer, so a
+    // long but alive reasoning stream is never cut off early, while a stalled
+    // connection still bails out well before the total ceiling.
     const deadline = Date.now() + timeoutMs;
+    let lastActivity = Date.now();
     try {
       while (true) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) throw makeTimeoutError('task analysis timed out');
+        const now = Date.now();
+        const totalRemaining = deadline - now;
+        const idleRemaining = PLAN_ANALYSIS_IDLE_TIMEOUT_MS - (now - lastActivity);
+        const remaining = Math.min(totalRemaining, idleRemaining);
+        if (remaining <= 0) {
+          throw makeTimeoutError(idleRemaining <= 0 ? 'task analysis stream idle' : 'task analysis timed out');
+        }
         const next = await withAbortTimeout(iterator.next(), linkedController.signal, remaining, 'task analysis');
         if (next.done) break;
+        lastActivity = Date.now();
         const chunk = next.value;
         if (chunk.type === 'content') {
-          text += chunk.content;
-          // Keep machine metadata out of the visible thinking trace. The user
-          // should see the model's reasoning continuously, not JSON delimiters
-          // or an implementation-specific assessment payload.
-          const metadataStart = text.search(/```|<intent_assessment>|\[\s*\{/);
-          const visible = metadataStart >= 0 ? text.slice(0, metadataStart) : text;
-          if (visible.length > visibleSent) {
-            opts.onThinking?.(visible.slice(visibleSent));
-            visibleSent = visible.length;
-          }
+          contentText += chunk.content;
+          visibleText += chunk.content;
+        } else if (chunk.type === 'reasoning') {
+          reasoningText += chunk.content;
+          visibleText += chunk.content;
+        } else {
+          continue;
+        }
+        // Keep machine metadata out of the visible thinking trace. The user
+        // should see the model's reasoning continuously, not JSON delimiters
+        // or an implementation-specific assessment payload.
+        const metadataStart = visibleText.search(/```|<intent_assessment>|\[\s*\{/);
+        const visible = metadataStart >= 0 ? visibleText.slice(0, metadataStart) : visibleText;
+        if (visible.length > visibleSent) {
+          opts.onThinking?.(visible.slice(visibleSent));
+          visibleSent = visible.length;
         }
       }
     } finally {
@@ -798,7 +833,18 @@ export async function generateTaskAnalysis(
       linkedController.abort();
       void iterator.return?.();
     }
-    return parseTaskAnalysisText(text, userText);
+    // `content` wins when it produced a real analysis; reasoning steps in for
+    // reasoning-first models. Each field independently picks the first source
+    // that yields a usable value, so a plan split across both streams still
+    // surfaces instead of forcing the heuristic fallback.
+    const contentResult = parseTaskAnalysisText(contentText, userText);
+    const reasoningResult = reasoningText.trim() ? parseTaskAnalysisText(reasoningText, userText) : null;
+    return {
+      analysis: contentResult.analysis || reasoningResult?.analysis || '',
+      plan: contentResult.plan ?? reasoningResult?.plan ?? null,
+      repaired: contentResult.repaired || reasoningResult?.repaired || false,
+      llmIntent: contentResult.llmIntent ?? reasoningResult?.llmIntent ?? null,
+    };
   } catch (err) {
     console.warn('[pure] task analysis failed, falling back to heuristic plan:', (err as Error)?.message ?? err);
     return { analysis: '', plan: null, repaired: false, llmIntent: null };
