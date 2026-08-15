@@ -23,4 +23,13 @@ describe('workspace picker startup path', () => {
     expect(workspaceInit).toBeLessThan(splash);
     expect(main.indexOf('workspace.init();', workspaceInit + 1)).toBe(-1);
   });
+
+  it('does not wait for session persistence before updating the selected workspace', () => {
+    const workspace = readFileSync(new URL('../workspace.ts', import.meta.url), 'utf8');
+    const commit = workspace.slice(workspace.indexOf('  async commit('), workspace.indexOf('  /** Render the "Recent" list'));
+    expect(commit.indexOf('showToast(')).toBeGreaterThan(commit.indexOf('this.closePopover();'));
+    expect(commit.indexOf('this.onCommitted();')).toBeGreaterThan(commit.indexOf('showToast('));
+    expect(commit).toContain('void saveSessionWorkspace(this.chat.getSessionId(), ws).catch');
+    expect(commit).not.toContain('await saveSessionWorkspace');
+  });
 });

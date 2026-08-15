@@ -189,18 +189,20 @@ export class WorkspaceController {
       return;
     }
     this.chat.setWorkspace(ws);
+    // closePopover() already refreshes the visible workspace labels. Do not
+    // refresh a second time here: the duplicate status/layout pass was visible
+    // as a small hitch immediately after dismissing the native macOS picker.
     this.closePopover();
-    this.refresh();
-    // Persist with the session so the override survives a restart. The backend
-    // no-ops when the session dir doesn't exist yet (brand-new unsaved chat);
-    // the override is then captured on the first save_session call.
-    try {
-      await saveSessionWorkspace(this.chat.getSessionId(), ws);
-    } catch (err) {
-      console.error('[pure] saveSessionWorkspace failed:', err);
-    }
     showToast(ws ? t('workspace.saved') : t('workspace.cleared'));
     this.onCommitted();
+
+    // Persistence is deliberately detached from the interaction. The selected
+    // workspace is already active in memory; waiting for a potentially large
+    // session file rewrite made the macOS picker feel frozen after selection.
+    // The Rust command also performs the disk work off the UI thread.
+    void saveSessionWorkspace(this.chat.getSessionId(), ws).catch((err) => {
+      console.error('[pure] saveSessionWorkspace failed:', err);
+    });
   }
 
   /** Render the "Recent" list from the independent recents store (not sessions):

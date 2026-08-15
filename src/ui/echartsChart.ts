@@ -560,6 +560,32 @@ interface ChartEntry {
 }
 
 const instances = new WeakMap<HTMLElement, ChartEntry>();
+const chartTargets = new Set<HTMLElement>();
+let detachedChartObserver: MutationObserver | null = null;
+
+function disposeEchartTarget(target: HTMLElement): void {
+  const existing = instances.get(target);
+  if (existing) {
+    existing.ro?.disconnect();
+    existing.chart.dispose();
+    instances.delete(target);
+  }
+  chartTargets.delete(target);
+  if (chartTargets.size === 0) {
+    detachedChartObserver?.disconnect();
+    detachedChartObserver = null;
+  }
+}
+
+function ensureDetachedChartObserver(): void {
+  if (detachedChartObserver || typeof MutationObserver === 'undefined' || typeof document === 'undefined' || !document.body) return;
+  detachedChartObserver = new MutationObserver(() => {
+    for (const target of [...chartTargets]) {
+      if (!target.isConnected) disposeEchartTarget(target);
+    }
+  });
+  detachedChartObserver.observe(document.body, { childList: true, subtree: true });
+}
 
 /**
  * Render a parsed chart spec into `target` (the `.chart-target` div of a
@@ -568,13 +594,13 @@ const instances = new WeakMap<HTMLElement, ChartEntry>();
  * ResizeObserver — sidebar toggles and window resizes stay correct.
  */
 export function renderEchartInto(target: HTMLElement, spec: ChartSpec): void {
-  const existing = instances.get(target);
-  if (existing) {
-    existing.ro?.disconnect();
-    existing.chart.dispose();
-    instances.delete(target);
-    target.innerHTML = '';
-  }
+  // An async chart render can finish after its transcript row was replaced.
+  // Never create an ECharts instance for an already-detached target; there is
+  // no future mutation in document.body that could reclaim it.
+  if (!target.isConnected) return;
+  const hadInstance = instances.has(target);
+  disposeEchartTarget(target);
+  if (hadInstance) target.innerHTML = '';
   // Defensive sizing: echarts renders an invisible 0-sized SVG when the
   // container measures 0 at init (e.g. inside a content-visibility-skipped
   // bubble during session restore, or before CSS loads). Force a synchronous
@@ -598,4 +624,6 @@ export function renderEchartInto(target: HTMLElement, spec: ChartSpec): void {
     : null;
   ro?.observe(target);
   instances.set(target, { chart, ro });
+  chartTargets.add(target);
+  ensureDetachedChartObserver();
 }

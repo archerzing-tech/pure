@@ -4526,6 +4526,15 @@ fn sessions_dir() -> PathBuf {
     PathBuf::from(home).join(".pure").join("sessions")
 }
 
+fn workspace_override_path(session_id: &str) -> PathBuf {
+    sessions_dir().join(session_id).join("workspace.txt")
+}
+
+fn write_workspace_override(session_id: &str, workspace: &str) -> Result<(), String> {
+    fs::write(workspace_override_path(session_id), workspace)
+        .map_err(|e| format!("write workspace: {}", e))
+}
+
 #[tauri::command]
 fn save_session(
     session_id: String,
@@ -4567,9 +4576,20 @@ fn save_session(
         serde_json::to_string_pretty(&data).unwrap_or_default(),
     )
     .map_err(|e| format!("write: {}", e))?;
+    // Keep the mutable workspace override in a tiny sidecar as well. Changing
+    // folders should not require the picker path to rewrite this potentially
+    // very large session.json, while older sessions remain readable through
+    // the embedded field below. Do not overwrite an existing sidecar: a
+    // workspace selection can be persisted concurrently with a turn that was
+    // already in flight, and the newer user choice must win.
+    let override_path = workspace_override_path(&session_id);
+    if !override_path.exists() {
+        write_workspace_override(&session_id, &workspace)?;
+    }
+    let effective_workspace = load_session_workspace(&session_id).unwrap_or(workspace);
 
     let title = extract_title(&data.messages);
-    update_sessions_index(&session_id, &title, data.message_count, now, workspace)?;
+    update_sessions_index(&session_id, &title, data.message_count, now, effective_workspace)?;
 
     Ok(())
 }
@@ -4586,17 +4606,22 @@ fn load_session(session_id: String) -> Result<Option<serde_json::Value>, String>
         "version": 1,
         "messages": data.messages,
     }));
+    let workspace = load_session_workspace(&session_id).unwrap_or_else(|_| data.workspace.clone());
     Ok(Some(serde_json::json!({
         "sessionId": session_id,
         "snapshot": snapshot,
         "updatedAt": data.updated_at,
         "messageCount": data.message_count,
-        "workspace": data.workspace,
+        "workspace": workspace,
     })))
 }
 
 /// Read the stored workspace override for a session ("" when absent).
 fn load_session_workspace(session_id: &str) -> Result<String, String> {
+    let override_path = workspace_override_path(session_id);
+    if override_path.exists() {
+        return fs::read_to_string(override_path).map_err(|e| format!("read workspace: {}", e));
+    }
     let path = sessions_dir().join(session_id).join("session.json");
     if !path.exists() {
         return Ok(String::new());
@@ -4725,23 +4750,25 @@ fn load_session_list() -> Result<Vec<serde_json::Value>, String> {
 
 /// Update ONLY the workspace override of an already-saved session (used when
 /// the user edits the workspace chip without sending a new message, so the
-/// change survives an app restart). No-op when the session dir does not exist
-/// yet — a brand-new chat that has never been persisted has nothing to update,
-/// and its workspace is captured on the first save_session call.
+/// change survives an app restart). The mutable value lives in a small sidecar
+/// instead of rewriting the complete session snapshot. No-op when the session
+/// has never been persisted; its workspace is captured on first save_session.
 #[tauri::command]
-fn save_session_workspace(session_id: String, workspace: String) -> Result<(), String> {
-    let dir = sessions_dir().join(&session_id);
+async fn save_session_workspace(session_id: String, workspace: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || save_session_workspace_sync(&session_id, &workspace))
+        .await
+        .map_err(|e| format!("workspace save task failed: {}", e))??;
+    Ok(())
+}
+
+fn save_session_workspace_sync(session_id: &str, workspace: &str) -> Result<(), String> {
+    let dir = sessions_dir().join(session_id);
     let data_path = dir.join("session.json");
     if data_path.exists() {
-        let raw = fs::read_to_string(&data_path).map_err(|e| format!("read: {}", e))?;
-        let mut data: SessionData =
-            serde_json::from_str(&raw).map_err(|e| format!("parse: {}", e))?;
-        data.workspace = workspace.clone();
-        fs::write(
-            &data_path,
-            serde_json::to_string_pretty(&data).unwrap_or_default(),
-        )
-        .map_err(|e| format!("write: {}", e))?;
+        // The sidecar is authoritative for this mutable field. Avoid reading,
+        // parsing and rewriting the complete session snapshot on every folder
+        // selection; long conversations can make that file several megabytes.
+        write_workspace_override(session_id, workspace)?;
     }
 
     let index_path = sessions_dir().join("index.json");
@@ -4749,7 +4776,7 @@ fn save_session_workspace(session_id: String, workspace: String) -> Result<(), S
         let raw = fs::read_to_string(&index_path).unwrap_or_default();
         let mut list: Vec<SessionMeta> = serde_json::from_str(&raw).unwrap_or_default();
         if let Some(meta) = list.iter_mut().find(|s| s.id == session_id) {
-            meta.workspace = workspace.clone();
+            meta.workspace = workspace.to_string();
         }
         fs::write(
             &index_path,

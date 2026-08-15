@@ -7,7 +7,7 @@
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
 import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, shouldCancelForEscape } from './chat';
-import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, type PureConfig } from './config';
+import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, modelListForProvider, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
 import { projectTranscript } from './transcriptProjection';
@@ -23,11 +23,12 @@ import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { providerLabel, providerDef, PROVIDERS, defaultModelFor, customProviderFor, type ProviderId } from '../shared/providers';
-import { renderMarkdown, stripToolCallXml } from './markdownLoader';  import { createToolRow, finalizeToolRow, markToolRowStopped } from './toolRow';
-  import { appendStoredThinking } from './thinkingCard';
-  import { createAssessmentFlowCard } from './assessmentFlow';
-  import { renderArtifactCards } from './artifactCards';
-  import { attachPlanPauseActions } from './planPauseActions';
+import { renderMarkdown, stripToolCallXml } from './markdownLoader';
+import { createToolRow, finalizeToolRow, markToolRowStopped } from './toolRow';
+import { appendStoredThinking } from './thinkingCard';
+import { createAssessmentFlowCard } from './assessmentFlow';
+import { renderArtifactCards } from './artifactCards';
+import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { PasteChipManager, composeMessageWithAttachments } from './pasteChip';
@@ -36,6 +37,7 @@ import { showConfirmModal } from './modal';
 import { WorkspaceController } from './workspace';
 import { SessionSidebar } from './sessionSidebar';
 import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
+import { loadDeferredStyles } from './deferredStyles';
 
 const chat = new ChatController();
 
@@ -68,7 +70,9 @@ const workspace = new WorkspaceController({
     enableInputIfReady();
   },
   onCommitted: () => {
-    sessionSidebar.refresh();
+    // Workspace selection is already reflected in the active chat. Defer the
+    // expensive grouped-session/sidebar IPC refresh until the WebView is idle.
+    sessionSidebar.refreshIdle();
   },
 });
 
@@ -130,6 +134,7 @@ function getSettingsPanel(): Promise<SettingsPanel> {
 }
 
 async function openSettings(): Promise<void> {
+  await loadDeferredStyles();
   (await getSettingsPanel()).open();
 }
 
@@ -253,46 +258,27 @@ function populateModeSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
 }
 
 function populateModelSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
-  const provider = cfg.provider;
   const customs = cfg.customProviders ?? [];
-  const custom = customProviderFor(customs, provider);
-  const model = cfg.model?.trim() || custom?.defaultModel || defaultModelFor(provider);
-  // One option per known provider (its default model), labeled with the full
-  // display name (t(i18nKey)) so the two DeepSeek entries — same label +
-  // same default model, different API protocol — stay distinguishable. A
-  // custom model typed into Settings is appended with a UNIQUE value
-  // ("<provider>:custom") so the select can actually point at it; a plain
-  // provider value would resolve to the first matching default option and
-  // silently display the wrong model. Custom providers render one option per
-  // entry (their name · default model).
+  const currentModel = cfg.model?.trim() || '';
   sel.innerHTML = '';
-  const isCustomModel = custom
-    ? custom.defaultModel !== model
-    : !PROVIDERS.some((p) => p.id === provider && p.defaultModel === model);
-  let selectedValue: string = provider;
-  for (const p of PROVIDERS) {
-    const opt = document.createElement('option');
-    opt.value = p.id;
-    opt.dataset.model = p.defaultModel;
-    opt.textContent = `${t(p.i18nKey)} · ${p.defaultModel}`;
-    sel.appendChild(opt);
-  }
-  for (const c of customs) {
-    const opt = document.createElement('option');
-    opt.value = c.id;
-    opt.dataset.model = c.defaultModel;
-    opt.textContent = `${c.name} · ${c.defaultModel}`;
-    sel.appendChild(opt);
-  }
-  if (isCustomModel) {
-    const opt = document.createElement('option');
-    opt.value = `${provider}:custom`;
-    opt.dataset.model = model;
-    // Same label style as the default options (t(i18nKey)) so a custom model
-    // stays visually consistent (e.g. "DeepSeek (OpenAI)" not "DeepSeek").
-    opt.textContent = `${custom?.name ?? t(providerDef(provider)?.i18nKey ?? provider)} · ${model}`;
-    sel.appendChild(opt);
-    selectedValue = `${provider}:custom`;
+  let selectedValue = '';
+  const appendProviderModels = (provider: string, label: string): void => {
+    const models = modelListForProvider(cfg, provider);
+    models.forEach((model, index) => {
+      const opt = document.createElement('option');
+      opt.value = `${provider}::${index}`;
+      opt.dataset.provider = provider;
+      opt.dataset.model = model;
+      opt.textContent = `${label} · ${model}`;
+      sel.appendChild(opt);
+      if (provider === cfg.provider && model === currentModel) selectedValue = opt.value;
+    });
+  };
+  for (const p of PROVIDERS) appendProviderModels(p.id, t(p.i18nKey));
+  for (const c of customs) appendProviderModels(c.id, c.name);
+  if (!selectedValue) {
+    const first = sel.options[0];
+    if (first) selectedValue = first.value;
   }
   sel.value = selectedValue;
 }
@@ -323,10 +309,8 @@ function wireModelSelect(sel: HTMLSelectElement): void {
   sel.addEventListener('change', () => {
     const cfg = loadConfig() ?? defaults();
     const opt = sel.selectedOptions[0];
-    // Custom entries carry a "<provider>:custom" value so they stay
-    // distinct from the plain provider option (see populate above).
     const raw = sel.value;
-    const providerId = raw.endsWith(':custom') ? raw.slice(0, -':custom'.length) : raw;
+    const providerId = opt?.dataset.provider || raw.split('::')[0] || raw;
     cfg.provider = providerId as ProviderId;
     cfg.model = opt?.dataset.model || defaultModelFor(providerId);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
@@ -500,10 +484,15 @@ function deferToIdle(fn: () => void): void {
   workspace.init();
   dismissBootSplash();
 
-  deferToIdle(() => {
+  deferToIdle(async () => {
+    // Feature styles are a separate CSS chunk. Await it before the deferred
+    // controllers so the first tool/session render never flashes unstyled.
     // Error isolation: a throw in any single deferred step must not silently
     // skip the rest (e.g. an unbound session sidebar for the whole session).
     try {
+      await loadDeferredStyles().catch((err) => {
+        console.error('[pure] deferred styles failed:', err);
+      });
       workspace.refresh();
       updateSidebarModel();
       updateContextPanelStage();
@@ -751,7 +740,7 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
         const artifactRow = document.createElement('div');
         artifactRow.className = 'bubble-row artifact-row';
         chatEl.appendChild(artifactRow);
-        renderArtifactCards(artifactRow, block.items, chat.getWorkspace() || '.', { userRequest: block.userRequest });
+        renderArtifactCards(artifactRow, block.items, chat.getEffectiveWorkspace() || '.', { userRequest: block.userRequest });
       }
 
       await yieldIfNeeded();
@@ -760,11 +749,12 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
     if (!isCurrentRestore()) return;
     flushReplayTools();
   } catch (err) {
-    // Remove the loading row on error and dismiss the overlay: a stale
-    // restore can only reach catch when the newer restore also threw, so
-    // hiding here is always safe (the next successful restore re-shows it).
+    // Always remove this restore's local loading row, but only the current
+    // restore may dismiss the shared overlay. An older restore can fail after
+    // the user has already selected another session and must not hide the new
+    // session's loading feedback.
     loadingRow.remove();
-    hideSessionLoading();
+    if (isCurrentRestore()) hideSessionLoading();
     throw err;
   }
   // Only the CURRENT restore may dismiss the overlay: a stale restore (user

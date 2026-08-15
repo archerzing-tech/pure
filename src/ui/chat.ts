@@ -1014,6 +1014,7 @@ export class ChatController {
   private verifierAbort: AbortController | null = null;
   private onStreamingChange?: (streaming: boolean) => void;
   private workspace: string = '';
+  private effectiveWorkspace: string = '';
   private sessionId: string = '';
   private messages: Message[] = [];
   private hasHistory = false;
@@ -1312,6 +1313,7 @@ export class ChatController {
 
   setWorkspace(path: string) {
     this.workspace = path;
+    this.effectiveWorkspace = path;
     this.snapshotPort = undefined;
     this.sessionToolAdapter = undefined;
     this.sessionToolAdapterKey = '';
@@ -1331,10 +1333,17 @@ export class ChatController {
     return this.workspace;
   }
 
+  /** Workspace used to open generated files when the session has no selected
+   * workspace and tools run inside the application-owned temporary directory. */
+  getEffectiveWorkspace(): string {
+    return this.effectiveWorkspace || this.workspace;
+  }
+
   /** Sync path-link resolution with the effective session workspace without
    * changing the user-visible workspace selection. */
   async syncEffectiveWorkspace(): Promise<void> {
     const effective = this.workspace || await getApplicationTmpWorkspace(this.sessionId);
+    this.effectiveWorkspace = effective;
     if (effective) setPathLinkWorkspace(effective);
   }
 
@@ -3415,9 +3424,9 @@ export class ChatController {
     const transcriptDrafts: TranscriptDraft[] = canonicalMessages.flatMap((m, index): TranscriptDraft[] => {
       if (m.role === 'system') return [];
       const currentAssistantIndex = m.role === 'assistant' ? assistantIndex++ : -1;
-      const phase = currentAssistantIndex >= 0
-        ? thinkingPhases.find(candidate => candidate.assistantIndex === currentAssistantIndex)
-        : undefined;
+      const phases = currentAssistantIndex >= 0
+        ? thinkingPhases.filter(candidate => candidate.assistantIndex === currentAssistantIndex && candidate.text)
+        : [];
       const isCurrentTurnAssistant = m.role === 'assistant' && index > latestUserIndex;
       const analysis = isCurrentTurnAssistant && !analysisAttached && taskAnalysisText
         ? (analysisAttached = true, taskAnalysisText)
@@ -3453,7 +3462,7 @@ export class ChatController {
         content: m.content,
         analysis,
         artifacts: m.role === 'assistant' && index === lastAssistantIndex && artifacts.length > 0 ? artifacts : undefined,
-        thinkingPhases: phase?.text ? [phase] : undefined,
+        thinkingPhases: phases.length > 0 ? phases : undefined,
         toolExec: recordedToolExec,
         isPlanPause: isPauseMessage || undefined,
         assessment: isPauseMessage ? pauseAssessment : undefined,

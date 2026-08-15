@@ -104,6 +104,26 @@ describe('session snapshot separation', () => {
     expect(merged.transcript[0]?.thinking).toBe('previous reasoning');
   });
 
+  it('falls back to the model position when canonical content changes its derived id', () => {
+    const previous = createSessionSnapshotFromLegacy([{
+      role: 'assistant',
+      content: '旧 canonical 内容',
+      displayContent: '富媒体展示内容',
+      thinking: '旧思考',
+    }]);
+    const next = createSessionSnapshot([
+      { role: 'assistant', content: '更新后的 canonical 内容' },
+    ], [{
+      message: { role: 'assistant', content: '更新后的 canonical 内容' },
+      modelMessageIndex: 0,
+      content: '更新后的 canonical 内容',
+    }]);
+    const merged = mergeSessionSnapshotMetadata(previous, next);
+    expect(merged.modelContext.messages[0]?.content).toBe('更新后的 canonical 内容');
+    expect(merged.transcript[0]?.content).toBe('富媒体展示内容');
+    expect(merged.transcript[0]?.thinking).toBe('旧思考');
+  });
+
   it('allows an explicitly cleared plan state to stay cleared', () => {
     const previous = createSessionSnapshotFromLegacy([{
       role: 'assistant',

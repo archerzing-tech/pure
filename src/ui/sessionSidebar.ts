@@ -59,6 +59,8 @@ export class SessionSidebar {
   private currentActiveId: string | null = null;
   private collapsedGroups = loadCollapsedGroups();
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private idleRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private idleRefreshHandle: number | undefined;
   /**
    * Monotonic load-request counter. Rapid clicks on two sessions start two
    * overlapping loads; without a guard the FIRST disk read to complete wins
@@ -88,11 +90,44 @@ export class SessionSidebar {
    * visible lag.
    */
   refresh(): void {
+    if (this.idleRefreshHandle !== undefined) {
+      const browserWindow = window as typeof window & { cancelIdleCallback?: (id: number) => void };
+      browserWindow.cancelIdleCallback?.(this.idleRefreshHandle);
+      this.idleRefreshHandle = undefined;
+    }
+    if (this.idleRefreshTimer) {
+      clearTimeout(this.idleRefreshTimer);
+      this.idleRefreshTimer = undefined;
+    }
     if (this.refreshTimer) return;
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = undefined;
       void this.renderList();
     }, 150);
+  }
+
+  /**
+   * Refresh after a low-priority metadata change without competing with the
+   * interaction that caused it. Workspace selection already updates the
+   * visible workspace immediately; rebuilding the whole grouped sidebar can
+   * involve IPC and stats reads, so defer that work until the WebView is idle.
+   */
+  refreshIdle(): void {
+    if (this.refreshTimer || this.idleRefreshTimer || this.idleRefreshHandle !== undefined) return;
+    const browserWindow = window as typeof window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+    };
+    if (browserWindow.requestIdleCallback) {
+      this.idleRefreshHandle = browserWindow.requestIdleCallback(() => {
+        this.idleRefreshHandle = undefined;
+        this.refresh();
+      }, { timeout: 1200 });
+      return;
+    }
+    this.idleRefreshTimer = setTimeout(() => {
+      this.idleRefreshTimer = undefined;
+      this.refresh();
+    }, 700);
   }
 
   /** Load a session's transcript and switch the active state to it. */

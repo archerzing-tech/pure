@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pure · LLM 多模型配置 · 4 个设计方向</title>
+<style>
+:root {
+  --ink: #20242b;
+  --muted: #7b808b;
+  --faint: #aeb3bc;
+  --line: #e5e7eb;
+  --panel: #ffffff;
+  --canvas: #f5f6f8;
+  --soft: #f0f2f5;
+  --blue: #3867d6;
+  --blue-soft: #edf2ff;
+  --green: #25845a;
+  --green-soft: #eaf7f0;
+  --orange: #bd6b25;
+  --orange-soft: #fff4e8;
+  --red: #c54c4c;
+  --shadow: 0 18px 50px rgba(24, 30, 42, .08);
+  --radius: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--canvas);
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 1160px; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+.page-head { max-width: 1480px; margin: 0 auto; padding: 44px 42px 28px; display: flex; justify-content: space-between; gap: 40px; align-items: end; }
+.eyebrow { color: var(--blue); font-size: 11px; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; }
+h1 { margin: 10px 0 8px; font-size: 32px; letter-spacing: -.045em; font-weight: 760; }
+.intro { max-width: 680px; margin: 0; color: var(--muted); line-height: 1.7; font-size: 14px; }
+.legend { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.legend i { width: 8px; height: 8px; border-radius: 50%; background: var(--blue); display: inline-block; }
+.legend i.secondary { background: #c8cdd5; margin-left: 10px; }
+.grid { max-width: 1480px; margin: 0 auto; padding: 0 42px 60px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; }
+.variant { background: var(--panel); border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow); overflow: hidden; }
+.variant-head { padding: 22px 24px 18px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 20px; align-items: start; }
+.variant-number { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; color: white; background: var(--ink); font-size: 12px; font-weight: 800; flex: 0 0 auto; }
+.variant-title { display: flex; gap: 12px; align-items: start; }
+.variant h2 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+.variant-note { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.tag { border: 1px solid var(--line); color: var(--muted); border-radius: 99px; padding: 5px 9px; font-size: 10px; white-space: nowrap; }
+.surface { min-height: 450px; background: #fbfcfd; }
+.toolbar { padding: 15px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.78); }
+.provider-name { font-size: 12px; font-weight: 750; }
+.provider-select { border: 1px solid var(--line); background: white; border-radius: 8px; padding: 7px 28px 7px 10px; color: var(--ink); font-size: 12px; }
+.ghost { border: 0; background: transparent; color: var(--muted); font-size: 12px; padding: 7px 0; }
+.primary { border: 0; border-radius: 8px; background: var(--blue); color: white; padding: 9px 13px; font-size: 12px; font-weight: 720; }
+.primary:hover { filter: brightness(.94); }
+.add-line { display: flex; gap: 8px; }
+.add-line input { min-width: 0; flex: 1; border: 1px solid var(--line); border-radius: 8px; background: white; padding: 9px 11px; outline: 0; font-size: 12px; }
+.add-line input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+.model-list { padding: 16px 20px 20px; display: flex; flex-direction: column; gap: 8px; }
+.model-row { display: flex; align-items: center; gap: 11px; border: 1px solid var(--line); background: white; border-radius: 11px; min-height: 51px; padding: 9px 11px; transition: .16s ease; }
+.model-row:hover { border-color: #b9c7ed; transform: translateY(-1px); }
+.model-row.default { border-color: #a9bced; background: var(--blue-soft); }
+.radio { width: 15px; height: 15px; border-radius: 50%; border: 1.5px solid #b9bec8; flex: 0 0 auto; position: relative; }
+.default .radio { border-color: var(--blue); }
+.default .radio:after { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); position: absolute; top: 2.5px; left: 2.5px; }
+.model-main { min-width: 0; flex: 1; }
+.model-id { display: block; font: 650 12px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.model-meta { display: block; color: var(--muted); font-size: 10px; margin-top: 4px; }
+.badge { padding: 4px 7px; border-radius: 6px; color: var(--blue); background: rgba(56,103,214,.1); font-size: 10px; font-weight: 760; white-space: nowrap; }
+.row-action { border: 0; background: transparent; color: #a4a9b2; font-size: 17px; line-height: 1; padding: 4px; }
+.row-action:hover { color: var(--red); }
+.section-label { padding: 16px 20px 2px; color: var(--faint); font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.hint { padding: 12px 20px 20px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+/* Version 1 */
+.v1 .toolbar { background: #f7f8fa; }
+.v1 .table-head { display: grid; grid-template-columns: 1fr 100px 34px; padding: 11px 20px 6px; color: var(--faint); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; }
+.v1 .model-list { padding-top: 5px; }
+.v1 .model-row { display: grid; grid-template-columns: 1fr 100px 34px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; background: transparent; transform: none; }
+.v1 .model-row.default { background: transparent; border-color: var(--line); }
+.v1 .model-row.default .model-id { color: var(--blue); }
+.v1 .model-row .radio { margin-left: 3px; }
+.v1 .model-list > .model-row:last-child { border-bottom: 0; }
+.v1 .model-main { grid-column: 1; grid-row: 1; }
+.v1 .badge { grid-column: 2; grid-row: 1; justify-self: start; }
+.v1 .row-action { grid-column: 3; grid-row: 1; }
+.v1 .add-dock { margin: 4px 20px 18px; padding: 12px; border: 1px dashed #c9ced7; border-radius: 10px; background: #fff; }
+.v1 .add-dock .section-label { padding: 0 0 9px; }
+/* Version 2 */
+.v2 .hero { padding: 27px 28px 20px; background: linear-gradient(135deg, #1f293b, #283e66); color: white; }
+.v2 .hero-kicker { font-size: 10px; letter-spacing: .15em; opacity: .62; font-weight: 800; }
+.v2 .hero-model { margin-top: 12px; font: 650 21px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: -.04em; }
+.v2 .hero-sub { color: rgba(255,255,255,.65); font-size: 11px; margin-top: 8px; }
+.v2 .hero-actions { display: flex; gap: 8px; margin-top: 22px; }
+.v2 .hero-actions button { border: 1px solid rgba(255,255,255,.2); border-radius: 7px; padding: 7px 10px; color: white; background: rgba(255,255,255,.09); font-size: 11px; }
+.v2 .hero-actions button:hover { background: rgba(255,255,255,.18); }
+.v2 .model-list { padding-top: 10px; }
+.v2 .model-row { min-height: 46px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 8px 0; background: transparent; }
+.v2 .model-row.default { background: transparent; border-color: var(--line); }
+.v2 .model-row.default .radio { border-color: var(--green); }
+.v2 .model-row.default .radio:after { background: var(--green); }
+.v2 .default-label { color: var(--green); font-size: 10px; }
+.v2 .collapsed-row { display: flex; justify-content: space-between; align-items: center; padding: 15px 20px 17px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.v2 .collapsed-row button { border: 0; background: transparent; color: var(--blue); font-size: 11px; font-weight: 700; }
+.v2 .extra-models { display: none; }
+.v2.expanded .extra-models { display: flex; }
+.v2.expanded .collapsed-row button:after { content: ' 收起'; }
+.v2:not(.expanded) .collapsed-row button:after { content: ' 查看'; }
+.v2.expanded .collapsed-row button { font-size: 0; }
+.v2.expanded .collapsed-row button:after { font-size: 11px; }
+/* Version 3 */
+.v3 .surface { display: grid; grid-template-columns: 155px 1fr; }
+.v3 .provider-rail { border-right: 1px solid var(--line); background: #f7f8fa; padding: 16px 10px; }
+.v3 .rail-label { padding: 0 8px 10px; color: var(--faint); font-size: 10px; font-weight: 800; letter-spacing: .12em; }
+.v3 .rail-item { border: 0; width: 100%; text-align: left; padding: 10px 9px; border-radius: 8px; color: var(--muted); background: transparent; font-size: 11px; }
+.v3 .rail-item:hover { background: #eceff4; color: var(--ink); }
+.v3 .rail-item.active { color: var(--ink); background: white; box-shadow: 0 2px 8px rgba(24,30,42,.06); font-weight: 750; }
+.v3 .rail-item small { display: block; margin-top: 4px; color: var(--faint); font-size: 9px; font-weight: 500; }
+.v3 .model-zone { min-width: 0; }
+.v3 .model-zone-head { padding: 20px 20px 14px; display: flex; justify-content: space-between; align-items: start; }
+.v3 .model-zone-title { font-size: 15px; font-weight: 760; }
+.v3 .model-zone-sub { margin-top: 5px; color: var(--muted); font-size: 11px; }
+.v3 .v3-list { padding-top: 0; }
+.v3 .model-row { min-height: 57px; }
+.v3 .provider-chip { color: var(--green); background: var(--green-soft); border-radius: 6px; padding: 4px 7px; font-size: 10px; font-weight: 720; }
+.v3 .v3-add { margin: 0 20px 16px; }
+/* Version 4 */
+.v4 .surface { padding-bottom: 20px; }
+.v4 .compact-provider { padding: 13px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); }
+.v4 .provider-summary { border: 0; background: transparent; padding: 4px 0; text-align: left; color: var(--ink); }
+.v4 .compact-provider strong { font-size: 13px; }
+.v4 .compact-provider .provider-summary span { display: block; color: var(--muted); font-size: 10px; margin-top: 4px; }
+.v4 .provider-actions { display: flex; align-items: center; gap: 7px; }
+.v4 .provider-switch-button, .v4 .connection-test { border-radius: 7px; padding: 7px 9px; font-size: 10px; font-weight: 740; }
+.v4 .provider-switch-button { border: 1px solid #b8c5eb; color: var(--blue); background: var(--blue-soft); }
+.v4 .provider-switch-button:hover { border-color: var(--blue); }
+.v4 .connection-test { border: 1px solid var(--line); color: var(--ink); background: white; }
+.v4 .connection-test:hover { border-color: var(--blue); }
+.v4 .connection-test:disabled { opacity: .65; cursor: wait; }
+.v4 .connection-status { color: var(--green); font-size: 10px; white-space: nowrap; }
+.v4 .connection-status.error { color: var(--red); }
+.v4 .provider-drawer { display: none; padding: 12px 20px 16px; border-bottom: 1px solid var(--line); background: #f7f8fa; }
+.v4.provider-open .provider-drawer { display: block; }
+.v4 .provider-drawer .drawer-head { padding: 0 0 9px; background: transparent; border: 0; }
+.v4 .provider-options { display: flex; flex-direction: column; gap: 5px; }
+.v4 .provider-option { display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; background: white; color: var(--ink); text-align: left; font-size: 11px; }
+.v4 .provider-option:hover, .v4 .provider-option.active { border-color: #b6c4ed; background: var(--blue-soft); }
+.v4 .provider-option small { color: var(--muted); font-size: 10px; }
+.v4 .add-provider { width: 100%; border: 1px dashed #bdc4d0; border-radius: 8px; padding: 9px; margin-top: 8px; color: var(--blue); background: transparent; font-size: 11px; font-weight: 720; }
+.v4 .add-provider:hover { background: white; border-color: var(--blue); }
+.v4 .provider-form { display: none; gap: 7px; margin-top: 9px; }
+.v4.adding-provider .provider-form { display: grid; }
+.v4 .provider-form input { width: 100%; border: 1px solid var(--line); border-radius: 7px; padding: 8px 9px; background: white; outline: 0; font-size: 11px; }
+.v4 .provider-form input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+.v4 .provider-form-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.v4 .provider-form-actions button { border: 0; border-radius: 7px; padding: 7px 10px; font-size: 11px; }
+.v4 .provider-form-actions .cancel { background: transparent; color: var(--muted); }
+.v4 .provider-form-actions .save { background: var(--blue); color: white; font-weight: 720; }
+.v4 .current-card { margin: 19px 20px 12px; padding: 17px; border: 1px solid #b6c4ed; border-radius: 12px; background: var(--blue-soft); }
+.v4 .current-top { display: flex; justify-content: space-between; align-items: center; }
+.v4 .current-label { color: var(--blue); font-size: 10px; font-weight: 800; letter-spacing: .1em; }
+.v4 .current-card .model-id { margin-top: 10px; font-size: 14px; }
+.v4 .current-card button { margin-top: 14px; border: 0; background: transparent; padding: 0; color: var(--blue); font-size: 11px; font-weight: 720; }
+.v4 .drawer { margin: 0 20px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.v4 .drawer-head { display: flex; justify-content: space-between; align-items: center; padding: 13px 14px; font-size: 11px; font-weight: 730; background: white; }
+.v4 .drawer-head button { border: 0; background: transparent; color: var(--blue); font-size: 11px; }
+.v4 .drawer-body { display: none; border-top: 1px solid var(--line); padding: 10px; background: #fbfcfd; }
+.v4.open .drawer-body { display: block; }
+.v4 .drawer .model-list { padding: 0; }
+.v4 .drawer .model-row { min-height: 42px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 7px 0; background: transparent; }
+.v4 .drawer .model-row:last-child { border-bottom: 0; }
+.v4 .inline-add { display: none; margin-top: 10px; }
+.v4.open .inline-add { display: flex; }
+.v4 .v4-note { padding: 14px 20px 0; color: var(--muted); font-size: 10px; }
+footer { max-width: 1480px; margin: -4px auto 0; padding: 0 42px 46px; color: var(--faint); font-size: 11px; }
+@media (max-width: 1200px) { .grid { grid-template-columns: 1fr; max-width: 800px; } body { min-width: 0; } }
+</style>
+</head>
+<body>
+<header class="page-head">
+  <div>
+    <div class="eyebrow">Pure / Settings / LLM</div>
+    <h1>一个供应商，多个模型</h1>
+    <p class="intro">四个完全不同的信息架构方向。每个版本都遵循同一条核心规则：<b>供应商是连接配置，模型是可管理的模型库，默认模型只有一个。</b>点击模型行可以设为默认，点击添加可以加入新的模型。</p>
+  </div>
+  <div class="legend"><i></i> 当前默认模型 <i class="secondary"></i> 已加入模型</div>
+</header>
+<main class="grid">
+  <article class="variant v1" data-variant="v1">
+    <header class="variant-head"><div class="variant-title"><span class="variant-number">01</span><div><h2>Model Library</h2><p class="variant-note">像管理字体 / 数据源一样管理模型，密度最高，适合模型数量多的用户。</p></div></div><span class="tag">效率优先</span></header>
+    <div class="surface">
+      <div class="toolbar"><div><div class="provider-name">DeepSeek (OpenAI)</div><div class="model-meta">OpenAI 兼容 · 3 个模型</div></div><select class="provider-select"><option>DeepSeek (OpenAI)</option><option>Qwen</option><option>GLM</option></select></div>
+      <div class="table-head"><span>模型标识符</span><span>状态</span><span></span></div>
+      <div class="model-list" data-list>
+        <div class="model-row default" data-model="deepseek-v4-flash"><div class="model-main"><span class="model-id">deepseek-v4-flash</span><span class="model-meta">快速 · 当前供应商默认</span></div><span class="badge">默认</span><button class="row-action" data-remove aria-label="删除">×</button><span class="radio"></span></div>
+        <div class="model-row" data-model="deepseek-reasoner"><div class="model-main"><span class="model-id">deepseek-reasoner</span><span class="model-meta">深度推理</span></div><span class="badge" style="visibility:hidden">默认</span><button class="row-action" data-remove aria-label="删除">×</button><span class="radio"></span></div>
+        <div class="model-row" data-model="deepseek-chat"><div class="model-main"><span class="model-id">deepseek-chat</span><span class="model-meta">通用对话</span></div><span class="badge" style="visibility:hidden">默认</span><button class="row-action" data-remove aria-label="删除">×</button><span class="radio"></span></div>
+      </div>
+      <div class="add-dock"><div class="section-label">添加到模型库</div><div class="add-line"><input placeholder="输入模型 ID，例如 deepseek-reasoner"><button class="primary" data-add>＋ 添加</button></div></div>
+      <div class="hint">点击任意模型行切换默认模型。删除只会从列表移除，不会删除供应商连接。</div>
+    </div>
+  </article>
+
+  <article class="variant v2" data-variant="v2">
+    <header class="variant-head"><div class="variant-title"><span class="variant-number">02</span><div><h2>Default Hero</h2><p class="variant-note">把“现在会用哪个模型”放到最显眼的位置，其余模型作为可展开的候选库。</p></div></div><span class="tag">认知最清晰</span></header>
+    <div class="surface">
+      <div class="toolbar"><span class="provider-name">DeepSeek (OpenAI)</span><button class="ghost">切换供应商⌄</button></div>
+      <div class="hero"><div class="hero-kicker">CURRENT DEFAULT MODEL</div><div class="hero-model" data-hero>deepseek-v4-flash</div><div class="hero-sub">所有新对话默认使用 · OpenAI 兼容接口</div><div class="hero-actions"><button>编辑模型 ID</button><button>测试连接</button></div></div>
+      <div class="section-label">其他可用模型</div>
+      <div class="model-list extra-models" data-list>
+        <div class="model-row" data-model="deepseek-reasoner"><span class="radio"></span><div class="model-main"><span class="model-id">deepseek-reasoner</span><span class="model-meta">点击设为默认</span></div><span class="default-label">设为默认</span><button class="row-action" data-remove>×</button></div>
+        <div class="model-row" data-model="deepseek-chat"><span class="radio"></span><div class="model-main"><span class="model-id">deepseek-chat</span><span class="model-meta">点击设为默认</span></div><span class="default-label">设为默认</span><button class="row-action" data-remove>×</button></div>
+      </div>
+      <div class="collapsed-row"><span>已保存 2 个候选模型</span><button data-expand>查看</button></div>
+      <div class="add-line" style="padding: 0 20px 18px"><input placeholder="添加另一个模型 ID"><button class="primary" data-add>添加</button></div>
+    </div>
+  </article>
+
+  <article class="variant v3" data-variant="v3">
+    <header class="variant-head"><div class="variant-title"><span class="variant-number">03</span><div><h2>Provider Command Center</h2><p class="variant-note">左侧切供应商，右侧只处理当前供应商的模型库，适合经常横向切换端点的人。</p></div></div><span class="tag">多供应商</span></header>
+    <div class="surface">
+      <aside class="provider-rail"><div class="rail-label">PROVIDERS</div><button class="rail-item active">DeepSeek<small>3 个模型 · 已连接</small></button><button class="rail-item">Qwen<small>2 个模型 · 已连接</small></button><button class="rail-item">GLM<small>1 个模型 · 未配置</small></button><button class="rail-item">＋ 添加供应商</button></aside>
+      <section class="model-zone"><div class="model-zone-head"><div><div class="model-zone-title">模型库</div><div class="model-zone-sub">DeepSeek (OpenAI) · 选择一个作为默认</div></div><span class="provider-chip">已连接</span></div><div class="model-list v3-list" data-list><div class="model-row default" data-model="deepseek-v4-flash"><span class="radio"></span><div class="model-main"><span class="model-id">deepseek-v4-flash</span><span class="model-meta">默认 · 快速响应</span></div><span class="badge">默认</span><button class="row-action" data-remove>×</button></div><div class="model-row" data-model="deepseek-reasoner"><span class="radio"></span><div class="model-main"><span class="model-id">deepseek-reasoner</span><span class="model-meta">推理能力更强</span></div><button class="row-action" data-remove>×</button></div><div class="model-row" data-model="deepseek-chat"><span class="radio"></span><div class="model-main"><span class="model-id">deepseek-chat</span><span class="model-meta">通用对话</span></div><button class="row-action" data-remove>×</button></div></div><div class="v3-add"><div class="add-line"><input placeholder="输入模型 ID"><button class="primary" data-add>＋ 添加模型</button></div></div><div class="hint">供应商的 API Key、Base URL 和连接测试放在“连接设置”中，不与模型列表争夺空间。</div></section>
+    </div>
+  </article>
+
+  <article class="variant v4" data-variant="v4">
+    <header class="variant-head"><div class="variant-title"><span class="variant-number">04</span><div><h2>Default + Drawer</h2><p class="variant-note">默认状态极简，只有用户主动管理多个模型时才打开抽屉，最适合日常使用。</p></div></div><span class="tag">最轻量</span></header>
+    <div class="surface">
+      <div class="compact-provider"><button class="provider-summary" data-open-provider><strong data-current-provider>DeepSeek (OpenAI)</strong><span data-current-endpoint>https://api.deepseek.com · 已连接</span></button><div class="provider-actions"><button class="provider-switch-button" data-open-provider>选择供应商</button><button class="connection-test" data-test-connection>测试连接</button><span class="connection-status" data-connection-status>已连接</span></div></div>
+      <div class="provider-drawer"><div class="drawer-head"><span>供应商</span><button class="ghost" data-open-provider>收起</button></div><div class="provider-options"><button class="provider-option active" data-provider-option="deepseek"><span>DeepSeek (OpenAI)</span><small>3 个模型 · 已连接</small></button><button class="provider-option" data-provider-option="qwen"><span>Qwen (Tongyi)</span><small>2 个模型 · 已连接</small></button><button class="provider-option" data-provider-option="glm"><span>GLM (Zhipu)</span><small>1 个模型 · 未配置</small></button></div><button class="add-provider" data-add-provider>＋ 添加供应商</button><div class="provider-form"><input data-provider-name placeholder="供应商名称，例如 OpenRouter"><input data-provider-url placeholder="Base URL，例如 https://openrouter.ai/api/v1"><div class="provider-form-actions"><button class="cancel" data-cancel-provider>取消</button><button class="save" data-save-provider>创建并配置</button></div></div></div>
+      <div class="current-card"><div class="current-top"><span class="current-label">DEFAULT MODEL</span><span class="badge">正在使用</span></div><span class="model-id" data-current-model>deepseek-v4-flash</span><span class="model-meta">新对话会自动使用这个模型</span><button data-open-drawer>管理模型库 →</button></div>
+      <div class="drawer"><div class="drawer-head"><span>模型库 <span style="color:var(--faint);font-weight:500" data-model-count>· 3 个</span></span><button data-open-drawer>展开</button></div><div class="drawer-body"><div class="model-list" data-list><div class="model-row default" data-model="deepseek-v4-flash"><span class="radio"></span><div class="model-main"><span class="model-id">deepseek-v4-flash</span><span class="model-meta">默认模型</span></div><button class="row-action" data-remove>×</button></div><div class="model-row" data-model="deepseek-reasoner"><span class="radio"></span><div class="model-main"><span class="model-id">deepseek-reasoner</span><span class="model-meta">点击切换默认</span></div><button class="row-action" data-remove>×</button></div><div class="model-row" data-model="deepseek-chat"><span class="radio"></span><div class="model-main"><span class="model-id">deepseek-chat</span><span class="model-meta">点击切换默认</span></div><button class="row-action" data-remove>×</button></div></div><div class="inline-add add-line"><input placeholder="模型 ID"><button class="primary" data-add>添加</button></div></div></div>
+      <div class="v4-note">模型只影响下一次请求，不会改变已经开始的对话。</div>
+    </div>
+  </article>
+</main>
+<footer>这是交互方向探索稿，方案 04 已在生产设置页落地。点击模型行可体验“设为默认”，点击 × 删除，添加框可加入模型；第 02 / 04 版需要先展开模型库；第 04 版点击供应商名称可切换或添加供应商。</footer>
+<script>  const clean = (value) => value.trim();
+  const providerCatalog = {
+    deepseek: { name: 'DeepSeek (OpenAI)', endpoint: 'https://api.deepseek.com · 已连接', status: '已连接', models: ['deepseek-v4-flash', 'deepseek-reasoner', 'deepseek-chat'], defaultModel: 'deepseek-v4-flash' },
+    qwen: { name: 'Qwen (Tongyi)', endpoint: 'https://dashscope.aliyuncs.com · 已连接', status: '已连接', models: ['qwen3-coder-next', 'qwen3-max'], defaultModel: 'qwen3-coder-next' },
+    glm: { name: 'GLM (Zhipu)', endpoint: 'https://open.bigmodel.cn · 未配置 Key', status: '未配置', models: ['glm-5.2'], defaultModel: 'glm-5.2' }
+  };
+function bindVariant(root) {
+  const list = root.querySelector('[data-list]');
+  const hero = root.querySelector('[data-hero]');
+  const setDefault = (row) => {
+    if (!row || row.matches('[data-remove]')) return;
+    root.querySelectorAll('.model-row').forEach((item) => item.classList.remove('default'));
+    row.classList.add('default');
+    root.querySelectorAll('.model-row .badge').forEach((badge) => badge.style.visibility = 'hidden');
+    const badge = row.querySelector('.badge');
+    if (badge) badge.style.visibility = 'visible';
+    if (hero) hero.textContent = row.dataset.model || '';
+    const current = root.querySelector('.current-card .model-id');
+    if (current) current.textContent = row.dataset.model || '';
+  };
+  const bindModelRow = (row) => {
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('[data-remove]')) return;
+      setDefault(row);
+    });
+    row.querySelector('[data-remove]')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (!row.classList.contains('default')) row.remove();
+    });
+  };
+  root.querySelectorAll('.model-row').forEach(bindModelRow);
+  root.querySelectorAll('[data-add]').forEach((button) => button.addEventListener('click', () => {
+    const input = button.parentElement.querySelector('input');
+    const value = clean(input.value);
+    if (!value || !list || [...root.querySelectorAll('.model-id')].some((el) => el.textContent === value)) return;
+    const row = document.createElement('div');
+    row.className = 'model-row';
+    row.dataset.model = value;
+    row.innerHTML = '<span class="radio"></span><div class="model-main"><span class="model-id"></span><span class="model-meta">点击设为默认</span></div><button class="row-action" data-remove>×</button>';
+    row.querySelector('.model-id').textContent = value;
+    list.appendChild(row);
+    bindModelRow(row);
+    input.value = '';
+  }));
+  root.querySelectorAll('[data-expand], [data-open-drawer]').forEach((button) => button.addEventListener('click', () => {
+    root.classList.toggle(root.classList.contains('v2') ? 'expanded' : 'open');
+    button.textContent = root.classList.contains('v2') ? (root.classList.contains('expanded') ? '收起' : '查看') : (root.classList.contains('open') ? '收起' : '展开');
+  }));
+  const renderV4Provider = (providerId) => {
+    const provider = providerCatalog[providerId];
+    if (!provider || !root.classList.contains('v4')) return;
+    root.querySelector('[data-current-provider]').textContent = provider.name;
+    root.querySelector('[data-current-endpoint]').textContent = provider.endpoint;
+    root.querySelector('[data-connection-status]').textContent = provider.status;
+    root.querySelector('[data-connection-status]').classList.toggle('error', provider.status !== '已连接');
+    root.querySelector('[data-model-count]').textContent = `· ${provider.models.length} 个`;
+    root.querySelector('[data-current-model]').textContent = provider.defaultModel;
+    const providerList = root.querySelector('.drawer-body [data-list]');
+    providerList.innerHTML = provider.models.map((model, index) => `<div class="model-row${index === 0 ? ' default' : ''}" data-model="${model}"><span class="radio"></span><div class="model-main"><span class="model-id"></span><span class="model-meta">${index === 0 ? '默认模型' : '点击切换默认'}</span></div><button class="row-action" data-remove>×</button></div>`).join('');
+    providerList.querySelectorAll('.model-id').forEach((el, index) => { el.textContent = provider.models[index]; });
+    providerList.querySelectorAll('.model-row').forEach(bindModelRow);
+    root.querySelectorAll('[data-provider-option]').forEach((option) => option.classList.toggle('active', option.dataset.providerOption === providerId));
+  };
+  root.querySelectorAll('[data-provider-option]').forEach((button) => button.addEventListener('click', () => {
+    renderV4Provider(button.dataset.providerOption);
+    root.classList.remove('adding-provider');
+    root.classList.remove('provider-open');
+  }));
+  root.querySelectorAll('[data-open-provider]').forEach((button) => button.addEventListener('click', () => {
+    root.classList.toggle('provider-open');
+    if (!root.classList.contains('provider-open')) root.classList.remove('adding-provider');
+  }));
+  root.querySelector('[data-test-connection]')?.addEventListener('click', (event) => {
+    const button = event.currentTarget;
+    const status = root.querySelector('[data-connection-status]');
+    button.disabled = true;
+    button.textContent = '测试中…';
+    status.textContent = '正在连接';
+    status.classList.remove('error');
+    window.setTimeout(() => {
+      button.disabled = false;
+      button.textContent = '测试连接';
+      status.textContent = '✓ 已连接 · 128 ms';
+    }, 700);
+  });
+  root.querySelector('[data-add-provider]')?.addEventListener('click', () => root.classList.add('adding-provider'));
+  root.querySelector('[data-cancel-provider]')?.addEventListener('click', () => root.classList.remove('adding-provider'));
+  root.querySelector('[data-save-provider]')?.addEventListener('click', () => {
+    const nameInput = root.querySelector('[data-provider-name]');
+    const urlInput = root.querySelector('[data-provider-url]');
+    const name = clean(nameInput.value);
+    const url = clean(urlInput.value);
+    if (!name || !url) return;
+    const id = `custom-${Date.now()}`;
+    providerCatalog[id] = { name, endpoint: `${url} · 未配置 Key`, status: '未配置', models: [], defaultModel: '' };
+    root.querySelectorAll('.provider-option').forEach((option) => option.classList.remove('active'));
+    const option = document.createElement('button');
+    option.className = 'provider-option active';
+    option.dataset.providerOption = id;
+    option.innerHTML = `<span></span><small>新建 · 需配置</small>`;
+    option.querySelector('span').textContent = name;
+    option.addEventListener('click', () => {
+      renderV4Provider(id);
+      root.classList.remove('adding-provider');
+      root.classList.remove('provider-open');
+    });
+    root.querySelector('.provider-options').prepend(option);
+    renderV4Provider(id);
+    nameInput.value = '';
+    urlInput.value = '';
+    root.classList.remove('adding-provider');
+  });
+}
+document.querySelectorAll('.variant').forEach(bindVariant);
+</script>
+</body>
+</html>
