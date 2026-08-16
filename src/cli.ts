@@ -63,7 +63,7 @@ function resolveCliVersion(): string {
   } catch {
     // Compiled binary has no package.json beside it — use the fallback.
   }
-  return 'v1.9.6-test2';
+  return 'v1.9.6';
 }
 
 const CLI_VERSION = resolveCliVersion();

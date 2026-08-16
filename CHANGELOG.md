@@ -3,9 +3,9 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v1.9.6-test2
+## v1.9.6
 
-**测试构建：CLI 版本烘焙、Harness 收尾顺序修复与自定义供应商配置 UX 细化**
+**正式版：内置供应商 per-provider 覆盖与官方端点修复、思考过程实时可视化、CLI Tier-2/3 Web 工具与能力审计清理**
 
 - CLI 版本号改为编译时烘焙：新增 `scripts/build-cli.ts`，用 `--define process.env.PURE_CLI_VERSION` 把 package.json 版本注入二进制，banner 与启动行永不漂移；dev 运行直接读 package.json，硬编码常量仅作最后兜底
 - 修复 Harness 事件流收尾顺序：checkpoint 持久化与记忆写入移到 `yield` 之前——消费者在 `Completed` 处 break 时不再丢失状态；`Interrupted` 快照回退到当前消息列表；新增回归测试锁定该行为
@@ -16,8 +16,8 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - CLI 同步 per-provider 覆盖：`~/.pure/config.json` 的 `providerOverrides` 现在对内置供应商生效——名称（`pure config` 列表与启动行）、Base URL（DeepSeek / Qwen / GLM 各 adapter 工厂接受覆盖端点，Qwen 有覆盖时不再强制要求 `DASHSCOPE_WORKSPACE_ID`）、API Key（优先读 config 明文条目，桌面端 `hasApiKey` 时从 `~/.pure/secrets.json` 的 `llm.apiKey.<id>` 槽读取，与 GUI 共享同一份密钥）；`pure config` 重跑不再丢弃已有覆盖
 - 内置供应商默认端点复核并全部对齐官方地址（DeepSeek `api.deepseek.com` / 百炼 `dashscope.aliyuncs.com/compatible-mode/v1` / 智谱 `open.bigmodel.cn/api/paas/v4`）；v11 迁移自动清理残留的默认值变体（带尾斜杠、大小写/空白变体、跨供应商交叉污染的注册表地址），每个内置卡片重新显示官方端点；设置面板保存 Base URL 时统一去除尾部斜杠
 - README（中英）新增「优点 / 独特之处 / 与其他 coding agent 的差异」一览；架构图补充请求预检（intake → assess → probe → plan → confirm）与 GUI/CLI 共享控制平面；默认界面改用真实截图
-
-## v1.9.6
+- 思考过程实时可视化：思考卡片提前到 preflight 起点，全程展示「正在准备… → 正在读取工作区… → 正在分析你的请求… → 实时思考文字」；分析路径复用同一张卡不再叠加；取消 / 中断时自动移除——简单问题不再有 3-7 秒静默等待
+- Web 工具卡片视觉升级：搜索 / 抓取 / 直查类工具（web_search / web_fetch / web_scrape / web_public_api）内容区（Input + Output）改为与主题一致的深蓝紫渐变表面（暗色 `#1E2340 → #161A31`、亮色 `#F2F0FC → #E9E5F7`），头部保持原蓝色层次；`web_scrape` / `web_public_api` 补全 web-tool 表面、名称 / 图标与参数摘要
 
 **GUI 卡片布局、Default + Drawer 供应商配置、Event Loop 文档与 CLI Tier-2/3 Web 工具**
 
