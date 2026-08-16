@@ -3,6 +3,16 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.6-test
+
+**测试构建：CLI 版本烘焙、Harness 收尾顺序修复与自定义供应商配置 UX 细化**
+
+- CLI 版本号改为编译时烘焙：新增 `scripts/build-cli.ts`，用 `--define process.env.PURE_CLI_VERSION` 把 package.json 版本注入二进制，banner 与启动行永不漂移；dev 运行直接读 package.json，硬编码常量仅作最后兜底
+- 修复 Harness 事件流收尾顺序：checkpoint 持久化与记忆写入移到 `yield` 之前——消费者在 `Completed` 处 break 时不再丢失状态；`Interrupted` 快照回退到当前消息列表；新增回归测试锁定该行为
+- 修复上下文压缩摘要对空 content 消息的空引用风险
+- 自定义供应商配置提示精确化：Base URL 缺失时停在连接设置，只缺模型时自动打开模型库抽屉并聚焦输入框；启用成功后收起全部配置抽屉
+- README（中英）新增「优点 / 独特之处 / 与其他 coding agent 的差异」一览；架构图补充请求预检（intake → assess → probe → plan → confirm）与 GUI/CLI 共享控制平面；默认界面改用真实截图
+
 ## v1.9.6
 
 **GUI 卡片布局、Default + Drawer 供应商配置、Event Loop 文档与 CLI Tier-2/3 Web 工具**

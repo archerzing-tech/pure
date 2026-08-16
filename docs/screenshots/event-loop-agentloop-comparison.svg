@@ -57,7 +57,7 @@
   <rect x="734" y="132" width="622" height="526" rx="22" fill="#202033" stroke="#5b51a0" filter="url(#shadow)"/>
   <text x="766" y="174" class="section" fill="#a89bff">PURE CODING AGENT RUNTIME</text>
   <text x="766" y="207" class="heading">AgentLoop</text>
-  <text x="766" y="232" class="note">Turn tool results into evidence and continue until the outcome is verified.</text>
+  <text x="766" y="232" class="note">Assess intent and risk first, then turn tool results into evidence until the outcome is verified.</text>
 
   <path d="M866 336C900 285 942 266 984 272" fill="none" stroke="#a89bff" stroke-width="3" marker-end="url(#arrow-agent)"/>
   <path d="M1074 272C1124 266 1164 288 1194 336" fill="none" stroke="#a89bff" stroke-width="3" marker-end="url(#arrow-agent)"/>
@@ -77,9 +77,10 @@
   <rect x="786" y="506" width="496" height="64" rx="14" fill="#283746" stroke="#4f8990"/>
   <text x="1034" y="534" text-anchor="middle" class="node">TERMINATE only with evidence</text>
   <text x="1034" y="553" text-anchor="middle" class="small">budget · permissions · memory · user signal</text>
-  <text x="766" y="614" class="note">Core idea: event-driven scheduling becomes evidence-driven execution.</text>
+  <text x="766" y="596" class="small">Preflight: intake → assess → probe → plan → confirm (requestWorkflow) gates the loop.</text>
+  <text x="766" y="618" class="note">Core idea: event-driven scheduling becomes evidence-driven execution.</text>
 
   <rect x="44" y="692" width="1312" height="80" rx="16" fill="#11131e" stroke="#3b3a52"/>
   <text x="76" y="725" class="section" fill="#72d8ce">THE RELATIONSHIP</text>
-  <text x="76" y="750" class="note">Same inspiration: phases consume events and keep progress moving. Different responsibility: JavaScript runs callbacks; Pure runs tools, verifies outcomes, and maintains project memory.</text>
+  <text x="76" y="750" class="note">Same inspiration: phases consume events and keep progress moving. Different responsibility: JavaScript runs callbacks; Pure first assesses intent/risk/trap, then runs tools, verifies outcomes, and maintains evolving project memory.</text>
 </svg>

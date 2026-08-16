@@ -230,6 +230,7 @@ const translations: Record<Language, Record<string, string>> = {
     'llm.custom.defaultName': '用户自定义',
     'llm.custom.addedBlank': '已创建自定义供应商，请填写名称与 Base URL',
     'llm.custom.needURL': '⚠ 未配置 — 请填写 Base URL',
+    'llm.custom.needModel': '⚠ 未配置 — 请添加至少一个模型',
     'llm.custom.preset.openai': 'OpenAI',
     'llm.custom.preset.openrouter': 'OpenRouter',
     'llm.custom.preset.nvidia': 'NVIDIA NIM',
@@ -282,7 +283,7 @@ const translations: Record<Language, Record<string, string>> = {
     'llm.custom.editing': '配置中',
     'llm.custom.notEnabled': '未启用',
     'llm.custom.enableBtn': '启用此供应商',
-    'llm.custom.configureFirst': '请先填写名称与 Base URL，配置完成后再点击卡片启用',
+    'llm.custom.configureFirst': '请先填写 Base URL 并添加至少一个模型，配置完成后再点击卡片启用',
     'llm.custom.enabledToast': '已启用 {name}',
     'llm.custom.addedConfig': '{name} 已添加 — 点击卡片即可启用',
 
@@ -864,6 +865,7 @@ const translations: Record<Language, Record<string, string>> = {
     'llm.custom.defaultName': 'Custom',
     'llm.custom.addedBlank': 'Custom provider created — fill in the name and Base URL',
     'llm.custom.needURL': '⚠ Unconfigured — fill in the Base URL',
+    'llm.custom.needModel': '⚠ Unconfigured — add at least one model',
     'llm.custom.preset.openai': 'OpenAI',
     'llm.custom.preset.openrouter': 'OpenRouter',
     'llm.custom.preset.nvidia': 'NVIDIA NIM',
@@ -916,7 +918,7 @@ const translations: Record<Language, Record<string, string>> = {
     'llm.custom.editing': 'Configuring',
     'llm.custom.notEnabled': 'Not enabled',
     'llm.custom.enableBtn': 'Enable this provider',
-    'llm.custom.configureFirst': 'Fill in the name and Base URL first, then click the card to enable it',
+    'llm.custom.configureFirst': 'Fill in the Base URL and add at least one model first, then click the card to enable it',
     'llm.custom.enabledToast': '{name} enabled',
     'llm.custom.addedConfig': '{name} added — click the card to enable it',
 

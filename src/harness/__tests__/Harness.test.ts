@@ -781,4 +781,35 @@ describe('Harness resume (P1-7)', () => {
     expect(roles(savedMsgs)).toContain('assistant');
     expect(savedMsgs[savedMsgs.length - 1].content).toBe('done');
   });
+
+  it('persists checkpoint + memory when the consumer breaks on Completed', async () => {
+    const store = new MemoryStore();
+    const memStore = new FakeMemoryStore();
+    const llm = recordingLLM('final answer');
+    const harness = new Harness({
+      sessionId: 'sess-break',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      stateStore: store,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    // Consume only until Completed, then break without resuming the generator —
+    // the checkpoint + memory side effects must have run before the yield.
+    let completed = false;
+    for await (const event of harness.run('SYS', 'do the thing')) {
+      if (event.type === 'Completed') {
+        completed = true;
+        break;
+      }
+    }
+    expect(completed).toBe(true);
+
+    const session = store.loadSession('sess-break');
+    expect(session).not.toBeNull();
+    expect(session!.checkpoints.some(cp => cp.label === 'turn_completed')).toBe(true);
+    expect(memStore.entries.some(e => e.type === 'successful_pattern')).toBe(true);
+  });
 });
