@@ -52,7 +52,7 @@ Pure is not just a chat window with shell access. Its unique design is the combi
 - **会话记忆 ≠ UI 转录**：V2 快照分三层（`modelContext` / `transcript` / `uiState`），历史恢复时展示层无法反向污染下一次 LLM 请求。
 - **能力缺口诚实协议**：模型不做它没有的能力——需要 OCR / PDF / 音频 / 视觉时会自己查找并安装 skill 或工具、验证可用后再用，并告诉你装了什么。
 - **逻辑陷阱逃生**：失败后提示“重读原始请求”，识别自相矛盾 / 不可能的前提，换一个解释而不是死磕同一条路径。
-- **失败记忆**：同一调用反复失败会被记为 `error_pattern`，未来会话在 `<session_memory>` 里被告知“别重复这个调用”。
+- **失败记忆**：**每一次**失败的执行都会在后续思路中降级——同会话内下一次思考前被显式告知“不要重复完全相同的调用”；会话结束时未恢复的失败（包括被放弃的单一失败）一律沉淀为 `error_pattern`（带原始请求作检索锚点），未来会话在 `<session_memory>` 里被告知“别重复这个调用”；已验证的成功经验以更高优先级注入并排在错误教训之前。
 
 **与其他 coding agent 的差异 / How it differs**
 
