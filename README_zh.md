@@ -1,38 +1,38 @@
 # Pure
 
-**Pure** 是一个本地优先的 AI 编程助手，核心只有两个坚持：**用一个不会轻易停下来的闭环完成任务，用会进化但不会无限膨胀的记忆延续经验**。它可以读取、写入和编辑文件，执行 Shell 命令，并在配置 verifier 时验证结果，再把紧凑的项目经验带到下一次会话 — 这一切都通过快速的终端 CLI 或原生 macOS 桌面应用完成。
+**Pure** 是一个本地优先的 AI 编程助手，核心只有两个坚持：**用一个不会轻易停下来的闭环完成任务，用会进化但不会无限膨胀的记忆延续经验**。它的 Agent Loop 灵感来自 JavaScript 引擎中的 Event Loop：借鉴事件驱动、分阶段调度和持续推进的思路，让编码任务不断消费工具结果，直到获得可验证的完成证据。Pure 可以读取、写入和编辑文件，执行 Shell 命令，并在配置 verifier 时验证结果，再把紧凑的项目经验带到下一次会话 — 这一切都通过快速的终端 CLI 或原生 macOS 桌面应用完成。它的对话窗口是会话状态的映射，不是长期记忆的直接倾倒：已保存的会话转录会被映射成界面内容，而检索到的记忆只留在模型上下文中，除非界面明确把它展示出来。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.5-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.6-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
 
 ---
 
-## 界面截图与架构图
+## 界面视觉与架构图
 
 <p align="center">
-  <img src="docs/screenshots/app-current.png" alt="Pure 当前应用界面" width="720" />
+  <img src="docs/screenshots/pure-ui-default-drawer.svg" alt="Pure GUI Default + Drawer 布局" width="720" />
   <br />
-  <em>当前应用界面 — 工作区状态、任务输入、模式/模型控制和项目上下文面板</em>
+  <em>Pure GUI — 默认态保持清爽，供应商、模型和连接 Drawer 保持统一外宽</em>
   <br /><br />
-  <img src="docs/screenshots/landing.png" alt="Pure 首页" width="720" />
+  <img src="docs/screenshots/event-loop-agentloop-comparison.svg" alt="经典 JavaScript Event Loop 与 Pure AgentLoop 对比" width="720" />
   <br />
-  <em>当前首页 — 工作区选择、任务输入框、模式/模型控制和状态栏</em>
-  <br /><br />
-  <img src="docs/screenshots/memory-settings.png" alt="Pure 记忆设置 — 遗忘速度、诊断和导入导出" width="720" />
-  <br />
-  <em>当前记忆工作区 — 遗忘速度、运行时诊断和记忆导入/导出控制</em>
+  <em>概念对比图：经典 JavaScript Event Loop 的调度方式与 Pure 证据驱动 AgentLoop；概念参考 <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model">MDN 执行模型</a> 和 <a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick">Node.js Event Loop 文档</a></em>
   <br /><br />
   <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure Agent Loop 与进化项目记忆" width="720" />
   <br />
-  <em>架构图 — 证据驱动的执行闭环与会进化的项目记忆</em>
+  <em>架构图 — 经过验证的执行闭环与按项目隔离、持续进化的记忆</em>
 </p>
+
+上面的视觉图本身就是 Pure 设计的一部分：界面通过渐进式 Drawer 控制配置复杂度，运行时则把每次工具结果变成证据，把通过验证的结果沉淀为候选经验。
 
 ---
 
-## Pure 和普通 coding agent 的不同
+## Pure 的独特之处
+
+Pure 不只是一个可以调用 Shell 的聊天窗口。它的独特性来自三件事的组合：**证据驱动的执行闭环**、**界面展示与模型上下文分离**，以及**会维护而不是无限堆积的记忆**。
 
 很多 coding agent 的介绍重点是“能调用哪些工具”。Pure 更关注的是：**工具调用之后，智能体是否继续验证、如何从失败中退出，以及下一次是否真的记住了经验**。
 
@@ -48,7 +48,11 @@
 
 ### 1. Agent Loop：在完成之前先拿到证据
 
-Pure 的引擎是一个流式五状态事件循环：
+Pure 的引擎是一个借鉴 JavaScript 引擎 Event Loop 思路的流式五状态事件循环。它不是 JavaScript 运行时本身，而是把事件驱动、分阶段推进的方式迁移到智能体执行中：每次工具结果都会成为可观察事件，推动下一阶段继续运行：
+
+<p align="center">
+  <img src="docs/screenshots/event-loop-agentloop-comparison.svg" alt="JavaScript Event Loop 与 Pure AgentLoop 对比" width="720" />
+</p>
 
 ```text
 THINK → ACT → OBSERVE ──┐
@@ -57,6 +61,8 @@ THINK → ACT → OBSERVE ──┐
               │
           TERMINATE
 ```
+
+这个类比有明确边界：JavaScript 运行时调度 callback 和 microtask；Pure 调度思考、工具、观察、验证和失败恢复。借鉴的是持续消费事件、分阶段推进的模型；Pure 的智能体扩展则是：没有证据支持，就不因为“看起来合理”而结束。
 
 - **THINK** — 结合当前请求、工具、预算和相关记忆，规划下一步。
 - **ACT** — 在权限、文件锁保护下执行工具调用；只读工作可并行，写入工作串行。
@@ -106,9 +112,9 @@ THINK → ACT → OBSERVE ──┐
 
 ### 1.65 会话记忆与界面转录分离
 
-GUI 会话不会把“界面显示内容”直接当作 LLM 记忆。V2 会话快照明确拆分为三层：`modelContext.messages` 是下一轮真正发送给 LLM 的 canonical 消息；`transcript` 保存分析、思考、工具参数/结果、Markdown 富媒体和文件卡片等界面转录；`uiState` 保存计划游标和暂停状态等界面运行状态。
+GUI 会话不会把“界面显示内容”直接当作 LLM 记忆，对话窗口也不是长期记忆的直接视图，而是会话状态的映射。V2 会话快照明确拆分为三层：`modelContext.messages` 是下一轮真正发送给 LLM 的 canonical 消息；`transcript` 保存分析、思考、工具参数/结果、Markdown 富媒体和文件卡片等界面转录；`uiState` 保存计划游标和暂停状态等界面运行状态。
 
-历史恢复先把 `modelContext.messages` 加载回 Agent，再通过 `src/ui/transcriptProjection.ts` 将 `transcript` 投影为用户消息、分析卡、思考阶段、工具行、助手回复、评估卡和产物卡片，最后由 UI 渲染。`displayContent` 等旧版展示字段不会回填空的模型消息，因此界面信息不会污染下一次 LLM 请求；上下文压缩也只影响模型窗口，不删除可见转录。
+历史恢复先把 `modelContext.messages` 加载回 Agent，再通过 `src/ui/transcriptProjection.ts` 将 `transcript` 映射为用户消息、分析卡、思考阶段、工具行、助手回复、评估卡和产物卡片，最后由 UI 渲染。可见对话的来源是这层转录映射，而不是把长期记忆条目直接复制进窗口；检索到的记忆会被注入模型专用的 `<session_memory>` 上下文。`displayContent` 等旧版展示字段不会回填空的模型消息，因此界面信息不会污染下一次 LLM 请求；上下文压缩也只影响模型窗口，不删除可见转录。
 
 旧版 `StoredMessage[]` 会在读取时迁移到 V2。工具调用通过 `toolCallId` 配对，未返回的调用显示为 stopped，旧会话缺少 `toolExec` 时会从工具消息补全。详细字段、保存/恢复链路和后续优化方向见 [`docs/session-persistence-and-transcript.md`](docs/session-persistence-and-transcript.md)。
 
@@ -301,7 +307,47 @@ pure/
 | Qwen / DashScope | `--provider qwen` | `DASHSCOPE_API_KEY` |
 | GLM / 智谱 | `--provider glm` | `ZHIPU_API_KEY` |
 
-GUI 设置 → LLM 页面支持一个供应商配置多个大模型。默认界面只突出当前供应商和默认模型；点击「选择供应商」可切换供应商及其模型库，点击「管理模型库」可添加、删除或设置默认模型，点击「测试连接」可检测当前端点。API Key 和 Base URL 仍可在「连接设置」中编辑。
+GUI 设置 → LLM 页面支持一个供应商配置多个大模型。默认界面只突出当前供应商和默认模型；点击「选择供应商」可展开或收起供应商 Drawer，点击「管理模型库」可添加、删除或设置默认模型，点击「测试连接」可检测当前端点。知名供应商使用内置端点和默认模型，只需填写 API Key；Base URL 和供应商名称只对自定义端点显示。
+
+### Web 搜索与抓取 Key（CLI，全部可选）
+
+不配置任何 key，CLI 也能通过免费 HTML 后端（Sogou / cn.bing.com / DuckDuckGo / Bing）搜索，并通过免 key 公共 API 回答结构化查询（天气、地理编码、新闻、维基、IP、汇率、股票、GitHub、航班动态）。可选 key 提升质量与稳定性——配置的多个后端按「第一个出结果者胜」降级，失败/被限流的后端会进入短暂冷却而不是反复重试：
+
+| 环境变量 | 用途 | 免费额度 | 申请链接 |
+|---|---|---|---|
+| `SERPER_API_KEY` | Google SERP 后端（中英文索引最好） | 2500 次（一次性） | [serper.dev](https://serper.dev) |
+| `TAVILY_API_KEY` | Tavily 搜索后端 | 1000 次/月 | [tavily.com](https://tavily.com) |
+| `EXA_API_KEY` | Exa 神经搜索后端 | 开户 $20 + 每月 $10 循环 | [exa.ai](https://exa.ai) |
+| `PURE_JINA_API_KEY` | `web_scrape` 兜底（r.jina.ai） | 免 key 可用，带 key 提高限额 | [jina.ai](https://jina.ai) |
+| `PURE_FIRECRAWL_API_KEY` | `web_scrape` 第二兜底 | 约 500–1000 credits/月 | [firecrawl.dev](https://firecrawl.dev) |
+| `PURE_AVIATIONSTACK_KEY` | 航班动态（如「CA981 航班动态」） | 100 次/月 | [aviationstack.com](https://aviationstack.com) |
+| `PURE_LOCATION` | 天气查询缺城市时的默认城市 | — | — |
+
+GUI 设置 → 工具 → Web 工具页内置 Serper / Tavily 配置项，附一键申请链接；其余 CLI key 通过环境变量设置。
+
+Web 工具结果带缓存，重复查询不会反复消耗免费额度：`web_search`（15 分钟）、`web_public_api`（按类别——天气/新闻/股票分钟级、地理编码/维基周级）、`web_scrape`/`web_fetch`（1 小时）统一读写 `~/.pure/cache/web-cache.json`，CLI 与 GUI 共享同一文件与 key 方案。缓存文件有上限（200 条、最旧优先淘汰、单值 30 KB）且容忍损坏。`PURE_WEB_CACHE=off` 关闭缓存，`PURE_CACHE_DIR` 可改目录。
+
+#### Scrapling MCP 服务器（可选）
+
+对付最难的反爬站点（Cloudflare 级别、JS 重页面），Scrapling 自带的 [MCP server](https://scrapling.readthedocs.io/en/latest/ai/mcp-server.html) 可以把自适应隐身抓取能力作为普通 MCP 工具接入 Pure——选择加入制，因为它需要 Python + uv（Pure 本身不捆绑浏览器）。2026-08 实测：启动命令必须是 `uvx --from "scrapling[ai]" scrapling mcp`——裸 `uvx scrapling mcp` 会装到空壳基础包，报 `ModuleNotFoundError: click` 直接退出。
+
+```bash
+pip install "scrapling[ai]"   # 一次性安装
+```
+
+两种启用方式：
+- **GUI**：设置 → MCP → 「＋ Scrapling 抓取」一键注册（浏览器工具请求超时 120 秒）。
+- **CLI**：每次运行传 flag，或把 `mcpServers` 写进 `~/.pure/config.json`（GUI 保存的也是这个文件）：
+
+```bash
+pure --workspace . --mcp-server "scrapling:uvx --from scrapling[ai] scrapling mcp" "抓一下这个网站"
+```
+
+下一次会话的工具列表会包含 Scrapling 的 fetch/scrape 工具（服务名前缀 `scrapling__…`），与其他 MCP 工具一样受权限管控。
+
+#### MCP 工具过滤（GUI + CLI）
+
+MCP 服务器可能一次性暴露大量工具；为避免第三方工具列表挤占内置工具选择，完整名（`serverName__tool`）命中排除前缀的工具不会被注册。在 **设置 → MCP → 排除 MCP 工具前缀** 里配置（如 `scrapling__bulk_, …`），或 CLI 重复传 `--mcp-exclude-prefix <前缀>`。服务器保持连接，只是匹配的工具对模型不可见。
 
 ### 权限模式
 

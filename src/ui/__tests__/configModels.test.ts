@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { defaults, modelListForProvider, normalizeProviderModels } from '../config';
+import { defaults, modelListForProvider, normalizeProviderModels, SCRAPLING_MCP_PRESET } from '../config';
 
 describe('provider model lists', () => {
   it('keeps a built-in provider usable with one default model', () => {
@@ -41,5 +41,34 @@ describe('provider model lists', () => {
       openai: [' gpt-4o ', 'gpt-4o', '', 42, 'gpt-4o-mini'],
       broken: 'not-an-array',
     })).toEqual({ openai: ['gpt-4o', 'gpt-4o-mini'] });
+  });
+});
+
+describe('Scrapling MCP preset', () => {
+  it('launches scrapling with the [ai] extra (bare uvx scrapling mcp lacks CLI deps)', () => {
+    expect(SCRAPLING_MCP_PRESET).toEqual({
+      name: 'scrapling',
+      transport: 'stdio',
+      command: ['uvx', '--from', 'scrapling[ai]', 'scrapling', 'mcp'],
+      requestTimeoutMs: 120_000,
+    });
+  });
+
+  it('sets a long request timeout for browser-backed tools', () => {
+    expect(SCRAPLING_MCP_PRESET.requestTimeoutMs).toBeGreaterThanOrEqual(120_000);
+  });
+
+  it('is NOT part of the always-on defaults (Python + uv is opt-in)', () => {
+    const d = defaults();
+    expect(d.mcpServers.some(s => s.name === 'scrapling')).toBe(false);
+  });
+
+  it('defaults to no excluded MCP prefixes', () => {
+    expect(defaults().mcpExcludedPrefixes).toEqual([]);
+  });
+
+  it('does not collide with the built-in web-search server name', () => {
+    const names = new Set([...defaults().mcpServers, SCRAPLING_MCP_PRESET].map(s => s.name));
+    expect(names.size).toBe(2); // web-search + scrapling
   });
 });

@@ -374,9 +374,7 @@
                       <span id="provider-v4-current-endpoint">https://api.deepseek.com</span>
                     </div>
                     <div class="provider-v4-summary-actions">
-                      <span class="provider-v4-connection-status" id="provider-v4-connection-status" data-state="active" data-i18n="llm.connection.connected">已连接</span>
-                      <button type="button" class="provider-v4-test-btn" id="provider-v4-test-btn" data-i18n="llm.connection.test">测试连接</button>
-                      <button type="button" class="provider-v4-provider-btn" data-open-provider aria-expanded="false" data-i18n="llm.provider.chooseButton">选择供应商</button>
+                      <button type="button" class="provider-v4-provider-btn" data-open-provider aria-expanded="false" aria-controls="provider-v4-provider-drawer" data-i18n="llm.provider.chooseButton">选择供应商</button>
                     </div>
                   </div>
                   <div class="provider-v4-provider-drawer" id="provider-v4-provider-drawer" hidden>
@@ -437,54 +435,54 @@
                     </div>
                     <strong class="provider-v4-current-model-name" id="provider-v4-current-model-name">deepseek-v4-flash</strong>
                     <span class="provider-v4-current-model-hint" data-i18n="llm.model.newChatHint">新对话会自动使用这个模型</span>
-                    <button type="button" class="provider-v4-manage-btn" data-open-models aria-expanded="false"><span data-i18n="llm.model.manage">管理模型库</span><span aria-hidden="true">→</span></button>
+                    <button type="button" class="provider-v4-manage-btn" data-open-models aria-expanded="false" aria-controls="provider-v4-model-drawer"><span data-i18n="llm.model.manage">管理模型库</span><span aria-hidden="true">→</span></button>
                   </div>
-                  <div class="provider-v4-model-drawer" id="provider-v4-model-drawer" hidden>
+                  <div class="provider-v4-model-drawer" id="provider-v4-model-drawer">
                     <div class="provider-v4-drawer-head">
                       <div>
                         <strong data-i18n="llm.model.library">模型库</strong>
                         <span id="provider-v4-model-count">· 1 个模型</span>
                       </div>
-                      <button type="button" class="provider-v4-close-btn" data-close-models aria-label="Close">×</button>
+                      <button type="button" class="provider-v4-model-drawer-toggle" data-open-models aria-expanded="false" aria-controls="provider-v4-model-drawer-body" data-i18n="llm.model.expand">展开</button>
                     </div>
-                    <div id="provider-v4-model-editor">
-                      <div class="setting-row provider-model-row">
-                        <div class="setting-info"><span class="setting-label" data-i18n="llm.model">Model</span><span class="setting-hint" data-i18n="llm.model.hint">模型标识符（可添加多个，点击芯片设为默认）</span></div>
-                        <div class="provider-model-editor">
-                          <section class="provider-model-editor-section provider-model-default-section">
-                            <div class="provider-model-section-copy">
-                              <span class="provider-model-section-kicker" data-i18n="llm.model.defaultKicker">默认模型</span>
-                              <span class="provider-model-section-hint" data-i18n="llm.model.editorDefaultHint">新对话优先使用此模型；点击列表项可切换</span>
-                            </div>
-                            <div class="provider-model-default-value">
-                              <input id="cfg-model" type="hidden" />
-                              <strong id="cfg-default-model-name">—</strong>
-                              <span class="provider-v4-active-badge" data-i18n="llm.model.inUse">正在使用</span>
-                            </div>
-                          </section>
-                          <section class="provider-model-editor-section provider-model-library-section">
-                            <div class="provider-model-library-heading">
-                              <div class="provider-model-section-copy">
-                                <span class="provider-model-section-kicker" data-i18n="llm.model.editorListTitle">模型库</span>
-                                <span class="provider-model-section-hint" data-i18n="llm.model.editorAddHint">输入模型 ID 添加到列表；点击列表项切换默认模型</span>
-                              </div>
-                              <button id="cfg-clear-models-btn" class="provider-model-clear-btn" type="button" data-i18n="llm.custom.clearModels" data-i18n-title="llm.custom.clearModelsTitle" title="删除除默认模型外的所有模型">全部删除</button>
-                            </div>
+                    <div id="provider-v4-model-drawer-body" class="provider-v4-model-drawer-body" hidden>
+                      <div id="provider-v4-model-editor">
+                        <div class="setting-row provider-model-row">
+                          <div class="setting-info"><span class="setting-label" data-i18n="llm.model">Model</span><span class="setting-hint" data-i18n="llm.model.hint">模型标识符（可添加多个，点击模型行设为默认）</span></div>
+                          <div class="provider-model-editor">
+                            <input id="cfg-model" type="hidden" />
+                            <div id="cfg-model-list" class="provider-model-list" role="list" hidden></div>
                             <div class="setting-input-group provider-model-input-group">
                               <input id="cfg-model-add" class="setting-input" type="text" data-i18n-placeholder="llm.custom.addModelPlaceholder" placeholder="输入模型 ID，例如 deepseek-reasoner" />
                               <button id="cfg-add-model-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.addModel" data-i18n-title="llm.custom.addModelTitle" title="将输入框中的模型加入列表，不改变当前默认模型" hidden>＋ 添加</button>
                               <button id="cfg-fetch-models-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.fetch" title="从 API 获取模型列表" hidden>⟳ 获取模型</button>
+                              <button id="cfg-clear-models-btn" class="provider-model-clear-btn" type="button" data-i18n="llm.custom.clearModels" data-i18n-title="llm.custom.clearModelsTitle" title="删除除默认模型外的所有模型">全部删除</button>
                             </div>
-                            <div id="cfg-model-list" class="provider-model-list" role="list" hidden></div>
-                          </section>
+                          </div>
                         </div>
                       </div>
                     </div>
                   </div>
-                  <div class="provider-v4-connection-drawer" id="provider-v4-connection-drawer">
-                    <button type="button" class="provider-v4-connection-toggle" data-open-connection aria-expanded="false">
-                      <span data-i18n="llm.connection.settings">连接设置</span><span aria-hidden="true">⌄</span>
-                    </button>
+                  <div class="provider-v4-connection-default" id="provider-v4-connection-default">
+                    <div class="provider-v4-connection-default-copy">
+                      <span class="provider-v4-kicker" data-i18n="llm.connection.kicker">CONNECTION</span>
+                      <strong data-i18n="llm.connection.settings">连接设置</strong>
+                      <span data-i18n="llm.connection.hint">API Key、Base URL 与供应商连接选项</span>
+                    </div>
+                    <div class="provider-v4-connection-default-actions">
+                      <span class="provider-v4-connection-status" id="provider-v4-connection-status" data-state="active" data-i18n="llm.connection.connected">已连接</span>
+                      <button type="button" class="provider-v4-test-btn" id="provider-v4-test-btn" data-i18n="llm.connection.test">测试连接</button>
+                      <button type="button" class="provider-v4-connection-open-btn" data-open-connection aria-expanded="false" aria-controls="provider-v4-connection-drawer"><span data-i18n="llm.connection.settings">连接设置</span><span aria-hidden="true">→</span></button>
+                    </div>
+                  </div>
+                  <div class="provider-v4-connection-drawer" id="provider-v4-connection-drawer" hidden>
+                    <div class="provider-v4-drawer-head">
+                      <div>
+                        <strong data-i18n="llm.connection.settings">连接设置</strong>
+                        <span data-i18n="llm.connection.hint">API Key、Base URL 与供应商连接选项</span>
+                      </div>
+                      <button type="button" class="provider-v4-close-btn" data-close-connection aria-label="Close">×</button>
+                    </div>
                 <div class="provider-config-card">
                   <div class="provider-config-header">
                     <div>
@@ -551,11 +549,15 @@
                   </div>
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="tools.serper">Serper.dev Search API</span><span class="setting-hint" data-i18n="tools.serper.hint">Optional: Serper key for Google-index web search (2500 free queries at serper.dev) — falls back to Tavily / free backends when empty</span></div>
-                    <input id="cfg-serper-key" class="setting-input" type="password" placeholder="serper-..." autocomplete="off" />
+                    <div class="key-field"><input id="cfg-serper-key" class="setting-input" type="password" placeholder="serper-..." autocomplete="off" /><a class="key-link" href="https://serper.dev" target="_blank" rel="noopener" data-i18n="tools.freeKey">免费 Key ↗</a></div>
                   </div>
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="tools.tavily">Tavily Search API</span><span class="setting-hint" data-i18n="tools.tavily.hint">Optional: Tavily key for high-quality web search (free tier at tavily.com) — falls back to free backends when empty</span></div>
-                    <input id="cfg-tavily-key" class="setting-input" type="password" placeholder="tvly-..." autocomplete="off" />
+                    <div class="key-field"><input id="cfg-tavily-key" class="setting-input" type="password" placeholder="tvly-..." autocomplete="off" /><a class="key-link" href="https://tavily.com" target="_blank" rel="noopener" data-i18n="tools.freeKey">免费 Key ↗</a></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.moreKeys">CLI 更多免费 Key</span><span class="setting-hint" data-i18n="tools.moreKeys.hint">CLI 环境变量：EXA_API_KEY · PURE_JINA_API_KEY · PURE_FIRECRAWL_API_KEY · PURE_AVIATIONSTACK_KEY</span></div>
+                    <div class="key-links"><a class="key-link" href="https://exa.ai" target="_blank" rel="noopener">Exa ↗</a><a class="key-link" href="https://jina.ai" target="_blank" rel="noopener">Jina ↗</a><a class="key-link" href="https://firecrawl.dev" target="_blank" rel="noopener">Firecrawl ↗</a><a class="key-link" href="https://aviationstack.com" target="_blank" rel="noopener">AviationStack ↗</a></div>
                   </div>
                 </div>
                 <h3 class="settings-section-title" data-i18n="tools.permissionSection">Permission &amp; approval</h3>
@@ -744,6 +746,18 @@
                     </div>
                   </div>
                   <button id="cfg-add-mcp" class="setting-btn primary" data-i18n="mcp.addBtn">+ Add MCP Server</button>
+                  <div class="mcp-preset-row">
+                    <button id="cfg-add-scrapling-mcp" class="setting-btn secondary" data-i18n="mcp.scraplingBtn">＋ Scrapling 抓取</button>
+                    <span class="mcp-preset-hint">
+                      <span data-i18n="mcp.scraplingHint">安装一次后一键添加（需要 Python + uv）：</span>
+                      <code>pip install "scrapling[ai]"</code>
+                      <a href="https://scrapling.readthedocs.io/en/latest/ai/mcp-server.html" target="_blank" rel="noopener"><span data-i18n="mcp.scraplingDocs">官方文档 ↗</span></a>
+                    </span>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="mcp.excludeLabel">排除 MCP 工具前缀</span><span class="setting-hint" data-i18n="mcp.excludeHint">逗号分隔；匹配的工具不会出现在模型工具列表（如 scrapling__bulk_）</span></div>
+                    <input id="cfg-mcp-exclude-prefixes" class="setting-input" type="text" placeholder="scrapling__bulk_, filesystem__" />
+                  </div>
                 </div>
               </div>
               <!-- Appearance -->

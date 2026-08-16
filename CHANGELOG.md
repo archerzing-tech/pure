@@ -3,6 +3,25 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.6
+
+**GUI 卡片布局、Default + Drawer 供应商配置、Event Loop 文档与 CLI Tier-2/3 Web 工具**
+
+- 统一 LLM 面板所有最外层卡片宽度，避免 Default 与 Drawer 边界错位
+- “选择供应商”支持展开/收起 toggle；知名供应商默认只需 API Key
+- 新增 GUI Default + Drawer 结构图，以及 JavaScript Event Loop 与 Pure AgentLoop 对比图
+- README 更新 Pure 的证据驱动执行、会话投影记忆和可进化项目记忆说明
+- CLI 新增 Tier-2/3 Web 工具：`web_public_api` 通过免 key 公共 API 直查结构化数据（天气/地理编码/新闻/维基/IP/汇率/股票/GitHub/航班动态），`web_scrape` 对已知 URL 提取可读文本（导航剥离、`#id/.class/tag` selector、RSS/JSON 自动格式化、Jina Reader 兜底）；`web_search` 对结构化查询自动走直查快路径
+- Web 搜索增强：新增 Exa 神经搜索后端（`EXA_API_KEY`，开户 $20 + 每月 $10 循环免费）；Serper/Tavily/Exa/免费 HTML 后端接入 BackendQuota 冷却与滑动窗口限流，失败或被限流的后端自动跳过而不是反复重试
+- `web_public_api` 直查未命中时自动降级到 web 搜索（`searchOnMiss:false` 可关闭），避免多一轮模型调用；新增航班动态意图（AviationStack，`PURE_AVIATIONSTACK_KEY`，100 次/月免费）
+- `web_scrape` 增加 Firecrawl 第二兜底（`PURE_FIRECRAWL_API_KEY`，免费额度约 500–1000 页/月），Jina 失败后自动升级
+- Web 工具结果缓存：`web_search` / `web_public_api` / `web_scrape` / `web_fetch` 结果按 TTL 写入 `~/.pure/cache/web-cache.json`（CLI 与 GUI 共享同一文件与 key 方案，FNV-1a 交叉测试锁定），重复查询不再重复消耗免费额度；搜索 15 分钟、页面内容 1 小时、结构化直查按类别区分（天气/新闻/股票分钟级，地理编码/维基周级），缓存文件有上限（200 条，最旧优先淘汰）且容忍损坏；`PURE_WEB_CACHE=off` 可关闭，`PURE_CACHE_DIR` 可改目录
+- 设置 → 工具页 Serper/Tavily 配置项旁新增「免费 Key ↗」一键申请链接；README 新增全部 Web 工具 key 表（含申请链接与免费额度）
+- GUI（macOS 桌面端）同步移植 Tier-2/3 Web 工具：Rust 侧 `web_search` 获得结构化直查快路径与 location 参数，新增 `web_public_api`（天气/地理编码/新闻/维基/IP/汇率/股票/航班动态等免 key 直查 + 未命中自动降级搜索）与 `web_scrape`（导航剥离、selector、RSS/JSON 格式化、Jina → Firecrawl 两级兜底）命令，与 CLI 行为对齐；`web_fetch` 同样获得 Jina/Firecrawl 兜底
+- 设置 → MCP 新增「＋ Scrapling 抓取」一键预设（`uvx --from "scrapling[ai]" scrapling mcp`，实测裸命令缺依赖），把 Scrapling 自适应隐身抓取能力以 MCP 工具形式接入（`scrapling__…` 前缀，权限管控同其他 MCP 工具）；浏览器类工具请求超时放宽到 120 秒（MCP 服务器配置新增 `requestTimeoutMs` 字段）
+- CLI 支持 MCP 服务器：读取 `~/.pure/config.json` 的 `mcpServers`（GUI 设置页写入的同一份），或重复传 `--mcp-server "<name>:<命令或 URL>"`；终端用户可直接用 Scrapling 等 MCP 工具，工具列表含 `scrapling__*`；修复 one-shot/REPL 退出时 MCP 子进程管道挂起 CLI 的问题（显式 disconnect）
+- MCP 工具前缀过滤：设置 → MCP 可配置「排除 MCP 工具前缀」（如 `scrapling__bulk_`），或 CLI 重复传 `--mcp-exclude-prefix`，匹配工具不进入模型工具列表，第三方 MCP 工具不再挤占内置工具选择
+
 ## v1.9.5
 
 **正式版：多模型配置、工作区响应与资源生命周期优化**

@@ -15,6 +15,7 @@ import {
   containsCJK,
   serperSearch,
   tavilySearch,
+  exaSearch,
   firstRelevantResult,
   readResponseText,
   charsetFromContentType,
@@ -386,5 +387,37 @@ describe('Charset-aware response decoding (mirrors Rust response_text_with_chars
     expect(sniffHtmlCharset(new TextEncoder().encode('<meta http-equiv="Content-Type" content="text/html; charset=GBK">'))).toBe('GBK');
     expect(sniffHtmlCharset(new TextEncoder().encode('<meta charset=UTF-8>'))).toBe('UTF-8');
     expect(sniffHtmlCharset(new TextEncoder().encode('<html><body>no meta</body></html>'))).toBeUndefined();
+  });
+});
+
+describe('Exa API backend', () => {
+  it('maps Exa results to SearchResult with the publish date in the title', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({
+        results: [
+          { title: 'Exa result one', url: 'https://exa.example/1', text: 'content one', publishedDate: '2026-08-10T00:00:00.000Z' },
+          { title: 'Exa result two', url: 'https://exa.example/2', text: 'content two' },
+          { title: 'No url', text: 'x' },
+        ],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    ) as unknown as typeof fetch;
+    process.env.EXA_API_KEY = 'exa-test';
+    try {
+      const results = await exaSearch('rust web framework', 10);
+      expect(results.length).toBe(2);
+      expect(results[0].title).toContain('Exa result one');
+      expect(results[0].title).toContain('2026-08-10');
+      expect(results[0].url).toBe('https://exa.example/1');
+      expect(results[1].snippet).toBe('content two');
+    } finally {
+      delete process.env.EXA_API_KEY;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('throws when no EXA_API_KEY is set', async () => {
+    delete process.env.EXA_API_KEY;
+    await expect(exaSearch('query', 10)).rejects.toThrow('EXA_API_KEY');
   });
 });

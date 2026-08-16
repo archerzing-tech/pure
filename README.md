@@ -1,38 +1,38 @@
 # Pure
 
-**Pure** is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. It reads, writes, and edits files, executes shell commands, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app.
+**Pure** is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. Its Agent Loop is inspired by the Event Loop in JavaScript engines: it borrows the idea of event-driven phases that keep progressing until the work reaches a verified outcome, then applies it to tool-driven coding tasks. Pure reads, writes, and edits files, executes shell commands, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app. Its conversation window is a projection of session state, not a direct dump of long-term memory: stored transcript data is mapped into UI blocks, while retrieved memory stays in the model context unless the UI explicitly represents it.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.5-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.6-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
 
 ---
 
-## Screenshots & architecture
+## Product visuals & architecture
 
 <p align="center">
-  <img src="docs/screenshots/app-current.png" alt="Pure current application shell" width="720" />
+  <img src="docs/screenshots/pure-ui-default-drawer.svg" alt="Pure GUI Default plus Drawer layout" width="720" />
   <br />
-  <em>Current application shell — workspace state, task composer, task mode/model controls, and project context panel</em>
+  <em>Pure GUI — a calm Default surface with equal-width provider, model, and connection Drawers</em>
   <br /><br />
-  <img src="docs/screenshots/landing.png" alt="Pure landing page" width="720" />
+  <img src="docs/screenshots/event-loop-agentloop-comparison.svg" alt="Classic JavaScript Event Loop compared with Pure AgentLoop" width="720" />
   <br />
-  <em>Current landing page — workspace picker, task composer, mode/model controls, and status bar</em>
-  <br /><br />
-  <img src="docs/screenshots/memory-settings.png" alt="Pure memory settings — forgetting speed, diagnostics, and export/import" width="720" />
-  <br />
-  <em>Current memory workspace — forgetting speed, runtime diagnostics, and memory export/import controls</em>
+  <em>Conceptual comparison: classic JavaScript Event Loop scheduling beside Pure's evidence-driven AgentLoop; based on the <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model">MDN execution model</a> and <a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick">Node.js Event Loop overview</a></em>
   <br /><br />
   <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure Agent Loop and evolving project memory" width="720" />
   <br />
-  <em>Architecture diagram — evidence-driven execution and evolving project memory</em>
+  <em>Architecture diagram — a verified execution loop connected to project-scoped evolving memory</em>
 </p>
+
+The visuals above are intentionally part of the documentation: Pure's UI keeps configuration progressive and predictable, while its runtime turns every tool result into evidence and every verified outcome into a candidate lesson.
 
 ---
 
-## Why Pure is different
+## What makes Pure different
+
+Pure is not just a chat window with shell access. Its unique design is the combination of **evidence-driven execution**, **separated presentation and model context**, and **memory that is maintained rather than accumulated**.
 
 Most coding agents are described by the tools they can call. Pure is defined by **what happens after a tool call**:
 
@@ -48,7 +48,11 @@ This is not a claim that every other agent behaves identically; it is Pure's des
 
 ### 1. The Agent Loop: evidence before completion
 
-Pure's engine is a streaming five-state event loop:
+Pure's engine is a streaming five-state event loop inspired by the Event Loop model used by JavaScript engines. It is not a JavaScript runtime loop; it adapts the same phase-oriented, event-driven way of thinking to agent execution, so each tool result becomes an observable event that drives the next phase:
+
+<p align="center">
+  <img src="docs/screenshots/event-loop-agentloop-comparison.svg" alt="JavaScript Event Loop and Pure AgentLoop comparison" width="720" />
+</p>
 
 ```text
 THINK → ACT → OBSERVE ──┐
@@ -57,6 +61,8 @@ THINK → ACT → OBSERVE ──┐
               │
           TERMINATE
 ```
+
+The analogy is deliberately limited: JavaScript's runtime schedules callbacks and microtasks; Pure schedules reasoning, tools, observations, verification, and recovery. The borrowed idea is the continuously advancing, event-driven phase model — the agent-specific addition is that Pure refuses to terminate on plausibility alone.
 
 - **THINK** — plan the next move with the current request, tools, budget, and relevant memory.
 - **ACT** — execute tool calls with permissions, file locks, parallel read-only work, and serialized writes.
@@ -106,9 +112,9 @@ Compaction does not encode a fixed number of plan steps, Todo items, or verifica
 
 ### 1.65 Session memory and UI transcript are separate
 
-The GUI does not treat everything visible on screen as LLM memory. V2 session snapshots have three explicit layers: `modelContext.messages` contains the canonical messages sent to the next LLM request; `transcript` stores UI-only analysis, reasoning phases, tool parameters/results, rich Markdown, and artifact cards; `uiState` stores UI runtime state such as the plan cursor and paused-plan status.
+The GUI does not treat everything visible on screen as LLM memory, and the conversation window is not a direct view of long-term memory. It is a projection of session state: V2 session snapshots have three explicit layers: `modelContext.messages` contains the canonical messages sent to the next LLM request; `transcript` stores UI-only analysis, reasoning phases, tool parameters/results, rich Markdown, and artifact cards; `uiState` stores UI runtime state such as the plan cursor and paused-plan status.
 
-History restore first loads `modelContext.messages` back into the agent, then `src/ui/transcriptProjection.ts` projects `transcript` into user messages, analysis cards, thinking phases, tool rows, assistant replies, assessment cards, and artifact cards for the UI renderer. Legacy `displayContent`-style fields never backfill an empty model message, so presentation data cannot contaminate the next LLM request; context compaction changes only the model window and does not delete the visible transcript.
+History restore first loads `modelContext.messages` back into the agent, then `src/ui/transcriptProjection.ts` maps `transcript` into user messages, analysis cards, thinking phases, tool rows, assistant replies, assessment cards, and artifact cards for the UI renderer. This mapping is the source of the visible conversation; long-term memories are not copied directly into it. Retrieved memories are instead injected into the model's dedicated `<session_memory>` context, while legacy `displayContent`-style fields never backfill an empty model message. Presentation data therefore cannot contaminate the next LLM request, and context compaction changes only the model window without deleting the visible transcript.
 
 Legacy `StoredMessage[]` data is migrated to V2 on read. Tool calls are paired by `toolCallId`; unreturned calls replay as stopped rows; older sessions without `toolExec` recover tool metadata from the tool message and its preceding call. See [`docs/session-persistence-and-transcript.md`](docs/session-persistence-and-transcript.md) for the field contract, save/restore flow, compatibility rules, and optimization roadmap.
 
@@ -301,7 +307,47 @@ Supported providers:
 | Qwen / DashScope | `--provider qwen` | `DASHSCOPE_API_KEY` |
 | GLM / Zhipu | `--provider glm` | `ZHIPU_API_KEY` |
 
-The GUI Settings → LLM page supports multiple models per provider. The compact default view shows the active provider and model; use **Choose provider** to switch provider and its model library, **Manage model library** to add/remove models or set the default, and **Test connection** to probe the selected endpoint. API key and Base URL fields remain available under Connection settings.
+The GUI Settings → LLM page supports multiple models per provider. The compact default view shows the active provider and model; use **Choose provider** to expand or collapse the provider Drawer, **Manage model library** to add/remove models or set the default, and **Test connection** to probe the selected endpoint. Known providers use their built-in endpoint/model defaults and only ask for an API key; Base URL and provider-name fields appear only for custom endpoints.
+
+### Web search & scraping keys (CLI, all optional)
+
+Without any key, the CLI already searches via free HTML backends (Sogou / cn.bing.com / DuckDuckGo / Bing) and answers structured lookups (weather, geocode, news, wiki, IP, FX, stock, GitHub, flight status) via no-key public APIs. Optional keys raise quality and reliability — the first configured backend that answers wins, and failed/rate-limited backends enter a short cooldown instead of being retried:
+
+| Env var | Purpose | Free tier | Get key |
+|---|---|---|---|
+| `SERPER_API_KEY` | Google SERP backend (best CN+EN index) | 2,500 queries (one-time) | [serper.dev](https://serper.dev) |
+| `TAVILY_API_KEY` | Tavily search backend | 1,000 searches/month | [tavily.com](https://tavily.com) |
+| `EXA_API_KEY` | Exa neural search backend | $20 on signup + $10/month recurring | [exa.ai](https://exa.ai) |
+| `PURE_JINA_API_KEY` | `web_scrape` fallback (r.jina.ai) | works without a key; key raises limits | [jina.ai](https://jina.ai) |
+| `PURE_FIRECRAWL_API_KEY` | `web_scrape` second fallback | ~500–1,000 credits/month | [firecrawl.dev](https://firecrawl.dev) |
+| `PURE_AVIATIONSTACK_KEY` | Flight status (`CA981 航班动态`) | 100 requests/month | [aviationstack.com](https://aviationstack.com) |
+| `PURE_LOCATION` | Default city for weather without one | — | — |
+
+The GUI Settings → Tools → Web Tools page shows the same Serper / Tavily fields with one-click signup links; the CLI-only keys are set as environment variables.
+
+Results are cached so repeated queries don't burn free-tier quota: `web_search` (15 min), `web_public_api` (per intent — weather/news/stock are minutes-fresh, geocode/wiki are weeks-fresh), and `web_scrape`/`web_fetch` (1 hour) all read and write `~/.pure/cache/web-cache.json`, shared between CLI and GUI with the same key scheme. The file is bounded (200 entries, oldest-first eviction, 30 KB per value) and tolerates corruption. `PURE_WEB_CACHE=off` disables the cache; `PURE_CACHE_DIR` overrides its directory.
+
+#### Scrapling MCP server (optional)
+
+For the hardest anti-bot targets (Cloudflare-grade, JS-heavy pages), Scrapling's own [MCP server](https://scrapling.readthedocs.io/en/latest/ai/mcp-server.html) brings adaptive stealth scraping into Pure as regular MCP tools — opt-in because it needs Python + uv (Pure itself does not bundle a browser). Verified 2026-08: the launch command must be `uvx --from "scrapling[ai]" scrapling mcp` — bare `uvx scrapling mcp` ships the empty base package and dies with `ModuleNotFoundError: click`.
+
+```bash
+pip install "scrapling[ai]"   # one-time install
+```
+
+Then either:
+- **GUI**: Settings → MCP → **＋ Scrapling 抓取** registers the server (120s request timeout for browser tools).
+- **CLI**: pass it per run, or add `mcpServers` to `~/.pure/config.json` (the GUI writes it there too):
+
+```bash
+pure --workspace . --mcp-server "scrapling:uvx --from scrapling[ai] scrapling mcp" "scrape this site"
+```
+
+The next session's tool list then includes Scrapling's fetch/scrape tools (server prefix `scrapling__…`), permission-gated like any other MCP tool.
+
+#### MCP tool filtering (GUI + CLI)
+
+MCP servers can expose many tools at once; to keep third-party lists from crowding out the built-in selection, tools whose full name (`serverName__tool`) starts with an excluded prefix are never registered. Set **Settings → MCP → 排除 MCP 工具前缀** (`scrapling__bulk_, …`), or repeat `--mcp-exclude-prefix <prefix>` on the CLI. The server stays connected; only its matching tools are hidden from the model.
 
 ### Permission Modes
 

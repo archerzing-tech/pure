@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820" role="img" aria-labelledby="title desc">
+  <title id="title">JavaScript Event Loop compared with Pure AgentLoop</title>
+  <desc id="desc">A side-by-side conceptual comparison between a classic JavaScript runtime event loop and Pure's evidence-driven coding agent loop.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#171522"/><stop offset="1" stop-color="#20283a"/></linearGradient>
+    <linearGradient id="js" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f6c453"/><stop offset="1" stop-color="#d98835"/></linearGradient>
+    <linearGradient id="agent" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a89bff"/><stop offset="1" stop-color="#6258d3"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#05060d" flood-opacity=".35"/></filter>
+    <marker id="arrow-js" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0L9 4.5L0 9Z" fill="#f6c453"/></marker>
+    <marker id="arrow-agent" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0L9 4.5L0 9Z" fill="#a89bff"/></marker>
+    <style>
+      .title { font: 700 29px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #f8f7ff; }
+      .subtitle { font: 400 14px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #b8b8c9; }
+      .section { font: 800 11px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing: .14em; }
+      .heading { font: 700 17px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #fff; }
+      .node { font: 700 13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #fff; }
+      .small { font: 400 11px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #d0cede; }
+      .note { font: 500 12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #b8b8c9; }
+    </style>
+  </defs>
+  <rect width="1400" height="820" rx="28" fill="url(#bg)"/>
+  <text x="58" y="62" class="title">From Event Loop to AgentLoop</text>
+  <text x="58" y="91" class="subtitle">Pure borrows the scheduling idea from JavaScript engines, then adds tools, evidence, verification, memory, and safe termination.</text>
+
+  <rect x="44" y="132" width="622" height="526" rx="22" fill="#242335" stroke="#594d3b" filter="url(#shadow)"/>
+  <text x="76" y="174" class="section" fill="#f6c453">CLASSIC JAVASCRIPT RUNTIME</text>
+  <text x="76" y="207" class="heading">Event Loop</text>
+  <text x="76" y="232" class="note">Move ready work into the call stack without blocking the runtime.</text>
+
+  <rect x="82" y="280" width="208" height="126" rx="16" fill="url(#js)"/>
+  <text x="186" y="320" text-anchor="middle" class="node">CALL STACK</text>
+  <text x="186" y="344" text-anchor="middle" class="small">run synchronous JavaScript</text>
+  <text x="186" y="364" text-anchor="middle" class="small">执行当前任务</text>
+
+  <rect x="378" y="280" width="208" height="126" rx="16" fill="#443e31" stroke="#a48647"/>
+  <text x="482" y="320" text-anchor="middle" class="node">TASK QUEUE</text>
+  <text x="482" y="344" text-anchor="middle" class="small">macrotasks / callbacks</text>
+  <text x="482" y="364" text-anchor="middle" class="small">等待调度的任务</text>
+
+  <rect x="82" y="460" width="208" height="96" rx="16" fill="#443e31" stroke="#a48647"/>
+  <text x="186" y="497" text-anchor="middle" class="node">MICROTASK QUEUE</text>
+  <text x="186" y="521" text-anchor="middle" class="small">Promise reactions first</text>
+  <text x="186" y="539" text-anchor="middle" class="small">微任务优先清空</text>
+
+  <rect x="378" y="460" width="208" height="96" rx="16" fill="#443e31" stroke="#a48647"/>
+  <text x="482" y="497" text-anchor="middle" class="node">WEB APIs / I/O</text>
+  <text x="482" y="521" text-anchor="middle" class="small">timers, network, DOM</text>
+  <text x="482" y="539" text-anchor="middle" class="small">异步事件来源</text>
+
+  <path d="M290 342H370" stroke="#f6c453" stroke-width="3" marker-end="url(#arrow-js)"/>
+  <path d="M482 406V452" stroke="#f6c453" stroke-width="3" marker-end="url(#arrow-js)"/>
+  <path d="M378 508H298" stroke="#f6c453" stroke-width="3" marker-end="url(#arrow-js)"/>
+  <path d="M186 460V414" stroke="#f6c453" stroke-width="3" marker-end="url(#arrow-js)"/>
+  <path d="M482 460C610 420 610 250 482 250C410 250 348 260 290 300" fill="none" stroke="#f6c453" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow-js)"/>
+  <text x="76" y="614" class="note">Core idea: keep the stack moving by consuming queued events.</text>
+
+  <rect x="734" y="132" width="622" height="526" rx="22" fill="#202033" stroke="#5b51a0" filter="url(#shadow)"/>
+  <text x="766" y="174" class="section" fill="#a89bff">PURE CODING AGENT RUNTIME</text>
+  <text x="766" y="207" class="heading">AgentLoop</text>
+  <text x="766" y="232" class="note">Turn tool results into evidence and continue until the outcome is verified.</text>
+
+  <path d="M866 336C900 285 942 266 984 272" fill="none" stroke="#a89bff" stroke-width="3" marker-end="url(#arrow-agent)"/>
+  <path d="M1074 272C1124 266 1164 288 1194 336" fill="none" stroke="#a89bff" stroke-width="3" marker-end="url(#arrow-agent)"/>
+  <path d="M1194 390C1165 438 1120 458 1073 454" fill="none" stroke="#a89bff" stroke-width="3" marker-end="url(#arrow-agent)"/>
+  <path d="M982 454C930 458 890 438 862 390" fill="none" stroke="#a89bff" stroke-width="3" marker-end="url(#arrow-agent)"/>
+  <path d="M984 322C1010 308 1048 308 1074 322" fill="none" stroke="#72d8ce" stroke-width="3" stroke-dasharray="7 7" marker-end="url(#arrow-agent)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="786" y="316" width="108" height="76" rx="14" fill="url(#agent)"/><text x="840" y="347" text-anchor="middle" class="node">THINK</text><text x="840" y="369" text-anchor="middle" class="small">规划下一步</text>
+    <rect x="980" y="228" width="108" height="76" rx="14" fill="url(#agent)"/><text x="1034" y="259" text-anchor="middle" class="node">ACT</text><text x="1034" y="281" text-anchor="middle" class="small">调用工具</text>
+    <rect x="1174" y="316" width="108" height="76" rx="14" fill="url(#agent)"/><text x="1228" y="347" text-anchor="middle" class="node">OBSERVE</text><text x="1228" y="369" text-anchor="middle" class="small">消费证据</text>
+    <rect x="980" y="414" width="108" height="76" rx="14" fill="url(#agent)"/><text x="1034" y="445" text-anchor="middle" class="node">VERIFY</text><text x="1034" y="467" text-anchor="middle" class="small">验证结果</text>
+  </g>
+  <rect x="900" y="336" width="270" height="66" rx="14" fill="#292746" stroke="#7167c5"/>
+  <text x="1035" y="364" text-anchor="middle" class="node">FailurePolicy</text>
+  <text x="1035" y="384" text-anchor="middle" class="small">retry → reflect → degrade → stop</text>
+  <rect x="786" y="506" width="496" height="64" rx="14" fill="#283746" stroke="#4f8990"/>
+  <text x="1034" y="534" text-anchor="middle" class="node">TERMINATE only with evidence</text>
+  <text x="1034" y="553" text-anchor="middle" class="small">budget · permissions · memory · user signal</text>
+  <text x="766" y="614" class="note">Core idea: event-driven scheduling becomes evidence-driven execution.</text>
+
+  <rect x="44" y="692" width="1312" height="80" rx="16" fill="#11131e" stroke="#3b3a52"/>
+  <text x="76" y="725" class="section" fill="#72d8ce">THE RELATIONSHIP</text>
+  <text x="76" y="750" class="note">Same inspiration: phases consume events and keep progress moving. Different responsibility: JavaScript runs callbacks; Pure runs tools, verifies outcomes, and maintains project memory.</text>
+</svg>

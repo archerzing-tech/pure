@@ -13,6 +13,9 @@ import { formatCommandError, safeParseArgs } from '../../shared/format';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
 import { isPublicToolName } from '../../shared/toolDefs';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotEntry, WorkspaceSnapshotPort } from '../../shared/workspaceSnapshot';
+import { cachedDirectPublicApi, quota } from './publicApis';
+import { pageCacheKey, PAGE_TTL_MS, searchCacheKey, SEARCH_TTL_MS, webCache } from './webCache';
+import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeViaFirecrawl, scrapeViaJina, truncateText } from './webScrape';
 
 /** Windows has no POSIX shell (`sh`) or `diff` binary — cmd.exe / Git for
  * Windows provide the equivalents. Module-level so every handler branches
@@ -88,8 +91,27 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'researcher_web': return await this.handleResearcherWeb(args, signal, start);
         case 'researcher_docs': return await this.handleResearcherDocs(args, signal, start);
         case 'code_searcher': return await this.handleCodeSearcher(args, signal, start);
-        case 'web_search': return await this.handleWebSearch(args, start);
+        case 'web_search': {
+          // Tier-2 fast path: structured intents (weather/geocode/news/wiki/IP/
+          // FX/stock/GitHub) are answered from curated no-key public APIs
+          // instead of search backends; only general queries fall through to
+          // a real search. researcher_web calls handleWebSearch directly, so
+          // this fast path never hijacks research queries.
+          const direct = await cachedDirectPublicApi(String(args.query ?? ''));
+          if (direct.outcome) {
+            return {
+              id: `tool_${Date.now()}`,
+              toolName: 'web_search',
+              result: `${direct.cached ? '[cached] ' : ''}[${direct.outcome.source}] ${direct.outcome.text}`,
+              success: true,
+              duration: Date.now() - start,
+            };
+          }
+          return await this.handleWebSearch(args, start);
+        }
         case 'web_fetch': return await this.handleWebFetch(args, signal, start);
+        case 'web_public_api': return await this.handleWebPublicApi(args, start);
+        case 'web_scrape': return await this.handleWebScrape(args, signal, start);
         case 'glob_files': return await this.handleGlobFiles(args, start);
         case 'replace_files': return await this.handleReplaceFiles(args, start);
         case 'git_diff': return await this.handleGitCmd(args, ['diff', ...(args.staged ? ['--staged'] : []), ...(typeof args.path === 'string' ? ['--', args.path as string] : [])], signal, start);
@@ -756,17 +778,37 @@ export class NodeToolAdapter implements ToolAdapter {
     const maxResults = Math.min(typeof args.maxResults === 'number' ? args.maxResults : 10, 20);
     const cjk = containsCJK(query);
 
+    // Result cache: identical queries inside an agent loop (or across CLI/GUI
+    // sessions) hit the shared ~/.pure/cache/web-cache.json instead of burning
+    // free-tier quota or re-hitting rate-limited backends. TTL is 15 minutes;
+    // PURE_WEB_CACHE=off disables. The Tier-2 fast path is cached separately
+    // (cachedDirectPublicApi) with its own per-intent TTLs.
+    const cacheKey = searchCacheKey(query, maxResults);
+    const cached = webCache().get(cacheKey);
+    if (cached !== undefined) {
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'web_search',
+        result: `[cached] ${cached}`,
+        success: true,
+        duration: Date.now() - start,
+      };
+    }
+
     // 1) Serper API backend (real Google index — best quality for Chinese AND
     // English): opt-in via the SERPER_API_KEY env var. Mirrors the Rust
     // web_search — on failure or (for CJK) a relevance-gated-out set, degrade
-    // to Tavily and then the free HTML backends below.
+    // to Tavily and then the free HTML backends below. Each API backend is
+    // guarded by BackendQuota: a failed/over-budget backend goes into cooldown
+    // instead of being retried on every query (free tiers die silently).
     let results: SearchResult[] = [];
     const failed: string[] = [];
     let anyEmpty = false;
     let irrelevant = 0;
-    if (process.env.SERPER_API_KEY?.trim()) {
+    if (process.env.SERPER_API_KEY?.trim() && !quota.isBlocked('serper')) {
       try {
         const r = await serperSearch(query, maxResults);
+        if (quota.registerUse('serper', 60_000, 20)) quota.markBlocked('serper', 60_000);
         if (r.length > 0) {
           if (!cjk || resultsRelevant(query, r)) results = dedupeResults(r);
           else irrelevant += 1;
@@ -774,6 +816,7 @@ export class NodeToolAdapter implements ToolAdapter {
           anyEmpty = true;
         }
       } catch (err: any) {
+        quota.markBlocked('serper', 300_000);
         failed.push(`Serper: ${err?.message ?? String(err)}`);
       }
     }
@@ -782,9 +825,10 @@ export class NodeToolAdapter implements ToolAdapter {
     // via the TAVILY_API_KEY env var. Mirrors the Rust web_search — on
     // failure or (for CJK) a relevance-gated-out set, degrade to the free
     // HTML backends below.
-    if (process.env.TAVILY_API_KEY?.trim()) {
+    if (process.env.TAVILY_API_KEY?.trim() && !quota.isBlocked('tavily')) {
       try {
         const r = await tavilySearch(query, maxResults);
+        if (quota.registerUse('tavily', 60_000, 20)) quota.markBlocked('tavily', 60_000);
         if (r.length > 0) {
           // API results are usually on-topic; the CJK relevance gate still
           // applies so a bad API answer degrades to scraping.
@@ -794,7 +838,27 @@ export class NodeToolAdapter implements ToolAdapter {
           anyEmpty = true;
         }
       } catch (err: any) {
+        quota.markBlocked('tavily', 300_000);
         failed.push(`Tavily: ${err?.message ?? String(err)}`);
+      }
+    }
+
+    // 3) Exa neural-search backend: $20 signup credits + $10/month recurring
+    // on the free tier (no payment method). Opt-in via the EXA_API_KEY env
+    // var; same cooldown/use-cap treatment as Serper and Tavily.
+    if (process.env.EXA_API_KEY?.trim() && !quota.isBlocked('exa')) {
+      try {
+        const r = await exaSearch(query, maxResults);
+        if (quota.registerUse('exa', 60_000, 30)) quota.markBlocked('exa', 60_000);
+        if (r.length > 0) {
+          if (!cjk || resultsRelevant(query, r)) results = dedupeResults(r);
+          else irrelevant += 1;
+        } else {
+          anyEmpty = true;
+        }
+      } catch (err: any) {
+        quota.markBlocked('exa', 300_000);
+        failed.push(`Exa: ${err?.message ?? String(err)}`);
       }
     }
 
@@ -811,7 +875,7 @@ export class NodeToolAdapter implements ToolAdapter {
         ? [
             {
               label: 'Sogou',
-              fetch: async () => {
+              fetch: guarded('Sogou', async () => {
                 const resp = await fetch(`https://www.sogou.com/web?query=${encodeURIComponent(query)}`, {
                   headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8' },
                   redirect: 'follow',
@@ -819,11 +883,11 @@ export class NodeToolAdapter implements ToolAdapter {
                 });
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 return parseSogouResults(await readResponseText(resp), maxResults);
-              },
+              }),
             },
             {
               label: 'cn.bing.com',
-              fetch: async () => {
+              fetch: guarded('cn.bing.com', async () => {
                 const resp = await fetch(`https://cn.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`, {
                   headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8' },
                   redirect: 'follow',
@@ -831,13 +895,13 @@ export class NodeToolAdapter implements ToolAdapter {
                 });
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 return parseBingResults(await readResponseText(resp), maxResults);
-              },
+              }),
             },
           ]
         : []),
       {
         label: 'DuckDuckGo',
-        fetch: async () => {
+        fetch: guarded('DuckDuckGo', async () => {
           const resp = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
             headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8' },
             redirect: 'follow',
@@ -845,11 +909,11 @@ export class NodeToolAdapter implements ToolAdapter {
           });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
           return parseDuckDuckGoResults(await readResponseText(resp), maxResults);
-        },
+        }),
       },
       {
         label: 'Bing',
-        fetch: async () => {
+        fetch: guarded('Bing', async () => {
           const resp = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`, {
             headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8' },
             redirect: 'follow',
@@ -857,15 +921,18 @@ export class NodeToolAdapter implements ToolAdapter {
           });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
           return parseBingResults(await readResponseText(resp), maxResults);
-        },
+        }),
       },
     ];
+    // A failed/rate-limited backend sits in cooldown (30s) so the next query
+    // skips it instead of re-hitting the same dead endpoint.
+    const activeBackends = backends.filter((b) => !quota.isBlocked(b.label));
 
     // 2) Free HTML backends, probed IN PARALLEL — first relevant set wins
     // ("first win"), so a dead/slow/irrelevant backend no longer serializes
     // the search. Mirrors the Rust run_html_backends_parallel.
-    if (results.length === 0) {
-      const outcome = await firstRelevantResult(query, backends);
+    if (results.length === 0 && activeBackends.length > 0) {
+      const outcome = await firstRelevantResult(query, activeBackends);
       if (outcome.results) {
         results = outcome.results;
       } else {
@@ -873,6 +940,10 @@ export class NodeToolAdapter implements ToolAdapter {
         anyEmpty = anyEmpty || outcome.anyEmpty;
         irrelevant += outcome.irrelevant;
       }
+    } else if (results.length === 0) {
+      // Every free backend is in cooldown (all failed recently) — retrying
+      // now would only re-hit rate limits.
+      failed.push('free HTML backends in cooldown (recent failures)');
     }
 
     if (results.length === 0) {
@@ -886,7 +957,7 @@ export class NodeToolAdapter implements ToolAdapter {
         return {
           id: `tool_${Date.now()}`,
           toolName: 'web_search',
-          result: `No results found for "${query}" on the available search backends (Tavily, Sogou, cn.bing.com, DuckDuckGo, Bing) — the backends returned either no hits or only content unrelated to the query${unreachable}. Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to contain the information.`,
+          result: `No results found for "${query}" on the available search backends (Serper, Tavily, Exa, Sogou, cn.bing.com, DuckDuckGo, Bing) — the backends returned either no hits or only content unrelated to the query${unreachable}. Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch / web_scrape on a URL you expect to contain the information.`,
           success: true,
           duration: Date.now() - start,
         };
@@ -896,12 +967,13 @@ export class NodeToolAdapter implements ToolAdapter {
       // blindly retry, and how to recover. This is the message the failure
       // policy feeds back on.
       const details = failed.length > 0 ? failed.join('; ') : 'all backends unreachable';
-      return this.fail(null!, start, `Web search failed on all backends (${details}). This looks like a network or rate-limit issue rather than a bad query — do NOT retry web_search immediately with the same or similar queries. Retry later, or use web_fetch on a URL you expect to contain the information.`);
+      return this.fail(null!, start, `Web search failed on all backends (${details}). This looks like a network or rate-limit issue rather than a bad query — do NOT retry web_search immediately with the same or similar queries. Retry later, or use web_fetch / web_scrape on a URL you expect to contain the information.`);
     }
 
     const output = results
       .map((r, i) => `${i + 1}. ${r.title}\n   ${r.snippet}\n   ${r.url}`)
       .join('\n\n');
+    webCache().set(cacheKey, output, SEARCH_TTL_MS);
 
     return {
       id: `tool_${Date.now()}`,
@@ -915,6 +987,21 @@ export class NodeToolAdapter implements ToolAdapter {
   private async handleWebFetch(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
     const url = String(args.url);
     const maxChars = typeof args.maxChars === 'number' ? args.maxChars : 20000;
+
+    // Page cache: the same URL (with the same selector/maxChars bucket) served
+    // within the hour comes from disk — news pages change but an agent loop
+    // re-reading the same article mid-task does not need a second fetch.
+    const pageKey = pageCacheKey(url, undefined, maxChars);
+    const cachedPage = webCache().get(pageKey);
+    if (cachedPage !== undefined) {
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'web_fetch',
+        result: cachedPage,
+        success: true,
+        duration: Date.now() - start,
+      };
+    }
     const abort = createAbortController(signal, 30000);
 
     try {
@@ -946,6 +1033,7 @@ export class NodeToolAdapter implements ToolAdapter {
       // double-decode (&amp;copy; → ©).
       const text = extractReadableText(html);
       const truncated = text.length > maxChars ? text.slice(0, maxChars) + '\n\n[truncated]' : text;
+      webCache().set(pageKey, truncated || '(empty page)', PAGE_TTL_MS);
 
       return {
         id: `tool_${Date.now()}`,
@@ -957,6 +1045,128 @@ export class NodeToolAdapter implements ToolAdapter {
     } finally {
       abort.cleanup();
     }
+  }
+
+  private async handleWebPublicApi(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const query = String(args.query ?? '').trim();
+    if (!query) return this.fail(null!, start, 'web_public_api query must not be empty', 'web_public_api');
+    const { outcome, cached } = await cachedDirectPublicApi(
+      query,
+      typeof args.category === 'string' ? args.category : undefined,
+      this.location,
+    );
+    if (outcome) {
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'web_public_api',
+        result: `${cached ? '[cached] ' : ''}[${outcome.source}] ${outcome.text}`,
+        success: true,
+        duration: Date.now() - start,
+      };
+    }
+    // Auto-escalation (L2 → L1): the direct tier had nothing for this query,
+    // so fall through to web search instead of forcing a second model
+    // round-trip. Opt out with searchOnMiss:false.
+    if (args.searchOnMiss !== false) {
+      const search = await this.handleWebSearch({ query, maxResults: 8 }, start);
+      if (search.success) return { ...search, toolName: 'web_public_api' };
+    }
+    return this.fail(
+      null!,
+      start,
+      `No structured-data source matched "${query}" and web search also failed. web_public_api covers weather/geocode/news/wiki/IP/FX/stock/flight/GitHub lookups — for anything else use researcher_web instead of retrying this tool with the same query (auto-fallback to search is off when searchOnMiss:false).`,
+      'web_public_api',
+    );
+  }
+
+  private async handleWebScrape(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
+    const url = String(args.url ?? '').trim();
+    if (!url) return this.fail(null!, start, 'web_scrape url must not be empty', 'web_scrape');
+    const selector = typeof args.selector === 'string' ? args.selector.trim() || undefined : undefined;
+    const maxChars = Math.min(typeof args.maxChars === 'number' ? args.maxChars : 20000, 50000);
+
+    // Page cache: same URL + selector + maxChars bucket within the hour.
+    const pageKey = pageCacheKey(url, selector, maxChars);
+    const cachedPage = webCache().get(pageKey);
+    if (cachedPage !== undefined) {
+      return this.okResult('web_scrape', cachedPage, start);
+    }
+    const abort = createAbortController(signal, 30000);
+
+    try {
+      const resp = await fetch(url, {
+        headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9' },
+        signal: abort.signal,
+      });
+
+      if (!resp.ok) {
+        // Blocked / anti-bot page: Jina Reader first, Firecrawl second.
+        const fallback = await this.scrapeFallback(url);
+        if (fallback) {
+          const page = truncateText(fallback, maxChars);
+          webCache().set(pageKey, page, PAGE_TTL_MS);
+          return this.okResult('web_scrape', page, start);
+        }
+        return this.fail(null!, start, `Fetch failed: HTTP ${resp.status} — the page may block non-browser clients. Do NOT retry web_scrape on this URL; use researcher_web to find a mirror or a different page.`, 'web_scrape');
+      }
+
+      const contentType = resp.headers.get('content-type') || '';
+      if (!isTextualContentType(contentType)) {
+        // Binary payloads (PDFs, images) can still be read via Jina/Firecrawl.
+        const fallback = await this.scrapeFallback(url);
+        if (fallback) {
+          const page = truncateText(fallback, maxChars);
+          webCache().set(pageKey, page, PAGE_TTL_MS);
+          return this.okResult('web_scrape', page, start);
+        }
+        return this.fail(null!, start, `Unsupported content type: ${contentType} — the URL serves a non-text payload, so web_scrape cannot extract readable text from it. Do NOT retry web_scrape on this URL; use researcher_web to find a text/HTML page with the information, or pick a different URL.`, 'web_scrape');
+      }
+
+      const body = await readResponseText(resp);
+      let text = '';
+      if (isFeedBody(body)) {
+        text = formatFeedText(body);
+      } else if (/json/i.test(contentType) || /^\s*[\[{]/.test(body)) {
+        text = formatJsonBody(body);
+      } else {
+        text = extractScrapeText(body, selector);
+      }
+      text = text.trim();
+      if (!text) {
+        // JS-heavy or blank page: the static HTML carried no readable text.
+        const fallback = await this.scrapeFallback(url);
+        if (fallback) {
+          const page = truncateText(fallback, maxChars);
+          webCache().set(pageKey, page, PAGE_TTL_MS);
+          return this.okResult('web_scrape', page, start);
+        }
+        return this.fail(null!, start, `No readable text could be extracted from ${url} — the page is likely JavaScript-rendered or blank. Do NOT retry web_scrape on this URL; use researcher_web to find the information elsewhere.`, 'web_scrape');
+      }
+      const page = truncateText(text, maxChars);
+      webCache().set(pageKey, page, PAGE_TTL_MS);
+      return this.okResult('web_scrape', page, start);
+    } finally {
+      abort.cleanup();
+    }
+  }
+
+  /** Jina Reader first, then Firecrawl — both render pages the direct fetch
+   * cannot (blocked, JS-heavy, binary). No key needed for Jina; Firecrawl
+   * only runs when PURE_FIRECRAWL_API_KEY is set. */
+  private async scrapeFallback(url: string): Promise<string | null> {
+    const jina = await scrapeViaJina(url, process.env.PURE_JINA_API_KEY);
+    if (jina) return jina;
+    return scrapeViaFirecrawl(url, process.env.PURE_FIRECRAWL_API_KEY);
+  }
+
+  private okResult(toolName: string, result: string, start: number): ToolResult {
+    return {
+      id: `tool_${Date.now()}`,
+      toolName,
+      result,
+      success: true,
+      duration: Date.now() - start,
+    };
   }
 
   private async handleGlobFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
@@ -1551,6 +1761,54 @@ export async function tavilySearch(query: string, maxResults: number): Promise<S
   return (data.results ?? [])
     .filter((r) => r.title && r.url)
     .map((r) => ({ title: r.title!, snippet: r.content ?? '', url: r.url! }));
+}
+
+/**
+ * Exa neural-search backend: semantic + keyword hybrid search with page
+ * contents and publish dates. Free tier = $20 signup credits (~2,800
+ * searches) plus $10 in credits every month, no payment method required.
+ * Enabled when EXA_API_KEY is set; throws otherwise so callers degrade to
+ * the free HTML backends.
+ */
+export async function exaSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  const apiKey = process.env.EXA_API_KEY?.trim();
+  if (!apiKey) throw new Error('EXA_API_KEY not set');
+  const resp = await fetch('https://api.exa.ai/search', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+    },
+    body: JSON.stringify({
+      query,
+      numResults: maxResults,
+      type: 'auto',
+      contents: { text: { maxCharacters: 600 } },
+    }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data: { results?: Array<{ title?: string; url?: string; text?: string; publishedDate?: string }> } = await resp.json();
+  return (data.results ?? [])
+    .filter((r) => r.title && r.url)
+    .map((r) => {
+      const date = typeof r.publishedDate === 'string' && r.publishedDate ? ` (${r.publishedDate.slice(0, 10)})` : '';
+      return { title: `${r.title}${date}`, snippet: r.text ?? '', url: r.url! };
+    });
+}
+
+/** Wrap a free-HTML-backend fetch so a failure puts the backend into a short
+ * cooldown (30s) — a captcha-walled or geo-blocked engine is otherwise
+ * re-probed on every query, wasting latency on a dead endpoint. */
+function guarded(label: string, fetch: () => Promise<SearchResult[]>): () => Promise<SearchResult[]> {
+  return async () => {
+    try {
+      return await fetch();
+    } catch (err) {
+      quota.markBlocked(label, 30_000);
+      throw err;
+    }
+  };
 }
 
 /**

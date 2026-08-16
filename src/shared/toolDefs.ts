@@ -186,6 +186,33 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: 'web_public_api',
+    description: 'Structured-data lookup through curated no-key public APIs: weather, geocode, news, wiki, IP, FX, stock, GitHub, flight status. Use for concrete factual lookups like "北京天气", "100 usd to cny", "苹果股价", or "CA981 航班动态" — returns ready-to-use formatted data directly. When no structured source matches, it automatically falls back to web search (disable with searchOnMiss:false). Not for general discovery or ambiguous questions — use researcher_web for those.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The lookup question, e.g. "北京明天天气" or "100 usd to cny"' },
+        category: { type: 'string', enum: ['weather', 'geocode', 'news', 'wiki', 'ip', 'fx', 'stock', 'github', 'flight'], description: 'Optional intent override; defaults to automatic classification' },
+        location: { type: 'string', description: 'Optional city for weather when the query has none (defaults to the configured location)' },
+        searchOnMiss: { type: 'boolean', description: 'Fall back to web search when no structured source matches (default true)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'web_scrape',
+    description: 'Fetch a KNOWN URL and extract readable text: strips navigation/boilerplate, supports an optional #id/.class/tag selector, auto-formats RSS/Atom feeds and JSON, and falls back to Jina Reader (free) then Firecrawl (optional key) for blocked, JS-heavy, or binary pages (e.g. PDFs). Use when you already have the URL; use researcher_web when you need to find one.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Full URL to fetch (https://...)' },
+        selector: { type: 'string', description: 'Optional scope: #id, .class, or a tag name (article, main)' },
+        maxChars: { type: 'number', description: 'Max characters to return (default 20000, max 50000)' },
+      },
+      required: ['url'],
+    },
+  },
+  {
     name: 'glob_files',
     description: 'Find files matching a glob pattern. Returns sorted file paths relative to workspace.',
     input_schema: {
@@ -252,7 +279,7 @@ export const PUBLIC_TOOL_NAMES = new Set([
   'read_file', 'write_file', 'edit_file', 'list_files', 'execute_command',
   'create_directory', 'diff_files', 'researcher_web', 'researcher_docs',
   'code_searcher', 'glob_files', 'replace_files', 'git_diff', 'git_log',
-  'git_status', 'sys_info', 'generate_image',
+  'git_status', 'sys_info', 'generate_image', 'web_public_api', 'web_scrape',
 ]);
 
 /**
@@ -310,6 +337,8 @@ const TOOL_METADATA_TABLE = {
   code_searcher: { sideEffects: false, isWrite: false },
   web_search: { sideEffects: false, isWrite: false },
   web_fetch: { sideEffects: false, isWrite: false },
+  web_public_api: { sideEffects: false, isWrite: false },
+  web_scrape: { sideEffects: false, isWrite: false },
   glob_files: { sideEffects: false, isWrite: false },
   replace_files: { sideEffects: true, isWrite: true },
   sys_info: { sideEffects: false, isWrite: false },

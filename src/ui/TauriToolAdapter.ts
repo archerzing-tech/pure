@@ -430,7 +430,7 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: raw, success: true, duration: Date.now() - start };
         }
         case 'web_search': {
-          const searchData = await this.call('web_search', buildWebSearchArgs(ws, args, this.tavilyApiKey, this.serperApiKey, this.proxyUrl)) as string;
+          const searchData = await this.call('web_search', buildWebSearchArgs(ws, args, this.tavilyApiKey, this.serperApiKey, this.proxyUrl, this.location)) as string;
           return { id: toolCall.id, toolName: name, result: searchData, success: true, duration: Date.now() - start };
         }
         case 'web_fetch': {
@@ -441,6 +441,32 @@ export class TauriToolAdapter implements ToolAdapter {
             proxyUrl: this.proxyUrl,
           }) as string;
           return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
+        }
+        case 'web_public_api': {
+          // Structured direct lookups (Tier-2) with the same search keys so
+          // searchOnMiss escalation hits Serper/Tavily first, like web_search.
+          const data = await this.call('web_public_api', {
+            workspace: ws,
+            query: String(args.query ?? ''),
+            category: typeof args.category === 'string' ? args.category : null,
+            location: this.location,
+            apiKey: this.tavilyApiKey,
+            serperApiKey: this.serperApiKey,
+            searchOnMiss: args.searchOnMiss !== false,
+            proxyUrl: this.proxyUrl,
+          }) as string;
+          return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
+        }
+        case 'web_scrape': {
+          // Tier-3 known-URL extraction with Jina/Firecrawl fallbacks.
+          const data = await this.call('web_scrape', {
+            workspace: ws,
+            url: String(args.url ?? ''),
+            selector: typeof args.selector === 'string' ? args.selector : null,
+            maxChars: args.maxChars ?? 20000,
+            proxyUrl: this.proxyUrl,
+          }) as string;
+          return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
         }
         case 'glob_files': {
           const globResult = await this.call('glob_files', {
@@ -535,7 +561,7 @@ export class TauriToolAdapter implements ToolAdapter {
           return {
             id: toolCall.id,
             toolName: name,
-            error: `Unknown tool: ${name}. Available: read_file, write_file, edit_file, search_files, list_files, execute_command, create_directory, diff_files, web_search, web_fetch, glob_files, replace_files, git_diff, git_log, git_status, sys_info`,
+            error: `Unknown tool: ${name}. Available: read_file, write_file, edit_file, search_files, list_files, execute_command, create_directory, diff_files, web_search, web_fetch, web_public_api, web_scrape, glob_files, replace_files, git_diff, git_log, git_status, sys_info`,
             success: false,
             duration: Date.now() - start,
           };
@@ -730,6 +756,7 @@ export function buildWebSearchArgs(
   tavilyApiKey: string,
   serperApiKey: string,
   proxyUrl = '',
+  location = '',
 ): Record<string, unknown> {
   return {
     workspace,
@@ -741,6 +768,9 @@ export function buildWebSearchArgs(
     apiKey: tavilyApiKey,
     serperApiKey,
     ...(proxyUrl ? { proxyUrl } : {}),
+    // User-configured city (Settings → General → Environment): the Tier-2
+    // fast path uses it as the weather fallback when the query names no city.
+    ...(location ? { location } : {}),
   };
 }
 
