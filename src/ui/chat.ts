@@ -1738,6 +1738,20 @@ export class ChatController {
       appendThinkingText(thinkingCard, thinkingPending);
       thinkingPending = '';
     };
+    // Drop the live trace on aborted turns (pre-flight cancel / plan gate
+    // rejection / fatal error) — a "正在准备…" card must not linger as a
+    // ghost when the turn never produced output.
+    const removeThinkingCard = (): void => {
+      if (thinkingFlushTimer !== undefined) {
+        clearTimeout(thinkingFlushTimer);
+        thinkingFlushTimer = undefined;
+      }
+      thinkingPending = '';
+      if (thinkingCard) {
+        thinkingCard.el.remove();
+        thinkingCard = null;
+      }
+    };
     const endThinking = () => {
       if (thinkingFlushTimer !== undefined) {
         clearTimeout(thinkingFlushTimer);
@@ -1798,6 +1812,15 @@ export class ChatController {
       // application temporary workspace is a real filesystem root for this
       // session, while web tools remain available independently.
       const usingTemporaryWorkspace = !sendWorkspace && !!effectiveWorkspace;
+      // Eager feedback: open the live trace BEFORE the remaining preflight
+      // (runtime probe, request assessment) so the user never stares at a
+      // frozen transcript between the user bubble and the first token. The
+      // label tracks the real phase; the first streamed reasoning delta
+      // replaces the waiting text with live content. The same card is reused
+      // as the task-analysis trace and (for plain turns) the engine's
+      // thinking card, so exactly one card exists per turn.
+      thinkingCard = openThinkingCard();
+      setThinkingLabel(thinkingCard, '正在准备…');
       // One-shot runtime probe (node/bun/python3/rustc/git versions) — the cached
       // promise resolves in ms after the first send; awaiting here guarantees
       // the first turn already carries the runtimes line in its prompt.
@@ -2011,9 +2034,9 @@ export class ChatController {
         || forcedMode === 'build'
         || (analysis.complexity === 'complex' && !!analysis.plan)
       );
-      // Open the live trace before any read-only workspace probe so a slow
-      // filesystem call never leaves the transcript visually idle.
-      const earlyAnalysisCard = shouldRunTaskAnalysis ? openThinkingCard() : null;
+      // The live trace opened before the preflight doubles as the analysis
+      // card — one continuous feedback row instead of two stacked cards.
+      const earlyAnalysisCard = shouldRunTaskAnalysis ? thinkingCard : null;
       if (earlyAnalysisCard) setThinkingLabel(earlyAnalysisCard, '正在读取工作区，并结合你的目标判断…');
       let workspaceProfile: WorkspaceProfile | undefined;
       // 探针本身只读、快速，照常先行（结果用于给 LLM 分析做 grounding）；但它的
@@ -2029,10 +2052,7 @@ export class ChatController {
       }
       // 探针期间用户点击「停止」：立即收尾，不再进入访谈（探针只读，无副作用）。
       if (this.abortController?.signal.aborted) {
-        if (earlyAnalysisCard) {
-          finalizeThinkingCard(earlyAnalysisCard);
-          earlyAnalysisCard.el.remove();
-        }
+        removeThinkingCard();
         keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
         return;
       }
@@ -2179,8 +2199,7 @@ export class ChatController {
           ].filter(Boolean).join('\n\n');
           if (gen !== this.generation || this.abortController?.signal.aborted) {
             assessmentFlow?.cancel('本轮准备工作被中断，未执行任何改动。');
-            finalizeThinkingCard(analysisCard);
-            analysisCard.el.remove();
+            removeThinkingCard();
             discardPlanCard();
             modeBubble?.remove();
             keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
@@ -2197,6 +2216,9 @@ export class ChatController {
             },
           });
           finalizeThinkingCard(analysisCard);
+          // The analysis card is complete and stays in the transcript; the
+          // engine loop gets its own fresh card below any plan card.
+          thinkingCard = null;
           // 实时分析没有返回任何内容时，思考卡不能假装“已经想清楚”：明确标注分析
           // 未完成并说明接下来按通用步骤推进，而不是留一张空卡误导用户（“思考完
           // 成”却什么都没想，正是用户这次反馈的困惑点）。
@@ -2304,6 +2326,7 @@ export class ChatController {
               discardPlanCard();
               reviewCard?.remove();
               reviewCard = null;
+              removeThinkingCard();
               keepOrDropUserBubble(stopped ? '⏸ 已暂停：你的请求已保留在对话中。' : '已取消本次执行计划，你的请求已保留在对话中。');
               modeBubble?.remove();
               return; // finally resets streaming
@@ -2605,11 +2628,10 @@ export class ChatController {
         this.addStatusBubble(`⚠️ 检测到请求中可能包含逻辑陷阱（${labels}）— 将先验证前提，若前提有误会换思路处理`);
       }
       // Eager thinking indicator: the user sees the animation while waiting
-      // for the first token; reasoning deltas upgrade it with live text. Note
-      // this is the ONLY thinking card creation point for a turn — opening it
-      // again just before the engine loop (as well as in ReasoningDelta while
-      // it is still live) duplicated the "思考…" row.
-      thinkingCard = openThinkingCard();
+      // for the first token; reasoning deltas upgrade it with live text. A
+      // plain turn (no task analysis) reuses the card opened before the
+      // preflight; analysis turns get a fresh card below the plan card.
+      if (!thinkingCard) thinkingCard = openThinkingCard();
       // Waiting for the engine's first token: a stable honest label keeps the
       // card alive (dots animate) without pretending to do specific work; the
       // first streamed reasoning delta replaces it with real content.
@@ -3402,6 +3424,7 @@ export class ChatController {
       if (assistantSegments.length === 0 && finalMessages.length === 0 && !interruptedMessages) {
         // 前置检查失败/被停止时不再删除用户消息：它仍是发送过的记录。只有切换会话
         // 才移除（转录将由新会话重建）；同一会话内保留并给出提示。
+        removeThinkingCard();
         keepOrDropUserBubble(err?.name === 'AbortError' ? '⏸ 已暂停：你的请求已保留在对话中。' : '本轮处理未完成，你的请求已保留在对话中。');
       }
       if (interruptedMessages && gen === this.generation) {

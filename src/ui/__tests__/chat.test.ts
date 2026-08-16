@@ -652,16 +652,22 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
     expect(oldReplace).toBe(-1);
   });
 
-  it('opens the thinking card before workspace probing and model analysis', () => {
+  it('opens the thinking card before any preflight await (runtime probe, workspace probing, model analysis)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const thinking = src.indexOf('const earlyAnalysisCard = shouldRunTaskAnalysis ? openThinkingCard() : null;');
+    // The eager trace opens right before the runtime probe — before the
+    // workspace scan and model analysis — so the user never stares at a
+    // frozen transcript between the user bubble and the first token. The
+    // analysis path reuses that same card instead of stacking a second one.
+    const eager = src.indexOf("thinkingCard = openThinkingCard();\n      setThinkingLabel(thinkingCard, '正在准备…');");
+    const reuse = src.indexOf('const earlyAnalysisCard = shouldRunTaskAnalysis ? thinkingCard : null;');
     const firstProbe = src.indexOf('await discoverWorkspace(');
     const firstContextRead = src.indexOf('await buildWorkspaceContext(');
     const firstAnalysis = src.indexOf('await generateTaskAnalysis(');
-    expect(thinking).toBeGreaterThan(-1);
-    expect(firstProbe).toBeGreaterThan(thinking);
-    expect(firstContextRead).toBeGreaterThan(thinking);
-    expect(firstAnalysis).toBeGreaterThan(thinking);
+    expect(eager).toBeGreaterThan(-1);
+    expect(reuse).toBeGreaterThan(-1);
+    expect(firstProbe).toBeGreaterThan(eager);
+    expect(firstContextRead).toBeGreaterThan(eager);
+    expect(firstAnalysis).toBeGreaterThan(eager);
   });
 
   it('renders the task-specific plan card only after the LLM analysis lands', () => {
