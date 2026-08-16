@@ -40,6 +40,8 @@ const TOOL_META: Record<string, { name: string; icon: string }> = {
   code_searcher:   { name: 'Code Search',   icon: '🔍' },
   web_search:       { name: 'Web Search',    icon: '🌐' },
   web_fetch:        { name: 'Fetch',         icon: '📡' },
+  web_scrape:       { name: 'Web Scrape',    icon: '🕷️' },
+  web_public_api:   { name: 'Public API',    icon: '⚡' },
   web_researcher:   { name: 'Web Research',  icon: '🧭' },
   planner:          { name: 'Plan',          icon: '📋' },
   project_auditor:  { name: 'Project Audit', icon: '🛡️' },
@@ -73,7 +75,12 @@ export function formatToolArgsSummary(toolName: string, args: Record<string, unk
     case 'web_search':
       return typeof v('query') === 'string' ? `query="${String(v('query'))}"` : '';
     case 'web_fetch':
+    case 'web_scrape':
       return typeof v('url') === 'string' ? `url="${String(v('url'))}"` : '';
+    case 'web_public_api':
+      return typeof v('category') === 'string'
+        ? `category="${String(v('category'))}"`
+        : typeof v('query') === 'string' ? `query="${String(v('query'))}"` : '';
     case 'read_file':
     case 'write_file':
     case 'edit_file':
@@ -370,7 +377,7 @@ function fillInputSection(section: HTMLElement, args: Record<string, unknown>): 
 // built-in web_search / web_fetch: light-blue card, read-only permission
 // class, browser-toggle gate and workspace independence. web_researcher is
 // excluded here — it is a subagent tool, not a plain web read.
-const WEB_TOOL_BASE_NAMES = new Set(['web_search', 'web_fetch', 'researcher_web', 'researcher_docs', 'web-search', 'web-fetch', 'search', 'fetch']);
+const WEB_TOOL_BASE_NAMES = new Set(['web_search', 'web_fetch', 'web_scrape', 'web_public_api', 'researcher_web', 'researcher_docs', 'web-search', 'web-fetch', 'web-scrape', 'search', 'fetch']);
 
 export function isWebSearchLike(toolName: string): boolean {
   const base = toolName.includes('__') ? toolName.slice(toolName.lastIndexOf('__') + 2) : toolName;

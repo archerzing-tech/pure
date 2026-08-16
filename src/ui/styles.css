@@ -6772,13 +6772,15 @@ button svg,
  * toolRow.ts), so only the plain .tool-row-body surface is styled here. */
 .tool-row.sys-info .tool-row-body,
 .tool-row.web-tool .tool-row-body {
-  background: #eef8ff;
-  border-color: #cfe8f8;
-  color: #26485b;
+  /* 蓝紫表面：比聊天背景稍微深一点、带紫调，与主题 accent（紫）搭配。
+     Input/Output 整个内容区（除 header/summary 外）共用这一渐变。 */
+  background: linear-gradient(180deg, #f2f0fc 0%, #e9e5f7 100%);
+  border-color: #d8d1f0;
+  color: #403d68;
 }
 .tool-row.sys-info .tool-row-body,
 .tool-row.web-tool .tool-row-body {
-  border: 1px solid #cfe8f8;
+  border: 1px solid #d8d1f0;
   border-radius: 8px;
   padding: 10px 12px 12px 36px;
 }
@@ -6793,35 +6795,37 @@ button svg,
 }
 .tool-row.web-tool .tool-row-section + .tool-row-section,
 .tool-row.sys-info .tool-row-section + .tool-row-section {
-  border-top-color: #cfe8f8;
+  border-top-color: #d8d1f0;
 }
 .tool-row.web-tool .tool-row-section-label,
 .tool-row.web-tool .tool-row-field-key {
-  color: #527589;
+  color: #6d6a98;
 }
 .tool-row.web-tool .tool-row-field-value,
 .tool-row.web-tool .tool-row-result,
 .tool-row.web-tool .tool-result-preview,
 .tool-row.web-tool .fetch-preview {
-  color: #26485b;
+  color: #403d68;
 }
 .tool-row.web-tool .search-result-item {
-  border-bottom-color: #cfe8f8;
+  border-bottom-color: #d8d1f0;
 }
 .tool-row.web-tool .search-result-title,
 .tool-row.web-tool .search-result-url,
 .tool-row.web-tool .path-link {
-  color: #2474a6;
-  text-decoration-color: #2474a6;
+  color: #5b52d0;
+  text-decoration-color: #5b52d0;
 }
 .tool-row.web-tool .search-result-snippet {
-  color: #31566b;
+  color: #55538a;
 }
 [data-theme="dark"] .tool-row.sys-info .tool-row-body,
 [data-theme="dark"] .tool-row.web-tool .tool-row-body {
-  background: #182d3a;
-  border-color: #2d5870;
-  color: #d7f1fc;
+  /* 暗色主题的蓝紫渐变：顶部 #1e2340（深靛蓝紫）→ 底部 #161a31（更深），
+     比原 #182d3a 蓝色表面更紫、更深一层，与 accent-soft #2a2440 呼应。 */
+  background: linear-gradient(180deg, #1e2340 0%, #161a31 100%);
+  border-color: #2e3466;
+  color: #d9d6f2;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary {
   background: #182d3a;
@@ -6832,18 +6836,18 @@ button svg,
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-section + .tool-row-section,
 [data-theme="dark"] .tool-row.sys-info .tool-row-section + .tool-row-section {
-  border-top-color: #2d5870;
+  border-top-color: #2e3466;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-section-label,
 [data-theme="dark"] .tool-row.web-tool .tool-row-field-key,
 [data-theme="dark"] .tool-row.web-tool .search-result-snippet {
-  color: #9ccfe5;
+  color: #a5a3d9;
 }
 [data-theme="dark"] .tool-row.web-tool .search-result-title,
 [data-theme="dark"] .tool-row.web-tool .search-result-url,
 [data-theme="dark"] .tool-row.web-tool .path-link {
-  color: #8ecbff;
-  text-decoration-color: #8ecbff;
+  color: #9fb0ff;
+  text-decoration-color: #9fb0ff;
 }
 
 /* ── SVG / chart previews ── */
@@ -7291,8 +7295,7 @@ button svg,
   border-radius: 0;
 }
 .tool-row.web-tool .tool-row-summary,
-.tool-row.web-tool .tool-row-summary:hover,
-.tool-row.web-tool .tool-row-body {
+.tool-row.web-tool .tool-row-summary:hover {
   background: transparent;
 }
 [data-theme="dark"] .tool-row.web-tool {
@@ -7300,8 +7303,7 @@ button svg,
   background: #182d3a;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary,
-[data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover,
-[data-theme="dark"] .tool-row.web-tool .tool-row-body {
+[data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover {
   background: transparent;
 }
 .tool-row.web-tool.pending {
