@@ -517,8 +517,63 @@ function setToolRowExpandedLabel(button: HTMLButtonElement, expanded: boolean): 
 }
 
 export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void {
-  row.el.classList.toggle('tool-row-expanded', expanded);
+  const el = row.el;
+  if (el.classList.contains('tool-row-expanded') === expanded) return;
+
+  // FLIP the width/height change: capture the row's box, toggle the class
+  // (grid-column 1/-1 + taller scroll window), then invert the layout delta
+  // as a transform so maximize/collapse eases instead of snapping. CSS can't
+  // transition grid-column, so the motion lives here in JS.
+  const canAnimate = typeof el.getBoundingClientRect === 'function'
+    && typeof matchMedia === 'function'
+    && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Cancel any in-flight animation and snap to the true layout box so rapid
+  // re-clicks measure cleanly instead of stacking transforms.
+  if (canAnimate) {
+    el.style.transition = 'none';
+    el.style.transform = '';
+    el.style.transformOrigin = '';
+    void el.offsetWidth;
+    el.style.transition = '';
+  }
+
+  const first = canAnimate ? el.getBoundingClientRect() : null;
+
+  el.classList.toggle('tool-row-expanded', expanded);
   setToolRowExpandedLabel(row.expandButton, expanded);
+
+  if (first && first.width > 0 && first.height > 0) {
+    const last = el.getBoundingClientRect();
+    const dx = first.left - last.left;
+    const dy = first.top - last.top;
+    const sx = first.width / last.width;
+    const sy = first.height / last.height;
+    const moved = Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5
+      || Math.abs(sx - 1) > 0.005 || Math.abs(sy - 1) > 0.005;
+    if (moved) {
+      el.style.transformOrigin = 'top left';
+      el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+      void el.offsetWidth;
+      el.style.transition = 'transform 0.32s var(--ease-out)';
+      el.style.transform = 'translate(0, 0) scale(1, 1)';
+      const finish = (): void => {
+        el.style.transition = '';
+        el.style.transform = '';
+        el.style.transformOrigin = '';
+      };
+      const onEnd = (event: TransitionEvent): void => {
+        if (event.target !== el || event.propertyName !== 'transform') return;
+        el.removeEventListener('transitionend', onEnd);
+        finish();
+      };
+      el.addEventListener('transitionend', onEnd);
+      setTimeout(() => {
+        el.removeEventListener('transitionend', onEnd);
+        finish();
+      }, 360);
+    }
+  }
 }
 
 export function isToolRowExpanded(row: ToolRowHandle): boolean {

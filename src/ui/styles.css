@@ -47,15 +47,12 @@
   /* Terminal-style tool panels (file / shell / git tools). Dark console
      surface in BOTH themes so the same token pair keeps the command-line
      look consistent without hardcoding theme-locked hex values. */
-  /* Tool bodies share the user-bubble blue family (--bg-user #dbeafe), one
-     shade deeper, so system-tool output reads as the same surface as the
-     user's own message instead of a black console. */
-  --term-bg:      #cfdff4;
-  --term-border:  #b9d0ea;
-  --term-ink:     #0f2333;
-  --term-muted:   #3f5f80;
-  --term-dim:     #4a6b8c;
-  --term-accent:  #0b7cb0;
+  --term-bg:      #000000;
+  --term-border:  #242424;
+  --term-ink:     #f2f2f2;
+  --term-muted:   #a8a8a8;
+  --term-dim:     #8f8f8f;
+  --term-accent:  #8ecbff;
   --term-soft:    #202020;
 }
 
@@ -86,12 +83,8 @@
   --shadow-lg:    0 8px 30px rgba(0,0,0,0.5);
   /* Slightly lifted console surface so the terminal block reads as a raised
      panel instead of a void against the dark chat background. */
-  --term-bg:      #1e4168;
-  --term-border:  #2a4d74;
-  --term-ink:     #d8e8fb;
-  --term-muted:   #9db4cf;
-  --term-dim:     #8ca3bf;
-  --term-accent:  #71e5ff;
+  --term-bg:      #141414;
+  --term-border:  #2c2c2c;
 }
 
 /* ── Reset ── */
@@ -1121,6 +1114,10 @@ body {
 .bubble-row.tool-grid > .bubble-row.tool-row-row {
   margin: 0;
   min-width: 0;
+  /* Tool cards aren't chat bubbles: don't inherit the :last-child bubbleIn
+     entrance, whose forwards fill pins `transform` and would block the
+     maximize/collapse FLIP transition. */
+  animation: none;
 }
 /* A focused tool row spans the complete grid width. Because grid placement
    follows the original DOM order, earlier cards stay above it and later cards
@@ -1509,70 +1506,37 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
 }
-/* Terminal panels now sit on the pale-blue tool surface in light mode, so
-   the syntax palette switches with the theme: light-blue backgrounds get the
-   deep-blue light palette (same as the web-tool surfaces), dark-blue
-   backgrounds keep the GitHub-dark pastels. */
+/* Terminal panels are a dark console in BOTH themes, so the JSON/YAML syntax
+   palette is always the GitHub-dark pastel set (light text on near-black). */
 .tool-row-section.terminal-panel .hljs-keyword,
 .tool-row-section.terminal-panel .hljs-selector-tag,
 .tool-row-section.terminal-panel .hljs-built_in,
 .tool-row-section.terminal-panel .hljs-literal {
-  color: #0550ae;
+  color: #79c0ff;
 }
 .tool-row-section.terminal-panel .hljs-string,
 .tool-row-section.terminal-panel .hljs-attr,
 .tool-row-section.terminal-panel .hljs-symbol {
-  color: #0a3069;
+  color: #7ee787;
 }
 .tool-row-section.terminal-panel .hljs-number,
 .tool-row-section.terminal-panel .hljs-regexp,
 .tool-row-section.terminal-panel .hljs-title,
 .tool-row-section.terminal-panel .hljs-title.function_,
 .tool-row-section.terminal-panel .hljs-title.class_ {
-  color: #953800;
+  color: #d2a8ff;
 }
 .tool-row-section.terminal-panel .hljs-comment,
 .tool-row-section.terminal-panel .hljs-quote,
 .tool-row-section.terminal-panel .hljs-punctuation,
 .tool-row-section.terminal-panel .hljs-bullet,
 .tool-row-section.terminal-panel .hljs-meta {
-  color: #6e7781;
+  color: #8b949e;
   font-style: italic;
 }
 .tool-row-section.terminal-panel .hljs-bullet,
 .tool-row-section.terminal-panel .hljs-punctuation,
 .tool-row-section.terminal-panel .hljs-meta {
-  font-style: normal;
-}
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-keyword,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-selector-tag,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-built_in,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-literal {
-  color: #79c0ff;
-}
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-string,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-attr,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-symbol {
-  color: #7ee787;
-}
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-number,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-regexp,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-title,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-title.function_,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-title.class_ {
-  color: #d2a8ff;
-}
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-comment,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-quote,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-punctuation,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-bullet,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-meta {
-  color: #8b949e;
-  font-style: italic;
-}
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-bullet,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-punctuation,
-[data-theme="dark"] .tool-row-section.terminal-panel .hljs-meta {
   font-style: normal;
 }
 /* Light surfaces (web-tool cards, fetch previews) stay readable on pale blue. */
@@ -1605,6 +1569,40 @@ body {
 .tool-row-section:not(.terminal-panel) .hljs-bullet,
 .tool-row-section:not(.terminal-panel) .hljs-punctuation,
 .tool-row-section:not(.terminal-panel) .hljs-meta {
+  font-style: normal;
+}
+/* Blue surfaces (sys-info / web-tool cards, fetch previews) in dark mode:
+ * the light palette above (dark navy on pale blue) is unreadable on the deep
+ * blue surface #1b3d61, so reuse the terminal-panel dark palette. */
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-keyword,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-selector-tag,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-built_in,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-literal {
+  color: #79c0ff;
+}
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-string,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-attr,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-symbol {
+  color: #7ee787;
+}
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-number,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-regexp,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-title,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-title.function_,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-title.class_ {
+  color: #d2a8ff;
+}
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-comment,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-quote,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-punctuation,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-bullet,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-meta {
+  color: #8b949e;
+  font-style: italic;
+}
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-bullet,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-punctuation,
+[data-theme="dark"] .tool-row-section:not(.terminal-panel) .hljs-meta {
   font-style: normal;
 }
 
@@ -3639,6 +3637,36 @@ body {
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--text-tertiary);
+}
+/* System-permission rows: colored status dot + status text (Settings →
+ * General). Colors map to the OS permission states. */
+.perm-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.perm-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  flex: none;
+  align-self: center;
+  background: #8b949e;
+}
+.perm-dot-authorized {
+  background: #3fb950;
+}
+.perm-dot-denied {
+  background: #f85149;
+}
+.perm-dot-restricted,
+.perm-dot-disabled {
+  background: #d29922;
+}
+.perm-dot-not_determined {
+  background: #8b949e;
 }
 
 .setting-input,
@@ -10317,14 +10345,54 @@ button svg,
   height: 40px;
   padding: 0 14px;
   white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--accent);
+}
+.llm-test-conn-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-soft) 24%, transparent);
+  border-color: var(--accent);
+}
+.llm-test-conn-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 .llm-test-conn-btn.llm-model-test-ok {
   border-color: var(--success);
   color: var(--success);
+  background: transparent;
 }
 .llm-test-conn-btn.llm-model-test-fail {
   border-color: var(--danger);
   color: var(--danger);
+  background: transparent;
+}
+
+/* Model-library header actions (＋ 添加模型 / 全部删除): same height, padding
+ * and theme-accent treatment as the connectivity-verify button. */
+.provider-model-add-btn,
+.provider-model-clear-btn {
+  flex: 0 0 auto;
+  height: 40px;
+  padding: 0 14px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.provider-model-add-btn:hover,
+.provider-model-clear-btn:hover {
+  background: color-mix(in srgb, var(--accent-soft) 24%, transparent);
+  border-color: var(--accent);
 }
 
 /* Model list: header row (60px) + editable rows (50px each, min 2). */

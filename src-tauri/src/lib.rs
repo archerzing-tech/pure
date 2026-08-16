@@ -204,11 +204,25 @@ use tokio::process::{Child, Command as TokioCommand};
 use base64::Engine as _;
 
 #[cfg(target_os = "macos")]
-use objc2::runtime::AnyObject;
+use objc2::msg_send;
+#[cfg(target_os = "macos")]
+use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
+use objc2::runtime::{AnyObject, Bool};
+#[cfg(target_os = "macos")]
+use objc2::ClassType;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
 #[cfg(target_os = "macos")]
+use objc2_av_foundation::{
+    AVCaptureDevice, AVAuthorizationStatus, AVMediaType, AVMediaTypeAudio, AVMediaTypeVideo,
+};
+#[cfg(target_os = "macos")]
+use objc2_core_location::{CLAuthorizationStatus, CLLocationManager};
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSDictionary, NSString};
+#[cfg(target_os = "macos")]
+use block2::RcBlock;
 
 #[cfg(target_os = "windows")]
 use png::{BitDepth, ColorType, Encoder};
@@ -2871,29 +2885,35 @@ fn parse_skill_markdown(text: &str) -> Option<(String, String, String)> {
     Some((name, description, body.to_string()))
 }
 
-/// List skills installed in the app skills directory (name/description/body),
-/// used by the GUI to inject them into the system prompt. Never fails: a
-/// missing or unreadable directory just yields an empty list.
+/// List skills from the app skills directory (~/.pure/skills) plus the
+/// workspace's project-local .agents/skills directory (name/description/body),
+/// used by the GUI to inject them into the system prompt. Mirrors the CLI's
+/// loadAppSkills directory order (user skills first, project skills second).
+/// Never fails: a missing or unreadable directory just yields an empty list.
 #[tauri::command]
-fn list_app_skills() -> Vec<serde_json::Value> {
-    let dir = app_skills_dir();
+fn list_app_skills(workspace: String) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let Ok(ft) = entry.file_type() else { continue };
-        if !ft.is_dir() {
-            continue;
-        }
-        let skill_file = entry.path().join("SKILL.md");
-        let Ok(text) = std::fs::read_to_string(&skill_file) else { continue };
-        if let Some((name, description, body)) = parse_skill_markdown(&text) {
-            out.push(serde_json::json!({
-                "name": name,
-                "description": description,
-                "body": body,
-            }));
+    let mut dirs = vec![app_skills_dir()];
+    let project = workspace.trim();
+    if !project.is_empty() {
+        dirs.push(PathBuf::from(project).join(".agents").join("skills"));
+    }
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if !ft.is_dir() {
+                continue;
+            }
+            let skill_file = entry.path().join("SKILL.md");
+            let Ok(text) = std::fs::read_to_string(&skill_file) else { continue };
+            if let Some((name, description, body)) = parse_skill_markdown(&text) {
+                out.push(serde_json::json!({
+                    "name": name,
+                    "description": description,
+                    "body": body,
+                }));
+            }
         }
     }
     out
@@ -2902,6 +2922,11 @@ fn list_app_skills() -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod app_skills_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Two tests below mutate the process-global PURE_SKILLS_DIR; serialize
+    // them so parallel test threads can't read each other's temp directory.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parses_frontmatter_name_description_body() {
@@ -2929,6 +2954,7 @@ mod app_skills_tests {
 
     #[test]
     fn lists_only_valid_skills_from_the_directory() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!("pure-skills-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         // PURE_SKILLS_DIR is the BASE dir; skills live in <base>/skills/<name>/SKILL.md.
@@ -2942,7 +2968,7 @@ mod app_skills_tests {
 
         let prev = std::env::var("PURE_SKILLS_DIR").ok();
         std::env::set_var("PURE_SKILLS_DIR", &base);
-        let list = list_app_skills();
+        let list = list_app_skills(String::new());
         match prev {
             Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
             None => std::env::remove_var("PURE_SKILLS_DIR"),
@@ -2952,6 +2978,34 @@ mod app_skills_tests {
         assert_eq!(list[0]["name"], "ocr");
         assert_eq!(list[0]["description"], "OCR tool");
         assert!(list[0]["body"].as_str().unwrap().contains("tesseract"));
+    }
+
+    #[test]
+    fn lists_project_dot_agents_skills_when_workspace_is_given() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("pure-agents-skills-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let skill = base.join(".agents").join("skills").join("find-skills").join("SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill, "---\nname: find-skills\ndescription: Skill discovery\n---\nUse npx skills.\n").unwrap();
+
+        // Empty user-skills dir so only the project directory contributes.
+        let empty_home = base.join("empty-home");
+        std::fs::create_dir_all(&empty_home).unwrap();
+        let prev = std::env::var("PURE_SKILLS_DIR").ok();
+        std::env::set_var("PURE_SKILLS_DIR", &empty_home);
+
+        let list = list_app_skills(base.to_string_lossy().into_owned());
+
+        match prev {
+            Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
+            None => std::env::remove_var("PURE_SKILLS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["name"], "find-skills");
+        assert_eq!(list[0]["description"], "Skill discovery");
+        assert!(list[0]["body"].as_str().unwrap().contains("npx skills"));
     }
 }
 
@@ -7329,6 +7383,130 @@ async fn detect_location(proxy_url: Option<String>) -> Result<String, String> {
     ))
 }
 
+// ── System permissions (macOS) ──
+// Location / camera / microphone access is gated by the OS. The two commands
+// below let the GUI show the current status and trigger the native permission
+// dialog (the dialog itself is owned by the system; the app only requests it).
+// Status values returned to the frontend: authorized | denied | restricted |
+// not_determined | disabled | unsupported.
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // class authorizationStatus accessor is deprecated in the bindings; no replacement exists
+fn macos_location_status() -> String {
+    unsafe {
+        if !CLLocationManager::locationServicesEnabled_class() {
+            return "disabled".into();
+        }
+        let s = CLLocationManager::authorizationStatus_class();
+        if s == CLAuthorizationStatus::AuthorizedWhenInUse
+            || s == CLAuthorizationStatus::AuthorizedAlways
+        {
+            "authorized"
+        } else if s == CLAuthorizationStatus::Denied {
+            "denied"
+        } else if s == CLAuthorizationStatus::Restricted {
+            "restricted"
+        } else {
+            "not_determined"
+        }
+        .into()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_av_media_type(kind: &str) -> Result<&'static AVMediaType, String> {
+    unsafe {
+        match kind {
+            "camera" => AVMediaTypeVideo.ok_or_else(|| "AVMediaTypeVideo unavailable".into()),
+            "microphone" => AVMediaTypeAudio.ok_or_else(|| "AVMediaTypeAudio unavailable".into()),
+            other => Err(format!("unknown permission kind: {other}")),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_av_status(media: &AVMediaType) -> String {
+    unsafe {
+        let s = AVCaptureDevice::authorizationStatusForMediaType(media);
+        if s == AVAuthorizationStatus::Authorized {
+            "authorized"
+        } else if s == AVAuthorizationStatus::Denied {
+            "denied"
+        } else if s == AVAuthorizationStatus::Restricted {
+            "restricted"
+        } else {
+            "not_determined"
+        }
+        .into()
+    }
+}
+
+#[tauri::command]
+fn check_system_permission(kind: String) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(match kind.as_str() {
+            "location" => macos_location_status(),
+            "camera" => macos_av_status(macos_av_media_type("camera")?),
+            "microphone" => macos_av_status(macos_av_media_type("microphone")?),
+            other => return Err(format!("unknown permission kind: {other}")),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = kind;
+        Ok("unsupported".into())
+    }
+}
+
+#[tauri::command]
+fn request_system_permission(app: tauri::AppHandle, kind: String) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        match kind.as_str() {
+            "location" => {
+                // CLLocationManager must be touched on the main thread for the
+                // system dialog to appear reliably. run_on_main_thread only
+                // enqueues the closure, so the standard channel below is
+                // woken by the main-thread run loop without deadlocking.
+                let (tx, rx) = std::sync::mpsc::channel::<()>();
+                app.run_on_main_thread(move || {
+                    unsafe {
+                        let mgr: Retained<CLLocationManager> =
+                            msg_send![CLLocationManager::class(), new];
+                        mgr.requestWhenInUseAuthorization();
+                    }
+                    let _ = tx.send(());
+                })
+                .map_err(|e| e.to_string())?;
+                let _ = rx.recv();
+                Ok(macos_location_status())
+            }
+            "camera" | "microphone" => {
+                let (tx, rx) = std::sync::mpsc::channel::<()>();
+                let block = RcBlock::new(move |_granted: Bool| {
+                    let _ = tx.send(());
+                });
+                unsafe {
+                    let media = macos_av_media_type(&kind)?;
+                    AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &block);
+                }
+                // The framework retains the block; waits until the user
+                // answers the system dialog, then reports the final status.
+                let _ = rx.recv();
+                Ok(macos_av_status(macos_av_media_type(&kind)?))
+            }
+            other => Err(format!("unknown permission kind: {other}")),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, kind);
+        Err("system permissions are only supported on macOS".into())
+    }
+}
+
+
 /// Probe installed runtime versions (Node.js, Python, Rust) for sys_info.
 /// Each is a quick `--version` subprocess; a missing binary yields "not
 /// installed" instead of failing the whole sys_info call. python --version
@@ -7976,6 +8154,9 @@ pub fn run() {
             // System info
             sys_info,
             detect_location,
+            // System permissions
+            check_system_permission,
+            request_system_permission,
             list_app_skills,
             test_llm_connection,
             test_proxy,

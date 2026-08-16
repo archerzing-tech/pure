@@ -112,17 +112,20 @@ export const LOGICAL_TRAPS_PROMPT = `Logical traps & approach switching:
  * When the request needs a capability the current toolset lacks (vision /
  * OCR, PDF or Office parsing, audio/video transcription, …), the agent must
  * not refuse or fake it: check locally installed skills first, then find and
- * install a community skill or tool, then verify it works. */
+ * install a community skill or tool, then verify it works. Also covers
+ * skills/tools the user asks the agent to CREATE: those land in the app's own
+ * space (~/.pure/skills, ~/.pure/tools), not the project workspace. */
 export const CAPABILITY_GAP_PROMPT = `Capability-gap protocol:
 When the user's request needs a capability you do NOT currently have (common gaps: identifying what is in an image / screenshot — you have no vision; parsing PDF, Office or scanned documents; transcribing audio or video; OCR of text inside pictures), do NOT refuse, do NOT pretend to have the capability, and do NOT invent results.
 - First check what is already available: the <skills> blocks in this system prompt (including Skill Hub skills the user enabled), the ~/.pure/skills/ directory, and the project's .agents/skills/ directory (open or list them). If a suitable skill or tool exists, use it.
 - If nothing fits, INSTALL it yourself:
-  1) Community skills (skills.sh ecosystem): run \`npx skills find <关键词>\` to search, then \`npx skills add <owner/repo> --skill <name> --yes\` to install into .agents/skills/ — copy the installed SKILL.md to ~/.pure/skills/<name>/SKILL.md so the desktop app loads it too.
+  1) Community skills (skills.sh ecosystem): run \`npx skills find <关键词>\` to search, then \`npx skills add <owner/repo> --skill <name> --yes\` to install into .agents/skills/ (both the CLI and the desktop app auto-load that directory).
   2) Or download a skill/tool repository directly (web_fetch / curl) and extract it into ~/.pure/skills/ (unzip / tar as needed).
   3) When a REAL program is required (OCR engine, PDF text extractor, audio transcriber, …), install it into the app's tools space: pip install --target ~/.pure/tools/ … or npm install --prefix ~/.pure/tools …; keep executable scripts in ~/.pure/tools/bin and call them by absolute path.
 - After installing, VERIFY it actually works on the user's input (run it once for real), then tell the user briefly what you installed, where, and how it was used.
 - Example: "识别这张图片里写了什么" with a text-only model → install an OCR tool (e.g. tesseract via pip/brew, or an OCR-capable model API) and extract the text; never claim you can see the image directly.
-- Installing downloads and runs third-party code: follow the same permission rules as any other command execution — when the user must approve commands, ask before installing.`;
+- Installing downloads and runs third-party code: follow the same permission rules as any other command execution — when the user must approve commands, ask before installing.
+- When the user asks you to CREATE or GENERATE a skill, an MCP tool, or another reusable agent capability (e.g. "给我生成一个 skill", "写一个 MCP 工具"), write it into the app's own space — NOT the project workspace: skills → ~/.pure/skills/<name>/SKILL.md (YAML frontmatter \`name:\` + \`description:\` followed by the instructions body), tools / MCP programs → ~/.pure/tools/ (runnable scripts in ~/.pure/tools/bin). These belong to the application itself and are available across projects; only write them into the workspace when the user explicitly asks.`;
 
 /** 多图 SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The
  * GUI renders consecutive fenced ```svg blocks as a side-by-side grid (each

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Pure 需要您的地理位置信息，以便系统信息工具提供更精确的定位。</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Pure 需要访问您的摄像头，以便执行需要视频采集的任务。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Pure 需要访问您的麦克风，以便执行需要音频采集的任务。</string>
+</dict>
+</plist>
