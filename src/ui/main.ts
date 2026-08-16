@@ -22,7 +22,7 @@ import { loadSessionList, loadSessionStatsForList, type SessionMeta, type Sessio
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
-import { providerLabel, providerDef, PROVIDERS, defaultModelFor, customProviderFor, type ProviderId } from '../shared/providers';
+import { providerDef, PROVIDERS, defaultModelFor, customProviderLabel, type ProviderId } from '../shared/providers';
 import { renderMarkdown, stripToolCallXml } from './markdownLoader';
 import { createToolRow, finalizeToolRow, markToolRowStopped } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
@@ -335,10 +335,11 @@ function wireComposerSelects(): void {
 
 // ── Context panel display ──
 
-/** Provider display label, resolving custom providers by their saved name. */
+/** Provider display label, resolving custom providers by their saved name and
+ *  built-in providers by their per-provider override (Settings → LLM). */
 function providerDisplayLabel(cfg: PureConfig | null): string {
   if (!cfg) return '';
-  return customProviderFor(cfg.customProviders ?? [], cfg.provider)?.name ?? providerLabel(cfg.provider);
+  return customProviderLabel(cfg.customProviders ?? [], cfg.provider, cfg.providerOverrides);
 }
 
 function updateContextPanelModel() {

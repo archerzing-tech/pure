@@ -24,6 +24,7 @@ import {
   OPENROUTER_PRESET,
   NVIDIA_PRESET,
   providerDef,
+  providerOverrideFor,
   type CustomProvider,
 } from '../shared/providers';
 import { effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList } from '../shared/proxy';
@@ -843,10 +844,15 @@ export class SettingsPanel {
       try {
         const core = await loadTauriCore();
         if (!core) throw new Error('Tauri runtime unavailable');
+        const override = providerOverrideFor((loadConfig() ?? defaults()).providerOverrides, provider);
         probe = await core.invoke('test_llm_connection', {
           baseUrl: baseURL,
           apiKey,
-          secretKey: custom ? customSecretKey(custom.id) : undefined,
+          // Built-ins with their own saved key probe the same per-provider
+          // Rust secret slot real chats resolve.
+          secretKey: custom ? customSecretKey(custom.id)
+            : override?.hasApiKey ? customSecretKey(provider)
+            : undefined,
           proxyUrl: effectiveProxyUrl(proxy, 'llm') ?? '',
           proxyBypassProviders: proxy?.bypassProviders ?? [],
           proxyBypassModels: proxy?.bypassModels ?? [],
@@ -1053,8 +1059,10 @@ export class SettingsPanel {
     const cfg = loadConfig() ?? defaults();
     const customs = cfg.customProviders ?? [];
     const custom = customProviderFor(customs, provider);
+    const overrides = cfg.providerOverrides ?? {};
+    const override = providerOverrideFor(overrides, provider);
     const def = providerDef(provider);
-    const selectedLabel = custom?.name ?? (def ? t(def.i18nKey) : provider);
+    const selectedLabel = custom?.name ?? override?.name ?? (def ? t(def.i18nKey) : provider);
     const modelInput = document.getElementById('cfg-model') as HTMLInputElement | null;
     const baseUrlInput = document.getElementById('cfg-baseurl') as HTMLInputElement | null;
     const currentModel = modelInput?.value.trim() || '';
@@ -1072,22 +1080,28 @@ export class SettingsPanel {
       if (modelInput && (!currentModel || currentModel === previousDefault)) {
         modelInput.value = '';
       }
-      const previousEndpoint = previousCustom?.baseURL ?? previousDef?.baseURL;
+      const previousEndpoint = previousCustom?.baseURL
+        ?? providerOverrideFor(overrides, cfg.provider)?.baseURL
+        ?? previousDef?.baseURL;
       if (baseUrlInput && currentBaseURL && currentBaseURL === previousEndpoint) {
         baseUrlInput.value = '';
       }
       // Custom providers always carry a required base URL + default model —
       // prefill the editable fields so the config card reads back their values.
+      // Built-ins prefill their override (empty = registry default endpoint).
       const modelAddInput = document.getElementById('cfg-model-add') as HTMLInputElement | null;
       if (modelAddInput) modelAddInput.value = '';
       if (custom) {
         if (modelInput) modelInput.value = custom.defaultModel;
         if (baseUrlInput) baseUrlInput.value = custom.baseURL;
-      } else if (modelInput) {
-        const providerModels = modelListForProvider(cfg, provider);
-        modelInput.value = provider === cfg.provider
-          ? (cfg.model.trim() || providerModels[0] || defaultModelFor(provider))
-          : (cfg.providerModels?.[provider]?.[0] || providerModels[0] || defaultModelFor(provider));
+      } else {
+        if (baseUrlInput) baseUrlInput.value = override?.baseURL ?? '';
+        if (modelInput) {
+          const providerModels = modelListForProvider(cfg, provider);
+          modelInput.value = provider === cfg.provider
+            ? (cfg.model.trim() || providerModels[0] || defaultModelFor(provider))
+            : (cfg.providerModels?.[provider]?.[0] || providerModels[0] || defaultModelFor(provider));
+        }
       }
       // Refresh the model list only on a real card switch — never on live
       // keystrokes inside the same card (it would churn the DOM while typing).
@@ -1107,9 +1121,21 @@ export class SettingsPanel {
           : active ? t('llm.custom.editing')
           : t('llm.chooseCard');
       }
+      // A user-set display name (built-in override) wins over the i18n label
+      // and must survive language switches — drop data-i18n so applyTranslations
+      // never overwrites it; restoring the default re-attaches the key.
+      const cardOverride = providerOverrideFor(overrides, cardProvider);
+      const cardName = card.querySelector<HTMLElement>('.provider-card-name');
+      const cardDef = providerDef(cardProvider);
+      if (cardName && cardOverride?.name) {
+        if (cardName.textContent !== cardOverride.name) cardName.textContent = cardOverride.name;
+        cardName.removeAttribute('data-i18n');
+      } else if (cardName && cardDef && !cardName.hasAttribute('data-i18n')) {
+        cardName.setAttribute('data-i18n', cardDef.i18nKey);
+        cardName.textContent = t(cardDef.i18nKey);
+      }
       const modelValue = card.querySelector<HTMLElement>('.provider-card-model-value');
       const cardCustom = customProviderFor(customs, cardProvider);
-      const cardDef = providerDef(cardProvider);
       if (modelValue) {
         const cardModels = modelListForProvider(cfg, cardProvider || '');
         modelValue.textContent = active && modelInput?.value.trim()
@@ -1121,20 +1147,34 @@ export class SettingsPanel {
     const title = document.getElementById('provider-config-title');
     const endpoint = document.getElementById('provider-config-endpoint');
     if (title) title.textContent = selectedLabel;
-    if (endpoint) endpoint.textContent = baseUrlInput?.value.trim() || custom?.baseURL || def?.baseURL || '';
+    if (endpoint) endpoint.textContent = baseUrlInput?.value.trim() || custom?.baseURL || override?.baseURL || def?.baseURL || '';
     if (modelInput) {
       modelInput.placeholder = custom
         ? (custom.defaultModel || t('llm.model.addPlaceholder'))
         : (def?.defaultModel ?? '');
     }
 
-    // Custom-only rows: name edit + delete. Keyless locals (Ollama) get a hint
-    // in the API-key field instead of the generic sk-... placeholder.
+    // Name + Base URL rows are editable for EVERY provider: custom providers
+    // write back to their entry, built-ins to providerOverrides (empty input =
+    // registry default endpoint, shown as the field placeholder). Delete stays
+    // custom-only. Keyless locals (Ollama) get a hint in the API-key field
+    // instead of the generic sk-... placeholder.
     const isCustom = !!custom;
     const isKnown = this.isKnownProvider(provider);
     const isCustomSettings = isCustom && !isKnown;
     const baseUrlRow = baseUrlInput?.closest<HTMLElement>('.provider-baseurl-row');
-    baseUrlRow?.toggleAttribute('hidden', !isCustomSettings);
+    baseUrlRow?.toggleAttribute('hidden', false);
+    if (baseUrlInput) {
+      if (isCustom) {
+        baseUrlInput.setAttribute('data-i18n-placeholder', 'llm.baseURL.placeholder');
+        baseUrlInput.placeholder = t('llm.baseURL.placeholder');
+      } else {
+        // Built-ins: empty field = use the registry default (which the summary
+        // line right above already shows); a typed value overrides it.
+        baseUrlInput.removeAttribute('data-i18n-placeholder');
+        baseUrlInput.placeholder = t('llm.baseURL.builtinPlaceholder').replace('{url}', def?.baseURL ?? '');
+      }
+    }
     // 未配置的自定义供应商（还没有 Base URL）：端点处给出醒目标记，避免用户
     // 以为已就绪就直接发送 —— 空地址会静默回落到内置默认端点。
     const unconfigured = isCustom && !(baseUrlInput?.value.trim() || custom?.baseURL);
@@ -1163,9 +1203,9 @@ export class SettingsPanel {
     const nameRow = document.getElementById('cfg-custom-name-row');
     const deleteRow = document.getElementById('cfg-custom-delete-row');
     const nameEdit = document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null;
-    if (nameRow) nameRow.hidden = !isCustomSettings;
+    if (nameRow) nameRow.hidden = false;
     if (deleteRow) deleteRow.hidden = !isCustomSettings;
-    if (nameEdit) nameEdit.value = custom?.name ?? '';
+    if (nameEdit) nameEdit.value = custom?.name ?? override?.name ?? '';
     // 文生图配置只对自定义供应商开放（内置 DeepSeek/Qwen/GLM 无图片 API）：
     // 开启后该供应商的图片请求走 generate_image 工具，渲染为真实图片而非 SVG。
     const imageGenRow = document.getElementById('cfg-imagegen-row');
@@ -1185,7 +1225,7 @@ export class SettingsPanel {
     const v4Status = document.getElementById('provider-v4-connection-status');
     const v4Count = document.getElementById('provider-v4-model-count');
     if (v4Name) v4Name.textContent = selectedLabel;
-    if (v4Endpoint) v4Endpoint.textContent = baseUrlInput?.value.trim() || custom?.baseURL || def?.baseURL || t('llm.connection.notConfigured');
+    if (v4Endpoint) v4Endpoint.textContent = baseUrlInput?.value.trim() || custom?.baseURL || override?.baseURL || def?.baseURL || t('llm.connection.notConfigured');
     const selectedModels = modelListForProvider(cfg, provider);
     const selectedDefault = modelInput?.value.trim() || custom?.defaultModel || selectedModels[0] || t('llm.custom.err.models');
     if (v4Model) v4Model.textContent = selectedDefault;
@@ -1193,7 +1233,7 @@ export class SettingsPanel {
     if (v4Status && v4Status.dataset.state !== 'testing') {
       const hasProviderCredential = isCustom
         ? !!custom?.local || !!custom?.apiKey || custom?.hasApiKey === true
-        : !!cfg.apiKey || cfg.hasApiKey === true;
+        : !!cfg.apiKey || cfg.hasApiKey === true || !!override?.apiKey || override?.hasApiKey === true;
       // Three states: active+credential → 已连接; credential but NOT the
       // active provider → 已保存未启用 (a key is present, just not in use);
       // otherwise → 未配置. The middle state matters: after saving a key the
@@ -1212,13 +1252,18 @@ export class SettingsPanel {
 
     if (keyInput) {
       // Keyless locals say "leave empty"; cloud presets without a key yet say
-      // "required" — the hint must not tell an OpenAI user the key is optional.
+      // "required"; a built-in with its own saved key (desktop) says the key
+      // is already stored — the hint must not tell an OpenAI user the key is
+      // optional, or imply a stored key is missing.
       if (isCustom && custom?.local && !custom.apiKey && !custom.hasApiKey) {
         keyInput.removeAttribute('data-i18n-placeholder');
         keyInput.placeholder = t('llm.custom.apiKeyOptional.hint');
       } else if (isCustom && !custom.apiKey && !custom.hasApiKey) {
         keyInput.removeAttribute('data-i18n-placeholder');
         keyInput.placeholder = t('llm.custom.apiKeyRequired.hint');
+      } else if (!isCustom && override?.hasApiKey === true) {
+        keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.savedPlaceholder');
+        keyInput.placeholder = t('llm.apiKey.savedPlaceholder');
       } else {
         keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.placeholder');
         keyInput.placeholder = t('llm.apiKey.placeholder');
@@ -1252,16 +1297,20 @@ export class SettingsPanel {
     if (modelAddEl) modelAddEl.value = '';
     // Custom providers always carry a required base URL + default model in
     // their entry — prefill the editable fields so edits write back correctly.
+    // Built-in providers prefill their override (empty = registry default,
+    // shown as the field placeholder). The legacy global cfg.baseURL is never
+    // read here — a stale value once hijacked every provider's endpoint.
+    const selectedOverride = providerOverrideFor(cfg.providerOverrides, cfg.provider);
     modelEl.value = cfg.model || selectedCustom?.defaultModel || '';
-    baseUrlEl.value = cfg.baseURL || selectedCustom?.baseURL || '';
+    baseUrlEl.value = selectedCustom?.baseURL ?? selectedOverride?.baseURL ?? '';
     this.updateProviderPresentation(cfg.provider);
     const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
     // Browser mode: a custom provider's key lives in its config entry — prefill
     // the field so edits write back correctly and an unrelated autoSave never
     // clobbers it with an empty value. Tauri mode: entry keys are always '' in
     // storage (they live in Rust secrets), so this never leaks a secret.
-    keyInput.value = cfg.apiKey || selectedCustom?.apiKey || '';
-    if (isTauriRuntime() && (cfg.hasApiKey || selectedCustom?.hasApiKey)) {
+    keyInput.value = cfg.apiKey || selectedCustom?.apiKey || selectedOverride?.apiKey || '';
+    if (isTauriRuntime() && (cfg.hasApiKey || selectedCustom?.hasApiKey || selectedOverride?.hasApiKey)) {
       // Key is stored in Rust secrets — never pull it back into the WebView.
       // Show a masked placeholder; typing a new key replaces it, and clearing
       // a field the user actually edited revokes it.
@@ -1989,6 +2038,29 @@ export class SettingsPanel {
     return list;
   }
 
+  /**
+   * Collect name / Base URL overrides for the BUILT-IN provider currently
+   * being edited (custom providers own those fields on their entry, so they
+   * never appear in this map). An empty input clears the override and the
+   * registry default takes over again. API keys are handled separately in
+   * autoSave() (Rust secrets on desktop) and are carried through untouched.
+   */
+  private gatherProviderOverrides(): PureConfig['providerOverrides'] {
+    const prev = (loadConfig() ?? defaults()).providerOverrides ?? {};
+    const out: PureConfig['providerOverrides'] = { ...prev };
+    const editing = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    if (customProviderFor((loadConfig() ?? defaults()).customProviders ?? [], editing)) {
+      return out;
+    }
+    const name = (document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null)?.value.trim() || '';
+    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim();
+    const next = { ...(prev[editing] ?? {}) };
+    if (name) next.name = name; else delete next.name;
+    if (baseURL) next.baseURL = baseURL; else delete next.baseURL;
+    out[editing] = next;
+    return out;
+  }
+
   /** Stable slug for a new custom provider; appends -2/-3… on collisions. */
   private uniqueCustomId(customs: CustomProvider[], name: string): string {
     const base = name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-').replace(/^-+|-+$/g, '') || 'custom';
@@ -2328,13 +2400,14 @@ export class SettingsPanel {
     const select = document.getElementById('cfg-provider') as HTMLSelectElement;
     select.value = cfg.provider;
     const nextCustom = customProviderFor(cfg.customProviders ?? [], cfg.provider);
+    const nextOverride = providerOverrideFor(cfg.providerOverrides, cfg.provider);
     const nextDef = providerDef(cfg.provider);
     (document.getElementById('cfg-model') as HTMLInputElement).value =
       cfg.model || nextCustom?.defaultModel || nextDef?.defaultModel || '';
     (document.getElementById('cfg-baseurl') as HTMLInputElement).value =
-      cfg.baseURL || nextCustom?.baseURL || nextDef?.baseURL || '';
+      nextCustom?.baseURL ?? nextOverride?.baseURL ?? '';
     const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
-    keyInput.value = cfg.apiKey || nextCustom?.apiKey || '';
+    keyInput.value = cfg.apiKey || nextCustom?.apiKey || nextOverride?.apiKey || '';
     delete keyInput.dataset.touched;
     this.updateProviderPresentation(cfg.provider);
     this.toast(t('llm.custom.deleted'));
@@ -2371,15 +2444,18 @@ export class SettingsPanel {
     const editingActive = editing === active;
     const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement).value.trim();
     const model = (document.getElementById('cfg-model') as HTMLInputElement).value.trim();
-    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim();
 
     return {
       provider: active as PureConfig['provider'],
       customProviders: this.gatherCustomProviders(),
       providerModels: this.gatherProviderModels(),
+      providerOverrides: this.gatherProviderOverrides(),
       apiKey: editingActive ? apiKey : prev.apiKey,
       model: editingActive ? model : prev.model,
-      baseURL: editingActive ? baseURL : prev.baseURL,
+      // The legacy global baseURL is frozen after the v10 migration (a stale
+      // value once hijacked every provider's endpoint); per-provider edits now
+      // land in providerOverrides via gatherProviderOverrides().
+      baseURL: prev.baseURL,
       language: (document.getElementById('cfg-language') as HTMLSelectElement).value as PureConfig['language'],
       city: (document.getElementById('cfg-city') as HTMLInputElement | null)?.value.trim() ?? '',
       theme: (document.querySelector('.theme-option.active')?.getAttribute('data-theme') || 'light') as PureConfig['theme'],
@@ -2474,18 +2550,35 @@ export class SettingsPanel {
       if (!cfg.model) {
         cfg.model = defaultModelFor(cfg.provider);
       }
+      // Built-in providers may carry their own per-provider key (override
+      // slot 'llm.apiKey.<id>' on desktop). Without one the legacy global key
+      // (cfg.apiKey / Rust 'llm.apiKey') still applies, so existing setups
+      // keep working untouched.
+      const override = cfg.providerOverrides[cfg.provider] ?? {};
+      const hasOverrideKey = !!override.apiKey || override.hasApiKey === true;
       if (isTauriRuntime()) {
-        // Desktop: the key is owned by Rust secrets, never localStorage.
         if (cfg.apiKey) {
-          void storeSecretInRust(cfg.apiKey);
-          cfg.hasApiKey = true;
-        } else if (cfg.hasApiKey && keyInput.dataset.touched === '1') {
+          // Desktop: the key is owned by Rust secrets, never localStorage —
+          // stored under the provider's own slot so each built-in keeps a
+          // distinct key.
+          void storeCustomSecretInRust(cfg.provider, cfg.apiKey);
+          cfg.providerOverrides[cfg.provider] = { ...override, hasApiKey: true };
+        } else if (hasOverrideKey && keyInput.dataset.touched === '1') {
           // User edited the field and cleared it → revoke the stored key.
-          void revokeSecretFromRust();
-          cfg.hasApiKey = false;
+          void revokeCustomSecretFromRust(cfg.provider);
+          cfg.providerOverrides[cfg.provider] = { ...override, hasApiKey: false };
           delete keyInput.dataset.touched;
         }
         cfg.apiKey = ''; // never persist the raw key
+      } else if (cfg.apiKey) {
+        // Browser: the key lives in the override entry (plain storage, same
+        // as the legacy global key did).
+        cfg.providerOverrides[cfg.provider] = { ...override, apiKey: cfg.apiKey };
+        cfg.apiKey = '';
+      } else if (hasOverrideKey && keyInput.dataset.touched === '1') {
+        // User edited the field and cleared it → drop the stored key.
+        cfg.providerOverrides[cfg.provider] = { ...override, apiKey: '', hasApiKey: false };
+        delete keyInput.dataset.touched;
       } else {
         cfg.hasApiKey = !!cfg.apiKey;
       }
