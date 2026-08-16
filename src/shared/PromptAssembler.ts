@@ -90,6 +90,8 @@ export function formatPromptBudgetDiagnostic(report: PromptBudgetReport): string
 export interface PromptMemoryContext {
   preferences: string[];
   errorPatterns: string[];
+  /** v1.9.7 — verified successful patterns, injected with priority so proven approaches are preferred over unproven ones. */
+  successes?: string[];
   procedures?: string[];
   project?: string;
   /** Runtime-selected strategy compiled from current environment and feedback. */
@@ -337,6 +339,7 @@ export class PromptAssembler {
     const hasMemory = !!memory && (
       memory.preferences.length > 0
       || memory.errorPatterns.length > 0
+      || (memory.successes?.length ?? 0) > 0
       || (memory.procedures?.length ?? 0) > 0
       || Boolean(memory.adaptiveStrategy?.trim())
     );
@@ -345,8 +348,11 @@ export class PromptAssembler {
     const memoryFragments = [
       fragment('memory_project', memory?.project ? `Project: ${memory.project}` : '', 35),
       fragment('memory_preferences', memory?.preferences.length ? `User preferences:\n${memory.preferences.map((value) => `- ${value}`).join('\n')}` : '', 45),
-      fragment('memory_errors', memory?.errorPatterns.length ? `Known error patterns:\n${memory.errorPatterns.map((value) => `- ${value}`).join('\n')}` : '', 55),
+      // v1.9.7 — proven successes rank ABOVE errors: when a verified approach
+      // matches, the model should prefer it; error patterns are avoid-lists.
+      fragment('memory_successes', memory?.successes?.length ? `Proven successful approaches (prefer these when the situation matches):\n${memory.successes.map((value) => `- ${value}`).join('\n')}` : '', 60),
       fragment('memory_procedures', memory?.procedures?.length ? `Proven procedures (apply when the situation matches):\n${memory.procedures.map((value) => `- ${value}`).join('\n')}` : '', 40),
+      fragment('memory_errors', memory?.errorPatterns.length ? `Known error patterns (avoid repeating these calls):\n${memory.errorPatterns.map((value) => `- ${value}`).join('\n')}` : '', 55),
       fragment('adaptive_strategy', memory?.adaptiveStrategy ?? '', 95),
     ].filter((item): item is PromptFragment => item !== null);
     const open = input.template.indexOf('<session_memory>');

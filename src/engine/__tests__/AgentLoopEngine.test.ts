@@ -462,6 +462,57 @@ describe('AgentLoopEngine', () => {
     expect(completed).toBeDefined();
   });
 
+  // ═══ v1.9.7 — every failed execution degrades subsequent thinking ═══
+
+  it('injects a degradation note after a failed tool call (no policy)', async () => {
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm: toolThenTextLLM('read_file', '{"path":"missing.ts"}', 'File not readable.'),
+      tools: failToolAdapter([READ_FILE_TOOL], 'read_file'),
+      toolsDefs: [READ_FILE_TOOL],
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's10b', systemPrompt: 'X', userPrompt: 'Read missing.ts', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed).toBeDefined();
+    const note = completed!.payload.messages!.find(
+      m => m.role === 'user' && m.content.includes('Degrade this approach'),
+    );
+    expect(note).toBeDefined();
+    expect(note!.content).toContain('read_file');
+    expect(note!.content).toContain('tool execution failed');
+    expect(note!.content).toContain('do NOT repeat the exact same call');
+    expect(note!.content).toContain('Prefer approaches that have already proven successful this session');
+  });
+
+  it('injects the degradation note alongside the policy hint on retry', async () => {
+    const engine = new AgentLoopEngine();
+    const retryPolicy = { decide: () => ({ kind: 'retry' as const, hint: 'try again, simpler' }) };
+    const ctx = baseCtx({
+      llm: toolThenTextLLM('read_file', '{"path":"missing.ts"}', 'File not readable.'),
+      tools: failToolAdapter([READ_FILE_TOOL], 'read_file'),
+      toolsDefs: [READ_FILE_TOOL],
+      failurePolicy: retryPolicy,
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's10c', systemPrompt: 'X', userPrompt: 'Read missing.ts', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed).toBeDefined();
+    const userContents = completed!.payload.messages!
+      .filter(m => m.role === 'user')
+      .map(m => m.content);
+    expect(userContents.some(c => c.includes('Degrade this approach'))).toBe(true);
+    expect(userContents.some(c => c.includes('try again, simpler'))).toBe(true);
+  });
+
   // ═══ Continue mode ═══
 
   it('continue() starts from previous messages', async () => {
