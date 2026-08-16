@@ -98,13 +98,7 @@ describe('classifyIntent', () => {
     expect(classifyIntent('100 usd to cny')).toBe('fx');
     expect(classifyIntent('苹果股价')).toBe('stock');
     expect(classifyIntent('github 上最火的 AI 仓库')).toBe('github');
-    expect(classifyIntent('CA981 航班动态')).toBe('flight');
-    expect(classifyIntent('航班动态')).toBe('flight');
-  });
-
-  it('keeps flight-number-less travel queries out of the flight intent', () => {
     expect(classifyIntent('北京到上海机票')).toBeNull();
-    expect(classifyIntent('CA981 航班动态'.repeat(10))).toBeNull();
   });
 
   it('returns null for build requests, empty input, and non-structured queries', () => {
@@ -180,43 +174,6 @@ describe('parseRssItems', () => {
   });
 });
 
-describe('flight resolver (mocked network)', () => {
-  it('asks for a flight number when the query has none', async () => {
-    const outcome = await tryDirectPublicApi('航班动态');
-    expect(outcome?.intent).toBe('flight');
-    expect(outcome?.text).toContain('航班号');
-  });
-
-  it('explains the missing aviationstack key instead of failing', async () => {
-    delete process.env.PURE_AVIATIONSTACK_KEY;
-    const outcome = await tryDirectPublicApi('CA981 航班动态');
-    expect(outcome?.intent).toBe('flight');
-    expect(outcome?.text).toContain('PURE_AVIATIONSTACK_KEY');
-  });
-
-  it('answers flight status from aviationstack', async () => {
-    process.env.PURE_AVIATIONSTACK_KEY = 'av-test';
-    mockFetchOnce({
-      data: [{
-        flight_status: 'active',
-        airline: { name: 'Air China' },
-        departure: { airport: 'PEK', scheduled: '2026-08-16T10:30:00+00:00', terminal: '3', gate: 'C12' },
-        arrival: { airport: 'LAX', scheduled: '2026-08-16T15:45:00+00:00' },
-      }],
-    });
-    try {
-      const outcome = await tryDirectPublicApi('CA981 航班动态');
-      expect(outcome?.intent).toBe('flight');
-      expect(outcome?.source).toBe('AviationStack');
-      expect(outcome?.text).toContain('CA981');
-      expect(outcome?.text).toContain('active');
-      expect(outcome?.text).toContain('PEK');
-      expect(outcome?.text).toContain('LAX');
-    } finally {
-      delete process.env.PURE_AVIATIONSTACK_KEY;
-    }
-  });
-});
 
 describe('tryDirectPublicApi (mocked network)', () => {
   it('answers an FX lookup from the Frankfurter API', async () => {

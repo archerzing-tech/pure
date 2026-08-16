@@ -214,36 +214,14 @@ describe('CLI Tier-2/3 web tool wiring', () => {
     expect(String(result.result)).toContain('PDF text extracted');
   });
 
-  it('web_scrape falls back to Firecrawl when Jina also fails', async () => {
-    mockFetchByUrl({
-      'https://example.com/hard': { body: 'Forbidden', status: 403 },
-      'https://r.jina.ai/': { body: '', status: 503 },
-      'https://api.firecrawl.dev/': { body: { success: true, data: { markdown: 'Via Firecrawl' } } },
-    });
-    process.env.PURE_FIRECRAWL_API_KEY = 'fc-test';
-    try {
-      const result = await adapter.execute(call('web_scrape', { url: 'https://example.com/hard' }));
-      expect(result.success).toBe(true);
-      expect(String(result.result)).toContain('Via Firecrawl');
-    } finally {
-      delete process.env.PURE_FIRECRAWL_API_KEY;
-    }
-  });
-
-  it('web_scrape fails with guidance when direct fetch, Jina, and Firecrawl all fail', async () => {
+  it('web_scrape fails with guidance when direct fetch and Jina both fail', async () => {
     mockFetchByUrl({
       'https://example.com/dead': { body: 'Forbidden', status: 403 },
       'https://r.jina.ai/': { body: '', status: 503 },
-      'https://api.firecrawl.dev/': { body: '', status: 402 },
     });
-    process.env.PURE_FIRECRAWL_API_KEY = 'fc-test';
-    try {
-      const result = await adapter.execute(call('web_scrape', { url: 'https://example.com/dead' }));
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('researcher_web');
-    } finally {
-      delete process.env.PURE_FIRECRAWL_API_KEY;
-    }
+    const result = await adapter.execute(call('web_scrape', { url: 'https://example.com/dead' }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('researcher_web');
   });
 
   it('skips an API backend in cooldown instead of calling it', async () => {

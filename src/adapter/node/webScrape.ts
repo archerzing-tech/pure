@@ -10,8 +10,7 @@
 //   2. JSON → pretty-printed, truncated.
 //   3. RSS/Atom → parsed item list (title/link/date/description).
 //   4. Jina Reader (r.jina.ai) fallback for blocked, JS-heavy, or binary
-//      pages — free tier, no key required (PURE_JINA_API_KEY raises limits);
-//      Firecrawl (PURE_FIRECRAWL_API_KEY) is the second fallback tier.
+//      pages — free tier, no key required (PURE_JINA_API_KEY raises limits).
 
 import { parseRssItems } from './publicApis';
 
@@ -142,31 +141,6 @@ export async function scrapeViaJina(url: string, apiKey?: string): Promise<strin
     if (!resp.ok) return null;
     const text = await resp.text();
     return text.trim() ? text : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Firecrawl fallback: POST /v1/scrape turns any page into clean Markdown,
- * including JS-heavy SPAs and PDFs. Free tier ≈500–1000 credits/month;
- * enabled when PURE_FIRECRAWL_API_KEY is set (no key → null, so the Jina
- * path stays the no-key default).
- */
-export async function scrapeViaFirecrawl(url: string, apiKey?: string): Promise<string | null> {
-  const key = apiKey?.trim();
-  if (!key) return null;
-  try {
-    const resp = await fetch('https://api.firecrawl.dev/v1/scrape', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ url, formats: ['markdown'] }),
-      signal: AbortSignal.timeout(25000),
-    });
-    if (!resp.ok) return null;
-    const data: any = await resp.json();
-    const markdown = typeof data?.data?.markdown === 'string' ? data.data.markdown : undefined;
-    return markdown?.trim() ? markdown : null;
   } catch {
     return null;
   }

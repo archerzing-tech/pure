@@ -24,7 +24,7 @@
 
 import { publicApiCacheKey, webCache } from './webCache';
 
-export type IntentKind = 'weather' | 'geocode' | 'news' | 'wiki' | 'ip' | 'fx' | 'stock' | 'github' | 'flight';
+export type IntentKind = 'weather' | 'geocode' | 'news' | 'wiki' | 'ip' | 'fx' | 'stock' | 'github';
 
 export interface PublicApiOutcome {
   intent: IntentKind;
@@ -89,7 +89,6 @@ export const PUBLIC_API_TTL_MS: Record<IntentKind, number> = {
   weather: 20 * 60 * 1000,
   news: 10 * 60 * 1000,
   stock: 10 * 60 * 1000,
-  flight: 15 * 60 * 1000,
   fx: 6 * 60 * 60 * 1000,
   ip: 24 * 60 * 60 * 1000,
   github: 24 * 60 * 60 * 1000,
@@ -144,8 +143,6 @@ const NEWS_WORDS = /新闻|资讯|头条|快讯|时讯|热点|报道|新闻头�
 const WIKI_WORDS = /维基|百科|是什么|是谁|简介|wikipedia|wiki/i;
 const IP_WORDS = /(?:我的)?\s*(?:ip地址|ip 地址|本机ip|外网ip|ip)$|(?:what is|my)?\s*(?:ip address|my ip)\b|ip地址|IP地址/i;
 const GITHUB_WORDS = /\bgithub\b|开源项目|最火的.*仓库|star.*最多/i;
-const FLIGHT_NUMBER_RE = /\b([A-Z]{2}\d{2,4})\b/i;
-const BARE_FLIGHT_RE = /^(?:航班|flight)(?:动态|状态|信息|查询)?$/i;
 
 /** Classify a query's structured-data intent, or null when it does not fit. */
 export function classifyIntent(query: string): IntentKind | null {
@@ -162,9 +159,6 @@ export function classifyIntent(query: string): IntentKind | null {
   if (WIKI_WORDS.test(q) && q.length <= 60) return 'wiki';
   if (GITHUB_WORDS.test(q) && q.length <= 60) return 'github';
   if (resolveStockSymbol(q) && q.length <= 40) return 'stock';
-  // Flight needs a concrete flight number (CA981 / MU5101) or a bare
-  // "航班动态" intent — "北京到上海机票" stays a general query.
-  if ((FLIGHT_NUMBER_RE.test(q) && q.length <= 40) || BARE_FLIGHT_RE.test(q)) return 'flight';
   return null;
 }
 
@@ -576,45 +570,6 @@ async function resolveGithub(query: string): Promise<PublicApiOutcome | null> {
   return { intent: 'github', source: 'GitHub Search API', text: `GitHub 仓库 (按 star 排序):\n\n${lines.join('\n\n')}` };
 }
 
-/** Flight status via aviationstack (free plan: 100 requests/month, needs a
- * key). No key or no flight number → a helpful message instead of null, so
- * the caller answers the user instead of silently falling through. */
-async function resolveFlight(query: string): Promise<PublicApiOutcome | null> {
-  const m = query.match(FLIGHT_NUMBER_RE);
-  const flightNo = m ? m[1].toUpperCase() : undefined;
-  const key = process.env.PURE_AVIATIONSTACK_KEY?.trim();
-  if (!flightNo) {
-    return { intent: 'flight', source: 'AviationStack', text: '需要航班号才能查航班动态（例如“CA981 航班动态”或“MU5101 到哪了”）。' };
-  }
-  if (!key) {
-    return { intent: 'flight', source: 'AviationStack', text: `查询 ${flightNo} 需要免费的 AviationStack API key（100 次/月）：设置 PURE_AVIATIONSTACK_KEY 环境变量后可用（申请: https://aviationstack.com）。` };
-  }
-  const data = await fetchJson(
-    `https://api.aviationstack.com/v1/flights?access_key=${encodeURIComponent(key)}&flight_iata=${encodeURIComponent(flightNo)}&limit=1`,
-  );
-  const f = Array.isArray(data?.data) ? data.data[0] : undefined;
-  if (!f) return null;
-  const status = typeof f.flight_status === 'string' ? f.flight_status : 'unknown';
-  const airline = typeof f.airline?.name === 'string' ? f.airline.name : '';
-  const fmt = (airport: any, arrival: boolean): string => {
-    const name = typeof airport.airport === 'string' ? airport.airport : '—';
-    const scheduled = typeof airport.scheduled === 'string' ? airport.scheduled.replace('T', ' ').slice(5, 16) : '';
-    const actual = typeof airport.actual === 'string' ? airport.actual.replace('T', ' ').slice(5, 16) : '';
-    const gate = typeof airport.gate === 'string' && airport.gate ? ` · 登机口 ${airport.gate}` : '';
-    const terminal = typeof airport.terminal === 'string' && airport.terminal ? ` · T${airport.terminal}` : '';
-    return `${name}${scheduled ? ` 计划 ${scheduled}` : ''}${arrival && actual ? ` 实际 ${actual}` : ''}${gate}${terminal}`;
-  };
-  return {
-    intent: 'flight',
-    source: 'AviationStack',
-    text: [
-      `航班 ${flightNo}${airline ? ` · ${airline}` : ''} · 状态: ${status}`,
-      `出发: ${fmt(f.departure ?? {}, false)}`,
-      `到达: ${fmt(f.arrival ?? {}, true)}`,
-    ].join('\n'),
-  };
-}
-
 // ── Main entry ──
 
 export interface PublicApiOptions {
@@ -631,7 +586,7 @@ export async function tryDirectPublicApi(query: string, opts: PublicApiOptions =
   const q = query.trim();
   if (!q && !opts.category) return null;
   const category = (opts.category ?? '').trim();
-  const forced = ['weather', 'geocode', 'news', 'wiki', 'ip', 'fx', 'stock', 'github', 'flight'].includes(category)
+  const forced = ['weather', 'geocode', 'news', 'wiki', 'ip', 'fx', 'stock', 'github'].includes(category)
     ? category as IntentKind
     : undefined;
   const intent = forced ?? classifyIntent(q);
@@ -652,7 +607,6 @@ export async function tryDirectPublicApi(query: string, opts: PublicApiOptions =
       return symbol ? await resolveStock(symbol, q) : null;
     }
     case 'github': return await resolveGithub(q);
-    case 'flight': return await resolveFlight(q);
     default: return null;
   }
 }

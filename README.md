@@ -319,13 +319,25 @@ Without any key, the CLI already searches via free HTML backends (Sogou / cn.bin
 | `TAVILY_API_KEY` | Tavily search backend | 1,000 searches/month | [tavily.com](https://tavily.com) |
 | `EXA_API_KEY` | Exa neural search backend | $20 on signup + $10/month recurring | [exa.ai](https://exa.ai) |
 | `PURE_JINA_API_KEY` | `web_scrape` fallback (r.jina.ai) | works without a key; key raises limits | [jina.ai](https://jina.ai) |
-| `PURE_FIRECRAWL_API_KEY` | `web_scrape` second fallback | ~500–1,000 credits/month | [firecrawl.dev](https://firecrawl.dev) |
-| `PURE_AVIATIONSTACK_KEY` | Flight status (`CA981 航班动态`) | 100 requests/month | [aviationstack.com](https://aviationstack.com) |
 | `PURE_LOCATION` | Default city for weather without one | — | — |
 
 The GUI Settings → Tools → Web Tools page shows the same Serper / Tavily fields with one-click signup links; the CLI-only keys are set as environment variables.
 
 Results are cached so repeated queries don't burn free-tier quota: `web_search` (15 min), `web_public_api` (per intent — weather/news/stock are minutes-fresh, geocode/wiki are weeks-fresh), and `web_scrape`/`web_fetch` (1 hour) all read and write `~/.pure/cache/web-cache.json`, shared between CLI and GUI with the same key scheme. The file is bounded (200 entries, oldest-first eviction, 30 KB per value) and tolerates corruption. `PURE_WEB_CACHE=off` disables the cache; `PURE_CACHE_DIR` overrides its directory.
+
+#### Capability-gap auto-install (vision, OCR, PDF, audio, …)
+
+Pure's agent refuses to fake capabilities it doesn't have. When a request needs something outside the current toolset — reading what's in an image/screenshot with a text-only model, parsing PDF/Office files, transcribing audio — the agent follows the **capability-gap protocol** in its system prompt: check locally installed skills first, then find and install a community skill or tool itself, verify it actually works, and tell you what it installed and where.
+
+Install targets are shared by CLI and GUI and auto-load into the system prompt (no restart, ≤30s on desktop):
+
+| Target | Purpose | Example |
+|---|---|---|
+| `~/.pure/skills/<name>/SKILL.md` | Skill instructions (auto-injected) | OCR procedure, PDF parsing workflow |
+| `.agents/skills/<name>/SKILL.md` (project) | Project-local skills (auto-injected) | Repo-specific conventions |
+| `~/.pure/tools/` | Real programs via pip/npm | `pip install --target ~/.pure/tools` OCR engine, `npm install --prefix ~/.pure/tools` |
+
+Community skills come from the `npx skills` ecosystem (`npx skills find <query>` / `npx skills add <owner/repo> --skill <name> --yes`) or any GitHub repo (download + unzip into `~/.pure/skills/`). Installing downloads third-party code, so it obeys the same permission mode as every other command execution.
 
 #### Scrapling MCP server (optional)
 

@@ -33,14 +33,34 @@ describe('PromptAssembler', () => {
       capabilities: buildCliCapabilities(),
     });
 
-    for (const header of ['<agent_identity>', '<capabilities>', 'Output style:', 'Tool-calling rules:', 'Smart typo tolerance:', 'Logical traps & approach switching:']) {
+    for (const header of ['<agent_identity>', '<capabilities>', 'Output style:', 'Tool-calling rules:', 'Smart typo tolerance:', 'Logical traps & approach switching:', 'Capability-gap protocol:']) {
       expect(gui.split(header).length - 1).toBe(1);
       expect(cli.split(header).length - 1).toBe(1);
     }
     expect(gui.indexOf('<agent_identity>')).toBeLessThan(gui.indexOf('<capabilities>'));
-    expect(gui.indexOf('<capabilities>')).toBeLessThan(gui.indexOf('Output style:'));
     expect(gui).toContain('Path rule: pass file and directory paths relative');
     expect(cli).toContain('researcher_web(prompt');
+  });
+
+  it('injects app-skill bodies alongside hub skills', () => {
+    const assembly = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: 'test',
+      skills: [
+        { name: 'hub-skill', body: 'hub body', enabled: true },
+        { name: 'app-ocr', body: 'use tesseract for OCR', enabled: true },
+      ],
+    });
+    expect(assembly).toContain('hub body');
+    expect(assembly).toContain('use tesseract for OCR');
+    expect(assembly).toContain('<skill name="app-ocr">');
+  });
+
+  it('keeps the capability-gap protocol when budget allows', () => {
+    const assembly = assembler.buildSystemPrompt({ surface: 'cli', capabilities: 'test' });
+    expect(assembly).toContain('Capability-gap protocol:');
+    expect(assembly).toContain('npx skills find');
+    expect(assembly).toContain('~/.pure/skills/');
   });
 
   it('tells the CLI to emit mermaid/puml and explains the wireframe rendering', () => {

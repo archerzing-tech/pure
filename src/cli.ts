@@ -5,7 +5,7 @@
 //        pure --workspace .            → REPL
 //        pure config                   → set up provider + API key (persisted to ~/.pure/config.json)
 
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import * as os from 'node:os';
 import * as readline from 'node:readline';
 import { Harness } from './harness/Harness';
@@ -37,7 +37,8 @@ import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
 import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
 import type { EvolutionConfig } from './adapter/memory/evolution';
 import { harvestUserPreferences } from './shared/memory';
-import { buildCliCapabilities, formatPromptBudgetDiagnostic, promptAssembler, resolvePromptBudget } from './shared/PromptAssembler';
+import { buildCliCapabilities, formatPromptBudgetDiagnostic, promptAssembler, resolvePromptBudget, type PromptSkill } from './shared/PromptAssembler';
+import { parseSkillMarkdown } from './shared/skillFiles';
 import { mergeTranscriptWithTurn } from './shared/conversation';
 import { formatCliIntentAssessment, resolveCliAutoApprove } from './cliIntent';
 import { customProviderFor, defaultModelFor, isCustomProviderId, promptBudgetForProvider, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider } from './shared/providers';
@@ -328,6 +329,39 @@ function buildRuntimesContext(): string {
   return `\nEnvironment runtimes (installed on this machine): ${cachedRuntimes}. Use the actual versions above when the task depends on a runtime or tool version (e.g. writing a package.json engines field, a requirements.txt, or a CI/git workflow), and assume a tool is NOT installed when it is absent from this list.`;
 }
 
+/** Scan the app skills directory (~/.pure/skills/<name>/SKILL.md) and the
+ * project's .agents/skills/<name>/SKILL.md, parse each SKILL.md frontmatter,
+ * and return the bodies for system-prompt injection — the same directory the
+ * capability-gap protocol tells the agent to install community skills into.
+ * Unreadable entries are skipped; a missing directory is an empty list. */
+function loadAppSkills(): PromptSkill[] {
+  const home = process.env.HOME || os.homedir();
+  const base = process.env.PURE_SKILLS_DIR?.trim() || `${home}/.pure`;
+  const dirs = [`${base}/skills`, `${process.cwd()}/.agents/skills`];
+  const out: PromptSkill[] = [];
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const file = `${dir}/${entry.name}/SKILL.md`;
+      if (!existsSync(file)) continue;
+      try {
+        const parsed = parseSkillMarkdown(readFileSync(file, 'utf8'));
+        if (parsed) out.push({ name: parsed.name, body: parsed.body, enabled: true });
+      } catch {
+        // unreadable skill — skip, never crash the CLI
+      }
+    }
+  }
+  return out;
+}
+
 function assembleCliPrompt(
   mode: TaskMode,
   args: CliArgs,
@@ -341,7 +375,7 @@ function assembleCliPrompt(
     toolDefinitions: toolsDefs,
     environment: buildEnvironmentContext(),
     runtimes: buildRuntimesContext(),
-    skills: loadConfig()?.hubSkills,
+    skills: [...(loadConfig()?.hubSkills ?? []), ...loadAppSkills()],
     mode,
     budget: promptBudgetForProvider(args.customProviders, args.provider, args.model),
   }, userText, context);

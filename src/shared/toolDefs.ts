@@ -187,12 +187,12 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'web_public_api',
-    description: 'Structured-data lookup through curated no-key public APIs: weather, geocode, news, wiki, IP, FX, stock, GitHub, flight status. Use for concrete factual lookups like "北京天气", "100 usd to cny", "苹果股价", or "CA981 航班动态" — returns ready-to-use formatted data directly. When no structured source matches, it automatically falls back to web search (disable with searchOnMiss:false). Not for general discovery or ambiguous questions — use researcher_web for those.',
+    description: 'Structured-data lookup through curated no-key public APIs: weather, geocode, news, wiki, IP, FX, stock, GitHub. Use for concrete factual lookups like "北京天气", "100 usd to cny", or "苹果股价" — returns ready-to-use formatted data directly. When no structured source matches, it automatically falls back to web search (disable with searchOnMiss:false). Not for general discovery or ambiguous questions — use researcher_web for those.',
     input_schema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'The lookup question, e.g. "北京明天天气" or "100 usd to cny"' },
-        category: { type: 'string', enum: ['weather', 'geocode', 'news', 'wiki', 'ip', 'fx', 'stock', 'github', 'flight'], description: 'Optional intent override; defaults to automatic classification' },
+        category: { type: 'string', enum: ['weather', 'geocode', 'news', 'wiki', 'ip', 'fx', 'stock', 'github'], description: 'Optional intent override; defaults to automatic classification' },
         location: { type: 'string', description: 'Optional city for weather when the query has none (defaults to the configured location)' },
         searchOnMiss: { type: 'boolean', description: 'Fall back to web search when no structured source matches (default true)' },
       },

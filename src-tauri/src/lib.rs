@@ -26,6 +26,175 @@ fn valid_proxy_url(url: &str) -> bool {
     ["http://", "https://", "socks5://", "socks5h://"].iter().any(|prefix| lower.starts_with(prefix))
 }
 
+// ── LLM connection probe (Settings → LLM → 测试连接) ──
+// Desktop probing goes through the SAME Rust network path as real chat_stream
+// calls (reqwest + the configured proxy + secrets resolution), so a provider
+// that works in chat can never fail the test — and a test failure is a real
+// failure of the exact path the app will use. The WebView-fetch fallback stays
+// for browser dev mode, where CORS is not an issue for the user.
+
+#[derive(serde::Serialize)]
+struct LlmConnectionProbe {
+    ok: bool,
+    status: Option<u16>,
+    latency_ms: u64,
+    error: String,
+}
+
+/// GET {base}/models with the resolved key; 2xx is the only success. Split out
+/// of the command so tests can drive it against a local mock server.
+async fn probe_llm_endpoint(client: reqwest::Client, url: &str, api_key: &str) -> LlmConnectionProbe {
+    let started = std::time::Instant::now();
+    let mut request = client.get(url).header("User-Agent", BROWSER_UA);
+    if !api_key.is_empty() {
+        request = request.header("Authorization", format!("Bearer {}", api_key));
+    }
+    let response = match request.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return LlmConnectionProbe {
+                ok: false,
+                status: None,
+                latency_ms: started.elapsed().as_millis() as u64,
+                error: format!("network error: {}", e),
+            };
+        }
+    };
+    let status = response.status().as_u16();
+    let latency_ms = started.elapsed().as_millis() as u64;
+    if status >= 200 && status < 300 {
+        LlmConnectionProbe { ok: true, status: Some(status), latency_ms, error: String::new() }
+    } else if status == 401 || status == 403 {
+        LlmConnectionProbe {
+            ok: false,
+            status: Some(status),
+            latency_ms,
+            error: format!("HTTP {} — API key rejected", status),
+        }
+    } else {
+        LlmConnectionProbe { ok: false, status: Some(status), latency_ms, error: format!("HTTP {}", status) }
+    }
+}
+
+/// Test an LLM endpoint exactly like chat_stream would use it: same client
+/// builder (timeout + proxy), same key resolution (explicit key wins, else the
+/// named secret), same proxy bypass rules. The GUI shows the probe result.
+#[tauri::command]
+async fn test_llm_connection(
+    base_url: String,
+    api_key: Option<String>,
+    secret_key: Option<String>,
+    proxy_url: Option<String>,
+    proxy_bypass_providers: Option<Vec<String>>,
+    proxy_bypass_models: Option<Vec<String>>,
+    provider: Option<String>,
+    model: Option<String>,
+) -> Result<LlmConnectionProbe, String> {
+    let api_key = api_key.unwrap_or_default();
+    let secret_key = secret_key.unwrap_or_default();
+    let proxy_url = proxy_url.unwrap_or_default();
+    let proxy_bypass_providers = proxy_bypass_providers.unwrap_or_default();
+    let proxy_bypass_models = proxy_bypass_models.unwrap_or_default();
+    let provider = provider.unwrap_or_default();
+    let model = model.unwrap_or_default();
+    let secrets = load_secrets()?;
+    let resolved_key = resolve_api_key(&secrets, &api_key, &secret_key);
+    let effective_proxy = if proxy_url.trim().is_empty()
+        || proxy_matches(&provider, &proxy_bypass_providers)
+        || proxy_matches(&model, &proxy_bypass_models)
+    {
+        None
+    } else {
+        Some(proxy_url.trim())
+    };
+    let client = build_http_client(std::time::Duration::from_secs(8), effective_proxy)?;
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    Ok(probe_llm_endpoint(client, &url, &resolved_key).await)
+}
+
+#[cfg(test)]
+mod llm_probe_tests {
+    use super::*;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    /// Minimal one-shot HTTP server serving a canned status line + JSON body.
+    fn spawn_mock_server(status_line: &'static str, body: &'static str) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming().take(1) {
+                if let Ok(mut s) = stream {
+                    // Read the request first (the client waits for its bytes to
+                    // be consumed before trusting the response), then reply.
+                    let mut buf = [0u8; 4096];
+                    let _ = s.read(&mut buf);
+                    let resp = format!(
+                        "{}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                        status_line,
+                        body.len(),
+                        body
+                    );
+                    let _ = s.write_all(resp.as_bytes());
+                    let _ = s.shutdown(std::net::Shutdown::Write);
+                }
+            }
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn reports_2xx_as_ok_with_latency() {
+        let (addr, handle) = spawn_mock_server("HTTP/1.1 200 OK", "{\"data\":[]}");
+        let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
+        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-test").await;
+        handle.join().unwrap();
+        assert!(probe.ok, "probe error: {}", probe.error);
+        assert_eq!(probe.status, Some(200));
+        assert!(probe.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reports_401_as_key_rejected() {
+        let (addr, handle) = spawn_mock_server("HTTP/1.1 401 Unauthorized", "{}");
+        let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
+        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-bad").await;
+        handle.join().unwrap();
+        assert!(!probe.ok, "probe error: {}", probe.error);
+        assert_eq!(probe.status, Some(401));
+        assert!(probe.error.contains("API key rejected"));
+    }
+
+    #[tokio::test]
+    async fn reports_5xx_and_network_errors_as_failures() {
+        let (addr, handle) = spawn_mock_server("HTTP/1.1 500 Internal Server Error", "{}");
+        let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
+        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-test").await;
+        handle.join().unwrap();
+        assert!(!probe.ok);
+        assert_eq!(probe.status, Some(500));
+
+        // Connection refused → network error, no status.
+        let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
+        let probe = probe_llm_endpoint(client, "http://127.0.0.1:1/models", "sk-test").await;
+        assert!(!probe.ok);
+        assert_eq!(probe.status, None);
+        assert!(probe.error.contains("network error"));
+    }
+
+    #[tokio::test]
+    async fn resolves_key_from_secrets_when_not_passed() {
+        // The command-level resolution (resolve_api_key) must prefer the
+        // explicit key and fall back to the named secret — mirroring chat_stream.
+        let secrets = serde_json::json!({ "llm.apiKey": "secret-key" });
+        assert_eq!(resolve_api_key(&secrets, "", ""), "secret-key");
+        assert_eq!(resolve_api_key(&secrets, "explicit", ""), "explicit");
+        assert_eq!(resolve_api_key(&secrets, "", "llm.apiKey.custom"), "");
+        let secrets2 = serde_json::json!({ "llm.apiKey.custom": "custom-key" });
+        assert_eq!(resolve_api_key(&secrets2, "", "llm.apiKey.custom"), "custom-key");
+    }
+}
+
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -1582,7 +1751,7 @@ async fn web_search_inner(
     }
 
     // Tier-2 fast path: structured intents (weather/geocode/news/wiki/IP/FX/
-    // stock/GitHub/flight) are answered directly from curated no-key public
+    // stock/GitHub) are answered directly from curated no-key public
     // APIs instead of hitting search backends — mirrors the Node web_search
     // dispatch. General queries fall through to the search backends below.
     let mut failed: Vec<String> = Vec::new();
@@ -2663,6 +2832,129 @@ fn web_cache_enabled() -> bool {
     f != "off" && f != "0" && f != "false"
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  App skills directory (~/.pure/skills) — capability-gap auto-loading
+//  Skills installed there (manually or by the agent per the capability-gap
+//  protocol) are injected into the system prompt like Skill Hub skills.
+//  Mirror of src/shared/skillFiles.ts (CLI scans the same dir with node:fs).
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn app_skills_dir() -> PathBuf {
+    let base = std::env::var("PURE_SKILLS_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{}/.pure", home)
+    });
+    PathBuf::from(base).join("skills")
+}
+
+fn parse_skill_markdown(text: &str) -> Option<(String, String, String)> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix("---")?.trim_start();
+    let end = rest.find("\n---")?;
+    let frontmatter = &rest[..end];
+    let body = rest[end + 4..].trim();
+    if body.is_empty() {
+        return None;
+    }
+    let field = |key: &str| -> Option<String> {
+        frontmatter.lines().find_map(|line| {
+            let rest = line.strip_prefix(key)?;
+            let value = rest.strip_prefix(':')?.trim();
+            if value.is_empty() { None } else { Some(value.to_string()) }
+        })
+    };
+    let name = field("name")?;
+    if name.is_empty() {
+        return None;
+    }
+    let description = field("description").unwrap_or_default();
+    Some((name, description, body.to_string()))
+}
+
+/// List skills installed in the app skills directory (name/description/body),
+/// used by the GUI to inject them into the system prompt. Never fails: a
+/// missing or unreadable directory just yields an empty list.
+#[tauri::command]
+fn list_app_skills() -> Vec<serde_json::Value> {
+    let dir = app_skills_dir();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let skill_file = entry.path().join("SKILL.md");
+        let Ok(text) = std::fs::read_to_string(&skill_file) else { continue };
+        if let Some((name, description, body)) = parse_skill_markdown(&text) {
+            out.push(serde_json::json!({
+                "name": name,
+                "description": description,
+                "body": body,
+            }));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod app_skills_tests {
+    use super::*;
+
+    #[test]
+    fn parses_frontmatter_name_description_body() {
+        let text = "---\nname: vision-ocr\ndescription: Extract text from images\n---\nDo OCR on images.\n";
+        let parsed = parse_skill_markdown(text).expect("parses");
+        assert_eq!(parsed.0, "vision-ocr");
+        assert_eq!(parsed.1, "Extract text from images");
+        assert_eq!(parsed.2, "Do OCR on images.");
+    }
+
+    #[test]
+    fn rejects_missing_frontmatter_or_empty_body() {
+        assert!(parse_skill_markdown("just prose").is_none());
+        assert!(parse_skill_markdown("---\nname: x\n---\n   \n").is_none());
+        assert!(parse_skill_markdown("---\ndescription: no name\n---\nbody").is_none());
+    }
+
+    #[test]
+    fn tolerates_crlf_and_extra_metadata_lines() {
+        let text = "---\r\nname: pdf-extract\r\ndescription: Parse PDFs\r\nlicense: MIT\r\n---\r\nExtract text.\r\n";
+        let parsed = parse_skill_markdown(&text).expect("parses");
+        assert_eq!(parsed.0, "pdf-extract");
+        assert_eq!(parsed.2, "Extract text.");
+    }
+
+    #[test]
+    fn lists_only_valid_skills_from_the_directory() {
+        let base = std::env::temp_dir().join(format!("pure-skills-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // PURE_SKILLS_DIR is the BASE dir; skills live in <base>/skills/<name>/SKILL.md.
+        let skills_dir = base.join("skills");
+        let good = skills_dir.join("ocr").join("SKILL.md");
+        std::fs::create_dir_all(good.parent().unwrap()).unwrap();
+        std::fs::write(&good, "---\nname: ocr\ndescription: OCR tool\n---\nUse tesseract.\n").unwrap();
+        let bad = skills_dir.join("not-a-skill").join("SKILL.md");
+        std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
+        std::fs::write(&bad, "no frontmatter here").unwrap();
+
+        let prev = std::env::var("PURE_SKILLS_DIR").ok();
+        std::env::set_var("PURE_SKILLS_DIR", &base);
+        let list = list_app_skills();
+        match prev {
+            Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
+            None => std::env::remove_var("PURE_SKILLS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["name"], "ocr");
+        assert_eq!(list[0]["description"], "OCR tool");
+        assert!(list[0]["body"].as_str().unwrap().contains("tesseract"));
+    }
+}
+
 /// Query normalization: lowercase + trim + collapse whitespace; CJK queries
 /// also drop INTERNAL whitespace ("北京天气" == "北京 天气"). Matches the Node
 /// normalizeQuery.
@@ -2711,7 +3003,6 @@ fn public_api_ttl_ms(intent: IntentKind) -> u64 {
         IntentKind::Weather => 20 * 60 * 1000,
         IntentKind::News => 10 * 60 * 1000,
         IntentKind::Stock => 10 * 60 * 1000,
-        IntentKind::Flight => 15 * 60 * 1000,
         IntentKind::Fx => 6 * 60 * 60 * 1000,
         IntentKind::Ip => 24 * 60 * 60 * 1000,
         IntentKind::Github => 24 * 60 * 60 * 1000,
@@ -2866,7 +3157,7 @@ async fn cached_direct_public_api(
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Web Public API (Tier-2) — structured direct lookups
 //  Curated no-key public APIs for STRUCTURED intents (weather / geocode / news
-//  / wiki / IP / FX / stock / GitHub / flight), mirroring
+//  / wiki / IP / FX / stock / GitHub), mirroring
 //  src/adapter/node/publicApis.ts. A deterministic intent classifier decides
 //  whether a query is a structured lookup — the model is never asked to pick
 //  from a huge endpoint registry. Every resolver returns Ok(None) on failure
@@ -2883,7 +3174,6 @@ enum IntentKind {
     Fx,
     Stock,
     Github,
-    Flight,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -2919,8 +3209,6 @@ static_regex!(news_re, r"(?i)新闻|资讯|头条|快讯|时讯|热点|报道|�
 static_regex!(wiki_re, r"(?i)维基|百科|是什么|是谁|简介|wikipedia|wiki");
 static_regex!(ip_re, r"(?i)(?:我的)?\s*(?:ip地址|ip 地址|本机ip|外网ip|ip)$|(?:what is|my)?\s*(?:ip address|my ip)\b|ip地址|IP地址");
 static_regex!(github_re, r"(?i)\bgithub\b|开源项目|最火的.*仓库|star.*最多");
-static_regex!(flight_number_re, r"(?i)\b([A-Z]{2}\d{2,4})\b");
-static_regex!(bare_flight_re, r"(?i)^(?:航班|flight)(?:动态|状态|信息|查询)?$");
 
 /// True for requests that want something BUILT (never auto-route these). CJK
 /// prefixes match unconditionally (every Chinese build request continues with
@@ -2979,11 +3267,6 @@ fn classify_intent(query: &str) -> Option<IntentKind> {
     }
     if resolve_stock_symbol(q).is_some() && len <= 40 {
         return Some(IntentKind::Stock);
-    }
-    // Flight needs a concrete flight number (CA981 / MU5101) or a bare
-    // "航班动态" intent — "北京到上海机票" stays a general query.
-    if (flight_number_re().is_match(q) && len <= 40) || bare_flight_re().is_match(q) {
-        return Some(IntentKind::Flight);
     }
     None
 }
@@ -3795,102 +4078,6 @@ async fn resolve_github(query: &str, proxy_url: Option<&str>) -> Result<Option<P
     }))
 }
 
-/// Flight status via aviationstack (free plan: 100 requests/month, needs a
-/// key). No key or no flight number → a helpful message instead of Ok(None),
-/// so the caller answers the user instead of silently falling through.
-async fn resolve_flight(query: &str, proxy_url: Option<&str>) -> Result<Option<PublicApiOutcome>, String> {
-    let flight_no = flight_number_re().captures(query).map(|c| c[1].to_uppercase());
-    let Some(flight_no) = flight_no else {
-        return Ok(Some(PublicApiOutcome {
-            intent: IntentKind::Flight,
-            source: "AviationStack".to_string(),
-            text: "需要航班号才能查航班动态（例如“CA981 航班动态”或“MU5101 到哪了”）。".to_string(),
-        }));
-    };
-    let key = std::env::var("PURE_AVIATIONSTACK_KEY").ok();
-    let Some(key) = key.filter(|k| !k.trim().is_empty()) else {
-        return Ok(Some(PublicApiOutcome {
-            intent: IntentKind::Flight,
-            source: "AviationStack".to_string(),
-            text: format!(
-                "查询 {} 需要免费的 AviationStack API key（100 次/月）：设置 PURE_AVIATIONSTACK_KEY 环境变量后可用（申请: https://aviationstack.com）。",
-                flight_no
-            ),
-        }));
-    };
-    let url = format!(
-        "https://api.aviationstack.com/v1/flights?access_key={}&flight_iata={}&limit=1",
-        urlencoding(&key),
-        urlencoding(&flight_no)
-    );
-    let data = match fetch_json(&url, 8000, &[], proxy_url).await? {
-        Some(d) => d,
-        None => return Ok(None),
-    };
-    let f = match data.get("data").and_then(|v| v.as_array()).and_then(|a| a.first()) {
-        Some(x) => x,
-        None => return Ok(None),
-    };
-    let status = f.get("flight_status").and_then(|v| v.as_str()).unwrap_or("unknown");
-    let airline = f.get("airline").and_then(|v| v.get("name")).and_then(|v| v.as_str()).unwrap_or("");
-    let fmt_airport = |airport: &serde_json::Value, arrival: bool| -> String {
-        let name = airport.get("airport").and_then(|v| v.as_str()).unwrap_or("—");
-        let scheduled = airport
-            .get("scheduled")
-            .and_then(|v| v.as_str())
-            .map(|s| s.replace('T', " "))
-            .map(|s| s.chars().skip(5).take(16).collect::<String>());
-        let actual = airport
-            .get("actual")
-            .and_then(|v| v.as_str())
-            .map(|s| s.replace('T', " "))
-            .map(|s| s.chars().skip(5).take(16).collect::<String>());
-        let gate = airport
-            .get("gate")
-            .and_then(|v| v.as_str())
-            .filter(|g| !g.is_empty())
-            .map(|g| format!(" · 登机口 {}", g))
-            .unwrap_or_default();
-        let terminal = airport
-            .get("terminal")
-            .and_then(|v| v.as_str())
-            .filter(|t| !t.is_empty())
-            .map(|t| format!(" · T{}", t))
-            .unwrap_or_default();
-        let mut out = name.to_string();
-        if let Some(s) = scheduled {
-            out.push_str(&format!(" 计划 {}", s));
-        }
-        if arrival {
-            if let Some(a) = actual {
-                out.push_str(&format!(" 实际 {}", a));
-            }
-        }
-        out.push_str(&gate);
-        out.push_str(&terminal);
-        out
-    };
-    let dep = f.get("departure").cloned().unwrap_or_default();
-    let arr = f.get("arrival").cloned().unwrap_or_default();
-    let airline_suffix = if airline.is_empty() {
-        String::new()
-    } else {
-        format!(" · {}", airline)
-    };
-    Ok(Some(PublicApiOutcome {
-        intent: IntentKind::Flight,
-        source: "AviationStack".to_string(),
-        text: format!(
-            "航班 {}{} · 状态: {}\n出发: {}\n到达: {}",
-            flight_no,
-            airline_suffix,
-            status,
-            fmt_airport(&dep, false),
-            fmt_airport(&arr, true)
-        ),
-    }))
-}
-
 // ── Main entry ──
 
 /// Try to answer a query from the direct public API tier. Returns Ok(None)
@@ -3915,7 +4102,6 @@ async fn try_direct_public_api(
         "fx" => Some(IntentKind::Fx),
         "stock" => Some(IntentKind::Stock),
         "github" => Some(IntentKind::Github),
-        "flight" => Some(IntentKind::Flight),
         _ => None,
     });
     let intent = forced.or_else(|| classify_intent(q));
@@ -3941,7 +4127,6 @@ async fn try_direct_public_api(
             None => Ok(None),
         },
         IntentKind::Github => resolve_github(q, proxy_url).await,
-        IntentKind::Flight => resolve_flight(q, proxy_url).await,
     }
 }
 
@@ -3981,7 +4166,7 @@ async fn web_public_api(
         .await;
     }
     Err(format!(
-        "No structured-data source matched \"{}\" — web_public_api covers weather/geocode/news/wiki/IP/FX/stock/flight/GitHub lookups; for anything else use web_search instead of retrying this tool with the same query (auto-fallback to search is off when searchOnMiss:false).",
+        "No structured-data source matched \"{}\" — web_public_api covers weather/geocode/news/wiki/IP/FX/stock/GitHub lookups; for anything else use web_search instead of retrying this tool with the same query (auto-fallback to search is off when searchOnMiss:false).",
         q
     ))
 }
@@ -3990,8 +4175,7 @@ async fn web_public_api(
 //  Web Scrape (Tier-3) — known-URL extraction
 //  Mirrors src/adapter/node/webScrape.ts: noise-tag stripping, optional
 //  #id/.class/tag selector, RSS/JSON auto-formatting, then Jina Reader
-//  (free, no key) and Firecrawl (PURE_FIRECRAWL_API_KEY) fallbacks for
-//  blocked, JS-heavy, or binary pages.
+//  (free, no key) fallback for blocked, JS-heavy, or binary pages.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Block-level noise tags removed before text extraction (nav/header/footer/
@@ -4300,43 +4484,10 @@ async fn scrape_via_jina(url: &str, proxy_url: Option<&str>) -> Result<Option<St
     Ok((!text.trim().is_empty()).then_some(text))
 }
 
-/// Firecrawl fallback: POST /v1/scrape turns any page into clean Markdown,
-/// including JS-heavy SPAs and PDFs. Free tier ≈500–1000 credits/month;
-/// enabled when PURE_FIRECRAWL_API_KEY is set (no key → Ok(None), so the
-/// Jina path stays the no-key default).
-async fn scrape_via_firecrawl(url: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
-    let key = std::env::var("PURE_FIRECRAWL_API_KEY").ok();
-    let Some(key) = key.filter(|k| !k.trim().is_empty()) else {
-        return Ok(None);
-    };
-    let client = build_http_client(std::time::Duration::from_secs(25), proxy_url)?;
-    let resp = client
-        .post("https://api.firecrawl.dev/v1/scrape")
-        .header("Authorization", format!("Bearer {}", key.trim()))
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({ "url": url, "formats": ["markdown"] }))
-        .send()
-        .await
-        .map_err(|e| format!("request: {}", e))?;
-    if !resp.status().is_success() {
-        return Ok(None);
-    }
-    let body: serde_json::Value = resp.json().await.map_err(|e| format!("read: {}", e))?;
-    let md = body
-        .get("data")
-        .and_then(|d| d.get("markdown"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    Ok((!md.trim().is_empty()).then_some(md.to_string()))
-}
-
-/// Jina Reader first, then Firecrawl — both render pages the direct fetch
-/// cannot (blocked, JS-heavy, binary). Used by web_scrape AND web_fetch.
+/// Jina Reader renders pages the direct fetch cannot (blocked, JS-heavy,
+/// binary) — free tier, no key required. Used by web_scrape AND web_fetch.
 async fn scrape_fallback(url: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
-    if let Some(jina) = scrape_via_jina(url, proxy_url).await? {
-        return Ok(Some(jina));
-    }
-    scrape_via_firecrawl(url, proxy_url).await
+    scrape_via_jina(url, proxy_url).await
 }
 
 #[tauri::command]
@@ -4370,7 +4521,7 @@ async fn web_scrape(
         .map_err(|e| format!("request: {}", e))?;
 
     if !resp.status().is_success() {
-        // Blocked / anti-bot page: Jina Reader first, Firecrawl second.
+        // Blocked / anti-bot page: Jina Reader fallback.
         if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
             let page = truncate_text(&fallback, max);
             web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
@@ -4389,7 +4540,7 @@ async fn web_scrape(
         .unwrap_or("")
         .to_string();
     if !is_textual_content_type(&content_type) {
-        // Binary payloads (PDFs, images) can still be read via Jina/Firecrawl.
+        // Binary payloads (PDFs, images) can still be read via Jina Reader.
         if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
             let page = truncate_text(&fallback, max);
             web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
@@ -4565,8 +4716,7 @@ mod web_tier_2_3_tests {
         assert_eq!(classify_intent("100 usd to cny"), Some(IntentKind::Fx));
         assert_eq!(classify_intent("苹果股价"), Some(IntentKind::Stock));
         assert_eq!(classify_intent("github 上最火的 AI 仓库"), Some(IntentKind::Github));
-        assert_eq!(classify_intent("CA981 航班动态"), Some(IntentKind::Flight));
-        assert_eq!(classify_intent("航班动态"), Some(IntentKind::Flight));
+        assert_eq!(classify_intent("北京到上海机票"), None);
     }
 
     #[test]
@@ -4715,7 +4865,7 @@ async fn web_fetch(
         .map_err(|e| format!("request: {}", e))?;
 
     if !resp.status().is_success() {
-        // Blocked / anti-bot page: Jina Reader first, Firecrawl second.
+        // Blocked / anti-bot page: Jina Reader fallback.
         if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
             let page = truncate_text(&fallback, max);
             web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
@@ -4739,7 +4889,7 @@ async fn web_fetch(
     if !is_textual_content_type(&content_type) {
         // Empty content-type never reaches this branch (helper returns true),
         // so content_type is always a non-empty binary type here. Binary
-        // payloads (PDFs, images) can still be read via Jina/Firecrawl.
+        // payloads (PDFs, images) can still be read via Jina Reader.
         if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
             let page = truncate_text(&fallback, max);
             web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
@@ -7826,6 +7976,8 @@ pub fn run() {
             // System info
             sys_info,
             detect_location,
+            list_app_skills,
+            test_llm_connection,
             test_proxy,
             // Web tools
             web_search,

@@ -15,7 +15,7 @@ import { isPublicToolName } from '../../shared/toolDefs';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotEntry, WorkspaceSnapshotPort } from '../../shared/workspaceSnapshot';
 import { cachedDirectPublicApi, quota } from './publicApis';
 import { pageCacheKey, PAGE_TTL_MS, searchCacheKey, SEARCH_TTL_MS, webCache } from './webCache';
-import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeViaFirecrawl, scrapeViaJina, truncateText } from './webScrape';
+import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeViaJina, truncateText } from './webScrape';
 
 /** Windows has no POSIX shell (`sh`) or `diff` binary — cmd.exe / Git for
  * Windows provide the equivalents. Module-level so every handler branches
@@ -1074,7 +1074,7 @@ export class NodeToolAdapter implements ToolAdapter {
     return this.fail(
       null!,
       start,
-      `No structured-data source matched "${query}" and web search also failed. web_public_api covers weather/geocode/news/wiki/IP/FX/stock/flight/GitHub lookups — for anything else use researcher_web instead of retrying this tool with the same query (auto-fallback to search is off when searchOnMiss:false).`,
+      `No structured-data source matched "${query}" and web search also failed. web_public_api covers weather/geocode/news/wiki/IP/FX/stock/GitHub lookups — for anything else use researcher_web instead of retrying this tool with the same query (auto-fallback to search is off when searchOnMiss:false).`,
       'web_public_api',
     );
   }
@@ -1100,7 +1100,7 @@ export class NodeToolAdapter implements ToolAdapter {
       });
 
       if (!resp.ok) {
-        // Blocked / anti-bot page: Jina Reader first, Firecrawl second.
+        // Blocked / anti-bot page: Jina Reader fallback.
         const fallback = await this.scrapeFallback(url);
         if (fallback) {
           const page = truncateText(fallback, maxChars);
@@ -1112,7 +1112,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
       const contentType = resp.headers.get('content-type') || '';
       if (!isTextualContentType(contentType)) {
-        // Binary payloads (PDFs, images) can still be read via Jina/Firecrawl.
+        // Binary payloads (PDFs, images) can still be read via Jina Reader.
         const fallback = await this.scrapeFallback(url);
         if (fallback) {
           const page = truncateText(fallback, maxChars);
@@ -1150,13 +1150,10 @@ export class NodeToolAdapter implements ToolAdapter {
     }
   }
 
-  /** Jina Reader first, then Firecrawl — both render pages the direct fetch
-   * cannot (blocked, JS-heavy, binary). No key needed for Jina; Firecrawl
-   * only runs when PURE_FIRECRAWL_API_KEY is set. */
+  /** Jina Reader renders pages the direct fetch cannot (blocked, JS-heavy,
+   * binary) — free tier, no key required. */
   private async scrapeFallback(url: string): Promise<string | null> {
-    const jina = await scrapeViaJina(url, process.env.PURE_JINA_API_KEY);
-    if (jina) return jina;
-    return scrapeViaFirecrawl(url, process.env.PURE_FIRECRAWL_API_KEY);
+    return scrapeViaJina(url, process.env.PURE_JINA_API_KEY);
   }
 
   private okResult(toolName: string, result: string, start: number): ToolResult {

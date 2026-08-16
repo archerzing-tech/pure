@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, generateTaskAnalysis, parseTaskAnalysisText, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, parseIntentAssessmentBlock, mergeIntentAssessments } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, generateTaskAnalysis, parseTaskAnalysisText, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, parseIntentAssessmentBlock, mergeIntentAssessments, parseRequestReviewBlock } from '../chat';
 import { limitStoredMessages, MAX_PERSISTED_MESSAGES } from '../store';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 
@@ -306,6 +306,59 @@ describe('parseTaskAnalysisText (analysis + plan extraction)', () => {
   it('degrades to null llmIntent on an invalid enum value', () => {
     const block = '<intent_assessment>{"intent":"build","riskLevel":"extreme","reversibility":"reversible"}</intent_assessment>';
     expect(parseIntentAssessmentBlock(block)).toBeNull();
+  });
+});
+
+describe('parseRequestReviewBlock (诉求合理性评审)', () => {
+  const sample = (items: unknown): string =>
+    `<request_review>\n${JSON.stringify(items)}\n</request_review>`;
+
+  it('parses mixed verdicts with reasons and suggestions', () => {
+    const review = parseRequestReviewBlock(sample([
+      { part: '直接删除旧版本目录', verdict: 'unreasonable', reason: '旧目录里还有迁移脚本在引用', suggestion: '先归档再删除' },
+      { part: '两天内完成全量迁移', verdict: 'questionable', reason: '依赖数据清洗，工期不确定', suggestion: '先做数据量评估' },
+      { part: '保留新功能接口', verdict: 'reasonable', reason: '与现有架构一致' },
+    ]));
+    expect(review).toHaveLength(3);
+    expect(review[0].verdict).toBe('unreasonable');
+    expect(review[0].suggestion).toBe('先归档再删除');
+    expect(review[1].verdict).toBe('questionable');
+    expect(review[2].verdict).toBe('reasonable');
+    expect(review[2].suggestion).toBeUndefined();
+  });
+
+  it('returns [] when the block is missing (no gate)', () => {
+    expect(parseRequestReviewBlock('只有分析文字，没有评审块')).toEqual([]);
+    expect(parseRequestReviewBlock('[{"action":"A"}]')).toEqual([]);
+  });
+
+  it('returns [] on an empty array (everything reasonable)', () => {
+    expect(parseRequestReviewBlock(sample([]))).toEqual([]);
+  });
+
+  it('drops items with invalid verdicts or empty parts, keeps valid ones', () => {
+    const review = parseRequestReviewBlock(sample([
+      { part: '保留新接口', verdict: 'reasonable', reason: '一致' },
+      { part: '某条可疑项', verdict: 'maybe', reason: '非法判定' },
+      { verdict: 'unreasonable', reason: '缺少 part' },
+    ]));
+    expect(review).toHaveLength(1);
+    expect(review[0].part).toBe('保留新接口');
+  });
+
+  it('returns [] on malformed JSON inside the block', () => {
+    expect(parseRequestReviewBlock('<request_review>{broken json</request_review>')).toEqual([]);
+    expect(parseRequestReviewBlock('<request_review>{"verdict":"reasonable"}</request_review>')).toEqual([]);
+  });
+
+  it('strips the review block from the visible analysis text', () => {
+    const text = `<analysis>我理解你的诉求。</analysis>\n${sample([{ part: 'X', verdict: 'questionable', reason: 'Y', suggestion: 'Z' }])}\n\`\`\`json\n[{"action":"A","description":"d"}]\`\`\``;
+    const r = parseTaskAnalysisText(text, 'x');
+    expect(r.analysis).toContain('我理解你的诉求');
+    expect(r.analysis).not.toContain('request_review');
+    expect(r.analysis).not.toContain('questionable');
+    expect(r.review).toHaveLength(1);
+    expect(r.review[0].verdict).toBe('questionable');
   });
 });
 

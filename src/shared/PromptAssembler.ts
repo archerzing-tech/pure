@@ -8,6 +8,7 @@ import {
 import type { ToolDefinition } from './types';
 import { promptObservability, promptVersion, type PromptObservability } from './promptObservability';
 import {
+  CAPABILITY_GAP_PROMPT,
   CHART_DSL_PROMPT,
   COMPLETION_PROMPT,
   FILE_TOOLS_CORE,
@@ -108,8 +109,8 @@ const CLI_CAPABILITIES_PROMPT = `System:
 Web tools:
 - researcher_web(prompt, maxSources?, fetchContent?) — research a web question and return cited sources, extracted evidence, retrieval time, and partial failures. Do not repeat an unchanged query after a failure.
 - researcher_docs(library, topic, version?, maxSources?, fetchContent?) — research version-aware official documentation and return cited evidence.
-- web_public_api(query, category?, location?) — structured-data lookup through curated no-key public APIs (weather, geocode, news, wiki, IP, FX, stock, GitHub, flight status). Use it for concrete factual lookups like "北京天气", "100 usd to cny", "苹果股价", or "CA981 航班动态" — the web_search alias also auto-routes these, and when no structured source matches this tool auto-falls back to web search (searchOnMiss:false opts out). Not for general discovery or ambiguous questions — use researcher_web.
-- web_scrape(url, selector?, maxChars?) — fetch a KNOWN URL and extract readable text (navigation stripped; optional #id/.class/tag selector; RSS feeds and JSON auto-formatted; Jina Reader then Firecrawl fallback for blocked, JS-heavy, or binary pages). Use when you already have the URL; use researcher_web when you need to find one.
+- web_public_api(query, category?, location?) — structured-data lookup through curated no-key public APIs (weather, geocode, news, wiki, IP, FX, stock, GitHub). Use it for concrete factual lookups like "北京天气", "100 usd to cny", or "苹果股价" — the web_search alias also auto-routes these, and when no structured source matches this tool auto-falls back to web search (searchOnMiss:false opts out). Not for general discovery or ambiguous questions — use researcher_web.
+- web_scrape(url, selector?, maxChars?) — fetch a KNOWN URL and extract readable text (navigation stripped; optional #id/.class/tag selector; RSS feeds and JSON auto-formatted; Jina Reader fallback for blocked, JS-heavy, or binary pages). Use when you already have the URL; use researcher_web when you need to find one.
 
 Diagram rendering:
 - The CLI renders \`\`\`mermaid graph/flowchart and \`\`\`puml / \`\`\`plantuml blocks as a terminal WIREFRAME (boxes + connecting lines drawn with box-drawing characters) — no browser, no image. Prefer mermaid for process/flow diagrams, puml for activity/sequence. Emit them as normal fenced blocks; the client converts them.`;
@@ -257,6 +258,7 @@ export class PromptAssembler {
       fragment('tool_calling', buildToolCallingRules(context.surface), 115, true),
       fragment('typo_tolerance', TYPO_TOLERANCE_PROMPT, 55),
       fragment('logical_traps', LOGICAL_TRAPS_PROMPT, 70),
+      fragment('capability_gap', CAPABILITY_GAP_PROMPT, 75),
       fragment('environment', context.environment ?? '', 60),
       fragment('runtimes', context.runtimes ?? '', 45),
       fragment('skills', buildSkills(context.skills), 30),

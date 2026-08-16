@@ -311,7 +311,7 @@ GUI 设置 → LLM 页面支持一个供应商配置多个大模型。默认界�
 
 ### Web 搜索与抓取 Key（CLI，全部可选）
 
-不配置任何 key，CLI 也能通过免费 HTML 后端（Sogou / cn.bing.com / DuckDuckGo / Bing）搜索，并通过免 key 公共 API 回答结构化查询（天气、地理编码、新闻、维基、IP、汇率、股票、GitHub、航班动态）。可选 key 提升质量与稳定性——配置的多个后端按「第一个出结果者胜」降级，失败/被限流的后端会进入短暂冷却而不是反复重试：
+不配置任何 key，CLI 也能通过免费 HTML 后端（Sogou / cn.bing.com / DuckDuckGo / Bing）搜索，并通过免 key 公共 API 回答结构化查询（天气、地理编码、新闻、维基、IP、汇率、股票、GitHub）。可选 key 提升质量与稳定性——配置的多个后端按「第一个出结果者胜」降级，失败/被限流的后端会进入短暂冷却而不是反复重试：
 
 | 环境变量 | 用途 | 免费额度 | 申请链接 |
 |---|---|---|---|
@@ -319,13 +319,25 @@ GUI 设置 → LLM 页面支持一个供应商配置多个大模型。默认界�
 | `TAVILY_API_KEY` | Tavily 搜索后端 | 1000 次/月 | [tavily.com](https://tavily.com) |
 | `EXA_API_KEY` | Exa 神经搜索后端 | 开户 $20 + 每月 $10 循环 | [exa.ai](https://exa.ai) |
 | `PURE_JINA_API_KEY` | `web_scrape` 兜底（r.jina.ai） | 免 key 可用，带 key 提高限额 | [jina.ai](https://jina.ai) |
-| `PURE_FIRECRAWL_API_KEY` | `web_scrape` 第二兜底 | 约 500–1000 credits/月 | [firecrawl.dev](https://firecrawl.dev) |
-| `PURE_AVIATIONSTACK_KEY` | 航班动态（如「CA981 航班动态」） | 100 次/月 | [aviationstack.com](https://aviationstack.com) |
 | `PURE_LOCATION` | 天气查询缺城市时的默认城市 | — | — |
 
 GUI 设置 → 工具 → Web 工具页内置 Serper / Tavily 配置项，附一键申请链接；其余 CLI key 通过环境变量设置。
 
 Web 工具结果带缓存，重复查询不会反复消耗免费额度：`web_search`（15 分钟）、`web_public_api`（按类别——天气/新闻/股票分钟级、地理编码/维基周级）、`web_scrape`/`web_fetch`（1 小时）统一读写 `~/.pure/cache/web-cache.json`，CLI 与 GUI 共享同一文件与 key 方案。缓存文件有上限（200 条、最旧优先淘汰、单值 30 KB）且容忍损坏。`PURE_WEB_CACHE=off` 关闭缓存，`PURE_CACHE_DIR` 可改目录。
+
+#### 能力缺口自动补齐（视觉 / OCR / PDF / 音频…）
+
+Pure 的 Agent 不会假装拥有它没有的能力。当请求需要当前工具集之外的能力时——比如用纯文本模型识别图片/截图内容、解析 PDF/Office 文档、转写音频——Agent 会遵循系统提示中的 **Capability-gap 协议**：先检查本地已装的技能，找不到就从社区安装一个 skill 或 tool，装完必须真实验证可用，并告诉你装了什么、装在哪里。
+
+安装目标是 CLI 与 GUI 共享的，且会自动加载进系统提示（无需重启，桌面端 ≤30 秒）：
+
+| 位置 | 用途 | 示例 |
+|---|---|---|
+| `~/.pure/skills/<name>/SKILL.md` | 技能指令（自动注入） | OCR 流程、PDF 解析工作流 |
+| `.agents/skills/<name>/SKILL.md`（项目内） | 项目级技能（自动注入） | 仓库特有约定 |
+| `~/.pure/tools/` | 真实程序（pip/npm） | `pip install --target ~/.pure/tools` 装 OCR 引擎、`npm install --prefix ~/.pure/tools` |
+
+社区技能来自 `npx skills` 生态（`npx skills find <关键词>` / `npx skills add <owner/repo> --skill <name> --yes`）或任意 GitHub 仓库（下载后解压到 `~/.pure/skills/`）。安装会下载第三方代码，因此与其它命令执行一样遵循当前权限模式。
 
 #### Scrapling MCP 服务器（可选）
 

@@ -27,6 +27,7 @@ import {
   type CustomProvider,
 } from '../shared/providers';
 import { effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList } from '../shared/proxy';
+import { probeLlmEndpoint } from '../shared/llmProbe';
 import {
   STORAGE_KEY,
   defaults,
@@ -39,6 +40,7 @@ import {
   revokeSecretFromRust,
   storeCustomSecretInRust,
   storeSecretInRust,
+  customSecretKey,
   modelListForProvider,
   normalizeProviderModels,
   uniqueModels,
@@ -53,6 +55,20 @@ import {
   splitSkillMarkdown,
   type HubSkill,
 } from './skillHub';
+
+/**
+ * AbortSignal.timeout needs Safari 16+ (macOS 13). Older WKWebView versions
+ * throw a TypeError here, which would make every connection test / fetch
+ * fail with a generic network error — fall back to AbortController + setTimeout.
+ */
+function abortSignal(ms: number): AbortSignal {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms);
+  }
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), ms);
+  return ctrl.signal;
+}
 
 export class SettingsPanel {
   private onSave: () => void;
@@ -612,7 +628,10 @@ export class SettingsPanel {
     autoSaveSelectors.forEach(sel => {
       document.querySelectorAll(sel).forEach(el => {
         el.addEventListener('change', () => this.autoSave());
-        if (el.tagName === 'INPUT' && (el as HTMLInputElement).type === 'text') {
+        // Password inputs (the API key field) get the same debounced per-keystroke
+        // save as text inputs — otherwise a typed key only persists on blur, and
+        // the connection state looks stale while the user is still typing.
+        if (el.tagName === 'INPUT' && ((el as HTMLInputElement).type === 'text' || (el as HTMLInputElement).type === 'password')) {
           el.addEventListener('input', () => {
             if (sel === '#cfg-model' || sel === '#cfg-baseurl') {
               const provider = (document.getElementById('cfg-provider') as HTMLSelectElement | null)?.value;
@@ -809,42 +828,62 @@ export class SettingsPanel {
       status.dataset.state = 'testing';
     }
     const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() || '';
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-    const candidates = [`${baseURL}/models`, baseURL];
+    // One probe contract on both surfaces: desktop runs it in Rust through the
+    // SAME network path real chats use (reqwest + configured proxy + secrets
+    // resolution), browser dev mode runs the fetch mirror with identical
+    // semantics (only 2xx succeeds, 401/403 = key rejected, first /models
+    // probe decides). A result that says ok here is a result that will work
+    // when chatting.
     const started = performance.now();
-    let lastError = 'network error';
-    try {
-      for (const url of candidates) {
-        try {
-          const response = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(8000) });
-          const elapsed = Math.max(0, Math.round(performance.now() - started));
-          if (response.status < 500 || response.status === 401 || response.status === 403) {
-            if (status) {
-              status.textContent = t('llm.connection.testOk').replace('{ms}', String(elapsed));
-              status.dataset.state = 'active';
-            }
-            this.toast(t('llm.connection.testOk').replace('{ms}', String(elapsed)));
-            return;
-          }
-          lastError = `HTTP ${response.status}`;
-        } catch (err) {
-          lastError = (err as Error)?.message || String(err);
+    let probe: { ok: boolean; status?: number; latencyMs?: number; error?: string };
+    if (isTauriRuntime()) {
+      const proxy = normalizeProxyConfig(loadConfig()?.proxy);
+      const model = (document.getElementById('cfg-model') as HTMLInputElement | null)?.value.trim()
+        || custom?.defaultModel || defaultModelFor(provider);
+      try {
+        const core = await loadTauriCore();
+        if (!core) throw new Error('Tauri runtime unavailable');
+        probe = await core.invoke('test_llm_connection', {
+          baseUrl: baseURL,
+          apiKey,
+          secretKey: custom ? customSecretKey(custom.id) : undefined,
+          proxyUrl: effectiveProxyUrl(proxy, 'llm') ?? '',
+          proxyBypassProviders: proxy?.bypassProviders ?? [],
+          proxyBypassModels: proxy?.bypassModels ?? [],
+          provider,
+          model,
+        });
+      } catch (err) {
+        // Command-level failure (e.g. invalid proxy URL) — surface the real
+        // reason instead of a generic "cannot connect".
+        const message = (err as Error)?.message || String(err);
+        if (status) {
+          status.textContent = t('llm.connection.testFailed');
+          status.dataset.state = 'error';
         }
+        this.toast(`${t('llm.connection.testFailed')}：${message}`);
+        return;
       }
-      throw new Error(lastError);
-    } catch (err) {
-      console.warn('[pure] provider connection test failed:', err);
+    } else {
+      probe = await probeLlmEndpoint(baseURL, apiKey);
+    }
+    const elapsed = Math.max(0, Math.round(performance.now() - started));
+    if (probe.ok) {
+      if (status) {
+        status.textContent = t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
+        status.dataset.state = 'active';
+      }
+      this.toast(t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed)));
+    } else {
       if (status) {
         status.textContent = t('llm.connection.testFailed');
         status.dataset.state = 'error';
       }
-      this.toast(`${t('llm.connection.testFailed')}：${(err as Error)?.message || String(err)}`);
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = t('llm.connection.test');
-      }
+      this.toast(`${t('llm.connection.testFailed')}：${probe.error || 'unknown error'}`);
+    }
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = t('llm.connection.test');
     }
   }
 
@@ -932,7 +971,7 @@ export class SettingsPanel {
     }
     for (const url of ['https://ipwho.is/', 'https://ipinfo.io/json']) {
       try {
-        const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        const resp = await fetch(url, { signal: abortSignal(8000) });
         if (!resp.ok) continue;
         const data = await resp.json() as { city?: string; region?: string; regionName?: string; country?: string };
         const parts = [data.city, data.region ?? data.regionName, data.country]
@@ -1137,9 +1176,20 @@ export class SettingsPanel {
       const hasProviderCredential = isCustom
         ? !!custom?.local || !!custom?.apiKey || custom?.hasApiKey === true
         : !!cfg.apiKey || cfg.hasApiKey === true;
-      const ready = provider === cfg.provider && hasProviderCredential;
-      v4Status.textContent = ready ? t('llm.connection.connected') : t('llm.connection.notConfigured');
-      v4Status.dataset.state = ready ? 'active' : 'error';
+      // Three states: active+credential → 已连接; credential but NOT the
+      // active provider → 已保存未启用 (a key is present, just not in use);
+      // otherwise → 未配置. The middle state matters: after saving a key the
+      // pill must never keep saying 未配置 ("连不通") — the key IS there.
+      if (provider === cfg.provider && hasProviderCredential) {
+        v4Status.textContent = t('llm.connection.connected');
+        v4Status.dataset.state = 'active';
+      } else if (hasProviderCredential) {
+        v4Status.textContent = t('llm.connection.savedNotActive');
+        v4Status.dataset.state = 'saved';
+      } else {
+        v4Status.textContent = t('llm.connection.notConfigured');
+        v4Status.dataset.state = 'error';
+      }
     }
 
     if (keyInput) {
@@ -2002,7 +2052,7 @@ export class SettingsPanel {
       let data: ModelsResponse | null = null;
       for (const url of candidates) {
         try {
-          const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
+          const res = await fetch(url, { headers, signal: abortSignal(8000) });
           if (!res.ok) continue;
           data = await res.json() as ModelsResponse;
           if (data && ((Array.isArray(data.data) && data.data.length > 0) || (Array.isArray(data.models) && data.models.length > 0))) break;
@@ -2434,6 +2484,12 @@ export class SettingsPanel {
       cfg.fontSize === 'small' ? '13px' : cfg.fontSize === 'large' ? '15px' : '14px');
     document.documentElement.style.setProperty('--spacing',
       cfg.density === 'compact' ? '8px' : cfg.density === 'spacious' ? '16px' : '12px');
+
+    // Refresh the provider card presentation (status pill + labels) after a
+    // save — the pill must reflect the key state the user just changed, not
+    // the state captured when the panel opened.
+    const editing = (document.getElementById('cfg-provider') as HTMLSelectElement | null)?.value;
+    if (editing) this.updateProviderPresentation(editing);
 
     this.onSave();
   }
