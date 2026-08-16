@@ -302,7 +302,7 @@ export class Harness {
         }
         if (event.payload.action.kind === 'stop') {
           stopWrittenKeys.add(repeatKey);
-          await this.writeErrorPattern(event.payload.action, failure).catch(() => {});
+          await this.writeErrorPattern(event.payload.action, failure, userPrompt).catch(() => {});
         } else if (event.payload.action.kind === 'retry') {
           retriedFailures.push(failure);
         }
@@ -327,7 +327,7 @@ export class Harness {
           for (const [key, failure] of pendingRepeats) {
             if (recoveredRepeats.has(key)) continue;
             writtenRepeatKeys.add(key);
-            await this.writeRepeatedFailureMemory(failure).catch(() => {});
+            await this.writeRepeatedFailureMemory(failure, userPrompt).catch(() => {});
           }
           pendingRepeats.clear();
           // v1.9.7 — every failed execution is a candidate lesson: single
@@ -340,7 +340,7 @@ export class Harness {
             if (writtenRepeatKeys.has(key)) continue;
             if (retriedFailures.some(f => f.toolName === failure.toolName && f.message === failure.message)) continue;
             if (stopWrittenKeys.has(key)) continue;
-            await this.writeSingleFailureMemory(failure).catch(() => {});
+            await this.writeSingleFailureMemory(failure, userPrompt).catch(() => {});
           }
           failedCalls.clear();
           if (event.payload.isComplete) {
@@ -352,7 +352,7 @@ export class Harness {
             ).catch(() => {});
           }
           if (event.payload.isComplete && retriedFailures.length > 0) {
-            await this.writeRetriedErrorPatterns(retriedFailures).catch(() => {});
+            await this.writeRetriedErrorPatterns(retriedFailures, userPrompt).catch(() => {});
           }
         }
       }
@@ -486,7 +486,7 @@ export class Harness {
         }
         if (event.payload.action.kind === 'stop') {
           stopWrittenKeys.add(repeatKey);
-          await this.writeErrorPattern(event.payload.action, failure).catch(() => {});
+          await this.writeErrorPattern(event.payload.action, failure, newUserPrompt).catch(() => {});
         } else if (event.payload.action.kind === 'retry') {
           retriedFailures.push(failure);
         }
@@ -506,7 +506,7 @@ export class Harness {
         for (const [key, failure] of pendingRepeats) {
           if (recoveredRepeats.has(key)) continue;
           writtenRepeatKeys.add(key);
-          await this.writeRepeatedFailureMemory(failure).catch(() => {});
+          await this.writeRepeatedFailureMemory(failure, newUserPrompt).catch(() => {});
         }
         pendingRepeats.clear();
         // v1.9.7 — single (non-repeated) failed calls persist as error_pattern
@@ -516,7 +516,7 @@ export class Harness {
           if (writtenRepeatKeys.has(key)) continue;
           if (retriedFailures.some(f => f.toolName === failure.toolName && f.message === failure.message)) continue;
           if (stopWrittenKeys.has(key)) continue;
-          await this.writeSingleFailureMemory(failure).catch(() => {});
+          await this.writeSingleFailureMemory(failure, newUserPrompt).catch(() => {});
         }
         failedCalls.clear();
         if (event.payload.isComplete) {
@@ -527,7 +527,7 @@ export class Harness {
             retriedFailures,
           ).catch(() => {});
           if (retriedFailures.length > 0) {
-            await this.writeRetriedErrorPatterns(retriedFailures).catch(() => {});
+            await this.writeRetriedErrorPatterns(retriedFailures, newUserPrompt).catch(() => {});
           }
         }
       }
@@ -665,13 +665,13 @@ export class Harness {
    * Write an error_pattern memory when the failure policy stops the session
    * (Adapter Layer 设计文档 §12.3: decide() → stop). Non-fatal.
    */
-  private async writeErrorPattern(action: FailureAction, failure: FailureRecord): Promise<void> {
+  private async writeErrorPattern(action: FailureAction, failure: FailureRecord, symptom?: string): Promise<void> {
     if (!this.config.memory) return;
     const tool = failure.toolName ? ` (tool: ${failure.toolName})` : '';
     const reason = action.kind === 'stop' || action.kind === 'degrade'
       ? action.reason
       : (action as { hint?: string }).hint;
-    const content = `Stopped by failure policy: ${failure.message}${tool}. ${reason ?? ''}`.trim().slice(0, 300);
+    const content = this.withSymptom(symptom, `Stopped by failure policy: ${failure.message}${tool}. ${reason ?? ''}`.trim()).slice(0, 300);
     await this.config.memory.add({
       type: 'error_pattern',
       content,
@@ -686,14 +686,14 @@ export class Harness {
    * session eventually overcame (Adapter Layer 设计文档 §12.3: decide() → retry
    * 且最终成功). Non-fatal; failures never block the session.
    */
-  private async writeRetriedErrorPatterns(failures: FailureRecord[]): Promise<void> {
+  private async writeRetriedErrorPatterns(failures: FailureRecord[], symptom?: string): Promise<void> {
     if (!this.config.memory) return;
     const seen = new Set<string>();
     for (const failure of failures) {
       if (seen.has(failure.message)) continue; // dedupe within the session
       seen.add(failure.message);
       const tool = failure.toolName ? ` (tool: ${failure.toolName})` : '';
-      const content = `Recovered after retry: ${failure.message}${tool}`.slice(0, 300);
+      const content = this.withSymptom(symptom, `Recovered after retry: ${failure.message}${tool}`).slice(0, 300);
       await this.config.memory.add({
         type: 'error_pattern',
         content,
@@ -713,10 +713,10 @@ export class Harness {
    * future sessions (via the <session_memory> injection) not to repeat the
    * exact call. Non-fatal.
    */
-  private async writeRepeatedFailureMemory(failure: FailureRecord): Promise<void> {
+  private async writeRepeatedFailureMemory(failure: FailureRecord, symptom?: string): Promise<void> {
     if (!this.config.memory) return;
     const tool = failure.toolName ? ` (tool: ${failure.toolName})` : '';
-    const content = `Repeated failure: ${failure.message}${tool}. Do not make this exact call again — switch to a different approach.`.slice(0, 300);
+    const content = this.withSymptom(symptom, `Repeated failure: ${failure.message}${tool}. Do not make this exact call again — switch to a different approach.`).slice(0, 300);
     await this.config.memory.add({
       type: 'error_pattern',
       content,
@@ -733,10 +733,10 @@ export class Harness {
    * same dead-end — degradation persists even when the failure was neither
    * repeated nor fatal. Non-fatal.
    */
-  private async writeSingleFailureMemory(failure: FailureRecord): Promise<void> {
+  private async writeSingleFailureMemory(failure: FailureRecord, symptom?: string): Promise<void> {
     if (!this.config.memory) return;
     const tool = failure.toolName ? ` (tool: ${failure.toolName})` : '';
-    const content = `Failed during execution: ${failure.message}${tool}. Do not make this exact call again — switch to a different approach.`.slice(0, 300);
+    const content = this.withSymptom(symptom, `Failed during execution: ${failure.message}${tool}. Do not make this exact call again — switch to a different approach.`).slice(0, 300);
     await this.config.memory.add({
       type: 'error_pattern',
       content,
@@ -744,6 +744,17 @@ export class Harness {
       sessionId: this.config.sessionId,
       projectPath: this.projectPath(),
     });
+  }
+
+  /**
+   * v1.9.7 — prefix a failure lesson with the original request so future
+   * sessions asking a similar question can retrieve it by keyword overlap
+   * (the raw error text alone rarely shares tokens with the user prompt).
+   */
+  private withSymptom(symptom: string | undefined, body: string): string {
+    return symptom?.trim()
+      ? `Symptom: ${symptom.trim().slice(0, 120)}. ${body}`
+      : body;
   }
 
   /**

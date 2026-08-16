@@ -552,6 +552,9 @@ describe('Harness cross-session memory (v0.10)', () => {
     expect(singles[0].content).toContain('Unsupported content type');
     expect(singles[0].content).toContain('web_fetch');
     expect(singles[0].content).toContain('Do not make this exact call again');
+    // The original request is anchored as Symptom so a future session asking
+    // a similar question can retrieve the lesson by keyword overlap.
+    expect(singles[0].content).toContain('Symptom: get the data');
     expect(singles[0].projectPath).toBe('/ws');
   });
 
