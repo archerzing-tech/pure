@@ -3,6 +3,18 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.7
+
+**LLM 设置页全新卡片式布局：默认模型横条 + 8 家内置供应商网格**
+
+- 设置 → LLM 全面重构：删除旧的「当前供应商 + 抽屉」结构，改为顶部默认模型横条 + 两列供应商卡片网格；没有「默认供应商」概念，只有「默认模型」——从横条下拉选择任一供应商的模型即成为新对话的默认模型（下拉按供应商分组，当前默认打勾）
+- 默认内置 8 家供应商卡片：国内 5 家（DeepSeek `api.deepseek.com` / 通义千问 `dashscope.aliyuncs.com/compatible-mode/v1` / 智谱 GLM `open.bigmodel.cn/api/paas/v4` / Moonshot Kimi `api.moonshot.cn/v1` / MiniMax `api.minimaxi.com/v1`）+ 国外 3 家（OpenAI `api.openai.com/v1` / OpenRouter `openrouter.ai/api/v1` / NVIDIA NIM `integrate.api.nvidia.com/v1`），端点全部官方核实
+- 每张卡片点击展开为全宽配置面板：供应商名称、Base URL（内置留空即官方端点）、API Key（每个供应商独立）、模型库多模型管理、图片生成（自定义供应商）；「保存」或 ✕ 收起为小卡片
+- 模型库每个模型行带独立连通性测试按钮（复用 Rust 统一探测契约，传具体模型 id，无效模型名会报错）
+- 可新增供应商：点击「＋ 新增供应商」立即展开空白配置面板，保存后成为一张普通卡片
+- 内置供应商注册表扩展：Moonshot / MiniMax / OpenAI / OpenRouter / NVIDIA 转正为内置条目（含默认模型库），CLI 同步支持（`--provider` 新 id、各供应商独立 env key、`pure config` 列表）；OpenAI 内置默认开启文生图（gpt-image-1）
+- v12 配置迁移：DeepSeek 视为一家，退役 `deepseek-anthropic` id——旧配置的模型库 / 覆盖项自动合并到 `deepseek-openai`（惰性迁移，无残留的配置不重写）
+
 ## v1.9.6
 
 **正式版：内置供应商 per-provider 覆盖与官方端点修复、思考过程实时可视化、CLI Tier-2/3 Web 工具与能力审计清理**

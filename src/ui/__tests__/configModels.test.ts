@@ -4,7 +4,8 @@ import { defaults, hasConfiguredKey, modelListForProvider, normalizeProviderMode
 describe('provider model lists', () => {
   it('keeps a built-in provider usable with one default model', () => {
     const cfg = { ...defaults(), model: 'deepseek-v4-flash' };
-    expect(modelListForProvider(cfg, 'deepseek-openai')).toEqual(['deepseek-v4-flash']);
+    // Empty library falls back to the registry's default model list.
+    expect(modelListForProvider(cfg, 'deepseek-openai')).toEqual(['deepseek-v4-flash', 'deepseek-reasoner']);
   });
 
   it('returns all configured models for a provider without mixing providers', () => {

@@ -9,7 +9,15 @@ import type { ToolDefinition } from './types';
 // labels in shared/i18n.ts and — if it should appear in the GUI dropdown — a
 // matching <option> in index.html.
 
-export type ProviderId = 'deepseek-openai' | 'deepseek-anthropic' | 'qwen' | 'glm';
+export type ProviderId =
+  | 'deepseek-openai'
+  | 'qwen'
+  | 'glm'
+  | 'moonshot'
+  | 'minimax'
+  | 'openai'
+  | 'openrouter'
+  | 'nvidia';
 
 export interface PromptBudgetConfig {
   provider?: string;
@@ -43,6 +51,8 @@ function promptBudgetDefaults(provider: string, model: string): { contextWindowT
   if (id.includes('deepseek') || name.includes('deepseek')) return { contextWindowTokens: 64_000, outputReserveTokens: 32_768 };
   if (id === 'qwen' || name.includes('qwen')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
   if (id === 'glm' || name.includes('glm')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
+  if (id === 'moonshot' || name.includes('kimi')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
+  if (id === 'minimax' || name.includes('minimax')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
   if (name.includes('claude') || id.includes('anthropic')) return { contextWindowTokens: 200_000, outputReserveTokens: 8_192 };
   if (name.includes('o1') || name.includes('o3') || name.includes('gpt-4o')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
   if (id === 'ollama' || id === 'lmstudio' || name.includes('llama')) return { contextWindowTokens: 32_768, outputReserveTokens: 4_096 };
@@ -239,6 +249,11 @@ export interface ProviderDef {
   label: string;
   /** Default model used when config.model is empty (placeholder + fallback). */
   defaultModel: string;
+  /**
+   * Default model library shown when the user hasn't customized the list yet
+   * (Settings → LLM → provider card → 模型库). First entry == defaultModel.
+   */
+  models: string[];
   /** i18n key for the full display name in settings dropdowns. */
   i18nKey: string;
   /** Default base URL for the OpenAI-compatible HTTP fallback (browser mode). */
@@ -248,13 +263,23 @@ export interface ProviderDef {
    * providers get their own (larger) token budget (see ui/chat.ts).
    */
   deepSeekFamily: boolean;
+  /**
+   * Built-in text-to-image model (OpenAI /images/generations). When set, the
+   * provider exposes the generate_image tool like a custom provider with
+   * imageGen enabled.
+   */
+  imageGenModel?: string;
 }
 
 export const PROVIDERS: readonly ProviderDef[] = [
-  { id: 'deepseek-openai', label: 'DeepSeek', defaultModel: 'deepseek-v4-flash', i18nKey: 'provider.deepseek-openai', baseURL: 'https://api.deepseek.com', deepSeekFamily: true },
-  { id: 'deepseek-anthropic', label: 'DeepSeek', defaultModel: 'deepseek-v4-flash', i18nKey: 'provider.deepseek-anthropic', baseURL: 'https://api.deepseek.com', deepSeekFamily: true },
-  { id: 'qwen', label: 'Qwen', defaultModel: 'qwen3-coder-next', i18nKey: 'provider.qwen', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', deepSeekFamily: false },
-  { id: 'glm', label: 'GLM', defaultModel: 'glm-5.2', i18nKey: 'provider.glm', baseURL: 'https://open.bigmodel.cn/api/paas/v4', deepSeekFamily: false },
+  { id: 'deepseek-openai', label: 'DeepSeek', defaultModel: 'deepseek-v4-flash', models: ['deepseek-v4-flash', 'deepseek-reasoner'], i18nKey: 'provider.deepseek-openai', baseURL: 'https://api.deepseek.com', deepSeekFamily: true },
+  { id: 'qwen', label: 'Qwen', defaultModel: 'qwen3-coder-next', models: ['qwen3-coder-next', 'qwen3-max'], i18nKey: 'provider.qwen', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', deepSeekFamily: false },
+  { id: 'glm', label: 'GLM', defaultModel: 'glm-5.2', models: ['glm-5.2', 'glm-5.2-flash'], i18nKey: 'provider.glm', baseURL: 'https://open.bigmodel.cn/api/paas/v4', deepSeekFamily: false },
+  { id: 'moonshot', label: 'Moonshot', defaultModel: 'kimi-k3', models: ['kimi-k3', 'kimi-k2.6'], i18nKey: 'provider.moonshot', baseURL: 'https://api.moonshot.cn/v1', deepSeekFamily: false },
+  { id: 'minimax', label: 'MiniMax', defaultModel: 'MiniMax-M2.7', models: ['MiniMax-M2.7', 'MiniMax-M2'], i18nKey: 'provider.minimax', baseURL: 'https://api.minimaxi.com/v1', deepSeekFamily: false },
+  { id: 'openai', label: 'OpenAI', defaultModel: 'gpt-5.2', models: ['gpt-5.2', 'gpt-4o-mini', 'o3-mini'], i18nKey: 'provider.openai', baseURL: 'https://api.openai.com/v1', deepSeekFamily: false, imageGenModel: 'gpt-image-1' },
+  { id: 'openrouter', label: 'OpenRouter', defaultModel: 'openai/gpt-4o-mini', models: ['openai/gpt-4o-mini', 'anthropic/claude-sonnet-4', 'deepseek/deepseek-r1'], i18nKey: 'provider.openrouter', baseURL: 'https://openrouter.ai/api/v1', deepSeekFamily: false },
+  { id: 'nvidia', label: 'NVIDIA', defaultModel: 'meta/llama-3.1-8b-instruct', models: ['meta/llama-3.1-8b-instruct', 'deepseek-ai/deepseek-r1', 'mistralai/mixtral-8x7b-instruct'], i18nKey: 'provider.nvidia', baseURL: 'https://integrate.api.nvidia.com/v1', deepSeekFamily: false },
 ];
 
 const PROVIDER_BY_ID = new Map<string, ProviderDef>(PROVIDERS.map((p) => [p.id, p]));
@@ -347,6 +372,7 @@ export function imageGenEnabled(
   const custom = customProviderFor(customs, provider);
   if (custom?.imageGen === true) return true;
   if (custom?.imageGenModel?.trim()) return true;
+  if (providerDef(provider)?.imageGenModel?.trim()) return true;
   return isImageModelName(model);
 }
 
@@ -363,6 +389,8 @@ export function imageGenModelFor(
   const custom = customProviderFor(customs, provider);
   const explicit = custom?.imageGenModel?.trim();
   if (explicit) return explicit;
+  const builtin = providerDef(provider)?.imageGenModel?.trim();
+  if (builtin) return builtin;
   if (isImageModelName(model)) return model!.trim();
   return 'gpt-image-1';
 }

@@ -6,7 +6,7 @@
 
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
-import { customProviderFor, defaultModelFor, isProviderId, providerOverrideFor, PROVIDERS, type CustomProvider, type ProviderId, type ProviderOverride } from '../shared/providers';
+import { customProviderFor, defaultModelFor, isProviderId, providerDef, providerOverrideFor, PROVIDERS, type CustomProvider, type ProviderId, type ProviderOverride } from '../shared/providers';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
 import type { ProxyConfig } from '../shared/proxy';
@@ -197,7 +197,7 @@ export function defaults(): PureConfig {
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', bypassProviders: [], bypassModels: [] }),
     streamingRender: true,
     taskMode: 'auto',
-    configVersion: 11,
+    configVersion: 12,
   };
 }
 
@@ -258,8 +258,17 @@ export function modelListForProvider(cfg: PureConfig, provider: string): string[
   const custom = customProviderFor(cfg.customProviders ?? [], provider);
   const stored = custom ? custom.models : cfg.providerModels?.[provider];
   const current = provider === cfg.provider ? cfg.model?.trim() : '';
-  const fallback = custom?.defaultModel?.trim() || defaultModelFor(provider);
-  return uniqueModels([...(stored ?? []), current, fallback]);
+  const def = providerDef(provider);
+  if (custom) {
+    return uniqueModels([...(custom.models ?? []), current, custom.defaultModel?.trim() || def?.defaultModel || '']);
+  }
+  // A user-configured library wins as-is; only empty libraries fall back to
+  // the registry's default model list (so new registry entries never get
+  // mixed into a library the user deliberately built).
+  if (stored && stored.length > 0) {
+    return uniqueModels([...stored, current, defaultModelFor(provider)]);
+  }
+  return uniqueModels([...(def?.models ?? [defaultModelFor(provider)]), current]);
 }
 
 /**
@@ -448,6 +457,35 @@ export function loadConfig(): PureConfig | null {
         needsPersist = true;
       } else {
         cfg.providerOverrides = { ...(cfg.providerOverrides ?? {}) };
+      }
+      // Config v12: the registry treats DeepSeek as ONE provider (its
+      // OpenAI-compatible entry); the separate 'deepseek-anthropic' id is
+      // retired. Merge its model list / override into 'deepseek-openai' so
+      // existing configs keep working, then drop the stale id everywhere.
+      // Lazy: configs that never used the anthropic id are not rewritten.
+      if ((parsed.configVersion ?? 1) < 12) {
+        const hadAnthropic = String(cfg.provider) === 'deepseek-anthropic'
+          || !!cfg.providerModels?.['deepseek-anthropic']
+          || !!cfg.providerOverrides?.['deepseek-anthropic'];
+        if (String(cfg.provider) === 'deepseek-anthropic') cfg.provider = 'deepseek-openai';
+        if (cfg.providerModels?.['deepseek-anthropic']) {
+          const merged = uniqueModels([
+            ...(cfg.providerModels['deepseek-openai'] ?? []),
+            ...cfg.providerModels['deepseek-anthropic'],
+          ]);
+          cfg.providerModels = { ...cfg.providerModels, 'deepseek-openai': merged };
+          delete cfg.providerModels['deepseek-anthropic'];
+        }
+        if (cfg.providerOverrides?.['deepseek-anthropic']) {
+          const merged = { ...(cfg.providerOverrides['deepseek-openai'] ?? {}), ...cfg.providerOverrides['deepseek-anthropic'] };
+          cfg.providerOverrides = { ...cfg.providerOverrides };
+          delete cfg.providerOverrides['deepseek-anthropic'];
+          if (merged.name || merged.baseURL || merged.apiKey || merged.hasApiKey) {
+            cfg.providerOverrides['deepseek-openai'] = merged;
+          }
+        }
+        cfg.configVersion = 12;
+        if (hadAnthropic) needsPersist = true;
       }
       if (isTauriRuntime() && cfg.apiKey) {
         // Legacy migration: move a key previously persisted to localStorage

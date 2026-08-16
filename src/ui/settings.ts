@@ -17,12 +17,14 @@ import { showToastHtml } from '../shared/toast';
 import { buildExportSavedToast } from './statsExportToast';
 import {
   customProviderFor,
+  customProviderLabel,
   defaultModelFor,
   isCustomProviderId,
   OLLAMA_PRESET,
   OPENAI_PRESET,
   OPENROUTER_PRESET,
   NVIDIA_PRESET,
+  PROVIDERS,
   providerDef,
   providerOverrideFor,
   type CustomProvider,
@@ -83,15 +85,11 @@ export class SettingsPanel {
   /** Bound in the constructor; refreshes the paste-file footprint on open. */
   private refreshTmpUsage: () => Promise<void> = async () => {};
   /**
-   * Provider card being edited whose activation is pending an explicit user
-   * action (card click or "启用此供应商"). While set, autoSave keeps the
-   * previous active provider, so merely typing a Base URL / model never
-   * promotes the card to the active LLM.
+   * Provider whose expanded configuration panel is open (null = all cards
+   * collapsed). Only one panel can be expanded at a time; the grid renders
+   * the panel in place of that provider's card.
    */
-  private pendingActivation: string | null = null;
-  /** Last card the config panel rendered for — field prefill only runs on a
-   *  real card switch, never on live keystrokes in the same card. */
-  private presentedProvider: string | null = null;
+  private editingProvider: string | null = null;
   /** Pending debounced save (text-input keystrokes only). */
   private autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -150,10 +148,10 @@ export class SettingsPanel {
   // ── Navigation ──
 
   switchCategory(category: string) {
-    if (category !== 'llm') {
-      this.setProviderV4Drawer('provider', false);
-      this.setProviderV4Drawer('models', false);
-      this.setProviderV4Drawer('connection', false);
+    if (category !== 'llm' && this.editingProvider) {
+      // Leaving the LLM page collapses the expanded panel (edits are
+      // auto-saved, so nothing is lost).
+      this.collapseProviderPanel();
     }
     this.currentCategory = category;
 
@@ -417,141 +415,101 @@ export class SettingsPanel {
       }
     });
 
-    // Toggle API key visibility
-    const toggleKey = document.getElementById('cfg-toggle-key');
-    const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
-    toggleKey?.addEventListener('click', () => {
-      const isPassword = keyInput.type === 'password';
-      keyInput.type = isPassword ? 'text' : 'password';
-      toggleKey.querySelector('svg')?.style.setProperty('opacity', isPassword ? '1' : '0.5');
-    });
-
-    // Track real user edits: a stored (masked) key must only be revoked when
-    // the user explicitly types into the field and clears it — never by an
-    // unrelated autoSave (theme / language / font-size change) that fires
-    // while the masked field happens to be empty.
-    keyInput.addEventListener('input', () => {
-      if (keyInput.value.trim()) keyInput.dataset.touched = '1';
-    });
-
-    // Provider cards (built-in + dynamic custom) + hidden compatibility select
-    // share one source of truth. Delegated on the grid so cards rendered later
-    // (custom providers) work without rebinding.
-    const providerV4Shell = document.getElementById('provider-v4-shell');
-    providerV4Shell?.addEventListener('click', (event) => {
+    // ── LLM page: default-model bar + provider card grid ──
+    // The whole LLM page is event-delegated on the grid container: cards,
+    // the expanded panel and every model-row action are re-rendered on save,
+    // so direct listeners would need constant rebinding.
+    const llmGrid = document.getElementById('llm-provider-grid');
+    llmGrid?.addEventListener('click', (event) => {
       const target = event.target as HTMLElement;
-      const openProvider = target.closest<HTMLElement>('[data-open-provider]');
-      if (openProvider) {
-        event.preventDefault();
-        this.setProviderV4Drawer('provider');
+      // Expanded-panel actions.
+      const testBtn = target.closest<HTMLElement>('[data-test-model]');
+      if (testBtn) {
+        void this.testModelConnection(testBtn.dataset.testModel || '');
         return;
       }
-      if (target.closest('[data-close-provider]')) {
-        this.setProviderV4Drawer('provider', false);
-        return;
-      }
-      const openModels = target.closest<HTMLElement>('[data-open-models]');
-      if (openModels) {
-        event.preventDefault();
-        this.setProviderV4Drawer('models');
-        return;
-      }
-      if (target.closest('[data-close-models]')) {
-        this.setProviderV4Drawer('models', false);
-        return;
-      }
-      if (target.closest('[data-close-connection]')) {
-        this.setProviderV4Drawer('connection', false);
-        return;
-      }
-      const openConnection = target.closest<HTMLElement>('[data-open-connection]');
-      if (openConnection) {
-        event.preventDefault();
-        this.setProviderV4Drawer('connection');
-      }
-    });
-
-    document.getElementById('provider-card-grid')?.addEventListener('click', (event) => {
-      // Per-card delete (×) takes precedence.
-      const removeBtn = (event.target as HTMLElement).closest<HTMLElement>('.provider-card-remove');
-      if (removeBtn) {
+      const removeChip = target.closest<HTMLElement>('.provider-model-chip-remove');
+      if (removeChip) {
         event.stopPropagation();
-        this.removeCustomProvider(removeBtn.dataset.removeProvider || '');
+        this.removeModel(removeChip.getAttribute('data-remove') || '');
         return;
       }
-      const card = (event.target as HTMLElement).closest<HTMLElement>('.provider-card');
-      const provider = card?.dataset.provider;
-      if (!provider) return;
-      this.selectProvider(provider);
+      const chip = target.closest<HTMLElement>('.provider-model-chip');
+      if (chip) {
+        this.setDefaultModel(chip.getAttribute('data-model') || '');
+        return;
+      }
+      if (target.closest('#cfg-add-model-btn')) { this.addModel(); return; }
+      if (target.closest('#cfg-clear-models-btn')) { this.clearModels(); return; }
+      if (target.closest('#cfg-fetch-models-btn')) { void this.fetchProviderModels(); return; }
+      if (target.closest('#provider-delete-btn')) { this.removeCustomProvider(this.editingProvider || ''); return; }
+      if (target.closest('[data-close-panel]')) { this.collapseProviderPanel(); return; }
+      if (target.closest('[data-save-panel]')) { this.saveAndCollapsePanel(); return; }
+      const toggleKey = target.closest('#cfg-toggle-key');
+      if (toggleKey) {
+        const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement | null;
+        if (!keyInput) return;
+        const isPassword = keyInput.type === 'password';
+        keyInput.type = isPassword ? 'text' : 'password';
+        toggleKey.querySelector('svg')?.style.setProperty('opacity', isPassword ? '1' : '0.5');
+        return;
+      }
+      // "＋ 新增供应商" card.
+      if (target.closest('[data-add-provider]')) {
+        this.addBlankCustomProvider();
+        return;
+      }
+      // Collapsed provider card → expand (or collapse when re-clicked).
+      const card = target.closest<HTMLElement>('.llm-provider-card');
+      if (card?.dataset.provider) this.toggleProviderPanel(card.dataset.provider);
     });
 
-    // "Enable this provider" button — explicit activation for a card whose
-    // config is open but which isn't the active LLM yet.
-    document.getElementById('provider-activate-btn')?.addEventListener('click', () => {
-      const id = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
-      this.selectProvider(id);
-    });
-
-    // Provider change → update the card presentation, model placeholder + auto-save.
-    document.getElementById('cfg-provider')!.addEventListener('change', () => {
-      const p = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
-      this.selectProvider(p);
-    });
-
-    document.getElementById('provider-v4-test-btn')?.addEventListener('click', () => void this.testProviderConnection());
-
-    // ── Multi-model editor (custom providers): add / remove / set-default ──
-    // Enter in the model input (or the ＋ 添加 button) commits the typed model
-    // into the provider's model list and makes it the default. Clicking a chip
-    // switches the default; the × on a chip removes that model.
-    document.getElementById('cfg-add-model-btn')?.addEventListener('click', () => this.addModel());
-    document.getElementById('cfg-clear-models-btn')?.addEventListener('click', () => this.clearModels());
-    (document.getElementById('cfg-model-add') as HTMLInputElement | null)?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
+    // Enter in the model input commits the typed model.
+    llmGrid?.addEventListener('keydown', (event) => {
+      const input = event.target as HTMLInputElement;
+      if (input?.id === 'cfg-model-add' && event.key === 'Enter') {
+        event.preventDefault();
         this.addModel();
       }
     });
-    document.getElementById('cfg-model-list')?.addEventListener('click', (e) => {
-      const remove = (e.target as HTMLElement).closest<HTMLElement>('.provider-model-chip-remove');
-      if (remove) {
-        e.stopPropagation();
-        this.removeModel(remove.getAttribute('data-remove') || '');
+
+    // Live edits inside the expanded panel: per-keystroke saves are debounced,
+    // the API-key field additionally tracks "touched" so a cleared field only
+    // revokes a stored secret when the user actually edited it.
+    llmGrid?.addEventListener('input', (event) => {
+      const el = event.target as HTMLInputElement;
+      if (el.id === 'cfg-apikey') {
+        if (el.value.trim()) el.dataset.touched = '1';
+        this.debouncedAutoSave();
         return;
       }
-      const chip = (e.target as HTMLElement).closest<HTMLElement>('.provider-model-chip');
-      if (chip) this.setDefaultModel(chip.getAttribute('data-model') || '');
+      if (el.id === 'cfg-custom-name-edit' || el.id === 'cfg-baseurl' || el.id === 'cfg-imagegen-model') {
+        this.debouncedAutoSave();
+      }
+    });
+    llmGrid?.addEventListener('change', (event) => {
+      const el = event.target as HTMLInputElement;
+      if (el.id === 'cfg-imagegen') this.autoSave();
     });
 
-    // ── Custom providers: quick presets, delete, live name edit ──
-    document.getElementById('cfg-fetch-models-btn')?.addEventListener('click', () => this.fetchProviderModels());
-    document.getElementById('provider-delete-btn')?.addEventListener('click', () => this.removeSelectedCustomProvider());
-    // Quick-preset chips (用户自定义 / OpenAI / OpenRouter / NVIDIA / Ollama):
-    // one click adds the provider and selects it — the key (if any) is entered
-    // in the config card below, prompted by the toast.
-    document.querySelectorAll<HTMLElement>('.provider-preset-chip').forEach(chip => {
-      chip.addEventListener('click', () => {
-        const slug = chip.dataset.preset || '';
-        if (slug === 'custom') {
-          this.addBlankCustomProvider();
-          return;
-        }
-        const preset = this.customPresetFor(slug);
-        if (preset) this.addCustomPreset(preset);
-      });
+    // Default-model bar: open the grouped model menu, pick a model, close on
+    // outside click.
+    const defaultBtn = document.getElementById('llm-default-model-btn');
+    const defaultMenu = document.getElementById('llm-default-model-menu');
+    defaultBtn?.addEventListener('click', () => this.toggleDefaultModelMenu());
+    defaultMenu?.addEventListener('click', (event) => {
+      const item = (event.target as HTMLElement).closest<HTMLElement>('[data-default-model]');
+      if (!item) return;
+      const parts = (item.dataset.defaultModel || '').split('::');
+      if (parts.length === 2) this.setDefaultModelFromMenu(parts[0], parts[1]);
     });
-    const customNameEdit = document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null;
-    customNameEdit?.addEventListener('input', () => {
-      // Re-label the selected card as the user types the custom name.
-      const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
-      if (!isCustomProviderId((loadConfig() ?? defaults()).customProviders, provider)) return;
-      const name = customNameEdit.value.trim();
-      if (name) {
-        const nameEl = document.querySelector<HTMLElement>('.provider-card.selected .provider-card-name');
-        if (nameEl) nameEl.textContent = name;
-      }
-      this.debouncedAutoSave();
+    document.addEventListener('click', (event) => {
+      if (!defaultMenu || defaultMenu.hidden) return;
+      const t = event.target as HTMLElement;
+      if (defaultMenu.contains(t) || defaultBtn?.contains(t)) return;
+      this.closeDefaultModelMenu();
     });
+
 
     // Theme selector
     document.querySelectorAll('.theme-option').forEach(el => {
@@ -610,8 +568,9 @@ export class SettingsPanel {
 
     // Auto-save on all input/select/checkbox changes
     const autoSaveSelectors = [
-      '#cfg-provider', '#cfg-apikey', '#cfg-model', '#cfg-baseurl',
-      '#cfg-imagegen', '#cfg-imagegen-model',
+      // LLM fields (api key / name / base URL / image gen / model editor) are
+      // handled by the grid-delegated listeners above — the panel is
+      // re-rendered on every save, so a static binding would go stale.
       '#cfg-language',
       '#cfg-city',
       '#cfg-fontsize', '#cfg-density',
@@ -634,10 +593,6 @@ export class SettingsPanel {
         // the connection state looks stale while the user is still typing.
         if (el.tagName === 'INPUT' && ((el as HTMLInputElement).type === 'text' || (el as HTMLInputElement).type === 'password')) {
           el.addEventListener('input', () => {
-            if (sel === '#cfg-model' || sel === '#cfg-baseurl') {
-              const provider = (document.getElementById('cfg-provider') as HTMLSelectElement | null)?.value;
-              if (provider) this.updateProviderPresentation(provider);
-            }
             // Per-keystroke writes are debounced: autoSave() rebuilds the
             // whole form + writes localStorage (+ calls the Rust secret store
             // when a key is present), so a burst of typing must coalesce into
@@ -724,87 +679,219 @@ export class SettingsPanel {
       this.renderMemoryDashboard();
     });
 
-    // Keyboard: close the active Drawer before leaving Settings.
+    // Keyboard: Escape collapses the expanded provider panel first, then the
+    // default-model menu, and only then leaves Settings.
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || !this.visible) return;
-      const shell = document.getElementById('provider-v4-shell');
-      if (shell?.classList.contains('models-drawer-open')) {
-        this.setProviderV4Drawer('models', false);
+      const defaultMenu = document.getElementById('llm-default-model-menu');
+      if (this.editingProvider) {
+        this.collapseProviderPanel();
         return;
       }
-      const drawer = document.querySelector<HTMLElement>('#provider-v4-provider-drawer:not([hidden]), #provider-v4-connection-drawer:not([hidden])');
-      if (drawer) {
-        this.setProviderV4Drawer(drawer.id === 'provider-v4-provider-drawer' ? 'provider' : 'connection', false);
+      if (defaultMenu && !defaultMenu.hidden) {
+        this.closeDefaultModelMenu();
         return;
       }
       this.close();
     });
   }
 
-  // ── Provider v4 drawers ──
+  // ── LLM page: default-model bar + provider card grid ──
 
-  private setProviderV4Drawer(kind: 'provider' | 'models' | 'connection', open?: boolean): void {
-    const shell = document.getElementById('provider-v4-shell');
-    if (!shell) return;
-    const ids: Record<'provider' | 'models' | 'connection', string> = {
-      provider: 'provider-v4-provider-drawer',
-      models: 'provider-v4-model-drawer',
-      connection: 'provider-v4-connection-drawer',
-    };
-    const drawer = document.getElementById(ids[kind]);
-    if (!drawer) return;
-    const modelBody = document.getElementById('provider-v4-model-drawer-body');
-    const nextOpen = kind === 'models'
-      ? (open ?? !shell.classList.contains('models-drawer-open'))
-      : (open ?? drawer.hasAttribute('hidden'));
-    const kinds: Array<'provider' | 'models' | 'connection'> = ['provider', 'models', 'connection'];
+  /** Provider mark letters per built-in id (kept short for the card chip). */
+  private static readonly PROVIDER_MARKS: Record<string, string> = {
+    'deepseek-openai': 'DS',
+    qwen: 'Q',
+    glm: 'GLM',
+    moonshot: 'K',
+    minimax: 'MM',
+    openai: 'AI',
+    openrouter: 'OR',
+    nvidia: 'NV',
+  };
 
-    const updateModelToggle = (expanded: boolean): void => {
-      const toggle = shell.querySelector<HTMLElement>('.provider-v4-model-drawer-toggle');
-      if (!toggle) return;
-      toggle.dataset.i18n = expanded ? 'llm.model.collapse' : 'llm.model.expand';
-      toggle.textContent = t(expanded ? 'llm.model.collapse' : 'llm.model.expand');
-    };
-
-    if (nextOpen) {
-      // Default + Drawer is exclusive: one editing surface is visible at a time.
-      for (const current of kinds) {
-        const currentDrawer = document.getElementById(ids[current]);
-        const currentOpen = current === kind;
-        if (current === 'models') {
-          modelBody?.toggleAttribute('hidden', !currentOpen);
-          updateModelToggle(currentOpen);
-        } else {
-          currentDrawer?.toggleAttribute('hidden', !currentOpen);
-        }
-        shell.classList.toggle(`${current}-drawer-open`, currentOpen);
-        shell.querySelectorAll<HTMLElement>(`[data-open-${current}]`).forEach(trigger => {
-          trigger.setAttribute('aria-expanded', String(currentOpen));
-        });
-      }
+  /** Toggle the expanded panel for a provider (one at a time). Clicking the
+   *  card again — or ✕ / 保存 — collapses it; edits are auto-saved, so the
+   *  panel always reflects the persisted config on re-open. */
+  private toggleProviderPanel(provider: string): void {
+    if (this.editingProvider === provider) {
+      this.collapseProviderPanel();
       return;
     }
-
-    if (kind === 'models') {
-      modelBody?.toggleAttribute('hidden', true);
-      updateModelToggle(false);
-    } else {
-      drawer.toggleAttribute('hidden', true);
-    }
-    shell.classList.remove(`${kind}-drawer-open`);
-    shell.querySelectorAll<HTMLElement>(`[data-open-${kind}]`).forEach(trigger => {
-      trigger.setAttribute('aria-expanded', 'false');
-    });
+    if (this.editingProvider) this.flushAutoSave();
+    this.editingProvider = provider;
+    this.renderProviderGrid();
+    const nameEl = document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null;
+    nameEl?.focus();
+    nameEl?.select();
   }
 
-  /** Test the currently selected provider's endpoint without changing the
-   * active provider. Any HTTP response proves the endpoint is reachable;
-   * authentication errors are reported as reachable-but-not-authorized rather
-   * than falsely treating a working server as offline. */
-  private async testProviderConnection(): Promise<void> {
-    const btn = document.getElementById('provider-v4-test-btn') as HTMLButtonElement | null;
-    const status = document.getElementById('provider-v4-connection-status');
-    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement | null)?.value || '';
+  /** Collapse the expanded panel (auto-saves pending edits first). */
+  private collapseProviderPanel(): void {
+    this.flushAutoSave();
+    this.editingProvider = null;
+    this.renderProviderGrid();
+    this.renderDefaultBar();
+  }
+
+  /** 保存 button: flush, collapse, toast. */
+  private saveAndCollapsePanel(): void {
+    this.flushAutoSave();
+    this.editingProvider = null;
+    this.renderProviderGrid();
+    this.renderDefaultBar();
+    this.toast(t('llm.panel.saved'));
+  }
+
+  /** Render the provider grid: collapsed cards (2-col) + the expanded panel
+   *  (full width) when one provider is being edited + the add-provider card. */
+  private renderProviderGrid(): void {
+    const grid = document.getElementById('llm-provider-grid');
+    if (!grid) return;
+    const cfg = loadConfig() ?? defaults();
+    const customs = cfg.customProviders ?? [];
+    const overrides = cfg.providerOverrides ?? {};
+    const cards: string[] = [];
+    const editing = this.editingProvider;
+
+    const cardOrPanel = (id: string, label: string, defaultModel: string, hasKey: boolean, custom: boolean, mark: string, markClass: string): string => {
+      if (editing === id) {
+        return this.expandedPanelTemplate(id, label, defaultModel, hasKey, custom, mark, markClass);
+      }
+      const status = hasKey ? t('llm.card.configured') : t('llm.card.notConfigured');
+      return `<button type="button" class="llm-provider-card" data-provider="${escapeHtml(id)}" title="${t('llm.card.open')}">
+        <span class="llm-provider-card-top">
+          <span class="provider-card-mark ${markClass}">${escapeHtml(mark)}</span>
+          <span class="llm-provider-card-status${hasKey ? '' : ' llm-provider-card-status-empty'}">${escapeHtml(status)}</span>
+        </span>
+        <span class="llm-provider-card-name">${escapeHtml(label)}</span>
+        <span class="llm-provider-card-meta">${escapeHtml(defaultModel || '—')}</span>
+      </button>`;
+    };
+
+    // Built-ins first (registry order), then custom providers, then the add card.
+    for (const def of PROVIDERS) {
+      const custom = customProviderFor(customs, def.id);
+      const override = providerOverrideFor(overrides, def.id);
+      const label = custom?.name ?? override?.name ?? t(def.i18nKey);
+      const defaultModel = custom?.defaultModel
+        ?? (def.id === cfg.provider ? cfg.model.trim() : cfg.providerModels?.[def.id]?.[0])
+        ?? def.defaultModel;
+      const hasKey = !!custom
+        ? (!!custom.apiKey || custom.hasApiKey === true || !!custom.local)
+        : (!!cfg.apiKey || cfg.hasApiKey === true || !!override?.apiKey || override?.hasApiKey === true);
+      cards.push(cardOrPanel(
+        def.id,
+        label,
+        defaultModel,
+        hasKey,
+        !!custom,
+        SettingsPanel.PROVIDER_MARKS[def.id] ?? (def.label.slice(0, 2) || 'P').toUpperCase(),
+        `provider-mark-${def.id}`,
+      ));
+    }
+    for (const c of customs) {
+      cards.push(cardOrPanel(
+        c.id,
+        c.name,
+        c.defaultModel || c.models[0] || '',
+        !!c.apiKey || c.hasApiKey === true || !!c.local,
+        true,
+        (c.name.slice(0, 2) || 'C').toUpperCase(),
+        c.id === 'ollama' ? 'provider-mark-ollama' : 'provider-mark-custom',
+      ));
+    }
+    cards.push(`<button type="button" class="llm-provider-card llm-provider-add-card" data-add-provider data-i18n="llm.addProvider">
+      <span class="llm-provider-add-plus" aria-hidden="true">＋</span>
+      <span class="llm-provider-add-label" data-i18n="llm.addProvider">＋ 新增供应商</span>
+      <span class="llm-provider-add-hint" data-i18n="llm.addProvider.hint">添加 OpenAI 兼容的自定义端点</span>
+    </button>`);
+
+    grid.innerHTML = cards.join('');
+    const count = document.getElementById('llm-provider-count');
+    if (count) count.textContent = String(PROVIDERS.length + customs.length);
+    if (editing) this.renderModelList(editing);
+    applyTranslations();
+  }
+
+  /** Full-width expanded configuration panel for one provider. Field ids are
+   *  stable (cfg-apikey / cfg-baseurl / cfg-model-list / …) so the shared
+   *  gather / model-editor logic keeps working; only one panel exists at a
+   *  time, so the ids never collide. */
+  private expandedPanelTemplate(id: string, label: string, defaultModel: string, hasKey: boolean, custom: boolean, mark: string, markClass: string): string {
+    const cfg = loadConfig() ?? defaults();
+    const customEntry = customProviderFor(cfg.customProviders ?? [], id);
+    const def = providerDef(id);
+    const override = providerOverrideFor(cfg.providerOverrides, id);
+    const baseURL = customEntry?.baseURL ?? override?.baseURL ?? '';
+    const savedKey = isTauriRuntime() && (customEntry?.hasApiKey === true || override?.hasApiKey === true || (id === cfg.provider && cfg.hasApiKey === true));
+    const imageGen = customEntry?.imageGen === true;
+    const imageGenModel = customEntry?.imageGenModel ?? '';
+    const keyPlaceholder = savedKey
+      ? t('llm.apiKey.savedPlaceholder')
+      : (customEntry?.local ? t('llm.custom.apiKeyOptional.hint') : t('llm.apiKey.placeholder'));
+    const urlPlaceholder = custom
+      ? t('llm.baseURL.placeholder')
+      : t('llm.baseURL.builtinPlaceholder').replace('{url}', def?.baseURL ?? '');
+    const namePlaceholder = custom ? t('llm.custom.name.ph') : t('llm.panel.name.placeholder');
+    return `<div class="llm-provider-panel" data-provider="${escapeHtml(id)}">
+      <div class="llm-provider-panel-head">
+        <span class="provider-card-mark ${markClass}">${escapeHtml(mark)}</span>
+        <div class="llm-provider-panel-head-copy">
+          <span class="llm-kicker">${custom ? t('llm.custom.formTitle') : t('llm.connection.settings')}</span>
+          <input id="cfg-custom-name-edit" class="setting-input llm-provider-name-input" type="text" value="${escapeHtml(label)}" placeholder="${escapeHtml(namePlaceholder)}" aria-label="${t('llm.panel.name')}" />
+        </div>
+        <button type="button" class="llm-provider-panel-close" data-close-panel aria-label="${t('llm.panel.collapse')}" title="${t('llm.panel.collapse')}">✕</button>
+      </div>
+      <div class="llm-provider-panel-body">
+        <div class="setting-row">
+          <div class="setting-info"><span class="setting-label" data-i18n="llm.apiKey">API Key</span><span class="setting-hint" data-i18n="llm.apiKey.hint">您的 API 密钥</span></div>
+          <div class="setting-input-group">
+            <input id="cfg-apikey" class="setting-input" type="password" placeholder="${escapeHtml(keyPlaceholder)}" autocomplete="off" />
+            <button id="cfg-toggle-key" class="setting-icon-btn" type="button" data-i18n-title="llm.apiKey.toggle" title="Toggle visibility"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
+        </div>
+        <div class="setting-row provider-baseurl-row">
+          <div class="setting-info"><span class="setting-label" data-i18n="llm.baseURL">Base URL</span><span class="setting-hint" data-i18n="llm.baseURL.hint">自定义端点（可选）</span></div>
+          <input id="cfg-baseurl" class="setting-input" type="text" value="${escapeHtml(baseURL)}" placeholder="${escapeHtml(urlPlaceholder)}" autocomplete="off" />
+        </div>
+        ${custom ? `
+        <div class="setting-row" id="cfg-imagegen-row">
+          <div class="setting-info"><span class="setting-label" data-i18n="llm.custom.imageGen">图片生成（文生图）</span><span class="setting-hint" data-i18n="llm.custom.imageGen.hint">该供应商支持 OpenAI 兼容的 /images/generations 图片接口时开启；开启后图片请求会调用 generate_image 并直接渲染为真实图片，不再输出 SVG（失败时自动回退 SVG）</span></div>
+          <div class="setting-input-group">
+            <input id="cfg-imagegen-model" class="setting-input" type="text" placeholder="gpt-image-1" value="${escapeHtml(imageGenModel)}" aria-label="Image model" />
+            <label class="toggle"><input type="checkbox" id="cfg-imagegen" ${imageGen ? 'checked' : ''} /><span class="toggle-slider"></span></label>
+          </div>
+        </div>` : ''}
+        <div class="setting-row provider-model-row">
+          <div class="setting-info"><span class="setting-label" data-i18n="llm.model.library">模型库</span><span class="setting-hint" data-i18n="llm.model.hint">模型标识符（可添加多个，点击模型行设为默认；每个模型可单独测试连通性）</span></div>
+          <div class="provider-model-editor">
+            <input id="cfg-model" type="hidden" value="${escapeHtml(defaultModel)}" />
+            <div id="cfg-model-list" class="provider-model-list" role="list" hidden></div>
+            <div class="setting-input-group provider-model-input-group">
+              <input id="cfg-model-add" class="setting-input" type="text" data-i18n-placeholder="llm.custom.addModelPlaceholder" placeholder="输入模型 ID，例如 deepseek-reasoner" autocomplete="off" />
+              <button id="cfg-add-model-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.addModel" data-i18n-title="llm.custom.addModelTitle" title="将输入框中的模型加入列表，不改变当前默认模型" hidden>＋ 添加</button>
+              ${custom ? `<button id="cfg-fetch-models-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.fetch" title="从 API 获取模型列表" hidden>⟳ 获取模型</button>` : ''}
+              <button id="cfg-clear-models-btn" class="provider-model-clear-btn" type="button" data-i18n="llm.custom.clearModels" data-i18n-title="llm.custom.clearModelsTitle" title="删除除默认模型外的所有模型">全部删除</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="llm-provider-panel-foot">
+        ${custom ? `<button id="provider-delete-btn" class="setting-btn danger" data-i18n="llm.custom.deleteBtn">删除</button>` : ''}
+        <span class="llm-provider-panel-spacer"></span>
+        <button type="button" class="setting-btn primary" data-save-panel data-i18n="llm.panel.save">保存</button>
+      </div>
+    </div>`;
+  }
+
+  /** Per-model connectivity test: runs the SAME probe real chats use (Rust
+   *  reqwest on desktop, fetch mirror in browser), passing the concrete model
+   *  id so a typo'd / retired model name fails loudly instead of passing a
+   *  generic endpoint check. The row button shows ✓ / ✗ briefly. */
+  private async testModelConnection(model: string): Promise<void> {
+    const provider = this.editingProvider;
+    if (!provider || !model) return;
     const cfg = loadConfig() ?? defaults();
     const custom = customProviderFor(cfg.customProviders ?? [], provider);
     const def = providerDef(provider);
@@ -812,44 +899,31 @@ export class SettingsPanel {
       || custom?.baseURL
       || def?.baseURL
       || '').replace(/\/+$/, '');
+    const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() || '';
     if (!baseURL) {
-      if (status) {
-        status.textContent = t('llm.connection.notConfigured');
-        status.dataset.state = 'error';
-      }
       this.toast(t('llm.custom.needURL'));
       return;
     }
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = t('llm.connection.testing');
+    if (!apiKey && !custom?.local && !(custom?.hasApiKey || providerOverrideFor(cfg.providerOverrides, provider)?.hasApiKey)) {
+      this.toast(t('llm.model.testNeedKey'));
+      return;
     }
-    if (status) {
-      status.textContent = t('llm.connection.testing');
-      status.dataset.state = 'testing';
-    }
-    const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() || '';
-    // One probe contract on both surfaces: desktop runs it in Rust through the
-    // SAME network path real chats use (reqwest + configured proxy + secrets
-    // resolution), browser dev mode runs the fetch mirror with identical
-    // semantics (only 2xx succeeds, 401/403 = key rejected, first /models
-    // probe decides). A result that says ok here is a result that will work
-    // when chatting.
+    const btn = document.querySelector<HTMLButtonElement>(`[data-test-model="${CSS.escape(model)}"]`);
+    if (!btn) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '…';
     const started = performance.now();
     let probe: { ok: boolean; status?: number; latencyMs?: number; error?: string };
     if (isTauriRuntime()) {
-      const proxy = normalizeProxyConfig(loadConfig()?.proxy);
-      const model = (document.getElementById('cfg-model') as HTMLInputElement | null)?.value.trim()
-        || custom?.defaultModel || defaultModelFor(provider);
+      const proxy = normalizeProxyConfig(cfg.proxy);
       try {
         const core = await loadTauriCore();
         if (!core) throw new Error('Tauri runtime unavailable');
-        const override = providerOverrideFor((loadConfig() ?? defaults()).providerOverrides, provider);
+        const override = providerOverrideFor(cfg.providerOverrides, provider);
         probe = await core.invoke('test_llm_connection', {
           baseUrl: baseURL,
           apiKey,
-          // Built-ins with their own saved key probe the same per-provider
-          // Rust secret slot real chats resolve.
           secretKey: custom ? customSecretKey(custom.id)
             : override?.hasApiKey ? customSecretKey(provider)
             : undefined,
@@ -860,37 +934,135 @@ export class SettingsPanel {
           model,
         });
       } catch (err) {
-        // Command-level failure (e.g. invalid proxy URL) — surface the real
-        // reason instead of a generic "cannot connect".
-        const message = (err as Error)?.message || String(err);
-        if (status) {
-          status.textContent = t('llm.connection.testFailed');
-          status.dataset.state = 'error';
-        }
-        this.toast(`${t('llm.connection.testFailed')}：${message}`);
-        return;
+        probe = { ok: false, error: (err as Error)?.message || String(err) };
       }
     } else {
       probe = await probeLlmEndpoint(baseURL, apiKey);
     }
     const elapsed = Math.max(0, Math.round(performance.now() - started));
+    btn.disabled = false;
+    btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail');
     if (probe.ok) {
-      if (status) {
-        status.textContent = t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
-        status.dataset.state = 'active';
-      }
-      this.toast(t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed)));
+      btn.textContent = '✓';
+      btn.classList.add('llm-model-test-ok');
+      btn.title = t('llm.model.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
     } else {
-      if (status) {
-        status.textContent = t('llm.connection.testFailed');
-        status.dataset.state = 'error';
-      }
-      this.toast(`${t('llm.connection.testFailed')}：${probe.error || 'unknown error'}`);
+      btn.textContent = '✗';
+      btn.classList.add('llm-model-test-fail');
+      btn.title = t('llm.model.testErr').replace('{err}', probe.error || t('llm.model.testFailed'));
     }
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = t('llm.connection.test');
+    window.setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail');
+    }, 2500);
+  }
+
+  // ── Default-model bar (top strip) ──
+
+  /** The bar shows the default model + its provider; empty state when no
+   *  model is configured. Picking from the dropdown writes BOTH cfg.model and
+   *  cfg.provider (derived from the model's provider) — there is no separate
+   *  "active provider" concept anymore. */
+  private renderDefaultBar(): void {
+    const nameEl = document.getElementById('llm-default-model-name');
+    const providerEl = document.getElementById('llm-default-model-provider');
+    if (!nameEl || !providerEl) return;
+    const cfg = loadConfig() ?? defaults();
+    const model = cfg.model.trim();
+    if (model) {
+      nameEl.textContent = model;
+      nameEl.classList.remove('llm-default-model-name-empty');
+      providerEl.textContent = customProviderLabel(cfg.customProviders ?? [], cfg.provider, cfg.providerOverrides);
+    } else {
+      nameEl.textContent = t('llm.defaultBar.empty');
+      nameEl.classList.add('llm-default-model-name-empty');
+      providerEl.textContent = '';
     }
+  }
+
+  private toggleDefaultModelMenu(): void {
+    const menu = document.getElementById('llm-default-model-menu');
+    const btn = document.getElementById('llm-default-model-btn');
+    if (!menu) return;
+    if (menu.hidden) {
+      this.renderDefaultModelMenu();
+      menu.hidden = false;
+      btn?.setAttribute('aria-expanded', 'true');
+    } else {
+      this.closeDefaultModelMenu();
+    }
+  }
+
+  private closeDefaultModelMenu(): void {
+    const menu = document.getElementById('llm-default-model-menu');
+    const btn = document.getElementById('llm-default-model-btn');
+    if (!menu) return;
+    menu.hidden = true;
+    btn?.setAttribute('aria-expanded', 'false');
+  }
+
+  /** Grouped model picker: every provider's model library, grouped by
+   *  provider, current default marked. Empty libraries are skipped. */
+  private renderDefaultModelMenu(): void {
+    const menu = document.getElementById('llm-default-model-menu');
+    if (!menu) return;
+    const cfg = loadConfig() ?? defaults();
+    const customs = cfg.customProviders ?? [];
+    const groups: Array<{ id: string; label: string; models: string[] }> = [];
+    for (const def of PROVIDERS) {
+      const custom = customProviderFor(customs, def.id);
+      const override = providerOverrideFor(cfg.providerOverrides, def.id);
+      const label = custom?.name ?? override?.name ?? t(def.i18nKey);
+      const models = modelListForProvider(cfg, def.id);
+      if (models.length > 0) groups.push({ id: def.id, label, models });
+    }
+    for (const c of customs) {
+      const models = modelListForProvider(cfg, c.id);
+      if (models.length > 0) groups.push({ id: c.id, label: c.name, models });
+    }
+    menu.innerHTML = groups.map(g => `
+      <div class="llm-default-menu-group">
+        <div class="llm-default-menu-group-title">${escapeHtml(g.label)}</div>
+        ${g.models.map(m => {
+          const isDefault = g.id === cfg.provider && m === cfg.model;
+          return `<button type="button" class="llm-default-menu-item${isDefault ? ' active' : ''}" data-default-model="${escapeHtml(g.id)}::${escapeHtml(m)}">
+            <span class="llm-default-menu-check" aria-hidden="true">${isDefault ? '✓' : ''}</span>
+            <span class="llm-default-menu-model">${escapeHtml(m)}</span>
+          </button>`;
+        }).join('')}
+      </div>`).join('');
+    applyTranslations();
+  }
+
+  /** Pick a default model from the dropdown: the provider is derived from the
+   *  model's library, the model is ensured to be in that library, and the
+   *  choice persists immediately. */
+  private setDefaultModelFromMenu(provider: string, model: string): void {
+    const prev = loadConfig() ?? defaults();
+    const custom = customProviderFor(prev.customProviders ?? [], provider);
+    const cfg: PureConfig = {
+      ...prev,
+      provider: provider as PureConfig['provider'],
+      model,
+    };
+    if (custom) {
+      cfg.customProviders = (prev.customProviders ?? []).map(p =>
+        p.id === provider ? { ...p, defaultModel: model } : p);
+    } else {
+      // Ensure the model survives in the provider's library even when it was
+      // typed / fetched and not yet persisted in providerModels.
+      cfg.providerModels = {
+        ...normalizeProviderModels(prev.providerModels),
+        [provider]: uniqueModels([...(prev.providerModels?.[provider] ?? []), model]),
+      };
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    invalidateConfigCache();
+    this.closeDefaultModelMenu();
+    this.renderDefaultBar();
+    this.renderProviderGrid();
+    this.autoSave();
+    this.toast(t('llm.custom.defaultChanged').replace('{m}', model));
   }
 
   // ── Proxy connection test ──
@@ -989,287 +1161,18 @@ export class SettingsPanel {
     throw new Error('all geolocation backends failed');
   }
 
-  // ── Provider card presentation ──
+  // ── Provider configuration state ──
 
   /**
    * A provider is "configured" when it can serve requests out of the box:
    * built-ins always count (they carry their own endpoint/model), custom
-   * providers need a Base URL + at least one model. An unconfigured custom
-   * card must NEVER become the active LLM on its own.
+   * providers need a Base URL + at least one model.
    */
-  private isKnownProvider(provider: string): boolean {
-    return !!providerDef(provider) || ['openai', 'openrouter', 'nvidia', 'ollama'].includes(provider);
-  }
-
   private isProviderConfigured(provider: string): boolean {
     const customs = (loadConfig() ?? defaults()).customProviders ?? [];
     const custom = customProviderFor(customs, provider);
     if (custom) return !!custom.baseURL && !!custom.defaultModel;
     return !!providerDef(provider);
-  }
-
-  /**
-   * Select a card: open its config for editing and, only when it is fully
-   * configured, make it the active LLM. A bare "用户自定义" card is opened for
-   * editing WITHOUT switching providers — the user configures it first and
-   * clicks it again (or the "启用此供应商" button) to activate it.
-   */
-  private selectProvider(id: string): void {
-    const prevActive = (loadConfig() ?? defaults()).provider;
-    const select = document.getElementById('cfg-provider') as HTMLSelectElement;
-    select.value = id;
-    this.updateProviderPresentation(id);
-    if (!this.isProviderConfigured(id)) {
-      this.pendingActivation = id;
-      this.setProviderV4Drawer('provider', false);
-      const custom = customProviderFor((loadConfig() ?? defaults()).customProviders ?? [], id);
-      // 精确提示缺的是哪一项，而不是把「请填写 Base URL」甩给已经填了地址的用户：
-      // Base URL 缺失 → 停在连接设置；只缺模型 → 打开模型库抽屉并聚焦模型输入框。
-      if (custom && !custom.baseURL) {
-        this.setProviderV4Drawer('connection', true);
-        this.toast(t('llm.custom.needURL'));
-        return;
-      }
-      if (custom && custom.baseURL && !custom.defaultModel) {
-        this.setProviderV4Drawer('connection', false);
-        this.setProviderV4Drawer('models', true);
-        this.toast(t('llm.custom.needModel'));
-        document.getElementById('cfg-model-add')?.focus();
-        return;
-      }
-      this.setProviderV4Drawer('connection', true);
-      this.toast(t('llm.custom.configureFirst'));
-      return;
-    }
-    this.pendingActivation = null;
-    this.autoSave();
-    this.updateProviderPresentation(id);
-    if (id !== prevActive) {
-      const nameEl = document.querySelector<HTMLElement>(`.provider-card[data-provider="${id}"] .provider-card-name`);
-      const name = nameEl?.textContent ?? id;
-      this.toast(t('llm.custom.enabledToast').replace('{name}', name));
-    }
-    // 启用成功后收起整个配置面板（供应商列表 + 模型库 + 连接设置），回到默认概览。
-    this.setProviderV4Drawer('provider', false);
-    this.setProviderV4Drawer('connection', false);
-    this.setProviderV4Drawer('models', false);
-  }
-
-  private updateProviderPresentation(provider: string): void {
-    const cfg = loadConfig() ?? defaults();
-    const customs = cfg.customProviders ?? [];
-    const custom = customProviderFor(customs, provider);
-    const overrides = cfg.providerOverrides ?? {};
-    const override = providerOverrideFor(overrides, provider);
-    const def = providerDef(provider);
-    const selectedLabel = custom?.name ?? override?.name ?? (def ? t(def.i18nKey) : provider);
-    const modelInput = document.getElementById('cfg-model') as HTMLInputElement | null;
-    const baseUrlInput = document.getElementById('cfg-baseurl') as HTMLInputElement | null;
-    const currentModel = modelInput?.value.trim() || '';
-    const currentBaseURL = baseUrlInput?.value.trim() || '';
-    const previousDef = providerDef(cfg.provider);
-    const previousCustom = customProviderFor(customs, cfg.provider);
-    const previousDefault = previousCustom?.defaultModel ?? defaultModelFor(cfg.provider);
-
-    // Switching to a DIFFERENT card should not carry provider-specific defaults
-    // into the next card, while deliberate custom model/endpoint values are
-    // preserved. Running on every keystroke of the SAME card would clobber what
-    // the user is typing (e.g. an unconfigured card still being edited), so the
-    // prefill only fires when the panel actually switches which card it shows.
-    if (provider !== this.presentedProvider) {
-      if (modelInput && (!currentModel || currentModel === previousDefault)) {
-        modelInput.value = '';
-      }
-      const previousEndpoint = previousCustom?.baseURL
-        ?? providerOverrideFor(overrides, cfg.provider)?.baseURL
-        ?? previousDef?.baseURL;
-      if (baseUrlInput && currentBaseURL && currentBaseURL === previousEndpoint) {
-        baseUrlInput.value = '';
-      }
-      // Custom providers always carry a required base URL + default model —
-      // prefill the editable fields so the config card reads back their values.
-      // Built-ins prefill their override (empty = registry default endpoint).
-      const modelAddInput = document.getElementById('cfg-model-add') as HTMLInputElement | null;
-      if (modelAddInput) modelAddInput.value = '';
-      if (custom) {
-        if (modelInput) modelInput.value = custom.defaultModel;
-        if (baseUrlInput) baseUrlInput.value = custom.baseURL;
-      } else {
-        if (baseUrlInput) baseUrlInput.value = override?.baseURL ?? '';
-        if (modelInput) {
-          const providerModels = modelListForProvider(cfg, provider);
-          modelInput.value = provider === cfg.provider
-            ? (cfg.model.trim() || providerModels[0] || defaultModelFor(provider))
-            : (cfg.providerModels?.[provider]?.[0] || providerModels[0] || defaultModelFor(provider));
-        }
-      }
-      // Refresh the model list only on a real card switch — never on live
-      // keystrokes inside the same card (it would churn the DOM while typing).
-      this.renderModelList(provider);
-    }
-
-    document.querySelectorAll<HTMLElement>('.provider-card').forEach(card => {
-      const cardProvider = card.dataset.provider;
-      const active = cardProvider === provider;
-      const isActive = cardProvider === cfg.provider;
-      card.classList.toggle('selected', active);
-      card.classList.toggle('provider-card-active', isActive);
-      card.setAttribute('aria-selected', String(isActive));
-      const status = card.querySelector<HTMLElement>('[data-provider-status]');
-      if (status) {
-        status.textContent = isActive ? t('llm.selected')
-          : active ? t('llm.custom.editing')
-          : t('llm.chooseCard');
-      }
-      // A user-set display name (built-in override) wins over the i18n label
-      // and must survive language switches — drop data-i18n so applyTranslations
-      // never overwrites it; restoring the default re-attaches the key.
-      const cardOverride = providerOverrideFor(overrides, cardProvider);
-      const cardName = card.querySelector<HTMLElement>('.provider-card-name');
-      const cardDef = providerDef(cardProvider);
-      if (cardName && cardOverride?.name) {
-        if (cardName.textContent !== cardOverride.name) cardName.textContent = cardOverride.name;
-        cardName.removeAttribute('data-i18n');
-      } else if (cardName && cardDef && !cardName.hasAttribute('data-i18n')) {
-        cardName.setAttribute('data-i18n', cardDef.i18nKey);
-        cardName.textContent = t(cardDef.i18nKey);
-      }
-      const modelValue = card.querySelector<HTMLElement>('.provider-card-model-value');
-      const cardCustom = customProviderFor(customs, cardProvider);
-      if (modelValue) {
-        const cardModels = modelListForProvider(cfg, cardProvider || '');
-        modelValue.textContent = active && modelInput?.value.trim()
-          ? modelInput.value.trim()
-          : (cardCustom?.defaultModel || (cardProvider === cfg.provider ? cfg.model.trim() : cfg.providerModels?.[cardProvider || '']?.[0]) || cardModels[0] || cardDef?.defaultModel || '');
-      }
-    });
-
-    const title = document.getElementById('provider-config-title');
-    const endpoint = document.getElementById('provider-config-endpoint');
-    if (title) title.textContent = selectedLabel;
-    if (endpoint) endpoint.textContent = baseUrlInput?.value.trim() || custom?.baseURL || override?.baseURL || def?.baseURL || '';
-    if (modelInput) {
-      modelInput.placeholder = custom
-        ? (custom.defaultModel || t('llm.model.addPlaceholder'))
-        : (def?.defaultModel ?? '');
-    }
-
-    // Name + Base URL rows are editable for EVERY provider: custom providers
-    // write back to their entry, built-ins to providerOverrides (empty input =
-    // registry default endpoint, shown as the field placeholder). Delete stays
-    // custom-only. Keyless locals (Ollama) get a hint in the API-key field
-    // instead of the generic sk-... placeholder.
-    const isCustom = !!custom;
-    const isKnown = this.isKnownProvider(provider);
-    const isCustomSettings = isCustom && !isKnown;
-    const baseUrlRow = baseUrlInput?.closest<HTMLElement>('.provider-baseurl-row');
-    baseUrlRow?.toggleAttribute('hidden', false);
-    if (baseUrlInput) {
-      if (isCustom) {
-        baseUrlInput.setAttribute('data-i18n-placeholder', 'llm.baseURL.placeholder');
-        baseUrlInput.placeholder = t('llm.baseURL.placeholder');
-      } else {
-        // Built-ins: empty field = use the registry default (which the summary
-        // line right above already shows); a typed value overrides it.
-        baseUrlInput.removeAttribute('data-i18n-placeholder');
-        baseUrlInput.placeholder = t('llm.baseURL.builtinPlaceholder').replace('{url}', def?.baseURL ?? '');
-      }
-    }
-    // 未配置的自定义供应商（还没有 Base URL）：端点处给出醒目标记，避免用户
-    // 以为已就绪就直接发送 —— 空地址会静默回落到内置默认端点。
-    const unconfigured = isCustom && !(baseUrlInput?.value.trim() || custom?.baseURL);
-    if (unconfigured && endpoint) endpoint.textContent = t('llm.custom.needURL');
-    const configCard = document.querySelector<HTMLElement>('.provider-config-card');
-    configCard?.classList.toggle('provider-unconfigured', unconfigured);
-    baseUrlInput?.closest('.setting-row')?.classList.toggle('provider-needs-url', unconfigured);
-    // Badge + explicit activation: the badge says "当前使用" only for the ACTIVE
-    // LLM; any other card being edited shows "未启用" and reveals the enable
-    // button so a card never becomes the active model without a user action.
-    const editingIsActive = provider === cfg.provider;
-    const badge = document.getElementById('provider-config-badge');
-    const activateBtn = document.getElementById('provider-activate-btn');
-    if (badge) {
-      if (editingIsActive) {
-        badge.textContent = t('llm.active');
-        badge.dataset.i18n = 'llm.active';
-        badge.classList.remove('provider-config-badge-inactive');
-      } else {
-        badge.textContent = t('llm.custom.notEnabled');
-        delete badge.dataset.i18n;
-        badge.classList.add('provider-config-badge-inactive');
-      }
-    }
-    if (activateBtn) activateBtn.hidden = editingIsActive;
-    const nameRow = document.getElementById('cfg-custom-name-row');
-    const deleteRow = document.getElementById('cfg-custom-delete-row');
-    const nameEdit = document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null;
-    if (nameRow) nameRow.hidden = false;
-    if (deleteRow) deleteRow.hidden = !isCustomSettings;
-    if (nameEdit) nameEdit.value = custom?.name ?? override?.name ?? '';
-    // 文生图配置只对自定义供应商开放（内置 DeepSeek/Qwen/GLM 无图片 API）：
-    // 开启后该供应商的图片请求走 generate_image 工具，渲染为真实图片而非 SVG。
-    const imageGenRow = document.getElementById('cfg-imagegen-row');
-    if (imageGenRow) imageGenRow.hidden = !isCustomSettings;
-    const imageGenToggle = document.getElementById('cfg-imagegen') as HTMLInputElement | null;
-    const imageGenModel = document.getElementById('cfg-imagegen-model') as HTMLInputElement | null;
-    if (imageGenToggle) imageGenToggle.checked = custom?.imageGen === true;
-    if (imageGenModel) imageGenModel.value = custom?.imageGenModel ?? '';
-    // Model auto-fetch only makes sense for custom endpoints (the built-ins
-    // come with their own default model list).
-    const fetchBtn = document.getElementById('cfg-fetch-models-btn');
-    if (fetchBtn) fetchBtn.hidden = !isCustomSettings;
-    const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement | null;
-    const v4Name = document.getElementById('provider-v4-current-name');
-    const v4Endpoint = document.getElementById('provider-v4-current-endpoint');
-    const v4Model = document.getElementById('provider-v4-current-model-name');
-    const v4Status = document.getElementById('provider-v4-connection-status');
-    const v4Count = document.getElementById('provider-v4-model-count');
-    if (v4Name) v4Name.textContent = selectedLabel;
-    if (v4Endpoint) v4Endpoint.textContent = baseUrlInput?.value.trim() || custom?.baseURL || override?.baseURL || def?.baseURL || t('llm.connection.notConfigured');
-    const selectedModels = modelListForProvider(cfg, provider);
-    const selectedDefault = modelInput?.value.trim() || custom?.defaultModel || selectedModels[0] || t('llm.custom.err.models');
-    if (v4Model) v4Model.textContent = selectedDefault;
-    if (v4Count) v4Count.textContent = t('llm.model.count').replace('{n}', String(selectedModels.length));
-    if (v4Status && v4Status.dataset.state !== 'testing') {
-      const hasProviderCredential = isCustom
-        ? !!custom?.local || !!custom?.apiKey || custom?.hasApiKey === true
-        : !!cfg.apiKey || cfg.hasApiKey === true || !!override?.apiKey || override?.hasApiKey === true;
-      // Three states: active+credential → 已连接; credential but NOT the
-      // active provider → 已保存未启用 (a key is present, just not in use);
-      // otherwise → 未配置. The middle state matters: after saving a key the
-      // pill must never keep saying 未配置 ("连不通") — the key IS there.
-      if (provider === cfg.provider && hasProviderCredential) {
-        v4Status.textContent = t('llm.connection.connected');
-        v4Status.dataset.state = 'active';
-      } else if (hasProviderCredential) {
-        v4Status.textContent = t('llm.connection.savedNotActive');
-        v4Status.dataset.state = 'saved';
-      } else {
-        v4Status.textContent = t('llm.connection.notConfigured');
-        v4Status.dataset.state = 'error';
-      }
-    }
-
-    if (keyInput) {
-      // Keyless locals say "leave empty"; cloud presets without a key yet say
-      // "required"; a built-in with its own saved key (desktop) says the key
-      // is already stored — the hint must not tell an OpenAI user the key is
-      // optional, or imply a stored key is missing.
-      if (isCustom && custom?.local && !custom.apiKey && !custom.hasApiKey) {
-        keyInput.removeAttribute('data-i18n-placeholder');
-        keyInput.placeholder = t('llm.custom.apiKeyOptional.hint');
-      } else if (isCustom && !custom.apiKey && !custom.hasApiKey) {
-        keyInput.removeAttribute('data-i18n-placeholder');
-        keyInput.placeholder = t('llm.custom.apiKeyRequired.hint');
-      } else if (!isCustom && override?.hasApiKey === true) {
-        keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.savedPlaceholder');
-        keyInput.placeholder = t('llm.apiKey.savedPlaceholder');
-      } else {
-        keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.placeholder');
-        keyInput.placeholder = t('llm.apiKey.placeholder');
-      }
-    }
-    this.presentedProvider = provider;
   }
 
   // ── Load config into form ──
@@ -1278,51 +1181,12 @@ export class SettingsPanel {
     // Re-apply translations for dynamic content
     applyTranslations();
     const cfg = loadConfig() || defaults();
-    const selectedCustom = customProviderFor(cfg.customProviders ?? [], cfg.provider);
-    // (Re)opening the panel always lands on the ACTIVE provider — nothing is
-    // pending activation and the presented card resets to the active one.
-    this.pendingActivation = null;
-    this.presentedProvider = null;
-    this.setProviderV4Drawer('provider', false);
-    this.setProviderV4Drawer('models', false);
-    this.setProviderV4Drawer('connection', false);
-
-    // Custom provider cards are rendered dynamically — rebuild them before the
-    // presentation pass so selection styles apply to user-defined entries too.
-    this.renderCustomProviderCards();
-    (document.getElementById('cfg-provider') as HTMLSelectElement).value = cfg.provider;
-    const modelEl = document.getElementById('cfg-model') as HTMLInputElement;
-    const modelAddEl = document.getElementById('cfg-model-add') as HTMLInputElement | null;
-    const baseUrlEl = document.getElementById('cfg-baseurl') as HTMLInputElement;
-    if (modelAddEl) modelAddEl.value = '';
-    // Custom providers always carry a required base URL + default model in
-    // their entry — prefill the editable fields so edits write back correctly.
-    // Built-in providers prefill their override (empty = registry default,
-    // shown as the field placeholder). The legacy global cfg.baseURL is never
-    // read here — a stale value once hijacked every provider's endpoint.
-    const selectedOverride = providerOverrideFor(cfg.providerOverrides, cfg.provider);
-    modelEl.value = cfg.model || selectedCustom?.defaultModel || '';
-    baseUrlEl.value = selectedCustom?.baseURL ?? selectedOverride?.baseURL ?? '';
-    this.updateProviderPresentation(cfg.provider);
-    const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
-    // Browser mode: a custom provider's key lives in its config entry — prefill
-    // the field so edits write back correctly and an unrelated autoSave never
-    // clobbers it with an empty value. Tauri mode: entry keys are always '' in
-    // storage (they live in Rust secrets), so this never leaks a secret.
-    keyInput.value = cfg.apiKey || selectedCustom?.apiKey || selectedOverride?.apiKey || '';
-    if (isTauriRuntime() && (cfg.hasApiKey || selectedCustom?.hasApiKey || selectedOverride?.hasApiKey)) {
-      // Key is stored in Rust secrets — never pull it back into the WebView.
-      // Show a masked placeholder; typing a new key replaces it, and clearing
-      // a field the user actually edited revokes it.
-      delete keyInput.dataset.touched; // fresh session: user has not edited yet
-      keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.savedPlaceholder');
-      keyInput.placeholder = t('llm.apiKey.savedPlaceholder');
-    } else {
-      keyInput.setAttribute('data-i18n-placeholder', 'llm.apiKey.placeholder');
-      keyInput.placeholder = t('llm.apiKey.placeholder');
-    }
-    modelEl.placeholder = selectedCustom?.defaultModel ?? defaultModelFor(cfg.provider);
-    this.updateProviderPresentation(cfg.provider);
+    // LLM page is fully re-rendered on open: collapsed provider grid + the
+    // default-model bar. Nothing is "selected" — the default model drives
+    // which provider serves requests (see setDefaultModelFromMenu).
+    this.editingProvider = null;
+    this.renderProviderGrid();
+    this.renderDefaultBar();
     (document.getElementById('cfg-language') as HTMLSelectElement).value = cfg.language;
     const cityEl = document.getElementById('cfg-city') as HTMLInputElement | null;
     if (cityEl) cityEl.value = cfg.city ?? '';
@@ -1907,119 +1771,27 @@ export class SettingsPanel {
    * (Re)render the user-defined provider cards into the grid. Called on every
    * settings open and after add/delete so the grid mirrors the persisted list.
    */
-  private renderCustomProviderCards(): void {
-    const grid = document.getElementById('provider-card-grid');
-    if (!grid) return;
-    const customs = (loadConfig() ?? defaults()).customProviders ?? [];
-    // Keep the hidden provider select in sync with the custom entries so
-    // select.value stays the editing provider even for non-built-in ids
-    // (a <select> returns '' when its value matches no <option>).
-    const select = document.getElementById('cfg-provider') as HTMLSelectElement | null;
-    select?.querySelectorAll('option[data-custom]').forEach(o => o.remove());
-    for (const c of customs) {
-      const opt = document.createElement('option');
-      opt.value = c.id;
-      opt.textContent = c.name;
-      opt.dataset.custom = '1';
-      select?.appendChild(opt);
-    }
-    // Remove previously rendered custom cards (marked below) so re-opening the
-    // panel never duplicates them.
-    grid.querySelectorAll('.provider-card-custom').forEach(el => el.remove());
-    for (const c of customs) {
-      // A cloud provider without a key yet (preset saved, key pending) must
-      // NOT be presented as keyless — only true locals (Ollama / LM Studio)
-      // advertise "no key needed".
-      const keyless = !!c.local && !c.apiKey && !c.hasApiKey;
-      const needsKey = !c.local && !c.apiKey && !c.hasApiKey;
-      const markClass = c.id === 'ollama' ? 'provider-mark-ollama' : 'provider-mark-custom';
-      const mark = c.id === 'ollama' ? 'OL' : (c.name.slice(0, 2) || 'C').toUpperCase();
-
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = 'provider-card provider-card-custom';
-      card.dataset.provider = c.id;
-      card.setAttribute('role', 'option');
-      card.setAttribute('aria-selected', 'false');
-
-      // Per-card delete (×): hover/focus to reveal. The grid's delegated click
-      // handler intercepts it before card selection. A <span role="button">
-      // keeps the card itself a single <button> (no nested buttons).
-      const removeEl = document.createElement('span');
-      removeEl.className = 'provider-card-remove';
-      removeEl.setAttribute('role', 'button');
-      removeEl.tabIndex = 0;
-      removeEl.dataset.removeProvider = c.id;
-      removeEl.setAttribute('aria-label', `${t('llm.custom.deleteBtn')} ${c.name}`);
-      removeEl.title = t('llm.custom.deleteBtn');
-      removeEl.textContent = '×';
-
-      const topLine = document.createElement('span');
-      topLine.className = 'provider-card-topline';
-      const markEl = document.createElement('span');
-      markEl.className = `provider-card-mark ${markClass}`;
-      markEl.textContent = mark;
-      const statusEl = document.createElement('span');
-      statusEl.className = 'provider-card-status';
-      statusEl.dataset.providerStatus = '';
-      statusEl.textContent = t('llm.chooseCard');
-      topLine.append(markEl, statusEl);
-
-      const nameEl = document.createElement('span');
-      nameEl.className = 'provider-card-name';
-      nameEl.textContent = c.name;
-
-      const metaEl = document.createElement('span');
-      metaEl.className = 'provider-card-meta';
-      const protoEl = document.createElement('span');
-      protoEl.textContent = 'OpenAI';
-      const dotEl = document.createElement('b');
-      dotEl.textContent = '·';
-      const modelEl = document.createElement('span');
-      modelEl.className = 'provider-card-model-value';
-      modelEl.textContent = c.defaultModel;
-      metaEl.append(protoEl, dotEl, modelEl);
-
-      card.append(removeEl, topLine, nameEl, metaEl);
-      if (keyless) {
-        const badge = document.createElement('span');
-        badge.className = 'provider-card-keyless';
-        badge.textContent = t('llm.custom.noKeyBadge');
-        card.appendChild(badge);
-      } else if (needsKey) {
-        const badge = document.createElement('span');
-        badge.className = 'provider-card-keyless provider-card-needs-key';
-        badge.textContent = t('llm.custom.needKeyBadge');
-        card.appendChild(badge);
-      }
-      grid.appendChild(card);
-    }
-    const count = document.getElementById('provider-section-count');
-    if (count) count.textContent = String(4 + customs.length);
-  }
-
   private gatherProviderModels(): Record<string, string[]> {
     const cfg = loadConfig() ?? defaults();
-    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement | null)?.value || '';
     const result = normalizeProviderModels(cfg.providerModels);
-    const custom = customProviderFor(cfg.customProviders ?? [], provider);
     // Typing a model edits the single default field; only the explicit Add
     // action grows a provider's list. This keeps the default one-model setup
     // compact instead of turning every partial input into a new row.
     return result;
   }
 
-  /** Carry the custom-provider list through, applying the form's live edits. */
+  /** Carry the custom-provider list through, applying the expanded panel's
+   *  live edits (no panel open = unchanged list). */
   private gatherCustomProviders(): PureConfig['customProviders'] {
     const prev = (loadConfig() ?? defaults()).customProviders ?? [];
     const list = prev.map(p => ({ ...p }));
-    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const provider = this.editingProvider || '';
     const idx = list.findIndex(p => p.id === provider);
     if (idx < 0) return list;
     const entry = { ...list[idx] };
     const name = (document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null)?.value.trim();
-    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim().replace(/\/+$/, '');
-    const model = (document.getElementById('cfg-model') as HTMLInputElement).value.trim();
+    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement | null)?.value.trim().replace(/\/+$/, '') ?? '';
+    const model = (document.getElementById('cfg-model') as HTMLInputElement | null)?.value.trim() ?? '';
     if (name) entry.name = name;
     if (baseURL) entry.baseURL = baseURL;
     // 模型库由下方芯片管理（添加/移除/设默认）；输入框只承载当前默认模型，
@@ -2033,7 +1805,7 @@ export class SettingsPanel {
     if (imageGenModel) entry.imageGenModel = imageGenModel;
     else delete entry.imageGenModel;
     // Raw key from the field; autoSave() scrubs/redirects it per platform.
-    entry.apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement).value.trim();
+    entry.apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() ?? '';
     list[idx] = entry;
     return list;
   }
@@ -2048,12 +1820,12 @@ export class SettingsPanel {
   private gatherProviderOverrides(): PureConfig['providerOverrides'] {
     const prev = (loadConfig() ?? defaults()).providerOverrides ?? {};
     const out: PureConfig['providerOverrides'] = { ...prev };
-    const editing = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
-    if (customProviderFor((loadConfig() ?? defaults()).customProviders ?? [], editing)) {
+    const editing = this.editingProvider || '';
+    if (!editing || customProviderFor((loadConfig() ?? defaults()).customProviders ?? [], editing)) {
       return out;
     }
     const name = (document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null)?.value.trim() || '';
-    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim().replace(/\/+$/, '');
+    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement | null)?.value.trim().replace(/\/+$/, '') ?? '';
     const next = { ...(prev[editing] ?? {}) };
     if (name) next.name = name; else delete next.name;
     if (baseURL) next.baseURL = baseURL; else delete next.baseURL;
@@ -2096,20 +1868,13 @@ export class SettingsPanel {
       };
       customs.push(entry);
     }
-    // Do NOT activate the blank card: the active provider stays unchanged until
-    // the user fills in name + Base URL and clicks the card (or 启用此供应商).
+    // The provider only enters service once the user picks one of its models
+    // from the default-model bar — the blank card just opens for editing.
     const cfg: PureConfig = { ...prev, customProviders: customs };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
-    this.renderCustomProviderCards();
-    this.pendingActivation = id;
-    (document.getElementById('cfg-provider') as HTMLSelectElement).value = id;
-    (document.getElementById('cfg-model') as HTMLInputElement).value = '';
-    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = '';
-    (document.getElementById('cfg-apikey') as HTMLInputElement).value = '';
-    this.updateProviderPresentation(id);
-    this.setProviderV4Drawer('provider', false);
-    this.setProviderV4Drawer('connection', true);
+    this.editingProvider = id;
+    this.renderProviderGrid();
     this.toast(t('llm.custom.addedBlank'));
     document.getElementById('cfg-custom-name-edit')?.focus();
   }
@@ -2158,7 +1923,7 @@ export class SettingsPanel {
       // still returns it. Only an invalid or missing default falls back to the
       // first fetched model.
       const modelInput = document.getElementById('cfg-model') as HTMLInputElement | null;
-      const provider = (document.getElementById('cfg-provider') as HTMLSelectElement)?.value || '';
+      const provider = this.editingProvider || '';
       const prev = loadConfig() ?? defaults();
       const entry = (prev.customProviders ?? []).find(p => p.id === provider);
       const fetchedModels = uniqueModels(ids.slice(0, 30));
@@ -2172,10 +1937,9 @@ export class SettingsPanel {
         const cfg: PureConfig = { ...prev, customProviders: [...(prev.customProviders ?? [])] };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
         invalidateConfigCache();
-        this.renderCustomProviderCards();
+        this.renderProviderGrid();
       }
       this.renderModelList(provider);
-      this.updateProviderPresentation(provider);
       this.autoSave();
       this.toast(t('llm.custom.fetchOk').replace('{n}', String(fetchedModels.length)));
     } catch (err) {
@@ -2215,6 +1979,7 @@ export class SettingsPanel {
           <span class="provider-model-chip-name">${escapeHtml(model)}</span>
           <span class="provider-model-chip-meta">${isDefault ? t('llm.custom.chipIsDefault') : t('llm.custom.chipSetDefault')}</span>
         </button>
+        <button type="button" class="provider-model-chip-test" data-test-model="${escapeHtml(model)}" title="${t('llm.model.test')}" aria-label="${t('llm.model.test')} ${escapeHtml(model)}">⟳</button>
         ${isDefault ? `<span class="provider-model-chip-badge" data-i18n="llm.custom.defaultBadge">默认</span>` : ''}
         ${canRemove ? `<button type="button" class="provider-model-chip-remove" data-remove="${escapeHtml(model)}" title="${t('llm.custom.removeModel')}" aria-label="${t('llm.custom.removeModel')}">×</button>` : ''}
       </div>`;
@@ -2223,11 +1988,11 @@ export class SettingsPanel {
   }
 
   private addModel(): void {
-    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const provider = this.editingProvider || '';
     const prev = loadConfig() ?? defaults();
     const custom = customProviderFor(prev.customProviders ?? [], provider);
-    const input = document.getElementById('cfg-model-add') as HTMLInputElement;
-    const model = input.value.trim();
+    const input = document.getElementById('cfg-model-add') as HTMLInputElement | null;
+    const model = input?.value.trim() ?? '';
     if (!model) {
       this.toast(t('llm.custom.err.models'));
       return;
@@ -2249,16 +2014,15 @@ export class SettingsPanel {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     this.renderModelList(provider);
-    this.updateProviderPresentation(provider);
     this.autoSave();
-    input.value = '';
+    if (input) input.value = '';
     this.toast(exists
       ? t('llm.custom.modelExists').replace('{m}', model)
       : t('llm.custom.addModelDone').replace('{m}', model));
   }
 
   private clearModels(): void {
-    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const provider = this.editingProvider || '';
     const prev = loadConfig() ?? defaults();
     const custom = customProviderFor(prev.customProviders ?? [], provider);
     const models = modelListForProvider(prev, provider);
@@ -2276,15 +2040,15 @@ export class SettingsPanel {
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
-    (document.getElementById('cfg-model') as HTMLInputElement).value = keep;
+    const modelEl = document.getElementById('cfg-model') as HTMLInputElement | null;
+    if (modelEl) modelEl.value = keep;
     this.renderModelList(provider);
-    this.updateProviderPresentation(provider);
     this.autoSave();
     this.toast(t('llm.custom.clearModelsDone'));
   }
 
   private removeModel(model: string): void {
-    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const provider = this.editingProvider || '';
     const prev = loadConfig() ?? defaults();
     const custom = customProviderFor(prev.customProviders ?? [], provider);
     const models = modelListForProvider(prev, provider);
@@ -2301,16 +2065,15 @@ export class SettingsPanel {
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
-    const input = document.getElementById('cfg-model') as HTMLInputElement;
-    input.value = custom ? (cfg.customProviders.find(p => p.id === provider)?.defaultModel ?? remaining[0]) : (provider === cfg.provider ? cfg.model : remaining[0]);
+    const input = document.getElementById('cfg-model') as HTMLInputElement | null;
+    if (input) input.value = custom ? (cfg.customProviders.find(p => p.id === provider)?.defaultModel ?? remaining[0]) : (provider === cfg.provider ? cfg.model : remaining[0]);
     this.renderModelList(provider);
-    this.updateProviderPresentation(provider);
     this.autoSave();
     this.toast(t('llm.custom.removedModel').replace('{m}', model));
   }
 
   private setDefaultModel(model: string): void {
-    const provider = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
+    const provider = this.editingProvider || '';
     const prev = loadConfig() ?? defaults();
     const custom = customProviderFor(prev.customProviders ?? [], provider);
     const models = modelListForProvider(prev, provider);
@@ -2327,9 +2090,9 @@ export class SettingsPanel {
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
-    (document.getElementById('cfg-model') as HTMLInputElement).value = model;
+    const modelEl = document.getElementById('cfg-model') as HTMLInputElement | null;
+    if (modelEl) modelEl.value = model;
     this.renderModelList(provider);
-    this.updateProviderPresentation(provider);
     this.autoSave();
     this.toast(t('llm.custom.defaultChanged').replace('{m}', model));
   }
@@ -2346,10 +2109,9 @@ export class SettingsPanel {
   }
 
   /**
-   * One-click quick preset: add the provider entry (idempotent) and open its
-   * config card. The provider does NOT become the active LLM on add — the
-   * fields are prefilled, then the user clicks the card (or 启用此供应商) to
-   * activate it, so a card is only ever active after the user acts on it.
+   * Add a quick-preset entry (idempotent) and open its expanded panel. The
+   * provider only enters service when the user picks one of its models from
+   * the default-model bar.
    */
   private addCustomPreset(preset: CustomProvider): void {
     const prev = loadConfig() ?? defaults();
@@ -2360,19 +2122,9 @@ export class SettingsPanel {
     const cfg: PureConfig = { ...prev, customProviders: customs };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
-    this.renderCustomProviderCards();
-    this.pendingActivation = preset.id;
-    (document.getElementById('cfg-provider') as HTMLSelectElement).value = preset.id;
-    (document.getElementById('cfg-model') as HTMLInputElement).value = preset.defaultModel;
-    (document.getElementById('cfg-baseurl') as HTMLInputElement).value = preset.baseURL;
-    this.updateProviderPresentation(preset.id);
-    this.setProviderV4Drawer('provider', false);
-    this.setProviderV4Drawer('connection', true);
+    this.editingProvider = preset.id;
+    this.renderProviderGrid();
     this.toast(t('llm.custom.addedConfig').replace('{name}', preset.name));
-  }
-
-  private removeSelectedCustomProvider(): void {
-    this.removeCustomProvider((document.getElementById('cfg-provider') as HTMLSelectElement).value);
   }
 
   /** 按 id 删除自定义供应商卡片（卡片 × 与配置卡删除按钮共用）。若删除的是
@@ -2396,20 +2148,11 @@ export class SettingsPanel {
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
-    this.renderCustomProviderCards();
-    const select = document.getElementById('cfg-provider') as HTMLSelectElement;
-    select.value = cfg.provider;
-    const nextCustom = customProviderFor(cfg.customProviders ?? [], cfg.provider);
-    const nextOverride = providerOverrideFor(cfg.providerOverrides, cfg.provider);
-    const nextDef = providerDef(cfg.provider);
-    (document.getElementById('cfg-model') as HTMLInputElement).value =
-      cfg.model || nextCustom?.defaultModel || nextDef?.defaultModel || '';
-    (document.getElementById('cfg-baseurl') as HTMLInputElement).value =
-      nextCustom?.baseURL ?? nextOverride?.baseURL ?? '';
-    const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
-    keyInput.value = cfg.apiKey || nextCustom?.apiKey || nextOverride?.apiKey || '';
-    delete keyInput.dataset.touched;
-    this.updateProviderPresentation(cfg.provider);
+    // Deleting the provider whose panel is open also collapses the panel;
+    // the default model falls back to the first registry default.
+    if (this.editingProvider === id) this.editingProvider = null;
+    this.renderProviderGrid();
+    this.renderDefaultBar();
     this.toast(t('llm.custom.deleted'));
   }
 
@@ -2431,22 +2174,22 @@ export class SettingsPanel {
       if (!isNaN(idx) && hubSkills[idx]) hubSkills[idx] = { ...hubSkills[idx], enabled: el.checked };
     });
 
-    // Decouple "whose config the panel edits" (the hidden select, target of the
-    // form fields) from "the active LLM" (cfg.provider). A card is only active
-    // once it is fully configured AND the user explicitly selected it
-    // (pendingActivation is null); while editing a card that is pending
-    // activation the active provider and its model/baseURL/apiKey survive.
+    // The default model (chosen from the top bar) drives which provider
+    // serves requests; the expanded panel edits that provider's entry
+    // (models / overrides / custom fields) without changing the active
+    // provider unless the user picks a new default model.
     const prev = loadConfig() ?? defaults();
-    const editing = (document.getElementById('cfg-provider') as HTMLSelectElement).value;
-    const active = this.pendingActivation === editing
-      ? prev.provider
-      : (this.isProviderConfigured(editing) ? editing : prev.provider);
-    const editingActive = editing === active;
-    const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement).value.trim();
-    const model = (document.getElementById('cfg-model') as HTMLInputElement).value.trim();
+    const editing = this.editingProvider;
+    const editingActive = editing !== null && editing === prev.provider;
+    const apiKey = editing
+      ? ((document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() ?? '')
+      : '';
+    const model = editing
+      ? ((document.getElementById('cfg-model') as HTMLInputElement | null)?.value.trim() ?? '')
+      : '';
 
     return {
-      provider: active as PureConfig['provider'],
+      provider: prev.provider,
       customProviders: this.gatherCustomProviders(),
       providerModels: this.gatherProviderModels(),
       providerOverrides: this.gatherProviderOverrides(),
@@ -2524,8 +2267,12 @@ export class SettingsPanel {
     const cfg = this.gatherForm();
     cfg.hasApiKey = prev.hasApiKey;
 
-    const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement;
-    const selectedCustom = customProviderFor(cfg.customProviders ?? [], cfg.provider);
+    // API keys belong to the provider whose panel is open (per-provider slots
+    // for built-ins, the entry for customs). The legacy global key is frozen:
+    // existing setups keep working, but new keys never land there.
+    const editing = this.editingProvider;
+    const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement | null;
+    const selectedCustom = editing ? customProviderFor(cfg.customProviders ?? [], editing) : undefined;
     if (selectedCustom) {
       // Custom provider: its key lives in its OWN Rust secret slot
       // (llm.apiKey.<id>, desktop) or the config entry (browser). Keyless
@@ -2534,7 +2281,7 @@ export class SettingsPanel {
         if (selectedCustom.apiKey) {
           void storeCustomSecretInRust(selectedCustom.id, selectedCustom.apiKey);
           selectedCustom.hasApiKey = true;
-        } else if (selectedCustom.hasApiKey && keyInput.dataset.touched === '1') {
+        } else if (selectedCustom.hasApiKey && keyInput?.dataset.touched === '1') {
           // User edited the field and cleared it → revoke the stored key.
           void revokeCustomSecretFromRust(selectedCustom.id);
           selectedCustom.hasApiKey = false;
@@ -2544,43 +2291,32 @@ export class SettingsPanel {
       } else {
         selectedCustom.hasApiKey = !!selectedCustom.apiKey;
       }
-      cfg.apiKey = '';
-      cfg.hasApiKey = false;
-    } else {
+    } else if (editing) {
       if (!cfg.model) {
         cfg.model = defaultModelFor(cfg.provider);
       }
-      // Built-in providers may carry their own per-provider key (override
-      // slot 'llm.apiKey.<id>' on desktop). Without one the legacy global key
-      // (cfg.apiKey / Rust 'llm.apiKey') still applies, so existing setups
-      // keep working untouched.
-      const override = cfg.providerOverrides[cfg.provider] ?? {};
+      // Built-in provider being edited: its key lives in the override slot
+      // 'llm.apiKey.<id>' (desktop Rust secrets / browser entry).
+      const override = cfg.providerOverrides[editing] ?? {};
       const hasOverrideKey = !!override.apiKey || override.hasApiKey === true;
+      const typedKey = keyInput?.value.trim() ?? '';
       if (isTauriRuntime()) {
-        if (cfg.apiKey) {
-          // Desktop: the key is owned by Rust secrets, never localStorage —
-          // stored under the provider's own slot so each built-in keeps a
-          // distinct key.
-          void storeCustomSecretInRust(cfg.provider, cfg.apiKey);
-          cfg.providerOverrides[cfg.provider] = { ...override, hasApiKey: true };
-        } else if (hasOverrideKey && keyInput.dataset.touched === '1') {
+        if (typedKey) {
+          void storeCustomSecretInRust(editing, typedKey);
+          cfg.providerOverrides[editing] = { ...override, hasApiKey: true };
+        } else if (hasOverrideKey && keyInput?.dataset.touched === '1') {
           // User edited the field and cleared it → revoke the stored key.
-          void revokeCustomSecretFromRust(cfg.provider);
-          cfg.providerOverrides[cfg.provider] = { ...override, hasApiKey: false };
+          void revokeCustomSecretFromRust(editing);
+          cfg.providerOverrides[editing] = { ...override, hasApiKey: false };
           delete keyInput.dataset.touched;
         }
-        cfg.apiKey = ''; // never persist the raw key
-      } else if (cfg.apiKey) {
-        // Browser: the key lives in the override entry (plain storage, same
-        // as the legacy global key did).
-        cfg.providerOverrides[cfg.provider] = { ...override, apiKey: cfg.apiKey };
-        cfg.apiKey = '';
-      } else if (hasOverrideKey && keyInput.dataset.touched === '1') {
+      } else if (typedKey) {
+        // Browser: the key lives in the override entry (plain storage).
+        cfg.providerOverrides[editing] = { ...override, apiKey: typedKey };
+      } else if (hasOverrideKey && keyInput?.dataset.touched === '1') {
         // User edited the field and cleared it → drop the stored key.
-        cfg.providerOverrides[cfg.provider] = { ...override, apiKey: '', hasApiKey: false };
+        cfg.providerOverrides[editing] = { ...override, apiKey: '', hasApiKey: false };
         delete keyInput.dataset.touched;
-      } else {
-        cfg.hasApiKey = !!cfg.apiKey;
       }
     }
 
@@ -2596,11 +2332,10 @@ export class SettingsPanel {
     document.documentElement.style.setProperty('--spacing',
       cfg.density === 'compact' ? '8px' : cfg.density === 'spacious' ? '16px' : '12px');
 
-    // Refresh the provider card presentation (status pill + labels) after a
-    // save — the pill must reflect the key state the user just changed, not
-    // the state captured when the panel opened.
-    const editing = (document.getElementById('cfg-provider') as HTMLSelectElement | null)?.value;
-    if (editing) this.updateProviderPresentation(editing);
+    // Refresh the grid + default-model bar after a save — card labels, status
+    // pills and the bar must reflect the state the user just changed.
+    if (this.editingProvider) this.renderProviderGrid();
+    this.renderDefaultBar();
 
     this.onSave();
   }
