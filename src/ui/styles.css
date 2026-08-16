@@ -47,12 +47,15 @@
   /* Terminal-style tool panels (file / shell / git tools). Dark console
      surface in BOTH themes so the same token pair keeps the command-line
      look consistent without hardcoding theme-locked hex values. */
-  --term-bg:      #000000;
-  --term-border:  #242424;
-  --term-ink:     #f2f2f2;
-  --term-muted:   #a8a8a8;
-  --term-dim:     #8f8f8f;
-  --term-accent:  #8ecbff;
+  /* Tool bodies share the user-bubble blue family (--bg-user #dbeafe), one
+     shade deeper, so system-tool output reads as the same surface as the
+     user's own message instead of a black console. */
+  --term-bg:      #cfdff4;
+  --term-border:  #b9d0ea;
+  --term-ink:     #0f2333;
+  --term-muted:   #3f5f80;
+  --term-dim:     #4a6b8c;
+  --term-accent:  #0b7cb0;
   --term-soft:    #202020;
 }
 
@@ -83,8 +86,12 @@
   --shadow-lg:    0 8px 30px rgba(0,0,0,0.5);
   /* Slightly lifted console surface so the terminal block reads as a raised
      panel instead of a void against the dark chat background. */
-  --term-bg:      #141414;
-  --term-border:  #2c2c2c;
+  --term-bg:      #1e4168;
+  --term-border:  #2a4d74;
+  --term-ink:     #d8e8fb;
+  --term-muted:   #9db4cf;
+  --term-dim:     #8ca3bf;
+  --term-accent:  #71e5ff;
 }
 
 /* ── Reset ── */
@@ -1501,35 +1508,70 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* Terminal panels now sit on the pale-blue tool surface in light mode, so
+   the syntax palette switches with the theme: light-blue backgrounds get the
+   deep-blue light palette (same as the web-tool surfaces), dark-blue
+   backgrounds keep the GitHub-dark pastels. */
 .tool-row-section.terminal-panel .hljs-keyword,
 .tool-row-section.terminal-panel .hljs-selector-tag,
 .tool-row-section.terminal-panel .hljs-built_in,
 .tool-row-section.terminal-panel .hljs-literal {
-  color: #79c0ff;
+  color: #0550ae;
 }
 .tool-row-section.terminal-panel .hljs-string,
 .tool-row-section.terminal-panel .hljs-attr,
 .tool-row-section.terminal-panel .hljs-symbol {
-  color: #7ee787;
+  color: #0a3069;
 }
 .tool-row-section.terminal-panel .hljs-number,
 .tool-row-section.terminal-panel .hljs-regexp,
 .tool-row-section.terminal-panel .hljs-title,
 .tool-row-section.terminal-panel .hljs-title.function_,
 .tool-row-section.terminal-panel .hljs-title.class_ {
-  color: #d2a8ff;
+  color: #953800;
 }
 .tool-row-section.terminal-panel .hljs-comment,
 .tool-row-section.terminal-panel .hljs-quote,
 .tool-row-section.terminal-panel .hljs-punctuation,
 .tool-row-section.terminal-panel .hljs-bullet,
 .tool-row-section.terminal-panel .hljs-meta {
-  color: #8b949e;
+  color: #6e7781;
   font-style: italic;
 }
 .tool-row-section.terminal-panel .hljs-bullet,
 .tool-row-section.terminal-panel .hljs-punctuation,
 .tool-row-section.terminal-panel .hljs-meta {
+  font-style: normal;
+}
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-keyword,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-selector-tag,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-built_in,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-literal {
+  color: #79c0ff;
+}
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-string,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-attr,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-symbol {
+  color: #7ee787;
+}
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-number,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-regexp,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-title,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-title.function_,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-title.class_ {
+  color: #d2a8ff;
+}
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-comment,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-quote,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-punctuation,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-bullet,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-meta {
+  color: #8b949e;
+  font-style: italic;
+}
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-bullet,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-punctuation,
+[data-theme="dark"] .tool-row-section.terminal-panel .hljs-meta {
   font-style: normal;
 }
 /* Light surfaces (web-tool cards, fetch previews) stay readable on pale blue. */
@@ -6670,9 +6712,9 @@ button svg,
    card, seam, border, radius, or artificial section gap. */
 .tool-row.web-tool {
   overflow: hidden;
-  border: 1px solid #cfe8f8;
+  border: 1px solid #c3d6ea;
   border-radius: 10px;
-  background: #eef8ff;
+  background: #e2edf9;
 }
 .tool-row.web-tool .tool-row-summary,
 .tool-row.web-tool .tool-row-summary:hover {
@@ -6699,8 +6741,8 @@ button svg,
   margin-bottom: 4px;
 }
 [data-theme="dark"] .tool-row.web-tool {
-  border-color: #2d5870;
-  background: #182d3a;
+  border-color: #2a4d74;
+  background: #1a3b5c;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary,
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover,
@@ -6772,82 +6814,92 @@ button svg,
  * toolRow.ts), so only the plain .tool-row-body surface is styled here. */
 .tool-row.sys-info .tool-row-body,
 .tool-row.web-tool .tool-row-body {
-  /* 蓝紫表面：比聊天背景稍微深一点、带紫调，与主题 accent（紫）搭配。
+  /* 蓝色表面：与用户输入气泡同族（--bg-user #dbeafe），深一档的蓝；
      Input/Output 整个内容区（除 header/summary 外）共用这一渐变。 */
-  background: linear-gradient(180deg, #f2f0fc 0%, #e9e5f7 100%);
-  border-color: #d8d1f0;
-  color: #403d68;
+  background: linear-gradient(180deg, #d6e4f6 0%, #c8daf0 100%);
+  border-color: #b9d0ea;
+  color: #0f2333;
 }
 .tool-row.sys-info .tool-row-body,
 .tool-row.web-tool .tool-row-body {
-  border: 1px solid #d8d1f0;
+  border: 1px solid #b9d0ea;
   border-radius: 8px;
   padding: 10px 12px 12px 36px;
 }
 .tool-row.web-tool .tool-row-summary {
-  background: #eef8ff;
-  border: 1px solid #cfe8f8;
+  background: #e2edf9;
+  border: 1px solid #c3d6ea;
   border-radius: 8px;
   padding: 7px 12px;
 }
 .tool-row.web-tool .tool-row-summary:hover {
-  background: #e3f3fc;
+  background: #d7e5f5;
 }
 .tool-row.web-tool .tool-row-section + .tool-row-section,
 .tool-row.sys-info .tool-row-section + .tool-row-section {
-  border-top-color: #d8d1f0;
+  border-top-color: #b9d0ea;
 }
 .tool-row.web-tool .tool-row-section-label,
 .tool-row.web-tool .tool-row-field-key {
-  color: #6d6a98;
+  color: #4a6b8c;
 }
 .tool-row.web-tool .tool-row-field-value,
 .tool-row.web-tool .tool-row-result,
 .tool-row.web-tool .tool-result-preview,
 .tool-row.web-tool .fetch-preview {
-  color: #403d68;
+  color: #1d3a5f;
 }
 .tool-row.web-tool .search-result-item {
-  border-bottom-color: #d8d1f0;
+  border-bottom-color: #b9d0ea;
 }
 .tool-row.web-tool .search-result-title,
 .tool-row.web-tool .search-result-url,
 .tool-row.web-tool .path-link {
-  color: #5b52d0;
-  text-decoration-color: #5b52d0;
+  color: #0b7cb0;
+  text-decoration-color: #0b7cb0;
 }
 .tool-row.web-tool .search-result-snippet {
-  color: #55538a;
+  color: #3f5f80;
 }
 [data-theme="dark"] .tool-row.sys-info .tool-row-body,
 [data-theme="dark"] .tool-row.web-tool .tool-row-body {
-  /* 暗色主题的蓝紫渐变：顶部 #1e2340（深靛蓝紫）→ 底部 #161a31（更深），
-     比原 #182d3a 蓝色表面更紫、更深一层，与 accent-soft #2a2440 呼应。 */
-  background: linear-gradient(180deg, #1e2340 0%, #161a31 100%);
-  border-color: #2e3466;
-  color: #d9d6f2;
+  /* 暗色主题的蓝色渐变：顶部 #21486f → 底部 #1b3d61，比用户气泡
+     （--bg-user #235174）深一档，与蓝玻璃主题的 accent 呼应。 */
+  background: linear-gradient(180deg, #21486f 0%, #1b3d61 100%);
+  border-color: #2a4d74;
+  color: #d8e8fb;
+}
+[data-theme="dark"] .tool-row.web-tool .tool-row-field-value,
+[data-theme="dark"] .tool-row.web-tool .tool-row-result,
+[data-theme="dark"] .tool-row.web-tool .tool-result-preview,
+[data-theme="dark"] .tool-row.web-tool .fetch-preview,
+[data-theme="dark"] .tool-row.sys-info .tool-row-field-value,
+[data-theme="dark"] .tool-row.sys-info .tool-row-result,
+[data-theme="dark"] .tool-row.sys-info .tool-result-preview,
+[data-theme="dark"] .tool-row.sys-info .fetch-preview {
+  color: #d8e8fb;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary {
-  background: #182d3a;
-  border-color: #2d5870;
+  background: #1a3b5c;
+  border-color: #2a4d74;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover {
-  background: #1d3949;
+  background: #204a70;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-section + .tool-row-section,
 [data-theme="dark"] .tool-row.sys-info .tool-row-section + .tool-row-section {
-  border-top-color: #2e3466;
+  border-top-color: #2a4d74;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-section-label,
 [data-theme="dark"] .tool-row.web-tool .tool-row-field-key,
 [data-theme="dark"] .tool-row.web-tool .search-result-snippet {
-  color: #a5a3d9;
+  color: #9db4cf;
 }
 [data-theme="dark"] .tool-row.web-tool .search-result-title,
 [data-theme="dark"] .tool-row.web-tool .search-result-url,
 [data-theme="dark"] .tool-row.web-tool .path-link {
-  color: #9fb0ff;
-  text-decoration-color: #9fb0ff;
+  color: #71e5ff;
+  text-decoration-color: #71e5ff;
 }
 
 /* ── SVG / chart previews ── */
@@ -7281,9 +7333,9 @@ button svg,
 }
 
 .tool-row.web-tool {
-  border-color: #cfe8f8;
+  border-color: #c3d6ea;
   border-radius: 10px;
-  background: #eef8ff;
+  background: #e2edf9;
 }
 .tool-row.web-tool .tool-row-summary,
 .tool-row.web-tool .tool-row-summary:hover,
@@ -7299,18 +7351,18 @@ button svg,
   background: transparent;
 }
 [data-theme="dark"] .tool-row.web-tool {
-  border-color: #2d5870;
-  background: #182d3a;
+  border-color: #2a4d74;
+  background: #1a3b5c;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary,
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover {
   background: transparent;
 }
 .tool-row.web-tool.pending {
-  border-color: #cfe8f8;
+  border-color: #c3d6ea;
 }
 [data-theme="dark"] .tool-row.web-tool.pending {
-  border-color: #2d5870;
+  border-color: #2a4d74;
 }
 
 /* Pending state is communicated by the spinner/status, not an internal
