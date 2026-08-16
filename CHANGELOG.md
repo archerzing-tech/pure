@@ -13,6 +13,7 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - 自定义供应商配置提示精确化：Base URL 缺失时停在连接设置，只缺模型时自动打开模型库抽屉并聚焦输入框；启用成功后收起全部配置抽屉
 - 修复内置供应商端点被全局残留 Base URL 劫持的问题：早期版本在「连接设置」填过的地址（如阿里百炼）会残留在全局字段里，导致所有供应商卡片与请求都显示/打到该地址；v10 迁移清空全局字段（非默认地址转入对应供应商的覆盖），请求层与设置面板不再读取它
 - 内置供应商（DeepSeek / Qwen / GLM）支持 per-provider 覆盖：名称、Base URL（代理 / 镜像网关，留空即默认端点）与各自独立的 API Key（桌面端存入 `llm.apiKey.<id>` 独立密钥槽，与自定义供应商同一机制；浏览器模式存 override 条目）；设置面板对内置供应商同样开放名称与 Base URL 编辑行
+- CLI 同步 per-provider 覆盖：`~/.pure/config.json` 的 `providerOverrides` 现在对内置供应商生效——名称（`pure config` 列表与启动行）、Base URL（DeepSeek / Qwen / GLM 各 adapter 工厂接受覆盖端点，Qwen 有覆盖时不再强制要求 `DASHSCOPE_WORKSPACE_ID`）、API Key（优先读 config 明文条目，桌面端 `hasApiKey` 时从 `~/.pure/secrets.json` 的 `llm.apiKey.<id>` 槽读取，与 GUI 共享同一份密钥）；`pure config` 重跑不再丢弃已有覆盖
 - README（中英）新增「优点 / 独特之处 / 与其他 coding agent 的差异」一览；架构图补充请求预检（intake → assess → probe → plan → confirm）与 GUI/CLI 共享控制平面；默认界面改用真实截图
 
 ## v1.9.6

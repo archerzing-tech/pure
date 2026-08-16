@@ -176,9 +176,11 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
 
 // ── Pre-configured factory functions ──
 
-export function createDeepSeekAdapter(apiKey: string, model = 'deepseek-v4-flash') {
+export function createDeepSeekAdapter(apiKey: string, model = 'deepseek-v4-flash', baseURL?: string) {
   return new OpenAICompatibleAdapter({
-    baseURL: 'https://api.deepseek.com',
+    // A per-provider override (Settings → LLM → 连接设置, synced via
+    // providerOverrides) wins over the official endpoint.
+    baseURL: baseURL || 'https://api.deepseek.com',
     apiKey,
     model,
     // DeepSeek reasoning models draw reasoning_content and content from the
@@ -190,17 +192,20 @@ export function createDeepSeekAdapter(apiKey: string, model = 'deepseek-v4-flash
   });
 }
 
-export function createQwenAdapter(apiKey: string, workspaceId: string, model = 'qwen3-coder-next') {
+export function createQwenAdapter(apiKey: string, workspaceId: string, model = 'qwen3-coder-next', baseURL?: string) {
   return new OpenAICompatibleAdapter({
-    baseURL: `https://${workspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`,
+    // Default = the dedicated workspace deployment; an explicit override
+    // (e.g. a DashScope compatible-mode endpoint or a gateway) replaces it
+    // and drops the workspace requirement.
+    baseURL: baseURL || `https://${workspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`,
     apiKey,
     model,
   });
 }
 
-export function createGLMAdapter(apiKey: string, model = 'glm-5.2') {
+export function createGLMAdapter(apiKey: string, model = 'glm-5.2', baseURL?: string) {
   return new OpenAICompatibleAdapter({
-    baseURL: 'https://api.z.ai/api/paas/v4',
+    baseURL: baseURL || 'https://api.z.ai/api/paas/v4',
     apiKey,
     model,
     extraBody: { tool_stream: true },
