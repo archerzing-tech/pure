@@ -164,6 +164,10 @@ until the task is complete. Be aware of how the loop affects you:
 The system maintains long-term memory across sessions. Relevant memories below are
 injected from the IMemoryStore based on similarity to the current task. Use these to
 adapt your behavior to the user's preferences and the project's conventions.
+Proven successful approaches and procedures are listed first — PREFER them over
+unproven alternatives when the situation matches. Known error patterns are
+avoid-lists: never repeat the exact calls they flag; degrade them into a different
+approach instead.
 </session_memory>
 
 <response_format>

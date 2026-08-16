@@ -127,6 +127,23 @@ describe('PromptAssembler', () => {
     expect(prompt).toContain('</session_memory>');
   });
 
+  it('injects proven successes before error patterns (v1.9.7)', () => {
+    const prompt = assembler.composeMemoryPrompt({
+      template: 'Base',
+      memory: {
+        preferences: [],
+        errorPatterns: ['TS2307 needs the import added'],
+        successes: ['TS2307 resolved by adding the missing import'],
+      },
+    });
+
+    expect(prompt).toContain('Proven successful approaches (prefer these when the situation matches):');
+    expect(prompt).toContain('- TS2307 resolved by adding the missing import');
+    expect(prompt).toContain('Known error patterns (avoid repeating these calls):');
+    expect(prompt).toContain('- TS2307 needs the import added');
+    expect(prompt.indexOf('Proven successful approaches')).toBeLessThan(prompt.indexOf('Known error patterns'));
+  });
+
   it('injects a runtime adaptive strategy even when no long-term memory is available', () => {
     const prompt = assembler.composeMemoryPrompt({
       template: 'Base',

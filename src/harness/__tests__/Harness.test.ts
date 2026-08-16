@@ -500,6 +500,142 @@ describe('Harness cross-session memory (v0.10)', () => {
     expect(recovered[0].content).toContain('web_fetch');
   });
 
+  it('persists a single abandoned failed call as an error_pattern (v1.9.7)', async () => {
+    const memStore = new FakeMemoryStore();
+    // web_fetch fails ONCE with a dead-end error; the model abandons that
+    // approach (no failurePolicy here, so no retry hint) and the session
+    // completes via a different path. The single failure must still be
+    // persisted — degradation has to survive into new sessions, not just for
+    // repeated or fatal failures.
+    const deadEndTool: ToolAdapter = {
+      execute: async (): Promise<ToolResult> => ({
+        id: 'call_1',
+        toolName: 'web_fetch',
+        error: 'Unsupported content type: application/json',
+        success: false,
+        duration: 3,
+      }),
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+    };
+    let llmCalls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        llmCalls++;
+        if (llmCalls === 1) {
+          const tc = { id: 'call_1', index: 0, function: { name: 'web_fetch', arguments: '{"url":"https://x/api"}' } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: tc.function.arguments };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'content', content: 'final answer' };
+          yield { type: 'done', content: 'final answer', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'final answer', toolCalls: [] }),
+    };
+    const harness = new Harness({
+      sessionId: 'sess-single-fail',
+      llm,
+      tools: deadEndTool,
+      toolsDefs: [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    const events = await collect(harness.run('SYS', 'get the data'));
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed?.payload.isComplete).toBe(true);
+
+    const singles = memStore.entries.filter(e => e.type === 'error_pattern' && e.content.includes('Failed during execution'));
+    expect(singles).toHaveLength(1);
+    expect(singles[0].content).toContain('Unsupported content type');
+    expect(singles[0].content).toContain('web_fetch');
+    expect(singles[0].content).toContain('Do not make this exact call again');
+    expect(singles[0].projectPath).toBe('/ws');
+  });
+
+  it('skips the single-failure memory when the same tool later succeeds (v1.9.7 transient exemption)', async () => {
+    const memStore = new FakeMemoryStore();
+    let attempts = 0;
+    const flakyTool: ToolAdapter = {
+      execute: async (): Promise<ToolResult> => {
+        attempts++;
+        if (attempts === 1) {
+          return { id: 'call_1', toolName: 'web_fetch', error: 'Timeout after 10s', success: false, duration: 3 };
+        }
+        return { id: 'call_2', toolName: 'web_fetch', result: '{"data":"ok"}', success: true, duration: 3 };
+      },
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+    };
+    let call = 0;
+    const transientLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        call++;
+        if (call <= 2) {
+          const tc = { id: `call_${call}`, index: 0, function: { name: 'web_fetch', arguments: '{"url":"https://x/api"}' } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: tc.function.arguments };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'content', content: 'final answer' };
+          yield { type: 'done', content: 'final answer', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'final answer', toolCalls: [] }),
+    };
+    const harness = new Harness({
+      sessionId: 'sess-transient-single',
+      llm: transientLLM,
+      tools: flakyTool,
+      toolsDefs: [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('SYS', 'get the data'));
+
+    const singles = memStore.entries.filter(e => e.type === 'error_pattern' && e.content.includes('Failed during execution'));
+    expect(singles).toHaveLength(0);
+  });
+
+  it('injects verified successful patterns before error patterns (v1.9.7)', async () => {
+    const memStore = new FakeMemoryStore();
+    await memStore.add({
+      type: 'successful_pattern',
+      content: 'Successful lesson: fixed TS2307 by adding the missing import to tsconfig',
+      timestamp: Date.now(),
+      sessionId: 'old-session',
+      projectPath: '/ws',
+    });
+    await memStore.add({
+      type: 'error_pattern',
+      content: 'Error TS2307 was fixed by adding missing import',
+      timestamp: Date.now(),
+      sessionId: 'old-session',
+      projectPath: '/ws',
+    });
+
+    const llm = recordingLLM('answer');
+    const harness = new Harness({
+      sessionId: 'sess-success',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('BASE SYSTEM', 'fix the TS error in my project'));
+
+    const sys = llm.received[0][0].content;
+    expect(sys).toContain('Proven successful approaches');
+    expect(sys).toContain('Successful lesson: fixed TS2307');
+    expect(sys).toContain('Known error patterns');
+    expect(sys.indexOf('Proven successful approaches')).toBeLessThan(sys.indexOf('Known error patterns'));
+  });
+
   it('does NOT write a retry error_pattern when the session ends interrupted', async () => {
     const memStore = new FakeMemoryStore();
     // First call fails (policy retries), second call ALSO fails but the policy

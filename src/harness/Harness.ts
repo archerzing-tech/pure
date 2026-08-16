@@ -242,6 +242,11 @@ export class Harness {
     const seenFailures = new Set<string>();
     const pendingRepeats = new Map<string, FailureRecord>();
     const recoveredRepeats = new Set<string>();
+    // v1.9.7 — every failed tool call this run (single failures included), so
+    // abandoned dead-ends persist as error_pattern at session end; plus the
+    // set of failure keys already written by an immediate stop decision.
+    const failedCalls = new Map<string, FailureRecord>();
+    const stopWrittenKeys = new Set<string>();
 
     try {
       for await (const event of stream) {
@@ -258,6 +263,25 @@ export class Harness {
       if (event.type === 'ToolResult' && event.payload.result.success) {
         for (const [key, failure] of pendingRepeats) {
           if (failure.toolName === event.payload.toolName) recoveredRepeats.add(key);
+        }
+        // v1.9.7 — the transient-fault exemption also covers single failures:
+        // a tool that later succeeds was failing transiently, not a dead-end.
+        for (const [key, failure] of failedCalls) {
+          if (failure.toolName === event.payload.toolName) recoveredRepeats.add(key);
+        }
+      }
+      // v1.9.7 — observe tool FAILURE: every failed execution is recorded so a
+      // single (non-repeated) dead-end call is still persisted as an
+      // error_pattern at session end — degradation must survive the session.
+      if (event.type === 'ToolResult' && !event.payload.result.success) {
+        const key = `${event.payload.toolName}::${event.payload.result.error ?? 'unknown'}`;
+        if (!failedCalls.has(key)) {
+          failedCalls.set(key, {
+            type: 'tool_error',
+            message: event.payload.result.error ?? 'unknown',
+            turnNumber: 0,
+            toolName: event.payload.toolName,
+          });
         }
       }
 
@@ -277,6 +301,7 @@ export class Harness {
           seenFailures.add(repeatKey);
         }
         if (event.payload.action.kind === 'stop') {
+          stopWrittenKeys.add(repeatKey);
           await this.writeErrorPattern(event.payload.action, failure).catch(() => {});
         } else if (event.payload.action.kind === 'retry') {
           retriedFailures.push(failure);
@@ -298,11 +323,26 @@ export class Harness {
           // v0.12 — flush deferred "勿重试" memories: skip repeat keys whose
           // tool later succeeded (transient fault) — those keep only the
           // "Recovered after retry" memory written below.
+          const writtenRepeatKeys = new Set<string>();
           for (const [key, failure] of pendingRepeats) {
             if (recoveredRepeats.has(key)) continue;
+            writtenRepeatKeys.add(key);
             await this.writeRepeatedFailureMemory(failure).catch(() => {});
           }
           pendingRepeats.clear();
+          // v1.9.7 — every failed execution is a candidate lesson: single
+          // (non-repeated) failed calls the session abandoned are written as
+          // error_pattern too — degradation must persist into new sessions,
+          // not just for repeated or fatal failures. Transient faults (the
+          // tool later succeeded) keep the v0.12 exemption.
+          for (const [key, failure] of failedCalls) {
+            if (recoveredRepeats.has(key)) continue;
+            if (writtenRepeatKeys.has(key)) continue;
+            if (retriedFailures.some(f => f.toolName === failure.toolName && f.message === failure.message)) continue;
+            if (stopWrittenKeys.has(key)) continue;
+            await this.writeSingleFailureMemory(failure).catch(() => {});
+          }
+          failedCalls.clear();
           if (event.payload.isComplete) {
             await this.writeSessionMemory(
               userPrompt,
@@ -391,6 +431,11 @@ export class Harness {
     const seenFailures = new Set<string>();
     const pendingRepeats = new Map<string, FailureRecord>();
     const recoveredRepeats = new Set<string>();
+    // v1.9.7 — every failed tool call this run (single failures included), so
+    // abandoned dead-ends persist as error_pattern at session end; plus the
+    // set of failure keys already written by an immediate stop decision.
+    const failedCalls = new Map<string, FailureRecord>();
+    const stopWrittenKeys = new Set<string>();
 
     try {
       for await (const event of stream) {
@@ -405,6 +450,25 @@ export class Harness {
       if (event.type === 'ToolResult' && event.payload.result.success) {
         for (const [key, failure] of pendingRepeats) {
           if (failure.toolName === event.payload.toolName) recoveredRepeats.add(key);
+        }
+        // v1.9.7 — the transient-fault exemption also covers single failures:
+        // a tool that later succeeds was failing transiently, not a dead-end.
+        for (const [key, failure] of failedCalls) {
+          if (failure.toolName === event.payload.toolName) recoveredRepeats.add(key);
+        }
+      }
+      // v1.9.7 — observe tool FAILURE: every failed execution is recorded so a
+      // single (non-repeated) dead-end call is still persisted as an
+      // error_pattern at session end — degradation must survive the session.
+      if (event.type === 'ToolResult' && !event.payload.result.success) {
+        const key = `${event.payload.toolName}::${event.payload.result.error ?? 'unknown'}`;
+        if (!failedCalls.has(key)) {
+          failedCalls.set(key, {
+            type: 'tool_error',
+            message: event.payload.result.error ?? 'unknown',
+            turnNumber: 0,
+            toolName: event.payload.toolName,
+          });
         }
       }
 
@@ -421,6 +485,7 @@ export class Harness {
           seenFailures.add(repeatKey);
         }
         if (event.payload.action.kind === 'stop') {
+          stopWrittenKeys.add(repeatKey);
           await this.writeErrorPattern(event.payload.action, failure).catch(() => {});
         } else if (event.payload.action.kind === 'retry') {
           retriedFailures.push(failure);
@@ -437,11 +502,23 @@ export class Harness {
       // continuation turns without a state store but with memory.
       if (event.type === 'Completed' && this.config.memory) {
         // v0.12 — flush deferred "勿重试" memories (transient-fault exemption).
+        const writtenRepeatKeys = new Set<string>();
         for (const [key, failure] of pendingRepeats) {
           if (recoveredRepeats.has(key)) continue;
+          writtenRepeatKeys.add(key);
           await this.writeRepeatedFailureMemory(failure).catch(() => {});
         }
         pendingRepeats.clear();
+        // v1.9.7 — single (non-repeated) failed calls persist as error_pattern
+        // too (see run() for the same flush); transient faults are exempt.
+        for (const [key, failure] of failedCalls) {
+          if (recoveredRepeats.has(key)) continue;
+          if (writtenRepeatKeys.has(key)) continue;
+          if (retriedFailures.some(f => f.toolName === failure.toolName && f.message === failure.message)) continue;
+          if (stopWrittenKeys.has(key)) continue;
+          await this.writeSingleFailureMemory(failure).catch(() => {});
+        }
+        failedCalls.clear();
         if (event.payload.isComplete) {
           await this.writeSessionMemory(
             newUserPrompt,
@@ -527,8 +604,11 @@ export class Harness {
     let memories = [] as Awaited<ReturnType<IMemoryStore['search']>>;
     try {
       if (this.config.memory) {
+        // v1.9.7 — k=10 so verified successes/procedures are not squeezed out
+        // by a heap of error patterns; fragment priority in the assembler
+        // orders proven approaches above avoid-lists when budget-constrained.
         memories = await this.config.memory.search(userPrompt, {
-          k: 8,
+          k: 10,
           projectPath: this.projectPath(),
         });
       }
@@ -538,6 +618,12 @@ export class Harness {
 
     const preferences = memories
       .filter(m => m.type === 'user_preference')
+      .map(m => m.content);
+    // v1.9.7 — verified successes are injected with priority (they appear
+    // before error patterns in <session_memory>), so the model prefers proven
+    // approaches over unproven ones and treats failures as avoid-lists.
+    const successes = memories
+      .filter(m => m.type === 'successful_pattern')
       .map(m => m.content);
     const errorPatterns = memories
       .filter(m => m.type === 'error_pattern')
@@ -564,6 +650,7 @@ export class Harness {
       template: systemPrompt,
       memory: {
         preferences,
+        successes,
         errorPatterns,
         procedures,
         project: this.config.memory ? this.projectPath() : undefined,
@@ -630,6 +717,26 @@ export class Harness {
     if (!this.config.memory) return;
     const tool = failure.toolName ? ` (tool: ${failure.toolName})` : '';
     const content = `Repeated failure: ${failure.message}${tool}. Do not make this exact call again — switch to a different approach.`.slice(0, 300);
+    await this.config.memory.add({
+      type: 'error_pattern',
+      content,
+      timestamp: Date.now(),
+      sessionId: this.config.sessionId,
+      projectPath: this.projectPath(),
+    });
+  }
+
+  /**
+   * v1.9.7 — write an error_pattern for a SINGLE (non-repeated) failed tool
+   * call that the session abandoned: the call failed, was never retried, and
+   * the tool never succeeded later. Future sessions are told not to walk the
+   * same dead-end — degradation persists even when the failure was neither
+   * repeated nor fatal. Non-fatal.
+   */
+  private async writeSingleFailureMemory(failure: FailureRecord): Promise<void> {
+    if (!this.config.memory) return;
+    const tool = failure.toolName ? ` (tool: ${failure.toolName})` : '';
+    const content = `Failed during execution: ${failure.message}${tool}. Do not make this exact call again — switch to a different approach.`.slice(0, 300);
     await this.config.memory.add({
       type: 'error_pattern',
       content,

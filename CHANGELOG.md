@@ -15,6 +15,7 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - 内置供应商注册表扩展：Moonshot / MiniMax / OpenAI / OpenRouter / NVIDIA 转正为内置条目（含默认模型库），CLI 同步支持（`--provider` 新 id、各供应商独立 env key、`pure config` 列表）；OpenAI 内置默认开启文生图（gpt-image-1）
 - v12 配置迁移：DeepSeek 视为一家，退役 `deepseek-anthropic` id——旧配置的模型库 / 覆盖项自动合并到 `deepseek-openai`（惰性迁移，无残留的配置不重写）
 - Web 搜索 / 抓取 / 系统类工具（sys_info）的内容区统一为深一档的蓝色表面，与用户输入气泡同一蓝族（亮色 `#d6e4f6 → #c8daf0` 渐变 / 暗色 `#21486f → #1b3d61`，都比 `--bg-user` 深一档）；系统工具（Bash / 文件 / Git）终端面板同步蓝化（亮 `#cfdff4` / 暗 `#1e4168`），文字、字段名、链接、语法高亮按主题配套——暗色下修正 web 工具正文被亮色硬编码色覆盖导致对比度不足的问题
+- **失败执行即刻降级、成功经验优先**：① 同会话——每次工具调用失败后，引擎在下一次思考前显式注入降级指令（「此调用已失败：禁止重复完全相同的调用，改用不同参数/工具/策略，优先本会话已证明可行的路径」），与失败策略的重试提示互补；② 跨会话——被放弃的**单一**失败调用（未重复、未恢复）也会在会话结束时沉淀为 `error_pattern`（「Failed during execution … Do not make this exact call again」），不再只记重复失败/致命失败；瞬态故障豁免保留（同一工具后来成功过则不记）；③ 成功经验优先——`successful_pattern` 教训从记忆库检索后以更高优先级注入 `<session_memory>`，排在错误教训之前（「Proven successful approaches (prefer these when the situation matches)」，错误清单改为 avoid-list 措辞），预算紧张时成功经验先于错误教训被保留；`<session_memory>` 系统提示同步更新指导文案
 
 ## v1.9.6
 

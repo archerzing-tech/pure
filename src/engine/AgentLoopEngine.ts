@@ -3,7 +3,7 @@
 // Fixes: BudgetWarning events, completedSteps/lastState tracking, note injection for recoverable errors,
 //        VERIFY_FAILED → loop back to THINK with reflection note instead of completing.
 
-import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary } from '../shared/types';
+import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
 import { safeParseArgs } from '../shared/format';
 import { BudgetManager } from './BudgetManager';
@@ -226,6 +226,16 @@ export class AgentLoopEngine {
             messages.push({ role: 'tool', content: resultText, toolCallId: tr.toolCallId, toolName: tr.toolName });
             budget.addTokens(resultText);
           }
+          // v1.9.7 — every failed execution explicitly degrades the subsequent
+          // reasoning: the model is told the exact call is a dead-end and to
+          // prefer paths already proven this session. Complements the policy
+          // hint (which decides retry vs reflect): a retry must change
+          // something material instead of re-issuing the identical call.
+          for (const te of toolErrors) {
+            const note = this.degradationNote(te);
+            messages.push({ role: 'user' as const, content: note });
+            budget.addTokens(note);
+          }
           if (action.kind !== 'degrade') {
             messages.push({ role: 'user' as const, content: action.hint });
           }
@@ -256,6 +266,14 @@ export class AgentLoopEngine {
             : `Error: ${tr.result.error}`;
           messages.push({ role: 'tool', content: resultText, toolCallId: tr.toolCallId, toolName: tr.toolName });
           budget.addTokens(resultText);
+        }
+        // v1.9.7 — same degradation without a failure policy: the model still
+        // sees the raw error, but the explicit directive guarantees the next
+        // THINK treats the failed call as a dead-end instead of re-issuing it.
+        for (const te of toolErrors) {
+          const note = this.degradationNote(te);
+          messages.push({ role: 'user' as const, content: note });
+          budget.addTokens(note);
         }
 
         turnCount++;
@@ -401,6 +419,15 @@ export class AgentLoopEngine {
       payload: { finalOutput, isComplete: !interrupted, interrupted, turnCount, messages, usage: turnUsage, verification },
       timestamp: Date.now(),
     };
+  }
+
+  /**
+   * v1.9.7 — explicit degradation directive injected after every failed tool
+   * call, so the next THINK step treats the call as a dead-end: do not repeat
+   * the exact same call; adapt or switch; prefer what already worked.
+   */
+  private degradationNote(te: { toolName: string; result: ToolResult }): string {
+    return `Tool call ${te.toolName} failed: ${te.result.error ?? 'unknown error'}. Degrade this approach — do NOT repeat the exact same call: either adapt it (different arguments) or use a different tool or strategy. Prefer approaches that have already proven successful this session.`;
   }
 
   private async executeTools(
