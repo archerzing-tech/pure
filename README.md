@@ -15,7 +15,7 @@
 <p align="center">
   <img src="docs/screenshots/pure-ui-default.png" alt="Pure GUI default surface (landing view)" width="720" />
   <br />
-  <em>Pure GUI — the calm default surface: session rail, hero prompt, and status bar (real screenshot, v1.9.6)</em>
+  <em>Pure GUI — the calm default surface: session rail, hero prompt, and status bar (real screenshot, dark theme, v1.9.7)</em>
   <br /><br />
   <img src="docs/screenshots/event-loop-agentloop-comparison.svg" alt="Classic JavaScript Event Loop compared with Pure AgentLoop" width="720" />
   <br />

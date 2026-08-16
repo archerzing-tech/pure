@@ -54,7 +54,6 @@
   <text x="60" y="140" class="section" fill="#a89bff">THE AGENT LOOP</text>
   <rect x="44" y="158" width="750" height="450" rx="22" fill="#11131e" stroke="#3b3a52" filter="url(#shadow)"/>
 
-  <text x="72" y="192" class="section" fill="#f6c453">PREFLIGHT · 请求合理性分析</text>
   <g filter="url(#shadow)">
     <rect x="70" y="204" width="116" height="46" rx="12" fill="#443a24" stroke="#a48647"/>
     <text x="128" y="224" text-anchor="middle" class="pill">INTAKE</text>
@@ -81,8 +80,6 @@
   <path d="M446 227H458" stroke="#f6c453" stroke-width="3" marker-end="url(#arrow-amber)"/>
   <path d="M576 227H588" stroke="#f6c453" stroke-width="3" marker-end="url(#arrow-amber)"/>
   <path d="M388 250V292" stroke="#a89bff" stroke-width="3" marker-end="url(#arrow-violet)"/>
-
-  <text x="72" y="314" class="section" fill="#a89bff">THE LOOP · 证据驱动执行</text>
 
   <path d="M253 372H275" stroke="#a89bff" stroke-width="3" marker-end="url(#arrow-violet)"/>
   <path d="M407 372H429" stroke="#a89bff" stroke-width="3" marker-end="url(#arrow-violet)"/>
@@ -115,9 +112,6 @@
     <text x="424" y="496" text-anchor="middle" class="node-sub">完成 · 安全停止</text>
   </g>
 
-  <text x="419" y="540" text-anchor="middle" class="small">FailurePolicy · retry → reflect → degrade → stop</text>
-  <text x="419" y="562" text-anchor="middle" class="small">BudgetManager · HookRouter · FileLockManager · parallel reads / serialized writes</text>
-  <text x="419" y="584" text-anchor="middle" class="small">A failed verification loops back with evidence — never a plausible-but-unverified answer.</text>
 
   <!-- ═══ Right panel: evolving memory ═══ -->
   <text x="854" y="140" class="section" fill="#77d9d0">EVOLVING PROJECT MEMORY</text>
@@ -135,10 +129,9 @@
   <text x="1037" y="384" text-anchor="middle" class="memory-text">keyword fallback when offline</text>
   <text x="1037" y="404" text-anchor="middle" class="memory-text">inject only top relevant lessons</text>
 
-  <rect x="884" y="454" width="306" height="96" rx="14" fill="#183b39" stroke="#4b9c94"/>
-  <text x="1037" y="484" text-anchor="middle" class="memory-title">EVOLVE, DON'T ACCUMULATE</text>
-  <text x="1037" y="508" text-anchor="middle" class="memory-text">health score · supersede · decay</text>
-  <text x="1037" y="528" text-anchor="middle" class="memory-text">active → degraded → dormant → delete</text>
+  <rect x="884" y="454" width="306" height="66" rx="14" fill="#183b39" stroke="#4b9c94"/>
+  <text x="1037" y="482" text-anchor="middle" class="memory-title">EVOLVE, DON'T ACCUMULATE</text>
+  <text x="1037" y="504" text-anchor="middle" class="memory-text">active → degraded → dormant → delete</text>
 
   <text x="860" y="580" class="subtitle">Memory is project-scoped, inspectable, exportable, and configurable.</text>
   <text x="860" y="602" class="small">It stores compact lessons — not an ever-growing transcript.</text>
@@ -146,5 +139,5 @@
   <!-- ═══ Bottom strip: shared control plane ═══ -->
   <rect x="44" y="626" width="1192" height="78" rx="16" fill="#11131e" stroke="#3b3a52"/>
   <text x="76" y="658" class="section" fill="#72d8ce">SHARED BETWEEN GUI AND CLI</text>
-  <text x="76" y="684" class="small">requestWorkflow (intake → assess → probe → plan → confirm) · PromptAssembler (budget-aware fragments) · adaptiveControl (runtime strategy from evidence) — one compiled decision feeds both surfaces.</text>
+  <text x="76" y="684" class="small">requestWorkflow · PromptAssembler · adaptiveControl — one compiled decision feeds both surfaces.</text>
 </svg>
