@@ -516,6 +516,13 @@ function setToolRowExpandedLabel(button: HTMLButtonElement, expanded: boolean): 
     : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 9V3h6M3 3l6 6M21 15v6h-6M21 21l-6-6"/></svg>';
 }
 
+// Per-row cleanup for the in-flight FLIP transition (transitionend listener +
+// fallback timeout). Cancelling the previous cleanup before starting a new
+// animation stops a stale timeout from snapping a newer animation mid-flight
+// when the maximize/collapse button is clicked rapidly. WeakMap keys are
+// weakly held, so rows removed mid-animation are GC'd without extra work.
+const flipAnimations = new WeakMap<HTMLElement, () => void>();
+
 export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void {
   const el = row.el;
   if (el.classList.contains('tool-row-expanded') === expanded) return;
@@ -528,9 +535,12 @@ export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void 
     && typeof matchMedia === 'function'
     && !matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  // Cancel any in-flight animation and snap to the true layout box so rapid
-  // re-clicks measure cleanly instead of stacking transforms.
+  // Cancel any in-flight animation (and its pending cleanup) and snap to the
+  // true layout box so rapid re-clicks measure cleanly instead of stacking
+  // transforms or letting a stale timeout wipe a newer animation.
   if (canAnimate) {
+    flipAnimations.get(el)?.();
+    flipAnimations.delete(el);
     el.style.transition = 'none';
     el.style.transform = '';
     el.style.transformOrigin = '';
@@ -557,21 +567,22 @@ export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void 
       void el.offsetWidth;
       el.style.transition = 'transform 0.32s var(--ease-out)';
       el.style.transform = 'translate(0, 0) scale(1, 1)';
+      let timer: ReturnType<typeof setTimeout>;
+      const onEnd = (event: TransitionEvent): void => {
+        if (event.target !== el || event.propertyName !== 'transform') return;
+        finish();
+      };
       const finish = (): void => {
+        el.removeEventListener('transitionend', onEnd);
+        clearTimeout(timer);
         el.style.transition = '';
         el.style.transform = '';
         el.style.transformOrigin = '';
+        if (flipAnimations.get(el) === finish) flipAnimations.delete(el);
       };
-      const onEnd = (event: TransitionEvent): void => {
-        if (event.target !== el || event.propertyName !== 'transform') return;
-        el.removeEventListener('transitionend', onEnd);
-        finish();
-      };
+      timer = setTimeout(finish, 360);
       el.addEventListener('transitionend', onEnd);
-      setTimeout(() => {
-        el.removeEventListener('transitionend', onEnd);
-        finish();
-      }, 360);
+      flipAnimations.set(el, finish);
     }
   }
 }

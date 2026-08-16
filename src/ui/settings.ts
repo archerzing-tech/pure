@@ -29,7 +29,7 @@ import {
   providerOverrideFor,
   type CustomProvider,
 } from '../shared/providers';
-import { effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList } from '../shared/proxy';
+import { effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList, proxyUrlWithAuth } from '../shared/proxy';
 import { probeLlmEndpoint } from '../shared/llmProbe';
 import {
   STORAGE_KEY,
@@ -44,8 +44,11 @@ import {
   revokeSecretFromRust,
   storeCustomSecretInRust,
   storeSecretInRust,
+  revokeProxyPasswordFromRust,
+  storeProxyPasswordInRust,
   customSecretKey,
   modelListForProvider,
+  providerHasKey,
   normalizeProviderModels,
   uniqueModels,
   type PureConfig,
@@ -612,7 +615,7 @@ export class SettingsPanel {
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
       '#cfg-tavily-key', '#cfg-serper-key',
       '#cfg-mcp-exclude-prefixes',
-      '#cfg-proxy-enabled', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-url', '#cfg-proxy-bypass-providers', '#cfg-proxy-bypass-models',
+      '#cfg-proxy-enabled', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-url', '#cfg-proxy-username', '#cfg-proxy-password', '#cfg-proxy-bypass-providers', '#cfg-proxy-bypass-models',
       '#cfg-streaming-render',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle',
@@ -628,6 +631,10 @@ export class SettingsPanel {
         // the connection state looks stale while the user is still typing.
         if (el.tagName === 'INPUT' && ((el as HTMLInputElement).type === 'text' || (el as HTMLInputElement).type === 'password')) {
           el.addEventListener('input', () => {
+            // The proxy password is stored in Rust secrets; a typed value
+            // marks the field touched so autoSave can tell "user cleared it"
+            // (revoke) apart from "never retyped it" (keep the stored secret).
+            if (el.id === 'cfg-proxy-password' && (el as HTMLInputElement).value.trim()) (el as HTMLInputElement).dataset.touched = '1';
             // Per-keystroke writes are debounced: autoSave() rebuilds the
             // whole form + writes localStorage (+ calls the Rust secret store
             // when a key is present), so a burst of typing must coalesce into
@@ -812,9 +819,7 @@ export class SettingsPanel {
       const defaultModel = custom?.defaultModel
         ?? (def.id === cfg.provider ? cfg.model.trim() : cfg.providerModels?.[def.id]?.[0])
         ?? def.defaultModel;
-      const hasKey = !!custom
-        ? (!!custom.apiKey || custom.hasApiKey === true || !!custom.local)
-        : (!!cfg.apiKey || cfg.hasApiKey === true || !!override?.apiKey || override?.hasApiKey === true);
+      const hasKey = providerHasKey(cfg, def.id);
       cards.push(cardOrPanel(
         def.id,
         label,
@@ -830,7 +835,7 @@ export class SettingsPanel {
         c.id,
         c.name,
         c.defaultModel || c.models[0] || '',
-        !!c.apiKey || c.hasApiKey === true || !!c.local,
+        providerHasKey(cfg, c.id),
         true,
         (c.name.slice(0, 2) || 'C').toUpperCase(),
         c.id === 'ollama' ? 'provider-mark-ollama' : 'provider-mark-custom',
@@ -1110,6 +1115,8 @@ export class SettingsPanel {
   private async testProxyConnection(): Promise<void> {
     const btn = document.getElementById('cfg-proxy-test-btn') as HTMLButtonElement | null;
     const url = (document.getElementById('cfg-proxy-url') as HTMLInputElement).value.trim();
+    const username = (document.getElementById('cfg-proxy-username') as HTMLInputElement | null)?.value ?? '';
+    const password = (document.getElementById('cfg-proxy-password') as HTMLInputElement | null)?.value ?? '';
     if (!url) {
       this.toast(t('proxy.test.empty'));
       return;
@@ -1132,7 +1139,7 @@ export class SettingsPanel {
     }
     try {
       const core = await loadTauriCore();
-      const reached = await core?.invoke<string>('test_proxy', { proxyUrl: url });
+      const reached = await core?.invoke<string>('test_proxy', { proxyUrl: proxyUrlWithAuth(url, username, password) });
       this.toast(t('proxy.test.ok') + (reached ? `：${reached}` : ''));
     } catch (err) {
       console.warn('[pure] proxy test failed:', err);
@@ -1292,6 +1299,18 @@ export class SettingsPanel {
     if (proxyToolsEl) proxyToolsEl.checked = proxy.toolsEnabled;
     const proxyUrlEl = document.getElementById('cfg-proxy-url') as HTMLInputElement | null;
     if (proxyUrlEl) proxyUrlEl.value = proxy.url;
+    const proxyUsernameEl = document.getElementById('cfg-proxy-username') as HTMLInputElement | null;
+    if (proxyUsernameEl) proxyUsernameEl.value = proxy.username;
+    const proxyPasswordEl = document.getElementById('cfg-proxy-password') as HTMLInputElement | null;
+    if (proxyPasswordEl) {
+      proxyPasswordEl.value = proxy.password;
+      if (proxy.hasPassword) {
+        proxyPasswordEl.placeholder = t('proxy.password.savedPlaceholder');
+        delete proxyPasswordEl.dataset.touched;
+      } else {
+        proxyPasswordEl.placeholder = t('proxy.password.placeholder');
+      }
+    }
     const proxyProvidersEl = document.getElementById('cfg-proxy-bypass-providers') as HTMLInputElement | null;
     if (proxyProvidersEl) proxyProvidersEl.value = proxy.bypassProviders.join(', ');
     const proxyModelsEl = document.getElementById('cfg-proxy-bypass-models') as HTMLInputElement | null;
@@ -2337,6 +2356,8 @@ export class SettingsPanel {
         llmEnabled: (document.getElementById('cfg-proxy-llm') as HTMLInputElement | null)?.checked ?? false,
         toolsEnabled: (document.getElementById('cfg-proxy-tools') as HTMLInputElement | null)?.checked ?? false,
         url: (document.getElementById('cfg-proxy-url') as HTMLInputElement | null)?.value ?? '',
+        username: (document.getElementById('cfg-proxy-username') as HTMLInputElement | null)?.value ?? '',
+        password: (document.getElementById('cfg-proxy-password') as HTMLInputElement | null)?.value ?? '',
         bypassProviders: normalizeProxyList((document.getElementById('cfg-proxy-bypass-providers') as HTMLInputElement | null)?.value),
         bypassModels: normalizeProxyList((document.getElementById('cfg-proxy-bypass-models') as HTMLInputElement | null)?.value),
       }),
@@ -2433,6 +2454,37 @@ export class SettingsPanel {
         cfg.providerOverrides[editing] = { ...override, apiKey: '', hasApiKey: false };
         delete keyInput.dataset.touched;
       }
+    }
+
+    // Proxy password: desktop keeps it in Rust secrets (slot proxy.password)
+    // and only a hasPassword flag in localStorage; browser falls back to the
+    // plaintext entry. The raw value must never be persisted on desktop.
+    const proxyPasswordInput = document.getElementById('cfg-proxy-password') as HTMLInputElement | null;
+    const typedProxyPassword = proxyPasswordInput?.value ?? '';
+    if (isTauriRuntime()) {
+      if (typedProxyPassword) {
+        void storeProxyPasswordInRust(typedProxyPassword);
+        cfg.proxy = { ...cfg.proxy, hasPassword: true, password: '' };
+        // Clear the field so the plaintext never lingers in the DOM.
+        if (proxyPasswordInput) {
+          proxyPasswordInput.value = '';
+          delete proxyPasswordInput.dataset.touched;
+        }
+      } else if (prev.proxy?.hasPassword && proxyPasswordInput?.dataset.touched === '1') {
+        // User edited the field and cleared it → revoke the stored password.
+        void revokeProxyPasswordFromRust();
+        cfg.proxy = { ...cfg.proxy, hasPassword: false, password: '' };
+        delete proxyPasswordInput.dataset.touched;
+      } else {
+        cfg.proxy = { ...cfg.proxy, hasPassword: prev.proxy?.hasPassword === true, password: '' };
+      }
+    } else {
+      cfg.proxy = { ...cfg.proxy, hasPassword: false, password: typedProxyPassword };
+    }
+    if (proxyPasswordInput) {
+      proxyPasswordInput.placeholder = cfg.proxy.hasPassword
+        ? t('proxy.password.savedPlaceholder')
+        : t('proxy.password.placeholder');
     }
 
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));

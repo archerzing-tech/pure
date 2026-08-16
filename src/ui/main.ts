@@ -7,7 +7,7 @@
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
 import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, shouldCancelForEscape } from './chat';
-import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, modelListForProvider, type PureConfig } from './config';
+import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
 import { projectTranscript } from './transcriptProjection';
@@ -274,8 +274,14 @@ function populateModelSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
       if (provider === cfg.provider && model === currentModel) selectedValue = opt.value;
     });
   };
-  for (const p of PROVIDERS) appendProviderModels(p.id, t(p.i18nKey));
-  for (const c of customs) appendProviderModels(c.id, c.name);
+  for (const p of PROVIDERS) {
+    if (!providerHasKey(cfg, p.id)) continue;
+    appendProviderModels(p.id, t(p.i18nKey));
+  }
+  for (const c of customs) {
+    if (!providerHasKey(cfg, c.id)) continue;
+    appendProviderModels(c.id, c.name);
+  }
   if (!selectedValue) {
     const first = sel.options[0];
     if (first) selectedValue = first.value;

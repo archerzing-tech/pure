@@ -37,15 +37,11 @@ export class TauriStdioTransport implements MCPTransport {
       name: this.name,
       command: this.command[0] ?? '',
       args: this.command.slice(1),
+      // The proxy URL carries the username only; Rust resolves the password
+      // from ~/.pure/secrets.json and sets HTTP(S)_PROXY on the child.
+      proxyUrl: this.proxyUrl,
     };
-    const env = { ...(this.env ?? {}) };
-    if (this.proxyUrl) {
-      env.HTTP_PROXY = this.proxyUrl;
-      env.HTTPS_PROXY = this.proxyUrl;
-      env.ALL_PROXY = this.proxyUrl;
-      env.NO_PROXY = 'localhost,127.0.0.1,::1';
-    }
-    if (Object.keys(env).length > 0) args.env = env;
+    if (this.env && Object.keys(this.env).length > 0) args.env = this.env;
     await core.invoke<string>('spawn_mcp', args);
     this.spawned = true;
   }

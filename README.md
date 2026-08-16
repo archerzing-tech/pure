@@ -21,9 +21,9 @@
   <br />
   <em>Conceptual comparison: classic JavaScript Event Loop scheduling beside Pure's evidence-driven AgentLoop (with its request preflight); based on the <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model">MDN execution model</a> and <a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick">Node.js Event Loop overview</a></em>
   <br /><br />
-  <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure preflight, agent loop, and evolving project memory" width="720" />
+  <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure layered architecture — GUI/CLI surfaces, shared control plane, agent core, Rust IPC, and evolving memory" width="720" />
   <br />
-  <em>Architecture diagram — a request preflight feeding a verified execution loop, connected to project-scoped evolving memory, with a shared GUI/CLI control plane</em>
+  <em>Architecture diagram — GUI and CLI share one control plane and prompt compiler, driving a layered agent core (Coding Agent → Harness → Engine → Adapter) over a Rust/Tauri IPC layer, with project-scoped evolving memory alongside</em>
 </p>
 
 The visuals above are intentionally part of the documentation: the UI keeps configuration progressive and predictable; the preflight turns every request into an assessed, probed, and confirmed decision; and the runtime turns every tool result into evidence and every verified outcome into a candidate lesson.

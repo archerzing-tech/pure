@@ -488,6 +488,14 @@
                     </div>
                   </div>
                   <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.username">用户名</span><span class="setting-hint" data-i18n="proxy.username.hint">代理认证用户名（可选）</span></div>
+                    <input id="cfg-proxy-username" class="setting-input" type="text" data-i18n-placeholder="proxy.username.placeholder" placeholder="可选" autocomplete="off" />
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.password">密码</span><span class="setting-hint" data-i18n="proxy.password.hint">代理认证密码（可选）</span></div>
+                    <input id="cfg-proxy-password" class="setting-input" type="password" placeholder="可选" autocomplete="off" />
+                  </div>
+                  <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="proxy.bypassProviders">直连供应商</span><span class="setting-hint" data-i18n="proxy.bypassProviders.hint">供应商 ID，逗号或换行分隔；命中后 LLM 不走代理</span></div>
                     <input id="cfg-proxy-bypass-providers" class="setting-input" type="text" data-i18n-placeholder="proxy.bypass.placeholder" placeholder="ollama, deepseek-openai" autocomplete="off" />
                   </div>

@@ -21,9 +21,9 @@
   <br />
   <em>概念对比图：经典 JavaScript Event Loop 的调度方式与 Pure 证据驱动 AgentLoop（含请求预检）；概念参考 <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model">MDN 执行模型</a> 和 <a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick">Node.js Event Loop 文档</a></em>
   <br /><br />
-  <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure 请求预检、Agent Loop 与进化项目记忆" width="720" />
+  <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure 分层架构 — GUI/CLI 表面、共享控制平面、智能体内核、Rust IPC 与进化记忆" width="720" />
   <br />
-  <em>架构图 — 请求预检接入经过验证的执行闭环，连接按项目隔离、持续进化的记忆，并带 GUI/CLI 共享控制平面</em>
+  <em>架构图 — GUI 与 CLI 共享同一套控制平面与 Prompt 编译器，驱动分层智能体内核（Coding Agent → Harness → Engine → Adapter），底层经 Rust/Tauri IPC 提供 OS 能力，侧边是持续进化的项目记忆</em>
 </p>
 
 上面的视觉图本身就是 Pure 设计的一部分：界面保持配置渐进可预期；预检把每个请求变成经过评估、探查和确认的决策；运行时把每次工具结果变成证据，把通过验证的结果沉淀为候选经验。

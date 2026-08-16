@@ -3,6 +3,19 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.8-beta
+
+**本地 beta 构建：代理认证（用户名/密码）、代理密码安全存储、架构图重绘与稳定性修复**
+
+- 代理支持认证：设置 → 网络代理 新增「用户名 / 密码」字段，HTTP / HTTPS / SOCKS5 / SOCKS5H 代理均可携带 Basic / SOCKS5 认证；凭证按 `scheme://user:pass@host` 内嵌，含特殊字符的密码经百分号编码后由 reqwest 正确解码回传
+- 代理密码安全存储：桌面端密码写入 Rust 密钥库 `~/.pure/secrets.json`（0600，槽位 `proxy.password`），localStorage 只保留 `hasPassword` 标志——密码不再进入 WebView、也不明文落盘；用户名仍留在配置中
+- 密码注入统一收敛到 Rust 侧：`build_http_client`（LLM / 搜索 / 抓取 / 图片 / MCP HTTP）、命令执行环境变量、stdio MCP 子进程均从密钥库解析并填入密码，WebView 不再拼装含密码的 URL
+- 设置页密码框与 API Key 同体验：已保存时显示「已安全保存」占位且不回填真实值，清空并保存即吊销；历史明文密码在启动时惰性迁移进密钥库并擦除
+- README 架构图重绘：按当前实现改为分层大块图（GUI/CLI 双表面 → 共享控制平面 requestWorkflow/PromptAssembler/adaptiveControl → Coding Agent → Harness → Engine → Adapter → Rust/Tauri IPC → 外部世界），侧边保留项目进化记忆，替代旧的「预检 + 循环 + 记忆」概念图
+- 模型下拉只展示「已配置」的供应商（内置/自定义有 Key，或本地免 Key 端点），与设置页 LLM 卡片状态（已配置/未配置）一致
+- 修复工具卡片放大/还原动画快速连点时，旧超时回调误清除新动画的问题（每行独立清理，弱引用持有）
+- 修复 macOS 系统权限申请：定位权限改为轮询直到用户应答（或 60 秒超时）再返回状态；摄像头/麦克风复用已解析的媒体类型
+
 ## v1.9.7
 
 **正式版：系统权限申请（macOS 原生弹窗）、LLM 供应商表单式配置、暗色模式修复、工具卡片过渡动画与技能生态**
