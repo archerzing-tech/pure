@@ -3,7 +3,7 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v1.9.6-test
+## v1.9.6-test2
 
 **测试构建：CLI 版本烘焙、Harness 收尾顺序修复与自定义供应商配置 UX 细化**
 
