@@ -6814,16 +6814,15 @@ button svg,
  * toolRow.ts), so only the plain .tool-row-body surface is styled here. */
 .tool-row.sys-info .tool-row-body,
 .tool-row.web-tool .tool-row-body {
-  /* 蓝色表面：与用户输入气泡同族（--bg-user #dbeafe），深一档的蓝；
-     Input/Output 整个内容区（除 header/summary 外）共用这一渐变。 */
-  background: linear-gradient(180deg, #d6e4f6 0%, #c8daf0 100%);
-  border-color: #b9d0ea;
+  /* 蓝色表面：与用户输入气泡同族（--bg-user #dbeafe），深一档的纯色；
+     Input/Output 整个内容区（除 header/summary 外）共用这一表面，无边框。 */
+  background: #c8daf0;
   color: #0f2333;
 }
 .tool-row.sys-info .tool-row-body,
 .tool-row.web-tool .tool-row-body {
-  border: 1px solid #b9d0ea;
-  border-radius: 8px;
+  border: 0;
+  border-radius: 0;
   padding: 10px 12px 12px 36px;
 }
 .tool-row.web-tool .tool-row-summary {
@@ -6863,10 +6862,9 @@ button svg,
 }
 [data-theme="dark"] .tool-row.sys-info .tool-row-body,
 [data-theme="dark"] .tool-row.web-tool .tool-row-body {
-  /* 暗色主题的蓝色渐变：顶部 #21486f → 底部 #1b3d61，比用户气泡
-     （--bg-user #235174）深一档，与蓝玻璃主题的 accent 呼应。 */
-  background: linear-gradient(180deg, #21486f 0%, #1b3d61 100%);
-  border-color: #2a4d74;
+  /* 暗色主题的纯色蓝色表面：比用户气泡（--bg-user #235174）深一档，
+     与蓝玻璃主题的 accent 呼应；无边框。 */
+  background: #1b3d61;
   color: #d8e8fb;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-field-value,
