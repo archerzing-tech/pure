@@ -251,7 +251,6 @@ export class Harness {
       } else if (event.type === 'Error' && !event.payload.recoverable) {
         finishTrace();
       }
-      yield event;
 
       // v0.12 — observe tool success: a repeated failure whose tool later
       // succeeds was transient. Mark the matching pending repeat key(s)
@@ -328,6 +327,11 @@ export class Harness {
           await this.stateMgr.saveCheckpoint('interrupted', snapshot, event.payload.turnCount ?? 0);
         } catch { /* persistence error is non-fatal */ }
       }
+
+      // Yield last: a consumer that breaks on Completed never resumes the
+      // generator, so the checkpoint/memory side effects above must already
+      // have run before the event is handed over.
+      yield event;
       }
     } finally {
       finishTrace();
@@ -396,7 +400,6 @@ export class Harness {
       } else if (event.type === 'Error' && !event.payload.recoverable) {
         finishTrace();
       }
-      yield event;
 
       // v0.12 — observe tool success (transient-fault exemption, same as run()).
       if (event.type === 'ToolResult' && event.payload.result.success) {
@@ -453,10 +456,15 @@ export class Harness {
       }
       if (this.stateMgr && event.type === 'Interrupted') {
         try {
-          const snapshot = trimUnresolvedToolCalls(event.payload.messages ?? []);
+          const snapshot = trimUnresolvedToolCalls(event.payload.messages ?? msgs);
           await this.stateMgr.saveCheckpoint('interrupted', snapshot, event.payload.turnCount ?? 0);
         } catch { /* persistence error is non-fatal */ }
       }
+
+      // Yield last: a consumer that breaks on Completed never resumes the
+      // generator, so the checkpoint/memory side effects above must already
+      // have run before the event is handed over.
+      yield event;
       }
     } finally {
       finishTrace();

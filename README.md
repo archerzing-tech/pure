@@ -13,26 +13,50 @@
 ## Product visuals & architecture
 
 <p align="center">
-  <img src="docs/screenshots/pure-ui-default-drawer.svg" alt="Pure GUI Default plus Drawer layout" width="720" />
+  <img src="docs/screenshots/pure-ui-default.png" alt="Pure GUI default surface (landing view)" width="720" />
   <br />
-  <em>Pure GUI — a calm Default surface with equal-width provider, model, and connection Drawers</em>
+  <em>Pure GUI — the calm default surface: session rail, hero prompt, and status bar (real screenshot, v1.9.6)</em>
   <br /><br />
   <img src="docs/screenshots/event-loop-agentloop-comparison.svg" alt="Classic JavaScript Event Loop compared with Pure AgentLoop" width="720" />
   <br />
-  <em>Conceptual comparison: classic JavaScript Event Loop scheduling beside Pure's evidence-driven AgentLoop; based on the <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model">MDN execution model</a> and <a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick">Node.js Event Loop overview</a></em>
+  <em>Conceptual comparison: classic JavaScript Event Loop scheduling beside Pure's evidence-driven AgentLoop (with its request preflight); based on the <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model">MDN execution model</a> and <a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick">Node.js Event Loop overview</a></em>
   <br /><br />
-  <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure Agent Loop and evolving project memory" width="720" />
+  <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure preflight, agent loop, and evolving project memory" width="720" />
   <br />
-  <em>Architecture diagram — a verified execution loop connected to project-scoped evolving memory</em>
+  <em>Architecture diagram — a request preflight feeding a verified execution loop, connected to project-scoped evolving memory, with a shared GUI/CLI control plane</em>
 </p>
 
-The visuals above are intentionally part of the documentation: Pure's UI keeps configuration progressive and predictable, while its runtime turns every tool result into evidence and every verified outcome into a candidate lesson.
+The visuals above are intentionally part of the documentation: the UI keeps configuration progressive and predictable; the preflight turns every request into an assessed, probed, and confirmed decision; and the runtime turns every tool result into evidence and every verified outcome into a candidate lesson.
 
 ---
 
 ## What makes Pure different
 
 Pure is not just a chat window with shell access. Its unique design is the combination of **evidence-driven execution**, **separated presentation and model context**, and **memory that is maintained rather than accumulated**.
+
+### 0. Advantages, uniqueness, and differences at a glance
+
+**优点 / Advantages**
+
+- **证据驱动，而不是“看起来合理就停”** — THINK → ACT → OBSERVE → VERIFY 循环只在验证证据支持时才终止；验证失败会带着证据回环重试，绝不静默交出一个未经证实的答案。失败按 `retry → reflect → degrade → stop` 逐级升级，并识别“重复调用同一条死胡同”。
+- **主动预检，不是全盘接受** — 请求进入前先做意图 / 风险 / 可逆性分析 + 逻辑陷阱检测；高风险操作必须显式确认（GUI 硬门控、CLI 关闭自动批准），破坏性动作永远无法未经批准发生。
+- **会进化、可维护的记忆** — 不是第二个聊天记录：成功会话压成可复用的 lesson，按多维健康分（时间 × 可信度 × 使用频率 × 取代状态）走 `active → degraded → dormant → delete`，新策略取代旧策略，闲置的衰减。
+- **上下文管理独立于任务复杂度** — 自动 / 手动压缩、可检查、可逆；tool-call 组原子保留，provider 请求永远合法；展示层转录与模型上下文分离，不会被展示内容污染下一次请求。
+- **GUI 与 CLI 共享同一套决策** — `requestWorkflow` / `PromptAssembler` / `adaptiveControl` 一次编译、两个表面一致，不会 GUI 一套判断、CLI 另一套判断。
+- **本地优先 + 隐私** — 提示词可观测性只记 hash / 长度、不存原文；API key 走 Rust 中转，不进 JS 上下文；web 结果缓存到本地并在 CLI / GUI 间共享。
+- **可复现的评测基线** — 三个确定性的 bugfix / feature / refactor fixture + 真实 Bun 验证命令，作为每次发布的回归门。
+
+**独特之处 / What's unique**
+
+- 把 JavaScript 事件循环的“阶段推进、事件驱动”思想移植到 agent：责任从“跑回调”变成“跑工具、验证结果、维护项目记忆”。
+- **会话记忆 ≠ UI 转录**：V2 快照分三层（`modelContext` / `transcript` / `uiState`），历史恢复时展示层无法反向污染下一次 LLM 请求。
+- **能力缺口诚实协议**：模型不做它没有的能力——需要 OCR / PDF / 音频 / 视觉时会自己查找并安装 skill 或工具、验证可用后再用，并告诉你装了什么。
+- **逻辑陷阱逃生**：失败后提示“重读原始请求”，识别自相矛盾 / 不可能的前提，换一个解释而不是死磕同一条路径。
+- **失败记忆**：同一调用反复失败会被记为 `error_pattern`，未来会话在 `<session_memory>` 里被告知“别重复这个调用”。
+
+**与其他 coding agent 的差异 / How it differs**
+
+大多数 agent 用“它能调用什么工具”来定义自己；Pure 用“工具调用之后发生什么”来定义自己（见下表）：执行是状态机、经验是受维护的库、完成以验证证据为准，而不是以“生成了回答”为准。
 
 Most coding agents are described by the tools they can call. Pure is defined by **what happens after a tool call**:
 

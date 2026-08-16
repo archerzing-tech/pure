@@ -13,20 +13,20 @@
 ## 界面视觉与架构图
 
 <p align="center">
-  <img src="docs/screenshots/pure-ui-default-drawer.svg" alt="Pure GUI Default + Drawer 布局" width="720" />
+  <img src="docs/screenshots/pure-ui-default.png" alt="Pure GUI 默认界面（落地页）" width="720" />
   <br />
-  <em>Pure GUI — 默认态保持清爽，供应商、模型和连接 Drawer 保持统一外宽</em>
+  <em>Pure GUI — 默认态：会话侧栏、主输入区和状态栏（真实截图，v1.9.6）</em>
   <br /><br />
   <img src="docs/screenshots/event-loop-agentloop-comparison.svg" alt="经典 JavaScript Event Loop 与 Pure AgentLoop 对比" width="720" />
   <br />
-  <em>概念对比图：经典 JavaScript Event Loop 的调度方式与 Pure 证据驱动 AgentLoop；概念参考 <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model">MDN 执行模型</a> 和 <a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick">Node.js Event Loop 文档</a></em>
+  <em>概念对比图：经典 JavaScript Event Loop 的调度方式与 Pure 证据驱动 AgentLoop（含请求预检）；概念参考 <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model">MDN 执行模型</a> 和 <a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick">Node.js Event Loop 文档</a></em>
   <br /><br />
-  <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure Agent Loop 与进化项目记忆" width="720" />
+  <img src="docs/screenshots/pure-loop-memory.svg" alt="Pure 请求预检、Agent Loop 与进化项目记忆" width="720" />
   <br />
-  <em>架构图 — 经过验证的执行闭环与按项目隔离、持续进化的记忆</em>
+  <em>架构图 — 请求预检接入经过验证的执行闭环，连接按项目隔离、持续进化的记忆，并带 GUI/CLI 共享控制平面</em>
 </p>
 
-上面的视觉图本身就是 Pure 设计的一部分：界面通过渐进式 Drawer 控制配置复杂度，运行时则把每次工具结果变成证据，把通过验证的结果沉淀为候选经验。
+上面的视觉图本身就是 Pure 设计的一部分：界面保持配置渐进可预期；预检把每个请求变成经过评估、探查和确认的决策；运行时把每次工具结果变成证据，把通过验证的结果沉淀为候选经验。
 
 ---
 
@@ -35,6 +35,24 @@
 Pure 不只是一个可以调用 Shell 的聊天窗口。它的独特性来自三件事的组合：**证据驱动的执行闭环**、**界面展示与模型上下文分离**，以及**会维护而不是无限堆积的记忆**。
 
 很多 coding agent 的介绍重点是“能调用哪些工具”。Pure 更关注的是：**工具调用之后，智能体是否继续验证、如何从失败中退出，以及下一次是否真的记住了经验**。
+
+**优点**
+
+- **证据驱动，而不是“看起来合理就停”** — THINK → ACT → OBSERVE → VERIFY 循环只在验证证据支持时才终止；验证失败会带着证据回环重试，绝不静默交出一个未经证实的答案。失败按 `retry → reflect → degrade → stop` 逐级升级，并识别“重复调用同一条死胡同”。
+- **主动预检，不是全盘接受** — 请求进入前先做意图 / 风险 / 可逆性分析 + 逻辑陷阱检测；高风险操作必须显式确认（GUI 硬门控、CLI 关闭自动批准），破坏性动作永远无法未经批准发生。
+- **会进化、可维护的记忆** — 不是第二个聊天记录：成功会话压成可复用的 lesson，按多维健康分走 `active → degraded → dormant → delete`，新策略取代旧策略，闲置的衰减。
+- **上下文管理独立于任务复杂度** — 自动 / 手动压缩、可检查、可逆；tool-call 组原子保留，provider 请求永远合法；展示层转录与模型上下文分离。
+- **GUI 与 CLI 共享同一套决策** — `requestWorkflow` / `PromptAssembler` / `adaptiveControl` 一次编译、两个表面一致。
+- **本地优先 + 隐私** — 提示词可观测性只记 hash / 长度、不存原文；API key 走 Rust 中转；web 结果缓存到本地并在 CLI / GUI 间共享。
+- **可复现的评测基线** — 三个确定性 fixture + 真实 Bun 验证命令，作为每次发布的回归门。
+
+**独特之处**
+
+- 把 JavaScript 事件循环的“阶段推进、事件驱动”思想移植到 agent：责任从“跑回调”变成“跑工具、验证结果、维护项目记忆”。
+- **会话记忆 ≠ UI 转录**：V2 快照分三层（`modelContext` / `transcript` / `uiState`），展示层无法反向污染下一次 LLM 请求。
+- **能力缺口诚实协议**：模型不做它没有的能力——需要 OCR / PDF / 音频 / 视觉时会自己查找并安装 skill 或工具、验证可用后再用，并告诉你装了什么。
+- **逻辑陷阱逃生**：失败后提示“重读原始请求”，换一个解释而不是死磕同一条路径。
+- **失败记忆**：同一调用反复失败会被记为 `error_pattern`，未来会话被告知“别重复这个调用”。
 
 | | 基础工具调用助手 | Pure |
 |---|---|---|

@@ -141,7 +141,7 @@ export class ContextEngine {
     if (this.config.llm && this.config.summaryThreshold !== undefined && evicted.length > this.config.summaryThreshold) {
       try {
         const summaryInput = priorSummary ? [priorSummary, ...evicted] : evicted;
-        const summaryPrompt = `Summarize the key information from this conversation. Include decisions made, code patterns discussed, file paths mentioned, user preferences, and unresolved work. Do not invent facts.\n\n${summaryInput.map(message => `${message.role}: ${message.content.slice(0, 500)}`).join('\n')}`;
+        const summaryPrompt = `Summarize the key information from this conversation. Include decisions made, code patterns discussed, file paths mentioned, user preferences, and unresolved work. Do not invent facts.\n\n${summaryInput.map(message => `${message.role}: ${(message.content ?? '').slice(0, 500)}`).join('\n')}`;
         const summary = await this.config.llm.complete([{ role: 'user', content: summaryPrompt }], []);
         if (priorSummary) ordered.splice(baseSystemMessages.length, 1);
         ordered.splice(baseSystemMessages.length, 0, {

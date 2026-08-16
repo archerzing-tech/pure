@@ -47,10 +47,26 @@ import type { UserTurnContext } from './shared/promptLayers';
 import { buildTaskContract, discoverWorkspace, formatTaskContract, workspaceProfileSummary, type TaskContract, type WorkspaceProfile } from './shared/delivery';
 import { buildRepairPrompt, hasRepairableQualityFindings, qualityGateSummary, runProjectQualityGate, type ProjectQualityGateResult } from './ui/projectQualityGate';
 
-// Single source of truth for the CLI's displayed version (kept in sync with
-// package.json / src-tauri by the release flow; the CLI banner + startup line
-// both read from here).
-const CLI_VERSION = 'v1.9.2-beta7';
+// CLI version for the banner + startup line. The standalone binary bakes the
+// released version in at compile time via scripts/build-cli.ts (--define
+// process.env.PURE_CLI_VERSION, read from package.json), so it can never drift
+// from the release. Dev runs (`bun run cli`) read package.json directly; the
+// final literal is only a last-resort fallback so the banner never prints empty.
+function resolveCliVersion(): string {
+  const injected = process.env.PURE_CLI_VERSION;
+  if (injected && injected !== 'undefined') {
+    return /^v/i.test(injected) ? injected : `v${injected}`;
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8')) as { version?: string };
+    if (pkg?.version) return `v${pkg.version}`;
+  } catch {
+    // Compiled binary has no package.json beside it — use the fallback.
+  }
+  return 'v1.9.6-test';
+}
+
+const CLI_VERSION = resolveCliVersion();
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 

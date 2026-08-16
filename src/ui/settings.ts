@@ -1016,6 +1016,21 @@ export class SettingsPanel {
     if (!this.isProviderConfigured(id)) {
       this.pendingActivation = id;
       this.setProviderV4Drawer('provider', false);
+      const custom = customProviderFor((loadConfig() ?? defaults()).customProviders ?? [], id);
+      // 精确提示缺的是哪一项，而不是把「请填写 Base URL」甩给已经填了地址的用户：
+      // Base URL 缺失 → 停在连接设置；只缺模型 → 打开模型库抽屉并聚焦模型输入框。
+      if (custom && !custom.baseURL) {
+        this.setProviderV4Drawer('connection', true);
+        this.toast(t('llm.custom.needURL'));
+        return;
+      }
+      if (custom && custom.baseURL && !custom.defaultModel) {
+        this.setProviderV4Drawer('connection', false);
+        this.setProviderV4Drawer('models', true);
+        this.toast(t('llm.custom.needModel'));
+        document.getElementById('cfg-model-add')?.focus();
+        return;
+      }
       this.setProviderV4Drawer('connection', true);
       this.toast(t('llm.custom.configureFirst'));
       return;
@@ -1028,7 +1043,10 @@ export class SettingsPanel {
       const name = nameEl?.textContent ?? id;
       this.toast(t('llm.custom.enabledToast').replace('{name}', name));
     }
+    // 启用成功后收起整个配置面板（供应商列表 + 模型库 + 连接设置），回到默认概览。
     this.setProviderV4Drawer('provider', false);
+    this.setProviderV4Drawer('connection', false);
+    this.setProviderV4Drawer('models', false);
   }
 
   private updateProviderPresentation(provider: string): void {
@@ -1119,7 +1137,7 @@ export class SettingsPanel {
     baseUrlRow?.toggleAttribute('hidden', !isCustomSettings);
     // 未配置的自定义供应商（还没有 Base URL）：端点处给出醒目标记，避免用户
     // 以为已就绪就直接发送 —— 空地址会静默回落到内置默认端点。
-    const unconfigured = isCustom && !custom?.baseURL;
+    const unconfigured = isCustom && !(baseUrlInput?.value.trim() || custom?.baseURL);
     if (unconfigured && endpoint) endpoint.textContent = t('llm.custom.needURL');
     const configCard = document.querySelector<HTMLElement>('.provider-config-card');
     configCard?.classList.toggle('provider-unconfigured', unconfigured);
