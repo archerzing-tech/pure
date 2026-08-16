@@ -35,6 +35,7 @@ import {
   STORAGE_KEY,
   defaults,
   hasConfiguredKey,
+  withDefaultModel,
   invalidateConfigCache,
   isDefaultMcpServer,
   loadConfig,
@@ -1039,23 +1040,7 @@ export class SettingsPanel {
    *  choice persists immediately. */
   private setDefaultModelFromMenu(provider: string, model: string): void {
     const prev = loadConfig() ?? defaults();
-    const custom = customProviderFor(prev.customProviders ?? [], provider);
-    const cfg: PureConfig = {
-      ...prev,
-      provider: provider as PureConfig['provider'],
-      model,
-    };
-    if (custom) {
-      cfg.customProviders = (prev.customProviders ?? []).map(p =>
-        p.id === provider ? { ...p, defaultModel: model } : p);
-    } else {
-      // Ensure the model survives in the provider's library even when it was
-      // typed / fetched and not yet persisted in providerModels.
-      cfg.providerModels = {
-        ...normalizeProviderModels(prev.providerModels),
-        [provider]: uniqueModels([...(prev.providerModels?.[provider] ?? []), model]),
-      };
-    }
+    const cfg = withDefaultModel(prev, provider, model);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     this.closeDefaultModelMenu();

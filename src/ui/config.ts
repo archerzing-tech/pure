@@ -253,6 +253,27 @@ export function normalizeProviderModels(raw: unknown): Record<string, string[]> 
   return result;
 }
 
+/**
+ * Apply a default-model choice picked from the LLM page's top bar: the
+ * provider is derived from the model's library, the model is ensured to be
+ * in that library, and custom providers remember it as their defaultModel.
+ * Pure function (no storage) so the choice logic is unit-testable.
+ */
+export function withDefaultModel(cfg: PureConfig, provider: string, model: string): PureConfig {
+  const custom = customProviderFor(cfg.customProviders ?? [], provider);
+  const next: PureConfig = { ...cfg, provider: provider as PureConfig['provider'], model };
+  if (custom) {
+    next.customProviders = (cfg.customProviders ?? []).map(p =>
+      p.id === provider ? { ...p, defaultModel: model } : p);
+  } else {
+    next.providerModels = {
+      ...normalizeProviderModels(cfg.providerModels),
+      [provider]: uniqueModels([...(cfg.providerModels?.[provider] ?? []), model]),
+    };
+  }
+  return next;
+}
+
 /** Return the models shown for one provider, with built-ins retaining a usable fallback. */
 export function modelListForProvider(cfg: PureConfig, provider: string): string[] {
   const custom = customProviderFor(cfg.customProviders ?? [], provider);

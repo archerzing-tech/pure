@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { defaults, hasConfiguredKey, modelListForProvider, normalizeProviderModels, SCRAPLING_MCP_PRESET } from '../config';
+import { defaults, hasConfiguredKey, modelListForProvider, normalizeProviderModels, SCRAPLING_MCP_PRESET, withDefaultModel } from '../config';
 
 describe('provider model lists', () => {
   it('keeps a built-in provider usable with one default model', () => {
@@ -109,5 +109,41 @@ describe('hasConfiguredKey', () => {
   it('rejects an unconfigured built-in without any key', () => {
     const cfg = { ...defaults(), provider: 'glm', apiKey: '', hasApiKey: false };
     expect(hasConfiguredKey(cfg)).toBe(false);
+  });
+});
+
+describe('withDefaultModel (LLM page default-model bar)', () => {
+  it('derives the provider and pins the model into a built-in library', () => {
+    const cfg = { ...defaults(), provider: 'deepseek-openai', model: 'deepseek-v4-flash' };
+    const next = withDefaultModel(cfg, 'qwen', 'qwen3-coder-next');
+    expect(next.provider).toBe('qwen');
+    expect(next.model).toBe('qwen3-coder-next');
+    expect(next.providerModels.qwen).toContain('qwen3-coder-next');
+    // The previous provider's config survives untouched.
+    expect(next.providerModels['deepseek-openai']).toBeUndefined();
+  });
+
+  it('keeps an already-present model unique in the library', () => {
+    const cfg = {
+      ...defaults(),
+      provider: 'deepseek-openai',
+      providerModels: { qwen: ['qwen3-coder-next', 'qwen3-max'] },
+    };
+    const next = withDefaultModel(cfg, 'qwen', 'qwen3-coder-next');
+    expect(next.providerModels.qwen).toEqual(['qwen3-coder-next', 'qwen3-max']);
+  });
+
+  it('updates a custom provider entry without touching built-in libraries', () => {
+    const custom = {
+      id: 'local', name: 'Local', baseURL: 'http://localhost:11434/v1',
+      models: ['qwen2.5-coder:7b', 'llama3.1:8b'], defaultModel: 'qwen2.5-coder:7b',
+      apiKey: '', hasApiKey: false, local: true,
+    };
+    const cfg = { ...defaults(), customProviders: [custom] };
+    const next = withDefaultModel(cfg, 'local', 'llama3.1:8b');
+    expect(next.provider).toBe('local');
+    expect(next.model).toBe('llama3.1:8b');
+    expect(next.customProviders[0].defaultModel).toBe('llama3.1:8b');
+    expect(next.providerModels).toEqual({});
   });
 });
