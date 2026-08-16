@@ -11,7 +11,7 @@ import * as readline from 'node:readline';
 import { Harness } from './harness/Harness';
 import { MockLLMAdapter } from './adapter/mock/MockLLMAdapter';
 import { createDeepSeekAdapter, createQwenAdapter, createGLMAdapter, OpenAICompatibleAdapter } from './adapter/openai/OpenAICompatibleAdapter';
-import { DeepSeekAnthropicAdapter } from './adapter/deepseek/DeepSeekAnthropicAdapter';
+
 import { NodeToolAdapter, detectRuntimeVersions } from './adapter/node/NodeToolAdapter';
 import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
@@ -41,7 +41,7 @@ import { buildCliCapabilities, formatPromptBudgetDiagnostic, promptAssembler, re
 import { parseSkillMarkdown } from './shared/skillFiles';
 import { mergeTranscriptWithTurn } from './shared/conversation';
 import { formatCliIntentAssessment, resolveCliAutoApprove } from './cliIntent';
-import { customProviderFor, customProviderLabel, defaultModelFor, isCustomProviderId, promptBudgetForProvider, providerOverrideFor, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider, type ProviderOverride } from './shared/providers';
+import { baseURLFor, customProviderFor, customProviderLabel, defaultModelFor, isCustomProviderId, promptBudgetForProvider, providerOverrideFor, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider, type ProviderOverride } from './shared/providers';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
 import { buildTaskContract, discoverWorkspace, formatTaskContract, workspaceProfileSummary, type TaskContract, type WorkspaceProfile } from './shared/delivery';
@@ -614,14 +614,25 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
 function envKeyForProvider(provider: string): string | undefined {
   switch (provider) {
     case 'deepseek-openai':
-    case 'deepseek-anthropic':
       return process.env.DEEPSEEK_API_KEY;
     case 'qwen':
       return process.env.DASHSCOPE_API_KEY;
     case 'glm':
       return process.env.ZHIPU_API_KEY;
+    case 'moonshot':
+      return process.env.MOONSHOT_API_KEY;
+    case 'minimax':
+      return process.env.MINIMAX_API_KEY;
+    case 'openai':
+      return process.env.OPENAI_API_KEY;
+    case 'openrouter':
+      return process.env.OPENROUTER_API_KEY;
+    case 'nvidia':
+      return process.env.NVIDIA_API_KEY;
     default:
-      return process.env.DEEPSEEK_API_KEY ?? process.env.DASHSCOPE_API_KEY ?? process.env.ZHIPU_API_KEY;
+      return process.env.DEEPSEEK_API_KEY ?? process.env.DASHSCOPE_API_KEY ?? process.env.ZHIPU_API_KEY
+        ?? process.env.MOONSHOT_API_KEY ?? process.env.MINIMAX_API_KEY ?? process.env.OPENAI_API_KEY
+        ?? process.env.OPENROUTER_API_KEY ?? process.env.NVIDIA_API_KEY;
   }
 }
 
@@ -637,12 +648,17 @@ function autoDetectProvider(): CliArgs['provider'] {
   if (process.env.DEEPSEEK_API_KEY) return 'deepseek-openai';
   if (process.env.DASHSCOPE_API_KEY) return 'qwen';
   if (process.env.ZHIPU_API_KEY) return 'glm';
+  if (process.env.MOONSHOT_API_KEY) return 'moonshot';
+  if (process.env.MINIMAX_API_KEY) return 'minimax';
+  if (process.env.OPENAI_API_KEY) return 'openai';
+  if (process.env.OPENROUTER_API_KEY) return 'openrouter';
+  if (process.env.NVIDIA_API_KEY) return 'nvidia';
   return 'deepseek-openai';
 }
 
-/** True if any of the three provider API-key env vars is set. */
+/** True if any provider API-key env var is set. */
 function hasAnyApiKeyEnv(): boolean {
-  return !!(process.env.DEEPSEEK_API_KEY ?? process.env.DASHSCOPE_API_KEY ?? process.env.ZHIPU_API_KEY);
+  return !!(envKeyForProvider('default'));
 }
 
 // ── Adapter & tools factory ──
@@ -673,7 +689,7 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
     console.error(`${red('❌')} No API key configured for ${cyan(args.provider)}.`);
     console.error(`    ${dim('Run')} ${bold('pure config')} ${dim('to set up your provider and API key once for all sessions.')}`);
     console.error(`    ${dim('Or pass it inline:')} ${bold('pure --api-key <key>')}`);
-    console.error(`    ${dim('Or set an env var:')}  DEEPSEEK_API_KEY / DASHSCOPE_API_KEY / ZHIPU_API_KEY`);
+    console.error(`    ${dim('Or set an env var:')}  DEEPSEEK_API_KEY / DASHSCOPE_API_KEY / ZHIPU_API_KEY / MOONSHOT_API_KEY / MINIMAX_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / NVIDIA_API_KEY`);
     process.exit(1);
   }
 
@@ -684,8 +700,6 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
   const displayName = customProviderLabel(args.customProviders, args.provider, args.providerOverrides);
 
   switch (args.provider) {
-    case 'deepseek-anthropic':
-      return { adapter: new DeepSeekAnthropicAdapter({ apiKey: args.apiKey, model: args.model, baseURL: endpoint }), label: `${displayName} (${args.model})` };
     case 'qwen': {
       // A configured override (e.g. a DashScope compatible-mode endpoint or a
       // gateway) replaces the dedicated workspace deployment, so the
@@ -701,6 +715,16 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
       return { adapter: createGLMAdapter(args.apiKey, args.model, endpoint), label: `${displayName} (${args.model})` };
     case 'deepseek-openai':
       return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint), label: `${displayName} (${args.model})` };
+    // The remaining built-ins are plain OpenAI-compatible endpoints.
+    case 'moonshot':
+    case 'minimax':
+    case 'openai':
+    case 'openrouter':
+    case 'nvidia':
+      return {
+        adapter: new OpenAICompatibleAdapter({ baseURL: endpoint || baseURLFor(args.provider), apiKey: args.apiKey, model: args.model }),
+        label: `${displayName} (${args.model})`,
+      };
     default:
       return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint), label: `${displayName} (${args.model})` };
   }
@@ -1045,16 +1069,24 @@ async function createHarness(args: CliArgs) {
 
 const PROVIDER_LABELS: Record<Exclude<CliArgs['provider'], 'mock'>, string> = {
   'deepseek-openai': 'DeepSeek (OpenAI-compatible API)',
-  'deepseek-anthropic': 'DeepSeek (Anthropic-style API)',
   'qwen': 'Qwen / DashScope',
   'glm': 'GLM / Zhipu',
+  'moonshot': 'Moonshot Kimi',
+  'minimax': 'MiniMax',
+  'openai': 'OpenAI',
+  'openrouter': 'OpenRouter',
+  'nvidia': 'NVIDIA NIM',
 };
 
 const PROVIDER_ENV_HINT: Record<Exclude<CliArgs['provider'], 'mock'>, string> = {
   'deepseek-openai': 'DEEPSEEK_API_KEY',
-  'deepseek-anthropic': 'DEEPSEEK_API_KEY',
   'qwen': 'DASHSCOPE_API_KEY',
   'glm': 'ZHIPU_API_KEY',
+  'moonshot': 'MOONSHOT_API_KEY',
+  'minimax': 'MINIMAX_API_KEY',
+  'openai': 'OPENAI_API_KEY',
+  'openrouter': 'OPENROUTER_API_KEY',
+  'nvidia': 'NVIDIA_API_KEY',
 };
 
 async function runConfig(): Promise<void> {

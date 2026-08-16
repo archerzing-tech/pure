@@ -9933,3 +9933,351 @@ button svg,
   font-size: 12px;
   color: var(--text-secondary);
 }
+
+/* ═══ LLM page: default-model bar + provider card grid ═══ */
+.llm-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 14px;
+}
+
+.llm-kicker {
+  font: 800 10px var(--font-sans);
+  letter-spacing: .14em;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+
+/* ── Default-model bar (top strip) ── */
+.llm-default-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+}
+.llm-default-bar-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.llm-default-model-name {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llm-default-model-name-empty {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+.llm-default-model-provider {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llm-default-model-btn {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: 600 13px var(--font-sans);
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+.llm-default-model-btn:hover {
+  border-color: var(--accent);
+}
+.llm-default-model-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 18px;
+  width: min(360px, calc(100vw - 40px));
+  max-height: 380px;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-lg);
+  z-index: 40;
+}
+.llm-default-model-menu[hidden] { display: none; }
+.llm-default-menu-group + .llm-default-menu-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-light);
+}
+.llm-default-menu-group-title {
+  padding: 5px 10px 3px;
+  font: 800 10px var(--font-sans);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.llm-default-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: 500 13px var(--font-sans);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition);
+}
+.llm-default-menu-item:hover { background: var(--bg-hover); }
+.llm-default-menu-item.active { color: var(--accent); font-weight: 700; }
+.llm-default-menu-check {
+  flex: 0 0 16px;
+  font-size: 13px;
+  color: var(--accent);
+}
+.llm-default-menu-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Grid head ── */
+.llm-grid-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 20px 2px 10px;
+}
+.llm-grid-head-copy { min-width: 0; }
+.llm-grid-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+.llm-grid-hint {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.llm-grid-count {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: 700 12px var(--font-sans);
+}
+
+/* ── Provider cards (2-col grid) ── */
+.llm-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.llm-provider-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+  min-height: 108px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition), border-color var(--transition), box-shadow var(--transition);
+}
+.llm-provider-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.llm-provider-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.llm-provider-card-status {
+  font: 700 11px var(--font-sans);
+  color: var(--success);
+}
+.llm-provider-card-status-empty {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+.llm-provider-card-name {
+  font-size: 15px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llm-provider-card-meta {
+  font: 500 12px var(--font-mono);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llm-provider-add-card {
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border-style: dashed;
+  color: var(--text-secondary);
+  min-height: 108px;
+}
+.llm-provider-add-card:hover {
+  border-style: dashed;
+  color: var(--accent);
+  transform: none;
+}
+.llm-provider-add-plus {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+}
+.llm-provider-add-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.llm-provider-add-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+/* ── Expanded panel (full width) ── */
+.llm-provider-panel {
+  grid-column: 1 / -1;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+.llm-provider-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--accent-soft);
+}
+.llm-provider-panel-head-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.llm-provider-name-input {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: 700 15px var(--font-sans);
+  outline: none;
+  transition: border-color var(--transition), background var(--transition);
+}
+.llm-provider-name-input:focus {
+  border-color: var(--accent);
+  background: var(--bg-card);
+}
+.llm-provider-panel-close {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 15px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.llm-provider-panel-close:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.llm-provider-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+.llm-provider-panel-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px 16px;
+}
+.llm-provider-panel-spacer { flex: 1; }
+
+/* ── Per-model connectivity test button ── */
+.provider-model-chip-test {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition);
+}
+.provider-model-chip-test:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.provider-model-chip-test:disabled {
+  opacity: .55;
+  cursor: wait;
+}
+.provider-model-chip-test.llm-model-test-ok {
+  border-color: var(--success);
+  color: var(--success);
+}
+.provider-model-chip-test.llm-model-test-fail {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* ── Provider marks for the new built-in registry entries ── */
+.provider-mark-moonshot { background: #e7f0ff; color: #2f6fb5; }
+.provider-mark-minimax { background: #ffe9ef; color: #c2456a; }
+.provider-mark-openai { background: #e9f7ef; color: #2e8b5d; }
+.provider-mark-openrouter { background: #f0ecff; color: #6a4fc9; }
+.provider-mark-nvidia { background: #e9f5e6; color: #4c8a3d; }
+[data-theme="dark"] .provider-mark-moonshot { background: #16304d; color: #8fb8e8; }
+[data-theme="dark"] .provider-mark-minimax { background: #45212d; color: #f2a0b8; }
+[data-theme="dark"] .provider-mark-openai { background: #1d3b2c; color: #7fd6a4; }
+[data-theme="dark"] .provider-mark-openrouter { background: #2e2850; color: #b4a6f0; }
+[data-theme="dark"] .provider-mark-nvidia { background: #203b1d; color: #8fd67e; }

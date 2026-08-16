@@ -48,7 +48,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(11);
+    expect(cfg.configVersion).toBe(12);
   });
 
   it('moves a non-default global Base URL to the active built-in override', () => {
@@ -61,7 +61,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides.glm?.baseURL).toBe('https://my-gateway.example.com/v1');
-    expect(cfg.configVersion).toBe(11);
+    expect(cfg.configVersion).toBe(12);
   });
 
   it('never overwrites an existing override during migration', () => {
@@ -85,7 +85,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(11);
+    expect(cfg.configVersion).toBe(12);
   });
 
   it('persists the migrated config back to storage (idempotent re-read)', () => {
@@ -95,13 +95,13 @@ describe('config v10 migration — legacy global Base URL', () => {
     });
     loadConfig();
     const persisted = JSON.parse(mem[STORAGE_KEY]!) as PureConfig;
-    expect(persisted.configVersion).toBe(11);
+    expect(persisted.configVersion).toBe(12);
     expect(persisted.baseURL).toBe('');
     expect(persisted.providerOverrides.qwen?.baseURL).toBe('https://gateway.example.com/v1');
     // A second read must not re-migrate or change anything.
     invalidateConfigCache();
     const again = loadConfig()!;
-    expect(again.configVersion).toBe(11);
+    expect(again.configVersion).toBe(12);
     expect(again.baseURL).toBe('');
     expect(again.providerOverrides.qwen?.baseURL).toBe('https://gateway.example.com/v1');
   });
@@ -116,9 +116,10 @@ describe('config v10 migration — legacy global Base URL', () => {
     mem[STORAGE_KEY] = JSON.stringify(v11);
     const cfg = loadConfig()!;
     expect(cfg.providerOverrides.qwen?.baseURL).toBe('https://mirror.example.com/v1');
-    expect(cfg.configVersion).toBe(11);
-    // needsPersist stays false → storage byte-identical.
-    expect(JSON.parse(mem[STORAGE_KEY]!)).toEqual(v11);
+    expect(cfg.configVersion).toBe(12);
+    // No deepseek-anthropic residue → the v12 migration is lazy: storage
+    // stays byte-identical.
+    expect(mem[STORAGE_KEY]).toBe(JSON.stringify(v11));
   });
 
   it('chains older migrations (v1 → v11) without breaking the final state', () => {
@@ -130,7 +131,7 @@ describe('config v10 migration — legacy global Base URL', () => {
       toolBrowser: false, // pre-v2 decorative false must be restored
     });
     const cfg = loadConfig()!;
-    expect(cfg.configVersion).toBe(11);
+    expect(cfg.configVersion).toBe(12);
     expect(cfg.toolBrowser).toBe(true); // v2 restored the real gate
     expect(cfg.baseURL).toBe(''); // v10 scrubbed the global field
     expect(cfg.providerOverrides.glm?.baseURL).toBe('https://gateway.example.com/v1');
@@ -153,7 +154,7 @@ describe('config v11 migration — scrub registry-default override leftovers', (
     });
     const cfg = loadConfig()!;
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(11);
+    expect(cfg.configVersion).toBe(12);
   });
 
   it('removes a cross-provider default (DashScope URL sitting on DeepSeek)', () => {
@@ -199,5 +200,52 @@ describe('config v11 migration — scrub registry-default override leftovers', (
     });
     const cfg = loadConfig()!;
     expect(cfg.providerOverrides).toEqual({});
+  });
+});
+
+describe('config v12 migration — DeepSeek is ONE provider', () => {
+  it('repoints the active provider from the retired anthropic id', () => {
+    seedConfig({ provider: 'deepseek-anthropic', model: 'deepseek-v4-flash' });
+    const cfg = loadConfig()!;
+    expect(cfg.provider).toBe('deepseek-openai');
+    expect(cfg.model).toBe('deepseek-v4-flash');
+  });
+
+  it('merges the retired model library into deepseek-openai', () => {
+    seedConfig({
+      provider: 'deepseek-openai',
+      providerModels: {
+        'deepseek-anthropic': ['deepseek-reasoner', 'deepseek-chat'],
+        'deepseek-openai': ['deepseek-v4-flash'],
+      },
+    });
+    const cfg = loadConfig()!;
+    expect(cfg.providerModels['deepseek-anthropic']).toBeUndefined();
+    expect(cfg.providerModels['deepseek-openai']).toEqual(['deepseek-v4-flash', 'deepseek-reasoner', 'deepseek-chat']);
+  });
+
+  it('merges the retired override into deepseek-openai without clobbering existing fields', () => {
+    seedConfig({
+      provider: 'deepseek-anthropic',
+      providerOverrides: {
+        'deepseek-anthropic': { name: 'DeepSeek 网关', hasApiKey: true },
+        'deepseek-openai': { baseURL: 'https://gateway.example.com/v1' },
+      },
+    });
+    const cfg = loadConfig()!;
+    expect(cfg.providerOverrides['deepseek-anthropic']).toBeUndefined();
+    expect(cfg.providerOverrides['deepseek-openai']).toEqual({
+      baseURL: 'https://gateway.example.com/v1',
+      name: 'DeepSeek 网关',
+      hasApiKey: true,
+    });
+  });
+
+  it('stays put when the config is already at v12', () => {
+    const raw = JSON.stringify({ configVersion: 12, provider: 'glm', model: 'glm-5.2' });
+    mem[STORAGE_KEY] = raw;
+    const cfg = loadConfig()!;
+    expect(cfg.configVersion).toBe(12);
+    expect(mem[STORAGE_KEY]).toBe(raw); // byte-identical: no rewrite
   });
 });

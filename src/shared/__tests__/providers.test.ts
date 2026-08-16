@@ -5,6 +5,8 @@ import {
   OLLAMA_PRESET,
   OPENAI_PRESET,
   OPENROUTER_PRESET,
+  PROVIDERS,
+  baseURLFor,
   customBaseURL,
   customDefaultModel,
   customProviderFor,
@@ -13,6 +15,7 @@ import {
   imageGenEnabled,
   imageGenModelFor,
   isImageModelName,
+  isProviderId,
   promptBudgetForProvider,
   providerOverrideFor,
   resolvePromptBudget,
@@ -247,5 +250,27 @@ describe('text-to-image capability detection', () => {
   it('falls back to gpt-image-1 as the default image model', () => {
     const custom: CustomProvider = { ...OLLAMA, imageGen: true };
     expect(imageGenModelFor([custom], 'ollama', 'qwen2.5-coder:7b')).toBe('gpt-image-1');
+  });
+
+  it('treats the new built-in OpenAI entry as image-capable', () => {
+    expect(imageGenEnabled([], 'openai', 'gpt-5.2')).toBe(true);
+    expect(imageGenModelFor([], 'openai', 'gpt-5.2')).toBe('gpt-image-1');
+    // A user-supplied custom entry with the same id wins over the built-in.
+    const custom: CustomProvider = { ...OPENAI_PRESET, imageGenModel: 'dall-e-3' };
+    expect(imageGenModelFor([custom], 'openai', 'gpt-5.2')).toBe('dall-e-3');
+  });
+
+  it('ships the 8 built-in providers with the official endpoints and model libraries', () => {
+    expect(PROVIDERS).toHaveLength(8);
+    expect(baseURLFor('moonshot')).toBe('https://api.moonshot.cn/v1');
+    expect(baseURLFor('minimax')).toBe('https://api.minimaxi.com/v1');
+    expect(baseURLFor('openai')).toBe('https://api.openai.com/v1');
+    expect(baseURLFor('openrouter')).toBe('https://openrouter.ai/api/v1');
+    expect(baseURLFor('nvidia')).toBe('https://integrate.api.nvidia.com/v1');
+    expect(isProviderId('deepseek-anthropic')).toBe(false);
+    for (const def of PROVIDERS) {
+      expect(def.models.length).toBeGreaterThan(0);
+      expect(def.models[0]).toBe(def.defaultModel);
+    }
   });
 });
