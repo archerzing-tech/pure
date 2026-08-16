@@ -14,6 +14,7 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - 可新增供应商：点击「＋ 新增供应商」立即展开空白配置面板，保存后成为一张普通卡片
 - 内置供应商注册表扩展：Moonshot / MiniMax / OpenAI / OpenRouter / NVIDIA 转正为内置条目（含默认模型库），CLI 同步支持（`--provider` 新 id、各供应商独立 env key、`pure config` 列表）；OpenAI 内置默认开启文生图（gpt-image-1）
 - v12 配置迁移：DeepSeek 视为一家，退役 `deepseek-anthropic` id——旧配置的模型库 / 覆盖项自动合并到 `deepseek-openai`（惰性迁移，无残留的配置不重写）
+- Web 搜索 / 抓取 / 系统类工具（sys_info）的内容区统一为深一档的蓝色表面，与用户输入气泡同一蓝族（亮色 `#d6e4f6 → #c8daf0` 渐变 / 暗色 `#21486f → #1b3d61`，都比 `--bg-user` 深一档）；系统工具（Bash / 文件 / Git）终端面板同步蓝化（亮 `#cfdff4` / 暗 `#1e4168`），文字、字段名、链接、语法高亮按主题配套——暗色下修正 web 工具正文被亮色硬编码色覆盖导致对比度不足的问题
 
 ## v1.9.6
 
