@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { effectiveProxyUrl, normalizeProxyConfig, normalizeProxyList, shouldBypassProxy } from '../proxy';
+import { effectiveProxyUrl, normalizeProxyConfig, normalizeProxyList, proxyUrlWithAuth, shouldBypassProxy } from '../proxy';
 
 describe('proxy configuration', () => {
   it('normalizes comma and newline separated bypass entries', () => {
@@ -50,6 +50,44 @@ describe('proxy configuration', () => {
     config.toolsEnabled = false;
     expect(effectiveProxyUrl(config, 'llm')).toBe('socks5://127.0.0.1:1080');
     expect(effectiveProxyUrl(config, 'tools')).toBe('');
+  });
+
+  it('embeds percent-encoded proxy credentials into the effective URL', () => {
+    const config = normalizeProxyConfig({
+      enabled: true,
+      toolsEnabled: true,
+      url: 'http://127.0.0.1:7890',
+      username: 'bob',
+      password: 'p@ss',
+    });
+    expect(effectiveProxyUrl(config)).toBe('http://bob:p%40ss@127.0.0.1:7890/');
+  });
+
+  it('embeds credentials into SOCKS5 URLs too', () => {
+    expect(proxyUrlWithAuth('socks5://127.0.0.1:1080', 'bob', 'p@ss')).toBe('socks5://bob:p%40ss@127.0.0.1:1080');
+  });
+
+  it('ignores a password without a username and trims the username', () => {
+    expect(proxyUrlWithAuth('http://127.0.0.1:7890', '', 'secret')).toBe('http://127.0.0.1:7890');
+    expect(proxyUrlWithAuth('http://127.0.0.1:7890', '  bob  ', '')).toBe('http://bob@127.0.0.1:7890/');
+  });
+
+  it('omits the password when it is stored in Rust secrets (hasPassword)', () => {
+    const config = normalizeProxyConfig({
+      enabled: true,
+      toolsEnabled: true,
+      url: 'http://127.0.0.1:7890',
+      username: 'bob',
+      hasPassword: true,
+    });
+    // The URL carries only the username; the backend injects the password.
+    expect(effectiveProxyUrl(config)).toBe('http://bob@127.0.0.1:7890/');
+  });
+
+  it('keeps hasPassword false by default and normalizes it strictly', () => {
+    expect(normalizeProxyConfig({}).hasPassword).toBe(false);
+    expect(normalizeProxyConfig({ hasPassword: true }).hasPassword).toBe(true);
+    expect(normalizeProxyConfig({ hasPassword: 'yes' as unknown as boolean }).hasPassword).toBe(false);
   });
 
   it('bypasses LLM traffic by provider or model name', () => {

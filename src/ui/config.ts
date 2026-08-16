@@ -197,7 +197,7 @@ export function defaults(): PureConfig {
     providerModels: {},
     providerModelNames: {},
     providerOverrides: {},
-    proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', bypassProviders: [], bypassModels: [] }),
+    proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', username: '', password: '', hasPassword: false, bypassProviders: [], bypassModels: [] }),
     streamingRender: true,
     taskMode: 'auto',
     configVersion: 12,
@@ -312,6 +312,18 @@ export function hasConfiguredKey(cfg: PureConfig | null): cfg is PureConfig {
   const override = providerOverrideFor(cfg.providerOverrides, cfg.provider);
   if (override?.apiKey || override?.hasApiKey) return true;
   return false;
+}
+
+/**
+ * True when one provider is usable from the model dropdown: a keyed built-in
+ * or custom provider, or a keyless local endpoint (Ollama / LM Studio).
+ * Mirrors the Settings → LLM card status (已配置 vs 未配置).
+ */
+export function providerHasKey(cfg: PureConfig, id: string): boolean {
+  const custom = customProviderFor(cfg.customProviders ?? [], id);
+  if (custom) return !!custom.apiKey || custom.hasApiKey === true || !!custom.local;
+  const override = providerOverrideFor(cfg.providerOverrides, id);
+  return !!cfg.apiKey || cfg.hasApiKey === true || !!override?.apiKey || override?.hasApiKey === true;
 }
 
 // Cached parse of the config: loadConfig() JSON.parses localStorage and is
@@ -519,6 +531,14 @@ export function loadConfig(): PureConfig | null {
         cfg.apiKey = '';
         needsPersist = true;
       }
+      if (isTauriRuntime() && cfg.proxy?.password) {
+        // Lazy migration: a proxy password previously persisted to
+        // localStorage moves into Rust secrets (slot `proxy.password`), and
+        // the plaintext is scrubbed from the saved config.
+        void syncSecretToRust(PROXY_PASSWORD_SECRET_KEY, cfg.proxy.password);
+        cfg.proxy = { ...cfg.proxy, hasPassword: true, password: '' };
+        needsPersist = true;
+      }
       if (needsPersist) {
         try {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
@@ -542,6 +562,17 @@ export async function storeSecretInRust(value: string): Promise<void> {
 
 export async function revokeSecretFromRust(): Promise<void> {
   await deleteSecretFromRust(SECRET_KEY);
+}
+
+/** Rust secrets slot holding the proxy password (desktop only). */
+export const PROXY_PASSWORD_SECRET_KEY = 'proxy.password';
+
+export async function storeProxyPasswordInRust(value: string): Promise<void> {
+  await syncSecretToRust(PROXY_PASSWORD_SECRET_KEY, value);
+}
+
+export async function revokeProxyPasswordFromRust(): Promise<void> {
+  await deleteSecretFromRust(PROXY_PASSWORD_SECRET_KEY);
 }
 
 /** Rust secrets key under which a provider's own API key is stored

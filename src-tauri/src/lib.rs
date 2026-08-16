@@ -12,10 +12,14 @@ use std::time::Instant;
 fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().timeout(timeout);
     if let Some(url) = proxy_url.map(str::trim).filter(|url| !url.is_empty()) {
-        if !valid_proxy_url(url) {
+        // The WebView passes the proxy URL with the username embedded but the
+        // password resolved here from ~/.pure/secrets.json (never via
+        // localStorage). resolve_proxy_auth fills the missing password in.
+        let url = resolve_proxy_auth(url);
+        if !valid_proxy_url(&url) {
             return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
         }
-        let proxy = reqwest::Proxy::all(url).map_err(|e| format!("proxy: {}", e))?;
+        let proxy = reqwest::Proxy::all(&url).map_err(|e| format!("proxy: {}", e))?;
         builder = builder.proxy(proxy);
     }
     builder.build().map_err(|e| format!("client: {}", e))
@@ -24,6 +28,48 @@ fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> R
 fn valid_proxy_url(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
     ["http://", "https://", "socks5://", "socks5h://"].iter().any(|prefix| lower.starts_with(prefix))
+}
+
+/// Rust secret slot holding the proxy password (desktop only). The username
+/// travels with the proxy URL from the WebView; the password never does — it
+/// is stored in ~/.pure/secrets.json and injected here just before use.
+const PROXY_PASSWORD_SECRET_KEY: &str = "proxy.password";
+
+/// Fill the missing password into a proxy URL whose username is already
+/// embedded (`scheme://user@host:port` → `scheme://user:pass@host:port`).
+/// Leaves the URL untouched when it already carries a password, has no
+/// username, or no password is stored. reqwest percent-decodes the embedded
+/// credentials, so reserved characters round-trip correctly.
+fn resolve_proxy_auth(proxy_url: &str) -> String {
+    let trimmed = proxy_url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let secrets = load_secrets().unwrap_or_else(|_| serde_json::json!({}));
+    let password = secrets
+        .get(PROXY_PASSWORD_SECRET_KEY)
+        .and_then(|v| v.as_str());
+    inject_proxy_password(trimmed, password)
+}
+
+/// Pure URL edit: fill a missing password into a username-bearing proxy URL.
+/// Split from resolve_proxy_auth so it is unit-testable without touching the
+/// on-disk secrets file.
+fn inject_proxy_password(proxy_url: &str, password: Option<&str>) -> String {
+    let mut url = match reqwest::Url::parse(proxy_url) {
+        Ok(u) => u,
+        Err(_) => return proxy_url.to_string(),
+    };
+    if url.password().is_some() || url.username().is_empty() {
+        return proxy_url.to_string();
+    }
+    let Some(password) = password.filter(|p| !p.is_empty()) else {
+        return proxy_url.to_string();
+    };
+    if url.set_password(Some(password)).is_ok() {
+        return url.to_string();
+    }
+    proxy_url.to_string()
 }
 
 // ── LLM connection probe (Settings → LLM → 测试连接) ──
@@ -1071,12 +1117,13 @@ async fn execute_command(workspace: String, command: String, proxy_url: Option<S
         cmd.arg(&command)
             .current_dir(&workspace);
         if let Some(url) = proxy_url.as_deref().filter(|url| !url.trim().is_empty()) {
-            if !valid_proxy_url(url) {
+            let resolved = resolve_proxy_auth(url);
+            if !valid_proxy_url(&resolved) {
                 return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
             }
-            cmd.env("HTTP_PROXY", url)
-                .env("HTTPS_PROXY", url)
-                .env("ALL_PROXY", url)
+            cmd.env("HTTP_PROXY", &resolved)
+                .env("HTTPS_PROXY", &resolved)
+                .env("ALL_PROXY", &resolved)
                 .env("NO_PROXY", "localhost,127.0.0.1,::1");
         }
         cmd.output()
@@ -1135,12 +1182,13 @@ fn spawn_shell_command(workspace: &str, command: &str, proxy_url: Option<&str>) 
         cmd.process_group(0);
     }
     if let Some(url) = proxy_url.filter(|url| !url.trim().is_empty()) {
-        if !valid_proxy_url(url) {
+        let resolved = resolve_proxy_auth(url);
+        if !valid_proxy_url(&resolved) {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "proxy URL must start with http://, https://, socks5://, or socks5h://"));
         }
-        cmd.env("HTTP_PROXY", url)
-            .env("HTTPS_PROXY", url)
-            .env("ALL_PROXY", url)
+        cmd.env("HTTP_PROXY", &resolved)
+            .env("HTTPS_PROXY", &resolved)
+            .env("ALL_PROXY", &resolved)
             .env("NO_PROXY", "localhost,127.0.0.1,::1");
     }
     cmd.spawn()
@@ -5314,6 +5362,7 @@ async fn spawn_mcp(
     command: String,
     args: Vec<String>,
     env: Option<BTreeMap<String, String>>,
+    proxy_url: Option<String>,
 ) -> Result<String, String> {
     let key = mcp_key(&session_id, &name);
 
@@ -5330,6 +5379,17 @@ async fn spawn_mcp(
     let configured_path = env.as_ref().and_then(|e| e.get("PATH")).cloned();
     let base_path = configured_path.or_else(|| std::env::var("PATH").ok());
     cmd.env("PATH", augmented_mcp_path(base_path.as_deref()));
+    // The proxy password lives in Rust secrets and is resolved here, so it
+    // never travels through the WebView on the spawn path.
+    if let Some(url) = proxy_url.as_deref().filter(|url| !url.trim().is_empty()) {
+        let resolved = resolve_proxy_auth(url);
+        if valid_proxy_url(&resolved) {
+            cmd.env("HTTP_PROXY", &resolved)
+                .env("HTTPS_PROXY", &resolved)
+                .env("ALL_PROXY", &resolved)
+                .env("NO_PROXY", "localhost,127.0.0.1,::1");
+        }
+    }
 
     let mut child = cmd
         .spawn()
@@ -6080,6 +6140,38 @@ mod proxy_tests {
         assert!(valid_proxy_url("socks5://127.0.0.1:1080"));
         assert!(valid_proxy_url("socks5h://127.0.0.1:1080"));
         assert!(!valid_proxy_url("ftp://127.0.0.1:21"));
+    }
+
+    #[test]
+    fn injects_the_stored_proxy_password_after_the_username() {
+        assert_eq!(
+            inject_proxy_password("http://bob@127.0.0.1:7890", Some("p@ss")),
+            "http://bob:p%40ss@127.0.0.1:7890/"
+        );
+        assert_eq!(
+            inject_proxy_password("socks5://bob@127.0.0.1:1080", Some("secret")),
+            "socks5://bob:secret@127.0.0.1:1080"
+        );
+    }
+
+    #[test]
+    fn leaves_the_proxy_url_untouched_without_username_or_password() {
+        assert_eq!(
+            inject_proxy_password("http://127.0.0.1:7890", Some("secret")),
+            "http://127.0.0.1:7890"
+        );
+        assert_eq!(
+            inject_proxy_password("http://bob@127.0.0.1:7890", None),
+            "http://bob@127.0.0.1:7890"
+        );
+        assert_eq!(
+            inject_proxy_password("http://bob@127.0.0.1:7890", Some("")),
+            "http://bob@127.0.0.1:7890"
+        );
+        assert_eq!(
+            inject_proxy_password("http://bob:old@127.0.0.1:7890", Some("new")),
+            "http://bob:old@127.0.0.1:7890"
+        );
     }
 
     #[test]
@@ -7475,26 +7567,41 @@ fn request_system_permission(app: tauri::AppHandle, kind: String) -> Result<Stri
                         let mgr: Retained<CLLocationManager> =
                             msg_send![CLLocationManager::class(), new];
                         mgr.requestWhenInUseAuthorization();
+                        // requestWhenInUseAuthorization has no completion
+                        // handler, and Apple requires a strong reference to
+                        // the manager until the user answers the prompt.
+                        // Leaking keeps it alive for the process lifetime;
+                        // this is a one-shot settings action, so it is bounded.
+                        std::mem::forget(mgr);
                     }
                     let _ = tx.send(());
                 })
                 .map_err(|e| e.to_string())?;
                 let _ = rx.recv();
-                Ok(macos_location_status())
+                // No completion callback exists for location, so poll the
+                // class-level status until the user decides (or 60s elapses).
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                loop {
+                    let status = macos_location_status();
+                    if status != "not_determined" || std::time::Instant::now() >= deadline {
+                        return Ok(status);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
             }
             "camera" | "microphone" => {
+                let media = macos_av_media_type(&kind)?;
                 let (tx, rx) = std::sync::mpsc::channel::<()>();
                 let block = RcBlock::new(move |_granted: Bool| {
                     let _ = tx.send(());
                 });
                 unsafe {
-                    let media = macos_av_media_type(&kind)?;
                     AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &block);
                 }
                 // The framework retains the block; waits until the user
                 // answers the system dialog, then reports the final status.
                 let _ = rx.recv();
-                Ok(macos_av_status(macos_av_media_type(&kind)?))
+                Ok(macos_av_status(media))
             }
             other => Err(format!("unknown permission kind: {other}")),
         }

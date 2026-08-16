@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { defaults, hasConfiguredKey, modelListForProvider, normalizeProviderModels, SCRAPLING_MCP_PRESET, withDefaultModel } from '../config';
+import { defaults, hasConfiguredKey, modelListForProvider, normalizeProviderModels, providerHasKey, SCRAPLING_MCP_PRESET, withDefaultModel } from '../config';
 
 describe('provider model lists', () => {
   it('keeps a built-in provider usable with one default model', () => {
@@ -109,6 +109,37 @@ describe('hasConfiguredKey', () => {
   it('rejects an unconfigured built-in without any key', () => {
     const cfg = { ...defaults(), provider: 'glm', apiKey: '', hasApiKey: false };
     expect(hasConfiguredKey(cfg)).toBe(false);
+  });
+});
+
+describe('providerHasKey', () => {
+  const customProvider = (over: Partial<{ apiKey: string; hasApiKey: boolean; local: boolean }> = {}) => ({
+    id: 'local', name: 'Local', baseURL: 'http://localhost:11434/v1',
+    models: ['qwen2.5-coder:7b'], defaultModel: 'qwen2.5-coder:7b',
+    apiKey: '', hasApiKey: false, ...over,
+  });
+
+  it('accepts a built-in with the legacy global key', () => {
+    expect(providerHasKey({ ...defaults(), apiKey: 'sk-x' }, 'deepseek-openai')).toBe(true);
+    expect(providerHasKey({ ...defaults(), hasApiKey: true }, 'qwen')).toBe(true);
+  });
+
+  it('accepts a built-in with a per-provider override key', () => {
+    const cfg = { ...defaults(), providerOverrides: { qwen: { hasApiKey: true } } };
+    expect(providerHasKey(cfg, 'qwen')).toBe(true);
+  });
+
+  it('rejects a built-in without any key', () => {
+    expect(providerHasKey(defaults(), 'glm')).toBe(false);
+  });
+
+  it('accepts a keyed custom provider and a keyless local endpoint', () => {
+    expect(providerHasKey({ ...defaults(), customProviders: [customProvider({ apiKey: 'k' })] }, 'local')).toBe(true);
+    expect(providerHasKey({ ...defaults(), customProviders: [customProvider({ local: true })] }, 'local')).toBe(true);
+  });
+
+  it('rejects a key-required custom provider without a key', () => {
+    expect(providerHasKey({ ...defaults(), customProviders: [customProvider()] }, 'local')).toBe(false);
   });
 });
 
