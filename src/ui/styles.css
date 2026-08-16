@@ -6715,7 +6715,7 @@ button svg,
   overflow: hidden;
   border: 1px solid #c3d6ea;
   border-radius: 10px;
-  background: #e2edf9;
+  background: transparent;
 }
 .tool-row.web-tool .tool-row-summary,
 .tool-row.web-tool .tool-row-summary:hover {
@@ -6743,7 +6743,7 @@ button svg,
 }
 [data-theme="dark"] .tool-row.web-tool {
   border-color: #2a4d74;
-  background: #1a3b5c;
+  background: transparent;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary,
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover,
@@ -6826,14 +6826,12 @@ button svg,
   border-radius: 0;
   padding: 10px 12px 12px 36px;
 }
-.tool-row.web-tool .tool-row-summary {
-  background: #e2edf9;
-  border: 1px solid #c3d6ea;
-  border-radius: 8px;
-  padding: 7px 12px;
-}
+.tool-row.web-tool .tool-row-summary,
 .tool-row.web-tool .tool-row-summary:hover {
-  background: #d7e5f5;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 8px 12px;
 }
 .tool-row.web-tool .tool-row-section + .tool-row-section,
 .tool-row.sys-info .tool-row-section + .tool-row-section {
@@ -6878,12 +6876,9 @@ button svg,
 [data-theme="dark"] .tool-row.sys-info .fetch-preview {
   color: #d8e8fb;
 }
-[data-theme="dark"] .tool-row.web-tool .tool-row-summary {
-  background: #1a3b5c;
-  border-color: #2a4d74;
-}
+[data-theme="dark"] .tool-row.web-tool .tool-row-summary,
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover {
-  background: #204a70;
+  background: transparent;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-section + .tool-row-section,
 [data-theme="dark"] .tool-row.sys-info .tool-row-section + .tool-row-section {
@@ -6891,6 +6886,8 @@ button svg,
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-section-label,
 [data-theme="dark"] .tool-row.web-tool .tool-row-field-key,
+[data-theme="dark"] .tool-row.sys-info .tool-row-section-label,
+[data-theme="dark"] .tool-row.sys-info .tool-row-field-key,
 [data-theme="dark"] .tool-row.web-tool .search-result-snippet {
   color: #9db4cf;
 }
@@ -7334,7 +7331,7 @@ button svg,
 .tool-row.web-tool {
   border-color: #c3d6ea;
   border-radius: 10px;
-  background: #e2edf9;
+  background: transparent;
 }
 .tool-row.web-tool .tool-row-summary,
 .tool-row.web-tool .tool-row-summary:hover,
@@ -7351,7 +7348,7 @@ button svg,
 }
 [data-theme="dark"] .tool-row.web-tool {
   border-color: #2a4d74;
-  background: #1a3b5c;
+  background: transparent;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary,
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary:hover {

@@ -18,6 +18,8 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - **失败执行即刻降级、成功经验优先**：① 同会话——每次工具调用失败后，引擎在下一次思考前显式注入降级指令（「此调用已失败：禁止重复完全相同的调用，改用不同参数/工具/策略，优先本会话已证明可行的路径」），与失败策略的重试提示互补；② 跨会话——被放弃的**单一**失败调用（未重复、未恢复）也会在会话结束时沉淀为 `error_pattern`（「Failed during execution … Do not make this exact call again」），不再只记重复失败/致命失败；瞬态故障豁免保留（同一工具后来成功过则不记）；③ **检索锚点**——四类失败教训统一携带 `Symptom: <原始请求>` 前缀（错误文本本身与用户请求往往零关键词重叠，不加锚点新会话检索不到）；④ 成功经验优先——`successful_pattern` 教训从记忆库检索后以更高优先级注入 `<session_memory>`，排在错误教训之前（「Proven successful approaches (prefer these when the situation matches)」，错误清单改为 avoid-list 措辞），预算紧张时成功经验先于错误教训被保留；`<session_memory>` 系统提示同步更新指导文案
 - Web 搜索 / 抓取 / 系统类工具内容区改为**纯色无边框**表面：亮色 `#c8daf0` / 暗色 `#1b3d61`（去掉渐变与 body 内框线，外层工具卡 frame 边框保留）
 - 工具输出中的错误 / 告警文字改为**大红** `#ff4d4f`（stderr 流式行、error / warning token 高亮，两主题一致，在任何工具表面都醒目）
+- 修复暗色模式下 System Info 工具正文难读：section 标签与字段名补上 `#9db4cf` 暗色覆盖（此前漏掉，落在 `--text-tertiary` 灰蓝上几乎看不见）；字段值保持 `#d8e8fb`
+- 所有工具 header（summary）改为**透明**（亮/暗一致）：去掉 web 工具外层 frame 的底色（`#e2edf9` / `#1a3b5c` 之前从透明 header 透出，看起来像有色头条），header 现在直接落在聊天背景上，仅内容区保留蓝色表面与卡片边框
 
 ## v1.9.6
 
