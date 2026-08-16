@@ -48,7 +48,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(10);
+    expect(cfg.configVersion).toBe(11);
   });
 
   it('moves a non-default global Base URL to the active built-in override', () => {
@@ -61,7 +61,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides.glm?.baseURL).toBe('https://my-gateway.example.com/v1');
-    expect(cfg.configVersion).toBe(10);
+    expect(cfg.configVersion).toBe(11);
   });
 
   it('never overwrites an existing override during migration', () => {
@@ -85,7 +85,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(10);
+    expect(cfg.configVersion).toBe(11);
   });
 
   it('persists the migrated config back to storage (idempotent re-read)', () => {
@@ -95,33 +95,33 @@ describe('config v10 migration — legacy global Base URL', () => {
     });
     loadConfig();
     const persisted = JSON.parse(mem[STORAGE_KEY]!) as PureConfig;
-    expect(persisted.configVersion).toBe(10);
+    expect(persisted.configVersion).toBe(11);
     expect(persisted.baseURL).toBe('');
     expect(persisted.providerOverrides.qwen?.baseURL).toBe('https://gateway.example.com/v1');
     // A second read must not re-migrate or change anything.
     invalidateConfigCache();
     const again = loadConfig()!;
-    expect(again.configVersion).toBe(10);
+    expect(again.configVersion).toBe(11);
     expect(again.baseURL).toBe('');
     expect(again.providerOverrides.qwen?.baseURL).toBe('https://gateway.example.com/v1');
   });
 
-  it('leaves an already-migrated v10 config untouched (no rewrite)', () => {
-    const v10 = {
-      configVersion: 10,
+  it('leaves an already-migrated v11 config untouched (no rewrite)', () => {
+    const v11 = {
+      configVersion: 11,
       provider: 'qwen',
       baseURL: '',
       providerOverrides: { qwen: { baseURL: 'https://mirror.example.com/v1' } },
     };
-    mem[STORAGE_KEY] = JSON.stringify(v10);
+    mem[STORAGE_KEY] = JSON.stringify(v11);
     const cfg = loadConfig()!;
     expect(cfg.providerOverrides.qwen?.baseURL).toBe('https://mirror.example.com/v1');
-    expect(cfg.configVersion).toBe(10);
+    expect(cfg.configVersion).toBe(11);
     // needsPersist stays false → storage byte-identical.
-    expect(JSON.parse(mem[STORAGE_KEY]!)).toEqual(v10);
+    expect(JSON.parse(mem[STORAGE_KEY]!)).toEqual(v11);
   });
 
-  it('chains older migrations (v1 → v10) without breaking the final state', () => {
+  it('chains older migrations (v1 → v11) without breaking the final state', () => {
     mem[STORAGE_KEY] = JSON.stringify({
       provider: 'glm',
       baseURL: 'https://gateway.example.com/v1',
@@ -130,7 +130,7 @@ describe('config v10 migration — legacy global Base URL', () => {
       toolBrowser: false, // pre-v2 decorative false must be restored
     });
     const cfg = loadConfig()!;
-    expect(cfg.configVersion).toBe(10);
+    expect(cfg.configVersion).toBe(11);
     expect(cfg.toolBrowser).toBe(true); // v2 restored the real gate
     expect(cfg.baseURL).toBe(''); // v10 scrubbed the global field
     expect(cfg.providerOverrides.glm?.baseURL).toBe('https://gateway.example.com/v1');
@@ -138,5 +138,66 @@ describe('config v10 migration — legacy global Base URL', () => {
     expect(cfg.hubSkills).toEqual([]); // v4
     expect(cfg.customProviders).toEqual([]); // v5
     expect(cfg.mcpExcludedPrefixes).toEqual([]); // v9
+  });
+});
+
+describe('config v11 migration — scrub registry-default override leftovers', () => {
+  it('removes a trailing-slash copy of a registry default from its own provider', () => {
+    // e.g. the v10 migration could have carried 'https://dashscope.…/v1/'
+    // (exact string differs from the registry → migrated) — v11 normalizes
+    // and recognizes it as the default again, so the card shows the clean
+    // official endpoint.
+    seedConfig({
+      provider: 'qwen',
+      providerOverrides: { qwen: { baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1/' } },
+    });
+    const cfg = loadConfig()!;
+    expect(cfg.providerOverrides).toEqual({});
+    expect(cfg.configVersion).toBe(11);
+  });
+
+  it('removes a cross-provider default (DashScope URL sitting on DeepSeek)', () => {
+    // The hijack-era contamination: a DashScope URL stored as DeepSeek's
+    // override. It equals a registry default → scrub, restoring DeepSeek's
+    // official endpoint.
+    seedConfig({
+      provider: 'deepseek-openai',
+      providerOverrides: {
+        'deepseek-openai': { baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+      },
+    });
+    const cfg = loadConfig()!;
+    expect(cfg.providerOverrides).toEqual({});
+  });
+
+  it('keeps a genuine custom endpoint override', () => {
+    seedConfig({
+      provider: 'glm',
+      providerOverrides: { glm: { baseURL: 'https://my-gateway.example.com/v1' } },
+    });
+    const cfg = loadConfig()!;
+    expect(cfg.providerOverrides.glm?.baseURL).toBe('https://my-gateway.example.com/v1');
+  });
+
+  it('drops only the default endpoint, keeping sibling override fields', () => {
+    seedConfig({
+      provider: 'glm',
+      providerOverrides: {
+        glm: { name: 'GLM 网关', baseURL: 'https://open.bigmodel.cn/api/paas/v4', hasApiKey: true },
+      },
+    });
+    const cfg = loadConfig()!;
+    expect(cfg.providerOverrides.glm?.baseURL).toBeUndefined();
+    expect(cfg.providerOverrides.glm?.name).toBe('GLM 网关');
+    expect(cfg.providerOverrides.glm?.hasApiKey).toBe(true);
+  });
+
+  it('case/whitespace variants of a default are scrubbed too', () => {
+    seedConfig({
+      provider: 'glm',
+      providerOverrides: { glm: { baseURL: '  HTTPS://OPEN.BIGMODEL.CN/API/PAAS/V4/  ' } },
+    });
+    const cfg = loadConfig()!;
+    expect(cfg.providerOverrides).toEqual({});
   });
 });

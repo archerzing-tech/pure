@@ -2018,7 +2018,7 @@ export class SettingsPanel {
     if (idx < 0) return list;
     const entry = { ...list[idx] };
     const name = (document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null)?.value.trim();
-    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim();
+    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim().replace(/\/+$/, '');
     const model = (document.getElementById('cfg-model') as HTMLInputElement).value.trim();
     if (name) entry.name = name;
     if (baseURL) entry.baseURL = baseURL;
@@ -2053,7 +2053,7 @@ export class SettingsPanel {
       return out;
     }
     const name = (document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null)?.value.trim() || '';
-    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim();
+    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement).value.trim().replace(/\/+$/, '');
     const next = { ...(prev[editing] ?? {}) };
     if (name) next.name = name; else delete next.name;
     if (baseURL) next.baseURL = baseURL; else delete next.baseURL;
