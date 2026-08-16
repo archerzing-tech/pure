@@ -136,6 +136,8 @@ export interface CustomProvider {
   baseURL: string;
   /** Suggested models, comma-separated in the settings form. */
   models: string[];
+  /** Optional display names per model id (model id → human label). */
+  modelNames?: Record<string, string>;
   /** Default model used when config.model is empty. */
   defaultModel: string;
   /** API key when the endpoint requires one; empty = keyless (local). */

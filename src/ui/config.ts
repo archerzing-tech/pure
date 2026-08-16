@@ -24,6 +24,8 @@ export interface PureConfig {
   customProviders: CustomProvider[];
   /** Model lists for built-in providers; custom-provider lists stay on their provider entry for compatibility. */
   providerModels: Record<string, string[]>;
+  /** Optional display names per built-in model (provider id → model id → human label). */
+  providerModelNames: Record<string, Record<string, string>>;
   /**
    * Per-provider overrides for the built-in providers (config v10): a custom
    * display name, endpoint (proxy / mirror) and per-provider API key, edited
@@ -193,6 +195,7 @@ export function defaults(): PureConfig {
     mcpExcludedPrefixes: [],
     customProviders: [],
     providerModels: {},
+    providerModelNames: {},
     providerOverrides: {},
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', bypassProviders: [], bypassModels: [] }),
     streamingRender: true,

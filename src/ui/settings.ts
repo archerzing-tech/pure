@@ -424,23 +424,16 @@ export class SettingsPanel {
     llmGrid?.addEventListener('click', (event) => {
       const target = event.target as HTMLElement;
       // Expanded-panel actions.
-      const testBtn = target.closest<HTMLElement>('[data-test-model]');
-      if (testBtn) {
-        void this.testModelConnection(testBtn.dataset.testModel || '');
+      if (target.closest('#cfg-test-conn-btn')) {
+        void this.testProviderConnection();
         return;
       }
-      const removeChip = target.closest<HTMLElement>('.provider-model-chip-remove');
-      if (removeChip) {
+      const removeRow = target.closest<HTMLElement>('[data-remove-row]');
+      if (removeRow) {
         event.stopPropagation();
-        this.removeModel(removeChip.getAttribute('data-remove') || '');
+        this.removeModelRow(parseInt(removeRow.dataset.removeRow || '0', 10));
         return;
       }
-      const chip = target.closest<HTMLElement>('.provider-model-chip');
-      if (chip) {
-        this.setDefaultModel(chip.getAttribute('data-model') || '');
-        return;
-      }
-      if (target.closest('#cfg-add-model-btn')) { this.addModel(); return; }
       if (target.closest('#cfg-clear-models-btn')) { this.clearModels(); return; }
       if (target.closest('#cfg-fetch-models-btn')) { void this.fetchProviderModels(); return; }
       if (target.closest('#provider-delete-btn')) { this.removeCustomProvider(this.editingProvider || ''); return; }
@@ -465,12 +458,12 @@ export class SettingsPanel {
       if (card?.dataset.provider) this.toggleProviderPanel(card.dataset.provider);
     });
 
-    // Enter in the model input commits the typed model.
+    // Enter in a model row commits the typed id / name (add or rename).
     llmGrid?.addEventListener('keydown', (event) => {
       const input = event.target as HTMLInputElement;
-      if (input?.id === 'cfg-model-add' && event.key === 'Enter') {
+      if (input && (input.classList.contains('llm-model-row-id') || input.classList.contains('llm-model-row-name')) && event.key === 'Enter') {
         event.preventDefault();
-        this.addModel();
+        this.commitModelRows();
       }
     });
 
@@ -487,10 +480,17 @@ export class SettingsPanel {
       if (el.id === 'cfg-custom-name-edit' || el.id === 'cfg-baseurl' || el.id === 'cfg-imagegen-model') {
         this.debouncedAutoSave();
       }
+      // Typing in a model row: debounce, then re-render UNLESS the caret is
+      // still inside the list (the autoSave grid re-render would kill focus).
+      if (el.classList.contains('llm-model-row-id') || el.classList.contains('llm-model-row-name')) {
+        this.debouncedAutoSave();
+      }
     });
     llmGrid?.addEventListener('change', (event) => {
       const el = event.target as HTMLInputElement;
       if (el.id === 'cfg-imagegen') this.autoSave();
+      // Default-model radio inside a row → commit the selection.
+      if (el.classList.contains('llm-model-row-radio')) this.commitModelRows();
     });
 
     // Default-model bar: open the grouped model menu, pick a model, close on
@@ -840,43 +840,46 @@ export class SettingsPanel {
         <span class="provider-card-mark ${markClass}">${escapeHtml(mark)}</span>
         <div class="llm-provider-panel-head-copy">
           <span class="llm-kicker">${custom ? t('llm.custom.formTitle') : t('llm.connection.settings')}</span>
-          <input id="cfg-custom-name-edit" class="setting-input llm-provider-name-input" type="text" value="${escapeHtml(label)}" placeholder="${escapeHtml(namePlaceholder)}" aria-label="${t('llm.panel.name')}" />
         </div>
         <button type="button" class="llm-provider-panel-close" data-close-panel aria-label="${t('llm.panel.collapse')}" title="${t('llm.panel.collapse')}">✕</button>
       </div>
       <div class="llm-provider-panel-body">
-        <div class="setting-row">
-          <div class="setting-info"><span class="setting-label" data-i18n="llm.apiKey">API Key</span><span class="setting-hint" data-i18n="llm.apiKey.hint">您的 API 密钥</span></div>
-          <div class="setting-input-group">
-            <input id="cfg-apikey" class="setting-input" type="password" placeholder="${escapeHtml(keyPlaceholder)}" autocomplete="off" />
+        <div class="llm-form-row">
+          <label class="llm-form-label" for="cfg-custom-name-edit" data-i18n="llm.panel.name">供应商名称</label>
+          <input id="cfg-custom-name-edit" class="setting-input llm-form-input" type="text" value="${escapeHtml(label)}" placeholder="${escapeHtml(namePlaceholder)}" aria-label="${t('llm.panel.name')}" />
+        </div>
+        <div class="llm-form-row">
+          <label class="llm-form-label" for="cfg-baseurl" data-i18n="llm.baseURL">Base URL</label>
+          <input id="cfg-baseurl" class="setting-input llm-form-input" type="text" value="${escapeHtml(baseURL)}" placeholder="${escapeHtml(urlPlaceholder)}" autocomplete="off" />
+        </div>
+        <div class="llm-form-row">
+          <label class="llm-form-label" for="cfg-apikey" data-i18n="llm.apiKey">API Key</label>
+          <div class="llm-form-input-group">
+            <input id="cfg-apikey" class="setting-input llm-form-input" type="password" placeholder="${escapeHtml(keyPlaceholder)}" autocomplete="off" />
             <button id="cfg-toggle-key" class="setting-icon-btn" type="button" data-i18n-title="llm.apiKey.toggle" title="Toggle visibility"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <button id="cfg-test-conn-btn" class="setting-btn llm-test-conn-btn" type="button" data-i18n="llm.connection.verify">连通性验证</button>
           </div>
         </div>
-        <div class="setting-row provider-baseurl-row">
-          <div class="setting-info"><span class="setting-label" data-i18n="llm.baseURL">Base URL</span><span class="setting-hint" data-i18n="llm.baseURL.hint">自定义端点（可选）</span></div>
-          <input id="cfg-baseurl" class="setting-input" type="text" value="${escapeHtml(baseURL)}" placeholder="${escapeHtml(urlPlaceholder)}" autocomplete="off" />
+        <div class="llm-form-row llm-form-row-models">
+          <span class="llm-form-label" data-i18n="llm.model.library">模型列表</span>
+          <div class="llm-form-row-actions">
+            <span class="setting-hint" data-i18n="llm.model.hint">模型标识符（可添加多个，点击模型行设为默认）</span>
+            ${custom ? `<button id="cfg-fetch-models-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.fetch" title="从 API 获取模型列表">⟳ 获取模型</button>` : ''}
+            <button id="cfg-clear-models-btn" class="provider-model-clear-btn" type="button" data-i18n="llm.custom.clearModels" data-i18n-title="llm.custom.clearModelsTitle" title="删除除默认模型外的所有模型">全部删除</button>
+          </div>
+        </div>
+        <div class="llm-model-rows-wrap">
+          <input id="cfg-model" type="hidden" value="${escapeHtml(defaultModel)}" />
+          <div id="cfg-model-list" class="llm-model-rows" role="list"></div>
         </div>
         ${custom ? `
-        <div class="setting-row" id="cfg-imagegen-row">
-          <div class="setting-info"><span class="setting-label" data-i18n="llm.custom.imageGen">图片生成（文生图）</span><span class="setting-hint" data-i18n="llm.custom.imageGen.hint">该供应商支持 OpenAI 兼容的 /images/generations 图片接口时开启；开启后图片请求会调用 generate_image 并直接渲染为真实图片，不再输出 SVG（失败时自动回退 SVG）</span></div>
-          <div class="setting-input-group">
-            <input id="cfg-imagegen-model" class="setting-input" type="text" placeholder="gpt-image-1" value="${escapeHtml(imageGenModel)}" aria-label="Image model" />
+        <div class="llm-form-row">
+          <label class="llm-form-label" for="cfg-imagegen" data-i18n="llm.custom.imageGen">图片生成（文生图）</label>
+          <div class="llm-form-input-group">
+            <input id="cfg-imagegen-model" class="setting-input llm-form-input" type="text" placeholder="gpt-image-1" value="${escapeHtml(imageGenModel)}" aria-label="Image model" />
             <label class="toggle"><input type="checkbox" id="cfg-imagegen" ${imageGen ? 'checked' : ''} /><span class="toggle-slider"></span></label>
           </div>
         </div>` : ''}
-        <div class="setting-row provider-model-row">
-          <div class="setting-info"><span class="setting-label" data-i18n="llm.model.library">模型库</span><span class="setting-hint" data-i18n="llm.model.hint">模型标识符（可添加多个，点击模型行设为默认；每个模型可单独测试连通性）</span></div>
-          <div class="provider-model-editor">
-            <input id="cfg-model" type="hidden" value="${escapeHtml(defaultModel)}" />
-            <div id="cfg-model-list" class="provider-model-list" role="list" hidden></div>
-            <div class="setting-input-group provider-model-input-group">
-              <input id="cfg-model-add" class="setting-input" type="text" data-i18n-placeholder="llm.custom.addModelPlaceholder" placeholder="输入模型 ID，例如 deepseek-reasoner" autocomplete="off" />
-              <button id="cfg-add-model-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.addModel" data-i18n-title="llm.custom.addModelTitle" title="将输入框中的模型加入列表，不改变当前默认模型" hidden>＋ 添加</button>
-              ${custom ? `<button id="cfg-fetch-models-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.fetch" title="从 API 获取模型列表" hidden>⟳ 获取模型</button>` : ''}
-              <button id="cfg-clear-models-btn" class="provider-model-clear-btn" type="button" data-i18n="llm.custom.clearModels" data-i18n-title="llm.custom.clearModelsTitle" title="删除除默认模型外的所有模型">全部删除</button>
-            </div>
-          </div>
-        </div>
       </div>
       <div class="llm-provider-panel-foot">
         ${custom ? `<button id="provider-delete-btn" class="setting-btn danger" data-i18n="llm.custom.deleteBtn">删除</button>` : ''}
@@ -886,13 +889,14 @@ export class SettingsPanel {
     </div>`;
   }
 
-  /** Per-model connectivity test: runs the SAME probe real chats use (Rust
-   *  reqwest on desktop, fetch mirror in browser), passing the concrete model
-   *  id so a typo'd / retired model name fails loudly instead of passing a
-   *  generic endpoint check. The row button shows ✓ / ✗ briefly. */
-  private async testModelConnection(model: string): Promise<void> {
+  /** Provider-level connectivity test (the API-key row button): runs the SAME
+   *  probe real chats use (Rust reqwest on desktop, fetch mirror in browser),
+   *  passing the current default model so a typo'd / retired model name fails
+   *  loudly instead of passing a generic endpoint check. The button shows
+   *  ✓ / ✗ briefly. */
+  private async testProviderConnection(): Promise<void> {
     const provider = this.editingProvider;
-    if (!provider || !model) return;
+    if (!provider) return;
     const cfg = loadConfig() ?? defaults();
     const custom = customProviderFor(cfg.customProviders ?? [], provider);
     const def = providerDef(provider);
@@ -901,6 +905,10 @@ export class SettingsPanel {
       || def?.baseURL
       || '').replace(/\/+$/, '');
     const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() || '';
+    const model = (document.getElementById('cfg-model') as HTMLInputElement | null)?.value.trim()
+      || custom?.defaultModel
+      || def?.defaultModel
+      || '';
     if (!baseURL) {
       this.toast(t('llm.custom.needURL'));
       return;
@@ -909,11 +917,11 @@ export class SettingsPanel {
       this.toast(t('llm.model.testNeedKey'));
       return;
     }
-    const btn = document.querySelector<HTMLButtonElement>(`[data-test-model="${CSS.escape(model)}"]`);
+    const btn = document.getElementById('cfg-test-conn-btn') as HTMLButtonElement | null;
     if (!btn) return;
     const original = btn.textContent;
     btn.disabled = true;
-    btn.textContent = '…';
+    btn.textContent = t('llm.connection.testing');
     const started = performance.now();
     let probe: { ok: boolean; status?: number; latencyMs?: number; error?: string };
     if (isTauriRuntime()) {
@@ -944,11 +952,11 @@ export class SettingsPanel {
     btn.disabled = false;
     btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail');
     if (probe.ok) {
-      btn.textContent = '✓';
+      btn.textContent = '✓ ' + t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
       btn.classList.add('llm-model-test-ok');
       btn.title = t('llm.model.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
     } else {
-      btn.textContent = '✗';
+      btn.textContent = '✗ ' + t('llm.connection.testFailed');
       btn.classList.add('llm-model-test-fail');
       btn.title = t('llm.model.testErr').replace('{err}', probe.error || t('llm.model.testFailed'));
     }
@@ -1021,17 +1029,22 @@ export class SettingsPanel {
       const models = modelListForProvider(cfg, c.id);
       if (models.length > 0) groups.push({ id: c.id, label: c.name, models });
     }
-    menu.innerHTML = groups.map(g => `
+    menu.innerHTML = groups.map(g => {
+      const custom = customProviderFor(customs, g.id);
+      const names = custom?.modelNames ?? cfg.providerModelNames?.[g.id] ?? {};
+      return `
       <div class="llm-default-menu-group">
         <div class="llm-default-menu-group-title">${escapeHtml(g.label)}</div>
         ${g.models.map(m => {
           const isDefault = g.id === cfg.provider && m === cfg.model;
+          const displayName = names[m];
           return `<button type="button" class="llm-default-menu-item${isDefault ? ' active' : ''}" data-default-model="${escapeHtml(g.id)}::${escapeHtml(m)}">
             <span class="llm-default-menu-check" aria-hidden="true">${isDefault ? '✓' : ''}</span>
-            <span class="llm-default-menu-model">${escapeHtml(m)}</span>
+            <span class="llm-default-menu-model">${escapeHtml(displayName ? `${m} · ${displayName}` : m)}</span>
           </button>`;
         }).join('')}
-      </div>`).join('');
+      </div>`;
+    }).join('');
     applyTranslations();
   }
 
@@ -1759,10 +1772,24 @@ export class SettingsPanel {
   private gatherProviderModels(): Record<string, string[]> {
     const cfg = loadConfig() ?? defaults();
     const result = normalizeProviderModels(cfg.providerModels);
-    // Typing a model edits the single default field; only the explicit Add
-    // action grows a provider's list. This keeps the default one-model setup
-    // compact instead of turning every partial input into a new row.
+    // The open panel's rows are the live source for the editing provider;
+    // carry every other provider's library through untouched.
+    const editing = this.editingProvider || '';
+    if (editing && !customProviderFor(cfg.customProviders ?? [], editing)) {
+      const rows = this.readModelRowsFromDom();
+      if (rows.models.length > 0) result[editing] = rows.models;
+    }
     return result;
+  }
+
+  private gatherProviderModelNames(): Record<string, Record<string, string>> {
+    const prev = (loadConfig() ?? defaults()).providerModelNames ?? {};
+    const out: Record<string, Record<string, string>> = { ...prev };
+    const editing = this.editingProvider || '';
+    if (editing && !customProviderFor((loadConfig() ?? defaults()).customProviders ?? [], editing)) {
+      out[editing] = this.readModelRowsFromDom().names;
+    }
+    return out;
   }
 
   /** Carry the custom-provider list through, applying the expanded panel's
@@ -1779,8 +1806,16 @@ export class SettingsPanel {
     const model = (document.getElementById('cfg-model') as HTMLInputElement | null)?.value.trim() ?? '';
     if (name) entry.name = name;
     if (baseURL) entry.baseURL = baseURL;
-    // 模型库由下方芯片管理（添加/移除/设默认）；输入框只承载当前默认模型，
-    // 不再把每次击键的中间值追加进 models 列表。空输入时回退到列表首项。
+    // 模型库由下方行列表管理（每行：模型 ID + 可选名称 + 默认圆点）；这里
+    // 直接读取行输入框，击键即生效。默认模型 = 行列表圆点（否则回退旧默认
+    // 或列表首项），名称同步进 modelNames。
+    const rows = this.readModelRowsFromDom();
+    if (rows.models.length > 0) {
+      entry.models = rows.models;
+      entry.modelNames = rows.names;
+      entry.defaultModel = rows.defaultModel
+        || (entry.models.includes(entry.defaultModel) ? entry.defaultModel : entry.models[0] ?? '');
+    }
     if (model) entry.defaultModel = model;
     else if (!entry.models.includes(entry.defaultModel)) entry.defaultModel = entry.models[0] ?? '';
     // 文生图开关 + 图片模型名（仅自定义供应商表单里存在这些字段）。
@@ -1935,77 +1970,96 @@ export class SettingsPanel {
     }
   }
 
-  // ── Multi-model editor: compact list + add / remove / set-default ──
+  // ── Multi-model editor: editable rows (id + optional name), min 2 rows ──
+
+  /** Read the current model rows straight from the DOM: the inputs are the
+   *  source of truth while the panel is open, so typing a new id (or renaming
+   *  an existing one) is picked up by the debounced autosave without a
+   *  re-render racing the caret. Rows with an empty id are add-slots. */
+  private readModelRowsFromDom(): { models: string[]; names: Record<string, string>; defaultModel: string } {
+    const list = document.getElementById('cfg-model-list');
+    const rows = list ? [...list.querySelectorAll<HTMLElement>('.llm-model-row')] : [];
+    const models: string[] = [];
+    const names: Record<string, string> = {};
+    let defaultModel = '';
+    for (const row of rows) {
+      const idInput = row.querySelector<HTMLInputElement>('.llm-model-row-id');
+      const nameInput = row.querySelector<HTMLInputElement>('.llm-model-row-name');
+      const radio = row.querySelector<HTMLInputElement>('.llm-model-row-radio');
+      const id = (idInput?.value ?? '').trim();
+      if (!id) continue;
+      if (!models.includes(id)) models.push(id);
+      const name = (nameInput?.value ?? '').trim();
+      if (name) names[id] = name;
+      if (radio?.checked) defaultModel = id;
+    }
+    return { models, names, defaultModel };
+  }
 
   private renderModelList(provider: string): void {
     const list = document.getElementById('cfg-model-list');
-    const addBtn = document.getElementById('cfg-add-model-btn');
-    const clearBtn = document.getElementById('cfg-clear-models-btn') as HTMLButtonElement | null;
     if (!list) return;
     const cfg = loadConfig() ?? defaults();
     const custom = customProviderFor(cfg.customProviders ?? [], provider);
     const models = modelListForProvider(cfg, provider);
+    const names = custom?.modelNames ?? cfg.providerModelNames?.[provider] ?? {};
     const defaultModel = custom?.defaultModel
       || (provider === cfg.provider ? cfg.model.trim() : cfg.providerModels?.[provider]?.[0])
       || models[0]
       || '';
 
-    // Every provider uses the same editor. The fetch button remains custom-only,
-    // but manually entered model IDs work for built-in and custom providers.
-    if (addBtn) addBtn.hidden = false;
-    if (clearBtn) clearBtn.disabled = models.length <= 1;
-    list.hidden = models.length === 0;
-    list.innerHTML = models.map(model => {
-      const isDefault = model === defaultModel;
-      const canRemove = models.length > 1;
-      return `<div class="provider-model-chip${isDefault ? ' provider-model-chip-default' : ''}" data-model="${escapeHtml(model)}" title="${isDefault ? t('llm.custom.chipIsDefault') : t('llm.custom.chipSetDefault')}" role="listitem">
-        <button type="button" class="provider-model-chip-select" data-model="${escapeHtml(model)}" aria-pressed="${String(isDefault)}">
-          <span class="provider-model-chip-radio" aria-hidden="true"></span>
-          <span class="provider-model-chip-name">${escapeHtml(model)}</span>
-          <span class="provider-model-chip-meta">${isDefault ? t('llm.custom.chipIsDefault') : t('llm.custom.chipSetDefault')}</span>
-        </button>
-        <button type="button" class="provider-model-chip-test" data-test-model="${escapeHtml(model)}" title="${t('llm.model.test')}" aria-label="${t('llm.model.test')} ${escapeHtml(model)}">⟳</button>
-        ${isDefault ? `<span class="provider-model-chip-badge" data-i18n="llm.custom.defaultBadge">默认</span>` : ''}
-        ${canRemove ? `<button type="button" class="provider-model-chip-remove" data-remove="${escapeHtml(model)}" title="${t('llm.custom.removeModel')}" aria-label="${t('llm.custom.removeModel')}">×</button>` : ''}
+    // Always show at least 2 rows: real models first, then empty add-slots.
+    const rows = models.length >= 2 ? models : [...models, '', ''].slice(0, 2);
+    const hidden = document.getElementById('cfg-model') as HTMLInputElement | null;
+    if (hidden) hidden.value = defaultModel;
+    list.hidden = false;
+    list.innerHTML = rows.map((model, i) => {
+      const isDefault = !!model && model === defaultModel;
+      const canRemove = !!model && models.length > 1;
+      return `<div class="llm-model-row${isDefault ? ' llm-model-row-default' : ''}" data-row="${i}">
+        <input type="radio" name="cfg-model-default" class="llm-model-row-radio" data-radio-row="${i}" ${isDefault ? 'checked' : ''} title="${t('llm.model.setDefault')}" aria-label="${t('llm.model.setDefault')}" />
+        <input class="setting-input llm-model-row-id" data-row-id="${i}" type="text" value="${escapeHtml(model)}" placeholder="${t('llm.model.idPlaceholder')}" autocomplete="off" />
+        <input class="setting-input llm-model-row-name" data-row-name="${i}" type="text" value="${escapeHtml(model ? (names[model] ?? '') : '')}" placeholder="${t('llm.model.namePlaceholder')}" autocomplete="off" />
+        ${canRemove ? `<button type="button" class="llm-model-row-remove" data-remove-row="${i}" title="${t('llm.custom.removeModel')}" aria-label="${t('llm.custom.removeModel')}">×</button>` : ''}
       </div>`;
     }).join('');
     applyTranslations();
   }
 
-  private addModel(): void {
+  /** Commit the current row edits: id/name inputs → models + names, radio →
+   *  default. Re-renders so rows re-sync with what was just saved. The toast
+   *  only fires when the default model actually moved (Enter-to-add or a
+   *  rename should not claim a default change). */
+  private commitModelRows(): void {
     const provider = this.editingProvider || '';
+    if (!provider) return;
+    const { models, names, defaultModel } = this.readModelRowsFromDom();
     const prev = loadConfig() ?? defaults();
     const custom = customProviderFor(prev.customProviders ?? [], provider);
-    const input = document.getElementById('cfg-model-add') as HTMLInputElement | null;
-    const model = input?.value.trim() ?? '';
-    if (!model) {
-      this.toast(t('llm.custom.err.models'));
-      return;
-    }
+    const oldDefault = custom?.defaultModel
+      || (provider === prev.provider ? prev.model.trim() : '')
+      || '';
+    const fallbackDefault = oldDefault || models[0] || '';
+    const nextDefault = defaultModel || (models.includes(fallbackDefault) ? fallbackDefault : (models[0] ?? ''));
     let cfg: PureConfig;
-    let exists: boolean;
     if (custom) {
-      const existing = uniqueModels(custom.models ?? []);
-      const currentDefault = custom.defaultModel?.trim() || existing[0] || model;
-      const nextEntry = { ...custom, models: uniqueModels([...existing, model]), defaultModel: currentDefault };
-      cfg = { ...prev, customProviders: (prev.customProviders ?? []).map(p => p.id === provider ? nextEntry : p) };
-      exists = existing.includes(model);
+      const entry = { ...custom, models, modelNames: names, defaultModel: nextDefault };
+      cfg = { ...prev, customProviders: (prev.customProviders ?? []).map(p => p.id === provider ? entry : p) };
     } else {
-      const existing = modelListForProvider(prev, provider);
-      const nextModels = uniqueModels([...existing, model]);
-      cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: nextModels } };
-      exists = existing.includes(model);
+      cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: models }, providerModelNames: { ...(prev.providerModelNames ?? {}), [provider]: names } };
+      if (provider === prev.provider) cfg.model = nextDefault;
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
+    const hidden = document.getElementById('cfg-model') as HTMLInputElement | null;
+    if (hidden) hidden.value = nextDefault;
+    const defaultMoved = oldDefault !== nextDefault && !!nextDefault;
     this.renderModelList(provider);
-    this.autoSave();
-    if (input) input.value = '';
-    this.toast(exists
-      ? t('llm.custom.modelExists').replace('{m}', model)
-      : t('llm.custom.addModelDone').replace('{m}', model));
+    this.renderDefaultBar();
+    if (defaultMoved) this.toast(t('llm.custom.defaultChanged').replace('{m}', nextDefault));
   }
 
+  /** 全部删除: keep only the default model, drop the rest (rows re-render). */
   private clearModels(): void {
     const provider = this.editingProvider || '';
     const prev = loadConfig() ?? defaults();
@@ -2032,54 +2086,35 @@ export class SettingsPanel {
     this.toast(t('llm.custom.clearModelsDone'));
   }
 
-  private removeModel(model: string): void {
+  /** Remove the model in DOM row `index`; rows re-render after the commit. */
+  private removeModelRow(index: number): void {
     const provider = this.editingProvider || '';
+    const rows = this.readModelRowsFromDom();
+    const model = rows.models[index];
+    if (!model) return;
     const prev = loadConfig() ?? defaults();
     const custom = customProviderFor(prev.customProviders ?? [], provider);
-    const models = modelListForProvider(prev, provider);
-    if (models.length <= 1 || !models.includes(model)) return;
-    let cfg: PureConfig;
-    const remaining = models.filter(m => m !== model);
-    if (custom) {
-      const defaultModel = custom.defaultModel === model ? remaining[0] : custom.defaultModel;
-      const nextEntry = { ...custom, models: remaining, defaultModel };
-      cfg = { ...prev, customProviders: (prev.customProviders ?? []).map(p => p.id === provider ? nextEntry : p) };
-    } else {
-      cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: remaining } };
-      if (provider === prev.provider && prev.model === model) cfg.model = remaining[0];
-    }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
-    invalidateConfigCache();
-    const input = document.getElementById('cfg-model') as HTMLInputElement | null;
-    if (input) input.value = custom ? (cfg.customProviders.find(p => p.id === provider)?.defaultModel ?? remaining[0]) : (provider === cfg.provider ? cfg.model : remaining[0]);
-    this.renderModelList(provider);
-    this.autoSave();
-    this.toast(t('llm.custom.removedModel').replace('{m}', model));
-  }
-
-  private setDefaultModel(model: string): void {
-    const provider = this.editingProvider || '';
-    const prev = loadConfig() ?? defaults();
-    const custom = customProviderFor(prev.customProviders ?? [], provider);
-    const models = modelListForProvider(prev, provider);
-    if (!models.includes(model)) return;
+    if (rows.models.length <= 1) return;
+    const remaining = rows.models.filter((_, i) => i !== index);
+    const names = { ...rows.names };
+    delete names[model];
+    const currentDefault = custom?.defaultModel || (provider === prev.provider ? prev.model.trim() : '') || rows.models[0];
+    const defaultModel = currentDefault === model ? remaining[0] : currentDefault;
     let cfg: PureConfig;
     if (custom) {
-      if (custom.defaultModel === model) return;
-      const nextEntry = { ...custom, defaultModel: model };
+      const nextEntry = { ...custom, models: remaining, modelNames: names, defaultModel };
       cfg = { ...prev, customProviders: (prev.customProviders ?? []).map(p => p.id === provider ? nextEntry : p) };
     } else {
-      const nextModels = [model, ...models.filter(m => m !== model)];
-      cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: nextModels } };
-      if (provider === prev.provider) cfg.model = model;
+      cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: remaining }, providerModelNames: { ...(prev.providerModelNames ?? {}), [provider]: names } };
+      if (provider === prev.provider) cfg.model = defaultModel;
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     invalidateConfigCache();
     const modelEl = document.getElementById('cfg-model') as HTMLInputElement | null;
-    if (modelEl) modelEl.value = model;
+    if (modelEl) modelEl.value = defaultModel;
     this.renderModelList(provider);
     this.autoSave();
-    this.toast(t('llm.custom.defaultChanged').replace('{m}', model));
+    this.toast(t('llm.custom.removedModel').replace('{m}', model));
   }
 
   /** Resolve a quick-preset chip by slug (openai / openrouter / nvidia / ollama). */
@@ -2177,6 +2212,7 @@ export class SettingsPanel {
       provider: prev.provider,
       customProviders: this.gatherCustomProviders(),
       providerModels: this.gatherProviderModels(),
+      providerModelNames: this.gatherProviderModelNames(),
       providerOverrides: this.gatherProviderOverrides(),
       apiKey: editingActive ? apiKey : prev.apiKey,
       model: editingActive ? model : prev.model,
@@ -2318,8 +2354,13 @@ export class SettingsPanel {
       cfg.density === 'compact' ? '8px' : cfg.density === 'spacious' ? '16px' : '12px');
 
     // Refresh the grid + default-model bar after a save — card labels, status
-    // pills and the bar must reflect the state the user just changed.
-    if (this.editingProvider) this.renderProviderGrid();
+    // pills and the bar must reflect the state the user just changed. BUT skip
+    // the grid re-render while the caret is inside a model row: the panel is
+    // rebuilt from config and would kill the focus mid-typing (the row inputs
+    // are the source of truth until commit/blur).
+    const caretInRows = document.activeElement instanceof HTMLElement
+      && !!document.activeElement.closest('#cfg-model-list');
+    if (this.editingProvider && !caretInRows) this.renderProviderGrid();
     this.renderDefaultBar();
 
     this.onSave();
