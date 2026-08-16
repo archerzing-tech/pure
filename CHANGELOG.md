@@ -3,18 +3,25 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v1.9.7-beta8
+## v1.9.7
 
-**LLM 供应商配置面板改为表单式布局：60px 字段行 + 50px 模型行**
+**正式版：系统权限申请（macOS 原生弹窗）、LLM 供应商表单式配置、暗色模式修复、工具卡片过渡动画与技能生态**
+
+- 新增：LLM 模型库「＋ 添加模型」按钮；「全部删除」按钮与连通性验证按钮同尺寸、同主题色；修复快速连点连通性测试出现两个对号
+- 新增：工具卡片「放大到整行 / 还原卡片」FLIP 缓动过渡动画（0.32s，尊重 prefers-reduced-motion）
+- 修复：Bash / 文件 / Git / 搜索类工具（终端面板）body 恢复深色控制台背景（亮色黑底 / 暗色 #141414），Web / sys_info 蓝色表面保持
+- 新增：项目级安装开源技能 find-skills（vercel-labs/skills）；桌面 GUI list_app_skills 同步扫描项目 .agents/skills/（与 CLI 一致）；用户「生成 skill / MCP 工具」直接写入应用空间（~/.pure/skills/、~/.pure/tools/）
+
+- 修复：暗色模式下 sys-info / web 工具结构化输出（JSON 高亮）的 token 颜色沿用亮色系深藏青，在深蓝表面 #1b3d61 上不可读——蓝色表面补齐暗色 hljs 调色板（与终端面板一致的 GitHub-dark 色系），亮色不变
+- 新增：Settings → 通用 → 系统权限——地理位置 / 摄像头 / 麦克风三项，显示实时状态（彩色圆点：已授权 / 未请求 / 已拒绝 / 受限 / 关闭）
+- 新增：点击「申请权限」触发 macOS 原生系统弹窗（CoreLocation requestWhenInUseAuthorization / AVFoundation requestAccess），由用户在系统弹窗中决定；已拒绝时提示去 系统设置 → 隐私与安全性 修改
+- 新增：Info.plist 权限用途声明（NSLocationWhenInUseUsageDescription / NSCameraUsageDescription / NSMicrophoneUsageDescription）——没有这些声明 macOS 不会弹窗
+- 非 macOS 平台自动隐藏该区块
 
 - 展开面板重构为纵向表单：名称（60px 行）→ Base URL（60px，输入框更长）→ API Key + 连通性验证按钮（60px，文字上下居中、按钮等高）→ 模型列表（60px 表头）→ 模型行列表
 - 模型列表改为**可编辑行**：默认至少 2 行、每行 50px，每行包含 2 个输入框——模型 ID（必填）+ 名称（可选）；点击圆点设为默认，× 删除（仅剩 1 个时禁用），回车提交新行，行内输入即时自动保存且不抢焦点
 - 连通性验证按钮移到 API Key 行：用当前默认模型跑与真实对话相同的探针（桌面端 Rust reqwest / 浏览器 fetch 镜像），按钮短暂显示 ✓ / ✗
 - 模型名称随配置持久化（内置供应商 `providerModelNames` / 自定义供应商 `modelNames`），默认模型下拉菜单同步显示 `模型ID · 名称`
-
-## v1.9.7-beta7
-
-**LLM 设置页全新卡片式布局：默认模型横条 + 8 家内置供应商网格**
 
 - 设置 → LLM 全面重构：删除旧的「当前供应商 + 抽屉」结构，改为顶部默认模型横条 + 两列供应商卡片网格；没有「默认供应商」概念，只有「默认模型」——从横条下拉选择任一供应商的模型即成为新对话的默认模型（下拉按供应商分组，当前默认打勾）
 - 默认内置 8 家供应商卡片：国内 5 家（DeepSeek `api.deepseek.com` / 通义千问 `dashscope.aliyuncs.com/compatible-mode/v1` / 智谱 GLM `open.bigmodel.cn/api/paas/v4` / Moonshot Kimi `api.moonshot.cn/v1` / MiniMax `api.minimaxi.com/v1`）+ 国外 3 家（OpenAI `api.openai.com/v1` / OpenRouter `openrouter.ai/api/v1` / NVIDIA NIM `integrate.api.nvidia.com/v1`），端点全部官方核实

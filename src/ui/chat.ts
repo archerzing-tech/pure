@@ -622,23 +622,25 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
 const PLAN_ANALYSIS_TIMEOUT_MS = 60000;
 
 /**
- * App skills from ~/.pure/skills (the capability-gap protocol's install
- * target), injected into the system prompt like Skill Hub skills. Desktop:
- * read via the Rust list_app_skills command; browser dev mode: none. Cached
- * for 30s so a skill installed mid-session loads without a restart while a
- * per-turn invoke is avoided.
+ * App skills from ~/.pure/skills plus the workspace's .agents/skills (the
+ * capability-gap protocol's install targets), injected into the system prompt
+ * like Skill Hub skills. Desktop: read via the Rust list_app_skills command;
+ * browser dev mode: none. Cached for 30s (keyed on the workspace) so a skill
+ * installed mid-session loads without a restart while a per-turn invoke is
+ * avoided.
  */
 interface AppSkillEntry { name: string; description: string; body: string }
-let appSkillsCache: { at: number; items: PromptSkill[] } | null = null;
-async function loadAppSkills(): Promise<PromptSkill[]> {
-  if (appSkillsCache && Date.now() - appSkillsCache.at < 30_000) {
+let appSkillsCache: { at: number; workspace: string; items: PromptSkill[] } | null = null;
+async function loadAppSkills(workspace: string): Promise<PromptSkill[]> {
+  const ws = workspace || '';
+  if (appSkillsCache && Date.now() - appSkillsCache.at < 30_000 && appSkillsCache.workspace === ws) {
     return appSkillsCache.items;
   }
   let items: PromptSkill[] = [];
   if (isTauriRuntime()) {
     try {
       const core = await loadTauriCore();
-      const entries = await core?.invoke<AppSkillEntry[]>('list_app_skills');
+      const entries = await core?.invoke<AppSkillEntry[]>('list_app_skills', { workspace: ws });
       items = (entries ?? []).map((entry) => ({
         name: entry.name,
         body: entry.body,
@@ -648,7 +650,7 @@ async function loadAppSkills(): Promise<PromptSkill[]> {
       console.warn('[pure] failed to load app skills:', err);
     }
   }
-  appSkillsCache = { at: Date.now(), items };
+  appSkillsCache = { at: Date.now(), workspace: ws, items };
   return items;
 }
 /** Idle timeout while streaming a task analysis: as long as the model keeps
@@ -2743,7 +2745,7 @@ export class ChatController {
       // App skills (~/.pure/skills, installed by the capability-gap protocol)
       // join the enabled Skill Hub skills in the system prompt. TTL-cached: a
       // skill installed mid-session shows up within 30s, not after a restart.
-      const appSkills = await loadAppSkills();
+      const appSkills = await loadAppSkills(effectiveWorkspace);
       const assembly = promptAssembler.assemble({
         surface: 'gui',
         capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen }),

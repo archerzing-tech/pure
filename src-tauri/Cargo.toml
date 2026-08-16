@@ -1,6 +1,6 @@
 [package]
 name = "pure"
-version = "1.9.7-beta8"
+version = "1.9.7"
 edition = "2021"
 
 [lib]
@@ -32,6 +32,9 @@ base64 = "0.21"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSImage", "NSBitmapImageRep"] }
 objc2-foundation = { version = "0.3.2", features = ["NSData", "NSDictionary", "NSString"] }
+objc2-core-location = { version = "0.3.2", features = ["CLLocationManager"] }
+objc2-av-foundation = { version = "0.3.2", features = ["AVCaptureDevice", "AVFCapture", "AVMediaFormat", "block2"] }
+block2 = "0.6.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 png = "0.17"

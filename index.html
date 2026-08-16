@@ -349,6 +349,22 @@
                     </div>
                   </div>
                 </div>
+                <h3 class="settings-section-title" data-i18n="perm.title">System permissions</h3>
+                <p class="settings-page-desc" data-i18n="perm.desc">Location, camera and microphone access is granted via macOS permission dialogs</p>
+                <div class="settings-section" id="perm-section">
+                  <div class="setting-row" data-perm="location">
+                    <div class="setting-info"><span class="setting-label" data-i18n="perm.location">Location</span><span class="setting-hint"><span class="perm-dot" id="perm-location-dot"></span><span class="perm-status" id="perm-location-status">…</span></span></div>
+                    <button class="setting-btn secondary perm-request-btn" data-perm="location" data-i18n="perm.request">Request</button>
+                  </div>
+                  <div class="setting-row" data-perm="camera">
+                    <div class="setting-info"><span class="setting-label" data-i18n="perm.camera">Camera</span><span class="setting-hint"><span class="perm-dot" id="perm-camera-dot"></span><span class="perm-status" id="perm-camera-status">…</span></span></div>
+                    <button class="setting-btn secondary perm-request-btn" data-perm="camera" data-i18n="perm.request">Request</button>
+                  </div>
+                  <div class="setting-row" data-perm="microphone">
+                    <div class="setting-info"><span class="setting-label" data-i18n="perm.microphone">Microphone</span><span class="setting-hint"><span class="perm-dot" id="perm-microphone-dot"></span><span class="perm-status" id="perm-microphone-status">…</span></span></div>
+                    <button class="setting-btn secondary perm-request-btn" data-perm="microphone" data-i18n="perm.request">Request</button>
+                  </div>
+                </div>
                 <div class="settings-section">
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="tmp.title">Temp pasted files</span><span class="setting-hint" data-i18n="tmp.desc">Clean pasted files in ~/.pure/tmp older than N days</span></div>

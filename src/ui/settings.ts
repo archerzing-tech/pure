@@ -93,6 +93,8 @@ export class SettingsPanel {
   private editingProvider: string | null = null;
   /** Pending debounced save (text-input keystrokes only). */
   private autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Reset timer for the connectivity-verify button's ✓ / ✗ flash. */
+  private testConnResetTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(onSave: () => void, onOpen?: () => void, onClose?: () => void) {
     this.onSave = onSave;
@@ -396,6 +398,37 @@ export class SettingsPanel {
       }
     });
 
+    // ── System permissions: status + native request dialog (Tauri only) ──
+    const permSection = document.getElementById('perm-section');
+    if (permSection) {
+      if (!isTauriRuntime()) {
+        permSection.hidden = true;
+      } else {
+        permSection.addEventListener('click', async (event) => {
+          const btn = (event.target as HTMLElement).closest('.perm-request-btn') as HTMLButtonElement | null;
+          if (!btn || btn.disabled) return;
+          const kind = btn.getAttribute('data-perm');
+          if (!kind) return;
+          btn.disabled = true;
+          btn.textContent = t('perm.requesting');
+          try {
+            const core = await loadTauriCore();
+            // Blocks until the user answers the macOS dialog (location:
+            // system dialog; camera/mic: requestAccess completion).
+            await core?.invoke<string>('request_system_permission', { kind });
+            await this.refreshSystemPermissions();
+            this.toast(t('perm.status.updated'));
+          } catch (err) {
+            console.error('[pure] request_system_permission failed:', err);
+            this.toast(t('perm.requestFailed'));
+          } finally {
+            btn.disabled = false;
+            btn.textContent = t('perm.request');
+          }
+        });
+      }
+    }
+
     tmpCleanBtn?.addEventListener('click', async () => {
       if (!isTauriRuntime()) return;
       const days = Math.max(1, Math.min(365, parseInt(tmpDaysEl?.value || '7', 10) || 7));
@@ -434,6 +467,7 @@ export class SettingsPanel {
         this.removeModelRow(parseInt(removeRow.dataset.removeRow || '0', 10));
         return;
       }
+      if (target.closest('#cfg-add-model-btn')) { this.addModelRow(); return; }
       if (target.closest('#cfg-clear-models-btn')) { this.clearModels(); return; }
       if (target.closest('#cfg-fetch-models-btn')) { void this.fetchProviderModels(); return; }
       if (target.closest('#provider-delete-btn')) { this.removeCustomProvider(this.editingProvider || ''); return; }
@@ -865,6 +899,7 @@ export class SettingsPanel {
           <div class="llm-form-row-actions">
             <span class="setting-hint" data-i18n="llm.model.hint">模型标识符（可添加多个，点击模型行设为默认）</span>
             ${custom ? `<button id="cfg-fetch-models-btn" class="fetch-models-btn" type="button" data-i18n="llm.custom.fetch" title="从 API 获取模型列表">⟳ 获取模型</button>` : ''}
+            <button id="cfg-add-model-btn" class="provider-model-add-btn" type="button" data-i18n="llm.custom.addModel" data-i18n-title="llm.custom.addModelTitle" title="将输入框中的模型加入列表">＋ 添加模型</button>
             <button id="cfg-clear-models-btn" class="provider-model-clear-btn" type="button" data-i18n="llm.custom.clearModels" data-i18n-title="llm.custom.clearModelsTitle" title="删除除默认模型外的所有模型">全部删除</button>
           </div>
         </div>
@@ -919,7 +954,7 @@ export class SettingsPanel {
     }
     const btn = document.getElementById('cfg-test-conn-btn') as HTMLButtonElement | null;
     if (!btn) return;
-    const original = btn.textContent;
+    if (this.testConnResetTimer) clearTimeout(this.testConnResetTimer);
     btn.disabled = true;
     btn.textContent = t('llm.connection.testing');
     const started = performance.now();
@@ -952,7 +987,7 @@ export class SettingsPanel {
     btn.disabled = false;
     btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail');
     if (probe.ok) {
-      btn.textContent = '✓ ' + t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
+      btn.textContent = t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
       btn.classList.add('llm-model-test-ok');
       btn.title = t('llm.model.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
     } else {
@@ -960,8 +995,8 @@ export class SettingsPanel {
       btn.classList.add('llm-model-test-fail');
       btn.title = t('llm.model.testErr').replace('{err}', probe.error || t('llm.model.testFailed'));
     }
-    window.setTimeout(() => {
-      btn.textContent = original;
+    this.testConnResetTimer = setTimeout(() => {
+      btn.textContent = t('llm.connection.verify');
       btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail');
     }, 2500);
   }
@@ -1130,6 +1165,40 @@ export class SettingsPanel {
     }
   }
 
+  // ── System permissions: native macOS status (Tauri only) ──
+
+  /** Refresh the location / camera / microphone status rows in Settings →
+   * General. Each row shows a colored dot + localized status; the request
+   * button stays visible while the OS can still prompt (not determined) and
+   * is hidden once the user has already decided (authorized / denied / …). */
+  private async refreshSystemPermissions(): Promise<void> {
+    if (!isTauriRuntime()) return;
+    const core = await loadTauriCore();
+    if (!core) return;
+    const kinds = ['location', 'camera', 'microphone'] as const;
+    for (const kind of kinds) {
+      const dot = document.getElementById(`perm-${kind}-dot`);
+      const statusEl = document.getElementById(`perm-${kind}-status`);
+      const btn = document.querySelector(
+        `.perm-request-btn[data-perm="${kind}"]`
+      ) as HTMLButtonElement | null;
+      if (!dot || !statusEl) continue;
+      let status = 'unsupported';
+      try {
+        status = (await core.invoke<string>('check_system_permission', { kind })) || 'unsupported';
+      } catch (err) {
+        console.warn(`[pure] check_system_permission(${kind}) failed:`, err);
+      }
+      dot.className = `perm-dot perm-dot-${status}`;
+      statusEl.textContent = status === 'denied'
+        ? `${t('perm.status.denied')} · ${t('perm.status.deniedHint')}`
+        : t(`perm.status.${status}`);
+      if (btn) {
+        btn.hidden = status === 'authorized' || status === 'unsupported' || status === 'disabled';
+      }
+    }
+  }
+
   // ── Environment: IP-based city detection ──
 
   /** Detect the user's city from their IP address. In the Tauri app this runs
@@ -1261,6 +1330,9 @@ export class SettingsPanel {
     const excludeInput = document.getElementById('cfg-mcp-exclude-prefixes') as HTMLInputElement | null;
     if (excludeInput) excludeInput.value = (cfg.mcpExcludedPrefixes ?? []).join(', ');
     this.renderMcpServers();
+
+    // System permission statuses refresh on every panel open.
+    void this.refreshSystemPermissions();
   }
 
   // ── MCP Server Management ──
@@ -2013,17 +2085,21 @@ export class SettingsPanel {
     const hidden = document.getElementById('cfg-model') as HTMLInputElement | null;
     if (hidden) hidden.value = defaultModel;
     list.hidden = false;
-    list.innerHTML = rows.map((model, i) => {
-      const isDefault = !!model && model === defaultModel;
-      const canRemove = !!model && models.length > 1;
-      return `<div class="llm-model-row${isDefault ? ' llm-model-row-default' : ''}" data-row="${i}">
-        <input type="radio" name="cfg-model-default" class="llm-model-row-radio" data-radio-row="${i}" ${isDefault ? 'checked' : ''} title="${t('llm.model.setDefault')}" aria-label="${t('llm.model.setDefault')}" />
-        <input class="setting-input llm-model-row-id" data-row-id="${i}" type="text" value="${escapeHtml(model)}" placeholder="${t('llm.model.idPlaceholder')}" autocomplete="off" />
-        <input class="setting-input llm-model-row-name" data-row-name="${i}" type="text" value="${escapeHtml(model ? (names[model] ?? '') : '')}" placeholder="${t('llm.model.namePlaceholder')}" autocomplete="off" />
-        ${canRemove ? `<button type="button" class="llm-model-row-remove" data-remove-row="${i}" title="${t('llm.custom.removeModel')}" aria-label="${t('llm.custom.removeModel')}">×</button>` : ''}
-      </div>`;
-    }).join('');
+    list.innerHTML = rows.map((model, i) => this.modelRowHtml(model, i, defaultModel, models.length, names)).join('');
     applyTranslations();
+  }
+
+  /** One editable model row: radio (set default) + id input + optional name
+   *  input + a remove × button. An empty id is an add-slot (no × button). */
+  private modelRowHtml(model: string, i: number, defaultModel: string, modelCount: number, names: Record<string, string>): string {
+    const isDefault = !!model && model === defaultModel;
+    const canRemove = !!model && modelCount > 1;
+    return `<div class="llm-model-row${isDefault ? ' llm-model-row-default' : ''}" data-row="${i}">
+      <input type="radio" name="cfg-model-default" class="llm-model-row-radio" data-radio-row="${i}" ${isDefault ? 'checked' : ''} title="${t('llm.model.setDefault')}" aria-label="${t('llm.model.setDefault')}" />
+      <input class="setting-input llm-model-row-id" data-row-id="${i}" type="text" value="${escapeHtml(model)}" placeholder="${t('llm.model.idPlaceholder')}" autocomplete="off" />
+      <input class="setting-input llm-model-row-name" data-row-name="${i}" type="text" value="${escapeHtml(model ? (names[model] ?? '') : '')}" placeholder="${t('llm.model.namePlaceholder')}" autocomplete="off" />
+      ${canRemove ? `<button type="button" class="llm-model-row-remove" data-remove-row="${i}" title="${t('llm.custom.removeModel')}" aria-label="${t('llm.custom.removeModel')}">×</button>` : ''}
+    </div>`;
   }
 
   /** Commit the current row edits: id/name inputs → models + names, radio →
@@ -2084,6 +2160,24 @@ export class SettingsPanel {
     this.renderModelList(provider);
     this.autoSave();
     this.toast(t('llm.custom.clearModelsDone'));
+  }
+
+  /** ＋ 添加模型: commit any pending row edits, then append a fresh add-slot
+   *  row and focus its id input so a new model can be typed immediately. */
+  private addModelRow(): void {
+    const provider = this.editingProvider || '';
+    if (!provider) return;
+    this.commitModelRows();
+    const list = document.getElementById('cfg-model-list');
+    if (!list) return;
+    const index = list.querySelectorAll('.llm-model-row').length;
+    const row = document.createElement('div');
+    row.className = 'llm-model-row';
+    row.dataset.row = String(index);
+    row.innerHTML = this.modelRowHtml('', index, '', 0, {});
+    list.appendChild(row);
+    applyTranslations();
+    row.querySelector<HTMLInputElement>('.llm-model-row-id')?.focus();
   }
 
   /** Remove the model in DOM row `index`; rows re-render after the commit. */
