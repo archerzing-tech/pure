@@ -197,7 +197,7 @@ export function defaults(): PureConfig {
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', bypassProviders: [], bypassModels: [] }),
     streamingRender: true,
     taskMode: 'auto',
-    configVersion: 9,
+    configVersion: 11,
   };
 }
 
@@ -418,6 +418,33 @@ export function loadConfig(): PureConfig | null {
         }
         cfg.baseURL = '';
         cfg.configVersion = 10;
+        needsPersist = true;
+      } else {
+        cfg.providerOverrides = { ...(cfg.providerOverrides ?? {}) };
+      }
+      // Config v11: after the v10 hijack fix, scrub leftover built-in override
+      // endpoints that are NOT deliberate. A user-set endpoint would never be
+      // one of our own registry URLs (case / whitespace / trailing-slash
+      // variants included), and a cross-provider default (e.g. a DashScope
+      // URL sitting on DeepSeek, or a trailing-slash copy of the v10
+      // migration) is exactly the contamination the fix targeted. Removing
+      // them makes every built-in card show its official endpoint again;
+      // per-provider overrides entered in the connection drawer stay.
+      if ((parsed.configVersion ?? 1) < 11) {
+        const overrides = { ...(cfg.providerOverrides ?? {}) };
+        const normalize = (url: string) => url.trim().replace(/\/+$/, '').toLowerCase();
+        const registryURLs = new Set(PROVIDERS.map((p) => normalize(p.baseURL)));
+        for (const [pid, ovr] of Object.entries(overrides)) {
+          if (!ovr?.baseURL) continue;
+          if (!registryURLs.has(normalize(ovr.baseURL))) continue;
+          const next = { ...ovr };
+          delete next.baseURL;
+          if (!next.name && !next.apiKey && !next.hasApiKey) delete overrides[pid];
+          else overrides[pid] = next;
+        }
+        cfg.providerOverrides = overrides;
+        cfg.baseURL = ''; // belt-and-suspenders: the global field stays empty
+        cfg.configVersion = 11;
         needsPersist = true;
       } else {
         cfg.providerOverrides = { ...(cfg.providerOverrides ?? {}) };
