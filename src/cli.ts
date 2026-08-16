@@ -41,7 +41,7 @@ import { buildCliCapabilities, formatPromptBudgetDiagnostic, promptAssembler, re
 import { parseSkillMarkdown } from './shared/skillFiles';
 import { mergeTranscriptWithTurn } from './shared/conversation';
 import { formatCliIntentAssessment, resolveCliAutoApprove } from './cliIntent';
-import { customProviderFor, defaultModelFor, isCustomProviderId, promptBudgetForProvider, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider } from './shared/providers';
+import { customProviderFor, customProviderLabel, defaultModelFor, isCustomProviderId, promptBudgetForProvider, providerOverrideFor, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider, type ProviderOverride } from './shared/providers';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
 import { buildTaskContract, discoverWorkspace, formatTaskContract, workspaceProfileSummary, type TaskContract, type WorkspaceProfile } from './shared/delivery';
@@ -91,6 +91,14 @@ interface PureConfig {
    */
   customProviders?: CustomProvider[];
   /**
+   * Per-provider overrides for the built-in providers (mirror of the GUI's
+   * PureConfig.providerOverrides): a custom display name, endpoint (proxy /
+   * mirror) and per-provider API key. Desktop keys live in the Rust secrets
+   * file (~/.pure/secrets.json, slot 'llm.apiKey.<id>'); browser-mode keys
+   * sit here as plain `apiKey` entries.
+   */
+  providerOverrides?: Record<string, ProviderOverride>;
+  /**
    * Third-party skills installed via the GUI's Skill Hub (Settings → Skills →
    * Skill Hub). Enabled entries' SKILL.md bodies are injected into the CLI's
    * system prompt so terminal and GUI sessions behave identically.
@@ -123,6 +131,24 @@ function saveConfig(cfg: PureConfig): void {
     writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8');
   } catch (e) {
     console.error(`${red('❌')} Failed to write ${CONFIG_PATH}: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * Resolve a built-in provider's per-provider API key from the Rust secrets
+ * file (~/.pure/secrets.json, slot `llm.apiKey.<id>`) — the same slot the GUI
+ * desktop app writes when the user saves a per-provider key, so terminal and
+ * GUI sessions share the same credential. Returns '' when absent/unreadable.
+ */
+function resolveOverrideSecretKey(provider: string): string {
+  try {
+    const path = `${PURE_DIR}/secrets.json`;
+    if (!existsSync(path)) return '';
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    const value = raw[`llm.apiKey.${provider}`];
+    return typeof value === 'string' ? value : '';
+  } catch {
+    return '';
   }
 }
 
@@ -447,6 +473,8 @@ interface CliArgs {
   stateDb: string;
   /** User-defined custom providers from ~/.pure/config.json. */
   customProviders?: CustomProvider[];
+  /** Per-provider built-in overrides (name / Base URL / key) from ~/.pure/config.json. */
+  providerOverrides?: Record<string, ProviderOverride>;
   /**
    * MCP servers: ~/.pure/config.json `mcpServers` (written by GUI Settings →
    * MCP) plus repeatable `--mcp-server "<name>:<command-or-url>"` flags — e.g.
@@ -535,8 +563,13 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
   // Custom providers own their key inside the custom entry (or none at all for
   // keyless locals) — cloud-key env vars must never leak into their requests.
   const isCustom = isCustomProviderId(fileCfg?.customProviders, provider);
+  // Built-ins may carry a per-provider key override: plain `apiKey` in the
+  // config (browser mode) or the Rust secrets slot (desktop). It wins over
+  // the legacy global file key but loses to --api-key and provider env vars.
+  const override = isCustom ? undefined : providerOverrideFor(fileCfg?.providerOverrides, provider);
+  const overrideKey = override?.apiKey || (override?.hasApiKey ? resolveOverrideSecretKey(provider) : '');
   const apiKey = flags['api-key'] ??
-    (isCustom ? '' : (envKeyForProvider(provider) ?? fileCfg?.apiKey ?? ''));
+    (isCustom ? '' : (envKeyForProvider(provider) ?? (overrideKey || fileCfg?.apiKey || '')));
 
   const model = flags.model ?? fileCfg?.model ?? resolveDefaultModel(provider, fileCfg?.customProviders);
   const workspace =
@@ -569,6 +602,7 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
       prompt: promptParts.join(' '),
       provider, model, apiKey, workspace, resume, stateDb, autoApprove,
       customProviders: fileCfg?.customProviders,
+      providerOverrides: fileCfg?.providerOverrides,
       mcpServers,
       mcpExcludedPrefixes,
     },
@@ -643,20 +677,32 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
     process.exit(1);
   }
 
+  // Built-in providers honor a per-provider endpoint override (proxy / mirror)
+  // from ~/.pure/config.json providerOverrides, mirroring the GUI settings.
+  const builtinOverride = providerOverrideFor(args.providerOverrides, args.provider);
+  const endpoint = builtinOverride?.baseURL || undefined;
+  const displayName = customProviderLabel(args.customProviders, args.provider, args.providerOverrides);
+
   switch (args.provider) {
     case 'deepseek-anthropic':
-      return { adapter: new DeepSeekAnthropicAdapter({ apiKey: args.apiKey, model: args.model }), label: `DeepSeek Anthropic (${args.model})` };
+      return { adapter: new DeepSeekAnthropicAdapter({ apiKey: args.apiKey, model: args.model, baseURL: endpoint }), label: `${displayName} (${args.model})` };
     case 'qwen': {
-      const wsId = process.env.DASHSCOPE_WORKSPACE_ID ?? '';
-      if (!wsId) { console.error('❌ Qwen requires DASHSCOPE_WORKSPACE_ID env var'); process.exit(1); }
-      return { adapter: createQwenAdapter(args.apiKey, wsId, args.model), label: `Qwen (${args.model})` };
+      // A configured override (e.g. a DashScope compatible-mode endpoint or a
+      // gateway) replaces the dedicated workspace deployment, so the
+      // workspace requirement only applies to the default path.
+      if (!endpoint) {
+        const wsId = process.env.DASHSCOPE_WORKSPACE_ID ?? '';
+        if (!wsId) { console.error('❌ Qwen requires DASHSCOPE_WORKSPACE_ID env var'); process.exit(1); }
+        return { adapter: createQwenAdapter(args.apiKey, wsId, args.model), label: `${displayName} (${args.model})` };
+      }
+      return { adapter: createQwenAdapter(args.apiKey, '', args.model, endpoint), label: `${displayName} (${args.model})` };
     }
     case 'glm':
-      return { adapter: createGLMAdapter(args.apiKey, args.model), label: `GLM (${args.model})` };
+      return { adapter: createGLMAdapter(args.apiKey, args.model, endpoint), label: `${displayName} (${args.model})` };
     case 'deepseek-openai':
-      return { adapter: createDeepSeekAdapter(args.apiKey, args.model), label: `DeepSeek OpenAI (${args.model})` };
+      return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint), label: `${displayName} (${args.model})` };
     default:
-      return { adapter: createDeepSeekAdapter(args.apiKey, args.model), label: `${args.provider} (${args.model})` };
+      return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint), label: `${displayName} (${args.model})` };
   }
 }
 
@@ -1096,7 +1142,7 @@ async function runConfig(): Promise<void> {
         ? 'Add custom provider (OpenAI-compatible, e.g. Ollama)'
         : custom
           ? `${custom.name}${custom.apiKey ? '' : ' (no key)'}`
-          : PROVIDER_LABELS[k as keyof typeof PROVIDER_LABELS];
+          : customProviderLabel(existingCustoms, k, existing?.providerOverrides);
       const marker = existing?.provider === k ? green(' ← current') : '';
       process.stdout.write(`    ${cyan(String(i + 1))}) ${label}${marker}\n`);
     });
@@ -1195,10 +1241,19 @@ async function runConfig(): Promise<void> {
     const workspaceRaw = await ask(`  ${bold('Workspace')} ${dim('(Enter for current dir ".")')}: `);
     const workspace = workspaceRaw || existing?.workspace || '.';
 
-    const cfg: PureConfig = { provider, apiKey: finalKey, model, workspace, customProviders: finalCustoms };
+    const cfg: PureConfig = {
+      provider,
+      apiKey: finalKey,
+      model,
+      workspace,
+      customProviders: finalCustoms,
+      // Carry existing built-in overrides (name / Base URL / key) through a
+      // re-run so `pure config` never silently drops them.
+      providerOverrides: existing?.providerOverrides,
+    };
     saveConfig(cfg);
 
-    const providerLabelOut = customProviderFor(finalCustoms, provider)?.name
+    const providerLabelOut = customProviderLabel(finalCustoms, provider, existing?.providerOverrides)
       ?? PROVIDER_LABELS[provider as keyof typeof PROVIDER_LABELS];
     console.log('');
     process.stdout.write(`  ${green('✅ Saved.')} ${dim('Config written to')} ${CONFIG_PATH}\n`);

@@ -12,6 +12,8 @@ export interface DeepSeekAnthropicConfig {
   model?: string;
   maxTokens?: number;
   temperature?: number;
+  /** Per-provider endpoint override (Settings → LLM → 连接设置 / providerOverrides). */
+  baseURL?: string;
 }
 
 interface ToolBlock {
@@ -29,7 +31,7 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
   constructor(config: DeepSeekAnthropicConfig) {
     this.client = new Anthropic({
       apiKey: config.apiKey,
-      baseURL: 'https://api.deepseek.com/anthropic',
+      baseURL: config.baseURL || 'https://api.deepseek.com/anthropic',
     });
     this.model = config.model ?? 'deepseek-v4-flash';
     // Same reasoning-vs-content budget rationale as createDeepSeekAdapter: the
