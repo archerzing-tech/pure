@@ -10274,14 +10274,137 @@ button svg,
 .llm-provider-panel-body {
   display: flex;
   flex-direction: column;
+  gap: 0;
+  padding: 0 16px;
+}
+
+/* Form rows: one field per row, 60px tall, label left / control right. */
+.llm-form-row {
+  display: flex;
+  align-items: center;
   gap: 12px;
-  padding: 14px 16px;
+  min-height: 60px;
+  border-bottom: 1px solid var(--border-light);
+}
+.llm-form-label {
+  flex: 0 0 96px;
+  font: 700 12px var(--font-sans);
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+.llm-form-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 40px;
+}
+.llm-form-input-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.llm-form-input-group .llm-form-input {
+  flex: 1 1 auto;
+}
+.llm-form-input-group .setting-icon-btn {
+  flex: 0 0 auto;
+  height: 40px;
+  width: 40px;
+}
+.llm-test-conn-btn {
+  flex: 0 0 auto;
+  height: 40px;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+.llm-test-conn-btn.llm-model-test-ok {
+  border-color: var(--success);
+  color: var(--success);
+}
+.llm-test-conn-btn.llm-model-test-fail {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* Model list: header row (60px) + editable rows (50px each, min 2). */
+.llm-form-row-models {
+  min-height: 60px;
+}
+.llm-form-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.llm-form-row-actions .setting-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.llm-model-rows-wrap {
+  padding: 8px 0 10px 108px;
+}
+.llm-model-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.llm-model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 50px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+}
+.llm-model-row-default {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 18%, var(--bg-card));
+}
+.llm-model-row-radio {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.llm-model-row-id {
+  flex: 1 1 40%;
+  min-width: 0;
+  height: 36px;
+}
+.llm-model-row-name {
+  flex: 1 1 40%;
+  min-width: 0;
+  height: 36px;
+}
+.llm-model-row-remove {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  cursor: pointer;
+}
+.llm-model-row-remove:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 .llm-provider-panel-foot {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 16px 16px;
+  padding: 14px 16px 16px;
 }
 .llm-provider-panel-spacer { flex: 1; }
 

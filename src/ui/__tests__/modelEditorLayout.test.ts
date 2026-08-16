@@ -50,9 +50,13 @@ describe('LLM page layout (default-model bar + provider grid)', () => {
     expect(styles).toContain('.llm-provider-panel {\n  grid-column: 1 / -1;');
     expect(styles).toContain('.llm-provider-panel-head {');
     expect(styles).toContain('.llm-provider-panel-foot {');
-    expect(styles).toContain('.provider-model-chip-test {');
-    expect(styles).toContain('.provider-model-chip-test.llm-model-test-ok {');
-    expect(styles).toContain('.provider-model-chip-test.llm-model-test-fail {');
+    expect(styles).toContain('.llm-test-conn-btn {');
+    expect(styles).toContain('.llm-test-conn-btn.llm-model-test-ok {');
+    expect(styles).toContain('.llm-test-conn-btn.llm-model-test-fail {');
+    expect(styles).toContain('.llm-model-row {');
+    expect(styles).toContain('.llm-model-row-id {');
+    expect(styles).toContain('.llm-model-row-name {');
+    expect(styles).toContain('.llm-model-row-radio {');
     // Marks for every built-in registry entry.
     for (const id of ['deepseek', 'qwen', 'glm', 'moonshot', 'minimax', 'openai', 'openrouter', 'nvidia']) {
       expect(styles).toContain(`.provider-mark-${id} {`);
@@ -66,10 +70,38 @@ describe('LLM page layout (default-model bar + provider grid)', () => {
     // settings.ts must reference the same ids it renders into.
     const settings = readFileSync(new URL('../settings.ts', import.meta.url), 'utf8');
     expect(settings).toContain("id=\"cfg-model-list\"");
-    expect(settings).toContain("id=\"cfg-model-add\"");
+    expect(settings).toContain("id=\"cfg-test-conn-btn\"");
     expect(settings).toContain("id=\"cfg-clear-models-btn\"");
-    expect(settings).toContain("data-test-model");
+    expect(settings).toContain("llm-model-row-id");
+    expect(settings).toContain("llm-model-row-name");
+    expect(settings).toContain("data-remove-row");
     expect(settings).toContain("data-save-panel");
     expect(settings).toContain("data-add-provider");
+  });
+
+  it('renders the expanded panel as a vertical form: name → base URL → API key + verify → model list', () => {
+    const settings = readFileSync(new URL('../settings.ts', import.meta.url), 'utf8');
+    // Order of the form rows inside the panel body.
+    const body = sectionBetween(settings, '<div class="llm-provider-panel-body">', '<div class="llm-provider-panel-foot">');
+    const nameRow = body.indexOf('cfg-custom-name-edit');
+    const baseUrlRow = body.indexOf('cfg-baseurl');
+    const apiKeyRow = body.indexOf('cfg-apikey');
+    const verifyBtn = body.indexOf('cfg-test-conn-btn');
+    const modelRow = body.indexOf('cfg-model-list');
+    expect(nameRow).toBeGreaterThan(-1);
+    expect(baseUrlRow).toBeGreaterThan(nameRow);
+    expect(apiKeyRow).toBeGreaterThan(baseUrlRow);
+    expect(verifyBtn).toBeGreaterThan(apiKeyRow);
+    expect(modelRow).toBeGreaterThan(verifyBtn);
+    // The name input lives in the body as the first form row (not the head).
+    expect(settings).toContain('<label class="llm-form-label" for="cfg-custom-name-edit"');
+    // Model rows: radio + id input + optional name input, min 2 rows.
+    expect(settings).toContain('class="llm-model-row');
+    expect(settings).toContain('llm-model-row-radio');
+    expect(settings).toContain('llm.model.idPlaceholder');
+    expect(settings).toContain('llm.model.namePlaceholder');
+    // Padding to a minimum of 2 rows (real models + empty add-slots).
+    expect(settings).toContain('models.length >= 2 ? models :');
+    expect(settings).toContain('[...models, \'\', \'\'].slice(0, 2)');
   });
 });

@@ -3,6 +3,15 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.7-beta8
+
+**LLM 供应商配置面板改为表单式布局：60px 字段行 + 50px 模型行**
+
+- 展开面板重构为纵向表单：名称（60px 行）→ Base URL（60px，输入框更长）→ API Key + 连通性验证按钮（60px，文字上下居中、按钮等高）→ 模型列表（60px 表头）→ 模型行列表
+- 模型列表改为**可编辑行**：默认至少 2 行、每行 50px，每行包含 2 个输入框——模型 ID（必填）+ 名称（可选）；点击圆点设为默认，× 删除（仅剩 1 个时禁用），回车提交新行，行内输入即时自动保存且不抢焦点
+- 连通性验证按钮移到 API Key 行：用当前默认模型跑与真实对话相同的探针（桌面端 Rust reqwest / 浏览器 fetch 镜像），按钮短暂显示 ✓ / ✗
+- 模型名称随配置持久化（内置供应商 `providerModelNames` / 自定义供应商 `modelNames`），默认模型下拉菜单同步显示 `模型ID · 名称`
+
 ## v1.9.7-beta7
 
 **LLM 设置页全新卡片式布局：默认模型横条 + 8 家内置供应商网格**
