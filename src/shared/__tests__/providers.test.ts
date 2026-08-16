@@ -14,10 +14,12 @@ import {
   imageGenModelFor,
   isImageModelName,
   promptBudgetForProvider,
+  providerOverrideFor,
   resolvePromptBudget,
   isCustomKeyless,
   isCustomProviderId,
   type CustomProvider,
+  type ProviderOverride,
 } from '../providers';
 
 const OLLAMA: CustomProvider = { ...OLLAMA_PRESET };
@@ -105,6 +107,40 @@ describe('custom label / model / baseURL resolution', () => {
     // Built-ins keep their registry defaults.
     expect(customDefaultModel([], 'qwen')).toBe(defaultModelFor('qwen'));
     expect(customBaseURL([], 'glm')).toBe('https://open.bigmodel.cn/api/paas/v4');
+  });
+});
+
+describe('provider overrides (built-in name / endpoint / key edits)', () => {
+  const OVERRIDES: Record<string, ProviderOverride> = {
+    qwen: { baseURL: 'https://my-mirror.example.com/v1' },
+    glm: { name: 'GLM 国内网关', baseURL: 'https://gateway.example.com/v1', hasApiKey: true },
+    'deepseek-openai': {},
+  };
+
+  it('providerOverrideFor returns the entry, ignoring empty tombstones', () => {
+    expect(providerOverrideFor(OVERRIDES, 'qwen')?.baseURL).toBe('https://my-mirror.example.com/v1');
+    expect(providerOverrideFor(OVERRIDES, 'glm')?.name).toBe('GLM 国内网关');
+    // An all-empty entry is a stale tombstone — treated as absent.
+    expect(providerOverrideFor(OVERRIDES, 'deepseek-openai')).toBeUndefined();
+    expect(providerOverrideFor(OVERRIDES, 'unknown')).toBeUndefined();
+    expect(providerOverrideFor(undefined, 'qwen')).toBeUndefined();
+  });
+
+  it('customBaseURL honors a built-in override before the registry default', () => {
+    expect(customBaseURL([], 'qwen', OVERRIDES)).toBe('https://my-mirror.example.com/v1');
+    // Providers without an override keep the registry URL.
+    expect(customBaseURL([], 'deepseek-openai', OVERRIDES)).toBe('https://api.deepseek.com');
+    // Custom providers still win over the override map (they never appear in it).
+    expect(customBaseURL([OLLAMA], 'ollama', OVERRIDES)).toBe('http://localhost:11434/v1');
+    // Legacy call shape (no overrides) keeps working.
+    expect(customBaseURL([], 'glm')).toBe('https://open.bigmodel.cn/api/paas/v4');
+  });
+
+  it('customProviderLabel honors a built-in name override before the registry label', () => {
+    expect(customProviderLabel([], 'glm', OVERRIDES)).toBe('GLM 国内网关');
+    expect(customProviderLabel([], 'qwen', OVERRIDES)).toBe('Qwen');
+    // Custom providers resolve by their own name first.
+    expect(customProviderLabel([OLLAMA], 'ollama', OVERRIDES)).toBe('Ollama (local)');
   });
 });
 

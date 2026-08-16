@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, type PureConfig } from './config';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, promptBudgetForProvider, imageGenEnabled, imageGenModelFor } from '../shared/providers';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, promptBudgetForProvider, imageGenEnabled, imageGenModelFor } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionStats } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
@@ -543,11 +543,6 @@ function createPermissionHandler(config: PureConfig): PermissionRequestHandler {
 
 // ── Adapter factory ──
 
-function providerBaseURL(provider: PureConfig['provider']): string {
-  return baseURLFor(provider);
-}
-
-
 function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
   if (!config) {
     throw new Error('No configuration');
@@ -555,8 +550,11 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
   const customs = config.customProviders ?? [];
   const custom = customProviderFor(customs, config.provider);
   // Custom providers resolve their own base URL / default model; built-ins
-  // fall back to the shared registry.
-  const baseURL = config.baseURL || customBaseURL(customs, config.provider);
+  // fall back to the shared registry (a per-provider override, e.g. a proxy
+  // or mirror set in Settings → LLM → 连接设置, wins over the registry). The
+  // legacy global config.baseURL is deliberately NOT read here — a stale
+  // value once hijacked every provider's endpoint.
+  const baseURL = customBaseURL(customs, config.provider, config.providerOverrides);
   const model = config.model || customDefaultModel(customs, config.provider);
   // DeepSeek reasoning models spend reasoning_content tokens from the SAME
   // output budget as content — at the shared 8192 default, complex tasks (e.g.
@@ -573,11 +571,18 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
     // is resolved inside `chat_stream` — it never passes through the WebView.
     // Custom providers resolve their own named secret ('llm.apiKey.<id>');
     // keyless ones resolve to nothing and Rust omits the Authorization header.
+    const builtinOverride = providerOverrideFor(config.providerOverrides, config.provider);
     return new RustLLMAdapter({
       provider: config.provider,
       model,
       baseURL,
-      secretKey: custom ? customSecretKey(custom.id) : undefined,
+      // Built-in providers with their own saved key resolve it from the same
+      // per-provider Rust secret slot ('llm.apiKey.<id>') as custom providers;
+      // without an override the Rust backend falls back to the shared
+      // 'llm.apiKey' slot (or omits the header for keyless custom endpoints).
+      secretKey: custom ? customSecretKey(custom.id)
+        : builtinOverride?.hasApiKey ? customSecretKey(config.provider)
+        : undefined,
       proxyUrl: effectiveProxyUrl(config.proxy, 'llm'),
       proxyBypassProviders: config.proxy?.bypassProviders ?? [],
       proxyBypassModels: config.proxy?.bypassModels ?? [],
@@ -585,7 +590,8 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
       maxTokens,
     });
   }
-  const apiKey = custom?.apiKey ?? config.apiKey;
+  const builtinOverride = providerOverrideFor(config.providerOverrides, config.provider);
+  const apiKey = custom?.apiKey ?? builtinOverride?.apiKey ?? config.apiKey;
   if (!apiKey && !isCustomKeyless(customs, config.provider)) {
     throw new Error('No API key configured');
   }
@@ -1028,8 +1034,10 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
   return {
     provider: config.provider,
     model: imageGenModelFor(customs, config.provider, config.model),
-    baseURL: config.baseURL || customBaseURL(customs, config.provider),
-    secretKey: custom ? customSecretKey(custom.id) : undefined,
+    baseURL: customBaseURL(customs, config.provider, config.providerOverrides),
+    secretKey: custom ? customSecretKey(custom.id)
+      : providerOverrideFor(config.providerOverrides, config.provider)?.hasApiKey ? customSecretKey(config.provider)
+      : undefined,
     // Image generation hits the provider's LLM-family API — route it through
     // the same proxy scope (and bypass rules) as chat traffic.
     proxyUrl: effectiveProxyUrl(config.proxy, 'llm'),

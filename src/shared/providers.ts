@@ -150,6 +150,25 @@ export interface CustomProvider {
 }
 
 /**
+ * Per-provider overrides for BUILT-IN providers (config v10). Custom providers
+ * already carry their own name/baseURL/key on their entry, so this map only
+ * holds user edits for the built-ins (deepseek-openai / qwen / glm, …): a
+ * custom display name, a custom endpoint (proxy / mirror), and a per-provider
+ * API key. Desktop keys live in Rust secrets under `llm.apiKey.<id>` (same
+ * slot scheme as custom providers) and never round-trip through storage.
+ */
+export interface ProviderOverride {
+  /** Custom display name shown on the card / summary instead of the i18n label. */
+  name?: string;
+  /** Custom OpenAI-compatible base URL overriding the registry default. */
+  baseURL?: string;
+  /** Browser-mode per-provider API key (desktop keeps it in Rust secrets). */
+  apiKey?: string;
+  /** True when the key lives in Rust secrets under `llm.apiKey.<id>`. */
+  hasApiKey?: boolean;
+}
+
+/**
  * One-click Ollama preset (Settings → LLM → Ollama 一键预设). Uses the
  * OpenAI-compatible endpoint of a local Ollama daemon (default port 11434) and
  * a set of common coding-oriented tags — the user can edit models later.
@@ -256,6 +275,21 @@ export function customProviderFor(
   return customs.find((p) => p.id === id);
 }
 
+/** Find a built-in provider override by id (undefined when absent). */
+export function providerOverrideFor(
+  overrides: Record<string, ProviderOverride> | undefined | null,
+  id: string | undefined | null,
+): ProviderOverride | undefined {
+  if (!overrides || !id) return undefined;
+  const override = overrides[id];
+  if (!override) return undefined;
+  // An all-empty override is a stale tombstone — treat it as absent.
+  if (!override.name && !override.baseURL && !override.apiKey && !override.hasApiKey) {
+    return undefined;
+  }
+  return override;
+}
+
 /** Build a budget input from persisted custom-provider metadata. */
 export function promptBudgetForProvider(
   customs: readonly CustomProvider[] | undefined | null,
@@ -337,8 +371,11 @@ export function imageGenModelFor(
 export function customProviderLabel(
   customs: readonly CustomProvider[] | undefined | null,
   id: string | undefined | null,
+  overrides?: Record<string, ProviderOverride> | null,
 ): string {
-  return customProviderFor(customs, id)?.name ?? providerLabel(id);
+  return customProviderFor(customs, id)?.name
+    ?? providerOverrideFor(overrides, id)?.name
+    ?? providerLabel(id);
 }
 
 /** Default model for a provider id, custom-aware; falls back to built-in. */
@@ -353,8 +390,11 @@ export function customDefaultModel(
 export function customBaseURL(
   customs: readonly CustomProvider[] | undefined | null,
   id: string | undefined | null,
+  overrides?: Record<string, ProviderOverride> | null,
 ): string {
-  return customProviderFor(customs, id)?.baseURL ?? baseURLFor(id ?? '');
+  return customProviderFor(customs, id)?.baseURL
+    ?? providerOverrideFor(overrides, id)?.baseURL
+    ?? baseURLFor(id ?? '');
 }
 
 /**

@@ -11,6 +11,8 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - 修复 Harness 事件流收尾顺序：checkpoint 持久化与记忆写入移到 `yield` 之前——消费者在 `Completed` 处 break 时不再丢失状态；`Interrupted` 快照回退到当前消息列表；新增回归测试锁定该行为
 - 修复上下文压缩摘要对空 content 消息的空引用风险
 - 自定义供应商配置提示精确化：Base URL 缺失时停在连接设置，只缺模型时自动打开模型库抽屉并聚焦输入框；启用成功后收起全部配置抽屉
+- 修复内置供应商端点被全局残留 Base URL 劫持的问题：早期版本在「连接设置」填过的地址（如阿里百炼）会残留在全局字段里，导致所有供应商卡片与请求都显示/打到该地址；v10 迁移清空全局字段（非默认地址转入对应供应商的覆盖），请求层与设置面板不再读取它
+- 内置供应商（DeepSeek / Qwen / GLM）支持 per-provider 覆盖：名称、Base URL（代理 / 镜像网关，留空即默认端点）与各自独立的 API Key（桌面端存入 `llm.apiKey.<id>` 独立密钥槽，与自定义供应商同一机制；浏览器模式存 override 条目）；设置面板对内置供应商同样开放名称与 Base URL 编辑行
 - README（中英）新增「优点 / 独特之处 / 与其他 coding agent 的差异」一览；架构图补充请求预检（intake → assess → probe → plan → confirm）与 GUI/CLI 共享控制平面；默认界面改用真实截图
 
 ## v1.9.6

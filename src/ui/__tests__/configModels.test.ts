@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { defaults, modelListForProvider, normalizeProviderModels, SCRAPLING_MCP_PRESET } from '../config';
+import { defaults, hasConfiguredKey, modelListForProvider, normalizeProviderModels, SCRAPLING_MCP_PRESET } from '../config';
 
 describe('provider model lists', () => {
   it('keeps a built-in provider usable with one default model', () => {
@@ -67,8 +67,46 @@ describe('Scrapling MCP preset', () => {
     expect(defaults().mcpExcludedPrefixes).toEqual([]);
   });
 
+  it('defaults to no built-in provider overrides', () => {
+    expect(defaults().providerOverrides).toEqual({});
+  });
+
   it('does not collide with the built-in web-search server name', () => {
     const names = new Set([...defaults().mcpServers, SCRAPLING_MCP_PRESET].map(s => s.name));
     expect(names.size).toBe(2); // web-search + scrapling
+  });
+});
+
+describe('hasConfiguredKey', () => {
+  it('accepts the legacy global key (browser / Rust)', () => {
+    expect(hasConfiguredKey({ ...defaults(), apiKey: 'sk-x' })).toBe(true);
+    expect(hasConfiguredKey({ ...defaults(), hasApiKey: true })).toBe(true);
+  });
+
+  it('accepts a custom provider (keyed or keyless)', () => {
+    const cfg = {
+      ...defaults(),
+      customProviders: [{
+        id: 'local', name: 'Local', baseURL: 'http://localhost:11434/v1',
+        models: ['qwen2.5-coder:7b'], defaultModel: 'qwen2.5-coder:7b',
+        apiKey: '', hasApiKey: false, local: true,
+      }],
+      provider: 'local',
+    };
+    expect(hasConfiguredKey(cfg)).toBe(true);
+  });
+
+  it('accepts a built-in with a per-provider override key', () => {
+    const cfg = {
+      ...defaults(),
+      provider: 'qwen',
+      providerOverrides: { qwen: { baseURL: 'https://mirror/v1', hasApiKey: true } },
+    };
+    expect(hasConfiguredKey(cfg)).toBe(true);
+  });
+
+  it('rejects an unconfigured built-in without any key', () => {
+    const cfg = { ...defaults(), provider: 'glm', apiKey: '', hasApiKey: false };
+    expect(hasConfiguredKey(cfg)).toBe(false);
   });
 });

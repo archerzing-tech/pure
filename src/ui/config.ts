@@ -6,7 +6,7 @@
 
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
-import { customProviderFor, defaultModelFor, type CustomProvider, type ProviderId } from '../shared/providers';
+import { customProviderFor, defaultModelFor, isProviderId, providerOverrideFor, PROVIDERS, type CustomProvider, type ProviderId, type ProviderOverride } from '../shared/providers';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
 import type { ProxyConfig } from '../shared/proxy';
@@ -24,6 +24,13 @@ export interface PureConfig {
   customProviders: CustomProvider[];
   /** Model lists for built-in providers; custom-provider lists stay on their provider entry for compatibility. */
   providerModels: Record<string, string[]>;
+  /**
+   * Per-provider overrides for the built-in providers (config v10): a custom
+   * display name, endpoint (proxy / mirror) and per-provider API key, edited
+   * in Settings → LLM → 连接设置. Custom providers already own these fields,
+   * so this map only ever holds entries for the built-ins.
+   */
+  providerOverrides: Record<string, ProviderOverride>;
   apiKey: string;
   /**
    * True when an API key is stored outside the WebView (Rust secrets in the
@@ -186,6 +193,7 @@ export function defaults(): PureConfig {
     mcpExcludedPrefixes: [],
     customProviders: [],
     providerModels: {},
+    providerOverrides: {},
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', bypassProviders: [], bypassModels: [] }),
     streamingRender: true,
     taskMode: 'auto',
@@ -267,6 +275,9 @@ export function hasConfiguredKey(cfg: PureConfig | null): cfg is PureConfig {
   // Studio) need none — the transport omits the Authorization header.
   const custom = (cfg.customProviders ?? []).find((p) => p.id === cfg.provider);
   if (custom) return true;
+  // A built-in provider may carry its own per-provider key (override).
+  const override = providerOverrideFor(cfg.providerOverrides, cfg.provider);
+  if (override?.apiKey || override?.hasApiKey) return true;
   return false;
 }
 
@@ -385,6 +396,32 @@ export function loadConfig(): PureConfig | null {
         cfg.configVersion = 9;
         needsPersist = true;
       }
+      // Config v10: built-in providers gained editable name / Base URL / key
+      // overrides (providerOverrides). Before v10 the GUI kept a single global
+      // baseURL that hijacked EVERY provider's endpoint once filled (the form
+      // prefilled it and chat.ts preferred it over the registry URL) — a
+      // stale value like a DashScope URL would show on DeepSeek/GLM cards and
+      // route every request to it. Migrate a non-default leftover to the
+      // provider it was most recently edited for, then scrub the global field
+      // so the registry URLs take over again; the user can still override any
+      // built-in per provider in the connection drawer.
+      if ((parsed.configVersion ?? 1) < 10) {
+        cfg.providerOverrides = { ...(cfg.providerOverrides ?? {}) };
+        const legacy = typeof parsed.baseURL === 'string' ? parsed.baseURL.trim() : '';
+        const isBuiltin = isProviderId(String(cfg.provider));
+        const matchesAnyDefault = PROVIDERS.some((p) => p.baseURL === legacy);
+        if (legacy && isBuiltin && !matchesAnyDefault && !cfg.providerOverrides[String(cfg.provider)]?.baseURL) {
+          cfg.providerOverrides[String(cfg.provider)] = {
+            ...cfg.providerOverrides[String(cfg.provider)],
+            baseURL: legacy,
+          };
+        }
+        cfg.baseURL = '';
+        cfg.configVersion = 10;
+        needsPersist = true;
+      } else {
+        cfg.providerOverrides = { ...(cfg.providerOverrides ?? {}) };
+      }
       if (isTauriRuntime() && cfg.apiKey) {
         // Legacy migration: move a key previously persisted to localStorage
         // into Rust secrets, then scrub it.
@@ -418,7 +455,8 @@ export async function revokeSecretFromRust(): Promise<void> {
   await deleteSecretFromRust(SECRET_KEY);
 }
 
-/** Rust secrets key under which a custom provider's API key is stored. */
+/** Rust secrets key under which a provider's own API key is stored
+ *  ('llm.apiKey.<id>' — custom providers and per-provider built-in keys). */
 export function customSecretKey(id: string): string {
   return `llm.apiKey.${id}`;
 }
