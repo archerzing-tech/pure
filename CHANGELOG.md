@@ -3,7 +3,7 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v1.9.7
+## v1.9.7-beta7
 
 **LLM 设置页全新卡片式布局：默认模型横条 + 8 家内置供应商网格**
 
