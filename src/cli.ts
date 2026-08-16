@@ -24,6 +24,8 @@ import type { IntentAssessment, TaskMode } from './coding-agent/types';
 import { DefaultHookRouter } from './engine/HookRouter';
 import { DefaultFailurePolicy } from './engine/FailurePolicy';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
+import { MCPClient } from './harness/mcp/MCPClient';
+import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
 import { SubagentOrchestrator, BUILT_IN_SUBAGENTS } from './coding-agent/SubagentOrchestrator';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler } from './cli_permission';
@@ -77,6 +79,10 @@ interface PureConfig {
    * system prompt so terminal and GUI sessions behave identically.
    */
   hubSkills?: Array<{ name: string; description: string; source: string; body: string; enabled: boolean }>;
+  /** MCP servers written by the GUI Settings → MCP page. */
+  mcpServers?: MCPServerConfig[];
+  /** MCP tool-name prefixes to hide (GUI Settings → MCP). */
+  mcpExcludedPrefixes?: string[];
 }
 
 function loadConfig(): PureConfig | null {
@@ -392,6 +398,15 @@ interface CliArgs {
   /** User-defined custom providers from ~/.pure/config.json. */
   customProviders?: CustomProvider[];
   /**
+   * MCP servers: ~/.pure/config.json `mcpServers` (written by GUI Settings →
+   * MCP) plus repeatable `--mcp-server "<name>:<command-or-url>"` flags — e.g.
+   * `--mcp-server "scrapling:uvx --from scrapling[ai] scrapling mcp"`.
+   * Values containing `://` are treated as http (SSE) URLs.
+   */
+  mcpServers?: MCPServerConfig[];
+  /** MCP tool-name prefixes to hide (config.json + --mcp-exclude-prefix). */
+  mcpExcludedPrefixes?: string[];
+  /**
    * True when every tool call (read, write, execute_command, web_search, …)
    * should be approved without prompting. Defaults to true so a one-shot
    * `pure "do thing"` runs straight through — the operator has already
@@ -408,6 +423,31 @@ type SubCommand = 'config' | '';
 // Precedence for provider/apiKey/model: --flag > env var > ~/.pure/config.json > defaults.
 // This lets you `pure config` once and never worry about env vars again, while still
 // allowing one-off overrides per invocation.
+
+/** Collect repeatable `--flag <value>` occurrences (generic flags overwrite;
+ * repeatable ones accumulate — e.g. multiple --mcp-server entries). */
+function repeatableFlag(raw: string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] === `--${name}` && raw[i + 1] && !raw[i + 1].startsWith('--')) {
+      out.push(raw[i + 1]);
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/** Parse one `--mcp-server "<name>:<command-or-url>"` value: values containing
+ * `://` are http (SSE) endpoints, everything else is a stdio command. */
+function parseMcpServerFlag(value: string): MCPServerConfig {
+  const sep = value.indexOf(':');
+  const name = sep === -1 ? value : value.slice(0, sep).trim();
+  const rest = sep === -1 ? '' : value.slice(sep + 1).trim();
+  if (rest.includes('://')) {
+    return { name: name || 'mcp', transport: 'http', url: rest };
+  }
+  return { name: name || 'mcp', transport: 'stdio', command: rest.split(/\s+/).filter(Boolean) };
+}
 
 function parseArgs(): { args: CliArgs; command: SubCommand } {
   const raw = Bun.argv.slice(2);
@@ -459,11 +499,28 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
   // flag is needed because the default already matches the common case.
   const autoApprove = resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, DEFAULT_CLI_AUTO_APPROVE);
 
+  // MCP servers: GUI-written ~/.pure/config.json entries first, then any
+  // repeatable --mcp-server flags (a flag with the same name replaces the
+  // config entry so one-off overrides work). Prefix exclusions merge.
+  const mcpServers: MCPServerConfig[] = [...(fileCfg?.mcpServers ?? [])];
+  for (const entry of repeatableFlag(raw, 'mcp-server')) {
+    const server = parseMcpServerFlag(entry);
+    const idx = mcpServers.findIndex((s) => s.name === server.name);
+    if (idx >= 0) mcpServers[idx] = server;
+    else mcpServers.push(server);
+  }
+  const mcpExcludedPrefixes = [
+    ...(fileCfg?.mcpExcludedPrefixes ?? []),
+    ...repeatableFlag(raw, 'mcp-exclude-prefix'),
+  ];
+
   return {
     args: {
       prompt: promptParts.join(' '),
       provider, model, apiKey, workspace, resume, stateDb, autoApprove,
       customProviders: fileCfg?.customProviders,
+      mcpServers,
+      mcpExcludedPrefixes,
     },
     command,
   };
@@ -553,7 +610,13 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
   }
 }
 
-function createTools(workspace: string, autoApprove = false, sessionId = ''): { tools?: ToolAdapter; toolsDefs: ToolDefinition[] } {
+async function createTools(
+  workspace: string,
+  autoApprove = false,
+  sessionId = '',
+  mcpServers?: MCPServerConfig[],
+  mcpExcludedPrefixes?: string[],
+): Promise<{ tools?: ToolAdapter; toolsDefs: ToolDefinition[]; mcpClient?: MCPClient }> {
   if (!workspace) return { toolsDefs: [] };
 
   const resolved = workspace.startsWith('/') ? workspace : `${process.cwd()}/${workspace}`;
@@ -578,7 +641,29 @@ function createTools(workspace: string, autoApprove = false, sessionId = ''): { 
   const registry = new ToolRegistry(adapter);
   registry.setPermissionManager(new PermissionManager('NORMAL', createCliPermissionHandler(autoApprove)));
 
-  return { tools: registry, toolsDefs: adapter.getTools() };
+  // MCP servers: GUI-written ~/.pure/config.json `mcpServers` plus repeatable
+  // --mcp-server flags. Tools are registered into the same registry as the
+  // built-ins (permission-gated like the GUI) and routed to the MCPClient.
+  // Prefix exclusions (mcpExcludedPrefixes) keep third-party tool lists from
+  // crowding out the built-in selection.
+  const mcpDefs: ToolDefinition[] = [];
+  let mcpClient: MCPClient | undefined;
+  if (mcpServers && mcpServers.length > 0) {
+    mcpClient = new MCPClient({
+      servers: mcpServers,
+      sessionId,
+      excludedPrefixes: mcpExcludedPrefixes,
+      onToolDiscovered: (tool) => registry.register(tool),
+    });
+    registry.setMCPExecutor(mcpClient);
+    await mcpClient.connectAll();
+    // Register tools from any server that connected (allSettled tolerates
+    // individual failures, e.g. a missing uvx for the Scrapling preset).
+    for (const tool of mcpClient.getTaggedTools()) registry.register(tool);
+    mcpDefs.push(...mcpClient.getTools());
+  }
+
+  return { tools: registry, toolsDefs: [...adapter.getTools(), ...mcpDefs], mcpClient };
 }
 
 // ── Shared event consumer ──
@@ -799,10 +884,10 @@ function createStore(args: CliArgs): IStateStore | undefined {
 
 // ── Harness factory ──
 
-function createHarness(args: CliArgs) {
+async function createHarness(args: CliArgs) {
   const { adapter } = createAdapter(args);
   const sessionId = args.resume || `session_${Date.now()}`;
-  const createdTools = createTools(args.workspace, args.autoApprove, sessionId);
+  const createdTools = await createTools(args.workspace, args.autoApprove, sessionId, args.mcpServers, args.mcpExcludedPrefixes);
   const tools = createdTools.tools;
   let toolsDefs = createdTools.toolsDefs;
   if (tools && tools instanceof ToolRegistry) {
@@ -856,7 +941,7 @@ function createHarness(args: CliArgs) {
     failurePolicy: new DefaultFailurePolicy(),
   });
 
-  return { harness, tools, toolsDefs, store, sessionId, projectPath };
+  return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient };
 }
 
 // ── `pure config` — interactive one-time setup ──
@@ -1081,7 +1166,7 @@ async function runConfig(): Promise<void> {
 
 async function runOneShot(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
-  const { harness, tools, sessionId, projectPath, toolsDefs } = createHarness(args);
+  const { harness, tools, sessionId, projectPath, toolsDefs, mcpClient } = await createHarness(args);
   const hasTools = toolsDefs.length > 0;
   await learnFromInput(args.prompt, sessionId, projectPath);
 
@@ -1148,13 +1233,17 @@ async function runOneShot(args: CliArgs) {
   const time = dim(`${Date.now() - startTime}ms`);
   const turn = dim(`| turn ${result.turnCount}`);
   process.stdout.write(`  ${emoji} ${time} ${turn}\n`);
+
+  // MCP subprocesses keep stdio pipes open — without an explicit disconnect the
+  // event loop never drains and the one-shot CLI would hang after finishing.
+  mcpClient?.disconnectAll();
 }
 
 // ── REPL mode ──
 
 async function runRepl(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
-  const { harness, tools, sessionId, projectPath, toolsDefs } = createHarness(args);
+  const { harness, tools, sessionId, projectPath, toolsDefs, mcpClient } = await createHarness(args);
   const hasTools = toolsDefs.length > 0;
 
   renderLogo();
@@ -1184,6 +1273,7 @@ async function runRepl(args: CliArgs) {
       if (currentAbort.signal.aborted) {
         process.stdout.write('\n  👋 Goodbye.\n');
         rl.close();
+        mcpClient?.disconnectAll();
         process.exit(0);
       }
       currentAbort.abort();
@@ -1192,6 +1282,7 @@ async function runRepl(args: CliArgs) {
     }
     process.stdout.write('\n  👋 Goodbye.\n');
     rl.close();
+    mcpClient?.disconnectAll();
     process.exit(0);
   });
 
@@ -1205,7 +1296,11 @@ async function runRepl(args: CliArgs) {
     const input = await askQuestion();
     if (!input) continue;
 
-    if (input === '/exit' || input === '/quit') { process.stdout.write(`  ${dim('👋 Goodbye.')}\n`); break; }
+    if (input === '/exit' || input === '/quit') {
+      process.stdout.write(`  ${dim('👋 Goodbye.')}\n`);
+      mcpClient?.disconnectAll();
+      break;
+    }
     if (input === '/undo') {
       if (generating) {
         process.stdout.write(`  ${yellow('⏳')} ${dim('请先等待当前执行结束。')}\n`);

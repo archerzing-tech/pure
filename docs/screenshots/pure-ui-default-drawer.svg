@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820" role="img" aria-labelledby="title desc">
+  <title id="title">Pure GUI Default plus Drawer layout</title>
+  <desc id="desc">A visual overview of Pure's chat workspace and the equal-width LLM settings cards with provider, model, and connection drawers.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f8f7ff"/><stop offset="1" stop-color="#eef3f7"/></linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7768e8"/><stop offset="1" stop-color="#5147bd"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#3d3b63" flood-opacity=".14"/></filter>
+    <style>
+      .title { font: 700 28px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #242235; }
+      .subtitle { font: 400 14px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #706d83; }
+      .label { font: 800 10px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #7768e8; letter-spacing: .14em; }
+      .heading { font: 700 16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #28263a; }
+      .body { font: 400 12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #777387; }
+      .mono { font: 600 11px ui-monospace,SFMono-Regular,Menlo,monospace; fill: #6b667d; }
+      .button { font: 700 11px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; fill: #6658d7; }
+      .white { fill: #fff; }
+    </style>
+  </defs>
+  <rect width="1400" height="820" rx="28" fill="url(#bg)"/>
+  <text x="54" y="62" class="title">Pure GUI — Default + Drawer</text>
+  <text x="54" y="90" class="subtitle">The default surface stays calm; provider, model library, and connection details expand without changing the outer card width.</text>
+
+  <rect x="44" y="126" width="1312" height="646" rx="22" fill="#fff" stroke="#dddbea" filter="url(#shadow)"/>
+  <rect x="44" y="126" width="214" height="646" rx="22" fill="#f3f1fb"/>
+  <rect x="236" y="126" width="22" height="646" fill="#f3f1fb"/>
+  <circle cx="82" cy="168" r="16" fill="url(#accent)"/>
+  <text x="108" y="173" class="heading">pure</text>
+  <rect x="70" y="210" width="162" height="34" rx="9" fill="#fff" stroke="#dfdced"/>
+  <text x="86" y="231" class="body">＋ New chat</text>
+  <text x="70" y="284" class="label">SESSIONS</text>
+  <rect x="70" y="304" width="162" height="54" rx="10" fill="#e5e1fb"/>
+  <text x="86" y="327" class="heading" font-size="12">AgentLoop notes</text>
+  <text x="86" y="345" class="body">just now</text>
+  <text x="70" y="708" class="body">Settings  ·  Workspace</text>
+
+  <text x="302" y="174" class="label">SETTINGS / LLM</text>
+  <text x="302" y="207" class="title" font-size="23">LLM Provider</text>
+  <text x="302" y="233" class="subtitle">Configure the model connection without exposing unnecessary fields.</text>
+
+  <rect x="302" y="264" width="1052" height="88" rx="14" fill="#fbfaff" stroke="#d9d4f6"/>
+  <text x="324" y="289" class="label">CURRENT PROVIDER</text>
+  <text x="324" y="316" class="heading">DeepSeek (OpenAI)</text>
+  <text x="324" y="335" class="mono">api.deepseek.com</text>
+  <rect x="1190" y="287" width="140" height="36" rx="9" fill="#eeeaff" stroke="#cfc7fb"/>
+  <text x="1260" y="310" text-anchor="middle" class="button">选择供应商</text>
+
+  <rect x="302" y="364" width="1052" height="116" rx="14" fill="#f7f5ff" stroke="#cfc7fb"/>
+  <text x="324" y="391" class="label">DEFAULT MODEL</text>
+  <rect x="1236" y="382" width="94" height="22" rx="11" fill="#e8e3ff"/>
+  <text x="1283" y="397" text-anchor="middle" class="button" font-size="10">正在使用</text>
+  <text x="324" y="426" class="heading">deepseek-v4-flash</text>
+  <text x="324" y="449" class="body">新对话会自动使用这个模型</text>
+  <text x="324" y="468" class="button">管理模型库  →</text>
+
+  <rect x="302" y="492" width="1052" height="126" rx="14" fill="#fff" stroke="#dddbea"/>
+  <text x="324" y="522" class="heading">模型库</text>
+  <text x="395" y="522" class="body">· 3 个模型</text>
+  <text x="1286" y="522" text-anchor="middle" class="button">展开</text>
+  <line x1="324" y1="545" x2="1332" y2="545" stroke="#eeeaf4"/>
+  <text x="342" y="573" class="mono">deepseek-v4-flash</text>
+  <text x="1170" y="573" class="button">默认</text>
+  <text x="342" y="598" class="mono">deepseek-reasoner</text>
+  <text x="1280" y="598" text-anchor="middle" class="body">点击切换默认</text>
+
+  <rect x="302" y="630" width="1052" height="116" rx="14" fill="#fff" stroke="#dddbea"/>
+  <text x="324" y="658" class="label">CONNECTION</text>
+  <text x="324" y="686" class="heading">连接设置</text>
+  <text x="324" y="708" class="body">知名供应商只需填写 API Key</text>
+  <rect x="1086" y="663" width="78" height="30" rx="8" fill="#f1fbf5" stroke="#c8ead5"/>
+  <text x="1125" y="682" text-anchor="middle" class="body" fill="#23814b">已连接</text>
+  <rect x="1180" y="663" width="86" height="30" rx="8" fill="#fff" stroke="#dddbea"/>
+  <text x="1223" y="682" text-anchor="middle" class="body">测试连接</text>
+  <rect x="1280" y="663" width="50" height="30" rx="8" fill="#fff" stroke="#dddbea"/>
+  <text x="1305" y="682" text-anchor="middle" class="button">→</text>
+</svg>

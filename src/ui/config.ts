@@ -72,7 +72,13 @@ export interface PureConfig {
    * enabled entries are injected into the system prompt (chat.ts / cli.ts).
    */
   hubSkills: HubSkill[];
-  mcpServers: Array<{ name: string; transport: 'stdio' | 'http'; command?: string[]; url?: string }>;
+  mcpServers: Array<{ name: string; transport: 'stdio' | 'http'; command?: string[]; url?: string; requestTimeoutMs?: number }>;
+  /**
+   * MCP tool-name prefixes to hide from the model (e.g. ['scrapling__bulk_']).
+   * Filtered tools stay connected server-side but are never registered, so
+   * third-party MCP tool lists don't crowd out built-in tool selection.
+   */
+  mcpExcludedPrefixes: string[];
   /** Network proxy used by desktop LLM and agent requests. It is opt-in; an empty or invalid URL means direct connection. LLM and tool traffic have independent switches. */
   proxy: ProxyConfig;
   /**
@@ -132,6 +138,25 @@ export function isDefaultMcpServer(name: string): boolean {
   return DEFAULT_MCP_SERVERS.some((s) => s.name === name);
 }
 
+/**
+ * One-click preset for the Scrapling MCP server (D4Vinci/Scrapling): adaptive
+ * stealth web scraping via `uvx --from "scrapling[ai]" scrapling mcp`. The
+ * `--from "scrapling[ai]"` is REQUIRED — the bare `scrapling` PyPI package
+ * ships no CLI deps (verified 2026-08: `uvx scrapling mcp` dies with
+ * `ModuleNotFoundError: No module named 'click'`; the MCP server ships in the
+ * `[ai]` extra, which pulls `[fetchers]` → click). requestTimeoutMs is 120s
+ * because the browser-backed tools (stealthy_fetch / fetch) launch a browser
+ * and may solve Cloudflare challenges — the default 30s is too short.
+ * Opt-in (not a default) because it needs Python + uv and ships a browser
+ * fetcher; users install it once with `pip install "scrapling[ai]"` (README).
+ */
+export const SCRAPLING_MCP_PRESET: PureConfig['mcpServers'][number] = {
+  name: 'scrapling',
+  transport: 'stdio',
+  command: ['uvx', '--from', 'scrapling[ai]', 'scrapling', 'mcp'],
+  requestTimeoutMs: 120_000,
+};
+
 export function defaults(): PureConfig {
   return {
     provider: 'deepseek-openai',
@@ -158,12 +183,13 @@ export function defaults(): PureConfig {
     skills: { 'code-review': true, 'web-research': true, memory: true, planning: true },
     hubSkills: [],
     mcpServers: [...DEFAULT_MCP_SERVERS],
+    mcpExcludedPrefixes: [],
     customProviders: [],
     providerModels: {},
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', bypassProviders: [], bypassModels: [] }),
     streamingRender: true,
     taskMode: 'auto',
-    configVersion: 8,
+    configVersion: 9,
   };
 }
 
@@ -351,6 +377,13 @@ export function loadConfig(): PureConfig | null {
         needsPersist = true;
       } else {
         cfg.providerModels = normalizeProviderModels(cfg.providerModels);
+      }
+      // Config v9: MCP tool prefix filtering (Settings → MCP → excluded
+      // prefixes). Legacy configs start with nothing excluded.
+      if ((parsed.configVersion ?? 1) < 9) {
+        cfg.mcpExcludedPrefixes = Array.isArray(cfg.mcpExcludedPrefixes) ? cfg.mcpExcludedPrefixes : [];
+        cfg.configVersion = 9;
+        needsPersist = true;
       }
       if (isTauriRuntime() && cfg.apiKey) {
         // Legacy migration: move a key previously persisted to localStorage

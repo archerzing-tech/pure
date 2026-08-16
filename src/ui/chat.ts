@@ -1788,6 +1788,7 @@ export class ChatController {
         promptBudget: promptBudgetForProvider(config.customProviders, config.provider, config.model),
         mcpClient: this.mcpClient,
         mcpServers: this.deferredInitDone ? undefined : (config.mcpServers ?? []),
+        mcpExcludedPrefixes: config.mcpExcludedPrefixes,
         proxyUrl: effectiveProxyUrl(config.proxy, 'tools'),
         permissionManager: this.permissionManager,
         // P1-1 (async verification): the engine's `verifier` stays PURELY

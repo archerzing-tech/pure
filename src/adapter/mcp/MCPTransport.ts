@@ -44,6 +44,10 @@ export interface MCPServerConfig {
   url?: string;
   /** Environment variables for the subprocess */
   env?: Record<string, string>;
+  /** Per-request timeout (ms). Defaults to 30s; heavy tools (browser-based
+   * MCP servers like Scrapling's stealthy_fetch) need longer — set it on the
+   * server config (e.g. the Scrapling preset uses 120s). */
+  requestTimeoutMs?: number;
 }
 
 // ── Transport interface ──

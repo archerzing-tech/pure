@@ -1410,12 +1410,12 @@ async fn search_backend_bing_cn(query: &str, max: usize, proxy_url: Option<&str>
 /// Human-readable list of the configured search backends (API keys that were
 /// passed in plus the always-available free HTML backends) for the error /
 /// no-results guidance the model feeds back on.
-fn configured_backend_names(serper_api_key: &Option<String>, api_key: &Option<String>) -> String {
+fn configured_backend_names(serper_api_key: Option<&str>, api_key: Option<&str>) -> String {
     let mut names: Vec<&str> = Vec::new();
-    if serper_api_key.as_deref().map_or(false, |k| !k.is_empty()) {
+    if serper_api_key.map_or(false, |k| !k.is_empty()) {
         names.push("Serper");
     }
-    if api_key.as_deref().map_or(false, |k| !k.is_empty()) {
+    if api_key.map_or(false, |k| !k.is_empty()) {
         names.push("Tavily");
     }
     names.extend(["cn.bing.com", "DuckDuckGo", "Bing"]);
@@ -1558,19 +1558,43 @@ fn parse_tavily_results(body: &serde_json::Value, max: usize) -> Vec<SearchResul
 /// slower. Only adds latency when cn.bing.com is still in flight.
 const CN_BING_GRACE_MS: std::time::Duration = std::time::Duration::from_millis(1500);
 
-#[tauri::command]
-async fn web_search(
-    _workspace: String,
-    query: String,
+/// Tier-2 fast path + search backends, shared by the `web_search` command and
+/// `web_public_api`'s auto-fallback (searchOnMiss). Mirrors the Node
+/// handleWebSearch + web_search dispatch in NodeToolAdapter.ts.
+async fn web_search_inner(
+    query: &str,
     max_results: Option<usize>,
-    api_key: Option<String>,
-    serper_api_key: Option<String>,
-    proxy_url: Option<String>,
+    api_key: Option<&str>,
+    serper_api_key: Option<&str>,
+    location: Option<&str>,
+    proxy_url: Option<&str>,
 ) -> Result<String, String> {
     let max = max_results.unwrap_or(10).min(20);
 
-    let mut results: Vec<SearchResult> = Vec::new();
+    // Result cache: identical queries inside an agent loop (or across CLI/GUI
+    // sessions) hit the shared ~/.pure/cache/web-cache.json instead of burning
+    // free-tier quota or re-hitting rate-limited backends. TTL is 15 minutes;
+    // PURE_WEB_CACHE=off disables. The Tier-2 fast path is cached separately
+    // (cached_direct_public_api) with per-intent TTLs.
+    let search_key = search_cache_key(query, max);
+    if let Some(hit) = web_cache().lock().unwrap().get(&search_key) {
+        return Ok(format!("[cached] {}", hit));
+    }
+
+    // Tier-2 fast path: structured intents (weather/geocode/news/wiki/IP/FX/
+    // stock/GitHub/flight) are answered directly from curated no-key public
+    // APIs instead of hitting search backends — mirrors the Node web_search
+    // dispatch. General queries fall through to the search backends below.
     let mut failed: Vec<String> = Vec::new();
+    match cached_direct_public_api(query, None, location, proxy_url).await {
+        Ok((Some(outcome), cached)) => {
+            return Ok(format!("{}[{}] {}", if cached { "[cached] " } else { "" }, outcome.source, outcome.text));
+        }
+        Ok((None, _)) => {}
+        Err(e) => failed.push(format!("public API: {}", e)),
+    }
+
+    let mut results: Vec<SearchResult> = Vec::new();
     let mut any_empty = false;
 
     // API backends first (opt-in): Serper — a real Google index, the best
@@ -1583,16 +1607,16 @@ async fn web_search(
     // index, so the gate's benefit there is marginal and duplicating the
     // bigram logic here isn't worth it. The free HTML backends below are
     // likewise ungated on the Rust side.
-    if let Some(k) = serper_api_key.as_deref().filter(|k| !k.is_empty()) {
-        match search_backend_serper(&query, max, k, proxy_url.as_deref()).await {
+    if let Some(k) = serper_api_key.filter(|k| !k.is_empty()) {
+        match search_backend_serper(query, max, k, proxy_url).await {
             Ok(r) if !r.is_empty() => results = r,
             Ok(_) => any_empty = true,
             Err(e) => failed.push(format!("Serper: {}", e)),
         }
     }
     if results.is_empty() {
-        if let Some(k) = api_key.as_deref().filter(|k| !k.is_empty()) {
-            match search_backend_tavily(&query, max, k, proxy_url.as_deref()).await {
+        if let Some(k) = api_key.filter(|k| !k.is_empty()) {
+            match search_backend_tavily(query, max, k, proxy_url).await {
                 Ok(r) if !r.is_empty() => results = r,
                 Ok(_) => any_empty = true,
                 Err(e) => failed.push(format!("Tavily: {}", e)),
@@ -1614,16 +1638,16 @@ async fn web_search(
     // is used and the still-in-flight probes are dropped. Errors and empty
     // sets are still accumulated for the degraded-error message below.
     if results.is_empty() {
-        let chinese = is_chinese_query(&query);
+        let chinese = is_chinese_query(query);
         let mut cn = Box::pin(async {
             if chinese {
-                search_backend_bing_cn(&query, max, proxy_url.as_deref()).await
+                search_backend_bing_cn(query, max, proxy_url).await
             } else {
                 Err("cn.bing.com not probed for non-CJK queries".to_string())
             }
         });
-        let mut ddg = Box::pin(search_backend_duckduckgo(&query, max, proxy_url.as_deref()));
-        let mut bing = Box::pin(search_backend_bing(&query, max, proxy_url.as_deref()));
+        let mut ddg = Box::pin(search_backend_duckduckgo(query, max, proxy_url));
+        let mut bing = Box::pin(search_backend_bing(query, max, proxy_url));
         let (mut cn_done, mut ddg_done, mut bing_done) = (false, false, false);
         while results.is_empty() {
             // A completed branch is guarded off (never re-polled) so the loop
@@ -1669,8 +1693,8 @@ async fn web_search(
         // actionable guidance is the same.)
         if any_empty {
             return Ok(format!(
-                "No results found for \"{}\" on the available search backends ({}). Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to contain the information.",
-                query, configured_backend_names(&serper_api_key, &api_key)
+                "No results found for \"{}\" on the available search backends ({}). Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch / web_scrape on a URL you expect to contain the information.",
+                query, configured_backend_names(serper_api_key, api_key)
             ));
         }
         // Every backend errored (none returned empty): almost always network /
@@ -1693,8 +1717,31 @@ async fn web_search(
         .enumerate()
         .map(|(i, r)| format!("{}. {}\n   {}\n   {}", i + 1, r.title, r.snippet, r.url))
         .collect();
+    let joined = output.join("\n\n");
+    web_cache().lock().unwrap().set(&search_key, &joined, SEARCH_TTL_MS);
 
-    Ok(output.join("\n\n"))
+    Ok(joined)
+}
+
+#[tauri::command]
+async fn web_search(
+    _workspace: String,
+    query: String,
+    max_results: Option<usize>,
+    api_key: Option<String>,
+    serper_api_key: Option<String>,
+    location: Option<String>,
+    proxy_url: Option<String>,
+) -> Result<String, String> {
+    web_search_inner(
+        &query,
+        max_results,
+        api_key.as_deref(),
+        serper_api_key.as_deref(),
+        location.as_deref(),
+        proxy_url.as_deref(),
+    )
+    .await
 }
 
 fn urlencoding(s: &str) -> String {
@@ -2190,19 +2237,19 @@ mod web_search_tests {
     #[test]
     fn configured_backend_names_reflects_api_keys() {
         assert_eq!(
-            configured_backend_names(&None, &None),
+            configured_backend_names(None, None),
             "cn.bing.com, DuckDuckGo, Bing"
         );
         assert_eq!(
-            configured_backend_names(&Some("k".into()), &None),
+            configured_backend_names(Some("k"), None),
             "Serper, cn.bing.com, DuckDuckGo, Bing"
         );
         assert_eq!(
-            configured_backend_names(&Some("k".into()), &Some("".into())),
+            configured_backend_names(Some("k"), Some("")),
             "Serper, cn.bing.com, DuckDuckGo, Bing"
         );
         assert_eq!(
-            configured_backend_names(&Some("k".into()), &Some("t".into())),
+            configured_backend_names(Some("k"), Some("t")),
             "Serper, Tavily, cn.bing.com, DuckDuckGo, Bing"
         );
     }
@@ -2560,6 +2607,2086 @@ mod command_cancel_tests {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  Web tool result cache (~/.pure/cache/web-cache.json)
+//  Shared TTL cache for web_search / web_public_api / web_scrape / web_fetch
+//  results — the SAME file and key scheme as the Node CLI (src/adapter/node/
+//  webCache.ts, FNV-1a over the same key parts), so CLI and GUI share warm
+//  results instead of each paying the free-tier quota. Bounded (200 entries,
+//  oldest-first eviction, per-value size cap), corrupt-file tolerant,
+//  PURE_WEB_CACHE=off disables, PURE_CACHE_DIR overrides the base dir.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const WEB_CACHE_MAX_ENTRIES: usize = 200;
+const WEB_CACHE_MAX_VALUE_BYTES: usize = 30_000;
+const SEARCH_TTL_MS: u64 = 15 * 60 * 1000;
+const PAGE_TTL_MS: u64 = 60 * 60 * 1000;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct CacheRecord {
+    v: String,
+    /// Epoch ms when the record was written.
+    t: u64,
+    /// TTL in ms — records past t+ttl are expired.
+    ttl: u64,
+}
+
+/// FNV-1a 64-bit — byte-identical to the Node side's fnv1a64 (webCache.ts) so
+/// CLI and GUI produce the same cache keys for the same query/URL.
+fn fnv1a64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+fn cache_hash_key(parts: &[&str]) -> String {
+    format!("{:x}", fnv1a64(&parts.join("\0")))
+}
+
+fn web_cache_file() -> PathBuf {
+    let base = std::env::var("PURE_CACHE_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{}/.pure", home)
+    });
+    PathBuf::from(base).join("cache").join("web-cache.json")
+}
+
+fn web_cache_enabled() -> bool {
+    // Enabled by default; only explicit off/0/false disables. (Unset == "" is
+    // NOT a disable — matches the Node webCacheEnabled.)
+    let f = std::env::var("PURE_WEB_CACHE")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    f != "off" && f != "0" && f != "false"
+}
+
+/// Query normalization: lowercase + trim + collapse whitespace; CJK queries
+/// also drop INTERNAL whitespace ("北京天气" == "北京 天气"). Matches the Node
+/// normalizeQuery.
+fn normalize_query(q: &str) -> String {
+    let collapsed = q.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+    if is_chinese_query(&collapsed) {
+        collapsed.chars().filter(|c| !c.is_whitespace()).collect()
+    } else {
+        collapsed
+    }
+}
+
+/// Key for web_search result sets (query + result count).
+fn search_cache_key(query: &str, max: usize) -> String {
+    cache_hash_key(&["search", &max.to_string(), &normalize_query(query)])
+}
+
+/// Key for URL content (web_scrape / web_fetch) — selector and the maxChars
+/// bucket are part of the cache identity because they change the output.
+fn page_cache_key(url: &str, selector: Option<&str>, max_chars: usize) -> String {
+    let bucket = if max_chars <= 20000 {
+        "20k"
+    } else if max_chars <= 50000 {
+        "50k"
+    } else {
+        "big"
+    };
+    cache_hash_key(&["page", url.trim(), selector.unwrap_or(""), bucket])
+}
+
+/// Key for direct public-API outcomes (query + optional forced category +
+/// location — weather answers differ by city).
+fn public_api_cache_key(query: &str, category: Option<&str>, location: Option<&str>) -> String {
+    cache_hash_key(&[
+        "publicapi",
+        category.unwrap_or(""),
+        &normalize_query(query),
+        location.unwrap_or(""),
+    ])
+}
+
+/// Per-intent freshness: weather/news/stock are minutes-fresh, geocode/wiki
+/// barely ever change. Mirrors PUBLIC_API_TTL_MS in publicApis.ts.
+fn public_api_ttl_ms(intent: IntentKind) -> u64 {
+    match intent {
+        IntentKind::Weather => 20 * 60 * 1000,
+        IntentKind::News => 10 * 60 * 1000,
+        IntentKind::Stock => 10 * 60 * 1000,
+        IntentKind::Flight => 15 * 60 * 1000,
+        IntentKind::Fx => 6 * 60 * 60 * 1000,
+        IntentKind::Ip => 24 * 60 * 60 * 1000,
+        IntentKind::Github => 24 * 60 * 60 * 1000,
+        IntentKind::Geocode => 30 * 24 * 60 * 60 * 1000,
+        IntentKind::Wiki => 7 * 24 * 60 * 60 * 1000,
+    }
+}
+
+struct WebCache {
+    records: std::collections::HashMap<String, CacheRecord>,
+    file: PathBuf,
+    loaded: bool,
+}
+
+impl WebCache {
+    fn new(file: PathBuf) -> Self {
+        WebCache {
+            records: std::collections::HashMap::new(),
+            file,
+            loaded: false,
+        }
+    }
+
+    fn load(file: PathBuf) -> Self {
+        let mut cache = WebCache::new(file);
+        cache.reload();
+        cache
+    }
+
+    fn reload(&mut self) {
+        if self.loaded {
+            return;
+        }
+        self.loaded = true;
+        if !web_cache_enabled() {
+            return;
+        }
+        let raw = match std::fs::read_to_string(&self.file) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let parsed: Option<std::collections::HashMap<String, CacheRecord>> = serde_json::from_str(&raw).ok();
+        if let Some(map) = parsed {
+            self.records = map;
+        }
+    }
+
+    /// Fresh value for `key`, or None (expired entries are dropped).
+    fn get(&mut self, key: &str) -> Option<String> {
+        if !web_cache_enabled() {
+            return None;
+        }
+        self.reload();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        match self.records.get(key) {
+            Some(rec) if rec.t + rec.ttl > now => Some(rec.v.clone()),
+            Some(_) => {
+                self.records.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Store `value` under `key` for `ttl_ms`; oldest entries are evicted when
+    /// the cache is over the cap. Persisted best-effort.
+    fn set(&mut self, key: &str, value: &str, ttl_ms: u64) {
+        if !web_cache_enabled() {
+            return;
+        }
+        self.reload();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut value = value.to_string();
+        if value.len() > WEB_CACHE_MAX_VALUE_BYTES {
+            value.truncate(WEB_CACHE_MAX_VALUE_BYTES);
+        }
+        self.records.insert(
+            key.to_string(),
+            CacheRecord {
+                v: value,
+                t: now,
+                ttl: ttl_ms,
+            },
+        );
+        while self.records.len() > WEB_CACHE_MAX_ENTRIES {
+            let oldest = self
+                .records
+                .iter()
+                .min_by_key(|(_, rec)| rec.t)
+                .map(|(k, _)| k.clone());
+            match oldest {
+                Some(k) => {
+                    self.records.remove(&k);
+                }
+                None => break,
+            }
+        }
+        self.save();
+    }
+
+    fn save(&self) {
+        if !web_cache_enabled() {
+            return;
+        }
+        if let Some(dir) = self.file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string(&self.records) {
+            let _ = std::fs::write(&self.file, json);
+        }
+    }
+}
+
+/// Process-wide cache. Env vars are read at first init only.
+static WEB_CACHE: std::sync::OnceLock<StdMutex<WebCache>> = std::sync::OnceLock::new();
+
+fn web_cache() -> &'static StdMutex<WebCache> {
+    WEB_CACHE.get_or_init(|| StdMutex::new(WebCache::load(web_cache_file())))
+}
+
+/// try_direct_public_api + cache: fresh answers are served from the shared
+/// cache without hitting the network; misses resolve through the real resolver
+/// and are stored under the intent's TTL. Returns (outcome, cached).
+async fn cached_direct_public_api(
+    query: &str,
+    category: Option<&str>,
+    location: Option<&str>,
+    proxy_url: Option<&str>,
+) -> Result<(Option<PublicApiOutcome>, bool), String> {
+    let key = public_api_cache_key(query, category, location);
+    if let Some(hit) = web_cache().lock().unwrap().get(&key) {
+        if let Ok(outcome) = serde_json::from_str::<PublicApiOutcome>(&hit) {
+            return Ok((Some(outcome), true));
+        }
+    }
+    let outcome = try_direct_public_api(query, category, location, proxy_url).await?;
+    if let Some(o) = &outcome {
+        if let Ok(json) = serde_json::to_string(o) {
+            let ttl = public_api_ttl_ms(o.intent);
+            web_cache().lock().unwrap().set(&key, &json, ttl);
+        }
+    }
+    Ok((outcome, false))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Web Public API (Tier-2) — structured direct lookups
+//  Curated no-key public APIs for STRUCTURED intents (weather / geocode / news
+//  / wiki / IP / FX / stock / GitHub / flight), mirroring
+//  src/adapter/node/publicApis.ts. A deterministic intent classifier decides
+//  whether a query is a structured lookup — the model is never asked to pick
+//  from a huge endpoint registry. Every resolver returns Ok(None) on failure
+//  so callers degrade to web search / web_fetch instead of an error wall.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum IntentKind {
+    Weather,
+    Geocode,
+    News,
+    Wiki,
+    Ip,
+    Fx,
+    Stock,
+    Github,
+    Flight,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PublicApiOutcome {
+    #[allow(dead_code)]
+    intent: IntentKind,
+    /// Human-readable answer text, ready to hand to the model.
+    text: String,
+    /// Source label for the result, e.g. "Open-Meteo".
+    source: String,
+}
+
+/// Compile-once regex helpers (the regex crate has no lookahead, so the few
+/// lookahead-based JS patterns are implemented structurally instead).
+macro_rules! static_regex {
+    ($name:ident, $pattern:expr) => {
+        fn $name() -> &'static regex::Regex {
+            static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            RE.get_or_init(|| regex::Regex::new($pattern).expect("static regex must compile"))
+        }
+    };
+}
+
+// ── Intent classifier ──
+// Conservative keyword routing with length caps + a build-request guard, so
+// "写一个天气网站" can never be answered with weather data instead of being
+// treated as a coding request. Only HIGH-confidence intents auto-route inside
+// web_search; the model-facing web_public_api tool may force a category.
+
+static_regex!(weather_re, r"(?i)天气|气温|温度|预报|会不会下雨|降雨|降雪|风力|湿度|weather|forecast|temperature|rain|snow|humidity|wind");
+static_regex!(geocode_re, r"(?i)经纬度|坐标|geocode|latitude|longitude|lat\s*/?\s*lon|地理坐标");
+static_regex!(news_re, r"(?i)新闻|资讯|头条|快讯|时讯|热点|报道|新闻头条|news|headlines|breaking");
+static_regex!(wiki_re, r"(?i)维基|百科|是什么|是谁|简介|wikipedia|wiki");
+static_regex!(ip_re, r"(?i)(?:我的)?\s*(?:ip地址|ip 地址|本机ip|外网ip|ip)$|(?:what is|my)?\s*(?:ip address|my ip)\b|ip地址|IP地址");
+static_regex!(github_re, r"(?i)\bgithub\b|开源项目|最火的.*仓库|star.*最多");
+static_regex!(flight_number_re, r"(?i)\b([A-Z]{2}\d{2,4})\b");
+static_regex!(bare_flight_re, r"(?i)^(?:航班|flight)(?:动态|状态|信息|查询)?$");
+
+/// True for requests that want something BUILT (never auto-route these). CJK
+/// prefixes match unconditionally (every Chinese build request continues with
+/// CJK characters — the JS lookahead's practical equivalent); English prefixes
+/// need a word boundary so "makeup" / "codex" never match.
+fn is_build_request(query: &str) -> bool {
+    let q = query.trim();
+    if q.is_empty() {
+        return false;
+    }
+    static_regex!(cjk_build_re, r"^(?:写|做|建|造|生成|开发|设计|创建一个|帮我(?:写|做|建|造|开发|设计|生成|创建一个))");
+    static_regex!(en_build_re, r"^(?:make|build|create|write|generate|design|develop|code)");
+    if cjk_build_re().is_match(q) {
+        return true;
+    }
+    if let Some(m) = en_build_re().find(q) {
+        return q[m.end()..]
+            .chars()
+            .next()
+            .map_or(true, |c| !(c.is_ascii_alphanumeric() || c == '_'));
+    }
+    false
+}
+
+/// Classify a query's structured-data intent, or None when it does not fit.
+fn classify_intent(query: &str) -> Option<IntentKind> {
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+    if is_build_request(q) {
+        return None;
+    }
+    let len = q.chars().count();
+    if weather_re().is_match(q) && len <= 40 {
+        return Some(IntentKind::Weather);
+    }
+    if geocode_re().is_match(q) && len <= 60 {
+        return Some(IntentKind::Geocode);
+    }
+    // FX is checked via its parseable currency-pair grammar, not keywords.
+    if parse_fx_query(q).is_some() {
+        return Some(IntentKind::Fx);
+    }
+    if ip_re().is_match(q) && len <= 40 {
+        return Some(IntentKind::Ip);
+    }
+    if news_re().is_match(q) && len <= 60 {
+        return Some(IntentKind::News);
+    }
+    if wiki_re().is_match(q) && len <= 60 {
+        return Some(IntentKind::Wiki);
+    }
+    if github_re().is_match(q) && len <= 60 {
+        return Some(IntentKind::Github);
+    }
+    if resolve_stock_symbol(q).is_some() && len <= 40 {
+        return Some(IntentKind::Stock);
+    }
+    // Flight needs a concrete flight number (CA981 / MU5101) or a bare
+    // "航班动态" intent — "北京到上海机票" stays a general query.
+    if (flight_number_re().is_match(q) && len <= 40) || bare_flight_re().is_match(q) {
+        return Some(IntentKind::Flight);
+    }
+    None
+}
+
+/// Extract a location name from a weather/geocode query ("北京明天天气" → 北京).
+fn extract_location(query: &str) -> String {
+    let mut s = weather_re().replace(query, " ").to_string();
+    static_regex!(time_words_re, r"今天|明天|后天|昨天|早上|上午|中午|下午|晚上|夜里|下周|上周|这周|周末|周[一二三四五六日天]|today|tomorrow|yesterday|this|next|last|week|morning|afternoon|evening|night|in|the|for|at|what|is|like|now|的|怎么样|如何|呢|吧|啊");
+    s = time_words_re().replace(&s, " ").to_string();
+    static_regex!(punct_re, r"[，。？?！!、,.，\s]+");
+    punct_re().replace(&s, " ").trim().to_string()
+}
+
+// ── FX parsing ──
+
+struct FxRequest {
+    from: String,
+    to: String,
+    amount: f64,
+}
+
+fn currency_code(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "美元" | "美金" => "USD",
+        "人民币" => "CNY",
+        "日元" => "JPY",
+        "欧元" => "EUR",
+        "英镑" => "GBP",
+        "港币" => "HKD",
+        "韩元" => "KRW",
+        "卢布" => "RUB",
+        "澳元" => "AUD",
+        "加元" => "CAD",
+        "新台币" => "TWD",
+        "新加坡元" => "SGD",
+        "泰铢" => "THB",
+        "卢比" => "INR",
+        "巴西雷亚尔" => "BRL",
+        _ => return None,
+    })
+}
+
+const CURRENCY_CODES: &str = "USD|CNY|JPY|EUR|GBP|HKD|KRW|RUB|AUD|CAD|TWD|SGD|THB|INR|BRL|CHF";
+
+fn zh_currency_names() -> String {
+    [
+        "美元", "美金", "人民币", "日元", "欧元", "英镑", "港币", "韩元", "卢布", "澳元", "加元", "新台币", "新加坡元", "泰铢", "卢比", "巴西雷亚尔",
+    ]
+    .join("|")
+}
+
+/// Parse "100 USD to CNY", "usd cny", "1美元等于多少人民币", "美元汇率".
+fn parse_fx_query(query: &str) -> Option<FxRequest> {
+    let q = query.trim();
+    let zh_cur = zh_currency_names();
+    // English pair: [amount] CODE to/in CODE
+    let en_re = regex::Regex::new(&format!(
+        r"(?i)^(\d+(?:\.\d+)?)?\s*({})\s*(?:to|in|→|->|兑|换成|换)?\s*({})$",
+        CURRENCY_CODES, CURRENCY_CODES
+    ))
+    .ok()?;
+    if let Some(c) = en_re.captures(q) {
+        return Some(FxRequest {
+            from: c[2].to_uppercase(),
+            to: c[3].to_uppercase(),
+            amount: c.get(1).map(|m| m.as_str().parse().unwrap_or(1.0)).unwrap_or(1.0),
+        });
+    }
+    // Chinese pair: N 美元等于多少人民币 / N 美元换人民币 / 美元兑人民币
+    let zh_re = regex::Regex::new(&format!(
+        r"^(\d+(?:\.\d+)?)?\s*({})(?:等于多少|换成多少|是多少|等于|换成|兑换成|兑|换|折合|多少)?\s*({})$",
+        zh_cur, zh_cur
+    ))
+    .ok()?;
+    if let Some(c) = zh_re.captures(q) {
+        return Some(FxRequest {
+            from: currency_code(&c[2])?.to_string(),
+            to: currency_code(&c[3])?.to_string(),
+            amount: c.get(1).map(|m| m.as_str().parse().unwrap_or(1.0)).unwrap_or(1.0),
+        });
+    }
+    // Bare single currency: "美元汇率" / "usd rate" → USD → CNY baseline.
+    let single_re = regex::Regex::new(&format!(
+        r"(?i)^(\d+(?:\.\d+)?)?\s*({}|{})(?:汇率|兑人民币|换成人民币|和人民币|对人民币|rate)?$",
+        zh_cur, CURRENCY_CODES
+    ))
+    .ok()?;
+    if let Some(c) = single_re.captures(q) {
+        let code = if c[2].len() == 3 && c[2].chars().all(|ch| ch.is_ascii_alphabetic()) {
+            c[2].to_uppercase()
+        } else {
+            currency_code(&c[2])?.to_string()
+        };
+        return Some(FxRequest {
+            from: code,
+            to: "CNY".to_string(),
+            amount: c.get(1).map(|m| m.as_str().parse().unwrap_or(1.0)).unwrap_or(1.0),
+        });
+    }
+    None
+}
+
+// ── Stock symbol resolution ──
+
+fn resolve_stock_symbol(query: &str) -> Option<String> {
+    let q = query.trim().to_lowercase();
+    static KNOWN: &[(&str, &str)] = &[
+        ("苹果", "usAAPL"), ("aapl", "usAAPL"), ("apple", "usAAPL"),
+        ("特斯拉", "usTSLA"), ("tsla", "usTSLA"), ("tesla", "usTSLA"),
+        ("英伟达", "usNVDA"), ("nvda", "usNVDA"), ("微软", "usMSFT"), ("msft", "usMSFT"),
+        ("谷歌", "usGOOGL"), ("亚马逊", "usAMZN"), ("amzn", "usAMZN"), ("meta", "usMETA"),
+        ("阿里巴巴", "usBABA"), ("baba", "usBABA"), ("拼多多", "usPDD"), ("pdd", "usPDD"),
+        ("京东", "usJD"), ("jd", "usJD"),
+        ("腾讯", "hk00700"), ("腾讯控股", "hk00700"), ("美团", "hk03690"), ("小米", "hk01810"),
+        ("茅台", "sh600519"), ("贵州茅台", "sh600519"), ("比亚迪", "sz002594"), ("宁德时代", "sz300750"),
+        ("中国平安", "sh601318"), ("工商银行", "sh601398"), ("招商银行", "sh600036"), ("中国石油", "sh601857"),
+    ];
+    for (name, symbol) in KNOWN {
+        if q.contains(name) {
+            return Some(symbol.to_string());
+        }
+    }
+    // Explicit market codes: sh600519 / sz000001 / hk00700 / 0700.hk / aapl.us
+    // (HK tickers are commonly written 4-digit, e.g. 0700.hk / hk0700; the
+    // resolved Tencent symbol always pads to 5 digits — 00700.)
+    static_regex!(market_re, r"(?i)\b(sh|sz)\d{6}\b|\bhk\d{4,5}\b|\b\d{4,5}\.hk\b|\b[a-z]{1,5}\.(us|hk|sh|sz)\b");
+    if let Some(m) = market_re().find(&q) {
+        let raw = m.as_str().to_lowercase();
+        if raw.starts_with("sh") || raw.starts_with("sz") {
+            return Some(raw);
+        }
+        if raw.starts_with("hk") {
+            let ticker = &raw[2..];
+            return Some(format!("hk{}{}", "0".repeat(5usize.saturating_sub(ticker.len())), ticker));
+        }
+        if let Some(dot) = raw.find('.') {
+            let (ticker, market) = (&raw[..dot], &raw[dot + 1..]);
+            return if market == "hk" {
+                Some(format!("hk{}{}", "0".repeat(5usize.saturating_sub(ticker.len())), ticker))
+            } else {
+                Some(format!("us{}", ticker.to_uppercase()))
+            };
+        }
+    }
+    // Bare ticker-ish token (2-5 letters) → US listing, only as the WHOLE query.
+    static_regex!(bare_ticker_re, r"^[a-z]{2,5}$");
+    if bare_ticker_re().is_match(&q) {
+        return Some(format!("us{}", q.to_uppercase()));
+    }
+    None
+}
+
+// ── WMO weather code → description ──
+
+fn describe_wmo_code(code: i64, zh: bool) -> String {
+    let desc = if zh {
+        match code {
+            0 => "晴", 1 => "基本晴朗", 2 => "多云", 3 => "阴",
+            45 => "雾", 48 => "雾凇", 51 => "小毛毛雨", 53 => "毛毛雨", 55 => "浓毛毛雨",
+            56 => "冻毛毛雨", 57 => "浓冻毛毛雨", 61 => "小雨", 63 => "中雨", 65 => "大雨",
+            66 => "冻雨", 67 => "强冻雨", 71 => "小雪", 73 => "中雪", 75 => "大雪", 77 => "米雪",
+            80 => "小阵雨", 81 => "阵雨", 82 => "强阵雨", 85 => "阵雪", 86 => "强阵雪",
+            95 => "雷阵雨", 96 => "雷阵雨伴冰雹", 99 => "强雷阵雨伴冰雹",
+            _ => return format!("code {}", code),
+        }
+    } else {
+        match code {
+            0 => "Clear sky", 1 => "Mainly clear", 2 => "Partly cloudy", 3 => "Overcast",
+            45 => "Fog", 48 => "Depositing rime fog", 51 => "Light drizzle", 53 => "Drizzle",
+            55 => "Dense drizzle", 56 => "Freezing drizzle", 57 => "Dense freezing drizzle",
+            61 => "Light rain", 63 => "Rain", 65 => "Heavy rain", 66 => "Freezing rain", 67 => "Heavy freezing rain",
+            71 => "Light snow", 73 => "Snow", 75 => "Heavy snow", 77 => "Snow grains",
+            80 => "Light rain showers", 81 => "Rain showers", 82 => "Violent rain showers",
+            85 => "Snow showers", 86 => "Heavy snow showers",
+            95 => "Thunderstorm", 96 => "Thunderstorm with hail", 99 => "Thunderstorm with heavy hail",
+            _ => return format!("code {}", code),
+        }
+    };
+    desc.to_string()
+}
+
+// ── RSS parsing (shared with the Tier-3 feed formatting) ──
+
+struct RssItem {
+    title: String,
+    link: String,
+    date: String,
+    description: String,
+}
+
+fn clean_xml_text(s: &str) -> String {
+    static_regex!(cdata_re, r"<!\[CDATA\[|\]\]>");
+    static_regex!(tag_re, r"<[^>]+>");
+    tag_re().replace_all(&cdata_re().replace_all(s, ""), "").trim().to_string()
+}
+
+/// Parse RSS/Atom <item>/<entry> blocks (no XML dependency, mirrors the
+/// regex-based parsers in src/adapter/node/publicApis.ts).
+fn parse_rss_items(xml: &str, max: usize) -> Vec<RssItem> {
+    static_regex!(feed_block_re, r"(?is)<(item|entry)>([\s\S]*?)</(item|entry)>");
+    let mut out: Vec<RssItem> = Vec::new();
+    for caps in feed_block_re().captures_iter(xml) {
+        if out.len() >= max {
+            break;
+        }
+        let block = &caps[2];
+        let pick = |tag: &str| -> String {
+            let re = regex::Regex::new(&format!(r"(?is)<{}[^>]*>([\s\S]*?)</{}>", tag, tag)).ok();
+            re.and_then(|r| r.captures(block))
+                .map(|c| clean_xml_text(&c[1]))
+                .unwrap_or_default()
+        };
+        let title = pick("title");
+        if title.is_empty() {
+            continue;
+        }
+        let mut date = pick("pubDate");
+        if date.is_empty() {
+            date = pick("published");
+        }
+        if date.is_empty() {
+            date = pick("updated");
+        }
+        let mut description = pick("description");
+        if description.is_empty() {
+            description = pick("summary");
+        }
+        out.push(RssItem {
+            title,
+            link: pick("link").trim().to_string(),
+            date,
+            description,
+        });
+    }
+    out
+}
+
+// ── Resolver implementations (each returns Ok(None) on any failure) ──
+
+async fn fetch_json(
+    url: &str,
+    timeout_ms: u64,
+    headers: &[(&str, &str)],
+    proxy_url: Option<&str>,
+) -> Result<Option<serde_json::Value>, String> {
+    let client = build_http_client(std::time::Duration::from_millis(timeout_ms), proxy_url)?;
+    let mut req = client.get(url).header("User-Agent", BROWSER_UA);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = req.send().await.map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    match resp.json::<serde_json::Value>().await {
+        Ok(v) => Ok(Some(v)),
+        Err(_) => Ok(None),
+    }
+}
+
+struct GeoResult {
+    name: String,
+    latitude: f64,
+    longitude: f64,
+    country: Option<String>,
+}
+
+/// Open-Meteo geocoding first, Nominatim fallback (1 req/s, needs a UA).
+async fn geocode(location: &str, proxy_url: Option<&str>) -> Result<Option<GeoResult>, String> {
+    let zh = is_chinese_query(location);
+    let url = format!(
+        "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language={}&format=json",
+        urlencoding(location),
+        if zh { "zh" } else { "en" }
+    );
+    if let Some(data) = fetch_json(&url, 8000, &[], proxy_url).await? {
+        if let Some(first) = data.get("results").and_then(|v| v.as_array()).and_then(|a| a.first()) {
+            if let (Some(lat), Some(lon)) = (
+                first.get("latitude").and_then(|v| v.as_f64()),
+                first.get("longitude").and_then(|v| v.as_f64()),
+            ) {
+                return Ok(Some(GeoResult {
+                    name: first.get("name").and_then(|v| v.as_str()).unwrap_or(location).to_string(),
+                    latitude: lat,
+                    longitude: lon,
+                    country: first.get("country").and_then(|v| v.as_str()).map(String::from),
+                }));
+            }
+        }
+    }
+    let nomi = format!(
+        "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q={}",
+        urlencoding(location)
+    );
+    if let Some(arr) = fetch_json(&nomi, 6000, &[], proxy_url).await? {
+        if let Some(n) = arr.as_array().and_then(|a| a.first()) {
+            let lat = n.get("lat").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+            let lon = n.get("lon").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+            if let (Some(lat), Some(lon)) = (lat, lon) {
+                return Ok(Some(GeoResult {
+                    name: n.get("display_name").and_then(|v| v.as_str()).unwrap_or(location).to_string(),
+                    latitude: lat,
+                    longitude: lon,
+                    country: None,
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn json_num(v: &serde_json::Value, key: &str) -> Option<f64> {
+    v.get(key).and_then(|x| x.as_f64())
+}
+
+fn fmt_opt(opt: Option<f64>) -> String {
+    opt.map(|x| x.to_string()).unwrap_or_else(|| "?".to_string())
+}
+
+async fn resolve_weather(
+    query: &str,
+    location_opt: Option<&str>,
+    proxy_url: Option<&str>,
+) -> Result<Option<PublicApiOutcome>, String> {
+    let mut location = extract_location(query);
+    if location.is_empty() {
+        location = location_opt.unwrap_or("").to_string();
+    }
+    if location.is_empty() {
+        return Ok(Some(PublicApiOutcome {
+            intent: IntentKind::Weather,
+            source: "Open-Meteo".to_string(),
+            text: "需要知道城市才能查天气（例如“北京天气”或“weather in Tokyo”）；未检测到城市，也没有配置位置。".to_string(),
+        }));
+    }
+    let geo = match geocode(&location, proxy_url).await? {
+        Some(g) => g,
+        None => return Ok(None),
+    };
+    let url = format!(
+        "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&timezone=auto&forecast_days=3",
+        geo.latitude, geo.longitude
+    );
+    let data = match fetch_json(&url, 8000, &[], proxy_url).await? {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    let (Some(cur), Some(daily)) = (data.get("current"), data.get("daily")) else {
+        return Ok(None);
+    };
+    let zh = is_chinese_query(&location) || is_chinese_query(query);
+    let mut lines: Vec<String> = Vec::new();
+    let name = match &geo.country {
+        Some(country) => format!("{} ({})", geo.name, country),
+        None => geo.name.clone(),
+    };
+    let timezone = data.get("timezone").and_then(|v| v.as_str()).unwrap_or("");
+    let cur_time = cur.get("time").and_then(|v| v.as_str()).unwrap_or("");
+    lines.push(format!("{} 天气 · {} · 数据时间 {}", name, timezone, cur_time));
+    let precip = json_num(cur, "precipitation").unwrap_or(0.0);
+    let mut current_line = format!(
+        "当前: {}°C (体感 {}°C) {} · 湿度 {}% · 风速 {} km/h",
+        fmt_opt(json_num(cur, "temperature_2m")),
+        fmt_opt(json_num(cur, "apparent_temperature")),
+        describe_wmo_code(json_num(cur, "weather_code").unwrap_or(-1.0) as i64, zh),
+        fmt_opt(json_num(cur, "relative_humidity_2m")),
+        fmt_opt(json_num(cur, "wind_speed_10m")),
+    );
+    if precip > 0.0 {
+        current_line.push_str(&format!(" · 降水 {}mm", precip));
+    }
+    lines.push(current_line);
+    if let Some(times) = daily.get("time").and_then(|v| v.as_array()) {
+        for (i, _) in times.iter().enumerate().take(3) {
+            let label = match i {
+                0 => (if zh { "今日" } else { "Today" }).to_string(),
+                1 => (if zh { "明日" } else { "Tomorrow" }).to_string(),
+                _ => times[i].as_str().unwrap_or("").to_string(),
+            };
+            let day_max = daily.get("temperature_2m_max").and_then(|v| v.as_array()).and_then(|a| a.get(i)).and_then(|x| x.as_f64());
+            let day_min = daily.get("temperature_2m_min").and_then(|v| v.as_array()).and_then(|a| a.get(i)).and_then(|x| x.as_f64());
+            let day_code = daily.get("weather_code").and_then(|v| v.as_array()).and_then(|a| a.get(i)).and_then(|x| x.as_i64()).unwrap_or(-1);
+            let prob = daily.get("precipitation_probability_max").and_then(|v| v.as_array()).and_then(|a| a.get(i)).and_then(|x| x.as_f64());
+            let mut line = format!(
+                "{}: {}°C / {}°C · {}",
+                label,
+                fmt_opt(day_max),
+                fmt_opt(day_min),
+                describe_wmo_code(day_code, zh)
+            );
+            if let Some(p) = prob {
+                line.push_str(&format!(" · 降水概率 {}%", p));
+            }
+            lines.push(line);
+        }
+    }
+    Ok(Some(PublicApiOutcome {
+        intent: IntentKind::Weather,
+        source: "Open-Meteo".to_string(),
+        text: lines.join("\n"),
+    }))
+}
+
+async fn resolve_geocode(query: &str, proxy_url: Option<&str>) -> Result<Option<PublicApiOutcome>, String> {
+    let location = extract_location(query);
+    if location.is_empty() {
+        return Ok(None);
+    }
+    let geo = match geocode(&location, proxy_url).await? {
+        Some(g) => g,
+        None => return Ok(None),
+    };
+    let country = geo.country.as_deref().map(|c| format!(" ({})", c)).unwrap_or_default();
+    Ok(Some(PublicApiOutcome {
+        intent: IntentKind::Geocode,
+        source: "Open-Meteo/Nominatim".to_string(),
+        text: format!(
+            "地理位置: {}{}\n纬度: {}\n经度: {}",
+            geo.name, country, geo.latitude, geo.longitude
+        ),
+    }))
+}
+
+async fn resolve_news(query: &str, proxy_url: Option<&str>) -> Result<Option<PublicApiOutcome>, String> {
+    let zh = is_chinese_query(query);
+    let mut q = news_re().replace(query, "").trim().to_string();
+    if q.is_empty() {
+        q = if zh { "热点新闻".to_string() } else { "top news".to_string() };
+    }
+    // Bing News RSS is China-reachable; Google News RSS is the fallback.
+    let lang = if zh { "zh-hans" } else { "en-us" };
+    let mut xml = fetch_feed_text(
+        &format!(
+            "https://www.bing.com/news/search?q={}&format=RSS&setlang={}",
+            urlencoding(&q),
+            lang
+        ),
+        proxy_url,
+    )
+    .await?;
+    let mut source = "Bing News RSS";
+    if xml.is_none() {
+        let (hl, gl, ceid) = if zh {
+            ("zh-CN", "CN", "CN:zh-Hans")
+        } else {
+            ("en-US", "US", "US:en")
+        };
+        xml = fetch_feed_text(
+            &format!(
+                "https://news.google.com/rss/search?q={}&hl={}&gl={}&ceid={}",
+                urlencoding(&q),
+                hl,
+                gl,
+                ceid
+            ),
+            proxy_url,
+        )
+        .await?;
+        source = "Google News RSS";
+    }
+    let xml = match xml {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+    let items = parse_rss_items(&xml, 8);
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let mut line = format!("{}. {}", i + 1, item.title);
+            if !item.date.is_empty() {
+                line.push_str(&format!("\n   {}", item.date));
+            }
+            line.push_str(&format!("\n   {}", item.link));
+            line
+        })
+        .collect();
+    Ok(Some(PublicApiOutcome {
+        intent: IntentKind::News,
+        source: source.to_string(),
+        text: format!("新闻: {}\n\n{}", q, lines.join("\n\n")),
+    }))
+}
+
+async fn resolve_wiki(query: &str, proxy_url: Option<&str>) -> Result<Option<PublicApiOutcome>, String> {
+    let zh = is_chinese_query(query);
+    let lang = if zh { "zh" } else { "en" };
+    let mut title = wiki_re().replace(query, "").trim().to_string();
+    if title.is_empty() {
+        return Ok(None);
+    }
+    // Resolve to the real page title via opensearch (handles redirects/aliases).
+    let search = fetch_json(
+        &format!(
+            "https://{}.wikipedia.org/w/api.php?action=opensearch&search={}&limit=1&format=json",
+            lang,
+            urlencoding(&title)
+        ),
+        8000,
+        &[],
+        proxy_url,
+    )
+    .await?;
+    if let Some(arr) = search.as_ref().and_then(|v| v.get(1)).and_then(|v| v.as_array()) {
+        if let Some(first) = arr.first().and_then(|v| v.as_str()) {
+            if !first.is_empty() {
+                title = first.to_string();
+            }
+        }
+    }
+    let summary = fetch_json(
+        &format!(
+            "https://{}.wikipedia.org/api/rest_v1/page/summary/{}",
+            lang,
+            urlencoding(&title)
+        ),
+        8000,
+        &[],
+        proxy_url,
+    )
+    .await?;
+    let extract = summary
+        .as_ref()
+        .and_then(|v| v.get("extract"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let extract = match extract {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+    let page_url = summary
+        .as_ref()
+        .and_then(|v| v.get("content_urls"))
+        .and_then(|v| v.get("desktop"))
+        .and_then(|v| v.get("page"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| format!("https://{}.wikipedia.org/wiki/{}", lang, urlencoding(&title)));
+    let desc = summary
+        .as_ref()
+        .and_then(|v| v.get("description"))
+        .and_then(|v| v.as_str())
+        .map(|d| format!("{}\n", d))
+        .unwrap_or_default();
+    Ok(Some(PublicApiOutcome {
+        intent: IntentKind::Wiki,
+        source: format!("Wikipedia ({})", lang),
+        text: format!("{}\n{}{}\n\n来源: {}", title, desc, extract, page_url),
+    }))
+}
+
+async fn resolve_ip(proxy_url: Option<&str>) -> Result<Option<PublicApiOutcome>, String> {
+    let ip = fetch_json("https://api.ipify.org?format=json", 8000, &[], proxy_url).await?;
+    let addr = ip.as_ref().and_then(|v| v.get("ip")).and_then(|v| v.as_str()).map(String::from);
+    let addr = match addr {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let detail = fetch_json(
+        &format!(
+            "http://ip-api.com/json/{}?fields=status,country,regionName,city,isp,org,as,timezone",
+            urlencoding(&addr)
+        ),
+        8000,
+        &[],
+        proxy_url,
+    )
+    .await?;
+    if detail.as_ref().and_then(|v| v.get("status")).and_then(|v| v.as_str()) != Some("success") {
+        return Ok(Some(PublicApiOutcome {
+            intent: IntentKind::Ip,
+            source: "ipify".to_string(),
+            text: format!("IP 地址: {}", addr),
+        }));
+    }
+    let d = detail.unwrap_or_default();
+    let city = d.get("city").and_then(|v| v.as_str()).unwrap_or("");
+    let region = d.get("regionName").and_then(|v| v.as_str()).unwrap_or("");
+    let country = d.get("country").and_then(|v| v.as_str()).unwrap_or("");
+    let isp = d
+        .get("isp")
+        .and_then(|v| v.as_str())
+        .or_else(|| d.get("org").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let tz = d.get("timezone").and_then(|v| v.as_str()).unwrap_or("");
+    Ok(Some(PublicApiOutcome {
+        intent: IntentKind::Ip,
+        source: "ipify + ip-api.com".to_string(),
+        text: format!("IP 地址: {}\n位置: {} {} {}\n运营商: {}\n时区: {}", addr, city, region, country, isp, tz),
+    }))
+}
+
+async fn resolve_fx(req: &FxRequest, proxy_url: Option<&str>) -> Result<Option<PublicApiOutcome>, String> {
+    let data = match fetch_json(
+        &format!("https://api.frankfurter.app/latest?from={}&to={}", req.from, req.to),
+        8000,
+        &[],
+        proxy_url,
+    )
+    .await?
+    {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    let rate = data.get("rates").and_then(|v| v.get(&req.to)).and_then(|v| v.as_f64());
+    let rate = match rate {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    let total = rate * req.amount;
+    let date = data.get("date").and_then(|v| v.as_str()).unwrap_or("");
+    let precision = if req.amount >= 100.0 { 2 } else { 4 };
+    let date_suffix = if date.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", date)
+    };
+    Ok(Some(PublicApiOutcome {
+        intent: IntentKind::Fx,
+        source: "Frankfurter (ECB)".to_string(),
+        text: format!(
+            "{} {} = {:.*} {} (1 {} = {} {}{})",
+            req.amount, req.from, precision, total, req.to, req.from, rate, req.to, date_suffix
+        ),
+    }))
+}
+
+/// Tencent qt.gtimg.cn quote (GBK body, China-reachable, no key).
+async fn fetch_stock_tencent(symbol: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
+    let client = build_http_client(std::time::Duration::from_secs(8), proxy_url)?;
+    let resp = client
+        .get(format!("http://qt.gtimg.cn/q={}", urlencoding(symbol)))
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let body = response_text_with_charset(resp).await?;
+    let start = match body.find('"') {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+    let end = match body[start + 1..].find('"') {
+        Some(i) => i + start + 1,
+        None => return Ok(None),
+    };
+    let f: Vec<&str> = body[start + 1..end].split('~').collect();
+    if f.len() < 40 || f[3].is_empty() {
+        return Ok(None);
+    }
+    let num = |i: usize| f.get(i).and_then(|s| s.parse::<f64>().ok());
+    let change = num(31).unwrap_or(0.0);
+    let change_pct = num(32).unwrap_or(0.0);
+    let arrow = if change > 0.0 { "▲" } else if change < 0.0 { "▼" } else { "—" };
+    let sign = |v: f64| if v >= 0.0 { "+" } else { "" };
+    let at = |i: usize| f.get(i).copied().unwrap_or("");
+    Ok(Some(format!(
+        "腾讯行情 · {} {}\n现价 {} (昨收 {})  {} {}{} ({}{}%)\n今开 {}  最高 {}  最低 {}\n成交量 {}手  成交额 {}万  市盈率 {}  换手 {}%\n时间 {}",
+        symbol,
+        at(1),
+        at(3),
+        at(4),
+        arrow,
+        sign(change),
+        change,
+        sign(change_pct),
+        change_pct,
+        at(5),
+        at(33),
+        at(34),
+        at(6),
+        at(37),
+        at(39),
+        at(38),
+        at(30),
+    )))
+}
+
+/// Sina hq.sinajs.cn quote fallback (GBK body; needs a finance Referer).
+async fn fetch_stock_sina(symbol: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
+    let client = build_http_client(std::time::Duration::from_secs(8), proxy_url)?;
+    let resp = client
+        .get(format!("https://hq.sinajs.cn/list={}", urlencoding(symbol)))
+        .header("User-Agent", BROWSER_UA)
+        .header("Referer", "https://finance.sina.com.cn")
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let body = response_text_with_charset(resp).await?;
+    let start = match body.find('"') {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+    let end = match body[start + 1..].find('"') {
+        Some(i) => i + start + 1,
+        None => return Ok(None),
+    };
+    let f: Vec<&str> = body[start + 1..end].split(',').collect();
+    if f.len() < 10 || f[3].is_empty() {
+        return Ok(None);
+    }
+    let prev_close = f[2].parse::<f64>().unwrap_or(0.0);
+    let current = f[3].parse::<f64>().unwrap_or(0.0);
+    let change = current - prev_close;
+    let change_pct = if prev_close != 0.0 { change / prev_close * 100.0 } else { 0.0 };
+    let arrow = if change > 0.0 { "▲" } else if change < 0.0 { "▼" } else { "—" };
+    let sign = |v: f64| if v >= 0.0 { "+" } else { "" };
+    let amount = f.get(9).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let at = |i: usize| f.get(i).copied().unwrap_or("");
+    Ok(Some(format!(
+        "新浪行情 · {} {}\n现价 {} (昨收 {})  {} {}{:.2} ({}{:.2}%)\n今开 {}  最高 {}  最低 {}\n成交量 {}股  成交额 {}元  日期 {} {}",
+        symbol,
+        at(0),
+        at(3),
+        at(2),
+        arrow,
+        sign(change),
+        change,
+        sign(change_pct),
+        change_pct,
+        at(1),
+        at(4),
+        at(5),
+        at(8),
+        amount,
+        at(30),
+        at(31),
+    )))
+}
+
+async fn resolve_stock(symbol: &str, proxy_url: Option<&str>) -> Result<Option<PublicApiOutcome>, String> {
+    if let Some(text) = fetch_stock_tencent(symbol, proxy_url).await? {
+        return Ok(Some(PublicApiOutcome {
+            intent: IntentKind::Stock,
+            source: "腾讯行情".to_string(),
+            text,
+        }));
+    }
+    if symbol.starts_with("sh") || symbol.starts_with("sz") {
+        if let Some(text) = fetch_stock_sina(symbol, proxy_url).await? {
+            return Ok(Some(PublicApiOutcome {
+                intent: IntentKind::Stock,
+                source: "新浪行情".to_string(),
+                text,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+async fn resolve_github(query: &str, proxy_url: Option<&str>) -> Result<Option<PublicApiOutcome>, String> {
+    let mut q = github_re().replace(query, "").trim().to_string();
+    while q.starts_with('：') || q.starts_with(':') {
+        q = q[1..].trim_start().to_string();
+    }
+    if q.is_empty() {
+        return Ok(None);
+    }
+    let data = match fetch_json(
+        &format!(
+            "https://api.github.com/search/repositories?q={}&sort=stars&order=desc&per_page=5",
+            urlencoding(&q)
+        ),
+        8000,
+        &[("Accept", "application/vnd.github+json")],
+        proxy_url,
+    )
+    .await?
+    {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    let items = data.get("items").and_then(|v| v.as_array()).map(|a| a.to_vec()).unwrap_or_default();
+    let items: Vec<&serde_json::Value> = items.iter().take(5).collect();
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = items
+        .iter()
+        .enumerate()
+        .map(|(i, repo)| {
+            let full_name = repo.get("full_name").and_then(|v| v.as_str()).unwrap_or("");
+            let stars = repo.get("stargazers_count").and_then(|v| v.as_i64()).unwrap_or(0);
+            let lang = repo.get("language").and_then(|v| v.as_str()).filter(|l| !l.is_empty());
+            let lang_suffix = lang.map(|l| format!(" · {}", l)).unwrap_or_default();
+            let url = repo.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
+            let desc = repo
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|d| !d.is_empty())
+                .map(|d| format!("\n   {}", d))
+                .unwrap_or_default();
+            format!("{}. {} (⭐ {}{}){}\n   {}", i + 1, full_name, stars, lang_suffix, desc, url)
+        })
+        .collect();
+    Ok(Some(PublicApiOutcome {
+        intent: IntentKind::Github,
+        source: "GitHub Search API".to_string(),
+        text: format!("GitHub 仓库 (按 star 排序):\n\n{}", lines.join("\n\n")),
+    }))
+}
+
+/// Flight status via aviationstack (free plan: 100 requests/month, needs a
+/// key). No key or no flight number → a helpful message instead of Ok(None),
+/// so the caller answers the user instead of silently falling through.
+async fn resolve_flight(query: &str, proxy_url: Option<&str>) -> Result<Option<PublicApiOutcome>, String> {
+    let flight_no = flight_number_re().captures(query).map(|c| c[1].to_uppercase());
+    let Some(flight_no) = flight_no else {
+        return Ok(Some(PublicApiOutcome {
+            intent: IntentKind::Flight,
+            source: "AviationStack".to_string(),
+            text: "需要航班号才能查航班动态（例如“CA981 航班动态”或“MU5101 到哪了”）。".to_string(),
+        }));
+    };
+    let key = std::env::var("PURE_AVIATIONSTACK_KEY").ok();
+    let Some(key) = key.filter(|k| !k.trim().is_empty()) else {
+        return Ok(Some(PublicApiOutcome {
+            intent: IntentKind::Flight,
+            source: "AviationStack".to_string(),
+            text: format!(
+                "查询 {} 需要免费的 AviationStack API key（100 次/月）：设置 PURE_AVIATIONSTACK_KEY 环境变量后可用（申请: https://aviationstack.com）。",
+                flight_no
+            ),
+        }));
+    };
+    let url = format!(
+        "https://api.aviationstack.com/v1/flights?access_key={}&flight_iata={}&limit=1",
+        urlencoding(&key),
+        urlencoding(&flight_no)
+    );
+    let data = match fetch_json(&url, 8000, &[], proxy_url).await? {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    let f = match data.get("data").and_then(|v| v.as_array()).and_then(|a| a.first()) {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+    let status = f.get("flight_status").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let airline = f.get("airline").and_then(|v| v.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+    let fmt_airport = |airport: &serde_json::Value, arrival: bool| -> String {
+        let name = airport.get("airport").and_then(|v| v.as_str()).unwrap_or("—");
+        let scheduled = airport
+            .get("scheduled")
+            .and_then(|v| v.as_str())
+            .map(|s| s.replace('T', " "))
+            .map(|s| s.chars().skip(5).take(16).collect::<String>());
+        let actual = airport
+            .get("actual")
+            .and_then(|v| v.as_str())
+            .map(|s| s.replace('T', " "))
+            .map(|s| s.chars().skip(5).take(16).collect::<String>());
+        let gate = airport
+            .get("gate")
+            .and_then(|v| v.as_str())
+            .filter(|g| !g.is_empty())
+            .map(|g| format!(" · 登机口 {}", g))
+            .unwrap_or_default();
+        let terminal = airport
+            .get("terminal")
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty())
+            .map(|t| format!(" · T{}", t))
+            .unwrap_or_default();
+        let mut out = name.to_string();
+        if let Some(s) = scheduled {
+            out.push_str(&format!(" 计划 {}", s));
+        }
+        if arrival {
+            if let Some(a) = actual {
+                out.push_str(&format!(" 实际 {}", a));
+            }
+        }
+        out.push_str(&gate);
+        out.push_str(&terminal);
+        out
+    };
+    let dep = f.get("departure").cloned().unwrap_or_default();
+    let arr = f.get("arrival").cloned().unwrap_or_default();
+    let airline_suffix = if airline.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", airline)
+    };
+    Ok(Some(PublicApiOutcome {
+        intent: IntentKind::Flight,
+        source: "AviationStack".to_string(),
+        text: format!(
+            "航班 {}{} · 状态: {}\n出发: {}\n到达: {}",
+            flight_no,
+            airline_suffix,
+            status,
+            fmt_airport(&dep, false),
+            fmt_airport(&arr, true)
+        ),
+    }))
+}
+
+// ── Main entry ──
+
+/// Try to answer a query from the direct public API tier. Returns Ok(None)
+/// when the query is not a structured intent or every endpoint failed —
+/// callers then fall through to web search / scraping.
+async fn try_direct_public_api(
+    query: &str,
+    category: Option<&str>,
+    location: Option<&str>,
+    proxy_url: Option<&str>,
+) -> Result<Option<PublicApiOutcome>, String> {
+    let q = query.trim();
+    if q.is_empty() && category.is_none() {
+        return Ok(None);
+    }
+    let forced = category.and_then(|c| match c {
+        "weather" => Some(IntentKind::Weather),
+        "geocode" => Some(IntentKind::Geocode),
+        "news" => Some(IntentKind::News),
+        "wiki" => Some(IntentKind::Wiki),
+        "ip" => Some(IntentKind::Ip),
+        "fx" => Some(IntentKind::Fx),
+        "stock" => Some(IntentKind::Stock),
+        "github" => Some(IntentKind::Github),
+        "flight" => Some(IntentKind::Flight),
+        _ => None,
+    });
+    let intent = forced.or_else(|| classify_intent(q));
+    let Some(intent) = intent else {
+        return Ok(None);
+    };
+    match intent {
+        IntentKind::Weather => resolve_weather(q, location, proxy_url).await,
+        IntentKind::Geocode => resolve_geocode(q, proxy_url).await,
+        IntentKind::News => resolve_news(q, proxy_url).await,
+        IntentKind::Wiki => resolve_wiki(q, proxy_url).await,
+        IntentKind::Ip => resolve_ip(proxy_url).await,
+        IntentKind::Fx => {
+            let req = parse_fx_query(q).unwrap_or(FxRequest {
+                from: "USD".to_string(),
+                to: "CNY".to_string(),
+                amount: 1.0,
+            });
+            resolve_fx(&req, proxy_url).await
+        }
+        IntentKind::Stock => match resolve_stock_symbol(q) {
+            Some(symbol) => resolve_stock(&symbol, proxy_url).await,
+            None => Ok(None),
+        },
+        IntentKind::Github => resolve_github(q, proxy_url).await,
+        IntentKind::Flight => resolve_flight(q, proxy_url).await,
+    }
+}
+
+#[tauri::command]
+async fn web_public_api(
+    _workspace: String,
+    query: String,
+    category: Option<String>,
+    location: Option<String>,
+    api_key: Option<String>,
+    serper_api_key: Option<String>,
+    search_on_miss: Option<bool>,
+    proxy_url: Option<String>,
+) -> Result<String, String> {
+    let q = query.trim().to_string();
+    if q.is_empty() {
+        return Err("web_public_api query must not be empty".to_string());
+    }
+    match cached_direct_public_api(&q, category.as_deref(), location.as_deref(), proxy_url.as_deref()).await? {
+        (Some(outcome), cached) => {
+            return Ok(format!("{}[{}] {}", if cached { "[cached] " } else { "" }, outcome.source, outcome.text));
+        }
+        (None, _) => {}
+    }
+    // Auto-escalation (L2 → L1): the direct tier had nothing for this query,
+    // so fall through to web search instead of forcing a second model
+    // round-trip. Opt out with searchOnMiss:false.
+    if search_on_miss.unwrap_or(true) {
+        return web_search_inner(
+            &q,
+            Some(8),
+            api_key.as_deref(),
+            serper_api_key.as_deref(),
+            location.as_deref(),
+            proxy_url.as_deref(),
+        )
+        .await;
+    }
+    Err(format!(
+        "No structured-data source matched \"{}\" — web_public_api covers weather/geocode/news/wiki/IP/FX/stock/flight/GitHub lookups; for anything else use web_search instead of retrying this tool with the same query (auto-fallback to search is off when searchOnMiss:false).",
+        q
+    ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Web Scrape (Tier-3) — known-URL extraction
+//  Mirrors src/adapter/node/webScrape.ts: noise-tag stripping, optional
+//  #id/.class/tag selector, RSS/JSON auto-formatting, then Jina Reader
+//  (free, no key) and Firecrawl (PURE_FIRECRAWL_API_KEY) fallbacks for
+//  blocked, JS-heavy, or binary pages.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Block-level noise tags removed before text extraction (nav/header/footer/
+/// aside/form/button/script/style/iframe/svg/canvas/noscript/template/dialog).
+/// The JS original uses a backreference regex; the regex crate has none, so
+/// this is a manual case-insensitive scan that removes each block up to its
+/// OWN matching close tag (first `</tag>` occurrence).
+fn strip_noise_tags(html: &str) -> String {
+    const NOISE: &[&str] = &[
+        "nav", "header", "footer", "aside", "form", "button", "script", "style", "iframe", "svg", "canvas", "noscript", "template", "dialog",
+    ];
+    let chars: Vec<char> = html.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '<' {
+            let mut matched: Option<&str> = None;
+            for tag in NOISE {
+                let t: Vec<char> = tag.chars().collect();
+                if i + 1 + t.len() <= chars.len()
+                    && chars[i + 1..i + 1 + t.len()].iter().zip(t.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b))
+                    && chars.get(i + 1 + t.len()).map_or(true, |c| matches!(c, '>' | ' ' | '\t' | '\n' | '\r'))
+                {
+                    matched = Some(tag);
+                    break;
+                }
+            }
+            if let Some(tag) = matched {
+                let close: Vec<char> = format!("</{}>", tag).chars().collect();
+                let mut j = i + 1;
+                let mut end: Option<usize> = None;
+                while j + close.len() <= chars.len() {
+                    if chars[j] == '<'
+                        && chars[j..j + close.len()].iter().zip(close.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b))
+                    {
+                        end = Some(j + close.len());
+                        break;
+                    }
+                    j += 1;
+                }
+                if let Some(end) = end {
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Extract the inner HTML of elements matching a simple selector: `#id`,
+/// `.class`, or a bare tag name (`article`, `main`). Regex-based by design —
+/// mirrors src/adapter/node/webScrape.ts. Returns [] when nothing matches so
+/// callers fall back to whole-page extraction.
+fn extract_by_selector(html: &str, selector: &str) -> Vec<String> {
+    let sel = selector.trim();
+    if sel.is_empty() {
+        return vec![];
+    }
+    let is_id = sel.starts_with('#');
+    let is_class = sel.starts_with('.');
+    let token: String = if is_id || is_class { sel[1..].to_string() } else { String::new() };
+    if (is_id || is_class) && (token.is_empty() || token.chars().any(|c| !c.is_alphanumeric() && c != '-' && c != '_')) {
+        return vec![];
+    }
+    if !is_id && !is_class && !sel.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return vec![];
+    }
+    let chars: Vec<char> = html.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() && out.len() < 8 {
+        if chars[i] == '<' {
+            let mut j = i + 1;
+            let mut name = String::new();
+            while j < chars.len() && name.len() < 64 && (chars[j].is_ascii_alphanumeric() || chars[j] == '-') {
+                name.push(chars[j]);
+                j += 1;
+            }
+            if name.is_empty() {
+                i += 1;
+                continue;
+            }
+            let mut attr = String::new();
+            let mut k = j;
+            while k < chars.len() && chars[k] != '>' {
+                attr.push(chars[k]);
+                k += 1;
+            }
+            if k >= chars.len() {
+                i += 1;
+                continue;
+            }
+            let attr_lower = attr.to_lowercase();
+            let attr_matches = if is_id {
+                attr_lower.contains(&format!("id=\"{}\"", token)) || attr_lower.contains(&format!("id='{}'", token))
+            } else if is_class {
+                attr_lower.contains(&format!("class=\"")) && attr_lower.contains(&token)
+            } else {
+                sel.eq_ignore_ascii_case(&name)
+            };
+            if attr_matches {
+                let close: Vec<char> = format!("</{}>", name).chars().collect();
+                let mut m = k + 1;
+                let mut end: Option<usize> = None;
+                while m + close.len() <= chars.len() {
+                    if chars[m] == '<'
+                        && chars[m..m + close.len()].iter().zip(close.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b))
+                    {
+                        end = Some(m);
+                        break;
+                    }
+                    m += 1;
+                }
+                if let Some(end) = end {
+                    out.push(chars[k + 1..end].iter().collect());
+                    i = end + close.len();
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Tag-strip to readable text (mirrors the Node webScrape.ts stripHtml —
+/// script/style removal, <br> and block closers as breaks, whitespace
+/// collapse; entities are decoded separately by decode_basic_entities).
+fn strip_html_scrape(html: &str) -> String {
+    let chars: Vec<char> = html.chars().collect();
+    let mut kept: Vec<char> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let mut skipped = false;
+        for tag in ["script", "style"] {
+            let t: Vec<char> = tag.chars().collect();
+            if chars[i] == '<'
+                && i + 1 + t.len() <= chars.len()
+                && chars[i + 1..i + 1 + t.len()].iter().zip(t.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b))
+                && chars.get(i + 1 + t.len()).map_or(true, |c| matches!(c, '>' | ' ' | '\t' | '\n' | '\r'))
+            {
+                let close: Vec<char> = format!("</{}>", tag).chars().collect();
+                let mut j = i + 1;
+                let mut end: Option<usize> = None;
+                while j + close.len() <= chars.len() {
+                    if chars[j] == '<'
+                        && chars[j..j + close.len()].iter().zip(close.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b))
+                    {
+                        end = Some(j + close.len());
+                        break;
+                    }
+                    j += 1;
+                }
+                if let Some(end) = end {
+                    i = end;
+                    skipped = true;
+                }
+                break;
+            }
+        }
+        if skipped {
+            continue;
+        }
+        kept.push(chars[i]);
+        i += 1;
+    }
+    let cleaned: String = kept.iter().collect();
+    static_regex!(br_re, r"(?i)<br\s*/?\s*>");
+    static_regex!(p_close_re, r"(?i)</p\s*>");
+    static_regex!(block_close_re, r"(?i)</(?:div|h[1-6]|li|tr|section|article)\s*>");
+    static_regex!(any_tag_re, r"(?i)<[^>]+>");
+    static_regex!(triple_nl_re, r"\n{3,}");
+    let mut step = br_re().replace_all(&cleaned, "\n").to_string();
+    step = p_close_re().replace_all(&step, "\n\n").to_string();
+    step = block_close_re().replace_all(&step, "\n").to_string();
+    step = any_tag_re().replace_all(&step, "").to_string();
+    step = triple_nl_re().replace_all(&step, "\n\n").to_string();
+    step.split('\n')
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Decode the common HTML entities (mirrors webScrape.ts decodeEntities).
+fn decode_basic_entities(s: &str) -> String {
+    let mut out = s
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&nbsp;", " ");
+    static_regex!(numeric_entity_re, r"&#(\d+);");
+    out = numeric_entity_re()
+        .replace_all(&out, |caps: &regex::Captures| {
+            caps[1]
+                .parse::<u32>()
+                .ok()
+                .and_then(char::from_u32)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| caps[0].to_string())
+        })
+        .to_string();
+    out
+}
+
+/// Full HTML extraction: noise strip → optional selector scope → readable
+/// text with entities decoded (mirrors extractScrapeText).
+fn extract_scrape_text(html: &str, selector: Option<&str>) -> String {
+    let cleaned = strip_noise_tags(html);
+    let mut body = cleaned.clone();
+    if let Some(sel) = selector {
+        let scoped = extract_by_selector(&cleaned, sel).join("\n\n");
+        if !scoped.trim().is_empty() {
+            body = scoped;
+        }
+    }
+    decode_basic_entities(&strip_html_scrape(&body)).trim().to_string()
+}
+
+/// True when the body looks like an RSS/Atom feed (has item/entry blocks).
+fn is_feed_body(body: &str) -> bool {
+    static_regex!(feed_check_re, r"(?is)<(item|entry)>[\s\S]*?</(item|entry)>");
+    feed_check_re().is_match(body)
+}
+
+/// Format a feed body as a numbered list (title / date / link / description).
+fn format_feed_text(body: &str) -> String {
+    let items = parse_rss_items(body, 8);
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let mut line = format!("{}. {}", i + 1, item.title);
+            if !item.date.is_empty() {
+                line.push_str(&format!("\n   {}", item.date));
+            }
+            line.push_str(&format!("\n   {}", item.link));
+            if !item.description.is_empty() {
+                line.push_str(&format!("\n   {}", item.description));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Pretty-print a JSON body (capped by the caller). Falls back to the raw
+/// body when it is not valid JSON.
+fn format_json_body(body: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| body.to_string()),
+        Err(_) => body.to_string(),
+    }
+}
+
+/// Cap a string at maxChars with a truncation marker.
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    let head: String = chars[..max_chars].iter().collect();
+    format!("{}\n\n[truncated]", head)
+}
+
+/// Fetch a raw text body (RSS feeds — UTF-8 XML, plain .text() is fine).
+async fn fetch_feed_text(url: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
+    let client = build_http_client(std::time::Duration::from_secs(8), proxy_url)?;
+    let resp = client
+        .get(url)
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    Ok(Some(resp.text().await.map_err(|e| format!("read: {}", e))?))
+}
+
+/// Jina Reader fallback: `https://r.jina.ai/<url>` renders any page
+/// (including PDFs and JS-heavy SPAs) as readable text. Free tier works
+/// without a key; PURE_JINA_API_KEY raises the rate limits.
+async fn scrape_via_jina(url: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
+    let client = build_http_client(std::time::Duration::from_secs(25), proxy_url)?;
+    let mut req = client
+        .get(format!("https://r.jina.ai/{}", url))
+        .header("User-Agent", BROWSER_UA)
+        .header("Accept", "text/plain");
+    if let Ok(key) = std::env::var("PURE_JINA_API_KEY") {
+        if !key.trim().is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", key.trim()));
+        }
+    }
+    let resp = req.send().await.map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let text = resp.text().await.map_err(|e| format!("read: {}", e))?;
+    Ok((!text.trim().is_empty()).then_some(text))
+}
+
+/// Firecrawl fallback: POST /v1/scrape turns any page into clean Markdown,
+/// including JS-heavy SPAs and PDFs. Free tier ≈500–1000 credits/month;
+/// enabled when PURE_FIRECRAWL_API_KEY is set (no key → Ok(None), so the
+/// Jina path stays the no-key default).
+async fn scrape_via_firecrawl(url: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
+    let key = std::env::var("PURE_FIRECRAWL_API_KEY").ok();
+    let Some(key) = key.filter(|k| !k.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let client = build_http_client(std::time::Duration::from_secs(25), proxy_url)?;
+    let resp = client
+        .post("https://api.firecrawl.dev/v1/scrape")
+        .header("Authorization", format!("Bearer {}", key.trim()))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "url": url, "formats": ["markdown"] }))
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("read: {}", e))?;
+    let md = body
+        .get("data")
+        .and_then(|d| d.get("markdown"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Ok((!md.trim().is_empty()).then_some(md.to_string()))
+}
+
+/// Jina Reader first, then Firecrawl — both render pages the direct fetch
+/// cannot (blocked, JS-heavy, binary). Used by web_scrape AND web_fetch.
+async fn scrape_fallback(url: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
+    if let Some(jina) = scrape_via_jina(url, proxy_url).await? {
+        return Ok(Some(jina));
+    }
+    scrape_via_firecrawl(url, proxy_url).await
+}
+
+#[tauri::command]
+async fn web_scrape(
+    _workspace: String,
+    url: String,
+    selector: Option<String>,
+    max_chars: Option<usize>,
+    proxy_url: Option<String>,
+) -> Result<String, String> {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("web_scrape url must not be empty".to_string());
+    }
+    let selector = selector.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let max = max_chars.unwrap_or(20000).min(50000);
+
+    // Page cache: same URL + selector + maxChars bucket within the hour.
+    let page_key = page_cache_key(&url, selector.as_deref(), max);
+    if let Some(hit) = web_cache().lock().unwrap().get(&page_key) {
+        return Ok(hit);
+    }
+
+    let client = build_http_client(std::time::Duration::from_secs(30), proxy_url.as_deref())?;
+    let resp = client
+        .get(&url)
+        .header("User-Agent", BROWSER_UA)
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+
+    if !resp.status().is_success() {
+        // Blocked / anti-bot page: Jina Reader first, Firecrawl second.
+        if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
+            let page = truncate_text(&fallback, max);
+            web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
+            return Ok(page);
+        }
+        return Err(format!(
+            "Fetch failed: HTTP {} — the page may block non-browser clients. Do NOT retry web_scrape on this URL; use web_search to find a mirror or a different page.",
+            resp.status()
+        ));
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if !is_textual_content_type(&content_type) {
+        // Binary payloads (PDFs, images) can still be read via Jina/Firecrawl.
+        if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
+            let page = truncate_text(&fallback, max);
+            web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
+            return Ok(page);
+        }
+        return Err(format!(
+            "Unsupported content type: {} — the URL serves a non-text payload, so web_scrape cannot extract readable text from it. Do NOT retry web_scrape on this URL; use web_search to find a text/HTML page with the information, or pick a different URL.",
+            content_type
+        ));
+    }
+
+    let body = response_text_with_charset(resp).await?;
+    let text = if is_feed_body(&body) {
+        format_feed_text(&body)
+    } else if content_type.to_lowercase().contains("json")
+        || body.trim_start().starts_with('{')
+        || body.trim_start().starts_with('[')
+    {
+        format_json_body(&body)
+    } else {
+        extract_scrape_text(&body, selector.as_deref())
+    };
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        // JS-heavy or blank page: the static HTML carried no readable text.
+        if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
+            let page = truncate_text(&fallback, max);
+            web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
+            return Ok(page);
+        }
+        return Err(format!(
+            "No readable text could be extracted from {} — the page is likely JavaScript-rendered or blank. Do NOT retry web_scrape on this URL; use web_search to find the information elsewhere.",
+            url
+        ));
+    }
+    let page = truncate_text(&text, max);
+    web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
+    Ok(page)
+}
+
+#[cfg(test)]
+mod web_tier_2_3_tests {
+    use super::*;
+
+    #[test]
+    fn cache_serves_fresh_value_and_expires_after_ttl() {
+        let dir = std::env::temp_dir().join(format!("pure-cache-test-ttl-{}", std::process::id()));
+        let file = dir.join("web-cache.json");
+        let mut c = WebCache::new(file.clone());
+        c.set("k", "v", 40);
+        assert_eq!(c.get("k"), Some("v".to_string()));
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert_eq!(c.get("k"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_persists_and_reloads_from_disk() {
+        let dir = std::env::temp_dir().join(format!("pure-cache-test-persist-{}", std::process::id()));
+        let file = dir.join("web-cache.json");
+        {
+            let mut c = WebCache::new(file.clone());
+            c.set("k1", "hello", 60_000);
+        }
+        let mut c2 = WebCache::load(file.clone());
+        assert_eq!(c2.get("k1"), Some("hello".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_tolerates_corrupt_file_and_caps_values() {
+        let dir = std::env::temp_dir().join(format!("pure-cache-test-corrupt-{}", std::process::id()));
+        let file = dir.join("web-cache.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&file, "{not json!!").unwrap();
+        let mut c = WebCache::load(file.clone());
+        assert_eq!(c.get("k1"), None);
+        let big = "x".repeat(WEB_CACHE_MAX_VALUE_BYTES + 10_000);
+        c.set("big", &big, 60_000);
+        assert!(c.get("big").map(|v| v.len() <= WEB_CACHE_MAX_VALUE_BYTES).unwrap_or(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_evicts_oldest_first_over_the_entry_cap() {
+        let dir = std::env::temp_dir().join(format!("pure-cache-test-evict-{}", std::process::id()));
+        let file = dir.join("web-cache.json");
+        let mut c = WebCache::new(file.clone());
+        for i in 0..(WEB_CACHE_MAX_ENTRIES + 10) {
+            c.set(&format!("key-{}", i), &format!("value-{}", i), 60_000);
+        }
+        assert_eq!(c.get("key-0"), None); // oldest evicted
+        assert_eq!(
+            c.get(&format!("key-{}", WEB_CACHE_MAX_ENTRIES + 9)),
+            Some(format!("value-{}", WEB_CACHE_MAX_ENTRIES + 9))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_keys_normalize_and_match_the_node_scheme() {
+        // CJK internal whitespace is dropped; English keeps single spaces.
+        assert_eq!(
+            normalize_query("北京 天气"),
+            normalize_query("北京天气")
+        );
+        assert_ne!(normalize_query("react hooks"), normalize_query("reacthooks"));
+        // Keys are stable and bounded (64-bit hex, 1..=16 chars).
+        let k1 = search_cache_key("react hooks 教程", 10);
+        assert_eq!(k1, search_cache_key("react hooks 教程", 10));
+        assert_ne!(k1, search_cache_key("react hooks 教程", 5));
+        assert!((1..=16).contains(&k1.len()));
+        // Cross-language constants (locked against webCache.test.ts):
+        // fnv1a64("a\0b") and the CJK key hash — if these break, the CLI and
+        // GUI no longer share cache keys.
+        assert_eq!(cache_hash_key(&["a", "b"]), "e5d29919042666b2");
+        assert_eq!(cache_hash_key(&["publicapi", "", "京", ""]), "bcf7740e6f3298ee");
+        // Page keys include selector and maxChars bucket.
+        assert_eq!(
+            page_cache_key("https://a.com/x", None, 20000),
+            page_cache_key("https://a.com/x", None, 15000)
+        );
+        assert_ne!(
+            page_cache_key("https://a.com/x", None, 20000),
+            page_cache_key("https://a.com/x", Some("#main"), 20000)
+        );
+        assert_ne!(
+            page_cache_key("https://a.com/x", None, 20000),
+            page_cache_key("https://a.com/x", None, 50000)
+        );
+        // Public-API keys include category and location.
+        assert_eq!(
+            public_api_cache_key("北京天气", None, Some("beijing")),
+            public_api_cache_key("北京 天气", None, Some("beijing"))
+        );
+        assert_ne!(
+            public_api_cache_key("天气", None, Some("beijing")),
+            public_api_cache_key("天气", None, Some("shanghai"))
+        );
+        assert_ne!(
+            public_api_cache_key("weather", Some("weather"), None),
+            public_api_cache_key("weather", None, None)
+        );
+    }
+
+    #[test]
+    fn public_api_ttl_table_matches_freshness_classes() {
+        assert_eq!(public_api_ttl_ms(IntentKind::News), 10 * 60 * 1000);
+        assert_eq!(public_api_ttl_ms(IntentKind::Weather), 20 * 60 * 1000);
+        assert_eq!(public_api_ttl_ms(IntentKind::Wiki), 7 * 24 * 60 * 60 * 1000);
+        assert_eq!(public_api_ttl_ms(IntentKind::Geocode), 30 * 24 * 60 * 60 * 1000);
+    }
+
+    #[test]
+    fn build_request_guard_blocks_chinese_and_english_builds() {
+        assert!(is_build_request("写一个天气网站"));
+        assert!(is_build_request("帮我写一个爬虫脚本"));
+        assert!(is_build_request("帮我做一个小游戏"));
+        assert!(is_build_request("build a weather app"));
+        assert!(!is_build_request("北京天气"));
+        assert!(!is_build_request("weather in tokyo"));
+        assert!(!is_build_request("makeup"));
+        assert!(!is_build_request(""));
+    }
+
+    #[test]
+    fn classify_routes_structured_intents() {
+        assert_eq!(classify_intent("北京明天天气"), Some(IntentKind::Weather));
+        assert_eq!(classify_intent("东京的经纬度"), Some(IntentKind::Geocode));
+        assert_eq!(classify_intent("今天有什么新闻"), Some(IntentKind::News));
+        assert_eq!(classify_intent("JavaScript 是什么"), Some(IntentKind::Wiki));
+        assert_eq!(classify_intent("我的IP地址"), Some(IntentKind::Ip));
+        assert_eq!(classify_intent("100 usd to cny"), Some(IntentKind::Fx));
+        assert_eq!(classify_intent("苹果股价"), Some(IntentKind::Stock));
+        assert_eq!(classify_intent("github 上最火的 AI 仓库"), Some(IntentKind::Github));
+        assert_eq!(classify_intent("CA981 航班动态"), Some(IntentKind::Flight));
+        assert_eq!(classify_intent("航班动态"), Some(IntentKind::Flight));
+    }
+
+    #[test]
+    fn classify_rejects_builds_empty_and_prose() {
+        assert_eq!(classify_intent(""), None);
+        assert_eq!(classify_intent("写一个天气网站"), None);
+        assert_eq!(classify_intent("react 状态管理最佳实践"), None);
+        assert_eq!(classify_intent("北京到上海机票"), None);
+        let long = "北京明天天气怎么样，我想知道会不会下雨，因为我要考虑要不要带伞出门上班，还要看看温度适不适合穿外套";
+        assert!(long.chars().count() > 40);
+        assert_eq!(classify_intent(long), None);
+    }
+
+    #[test]
+    fn fx_grammar_parses_english_and_chinese_pairs() {
+        let en = parse_fx_query("100 usd to cny").expect("english pair");
+        assert_eq!((en.from.as_str(), en.to.as_str(), en.amount), ("USD", "CNY", 100.0));
+        let en2 = parse_fx_query("5 EUR in JPY").expect("english in");
+        assert_eq!((en2.from.as_str(), en2.to.as_str(), en2.amount), ("EUR", "JPY", 5.0));
+        let zh = parse_fx_query("1美元等于多少人民币").expect("chinese pair");
+        assert_eq!((zh.from.as_str(), zh.to.as_str(), zh.amount), ("USD", "CNY", 1.0));
+        let zh2 = parse_fx_query("人民币兑日元").expect("chinese 兑");
+        assert_eq!((zh2.from.as_str(), zh2.to.as_str()), ("CNY", "JPY"));
+        let bare = parse_fx_query("美元汇率").expect("bare");
+        assert_eq!((bare.from.as_str(), bare.to.as_str(), bare.amount), ("USD", "CNY", 1.0));
+        assert!(parse_fx_query("你好吗").is_none());
+        assert!(parse_fx_query("今天天气").is_none());
+    }
+
+    #[test]
+    fn stock_symbol_resolution() {
+        assert_eq!(resolve_stock_symbol("苹果股价").as_deref(), Some("usAAPL"));
+        assert_eq!(resolve_stock_symbol("贵州茅台").as_deref(), Some("sh600519"));
+        assert_eq!(resolve_stock_symbol("腾讯控股").as_deref(), Some("hk00700"));
+        assert_eq!(resolve_stock_symbol("0700.hk").as_deref(), Some("hk00700"));
+        assert_eq!(resolve_stock_symbol("aapl.us").as_deref(), Some("usAAPL"));
+        assert_eq!(resolve_stock_symbol("tsla").as_deref(), Some("usTSLA"));
+        assert!(resolve_stock_symbol("not a ticker").is_none());
+        assert!(resolve_stock_symbol("github").is_none());
+    }
+
+    #[test]
+    fn location_extraction_strips_time_and_intent_words() {
+        assert_eq!(extract_location("北京明天天气"), "北京");
+        assert_eq!(extract_location("weather in tokyo"), "tokyo");
+    }
+
+    #[test]
+    fn rss_items_parse_title_link_date_description() {
+        let xml = r#"<?xml version="1.0"?><rss><channel>
+            <item><title>First story</title><link>https://example.com/1</link><pubDate>Mon, 11 Aug 2026 10:00:00 GMT</pubDate><description>Lead paragraph one.</description></item>
+            <item><title>Second story</title><link>https://example.com/2</link><pubDate>Tue, 12 Aug 2026 09:00:00 GMT</pubDate><description>Lead paragraph two.</description></item>
+        </channel></rss>"#;
+        let items = parse_rss_items(xml, 8);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "First story");
+        assert_eq!(items[0].link, "https://example.com/1");
+        assert!(items[0].date.contains("2026"));
+        assert_eq!(items[1].description, "Lead paragraph two.");
+    }
+
+    #[test]
+    fn noise_tags_are_stripped_including_nested_blocks() {
+        let html = "<nav><a>menu</a></nav><header>brand</header><article><p>Real content</p></article><footer>© 2026</footer>";
+        let cleaned = strip_noise_tags(html);
+        assert!(!cleaned.contains("menu"));
+        assert!(!cleaned.contains("brand"));
+        assert!(!cleaned.contains("© 2026"));
+        assert!(cleaned.contains("Real content"));
+        let nested = "<div><nav><div><span>deep</span></div></nav><p>kept</p></div>";
+        assert_eq!(strip_noise_tags(nested), "<div><p>kept</p></div>");
+    }
+
+    #[test]
+    fn selector_extraction_scopes_by_id_class_and_tag() {
+        let html = "<div id=\"main\"><p>Main content</p></div><div id=\"sidebar\"><p>Side</p></div>";
+        assert_eq!(extract_by_selector(html, "#main"), vec!["<p>Main content</p>"]);
+        let classed = "<div class=\"content\">A</div><div class=\"sidebar\">B</div>";
+        assert_eq!(extract_by_selector(classed, ".content"), vec!["A"]);
+        let tagged = "<article>One</article><p>x</p><article>Two</article>";
+        assert_eq!(extract_by_selector(tagged, "article"), vec!["One", "Two"]);
+        assert!(extract_by_selector(html, "#nope").is_empty());
+        assert!(extract_by_selector(html, "a[b]").is_empty());
+        assert!(extract_by_selector(html, "").is_empty());
+    }
+
+    #[test]
+    fn feed_detection_and_formatting() {
+        let rss = r#"<rss><channel><item><title>First story</title><link>https://example.com/1</link><pubDate>Mon, 11 Aug 2026 10:00:00 GMT</pubDate><description>Lead one.</description></item></channel></rss>"#;
+        assert!(is_feed_body(rss));
+        assert!(!is_feed_body("<html><body>not a feed</body></html>"));
+        let text = format_feed_text(rss);
+        assert!(text.contains("1. First story"));
+        assert!(text.contains("https://example.com/1"));
+        assert!(text.contains("Lead one."));
+    }
+
+    #[test]
+    fn json_body_pretty_prints_and_passes_through_invalid() {
+        assert_eq!(format_json_body("{\"a\":1}"), "{\n  \"a\": 1\n}");
+        assert_eq!(format_json_body("not json"), "not json");
+    }
+
+    #[test]
+    fn truncate_caps_at_char_count() {
+        assert_eq!(truncate_text("abc", 5), "abc");
+        assert_eq!(truncate_text("abcdefghij", 5), "abcde\n\n[truncated]");
+    }
+
+    #[test]
+    fn scrape_text_extracts_scoped_readable_text() {
+        let html = "<nav>menu</nav><main><h1>Story</h1><p>First &amp; second.</p></main>";
+        assert_eq!(
+            extract_scrape_text(html, Some("#story")),
+            "Story\nFirst & second."
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  Web Fetch (URL → readable text)
 // ═══════════════════════════════════════════════════════════════════════════════
 #[tauri::command]
@@ -2570,6 +4697,12 @@ async fn web_fetch(
     proxy_url: Option<String>,
 ) -> Result<String, String> {
     let max = max_chars.unwrap_or(20000);
+
+    // Page cache: same URL + maxChars bucket within the hour.
+    let page_key = page_cache_key(&url, None, max);
+    if let Some(hit) = web_cache().lock().unwrap().get(&page_key) {
+        return Ok(hit);
+    }
 
     let client = build_http_client(std::time::Duration::from_secs(30), proxy_url.as_deref())?;
 
@@ -2582,6 +4715,12 @@ async fn web_fetch(
         .map_err(|e| format!("request: {}", e))?;
 
     if !resp.status().is_success() {
+        // Blocked / anti-bot page: Jina Reader first, Firecrawl second.
+        if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
+            let page = truncate_text(&fallback, max);
+            web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
+            return Ok(page);
+        }
         return Err(format!("Fetch failed: HTTP {}", resp.status()));
     }
 
@@ -2589,7 +4728,8 @@ async fn web_fetch(
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
 
     // Accept any text-ish media type so the model doesn't hit the same
     // "unsupported content type" wall repeatedly on JSON/XML/JS/CSV pages or
@@ -2598,7 +4738,13 @@ async fn web_fetch(
     // the model how to recover instead of just what failed.
     if !is_textual_content_type(&content_type) {
         // Empty content-type never reaches this branch (helper returns true),
-        // so content_type is always a non-empty binary type here.
+        // so content_type is always a non-empty binary type here. Binary
+        // payloads (PDFs, images) can still be read via Jina/Firecrawl.
+        if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
+            let page = truncate_text(&fallback, max);
+            web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
+            return Ok(page);
+        }
         return Err(format!(
             "Unsupported content type: {} — the URL serves a non-text payload, so web_fetch cannot extract readable text from it. Do NOT retry web_fetch on this URL; instead use web_search to find a text/HTML page with the information, or pick a different URL.",
             content_type
@@ -2620,8 +4766,16 @@ async fn web_fetch(
     };
 
     if truncated.trim().is_empty() {
+        // JS-heavy or blank page: the static HTML carried no readable text.
+        if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
+            let page = truncate_text(&fallback, max);
+            web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
+            return Ok(page);
+        }
+        web_cache().lock().unwrap().set(&page_key, "(empty page)", PAGE_TTL_MS);
         Ok("(empty page)".to_string())
     } else {
+        web_cache().lock().unwrap().set(&page_key, &truncated, PAGE_TTL_MS);
         Ok(truncated)
     }
 }
@@ -5676,6 +7830,8 @@ pub fn run() {
             // Web tools
             web_search,
             web_fetch,
+            web_public_api,
+            web_scrape,
             // Command execution
             execute_command,
             execute_command_stream,

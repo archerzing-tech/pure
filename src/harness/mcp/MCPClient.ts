@@ -23,6 +23,16 @@ export interface MCPClientConfig {
   /** Session id — passed to the Rust subprocess registry in the desktop app. */
   sessionId?: string;
   proxyUrl?: string;
+  /**
+   * Tool-name prefix filter: discovered tools whose full name (serverName__tool)
+   * starts with any of these prefixes are NOT registered / exposed — e.g.
+   * ['scrapling__bulk_'] hides Scrapling's bulk variants so third-party tool
+   * lists don't crowd out built-in tool selection. Set in Settings → MCP
+   * (mcpExcludedPrefixes) and honored by CLI --mcp-exclude-prefix.
+   */
+  excludedPrefixes?: string[];
+  /** Test seam: inject a transport factory (defaults to stdio/http by config). */
+  transportFactory?: (config: MCPServerConfig) => MCPTransport;
 }
 
 interface ServerState {
@@ -73,14 +83,16 @@ export class MCPClient implements ToolAdapter {
     }
 
     const transport: MCPTransport =
-      config.transport === 'stdio'
+      this.config.transportFactory?.(config) ??
+      (config.transport === 'stdio'
         // Desktop WebView can't import node:child_process — spawn stdio MCP
         // servers through the Rust subprocess manager instead. Plain browser /
-        // CLI keep the JS StdioTransport.
+        // CLI keep the JS StdioTransport. Per-server requestTimeoutMs (e.g.
+        // the Scrapling preset's 120s for browser tools) is honored by both.
         ? (this.config.sessionId && isTauriRuntime()
-            ? new TauriStdioTransport(this.config.sessionId, config.name, config.command ?? [], config.env, this.config.proxyUrl ?? '')
-            : new StdioTransport(config.command ?? [], config.env))
-        : new HttpTransport(config.url ?? 'http://localhost:3000', this.config.proxyUrl ?? '');
+            ? new TauriStdioTransport(this.config.sessionId, config.name, config.command ?? [], config.env, this.config.proxyUrl ?? '', config.requestTimeoutMs)
+            : new StdioTransport(config.command ?? [], config.env, config.requestTimeoutMs))
+        : new HttpTransport(config.url ?? 'http://localhost:3000', this.config.proxyUrl ?? ''));
 
     const state: ServerState = { config, transport, tools: [], connected: false };
     this.servers.set(config.name, state);
@@ -101,6 +113,7 @@ export class MCPClient implements ToolAdapter {
     };
 
     if (toolsResult?.tools) {
+      const excluded = this.config.excludedPrefixes ?? [];
       for (const t of toolsResult.tools) {
         const tagged: TaggedTool = {
           ...mcpToolToDefinition(t, config.name),
@@ -108,6 +121,11 @@ export class MCPClient implements ToolAdapter {
           riskLevel: 'medium',
           serverName: config.name,
         };
+        // Prefix filter: excluded tools are not registered/exposed at all, so
+        // third-party MCP servers (e.g. scrapling__bulk_*) can't crowd out
+        // built-in tool selection. The server stays connected; only its
+        // filtered tools are hidden from the model.
+        if (excluded.some((p) => p && tagged.name.startsWith(p))) continue;
         state.tools.push(tagged);
         this.toolToServer.set(tagged.name, config.name);
         this.config.onToolDiscovered?.(tagged);

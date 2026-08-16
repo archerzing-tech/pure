@@ -70,6 +70,8 @@ export interface CodingAgentConfig {
   failurePolicy?: FailurePolicy;
   subagents?: SubagentDefinition[];
   mcpServers?: MCPServerConfig[];
+  /** Tool-name prefixes to hide from MCP discovery (see MCPClientConfig). */
+  mcpExcludedPrefixes?: string[];
   proxyUrl?: string;
   /** Pre-created MCPClient — if provided, mcpServers is ignored. */
   mcpClient?: MCPClient;
@@ -136,6 +138,7 @@ export class CodingAgent {
         sessionId: config.sessionId,
         onToolDiscovered: (tool) => this.toolRegistry.register(tool),
         proxyUrl: config.proxyUrl,
+        excludedPrefixes: config.mcpExcludedPrefixes,
       });
       this.toolRegistry.setMCPExecutor(this.mcpClient);
       // Deferred connect: call mcpClient.connectAll() from the UI after construction

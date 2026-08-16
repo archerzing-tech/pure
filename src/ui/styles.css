@@ -3664,6 +3664,36 @@ body {
   min-width: 160px;
 }
 
+/* Tiny "get free key" links next to API-key fields — deliberately small so
+   they never crowd the settings rows. */
+.key-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.key-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.key-link {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
+.key-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+  opacity: 1;
+}
+
 .setting-icon-btn {
   background: none;
   border: 1px solid var(--border);
@@ -4074,6 +4104,40 @@ body {
 
 #cfg-add-mcp {
   margin: 12px 0 2px;
+}
+
+.mcp-preset-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin-top: 8px;
+}
+
+.mcp-preset-hint {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.mcp-preset-hint code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--border) 40%, transparent);
+  font-size: 10.5px;
+}
+
+.mcp-preset-hint a {
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.mcp-preset-hint a:hover {
+  text-decoration: underline;
 }
 
 /* ── Memory Dashboard（智能进化记忆库可视化，Adapter Layer 设计文档 §12.9）──
@@ -9253,6 +9317,16 @@ button svg,
   flex-direction: column;
   gap: 12px;
 }
+.provider-v4-shell > .provider-v4-summary,
+.provider-v4-shell > .provider-v4-provider-drawer,
+.provider-v4-shell > .provider-v4-current-model,
+.provider-v4-shell > .provider-v4-model-drawer,
+.provider-v4-shell > .provider-v4-connection-default,
+.provider-v4-shell > .provider-v4-connection-drawer {
+  width: 100%;
+  box-sizing: border-box;
+  margin-inline: 0;
+}
 .provider-v4-summary {
   display: flex;
   align-items: center;
@@ -9310,7 +9384,7 @@ button svg,
 }
 .provider-v4-provider-btn,
 .provider-v4-test-btn,
-.provider-v4-connection-toggle,
+.provider-v4-connection-open-btn,
 .provider-v4-manage-btn {
   border-radius: var(--radius-xs);
   font: 600 11px var(--font-sans);
@@ -9346,6 +9420,67 @@ button svg,
   font: 600 10px var(--font-sans);
   white-space: nowrap;
 }
+.provider-v4-connection-default {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+}
+.provider-v4-connection-default-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+.provider-v4-connection-default-copy strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+.provider-v4-connection-default-copy > span:last-child {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provider-v4-connection-default-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.provider-v4-connection-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-secondary);
+  font: 600 11px var(--font-sans);
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition), border-color var(--transition), transform var(--transition);
+}
+.provider-v4-connection-open-btn:hover,
+.provider-v4-connection-open-btn:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  outline: none;
+}
+.provider-v4-connection-open-btn:hover span:last-child { transform: translateX(2px); }
 .provider-v4-connection-status[data-state="error"] { color: var(--danger); }
 .provider-v4-connection-status[data-state="testing"] { color: var(--accent); }
 .provider-v4-provider-drawer,
@@ -9357,7 +9492,8 @@ button svg,
   overflow: hidden;
 }
 .provider-v4-provider-drawer[hidden],
-.provider-v4-model-drawer[hidden] { display: none; }
+.provider-v4-connection-drawer[hidden],
+.provider-v4-model-drawer-body[hidden] { display: none; }
 .provider-v4-drawer-head {
   justify-content: space-between;
   gap: 12px;
@@ -9405,6 +9541,7 @@ button svg,
   padding: 0 15px 15px;
 }
 .provider-v4-current-model {
+  margin: 0;
   padding: 17px 18px 15px;
   border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border-light));
   border-radius: var(--radius);
@@ -9449,13 +9586,34 @@ button svg,
 }
 .provider-v4-manage-btn:hover { color: var(--accent-hover); transform: translateX(2px); }
 .provider-v4-model-drawer {
-  overflow: visible;
   position: relative;
   z-index: 1;
+  margin: 0;
+  overflow: hidden;
 }
-.provider-v4-model-drawer > .provider-v4-drawer-head { border-bottom: 1px solid var(--border-light); }
+.provider-v4-model-drawer > .provider-v4-drawer-head {
+  border-bottom: 0;
+  background: var(--bg-card);
+}
+.provider-v4-model-drawer-toggle {
+  padding: 7px 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: 700 11px var(--font-sans);
+  cursor: pointer;
+}
+.provider-v4-model-drawer-toggle:hover,
+.provider-v4-model-drawer-toggle:focus-visible {
+  color: var(--accent-hover);
+  outline: none;
+}
+.provider-v4-model-drawer-body {
+  border-top: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--bg-card) 92%, var(--bg));
+}
 .provider-v4-model-drawer #provider-v4-model-editor {
-  padding: 10px 14px 12px;
+  padding: 10px 10px 12px;
   overflow: visible;
 }
 .provider-v4-model-drawer .provider-model-row {
@@ -9476,58 +9634,16 @@ button svg,
   width: 100%;
   min-width: 0;
 }
-.provider-v4-model-drawer .provider-model-editor-section {
-  min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg-card) 92%, var(--bg));
-}
-.provider-v4-model-drawer .provider-model-default-section {
-  background: color-mix(in srgb, var(--accent-soft) 42%, var(--bg-card));
-}
-.provider-v4-model-drawer .provider-model-section-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-.provider-v4-model-drawer .provider-model-section-kicker {
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 750;
-}
-.provider-v4-model-drawer .provider-model-section-hint {
-  color: var(--text-tertiary);
-  font-size: 10px;
-  line-height: 1.35;
-}
-.provider-v4-model-drawer .provider-model-default-value {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-top: 8px;
-  min-width: 0;
-}
-.provider-v4-model-drawer .provider-model-default-value strong {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font: 650 13px var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .provider-v4-model-drawer .provider-model-input-group {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: 1 1 300px;
+  flex: 1 1 auto;
   width: auto;
   min-width: 0;
   height: 32px;
   min-height: 32px;
-  margin: 0 12px 8px;
+  margin: 10px 0 0;
   padding: 0;
   border: 0;
 }
@@ -9535,26 +9651,15 @@ button svg,
   min-width: 0;
   height: 32px;
 }
-.provider-v4-model-drawer .provider-model-input-group .fetch-models-btn {
+.provider-v4-model-drawer .provider-model-input-group .fetch-models-btn,
+.provider-v4-model-drawer .provider-model-input-group .provider-model-clear-btn {
   flex: 0 0 auto;
   height: 32px;
   min-height: 32px;
   padding: 0 9px;
   white-space: nowrap;
 }
-.provider-v4-model-drawer .provider-model-library-section {
-  padding: 0;
-}
-.provider-v4-model-drawer .provider-model-library-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px 8px;
-}
 .provider-v4-model-drawer .provider-model-clear-btn {
-  flex: 0 0 auto;
-  padding: 4px 8px;
   border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
   border-radius: var(--radius-xs);
   background: transparent;
@@ -9575,7 +9680,7 @@ button svg,
   flex-direction: column;
   max-height: none;
   margin: 0;
-  padding: 0 12px 4px;
+  padding: 0 0 4px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -9585,41 +9690,42 @@ button svg,
 }
 .provider-v4-model-drawer #cfg-model-list[hidden] { display: none; }
 .provider-v4-model-drawer .provider-model-chip {
-  min-height: 34px;
-  border-radius: 0;
+  min-height: 42px;
+  padding: 0;
+  border: 0;
   border-bottom: 1px solid var(--border-light);
+  border-radius: 0;
+  background: transparent;
+}
+.provider-v4-model-drawer .provider-model-chip:hover {
+  background: var(--bg-hover);
 }
 .provider-v4-model-drawer .provider-model-chip:last-child { border-bottom: 0; }
 .provider-v4-model-drawer .provider-model-chip-default {
-  background: color-mix(in srgb, var(--accent-soft) 62%, var(--bg-card));
+  background: transparent;
 }
 .provider-v4-model-drawer .provider-model-chip-select {
-  padding: 6px 10px;
+  padding: 9px 0;
 }
-.provider-v4-connection-drawer { background: transparent; }
-.provider-v4-connection-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  padding: 12px 15px;
+.provider-v4-model-drawer .provider-model-chip-meta {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.provider-v4-connection-drawer {
+  overflow: hidden;
+}
+.provider-v4-connection-drawer .provider-config-card {
   border: 0;
-  background: color-mix(in srgb, var(--bg-card) 82%, var(--bg));
-  color: var(--text-secondary);
-  text-align: left;
+  border-top: 1px solid var(--border-light);
+  border-radius: 0;
+  box-shadow: none;
 }
-.provider-v4-connection-toggle:hover,
-.provider-v4-connection-toggle:focus-visible {
-  color: var(--accent);
-  background: var(--bg-hover);
-  outline: none;
-}
-.provider-v4-connection-toggle > span:last-child { font-size: 15px; transition: transform var(--transition); }
-.provider-v4-shell.connection-drawer-open .provider-v4-connection-toggle > span:last-child { transform: rotate(180deg); }
-.provider-v4-shell:not(.connection-drawer-open) .provider-v4-connection-drawer .provider-config-card { display: none; }
-.provider-v4-shell.connection-drawer-open .provider-v4-connection-drawer .provider-config-card { border: 0; border-top: 1px solid var(--border-light); border-radius: 0; box-shadow: none; }
 .provider-v4-connection-drawer .provider-config-header { padding: 14px 15px; }
 .provider-v4-connection-drawer .provider-config-fields { padding: 0 5px 8px; }
+.provider-v4-connection-drawer .provider-config-fields .setting-row[hidden] { display: none; }
 .provider-v4-connection-drawer .provider-model-row { display: none; }
 .provider-v4-shell .provider-config-card { margin-top: 0; }
 .provider-v4-shell .provider-config-header h3 { font-size: 14px; }
@@ -9630,9 +9736,17 @@ button svg,
 @media (max-width: 720px) {
   .provider-v4-summary { align-items: flex-start; flex-direction: column; }
   .provider-v4-summary-actions { width: 100%; justify-content: flex-start; }
-  .provider-v4-model-drawer .provider-model-row { flex-direction: column; gap: 8px; }
-  .provider-v4-model-drawer .provider-model-row > .setting-info { flex-basis: auto; padding-top: 0; }
-  .provider-v4-model-drawer .provider-model-input-group { flex-basis: auto; width: auto; }
+  .provider-v4-connection-default { align-items: flex-start; flex-direction: column; }
+  .provider-v4-connection-default-actions { width: 100%; justify-content: flex-start; }
+  .provider-v4-current-model,
+  .provider-v4-model-drawer { margin-inline: 0; }
+  .provider-v4-model-drawer .provider-model-input-group {
+    flex-wrap: wrap;
+    height: auto;
+  }
+  .provider-v4-model-drawer .provider-model-input-group .setting-input {
+    flex: 1 1 180px;
+  }
   .provider-v4-provider-drawer .provider-section-heading { padding-inline: 12px; }
   .provider-v4-provider-drawer .provider-card-grid { padding-inline: 12px; }
   .provider-v4-provider-drawer .provider-custom-toolbar { padding-inline: 12px; }

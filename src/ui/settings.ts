@@ -34,6 +34,7 @@ import {
   invalidateConfigCache,
   isDefaultMcpServer,
   loadConfig,
+  SCRAPLING_MCP_PRESET,
   revokeCustomSecretFromRust,
   revokeSecretFromRust,
   storeCustomSecretInRust,
@@ -132,6 +133,11 @@ export class SettingsPanel {
   // ── Navigation ──
 
   switchCategory(category: string) {
+    if (category !== 'llm') {
+      this.setProviderV4Drawer('provider', false);
+      this.setProviderV4Drawer('models', false);
+      this.setProviderV4Drawer('connection', false);
+    }
     this.currentCategory = category;
 
     document.querySelectorAll('.settings-nav-item').forEach(el => {
@@ -420,7 +426,7 @@ export class SettingsPanel {
       const openProvider = target.closest<HTMLElement>('[data-open-provider]');
       if (openProvider) {
         event.preventDefault();
-        this.setProviderV4Drawer('provider', true);
+        this.setProviderV4Drawer('provider');
         return;
       }
       if (target.closest('[data-close-provider]')) {
@@ -430,11 +436,15 @@ export class SettingsPanel {
       const openModels = target.closest<HTMLElement>('[data-open-models]');
       if (openModels) {
         event.preventDefault();
-        this.setProviderV4Drawer('models', true);
+        this.setProviderV4Drawer('models');
         return;
       }
       if (target.closest('[data-close-models]')) {
         this.setProviderV4Drawer('models', false);
+        return;
+      }
+      if (target.closest('[data-close-connection]')) {
+        this.setProviderV4Drawer('connection', false);
         return;
       }
       const openConnection = target.closest<HTMLElement>('[data-open-connection]');
@@ -559,6 +569,10 @@ export class SettingsPanel {
 
     // Add MCP server
     document.getElementById('cfg-add-mcp')?.addEventListener('click', () => this.showAddForm());
+    document.getElementById('cfg-add-scrapling-mcp')?.addEventListener('click', () => {
+      this.addScraplingMcp();
+      this.autoSave();
+    });
     document.getElementById('mcp-form-save')?.addEventListener('click', () => {
       this.addMcpServer();
       this.autoSave();
@@ -586,6 +600,7 @@ export class SettingsPanel {
       '#cfg-fontsize', '#cfg-density',
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
       '#cfg-tavily-key', '#cfg-serper-key',
+      '#cfg-mcp-exclude-prefixes',
       '#cfg-proxy-enabled', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-url', '#cfg-proxy-bypass-providers', '#cfg-proxy-bypass-models',
       '#cfg-streaming-render',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
@@ -689,11 +704,20 @@ export class SettingsPanel {
       this.renderMemoryDashboard();
     });
 
-    // Keyboard: Esc to close
+    // Keyboard: close the active Drawer before leaving Settings.
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.visible) {
-        this.close();
+      if (e.key !== 'Escape' || !this.visible) return;
+      const shell = document.getElementById('provider-v4-shell');
+      if (shell?.classList.contains('models-drawer-open')) {
+        this.setProviderV4Drawer('models', false);
+        return;
       }
+      const drawer = document.querySelector<HTMLElement>('#provider-v4-provider-drawer:not([hidden]), #provider-v4-connection-drawer:not([hidden])');
+      if (drawer) {
+        this.setProviderV4Drawer(drawer.id === 'provider-v4-provider-drawer' ? 'provider' : 'connection', false);
+        return;
+      }
+      this.close();
     });
   }
 
@@ -709,23 +733,48 @@ export class SettingsPanel {
     };
     const drawer = document.getElementById(ids[kind]);
     if (!drawer) return;
-    const nextOpen = kind === 'connection'
-      ? (open ?? !shell.classList.contains('connection-drawer-open'))
+    const modelBody = document.getElementById('provider-v4-model-drawer-body');
+    const nextOpen = kind === 'models'
+      ? (open ?? !shell.classList.contains('models-drawer-open'))
       : (open ?? drawer.hasAttribute('hidden'));
-    if (kind === 'provider' || kind === 'models') {
-      drawer.toggleAttribute('hidden', !nextOpen);
-      shell.classList.toggle(`${kind}-drawer-open`, nextOpen);
-      drawer.querySelector<HTMLElement>('[data-open-provider], [data-open-models]')?.setAttribute('aria-expanded', String(nextOpen));
-      if (kind === 'provider') {
-        shell.querySelectorAll<HTMLElement>('[data-open-provider]').forEach(el => el.setAttribute('aria-expanded', String(nextOpen)));
-      }
-      if (kind === 'models') {
-        shell.querySelectorAll<HTMLElement>('[data-open-models]').forEach(el => el.setAttribute('aria-expanded', String(nextOpen)));
+    const kinds: Array<'provider' | 'models' | 'connection'> = ['provider', 'models', 'connection'];
+
+    const updateModelToggle = (expanded: boolean): void => {
+      const toggle = shell.querySelector<HTMLElement>('.provider-v4-model-drawer-toggle');
+      if (!toggle) return;
+      toggle.dataset.i18n = expanded ? 'llm.model.collapse' : 'llm.model.expand';
+      toggle.textContent = t(expanded ? 'llm.model.collapse' : 'llm.model.expand');
+    };
+
+    if (nextOpen) {
+      // Default + Drawer is exclusive: one editing surface is visible at a time.
+      for (const current of kinds) {
+        const currentDrawer = document.getElementById(ids[current]);
+        const currentOpen = current === kind;
+        if (current === 'models') {
+          modelBody?.toggleAttribute('hidden', !currentOpen);
+          updateModelToggle(currentOpen);
+        } else {
+          currentDrawer?.toggleAttribute('hidden', !currentOpen);
+        }
+        shell.classList.toggle(`${current}-drawer-open`, currentOpen);
+        shell.querySelectorAll<HTMLElement>(`[data-open-${current}]`).forEach(trigger => {
+          trigger.setAttribute('aria-expanded', String(currentOpen));
+        });
       }
       return;
     }
-    shell.classList.toggle('connection-drawer-open', nextOpen);
-    shell.querySelector<HTMLElement>('[data-open-connection]')?.setAttribute('aria-expanded', String(nextOpen));
+
+    if (kind === 'models') {
+      modelBody?.toggleAttribute('hidden', true);
+      updateModelToggle(false);
+    } else {
+      drawer.toggleAttribute('hidden', true);
+    }
+    shell.classList.remove(`${kind}-drawer-open`);
+    shell.querySelectorAll<HTMLElement>(`[data-open-${kind}]`).forEach(trigger => {
+      trigger.setAttribute('aria-expanded', 'false');
+    });
   }
 
   /** Test the currently selected provider's endpoint without changing the
@@ -903,6 +952,10 @@ export class SettingsPanel {
    * providers need a Base URL + at least one model. An unconfigured custom
    * card must NEVER become the active LLM on its own.
    */
+  private isKnownProvider(provider: string): boolean {
+    return !!providerDef(provider) || ['openai', 'openrouter', 'nvidia', 'ollama'].includes(provider);
+  }
+
   private isProviderConfigured(provider: string): boolean {
     const customs = (loadConfig() ?? defaults()).customProviders ?? [];
     const custom = customProviderFor(customs, provider);
@@ -1021,6 +1074,10 @@ export class SettingsPanel {
     // Custom-only rows: name edit + delete. Keyless locals (Ollama) get a hint
     // in the API-key field instead of the generic sk-... placeholder.
     const isCustom = !!custom;
+    const isKnown = this.isKnownProvider(provider);
+    const isCustomSettings = isCustom && !isKnown;
+    const baseUrlRow = baseUrlInput?.closest<HTMLElement>('.provider-baseurl-row');
+    baseUrlRow?.toggleAttribute('hidden', !isCustomSettings);
     // 未配置的自定义供应商（还没有 Base URL）：端点处给出醒目标记，避免用户
     // 以为已就绪就直接发送 —— 空地址会静默回落到内置默认端点。
     const unconfigured = isCustom && !custom?.baseURL;
@@ -1049,13 +1106,13 @@ export class SettingsPanel {
     const nameRow = document.getElementById('cfg-custom-name-row');
     const deleteRow = document.getElementById('cfg-custom-delete-row');
     const nameEdit = document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null;
-    if (nameRow) nameRow.hidden = !isCustom;
-    if (deleteRow) deleteRow.hidden = !isCustom;
+    if (nameRow) nameRow.hidden = !isCustomSettings;
+    if (deleteRow) deleteRow.hidden = !isCustomSettings;
     if (nameEdit) nameEdit.value = custom?.name ?? '';
     // 文生图配置只对自定义供应商开放（内置 DeepSeek/Qwen/GLM 无图片 API）：
     // 开启后该供应商的图片请求走 generate_image 工具，渲染为真实图片而非 SVG。
     const imageGenRow = document.getElementById('cfg-imagegen-row');
-    if (imageGenRow) imageGenRow.hidden = !isCustom;
+    if (imageGenRow) imageGenRow.hidden = !isCustomSettings;
     const imageGenToggle = document.getElementById('cfg-imagegen') as HTMLInputElement | null;
     const imageGenModel = document.getElementById('cfg-imagegen-model') as HTMLInputElement | null;
     if (imageGenToggle) imageGenToggle.checked = custom?.imageGen === true;
@@ -1063,7 +1120,7 @@ export class SettingsPanel {
     // Model auto-fetch only makes sense for custom endpoints (the built-ins
     // come with their own default model list).
     const fetchBtn = document.getElementById('cfg-fetch-models-btn');
-    if (fetchBtn) fetchBtn.hidden = !isCustom;
+    if (fetchBtn) fetchBtn.hidden = !isCustomSettings;
     const keyInput = document.getElementById('cfg-apikey') as HTMLInputElement | null;
     const v4Name = document.getElementById('provider-v4-current-name');
     const v4Endpoint = document.getElementById('provider-v4-current-endpoint');
@@ -1113,6 +1170,9 @@ export class SettingsPanel {
     // pending activation and the presented card resets to the active one.
     this.pendingActivation = null;
     this.presentedProvider = null;
+    this.setProviderV4Drawer('provider', false);
+    this.setProviderV4Drawer('models', false);
+    this.setProviderV4Drawer('connection', false);
 
     // Custom provider cards are rendered dynamically — rebuild them before the
     // presentation pass so selection styles apply to user-defined entries too.
@@ -1219,6 +1279,8 @@ export class SettingsPanel {
 
     // ── MCP servers ──
     this.mcpServers = cfg.mcpServers ? [...cfg.mcpServers] : [];
+    const excludeInput = document.getElementById('cfg-mcp-exclude-prefixes') as HTMLInputElement | null;
+    if (excludeInput) excludeInput.value = (cfg.mcpExcludedPrefixes ?? []).join(', ');
     this.renderMcpServers();
   }
 
@@ -1317,6 +1379,18 @@ export class SettingsPanel {
   private removeMcpServer(index: number) {
     this.mcpServers.splice(index, 1);
     this.renderMcpServers();
+  }
+
+  /** One-click Scrapling MCP preset (adaptive stealth scraping, `uvx scrapling
+   * mcp`). Opt-in: requires Python + uv; see the hint next to the button. */
+  private addScraplingMcp() {
+    if (this.mcpServers.some(s => s.name === SCRAPLING_MCP_PRESET.name)) {
+      this.toast(t('toast.serverNameExists'));
+      return;
+    }
+    this.mcpServers.push({ ...SCRAPLING_MCP_PRESET });
+    this.renderMcpServers();
+    this.toast(t('toast.scraplingAdded'));
   }
 
   // ── Skill Hub installed-list rendering (shared by bindActions + loadToForm) ──
@@ -1940,15 +2014,21 @@ export class SettingsPanel {
       if (Array.isArray(data.data)) ids.push(...data.data.map((m) => m.id));
       if (Array.isArray(data.models)) ids.push(...data.models.map((m) => m.name));
       if (ids.length === 0) throw new Error('no models in response');
-      // 默认模型取第一个；完整列表持久化到该自定义供应商条目。
+      // Replace the library, but keep the current default when the endpoint
+      // still returns it. Only an invalid or missing default falls back to the
+      // first fetched model.
       const modelInput = document.getElementById('cfg-model') as HTMLInputElement | null;
-      if (modelInput) modelInput.value = ids[0];
       const provider = (document.getElementById('cfg-provider') as HTMLSelectElement)?.value || '';
       const prev = loadConfig() ?? defaults();
       const entry = (prev.customProviders ?? []).find(p => p.id === provider);
+      const fetchedModels = uniqueModels(ids.slice(0, 30));
+      if (fetchedModels.length === 0) throw new Error('no valid models in response');
+      const existingDefault = entry?.defaultModel?.trim() || '';
+      const nextDefault = fetchedModels.includes(existingDefault) ? existingDefault : fetchedModels[0];
+      if (modelInput) modelInput.value = nextDefault;
       if (entry) {
-        entry.models = ids.slice(0, 30);
-        entry.defaultModel = ids[0];
+        entry.models = fetchedModels;
+        entry.defaultModel = nextDefault;
         const cfg: PureConfig = { ...prev, customProviders: [...(prev.customProviders ?? [])] };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
         invalidateConfigCache();
@@ -1957,7 +2037,7 @@ export class SettingsPanel {
       this.renderModelList(provider);
       this.updateProviderPresentation(provider);
       this.autoSave();
-      this.toast(t('llm.custom.fetchOk').replace('{n}', String(Math.min(ids.length, 30))));
+      this.toast(t('llm.custom.fetchOk').replace('{n}', String(fetchedModels.length)));
     } catch (err) {
       console.warn('[pure] fetch models failed:', err);
       this.toast(t('llm.custom.fetchFail') + '：' + ((err as Error)?.message || ''));
@@ -1972,7 +2052,6 @@ export class SettingsPanel {
     const list = document.getElementById('cfg-model-list');
     const addBtn = document.getElementById('cfg-add-model-btn');
     const clearBtn = document.getElementById('cfg-clear-models-btn') as HTMLButtonElement | null;
-    const defaultName = document.getElementById('cfg-default-model-name');
     if (!list) return;
     const cfg = loadConfig() ?? defaults();
     const custom = customProviderFor(cfg.customProviders ?? [], provider);
@@ -1986,7 +2065,6 @@ export class SettingsPanel {
     // but manually entered model IDs work for built-in and custom providers.
     if (addBtn) addBtn.hidden = false;
     if (clearBtn) clearBtn.disabled = models.length <= 1;
-    if (defaultName) defaultName.textContent = defaultModel || '—';
     list.hidden = models.length === 0;
     list.innerHTML = models.map(model => {
       const isDefault = model === defaultModel;
@@ -1995,6 +2073,7 @@ export class SettingsPanel {
         <button type="button" class="provider-model-chip-select" data-model="${escapeHtml(model)}" aria-pressed="${String(isDefault)}">
           <span class="provider-model-chip-radio" aria-hidden="true"></span>
           <span class="provider-model-chip-name">${escapeHtml(model)}</span>
+          <span class="provider-model-chip-meta">${isDefault ? t('llm.custom.chipIsDefault') : t('llm.custom.chipSetDefault')}</span>
         </button>
         ${isDefault ? `<span class="provider-model-chip-badge" data-i18n="llm.custom.defaultBadge">默认</span>` : ''}
         ${canRemove ? `<button type="button" class="provider-model-chip-remove" data-remove="${escapeHtml(model)}" title="${t('llm.custom.removeModel')}" aria-label="${t('llm.custom.removeModel')}">×</button>` : ''}
@@ -2250,6 +2329,7 @@ export class SettingsPanel {
       toolBrowser: (document.getElementById('cfg-tool-browser') as HTMLInputElement).checked,
       tavilyApiKey: (document.getElementById('cfg-tavily-key') as HTMLInputElement | null)?.value.trim() ?? '',
       serperApiKey: (document.getElementById('cfg-serper-key') as HTMLInputElement | null)?.value.trim() ?? '',
+      mcpExcludedPrefixes: (document.getElementById('cfg-mcp-exclude-prefixes') as HTMLInputElement | null)?.value.split(',').map((p) => p.trim()).filter(Boolean) ?? [],
       proxy: normalizeProxyConfig({
         enabled: (document.getElementById('cfg-proxy-enabled') as HTMLInputElement | null)?.checked ?? false,
         llmEnabled: (document.getElementById('cfg-proxy-llm') as HTMLInputElement | null)?.checked ?? false,

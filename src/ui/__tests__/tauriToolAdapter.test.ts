@@ -106,6 +106,13 @@ describe('buildWebSearchArgs (Rust web_search invoke arg lock)', () => {
     expect(buildWebSearchArgs('/ws', { query: 'rust' }, '', '', 'socks5://127.0.0.1:1080').proxyUrl)
       .toBe('socks5://127.0.0.1:1080');
   });
+
+  it('forwards the configured location so the Tier-2 weather fallback works', () => {
+    expect(buildWebSearchArgs('/ws', { query: '明天天气' }, '', '', '', '上海').location)
+      .toBe('上海');
+    expect(buildWebSearchArgs('/ws', { query: '明天天气' }, '', '', '', '').location)
+      .toBeUndefined();
+  });
 });
 
 describe('research tool argument contracts', () => {
@@ -143,6 +150,57 @@ describe('research tool argument contracts', () => {
 function toolCall(name: string, args: Record<string, unknown>): ToolCall {
   return { id: `test_${name}`, index: 0, function: { name, arguments: JSON.stringify(args) } };
 }
+
+describe('Tauri Tier-2/3 web tool execution paths', () => {
+  it('forwards web_public_api with the search keys, location, and searchOnMiss', async () => {
+    let seen: Record<string, unknown> = {};
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      expect(command).toBe('web_public_api');
+      seen = args ?? {};
+      return '[Frankfurter (ECB)] 1 USD = 7.2 CNY';
+    };
+    const result = await new TauriToolAdapter('/ws', 'tvly-1', 'serper-2', '上海', invoke).execute(toolCall('web_public_api', { query: '1 usd to cny' }));
+    expect(result.success).toBe(true);
+    expect(String(result.result)).toContain('[Frankfurter (ECB)]');
+    expect(seen).toMatchObject({
+      workspace: '/ws',
+      query: '1 usd to cny',
+      apiKey: 'tvly-1',
+      serperApiKey: 'serper-2',
+      location: '上海',
+      searchOnMiss: true,
+    });
+  });
+
+  it('forwards web_scrape with the selector and maxChars contract', async () => {
+    let seen: Record<string, unknown> = {};
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      expect(command).toBe('web_scrape');
+      seen = args ?? {};
+      return 'Scraped content';
+    };
+    const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(toolCall('web_scrape', { url: 'https://example.com/page', selector: '#main', maxChars: 5000 }));
+    expect(result.success).toBe(true);
+    expect(String(result.result)).toBe('Scraped content');
+    expect(seen).toMatchObject({
+      workspace: '/ws',
+      url: 'https://example.com/page',
+      selector: '#main',
+      maxChars: 5000,
+    });
+  });
+
+  it('defaults web_scrape selector to null when omitted', async () => {
+    let seen: Record<string, unknown> = {};
+    const invoke = async (_command: string, args?: Record<string, unknown>) => {
+      seen = args ?? {};
+      return 'ok';
+    };
+    await new TauriToolAdapter('/ws', '', '', '', invoke).execute(toolCall('web_scrape', { url: 'https://example.com' }));
+    expect(seen.selector).toBeNull();
+    expect(seen.maxChars).toBe(20000);
+  });
+});
 
 describe('Tauri researcher execution paths', () => {
   it('reports empty web research as a failed tool result', async () => {
