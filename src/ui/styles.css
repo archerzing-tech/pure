@@ -9483,6 +9483,7 @@ button svg,
 .provider-v4-connection-open-btn:hover span:last-child { transform: translateX(2px); }
 .provider-v4-connection-status[data-state="error"] { color: var(--danger); }
 .provider-v4-connection-status[data-state="testing"] { color: var(--accent); }
+.provider-v4-connection-status[data-state="saved"] { color: var(--text-secondary); }
 .provider-v4-provider-drawer,
 .provider-v4-model-drawer,
 .provider-v4-connection-drawer {
@@ -9750,4 +9751,183 @@ button svg,
   .provider-v4-provider-drawer .provider-section-heading { padding-inline: 12px; }
   .provider-v4-provider-drawer .provider-card-grid { padding-inline: 12px; }
   .provider-v4-provider-drawer .provider-custom-toolbar { padding-inline: 12px; }
+}
+
+/* ── 诉求合理性分析卡（request review） ──
+   Structured verdicts on the user's request, shown between the live analysis
+   and the plan card. Reasonable parts proceed; flagged parts pause the plan
+   and carry decision buttons. */
+.request-review-row {
+  align-items: flex-start;
+}
+
+.request-review-card {
+  width: min(620px, 100%);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.request-review-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.request-review-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+
+.request-review-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.request-review-ok {
+  font-size: 12.5px;
+  color: var(--success);
+  line-height: 1.5;
+}
+
+.request-review-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-hover) 55%, transparent);
+}
+
+.request-review-item.request-review-questionable {
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+}
+
+.request-review-item.request-review-unreasonable {
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
+}
+
+.request-review-marker {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+}
+
+.request-review-questionable .request-review-marker { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
+.request-review-unreasonable .request-review-marker { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+
+.request-review-item-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.request-review-part {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.45;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.request-review-verdict {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  white-space: nowrap;
+}
+
+.request-review-questionable .request-review-verdict { color: var(--warning); }
+.request-review-unreasonable .request-review-verdict { color: var(--danger); }
+
+.request-review-reason {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.request-review-suggestion {
+  font-size: 12px;
+  color: var(--accent);
+  line-height: 1.5;
+}
+
+.request-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 12px;
+  flex-wrap: wrap;
+}
+
+.request-review-action {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 18%, transparent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 7px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease, opacity 0.15s ease;
+}
+
+.request-review-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-soft) 32%, transparent);
+  border-color: var(--accent);
+}
+
+.request-review-action:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.request-review-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.request-review-action-proceed {
+  border-color: var(--border-light);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.request-review-action-proceed:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.request-review-decided {
+  padding: 0 14px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
 }

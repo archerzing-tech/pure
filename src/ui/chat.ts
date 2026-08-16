@@ -8,7 +8,7 @@ import { saveSession, loadLastSession, loadSession, saveSessionStats, loadSessio
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
-import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget } from '../shared/PromptAssembler';
+import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
 import { compileRequestWorkflow } from '../shared/requestWorkflow';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { CodingAgent } from '../coding-agent/CodingAgent';
@@ -46,6 +46,7 @@ import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputList
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
 import { planOverview, setOverviewPositionSession, type PlanOverviewStatus } from './planOverview';
 import { attachPlanPauseActions } from './planPauseActions';
+import { createRequestReviewCard, formatRequestReviewSection, hasFlaggedReviewItems, type RequestReviewCardHandle, type RequestReviewItem } from './requestReview';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
 import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore } from '../shared/tauri';
@@ -613,6 +614,37 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
 // so a tight deadline turns every request into a forced heuristic fallback.
 // The per-chunk idle clock below is the real safety valve for stalled streams.
 const PLAN_ANALYSIS_TIMEOUT_MS = 60000;
+
+/**
+ * App skills from ~/.pure/skills (the capability-gap protocol's install
+ * target), injected into the system prompt like Skill Hub skills. Desktop:
+ * read via the Rust list_app_skills command; browser dev mode: none. Cached
+ * for 30s so a skill installed mid-session loads without a restart while a
+ * per-turn invoke is avoided.
+ */
+interface AppSkillEntry { name: string; description: string; body: string }
+let appSkillsCache: { at: number; items: PromptSkill[] } | null = null;
+async function loadAppSkills(): Promise<PromptSkill[]> {
+  if (appSkillsCache && Date.now() - appSkillsCache.at < 30_000) {
+    return appSkillsCache.items;
+  }
+  let items: PromptSkill[] = [];
+  if (isTauriRuntime()) {
+    try {
+      const core = await loadTauriCore();
+      const entries = await core?.invoke<AppSkillEntry[]>('list_app_skills');
+      items = (entries ?? []).map((entry) => ({
+        name: entry.name,
+        body: entry.body,
+        enabled: true,
+      }));
+    } catch (err) {
+      console.warn('[pure] failed to load app skills:', err);
+    }
+  }
+  appSkillsCache = { at: Date.now(), items };
+  return items;
+}
 /** Idle timeout while streaming a task analysis: as long as the model keeps
  * yielding chunks (even a long reasoning pass), the clock resets; only a
  * genuinely dead connection trips the bail-out before the total ceiling. */
@@ -631,6 +663,11 @@ function limitMessageHistory(messages: Message[], max = MAX_MESSAGE_HISTORY): Me
 // full-stack app get different step lists), never a fixed template. The
 // heuristic plan from analyzeTask() is only a fallback when this call fails.
 const TASK_ANALYSIS_PROMPT = `You are a senior engineer thinking through a task before executing it. Think about THIS request, not a generic software task. Write natural, conversational reasoning first in the user's language. Do not use prescribed headings, a fixed number of sections, or a canned sequence. Explain what you understood, what is still unknown, why the scope is easy or difficult, and what you would do next in the order that makes sense for this request. Refer to concrete details from the request. For a Shandong 5G monitoring dashboard, distinguish province-wide city drill-down, live data freshness, data-source availability, alert/diagnosis logic, and whether the workspace is an empty prototype or an existing system. If a missing decision blocks implementation, say so plainly and ask only the smallest useful question at the point where it matters; do not pretend an invented assumption is settled.
+
+First, honestly review the REASONABLENESS of the user's request itself — not your plan. List every notable part of the request (requirements, constraints, tech choices, deadlines, scope) with a verdict: \"reasonable\" (feasible, no hidden cost → execute as asked), \"questionable\" (risky, depends on an unverified premise, or likely not what the user really wants → needs the user's decision), or \"unreasonable\" (infeasible, self-contradictory, wrong tool for the goal, destructive to existing work, or conflicts with the project reality → needs the user's decision). Do not rubber-stamp the request: call out impossible deadlines, wrong-technology choices, contradictory requirements, and scope that would destroy existing work. Do not flag trivial details either — only parts that genuinely need the user's decision. For questionable/unreasonable parts give a concrete suggestion (adjustment or alternative). If every part is fine, output an empty array. Output the machine-readable block before the JSON plan:
+<request_review>
+[{\"part\":\"one part of the request\",\"verdict\":\"questionable\",\"reason\":\"why it needs a decision\",\"suggestion\":\"what I propose instead\"}]
+</request_review>
 
 Then output a JSON array of concrete, ordered steps tailored to THIS task for the application to track. Choose the number and granularity from the work itself; never pad the list to reach a target count. Include testing or meaningful verification when it matters. Use a visible Todo list only when it genuinely clarifies independently verifiable work (todosRequired=true); use false for an atomic step. Do NOT invent file contents or claim that an external data source exists. Write every plan and Todo in plain language the USER understands, in the same language as the user's request.
 
@@ -652,6 +689,10 @@ export interface TaskAnalysisResult {
   /** The model's own intent/risk judgment for the safety gate; null when the
    * model did not provide a parseable assessment (rules layer then decides). */
   llmIntent: IntentAssessment | null;
+  /** The model's structured verdict on the reasonableness of the user's
+   * request itself; empty when nothing needs a decision (or the model did
+   * not provide a parseable review). */
+  review: RequestReviewItem[];
 }
 
 /** Parse the streamed analysis response into { analysis, plan, repaired }.
@@ -663,7 +704,10 @@ export function parseTaskAnalysisText(text: string, userText: string): TaskAnaly
   // Strip the <analysis>…</analysis> wrapper tags the prompt asks for, so the
   // reasoning text shown in the thinking card reads naturally.
   const rawAnalysis = fence ? text.slice(0, fence.index ?? 0) : text.replace(/\[[\s\S]*$/, '');
-  const analysis = rawAnalysis.replace(/<\/?analysis>/g, '').trim();
+  const analysis = rawAnalysis
+    .replace(/<\/?analysis>/g, '')
+    .replace(/<request_review>[\s\S]*?<\/request_review>/g, '')
+    .trim();
   const planText = fence ? fence[1].trim() : text;
   const parsed = parsePlanJsonWithMeta(planText);
   return {
@@ -671,7 +715,51 @@ export function parseTaskAnalysisText(text: string, userText: string): TaskAnaly
     plan: parsed.plan,
     repaired: parsed.repaired,
     llmIntent: parseIntentAssessmentBlock(text),
+    review: parseRequestReviewBlock(text),
   };
+}
+
+const REVIEW_VERDICTS: ReadonlyArray<RequestReviewItem['verdict']> =
+  ['reasonable', 'questionable', 'unreasonable'];
+
+/** Parse the <request_review> JSON block the model emits after its reasoning.
+ * Any missing/invalid block degrades to [] — the request then proceeds with
+ * no extra gate, so a non-compliant reply can never block execution. Items
+ * with an invalid verdict or an empty part are dropped individually. */
+export function parseRequestReviewBlock(text: string): RequestReviewItem[] {
+  const block = text.match(/<request_review>\s*([\s\S]*?)\s*<\/request_review>/);
+  if (!block) return [];
+  const raw = block[1].trim();
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    try {
+      data = JSON.parse(repairJsonSource(raw).source);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(data)) return [];
+  const items: RequestReviewItem[] = [];
+  for (const entry of data) {
+    if (!entry || typeof entry !== 'object') continue;
+    const verdict = (entry as Record<string, unknown>).verdict as RequestReviewItem['verdict'];
+    const part = (entry as Record<string, unknown>).part;
+    if (!REVIEW_VERDICTS.includes(verdict)) continue;
+    if (typeof part !== 'string' || !part.trim()) continue;
+    items.push({
+      part: part.trim(),
+      verdict,
+      reason: typeof (entry as Record<string, unknown>).reason === 'string'
+        ? (entry as Record<string, unknown>).reason as string
+        : '',
+      suggestion: typeof (entry as Record<string, unknown>).suggestion === 'string'
+        ? (entry as Record<string, unknown>).suggestion as string
+        : undefined,
+    });
+  }
+  return items;
 }
 
 const INTENT_KEYS: ReadonlyArray<IntentAssessment['intent']> =
@@ -760,7 +848,7 @@ export async function generateTaskAnalysis(
   opts: { context?: string; onThinking?: (delta: string) => void } = {},
 ): Promise<TaskAnalysisResult> {
   try {
-    if (signal?.aborted) return { analysis: '', plan: null, repaired: false, llmIntent: null };
+    if (signal?.aborted) return { analysis: '', plan: null, repaired: false, llmIntent: null, review: [] };
     // Ground the analysis+plan in reality: the workspace scan makes steps
     // reference real files.
     const grounding: string[] = [];
@@ -844,10 +932,11 @@ export async function generateTaskAnalysis(
       plan: contentResult.plan ?? reasoningResult?.plan ?? null,
       repaired: contentResult.repaired || reasoningResult?.repaired || false,
       llmIntent: contentResult.llmIntent ?? reasoningResult?.llmIntent ?? null,
+      review: contentResult.review ?? reasoningResult?.review ?? [],
     };
   } catch (err) {
     console.warn('[pure] task analysis failed, falling back to heuristic plan:', (err as Error)?.message ?? err);
-    return { analysis: '', plan: null, repaired: false, llmIntent: null };
+    return { analysis: '', plan: null, repaired: false, llmIntent: null, review: [] };
   }
 }
 
@@ -1940,6 +2029,11 @@ export class ChatController {
         return;
       }
       let pauseAfterPlanning = false;
+      // 诉求合理性分析卡（live-only，随本回合渲染）；存在存疑/不合理项时执行前
+      // 暂停，由卡上的决策按钮（或暂停气泡）让用户选择调整/原样执行。
+      let reviewCard: RequestReviewCardHandle | null = null;
+      let reviewNeedsDecision = false;
+      let reviewItems: RequestReviewItem[] = [];
       if (workflow.userContext.buildProtocol) {
         userBuildProtocol = workflow.userContext.buildProtocol;
       }
@@ -2124,6 +2218,15 @@ export class ChatController {
           // 评估卡此刻才出现：thinking 卡已经流式展示过模型对这项任务的真实分析，
           // 卡上的意图/风险节点以合并后的 effectiveIntent 落定，不再先于任何思考弹出。
           maybeShowAssessment();
+          // 诉求合理性分析卡：把模型对诉求本身的评审结论展示给用户。合理项直接
+          // 执行；存疑/不合理项会让本回合在执行前停下等用户决策（见 approvePlan
+          // 与暂停块）——评审结论始终可见，即使不触发暂停。
+          if (llmAnalysis.review.length > 0) {
+            reviewItems = llmAnalysis.review;
+            reviewNeedsDecision = hasFlaggedReviewItems(llmAnalysis.review);
+            reviewCard = createRequestReviewCard(llmAnalysis.review);
+            chatEl.appendChild(reviewCard.el);
+          }
           if (llmAnalysis.plan) {
             planForReview = llmAnalysis.plan;
             // 分析真实完成：意图/风险前置节点随分析落地，计划卡用任务专属步骤渲染。
@@ -2189,8 +2292,10 @@ export class ChatController {
               const stopped = this.abortController?.signal.aborted === true;
               assessmentFlow?.cancel(stopped ? '已暂停：尚未执行任何改动。' : '你暂未批准本次执行，未执行任何改动。');
               // 用户拒绝/停止执行：他的请求保留在对话里作为记录（只有切换会话才移除），
-              // 计划卡与模式提示属于本次流程，一并清理。
+              // 计划卡、评审卡与模式提示属于本次流程，一并清理。
               discardPlanCard();
+              reviewCard?.remove();
+              reviewCard = null;
               keepOrDropUserBubble(stopped ? '⏸ 已暂停：你的请求已保留在对话中。' : '已取消本次执行计划，你的请求已保留在对话中。');
               modeBubble?.remove();
               return; // finally resets streaming
@@ -2206,6 +2311,22 @@ export class ChatController {
             // Auto-detected work keeps moving. The plan is visible context,
             // not a second confirmation prompt the user has to dismiss.
             approvePlan(true);
+            // 评审卡发现存疑/不合理项：即使是自动检测的复杂任务也停在执行前，
+            // 先让用户对诉求做决策（采纳建议调整 / 仍按原诉求执行）。用户已通过
+            // 确认对话框明确批准（上一条分支）时不再二次暂停。
+            if (reviewNeedsDecision && !forcedMode) {
+              pauseAfterPlanning = true;
+              const sendDecision = (text: string): boolean => {
+                if (this.streaming) return false;
+                reviewCard?.setDecided();
+                void this.send(text);
+                return true;
+              };
+              reviewCard?.enableDecisions(
+                () => sendDecision('用户决策：请按你刚才给出的建议调整后继续执行。'),
+                () => sendDecision('用户决策：我已知晓你的顾虑，仍按原诉求执行。'),
+              );
+            }
           }
         } else if (continuingPlan && this.activeComplexPlan) {
             userPlan = formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate);
@@ -2529,7 +2650,10 @@ export class ChatController {
         assessmentFlow?.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
         endThinking();
         this.activePlanStarted = false;
-        const pauseMessage = formatPlanPauseMessage(this.activeComplexPlan);
+        // 评审摘要并入暂停消息：任何后续回复（决策按钮或直接打字）都能看到
+        // 评审结论与建议——评审卡本身是 live-only，不随会话恢复。
+        const pauseMessage = formatPlanPauseMessage(this.activeComplexPlan)
+          + (reviewNeedsDecision ? formatRequestReviewSection(reviewItems) : '');
         const pauseSnapshot: Message[] = [
           ...this.messages,
           { role: 'user', content: userText },
@@ -2557,8 +2681,10 @@ export class ChatController {
         planCard?.setWaiting(1, firstLabel);
         syncPlanOverview('waiting');
         // 一个脉冲状态气泡放在最后：明确告诉用户“一切就绪，等你回复开工”，
-        // 避免输入框恢复后看起来像流程悄悄停止了。
-        this.addStatusBubble(`⏸ 已暂停在这里等你：直接回复即可开始第 1 项「${firstLabel}」。`, true, false);
+        // 避免输入框恢复后看起来像流程悄悄停止了。评审待决策时文案指向评审卡。
+        this.addStatusBubble(reviewNeedsDecision
+          ? '⏸ 你的诉求中有需要决策的部分：请在上方评审卡选择「采纳建议调整后继续」或「仍按原诉求执行」，也可以直接回复你的决定。'
+          : `⏸ 已暂停在这里等你：直接回复即可开始第 1 项「${firstLabel}」。`, true, false);
         scrollChatToBottomIfPinned(chatEl);
         await this.persistSession(
           pauseSnapshot,
@@ -2584,6 +2710,10 @@ export class ChatController {
       const finalPromptTools = effectiveWorkspace
         ? codingAgent.toolRegistry.getTools()
         : promptTools;
+      // App skills (~/.pure/skills, installed by the capability-gap protocol)
+      // join the enabled Skill Hub skills in the system prompt. TTL-cached: a
+      // skill installed mid-session shows up within 30s, not after a restart.
+      const appSkills = await loadAppSkills();
       const assembly = promptAssembler.assemble({
         surface: 'gui',
         capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen }),
@@ -2591,7 +2721,7 @@ export class ChatController {
         toolDefinitions: finalPromptTools,
         environment: buildEnvironmentContext(config),
         runtimes: buildRuntimesContext(),
-        skills: config.hubSkills,
+        skills: [...(config.hubSkills ?? []), ...appSkills],
         mode: analysis.mode,
         budget: promptBudgetForProvider(config.customProviders, config.provider, config.model),
       }, userText, {

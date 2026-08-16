@@ -9,7 +9,6 @@ import {
   formatFeedText,
   formatJsonBody,
   isFeedBody,
-  scrapeViaFirecrawl,
   scrapeViaJina,
   stripHtml,
   stripNoiseTags,
@@ -125,27 +124,3 @@ describe('scrapeViaJina', () => {
   });
 });
 
-describe('scrapeViaFirecrawl', () => {
-  it('POSTs the URL and returns the markdown payload', async () => {
-    let posted = '';
-    let auth = '';
-    globalThis.fetch = (async (_input: any, init: any) => {
-      posted = String(init?.body ?? '');
-      auth = String((init?.headers as Record<string, string> | undefined)?.Authorization ?? '');
-      return new Response(JSON.stringify({ success: true, data: { markdown: '# Clean markdown' } }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }) as unknown as typeof fetch;
-    const text = await scrapeViaFirecrawl('https://example.com/page', 'fc-test');
-    expect(text).toBe('# Clean markdown');
-    expect(posted).toContain('https://example.com/page');
-    expect(auth).toBe('Bearer fc-test');
-  });
-
-  it('returns null without a key or on failure so callers degrade to the next tier', async () => {
-    expect(await scrapeViaFirecrawl('https://example.com/page', '')).toBeNull();
-    globalThis.fetch = (async () => new Response('quota', { status: 402 })) as unknown as typeof fetch;
-    expect(await scrapeViaFirecrawl('https://example.com/page', 'fc-test')).toBeNull();
-  });
-});

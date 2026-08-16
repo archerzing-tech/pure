@@ -108,6 +108,22 @@ export const LOGICAL_TRAPS_PROMPT = `Logical traps & approach switching:
 - Before acting, scan the user's request for logical traps: self-contradictory requirements ("不要X但又要X"), impossible constraints, mutually exclusive goals, or a trick premise. If the request as stated is logically impossible or self-contradictory, do NOT blindly follow it into a failure loop — state the trap briefly and solve the most reasonable interpretation (or explain why it is impossible and propose the closest achievable alternative).
 - If your FIRST attempt fails (verification failure, repeated tool errors, or the result keeps getting rejected), do NOT retry the same approach a second time. Re-read the ORIGINAL user request and question whether the premise itself is the problem. If it is, escape the trap by switching to a fundamentally different interpretation or method.`;
 
+/** Capability-gap protocol — identical in GUI and CLI (shared, not duplicated).
+ * When the request needs a capability the current toolset lacks (vision /
+ * OCR, PDF or Office parsing, audio/video transcription, …), the agent must
+ * not refuse or fake it: check locally installed skills first, then find and
+ * install a community skill or tool, then verify it works. */
+export const CAPABILITY_GAP_PROMPT = `Capability-gap protocol:
+When the user's request needs a capability you do NOT currently have (common gaps: identifying what is in an image / screenshot — you have no vision; parsing PDF, Office or scanned documents; transcribing audio or video; OCR of text inside pictures), do NOT refuse, do NOT pretend to have the capability, and do NOT invent results.
+- First check what is already available: the <skills> blocks in this system prompt (including Skill Hub skills the user enabled), the ~/.pure/skills/ directory, and the project's .agents/skills/ directory (open or list them). If a suitable skill or tool exists, use it.
+- If nothing fits, INSTALL it yourself:
+  1) Community skills (skills.sh ecosystem): run \`npx skills find <关键词>\` to search, then \`npx skills add <owner/repo> --skill <name> --yes\` to install into .agents/skills/ — copy the installed SKILL.md to ~/.pure/skills/<name>/SKILL.md so the desktop app loads it too.
+  2) Or download a skill/tool repository directly (web_fetch / curl) and extract it into ~/.pure/skills/ (unzip / tar as needed).
+  3) When a REAL program is required (OCR engine, PDF text extractor, audio transcriber, …), install it into the app's tools space: pip install --target ~/.pure/tools/ … or npm install --prefix ~/.pure/tools …; keep executable scripts in ~/.pure/tools/bin and call them by absolute path.
+- After installing, VERIFY it actually works on the user's input (run it once for real), then tell the user briefly what you installed, where, and how it was used.
+- Example: "识别这张图片里写了什么" with a text-only model → install an OCR tool (e.g. tesseract via pip/brew, or an OCR-capable model API) and extract the text; never claim you can see the image directly.
+- Installing downloads and runs third-party code: follow the same permission rules as any other command execution — when the user must approve commands, ask before installing.`;
+
 /** 多图 SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The
  * GUI renders consecutive fenced ```svg blocks as a side-by-side grid (each
  * image ~half the chat width), so multi-image requests must yield one SVG

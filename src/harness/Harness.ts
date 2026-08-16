@@ -175,7 +175,7 @@ export class Harness {
     // ── Memory retrieval (Layer 2 per Harness 设计文档 §3.8): at session
     // start, search the IMemoryStore with the user prompt and inject the
     // relevant preferences / error patterns into the system prompt's
-    // <session_memory> section via PromptComposer.
+    // <session_memory> section (composeMemoryPrompt → promptAssembler).
     const effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, userPrompt);
 
     // ── Resume (P1-7): feed the checkpoint as initial context ──
@@ -615,8 +615,8 @@ export class Harness {
    * tool never succeeded afterward (genuine dead-ends; interrupted sessions).
    * Transient faults (the tool later succeeded) are skipped by the caller —
    * they keep only the "Recovered after retry" memory. The memory tells
-   * future sessions (via PromptComposer's <session_memory> injection) not to
-   * repeat the exact call. Non-fatal.
+   * future sessions (via the <session_memory> injection) not to repeat the
+   * exact call. Non-fatal.
    */
   private async writeRepeatedFailureMemory(failure: FailureRecord): Promise<void> {
     if (!this.config.memory) return;

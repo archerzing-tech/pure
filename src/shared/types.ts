@@ -296,7 +296,7 @@ export interface IMemoryStore {
   /** 写入一条记忆（Engine/Harness 在关键事件时调用） */
   add(entry: Omit<MemoryEntry, 'id'>): Promise<string>;
 
-  /** 检索相关记忆（PromptComposer 在会话开始时调用） */
+  /** 检索相关记忆（Harness 会话开始时注入 <session_memory>） */
   search(query: string, opts?: MemorySearchOptions): Promise<MemoryEntry[]>;
 
   /** 按会话批量清理 */
