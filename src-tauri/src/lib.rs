@@ -6010,6 +6010,44 @@ fn secret_list() -> Result<Vec<String>, String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  App config file (~/.pure/config.json) — GUI + hand-editing share one source.
+//  The WebView mirrors the file into localStorage at startup and writes it back
+//  on every save, so a user who edits config.json directly sees the change
+//  after the next app launch. Secrets (API keys / proxy password) are NOT in
+//  this file — they stay in ~/.pure/secrets.json (0600).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".pure").join("config.json")
+}
+
+/// Read the user-editable app config. `Ok(None)` when the file is missing
+/// (first run / not yet migrated) — the caller falls back to its defaults.
+#[tauri::command]
+fn load_config() -> Result<Option<serde_json::Value>, String> {
+    let path = config_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read config: {}", e))?;
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|e| format!("parse config: {}", e))
+}
+
+/// Persist the user-editable app config (pretty JSON, ~/.pure/config.json).
+#[tauri::command]
+fn save_config(config: serde_json::Value) -> Result<(), String> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(&config).map_err(|e| format!("serialize: {}", e))?;
+    fs::write(&path, &json).map_err(|e| format!("write config: {}", e))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  LLM Transport (reqwest HTTP/2 SSE → Channel)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -6199,6 +6237,79 @@ mod proxy_tests {
         assert!(llm_proxy_url(&args).is_none());
         args.proxy_bypass_models.clear();
         assert_eq!(llm_proxy_url(&args), Some("socks5://127.0.0.1:1080"));
+    }
+
+    #[test]
+    fn splits_proxy_urls_into_scheme_host_port() {
+        assert_eq!(
+            split_proxy_url("http://127.0.0.1:7890"),
+            Some(("http://".into(), "127.0.0.1".into(), "7890".into()))
+        );
+        assert_eq!(
+            split_proxy_url("socks5://proxy.example.com:1080"),
+            Some(("socks5://".into(), "proxy.example.com".into(), "1080".into()))
+        );
+        // Scheme-less shorthand defaults to http.
+        assert_eq!(
+            split_proxy_url("127.0.0.1:7890"),
+            Some(("http://".into(), "127.0.0.1".into(), "7890".into()))
+        );
+        // Scheme-default port (https:443) is recovered from the raw authority.
+        assert_eq!(
+            split_proxy_url("https://proxy:443"),
+            Some(("https://".into(), "proxy".into(), "443".into()))
+        );
+        assert_eq!(split_proxy_url("ftp://127.0.0.1:21"), None);
+        assert_eq!(split_proxy_url(""), None);
+    }
+
+    #[test]
+    fn parses_scutil_proxy_output() {
+        let http_only = "HTTPEnable : 1\nHTTPPort : 7890\nHTTPProxy : 127.0.0.1\nHTTPSEnable : 0\nSOCKSEnable : 0\n";
+        assert_eq!(
+            parse_scutil_proxy(http_only),
+            Some(("http://".into(), "127.0.0.1".into(), "7890".into()))
+        );
+        // The HTTPS-traffic proxy is preferred over the HTTP one when both
+        // are enabled — but it still maps to an http:// scheme (it is an HTTP
+        // CONNECT proxy, not a TLS proxy).
+        let https_first = "HTTPSEnable : 1\nHTTPSPort : 7890\nHTTPSProxy : 127.0.0.1\nHTTPEnable : 1\nHTTPPort : 8080\nHTTPProxy : 10.0.0.1\n";
+        assert_eq!(
+            parse_scutil_proxy(https_first),
+            Some(("http://".into(), "127.0.0.1".into(), "7890".into()))
+        );
+        assert_eq!(parse_scutil_proxy("HTTPEnable : 0\nHTTPSEnable : 0\nSOCKSEnable : 0\n"), None);
+    }
+
+    #[test]
+    fn parses_windows_proxy_server() {
+        assert_eq!(
+            parse_windows_proxy_server("127.0.0.1:7890"),
+            Some(("http://".into(), "127.0.0.1".into(), "7890".into()))
+        );
+        assert_eq!(
+            parse_windows_proxy_server("http=127.0.0.1:7890;https=127.0.0.1:7890"),
+            Some(("http://".into(), "127.0.0.1".into(), "7890".into()))
+        );
+        assert_eq!(
+            parse_windows_proxy_server("socks=127.0.0.1:7890"),
+            Some(("socks5://".into(), "127.0.0.1".into(), "7890".into()))
+        );
+        assert_eq!(
+            split_host_port("[::1]:7890"),
+            ("::1".to_string(), "7890".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_windows_reg_query() {
+        let enabled = "\n    ProxyEnable    REG_DWORD    0x1\n    ProxyServer    REG_SZ    127.0.0.1:7890\n";
+        assert_eq!(
+            parse_windows_reg_query(enabled),
+            Some(("http://".into(), "127.0.0.1".into(), "7890".into()))
+        );
+        let disabled = "\n    ProxyEnable    REG_DWORD    0x0\n    ProxyServer    REG_SZ    127.0.0.1:7890\n";
+        assert_eq!(parse_windows_reg_query(disabled), None);
     }
 }
 
@@ -7374,6 +7485,29 @@ fn update_sessions_index(
 /// is deliberately NOT first. Order: ipwho.is (HTTPS, no key, no challenge) →
 /// ipinfo.io (HTTPS fallback) → ip-api.com (Chinese names; HTTP only, so the
 /// browser dev fallback skips it).
+/// Flatten a reqwest error's cause chain into one readable line. The Display
+/// of a request error is just "error sending request for url (…)" — the real
+/// reason (connection refused, DNS failure, timeout) lives in the source
+/// chain, so surface it instead of leaving the user guessing.
+fn reqwest_error_detail(err: &reqwest::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(cause) = current {
+        let msg = cause.to_string();
+        if !msg.is_empty() && parts.last() != Some(&msg) {
+            parts.push(msg);
+        }
+        current = cause.source();
+    }
+    parts.join(": ")
+}
+
+/// Probe endpoint used to verify a proxy forwards requests. Baidu is chosen
+/// because it is reachable from mainland China (google.com/generate_204 is
+/// not), so the connectivity test stays meaningful for users on a China
+/// network and for proxies that only route domestic traffic.
+const PROXY_PROBE_URL: &str = "https://www.baidu.com/";
+
 /// Connectivity check for the proxy config (Settings → 网络代理 → 测试连接).
 /// Builds the exact client the LLM / tool paths use and probes small endpoints
 /// through it — a malformed URL (bad scheme) or a dead proxy is caught HERE
@@ -7386,7 +7520,7 @@ async fn test_proxy(proxy_url: String) -> Result<String, String> {
         Err(e) => return Err(format!("proxy config invalid: {}", e)),
     };
     let probes: &[&str] = &[
-        "https://www.google.com/generate_204",
+        PROXY_PROBE_URL,
         "https://api.deepseek.com",
         "https://ipwho.is/",
     ];
@@ -7396,7 +7530,7 @@ async fn test_proxy(proxy_url: String) -> Result<String, String> {
         let status = match client.get(*url).header("User-Agent", BROWSER_UA).send().await {
             Ok(r) => r.status(),
             Err(e) => {
-                failed.push(format!("{}: {}", url, e));
+                failed.push(format!("{}: {}", url, reqwest_error_detail(&e)));
                 continue;
             }
         };
@@ -7406,6 +7540,309 @@ async fn test_proxy(proxy_url: String) -> Result<String, String> {
         failed.push(format!("{}: HTTP {}", url, status));
     }
     Err(format!("all probes failed through the proxy: {}", failed.join(" | ")))
+}
+
+// ── System proxy detection (Settings → 网络代理 → 读取系统代理) ──
+// Reads the OS-level proxy (macOS scutil / Windows reg) or the standard proxy
+// environment variables, then maps the result onto the settings form's
+// scheme/host/port triple so the user never has to hand-type the address when
+// Clash / a VPN / a corporate proxy is already active. `source` is a stable
+// code (`macos` | `windows` | `env`) the UI localizes; `detail` carries the
+// env-var name when the value came from the environment.
+
+#[derive(serde::Serialize)]
+struct DetectedProxy {
+    scheme: String,
+    host: String,
+    port: String,
+    source: String,
+    detail: String,
+}
+
+/// Split a proxy URL into the form's (scheme, host, port) fields. Accepts the
+/// full `scheme://host:port` form and the scheme-less `host:port` shorthand
+/// (assumed http), and recovers a scheme-default port that URL normalization
+/// drops (https:443). Returns None for unsupported schemes or an empty host.
+fn split_proxy_url(url: &str) -> Option<(String, String, String)> {
+    let raw = url.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
+    };
+    let parsed = reqwest::Url::parse(&candidate).ok()?;
+    let scheme = match parsed.scheme() {
+        "http" => "http://",
+        "https" => "https://",
+        "socks5" => "socks5://",
+        "socks5h" => "socks5h://",
+        "socks" | "socks4" => "socks5://",
+        _ => return None,
+    };
+    let host = parsed.host_str()?.to_string();
+    if host.is_empty() {
+        return None;
+    }
+    let mut port = parsed.port().map(|p| p.to_string()).unwrap_or_default();
+    if port.is_empty() {
+        // URL normalization drops a scheme-default port; recover it from the
+        // raw authority (the last colon of the userinfo-less authority).
+        let authority = candidate
+            .split("://")
+            .nth(1)
+            .unwrap_or(&candidate)
+            .split(|c: char| matches!(c, '/' | '?' | '#'))
+            .next()
+            .unwrap_or("");
+        if let Some(idx) = authority.rfind(':') {
+            let tail = &authority[idx + 1..];
+            if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+                port = tail.to_string();
+            }
+        }
+    }
+    Some((scheme.to_string(), host, port))
+}
+
+/// Parse `scutil --proxy` output (macOS) into a (scheme, host, port) triple.
+/// Prefers HTTPS, then HTTP, then SOCKS — the order most proxy tools populate.
+/// NOTE: `HTTPSProxy` means "proxy for HTTPS traffic", not "a TLS proxy" —
+/// the endpoint still speaks plain HTTP (CONNECT tunneling), so it maps to
+/// `http://`, never `https://`. Only the SOCKS fields map to a real SOCKS
+/// scheme.
+#[cfg(any(target_os = "macos", test))]
+fn parse_scutil_proxy(output: &str) -> Option<(String, String, String)> {
+    fn key_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
+        output.lines().find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            (k.trim() == key).then(|| v.trim())
+        })
+    }
+    for (enable_key, proxy_key, port_key, scheme) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort", "http://"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort", "http://"),
+        ("SOCKSEnable", "SOCKSProxy", "SOCKSPort", "socks5://"),
+    ] {
+        if key_value(output, enable_key) != Some("1") {
+            continue;
+        }
+        let host = key_value(output, proxy_key).unwrap_or("").trim();
+        if host.is_empty() {
+            continue;
+        }
+        let port = key_value(output, port_key).unwrap_or("").to_string();
+        return Some((scheme.to_string(), host.to_string(), port));
+    }
+    None
+}
+
+/// Parse a Windows `ProxyServer` value (`reg query`) into (scheme, host, port).
+/// Accepts a bare `host:port`, per-scheme `http=…;https=…;socks=…`, and IPv6
+/// bracket hosts. Explicit per-scheme entries win; the bare default maps to http.
+/// NOTE: `https=` means "proxy for HTTPS traffic", not a TLS proxy — it still
+/// speaks HTTP, so it maps to `http://` like the `http=` entry.
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_proxy_server(value: &str) -> Option<(String, String, String)> {
+    let entries: Vec<&str> = value.split(';').map(str::trim).filter(|s| !s.is_empty()).collect();
+    for (want, scheme) in [
+        ("https", "http://"),
+        ("http", "http://"),
+        ("socks5", "socks5://"),
+        ("socks", "socks5://"),
+    ] {
+        let addr = entries.iter().find_map(|e| {
+            let (s, a) = e.split_once('=')?;
+            (s.trim() == want).then(|| a.trim())
+        });
+        if let Some(addr) = addr {
+            let (host, port) = split_host_port(addr);
+            return Some((scheme.to_string(), host, port));
+        }
+    }
+    let bare = entries.iter().find(|e| !e.contains('='))?;
+    let (host, port) = split_host_port(bare);
+    Some(("http://".to_string(), host, port))
+}
+
+/// Split `host:port` (or IPv6 `[host]:port`) into its two parts.
+#[cfg(any(target_os = "windows", test))]
+fn split_host_port(addr: &str) -> (String, String) {
+    let addr = addr.trim();
+    if let Some(rest) = addr.strip_prefix('[') {
+        if let Some(idx) = rest.find(']') {
+            return (rest[..idx].to_string(), rest[idx + 1..].trim_start_matches(':').to_string());
+        }
+    }
+    match addr.rfind(':') {
+        Some(idx) => (addr[..idx].to_string(), addr[idx + 1..].to_string()),
+        None => (addr.to_string(), String::new()),
+    }
+}
+
+/// Parse `reg query "HKCU\...\Internet Settings"` output (Windows) into
+/// (scheme, host, port). Returns None when the proxy is disabled or unset.
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_reg_query(output: &str) -> Option<(String, String, String)> {
+    let enabled = output
+        .lines()
+        .any(|l| l.contains("ProxyEnable") && l.trim_end().ends_with("0x1"));
+    if !enabled {
+        return None;
+    }
+    let value = output
+        .lines()
+        .find(|l| l.contains("ProxyServer"))?
+        .split("REG_SZ")
+        .nth(1)?
+        .trim();
+    parse_windows_proxy_server(value)
+}
+
+/// Read a proxy from the standard environment variables (HTTPS_PROXY /
+/// HTTP_PROXY / ALL_PROXY, plus lowercase variants). Returns the resolved
+/// triple and the variable name it came from.
+fn env_proxy() -> Option<(String, String, String, String)> {
+    for name in [
+        "HTTPS_PROXY", "https_proxy",
+        "HTTP_PROXY", "http_proxy",
+        "ALL_PROXY", "all_proxy",
+    ] {
+        let Ok(value) = std::env::var(name) else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if let Some((scheme, host, port)) = split_proxy_url(value) {
+            return Some((scheme, host, port, name.to_string()));
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn detect_macos_proxy() -> Option<(String, String, String, &'static str)> {
+    let out = silent_child(std::process::Command::new("scutil"))
+        .args(["--proxy"])
+        .output()
+        .ok()?;
+    parse_scutil_proxy(&String::from_utf8_lossy(&out.stdout))
+        .map(|(s, h, p)| (s, h, p, "macos"))
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_proxy() -> Option<(String, String, String, &'static str)> {
+    let out = silent_child(std::process::Command::new("reg"))
+        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"])
+        .output()
+        .ok()?;
+    parse_windows_reg_query(&String::from_utf8_lossy(&out.stdout))
+        .map(|(s, h, p)| (s, h, p, "windows"))
+}
+
+/// Candidate loopback ports for common local proxy tools (Clash / V2Ray /
+/// Shadowsocks / Squid / Privoxy). Ordered by likelihood so the ubiquitous
+/// Clash mixed port wins immediately. The list is deliberately short — this
+/// fallback only runs when the OS system proxy AND env vars are both unset.
+const LOCAL_PROXY_PORTS: &[u16] = &[7897, 7890, 7891, 7893, 1080, 10808, 10809, 8118, 8888, 3128];
+
+/// Fallback detection for when the system proxy is off but a local proxy tool
+/// is still running (Clash without "设为系统代理"). First checks which loopback
+/// ports are listening (fast TCP connect), then verifies each open port really
+/// forwards a request — trying HTTP then SOCKS5 — so a random service on the
+/// port is never mistaken for a proxy. Returns (scheme, host, port).
+async fn probe_local_proxy() -> Option<(String, String, String)> {
+    let open: Vec<u16> = {
+        let checks = LOCAL_PROXY_PORTS.iter().map(|&port| async move {
+            let addr = format!("127.0.0.1:{port}");
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
+                Ok(Ok(_)) => Some(port),
+                _ => None,
+            }
+        });
+        futures_util::future::join_all(checks)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+    };
+    for port in open {
+        let host = "127.0.0.1".to_string();
+        let port_str = port.to_string();
+        for scheme in ["http://", "socks5://"] {
+            let url = format!("{scheme}{host}:{port}");
+            let Ok(client) = build_http_client(std::time::Duration::from_secs(2), Some(&url)) else {
+                continue;
+            };
+            // A proxy that accepts and forwards the request replies with SOME
+            // status (even 4xx/5xx); a non-proxy service can't complete the
+            // proxy handshake, so `send()` errors. `is_ok()` is the signal.
+            if client
+                .get(PROXY_PROBE_URL)
+                .header("User-Agent", BROWSER_UA)
+                .send()
+                .await
+                .is_ok()
+            {
+                return Some((scheme.to_string(), host, port_str));
+            }
+        }
+    }
+    None
+}
+
+/// Detect the OS-level system proxy, then the standard proxy environment
+/// variables, then — as a last resort — probe common local proxy ports (so a
+/// Clash / V2Ray instance works even with "设为系统代理" off). Returns the
+/// result split into the settings form's scheme/host/port fields; `Ok(None)`
+/// means nothing was found. Desktop-only: browser JS cannot read the OS proxy.
+#[tauri::command]
+async fn detect_system_proxy() -> Result<Option<DetectedProxy>, String> {
+    #[cfg(target_os = "macos")]
+    let os_proxy = detect_macos_proxy();
+    #[cfg(target_os = "windows")]
+    let os_proxy = detect_windows_proxy();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let os_proxy: Option<(String, String, String, &'static str)> = None;
+
+    if let Some((scheme, host, port, source)) = os_proxy {
+        return Ok(Some(DetectedProxy {
+            scheme,
+            host,
+            port,
+            source: source.to_string(),
+            detail: String::new(),
+        }));
+    }
+    if let Some((scheme, host, port, name)) = env_proxy() {
+        return Ok(Some(DetectedProxy {
+            scheme,
+            host,
+            port,
+            source: "env".to_string(),
+            detail: name,
+        }));
+    }
+    if let Some((scheme, host, port)) = probe_local_proxy().await {
+        let detail = format!("{host}:{port}");
+        return Ok(Some(DetectedProxy {
+            scheme,
+            host,
+            port,
+            source: "local".to_string(),
+            detail,
+        }));
+    }
+    Ok(None)
 }
 
 #[tauri::command]
@@ -8267,6 +8704,7 @@ pub fn run() {
             list_app_skills,
             test_llm_connection,
             test_proxy,
+            detect_system_proxy,
             // Web tools
             web_search,
             web_fetch,
@@ -8298,6 +8736,9 @@ pub fn run() {
             secret_set,
             secret_delete,
             secret_list,
+            // App config file (~/.pure/config.json)
+            load_config,
+            save_config,
             // Open path (clickable transcript paths)
             open_path,
             // LLM transport

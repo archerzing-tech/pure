@@ -32,13 +32,13 @@ import {
 import { composeProxyUrl, effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList, parseProxyUrl, proxyUrlWithAuth } from '../shared/proxy';
 import { probeLlmEndpoint } from '../shared/llmProbe';
 import {
-  STORAGE_KEY,
   defaults,
   hasConfiguredKey,
   withDefaultModel,
   invalidateConfigCache,
   isDefaultMcpServer,
   loadConfig,
+  persistConfig,
   SCRAPLING_MCP_PRESET,
   revokeCustomSecretFromRust,
   revokeSecretFromRust,
@@ -318,7 +318,7 @@ export class SettingsPanel {
         const summary = { name: skill, description: split.description ?? '', hasDescription: !!split.description };
         skills.push(makeHubSkill(repo, summary, split.body || raw));
         cfg.hubSkills = skills;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+        persistConfig(cfg);
         invalidateConfigCache();
         renderInstalled();
         // Mark the card installed IN PLACE (badge + disabled) instead of
@@ -355,7 +355,7 @@ export class SettingsPanel {
       if (skills[idx]) {
         skills[idx] = { ...skills[idx], enabled: input.checked };
         cfg.hubSkills = skills;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+        persistConfig(cfg);
         invalidateConfigCache();
       }
     });
@@ -368,7 +368,7 @@ export class SettingsPanel {
       const skills = [...(cfg.hubSkills ?? [])];
       skills.splice(idx, 1);
       cfg.hubSkills = skills;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+      persistConfig(cfg);
       invalidateConfigCache();
       renderInstalled();
       setHubStatus(t('hub.removed'));
@@ -603,6 +603,7 @@ export class SettingsPanel {
     // ── Proxy: test the configured URL before relying on it — a malformed
     // address must not silently break every subsequent LLM / tool request. ──
     document.getElementById('cfg-proxy-test-btn')?.addEventListener('click', () => void this.testProxyConnection());
+    document.getElementById('cfg-proxy-detect-btn')?.addEventListener('click', () => void this.detectSystemProxy());
 
     // The address is split into scheme + host + port fields; keep the hidden
     // cfg-proxy-url mirror in sync so save/test read one composed value.
@@ -1109,7 +1110,7 @@ export class SettingsPanel {
   private setDefaultModelFromMenu(provider: string, model: string): void {
     const prev = loadConfig() ?? defaults();
     const cfg = withDefaultModel(prev, provider, model);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    persistConfig(cfg);
     invalidateConfigCache();
     this.closeDefaultModelMenu();
     this.renderDefaultBar();
@@ -1167,6 +1168,54 @@ export class SettingsPanel {
       if (btn) {
         btn.disabled = false;
         btn.textContent = t('proxy.test');
+      }
+    }
+  }
+
+  /**
+   * Read the OS-level system proxy (macOS scutil / Windows registry) or the
+   * standard proxy environment variables and back-fill the scheme/host/port
+   * fields — a Clash / VPN / corporate proxy already active on the machine is
+   * one click away instead of hand-typed. Desktop-only: browser JS cannot
+   * read the OS proxy, so be honest instead of pretending a detection ran.
+   */
+  private async detectSystemProxy(): Promise<void> {
+    const btn = document.getElementById('cfg-proxy-detect-btn') as HTMLButtonElement | null;
+    if (!isTauriRuntime()) {
+      this.toast(t('proxy.detect.browserOnly'));
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = t('proxy.detecting');
+    }
+    try {
+      const core = await loadTauriCore();
+      const found = await core?.invoke<
+        { scheme: string; host: string; port: string; source: string; detail: string } | null
+      >('detect_system_proxy');
+      if (!found) {
+        this.toast(t('proxy.detect.none'));
+        return;
+      }
+      const schemeEl = document.getElementById('cfg-proxy-scheme') as HTMLSelectElement | null;
+      const hostEl = document.getElementById('cfg-proxy-host') as HTMLInputElement | null;
+      const portEl = document.getElementById('cfg-proxy-port') as HTMLInputElement | null;
+      if (schemeEl) schemeEl.value = found.scheme;
+      if (hostEl) hostEl.value = found.host;
+      if (portEl) portEl.value = found.port;
+      this.autoSave();
+      const source = found.detail
+        ? `${t(`proxy.detect.source.${found.source}`)} ${found.detail}`
+        : t(`proxy.detect.source.${found.source}`);
+      this.toast(`${t('proxy.detect.ok')}：${source}`);
+    } catch (err) {
+      console.warn('[pure] system proxy detection failed:', err);
+      this.toast(t('proxy.detect.fail') + '：' + ((err as Error)?.message || String(err)));
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = t('proxy.detect');
       }
     }
   }
@@ -1994,7 +2043,7 @@ export class SettingsPanel {
     // The provider only enters service once the user picks one of its models
     // from the default-model bar — the blank card just opens for editing.
     const cfg: PureConfig = { ...prev, customProviders: customs };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    persistConfig(cfg);
     invalidateConfigCache();
     this.editingProvider = id;
     this.renderProviderGrid();
@@ -2058,7 +2107,7 @@ export class SettingsPanel {
         entry.models = fetchedModels;
         entry.defaultModel = nextDefault;
         const cfg: PureConfig = { ...prev, customProviders: [...(prev.customProviders ?? [])] };
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+        persistConfig(cfg);
         invalidateConfigCache();
         this.renderProviderGrid();
       }
@@ -2156,7 +2205,7 @@ export class SettingsPanel {
       cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: models }, providerModelNames: { ...(prev.providerModelNames ?? {}), [provider]: names } };
       if (provider === prev.provider) cfg.model = nextDefault;
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    persistConfig(cfg);
     invalidateConfigCache();
     const hidden = document.getElementById('cfg-model') as HTMLInputElement | null;
     if (hidden) hidden.value = nextDefault;
@@ -2184,7 +2233,7 @@ export class SettingsPanel {
       cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: [keep] } };
       if (provider === prev.provider) cfg.model = keep;
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    persistConfig(cfg);
     invalidateConfigCache();
     const modelEl = document.getElementById('cfg-model') as HTMLInputElement | null;
     if (modelEl) modelEl.value = keep;
@@ -2233,7 +2282,7 @@ export class SettingsPanel {
       cfg = { ...prev, providerModels: { ...normalizeProviderModels(prev.providerModels), [provider]: remaining }, providerModelNames: { ...(prev.providerModelNames ?? {}), [provider]: names } };
       if (provider === prev.provider) cfg.model = defaultModel;
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    persistConfig(cfg);
     invalidateConfigCache();
     const modelEl = document.getElementById('cfg-model') as HTMLInputElement | null;
     if (modelEl) modelEl.value = defaultModel;
@@ -2265,7 +2314,7 @@ export class SettingsPanel {
       customs.push({ ...preset });
     }
     const cfg: PureConfig = { ...prev, customProviders: customs };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    persistConfig(cfg);
     invalidateConfigCache();
     this.editingProvider = preset.id;
     this.renderProviderGrid();
@@ -2291,7 +2340,7 @@ export class SettingsPanel {
       baseURL: wasSelected ? '' : prev.baseURL,
       apiKey: wasSelected ? '' : prev.apiKey,
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    persistConfig(cfg);
     invalidateConfigCache();
     // Deleting the provider whose panel is open also collapses the panel;
     // the default model falls back to the first registry default.
@@ -2503,7 +2552,7 @@ export class SettingsPanel {
         : t('proxy.password.placeholder');
     }
 
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    persistConfig(cfg);
     // Drop the cached config so the next loadConfig() re-reads the saved state.
     invalidateConfigCache();
 
