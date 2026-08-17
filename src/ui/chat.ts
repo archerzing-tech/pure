@@ -4,7 +4,7 @@
 
 import { loadConfig, hasConfiguredKey, customSecretKey, type PureConfig } from './config';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, promptBudgetForProvider, imageGenEnabled, imageGenModelFor } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionStats } from './store';
+import { saveSession, loadLastSession, loadSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionStats, type PlanCardSnapshot } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
@@ -1124,6 +1124,12 @@ export class ChatController {
   private activePlanNumber = 1;
   private activeTodoNumber = 1;
   private activePlanStarted = false;
+  // Persistable snapshot of the in-chat plan card for the CURRENT turn, so a
+  // session restore can rebuild the card in place with its progress. Reset at
+  // the top of every send() and set whenever a plan card is shown or its
+  // cursor advances; a completed plan keeps its final snapshot for that turn's
+  // persist even though activeComplexPlan is cleared on completion.
+  private activePlanCardSnapshot: PlanCardSnapshot | null = null;
   // Background pre-compaction cache: the ContextEngine's LLM summarization —
   // the dominant pre-send cost once a long session crosses maxMessages — runs
   // after each completed turn (idle) instead of blocking the next send. The
@@ -1302,6 +1308,7 @@ export class ChatController {
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;
+    this.activePlanCardSnapshot = null;
     // The in-transcript plan/assessment cards must not stay stuck on
     // "等待你回复" next to a cancellation notice.
     this.pauseAssessmentFlow?.cancel('已取消本次执行计划。');
@@ -1369,29 +1376,40 @@ export class ChatController {
     this.messages = boundedMessages.map(m => ({ ...m }));
     const savedPlanState = snapshot.uiState.planState;
     if (savedPlanState) {
-      this.activeComplexPlan = savedPlanState.plan;
-      this.activePlanNumber = savedPlanState.planNumber;
-      this.activeTodoNumber = savedPlanState.todoNumber;
-      this.activePlanStarted = savedPlanState.started;
+      if (savedPlanState.complete) {
+        // A completed plan: the cross-turn cursor is gone (activeComplexPlan
+        // was nulled on completion), so the next turn plans fresh. Only the
+        // floating outline comes back, in its all-done state.
+        this.activeComplexPlan = null;
+        this.activePlanNumber = 1;
+        this.activeTodoNumber = 1;
+        this.activePlanStarted = false;
+        this.activePlanCardSnapshot = null;
+        planOverview().show(savedPlanState.plan, 'complete', savedPlanState.planNumber, savedPlanState.todoNumber, '');
+      } else {
+        this.activeComplexPlan = savedPlanState.plan;
+        this.activePlanNumber = savedPlanState.planNumber;
+        this.activeTodoNumber = savedPlanState.todoNumber;
+        this.activePlanStarted = savedPlanState.started;
+        // Re-show the floating outline for a restored plan: a paused plan
+        // (never started) comes back in the "waiting for reply" state, an
+        // in-progress one in the executing state with its persisted cursor.
+        planOverview().show(
+          this.activeComplexPlan,
+          this.activePlanStarted ? 'active' : 'waiting',
+          this.activePlanNumber,
+          this.activeTodoNumber,
+          '',
+        );
+      }
     } else {
       this.activeComplexPlan = null;
       this.activePlanNumber = 1;
       this.activeTodoNumber = 1;
       this.activePlanStarted = false;
+      this.activePlanCardSnapshot = null;
     }
     this.hasHistory = this.messages.length > 0;
-    // Re-show the floating outline for a restored plan: a paused plan (never
-    // started) comes back in the "waiting for reply" state, an in-progress one
-    // in the executing state with its persisted cursor.
-    if (this.activeComplexPlan) {
-      planOverview().show(
-        this.activeComplexPlan,
-        this.activePlanStarted ? 'active' : 'waiting',
-        this.activePlanNumber,
-        this.activeTodoNumber,
-        '',
-      );
-    }
   }
 
   /** Restore last session for view-only display. Messages are NOT loaded into CodingAgent. */
@@ -1501,6 +1519,9 @@ export class ChatController {
 
     this.cancel();
     const gen = ++this.generation;
+    // The plan-card snapshot belongs to this turn only; a follow-up simple
+    // task must not re-attach a stale card from a previous complex plan.
+    this.activePlanCardSnapshot = null;
     // Create the turn controller before any preflight await. Previously the
     // controller and streaming state were installed only after workspace
     // resolution, so Stop/Escape could not interrupt a slow startup probe.
@@ -2103,25 +2124,27 @@ export class ChatController {
           overview.clear();
           return;
         }
-        if (!this.activeComplexPlan) {
-          // The cursor advanced past the last plan (marker path): keep the
-          // last state visible instead of clearing it mid-stream — the final
-          // completion call flips it to the complete state.
-          return;
-        }
-        const plan = this.activeComplexPlan;
+        // Mirror the card itself, not the cross-turn cursor: the cursor is
+        // nulled the moment the card advances past its last plan (completion),
+        // which used to leave the floating outline stuck on an earlier step
+        // even though the card was already all-done. Deriving from the card
+        // keeps both in lockstep and flips the outline to "complete" the
+        // instant the card finishes, without waiting for the turn-final path.
+        const plan = planCard.plan;
+        const done = planCard.current > planCard.total;
         const todoNumber = planCard.currentSubstep;
-        const todoRows = planCard.substepEls[planCard.current - 1] ?? [];
+        const todoRows = planCard.substepEls[Math.min(planCard.current, planCard.total) - 1] ?? [];
         const todoLabel = planCard.currentTodosRequired && todoNumber >= 1 && todoNumber <= todoRows.length
           ? todoRows[todoNumber - 1]?.querySelector<HTMLElement>('.plan-progress-substep-action')?.textContent ?? ''
           : '';
-        overview.update(plan, status, planCard.current, todoNumber, todoLabel);
+        overview.update(plan, done ? 'complete' : status, Math.min(planCard.current, planCard.total), todoNumber, todoLabel);
       };
       const discardPlanCard = (): void => {
         if (!planCard) return;
         clearPlanCardRefining(planCard);
         planCard.el.remove();
         planCard = null;
+        this.activePlanCardSnapshot = null;
         planOverview().clear();
       };
       // Analysis is useful for a real build even when no approval is needed.
@@ -2180,6 +2203,7 @@ export class ChatController {
             }
             // Right-edge outline: mirror the (possibly refining) plan card.
             this.activeComplexPlan = plan;
+            this.activePlanCardSnapshot = { plan, currentPlan: 1, currentTodo: 1, complete: false };
             syncPlanOverview();
             scrollChatToBottomIfPinned(chatEl);
           };
@@ -2366,6 +2390,7 @@ export class ChatController {
             const restored = createPlanCard(this.activeComplexPlan, analysis.mode, false);
             restorePlanCardProgress(restored, this.activePlanNumber, this.activeTodoNumber);
             planCard = restored;
+            this.activePlanCardSnapshot = { plan: this.activeComplexPlan, currentPlan: this.activePlanNumber, currentTodo: this.activeTodoNumber, complete: false };
             chatEl.appendChild(planCard.el);
             this.addStatusBubble(`收到，我们继续处理第 ${this.activePlanNumber} 阶段的第 ${this.activeTodoNumber} 个 Todo，不重新规划。`, false, false);
             // 用户回复即明确“开工”：悬浮大纲卡从「等待回复」切回「正在执行」。
@@ -2413,6 +2438,7 @@ export class ChatController {
           this.activePlanNumber = card.total;
           this.activeTodoNumber = (card.substepEls[card.total - 1]?.length ?? 0) + 1;
           this.activePlanStarted = true;
+          this.activePlanCardSnapshot = { plan: card.plan, currentPlan: this.activePlanNumber, currentTodo: this.activeTodoNumber, complete: true };
           this.activeComplexPlan = null;
           return;
         } else {
@@ -2422,6 +2448,7 @@ export class ChatController {
             : 1;
         }
         this.activePlanStarted = true;
+        this.activePlanCardSnapshot = { plan: card.plan, currentPlan: this.activePlanNumber, currentTodo: this.activeTodoNumber, complete: false };
       };
       const trackPlanPhase = (seg: { el: HTMLDivElement; text: string }) => {
         if (!planCard) return;
@@ -3518,6 +3545,7 @@ export class ChatController {
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;
+    this.activePlanCardSnapshot = null;
     this.pausePlanCard = null;
     this.pauseAssessmentFlow = null;
     // Drop the right-edge execution outline — the new conversation has none.
@@ -3566,6 +3594,17 @@ export class ChatController {
     let assistantIndex = 0;
     let renderedAssistantIndex = 0;
     let analysisAttached = false;
+    let planCardAttached = false;
+    // A completed plan nulls activeComplexPlan (see syncActivePlanCursor), so
+    // the cross-turn cursor alone would leave the finished plan with no
+    // persisted state and the floating outline would not survive a reload.
+    // The final card snapshot (complete: true) stands in for the cursor so the
+    // all-done outline can be restored; an in-progress plan keeps its cursor.
+    const turnPlanState = this.activeComplexPlan
+      ? { plan: this.activeComplexPlan, planNumber: this.activePlanNumber, todoNumber: this.activeTodoNumber, started: this.activePlanStarted }
+      : this.activePlanCardSnapshot?.complete
+        ? { plan: this.activePlanCardSnapshot.plan, planNumber: this.activePlanCardSnapshot.currentPlan, todoNumber: this.activePlanCardSnapshot.currentTodo, started: true, complete: true }
+        : null;
     const latestUserIndex = messages.reduce((latest, message, index) => message.role === 'user' ? index : latest, -1);
     const lastAssistantIndex = messages.reduce((latest, message, index) => message.role === 'assistant' ? index : latest, -1);
     const canonicalMessages = messages.map((message, index) => {
@@ -3596,6 +3635,12 @@ export class ChatController {
         ? (analysisAttached = true, taskAnalysisText)
         : undefined;
       const isPauseMessage = planPause && m.role === 'assistant' && index === messages.length - 1;
+      // The plan card lives between the preflight analysis and the engine's
+      // reasoning, so persist it on the same (first) assistant entry of this
+      // turn that carries the analysis.
+      const planCard = isCurrentTurnAssistant && !planCardAttached && this.activePlanCardSnapshot
+        ? (planCardAttached = true, this.activePlanCardSnapshot)
+        : undefined;
       const storedToolCall = m.toolCallId ? toolCallsById.get(m.toolCallId) : undefined;
       const recordedToolExec = m.role === 'tool' && m.toolCallId
         ? (() => {
@@ -3617,8 +3662,8 @@ export class ChatController {
             } satisfies ToolExecMeta;
           })()
         : undefined;
-      const planState = index === messages.length - 1 && this.activeComplexPlan
-        ? { plan: this.activeComplexPlan, planNumber: this.activePlanNumber, todoNumber: this.activeTodoNumber, started: this.activePlanStarted }
+      const planState = index === messages.length - 1 && turnPlanState
+        ? turnPlanState
         : m === messages[messages.length - 1] ? null : undefined;
       return [{
         message: m,
@@ -3631,6 +3676,7 @@ export class ChatController {
         isPlanPause: isPauseMessage || undefined,
         assessment: isPauseMessage ? pauseAssessment : undefined,
         planState,
+        planCard,
       }];
     });
     // Merge with the previously saved transcript before writing: in-memory

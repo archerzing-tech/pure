@@ -6,6 +6,7 @@ import {
   type ToolExecMeta,
   type StoredToolCallInfo,
   type TranscriptEntry,
+  type PlanCardSnapshot,
 } from './store';
 
 export type TranscriptReplayBlock =
@@ -13,6 +14,7 @@ export type TranscriptReplayBlock =
   | { type: 'analysis'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'assessment'; assessment: IntentAssessment }
+  | { type: 'plan'; snapshot: PlanCardSnapshot }
   | { type: 'assistant'; content: string; isPlanPause: boolean }
   | { type: 'tool'; exec: ToolExecMeta; stopped: boolean }
   | { type: 'artifact'; items: Array<{ path: string }>; userRequest?: string };
@@ -87,6 +89,9 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
 
     flushPending();
     if (entry.analysis) blocks.push({ type: 'analysis', text: entry.analysis });
+    // The plan card sits between the preflight analysis and the engine's
+    // reasoning trace in the live transcript, so replay it at the same spot.
+    if (entry.planCard) blocks.push({ type: 'plan', snapshot: entry.planCard });
     for (const text of getTranscriptThinkingSegments(entry)) {
       blocks.push({ type: 'thinking', text });
     }

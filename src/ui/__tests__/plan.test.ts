@@ -4,9 +4,10 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { createPlanCard, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers, QUALITY_GATE_STEPS, updatePlanCardPhase, updatePlanCardSubstep, completePlanCardSubstep, canCompletePlanCardSubsteps, completePlanCardSubsteps } from '../plan';
+import { createPlanCard, createRestoredPlanCard, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers, QUALITY_GATE_STEPS, updatePlanCardPhase, updatePlanCardSubstep, completePlanCardSubstep, canCompletePlanCardSubsteps, completePlanCardSubsteps } from '../plan';
 import { t } from '../../shared/i18n';
 import type { Plan } from '../../coding-agent/types';
+import type { PlanCardSnapshot } from '../store';
 
 describe('formatPlanForPrompt', () => {
   it('renders ordered steps into a prompt fragment', () => {
@@ -357,6 +358,89 @@ describe('completed plan step presentation', () => {
     const src = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
     expect(src).toContain('setPlanPhase(h, h.total + 1)');
     expect(src).toContain("if (checks[i]) checks[i]!.textContent = '✓'");
+  });
+});
+
+describe('createRestoredPlanCard (session restore)', () => {
+  function installFakeDocument(): () => void {
+    const previous = (globalThis as any).document;
+    (globalThis as any).document = {
+      createElement: (tag: string) => {
+        const children: any[] = [];
+        const classes = new Set<string>();
+        const element: any = {
+          tagName: tag.toUpperCase(),
+          children,
+          childNodes: children,
+          className: '',
+          dataset: {},
+          isConnected: true,
+          classList: {
+            add: (...names: string[]) => names.forEach((name) => classes.add(name)),
+            remove: (...names: string[]) => names.forEach((name) => classes.delete(name)),
+            contains: (name: string) => classes.has(name),
+          },
+          append: (...items: any[]) => items.forEach((item) => children.push(item)),
+          appendChild: (item: any) => { children.push(item); return item; },
+          querySelector: () => null,
+          setAttribute: () => {},
+          textContent: '',
+        };
+        return element;
+      },
+    };
+    return () => { (globalThis as any).document = previous; };
+  }
+
+  const plan: Plan = {
+    reasoning: 'r',
+    steps: [
+      { id: '1', action: '计划一', description: 'd', expectedOutcome: 'o', todosRequired: true, substeps: [
+        { id: '1', action: '小步骤一', description: 'd', expectedOutcome: 'o' },
+        { id: '2', action: '小步骤二', description: 'd', expectedOutcome: 'o' },
+      ] },
+      { id: '2', action: '计划二', description: 'd', expectedOutcome: 'o' },
+    ],
+  };
+
+  it('rebuilds the card with its saved top-level progress', () => {
+    const restore = installFakeDocument();
+    try {
+      const card = createRestoredPlanCard({ plan, currentPlan: 2, currentTodo: 1, complete: false } satisfies PlanCardSnapshot);
+      expect(card.plan).toBe(plan);
+      expect(card.total).toBe(2);
+      expect(card.current).toBe(2);
+      expect(card.stepEls[0].classList.contains('done')).toBe(true);
+      expect(card.stepEls[1].classList.contains('active')).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('restores an advanced substep cursor inside the active plan', () => {
+    const restore = installFakeDocument();
+    try {
+      const card = createRestoredPlanCard({ plan, currentPlan: 1, currentTodo: 2, complete: false } satisfies PlanCardSnapshot);
+      expect(card.current).toBe(1);
+      expect(card.currentSubstep).toBe(2);
+      expect(card.substepEls[0][0].classList.contains('done')).toBe(true);
+      expect(card.substepEls[0][1].classList.contains('active')).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('re-renders a completed snapshot with every step checked off', () => {
+    const restore = installFakeDocument();
+    try {
+      const card = createRestoredPlanCard({ plan, currentPlan: 3, currentTodo: 3, complete: true } satisfies PlanCardSnapshot);
+      expect(card.current).toBe(3); // total + 1, the finalize sentinel
+      expect(card.stepEls.every((el) => el.classList.contains('done'))).toBe(true);
+      expect(card.checkEls.every((el) => el.textContent === '✓')).toBe(true);
+      expect(card.substepEls[0].every((el) => el.classList.contains('done'))).toBe(true);
+    } finally {
+      restore();
+    }
   });
 });
 

@@ -4,6 +4,7 @@
 // can approve (plan injected into the system prompt), skip planning, or cancel.
 
 import type { AnalysisResult, Plan, TaskMode } from '../coding-agent/types';
+import type { PlanCardSnapshot } from './store';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { showInlineCard } from './inlineCard';
@@ -88,6 +89,10 @@ export function formatPlanContinuation(plan: Plan, currentPlan: number, currentT
 
 export interface PlanCardHandle {
   el: HTMLElement;
+  /** The plan this card renders — kept on the handle so the floating outline
+   * and the persisted snapshot can keep mirroring the card even after the
+   * cross-turn cursor is cleared (activeComplexPlan → null on completion). */
+  plan: Plan;
   stepEls: HTMLElement[]; // top-level plan rows
   numEls: HTMLElement[];  // top-level number labels
   checkEls: HTMLElement[]; // independent completion marks for top-level plans
@@ -279,6 +284,7 @@ export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false, fa
 
   const handle: PlanCardHandle = {
     el,
+    plan,
     stepEls,
     numEls,
     checkEls,
@@ -327,6 +333,7 @@ export function updatePlanCard(h: PlanCardHandle, plan: Plan, mode?: TaskMode, r
   h.el.classList.remove('plan-card-updating');
   h.el.classList.add('plan-card-updating');
   h.el.replaceChildren(...Array.from(fresh.el.childNodes));
+  h.plan = fresh.plan;
   h.stepEls = fresh.stepEls;
   h.numEls = fresh.numEls;
   h.checkEls = fresh.checkEls;
@@ -728,6 +735,18 @@ export function completePlanCardSubstep(h: PlanCardHandle, n: number): void {
   } else {
     h.currentSubstep = rows.length + 1;
   }
+}
+
+/** Rebuild a plan card from a persisted snapshot so session restore renders
+ * the card in place with its saved progress (and final all-done state). */
+export function createRestoredPlanCard(snapshot: PlanCardSnapshot): PlanCardHandle {
+  const card = createPlanCard(snapshot.plan, undefined, false);
+  restorePlanCardProgress(card, snapshot.currentPlan, snapshot.currentTodo);
+  if (snapshot.complete) {
+    finalizePlanCard(card);
+    card.setActivity('计划中的所有步骤已完成。');
+  }
+  return card;
 }
 
 /** Return true only after every visible substep has been explicitly entered. */

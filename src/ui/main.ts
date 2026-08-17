@@ -27,6 +27,7 @@ import { renderMarkdown, stripToolCallXml } from './markdownLoader';
 import { createToolRow, finalizeToolRow, markToolRowStopped } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
 import { createAssessmentFlowCard } from './assessmentFlow';
+import { createRestoredPlanCard } from './plan';
 import { renderArtifactCards } from './artifactCards';
 import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
@@ -723,6 +724,8 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
         flow.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
         chatEl.appendChild(flow.el);
         chat.registerPausedAssessment(flow);
+      } else if (block.type === 'plan') {
+        chatEl.appendChild(createRestoredPlanCard(block.snapshot).el);
       } else if (block.type === 'assistant') {
         const wrapper = document.createElement('div');
         wrapper.className = 'bubble-row assistant';

@@ -136,6 +136,38 @@ describe('session snapshot separation', () => {
     }]);
     expect(mergeSessionSnapshotMetadata(previous, next).uiState.planState).toBeNull();
   });
+
+  it('persists a completed plan state with the complete flag so the outline can be restored', () => {
+    const plan = { steps: [{ id: '1', action: '拆模块', description: '', expectedOutcome: '模块边界清晰' }], reasoning: '' };
+    const modelMessages: Message[] = [{ role: 'assistant', content: '完成' }];
+    const snapshot = createSessionSnapshot(modelMessages, [{
+      message: modelMessages[0],
+      modelMessageIndex: 0,
+      content: '完成',
+      planState: { plan, planNumber: 1, todoNumber: 2, started: true, complete: true },
+    }]);
+    expect(snapshot.uiState.planState).toEqual({ plan, planNumber: 1, todoNumber: 2, started: true, complete: true });
+  });
+
+  it('persists the plan card snapshot and carries it across re-persists', () => {
+    const plan = { steps: [{ id: '1', action: '拆模块', description: '', expectedOutcome: '模块边界清晰' }], reasoning: '' };
+    const card = { plan, currentPlan: 2, currentTodo: 1, complete: true };
+    const modelMessages: Message[] = [{ role: 'assistant', content: '完成' }];
+    const snapshot = createSessionSnapshot(modelMessages, [{
+      message: modelMessages[0],
+      modelMessageIndex: 0,
+      content: '完成',
+      planCard: card,
+    }]);
+    expect(snapshot.transcript[0]?.planCard).toEqual(card);
+    // 后续回合重建 transcript 时不再携带 planCard，靠合并保留上一回合的卡片。
+    const next = createSessionSnapshot(modelMessages, [{
+      message: modelMessages[0],
+      modelMessageIndex: 0,
+      content: '完成',
+    }]);
+    expect(mergeSessionSnapshotMetadata(snapshot, next).transcript[0]?.planCard).toEqual(card);
+  });
 });
 
 describe('bounded session messages', () => {
