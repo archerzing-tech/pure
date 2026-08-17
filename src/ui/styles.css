@@ -8626,10 +8626,29 @@ button svg,
   max-width: 100%;
 }
 
-/* Proxy URL row: scheme + host + port fields with the test-connection button
-   beside them. The host stretches, the scheme and port stay fixed-width. */
-.setting-row.proxy-url-row .setting-input-group {
+/* Proxy URL row: title + hint on the first line, the controls (scheme + host
+   + port + detect/test buttons) on the second. The row keeps the standard
+   .setting-row 68px rhythm; the two lines just stack vertically instead of
+   sitting label-left / controls-right. */
+.setting-row.proxy-url-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+.setting-row.proxy-url-row .setting-info {
+  flex: 0 0 auto;
+}
+.setting-row.proxy-url-row .proxy-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.setting-row.proxy-url-row .proxy-address-group {
   flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
 }
 .setting-row.proxy-url-row .proxy-address-group .proxy-scheme {
   flex: 0 0 auto;
@@ -8638,16 +8657,43 @@ button svg,
 }
 .setting-row.proxy-url-row .proxy-address-group .proxy-host {
   flex: 1 1 auto;
-  min-width: 140px;
+  min-width: 100px;
 }
 .setting-row.proxy-url-row .proxy-address-group .proxy-port {
   flex: 0 0 auto;
-  width: 88px;
-  min-width: 88px;
+  width: 76px;
+  min-width: 76px;
 }
 .setting-row.proxy-url-row .proxy-colon {
   color: var(--text-tertiary);
   font-weight: 600;
+}
+.setting-row.proxy-url-row .proxy-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.setting-row.proxy-url-row .proxy-btn {
+  height: 38px;
+  padding: 0 12px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s var(--ease-out), border-color 0.15s var(--ease-out), background 0.15s var(--ease-out);
+}
+.setting-row.proxy-url-row .proxy-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 18%, transparent);
+}
+.setting-row.proxy-url-row .proxy-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* ── Custom providers (user-defined / Ollama preset) ── */

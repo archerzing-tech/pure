@@ -10,7 +10,14 @@ use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 
 fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder().timeout(timeout);
+    let mut builder = reqwest::Client::builder()
+        .timeout(timeout)
+        // Force HTTP/1.1: corporate TLS-intercepting gateways (netentsec et al.)
+        // frequently break ALPN-negotiated HTTP/2, while plain HTTP/1.1 CONNECT
+        // + streaming works everywhere. curl speaks HTTP/1.1 by default, which
+        // is exactly why it succeeds through such proxies where the h2 client
+        // fails.
+        .http1_only();
     if let Some(url) = proxy_url.map(str::trim).filter(|url| !url.is_empty()) {
         // The WebView passes the proxy URL with the username embedded but the
         // password resolved here from ~/.pure/secrets.json (never via
