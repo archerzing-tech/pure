@@ -346,6 +346,64 @@ export function invalidateConfigCache(): void {
   configCache = undefined;
 }
 
+/** Fire-and-forget write of the config to ~/.pure/config.json (desktop). The
+ * WebView mirrors the file into localStorage at startup and writes it back on
+ * every save, so a user who hand-edits config.json sees the change after the
+ * next launch. Secrets are never in this object — autoSave scrubs them first. */
+async function saveConfigToRust(cfg: PureConfig): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const core = await loadTauriCore();
+  if (!core) return;
+  try {
+    await core.invoke('save_config', { config: cfg });
+  } catch (e) {
+    console.warn('[pure] failed to save config file:', e);
+  }
+}
+
+/**
+ * Single choke point for persisting a changed config: writes localStorage
+ * (runtime + browser mirror), drops the cache, and mirrors to the desktop
+ * config file. Every settings/main write should go through here instead of
+ * a raw localStorage.setItem so the file stays in sync.
+ */
+export function persistConfig(cfg: PureConfig): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+  } catch { /* ignore */ }
+  invalidateConfigCache();
+  if (isTauriRuntime()) void saveConfigToRust(cfg);
+}
+
+/**
+ * Desktop startup: make ~/.pure/config.json the source of truth for this
+ * launch. If the file exists, mirror it into localStorage (where the sync
+ * loadConfig() reads) so a hand edit applies now; if it doesn't, seed it from
+ * the existing localStorage config (one-time migration). Browser mode is a
+ * no-op — localStorage is the only store there.
+ */
+export async function initConfigFile(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const core = await loadTauriCore();
+  if (!core) return;
+  try {
+    const fileCfg = await core.invoke<unknown>('load_config');
+    if (fileCfg != null) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(fileCfg));
+      invalidateConfigCache();
+    } else {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        try {
+          await core.invoke('save_config', { config: JSON.parse(raw) });
+        } catch { /* ignore */ }
+      }
+    }
+  } catch (err) {
+    console.warn('[pure] config file init failed:', err);
+  }
+}
+
 export function loadConfig(): PureConfig | null {
   if (configCache !== undefined) {
     return configCache === null ? null : { ...configCache };
@@ -548,9 +606,7 @@ export function loadConfig(): PureConfig | null {
         needsPersist = true;
       }
       if (needsPersist) {
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
-        } catch { /* ignore */ }
+        persistConfig(cfg);
       }
       configCache = cfg;
       return cfg;

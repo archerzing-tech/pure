@@ -7,7 +7,7 @@
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
 import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, shouldCancelForEscape } from './chat';
-import { loadConfig, hasConfiguredKey, defaults, STORAGE_KEY, invalidateConfigCache, modelListForProvider, providerHasKey, type PureConfig } from './config';
+import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
 import { projectTranscript } from './transcriptProjection';
@@ -306,7 +306,7 @@ function wireModeSelect(sel: HTMLSelectElement): void {
   sel.addEventListener('change', () => {
     const cfg = loadConfig() ?? defaults();
     cfg.taskMode = sel.value as PureConfig['taskMode'];
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    persistConfig(cfg);
     invalidateConfigCache();
     showToast(t('composer.modeSaved'));
   });
@@ -320,7 +320,7 @@ function wireModelSelect(sel: HTMLSelectElement): void {
     const providerId = opt?.dataset.provider || raw.split('::')[0] || raw;
     cfg.provider = providerId as ProviderId;
     cfg.model = opt?.dataset.model || defaultModelFor(providerId);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    persistConfig(cfg);
     invalidateConfigCache();
     // updateSidebarModel() cascades into the status footer + context panel.
     updateSidebarModel();
@@ -452,6 +452,7 @@ function deferToIdle(fn: () => void): void {
 //     delay the first paint or the splash transition.
 (async () => {
   tagPlatform();
+  await initConfigFile();
   applySavedAppearance();
   chat.setWorkspace('');
   wireComposerSelects();

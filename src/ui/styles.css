@@ -932,7 +932,7 @@ body {
      Kept in sync with the default window width (tauri.conf.json 1400px minus
      the sidebar) so the wider GUI is actually filled, not padded with margins. */
   width: 100%;
-  max-width: 1100px;
+  max-width: 1120px;
   margin: 0 auto;
   /* Programmatic scrollTop assignments happen on every streamed token; smooth
      scrolling would animate each one and cause janky lag during streaming. */
