@@ -30,6 +30,7 @@ export interface TranscriptEntry {
   isPlanPause?: boolean;
   assessment?: IntentAssessment;
   toolExec?: ToolExecMeta;
+  planCard?: PlanCardSnapshot;
 }
 
 export interface SessionUiState {
@@ -41,6 +42,22 @@ export interface PlanState {
   planNumber: number;
   todoNumber: number;
   started: boolean;
+  /** True when the plan had finished: the cross-turn cursor is gone but the
+   * all-done floating outline must still come back on session restore. */
+  complete?: boolean;
+}
+
+/**
+ * A snapshot of the in-chat plan-progress card, persisted so session restore
+ * can rebuild the card in place (the card itself is a live DOM element and
+ * never entered the stored transcript before). `complete` records whether the
+ * plan had finished so a restored card re-renders its final all-done state.
+ */
+export interface PlanCardSnapshot {
+  plan: Plan;
+  currentPlan: number;
+  currentTodo: number;
+  complete: boolean;
 }
 
 export interface TranscriptDraft {
@@ -56,6 +73,7 @@ export interface TranscriptDraft {
   assessment?: IntentAssessment;
   toolExec?: ToolExecMeta;
   planState?: PlanState | null;
+  planCard?: PlanCardSnapshot;
 }
 
 export interface SessionSnapshotV2 {
@@ -137,12 +155,7 @@ export interface StoredMessage {
   thinkingSegments?: string[];
   toolExec?: ToolExecMeta;
   /** Cross-turn complex-task cursor, stored on the latest message. */
-  planState?: {
-    plan: Plan;
-    planNumber: number;
-    todoNumber: number;
-    started: boolean;
-  };
+  planState?: PlanState;
 }
 
 export function getStoredThinkingSegments(message: Partial<StoredMessage>): string[] {
@@ -262,6 +275,7 @@ export function createSessionSnapshot(
       isPlanPause: draft.isPlanPause,
       assessment: draft.assessment,
       toolExec: draft.toolExec,
+      planCard: draft.planCard,
     };
   });
   const latestPlanState = [...drafts].reverse().find(draft => draft.planState !== undefined)?.planState;
@@ -305,6 +319,7 @@ export function mergeSessionSnapshotMetadata(
       assessment: entry.assessment ?? prior.assessment,
       toolExec: entry.toolExec ?? prior.toolExec,
       toolCalls: entry.toolCalls ?? prior.toolCalls,
+      planCard: entry.planCard ?? prior.planCard,
     };
   });
   return { ...next, transcript, uiState: next.uiState };

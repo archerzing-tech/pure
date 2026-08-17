@@ -131,6 +131,22 @@ describe('projectTranscript', () => {
     });
   });
 
+  it('replays the plan card between the preflight analysis and the reasoning trace', () => {
+    const plan = { steps: [{ id: '1', action: '拆模块', description: '', expectedOutcome: '模块边界清晰' }], reasoning: '' };
+    const blocks = projectTranscript([{
+      id: 'a1',
+      modelMessageIndex: 0,
+      role: 'assistant',
+      content: '开始执行。',
+      analysis: '这是一个复杂任务',
+      thinkingPhases: [{ text: '读取配置', assistantIndex: 0 }],
+      planCard: { plan, currentPlan: 1, currentTodo: 1, complete: false },
+    }]);
+
+    expect(types(blocks)).toEqual(['analysis', 'plan', 'thinking', 'assistant']);
+    expect(blocks[1]).toEqual({ type: 'plan', snapshot: { plan, currentPlan: 1, currentTodo: 1, complete: false } });
+  });
+
   it('replays plan assessment and artifact blocks around the assistant message', () => {
     const assessment = {
       intent: 'modify' as const,

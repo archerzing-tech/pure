@@ -899,22 +899,47 @@ describe('plan overview completion state', () => {
     expect(src).toContain('&& !turnAsksForInput && gen === this.generation && !this.pausePlanCard;');
   });
 
-  it('keeps the last outline state instead of clearing it mid-stream after the final plan', () => {
+  it('keeps the floating outline in lockstep with the card after the final plan', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 标记把游标推进到末尾后 activeComplexPlan 会置空；此时 syncPlanOverview
-    // 必须保留最后状态（由完成调用翻转为 complete），而不是把大纲清掉。
+    // 标记把游标推进到末尾后 activeComplexPlan 会置空；但大纲必须镜像卡片自身
+    // （planCard.plan + current > total），而不是读取会被置空的游标——否则大纲会
+    // 停在之前的步骤上，和已经全部打勾的卡片不同步。
     const guard = src.indexOf('const syncPlanOverview = (status: PlanOverviewStatus = \'active\'): void => {');
     expect(guard).toBeGreaterThan(-1);
-    const planCardGuard = src.indexOf('if (!planCard) {', guard);
-    const planNullGuard = src.indexOf('if (!this.activeComplexPlan) {', guard);
-    const clearAt = src.indexOf('overview.clear();', guard);
-    expect(planCardGuard).toBeGreaterThan(guard);
-    expect(planNullGuard).toBeGreaterThan(planCardGuard);
-    // clear() 只属于 planCard 消失的分支（位于 planNullGuard 之前）；
-    // 计划完成的置空分支必须直接 return，保留最后状态。
-    expect(clearAt).toBeGreaterThan(-1);
-    expect(clearAt).toBeLessThan(planNullGuard);
-    expect(src.indexOf('return;', planNullGuard)).toBeGreaterThan(planNullGuard);
+    const cardPlan = src.indexOf('const plan = planCard.plan;', guard);
+    const done = src.indexOf('const done = planCard.current > planCard.total;', guard);
+    const update = src.indexOf("overview.update(plan, done ? 'complete' : status, Math.min(planCard.current, planCard.total), todoNumber, todoLabel);", guard);
+    expect(cardPlan).toBeGreaterThan(guard);
+    expect(done).toBeGreaterThan(cardPlan);
+    expect(update).toBeGreaterThan(done);
+    // 只有 planCard 消失的分支才允许 clear()；不再有依赖 activeComplexPlan 的早退。
+    expect(src.indexOf('overview.clear();', guard)).toBeLessThan(cardPlan);
+  });
+
+  it('persists the completed plan state so the finished outline survives a reload', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 完成态：activeComplexPlan 已被置空，但快照带 complete: true，仍要落盘
+    // planState——否则还原时大纲不会以 complete 状态重现。
+    const turnPlanState = src.indexOf('const turnPlanState = this.activeComplexPlan');
+    expect(turnPlanState).toBeGreaterThan(-1);
+    const completeBranch = src.indexOf('this.activePlanCardSnapshot?.complete', turnPlanState);
+    const completeFlag = src.indexOf('complete: true', completeBranch);
+    expect(completeBranch).toBeGreaterThan(turnPlanState);
+    expect(completeFlag).toBeGreaterThan(completeBranch);
+    const planState = src.indexOf('const planState = index === messages.length - 1 && turnPlanState', completeFlag);
+    expect(planState).toBeGreaterThan(completeFlag);
+  });
+
+  it('restores the floating outline in the complete state for a finished plan', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const guard = src.indexOf('const savedPlanState = snapshot.uiState.planState;');
+    expect(guard).toBeGreaterThan(-1);
+    const completeBranch = src.indexOf('if (savedPlanState.complete) {', guard);
+    const cursorNull = src.indexOf('this.activeComplexPlan = null;', completeBranch);
+    const show = src.indexOf("planOverview().show(savedPlanState.plan, 'complete'", completeBranch);
+    expect(completeBranch).toBeGreaterThan(guard);
+    expect(cursorNull).toBeGreaterThan(completeBranch);
+    expect(show).toBeGreaterThan(cursorNull);
   });
 
   it('persists every reasoning phase for the matching assistant message', () => {
