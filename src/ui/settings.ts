@@ -1235,20 +1235,6 @@ export class SettingsPanel {
     throw new Error('all geolocation backends failed');
   }
 
-  // ── Provider configuration state ──
-
-  /**
-   * A provider is "configured" when it can serve requests out of the box:
-   * built-ins always count (they carry their own endpoint/model), custom
-   * providers need a Base URL + at least one model.
-   */
-  private isProviderConfigured(provider: string): boolean {
-    const customs = (loadConfig() ?? defaults()).customProviders ?? [];
-    const custom = customProviderFor(customs, provider);
-    if (custom) return !!custom.baseURL && !!custom.defaultModel;
-    return !!providerDef(provider);
-  }
-
   // ── Load config into form ──
 
   private loadToForm() {

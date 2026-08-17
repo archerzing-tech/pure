@@ -68,6 +68,10 @@ describe('formatPlanForPrompt', () => {
     expect(continuation).toContain('<plan_continuation>');
     expect(continuation).toContain('当前阶段 Todos');
     expect(continuation).toContain('根据实际依赖选择下一步工作');
+    // 续跑回合必须同样指示模型发出 `## 计划 n：` / `## 计划 n 已完成` 标记，
+    // 否则执行期卡片/悬浮大纲停在第一步（只有首轮 formatPlanForPrompt 有该指令）。
+    expect(continuation).toContain('## 计划 n：');
+    expect(continuation).toContain('## 计划 n 已完成');
   });
 });
 

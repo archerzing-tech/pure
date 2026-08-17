@@ -161,6 +161,7 @@ function buildToolCallingRules(surface: PromptSurface): string {
   return `Tool-calling rules:
 - NEVER emit tool calls as XML or text (no <tool_calls>, <invoke name="...">, or JSON inside your reply).
 - Tool calls are made ONLY through the function-calling interface, never as visible text.
+- Finish the sentence you are writing BEFORE emitting a tool call. Never leave a dangling, incomplete sentence of prose right before a tool call — that fragment is shown to the user as its own message and reads as a confusing cut-off. A tool call is an action, not a continuation of your narration; if your lead-in is incomplete, complete it first.
 ${workspaceRule}`;
 }
 

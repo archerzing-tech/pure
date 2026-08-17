@@ -985,6 +985,24 @@ document.addEventListener('keydown', (e) => {
   if (document.querySelector('.bubble-row.inline-card')) return;
 });
 
+// Right-click on empty space in the desktop WebView would only offer the native
+// navigation menu (Reload / Back / Forward) — useless here, and Reload wipes the
+// in-memory session. Suppress the native menu in that case, but keep it whenever
+// it has something useful: a text selection (Copy), a link (Open/Copy Link), an
+// image, or an editable field (Paste).
+document.addEventListener('contextmenu', (e) => {
+  const target = e.target;
+  if (!(target instanceof Element)) return;
+  const editable = target.closest('input, textarea, [contenteditable="true"], [contenteditable=""]');
+  const link = target.closest('a[href]');
+  const image = target.closest('img');
+  const selection = window.getSelection();
+  const hasSelection = !!selection && !selection.isCollapsed;
+  if (!editable && !link && !image && !hasSelection) {
+    e.preventDefault();
+  }
+});
+
 promptEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
