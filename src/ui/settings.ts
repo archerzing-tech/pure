@@ -29,7 +29,7 @@ import {
   providerOverrideFor,
   type CustomProvider,
 } from '../shared/providers';
-import { effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList, proxyUrlWithAuth } from '../shared/proxy';
+import { composeProxyUrl, effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList, parseProxyUrl, proxyUrlWithAuth } from '../shared/proxy';
 import { probeLlmEndpoint } from '../shared/llmProbe';
 import {
   STORAGE_KEY,
@@ -604,6 +604,21 @@ export class SettingsPanel {
     // address must not silently break every subsequent LLM / tool request. ──
     document.getElementById('cfg-proxy-test-btn')?.addEventListener('click', () => void this.testProxyConnection());
 
+    // The address is split into scheme + host + port fields; keep the hidden
+    // cfg-proxy-url mirror in sync so save/test read one composed value.
+    const recomposeProxyUrl = (): void => {
+      const urlEl = document.getElementById('cfg-proxy-url') as HTMLInputElement | null;
+      if (!urlEl) return;
+      const scheme = (document.getElementById('cfg-proxy-scheme') as HTMLSelectElement | null)?.value ?? '';
+      const host = (document.getElementById('cfg-proxy-host') as HTMLInputElement | null)?.value ?? '';
+      const port = (document.getElementById('cfg-proxy-port') as HTMLInputElement | null)?.value ?? '';
+      urlEl.value = composeProxyUrl(scheme, host, port);
+    };
+    ['#cfg-proxy-scheme', '#cfg-proxy-host', '#cfg-proxy-port'].forEach(sel => {
+      document.querySelector(sel)?.addEventListener('change', recomposeProxyUrl);
+      document.querySelector(sel)?.addEventListener('input', recomposeProxyUrl);
+    });
+
     // Auto-save on all input/select/checkbox changes
     const autoSaveSelectors = [
       // LLM fields (api key / name / base URL / image gen / model editor) are
@@ -615,7 +630,7 @@ export class SettingsPanel {
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
       '#cfg-tavily-key', '#cfg-serper-key',
       '#cfg-mcp-exclude-prefixes',
-      '#cfg-proxy-enabled', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-url', '#cfg-proxy-username', '#cfg-proxy-password', '#cfg-proxy-bypass-providers', '#cfg-proxy-bypass-models',
+      '#cfg-proxy-enabled', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-scheme', '#cfg-proxy-host', '#cfg-proxy-port', '#cfg-proxy-username', '#cfg-proxy-password', '#cfg-proxy-bypass-providers', '#cfg-proxy-bypass-models',
       '#cfg-streaming-render',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle',
@@ -1114,7 +1129,11 @@ export class SettingsPanel {
    */
   private async testProxyConnection(): Promise<void> {
     const btn = document.getElementById('cfg-proxy-test-btn') as HTMLButtonElement | null;
-    const url = (document.getElementById('cfg-proxy-url') as HTMLInputElement).value.trim();
+    const url = composeProxyUrl(
+      (document.getElementById('cfg-proxy-scheme') as HTMLSelectElement | null)?.value ?? '',
+      (document.getElementById('cfg-proxy-host') as HTMLInputElement | null)?.value ?? '',
+      (document.getElementById('cfg-proxy-port') as HTMLInputElement | null)?.value ?? '',
+    );
     const username = (document.getElementById('cfg-proxy-username') as HTMLInputElement | null)?.value ?? '';
     const password = (document.getElementById('cfg-proxy-password') as HTMLInputElement | null)?.value ?? '';
     if (!url) {
@@ -1284,7 +1303,14 @@ export class SettingsPanel {
     const proxyToolsEl = document.getElementById('cfg-proxy-tools') as HTMLInputElement | null;
     if (proxyToolsEl) proxyToolsEl.checked = proxy.toolsEnabled;
     const proxyUrlEl = document.getElementById('cfg-proxy-url') as HTMLInputElement | null;
+    const proxySchemeEl = document.getElementById('cfg-proxy-scheme') as HTMLSelectElement | null;
+    const proxyHostEl = document.getElementById('cfg-proxy-host') as HTMLInputElement | null;
+    const proxyPortEl = document.getElementById('cfg-proxy-port') as HTMLInputElement | null;
+    const parsed = parseProxyUrl(proxy.url);
     if (proxyUrlEl) proxyUrlEl.value = proxy.url;
+    if (proxySchemeEl) proxySchemeEl.value = parsed.scheme;
+    if (proxyHostEl) proxyHostEl.value = parsed.host;
+    if (proxyPortEl) proxyPortEl.value = parsed.port;
     const proxyUsernameEl = document.getElementById('cfg-proxy-username') as HTMLInputElement | null;
     if (proxyUsernameEl) proxyUsernameEl.value = proxy.username;
     const proxyPasswordEl = document.getElementById('cfg-proxy-password') as HTMLInputElement | null;
@@ -2341,7 +2367,11 @@ export class SettingsPanel {
         enabled: (document.getElementById('cfg-proxy-enabled') as HTMLInputElement | null)?.checked ?? false,
         llmEnabled: (document.getElementById('cfg-proxy-llm') as HTMLInputElement | null)?.checked ?? false,
         toolsEnabled: (document.getElementById('cfg-proxy-tools') as HTMLInputElement | null)?.checked ?? false,
-        url: (document.getElementById('cfg-proxy-url') as HTMLInputElement | null)?.value ?? '',
+        url: composeProxyUrl(
+          (document.getElementById('cfg-proxy-scheme') as HTMLSelectElement | null)?.value ?? '',
+          (document.getElementById('cfg-proxy-host') as HTMLInputElement | null)?.value ?? '',
+          (document.getElementById('cfg-proxy-port') as HTMLInputElement | null)?.value ?? '',
+        ),
         username: (document.getElementById('cfg-proxy-username') as HTMLInputElement | null)?.value ?? '',
         password: (document.getElementById('cfg-proxy-password') as HTMLInputElement | null)?.value ?? '',
         bypassProviders: normalizeProxyList((document.getElementById('cfg-proxy-bypass-providers') as HTMLInputElement | null)?.value),
