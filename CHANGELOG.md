@@ -3,6 +3,17 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.9-adv
+
+**代理增强版：系统代理检测、配置持久化到文件、企业代理兼容**
+
+- 代理地址配置拆分：设置 → 网络代理 的地址改为「协议下拉（http/https/socks5/socks5h）+ 主机 + 端口」三个独立字段；端口占位默认 8080；粘贴完整地址或 `host:port` 简写进主机框时自动拆解，内嵌凭证被剥离
+- 读取系统代理：一键检测 macOS 系统设置（scutil）/ Windows 系统设置（注册表）/ 标准代理环境变量，回填三字段表单；系统代理未开启时自动探测常见本地代理端口（7897/7890/1080 等）兜底
+- 强制 HTTP/1.1：修复网康（netentsec）等企业安全网关在 SSL 解密/MITM 下 ALPN 协商出 HTTP/2 导致握手失败的问题，与 curl 默认行为对齐
+- 测试连接改进：探测端点改为国内可达（百度），失败时展开底层原因（连接被拒 / 超时 / DNS / 证书），不再只显示笼统的 "error sending request for url"
+- 配置持久化：整套 GUI 配置写入 `~/.pure/config.json`（pretty JSON），启动时文件为 source of truth——GUI 保存即写回，有能力的用户可直接手改文件、重启生效；密钥 / 代理密码仍单独存 `~/.pure/secrets.json`
+- 代理设置布局：地址行的标题与表单分两行显示，按钮与输入框等高对齐，不再越界
+
 ## v1.9.9
 
 **正式版：代理地址拆分为协议/主机/端口三字段，Windows 中文字体渲染优化**

@@ -482,18 +482,22 @@
                   </div>
                   <div class="setting-row proxy-url-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="proxy.url">代理地址</span><span class="setting-hint" data-i18n="proxy.url.hint">协议、主机与端口分开填写，支持 HTTP/HTTPS 与 SOCKS5</span></div>
-                    <div class="setting-input-group proxy-address-group">
-                      <select id="cfg-proxy-scheme" class="setting-select proxy-scheme" aria-label="协议">
-                        <option value="http://">http://</option>
-                        <option value="https://">https://</option>
-                        <option value="socks5://">socks5://</option>
-                        <option value="socks5h://">socks5h://</option>
-                      </select>
-                      <input id="cfg-proxy-host" class="setting-input proxy-host" type="text" data-i18n-placeholder="proxy.host.placeholder" placeholder="127.0.0.1" autocomplete="off" />
-                      <span class="proxy-colon">:</span>
-                      <input id="cfg-proxy-port" class="setting-input proxy-port" type="text" inputmode="numeric" data-i18n-placeholder="proxy.port.placeholder" placeholder="7890" autocomplete="off" />
-                      <button id="cfg-proxy-detect-btn" class="fetch-models-btn" type="button" data-i18n="proxy.detect" title="读取系统/环境变量代理并回填">读取系统代理</button>
-                      <button id="cfg-proxy-test-btn" class="fetch-models-btn" type="button" data-i18n="proxy.test" title="测试该代理是否可用">测试连接</button>
+                    <div class="proxy-controls">
+                      <div class="setting-input-group proxy-address-group">
+                        <select id="cfg-proxy-scheme" class="setting-select proxy-scheme" aria-label="协议">
+                          <option value="http://">http://</option>
+                          <option value="https://">https://</option>
+                          <option value="socks5://">socks5://</option>
+                          <option value="socks5h://">socks5h://</option>
+                        </select>
+                        <input id="cfg-proxy-host" class="setting-input proxy-host" type="text" data-i18n-placeholder="proxy.host.placeholder" placeholder="127.0.0.1" autocomplete="off" />
+                        <span class="proxy-colon">:</span>
+                        <input id="cfg-proxy-port" class="setting-input proxy-port" type="text" inputmode="numeric" data-i18n-placeholder="proxy.port.placeholder" placeholder="8080" autocomplete="off" />
+                      </div>
+                      <div class="proxy-actions">
+                        <button id="cfg-proxy-detect-btn" class="proxy-btn" type="button" data-i18n="proxy.detect" title="读取系统/环境变量代理并回填">读取系统代理</button>
+                        <button id="cfg-proxy-test-btn" class="proxy-btn" type="button" data-i18n="proxy.test" title="测试该代理是否可用">测试连接</button>
+                      </div>
                     </div>
                     <input id="cfg-proxy-url" type="hidden" />
                   </div>
