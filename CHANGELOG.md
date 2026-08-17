@@ -3,6 +3,14 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.9
+
+**正式版：代理地址拆分为协议/主机/端口三字段，Windows 中文字体渲染优化**
+
+- 代理地址配置拆分：设置 → 网络代理 的地址改为「协议下拉（http/https/socks5/socks5h）+ 主机 + 端口」三个独立字段，不再要求手拼完整 URL；粘贴完整地址或 `host:port` 简写进主机框时自动拆解，内嵌的 `user:pass@` 凭证会被剥离（用户名/密码仍走各自字段），端口为空且主机带端口时自动补全
+- 存储格式保持 `scheme://host:port` 不变，请求时凭证注入逻辑零改动；半输入状态不会因 URL 解析失败清空其他字段
+- Windows 中文字体渲染优化：Windows 上恢复 Chromium 默认的 ClearType 亚像素抗锯齿（此前全局 grayscale AA 让中文小字号发虚）；字体栈补充 Microsoft YaHei / Microsoft JhengHei / PingFang SC / Segoe UI Variable，跨平台中文观感更锐利
+
 ## v1.9.8-beta
 
 **本地 beta 构建：代理认证（用户名/密码）、代理密码安全存储、架构图重绘与稳定性修复**

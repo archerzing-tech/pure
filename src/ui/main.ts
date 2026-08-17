@@ -451,6 +451,7 @@ function deferToIdle(fn: () => void): void {
 //     all safe to run in idle slots after the first reveal, so none of it can
 //     delay the first paint or the splash transition.
 (async () => {
+  tagPlatform();
   applySavedAppearance();
   chat.setWorkspace('');
   wireComposerSelects();
@@ -579,6 +580,15 @@ function goToLanding() {
   landingPrompt.style.height = 'auto';
   syncLandingHasText();
   landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
+}
+
+/** Tag the platform for CSS (Windows WebView2 renders crisper with ClearType
+ * subpixel AA; macOS keeps its preferred grayscale antialiasing). Runs before
+ * any config-dependent setup so it applies even on a first-run profile. */
+function tagPlatform(): void {
+  if (/Windows/i.test(navigator.userAgent) || navigator.platform?.startsWith('Win')) {
+    document.documentElement.setAttribute('data-platform', 'win');
+  }
 }
 
 /** Apply saved theme, language, font size, and density on initial load */

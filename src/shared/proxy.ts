@@ -59,6 +59,65 @@ export function shouldBypassProxy(
   return proxyMatches(provider, config.bypassProviders) || proxyMatches(model, config.bypassModels);
 }
 
+/**
+ * Split a stored proxy URL into its editable parts for the settings form
+ * (scheme select + host + port). Accepts the full `scheme://host:port` form
+ * and the scheme-less `host:port` shorthand, and strips any embedded
+ * credentials (username/password live in their own fields). Falls back to a
+ * raw split when `new URL` rejects the input, so a half-typed value never
+ * wipes the other fields while the user is editing.
+ */
+export function parseProxyUrl(url: string): { scheme: string; host: string; port: string } {
+  let candidate = String(url ?? '').trim();
+  if (!candidate) return { scheme: 'http://', host: '', port: '' };
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) candidate = 'http://' + candidate;
+  try {
+    const parsed = new URL(candidate);
+    const scheme = parsed.protocol.endsWith(':') ? parsed.protocol + '//' : parsed.protocol + '://';
+    // URL drops a port that equals the scheme default (e.g. https:443), but a
+    // proxy address needs the explicit port preserved — read it from the raw
+    // authority when URL normalized it away.
+    let port = parsed.port || '';
+    if (!port) {
+      const authority = candidate.slice(candidate.indexOf('://') + 3).split(/[/?#]/)[0];
+      const m = authority.match(/:(\d+)$/);
+      if (m) port = m[1];
+    }
+    return { scheme, host: parsed.hostname || '', port };
+  } catch {
+    const m = candidate.match(/^([a-z][a-z0-9+.-]*:\/\/)?([^:/]+)(?::(\d+))?/i);
+    return { scheme: m?.[1] || 'http://', host: m?.[2] || '', port: m?.[3] || '' };
+  }
+}
+
+/**
+ * Compose the stored proxy URL from the settings form's scheme/host/port
+ * fields. Defaults the scheme to http://, tolerates a scheme or `host:port`
+ * pasted into the host field, and strips any credentials pasted in. The
+ * stored form is always `scheme://host:port` (no trailing slash) so the
+ * request-time credential injection keeps working.
+ */
+export function composeProxyUrl(scheme: string, host: string, port: string): string {
+  const schemeNorm = (scheme || 'http://').trim().toLowerCase();
+  const schemePart = /:\/\//.test(schemeNorm) ? schemeNorm : schemeNorm + '://';
+  let hostPart = host.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/\/+$/, '');
+  const at = hostPart.lastIndexOf('@');
+  if (at >= 0) hostPart = hostPart.slice(at + 1);
+  let portPart = port.trim();
+  const colonIdx = hostPart.lastIndexOf(':');
+  if (!portPart && colonIdx > 0 && !hostPart.startsWith('[')) {
+    const maybe = hostPart.slice(colonIdx + 1);
+    if (/^\d+$/.test(maybe)) {
+      portPart = maybe;
+      hostPart = hostPart.slice(0, colonIdx);
+    }
+  }
+  // Nothing configured stays an empty string so the stored config never
+  // carries a meaningless bare scheme.
+  if (!hostPart) return '';
+  return portPart ? `${schemePart}${hostPart}:${portPart}` : `${schemePart}${hostPart}`;
+}
+
 export type ProxyScope = 'llm' | 'tools';
 
 export function isUsableProxyUrl(url: string): boolean {

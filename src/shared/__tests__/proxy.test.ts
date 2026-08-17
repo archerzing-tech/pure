@@ -1,5 +1,44 @@
 import { describe, expect, it } from 'bun:test';
-import { effectiveProxyUrl, normalizeProxyConfig, normalizeProxyList, proxyUrlWithAuth, shouldBypassProxy } from '../proxy';
+import { composeProxyUrl, effectiveProxyUrl, normalizeProxyConfig, normalizeProxyList, parseProxyUrl, proxyUrlWithAuth, shouldBypassProxy } from '../proxy';
+
+describe('proxy address split/compose', () => {
+  it('splits a full URL into scheme, host, and port', () => {
+    expect(parseProxyUrl('http://127.0.0.1:7890')).toEqual({ scheme: 'http://', host: '127.0.0.1', port: '7890' });
+    expect(parseProxyUrl('socks5://proxy.example.com:1080')).toEqual({ scheme: 'socks5://', host: 'proxy.example.com', port: '1080' });
+    expect(parseProxyUrl('https://10.0.0.1:443')).toEqual({ scheme: 'https://', host: '10.0.0.1', port: '443' });
+  });
+
+  it('accepts the scheme-less host:port shorthand', () => {
+    expect(parseProxyUrl('127.0.0.1:7890')).toEqual({ scheme: 'http://', host: '127.0.0.1', port: '7890' });
+  });
+
+  it('strips embedded credentials and empty input defaults to http', () => {
+    expect(parseProxyUrl('http://bob:p%40ss@127.0.0.1:7890')).toEqual({ scheme: 'http://', host: '127.0.0.1', port: '7890' });
+    expect(parseProxyUrl('')).toEqual({ scheme: 'http://', host: '', port: '' });
+  });
+
+  it('composes scheme, host, and port into a stored URL', () => {
+    expect(composeProxyUrl('http://', '127.0.0.1', '7890')).toBe('http://127.0.0.1:7890');
+    expect(composeProxyUrl('socks5://', 'proxy.example.com', '1080')).toBe('socks5://proxy.example.com:1080');
+    expect(composeProxyUrl('', '127.0.0.1', '7890')).toBe('http://127.0.0.1:7890');
+    // Nothing configured stays empty — a bare scheme must not be persisted.
+    expect(composeProxyUrl('', '', '')).toBe('');
+    expect(composeProxyUrl('socks5://', '', '1080')).toBe('');
+  });
+
+  it('pulls a port pasted into the host field and strips a pasted scheme', () => {
+    expect(composeProxyUrl('http://', '192.168.1.5:7890', '')).toBe('http://192.168.1.5:7890');
+    expect(composeProxyUrl('http://', 'http://10.0.0.2:8080', '')).toBe('http://10.0.0.2:8080');
+    expect(composeProxyUrl('http://', 'bob@127.0.0.1', '7890')).toBe('http://127.0.0.1:7890');
+  });
+
+  it('round-trips through parse and compose', () => {
+    for (const url of ['http://127.0.0.1:7890', 'socks5://proxy.example.com:1080', 'https://10.0.0.1:443']) {
+      const { scheme, host, port } = parseProxyUrl(url);
+      expect(composeProxyUrl(scheme, host, port)).toBe(url);
+    }
+  });
+});
 
 describe('proxy configuration', () => {
   it('normalizes comma and newline separated bypass entries', () => {
