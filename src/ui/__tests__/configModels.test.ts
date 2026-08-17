@@ -113,7 +113,7 @@ describe('hasConfiguredKey', () => {
 });
 
 describe('providerHasKey', () => {
-  const customProvider = (over: Partial<{ apiKey: string; hasApiKey: boolean; local: boolean }> = {}) => ({
+  const customProvider = (over: Partial<{ apiKey: string; hasApiKey: boolean; local: boolean; baseURL: string }> = {}) => ({
     id: 'local', name: 'Local', baseURL: 'http://localhost:11434/v1',
     models: ['qwen2.5-coder:7b'], defaultModel: 'qwen2.5-coder:7b',
     apiKey: '', hasApiKey: false, ...over,
@@ -140,6 +140,19 @@ describe('providerHasKey', () => {
 
   it('rejects a key-required custom provider without a key', () => {
     expect(providerHasKey({ ...defaults(), customProviders: [customProvider()] }, 'local')).toBe(false);
+  });
+
+  it('rejects a custom provider with a key but no Base URL', () => {
+    expect(providerHasKey({ ...defaults(), customProviders: [customProvider({ apiKey: 'k', baseURL: '' })] }, 'local')).toBe(false);
+  });
+
+  it('rejects a keyless local endpoint without a Base URL', () => {
+    expect(providerHasKey({ ...defaults(), customProviders: [customProvider({ local: true, baseURL: '' })] }, 'local')).toBe(false);
+  });
+
+  it('rejects a built-in whose override blanked the Base URL', () => {
+    const cfg = { ...defaults(), providerOverrides: { qwen: { baseURL: '', hasApiKey: true } } };
+    expect(providerHasKey(cfg, 'qwen')).toBe(false);
   });
 });
 

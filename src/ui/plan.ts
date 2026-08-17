@@ -78,7 +78,7 @@ export function formatPlanContinuation(plan: Plan, currentPlan: number, currentT
     const done = index + 1 < currentTodo;
     return `${done ? '✓ ~~' : '□ '}${index + 1}. ${todo.action}${done ? '~~ [已完成]' : index + 1 === currentTodo ? ' 👈 建议从这里继续' : ''}`;
   }).join('\n');
-  return `\n\n<plan_continuation>\n这是一个已经开始的复杂任务，不要重新生成计划，也不要从头开始。\n\n当前总计划：\n${planLines}\n\n当前阶段 Todos（阶段 ${currentPlan}）：\n${todos || '当前阶段没有拆分 Todo，请直接处理这一阶段。'}\n\n继续规则：把这里的计划和 Todo 当作当前上下文，根据实际依赖选择下一步工作；可以合并紧密相关的小项，也可以在需要信息时先提问并暂停。完成后用自然语言说明真实进展，并在有帮助时使用完成标记。${projectBuild ? '项目级交付仍需提供真实验证证据。' : ''}\n</plan_continuation>`;
+  return `\n\n<plan_continuation>\n这是一个已经开始的复杂任务，不要重新生成计划，也不要从头开始。\n\n当前总计划：\n${planLines}\n\n当前阶段 Todos（阶段 ${currentPlan}）：\n${todos || '当前阶段没有拆分 Todo，请直接处理这一阶段。'}\n\n继续规则：把这里的计划和 Todo 当作当前上下文，根据实际依赖选择下一步工作；可以合并紧密相关的小项，也可以在需要信息时先提问并暂停。每个计划开始时用一行明确的「## 计划 n：<正在做什么>」开头、结束时用「## 计划 n 已完成」收尾（例如「## 计划 1 已完成」），编号与上面的列表保持一致；界面靠这些标记把执行大纲一步步往下推。完成后用自然语言说明真实进展，并在有帮助时使用完成标记。${projectBuild ? '项目级交付仍需提供真实验证证据。' : ''}\n</plan_continuation>`;
 }
 
 // ── Live plan-progress card (transcript) ──

@@ -168,10 +168,10 @@
 }
 
 /* Pause-point assistant bubble: the "计划先列到这里…" message is a handoff
-   point, not a finished answer. A dashed accent edge + soft tint marks it as
+   point, not a finished answer. A solid accent edge + soft tint marks it as
    a place where the flow is waiting for the user to continue. */
 .bubble.plan-pause-message {
-  border-left: 3px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
   border-radius: var(--radius-lg) var(--radius-lg) var(--radius-lg) 3px;
   background: color-mix(in srgb, var(--accent-soft) 26%, transparent);
 }

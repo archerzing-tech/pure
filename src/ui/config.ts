@@ -315,14 +315,22 @@ export function hasConfiguredKey(cfg: PureConfig | null): cfg is PureConfig {
 }
 
 /**
- * True when one provider is usable from the model dropdown: a keyed built-in
- * or custom provider, or a keyless local endpoint (Ollama / LM Studio).
- * Mirrors the Settings → LLM card status (已配置 vs 未配置).
+ * True when one provider is usable from the model dropdown and shows 已配置 on
+ * the Settings → LLM card: it must have a Base URL plus either an API key
+ * (keyed built-in or custom provider) or be a keyless local endpoint
+ * (Ollama / LM Studio need no key). A provider missing its endpoint or its
+ * key is 未配置 — a key without a Base URL is unusable, and vice versa.
  */
 export function providerHasKey(cfg: PureConfig, id: string): boolean {
   const custom = customProviderFor(cfg.customProviders ?? [], id);
-  if (custom) return !!custom.apiKey || custom.hasApiKey === true || !!custom.local;
+  if (custom) {
+    if (!custom.baseURL) return false;
+    return !!custom.apiKey || custom.hasApiKey === true || custom.local === true;
+  }
   const override = providerOverrideFor(cfg.providerOverrides, id);
+  // Built-ins always carry a default endpoint; an override may blank it.
+  const baseURL = override?.baseURL ?? providerDef(id)?.baseURL ?? '';
+  if (!baseURL) return false;
   return !!cfg.apiKey || cfg.hasApiKey === true || !!override?.apiKey || override?.hasApiKey === true;
 }
 

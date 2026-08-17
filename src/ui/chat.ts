@@ -2509,8 +2509,40 @@ export class ChatController {
               for (const todoMarker of queued) consumeTodoMarker(todoMarker);
               deferredForPhase = null;
             } else if (marker.number > before) {
-              deferredForPhase = marker.number;
-              card.setActivity(`计划 ${before} 仍有工作未完成，暂不进入计划 ${marker.number}…`);
+              // The model explicitly started a later plan: treat that as
+              // implicit completion of the current plan's Todos and advance,
+              // so the card (and the floating outline mirroring it) follows
+              // the build instead of stalling on step 1 whenever the model
+              // reports plan-level progress without granular Todo-done lines.
+              // Project builds still wait for the finished phase's real
+              // verification evidence before moving on.
+              if (needsDeliveryGate && !planTrack.phaseVerifySeen[before]) {
+                card.setActivity(`计划 ${before} 已报告完成，等待真实验证结果…`);
+                deferredForPhase = marker.number;
+              } else {
+                const rows = card.substepEls[before - 1] ?? [];
+                rows.forEach((row) => {
+                  row.classList.remove('active', 'pending');
+                  row.classList.add('done');
+                  const check = row.querySelector<HTMLElement>('.plan-progress-substep-check');
+                  if (check) check.textContent = '✓';
+                });
+                if (card.currentTodosRequired && rows.length > 0) {
+                  card.substepStarted = true;
+                  card.currentSubstep = rows.length + 1;
+                }
+                updatePlanCardPhase(card, marker.number);
+                if (card.current === marker.number) {
+                  const stepLabel = card.stepEls[marker.number - 1]?.querySelector<HTMLElement>('.plan-progress-step-action')?.textContent;
+                  card.setActivity(`已开始计划 ${marker.number}${stepLabel ? `：${stepLabel}` : ''}${card.currentTodosRequired ? '，正在执行它的 Todos…' : '，正在执行原子任务…'}`);
+                  const queued = planTrack.deferredMarkers.get(marker.number) ?? [];
+                  planTrack.deferredMarkers.delete(marker.number);
+                  for (const todoMarker of queued) consumeTodoMarker(todoMarker);
+                  deferredForPhase = null;
+                } else {
+                  deferredForPhase = marker.number;
+                }
+              }
             }
           } else if (marker.kind === 'phaseDone') {
             finishPlan(marker.number);

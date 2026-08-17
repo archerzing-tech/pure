@@ -916,6 +916,24 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('overview.clear();', guard)).toBeLessThan(cardPlan);
   });
 
+  it('advances the card when the model starts a later plan even without Todo-done markers', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 执行期卡片靠 `## 计划 n：` 标记推进。旧逻辑在“当前计划的 Todo 未全部
+    // 标记完成”时直接卡在第一步；现在模型明确进入更后面的计划时，把它当作
+    // 当前计划隐式完成并推进（项目构建仍等真实验证证据）。
+    const guard = src.indexOf("if (marker.kind === 'phase') {", src.indexOf('const trackPlanPhase'));
+    expect(guard).toBeGreaterThan(-1);
+    const forceAdvance = src.indexOf('The model explicitly started a later plan', guard);
+    const verifyGate = src.indexOf('needsDeliveryGate && !planTrack.phaseVerifySeen[before]', guard);
+    const completeSubsteps = src.indexOf('card.substepEls[before - 1] ?? []', guard);
+    // updatePlanCardPhase 在分支前也出现一次；这里要的是强制推进分支里的那次。
+    const advance = src.indexOf('updatePlanCardPhase(card, marker.number);', completeSubsteps);
+    expect(forceAdvance).toBeGreaterThan(guard);
+    expect(verifyGate).toBeGreaterThan(forceAdvance);
+    expect(completeSubsteps).toBeGreaterThan(verifyGate);
+    expect(advance).toBeGreaterThan(completeSubsteps);
+  });
+
   it('persists the completed plan state so the finished outline survives a reload', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 完成态：activeComplexPlan 已被置空，但快照带 complete: true，仍要落盘
