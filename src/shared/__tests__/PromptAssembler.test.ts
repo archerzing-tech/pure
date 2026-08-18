@@ -90,6 +90,7 @@ describe('PromptAssembler', () => {
       capabilities: 'dynamic capability',
       environment: 'Environment: test-city',
       runtimes: 'Environment runtimes: bun 1.x',
+      network: 'Environment network (this machine): proxy: none; reach: domestic ok, international blocked',
       skills: [{ name: 'skill<>', body: 'skill body', enabled: true }],
       mode: 'build',
     });
@@ -97,6 +98,8 @@ describe('PromptAssembler', () => {
     expect(prompt).toContain('dynamic capability');
     expect(prompt).toContain('Environment: test-city');
     expect(prompt).toContain('Environment runtimes: bun 1.x');
+    expect(prompt).toContain('Environment network (this machine)');
+    expect(prompt).toContain('domestic ok, international blocked');
     expect(prompt).toContain('<skill name="skill__">');
     expect(prompt).toContain('skill body');
     expect(prompt).toContain('<task_mode>');

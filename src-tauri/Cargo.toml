@@ -1,6 +1,6 @@
 [package]
 name = "pure"
-version = "1.9.9-adv"
+version = "1.9.10"
 edition = "2021"
 
 [lib]
@@ -18,7 +18,7 @@ tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json", "stream", "http2", "socks"] }
+reqwest = { version = "0.12", features = ["json", "stream", "http2", "socks", "cookies"] }
 encoding_rs = "0.8"
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
@@ -27,6 +27,9 @@ walkdir = "2"
 regex = "1"
 libc = "0.2"
 base64 = "0.21"
+zip = "4"
+flate2 = "1"
+quick-xml = "0.41"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"

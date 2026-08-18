@@ -233,7 +233,7 @@ export class SettingsPanel {
     };
 
     // ── Skill Hub: browse + install third-party skills ──
-    const hubRepoInput = document.getElementById('hub-repo') as HTMLInputElement | null;
+    const hubRepoSelect = document.getElementById('hub-repo') as HTMLSelectElement | null;
     const hubBrowseBtn = document.getElementById('hub-browse-btn') as HTMLButtonElement | null;
     const hubStatusEl = document.getElementById('hub-status');
     const hubGroupedEl = document.getElementById('hub-grouped');
@@ -248,8 +248,20 @@ export class SettingsPanel {
 
     const renderInstalled = () => this.renderInstalledHubSkills();
 
+    // Filter the browsed skill cards by name/description as the user types.
+    const hubFilterEl = document.getElementById('hub-filter') as HTMLInputElement | null;
+    hubFilterEl?.addEventListener('input', () => {
+      const query = hubFilterEl.value.trim().toLowerCase();
+      hubGroupedEl?.querySelectorAll<HTMLElement>('.hub-skill-card').forEach(card => {
+        const name = card.querySelector('.skill-name')?.textContent?.toLowerCase() ?? '';
+        const desc = card.querySelector('.skill-desc')?.textContent?.toLowerCase() ?? '';
+        const matches = !query || name.includes(query) || desc.includes(query);
+        card.classList.toggle('hidden', !matches);
+      });
+    });
+
     hubBrowseBtn?.addEventListener('click', async () => {
-      const repo = normalizeHubRepo(hubRepoInput?.value.trim() || DEFAULT_HUB_REPO);
+      const repo = normalizeHubRepo(hubRepoSelect?.value.trim() || DEFAULT_HUB_REPO);
       if (!repo) return;
       hubBrowseBtn.disabled = true;
       hubBrowseBtn.textContent = t('hub.loading');
@@ -374,8 +386,8 @@ export class SettingsPanel {
       setHubStatus(t('hub.removed'));
     });
 
-    // Seed the repo input + installed list on first bind.
-    if (hubRepoInput && !hubRepoInput.value) hubRepoInput.value = DEFAULT_HUB_REPO;
+    // Installed list renders on first bind (the provider dropdown always has a
+    // default selection, so it needs no seeding).
     renderInstalled();
 
     // ── Environment: auto-detect the user's city from IP ──
@@ -619,6 +631,7 @@ export class SettingsPanel {
       document.querySelector(sel)?.addEventListener('change', recomposeProxyUrl);
       document.querySelector(sel)?.addEventListener('input', recomposeProxyUrl);
     });
+    document.getElementById('cfg-proxy-mode')?.addEventListener('change', () => this.updateProxyModeVisibility());
 
     // Auto-save on all input/select/checkbox changes
     const autoSaveSelectors = [
@@ -631,7 +644,8 @@ export class SettingsPanel {
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
       '#cfg-tavily-key', '#cfg-serper-key',
       '#cfg-mcp-exclude-prefixes',
-      '#cfg-proxy-enabled', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-scheme', '#cfg-proxy-host', '#cfg-proxy-port', '#cfg-proxy-username', '#cfg-proxy-password', '#cfg-proxy-bypass-providers', '#cfg-proxy-bypass-models',
+      '#cfg-proxy-enabled', '#cfg-proxy-mode', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-scheme', '#cfg-proxy-host', '#cfg-proxy-port', '#cfg-proxy-username', '#cfg-proxy-password', '#cfg-proxy-bypass-providers', '#cfg-proxy-bypass-models',
+      '#cfg-proxy-probe-0-enabled', '#cfg-proxy-probe-0-url', '#cfg-proxy-probe-1-enabled', '#cfg-proxy-probe-1-url', '#cfg-proxy-probe-2-enabled', '#cfg-proxy-probe-2-url',
       '#cfg-streaming-render',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle',
@@ -1153,13 +1167,24 @@ export class SettingsPanel {
       this.toast(t('proxy.test.browserOnly'));
       return;
     }
+    const probeUrls = [0, 1, 2]
+      .map((i) => {
+        const enabled = (document.getElementById(`cfg-proxy-probe-${i}-enabled`) as HTMLInputElement | null)?.checked ?? false;
+        const probeUrl = (document.getElementById(`cfg-proxy-probe-${i}-url`) as HTMLInputElement | null)?.value.trim() ?? '';
+        return enabled && probeUrl ? probeUrl : null;
+      })
+      .filter((u): u is string => Boolean(u));
+    if (probeUrls.length === 0) {
+      this.toast(t('proxy.test.noProbes'));
+      return;
+    }
     if (btn) {
       btn.disabled = true;
       btn.textContent = t('proxy.testing');
     }
     try {
       const core = await loadTauriCore();
-      const reached = await core?.invoke<string>('test_proxy', { proxyUrl: proxyUrlWithAuth(url, username, password) });
+      const reached = await core?.invoke<string>('test_proxy', { proxyUrl: proxyUrlWithAuth(url, username, password), probeUrls });
       this.toast(t('proxy.test.ok') + (reached ? `：${reached}` : ''));
     } catch (err) {
       console.warn('[pure] proxy test failed:', err);
@@ -1218,6 +1243,19 @@ export class SettingsPanel {
         btn.textContent = t('proxy.detect');
       }
     }
+  }
+
+  /**
+   * Show/hide the manual-address-only proxy fields (address row, username,
+   * password) based on the 代理方式 selector. In system mode the app resolves
+   * the OS proxy transparently, so the hand-typed address is irrelevant.
+   */
+  private updateProxyModeVisibility(): void {
+    const mode = (document.getElementById('cfg-proxy-mode') as HTMLSelectElement | null)?.value;
+    const system = mode === 'system';
+    document.querySelectorAll('.proxy-manual-field').forEach(el => {
+      el.classList.toggle('hidden', system);
+    });
   }
 
   // ── Theme ──
@@ -1344,9 +1382,14 @@ export class SettingsPanel {
     if (tavilyKeyEl) tavilyKeyEl.value = cfg.tavilyApiKey ?? '';
     const serperKeyEl = document.getElementById('cfg-serper-key') as HTMLInputElement | null;
     if (serperKeyEl) serperKeyEl.value = cfg.serperApiKey ?? '';
+    const searxngUrlEl = document.getElementById('cfg-searxng-url') as HTMLInputElement | null;
+    if (searxngUrlEl) searxngUrlEl.value = cfg.searxngUrl ?? '';
     const proxy = normalizeProxyConfig(cfg.proxy);
     const proxyEnabledEl = document.getElementById('cfg-proxy-enabled') as HTMLInputElement | null;
     if (proxyEnabledEl) proxyEnabledEl.checked = proxy.enabled;
+    const proxyModeEl = document.getElementById('cfg-proxy-mode') as HTMLSelectElement | null;
+    if (proxyModeEl) proxyModeEl.value = proxy.mode;
+    this.updateProxyModeVisibility();
     const proxyLlmEl = document.getElementById('cfg-proxy-llm') as HTMLInputElement | null;
     if (proxyLlmEl) proxyLlmEl.checked = proxy.llmEnabled;
     const proxyToolsEl = document.getElementById('cfg-proxy-tools') as HTMLInputElement | null;
@@ -1376,6 +1419,12 @@ export class SettingsPanel {
     if (proxyProvidersEl) proxyProvidersEl.value = proxy.bypassProviders.join(', ');
     const proxyModelsEl = document.getElementById('cfg-proxy-bypass-models') as HTMLInputElement | null;
     if (proxyModelsEl) proxyModelsEl.value = proxy.bypassModels.join(', ');
+    proxy.probeUrls.forEach((probe, i) => {
+      const enabledEl = document.getElementById(`cfg-proxy-probe-${i}-enabled`) as HTMLInputElement | null;
+      const urlEl = document.getElementById(`cfg-proxy-probe-${i}-url`) as HTMLInputElement | null;
+      if (enabledEl) enabledEl.checked = probe.enabled;
+      if (urlEl) urlEl.value = probe.url;
+    });
 
     document.querySelectorAll('.cfg-skill-toggle').forEach(el => {
       const skill = el.getAttribute('data-skill');
@@ -2411,9 +2460,11 @@ export class SettingsPanel {
       toolBrowser: (document.getElementById('cfg-tool-browser') as HTMLInputElement).checked,
       tavilyApiKey: (document.getElementById('cfg-tavily-key') as HTMLInputElement | null)?.value.trim() ?? '',
       serperApiKey: (document.getElementById('cfg-serper-key') as HTMLInputElement | null)?.value.trim() ?? '',
+      searxngUrl: (document.getElementById('cfg-searxng-url') as HTMLInputElement | null)?.value.trim() ?? '',
       mcpExcludedPrefixes: (document.getElementById('cfg-mcp-exclude-prefixes') as HTMLInputElement | null)?.value.split(',').map((p) => p.trim()).filter(Boolean) ?? [],
       proxy: normalizeProxyConfig({
         enabled: (document.getElementById('cfg-proxy-enabled') as HTMLInputElement | null)?.checked ?? false,
+        mode: ((document.getElementById('cfg-proxy-mode') as HTMLSelectElement | null)?.value ?? 'manual') as 'manual' | 'system',
         llmEnabled: (document.getElementById('cfg-proxy-llm') as HTMLInputElement | null)?.checked ?? false,
         toolsEnabled: (document.getElementById('cfg-proxy-tools') as HTMLInputElement | null)?.checked ?? false,
         url: composeProxyUrl(
@@ -2425,6 +2476,10 @@ export class SettingsPanel {
         password: (document.getElementById('cfg-proxy-password') as HTMLInputElement | null)?.value ?? '',
         bypassProviders: normalizeProxyList((document.getElementById('cfg-proxy-bypass-providers') as HTMLInputElement | null)?.value),
         bypassModels: normalizeProxyList((document.getElementById('cfg-proxy-bypass-models') as HTMLInputElement | null)?.value),
+        probeUrls: [0, 1, 2].map((i) => ({
+          url: (document.getElementById(`cfg-proxy-probe-${i}-url`) as HTMLInputElement | null)?.value ?? '',
+          enabled: (document.getElementById(`cfg-proxy-probe-${i}-enabled`) as HTMLInputElement | null)?.checked ?? false,
+        })),
       }),
       skills,
       hubSkills,

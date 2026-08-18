@@ -10,6 +10,13 @@ import {
   parseBingResults,
   parseDuckDuckGoResults,
   parseSogouResults,
+  parseSo360Results,
+  parseBaiduResults,
+  parseBraveResults,
+  parseJinaMarkdownResults,
+  resolveBingCkUrl,
+  normalizeQueryForRetry,
+  searxngSearch,
   resultsRelevant,
   significantCJKBigrams,
   containsCJK,
@@ -419,5 +426,117 @@ describe('Exa API backend', () => {
   it('throws when no EXA_API_KEY is set', async () => {
     delete process.env.EXA_API_KEY;
     await expect(exaSearch('query', 10)).rejects.toThrow('EXA_API_KEY');
+  });
+});
+
+describe('360 Search (so.com) parser (mirrors Rust parse_so360_results)', () => {
+  it('parses res-list blocks, honoring data-mdurl over the redirect href', () => {
+    const html = `<li class="res-list"><h3 class="res-title"><a href="https://www.so.com/link?m=abc" data-mdurl="https://blog.csdn.net/rust/123" rel="noopener">了解<em>Rust语言</em>-CSDN博客</a></h3><div class="res-rich so-rich-blog clearfix"><div class="res-comm-con"><p class="res-desc"><span class="res-list-summary">Rust 是一门系统编程语言。</span></p></div></div></li>
+<li class="res-list"><h3 class="res-title"><a href="/link?m=def">无 mdurl 的结果</a></h3><p class="res-desc">摘要</p></li>`;
+    const results = parseSo360Results(html, 10);
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe('了解Rust语言-CSDN博客');
+    expect(results[0].url).toBe('https://blog.csdn.net/rust/123');
+    expect(results[0].snippet).toContain('系统编程语言');
+    expect(results[1].url).toBe('https://www.so.com/link?m=def');
+  });
+});
+
+describe('Baidu parser (mirrors Rust parse_baidu_results)', () => {
+  it('parses c-container blocks via data-tools JSON and h3 fallback', () => {
+    const html = `<div class="result c-container" id="1"><h3 class="t"><a href="https://baike.baidu.com/item/rust">Rust语言百科</a></h3><div class="c-abstract">Rust 是一门系统编程语言。</div></div>
+<div class="result c-container" id="2" data-tools='{"title":"百度百科","url":"https://baike.example/2"}'><div class="content-right_8Zs40">工具摘要</div></div>`;
+    const results = parseBaiduResults(html, 10);
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe('Rust语言百科');
+    expect(results[0].url).toBe('https://baike.baidu.com/item/rust');
+    expect(results[0].snippet).toContain('系统编程');
+    expect(results[1].title).toBe('百度百科');
+    expect(results[1].url).toBe('https://baike.example/2');
+  });
+});
+
+describe('Brave parser (mirrors Rust parse_brave_results)', () => {
+  it('parses snippet blocks with rotating svelte class suffixes', () => {
+    const html = `<div class="snippet svelte-jmfu5f" data-pos="0" data-type="web"><div class="result-wrapper svelte-1rq4ngz"><div class="result-content svelte-1rq4ngz"><a href="https://rust-lang.org/" target="_self" class="svelte-14r20fy l1"><div class="site-name-wrapper svelte-on1hvy">rust-lang.org</div></a><div class="title search-snippet-title line-clamp-1 svelte-14r20fy">Rust Programming Language</div><p class="generic-snippet svelte-1cwdgg3">A language empowering everyone to build reliable software.</p></div></div></div>
+<div class="snippet svelte-jmfu5f" data-pos="1" data-type="web"><div class="result-wrapper svelte-1rq4ngz"><a href="https://example.com/2"><div class="title search-snippet-title svelte-14r20fy">Two</div></a><p class="generic-snippet svelte-1cwdgg3">s2</p></div></div>`;
+    const results = parseBraveResults(html, 10);
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe('Rust Programming Language');
+    expect(results[0].url).toBe('https://rust-lang.org/');
+    expect(results[0].snippet).toContain('empowering');
+    expect(results[1].url).toBe('https://example.com/2');
+  });
+});
+
+describe('Jina markdown parser (mirrors Rust parse_jina_markdown_results)', () => {
+  it('parses numbered markdown headings and resolves Bing ck/a redirects', () => {
+    const md = `Title: rust language - Bing
+
+URL Source: https://www.bing.com/search?q=rust+language
+
+Markdown Content:
+About 16,200 results
+
+1.   ## [**Rust** Programming **Language**](https://www.bing.com/ck/a?!&&p=abc&u=aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw&ntb=1)
+
+A language empowering everyone to build reliable and efficient software.
+
+2.   ## [Install **Rust**](https://www.bing.com/ck/a?u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnL3Rvb2xzL2luc3RhbGwv)
+
+Install the toolchain.
+`;
+    const results = parseJinaMarkdownResults(md, 10);
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe('Rust Programming Language');
+    expect(results[0].url).toBe('https://rust-lang.org/');
+    expect(results[0].snippet).toContain('empowering');
+    expect(results[1].url).toBe('https://rust-lang.org/tools/install/');
+  });
+
+  it('leaves plain URLs untouched and decodes percent-encoded base64', () => {
+    expect(resolveBingCkUrl('https://example.com/page')).toBe('https://example.com/page');
+    expect(resolveBingCkUrl('https://www.bing.com/ck/a?u=aHR0cHM6Ly9leGFtcGxlLmNvbS8%3D&ntb=1')).toBe('https://example.com/');
+  });
+});
+
+describe('Query normalization retry (mirrors Rust normalize_query_for_retry)', () => {
+  it('strips operators, quotes, and punctuation', () => {
+    expect(normalizeQueryForRetry('"rust" site:rust-lang.org 2026')).toBe('rust 2026');
+    expect(normalizeQueryForRetry('西安到重庆 机票？（价格）')).toBe('西安到重庆 机票 价格');
+  });
+  it('returns null when nothing would change', () => {
+    expect(normalizeQueryForRetry('plain query')).toBeNull();
+    expect(normalizeQueryForRetry('西安天气')).toBeNull();
+  });
+});
+
+describe('SearXNG JSON backend', () => {
+  it('maps SearXNG JSON results to SearchResult', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({
+        results: [
+          { title: 'Rust', url: 'https://rust-lang.org/', content: 's1' },
+          { title: '', url: 'https://empty.example/', content: 'skip me' },
+          { title: 'T2', url: 'https://t2.example/', content: 's2' },
+        ],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    ) as unknown as typeof fetch;
+    process.env.SEARXNG_URL = 'https://searxng.internal';
+    try {
+      const results = await searxngSearch('rust', 10);
+      expect(results.length).toBe(2);
+      expect(results[0].title).toBe('Rust');
+      expect(results[1].snippet).toBe('s2');
+    } finally {
+      delete process.env.SEARXNG_URL;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('throws when SEARXNG_URL is not set', async () => {
+    delete process.env.SEARXNG_URL;
+    await expect(searxngSearch('query', 10)).rejects.toThrow('SEARXNG_URL');
   });
 });

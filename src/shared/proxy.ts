@@ -1,3 +1,32 @@
+export type ProxyMode = 'manual' | 'system';
+
+/**
+ * Sentinel URL the WebView sends to the Rust backend when the proxy mode is
+ * "system": the backend resolves the OS system proxy (macOS scutil / Windows
+ * registry) at request time and falls back to the standard proxy env vars
+ * when none is set. It must never be treated as a real URL by the request
+ * path — only `effectiveProxyUrl` produces it and only the Rust side (or
+ * `isUsableProxyUrl`) interprets it.
+ */
+export const SYSTEM_PROXY_MARKER = 'system://';
+
+export interface ProxyProbe {
+  url: string;
+  enabled: boolean;
+}
+
+/**
+ * Default connectivity-test endpoints for 测试连接. The first is reachable
+ * from mainland China (google.com/generate_204 is not), so the test stays
+ * meaningful on a China network or for proxies that only route domestic
+ * traffic. The three are editable/toggleable in Settings → 网络代理.
+ */
+export const DEFAULT_PROXY_PROBES: ProxyProbe[] = [
+  { url: 'https://www.baidu.com/', enabled: true },
+  { url: 'https://api.deepseek.com', enabled: true },
+  { url: 'https://ipwho.is/', enabled: true },
+];
+
 export interface ProxyConfig {
   enabled: boolean;
   llmEnabled: boolean;
@@ -17,6 +46,19 @@ export interface ProxyConfig {
   hasPassword: boolean;
   bypassProviders: string[];
   bypassModels: string[];
+  /**
+   * How the proxy URL is determined. `manual` uses the address fields;
+   * `system` ignores them and lets the backend resolve the OS system proxy
+   * transparently (falling back to the standard proxy env vars).
+   */
+  mode: ProxyMode;
+  /**
+   * Connectivity-test endpoints for 测试连接, in probe order. The list is
+   * fixed at three (matching the three settings rows) and merged with
+   * DEFAULT_PROXY_PROBES by index so an older config without this field still
+   * gets the defaults.
+   */
+  probeUrls: ProxyProbe[];
 }
 
 export function normalizeProxyList(value: string | readonly string[] | null | undefined): string[] {
@@ -39,7 +81,38 @@ export function normalizeProxyConfig(config: Partial<ProxyConfig> | null | undef
     hasPassword: config?.hasPassword === true,
     bypassProviders: normalizeProxyList(config?.bypassProviders),
     bypassModels: normalizeProxyList(config?.bypassModels),
+    mode: config?.mode === 'system' ? 'system' : 'manual',
+    probeUrls: normalizeProxyProbes(config?.probeUrls),
   };
+}
+
+/**
+ * Merge user-edited probe endpoints with the three defaults by index. The
+ * settings form always shows three rows, so an older config (no `probeUrls`
+ * field) or a shorter list is back-filled with the defaults. A slot that IS
+ * present keeps its value verbatim (including an empty URL, which
+ * enabledProbeUrls then skips); only missing slots inherit the default.
+ */
+export function normalizeProxyProbes(
+  list: readonly Partial<ProxyProbe>[] | null | undefined,
+): ProxyProbe[] {
+  const source = Array.isArray(list) ? list : [];
+  return DEFAULT_PROXY_PROBES.map((def, i) => {
+    const item = source[i];
+    if (!item) return { url: def.url, enabled: def.enabled };
+    return {
+      url: String(item.url ?? '').trim(),
+      enabled: item.enabled !== false,
+    };
+  });
+}
+
+/** The enabled, non-empty probe URLs in order — what 测试连接 actually sends. */
+export function enabledProbeUrls(config: Pick<ProxyConfig, 'probeUrls'>): string[] {
+  return config.probeUrls
+    .filter((probe) => probe.enabled)
+    .map((probe) => probe.url.trim())
+    .filter(Boolean);
 }
 
 export function proxyMatches(value: string, patterns: readonly string[]): boolean {
@@ -151,7 +224,11 @@ export function proxyUrlWithAuth(url: string, username: string, password: string
 
 export function effectiveProxyUrl(config: ProxyConfig, scope: ProxyScope = 'tools'): string {
   const scopeEnabled = scope === 'llm' ? config.llmEnabled : config.toolsEnabled;
-  if (!config.enabled || !scopeEnabled || !isUsableProxyUrl(config.url)) return '';
+  if (!config.enabled || !scopeEnabled) return '';
+  // System mode: send the sentinel so the backend resolves the OS proxy at
+  // request time (transparent forwarding) instead of using the form address.
+  if (config.mode === 'system') return SYSTEM_PROXY_MARKER;
+  if (!isUsableProxyUrl(config.url)) return '';
   // Desktop keeps the password in Rust secrets: the URL carries only the
   // username, and the backend injects the password from `proxy.password`.
   const password = config.hasPassword ? '' : config.password;

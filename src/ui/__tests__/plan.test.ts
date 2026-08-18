@@ -257,6 +257,87 @@ describe('nested execution plan progression', () => {
     }
   });
 
+  it('completes the card from the LAST plan\'s own completion marker (total + 1)', () => {
+    const oldDocument = (globalThis as any).document;
+    const fakeDocument = {
+      createElement: (tag: string) => {
+        const children: any[] = [];
+        const classes = new Set<string>();
+        return {
+          tagName: tag.toUpperCase(), children, childNodes: children, className: '', dataset: {},
+          classList: { add: (...names: string[]) => names.forEach((name) => classes.add(name)), remove: (...names: string[]) => names.forEach((name) => classes.delete(name)), contains: (name: string) => classes.has(name) },
+          append: (...items: any[]) => items.forEach((item) => children.push(item)), appendChild: (item: any) => { children.push(item); return item; },
+          querySelector: () => null, setAttribute: () => {}, textContent: '', isConnected: true,
+        } as any;
+      },
+    };
+    (globalThis as any).document = fakeDocument;
+    try {
+      const handle = createPlanCard({ reasoning: 'last', steps: [
+        { id: '1', action: '一', description: '一', expectedOutcome: '一', todosRequired: false },
+        { id: '2', action: '二', description: '二', expectedOutcome: '二', todosRequired: true, substeps: [
+          { id: '1', action: '二·一', description: '', expectedOutcome: '' },
+        ] },
+      ] });
+      // Plan 1 is atomic: its own completion marker advances to plan 2.
+      updatePlanCardPhase(handle, 2);
+      expect(handle.current).toBe(2);
+      // The last plan's substep is never explicitly reported as done — the
+      // model just emits `## 计划 2 已完成`. finishPlan force-completes the
+      // substeps, then updatePlanCardPhase(3) must reach total + 1 (the
+      // completed state) instead of being clamped to total.
+      completePlanCardSubsteps(handle, true);
+      expect(handle.currentSubstep).toBe(2);
+      expect(canCompletePlanCardSubsteps(handle)).toBe(true);
+      updatePlanCardPhase(handle, 3);
+      expect(handle.current).toBe(3);
+      expect(handle.current).toBe(handle.total + 1);
+      // Every top-level row is done like finalizePlanCard.
+      handle.stepEls.forEach((el) => expect(el.classList.contains('done')).toBe(true));
+      expect(handle.checkEls[0].textContent).toBe('✓');
+      expect(handle.checkEls[1].textContent).toBe('✓');
+    } finally {
+      if (oldDocument === undefined) delete (globalThis as any).document;
+      else (globalThis as any).document = oldDocument;
+    }
+  });
+
+  it('force-completes substeps even when they were never explicitly entered', () => {
+    const oldDocument = (globalThis as any).document;
+    const fakeDocument = {
+      createElement: (tag: string) => {
+        const children: any[] = [];
+        const classes = new Set<string>();
+        return {
+          tagName: tag.toUpperCase(), children, childNodes: children, className: '', dataset: {},
+          classList: { add: (...names: string[]) => names.forEach((name) => classes.add(name)), remove: (...names: string[]) => names.forEach((name) => classes.delete(name)), contains: (name: string) => classes.has(name) },
+          append: (...items: any[]) => items.forEach((item) => children.push(item)), appendChild: (item: any) => { children.push(item); return item; },
+          querySelector: () => null, setAttribute: () => {}, textContent: '', isConnected: true,
+        } as any;
+      },
+    };
+    (globalThis as any).document = fakeDocument;
+    try {
+      const handle = createPlanCard({ reasoning: 'force', steps: [
+        { id: '1', action: '一', description: '', expectedOutcome: '', todosRequired: true, substeps: [
+          { id: '1', action: '子一', description: '', expectedOutcome: '' },
+          { id: '2', action: '子二', description: '', expectedOutcome: '' },
+        ] },
+      ] });
+      // Nothing was ever started: the guarded call is a no-op, the forced one
+      // completes every substep and moves the cursor past the last one.
+      completePlanCardSubsteps(handle);
+      expect(handle.currentSubstep).toBe(1);
+      completePlanCardSubsteps(handle, true);
+      expect(handle.currentSubstep).toBe(3);
+      expect(canCompletePlanCardSubsteps(handle)).toBe(true);
+      handle.substepEls[0].forEach((row) => expect(row.classList.contains('done')).toBe(true));
+    } finally {
+      if (oldDocument === undefined) delete (globalThis as any).document;
+      else (globalThis as any).document = oldDocument;
+    }
+  });
+
   it('supports optional Todos for atomic plans and explicit Todo completion markers', () => {
     const oldDocument = (globalThis as any).document;
     const fakeDocument = {

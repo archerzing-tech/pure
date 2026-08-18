@@ -916,22 +916,74 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('overview.clear();', guard)).toBeLessThan(cardPlan);
   });
 
-  it('advances the card when the model starts a later plan even without Todo-done markers', () => {
+  it('jumps the card straight to a later plan the model reports starting', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 执行期卡片靠 `## 计划 n：` 标记推进。旧逻辑在“当前计划的 Todo 未全部
     // 标记完成”时直接卡在第一步；现在模型明确进入更后面的计划时，把它当作
-    // 当前计划隐式完成并推进（项目构建仍等真实验证证据）。
+    // 当前计划隐式完成并直接跳到标记指出的计划（而不是每标记只前进一步），
+    // 项目构建仍等真实验证证据。
     const guard = src.indexOf("if (marker.kind === 'phase') {", src.indexOf('const trackPlanPhase'));
     expect(guard).toBeGreaterThan(-1);
     const forceAdvance = src.indexOf('The model explicitly started a later plan', guard);
     const verifyGate = src.indexOf('needsDeliveryGate && !planTrack.phaseVerifySeen[before]', guard);
     const completeSubsteps = src.indexOf('card.substepEls[before - 1] ?? []', guard);
-    // updatePlanCardPhase 在分支前也出现一次；这里要的是强制推进分支里的那次。
-    const advance = src.indexOf('updatePlanCardPhase(card, marker.number);', completeSubsteps);
+    // 强制推进分支直接 setPlanPhase 跳到标记计划（total + 1 为完成态），
+    // 不再经过只能 +1 的 updatePlanCardPhase。
+    const jump = src.indexOf('setPlanPhase(card, Math.max(before + 1', completeSubsteps);
     expect(forceAdvance).toBeGreaterThan(guard);
     expect(verifyGate).toBeGreaterThan(forceAdvance);
     expect(completeSubsteps).toBeGreaterThan(verifyGate);
-    expect(advance).toBeGreaterThan(completeSubsteps);
+    expect(jump).toBeGreaterThan(completeSubsteps);
+  });
+
+  it('completes the last plan from its own completion marker (no N-1/N stall)', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // `## 计划 n 已完成`（最后一个计划）以前永远无法把卡片推到完成态：
+    // updatePlanCardPhase 把 total+1 截到 total，而收尾门禁又要求本轮有工具
+    // 调用——无工具收尾轮（纯总结 / 用户确认）会让卡片和大纲永远停在 N-1/N。
+    const finishPlan = src.indexOf('const finishPlan = (planNumber: number): void => {');
+    expect(finishPlan).toBeGreaterThan(-1);
+    const lastPlan = src.indexOf('const isLastPlan = planNumber >= card.total;', finishPlan);
+    const forceComplete = src.indexOf('completePlanCardSubsteps(card, isLastPlan);', finishPlan);
+    const lastActivity = src.indexOf('整个计划收尾中…', finishPlan);
+    expect(lastPlan).toBeGreaterThan(finishPlan);
+    expect(forceComplete).toBeGreaterThan(lastPlan);
+    expect(lastActivity).toBeGreaterThan(forceComplete);
+  });
+
+  it('finalizes a no-tool final turn at the last plan so the outline catches up', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 收尾轮没有工具调用（工作在前一轮已全部完成，本轮只是总结或被用户确认）
+    // 时，只要卡片已在最后一个计划上，就按完成收尾——否则卡片与浮动大纲永远
+    // 停在 N-1/N，和已经完成的任务不同步。
+    const planFinished = src.indexOf('const planFinished = planCard && hasToolWork');
+    expect(planFinished).toBeGreaterThan(-1);
+    const summarized = src.indexOf('const planSummarized = planCard && !hasToolWork', planFinished);
+    const lastPlan = src.indexOf('planCard.current === planCard.total', summarized);
+    const turnText = src.indexOf('turnText.length > 0', summarized);
+    const combined = src.indexOf('(planFinished || planSummarized) && planCard', summarized);
+    expect(summarized).toBeGreaterThan(planFinished);
+    expect(lastPlan).toBeGreaterThan(summarized);
+    expect(turnText).toBeGreaterThan(lastPlan);
+    expect(combined).toBeGreaterThan(turnText);
+    // 完成后仍是同一套收尾：finalizePlanCard → setStatus('complete')。
+    const finalize = src.indexOf('finalizePlanCard(planCard);', combined);
+    const setComplete = src.indexOf("planOverview().setStatus('complete');", combined);
+    expect(finalize).toBeGreaterThan(combined);
+    expect(setComplete).toBeGreaterThan(finalize);
+  });
+
+  it('clears the floating outline when a turn has no plan card', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 执行开始前的安全网现在无条件同步：有计划卡则镜像执行态，没有（简单任务、
+    // 强制模式弃用旧计划、旧计划完成后的话题延续）就清掉，旧任务的大纲不能
+    // 继续悬浮在新任务上。
+    const anchor = src.indexOf('the outline mirrors the CURRENT turn only.');
+    expect(anchor).toBeGreaterThan(-1);
+    const sync = src.indexOf('syncPlanOverview();', anchor);
+    expect(sync).toBeGreaterThan(anchor);
+    // 旧的条件同步（必须同时有计划卡和 activeComplexPlan）必须已删除。
+    expect(src.indexOf('if (planCard && this.activeComplexPlan) syncPlanOverview', anchor)).toBe(-1);
   });
 
   it('persists the completed plan state so the finished outline survives a reload', () => {

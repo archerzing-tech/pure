@@ -4035,6 +4035,40 @@ body {
   border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
 }
 
+/* Skill Hub search bar: a full-width 68px row (repo input + browse + card
+   filter). The compound class outranks the global .setting-input-group
+   normalization (38px / 220px) further down the cascade. */
+.setting-input-group.hub-search-bar {
+  height: 68px;
+  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+#hub-repo {
+  flex: 1 1 auto;
+  min-width: 200px;
+  width: auto;
+}
+#hub-filter {
+  flex: 0 0 200px;
+  width: 200px;
+  min-width: 200px;
+}
+
+/* Browsed skills list: two cards per row; a filtered-out card leaves the grid
+   so the rest reflow. */
+.hub-group-skills {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.hub-group-skills .hub-skill-card {
+  margin-bottom: 0;
+}
+.hub-skill-card.hidden {
+  display: none;
+}
+
 /* ── MCP Server List ── */
 #mcp-server-list {
   min-height: 60px;
@@ -4898,6 +4932,7 @@ body {
 /* Tables */
 .bubble table {
   border-collapse: collapse;
+  width: 100%;
   margin: 8px 0;
   font-size: 13px;
   background: var(--bg-card);
@@ -8694,6 +8729,13 @@ button svg,
 .setting-row.proxy-url-row .proxy-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Manual-address-only proxy fields hide in "system proxy" mode (the app
+   resolves the OS proxy transparently). .setting-row is display:flex, so the
+   native [hidden] attribute would be overridden — toggle the class instead. */
+.setting-row.proxy-manual-field.hidden {
+  display: none;
 }
 
 /* ── Custom providers (user-defined / Ollama preset) ── */

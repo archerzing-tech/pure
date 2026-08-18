@@ -18,11 +18,7 @@ fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> R
         // is exactly why it succeeds through such proxies where the h2 client
         // fails.
         .http1_only();
-    if let Some(url) = proxy_url.map(str::trim).filter(|url| !url.is_empty()) {
-        // The WebView passes the proxy URL with the username embedded but the
-        // password resolved here from ~/.pure/secrets.json (never via
-        // localStorage). resolve_proxy_auth fills the missing password in.
-        let url = resolve_proxy_auth(url);
+    if let Some(url) = effective_proxy_url(proxy_url.unwrap_or("")) {
         if !valid_proxy_url(&url) {
             return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
         }
@@ -32,9 +28,105 @@ fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> R
     builder.build().map_err(|e| format!("client: {}", e))
 }
 
+/// The sentinel the WebView sends in "system proxy" mode (mirrors
+/// SYSTEM_PROXY_MARKER on the TS side). It is resolved here at request time
+/// and must never be treated as a real URL.
+const SYSTEM_PROXY_MARKER: &str = "system://";
+
+/// Resolve a WebView proxy spec into a concrete, auth-injected proxy URL, or
+/// None for direct. Empty → None (reqwest / child processes then fall back to
+/// the standard proxy env vars automatically). `system://` → the OS system
+/// proxy (macOS scutil / Windows registry), or None when unset. Anything else
+/// → the literal manual URL. Auth injection reuses resolve_proxy_auth so a
+/// manual username/password still applies; the OS proxy URL carries no
+/// username, so it passes through untouched.
+fn effective_proxy_url(spec: &str) -> Option<String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    let resolved = if spec == SYSTEM_PROXY_MARKER {
+        resolve_system_proxy_url()?
+    } else {
+        spec.to_string()
+    };
+    Some(resolve_proxy_auth(&resolved))
+}
+
+/// Read the OS system proxy (macOS `scutil --proxy` / Windows WinINET registry)
+/// as a `scheme://host:port` URL. Env-var proxies are intentionally NOT read
+/// here: reqwest already honors HTTP(S)_PROXY/NO_PROXY when no explicit proxy
+/// is configured, so returning None lets those apply naturally.
+fn resolve_system_proxy_url() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let os = detect_macos_proxy();
+    #[cfg(target_os = "windows")]
+    let os = detect_windows_proxy();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let os: Option<(String, String, String, &'static str)> = None;
+    let (scheme, host, port, _) = os?;
+    Some(if port.is_empty() {
+        format!("{scheme}{host}")
+    } else {
+        format!("{scheme}{host}:{port}")
+    })
+}
+
 fn valid_proxy_url(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
     ["http://", "https://", "socks5://", "socks5h://"].iter().any(|prefix| lower.starts_with(prefix))
+}
+
+/// Shared cookie jar for the HTML search backends. Reusing session cookies
+/// (Baidu's BAIDUID, Bing's MUID, Sogou's SUV, …) across searches within the
+/// process is the single cheapest captcha-avoidance lever there is: a fresh
+/// cookie-less client trips anti-bot challenges on the very first request,
+/// which is exactly how "经常搜不到" happens. The jar is process-global and
+/// intentionally carries no credentials (proxy auth lives in the secrets
+/// store, never in cookies).
+static SEARCH_COOKIE_JAR: std::sync::OnceLock<Arc<reqwest::cookie::Jar>> = std::sync::OnceLock::new();
+
+fn search_cookie_jar() -> &'static Arc<reqwest::cookie::Jar> {
+    SEARCH_COOKIE_JAR.get_or_init(|| Arc::new(reqwest::cookie::Jar::default()))
+}
+
+/// Lazily warmed-up flag: the first Baidu search first fetches the homepage so
+/// the shared jar picks up a BAIDUID cookie before the real query — Baidu
+/// serves a captcha page to cookie-less clients and the warm-up is the
+/// documented workaround. Best-effort (a failed warm-up just means the search
+/// may hit the captcha and degrade to the next backend).
+static BAIDU_WARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+async fn ensure_baidu_cookies(proxy_url: Option<&str>) {
+    if BAIDU_WARMED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if let Ok(client) = build_search_client(std::time::Duration::from_secs(4), proxy_url) {
+        let _ = client
+            .get("https://www.baidu.com/")
+            .header("User-Agent", BROWSER_UA)
+            .send()
+            .await;
+    }
+}
+
+/// Search-specific HTTP client: same HTTP/1.1 + proxy handling as
+/// build_http_client, plus the shared cookie jar so session cookies persist
+/// across searches (see SEARCH_COOKIE_JAR). API backends (Serper/Tavily/
+/// SearXNG) don't need cookies and keep using build_http_client.
+fn build_search_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .http1_only()
+        .cookie_provider(search_cookie_jar().clone());
+    if let Some(url) = effective_proxy_url(proxy_url.unwrap_or("")) {
+        if !valid_proxy_url(&url) {
+            return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
+        }
+        let proxy = reqwest::Proxy::all(&url).map_err(|e| format!("proxy: {}", e))?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|e| format!("client: {}", e))
 }
 
 /// Rust secret slot holding the proxy password (desktop only). The username
@@ -452,7 +544,10 @@ fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
     let canonical_existing =
         fs::canonicalize(&existing).map_err(|e| format!("resolve '{}': {}", path, e))?;
     if !canonical_existing.starts_with(&base_canonical) {
-        return Err(format!("path escapes workspace: {}", path));
+        return Err(format!(
+            "path escapes workspace '{}': {} — 文件工具只能访问所选工作区内的路径。如果目标在其它目录（如 D:\\tmp），请在设置（Settings → Tools → Workspace）中把工作区切换到该目录，或把文件复制进当前工作区。",
+            workspace, path
+        ));
     }
 
     let mut resolved = canonical_existing;
@@ -522,7 +617,29 @@ fn normalize_lexical(path: &std::path::Path) -> Result<PathBuf, ()> {
 #[tauri::command]
 fn read_file(workspace: String, path: String) -> Result<String, String> {
     let full = resolve(&workspace, &path)?;
-    fs::read_to_string(&full).map_err(|e| format!("read_file: {}", e))
+    let meta = fs::metadata(&full).map_err(|e| format!("read_file: {}", e))?;
+    if meta.is_dir() {
+        return Err(format!(
+            "read_file: '{}' 是目录，不是文件——请用 list_files 查看目录内容，或补全到具体文件名。",
+            path
+        ));
+    }
+    if meta.len() > MAX_READ_BYTES {
+        return Err(format!(
+            "read_file: 文件 {}MB 超过读取上限 64MB；可以改用 search_files 搜索其中的内容，或用 execute_command 分段读取。",
+            meta.len() / 1024 / 1024
+        ));
+    }
+    let bytes = fs::read(&full).map_err(|e| format!("read_file: {}", e))?;
+    let (text, note) = extract_file_text(&bytes, &full);
+    let text = text.trim().to_string();
+    if text.is_empty() && !note.is_empty() {
+        return Err(format!("read_file: '{}' — {}", path, note));
+    }
+    if text.is_empty() {
+        return Ok("(empty file)".to_string());
+    }
+    Ok(text)
 }
 
 #[tauri::command]
@@ -713,6 +830,53 @@ fn edit_file(
     ))
 }
 
+/// Search one file's extracted text for the pattern (literal, optionally
+/// case-insensitive). Returns (matches, skipped_reason) — the reason is Some
+/// when the file could not be read as text at all.
+fn search_one_file(
+    entry_path: &std::path::Path,
+    search_dir: &std::path::Path,
+    needle: &str,
+    ignore_case: bool,
+    max: usize,
+) -> (Vec<String>, Option<String>) {
+    let Ok(meta) = fs::metadata(entry_path) else {
+        return (Vec::new(), Some("无法读取文件信息".to_string()));
+    };
+    if !meta.is_file() {
+        return (Vec::new(), None);
+    }
+    if meta.len() > MAX_SEARCH_FILE_BYTES {
+        return (
+            Vec::new(),
+            Some(format!("文件 {:.1}MB 超过搜索上限 32MB", meta.len() as f64 / 1024.0 / 1024.0)),
+        );
+    }
+    let Ok(bytes) = fs::read(entry_path) else {
+        return (Vec::new(), Some("无法读取文件".to_string()));
+    };
+    let (text, note) = extract_file_text(&bytes, entry_path);
+    if text.is_empty() && !note.is_empty() {
+        return (Vec::new(), Some(note));
+    }
+    let rel_path = entry_path
+        .strip_prefix(search_dir)
+        .unwrap_or(entry_path)
+        .to_string_lossy()
+        .to_string();
+    let mut matches: Vec<String> = Vec::new();
+    for (line_no, line) in text.lines().enumerate() {
+        if matches.len() >= max {
+            break;
+        }
+        let hay = if ignore_case { line.to_lowercase() } else { line.to_string() };
+        if hay.contains(needle) {
+            matches.push(format!("{}:{}: {}", rel_path, line_no + 1, line.trim()));
+        }
+    }
+    (matches, None)
+}
+
 #[tauri::command]
 fn search_files(
     workspace: String,
@@ -720,56 +884,87 @@ fn search_files(
     path: Option<String>,
     file_pattern: Option<String>,
     max_results: Option<usize>,
+    case_sensitive: Option<bool>,
 ) -> Result<String, String> {
     let search_dir = match &path {
-        Some(p) => resolve(&workspace, p)?,
-        None => resolve(&workspace, ".")?,
+        Some(p) if !p.trim().is_empty() => resolve(&workspace, p)?,
+        _ => resolve(&workspace, ".")?,
     };
-
-    let max = max_results.unwrap_or(50);
-    let glob_pattern = file_pattern.unwrap_or_else(|| "**/*".to_string());
-    let glob_pattern = format!("{}/{}", search_dir.to_string_lossy(), glob_pattern);
-
+    if !search_dir.exists() {
+        return Err(format!(
+            "search_files: '{}' 不存在。若这是 Windows 绝对路径，请确认工作区包含它（设置 → Tools → Workspace 选择该目录）。",
+            path.as_deref().unwrap_or(".")
+        ));
+    }
+    let max = max_results.unwrap_or(50).clamp(1, 500);
+    let ignore_case = !case_sensitive.unwrap_or(false);
+    let needle = if ignore_case {
+        pattern.to_lowercase()
+    } else {
+        pattern.clone()
+    };
     let mut results: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
 
-    for entry in glob::glob(&glob_pattern).map_err(|e| format!("glob: {}", e))? {
-        if results.len() >= max {
-            break;
+    // A `path` pointing at a single FILE searches that file directly — models
+    // often point search_files at the document they think contains the answer.
+    if search_dir.is_file() {
+        // Base = parent so the match lines carry the file name, not an empty
+        // relative path (strip_prefix against the file itself yields "").
+        let base = search_dir.parent().unwrap_or(&search_dir);
+        let (matches, reason) = search_one_file(&search_dir, base, &needle, ignore_case, max);
+        results.extend(matches);
+        if let Some(reason) = reason {
+            skipped.push(format!("{}（{}）", search_dir.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), reason));
         }
-        let entry_path = match entry {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if !entry_path.is_file() {
-            continue;
+    } else {
+        let mut glob_pattern = file_pattern.unwrap_or_else(|| "**/*".to_string());
+        // Models echo Windows paths (D:\tmp\*.docx) verbatim; on non-Windows
+        // platforms backslashes are literal filename characters, so normalize.
+        #[cfg(not(windows))]
+        {
+            glob_pattern = glob_pattern.replace('\\', "/");
         }
+        let glob_pattern = format!("{}/{}", search_dir.to_string_lossy(), glob_pattern);
 
-        let content = match fs::read_to_string(&entry_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let rel_path = entry_path
-            .strip_prefix(&search_dir)
-            .unwrap_or(&entry_path)
-            .to_string_lossy()
-            .to_string();
-
-        for (line_no, line) in content.lines().enumerate() {
+        for entry in glob::glob(&glob_pattern).map_err(|e| format!("glob: {}", e))? {
+            let entry_path = match entry {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
             if results.len() >= max {
                 break;
             }
-            if line.contains(&pattern) {
-                results.push(format!("{}:{}: {}", rel_path, line_no + 1, line.trim()));
+            let (matches, reason) = search_one_file(&entry_path, &search_dir, &needle, ignore_case, max);
+            if let Some(reason) = reason {
+                skipped.push(format!("{}（{}）", entry_path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), reason));
+                continue;
             }
+            if results.len() >= max {
+                break;
+            }
+            results.extend(matches);
         }
     }
 
-    if results.is_empty() {
-        Ok(format!("No matches found for \"{}\"", pattern))
+    let mut out = if results.is_empty() {
+        format!("No matches found for \"{}\"", pattern)
     } else {
-        Ok(results.join("\n"))
+        results.join("\n")
+    };
+    if !skipped.is_empty() {
+        let mut display: Vec<String> = skipped.iter().take(8).cloned().collect();
+        let more = skipped.len().saturating_sub(8);
+        if more > 0 {
+            display.push(format!("…等共 {} 个", skipped.len()));
+        }
+        out.push_str(&format!(
+            "\n\n[提示] {} 个文件无法解析文本内容（扫描版 PDF / 加密文档 / 旧版二进制 / 超大文件），已跳过：{}\n如需读取这些文件，请单独 read_file 它们查看具体原因。",
+            skipped.len(),
+            display.join("、")
+        ));
     }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -1005,8 +1200,14 @@ fn list_files(
     const DEFAULT_MAX_LIST_RESULTS: usize = 2000;
     const ABSOLUTE_MAX_LIST_RESULTS: usize = 5000;
     let dir = resolve(&workspace, &path)?;
+    if dir.is_file() {
+        return Err(format!(
+            "list_files: '{}' 是文件而不是目录——读取文件内容请用 read_file，按名字查找请用 glob_files。",
+            path
+        ));
+    }
     if !dir.is_dir() {
-        return Err(format!("Not a directory: {}", path));
+        return Err(format!("Not a directory: {}（路径不存在或不是目录）", path));
     }
 
     let max = max_results
@@ -1067,6 +1268,13 @@ fn glob_files(
         _ => resolve(&workspace, ".")?,
     };
 
+    // Models echo Windows paths (D:\tmp\**) verbatim; on non-Windows platforms
+    // backslashes are literal filename characters, so normalize.
+    let mut pattern = pattern;
+    #[cfg(not(windows))]
+    {
+        pattern = pattern.replace('\\', "/");
+    }
     let glob_pattern = format!("{}/{}", search_dir.to_string_lossy(), pattern);
     let max = max_results.unwrap_or(200);
 
@@ -1101,7 +1309,668 @@ fn glob_files(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Async Command Execution (non-blocking tokio version)
+//  Format-aware file text extraction
+//  ═══════════════════════════════════════════════════════════════════════════════
+//  read_file / search_files used to run bare fs::read_to_string: every non-UTF-8
+//  file (GBK-encoded txt on Chinese Windows, UTF-16 exports) errored, and binary
+//  formats (pdf / docx / xlsx) were either unreadable or silently skipped in
+//  search. This module extracts human-readable text from the common local
+//  formats so the model can actually read and search the user's files.
+
+/// Hard cap for read_file. A file above this gets an actionable error (search
+/// or a shell one-liner) instead of a multi-hundred-MB dump into the prompt.
+const MAX_READ_BYTES: u64 = 64 * 1024 * 1024;
+/// search_files skips files above this size (they would dominate the scan).
+const MAX_SEARCH_FILE_BYTES: u64 = 32 * 1024 * 1024;
+
+fn hex_digit(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 16,
+    }
+}
+
+/// Decode plain-text bytes with BOM detection and a CJK-friendly fallback
+/// chain: UTF-8 strict → GB18030 (covers GBK, the ANSI default on Chinese
+/// Windows) → Big5 → lossy Latin-1. encoding_rs decode never fails, so the
+/// GB18030 step effectively catches every legacy-CJK file.
+fn decode_text_bytes(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(&bytes[3..]).into_owned();
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let (cow, _, _) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
+        return cow.into_owned();
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let (cow, _, _) = encoding_rs::UTF_16BE.decode(&bytes[2..]);
+        return cow.into_owned();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    let (cow, used, had_errors) = encoding_rs::GB18030.decode(bytes);
+    if !had_errors || used == encoding_rs::GB18030 {
+        return cow.into_owned();
+    }
+    let (cow, _, _) = encoding_rs::BIG5.decode(bytes);
+    cow.into_owned()
+}
+
+/// Collect the text content inside every `<tag>…</tag>` element of an XML
+/// document (docx `<w:t>`, xlsx `<t>`, pptx `<a:t>`, odt `<text:p>`). Nested
+/// tags are flattened; XML entities are decoded; paragraphs joined with \n.
+fn xml_text_in_tag(xml: &str, tag: &str) -> String {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+    let mut reader = Reader::from_str(xml);
+    let mut out: Vec<String> = Vec::new();
+    let mut in_tag = false;
+    let mut depth = 0usize;
+    let mut pending = String::new();
+    let mut buf = Vec::new();
+    // quick-xml 0.38+ does NOT decode entities in the reader: `&amp;` arrives
+    // as its own Event::GeneralRef and splits the surrounding text into
+    // separate Text events. Accumulate fragments + refs verbatim and unescape
+    // once per tag close, or the entity is lost entirely.
+    let flush = |pending: &mut String, out: &mut Vec<String>| {
+        let raw = std::mem::take(pending);
+        let text = quick_xml::escape::unescape(&raw)
+            .map(|cow| cow.into_owned())
+            .unwrap_or(raw);
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_string());
+        }
+    };
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                if e.name().as_ref() == tag.as_bytes() {
+                    in_tag = true;
+                    depth = 1;
+                } else if in_tag {
+                    depth += 1;
+                }
+            }
+            Ok(Event::End(_)) => {
+                if in_tag {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        in_tag = false;
+                        flush(&mut pending, &mut out);
+                    }
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if in_tag {
+                    if let Ok(text) = t.decode() {
+                        pending.push_str(&text);
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if in_tag {
+                    // BytesRef carries only the entity NAME (`amp`, `#x1F`) —
+                    // delimiters stripped. Normalize to `&name;` so the
+                    // flush-time unescape can decode it.
+                    let mut name = String::from_utf8_lossy(&r).into_owned();
+                    if name.starts_with('&') {
+                        name.remove(0);
+                    }
+                    if name.ends_with(';') {
+                        name.pop();
+                    }
+                    pending.push('&');
+                    pending.push_str(&name);
+                    pending.push(';');
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    if in_tag {
+        flush(&mut pending, &mut out);
+    }
+    out.join("\n")
+}
+
+/// Extract text from a single named XML entry of a ZIP container (docx/xlsx).
+fn zip_entry_xml_text(bytes: &[u8], entry: &str, tag: &str) -> Option<String> {
+    use std::io::Read as _;
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor).ok()?;
+    let mut file = archive.by_name(entry).ok()?;
+    let mut xml = String::new();
+    file.read_to_string(&mut xml).ok()?;
+    Some(xml_text_in_tag(&xml, tag))
+}
+
+/// Extract text from every XML entry whose name matches `predicate` (pptx
+/// slides, odt content). Returns None when the archive or all entries fail.
+fn zip_entries_xml_text(bytes: &[u8], predicate: impl Fn(&str) -> bool, tag: &str) -> Option<String> {
+    use std::io::Read as _;
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor).ok()?;
+    let mut out = String::new();
+    let mut any = false;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).ok()?;
+        let name = file.name().to_string();
+        if !predicate(&name) {
+            continue;
+        }
+        let mut xml = String::new();
+        if file.read_to_string(&mut xml).is_err() {
+            continue;
+        }
+        let text = xml_text_in_tag(&xml, tag);
+        if !text.trim().is_empty() {
+            out.push_str(&text);
+            out.push('\n');
+            any = true;
+        }
+    }
+    if any {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Locate every `stream … endstream` body in a PDF byte buffer (raw scan —
+/// the lossy-string conversion would corrupt binary stream data).
+fn pdf_streams(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 6 <= bytes.len() {
+        if &bytes[i..i + 6] == b"stream" {
+            let mut j = i + 6;
+            if j < bytes.len() && bytes[j] == b'\r' {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'\n' {
+                j += 1;
+            }
+            let start = j;
+            if let Some(rel) = bytes[j..]
+                .windows(9)
+                .position(|w| w == b"endstream")
+            {
+                let mut end = j + rel;
+                while end > start && matches!(bytes[end - 1], b'\n' | b'\r') {
+                    end -= 1;
+                }
+                out.push(bytes[start..end].to_vec());
+                i = j + rel + 9;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Inflate a PDF stream: try zlib-wrapped first, then raw deflate (some
+/// producers skip the zlib header).
+fn inflate_pdf_stream(stream: &[u8]) -> Option<Vec<u8>> {
+    use flate2::read::{DeflateDecoder, ZlibDecoder};
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    if ZlibDecoder::new(stream).read_to_end(&mut out).is_ok() && !out.is_empty() {
+        return Some(out);
+    }
+    out.clear();
+    if DeflateDecoder::new(stream).read_to_end(&mut out).is_ok() && !out.is_empty() {
+        return Some(out);
+    }
+    None
+}
+
+fn is_ascii_text(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.iter().all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (0x20..=0x7E).contains(&b))
+}
+
+fn looks_like_pdf_content(text: &str) -> bool {
+    text.contains("Tj") || text.contains("TJ") || text.contains("BT") || text.contains("Tf")
+}
+
+fn hex_to_units(hex: &str) -> Vec<u16> {
+    let bytes: Vec<u8> = hex.as_bytes().to_vec();
+    let mut units = Vec::new();
+    let mut i = 0usize;
+    // Two hex chars = one byte; two bytes = one big-endian code unit (CID
+    // codes and UTF-16BE mappings are 2-byte units, e.g. <C4E3> → 0xC4E3).
+    // A trailing lone byte (odd count) becomes a unit on its own.
+    let mut pending: Option<u8> = None;
+    while i + 1 < bytes.len() {
+        let hi = hex_digit(bytes[i]);
+        let lo = hex_digit(bytes[i + 1]);
+        if hi < 16 && lo < 16 {
+            let byte = (hi << 4) | lo;
+            match pending.take() {
+                Some(first) => units.push(((first as u16) << 8) | byte as u16),
+                None => pending = Some(byte),
+            }
+        }
+        i += 2;
+    }
+    if let Some(b) = pending {
+        units.push(b as u16);
+    }
+    units
+}
+
+fn parse_pdf_cmap(data: &[u8]) -> BTreeMap<u16, Vec<u16>> {
+    let text = String::from_utf8_lossy(data);
+    let mut map: BTreeMap<u16, Vec<u16>> = BTreeMap::new();
+    let re_bfchar = regex::Regex::new(r"(?s)beginbfchar(.*?)endbfchar").unwrap();
+    for caps in re_bfchar.captures_iter(&text) {
+        let pair = regex::Regex::new(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>").unwrap();
+        for m in pair.captures_iter(&caps[1]) {
+            if let Some(src) = hex_to_units(&m[1]).first().copied() {
+                map.insert(src, hex_to_units(&m[2]));
+            }
+        }
+    }
+    let re_bfrange = regex::Regex::new(r"(?s)beginbfrange(.*?)endbfrange").unwrap();
+    let range = regex::Regex::new(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(?:<([0-9A-Fa-f]+)>|\[([^\]]*)\])").unwrap();
+    for caps in re_bfrange.captures_iter(&text) {
+        for m in range.captures_iter(&caps[1]) {
+            let Some(lo) = hex_to_units(&m[1]).first().copied() else { continue };
+            let Some(hi) = hex_to_units(&m[2]).first().copied() else { continue };
+            if let Some(single) = m.get(3) {
+                let mut dst = hex_to_units(single.as_str());
+                let mut code = lo;
+                while code <= hi {
+                    map.insert(code, dst.clone());
+                    // dst increments as a big-endian number for the next code
+                    for unit in dst.iter_mut().rev() {
+                        let next = unit.wrapping_add(1);
+                        *unit = next;
+                        if next != 0 {
+                            break;
+                        }
+                    }
+                    code = code.wrapping_add(1);
+                }
+            } else if let Some(arr) = m.get(4) {
+                let list = regex::Regex::new(r"<([0-9A-Fa-f]+)>").unwrap();
+                for (k, item) in list.captures_iter(arr.as_str()).enumerate() {
+                    let code = lo.wrapping_add(k as u16);
+                    if code <= hi {
+                        map.insert(code, hex_to_units(&item[1]));
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Read one PDF string starting at `i` (`(` literal or `<` hex). Returns the
+/// decoded text and the index just past the closing delimiter.
+fn read_pdf_string(bytes: &[u8], i: usize, cmaps: &[BTreeMap<u16, Vec<u16>>]) -> (String, usize) {
+    if bytes[i] == b'(' {
+        let mut out = Vec::new();
+        let mut j = i + 1;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'\\' => {
+                    j += 1;
+                    if j >= bytes.len() {
+                        break;
+                    }
+                    match bytes[j] {
+                        b'n' => out.push(b'\n'),
+                        b'r' => out.push(b'\r'),
+                        b't' => out.push(b'\t'),
+                        b'b' => out.push(8),
+                        b'f' => out.push(12),
+                        b'0'..=b'7' => {
+                            let mut octal = 0u32;
+                            for _ in 0..3 {
+                                if j < bytes.len() && (b'0'..=b'7').contains(&bytes[j]) {
+                                    octal = octal * 8 + (bytes[j] - b'0') as u32;
+                                    j += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            out.push(octal as u8);
+                            j -= 1;
+                        }
+                        other => out.push(other),
+                    }
+                    j += 1;
+                }
+                b')' => return (String::from_utf8_lossy(&out).into_owned(), j + 1),
+                other => {
+                    out.push(other);
+                    j += 1;
+                }
+            }
+        }
+        return (String::from_utf8_lossy(&out).into_owned(), j);
+    }
+    // hex string <…> — codes map through the document's ToUnicode CMaps
+    let close = bytes[i..]
+        .iter()
+        .position(|&b| b == b'>')
+        .map(|rel| i + rel)
+        .unwrap_or(bytes.len());
+    let hex = String::from_utf8_lossy(&bytes[i + 1..close]);
+    let units = hex_to_units(&hex);
+    let mut out = String::new();
+    let mut k = 0usize;
+    while k < units.len() {
+        let code = units[k];
+        if let Some(mapped) = cmaps.iter().find_map(|cmap| cmap.get(&code)) {
+            if mapped.len() >= 2 && (0xD800..=0xDBFF).contains(&mapped[0]) && (0xDC00..=0xDFFF).contains(&mapped[1]) {
+                let cp = 0x10000 + (((mapped[0] - 0xD800) as u32) << 10) + (mapped[1] - 0xDC00) as u32;
+                out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                k += 2;
+                continue;
+            }
+            for &u in mapped {
+                out.push(char::from_u32(u as u32).unwrap_or('\u{FFFD}'));
+            }
+            k += 1;
+            continue;
+        }
+        if code < 256 {
+            out.push(code as u8 as char);
+        }
+        k += 1;
+    }
+    (out, close + 1)
+}
+
+/// Extract the text of one PDF content stream: literal `(…)` and hex `<…>`
+/// strings, TJ arrays, with newlines at positioning operators (Td/TD/T*/Tm)
+/// and block boundaries (BT/ET).
+fn pdf_content_text(content: &[u8], cmaps: &[BTreeMap<u16, Vec<u16>>]) -> String {
+    let mut out = String::new();
+    let mut line = String::new();
+    let flush = |line: &mut String, out: &mut String| {
+        if !line.is_empty() {
+            out.push_str(line);
+            out.push('\n');
+            line.clear();
+        }
+    };
+    let mut i = 0usize;
+    let n = content.len();
+    while i < n {
+        let b = content[i];
+        match b {
+            b'(' | b'<' => {
+                let (text, next) = read_pdf_string(content, i, cmaps);
+                line.push_str(&text);
+                i = next;
+            }
+            b'[' => {
+                // TJ array: strings (and kerning numbers) until the closing ]
+                i += 1;
+                while i < n && content[i] != b']' {
+                    if content[i] == b'(' || content[i] == b'<' {
+                        let (text, next) = read_pdf_string(content, i, cmaps);
+                        line.push_str(&text);
+                        i = next;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if i < n {
+                    i += 1;
+                }
+            }
+            b'A'..=b'Z' | b'a'..=b'z' => {
+                let start = i;
+                while i < n && content[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                let op = &content[start..i];
+                // positioning operators end the current visual line
+                if matches!(op, b"Tj" | b"TJ" | b"Td" | b"TD" | b"T*" | b"Tm" | b"TL" | b"BT" | b"ET" | b"'" | b"\"") {
+                    flush(&mut line, &mut out);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    flush(&mut line, &mut out);
+    out
+}
+
+/// Best-effort PDF text extraction. Collects streams, separates ToUnicode
+/// CMaps from content streams, inflates both, and extracts strings (CID fonts
+/// resolve through the CMaps — the usual way Chinese PDFs encode text).
+/// Returns (text, note) where note is only set when nothing usable was found.
+fn pdf_extract_text(bytes: &[u8]) -> (String, String) {
+    let streams = pdf_streams(bytes);
+    let mut cmaps: Vec<BTreeMap<u16, Vec<u16>>> = Vec::new();
+    let mut contents: Vec<Vec<u8>> = Vec::new();
+    for raw in &streams {
+        let inflated = inflate_pdf_stream(raw).filter(|data| !data.is_empty()).or_else(|| {
+            if is_ascii_text(raw) {
+                Some(raw.clone())
+            } else {
+                None
+            }
+        });
+        let Some(data) = inflated else { continue };
+        let text = String::from_utf8_lossy(&data);
+        if text.contains("beginbfchar") || text.contains("beginbfrange") {
+            cmaps.push(parse_pdf_cmap(&data));
+        } else if looks_like_pdf_content(&text) {
+            contents.push(data);
+        }
+    }
+    let mut extracted = String::new();
+    for content in &contents {
+        extracted.push_str(&pdf_content_text(content, &cmaps));
+    }
+    let text = extracted.trim().to_string();
+    if text.is_empty() {
+        (
+            String::new(),
+            "PDF 未提取到文本：可能是扫描/图片型 PDF（无文本层），或使用了无法解析的字体编码。可尝试用 OCR 工具，或把 PDF 转成文本/图片后再读取。".to_string(),
+        )
+    } else {
+        (text, String::new())
+    }
+}
+
+/// Extract readable text from RTF (Chinese WordPad/WPS RTF escapes text as
+/// `\'hh` GBK bytes; newer files use `\uN` unicode escapes — both handled).
+fn rtf_extract_text(bytes: &[u8]) -> String {
+    let mut ansi_bytes: Vec<u8> = Vec::new();
+    let mut unicode: String = String::new();
+    let mut is_gbk = false;
+    let mut i = 0usize;
+    let n = bytes.len();
+    while i < n {
+        match bytes[i] {
+            b'\\' => {
+                i += 1;
+                if i >= n {
+                    break;
+                }
+                if bytes[i] == b'\'' {
+                    i += 1;
+                    if i + 1 < n {
+                        let hi = hex_digit(bytes[i]);
+                        let lo = hex_digit(bytes[i + 1]);
+                        if hi < 16 && lo < 16 {
+                            ansi_bytes.push(hi * 16 + lo);
+                        }
+                        i += 2;
+                    }
+                } else if bytes[i] == b'u' {
+                    i += 1;
+                    let mut sign = 1i64;
+                    if i < n && bytes[i] == b'-' {
+                        sign = -1;
+                        i += 1;
+                    }
+                    let mut num = 0i64;
+                    while i < n && bytes[i].is_ascii_digit() {
+                        num = num * 10 + (bytes[i] - b'0') as i64;
+                        i += 1;
+                    }
+                    let mut cp = num * sign;
+                    if cp < 0 {
+                        cp += 65536;
+                    }
+                    if let Some(c) = char::from_u32(cp as u32) {
+                        unicode.push(c);
+                    }
+                    // `\uN?` — the single ANSI fallback char follows; skip it
+                    if i < n && bytes[i] != b'\\' {
+                        i += 1;
+                    }
+                } else {
+                    let start = i;
+                    while i < n && bytes[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                    let word = &bytes[start..i];
+                    let mut arg = 0i64;
+                    if i < n && bytes[i] == b'-' {
+                        i += 1;
+                    }
+                    while i < n && bytes[i].is_ascii_digit() {
+                        arg = arg * 10 + (bytes[i] - b'0') as i64;
+                        i += 1;
+                    }
+                    if word == b"ansicpg" && arg == 936 {
+                        is_gbk = true;
+                    }
+                    // delimiter space is part of the control word
+                    if i < n && bytes[i] == b' ' {
+                        i += 1;
+                    }
+                }
+            }
+            b'{' | b'}' | b'\r' => i += 1,
+            _ => {
+                ansi_bytes.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    let mut decoded = if is_gbk || std::str::from_utf8(&ansi_bytes).is_err() {
+        let (cow, _, _) = encoding_rs::GB18030.decode(&ansi_bytes);
+        cow.into_owned()
+    } else {
+        String::from_utf8_lossy(&ansi_bytes).into_owned()
+    };
+    if !unicode.is_empty() {
+        if !decoded.trim().is_empty() {
+            decoded.push('\n');
+        }
+        decoded.push_str(&unicode);
+    }
+    decoded.trim().to_string()
+}
+
+/// True when the bytes are a NUL-heavy or mostly non-printable blob (i.e. a
+/// binary file rather than any text encoding).
+fn looks_binary(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let sample_len = bytes.len().min(8192);
+    let sample = &bytes[..sample_len];
+    if sample.contains(&0) {
+        return true;
+    }
+    let printable = sample
+        .iter()
+        .filter(|&&b| b == b'\n' || b == b'\r' || b == b'\t' || (0x20..=0x7E).contains(&b) || b >= 0x80)
+        .count();
+    printable * 10 < sample_len * 9
+}
+
+fn describe_binary(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG") {
+        "PNG 图片"
+    } else if bytes.starts_with(b"\xFF\xD8") {
+        "JPEG 图片"
+    } else if bytes.starts_with(b"GIF8") {
+        "GIF 图片"
+    } else if bytes.starts_with(b"\x89JFIF") || bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        "TIFF 图片"
+    } else if bytes.starts_with(b"\x1F\x8B") {
+        "GZIP 压缩文件"
+    } else if bytes.starts_with(b"7z\xBC\xAF\x27\x1C") {
+        "7z 压缩文件"
+    } else if bytes.starts_with(b"Rar!") {
+        "RAR 压缩文件"
+    } else if bytes.starts_with(b"\x00\x00\x01\x00") {
+        "ICO 图片"
+    } else if bytes.starts_with(b"\x25\x50\x44\x46") {
+        "PDF"
+    } else if bytes.starts_with(b"PK") {
+        "ZIP 压缩包（可能是 .docx/.xlsx 或普通压缩文件）"
+    } else if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+        "OLE2 复合文档（旧版 .doc/.xls）"
+    } else {
+        "未知二进制文件"
+    }
+}
+
+/// The main dispatcher: turn a local file's bytes into readable text.
+/// Returns (text, note) — note is ONLY set when nothing usable was extracted
+/// and carries an actionable hint (conversion suggestion / OCR advice) instead
+/// of the old bare UTF-8 error.
+fn extract_file_text(bytes: &[u8], path: &std::path::Path) -> (String, String) {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    // ZIP-based office formats (docx / xlsx / pptx / odt…)
+    if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
+        let (text, note): (Option<String>, String) = match ext.as_str() {
+            "docx" | "docm" => (zip_entry_xml_text(bytes, "word/document.xml", "w:t"), String::new()),
+            "xlsx" | "xlsm" => (zip_entry_xml_text(bytes, "xl/sharedStrings.xml", "t"), String::new()),
+            "pptx" | "pptm" => (zip_entries_xml_text(bytes, |name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"), "a:t"), String::new()),
+            "odt" | "ods" | "odp" => (zip_entries_xml_text(bytes, |name| name == "content.xml", "text:p"), String::new()),
+            _ => (None, format!("文件扩展名 .{} 不是支持的文档格式（支持 docx/xlsx/pptx/odt/ods/odp）。", ext)),
+        };
+        match text {
+            Some(t) if !t.trim().is_empty() => return (t, String::new()),
+            Some(_) => return (String::new(), format!("{} 未提取到文本内容（文档可能为空或内容为图片）。", ext.to_uppercase())),
+            None => return (String::new(), note),
+        }
+    }
+    // PDF
+    if bytes.starts_with(b"%PDF") {
+        return pdf_extract_text(bytes);
+    }
+    // RTF
+    if bytes.starts_with(b"{\\rtf") {
+        return (rtf_extract_text(bytes), String::new());
+    }
+    // OLE2 compound documents (.doc / .xls) — not directly parseable
+    if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+        let name = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        return (
+            String::new(),
+            format!("{} 是旧版二进制文档（.doc/.xls），无法直接解析文本。请用 Word/WPS 另存为 .docx/.xlsx/.txt，或执行转换命令（例如 soffice --headless --convert-to txt \"{}\"）。", name, name),
+        );
+    }
+    // Everything else: text with encoding detection, or a clear binary note
+    if looks_binary(bytes) {
+        return (String::new(), format!("二进制文件（{}），不是文本文件，无法读取内容。", describe_binary(bytes)));
+    }
+    (decode_text_bytes(bytes), String::new())
+}
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Execute a shell command and return all output at once.
@@ -1123,8 +1992,7 @@ async fn execute_command(workspace: String, command: String, proxy_url: Option<S
         cmd.arg("/C");
         cmd.arg(&command)
             .current_dir(&workspace);
-        if let Some(url) = proxy_url.as_deref().filter(|url| !url.trim().is_empty()) {
-            let resolved = resolve_proxy_auth(url);
+        if let Some(resolved) = effective_proxy_url(proxy_url.as_deref().unwrap_or("")) {
             if !valid_proxy_url(&resolved) {
                 return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
             }
@@ -1188,8 +2056,7 @@ fn spawn_shell_command(workspace: &str, command: &str, proxy_url: Option<&str>) 
     {
         cmd.process_group(0);
     }
-    if let Some(url) = proxy_url.filter(|url| !url.trim().is_empty()) {
-        let resolved = resolve_proxy_auth(url);
+    if let Some(resolved) = effective_proxy_url(proxy_url.unwrap_or("")) {
         if !valid_proxy_url(&resolved) {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "proxy URL must start with http://, https://, socks5://, or socks5h://"));
         }
@@ -1589,7 +2456,10 @@ fn is_utf8_family_label(label: &str) -> bool {
 }
 
 async fn fetch_search_page(url: &str, proxy_url: Option<&str>) -> Result<String, String> {
-    let client = build_http_client(std::time::Duration::from_secs(8), proxy_url)?;
+    // Search pages go through the cookie-jar client: session cookies from
+    // earlier searches (or the Baidu warm-up) ride along, which is what keeps
+    // anti-bot challenges at bay.
+    let client = build_search_client(std::time::Duration::from_secs(8), proxy_url)?;
     let resp = client
         .get(url)
         .header("User-Agent", BROWSER_UA)
@@ -1610,10 +2480,14 @@ async fn search_backend_duckduckgo(query: &str, max: usize, proxy_url: Option<&s
 }
 
 async fn search_backend_bing(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    // CJK queries pin the market to zh-CN so the international Bing serves
+    // Chinese results instead of its English-biased block page.
+    let mkt = if is_chinese_query(query) { "&mkt=zh-CN&setlang=zh-hans" } else { "" };
     let url = format!(
-        "https://www.bing.com/search?q={}&count={}",
+        "https://www.bing.com/search?q={}&count={}{}",
         urlencoding(query),
-        max
+        max,
+        mkt
     );
     let html = fetch_search_page(&url, proxy_url).await?;
     Ok(parse_bing_results(&html, max))
@@ -1645,6 +2519,164 @@ async fn search_backend_bing_cn(query: &str, max: usize, proxy_url: Option<&str>
     Ok(parse_bing_results(&html, max))
 }
 
+/// Sogou — the only major Chinese engine that reliably returns relevant
+/// results without a captcha (it is the CLI's CJK workhorse; the desktop GUI
+/// previously lacked it entirely). CJK-only.
+async fn search_backend_sogou(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    let url = format!(
+        "https://www.sogou.com/web?query={}",
+        urlencoding(query)
+    );
+    let html = fetch_search_page(&url, proxy_url).await?;
+    Ok(parse_sogou_results(&html, max))
+}
+
+/// 360 Search (so.com) — China-native, no captcha for low volume, parseable
+/// res-list markup. CJK-only.
+async fn search_backend_so360(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    let url = format!("https://www.so.com/s?q={}", urlencoding(query));
+    let html = fetch_search_page(&url, proxy_url).await?;
+    Ok(parse_so360_results(&html, max))
+}
+
+/// Baidu — the dominant Chinese engine. Captcha-prone (especially for
+/// cookie-less or foreign clients), so the first search warms up a BAIDUID
+/// cookie and any captcha page simply yields empty results → next backend.
+/// CJK-only.
+async fn search_backend_baidu(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    ensure_baidu_cookies(proxy_url).await;
+    let url = format!("https://www.baidu.com/s?wd={}&ie=utf-8", urlencoding(query));
+    let html = fetch_search_page(&url, proxy_url).await?;
+    Ok(parse_baidu_results(&html, max))
+}
+
+/// Brave Search — free HTML, no API key, works globally (block pages appear
+/// only at high volume). Non-CJK.
+async fn search_backend_brave(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    let url = format!(
+        "https://search.brave.com/search?q={}",
+        urlencoding(query)
+    );
+    let html = fetch_search_page(&url, proxy_url).await?;
+    Ok(parse_brave_results(&html, max))
+}
+
+/// Last-resort universal backend: Bing rendered through Jina Reader
+/// (`r.jina.ai`, free tier ~20 req/min, no key). Jina fetches Bing from its
+/// own infrastructure, so this works when every local engine is blocked or
+/// rate-limited (China / restrictive networks), as long as r.jina.ai itself
+/// is reachable. Used only after all other backends have failed, because it
+/// is rate-limited and slower. PURE_JINA_API_KEY (if set) raises the limits.
+async fn search_backend_jina_bing(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    let jina_key = std::env::var("PURE_JINA_API_KEY").ok().filter(|k| !k.is_empty());
+    let mut req = build_search_client(std::time::Duration::from_secs(15), proxy_url)?
+        .get(format!(
+            "https://r.jina.ai/https://www.bing.com/search?q={}",
+            urlencoding(query)
+        ))
+        .header("User-Agent", BROWSER_UA)
+        .header("X-Return-Format", "markdown")
+        .header("Accept", "text/plain");
+    if let Some(k) = jina_key {
+        req = req.header("Authorization", format!("Bearer {}", k));
+    }
+    let resp = req.send().await.map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let text = resp.text().await.map_err(|e| format!("read: {}", e))?;
+    Ok(parse_jina_markdown_results(&text, max))
+}
+
+/// SearXNG metasearch backend (intranet / self-hosted / power users): a JSON
+/// endpoint aggregates dozens of upstream engines and is the standard answer
+/// for corporate or offline networks where the public engines are blocked.
+/// Configured via the `searxng_url` arg (GUI Settings → Tools → Web Tools) or
+/// `SEARXNG_URL` (CLI). Tried right after the API backends, before scraping.
+async fn search_backend_searxng(
+    query: &str,
+    max: usize,
+    base_url: &str,
+    proxy_url: Option<&str>,
+) -> Result<Vec<SearchResult>, String> {
+    let client = build_http_client(std::time::Duration::from_secs(10), proxy_url)?;
+    let base = base_url.trim().trim_end_matches('/');
+    let url = format!("{}/search?q={}&format=json&safesearch=0", base, urlencoding(query));
+    let resp = client
+        .get(&url)
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("read: {}", e))?;
+    Ok(parse_searxng_results(&body, max))
+}
+
+fn parse_searxng_results(body: &serde_json::Value, max: usize) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    if let Some(results) = body.get("results").and_then(|v| v.as_array()) {
+        for item in results {
+            if out.len() >= max {
+                break;
+            }
+            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let snippet = item.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !title.is_empty() && !url.is_empty() {
+                out.push(SearchResult {
+                    title,
+                    snippet,
+                    url,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Strip search operators / quotes / punctuation for a lighter retry query.
+/// When every backend fails on a syntactically heavy query (quotes, colons,
+/// parens, site: filters), one normalized retry often succeeds — engines are
+/// picky about operators and punctuation, and the model shouldn't have to
+/// rephrase by hand. Returns None when nothing would change.
+fn normalize_query_for_retry(query: &str) -> Option<String> {
+    const REPLACE: [char; 22] = [
+        '"', '\'', '(', ')', '（', '）', '[', ']', '{', '}', ':', '|', '~', '!', '?', '，', '。', '？', '！', '、', '；', '：',
+    ];
+    // Operator words (site:/filetype:/…: ) are dropped on the RAW query
+    // before the colon replacement turns `site:foo` into two words — the
+    // operator filter must see the operator intact.
+    let filtered: Vec<&str> = query
+        .split_whitespace()
+        .filter(|w| {
+            let lower = w.to_lowercase();
+            !(lower.starts_with("site:")
+                || lower.starts_with("filetype:")
+                || lower.starts_with("inurl:")
+                || lower.starts_with("intitle:")
+                || lower.starts_with("intext:")
+                || lower.starts_with("lang:")
+                || lower.starts_with("before:")
+                || lower.starts_with("after:")
+                || lower.starts_with("define:"))
+        })
+        .collect();
+    let mut cleaned = filtered.join(" ");
+    for c in REPLACE {
+        cleaned = cleaned.replace(c, " ");
+    }
+    let joined = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined = joined.trim();
+    if joined.is_empty() || joined == query {
+        None
+    } else {
+        Some(joined.to_string())
+    }
+}
+
 /// Human-readable list of the configured search backends (API keys that were
 /// passed in plus the always-available free HTML backends) for the error /
 /// no-results guidance the model feeds back on.
@@ -1656,7 +2688,7 @@ fn configured_backend_names(serper_api_key: Option<&str>, api_key: Option<&str>)
     if api_key.map_or(false, |k| !k.is_empty()) {
         names.push("Tavily");
     }
-    names.extend(["cn.bing.com", "DuckDuckGo", "Bing"]);
+    names.extend(["Sogou", "cn.bing.com", "360", "Baidu", "DuckDuckGo", "Bing", "Brave"]);
     names.join(", ")
 }
 
@@ -1806,6 +2838,7 @@ async fn web_search_inner(
     serper_api_key: Option<&str>,
     location: Option<&str>,
     proxy_url: Option<&str>,
+    searxng_url: Option<&str>,
 ) -> Result<String, String> {
     let max = max_results.unwrap_or(10).min(20);
 
@@ -1862,65 +2895,58 @@ async fn web_search_inner(
         }
     }
 
+    // SearXNG metasearch backend (opt-in): intranet / self-hosted instances
+    // aggregate dozens of upstream engines behind one JSON endpoint — the
+    // standard answer for corporate or offline networks where every public
+    // engine is blocked. Tried right after the API backends, before scraping.
+    if results.is_empty() {
+        if let Some(base) = searxng_url.filter(|u| !u.trim().is_empty()) {
+            match search_backend_searxng(query, max, base, proxy_url).await {
+                Ok(r) if !r.is_empty() => results = r,
+                Ok(_) => any_empty = true,
+                Err(e) => failed.push(format!("SearXNG: {}", e)),
+            }
+        }
+    }
+
     // Free HTML backends — probed ONLY when the API backends produced nothing
-    // (a successful Serper hit no longer triggers three wasted scrapes), and
-    // then IN PARALLEL with first-success-returns. Each backend keeps its own
-    // bounded request timeout (8s via fetch_search_page), so the effective
-    // latency is the FIRST backend to deliver a non-empty result, not the
-    // slowest — the join!-style sweep this replaces still waited for every
-    // probe to finish (up to the worst-case timeout). cn.bing.com is biased
-    // to win ties for CJK (biased select checks branches in declaration
-    // order) and gets a short grace window (CN_BING_GRACE_MS) when another
-    // backend wins the race, because international backends return
-    // irrelevant results for Chinese; otherwise the first non-empty winner
-    // is used and the still-in-flight probes are dropped. Errors and empty
-    // sets are still accumulated for the degraded-error message below.
+    // (a successful Serper hit no longer triggers wasted scrapes), and then IN
+    // PARALLEL with first-success-returns (probe_html_backends). Each backend
+    // keeps its own bounded request timeout (8s via fetch_search_page), so the
+    // effective latency is the FIRST backend to deliver a non-empty result,
+    // not the slowest.
     if results.is_empty() {
         let chinese = is_chinese_query(query);
-        let mut cn = Box::pin(async {
-            if chinese {
-                search_backend_bing_cn(query, max, proxy_url).await
-            } else {
-                Err("cn.bing.com not probed for non-CJK queries".to_string())
-            }
-        });
-        let mut ddg = Box::pin(search_backend_duckduckgo(query, max, proxy_url));
-        let mut bing = Box::pin(search_backend_bing(query, max, proxy_url));
-        let (mut cn_done, mut ddg_done, mut bing_done) = (false, false, false);
-        while results.is_empty() {
-            // A completed branch is guarded off (never re-polled) so the loop
-            // keeps racing only the still-pending backends; when every branch
-            // is done or disabled the else arm breaks out. Non-CJK never
-            // consults cn.bing.com (guard false), so its synthetic error can't
-            // surface in the degraded-error message.
-            let winner = tokio::select! {
-                biased;
-                r = &mut cn, if chinese && !cn_done => { cn_done = true; ("cn.bing.com", r) }
-                r = &mut ddg, if !ddg_done => { ddg_done = true; ("DuckDuckGo", r) }
-                r = &mut bing, if !bing_done => { bing_done = true; ("Bing", r) }
-                else => break,
-            };
-            match winner {
-                (_, Ok(r)) if !r.is_empty() => {
-                    // CJK relevance guard: a fast-but-English-biased DDG/Bing
-                    // win must not preempt cn.bing.com, the Chinese-relevant
-                    // backend. When cn.bing.com is still in flight, grant it a
-                    // short grace window and only accept the race winner if
-                    // cn.bing.com times out or returns nothing usable.
-                    if chinese && !cn_done {
-                        let grace = tokio::time::timeout(CN_BING_GRACE_MS, &mut cn).await;
-                        cn_done = true;
-                        match grace {
-                            Ok(Ok(cn_r)) if !cn_r.is_empty() => results = cn_r,
-                            _ => results = r,
-                        }
-                    } else {
-                        results = r;
-                    }
-                }
-                (_, Ok(_)) => any_empty = true,
-                (name, Err(e)) => failed.push(format!("{}: {}", name, e)),
-            }
+        let (html_results, html_failed, html_empty) =
+            probe_html_backends(query, max, proxy_url, chinese).await;
+        results = html_results;
+        any_empty = any_empty || html_empty;
+        failed.extend(html_failed);
+    }
+
+    // One normalized retry: syntactically heavy queries (quotes, operators,
+    // Chinese punctuation) make engines fail or return nothing even when the
+    // intent is findable — strip the noise once and re-probe before giving up.
+    if results.is_empty() {
+        if let Some(simplified) = normalize_query_for_retry(query) {
+            let chinese = is_chinese_query(&simplified);
+            let (html_results, html_failed, html_empty) =
+                probe_html_backends(&simplified, max, proxy_url, chinese).await;
+            results = html_results;
+            any_empty = any_empty || html_empty;
+            failed.extend(html_failed);
+        }
+    }
+
+    // Last resort: Bing rendered through Jina Reader (r.jina.ai, free tier).
+    // Jina fetches Bing from its own infrastructure, so this works when every
+    // local engine is blocked / rate-limited (China, restrictive networks) as
+    // long as r.jina.ai is reachable. Slower + rate-limited, hence last.
+    if results.is_empty() {
+        match search_backend_jina_bing(query, max, proxy_url).await {
+            Ok(r) if !r.is_empty() => results = r,
+            Ok(_) => any_empty = true,
+            Err(e) => failed.push(format!("Bing via Jina: {}", e)),
         }
     }
 
@@ -1961,6 +2987,78 @@ async fn web_search_inner(
     Ok(joined)
 }
 
+/// Race the free HTML backends IN PARALLEL, first non-empty result wins. CJK
+/// queries probe the China-relevant engines (Sogou, cn.bing.com, 360, Baidu)
+/// plus the international ones as safety nets; non-CJK probes DuckDuckGo,
+/// Bing and Brave. When an international backend wins while a Chinese-relevant
+/// one is still in flight, the Chinese backend gets a short grace window
+/// (CN_BING_GRACE_MS) — international engines return irrelevant results for
+/// Chinese queries, and the point of the sweep is to hand the model results it
+/// can actually use, not the fastest English-biased set. Errors and empty sets
+/// are accumulated for the degraded-error message. Returns (results, failures,
+/// any_empty).
+async fn probe_html_backends(
+    query: &str,
+    max: usize,
+    proxy_url: Option<&str>,
+    chinese: bool,
+) -> (Vec<SearchResult>, Vec<String>, bool) {
+    use futures_util::stream::FuturesUnordered;
+    use futures_util::StreamExt;
+
+    let mut probes: Vec<(
+        String,
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<SearchResult>, String>> + Send>>,
+    )> = Vec::new();
+    if chinese {
+        probes.push(("Sogou".into(), Box::pin(search_backend_sogou(query, max, proxy_url))));
+        probes.push(("cn.bing.com".into(), Box::pin(search_backend_bing_cn(query, max, proxy_url))));
+        probes.push(("360".into(), Box::pin(search_backend_so360(query, max, proxy_url))));
+        probes.push(("Baidu".into(), Box::pin(search_backend_baidu(query, max, proxy_url))));
+        probes.push(("DuckDuckGo".into(), Box::pin(search_backend_duckduckgo(query, max, proxy_url))));
+        probes.push(("Bing".into(), Box::pin(search_backend_bing(query, max, proxy_url))));
+    } else {
+        probes.push(("DuckDuckGo".into(), Box::pin(search_backend_duckduckgo(query, max, proxy_url))));
+        probes.push(("Bing".into(), Box::pin(search_backend_bing(query, max, proxy_url))));
+        probes.push(("Brave".into(), Box::pin(search_backend_brave(query, max, proxy_url))));
+    }
+
+    let mut pending: FuturesUnordered<_> = probes
+        .into_iter()
+        .map(|(label, fut)| async move { (label, fut.await) })
+        .collect();
+    let mut failed: Vec<String> = Vec::new();
+    let mut any_empty = false;
+    while let Some((label, outcome)) = pending.next().await {
+        match outcome {
+            Ok(r) if !r.is_empty() => {
+                let chinese_relevant =
+                    matches!(label.as_str(), "Sogou" | "cn.bing.com" | "360" | "Baidu");
+                if chinese && !chinese_relevant && !pending.is_empty() {
+                    // An international backend won while Chinese engines are
+                    // still in flight: grant a short grace window so a
+                    // relevant result can preempt it.
+                    if let Ok(Some((cn_label, cn_outcome))) =
+                        tokio::time::timeout(CN_BING_GRACE_MS, pending.next()).await
+                    {
+                        if let Ok(cn_r) = cn_outcome {
+                            if !cn_r.is_empty()
+                                && matches!(cn_label.as_str(), "Sogou" | "cn.bing.com" | "360" | "Baidu")
+                            {
+                                return (cn_r, failed, any_empty);
+                            }
+                        }
+                    }
+                }
+                return (r, failed, any_empty);
+            }
+            Ok(_) => any_empty = true,
+            Err(e) => failed.push(format!("{}: {}", label, e)),
+        }
+    }
+    (Vec::new(), failed, any_empty)
+}
+
 #[tauri::command]
 async fn web_search(
     _workspace: String,
@@ -1970,6 +3068,7 @@ async fn web_search(
     serper_api_key: Option<String>,
     location: Option<String>,
     proxy_url: Option<String>,
+    searxng_url: Option<String>,
 ) -> Result<String, String> {
     web_search_inner(
         &query,
@@ -1978,6 +3077,7 @@ async fn web_search(
         serper_api_key.as_deref(),
         location.as_deref(),
         proxy_url.as_deref(),
+        searxng_url.as_deref(),
     )
     .await
 }
@@ -2208,6 +3308,430 @@ fn parse_bing_block(block: &str) -> Option<SearchResult> {
         snippet,
         url: html_decode(&url),
     })
+}
+
+/// Sogou results: `<h3 class="vr-title">` blocks with the anchor inside and
+/// the snippet container (`<p class="star-wiki">` / `.text-layout` / `.fz-mid`)
+/// right after `</h3>`. Mirrors NodeToolAdapter.ts `parseSogouResults` — the
+/// desktop GUI previously had NO Sogou backend at all (only the CLI did), so
+/// this closes the biggest China-coverage gap. Relative `/link?url=…` links
+/// are absolutized to https://www.sogou.com/… so the model can still web_fetch
+/// them.
+fn parse_sogou_results(html: &str, max: usize) -> Vec<SearchResult> {
+    let mut results: Vec<SearchResult> = Vec::new();
+    let mut pos = 0;
+    while results.len() < max {
+        let Some(rel_h3) = html[pos..].find("<h3") else {
+            break;
+        };
+        let h3 = pos + rel_h3;
+        // Block = this <h3> through the start of the next <h3> (or end of
+        // page): the anchor/title live inside the h3, while the snippet
+        // container sits right AFTER </h3>, before the next result block.
+        let after_h3 = h3 + 3;
+        let next = html[after_h3..].find("<h3").map(|i| after_h3 + i).unwrap_or(html.len());
+        let block = &html[h3..next];
+        if let Some(r) = parse_sogou_block(block) {
+            if !results.iter().any(|x| x.url == r.url || x.title == r.title) {
+                results.push(r);
+            }
+        }
+        pos = next;
+    }
+    results
+}
+
+fn parse_sogou_block(block: &str) -> Option<SearchResult> {
+    let a_idx = block.find("<a")?;
+    let mut url = extract_href(block, a_idx)?;
+    // Absolutize Sogou's relative redirect links (/link?url=…, //www.sogou.com/…).
+    if url.starts_with("//") {
+        url = format!("https:{}", url);
+    } else if url.starts_with('/') {
+        url = format!("https://www.sogou.com{}", url);
+    }
+
+    // Title: anchor text, stripped to </a> — Sogou bolds matched terms with
+    // <em> INSIDE the title text, so stripping to the first '<' would cut the
+    // title short; strip tags and keep everything up to </a>.
+    let after_a = &block[a_idx..];
+    let gt = after_a.find('>')?;
+    let after_gt = &after_a[gt + 1..];
+    let anchor_end = after_gt.find("</a>")?;
+    let title = html_decode(&strip_html_tags(&after_gt[..anchor_end])).trim().to_string();
+
+    // Snippet: star-wiki <p> first (organic results), else the fz-mid div
+    // (zhihu/other layouts). Both sit after the anchor inside the h3 block.
+    let region = &after_gt[anchor_end + "</a>".len()..];
+    let mut snippet = String::new();
+    if let Some(star) = region.find("<p class=\"star-wiki") {
+        if let Some(gt) = region[star..].find('>') {
+            let content = &region[star + gt + 1..];
+            if let Some(end) = content.find("</p>") {
+                snippet = content[..end].to_string();
+            }
+        }
+    } else if let Some(fz) = region.find("fz-mid") {
+        if let Some(gt) = region[fz..].find('>') {
+            let content = &region[fz + gt + 1..];
+            if let Some(end) = content.find("</div>") {
+                snippet = content[..end].to_string();
+            }
+        }
+    }
+    let snippet = html_decode(&strip_html_tags(&snippet)).trim().to_string();
+
+    if title.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some(SearchResult {
+        title,
+        snippet,
+        url: html_decode(&url),
+    })
+}
+
+/// 360 Search (so.com) results: `<li class="res-list">` blocks with a
+/// `<h3 class="res-title"><a data-mdurl="REAL_URL" href="…">TITLE</a></h3>`
+/// title and a `<p class="res-desc">` snippet. `data-mdurl` carries the real
+/// destination (the href is a /link?m=… redirect), so it wins; otherwise the
+/// href is absolutized.
+fn parse_so360_results(html: &str, max: usize) -> Vec<SearchResult> {
+    let mut results: Vec<SearchResult> = Vec::new();
+    let mut rest = html;
+    while results.len() < max {
+        let Some(idx) = rest.find("<li class=\"res-list") else {
+            break;
+        };
+        let tail = &rest[idx..];
+        let next = tail["<li class=\"res-list".len()..].find("<li class=\"res-list");
+        let (block, consumed) = match next {
+            Some(rel) => (&tail[.."<li class=\"res-list".len() + rel], "<li class=\"res-list".len() + rel),
+            None => (tail, tail.len()),
+        };
+        if let Some(r) = parse_so360_block(block) {
+            results.push(r);
+        }
+        rest = &rest[idx + consumed..];
+    }
+    results
+}
+
+fn parse_so360_block(block: &str) -> Option<SearchResult> {
+    // Title + URL: the first <a> after res-title.
+    let title_start = block.find("res-title")?;
+    let a_idx = block[title_start..].find("<a")? + title_start;
+    let raw_href = extract_href(block, a_idx)?;
+    // data-mdurl holds the real URL when present (modern markup); else the
+    // href is a /link?m=… redirect we absolutize.
+    let url = if let Some(md) = extract_attr(block, "data-mdurl") {
+        md
+    } else if raw_href.starts_with("//") {
+        format!("https:{}", raw_href)
+    } else if raw_href.starts_with('/') {
+        format!("https://www.so.com{}", raw_href)
+    } else {
+        raw_href
+    };
+
+    let after_a = &block[a_idx..];
+    let gt = after_a.find('>')?;
+    let after_gt = &after_a[gt + 1..];
+    let anchor_end = after_gt.find("</a>")?;
+    let title = html_decode(&strip_html_tags(&after_gt[..anchor_end])).trim().to_string();
+
+    // Snippet: <p class="res-desc">…</p> (organic) — the span inside is
+    // stripped too. res-desc IS the <p> tag's class, so the content starts at
+    // the tag's '>' after the class name.
+    let mut snippet = String::new();
+    if let Some(d) = block.find("res-desc") {
+        let after_d = &block[d..];
+        if let Some(gt) = after_d.find('>') {
+            let content = &after_d[gt + 1..];
+            if let Some(end) = content.find("</p>") {
+                snippet = content[..end].to_string();
+            }
+        }
+    }
+    let snippet = html_decode(&strip_html_tags(&snippet)).trim().to_string();
+
+    if title.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some(SearchResult {
+        title,
+        snippet,
+        url: html_decode(&url),
+    })
+}
+
+/// Extract a bare attribute value (unquoted or double-quoted) from HTML, e.g.
+/// `data-mdurl="https://…"`. Used where `<a>` hrefs are redirect wrappers.
+fn extract_attr(block: &str, attr: &str) -> Option<String> {
+    let idx = block.find(attr)?;
+    let rest = &block[idx + attr.len()..];
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let quote = rest.chars().next()?;
+    let start = 1;
+    if quote == '"' || quote == '\'' {
+        let end = rest[start..].find(quote)?;
+        Some(rest[start..start + end].to_string())
+    } else {
+        let end = rest.find([' ', '>']).unwrap_or(rest.len());
+        Some(rest[..end].to_string())
+    }
+}
+
+/// Baidu results (best-effort — Baidu serves a captcha to cookie-less or
+/// foreign clients, so this backend degrades gracefully to the next one).
+/// Blocks are `<div class="result c-container …">`; title from
+/// `<h3 class="t"><a href="…">TITLE</a></h3>` (or the `data-tools` JSON on
+/// some blocks), snippet from `.content-right_…` / `.c-abstract` / `.c-span-last`.
+fn parse_baidu_results(html: &str, max: usize) -> Vec<SearchResult> {
+    let mut results: Vec<SearchResult> = Vec::new();
+    let mut rest = html;
+    while results.len() < max {
+        let Some(idx) = rest.find("class=\"result c-container") else {
+            break;
+        };
+        let tail = &rest[idx..];
+        let next = tail["class=\"result c-container".len()..].find("class=\"result c-container");
+        let (block, consumed) = match next {
+            Some(rel) => {
+                let end = "class=\"result c-container".len() + rel;
+                (&tail[..end], end)
+            }
+            None => (tail, tail.len()),
+        };
+        if let Some(r) = parse_baidu_block(block) {
+            results.push(r);
+        }
+        rest = &rest[idx + consumed..];
+    }
+    results
+}
+
+fn parse_baidu_block(block: &str) -> Option<SearchResult> {
+    // data-tools="{"title":"…","url":"…"}" is the most reliable source on
+    // modern Baidu markup; fall back to the h3 anchor.
+    let mut title = String::new();
+    let mut url = String::new();
+    if let Some(tools) = extract_attr(block, "data-tools") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&tools) {
+            title = v.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            url = v.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
+        }
+    }
+    if url.is_empty() {
+        if let Some(h3) = block.find("<h3") {
+            let after_h3 = &block[h3..];
+            if let Some(a) = after_h3.find("<a") {
+                let a_idx = a;
+                url = extract_href(after_h3, a_idx).unwrap_or_default();
+                let after_a = &after_h3[a_idx..];
+                if let Some(gt) = after_a.find('>') {
+                    let after_gt = &after_a[gt + 1..];
+                    if let Some(end) = after_gt.find("</a>") {
+                        title = html_decode(&strip_html_tags(&after_gt[..end])).trim().to_string();
+                    }
+                }
+            }
+        }
+    }
+    // Snippet: content-right… / c-abstract / c-span-last containers.
+    let mut snippet = String::new();
+    for needle in ["content-right", "c-abstract", "c-span-last"] {
+        if let Some(i) = block.find(needle) {
+            let after = &block[i..];
+            if let Some(gt) = after.find('>') {
+                let content = &after[gt + 1..];
+                let end = content.find("</div>").or_else(|| content.find("</span>")).unwrap_or(content.len());
+                snippet = content[..end].to_string();
+                if !snippet.trim().is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+    let snippet = html_decode(&strip_html_tags(&snippet)).trim().to_string();
+    let title = title.trim().to_string();
+    if title.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some(SearchResult {
+        title,
+        snippet,
+        url: html_decode(&url),
+    })
+}
+
+/// Brave Search results: `<div class="snippet …" data-type="web">` blocks with
+/// a `title search-snippet-title` div (the anchor URL lives earlier in the
+/// block) and a `generic-snippet` paragraph. The svelte hash suffixes rotate
+/// across Brave builds, so blocks are matched on the stable `class=\"snippet `
+/// prefix and the `search-snippet-title` / `generic-snippet` substrings.
+fn parse_brave_results(html: &str, max: usize) -> Vec<SearchResult> {
+    let mut results: Vec<SearchResult> = Vec::new();
+    let mut rest = html;
+    while results.len() < max {
+        let Some(idx) = rest.find("class=\"snippet ") else {
+            break;
+        };
+        let tail = &rest[idx..];
+        let next = tail["class=\"snippet ".len()..].find("class=\"snippet ");
+        let (block, consumed) = match next {
+            Some(rel) => {
+                let end = "class=\"snippet ".len() + rel;
+                (&tail[..end], end)
+            }
+            None => (tail, tail.len()),
+        };
+        if let Some(r) = parse_brave_block(block) {
+            results.push(r);
+        }
+        rest = &rest[idx + consumed..];
+    }
+    results
+}
+
+fn parse_brave_block(block: &str) -> Option<SearchResult> {
+    let a_idx = block.find("<a")?;
+    let url = extract_href(block, a_idx)?;
+
+    let title = block
+        .find("search-snippet-title")
+        .and_then(|ti| {
+            let rest = &block[ti..];
+            let gt = rest.find('>')?;
+            let content = &rest[gt + 1..];
+            let end = content.find('<')?;
+            Some(strip_html_tags(&content[..end]))
+        })
+        .unwrap_or_default();
+
+    let snippet = block
+        .find("generic-snippet")
+        .and_then(|si| {
+            let rest = &block[si..];
+            let gt = rest.find('>')?;
+            let content = &rest[gt + 1..];
+            let end = content.find("</p>")?;
+            Some(strip_html_tags(&content[..end]))
+        })
+        .unwrap_or_default();
+
+    let title = html_decode(&title).trim().to_string();
+    let snippet = html_decode(&snippet).trim().to_string();
+    if title.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some(SearchResult {
+        title,
+        snippet,
+        url: html_decode(&url),
+    })
+}
+
+/// Jina Reader (r.jina.ai) markdown output parser — the last-resort backend
+/// renders `https://www.bing.com/search?q=…` from Jina's infrastructure and
+/// returns clean markdown, so it works even when every local engine is
+/// blocked (China / restrictive networks) as long as r.jina.ai is reachable.
+/// Results are `## [Title](url)` headings followed by a snippet paragraph.
+fn parse_jina_markdown_results(text: &str, max: usize) -> Vec<SearchResult> {
+    let heading_re = regex::Regex::new(r"^\s*(?:\d+\.\s+)?#{1,4}\s*\[([^\]]+)\]\(([^)]+)\)\s*$").unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<SearchResult> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() && out.len() < max {
+        if let Some(caps) = heading_re.captures(lines[i]) {
+            let title = caps.get(1).unwrap().as_str().replace("**", "").trim().to_string();
+            let url = resolve_bing_ck_url(caps.get(2).unwrap().as_str());
+            // Snippet: the next non-empty, non-heading line.
+            let mut snippet = String::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let t = lines[j].trim();
+                if t.is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if t.starts_with('#') {
+                    break;
+                }
+                snippet = t.to_string();
+                break;
+            }
+            if !title.is_empty() && !url.is_empty() {
+                out.push(SearchResult {
+                    title,
+                    snippet,
+                    url,
+                });
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Bing wraps result URLs in `/ck/a` redirects: `…&u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw&ntb=1`.
+/// The `u=` param holds the base64 (URL-safe, sometimes prefixed `a1`) real
+/// URL. Decode it when present so the model gets the actual destination
+/// (fetchable via web_fetch) instead of a bing.com redirect.
+fn resolve_bing_ck_url(url: &str) -> String {
+    let Some(idx) = url.find("u=") else {
+        return url.to_string();
+    };
+    let after = &url[idx + 2..];
+    let end = after.find(['&', '#']).unwrap_or(after.len());
+    let b64 = after[..end].trim();
+    if b64.is_empty() {
+        return url.to_string();
+    }
+    // URL-decode first (the base64 may be percent-encoded), then try STANDARD
+    // and, on failure, a leading-"a1"-stripped + base64url variant.
+    let decoded = percent_decode(b64);
+    let candidates = [
+        decoded.clone(),
+        decoded.strip_prefix("a1").unwrap_or("").to_string(),
+    ];
+    for cand in candidates.iter() {
+        let normalized = cand.replace('-', "+").replace('_', "/");
+        let padded = format!("{}{}", normalized, "=".repeat((4 - normalized.len() % 4) % 4));
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(padded) {
+            if let Ok(s) = String::from_utf8(bytes) {
+                if s.starts_with("http") {
+                    return s;
+                }
+            }
+        }
+    }
+    url.to_string()
+}
+
+/// Percent-decode a string (`%2F` → `/`, `+` kept literal). Used to unwrap the
+/// `u=` base64 param in Bing redirect URLs before base64-decoding it.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -2476,20 +4000,156 @@ mod web_search_tests {
     fn configured_backend_names_reflects_api_keys() {
         assert_eq!(
             configured_backend_names(None, None),
-            "cn.bing.com, DuckDuckGo, Bing"
+            "Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave"
         );
         assert_eq!(
             configured_backend_names(Some("k"), None),
-            "Serper, cn.bing.com, DuckDuckGo, Bing"
+            "Serper, Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave"
         );
         assert_eq!(
             configured_backend_names(Some("k"), Some("")),
-            "Serper, cn.bing.com, DuckDuckGo, Bing"
+            "Serper, Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave"
         );
         assert_eq!(
             configured_backend_names(Some("k"), Some("t")),
-            "Serper, Tavily, cn.bing.com, DuckDuckGo, Bing"
+            "Serper, Tavily, Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave"
         );
+    }
+
+    #[test]
+    fn parses_sogou_results_with_redirect_absolutization() {
+        // vr-title h3 blocks: anchor inside the h3, star-wiki <p> snippet
+        // right after </h3>; <em> highlights INSIDE the title; relative
+        // /link?url=… hrefs absolutized. Mirrors the Node fixture.
+        let html = r#"<h3 class="vr-title"><a name="dttl" href="/link?url=abc123" id="sogou_vr_1">为什么要使用 <em>Rust</em> <em>语言</em>？</a></h3><div class="star-wiki"><p class="star-wiki base-ellipsis clamp3 space-txt">Rust 语言的优势在哪里？</p></div>
+<h3 class="vr-title"><a href="//www.sogou.com/link?url=def">第二条 <em>结果</em></a></h3><p class="star-wiki">摘要二</p>"#;
+        let results = parse_sogou_results(html, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "为什么要使用 Rust 语言？");
+        assert_eq!(results[0].url, "https://www.sogou.com/link?url=abc123");
+        assert!(results[0].snippet.contains("Rust 语言的优势"));
+        assert_eq!(results[1].url, "https://www.sogou.com/link?url=def");
+    }
+
+    #[test]
+    fn sogou_parser_skips_duplicates_and_bad_blocks() {
+        let html = r#"<h3 class="vr-title"><a href="/link?url=x">唯一 <em>结果</em></a></h3><p class="star-wiki">s</p>
+<h3 class="vr-title"><a href="/link?url=x">唯一 结果</a></h3><p class="star-wiki">dup</p>
+<h3 class="vr-title"><div>no anchor here</div></h3>"#;
+        let results = parse_sogou_results(html, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "唯一 结果");
+    }
+
+    #[test]
+    fn parses_so360_results_with_data_mdurl() {
+        // res-list <li> blocks: data-mdurl carries the real URL; res-desc <p>
+        // holds the snippet (span inside stripped). Mirrors real so.com markup.
+        let html = r#"<li class="res-list"><h3 class="res-title"><a href="https://www.so.com/link?m=abc" data-mdurl="https://blog.csdn.net/rust/123" rel="noopener">了解<em>Rust语言</em>-CSDN博客</a></h3><div class="res-rich so-rich-blog clearfix"><div class="res-comm-con"><p class="res-desc"><span class="res-list-summary">Rust 是一门系统编程语言。</span></p></div></div></li>
+<li class="res-list"><h3 class="res-title"><a href="/link?m=def">无 mdurl 的结果</a></h3><p class="res-desc">摘要</p></li>"#;
+        let results = parse_so360_results(html, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "了解Rust语言-CSDN博客");
+        assert_eq!(results[0].url, "https://blog.csdn.net/rust/123");
+        assert!(results[0].snippet.contains("系统编程语言"));
+        assert_eq!(results[1].url, "https://www.so.com/link?m=def");
+    }
+
+    #[test]
+    fn parses_baidu_results_with_data_tools_and_h3_fallback() {
+        let html = r#"<div class="result c-container" id="1"><h3 class="t"><a href="https://baike.baidu.com/item/rust">Rust语言百科</a></h3><div class="c-abstract">Rust 是一门系统编程语言。</div></div>
+<div class="result c-container" id="2" data-tools='{"title":"百度百科","url":"https://baike.example/2"}'><div class="content-right_8Zs40">工具摘要</div></div>"#;
+        let results = parse_baidu_results(html, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust语言百科");
+        assert_eq!(results[0].url, "https://baike.baidu.com/item/rust");
+        assert!(results[0].snippet.contains("系统编程"));
+        assert_eq!(results[1].title, "百度百科");
+        assert_eq!(results[1].url, "https://baike.example/2");
+    }
+
+    #[test]
+    fn parses_brave_results_with_rotating_svelte_classes() {
+        // The svelte hash suffixes rotate across Brave builds — matching must
+        // ride on the stable class prefixes only.
+        let html = r#"<div class="snippet svelte-jmfu5f" data-pos="0" data-type="web"><div class="result-wrapper svelte-1rq4ngz"><div class="result-content svelte-1rq4ngz"><a href="https://rust-lang.org/" target="_self" class="svelte-14r20fy l1"><div class="site-name-wrapper svelte-on1hvy">rust-lang.org</div></a><div class="title search-snippet-title line-clamp-1 svelte-14r20fy">Rust Programming Language</div><p class="generic-snippet svelte-1cwdgg3">A language empowering everyone to build reliable software.</p></div></div></div>
+<div class="snippet svelte-jmfu5f" data-pos="1" data-type="web"><div class="result-wrapper svelte-1rq4ngz"><a href="https://example.com/2"><div class="title search-snippet-title svelte-14r20fy">Two</div></a><p class="generic-snippet svelte-1cwdgg3">s2</p></div></div>"#;
+        let results = parse_brave_results(html, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust Programming Language");
+        assert_eq!(results[0].url, "https://rust-lang.org/");
+        assert!(results[0].snippet.contains("empowering"));
+        assert_eq!(results[1].url, "https://example.com/2");
+    }
+
+    #[test]
+    fn parses_jina_markdown_results_and_resolves_bing_redirects() {
+        // Real r.jina.ai output shape for bing.com/search: numbered markdown
+        // headings with **bold** title fragments and /ck/a redirect URLs whose
+        // u= param holds the base64 real URL.
+        let md = r#"Title: rust language - Bing
+
+URL Source: https://www.bing.com/search?q=rust+language
+
+Markdown Content:
+About 16,200 results
+
+1.   ## [**Rust** Programming **Language**](https://www.bing.com/ck/a?!&&p=abc&u=aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw&ntb=1)
+
+A language empowering everyone to build reliable and efficient software.
+
+2.   ## [Install **Rust**](https://www.bing.com/ck/a?u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnL3Rvb2xzL2luc3RhbGwv)
+
+Install the toolchain.
+"#;
+        let results = parse_jina_markdown_results(md, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust Programming Language");
+        assert_eq!(results[0].url, "https://rust-lang.org/");
+        assert!(results[0].snippet.contains("empowering"));
+        // a1-prefixed variant decodes too.
+        assert_eq!(results[1].url, "https://rust-lang.org/tools/install/");
+    }
+
+    #[test]
+    fn resolve_bing_ck_url_leaves_plain_urls_untouched() {
+        assert_eq!(resolve_bing_ck_url("https://example.com/page"), "https://example.com/page");
+        // Percent-encoded base64 also decodes.
+        assert_eq!(
+            resolve_bing_ck_url("https://www.bing.com/ck/a?u=aHR0cHM6Ly9leGFtcGxlLmNvbS8%3D&ntb=1"),
+            "https://example.com/"
+        );
+    }
+
+    #[test]
+    fn normalize_query_strips_operators_and_punctuation() {
+        assert_eq!(
+            normalize_query_for_retry("\"rust\" site:rust-lang.org 2026").as_deref(),
+            Some("rust 2026")
+        );
+        assert_eq!(
+            normalize_query_for_retry("西安到重庆 机票？（价格）").as_deref(),
+            Some("西安到重庆 机票 价格")
+        );
+        // Nothing to strip → None (no pointless retry).
+        assert_eq!(normalize_query_for_retry("plain query"), None);
+        assert_eq!(normalize_query_for_retry("西安天气"), None);
+    }
+
+    #[test]
+    fn parses_searxng_json_results() {
+        let body = serde_json::json!({
+            "results": [
+                {"title": "Rust", "url": "https://rust-lang.org/", "content": "s1"},
+                {"title": "", "url": "https://empty.example/", "content": "skip me"},
+                {"title": "T2", "url": "https://t2.example/", "content": "s2"}
+            ]
+        });
+        let results = parse_searxng_results(&body, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust");
+        assert_eq!(results[0].url, "https://rust-lang.org/");
+        assert_eq!(results[1].snippet, "s2");
     }
 }
 
@@ -2613,6 +4273,159 @@ mod resolve_tests {
 }
 
 #[cfg(test)]
+mod file_text_extraction_tests {
+    use super::*;
+    use std::io::Write as _;
+
+
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pure-filetext-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_docx_bytes() -> Vec<u8> {
+        let xml = "<?xml version=\"1.0\"?><w:document><w:body><w:p><w:r><w:t>公司名称：北极星科技有限公司</w:t></w:r></w:p><w:p><w:r><w:t>地址：北京市</w:t></w:r></w:p></w:body></w:document>";
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("word/document.xml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(xml.as_bytes()).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn decode_text_bytes_handles_gbk_utf16_and_utf8() {
+        // GBK (Chinese Windows ANSI default): 你好 = C4E3 BAC3
+        let gbk = [0xC4u8, 0xE3, 0xBA, 0xC3];
+        assert_eq!(decode_text_bytes(&gbk), "你好");
+        // UTF-16LE with BOM
+        let mut utf16 = vec![0xFF, 0xFE];
+        for unit in "Hello 你好".encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(decode_text_bytes(&utf16), "Hello 你好");
+        // plain UTF-8
+        assert_eq!(decode_text_bytes("公司".as_bytes()), "公司");
+    }
+
+    #[test]
+    fn xml_text_in_tag_extracts_docx_paragraphs() {
+        let text = xml_text_in_tag(
+            "<w:document><w:p><w:r><w:t>第一段&amp;内容</w:t></w:r></w:p><w:p><w:t>第二段</w:t></w:p></w:document>",
+            "w:t",
+        );
+        assert!(text.contains("第一段&内容"));
+        assert!(text.contains("第二段"));
+    }
+
+    #[test]
+    fn zip_entry_extracts_docx_text() {
+        let bytes = make_docx_bytes();
+        let text = zip_entry_xml_text(&bytes, "word/document.xml", "w:t").unwrap();
+        assert!(text.contains("北极星科技有限公司"));
+    }
+
+    #[test]
+    fn pdf_extract_text_handles_literal_and_cid_strings() {
+        // Uncompressed content stream + a ToUnicode CMap (C4E3→你, BAC3→好)
+        let pdf = concat!(
+            "%PDF-1.4\n",
+            "1 0 obj\n<< /Type /Catalog >>\nendobj\n",
+            "2 0 obj\n<< /Length 400 >>\nstream\n",
+            "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n",
+            "/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n",
+            "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+            "1 beginbfchar\n<C4E3> <4F60>\nendbfchar\n",
+            "1 beginbfrange\n<BAC3> <BAC3> <597D>\nendbfrange\n",
+            "endcmap\nend\nend\nendstream\nendobj\n",
+            "3 0 obj\n<< /Length 120 >>\nstream\n",
+            "BT\n/F1 12 Tf\n(Hello) Tj\nT*\n<C4E3BAC3> Tj\nET\n",
+            "endstream\nendobj\n%%EOF\n",
+        );
+        let (text, note) = pdf_extract_text(pdf.as_bytes());
+        assert!(note.is_empty(), "note should be empty: {}", note);
+        assert!(text.contains("Hello"));
+        assert!(text.contains("你好"), "CID text should map through ToUnicode: {}", text);
+    }
+
+    #[test]
+    fn pdf_extract_text_notes_scanned_pdf() {
+        let pdf = b"%PDF-1.4\n1 0 obj\n<< /Length 0 >>\nstream\n\nendstream\nendobj\n%%EOF";
+        let (text, note) = pdf_extract_text(pdf);
+        assert!(text.is_empty());
+        assert!(note.contains("PDF"), "scanned/empty PDF gets an actionable note");
+    }
+
+    #[test]
+    fn rtf_extract_text_decodes_gbk_escapes_and_unicode() {
+        // \'c4\'e3\'ba\'c3 = 你好 (GBK); \u20013 = 中
+        let rtf = b"{\\rtf1\\ansi\\ansicpg936 {\\fonttbl {\\f0 \\'cb\\'ce\\'cc\\'e5;}}\\f0\\pard Hello \\'c4\\'e3\\'ba\\'c3\\u20013?\\par}";
+        let text = rtf_extract_text(rtf);
+        assert!(text.contains("Hello"));
+        assert!(text.contains("你好"), "GBK escapes decode: {}", text);
+        assert!(text.contains("中"), "unicode escapes decode: {}", text);
+    }
+
+    #[test]
+    fn extract_file_text_detects_binary_and_ole() {
+        let png: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let (text, note) = extract_file_text(&png, std::path::Path::new("logo.png"));
+        assert!(text.is_empty());
+        assert!(note.contains("PNG"));
+        let ole: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        let (text, note) = extract_file_text(&ole, std::path::Path::new("old.doc"));
+        assert!(text.is_empty());
+        assert!(note.contains("doc"), "OLE note suggests conversion: {}", note);
+    }
+
+    #[test]
+    fn search_files_finds_content_inside_docx_and_reports_skips() {
+        let dir = temp_dir("search-docx");
+        fs::write(dir.join("notes.docx"), make_docx_bytes()).unwrap();
+        fs::write(dir.join("report.txt"), "公司名称：北极星科技有限公司\n其他内容").unwrap();
+        // Old .doc (OLE magic) — must be skipped with a hint, not silently
+        let ole: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        fs::write(dir.join("legacy.doc"), ole).unwrap();
+
+        let ws = dir.to_string_lossy().into_owned();
+        let result = search_files(ws.clone(), "北极星".into(), None, None, None, None).unwrap();
+        assert!(result.contains("notes.docx"), "docx content searchable: {}", result);
+        assert!(result.contains("report.txt"));
+        assert!(result.contains("legacy.doc"), "skipped binary listed in hint: {}", result);
+        assert!(result.contains("无法解析") || result.contains("已跳过"), "skip hint present: {}", result);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn search_files_case_sensitive_flag() {
+        let dir = temp_dir("search-case");
+        fs::write(dir.join("upper.txt"), "Apple Pie").unwrap();
+        fs::write(dir.join("lower.txt"), "apple pie").unwrap();
+        let ws = dir.to_string_lossy().into_owned();
+        let loose = search_files(ws.clone(), "apple".into(), None, None, None, None).unwrap();
+        assert!(loose.contains("upper.txt") && loose.contains("lower.txt"));
+        let strict = search_files(ws.clone(), "apple".into(), None, None, None, Some(true)).unwrap();
+        assert!(strict.contains("lower.txt"));
+        assert!(!strict.contains("upper.txt"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn search_files_accepts_a_single_file_path() {
+        let dir = temp_dir("search-file");
+        let file = dir.join("target.docx");
+        fs::write(&file, make_docx_bytes()).unwrap();
+        let ws = dir.to_string_lossy().into_owned();
+        let result = search_files(ws.clone(), "北极星".into(), Some(file.to_string_lossy().into_owned()), None, None, None).unwrap();
+        assert!(result.contains("target.docx"), "single-file search: {}", result);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
 mod write_file_stream_tests {
     use super::*;
 
@@ -4249,6 +6062,7 @@ async fn web_public_api(
     serper_api_key: Option<String>,
     search_on_miss: Option<bool>,
     proxy_url: Option<String>,
+    searxng_url: Option<String>,
 ) -> Result<String, String> {
     let q = query.trim().to_string();
     if q.is_empty() {
@@ -4271,6 +6085,7 @@ async fn web_public_api(
             serper_api_key.as_deref(),
             location.as_deref(),
             proxy_url.as_deref(),
+            searxng_url.as_deref(),
         )
         .await;
     }
@@ -7515,36 +9330,48 @@ fn reqwest_error_detail(err: &reqwest::Error) -> String {
 /// network and for proxies that only route domestic traffic.
 const PROXY_PROBE_URL: &str = "https://www.baidu.com/";
 
+/// Default connectivity-test endpoints for 测试连接, in probe order. The WebView
+/// sends the user-edited list (Settings → 网络代理), so this is only the
+/// fallback when the passed list is empty (defensive — the UI blocks this).
+const DEFAULT_PROXY_PROBES: &[&str] = &[
+    PROXY_PROBE_URL,
+    "https://api.deepseek.com",
+    "https://ipwho.is/",
+];
+
 /// Connectivity check for the proxy config (Settings → 网络代理 → 测试连接).
-/// Builds the exact client the LLM / tool paths use and probes small endpoints
-/// through it — a malformed URL (bad scheme) or a dead proxy is caught HERE
-/// instead of silently failing every subsequent request. Returns the first
-/// reachable endpoint + latency, or the aggregated failure reasons.
+/// Builds the exact client the LLM / tool paths use and probes the configured
+/// endpoints through it — a malformed URL (bad scheme) or a dead proxy is
+/// caught HERE instead of silently failing every subsequent request. Returns
+/// the first reachable endpoint + latency, or the aggregated failure reasons.
 #[tauri::command]
-async fn test_proxy(proxy_url: String) -> Result<String, String> {
+async fn test_proxy(proxy_url: String, probe_urls: Vec<String>) -> Result<String, String> {
     let client = match build_http_client(std::time::Duration::from_secs(6), Some(&proxy_url)) {
         Ok(c) => c,
         Err(e) => return Err(format!("proxy config invalid: {}", e)),
     };
-    let probes: &[&str] = &[
-        PROXY_PROBE_URL,
-        "https://api.deepseek.com",
-        "https://ipwho.is/",
-    ];
+    let mut probes: Vec<String> = probe_urls
+        .iter()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .collect();
+    if probes.is_empty() {
+        probes = DEFAULT_PROXY_PROBES.iter().map(|s| s.to_string()).collect();
+    }
     let mut failed: Vec<String> = Vec::new();
-    for url in probes {
+    for url in &probes {
         let start = Instant::now();
-        let status = match client.get(*url).header("User-Agent", BROWSER_UA).send().await {
+        let status = match client.get(url.as_str()).header("User-Agent", BROWSER_UA).send().await {
             Ok(r) => r.status(),
             Err(e) => {
-                failed.push(format!("{}: {}", url, reqwest_error_detail(&e)));
+                failed.push(format!("{url}: {}", reqwest_error_detail(&e)));
                 continue;
             }
         };
         if status.is_success() || status == reqwest::StatusCode::NO_CONTENT {
-            return Ok(format!("{} ({}ms)", url, start.elapsed().as_millis()));
+            return Ok(format!("{url} ({}ms)", start.elapsed().as_millis()));
         }
-        failed.push(format!("{}: HTTP {}", url, status));
+        failed.push(format!("{url}: HTTP {status}"));
     }
     Err(format!("all probes failed through the proxy: {}", failed.join(" | ")))
 }
@@ -8098,8 +9925,108 @@ fn detect_runtime_versions() -> Vec<String> {
     out
 }
 
+/// Summarize the standard proxy environment variables (HTTP_PROXY /
+/// HTTPS_PROXY / ALL_PROXY / NO_PROXY plus lowercase variants) as
+/// `NAME=value` pairs, or "none" when none are set. Reported raw (unlike
+/// env_proxy(), which resolves the first usable triple) so the model sees the
+/// full picture — e.g. a NO_PROXY bypass list it should account for.
+fn env_proxy_summary() -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for name in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ] {
+        if let Ok(value) = std::env::var(name) {
+            let value = value.trim();
+            if !value.is_empty() {
+                parts.push(format!("{name}={value}"));
+            }
+        }
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+/// Detect currently-connected VPN services. macOS: `scutil --nc list` marks
+/// connected VPNs with "(Connected)" followed by the service name. Other
+/// platforms report "not detected" (Windows has no reliable single source
+/// without extra tooling; Linux none at all).
+fn detect_vpn_connections() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let output = silent_child(std::process::Command::new("scutil"))
+            .args(["--nc", "list"])
+            .output()
+            .ok();
+        if let Some(output) = output {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let names: Vec<String> = text
+                .lines()
+                .filter(|line| line.contains("(Connected)"))
+                .filter_map(|line| {
+                    line.split("(Connected)").nth(1).map(|s| s.trim().to_string())
+                })
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !names.is_empty() {
+                return format!("{} (connected)", names.join(", "));
+            }
+        }
+        "none".to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "not detected".to_string()
+    }
+}
+
+/// Probe DIRECT connectivity (no proxy at all, env proxy vars ignored) to a
+/// domestic and an international endpoint, so the model knows which network
+/// the machine sits on (mainland China / intranet / open internet). Returns a
+/// short "domestic ok, international blocked" style summary; "unknown" when
+/// the client itself cannot be built. Timeouts are tight — this runs inside
+/// sys_info and the per-session prompt probe.
+async fn probe_reachability() -> String {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .no_proxy()
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return "unknown".to_string(),
+    };
+    // The client's own 2s timeout bounds each probe; the requests run in
+    // parallel, so the whole check takes ~2s worst case.
+    async fn reachable(client: &reqwest::Client, url: &str) -> bool {
+        client
+            .get(url)
+            .header("User-Agent", BROWSER_UA)
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+    }
+    let (domestic, international) = tokio::join!(
+        reachable(&client, "https://www.baidu.com/"),
+        reachable(&client, "https://www.google.com/generate_204"),
+    );
+    format!(
+        "domestic {}, international {}",
+        if domestic { "ok" } else { "blocked" },
+        if international { "ok" } else { "blocked" }
+    )
+}
+
 #[tauri::command]
-fn sys_info(_workspace: String, location: Option<String>) -> Result<String, String> {
+async fn sys_info(_workspace: String, location: Option<String>) -> Result<String, String> {
     let tz = std::env::var("TZ").unwrap_or_else(|_| "UTC".to_string());
 
     let lang = std::env::var("LANG")
@@ -8170,9 +10097,19 @@ fn sys_info(_workspace: String, location: Option<String>) -> Result<String, Stri
 
     let runtimes = detect_runtime_versions().join("  ");
 
+    // Network environment: what the machine itself looks like (system proxy /
+    // env proxy / VPN / direct reachability), NOT the app's proxy config — the
+    // model combines this with the Settings → 网络代理 state to pick working
+    // backends (e.g. "international blocked + system proxy set" → the proxy
+    // likely unlocks it, so web_search through the proxy should work).
+    let system_proxy = resolve_system_proxy_url().unwrap_or_else(|| "none".to_string());
+    let env_proxy = env_proxy_summary();
+    let vpn = detect_vpn_connections();
+    let reach = probe_reachability().await;
+
     let info = format!(
-        "timezone:  {}\nlanguage:  {}\ntime:      {}\nos:        {}\nlocation:  {}\nruntimes:  {}",
-        tz, lang, time, os_version, loc, runtimes
+        "timezone:  {}\nlanguage:  {}\ntime:      {}\nos:        {}\nlocation:  {}\nruntimes:  {}\nnetwork:   proxy: {}; env: {}; vpn: {}; reach: {}",
+        tz, lang, time, os_version, loc, runtimes, system_proxy, env_proxy, vpn, reach
     );
     Ok(info)
 }

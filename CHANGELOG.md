@@ -3,6 +3,18 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.10
+
+**网络搜索全面增强 + 本地文件读取/搜索重做 + 系统环境预取注入 + 进度同步修复**
+
+- 网络搜索多后端（适配国内 / 内网 / 代理多种网络条件）：新增搜狗、360、百度、Brave、Bing-via-Jina（免 key 兜底）与 SearXNG（内网聚合，可在设置中配置 URL）后端，桌面端补齐此前缺失的搜狗；请求共享 cookie 会话并预热百度，降低反爬验证码触发；复杂查询自动归一化后重试（引号 / 括号 / 操作符导致失败不再直接报错）；中文查询 mkt=zh-CN，Bing 结果真实 URL 解码
+- 系统环境预取注入提示词：sys_info 新增 network 行——系统代理 / 环境代理变量 / VPN 连接 / 国内+国际可达性探测，会话开始时动态注入，模型据此判断该走哪个搜索后端（如国际不通时优先 cn.bing / 搜狗 / 百度 / 360）
+- 本地文件读取重做：格式感知文本提取——UTF-8 / UTF-16 / GBK（GB18030）/ Big5 编码自动识别，PDF（ToUnicode CMap 中文映射）、DOCX / XLSX / PPTX / ODT（ZIP+XML）、RTF 均可直接读取；二进制、扫描版 PDF、旧版 .doc/.xls 返回带解决办法的错误（转换命令 / OCR 提示），不再乱码或报裸异常
+- 本地文件搜索增强：search_files 可搜索 PDF / Office 文档 / GBK 文本内容，支持大小写敏感开关、单文件直搜（模型把文件路径直接传给 search_files 时可用）、跳过文件时列出原因；路径错误提示修复方法，Windows 反斜杠路径自动兼容
+- 计划进度同步修复：浮动大纲与计划卡片不再错位——最后计划的完成标记、模型跨计划跳跃、回合末总结收尾、无计划轮次清空大纲四种脱节场景全部修复
+- 代理设置增强：代理方式支持「手动地址 / 系统代理透明转发」（后端按请求解析系统代理）；测试连接探测端点改为 3 个可开关、可编辑（国内可达优先）
+- Skill Hub 增加搜索过滤与常用技能源下拉（Vercel / NVIDIA / You.com / Zapier / OpenClaw）
+
 ## v1.9.9-adv
 
 **代理增强版：系统代理检测、配置持久化到文件、企业代理兼容**

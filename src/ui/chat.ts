@@ -30,6 +30,7 @@ import {
   createPlanCard,
   updatePlanCard,
   clearPlanCardRefining,
+  setPlanPhase,
   updatePlanCardPhase,
   updatePlanCardSubstep,
   completePlanCardSubstep,
@@ -386,6 +387,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
     toolDefinitions,
     environment: buildEnvironmentContext(config),
     runtimes: buildRuntimesContext(),
+    network: buildNetworkContext(),
     skills: config?.hubSkills,
     budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model),
   });
@@ -436,18 +438,21 @@ function withAbortTimeout<T>(
   });
 }
 
-// ── Installed-runtime context (node / python / rust versions) ──
+// ── Environment probe: installed runtimes + network state ──
 // Probed ONCE per session via the Rust sys_info backend (Tauri only) and
 // cached, then injected into every system prompt so the model knows which
 // runtimes exist on this machine (e.g. whether `node` is available before
-// proposing a Node script). A missing probe (browser dev mode, Rust invoke
-// failure) leaves the context empty — the sys_info tool still reports
-// runtimes on demand in that case.
+// proposing a Node script) and which network it sits on (system/env proxy,
+// VPN, domestic/international reachability — so web_search backends and
+// web_fetch targets are chosen for what actually works). A missing probe
+// (browser dev mode, Rust invoke failure) leaves the context empty — the
+// sys_info tool still reports both on demand in that case.
 let cachedRuntimes = '';
+let cachedNetwork = '';
 let runtimesProbe: Promise<string> | null = null;
 
-/** Kick off the one-shot runtime probe (idempotent). Callers await the same
- * promise so the first send doesn't race the probe. */
+/** Kick off the one-shot environment probe (idempotent). Callers await the
+ * same promise so the first send doesn't race the probe. */
 export function ensureRuntimesProbed(signal?: AbortSignal): Promise<string> {
   if (!runtimesProbe) {
     runtimesProbe = (async () => {
@@ -458,24 +463,33 @@ export function ensureRuntimesProbed(signal?: AbortSignal): Promise<string> {
           core.invoke<string>('sys_info', { workspace: '', location: null }),
           undefined,
           8_000,
-          'runtime probe',
+          'environment probe',
         ) ?? '';
       // sys_info output: "runtimes:  node: v22.x.x  bun: 1.3.x  python3: 3.x.x  rustc: …"
+      // and "network:   proxy: …; env: …; vpn: …; reach: …"
         const m = raw.match(/^runtimes:\s*(.+)$/m);
         cachedRuntimes = m?.[1]?.trim() ?? '';
+        const n = raw.match(/^network:\s*(.+)$/m);
+        cachedNetwork = n?.[1]?.trim() ?? '';
       } catch {
         cachedRuntimes = '';
+        cachedNetwork = '';
       }
       return cachedRuntimes;
     })();
   }
-  return withAbortTimeout(runtimesProbe, signal, 8_500, 'runtime probe');
+  return withAbortTimeout(runtimesProbe, signal, 8_500, 'environment probe');
 }
 
 function buildRuntimesContext(): string {
   return cachedRuntimes
     ? `\nEnvironment runtimes (installed on this machine): ${cachedRuntimes}. Use the actual versions above when the task depends on a runtime or tool version (e.g. writing a package.json engines field, a requirements.txt, or a CI/git workflow), and assume a tool is NOT installed when it is absent from this list.`
     : '';
+}
+
+function buildNetworkContext(): string {
+  if (!cachedNetwork) return '';
+  return `\nEnvironment network (this machine): ${cachedNetwork}. Use it to choose what will actually work: if international is blocked, prefer domestic search engines (cn.bing.com / sogou / baidu / 360) and domestic sources, and expect Google/DuckDuckGo to fail; if a system/env proxy is listed, requests route through it when proxy is enabled in Settings → 网络代理.`;
 }
 
 // Third-party skills installed from a Skill Hub (Settings → Skills → Skill
@@ -1049,7 +1063,7 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
 }
 
 function createToolAdapter(workspace: string, config: PureConfig, sessionId = ''): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy, 'tools'), imageGenContextFor(config));
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy, 'tools'), imageGenContextFor(config), config.searxngUrl);
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.
@@ -1470,6 +1484,7 @@ export class ChatController {
       sessionId,
       config.tavilyApiKey,
       config.serperApiKey,
+      config.searxngUrl,
       config.city,
       config.proxy?.enabled,
       config.proxy?.llmEnabled,
@@ -2249,8 +2264,15 @@ export class ChatController {
           // 未完成并说明接下来按通用步骤推进，而不是留一张空卡误导用户（“思考完
           // 成”却什么都没想，正是用户这次反馈的困惑点）。
           if (!llmAnalysis.analysis) {
-            setThinkingLabel(analysisCard, t('thinking.failed', '分析未完成'));
-            appendThinkingText(analysisCard, t('thinking.failedNote', '\n（实时分析未返回内容，已回退到通用步骤；执行中会结合实际情况调整。）'));
+            if (llmAnalysis.plan) {
+              // 任务专属计划其实拿到了，只是缺少自然语言分析文本（推理型模型常把
+              // 分析写进 reasoning_content、content 留空）。这时不能宣称“回退到通用
+              // 步骤”——计划是真的，只标注“已生成计划”即可。
+              setThinkingLabel(analysisCard, t('thinking.planned', '已生成任务计划'));
+            } else {
+              setThinkingLabel(analysisCard, t('thinking.failed', '分析未完成'));
+              appendThinkingText(analysisCard, t('thinking.failedNote', '\n（实时分析未返回内容，已回退到通用步骤；执行中会结合实际情况调整。）'));
+            }
           }
           // The user may have switched sessions / started a new chat during the
           // analysis — abandon this turn before showing anything.
@@ -2464,12 +2486,20 @@ export class ChatController {
             card.setActivity(`计划 ${planNumber} 已报告完成，等待真实验证结果…`);
             return;
           }
-          if (!canCompletePlanCardSubsteps(card)) {
+          const isLastPlan = planNumber >= card.total;
+          // Earlier plans keep waiting for granular Todo-done markers (or the
+          // next plan's start marker, which force-advances); the LAST plan has
+          // no following marker, so the model's explicit completion claim must
+          // finish its remaining Todos itself — otherwise the card and the
+          // floating outline stay at N-1/N after the work is done.
+          if (!isLastPlan && !canCompletePlanCardSubsteps(card)) {
             card.setActivity(`计划 ${planNumber} 仍有 Todo 未完成，暂不进入下一计划…`);
             return;
           }
-          completePlanCardSubsteps(card);
-          card.setActivity(`计划 ${planNumber} 已完成，正在准备下一个计划…`);
+          completePlanCardSubsteps(card, isLastPlan);
+          card.setActivity(isLastPlan
+            ? `计划 ${planNumber} 已完成，整个计划收尾中…`
+            : `计划 ${planNumber} 已完成，正在准备下一个计划…`);
           updatePlanCardPhase(card, planNumber + 1);
           consumeDeferredSubsteps(planNumber, planNumber + 1);
         };
@@ -2531,7 +2561,14 @@ export class ChatController {
                   card.substepStarted = true;
                   card.currentSubstep = rows.length + 1;
                 }
-                updatePlanCardPhase(card, marker.number);
+                // Jump straight to the reported plan instead of one step per
+                // marker: updatePlanCardPhase only advances by exactly one, so
+                // a model that reports "## 计划 3：" while the card is on plan
+                // 1 would otherwise leave the card (and the floating outline
+                // mirroring it) stuck on the old step while the transcript
+                // already shows plan 3 work. Everything in between is
+                // implicitly done. total + 1 (beyond the list) completes.
+                setPlanPhase(card, Math.max(before + 1, Math.min(marker.number, card.total + 1)));
                 if (card.current === marker.number) {
                   const stepLabel = card.stepEls[marker.number - 1]?.querySelector<HTMLElement>('.plan-progress-step-action')?.textContent;
                   card.setActivity(`已开始计划 ${marker.number}${stepLabel ? `：${stepLabel}` : ''}${card.currentTodosRequired ? '，正在执行它的 Todos…' : '，正在执行原子任务…'}`);
@@ -2812,6 +2849,7 @@ export class ChatController {
         toolDefinitions: finalPromptTools,
         environment: buildEnvironmentContext(config),
         runtimes: buildRuntimesContext(),
+        network: buildNetworkContext(),
         skills: [...(config.hubSkills ?? []), ...appSkills],
         mode: analysis.mode,
         budget: promptBudgetForProvider(config.customProviders, config.provider, config.model),
@@ -2834,10 +2872,14 @@ export class ChatController {
         this.preCompactedMessages, this.preCompactSessionId, this.preCompactMessageCount,
         sendSessionId, this.messages, this.preCompactSourceMessages,
       );
-      // Safety net: whenever a plan is active and the engine is about to run
-      // (any pre-flight path — continuation, approval, forced mode), the
+      // Safety net: whenever a plan card exists and the engine is about to
+      // run (any pre-flight path — continuation, approval, forced mode), the
       // floating outline must be in the executing state, never stale-waiting.
-      if (planCard && this.activeComplexPlan) syncPlanOverview('active');
+      // When the turn has NO plan card (simple task, forced mode abandoning
+      // the plan, or a follow-up after the previous plan finished), clear the
+      // outline so the previous task's list cannot keep floating over
+      // unrelated work — the outline mirrors the CURRENT turn only.
+      syncPlanOverview();
       const events = this.hasHistory
         ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal)
         : codingAgent.run(systemPrompt, userTurn, turnSignal);
@@ -3258,7 +3300,18 @@ export class ChatController {
             const turnAsksForInput = finalAnswer.length > 0 && /[?？]\s*$/.test(finalAnswer);
             const planFinished = planCard && hasToolWork && !event.payload.interrupted
               && !turnAsksForInput && gen === this.generation && !this.pausePlanCard;
-            if (planFinished && planCard) {
+            // A final turn often contains NO tool calls at all (pure summary
+            // after the last plan's work, or a plain user ack after the model
+            // asked a closing question). If the card already reached the last
+            // plan, that work finished in an earlier turn — only the finalize
+            // step remained. Without this the card and the floating outline
+            // stay at N-1/N forever whenever the last turn ran no tools, which
+            // is exactly the "进度和浮动窗口不同步" the UI kept showing.
+            const turnText = finalAnswer || assistantSegments.map((segment) => segment.text).join('').trim();
+            const planSummarized = planCard && !hasToolWork && !event.payload.interrupted
+              && !turnAsksForInput && gen === this.generation && !this.pausePlanCard
+              && planCard.current === planCard.total && turnText.length > 0;
+            if ((planFinished || planSummarized) && planCard) {
               finalizePlanCard(planCard);
               if (this.activeComplexPlan) syncActivePlanCursor(planCard);
               planCard.setActivity(qualityPassed

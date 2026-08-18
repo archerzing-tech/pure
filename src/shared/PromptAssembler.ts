@@ -48,6 +48,10 @@ export interface PromptAssemblyContext {
   imageGeneration?: boolean;
   environment?: string;
   runtimes?: string;
+  /** Pre-probed network state (system/env proxy, VPN, domestic/international
+   * reachability) so the model picks search backends and fetch targets that
+   * actually work on this machine's network. */
+  network?: string;
   skills?: PromptSkill[];
   mode?: PromptTaskMode;
   budget?: PromptBudgetConfig;
@@ -103,10 +107,10 @@ const GUI_WEB_TOOLS_PROMPT = `Web tools:
 - web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.`;
 
 const GUI_SYS_INFO_PROMPT = `System:
-- sys_info() — timezone, language, current time, OS version, and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data. The user can set/override their location in Settings → General → Environment.`;
+- sys_info() — timezone, language, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data. The user can set/override their location in Settings → General → Environment.`;
 
 const CLI_CAPABILITIES_PROMPT = `System:
-- sys_info() — timezone, language, current time, OS version, installed runtimes (node/bun/python3/rustc/git versions), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, a runtime version, a git capability, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data.
+- sys_info() — timezone, language, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data.
 
 Web tools:
 - researcher_web(prompt, maxSources?, fetchContent?) — research a web question and return cited sources, extracted evidence, retrieval time, and partial failures. Do not repeat an unchanged query after a failure.
@@ -264,6 +268,7 @@ export class PromptAssembler {
       fragment('capability_gap', CAPABILITY_GAP_PROMPT, 75),
       fragment('environment', context.environment ?? '', 60),
       fragment('runtimes', context.runtimes ?? '', 45),
+      fragment('network', context.network ?? '', 50),
       fragment('skills', buildSkills(context.skills), 30),
       fragment('task_mode', buildMode(context.mode), 85),
     ].filter((item): item is PromptFragment => item !== null);
