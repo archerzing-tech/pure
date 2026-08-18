@@ -435,7 +435,11 @@
                     <div class="key-field"><input id="cfg-tavily-key" class="setting-input" type="password" placeholder="tvly-..." autocomplete="off" /><a class="key-link" href="https://tavily.com" target="_blank" rel="noopener" data-i18n="tools.freeKey">免费 Key ↗</a></div>
                   </div>
                   <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="tools.moreKeys">CLI 更多免费 Key</span><span class="setting-hint" data-i18n="tools.moreKeys.hint">CLI 环境变量：EXA_API_KEY · PURE_JINA_API_KEY</span></div>
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.searxng">SearXNG 聚合搜索</span><span class="setting-hint" data-i18n="tools.searxng.hint">可选：内网/自建 SearXNG 实例地址（需开启 JSON 格式），公司内网等公共引擎不可达时的标准解法；留空则跳过</span></div>
+                    <input id="cfg-searxng-url" class="setting-input" type="text" placeholder="http://searxng.internal:8080" autocomplete="off" spellcheck="false" />
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="tools.moreKeys">CLI 更多免费 Key</span><span class="setting-hint" data-i18n="tools.moreKeys.hint">CLI 环境变量：EXA_API_KEY · PURE_JINA_API_KEY · SEARXNG_URL</span></div>
                     <div class="key-links"><a class="key-link" href="https://exa.ai" target="_blank" rel="noopener">Exa ↗</a><a class="key-link" href="https://jina.ai" target="_blank" rel="noopener">Jina ↗</a></div>
                   </div>
                 </div>
@@ -473,6 +477,10 @@
                     <label class="toggle"><input type="checkbox" id="cfg-proxy-enabled" /><span class="toggle-slider"></span></label>
                   </div>
                   <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.mode">代理方式</span><span class="setting-hint" data-i18n="proxy.mode.hint">手动填写地址，或直接使用系统代理（透明转发）</span></div>
+                    <select id="cfg-proxy-mode" class="setting-select" data-i18n-options="manual:proxy.mode.manual,system:proxy.mode.system"><option value="manual" selected>手动地址</option><option value="system">系统代理</option></select>
+                  </div>
+                  <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="proxy.llmEnabled">大模型请求走代理</span><span class="setting-hint" data-i18n="proxy.llmEnabled.hint">控制 LLM 的请求是否使用上面的代理</span></div>
                     <label class="toggle"><input type="checkbox" id="cfg-proxy-llm" /><span class="toggle-slider"></span></label>
                   </div>
@@ -480,7 +488,7 @@
                     <div class="setting-info"><span class="setting-label" data-i18n="proxy.toolsEnabled">工具网络走代理</span><span class="setting-hint" data-i18n="proxy.toolsEnabled.hint">控制 Agent、网页工具、MCP 和命令行网络请求</span></div>
                     <label class="toggle"><input type="checkbox" id="cfg-proxy-tools" /><span class="toggle-slider"></span></label>
                   </div>
-                  <div class="setting-row proxy-url-row">
+                  <div class="setting-row proxy-url-row proxy-manual-field">
                     <div class="setting-info"><span class="setting-label" data-i18n="proxy.url">代理地址</span><span class="setting-hint" data-i18n="proxy.url.hint">协议、主机与端口分开填写，支持 HTTP/HTTPS 与 SOCKS5</span></div>
                     <div class="proxy-controls">
                       <div class="setting-input-group proxy-address-group">
@@ -501,11 +509,11 @@
                     </div>
                     <input id="cfg-proxy-url" type="hidden" />
                   </div>
-                  <div class="setting-row">
+                  <div class="setting-row proxy-manual-field">
                     <div class="setting-info"><span class="setting-label" data-i18n="proxy.username">用户名</span><span class="setting-hint" data-i18n="proxy.username.hint">代理认证用户名（可选）</span></div>
                     <input id="cfg-proxy-username" class="setting-input" type="text" data-i18n-placeholder="proxy.username.placeholder" placeholder="可选" autocomplete="off" />
                   </div>
-                  <div class="setting-row">
+                  <div class="setting-row proxy-manual-field">
                     <div class="setting-info"><span class="setting-label" data-i18n="proxy.password">密码</span><span class="setting-hint" data-i18n="proxy.password.hint">代理认证密码（可选）</span></div>
                     <input id="cfg-proxy-password" class="setting-input" type="password" placeholder="可选" autocomplete="off" />
                   </div>
@@ -516,6 +524,27 @@
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="proxy.bypassModels">直连模型</span><span class="setting-hint" data-i18n="proxy.bypassModels.hint">模型 ID/名称，逗号或换行分隔；命中后 LLM 不走代理</span></div>
                     <input id="cfg-proxy-bypass-models" class="setting-input" type="text" data-i18n-placeholder="proxy.bypass.placeholder" placeholder="qwen2.5-coder:7b" autocomplete="off" />
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.probe.1">探测端点 1</span><span class="setting-hint" data-i18n="proxy.probe.hint">测试连接依次请求已开启的端点，任一可达即通过；关闭的会被跳过</span></div>
+                    <div class="setting-input-group">
+                      <label class="toggle"><input type="checkbox" id="cfg-proxy-probe-0-enabled" /><span class="toggle-slider"></span></label>
+                      <input id="cfg-proxy-probe-0-url" class="setting-input" type="text" placeholder="https://www.baidu.com/" autocomplete="off" />
+                    </div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.probe.2">探测端点 2</span></div>
+                    <div class="setting-input-group">
+                      <label class="toggle"><input type="checkbox" id="cfg-proxy-probe-1-enabled" /><span class="toggle-slider"></span></label>
+                      <input id="cfg-proxy-probe-1-url" class="setting-input" type="text" placeholder="https://api.deepseek.com" autocomplete="off" />
+                    </div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.probe.3">探测端点 3</span></div>
+                    <div class="setting-input-group">
+                      <label class="toggle"><input type="checkbox" id="cfg-proxy-probe-2-enabled" /><span class="toggle-slider"></span></label>
+                      <input id="cfg-proxy-probe-2-url" class="setting-input" type="text" placeholder="https://ipwho.is/" autocomplete="off" />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -536,9 +565,16 @@
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="hub.title">Skill Hub</span><span class="setting-hint" data-i18n="hub.desc">Browse and install skills from open-source agent skill hubs (skills.sh ecosystem)</span></div>
                   </div>
-                  <div class="setting-input-group">
-                    <input id="hub-repo" class="setting-input" type="text" data-i18n-placeholder="hub.repoPlaceholder" placeholder="vercel-labs/agent-skills" autocomplete="off" spellcheck="false" />
+                  <div class="setting-input-group hub-search-bar">
+                    <select id="hub-repo" class="setting-select" aria-label="Skill provider">
+                      <option value="vercel-labs/agent-skills">Vercel · vercel-labs/agent-skills</option>
+                      <option value="nvidia/skills">NVIDIA · nvidia/skills</option>
+                      <option value="youdotcom-oss/agent-skills">You.com · youdotcom-oss/agent-skills</option>
+                      <option value="zapier/agent-skills">Zapier · zapier/agent-skills</option>
+                      <option value="openclaw/agent-skills">OpenClaw · openclaw/agent-skills</option>
+                    </select>
                     <button id="hub-browse-btn" class="setting-btn secondary" data-i18n="hub.browse">Browse</button>
+                    <input id="hub-filter" class="setting-input" type="text" data-i18n-placeholder="hub.filterPlaceholder" placeholder="搜索技能" autocomplete="off" spellcheck="false" />
                   </div>
                   <div id="hub-status" class="hub-status" hidden></div>
                   <div id="hub-grouped" class="hub-grouped"></div>

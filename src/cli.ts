@@ -12,7 +12,7 @@ import { Harness } from './harness/Harness';
 import { MockLLMAdapter } from './adapter/mock/MockLLMAdapter';
 import { createDeepSeekAdapter, createQwenAdapter, createGLMAdapter, OpenAICompatibleAdapter } from './adapter/openai/OpenAICompatibleAdapter';
 
-import { NodeToolAdapter, detectRuntimeVersions } from './adapter/node/NodeToolAdapter';
+import { NodeToolAdapter, detectNetworkSummary, detectRuntimeVersions } from './adapter/node/NodeToolAdapter';
 import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
 import { FSStore } from './adapter/storage/FSStore';
@@ -371,6 +371,16 @@ function buildRuntimesContext(): string {
   return `\nEnvironment runtimes (installed on this machine): ${cachedRuntimes}. Use the actual versions above when the task depends on a runtime or tool version (e.g. writing a package.json engines field, a requirements.txt, or a CI/git workflow), and assume a tool is NOT installed when it is absent from this list.`;
 }
 
+// Network environment pre-seed, mirroring the GUI: sync detection (system
+// proxy / env proxy / VPN) at prompt build, cached per process — live
+// reachability stays in sys_info(), which the NodeToolAdapter reports on
+// demand.
+let cachedNetwork: string | null = null;
+function buildNetworkContext(): string {
+  if (cachedNetwork === null) cachedNetwork = detectNetworkSummary();
+  return `\nEnvironment network (this machine): ${cachedNetwork}. Use it to choose what will actually work: if international is blocked, prefer domestic search engines (cn.bing.com / sogou / baidu / 360) and domestic sources, and expect Google/DuckDuckGo to fail; if a system/env proxy is listed, requests route through it when proxy is enabled.`;
+}
+
 /** Scan the app skills directory (~/.pure/skills/<name>/SKILL.md) and the
  * project's .agents/skills/<name>/SKILL.md, parse each SKILL.md frontmatter,
  * and return the bodies for system-prompt injection — the same directory the
@@ -417,6 +427,7 @@ function assembleCliPrompt(
     toolDefinitions: toolsDefs,
     environment: buildEnvironmentContext(),
     runtimes: buildRuntimesContext(),
+    network: buildNetworkContext(),
     skills: [...(loadConfig()?.hubSkills ?? []), ...loadAppSkills()],
     mode,
     budget: promptBudgetForProvider(args.customProviders, args.provider, args.model),

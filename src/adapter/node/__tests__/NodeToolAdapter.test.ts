@@ -4,7 +4,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeToolAdapter, detectRuntimeVersions } from '../NodeToolAdapter';
+import { NodeToolAdapter, detectNetworkSummary, detectRuntimeVersions } from '../NodeToolAdapter';
 import type { ToolCall, ToolResult } from '../../../shared/types';
 
 function makeCall(command: string): ToolCall {
@@ -352,5 +352,15 @@ describe('detectRuntimeVersions', () => {
       expect(entry).not.toContain('\n');
       expect(entry).not.toMatch(/ {2,}/);
     }
+  });
+});
+
+describe('detectNetworkSummary', () => {
+  it('reports proxy / env / vpn fields on one line, never throwing', () => {
+    const out = detectNetworkSummary();
+    // Field order is stable (proxy, env, vpn) and every field is populated —
+    // the summary lands in the system prompt and sys_info output verbatim.
+    expect(out).toMatch(/^proxy: .+; env: .+; vpn: .+$/);
+    expect(out).not.toContain('\n');
   });
 });

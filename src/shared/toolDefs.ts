@@ -14,11 +14,11 @@ import type { ToolDefinition } from './types';
 export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   {
     name: 'read_file',
-    description: 'Read a file from the workspace. Optionally specify startLine and endLine to read a range.',
+    description: 'Read a file from the workspace. Supports plain text/code (UTF-8, UTF-16, GBK/GB18030 Chinese Windows encoding), PDF (with ToUnicode CMap for Chinese fonts), DOCX/XLSX/PPTX/ODT, and RTF — binary/scanned files get an actionable error instead of mojibake. Optionally specify startLine and endLine to read a range.',
     input_schema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'File path relative to workspace root' },
+        path: { type: 'string', description: 'File path relative to workspace root (absolute paths inside the workspace are fine)' },
         startLine: { type: 'number', description: 'First line to read (1-indexed, optional)' },
         endLine: { type: 'number', description: 'Last line to read (1-indexed, optional)' },
       },
@@ -53,14 +53,15 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'search_files',
-    description: 'Search for a pattern in files under the workspace. Returns matching lines with file paths and line numbers.',
+    description: 'Search for a text pattern inside files under the workspace (content search, not filename matching). Searches inside supported documents too: PDF, DOCX, XLSX, PPTX, ODT, RTF, and GBK-encoded text. Returns matching lines with file paths and line numbers; unreadable binary files are listed in a skip notice instead of being silently ignored.',
     input_schema: {
       type: 'object',
       properties: {
-        pattern: { type: 'string', description: 'Text or regex pattern to search for' },
-        path: { type: 'string', description: 'Directory to search in (relative to workspace). Default: workspace root' },
-        filePattern: { type: 'string', description: 'Glob to filter files. e.g. "*.ts", "*.{ts,js}"' },
-        maxResults: { type: 'number', description: 'Max results to return. Default: 50' },
+        pattern: { type: 'string', description: 'Text to search for (literal substring)' },
+        path: { type: 'string', description: 'Directory to search in (relative to workspace), or a single file to search directly. Default: workspace root' },
+        filePattern: { type: 'string', description: 'Glob to filter files. e.g. "*.ts", "*.{ts,js}", "*.pdf"' },
+        maxResults: { type: 'number', description: 'Max results to return. Default: 50, max 500' },
+        caseSensitive: { type: 'boolean', description: 'Match case exactly. Default: false' },
       },
       required: ['pattern'],
     },
@@ -268,7 +269,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'sys_info',
-    description: 'Get operating system information: timezone, language, current time, OS version, installed runtimes (node/bun/python3/rustc/git versions), and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
+    description: 'Get operating system information: timezone, language, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
     input_schema: { type: 'object', properties: {} },
   },
 ] as const satisfies readonly ToolDefinition[];

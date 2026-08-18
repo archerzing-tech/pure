@@ -16,6 +16,7 @@ import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotE
 import { cachedDirectPublicApi, quota } from './publicApis';
 import { pageCacheKey, PAGE_TTL_MS, searchCacheKey, SEARCH_TTL_MS, webCache } from './webCache';
 import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeViaJina, truncateText } from './webScrape';
+import { extractFileText, MAX_SEARCH_FILE_BYTES } from './fileText';
 
 /** Windows has no POSIX shell (`sh`) or `diff` binary — cmd.exe / Git for
  * Windows provide the equivalents. Module-level so every handler branches
@@ -54,7 +55,7 @@ export class NodeToolAdapter implements ToolAdapter {
     this.workspace = pathResolve(config.workspace);
     this.sessionId = config.sessionId ?? '';
     this.commandTimeout = config.commandTimeout ?? 30000;
-    this.maxFileSize = config.maxFileSize ?? 1_048_576; // 1MB
+    this.maxFileSize = config.maxFileSize ?? 64 * 1024 * 1024; // 64MB — matches the Rust read_file cap
     this.maxSnapshotBytes = config.maxSnapshotBytes ?? 8 * 1024 * 1024;
     this.location = (config.location ?? '').trim();
   }
@@ -130,18 +131,35 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleReadFile(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const path = this.resolve(String(args.path));
-    const file = Bun.file(path);
 
-    if (!(await file.exists())) {
+    if (!existsSync(path)) {
       return this.fail(null!, start, `File not found: ${String(args.path)}`);
     }
 
-    const size = file.size;
-    if (size > this.maxFileSize) {
-      return this.fail(null!, start, `File too large: ${(size / 1024 / 1024).toFixed(1)}MB (max ${this.maxFileSize / 1024 / 1024}MB)`);
+    let meta: ReturnType<typeof statSync>;
+    try {
+      meta = statSync(path);
+    } catch {
+      return this.fail(null!, start, `File not found: ${String(args.path)}`);
+    }
+    if (meta.isDirectory()) {
+      return this.fail(null!, start, `read_file: '${String(args.path)}' 是目录，不是文件——请用 list_files 查看目录内容，或补全到具体文件名。`);
     }
 
-    let text = await file.text();
+    if (meta.size > this.maxFileSize) {
+      return this.fail(null!, start, `read_file: 文件 ${(meta.size / 1024 / 1024).toFixed(0)}MB 超过读取上限 ${Math.round(this.maxFileSize / 1024 / 1024)}MB；可以改用 search_files 搜索其中的内容，或用 execute_command 分段读取。`);
+    }
+
+    const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+    const { text: extracted, note } = await extractFileText(bytes, path);
+    let text = extracted.trim();
+    if (!text && note) {
+      return this.fail(null!, start, `read_file: '${String(args.path)}' — ${note}`);
+    }
+    if (!text) {
+      text = '(empty file)';
+    }
+
     const lines = text.split('\n');
 
     const startLine = typeof args.startLine === 'number' ? Math.max(1, args.startLine) : 1;
@@ -226,39 +244,81 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleSearchFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const pattern = String(args.pattern);
-    const searchDir = this.resolve(String(args.path || '.'));
-    const fileGlob = String(args.filePattern || '*');
-    const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 50;
+    const pathArg = args.path ? String(args.path) : '';
+    const searchDir = pathArg.trim() ? this.resolve(pathArg) : this.resolve('.');
+
+    if (!existsSync(searchDir)) {
+      return this.fail(null!, start, `search_files: '${pathArg || '.'}' 不存在。若这是 Windows 绝对路径，请确认工作区包含它（设置 → Tools → Workspace 选择该目录）。`);
+    }
+
+    const max = Math.min(Math.max(1, typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : 50), 500);
+    const ignoreCase = args.caseSensitive !== true;
+    const needle = ignoreCase ? pattern.toLowerCase() : pattern;
 
     const results: string[] = [];
-    let count = 0;
+    const skipped: string[] = [];
 
-    const glob = new Bun.Glob(`**/${fileGlob}`);
-
-    for await (const entry of glob.scan({ cwd: searchDir, absolute: false })) {
-      if (count >= maxResults) break;
-
+    // Search one file: extract text via the format-aware engine (PDF/DOCX/
+    // XLSX/GBK text now searchable), report skip reasons instead of silently
+    // ignoring unreadable files.
+    const searchOneFile = async (entryPath: string, base: string): Promise<void> => {
+      let meta: ReturnType<typeof statSync>;
       try {
-        const fullPath = join(searchDir, entry);
-        const file = Bun.file(fullPath);
-        const text = await file.text();
-        const lines = text.split('\n');
-
-        for (let i = 0; i < lines.length && count < maxResults; i++) {
-          if (lines[i].includes(pattern)) {
-            results.push(`${entry}:${i + 1}: ${lines[i].trim()}`);
-            count++;
-          }
-        }
+        meta = statSync(entryPath);
       } catch {
-        // skip unreadable files
+        skipped.push(`${basename(entryPath)}（无法读取文件信息）`);
+        return;
       }
+      if (!meta.isFile()) return;
+      if (meta.size > MAX_SEARCH_FILE_BYTES) {
+        skipped.push(`${basename(entryPath)}（文件 ${(meta.size / 1024 / 1024).toFixed(1)}MB 超过搜索上限 32MB）`);
+        return;
+      }
+      const bytes = new Uint8Array(await Bun.file(entryPath).arrayBuffer());
+      const { text: fileText, note } = await extractFileText(bytes, entryPath);
+      if (!fileText.trim() && note) {
+        skipped.push(`${basename(entryPath)}（${note}）`);
+        return;
+      }
+      const relPath = pathRelative(base, entryPath) || basename(entryPath);
+      for (const [idx, line] of fileText.split('\n').entries()) {
+        if (results.length >= max) break;
+        const hay = ignoreCase ? line.toLowerCase() : line;
+        if (hay.includes(needle)) {
+          results.push(`${relPath}:${idx + 1}: ${line.trim()}`);
+        }
+      }
+    };
+
+    // A `path` pointing at a single FILE searches that file directly — models
+    // often point search_files at the document they think contains the answer.
+    if (statSync(searchDir).isFile()) {
+      const base = dirname(searchDir);
+      await searchOneFile(searchDir, base);
+    } else {
+      let fileGlob = String(args.filePattern || '**/*');
+      // Models echo Windows paths (D:\tmp\*.docx) verbatim; on non-Windows
+      // platforms backslashes are literal filename characters, so normalize.
+      if (!IS_WINDOWS) fileGlob = fileGlob.replace(/\\/g, '/');
+      const glob = new Bun.Glob(fileGlob);
+      for await (const entry of glob.scan({ cwd: searchDir, absolute: false })) {
+        if (results.length >= max) break;
+        await searchOneFile(join(searchDir, entry), searchDir);
+      }
+    }
+
+    let out = results.length > 0 ? results.join('\n') : `No matches found for "${pattern}"`;
+    if (skipped.length > 0) {
+      const display = skipped.slice(0, 8);
+      const more = skipped.length - 8;
+      if (more > 0) display.push(`…等共 ${skipped.length} 个`);
+      out += `\n\n[提示] ${skipped.length} 个文件无法解析文本内容（扫描版 PDF / 加密文档 / 旧版二进制 / 超大文件），已跳过：${display.join('、')}\n如需读取这些文件，请单独 read_file 它们查看具体原因。`;
     }
 
     return {
       id: `tool_${Date.now()}`,
       toolName: 'search_files',
-      result: results.length > 0 ? results.join('\n') : `No matches found for "${pattern}"`,
+      result: out,
       success: true,
       duration: Date.now() - start,
     };
@@ -862,21 +922,39 @@ export class NodeToolAdapter implements ToolAdapter {
       }
     }
 
+    // 4) SearXNG metasearch backend (opt-in via SEARXNG_URL): intranet /
+    // self-hosted instances aggregate dozens of upstream engines behind one
+    // JSON endpoint — the standard answer for corporate or offline networks
+    // where every public engine is blocked. Tried right after the API
+    // backends, before scraping.
+    if (results.length === 0 && process.env.SEARXNG_URL?.trim() && !quota.isBlocked('SearXNG')) {
+      try {
+        const r = await searxngSearch(query, maxResults);
+        if (r.length > 0) {
+          if (!cjk || resultsRelevant(query, r)) results = dedupeResults(r);
+          else irrelevant += 1;
+        } else {
+          anyEmpty = true;
+        }
+      } catch (err: any) {
+        quota.markBlocked('SearXNG', 300_000);
+        failed.push(`SearXNG: ${err?.message ?? String(err)}`);
+      }
+    }
+
     // Free HTML backends, probed IN PARALLEL by firstRelevantResult below
-    // (first set that passes the CJK relevance gate wins). CJK queries add
-    // Sogou + cn.bing.com — Sogou is the only major Chinese engine reachable
-    // without a captcha that returns genuinely relevant results (cn.bing.com
-    // returns Xi'an tourism guides for "西安到重庆 机票", Baidu redirects to a
-    // captcha); non-CJK probes DuckDuckGo + Bing. Same parallel first-win
-    // design as the Rust desktop backend, which probes cn.bing.com →
-    // DuckDuckGo → Bing (no Sogou on the Rust side).
+    // (first set that passes the CJK relevance gate wins). CJK queries probe
+    // the China-relevant engines — Sogou, cn.bing.com, 360 (so.com), Baidu —
+    // plus the international ones as safety nets; non-CJK probes DuckDuckGo,
+    // Bing and Brave. All fetches ride the shared cookie jar (searchFetch) so
+    // session cookies from earlier searches keep anti-bot challenges at bay.
     const backends: Array<{ label: string; fetch: () => Promise<SearchResult[]> }> = [
       ...(cjk
         ? [
             {
               label: 'Sogou',
               fetch: guarded('Sogou', async () => {
-                const resp = await fetch(`https://www.sogou.com/web?query=${encodeURIComponent(query)}`, {
+                const resp = await searchFetch(`https://www.sogou.com/web?query=${encodeURIComponent(query)}`, {
                   headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8' },
                   redirect: 'follow',
                   signal: AbortSignal.timeout(8000),
@@ -888,7 +966,7 @@ export class NodeToolAdapter implements ToolAdapter {
             {
               label: 'cn.bing.com',
               fetch: guarded('cn.bing.com', async () => {
-                const resp = await fetch(`https://cn.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`, {
+                const resp = await searchFetch(`https://cn.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}&mkt=zh-CN`, {
                   headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8' },
                   redirect: 'follow',
                   signal: AbortSignal.timeout(8000),
@@ -897,12 +975,39 @@ export class NodeToolAdapter implements ToolAdapter {
                 return parseBingResults(await readResponseText(resp), maxResults);
               }),
             },
+            {
+              label: '360',
+              fetch: guarded('360', async () => {
+                const resp = await searchFetch(`https://www.so.com/s?q=${encodeURIComponent(query)}`, {
+                  headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8' },
+                  redirect: 'follow',
+                  signal: AbortSignal.timeout(8000),
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                return parseSo360Results(await readResponseText(resp), maxResults);
+              }),
+            },
+            {
+              label: 'Baidu',
+              fetch: guarded('Baidu', async () => {
+                // Warm up a BAIDUID cookie before the first real query —
+                // Baidu serves a captcha to cookie-less clients.
+                await ensureBaiduCookies();
+                const resp = await searchFetch(`https://www.baidu.com/s?wd=${encodeURIComponent(query)}&ie=utf-8`, {
+                  headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8' },
+                  redirect: 'follow',
+                  signal: AbortSignal.timeout(8000),
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                return parseBaiduResults(await readResponseText(resp), maxResults);
+              }),
+            },
           ]
         : []),
       {
         label: 'DuckDuckGo',
         fetch: guarded('DuckDuckGo', async () => {
-          const resp = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+          const resp = await searchFetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
             headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8' },
             redirect: 'follow',
             signal: AbortSignal.timeout(8000),
@@ -914,7 +1019,8 @@ export class NodeToolAdapter implements ToolAdapter {
       {
         label: 'Bing',
         fetch: guarded('Bing', async () => {
-          const resp = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`, {
+          const mkt = cjk ? '&mkt=zh-CN&setlang=zh-hans' : '';
+          const resp = await searchFetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}${mkt}`, {
             headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8' },
             redirect: 'follow',
             signal: AbortSignal.timeout(8000),
@@ -923,14 +1029,30 @@ export class NodeToolAdapter implements ToolAdapter {
           return parseBingResults(await readResponseText(resp), maxResults);
         }),
       },
+      ...(cjk
+        ? []
+        : [
+            {
+              label: 'Brave',
+              fetch: guarded('Brave', async () => {
+                const resp = await searchFetch(`https://search.brave.com/search?q=${encodeURIComponent(query)}`, {
+                  headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9' },
+                  redirect: 'follow',
+                  signal: AbortSignal.timeout(8000),
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                return parseBraveResults(await readResponseText(resp), maxResults);
+              }),
+            },
+          ]),
     ];
     // A failed/rate-limited backend sits in cooldown (30s) so the next query
     // skips it instead of re-hitting the same dead endpoint.
     const activeBackends = backends.filter((b) => !quota.isBlocked(b.label));
 
-    // 2) Free HTML backends, probed IN PARALLEL — first relevant set wins
+    // 5) Free HTML backends, probed IN PARALLEL — first relevant set wins
     // ("first win"), so a dead/slow/irrelevant backend no longer serializes
-    // the search. Mirrors the Rust run_html_backends_parallel.
+    // the search.
     if (results.length === 0 && activeBackends.length > 0) {
       const outcome = await firstRelevantResult(query, activeBackends);
       if (outcome.results) {
@@ -946,6 +1068,45 @@ export class NodeToolAdapter implements ToolAdapter {
       failed.push('free HTML backends in cooldown (recent failures)');
     }
 
+    // 6) One normalized retry: syntactically heavy queries (quotes,
+    // operators, Chinese punctuation) make engines fail or return nothing
+    // even when the intent is findable — strip the noise once and re-probe
+    // the HTML backends before giving up.
+    if (results.length === 0) {
+      const simplified = normalizeQueryForRetry(query);
+      if (simplified) {
+        const retryBackends = backends.filter((b) => !quota.isBlocked(b.label));
+        if (retryBackends.length > 0) {
+          const outcome = await firstRelevantResult(simplified, retryBackends);
+          if (outcome.results) {
+            results = outcome.results;
+          } else {
+            failed.push(...outcome.failed);
+            anyEmpty = anyEmpty || outcome.anyEmpty;
+            irrelevant += outcome.irrelevant;
+          }
+        }
+      }
+    }
+
+    // 7) Last resort: Bing rendered through Jina Reader (r.jina.ai, free
+    // tier ~20 req/min). Jina fetches Bing from its own infrastructure, so
+    // this works when every local engine is blocked / rate-limited (China,
+    // restrictive networks) as long as r.jina.ai is reachable. Slower +
+    // rate-limited, hence last.
+    if (results.length === 0) {
+      try {
+        const r = await jinaBingSearch(query, maxResults);
+        if (r.length > 0) {
+          results = dedupeResults(r);
+        } else {
+          anyEmpty = true;
+        }
+      } catch (err: any) {
+        failed.push(`Bing via Jina: ${err?.message ?? String(err)}`);
+      }
+    }
+
     if (results.length === 0) {
       // Backends answered but nothing usable (empty OR relevance-gated-out OR
       // all unreachable): the actionable guidance is the same — the query
@@ -957,7 +1118,7 @@ export class NodeToolAdapter implements ToolAdapter {
         return {
           id: `tool_${Date.now()}`,
           toolName: 'web_search',
-          result: `No results found for "${query}" on the available search backends (Serper, Tavily, Exa, Sogou, cn.bing.com, DuckDuckGo, Bing) — the backends returned either no hits or only content unrelated to the query${unreachable}. Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch / web_scrape on a URL you expect to contain the information.`,
+          result: `No results found for "${query}" on the available search backends (${searchBackendNames(cjk)}) — the backends returned either no hits or only content unrelated to the query${unreachable}. Do NOT repeat the same query — rephrase it (broader terms, simpler wording, or English), or use web_fetch / web_scrape on a URL you expect to contain the information.`,
           success: true,
           duration: Date.now() - start,
         };
@@ -1298,17 +1459,19 @@ export class NodeToolAdapter implements ToolAdapter {
     } catch {}
     // Mirrors the Rust sys_info output shape (timezone/language/time/os
     // aligned under the same 10-char label column) plus the user-configured
-    // location when present (CLI: PURE_LOCATION / PURE_CITY env var) and the
-    // installed runtimes (node / bun / python3 / rustc / git --version).
+    // location when present (CLI: PURE_LOCATION / PURE_CITY env var), the
+    // installed runtimes (node / bun / python3 / rustc / git --version), and
+    // the network environment (system proxy / env proxy / VPN / reachability).
     const location = this.location
       ? `${this.location} (user-set)`
       : 'not set';
     const runtimes = detectRuntimeVersions().join('  ');
+    const network = `${detectNetworkSummary()}; reach: ${await detectReachability()}`;
 
     return {
       id: `tool_${Date.now()}`,
       toolName: 'sys_info',
-      result: `timezone:  ${tz}\nlanguage:  ${lang}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}\nruntimes:  ${runtimes}`,
+      result: `timezone:  ${tz}\nlanguage:  ${lang}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}\nruntimes:  ${runtimes}\nnetwork:   ${network}`,
       success: true,
       duration: Date.now() - start,
     };
@@ -1592,6 +1755,103 @@ export function detectRuntimeVersions(): string[] {
   return out;
 }
 
+// ── Network environment for sys_info / prompt injection ──
+// Mirrors the Rust sys_info `network:` line: system proxy (macOS scutil),
+// env proxy vars, connected VPNs, and live direct reachability. The sync
+// summary is exported for the CLI prompt pre-seed; sys_info additionally
+// probes reachability (async fetch) so the on-demand tool reports it fresh.
+const PROXY_ENV_VARS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'];
+
+function spawnSyncOutput(cmd: string, args: string[]): string {
+  try {
+    const r = Bun.spawnSync({ cmd: [cmd, ...args], stdout: 'pipe', stderr: 'pipe' });
+    if (r.exitCode === 0) return new TextDecoder().decode(r.stdout);
+  } catch {}
+  return '';
+}
+
+/** Value of `key:` in macOS `scutil --proxy` / `--nc list` output. */
+function scutilValue(output: string, key: string): string {
+  for (const line of output.split('\n')) {
+    const idx = line.indexOf(':');
+    if (idx < 0) continue;
+    if (line.slice(0, idx).trim() === key) return line.slice(idx + 1).trim();
+  }
+  return '';
+}
+
+/** macOS system proxy as `scheme://host:port` (same precedence as the Rust
+ * parse_scutil_proxy: HTTPS → HTTP → SOCKS). Non-macOS: "not detected". */
+function detectSystemProxySync(): string {
+  if (process.platform !== 'darwin') return 'not detected';
+  const out = spawnSyncOutput('scutil', ['--proxy']);
+  if (!out) return 'not detected';
+  for (const [enable, hostKey, portKey, scheme] of [
+    ['HTTPSEnable', 'HTTPSProxy', 'HTTPSPort', 'http://'],
+    ['HTTPEnable', 'HTTPProxy', 'HTTPPort', 'http://'],
+    ['SOCKSEnable', 'SOCKSProxy', 'SOCKSPort', 'socks5://'],
+  ] as const) {
+    if (scutilValue(out, enable) !== '1') continue;
+    const host = scutilValue(out, hostKey);
+    if (!host) continue;
+    const port = scutilValue(out, portKey);
+    return port ? `${scheme}${host}:${port}` : `${scheme}${host}`;
+  }
+  return 'none';
+}
+
+/** Connected VPN service names (macOS `scutil --nc list`); "not detected" on
+ * other platforms. */
+function detectVpnSync(): string {
+  if (process.platform !== 'darwin') return 'not detected';
+  const out = spawnSyncOutput('scutil', ['--nc', 'list']);
+  const names: string[] = [];
+  for (const line of out.split('\n')) {
+    if (!line.includes('(Connected)')) continue;
+    const name = line.split('(Connected)')[1]?.trim();
+    if (name) names.push(name);
+  }
+  return names.length ? `${names.join(', ')} (connected)` : 'none';
+}
+
+/** Raw standard proxy env vars as `NAME=value` pairs; "none" when unset. */
+function detectEnvProxySummary(): string {
+  const parts: string[] = [];
+  for (const name of PROXY_ENV_VARS) {
+    const value = process.env[name]?.trim();
+    if (value) parts.push(`${name}=${value}`);
+  }
+  return parts.length ? parts.join(' ') : 'none';
+}
+
+/** Sync network summary (no live reachability — that needs async fetch and
+ * belongs to sys_info). Exported so the CLI reuses it for its system prompt,
+ * keeping the prompt pre-seed and sys_info output consistent. */
+export function detectNetworkSummary(): string {
+  return `proxy: ${detectSystemProxySync()}; env: ${detectEnvProxySummary()}; vpn: ${detectVpnSync()}`;
+}
+
+/** Probe connectivity to a domestic and an international endpoint (2s bound
+ * each, in parallel). Note: fetch() honors HTTP(S)_PROXY env vars, so on a
+ * machine with env proxies set this reflects the env-proxy-routed view — the
+ * CLI normally has none set, and the prompt pre-seed reports them separately.
+ * Mirrors Rust probe_reachability. */
+async function detectReachability(): Promise<string> {
+  const probe = async (url: string): Promise<boolean> => {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(2000) });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+  const [domestic, international] = await Promise.all([
+    probe('https://www.baidu.com/'),
+    probe('https://www.google.com/generate_204'),
+  ]);
+  return `domestic ${domestic ? 'ok' : 'blocked'}, international ${international ? 'ok' : 'blocked'}`;
+}
+
 /** True when `target` resolves strictly inside `base` (both canonicalized
  * before comparison). Uses the platform separator (path.sep) — a single `\`
  * on Windows, which a hardcoded escaped `\\` would never match — and treats
@@ -1644,6 +1904,89 @@ function createAbortController(parent: AbortSignal | undefined, timeoutMs: numbe
 // string, which surfaced as a wall of generic HTTP errors. A real browser UA
 // keeps both search backends and web_fetch targets responsive.
 const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
+// ── Shared cookie jar for HTML search backends ──
+// Reusing session cookies (Baidu's BAIDUID, Bing's MUID, Sogou's SUV, …)
+// across searches within the process is the single cheapest captcha-avoidance
+// lever there is: a fresh cookie-less client trips anti-bot challenges on the
+// very first request, which is exactly how "经常搜不到" happens. Mirrors the
+// Rust SEARCH_COOKIE_JAR in src-tauri/src/lib.rs. In-memory only (no
+// persistence across runs) and carries no credentials.
+const searchCookieJar = new Map<string, Map<string, string>>(); // domain -> name -> value
+
+function cookieHeaderFor(url: string): string {
+  try {
+    const host = new URL(url).host;
+    const pairs: string[] = [];
+    for (const [domain, cookies] of searchCookieJar) {
+      if (host === domain || host.endsWith('.' + domain)) {
+        for (const [k, v] of cookies) pairs.push(`${k}=${v}`);
+      }
+    }
+    return pairs.join('; ');
+  } catch {
+    return '';
+  }
+}
+
+function storeCookies(url: string, setCookieHeader: string | null): void {
+  if (!setCookieHeader) return;
+  try {
+    const host = new URL(url).host;
+    for (const raw of setCookieHeader.split(',')) {
+      const [pair, ...attrs] = raw.split(';');
+      const eq = pair.indexOf('=');
+      if (eq === -1) continue;
+      const name = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
+      if (!name) continue;
+      // Honor an explicit Domain attribute; otherwise scope to the request host.
+      let domain = host;
+      for (const a of attrs) {
+        const t = a.trim().toLowerCase();
+        if (t.startsWith('domain=')) {
+          const d = t.slice(7).trim().replace(/^\./, '');
+          if (d) domain = d;
+        }
+      }
+      if (!searchCookieJar.has(domain)) searchCookieJar.set(domain, new Map());
+      searchCookieJar.get(domain)!.set(name, value);
+    }
+  } catch {
+    /* ignore malformed cookie headers */
+  }
+}
+
+/** fetch() that rides the shared cookie jar: attaches stored cookies for the
+ * request host and stores any Set-Cookie the response returns. Used by the
+ * HTML search backends (and the Baidu warm-up). */
+async function searchFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const cookies = cookieHeaderFor(url);
+  if (cookies) headers.set('Cookie', cookies);
+  const resp = await fetch(url, { ...init, headers });
+  storeCookies(url, resp.headers.get('set-cookie'));
+  return resp;
+}
+
+// Lazily warmed-up flag: the first Baidu search first fetches the homepage so
+// the jar picks up a BAIDUID cookie before the real query — Baidu serves a
+// captcha page to cookie-less clients and the warm-up is the documented
+// workaround. Best-effort (a failed warm-up just means the search may hit the
+// captcha and degrade to the next backend). Mirrors Rust ensure_baidu_cookies.
+let baiduWarmed = false;
+async function ensureBaiduCookies(): Promise<void> {
+  if (baiduWarmed) return;
+  baiduWarmed = true;
+  try {
+    await searchFetch('https://www.baidu.com/', {
+      headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
+      signal: AbortSignal.timeout(4000),
+    });
+  } catch {
+    /* best-effort */
+  }
+}
 
 // ── Charset-aware HTTP body decoding ──
 // `Response.text()` always decodes the body as UTF-8 (the Fetch spec mandates
@@ -1792,6 +2135,68 @@ export async function exaSearch(query: string, maxResults: number): Promise<Sear
       const date = typeof r.publishedDate === 'string' && r.publishedDate ? ` (${r.publishedDate.slice(0, 10)})` : '';
       return { title: `${r.title}${date}`, snippet: r.text ?? '', url: r.url! };
     });
+}
+
+/** SearXNG metasearch backend (opt-in via SEARXNG_URL): intranet /
+ * self-hosted instances aggregate dozens of upstream engines behind one JSON
+ * endpoint — the standard answer for corporate or offline networks where
+ * every public engine is blocked. Expects an instance with JSON format
+ * enabled (settings.yml `formats: [html, json]`). Mirrors the Rust
+ * search_backend_searxng in lib.rs. */
+export async function searxngSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  const base = process.env.SEARXNG_URL?.trim();
+  if (!base) throw new Error('SEARXNG_URL not set');
+  const resp = await fetch(
+    `${base.replace(/\/+$/, '')}/search?q=${encodeURIComponent(query)}&format=json&safesearch=0`,
+    {
+      headers: { 'User-Agent': BROWSER_UA },
+      signal: AbortSignal.timeout(10000),
+    },
+  );
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data: { results?: Array<{ title?: string; url?: string; content?: string }> } = await resp.json();
+  return (data.results ?? [])
+    .filter((r) => r.title && r.url)
+    .map((r) => ({ title: r.title!, snippet: r.content ?? '', url: r.url! }));
+}
+
+/** Last-resort universal backend: Bing rendered through Jina Reader
+ * (`r.jina.ai`, free tier ~20 req/min, no key). Jina fetches Bing from its
+ * own infrastructure, so this works when every local engine is blocked or
+ * rate-limited (China / restrictive networks), as long as r.jina.ai itself
+ * is reachable. PURE_JINA_API_KEY (if set) raises the limits. Mirrors the
+ * Rust search_backend_jina_bing in lib.rs. */
+export async function jinaBingSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  const headers: Record<string, string> = {
+    'User-Agent': BROWSER_UA,
+    'X-Return-Format': 'markdown',
+    Accept: 'text/plain',
+  };
+  const apiKey = process.env.PURE_JINA_API_KEY?.trim();
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const resp = await searchFetch(`https://r.jina.ai/https://www.bing.com/search?q=${encodeURIComponent(query)}`, {
+    headers,
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return parseJinaMarkdownResults(await resp.text(), maxResults);
+}
+
+/** Human-readable list of the actually-configured backends for the
+ * no-results guidance the model feeds back on (mirrors the Rust
+ * configured_backend_names). */
+export function searchBackendNames(cjk: boolean): string {
+  const names: string[] = [
+    ...(process.env.SERPER_API_KEY?.trim() ? ['Serper'] : []),
+    ...(process.env.TAVILY_API_KEY?.trim() ? ['Tavily'] : []),
+    ...(process.env.EXA_API_KEY?.trim() ? ['Exa'] : []),
+    ...(process.env.SEARXNG_URL?.trim() ? ['SearXNG'] : []),
+    ...(cjk ? ['Sogou', 'cn.bing.com', '360', 'Baidu'] : []),
+    'DuckDuckGo',
+    'Bing',
+    ...(cjk ? [] : ['Brave']),
+  ];
+  return names.join(', ');
 }
 
 /** Wrap a free-HTML-backend fetch so a failure puts the backend into a short
@@ -2026,6 +2431,307 @@ export function dedupeResults(results: SearchResult[]): SearchResult[] {
     seen.add(key);
     return true;
   });
+}
+
+/** Extract a bare double-quoted attribute value from HTML, e.g.
+ * `data-mdurl="https://…"` — used where `<a>` hrefs are redirect wrappers.
+ * Mirrors the Rust extract_attr. */
+function extractAttr(block: string, attr: string): string | undefined {
+  const idx = block.indexOf(attr);
+  if (idx === -1) return undefined;
+  const rest = block.slice(idx + attr.length).trimStart();
+  if (!rest.startsWith('=')) return undefined;
+  const after = rest.slice(1).trimStart();
+  if (after[0] === '"' || after[0] === "'") {
+    const end = after.indexOf(after[0], 1);
+    if (end === -1) return undefined;
+    return after.slice(1, end);
+  }
+  const m = after.match(/^[^\s>]+/);
+  return m?.[0];
+}
+
+/** Parse 360 Search (so.com) results (`<li class="res-list">` blocks with a
+ * `<h3 class="res-title"><a data-mdurl="REAL_URL" href="…">TITLE</a></h3>`
+ * title and a `<p class="res-desc">` snippet). `data-mdurl` carries the real
+ * destination (the href is a /link?m=… redirect), so it wins; otherwise the
+ * href is absolutized. Mirrors src-tauri/src/lib.rs `parse_so360_results`. */
+export function parseSo360Results(html: string, maxResults: number): SearchResult[] {
+  const results: SearchResult[] = [];
+  const marker = '<li class="res-list';
+  let rest = html;
+  while (results.length < maxResults) {
+    const idx = rest.indexOf(marker);
+    if (idx === -1) break;
+    const tail = rest.slice(idx);
+    const next = tail.indexOf(marker, marker.length);
+    const end = next === -1 ? tail.length : next;
+    const block = tail.slice(0, end);
+    const parsed = parseSo360Block(block);
+    if (parsed) results.push(parsed);
+    rest = tail.slice(end);
+  }
+  return results;
+}
+
+function parseSo360Block(block: string): SearchResult | undefined {
+  const titleStart = block.indexOf('res-title');
+  if (titleStart === -1) return undefined;
+  const relA = block.slice(titleStart).indexOf('<a');
+  if (relA === -1) return undefined;
+  const aIdx = titleStart + relA;
+  const rawHref = extractHref(block, aIdx);
+  if (rawHref === undefined) return undefined;
+  // data-mdurl holds the real URL when present (modern markup); else the
+  // href is a /link?m=… redirect we absolutize.
+  const url = extractAttr(block, 'data-mdurl')
+    ?? (rawHref.startsWith('//') ? `https:${rawHref}`
+      : rawHref.startsWith('/') ? `https://www.so.com${rawHref}`
+      : rawHref);
+
+  const afterA = block.slice(aIdx);
+  const gt = afterA.indexOf('>');
+  if (gt === -1) return undefined;
+  const afterGt = afterA.slice(gt + 1);
+  const anchorEnd = afterGt.indexOf('</a>');
+  if (anchorEnd === -1) return undefined;
+  const title = decodeHtmlEntities(stripHtml(afterGt.slice(0, anchorEnd))).trim();
+  if (!title || !url) return undefined;
+
+  // Snippet: <p class="res-desc">…</p> (organic) — the span inside is
+  // stripped too. res-desc IS the <p> tag's class, so the content starts at
+  // the tag's '>' after the class name.
+  let snippet = '';
+  const d = block.indexOf('res-desc');
+  if (d !== -1) {
+    const afterD = block.slice(d);
+    const gt = afterD.indexOf('>');
+    if (gt !== -1) {
+      const content = afterD.slice(gt + 1);
+      const end = content.indexOf('</p>');
+      if (end !== -1) snippet = decodeHtmlEntities(stripHtml(content.slice(0, end))).trim();
+    }
+  }
+
+  return { title, snippet, url };
+}
+
+/** Parse Baidu results (best-effort — Baidu serves a captcha to cookie-less
+ * or foreign clients, so this backend degrades gracefully to the next one).
+ * Blocks are `<div class="result c-container …">`; title from
+ * `<h3 class="t"><a href="…">TITLE</a></h3>` (or the `data-tools` JSON on
+ * some blocks), snippet from `.content-right_…` / `.c-abstract` / `.c-span-last`.
+ * Mirrors src-tauri/src/lib.rs `parse_baidu_results`. */
+export function parseBaiduResults(html: string, maxResults: number): SearchResult[] {
+  const results: SearchResult[] = [];
+  const marker = 'class="result c-container';
+  let rest = html;
+  while (results.length < maxResults) {
+    const idx = rest.indexOf(marker);
+    if (idx === -1) break;
+    const tail = rest.slice(idx);
+    const next = tail.indexOf(marker, marker.length);
+    const end = next === -1 ? tail.length : next;
+    const block = tail.slice(0, end);
+    const parsed = parseBaiduBlock(block);
+    if (parsed) results.push(parsed);
+    rest = tail.slice(end);
+  }
+  return results;
+}
+
+function parseBaiduBlock(block: string): SearchResult | undefined {
+  // data-tools='{"title":"…","url":"…"}' is the most reliable source on
+  // modern Baidu markup; fall back to the h3 anchor.
+  let title = '';
+  let url = '';
+  const tools = extractAttr(block, 'data-tools');
+  if (tools) {
+    try {
+      const v = JSON.parse(tools.replace(/&quot;/g, '"'));
+      title = String(v.title ?? '');
+      url = String(v.url ?? '');
+    } catch { /* malformed JSON → fall through to h3 */ }
+  }
+  if (!url) {
+    const h3 = block.indexOf('<h3');
+    if (h3 !== -1) {
+      const afterH3 = block.slice(h3);
+      const aIdx = afterH3.indexOf('<a');
+      if (aIdx !== -1) {
+        url = extractHref(afterH3, aIdx) ?? '';
+        const afterA = afterH3.slice(aIdx);
+        const gt = afterA.indexOf('>');
+        if (gt !== -1) {
+          const afterGt = afterA.slice(gt + 1);
+          const end = afterGt.indexOf('</a>');
+          if (end !== -1) title = decodeHtmlEntities(stripHtml(afterGt.slice(0, end))).trim();
+        }
+      }
+    }
+  }
+  // Snippet: content-right… / c-abstract / c-span-last containers.
+  let snippet = '';
+  for (const needle of ['content-right', 'c-abstract', 'c-span-last']) {
+    const i = block.indexOf(needle);
+    if (i === -1) continue;
+    const after = block.slice(i);
+    const gt = after.indexOf('>');
+    if (gt === -1) continue;
+    const content = after.slice(gt + 1);
+    const divEnd = content.indexOf('</div>');
+    const spanEnd = content.indexOf('</span>');
+    const end = divEnd === -1 ? (spanEnd === -1 ? content.length : spanEnd) : (spanEnd === -1 ? divEnd : Math.min(divEnd, spanEnd));
+    const s = decodeHtmlEntities(stripHtml(content.slice(0, end))).trim();
+    if (s) {
+      snippet = s;
+      break;
+    }
+  }
+  title = title.trim();
+  if (!title || !url) return undefined;
+  return { title, snippet, url: decodeHtmlEntities(url) };
+}
+
+/** Parse Brave Search results (`<div class="snippet …" data-type="web">`
+ * blocks with a `title search-snippet-title` div — the anchor URL lives
+ * earlier in the block — and a `generic-snippet` paragraph). The svelte hash
+ * suffixes rotate across Brave builds, so blocks are matched on the stable
+ * `class="snippet ` prefix and the `search-snippet-title` / `generic-snippet`
+ * substrings. Mirrors src-tauri/src/lib.rs `parse_brave_results`. */
+export function parseBraveResults(html: string, maxResults: number): SearchResult[] {
+  const results: SearchResult[] = [];
+  const marker = 'class="snippet ';
+  let rest = html;
+  while (results.length < maxResults) {
+    const idx = rest.indexOf(marker);
+    if (idx === -1) break;
+    const tail = rest.slice(idx);
+    const next = tail.indexOf(marker, marker.length);
+    const end = next === -1 ? tail.length : next;
+    const block = tail.slice(0, end);
+    const parsed = parseBraveBlock(block);
+    if (parsed) results.push(parsed);
+    rest = tail.slice(end);
+  }
+  return results;
+}
+
+function parseBraveBlock(block: string): SearchResult | undefined {
+  const aIdx = block.indexOf('<a');
+  if (aIdx === -1) return undefined;
+  const url = extractHref(block, aIdx);
+  if (url === undefined) return undefined;
+
+  let title = '';
+  const ti = block.indexOf('search-snippet-title');
+  if (ti !== -1) {
+    const rest = block.slice(ti);
+    const gt = rest.indexOf('>');
+    if (gt !== -1) {
+      const content = rest.slice(gt + 1);
+      const end = content.indexOf('<');
+      if (end !== -1) title = decodeHtmlEntities(stripHtml(content.slice(0, end))).trim();
+    }
+  }
+  if (!title) return undefined;
+
+  let snippet = '';
+  const si = block.indexOf('generic-snippet');
+  if (si !== -1) {
+    const rest = block.slice(si);
+    const gt = rest.indexOf('>');
+    if (gt !== -1) {
+      const content = rest.slice(gt + 1);
+      const end = content.indexOf('</p>');
+      if (end !== -1) snippet = decodeHtmlEntities(stripHtml(content.slice(0, end))).trim();
+    }
+  }
+
+  return { title, snippet, url };
+}
+
+/** Parse Jina Reader (r.jina.ai) markdown output — the last-resort backend
+ * renders `https://www.bing.com/search?q=…` from Jina's infrastructure and
+ * returns clean markdown, so it works even when every local engine is
+ * blocked (China / restrictive networks) as long as r.jina.ai is reachable.
+ * Results are `## [Title](url)` headings (optionally numbered) followed by a
+ * snippet paragraph. Mirrors src-tauri/src/lib.rs `parse_jina_markdown_results`. */
+export function parseJinaMarkdownResults(text: string, maxResults: number): SearchResult[] {
+  const lines = text.split('\n');
+  const out: SearchResult[] = [];
+  const heading = /^\s*(?:\d+\.\s+)?#{1,4}\s*\[([^\]]+)\]\(([^)]+)\)\s*$/;
+  for (let i = 0; i < lines.length && out.length < maxResults; i++) {
+    const m = lines[i].match(heading);
+    if (!m) continue;
+    const title = m[1].replace(/\*\*/g, '').trim();
+    const url = resolveBingCkUrl(m[2]);
+    // Snippet: the next non-empty, non-heading line.
+    let snippet = '';
+    let j = i + 1;
+    while (j < lines.length) {
+      const t = lines[j].trim();
+      if (!t) {
+        j += 1;
+        continue;
+      }
+      if (t.startsWith('#')) break;
+      snippet = t;
+      break;
+    }
+    if (title && url) out.push({ title, snippet, url });
+  }
+  return out;
+}
+
+/** Bing wraps result URLs in `/ck/a` redirects: `…&u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw&ntb=1`.
+ * The `u=` param holds the base64 (URL-safe, sometimes prefixed `a1`) real
+ * URL. Decode it when present so the model gets the actual destination
+ * (fetchable via web_fetch) instead of a bing.com redirect. Mirrors the Rust
+ * resolve_bing_ck_url. */
+export function resolveBingCkUrl(url: string): string {
+  const idx = url.indexOf('u=');
+  if (idx === -1) return url;
+  const after = url.slice(idx + 2);
+  const end = Math.min(...['&', '#'].map(c => after.indexOf(c)).filter(i => i !== -1), after.length);
+  const b64raw = after.slice(0, end).trim();
+  if (!b64raw) return url;
+  const decoded = percentDecode(b64raw);
+  const candidates = [decoded, decoded.startsWith('a1') ? decoded.slice(2) : ''];
+  for (const cand of candidates) {
+    if (!cand) continue;
+    const normalized = cand.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    try {
+      const s = new TextDecoder().decode(Uint8Array.from(atob(padded), c => c.charCodeAt(0)));
+      if (s.startsWith('http')) return s;
+    } catch { /* not valid base64 → try next */ }
+  }
+  return url;
+}
+
+function percentDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+/** Strip search operators / quotes / punctuation for a lighter retry query.
+ * When every backend fails on a syntactically heavy query (quotes, colons,
+ * parens, site: filters), one normalized retry often succeeds — engines are
+ * picky about operators and punctuation, and the model shouldn't have to
+ * rephrase by hand. Returns null when nothing would change. Mirrors the Rust
+ * normalize_query_for_retry. */
+export function normalizeQueryForRetry(query: string): string | null {
+  const operators = /^(site|filetype|inurl|intitle|intext|lang|before|after|define):/i;
+  const filtered = query.split(/\s+/).filter(w => !operators.test(w));
+  const cleaned = filtered.join(' ')
+    .replace(/["'()（）\[\]{}:|~!?，。？！、；：]/g, ' ');
+  const joined = cleaned.split(/\s+/).filter(Boolean).join(' ').trim();
+  if (!joined || joined === query) return null;
+  return joined;
 }
 
 /** Parse DuckDuckGo HTML results (`<div class="result">` blocks containing

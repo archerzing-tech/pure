@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { composeProxyUrl, effectiveProxyUrl, normalizeProxyConfig, normalizeProxyList, parseProxyUrl, proxyUrlWithAuth, shouldBypassProxy } from '../proxy';
+import { composeProxyUrl, DEFAULT_PROXY_PROBES, effectiveProxyUrl, enabledProbeUrls, normalizeProxyConfig, normalizeProxyList, normalizeProxyProbes, parseProxyUrl, proxyUrlWithAuth, shouldBypassProxy } from '../proxy';
 
 describe('proxy address split/compose', () => {
   it('splits a full URL into scheme, host, and port', () => {
@@ -91,6 +91,21 @@ describe('proxy configuration', () => {
     expect(effectiveProxyUrl(config, 'tools')).toBe('');
   });
 
+  it('defaults the mode to manual and treats system mode as a transparent marker', () => {
+    expect(normalizeProxyConfig({}).mode).toBe('manual');
+    const config = normalizeProxyConfig({
+      enabled: true,
+      llmEnabled: true,
+      toolsEnabled: true,
+      mode: 'system',
+      url: '',
+    });
+    expect(effectiveProxyUrl(config, 'llm')).toBe('system://');
+    expect(effectiveProxyUrl(config, 'tools')).toBe('system://');
+    config.enabled = false;
+    expect(effectiveProxyUrl(config, 'llm')).toBe('');
+  });
+
   it('embeds percent-encoded proxy credentials into the effective URL', () => {
     const config = normalizeProxyConfig({
       enabled: true,
@@ -139,5 +154,26 @@ describe('proxy configuration', () => {
     expect(shouldBypassProxy('ollama', 'qwen2.5-coder:7b', config)).toBe(true);
     expect(shouldBypassProxy('custom', 'deepseek-r1:8b', config)).toBe(true);
     expect(shouldBypassProxy('qwen', 'qwen3-coder-next', config)).toBe(false);
+  });
+
+  it('defaults to the three built-in probe endpoints when the field is missing', () => {
+    const config = normalizeProxyConfig({});
+    expect(config.probeUrls).toEqual(DEFAULT_PROXY_PROBES);
+    expect(enabledProbeUrls(config)).toEqual([
+      'https://www.baidu.com/',
+      'https://api.deepseek.com',
+      'https://ipwho.is/',
+    ]);
+  });
+
+  it('merges user probe edits by index and skips disabled/empty probes', () => {
+    const probes = normalizeProxyProbes([
+      { url: 'https://example.com', enabled: false },
+      { url: '  ' },
+    ]);
+    expect(probes[0]).toEqual({ url: 'https://example.com', enabled: false });
+    expect(probes[1]).toEqual({ url: '', enabled: true });
+    expect(probes[2]).toEqual({ url: 'https://ipwho.is/', enabled: true });
+    expect(enabledProbeUrls({ probeUrls: probes })).toEqual(['https://ipwho.is/']);
   });
 });

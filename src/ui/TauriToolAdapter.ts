@@ -117,6 +117,7 @@ export class TauriToolAdapter implements ToolAdapter {
   private workspace: string;
   private tavilyApiKey: string;
   private serperApiKey: string;
+  private searxngUrl: string;
   private location: string;
   private proxyUrl: string;
   private sessionId: string;
@@ -126,10 +127,11 @@ export class TauriToolAdapter implements ToolAdapter {
   private readonly maxSnapshotBytes = 8 * 1024 * 1024;
   private readonly imageGen?: ImageGenContext;
 
-  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext) {
+  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '') {
     this.workspace = workspace;
     this.tavilyApiKey = tavilyApiKey;
     this.serperApiKey = serperApiKey;
+    this.searxngUrl = searxngUrl;
     this.location = location;
     this.proxyUrl = proxyUrl;
     this.invokeFn = invoke ?? null;
@@ -236,6 +238,7 @@ export class TauriToolAdapter implements ToolAdapter {
             path: args.path ?? null,
             filePattern: args.filePattern ?? null,
             maxResults: args.maxResults ?? 50,
+            caseSensitive: typeof args.caseSensitive === 'boolean' ? args.caseSensitive : null,
           }) as string;
           return { id: toolCall.id, toolName: name, result: searchResult, success: true, duration: Date.now() - start };
         }
@@ -347,7 +350,7 @@ export class TauriToolAdapter implements ToolAdapter {
         case 'researcher_web': {
           const prompt = String(args.prompt ?? args.query ?? '').trim();
           const limits = researchLimits(args);
-          const searchData = await this.call('web_search', buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, this.proxyUrl)) as string;
+          const searchData = await this.call('web_search', buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, this.proxyUrl, this.location, this.searxngUrl)) as string;
           const rawSources = parseWebSearchText(searchData);
           const filteredSources = filterResearchSources(rawSources, args.allowedDomains);
           const filtered = rawSources.length - filteredSources.length;
@@ -387,7 +390,7 @@ export class TauriToolAdapter implements ToolAdapter {
             return researchFailure(toolCall.id, name, start, 'researcher_docs requires both library and topic');
           }
           const limits = researchLimits(args);
-          const searchData = await this.call('web_search', buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, this.proxyUrl)) as string;
+          const searchData = await this.call('web_search', buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, this.proxyUrl, this.location, this.searxngUrl)) as string;
           const rawSources = parseWebSearchText(searchData);
           const filteredSources = filterResearchSources(rawSources, args.allowedDomains);
           const filtered = rawSources.length - filteredSources.length;
@@ -430,7 +433,7 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: raw, success: true, duration: Date.now() - start };
         }
         case 'web_search': {
-          const searchData = await this.call('web_search', buildWebSearchArgs(ws, args, this.tavilyApiKey, this.serperApiKey, this.proxyUrl, this.location)) as string;
+          const searchData = await this.call('web_search', buildWebSearchArgs(ws, args, this.tavilyApiKey, this.serperApiKey, this.proxyUrl, this.location, this.searxngUrl)) as string;
           return { id: toolCall.id, toolName: name, result: searchData, success: true, duration: Date.now() - start };
         }
         case 'web_fetch': {
@@ -454,6 +457,7 @@ export class TauriToolAdapter implements ToolAdapter {
             serperApiKey: this.serperApiKey,
             searchOnMiss: args.searchOnMiss !== false,
             proxyUrl: this.proxyUrl,
+            searxngUrl: this.searxngUrl || null,
           }) as string;
           return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
         }
@@ -757,6 +761,7 @@ export function buildWebSearchArgs(
   serperApiKey: string,
   proxyUrl = '',
   location = '',
+  searxngUrl = '',
 ): Record<string, unknown> {
   return {
     workspace,
@@ -767,6 +772,9 @@ export function buildWebSearchArgs(
     // the free HTML backends otherwise.
     apiKey: tavilyApiKey,
     serperApiKey,
+    // Optional SearXNG instance (Settings → Tools → Web Tools): intranet /
+    // self-hosted metasearch, tried after the API backends.
+    ...(searxngUrl ? { searxngUrl } : {}),
     ...(proxyUrl ? { proxyUrl } : {}),
     // User-configured city (Settings → General → Environment): the Tier-2
     // fast path uses it as the weather fallback when the query names no city.

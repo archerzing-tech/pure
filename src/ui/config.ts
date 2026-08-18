@@ -74,6 +74,13 @@ export interface PureConfig {
    * quality for both Chinese and English (~2500 free trial queries).
    */
   serperApiKey: string;
+  /**
+   * Optional SearXNG instance URL (Settings → Tools → Web Tools). Intranet /
+   * self-hosted metasearch: aggregates dozens of upstream engines behind one
+   * JSON endpoint — the standard answer for corporate networks where the
+   * public engines are blocked. Mirrors the SEARXNG_URL env var in the CLI.
+   */
+  searxngUrl: string;
   skills: Record<string, boolean>;
   /**
    * Third-party skills installed from an open-source skill hub (Settings →
@@ -189,6 +196,7 @@ export function defaults(): PureConfig {
     toolBrowser: true,
     tavilyApiKey: '',
     serperApiKey: '',
+    searxngUrl: '',
     skills: { 'code-review': true, 'web-research': true, memory: true, planning: true },
     hubSkills: [],
     mcpServers: [...DEFAULT_MCP_SERVERS],

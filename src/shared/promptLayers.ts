@@ -84,7 +84,7 @@ export const COMPLETION_PROMPT = COMPLETION_LESSON_PROMPT;
  * surface's own assembly.
  */
 export const FILE_TOOLS_CORE = `File tools:
-- read_file(path, startLine?, endLine?) — read file content
+- read_file(path, startLine?, endLine?) — read file content. Supports text/code (UTF-8/UTF-16/GBK), PDF, DOCX/XLSX/PPTX/ODT, and RTF; binary or scanned files return an actionable error, not mojibake. Pass the exact path the user gave (Windows absolute paths like D:\\tmp\\a.docx work when the workspace covers them).
 - write_file(path, content) — create or overwrite a file
 - edit_file(path, oldString, newString, allowMultiple?) — string replacement in a file
 - list_files(path?, recursive?, maxResults?) — list directory contents; large listings are capped and report when truncated
@@ -93,6 +93,8 @@ export const FILE_TOOLS_CORE = `File tools:
 - create_directory(path) — create a directory (and parents)
 - diff_files(pathA, pathB) — unified diff between two files
 - replace_files(files[], oldString, newString, allowMultiple?) — batch string replacement across multiple files
+
+Local file search tips: search_files(pattern, path?, filePattern?, maxResults?, caseSensitive?) searches file CONTENT (not names) and works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK-encoded files too — use it to find a phrase inside documents, not just code. To find a file by NAME use glob_files. When a read/search fails, read the error carefully: it usually says whether the file is a directory, too large, binary, or an unsupported legacy format (.doc/.xls), and what to do (convert with soffice/Word, use OCR, or read a different file).
 
 Shell & Git:
 - execute_command(command) — run a shell command

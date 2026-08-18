@@ -637,7 +637,12 @@ function setPlanSubstep(h: PlanCardHandle, n: number): void {
   }
 }
 
-function setPlanPhase(h: PlanCardHandle, n: number): void {
+/** Set the active top-level plan directly (never clamps to total — total + 1
+ * is the completed state). Marks every plan below `n` done, `n` active, and
+ * resets the active plan's substep cursor. Exported so the marker scanner can
+ * jump the card straight to a plan the model reported starting (skipping
+ * several plans at once) instead of advancing one step per marker. */
+export function setPlanPhase(h: PlanCardHandle, n: number): void {
   h.current = n;
   h.currentTodosRequired = h.todosRequired[n - 1] !== false;
   h.substepStarted = false;
@@ -687,7 +692,12 @@ export function restorePlanCardProgress(h: PlanCardHandle, currentPlan: number, 
 }
 
 export function updatePlanCardPhase(h: PlanCardHandle, n: number): void {
-  const clamped = Math.max(1, Math.min(n, h.total));
+  // total + 1 is the completed state (same as finalizePlanCard): the LAST
+  // plan's `## 计划 n 已完成` marker must be able to finish the card, or the
+  // card and the floating outline stay at N-1/N while the task is already
+  // done. Clamping to total made that impossible (n = total+1 → total ≠
+  // current+1 → the marker was silently dropped).
+  const clamped = Math.max(1, Math.min(n, h.total + 1));
   if (clamped !== h.current + 1) return;
   const currentSubsteps = h.substepEls[h.current - 1] ?? [];
   if (h.currentTodosRequired && currentSubsteps.length > 0 && h.currentSubstep <= currentSubsteps.length) return;
@@ -755,9 +765,13 @@ export function canCompletePlanCardSubsteps(h: PlanCardHandle): boolean {
   return !h.currentTodosRequired || rows.length === 0 || (h.substepStarted && h.currentSubstep > rows.length);
 }
 
-/** Check off every substep in the active top-level plan before moving on. */
-export function completePlanCardSubsteps(h: PlanCardHandle): void {
-  if (!canCompletePlanCardSubsteps(h)) return;
+/** Check off every substep in the active top-level plan before moving on.
+ * `force` completes them even when not every substep was explicitly entered —
+ * used when the model reports a plan complete without granular Todo-done
+ * markers and nothing follows that could force-advance the card (the LAST
+ * plan has no `## 计划 n+1` start marker to trigger that branch). */
+export function completePlanCardSubsteps(h: PlanCardHandle, force = false): void {
+  if (!force && !canCompletePlanCardSubsteps(h)) return;
   const rows = h.substepEls[h.current - 1] ?? [];
   const checks = h.substepEls[h.current - 1].map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
 
