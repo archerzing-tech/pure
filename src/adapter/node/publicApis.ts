@@ -24,7 +24,7 @@
 
 import { publicApiCacheKey, webCache } from './webCache';
 
-export type IntentKind = 'weather' | 'geocode' | 'news' | 'wiki' | 'ip' | 'fx' | 'stock' | 'github';
+export type IntentKind = 'weather' | 'airquality' | 'geocode' | 'news' | 'wiki' | 'ip' | 'fx' | 'stock' | 'github' | 'worldbank';
 
 export interface PublicApiOutcome {
   intent: IntentKind;
@@ -87,6 +87,7 @@ export const quota = new BackendQuota();
 
 export const PUBLIC_API_TTL_MS: Record<IntentKind, number> = {
   weather: 20 * 60 * 1000,
+  airquality: 30 * 60 * 1000,
   news: 10 * 60 * 1000,
   stock: 10 * 60 * 1000,
   fx: 6 * 60 * 60 * 1000,
@@ -94,6 +95,7 @@ export const PUBLIC_API_TTL_MS: Record<IntentKind, number> = {
   github: 24 * 60 * 60 * 1000,
   geocode: 30 * 24 * 60 * 60 * 1000,
   wiki: 7 * 24 * 60 * 60 * 1000,
+  worldbank: 7 * 24 * 60 * 60 * 1000,
 };
 
 /** tryDirectPublicApi + cache: fresh answers are served from the shared cache
@@ -138,6 +140,10 @@ export function isBuildRequest(query: string): boolean {
 }
 
 const WEATHER_WORDS = /天气|气温|温度|预报|会不会下雨|降雨|降雪|风力|湿度|weather|forecast|temperature|rain|snow|humidity|wind/i;
+const AIR_QUALITY_WORDS = /空气质量|空气指数|空气污染|雾霾|霾|pm2\.?5|pm10|AQI|air quality|air pollution|air index/i;
+const WORLD_BANK_WORDS = /gdp|国内生产总值|人均gdp|人口|总人口|失业率|通胀|通货膨胀|world bank|世界银行|population|unemployment|inflation/i;
+const TIME_WORDS = /今天|明天|后天|昨天|早上|上午|中午|下午|晚上|夜里|下周|上周|这周|周末|周[一二三四五六日天]|today|tomorrow|yesterday|this|next|last|week|morning|afternoon|evening|night|in|the|for|at|what|is|like|now|的|怎么样|如何|呢|吧|啊/g;
+const PUNCT = /[，。？?！!、,.，\s]+/g;
 const GEOCODE_WORDS = /经纬度|坐标|geocode|latitude|longitude|lat\s*\/?\s*lon|地理坐标/i;
 const NEWS_WORDS = /新闻|资讯|头条|快讯|时讯|热点|报道|新闻头条|news|headlines|breaking/i;
 const WIKI_WORDS = /维基|百科|是什么|是谁|简介|wikipedia|wiki/i;
@@ -151,6 +157,7 @@ export function classifyIntent(query: string): IntentKind | null {
   if (isBuildRequest(q)) return null;
 
   if (WEATHER_WORDS.test(q) && q.length <= 40) return 'weather';
+  if (AIR_QUALITY_WORDS.test(q) && q.length <= 60) return 'airquality';
   if (GEOCODE_WORDS.test(q) && q.length <= 60) return 'geocode';
   // FX first checks the parseable currency-pair grammar, not just keywords.
   if (parseFxQuery(q)) return 'fx';
@@ -159,6 +166,7 @@ export function classifyIntent(query: string): IntentKind | null {
   if (WIKI_WORDS.test(q) && q.length <= 60) return 'wiki';
   if (GITHUB_WORDS.test(q) && q.length <= 60) return 'github';
   if (resolveStockSymbol(q) && q.length <= 40) return 'stock';
+  if (WORLD_BANK_WORDS.test(q) && q.length <= 60 && worldbankIndicator(q) && worldbankCountry(q)) return 'worldbank';
   return null;
 }
 
@@ -166,8 +174,17 @@ export function classifyIntent(query: string): IntentKind | null {
 export function extractLocation(query: string): string {
   return query
     .replace(WEATHER_WORDS, ' ')
-    .replace(/今天|明天|后天|昨天|早上|上午|中午|下午|晚上|夜里|下周|上周|这周|周末|周[一二三四五六日天]|today|tomorrow|yesterday|this|next|last|week|morning|afternoon|evening|night|in|the|for|at|what|is|like|now|的|怎么样|如何|呢|吧|啊/g, ' ')
-    .replace(/[，。？?！!、,.，\s]+/g, ' ')
+    .replace(TIME_WORDS, ' ')
+    .replace(PUNCT, ' ')
+    .trim();
+}
+
+/** Extract a location name from an air-quality query ("北京PM2.5" → 北京). */
+function extractAirQualityLocation(query: string): string {
+  return query
+    .replace(AIR_QUALITY_WORDS, ' ')
+    .replace(TIME_WORDS, ' ')
+    .replace(PUNCT, ' ')
     .trim();
 }
 
@@ -368,6 +385,128 @@ async function resolveGeocode(query: string): Promise<PublicApiOutcome | null> {
     intent: 'geocode',
     source: 'Open-Meteo/Nominatim',
     text: `地理位置: ${geo.name}${geo.country ? ` (${geo.country})` : ''}\n纬度: ${geo.latitude}\n经度: ${geo.longitude}`,
+  };
+}
+
+async function resolveAirQuality(query: string, opts: { location?: string }): Promise<PublicApiOutcome | null> {
+  let location = extractAirQualityLocation(query);
+  if (!location && opts.location) location = opts.location;
+  if (!location) {
+    return {
+      intent: 'airquality',
+      source: 'Open-Meteo Air Quality',
+      text: '需要知道城市才能查空气质量（例如“北京空气质量”或“北京PM2.5”）；未检测到城市，也没有配置 PURE_LOCATION。',
+    };
+  }
+  const geo = await geocode(location);
+  if (!geo) return null;
+  const data = await fetchJson(
+    `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${geo.latitude}&longitude=${geo.longitude}` +
+      '&current=pm10,pm2_5,nitrogen_dioxide,us_aqi&timezone=auto',
+  );
+  const cur = data?.current;
+  if (!cur) return null;
+  const lines: string[] = [];
+  lines.push(`${geo.name}${geo.country ? ` (${geo.country})` : ''} 空气质量 · 数据时间 ${cur.time ?? ''}`);
+  const pm25 = cur.pm2_5 ?? '?';
+  const pm10 = cur.pm10 ?? '?';
+  const usAqi = cur.us_aqi ?? '?';
+  let current = `当前: PM2.5 ${pm25} µg/m³ · PM10 ${pm10} µg/m³ · 美标 AQI ${usAqi}`;
+  if (typeof cur.us_aqi === 'number') current += ` · ${describeAqi(cur.us_aqi)}`;
+  lines.push(current);
+  if (cur.nitrogen_dioxide != null) lines.push(`二氧化氮 NO₂: ${cur.nitrogen_dioxide} µg/m³`);
+  return { intent: 'airquality', source: 'Open-Meteo Air Quality', text: lines.join('\n') };
+}
+
+/** US-AQI → six-level Chinese health label (近似国标阈值，供快速判断). */
+function describeAqi(usAqi: number): string {
+  if (usAqi <= 50) return '优';
+  if (usAqi <= 100) return '良';
+  if (usAqi <= 150) return '轻度污染';
+  if (usAqi <= 200) return '中度污染';
+  if (usAqi <= 300) return '重度污染';
+  return '严重污染';
+}
+
+// (English match, ISO2 code, Chinese display name). CJK names match by
+// substring; English names require word boundaries so "us" never matches
+// "must" / "house". Longest-first ordering lets "united states" beat "us".
+const WORLD_BANK_COUNTRIES: Array<[string, string, string]> = [
+  ['中国', 'CN', '中国'], ['美国', 'US', '美国'], ['日本', 'JP', '日本'], ['德国', 'DE', '德国'],
+  ['英国', 'GB', '英国'], ['法国', 'FR', '法国'], ['印度', 'IN', '印度'], ['韩国', 'KR', '韩国'],
+  ['俄罗斯', 'RU', '俄罗斯'], ['巴西', 'BR', '巴西'], ['加拿大', 'CA', '加拿大'],
+  ['澳大利亚', 'AU', '澳大利亚'], ['澳洲', 'AU', '澳大利亚'], ['意大利', 'IT', '意大利'], ['新加坡', 'SG', '新加坡'],
+  ['united states', 'US', '美国'], ['south korea', 'KR', '韩国'], ['united kingdom', 'GB', '英国'],
+  ['china', 'CN', '中国'], ['japan', 'JP', '日本'], ['germany', 'DE', '德国'], ['france', 'FR', '法国'],
+  ['india', 'IN', '印度'], ['korea', 'KR', '韩国'], ['russia', 'RU', '俄罗斯'], ['brazil', 'BR', '巴西'],
+  ['canada', 'CA', '加拿大'], ['australia', 'AU', '澳大利亚'], ['italy', 'IT', '意大利'], ['singapore', 'SG', '新加坡'],
+  ['usa', 'US', '美国'], ['uk', 'GB', '英国'], ['us', 'US', '美国'],
+];
+
+function asciiWordMatch(haystack: string, needle: string): boolean {
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i').test(haystack);
+}
+
+function worldbankCountry(query: string): string | null {
+  const q = query.toLowerCase();
+  for (const [name, code] of WORLD_BANK_COUNTRIES) {
+    if (/[\u3400-\u9FFF]/.test(name)) {
+      if (query.includes(name)) return code;
+    } else if (asciiWordMatch(q, name)) {
+      return code;
+    }
+  }
+  return null;
+}
+
+/** World Bank indicator lookup. "人口" is ambiguous ("人口老龄化"), so it
+ * requires a count/lookup signal alongside. */
+function worldbankIndicator(query: string): { code: string; label: string; percent: boolean } | null {
+  const q = query.toLowerCase();
+  if (q.includes('人均gdp') || q.includes('人均国内生产总值') || q.includes('gdp per capita')) {
+    return { code: 'NY.GDP.PCAP.CD', label: '人均GDP(现价美元)', percent: false };
+  }
+  if (q.includes('gdp') || q.includes('国内生产总值')) {
+    return { code: 'NY.GDP.MKTP.CD', label: 'GDP(现价美元)', percent: false };
+  }
+  if ((q.includes('人口') || q.includes('population'))
+    && (q.includes('多少') || q.includes('总数') || q.includes('数量') || q.includes('几') || q.includes('how many'))) {
+    return { code: 'SP.POP.TOTL', label: '人口总数', percent: false };
+  }
+  if (q.includes('失业率') || q.includes('unemployment')) {
+    return { code: 'SL.UEM.TOTL.ZS', label: '失业率', percent: true };
+  }
+  if (q.includes('通胀') || q.includes('通货膨胀') || q.includes('inflation')) {
+    return { code: 'FP.CPI.TOTL.ZG', label: '通胀率', percent: true };
+  }
+  return null;
+}
+
+async function resolveWorldbank(query: string): Promise<PublicApiOutcome | null> {
+  const indicator = worldbankIndicator(query);
+  if (!indicator) return null;
+  const code = worldbankCountry(query);
+  if (!code) return null;
+  const data = await fetchJson(
+    `https://api.worldbank.org/v2/country/${code}/indicator/${indicator.code}?format=json&per_page=1`,
+  );
+  const entry = Array.isArray(data) ? data[1]?.[0] : undefined;
+  const value = typeof entry?.value === 'number' ? entry.value : Number(entry?.value);
+  if (!Number.isFinite(value)) return null;
+  const year = entry?.date ?? '最新';
+  const zhName = WORLD_BANK_COUNTRIES.find(([, c]) => c === code)?.[2] ?? code;
+  const number = indicator.percent
+    ? `${value.toFixed(1)}%`
+    : value >= 1e12
+      ? `${(value / 1e12).toFixed(2)} 万亿`
+      : value >= 1e8
+        ? `${(value / 1e8).toFixed(2)} 亿`
+        : value.toFixed(1);
+  return {
+    intent: 'worldbank',
+    source: 'World Bank',
+    text: `${zhName} ${indicator.label}（${year}年）: ${number}\n数据来源: World Bank Open Data (${indicator.code})`,
   };
 }
 
@@ -586,7 +725,7 @@ export async function tryDirectPublicApi(query: string, opts: PublicApiOptions =
   const q = query.trim();
   if (!q && !opts.category) return null;
   const category = (opts.category ?? '').trim();
-  const forced = ['weather', 'geocode', 'news', 'wiki', 'ip', 'fx', 'stock', 'github'].includes(category)
+  const forced = ['weather', 'airquality', 'geocode', 'news', 'wiki', 'ip', 'fx', 'stock', 'github', 'worldbank'].includes(category)
     ? category as IntentKind
     : undefined;
   const intent = forced ?? classifyIntent(q);
@@ -594,6 +733,7 @@ export async function tryDirectPublicApi(query: string, opts: PublicApiOptions =
 
   switch (intent) {
     case 'weather': return await resolveWeather(q, opts);
+    case 'airquality': return await resolveAirQuality(q, opts);
     case 'geocode': return await resolveGeocode(q);
     case 'news': return await resolveNews(q);
     case 'wiki': return await resolveWiki(q);
@@ -607,6 +747,7 @@ export async function tryDirectPublicApi(query: string, opts: PublicApiOptions =
       return symbol ? await resolveStock(symbol, q) : null;
     }
     case 'github': return await resolveGithub(q);
+    case 'worldbank': return await resolveWorldbank(q);
     default: return null;
   }
 }

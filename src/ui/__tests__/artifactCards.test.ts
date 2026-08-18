@@ -96,6 +96,16 @@ describe('planArtifactDisplay', () => {
     expect(planArtifactDisplay([file('raw_data.json')])).toEqual({ mode: 'none' });
     expect(planArtifactDisplay([file('config.tmp')])).toEqual({ mode: 'none' });
   });
+
+  it('hides stashed data files for an informational/planning request', () => {
+    const items = [file('weather.json'), file('flights.json'), file('hotels.json')];
+    expect(planArtifactDisplay(items, { userRequest: '帮我制定一个从西安到上海的旅游规划' })).toEqual({ mode: 'none' });
+  });
+
+  it('keeps the project-directory link for a multi-file build without a project noun', () => {
+    const items = [file('crawler.py'), file('crawler/utils.py')];
+    expect(planArtifactDisplay(items, { userRequest: '帮我开发一个爬虫' })).toEqual({ mode: 'project', items });
+  });
 });
 
 describe('isCardFriendlyArtifact', () => {

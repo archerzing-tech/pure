@@ -109,8 +109,8 @@ export interface ToolExecMeta {
   resultKind?: 'search' | 'fetch' | 'image';
   /**
    * Parsed result for `resultKind: 'search'`. Each item is a search hit the
-   * web_search backends returned (cn.bing.com → DuckDuckGo → Bing; see
-   * src-tauri/src/lib.rs web_search).
+   * web_search backends returned (cn.bing / Sogou / 360 / Baidu / Brave /
+   * Bing-via-Jina / SearXNG; see src-tauri/src/lib.rs web_search).
    */
   resultItems?: Array<{ title: string; snippet: string; url: string }>;
   /**

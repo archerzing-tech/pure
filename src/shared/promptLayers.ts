@@ -84,9 +84,10 @@ export const COMPLETION_PROMPT = COMPLETION_LESSON_PROMPT;
  * surface's own assembly.
  */
 export const FILE_TOOLS_CORE = `File tools:
-- read_file(path, startLine?, endLine?) — read file content. Supports text/code (UTF-8/UTF-16/GBK), PDF, DOCX/XLSX/PPTX/ODT, and RTF; binary or scanned files return an actionable error, not mojibake. Pass the exact path the user gave (Windows absolute paths like D:\\tmp\\a.docx work when the workspace covers them).
+- read_file(path, startLine?, endLine?) — read file content. Supports text/code (UTF-8/UTF-16/GBK), PDF, DOCX/XLSX/PPTX/ODT, and RTF; binary or scanned files return an actionable error, not mojibake. Pass the exact path the user gave; absolute paths anywhere on disk work (e.g. D:\\tmp\\a.docx, ~/Documents/…) — the workspace is only the default base for relative paths, NOT a confinement boundary.
 - write_file(path, content) — create or overwrite a file
 - edit_file(path, oldString, newString, allowMultiple?) — string replacement in a file
+- find_files(query, path?, filePattern?, maxResults?, caseSensitive?) — smartly locate files most likely to contain a topic (e.g. "学历", "education", "毕业证") WITHOUT reading every file: filename matches rank first, then content hits, and it returns the TOP candidate files each with a few snippet lines (never full content). Use this FIRST when information is spread across many files, then read_file only the top 1-2 candidates (optionally with startLine/endLine). Reports actionable fallback suggestions when nothing matches.
 - list_files(path?, recursive?, maxResults?) — list directory contents; large listings are capped and report when truncated
 - code_searcher(query, path?, globs?, caseSensitive?, maxResults?, globalMaxResults?) — regex-aware repository search with file/line evidence
 - glob_files(pattern, path?, maxResults?) — find files matching a glob pattern (e.g. "**/*.ts")
@@ -95,6 +96,7 @@ export const FILE_TOOLS_CORE = `File tools:
 - replace_files(files[], oldString, newString, allowMultiple?) — batch string replacement across multiple files
 
 Local file search tips: search_files(pattern, path?, filePattern?, maxResults?, caseSensitive?) searches file CONTENT (not names) and works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK-encoded files too — use it to find a phrase inside documents, not just code. To find a file by NAME use glob_files. When a read/search fails, read the error carefully: it usually says whether the file is a directory, too large, binary, or an unsupported legacy format (.doc/.xls), and what to do (convert with soffice/Word, use OCR, or read a different file).
+- Finding something across many files (e.g. "我的学历" in D:\\tmp with hundreds of files): do NOT read files one by one — that wastes tokens and time. Call find_files(query, path?) first: it ranks candidates by filename + content hits and returns snippet lines. Then read_file only the top 1-2 candidates (use startLine/endLine to read just the relevant part). If find_files finds nothing, read its fallback suggestions (broader keywords, caseSensitive:false, filePattern, or list_files to explore subdirectories) instead of guessing.
 
 Shell & Git:
 - execute_command(command) — run a shell command
@@ -128,6 +130,15 @@ When the user's request needs a capability you do NOT currently have (common gap
 - Example: "识别这张图片里写了什么" with a text-only model → install an OCR tool (e.g. tesseract via pip/brew, or an OCR-capable model API) and extract the text; never claim you can see the image directly.
 - Installing downloads and runs third-party code: follow the same permission rules as any other command execution — when the user must approve commands, ask before installing.
 - When the user asks you to CREATE or GENERATE a skill, an MCP tool, or another reusable agent capability (e.g. "给我生成一个 skill", "写一个 MCP 工具"), write it into the app's own space — NOT the project workspace: skills → ~/.pure/skills/<name>/SKILL.md (YAML frontmatter \`name:\` + \`description:\` followed by the instructions body), tools / MCP programs → ~/.pure/tools/ (runnable scripts in ~/.pure/tools/bin). These belong to the application itself and are available across projects; only write them into the workspace when the user explicitly asks.`;
+
+/** 公开 API 目录 — 当内置 web 工具拿不到所需信息时的兜底数据源。目录本身
+ * 无需 key，列出大量按分类组织的免费/自托管公共 API（天气、地理、交通、
+ * 旅游、金融、行业统计等）。模型应在此处找到合适端点后直接 web_fetch /
+ * web_scrape / execute_command(curl) 调用，而不是放弃或编造数据。 */
+export const PUBLIC_API_DIRECTORIES_PROMPT = `Public-API directories (consult ONLY when the built-in web_search / web_public_api / web_scrape tools cannot obtain the data you need):
+- https://github.com/public-apis/public-apis — large curated list of public APIs by category (weather, geocoding, transportation, travel, finance, industry, …). Some entries are stale or need a key; prefer endpoints marked auth: "No" / apiKey: "".
+- https://github.com/n0shake/Public-APIs — supplementary list of public JSON APIs by category.
+When a lookup fails or no built-in tool fits (e.g. hotel availability, transit schedules, industry statistics), find a suitable no-key public API in one of these directories, then fetch its documented endpoint directly with web_fetch / web_scrape (or execute_command curl when you need raw JSON). NEVER invent data; if only key-gated APIs fit, say so and ask whether the user can provide a key.`;
 
 /** 多图 SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The
  * GUI renders consecutive fenced ```svg blocks as a side-by-side grid (each

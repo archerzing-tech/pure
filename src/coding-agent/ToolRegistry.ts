@@ -42,6 +42,7 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   write_file: { tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE], riskLevel: 'medium' },
   edit_file: { tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE], riskLevel: 'medium' },
   list_files: { tags: [Tags.FS, Tags.READ], riskLevel: 'low' },
+  find_files: { tags: [Tags.FS, Tags.READ, Tags.SEARCH], riskLevel: 'low' },
   search_files: { tags: [Tags.FS, Tags.READ, Tags.SEARCH], riskLevel: 'low' },
   execute_command: { tags: [Tags.SHELL, Tags.DESTRUCTIVE], riskLevel: 'high' },
   git_diff: { tags: [Tags.SHELL, Tags.READ], riskLevel: 'low' },

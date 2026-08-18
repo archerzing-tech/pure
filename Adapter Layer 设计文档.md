@@ -366,14 +366,14 @@ export class OllamaAdapter implements LLMAdapter {
 
 #### 安全机制
 
-**路径逃逸防护**：
+**路径解析（无工作区边界）**：工作区外访问限制已解除——绝对路径可指向磁盘任意位置，
+工作区只是相对路径的基准目录。`resolve()` 保留的防护是路径本身的合法性：
 ```typescript
-// resolvePath() 确保所有文件操作在 workspace 内
+// resolvePath() 以 workspace 为相对路径基准，但不再限制绝对路径必须在工作区内
 private resolvePath(filePath: string): string {
   const resolved = path.resolve(this.workspace, filePath);
-  if (!resolved.startsWith(this.workspace)) {
-    throw new Error(`Path escapes workspace: ${filePath}`);
-  }
+  // 悬空 symlink 拒绝（目标不存在无法解析）；.. 越过根目录报错
+  // 最深已存在祖先 canonicalize + 缺失部分回拼，得到可用的绝对路径
   return resolved;
 }
 ```

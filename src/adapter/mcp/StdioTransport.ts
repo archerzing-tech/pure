@@ -21,6 +21,12 @@ interface PendingRequest {
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
+// Cap on buffered stderr lines. MCP servers launched via bunx/npx write benign
+// startup progress to stderr ("Resolving dependencies", "Web Search MCP Server
+// started") that we don't want spamming every CLI launch, so we buffer a tail
+// and only surface it when the process exits unexpectedly.
+const STDERR_TAIL_MAX = 20;
+
 export class StdioTransport implements MCPTransport {
   private proc: ChildProcess | null = null;
   private processPromise: Promise<ChildProcess> | null = null;
@@ -29,6 +35,7 @@ export class StdioTransport implements MCPTransport {
   private closed = false;
   private command: string[];
   private env?: Record<string, string>;
+  private stderrTail: string[] = [];
 
   constructor(command: string[], env?: Record<string, string>, requestTimeoutMs = REQUEST_TIMEOUT_MS) {
     this.command = command;
@@ -87,14 +94,23 @@ export class StdioTransport implements MCPTransport {
       }
     });
 
+    // Buffer stderr instead of printing it live. Benign startup chatter from
+    // bunx/npx-launched servers would otherwise pollute every CLI launch; the
+    // tail is only surfaced when the server exits mid-request, the one case
+    // stderr actually helps diagnose.
     proc.stderr.on('data', (data: { toString(): string }) => {
-      console.error('[MCP stderr]', data.toString().trim());
+      const line = data.toString().trim();
+      if (!line) return;
+      this.stderrTail.push(line);
+      if (this.stderrTail.length > STDERR_TAIL_MAX) this.stderrTail.shift();
     });
 
     proc.on('exit', (code: number) => {
+      const tail = this.stderrTail.join('\n');
+      const suffix = tail ? `\n[stderr]\n${tail}` : '';
       for (const [, p] of this.pending) {
         clearTimeout(p.timer);
-        p.reject(new Error(`MCP server exited with code ${code}`));
+        p.reject(new Error(`MCP server exited with code ${code}${suffix}`));
       }
       this.pending.clear();
       if (this.proc === proc) this.proc = null;
