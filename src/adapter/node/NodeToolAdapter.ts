@@ -25,6 +25,53 @@ const IS_WINDOWS = process.platform === 'win32';
 const DEFAULT_MAX_LIST_RESULTS = 2000;
 const ABSOLUTE_MAX_LIST_RESULTS = 5000;
 
+/** CJK ideographs (CJK Unified, Ext-A, Compatibility) — the query-tokenizer
+ * must split Chinese/Japanese/Korean queries into bigrams because Chinese has
+ * no word boundaries; "我的学历" is far less useful as a needle than "学历". */
+const CJK_RE = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
+
+/** Single CJK characters that are grammatical particles / pronouns, never
+ * content words ("的了我你他是"). Bigrams containing any of these are dropped
+ * from find_files queries, so "学历" survives tokenizing "我的学历" while the
+ * noise pairs "我的" / "的学" do not. */
+const CJK_STOP_CHARS = new Set(['的', '了', '在', '是', '我', '你', '他', '她', '它', '们', '与', '和', '及', '都', '这', '那', '个', '要', '就', '还', '而', '或', '没', '有', '不', '把', '被', '对', '从', '到', '以', '中', '里', '上', '下', '之', '等', '什', '么', '谁']);
+
+/** Turn a free-form find_files query into searchable needle tokens. Latin
+ * queries are lowercased words (len >= 3); CJK queries become length-2
+ * bigrams that survive the stop-char filter. Empty / single-char CJK remnants
+ * are dropped. Returns a de-duplicated, sorted array. */
+export function tokenizeFindQuery(query: string): string[] {
+  const out = new Set<string>();
+  const segments = query.split(/[\s,，。;；:：、|/\\()（）"']+/).filter((s) => s.length > 0);
+  for (let seg of segments) {
+    if (CJK_RE.test(seg)) {
+      seg = seg.toLowerCase();
+      if (seg.length >= 2) {
+        for (let i = 0; i + 1 < seg.length; i++) {
+          const pair = seg.slice(i, i + 2);
+          if ([...pair].some((ch) => CJK_STOP_CHARS.has(ch))) continue;
+          out.add(pair);
+        }
+      }
+    } else {
+      const word = seg.toLowerCase();
+      if (word.length >= 3 || /[0-9]/.test(word)) out.add(word);
+    }
+  }
+  return [...out].sort();
+}
+
+/** Size of a file for ordering find_files scans, or Number.MAX_SAFE_INTEGER
+ * if the stat fails (unreadable files sort last and get skipped). */
+function statSafeSize(p: string): number {
+  try {
+    const meta = statSync(p);
+    return meta.isFile() ? meta.size : Number.MAX_SAFE_INTEGER;
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
+}
+
 export interface NodeToolConfig {
   workspace: string;
   sessionId?: string;
@@ -85,6 +132,7 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'write_file': return await this.handleWriteFile(args, start);
         case 'edit_file': return await this.handleEditFile(args, start);
         case 'search_files': return await this.handleSearchFiles(args, start);
+        case 'find_files': return await this.handleFindFiles(args, start);
         case 'list_files': return await this.handleListFiles(args, start);
         case 'execute_command': return await this.handleExecuteCommand(args, signal, start);
         case 'create_directory': return await this.handleCreateDirectory(args, start);
@@ -248,7 +296,7 @@ export class NodeToolAdapter implements ToolAdapter {
     const searchDir = pathArg.trim() ? this.resolve(pathArg) : this.resolve('.');
 
     if (!existsSync(searchDir)) {
-      return this.fail(null!, start, `search_files: '${pathArg || '.'}' 不存在。若这是 Windows 绝对路径，请确认工作区包含它（设置 → Tools → Workspace 选择该目录）。`);
+      return this.fail(null!, start, `search_files: '${pathArg || '.'}' 不存在。若这是 Windows 绝对路径，请确认路径拼写正确且磁盘上确实存在。`);
     }
 
     const max = Math.min(Math.max(1, typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : 50), 500);
@@ -318,6 +366,187 @@ export class NodeToolAdapter implements ToolAdapter {
     return {
       id: `tool_${Date.now()}`,
       toolName: 'search_files',
+      result: out,
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
+  private async handleFindFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const query = String(args.query ?? '').trim();
+    if (!query) {
+      return this.fail(null!, start, 'find_files: query 不能为空。请给出要查找的主题词，例如 "学历" 或 "education"。');
+    }
+    const pathArg = args.path ? String(args.path) : '';
+    const searchDir = pathArg.trim() ? this.resolve(pathArg) : this.resolve('.');
+
+    if (!existsSync(searchDir)) {
+      return this.fail(null!, start, `find_files: '${pathArg || '.'}' 不存在。若这是 Windows 绝对路径，请确认路径拼写正确且磁盘上确实存在。`);
+    }
+
+    const max = Math.min(Math.max(1, typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : 10), 30);
+    const ignoreCase = args.caseSensitive !== true;
+    const needles = tokenizeFindQuery(query);
+    if (needles.length === 0) {
+      return this.fail(null!, start, `find_files: 无法从查询 "${query}" 中提取有效关键词（只剩助词/停用词）。请换更具体的词，例如 "学历"、"毕业证" 或 "education"。`);
+    }
+
+    // ── Stage 0: filename scan (cheap — no content reads) ────────────────
+    // Collect every file's path + a filename score = how many needles appear
+    // in the (case-folded) basename. A file named 学历证明.pdf is the strongest
+    // possible signal and costs zero extraction time.
+    type Candidate = {
+      rel: string;
+      nameScore: number;
+      hits: number;
+      snippets: string[];
+      skipNote?: string;
+    };
+    const candidates: Candidate[] = [];
+    const skipped: string[] = [];
+
+    const fold = (s: string) => (ignoreCase ? s.toLowerCase() : s);
+    const nameScoreOf = (name: string): number => {
+      const folded = fold(name);
+      let score = 0;
+      for (const n of needles) if (folded.includes(n)) score++;
+      return score;
+    };
+
+    // Scan one file for content hits, capturing up to 3 snippet lines. Never
+    // returns full file content — that's what read_file is for.
+    const scanOneFile = async (entryPath: string, base: string): Promise<Candidate | undefined> => {
+      let meta: ReturnType<typeof statSync>;
+      try {
+        meta = statSync(entryPath);
+      } catch {
+        return undefined;
+      }
+      if (!meta.isFile()) return undefined;
+      const relPath = pathRelative(base, entryPath) || basename(entryPath);
+      const nameScore = nameScoreOf(basename(entryPath));
+      if (meta.size > MAX_SEARCH_FILE_BYTES) {
+        return { rel: relPath, nameScore, hits: 0, snippets: [], skipNote: `文件 ${(meta.size / 1024 / 1024).toFixed(1)}MB 超过搜索上限 32MB` };
+      }
+      const bytes = new Uint8Array(await Bun.file(entryPath).arrayBuffer());
+      const { text: fileText, note } = await extractFileText(bytes, entryPath);
+      if (!fileText.trim() && note) {
+        return { rel: relPath, nameScore, hits: 0, snippets: [], skipNote: note };
+      }
+      let hits = 0;
+      const snippets: string[] = [];
+      for (const [idx, line] of fileText.split('\n').entries()) {
+        const hay = fold(line);
+        if (needles.some((n) => hay.includes(n))) {
+          hits++;
+          if (snippets.length < 3) snippets.push(`${relPath}:${idx + 1}: ${line.trim().slice(0, 200)}`);
+        }
+      }
+      return { rel: relPath, nameScore, hits, snippets };
+    };
+
+    // ── Stage 1: ranked content scan with a budget ───────────────────────
+    // Content extraction is the expensive part (PDF/DOCX/XLSX all parse).
+    // The budget: scan filename-matching files first (highest signal), then
+    // keep going until either we've found `max` files with content hits or
+    // we've scanned `budget` files total — never the whole tree blindly.
+    const budget = max * 6 + 20;
+    const found: Candidate[] = [];
+    const seen = new Set<string>();
+
+    const consider = async (entryPath: string, base: string): Promise<void> => {
+      if (found.length >= max) return;
+      if (seen.has(entryPath)) return;
+      seen.add(entryPath);
+      const cand = await scanOneFile(entryPath, base);
+      if (!cand) return;
+      const isEmptyHit = cand.snippets.length === 0 && cand.hits === 0 && cand.nameScore === 0;
+      if (cand.hits > 0 || cand.nameScore > 0) {
+        found.push(cand);
+      }
+      if (isEmptyHit && cand.skipNote) {
+        skipped.push(`${basename(entryPath)}（${cand.skipNote}）`);
+      }
+    };
+
+    if (statSync(searchDir).isFile()) {
+      await consider(searchDir, dirname(searchDir));
+    } else {
+      // 1) Filename matches first — cheapest and strongest signal.
+      const fileGlob = String(args.filePattern || '**/*');
+      const globAll = new Bun.Glob(!IS_WINDOWS ? fileGlob.replace(/\\/g, '/') : fileGlob);
+      const allFiles: { entry: string; nameScore: number }[] = [];
+      for await (const entry of globAll.scan({ cwd: searchDir, absolute: false })) {
+        const folded = fold(basename(entry));
+        let nameScore = 0;
+        for (const n of needles) if (folded.includes(n)) nameScore++;
+        allFiles.push({ entry, nameScore });
+      }
+      allFiles.sort((a, b) => b.nameScore - a.nameScore);
+      // Only content-scan files whose NAME contains a needle (typically a
+      // handful) — the long tail goes to the budgeted phase below so a
+      // no-match query never degenerates into a full-tree content scan.
+      for (const f of allFiles) {
+        if (found.length >= max || f.nameScore === 0) break;
+        await consider(join(searchDir, f.entry), searchDir);
+      }
+      // 2) Fall back to scanning until budget exhausts, size-ascending so the
+      //    cheap files get checked before the slow multi-MB documents.
+      const unscanned = allFiles
+        .filter((f) => !seen.has(join(searchDir, f.entry)))
+        .sort((a, b) => {
+          const sa = statSafeSize(join(searchDir, a.entry));
+          const sb = statSafeSize(join(searchDir, b.entry));
+          return sa - sb;
+        });
+      for (const f of unscanned) {
+        if (found.length >= max || seen.size >= budget) break;
+        await consider(join(searchDir, f.entry), searchDir);
+      }
+    }
+
+    // ── Ranking + output ─────────────────────────────────────────────────
+    // Sort: content-hit files first (strongest proof), then filename-only
+    // matches. Within a tier, more hits wins.
+    found.sort((a, b) => {
+      const aProof = a.hits > 0 ? 1 : 0;
+      const bProof = b.hits > 0 ? 1 : 0;
+      if (aProof !== bProof) return bProof - aProof;
+      if (a.hits !== b.hits) return b.hits - a.hits;
+      return a.rel.localeCompare(b.rel);
+    });
+    const top = found.slice(0, max);
+
+    let out: string;
+    if (top.length === 0) {
+      // ── Fallback (兜底) ────────────────────────────────────────────────
+      out = `find_files "${query}": 在 ${searchDir} 未找到匹配文件。`;
+      const scannedTotal = seen.size;
+      out += `\n已扫描 ${scannedTotal} 个文件（${skipped.length} 个无法解析文本，已跳过）。`;
+      out += `\n[兜底建议] 换更宽泛的关键词（如 "学历" 的同类词：毕业证/学位/education），关闭大小写（caseSensitive:false），或用 filePattern 缩小范围（如 "*.{docx,pdf,txt}"）；若文件在子目录，可先 list_files 查看目录结构。`;
+    } else {
+      out = `find_files "${query}": 找到 ${top.length} 个候选文件`;
+      const scannedTotal = seen.size;
+      out += `（扫描 ${scannedTotal} 个文件，${skipped.length} 个跳过）。以下为最可能包含 "${query}" 的文件，按相关度排序，每个仅附前 3 行命中片段：`;
+      top.forEach((c, i) => {
+        const tag = c.hits > 0 ? `${c.hits} 处命中` : '仅文件名命中';
+        out += `\n\n${i + 1}. ${c.rel}（${tag}${c.nameScore > 0 ? ' · 文件名包含关键词' : ''}）`;
+        for (const s of c.snippets) out += `\n   ${s}`;
+        if (c.snippets.length === 0) out += `\n   （${c.skipNote ?? '文件名包含关键词，但内容无命中'}）`;
+      });
+      out += `\n\n[提示] 需查看完整内容时，用 read_file 读取以上文件（可用 startLine/endLine 只读片段）。`;
+    }
+
+    if (skipped.length > 0) {
+      const display = skipped.slice(0, 8);
+      const more = skipped.length - 8;
+      if (more > 0) display.push(`…等共 ${skipped.length} 个`);
+      out += `\n\n[提示] ${skipped.length} 个文件无法解析文本内容（扫描版 PDF / 加密文档 / 旧版二进制 / 超大文件），已跳过：${display.join('、')}\n如需读取这些文件，请单独 read_file 它们查看具体原因。`;
+    }
+
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'find_files',
       result: out,
       success: true,
       duration: Date.now() - start,
@@ -768,7 +997,6 @@ export class NodeToolAdapter implements ToolAdapter {
         const stat = lstatSync(fullPath, { throwIfNoEntry: false });
         if (!stat?.isFile() || stat.isSymbolicLink()) return;
         canonicalPath = realpathSync(fullPath);
-        if (!isWithin(workspaceRoot, canonicalPath)) return;
       } catch {
         return;
       }
@@ -1449,8 +1677,9 @@ export class NodeToolAdapter implements ToolAdapter {
   }
 
   private async handleSysInfo(start: number): Promise<ToolResult> {
-    const tz = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const lang = process.env.LANG ?? process.env.LC_ALL ?? process.env.LC_CTYPE ?? 'unknown';
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || process.env.TZ || 'unknown';
+    const lang = Intl.DateTimeFormat().resolvedOptions().locale || process.env.LANG || process.env.LC_ALL || process.env.LC_CTYPE || 'unknown';
+    const encoding = detectLocaleEncoding(lang);
     const time = new Date().toString();
     let osVersion = `${process.platform} ${process.arch}`;
     try {
@@ -1467,11 +1696,12 @@ export class NodeToolAdapter implements ToolAdapter {
       : 'not set';
     const runtimes = detectRuntimeVersions().join('  ');
     const network = `${detectNetworkSummary()}; reach: ${await detectReachability()}`;
+    const ipLine = await detectIpGeoLine();
 
     return {
       id: `tool_${Date.now()}`,
       toolName: 'sys_info',
-      result: `timezone:  ${tz}\nlanguage:  ${lang}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}\nruntimes:  ${runtimes}\nnetwork:   ${network}`,
+      result: `timezone:  ${tz}\nlanguage:  ${lang}\nencoding:  ${encoding}\nip:        ${ipLine}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}\nruntimes:  ${runtimes}\nnetwork:   ${network}`,
       success: true,
       duration: Date.now() - start,
     };
@@ -1618,17 +1848,10 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private resolve(filePath: string): string {
     const resolved = pathResolve(this.workspace, filePath);
-    const rel = pathRelative(this.workspace, resolved);
-    // Path escape check mirroring the Rust resolve(): the relative path must
-    // stay strictly inside the workspace. On Windows pathRelative uses a
-    // single `\` separator (path.sep) and returns an ABSOLUTE path when the
-    // two inputs are on different drives — both must be handled, or a
-    // different-drive absolute path would slip past the prefix checks.
-    if (!isWithin(this.workspace, resolved)) {
-      throw new Error(`Path escapes workspace: ${filePath}`);
-    }
+    // Workspace confinement is REMOVED: absolute paths anywhere on disk are
+    // allowed (relative paths still resolve against the workspace root). The
+    // remaining checks only guard against symlink tricks.
 
-    const baseCanonical = realpathSync(this.workspace);
     let existing = resolved;
     const missing: string[] = [];
     while (!existsSync(existing)) {
@@ -1641,12 +1864,7 @@ export class NodeToolAdapter implements ToolAdapter {
       existing = parent;
     }
 
-    const canonicalExisting = realpathSync(existing);
-    if (!isWithin(baseCanonical, canonicalExisting)) {
-      throw new Error(`Path escapes workspace: ${filePath}`);
-    }
-
-    let safePath = canonicalExisting;
+    let safePath = realpathSync(existing);
     for (const component of missing.reverse()) safePath = pathResolve(safePath, component);
     return safePath;
   }
@@ -1852,32 +2070,113 @@ async function detectReachability(): Promise<string> {
   return `domestic ${domestic ? 'ok' : 'blocked'}, international ${international ? 'ok' : 'blocked'}`;
 }
 
-/** True when `target` resolves strictly inside `base` (both canonicalized
- * before comparison). Uses the platform separator (path.sep) — a single `\`
- * on Windows, which a hardcoded escaped `\\` would never match — and treats
- * an absolute relative() result (different drives on Windows) as an escape.
- * Mirrors the Rust resolve() containment check. */
-function isWithin(base: string, target: string): boolean {
-  const rel = pathRelative(base, target);
-  if (rel === '..' || rel.startsWith(`..${sep}`)) return false;
-  return !isAbsolute(rel);
+/** Character encoding implied by the locale (en_US.UTF-8 → UTF-8). Modern
+ * macOS/Linux default to UTF-8; Windows ANSI code pages are not probed. */
+function detectLocaleEncoding(locale: string): string {
+  const dot = locale.indexOf('.');
+  if (dot >= 0) {
+    const enc = locale.slice(dot + 1).trim();
+    if (enc) return enc.toUpperCase();
+  }
+  return 'UTF-8';
+}
+
+/** Redact the identifying tail of an IP so sys_info never leaks the exact
+ * public address to the model backend. IPv4 → last octet; IPv6 → last hextet. */
+function maskIp(ip: string): string {
+  if (!ip) return 'unknown';
+  if (ip.includes(':')) {
+    const first = ip.split(':')[0];
+    return first ? `${first}:…` : 'unknown';
+  }
+  const idx = ip.lastIndexOf('.');
+  return idx > 0 ? `${ip.slice(0, idx)}.x` : 'unknown';
+}
+
+/** Public IP + city geolocation for sys_info (mirrors Rust detect_ip_geo).
+ * Fetched ONCE per process and cached — the public IP is city-stable for the
+ * CLI run, so repeated sys_info calls must not re-probe the backends. */
+let cachedIpGeoLine: Promise<string> | null = null;
+
+function detectIpGeoLine(): Promise<string> {
+  if (!cachedIpGeoLine) {
+    cachedIpGeoLine = fetchIpGeoLine();
+  }
+  return cachedIpGeoLine;
+}
+
+/** The raw IP is masked; city/region/country/timezone are the useful parts. */
+async function fetchIpGeoLine(): Promise<string> {
+  const backends = [
+    'https://ipwho.is/',
+    'https://ipinfo.io/json',
+    'http://ip-api.com/json/?lang=zh-CN',
+  ];
+  for (const url of backends) {
+    let data: any;
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(3000) });
+      if (!res.ok) continue;
+      data = await res.json();
+    } catch {
+      continue;
+    }
+    const get = (keys: string[]): string => {
+      for (const k of keys) {
+        const v = data?.[k];
+        if (typeof v === 'string' && v.trim() && v !== 'unknown') return v.trim();
+      }
+      return '';
+    };
+    const city = get(['city']);
+    const region = get(['region', 'regionName']);
+    const country = get(['country', 'country_name']);
+    const timezone = get(['timezone']);
+    const ip = get(['ip', 'query']);
+    if (!city && !timezone) continue;
+    const parts = [maskIp(ip)];
+    const loc = [city, region, country].filter(Boolean);
+    if (loc.length) parts.push(loc.join(', '));
+    if (timezone) parts.push(timezone);
+    return parts.join(' · ');
+  }
+  return 'unknown (offline or all geolocation backends blocked)';
 }
 
 function hasSymlinkComponent(base: string, filePath: string): boolean {
   const candidate = pathResolve(base, filePath);
-  if (!isWithin(base, candidate)) return true;
+  // Workspace confinement removed: outside-workspace paths are allowed, so only
+  // an ACTUAL symlink component within the path is a reason to refuse. Paths
+  // inside the workspace walk their relative components (catches middle-component
+  // symlinks like workspace/link -> elsewhere); outside paths only check the
+  // deepest existing ancestor itself, so harmless system symlink ancestors
+  // (/var -> /private/var on macOS) are never flagged.
   const rel = pathRelative(base, candidate);
-  let current = base;
-  for (const component of rel.split(sep)) {
-    if (!component || component === '.') continue;
-    current = join(current, component);
-    try {
-      if (lstatSync(current).isSymbolicLink()) return true;
-    } catch {
-      break;
+  if (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) {
+    let current = base;
+    for (const component of rel.split(sep)) {
+      if (!component || component === '.') continue;
+      current = join(current, component);
+      try {
+        if (lstatSync(current).isSymbolicLink()) return true;
+      } catch {
+        break;
+      }
     }
+    return false;
   }
-  return false;
+  // Outside the workspace: only the deepest existing ancestor can be a symlink.
+  let existing = candidate;
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+  try {
+    return lstatSync(existing).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 function createAbortController(parent: AbortSignal | undefined, timeoutMs: number): {

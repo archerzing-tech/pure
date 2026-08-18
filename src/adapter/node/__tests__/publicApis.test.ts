@@ -98,6 +98,8 @@ describe('classifyIntent', () => {
     expect(classifyIntent('100 usd to cny')).toBe('fx');
     expect(classifyIntent('苹果股价')).toBe('stock');
     expect(classifyIntent('github 上最火的 AI 仓库')).toBe('github');
+    expect(classifyIntent('北京空气质量')).toBe('airquality');
+    expect(classifyIntent('中国GDP是多少')).toBe('worldbank');
     expect(classifyIntent('北京到上海机票')).toBeNull();
   });
 
@@ -105,6 +107,8 @@ describe('classifyIntent', () => {
     expect(classifyIntent('')).toBeNull();
     expect(classifyIntent('写一个天气网站')).toBeNull();
     expect(classifyIntent('react 状态管理最佳实践')).toBeNull();
+    // "人口老龄化" is analysis, not a population-count lookup.
+    expect(classifyIntent('中国人口老龄化趋势')).toBeNull();
   });
 
   it('applies conservative length caps so long prose cannot be hijacked', () => {
@@ -278,6 +282,40 @@ describe('tryDirectPublicApi (mocked network)', () => {
     expect(outcome?.text).toContain('北京');
     expect(outcome?.text).toContain('27°C');
     expect(outcome?.text).toContain('明日');
+  });
+
+  it('answers an air-quality query through geocode + air-quality API', async () => {
+    globalThis.fetch = (async (input: any) => {
+      const url = String(input);
+      if (url.includes('geocoding-api.open-meteo.com')) {
+        return new Response(JSON.stringify({ results: [{ name: '北京', latitude: 39.9, longitude: 116.4, country: '中国' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ timezone: 'Asia/Shanghai', current: { time: '2026-08-16T12:00', pm2_5: 35.2, pm10: 60, nitrogen_dioxide: 20, us_aqi: 98 } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as unknown as typeof fetch;
+
+    const outcome = await tryDirectPublicApi('北京空气质量');
+    expect(outcome?.intent).toBe('airquality');
+    expect(outcome?.source).toBe('Open-Meteo Air Quality');
+    expect(outcome?.text).toContain('PM2.5 35.2');
+    expect(outcome?.text).toContain('良');
+  });
+
+  it('answers a World Bank GDP query', async () => {
+    globalThis.fetch = (async (input: any) => {
+      const url = String(input);
+      if (url.includes('api.worldbank.org')) {
+        return new Response(JSON.stringify([
+          { page: 1 },
+          [{ indicator: { id: 'NY.GDP.MKTP.CD' }, country: { id: 'CN', value: 'China' }, date: '2023', value: 17800000000000 }],
+        ]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const outcome = await tryDirectPublicApi('中国GDP是多少');
+    expect(outcome?.intent).toBe('worldbank');
+    expect(outcome?.source).toBe('World Bank');
+    expect(outcome?.text).toContain('17.80 万亿');
   });
 
   it('returns null for queries outside the structured intents', async () => {

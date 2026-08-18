@@ -514,8 +514,11 @@ fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
     } else {
         base_canonical.join(requested)
     };
+    // Lexically collapse `.` / `..` (a `..` that climbs above the filesystem
+    // root is an error). No workspace containment is enforced: absolute paths
+    // outside the workspace are allowed.
     let normalized =
-        normalize_lexical(&candidate).map_err(|_| format!("path escapes workspace: {}", path))?;
+        normalize_lexical(&candidate).map_err(|_| format!("path cannot be resolved: {}", path))?;
 
     // Canonicalize the deepest existing ancestor, then append the missing
     // components in reverse order. This resolves existing symlinks while still
@@ -526,7 +529,7 @@ fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
         // `Path::exists()` follows symlinks and returns false for a dangling
         // link. Inspect metadata before climbing so a broken link cannot be
         // treated as an ordinary missing directory and later followed by a
-        // write into an arbitrary target outside the workspace.
+        // write into an arbitrary target.
         if let Ok(meta) = fs::symlink_metadata(&existing) {
             if meta.file_type().is_symlink() {
                 return Err(format!("path uses an unresolved symlink: {}", path));
@@ -543,43 +546,52 @@ fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
 
     let canonical_existing =
         fs::canonicalize(&existing).map_err(|e| format!("resolve '{}': {}", path, e))?;
-    if !canonical_existing.starts_with(&base_canonical) {
-        return Err(format!(
-            "path escapes workspace '{}': {} — 文件工具只能访问所选工作区内的路径。如果目标在其它目录（如 D:\\tmp），请在设置（Settings → Tools → Workspace）中把工作区切换到该目录，或把文件复制进当前工作区。",
-            workspace, path
-        ));
-    }
 
     let mut resolved = canonical_existing;
     for component in missing.iter().rev() {
         resolved.push(component);
     }
-    if !resolved.starts_with(&base_canonical) {
-        return Err(format!("path escapes workspace: {}", path));
-    }
     Ok(resolved)
 }
 
 fn has_symlink_component(workspace: &str, path: &str) -> bool {
-    let Ok(base) = fs::canonicalize(workspace) else { return true };
+    let base = PathBuf::from(workspace.trim());
     let requested = PathBuf::from(path.trim());
     let candidate = if requested.is_absolute() { requested } else { base.join(requested) };
-    let Ok(normalized) = normalize_lexical(&candidate) else { return true };
-    if !normalized.starts_with(&base) { return true; }
-    let Ok(relative) = normalized.strip_prefix(&base) else { return true; };
-    let mut current = base;
-    for component in relative.components() {
-        if let std::path::Component::Normal(value) = component {
-            current.push(value);
-            if fs::symlink_metadata(&current)
-                .map(|metadata| metadata.file_type().is_symlink())
-                .unwrap_or(false)
-            {
-                return true;
+    let Ok(normalized) = normalize_lexical(&candidate) else { return false };
+    // Workspace confinement is removed: outside paths are allowed, so this only
+    // guards against an ACTUAL symlink component in the path itself. Paths
+    // inside the workspace are checked relative to the workspace root (original
+    // behavior — catches a middle-component symlink like workspace/link -> elsewhere).
+    if let Ok(relative) = normalized.strip_prefix(&base) {
+        let mut current = base;
+        for component in relative.components() {
+            if let std::path::Component::Normal(value) = component {
+                current.push(value);
+                if fs::symlink_metadata(&current)
+                    .map(|metadata| metadata.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
             }
         }
+        false
+    } else {
+        // Outside the workspace: only the deepest existing ancestor can still
+        // be a symlink the caller could traverse through (everything above it
+        // is a system directory — flagging /var on macOS would break every
+        // temp path). Missing tail components cannot be symlinks yet.
+        let mut existing = normalized.clone();
+        while !existing.exists() {
+            if !existing.pop() {
+                break;
+            }
+        }
+        fs::symlink_metadata(&existing)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
     }
-    false
 }
 
 /// Lexically normalize `.` and `..` without touching the filesystem. The
@@ -892,7 +904,7 @@ fn search_files(
     };
     if !search_dir.exists() {
         return Err(format!(
-            "search_files: '{}' 不存在。若这是 Windows 绝对路径，请确认工作区包含它（设置 → Tools → Workspace 选择该目录）。",
+            "search_files: '{}' 不存在。若这是 Windows 绝对路径，请确认路径拼写正确且磁盘上确实存在。",
             path.as_deref().unwrap_or(".")
         ));
     }
@@ -964,6 +976,331 @@ fn search_files(
             display.join("、")
         ));
     }
+    Ok(out)
+}
+
+/// CJK single characters that are grammatical particles / pronouns, never
+/// content words. Bigrams containing any of these are dropped from find_files
+/// queries, so "学历" survives tokenizing "我的学历" while noise pairs
+/// ("我的" / "的学") do not. Mirrors `CJK_STOP_CHARS` in NodeToolAdapter.ts.
+fn is_cjk_stop_char(c: char) -> bool {
+    matches!(
+        c,
+        '的' | '了' | '在' | '是' | '我' | '你' | '他' | '她' | '它' | '们' | '与' | '和' | '及'
+            | '都' | '这' | '那' | '个' | '要' | '就' | '还' | '而' | '或' | '没' | '有' | '不'
+            | '把' | '被' | '对' | '从' | '到' | '以' | '中' | '里' | '上' | '下' | '之' | '等'
+            | '什' | '么' | '谁'
+    )
+}
+
+/// Turn a free-form find_files query into searchable needle tokens. Latin
+/// queries are lowercased words (len >= 3); CJK queries become length-2
+/// bigrams that survive the stop-char filter. Returns sorted, de-duplicated.
+/// Mirrors `tokenizeFindQuery` in NodeToolAdapter.ts.
+fn tokenize_find_query(query: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut flush = |seg: &str| {
+        if seg.is_empty() {
+            return;
+        }
+        if is_chinese_query(seg) {
+            if seg.chars().count() >= 2 {
+                let lowered = seg.to_lowercase();
+                let chars: Vec<char> = lowered.chars().collect();
+                for i in 0..chars.len().saturating_sub(1) {
+                    let pair: String = chars[i..i + 2].iter().collect();
+                    if pair.chars().any(is_cjk_stop_char) {
+                        continue;
+                    }
+                    if !out.contains(&pair) {
+                        out.push(pair);
+                    }
+                }
+            }
+        } else {
+            let word = seg.to_lowercase();
+            if word.chars().count() >= 3 || word.chars().any(|c| c.is_ascii_digit()) {
+                if !out.contains(&word) {
+                    out.push(word);
+                }
+            }
+        }
+    };
+    for c in query.chars() {
+        if c.is_whitespace() || matches!(c, ',' | '，' | '。' | ';' | '；' | ':' | '：' | '、' | '|' | '/' | '\\' | '(' | ')' | '（' | '）' | '"' | '\'') {
+            flush(&current);
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    flush(&current);
+    out.sort();
+    out
+}
+
+/// find_files: smartly locate files most likely to contain a topic/keyword
+/// without reading every file. Strategy (mirrors NodeToolAdapter.handleFindFiles):
+/// 1) filename scan first (cheap — no content extraction), 2) ranked content
+/// scan of filename-matches first, then smallest files, with a scan budget,
+/// 3) return top files each with up to 3 snippet lines (never full content),
+/// 4) actionable fallback guidance when nothing matches.
+#[tauri::command]
+fn find_files(
+    workspace: String,
+    query: String,
+    path: Option<String>,
+    file_pattern: Option<String>,
+    max_results: Option<usize>,
+    case_sensitive: Option<bool>,
+) -> Result<String, String> {
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Err("find_files: query 不能为空。请给出要查找的主题词，例如 \"学历\" 或 \"education\"。".to_string());
+    }
+    let search_dir = match &path {
+        Some(p) if !p.trim().is_empty() => resolve(&workspace, p)?,
+        _ => resolve(&workspace, ".")?,
+    };
+    if !search_dir.exists() {
+        return Err(format!(
+            "find_files: '{}' 不存在。若这是 Windows 绝对路径，请确认路径拼写正确且磁盘上确实存在。",
+            path.as_deref().unwrap_or(".")
+        ));
+    }
+
+    let max = max_results.unwrap_or(10).clamp(1, 30);
+    let ignore_case = !case_sensitive.unwrap_or(false);
+    let needles = tokenize_find_query(&query);
+    if needles.is_empty() {
+        return Err(format!(
+            "find_files: 无法从查询 \"{}\" 中提取有效关键词（只剩助词/停用词）。请换更具体的词，例如 \"学历\"、\"毕业证\" 或 \"education\"。",
+            query
+        ));
+    }
+
+    struct Candidate {
+        rel: String,
+        name_score: usize,
+        hits: usize,
+        snippets: Vec<String>,
+        skip_note: Option<String>,
+    }
+
+    // Scan one file for content hits, capturing up to 3 snippet lines. Never
+    // returns full file content — that's what read_file is for.
+    fn scan_one_file(
+        entry_path: &std::path::Path,
+        base: &std::path::Path,
+        needles: &[String],
+        ignore_case: bool,
+    ) -> Option<Candidate> {
+        let meta = fs::metadata(entry_path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let rel_path = entry_path
+            .strip_prefix(base)
+            .unwrap_or(entry_path)
+            .to_string_lossy()
+            .to_string();
+        let file_name = entry_path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let folded_name = if ignore_case { file_name.to_lowercase() } else { file_name.clone() };
+        let name_score = needles.iter().filter(|n| folded_name.contains(n.as_str())).count();
+
+        if meta.len() > MAX_SEARCH_FILE_BYTES {
+            let note = format!("文件 {:.1}MB 超过搜索上限 32MB", meta.len() as f64 / 1024.0 / 1024.0);
+            return Some(Candidate {
+                rel: rel_path,
+                name_score,
+                hits: 0,
+                snippets: Vec::new(),
+                skip_note: Some(note),
+            });
+        }
+        let bytes = fs::read(entry_path).ok()?;
+        let (text, note) = extract_file_text(&bytes, entry_path);
+        if text.is_empty() && !note.is_empty() {
+            return Some(Candidate {
+                rel: rel_path,
+                name_score,
+                hits: 0,
+                snippets: Vec::new(),
+                skip_note: Some(note),
+            });
+        }
+        let mut hits = 0usize;
+        let mut snippets: Vec<String> = Vec::new();
+        for (idx, line) in text.lines().enumerate() {
+            let hay = if ignore_case { line.to_lowercase() } else { line.to_string() };
+            if needles.iter().any(|n| hay.contains(n.as_str())) {
+                hits += 1;
+                if snippets.len() < 3 {
+                    snippets.push(format!("{}:{}: {}", rel_path, idx + 1, line.trim().chars().take(200).collect::<String>()));
+                }
+            }
+        }
+        Some(Candidate {
+            rel: rel_path,
+            name_score,
+            hits,
+            snippets,
+            skip_note: None,
+        })
+    }
+
+    // Consider one file as a candidate: skip if already seen or if `max`
+    // candidates are already collected; otherwise scan and keep it when it has
+    // content hits or a filename match (recording skip reasons otherwise).
+    fn consider(
+        entry_path: &std::path::Path,
+        base: &std::path::Path,
+        candidates: &mut Vec<Candidate>,
+        seen: &mut std::collections::HashSet<std::path::PathBuf>,
+        skipped: &mut Vec<String>,
+        needles: &[String],
+        ignore_case: bool,
+        max: usize,
+    ) {
+        if candidates.len() >= max {
+            return;
+        }
+        if !seen.insert(entry_path.to_path_buf()) {
+            return;
+        }
+        match scan_one_file(entry_path, base, needles, ignore_case) {
+            Some(cand) => {
+                let skip_note = cand.skip_note.clone();
+                let is_empty_hit = cand.snippets.is_empty() && cand.hits == 0 && cand.name_score == 0;
+                if cand.hits > 0 || cand.name_score > 0 {
+                    candidates.push(cand);
+                }
+                if is_empty_hit {
+                    if let Some(note) = skip_note {
+                        skipped.push(format!("{}（{}）", entry_path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), note));
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let budget = max * 6 + 20;
+
+    // A `path` pointing at a single FILE searches that file directly.
+    if search_dir.is_file() {
+        let base = search_dir.parent().unwrap_or(&search_dir).to_path_buf();
+        consider(&search_dir, &base, &mut candidates, &mut seen, &mut skipped, &needles, ignore_case, max);
+    } else {
+        let mut glob_pattern = file_pattern.unwrap_or_else(|| "**/*".to_string());
+        #[cfg(not(windows))]
+        {
+            glob_pattern = glob_pattern.replace('\\', "/");
+        }
+        let glob_pattern = format!("{}/{}", search_dir.to_string_lossy(), glob_pattern);
+        let mut all_files: Vec<(std::path::PathBuf, usize)> = Vec::new();
+        for entry in glob::glob(&glob_pattern).map_err(|e| format!("glob: {}", e))? {
+            let entry_path = match entry {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            // find_files is about FILES — skip directories so they cannot
+            // consume scan-budget slots or leak into filename hints (matches
+            // NodeToolAdapter's files-only Bun.Glob.scan default).
+            if !entry_path.is_file() {
+                continue;
+            }
+            let file_name = entry_path
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let folded_name = if ignore_case { file_name.to_lowercase() } else { file_name.clone() };
+            let name_score = needles.iter().filter(|n| folded_name.contains(n.as_str())).count();
+            all_files.push((entry_path, name_score));
+        }
+        // 1) Filename matches only — content-scan just the files whose NAME
+        //    contains a needle (typically a handful). The long tail is left to
+        //    the budgeted phase below, so a no-match query can never degenerate
+        //    into a full-tree content scan.
+        all_files.sort_by(|a, b| b.1.cmp(&a.1));
+        for (p, score) in &all_files {
+            if candidates.len() >= max || *score == 0 {
+                break;
+            }
+            consider(p, &search_dir, &mut candidates, &mut seen, &mut skipped, &needles, ignore_case, max);
+        }
+        // 2) Fall back to scanning until budget exhausts, size-ascending so
+        //    cheap files are checked before slow multi-MB documents.
+        let mut unscanned: Vec<&std::path::PathBuf> = all_files
+            .iter()
+            .filter(|(p, _)| !seen.contains(p))
+            .map(|(p, _)| p)
+            .collect();
+        unscanned.sort_by_key(|p| fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(u64::MAX));
+        for p in unscanned {
+            if candidates.len() >= max || seen.len() >= budget {
+                break;
+            }
+            consider(p, &search_dir, &mut candidates, &mut seen, &mut skipped, &needles, ignore_case, max);
+        }
+        // Content-hit files first (strongest proof), then filename-only
+        // matches; within a tier, more hits wins.
+        candidates.sort_by(|a, b| {
+            let a_proof = if a.hits > 0 { 1 } else { 0 };
+            let b_proof = if b.hits > 0 { 1 } else { 0 };
+            b_proof.cmp(&a_proof).then(b.hits.cmp(&a.hits)).then(a.rel.cmp(&b.rel))
+        });
+        candidates.truncate(max);
+    }
+
+    let mut out = if candidates.is_empty() {
+        let mut s = format!("find_files \"{}\": 在 {} 未找到匹配文件。", query, search_dir.to_string_lossy());
+        s.push_str(&format!("\n已扫描 {} 个文件（{} 个无法解析文本，已跳过）。", seen.len(), skipped.len()));
+        s.push_str(&format!(
+            "\n[兜底建议] 换更宽泛的关键词（如 \"学历\" 的同类词：毕业证/学位/education），关闭大小写（caseSensitive:false），或用 filePattern 缩小范围（如 \"*.{{docx,pdf,txt}}\"）；若文件在子目录，可先 list_files 查看目录结构。"
+        ));
+        s
+    } else {
+        let mut s = format!("find_files \"{}\": 找到 {} 个候选文件（扫描 {} 个文件，{} 个跳过）。以下为最可能包含 \"{}\" 的文件，按相关度排序，每个仅附前 3 行命中片段：", query, candidates.len(), seen.len(), skipped.len(), query);
+        for (i, c) in candidates.iter().enumerate() {
+            let tag = if c.hits > 0 {
+                format!("{} 处命中", c.hits)
+            } else {
+                "仅文件名命中".to_string()
+            };
+            let name_tag = if c.name_score > 0 { " · 文件名包含关键词" } else { "" };
+            s.push_str(&format!("\n\n{}. {}（{}{}）", i + 1, c.rel, tag, name_tag));
+            for snip in &c.snippets {
+                s.push_str(&format!("\n   {}", snip));
+            }
+            if c.snippets.is_empty() {
+                s.push_str(&format!("\n   （{}）", c.skip_note.clone().unwrap_or_else(|| "文件名包含关键词，但内容无命中".to_string())));
+            }
+        }
+        s.push_str("\n\n[提示] 需查看完整内容时，用 read_file 读取以上文件（可用 startLine/endLine 只读片段）。");
+        s
+    };
+
+    if !skipped.is_empty() {
+        let mut display: Vec<String> = skipped.iter().take(8).cloned().collect();
+        let more = skipped.len().saturating_sub(8);
+        if more > 0 {
+            display.push(format!("…等共 {} 个", skipped.len()));
+        }
+        out.push_str(&format!(
+            "\n\n[提示] {} 个文件无法解析文本内容（扫描版 PDF / 加密文档 / 旧版二进制 / 超大文件），已跳过：{}\n如需读取这些文件，请单独 read_file 它们查看具体原因。",
+            skipped.len(),
+            display.join("、")
+        ));
+    }
+
     Ok(out)
 }
 
@@ -1187,6 +1524,98 @@ mod code_searcher_tests {
         assert_eq!(payload["truncated"], true);
 
         fs::remove_dir_all(&workspace).expect("remove test workspace");
+    }
+}
+
+#[cfg(test)]
+mod find_files_tests {
+    use super::*;
+
+    fn seed_workspace(name: &str) -> (std::path::PathBuf, String) {
+        let ws = std::env::temp_dir().join(format!("pure-find-files-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(ws.join("docs")).expect("create test workspace");
+        fs::write(ws.join("学历证明.pdf"), "certificate of education").expect("write file");
+        fs::write(ws.join("docs/resume.txt"), "我的学历：清华大学硕士\n工作经历：五年\n").expect("write file");
+        fs::write(ws.join("docs/notes.txt"), "无相关内容").expect("write file");
+        let ws_str = ws.to_string_lossy().to_string();
+        (ws, ws_str)
+    }
+
+    #[test]
+    fn finds_content_hit_after_stripping_cjk_stop_words() {
+        let (ws, workspace) = seed_workspace("cjk");
+        let result = find_files(workspace.clone(), "我的学历".to_string(), None, None, None, None).expect("find_files succeeds");
+        assert!(result.contains("resume.txt"), "content hit listed: {}", result);
+        assert!(result.contains("1 处命中"), "hit count shown: {}", result);
+        fs::remove_dir_all(&ws).expect("remove test workspace");
+    }
+
+    #[test]
+    fn ranks_content_hit_above_filename_only_match() {
+        let (ws, workspace) = seed_workspace("rank");
+        let result = find_files(workspace.clone(), "学历".to_string(), None, None, None, None).expect("find_files succeeds");
+        assert!(result.contains("resume.txt"), "content hit listed: {}", result);
+        assert!(result.contains("仅文件名命中"), "filename-only tier labeled: {}", result);
+        let content_idx = result.find("resume.txt").expect("resume.txt present");
+        let name_idx = result.find("学历证明.pdf").expect("pdf present");
+        assert!(content_idx < name_idx, "content hit ranks above filename-only: {}", result);
+        fs::remove_dir_all(&ws).expect("remove test workspace");
+    }
+
+    #[test]
+    fn reports_fallback_when_nothing_matches() {
+        let (ws, workspace) = seed_workspace("miss");
+        let result = find_files(workspace.clone(), "太空旅行".to_string(), None, None, None, None).expect("find_files succeeds");
+        assert!(result.contains("未找到匹配文件"), "fallback headline: {}", result);
+        assert!(result.contains("兜底建议"), "fallback guidance: {}", result);
+        fs::remove_dir_all(&ws).expect("remove test workspace");
+    }
+
+    #[test]
+    fn rejects_empty_query() {
+        let (ws, workspace) = seed_workspace("empty");
+        let err = find_files(workspace.clone(), "   ".to_string(), None, None, None, None).unwrap_err();
+        assert!(err.contains("query 不能为空"), "empty-query message: {}", err);
+        fs::remove_dir_all(&ws).expect("remove test workspace");
+    }
+
+    #[test]
+    fn rejects_query_that_tokenizes_to_only_stop_words() {
+        let (ws, workspace) = seed_workspace("stops");
+        let err = find_files(workspace.clone(), "的的的".to_string(), None, None, None, None).unwrap_err();
+        assert!(err.contains("无法从查询"), "stop-word message: {}", err);
+        fs::remove_dir_all(&ws).expect("remove test workspace");
+    }
+}
+
+#[cfg(test)]
+mod tokenize_find_query_tests {
+    use super::tokenize_find_query;
+
+    fn check(input: &str, expected: &[&str]) {
+        assert_eq!(
+            tokenize_find_query(input),
+            expected.iter().map(|s| s.to_string()).collect::<Vec<String>>(),
+            "tokenize_find_query({:?})",
+            input
+        );
+    }
+
+    #[test]
+    fn matches_node_tokenize_find_query() {
+        check("我的学历", &["学历"]);
+        check("毕业证", &["业证", "毕业"]);
+        check("太空旅行", &["太空", "旅行", "空旅"]);
+        check("education", &["education"]);
+        check("Education", &["education"]);
+        check("abc", &["abc"]);
+        check("ab", &[]);
+        check("a1", &["a1"]);
+        check("123", &["123"]);
+        check("发票 学历", &["发票", "学历"]);
+        check("的的的", &[]);
+        check("abc学历", &["ab", "bc", "c学", "学历"]);
     }
 }
 
@@ -4236,14 +4665,16 @@ mod resolve_tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_new_files_through_a_symlink_outside_workspace() {
+    fn allows_files_through_a_symlink_outside_workspace() {
+        // Workspace confinement is removed — a symlink pointing outside the
+        // workspace resolves to its real target instead of being refused.
         let ws = temp_workspace("symlink");
         let outside =
             std::env::temp_dir().join(format!("pure-resolve-outside-{}", std::process::id()));
         let _ = fs::remove_dir_all(&outside);
         fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, PathBuf::from(&ws).join("linked")).unwrap();
-        assert!(resolve(&ws, "linked/evil.txt").is_err());
+        assert!(resolve(&ws, "linked/evil.txt").is_ok());
         fs::remove_dir_all(&outside).unwrap();
         fs::remove_dir_all(&ws).unwrap();
     }
@@ -4261,13 +4692,19 @@ mod resolve_tests {
     }
 
     #[test]
-    fn rejects_paths_escaping_the_workspace() {
-        let ws = temp_workspace("escape");
-        assert!(resolve(&ws, "../../etc/passwd").is_err());
-        assert!(resolve(&ws, "sub/../../../etc/passwd").is_err());
-        // More `..` segments than the absolute root can absorb must never be
-        // silently normalized into a different relative path.
-        assert!(resolve(&ws, "../../../../../../etc/passwd").is_err());
+    fn allows_absolute_paths_outside_the_workspace() {
+        // Workspace confinement is removed: absolute paths anywhere on disk
+        // are accepted (not just paths under the workspace root).
+        let ws = temp_workspace("absolute-outside");
+        let outside =
+            std::env::temp_dir().join(format!("pure-resolve-absout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&outside).unwrap();
+        let target = outside.join("note.txt");
+        fs::write(&target, "outside").unwrap();
+        let r = resolve(&ws, target.to_str().unwrap()).unwrap();
+        assert_eq!(r, fs::canonicalize(&target).unwrap());
+        fs::remove_dir_all(&outside).unwrap();
         fs::remove_dir_all(&ws).unwrap();
     }
 }
@@ -4923,6 +5360,7 @@ fn public_api_cache_key(query: &str, category: Option<&str>, location: Option<&s
 fn public_api_ttl_ms(intent: IntentKind) -> u64 {
     match intent {
         IntentKind::Weather => 20 * 60 * 1000,
+        IntentKind::AirQuality => 30 * 60 * 1000,
         IntentKind::News => 10 * 60 * 1000,
         IntentKind::Stock => 10 * 60 * 1000,
         IntentKind::Fx => 6 * 60 * 60 * 1000,
@@ -4930,6 +5368,7 @@ fn public_api_ttl_ms(intent: IntentKind) -> u64 {
         IntentKind::Github => 24 * 60 * 60 * 1000,
         IntentKind::Geocode => 30 * 24 * 60 * 60 * 1000,
         IntentKind::Wiki => 7 * 24 * 60 * 60 * 1000,
+        IntentKind::WorldBank => 7 * 24 * 60 * 60 * 1000,
     }
 }
 
@@ -5089,6 +5528,7 @@ async fn cached_direct_public_api(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum IntentKind {
     Weather,
+    AirQuality,
     Geocode,
     News,
     Wiki,
@@ -5096,6 +5536,7 @@ enum IntentKind {
     Fx,
     Stock,
     Github,
+    WorldBank,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -5131,6 +5572,10 @@ static_regex!(news_re, r"(?i)新闻|资讯|头条|快讯|时讯|热点|报道|�
 static_regex!(wiki_re, r"(?i)维基|百科|是什么|是谁|简介|wikipedia|wiki");
 static_regex!(ip_re, r"(?i)(?:我的)?\s*(?:ip地址|ip 地址|本机ip|外网ip|ip)$|(?:what is|my)?\s*(?:ip address|my ip)\b|ip地址|IP地址");
 static_regex!(github_re, r"(?i)\bgithub\b|开源项目|最火的.*仓库|star.*最多");
+static_regex!(air_quality_re, r"(?i)空气质量|空气指数|空气污染|雾霾|霾|pm2\.?5|pm10|AQI|air quality|air pollution|air index");
+static_regex!(worldbank_re, r"(?i)gdp|国内生产总值|人均gdp|人口|总人口|失业率|通胀|通货膨胀|world bank|世界银行|population|unemployment|inflation");
+static_regex!(time_words_re, r"今天|明天|后天|昨天|早上|上午|中午|下午|晚上|夜里|下周|上周|这周|周末|周[一二三四五六日天]|today|tomorrow|yesterday|this|next|last|week|morning|afternoon|evening|night|in|the|for|at|what|is|like|now|的|怎么样|如何|呢|吧|啊");
+static_regex!(punct_re, r"[，。？?！!、,.，\s]+");
 
 /// True for requests that want something BUILT (never auto-route these). CJK
 /// prefixes match unconditionally (every Chinese build request continues with
@@ -5168,6 +5613,9 @@ fn classify_intent(query: &str) -> Option<IntentKind> {
     if weather_re().is_match(q) && len <= 40 {
         return Some(IntentKind::Weather);
     }
+    if air_quality_re().is_match(q) && len <= 60 {
+        return Some(IntentKind::AirQuality);
+    }
     if geocode_re().is_match(q) && len <= 60 {
         return Some(IntentKind::Geocode);
     }
@@ -5190,15 +5638,23 @@ fn classify_intent(query: &str) -> Option<IntentKind> {
     if resolve_stock_symbol(q).is_some() && len <= 40 {
         return Some(IntentKind::Stock);
     }
+    if worldbank_re().is_match(q) && len <= 60 && worldbank_indicator(q).is_some() && worldbank_country(q).is_some() {
+        return Some(IntentKind::WorldBank);
+    }
     None
 }
 
 /// Extract a location name from a weather/geocode query ("北京明天天气" → 北京).
 fn extract_location(query: &str) -> String {
     let mut s = weather_re().replace(query, " ").to_string();
-    static_regex!(time_words_re, r"今天|明天|后天|昨天|早上|上午|中午|下午|晚上|夜里|下周|上周|这周|周末|周[一二三四五六日天]|today|tomorrow|yesterday|this|next|last|week|morning|afternoon|evening|night|in|the|for|at|what|is|like|now|的|怎么样|如何|呢|吧|啊");
     s = time_words_re().replace(&s, " ").to_string();
-    static_regex!(punct_re, r"[，。？?！!、,.，\s]+");
+    punct_re().replace(&s, " ").trim().to_string()
+}
+
+/// Extract a location name from an air-quality query ("北京PM2.5" → 北京).
+fn extract_air_quality_location(query: &str) -> String {
+    let mut s = air_quality_re().replace(query, " ").to_string();
+    s = time_words_re().replace(&s, " ").to_string();
     punct_re().replace(&s, " ").trim().to_string()
 }
 
@@ -5612,6 +6068,226 @@ async fn resolve_geocode(query: &str, proxy_url: Option<&str>) -> Result<Option<
     }))
 }
 
+async fn resolve_air_quality(
+    query: &str,
+    location_opt: Option<&str>,
+    proxy_url: Option<&str>,
+) -> Result<Option<PublicApiOutcome>, String> {
+    let mut location = extract_air_quality_location(query);
+    if location.is_empty() {
+        location = location_opt.unwrap_or("").to_string();
+    }
+    if location.is_empty() {
+        return Ok(Some(PublicApiOutcome {
+            intent: IntentKind::AirQuality,
+            source: "Open-Meteo Air Quality".to_string(),
+            text: "需要知道城市才能查空气质量（例如“北京空气质量”或“北京PM2.5”）；未检测到城市，也没有配置位置。".to_string(),
+        }));
+    }
+    let geo = match geocode(&location, proxy_url).await? {
+        Some(g) => g,
+        None => return Ok(None),
+    };
+    let url = format!(
+        "https://air-quality-api.open-meteo.com/v1/air-quality?latitude={}&longitude={}&current=pm10,pm2_5,nitrogen_dioxide,us_aqi&timezone=auto",
+        geo.latitude, geo.longitude
+    );
+    let data = match fetch_json(&url, 8000, &[], proxy_url).await? {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    let Some(cur) = data.get("current") else {
+        return Ok(None);
+    };
+    let name = match &geo.country {
+        Some(country) => format!("{} ({})", geo.name, country),
+        None => geo.name.clone(),
+    };
+    let cur_time = cur.get("time").and_then(|v| v.as_str()).unwrap_or("");
+    let pm25 = json_num(cur, "pm2_5");
+    let pm10 = json_num(cur, "pm10");
+    let us_aqi = json_num(cur, "us_aqi");
+    let no2 = json_num(cur, "nitrogen_dioxide");
+    let mut lines = vec![format!("{} 空气质量 · 数据时间 {}", name, cur_time)];
+    let mut current_line = format!(
+        "当前: PM2.5 {} µg/m³ · PM10 {} µg/m³ · 美标 AQI {}",
+        fmt_opt(pm25),
+        fmt_opt(pm10),
+        fmt_opt(us_aqi)
+    );
+    if let Some(aqi) = us_aqi {
+        current_line.push_str(&format!(" · {}", describe_aqi(aqi)));
+    }
+    lines.push(current_line);
+    if no2.is_some() {
+        lines.push(format!("二氧化氮 NO₂: {} µg/m³", fmt_opt(no2)));
+    }
+    Ok(Some(PublicApiOutcome {
+        intent: IntentKind::AirQuality,
+        source: "Open-Meteo Air Quality".to_string(),
+        text: lines.join("\n"),
+    }))
+}
+
+/// US-AQI → six-level Chinese health label (近似国标阈值，供快速判断).
+fn describe_aqi(us_aqi: f64) -> String {
+    if us_aqi <= 50.0 {
+        "优".to_string()
+    } else if us_aqi <= 100.0 {
+        "良".to_string()
+    } else if us_aqi <= 150.0 {
+        "轻度污染".to_string()
+    } else if us_aqi <= 200.0 {
+        "中度污染".to_string()
+    } else if us_aqi <= 300.0 {
+        "重度污染".to_string()
+    } else {
+        "严重污染".to_string()
+    }
+}
+
+/// Look up a World Bank country ISO2 code + Chinese display name from the
+/// query. CJK names match by substring; English names require word boundaries
+/// (longest first so "united states" wins over "us").
+fn worldbank_country(query: &str) -> Option<(&'static str, &'static str)> {
+    let q = query.to_lowercase();
+    for (name, code, zh) in [
+        ("中国", "CN", "中国"),
+        ("美国", "US", "美国"),
+        ("日本", "JP", "日本"),
+        ("德国", "DE", "德国"),
+        ("英国", "GB", "英国"),
+        ("法国", "FR", "法国"),
+        ("印度", "IN", "印度"),
+        ("韩国", "KR", "韩国"),
+        ("俄罗斯", "RU", "俄罗斯"),
+        ("巴西", "BR", "巴西"),
+        ("加拿大", "CA", "加拿大"),
+        ("澳大利亚", "AU", "澳大利亚"),
+        ("澳洲", "AU", "澳大利亚"),
+        ("意大利", "IT", "意大利"),
+        ("新加坡", "SG", "新加坡"),
+    ] {
+        if query.contains(name) {
+            return Some((code, zh));
+        }
+    }
+    for (name, code, zh) in [
+        ("united states", "US", "美国"),
+        ("south korea", "KR", "韩国"),
+        ("united kingdom", "GB", "英国"),
+        ("china", "CN", "中国"),
+        ("japan", "JP", "日本"),
+        ("germany", "DE", "德国"),
+        ("france", "FR", "法国"),
+        ("india", "IN", "印度"),
+        ("korea", "KR", "韩国"),
+        ("russia", "RU", "俄罗斯"),
+        ("brazil", "BR", "巴西"),
+        ("canada", "CA", "加拿大"),
+        ("australia", "AU", "澳大利亚"),
+        ("italy", "IT", "意大利"),
+        ("singapore", "SG", "新加坡"),
+        ("usa", "US", "美国"),
+        ("uk", "GB", "英国"),
+        ("us", "US", "美国"),
+    ] {
+        if ascii_word_match(&q, name) {
+            return Some((code, zh));
+        }
+    }
+    None
+}
+
+/// ASCII word-boundary match so "us" never matches "must" / "house".
+fn ascii_word_match(haystack: &str, needle: &str) -> bool {
+    let pattern = format!(r"(?i)(?:^|[^a-z0-9]){}(?:[^a-z0-9]|$)", regex::escape(needle));
+    regex::Regex::new(&pattern)
+        .map(|re| re.is_match(haystack))
+        .unwrap_or(false)
+}
+
+/// World Bank indicator lookup: (code, display label, is_percent). "人口" is
+/// ambiguous ("人口老龄化"), so it requires a count/lookup signal alongside.
+fn worldbank_indicator(query: &str) -> Option<(&'static str, &'static str, bool)> {
+    let q = query.to_lowercase();
+    if q.contains("人均gdp") || q.contains("人均国内生产总值") || q.contains("gdp per capita") {
+        return Some(("NY.GDP.PCAP.CD", "人均GDP(现价美元)", false));
+    }
+    if q.contains("gdp") || q.contains("国内生产总值") {
+        return Some(("NY.GDP.MKTP.CD", "GDP(现价美元)", false));
+    }
+    if (q.contains("人口") || q.contains("population"))
+        && (q.contains("多少") || q.contains("总数") || q.contains("数量") || q.contains("几") || q.contains("how many"))
+    {
+        return Some(("SP.POP.TOTL", "人口总数", false));
+    }
+    if q.contains("失业率") || q.contains("unemployment") {
+        return Some(("SL.UEM.TOTL.ZS", "失业率", true));
+    }
+    if q.contains("通胀") || q.contains("通货膨胀") || q.contains("inflation") {
+        return Some(("FP.CPI.TOTL.ZG", "通胀率", true));
+    }
+    None
+}
+
+async fn resolve_worldbank(
+    query: &str,
+    proxy_url: Option<&str>,
+) -> Result<Option<PublicApiOutcome>, String> {
+    let Some((indicator, label, is_percent)) = worldbank_indicator(query) else {
+        return Ok(None);
+    };
+    let Some((code, zh_name)) = worldbank_country(query) else {
+        return Ok(None);
+    };
+    let url = format!(
+        "https://api.worldbank.org/v2/country/{}/indicator/{}?format=json&per_page=1",
+        code, indicator
+    );
+    let Some(data) = fetch_json(&url, 8000, &[], proxy_url).await? else {
+        return Ok(None);
+    };
+    let entry = data
+        .as_array()
+        .and_then(|a| a.get(1))
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first());
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let value = entry
+        .get("value")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            entry
+                .get("value")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+        });
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let year = entry.get("date").and_then(|v| v.as_str()).unwrap_or("最新");
+    let number = if is_percent {
+        format!("{:.1}%", value)
+    } else if value >= 1e12 {
+        format!("{:.2} 万亿", value / 1e12)
+    } else if value >= 1e8 {
+        format!("{:.2} 亿", value / 1e8)
+    } else {
+        format!("{:.1}", value)
+    };
+    Ok(Some(PublicApiOutcome {
+        intent: IntentKind::WorldBank,
+        source: "World Bank".to_string(),
+        text: format!(
+            "{} {}（{}年）: {}\n数据来源: World Bank Open Data ({})",
+            zh_name, label, year, number, indicator
+        ),
+    }))
+}
+
 async fn resolve_news(query: &str, proxy_url: Option<&str>) -> Result<Option<PublicApiOutcome>, String> {
     let zh = is_chinese_query(query);
     let mut q = news_re().replace(query, "").trim().to_string();
@@ -6017,6 +6693,7 @@ async fn try_direct_public_api(
     }
     let forced = category.and_then(|c| match c {
         "weather" => Some(IntentKind::Weather),
+        "airquality" => Some(IntentKind::AirQuality),
         "geocode" => Some(IntentKind::Geocode),
         "news" => Some(IntentKind::News),
         "wiki" => Some(IntentKind::Wiki),
@@ -6024,6 +6701,7 @@ async fn try_direct_public_api(
         "fx" => Some(IntentKind::Fx),
         "stock" => Some(IntentKind::Stock),
         "github" => Some(IntentKind::Github),
+        "worldbank" => Some(IntentKind::WorldBank),
         _ => None,
     });
     let intent = forced.or_else(|| classify_intent(q));
@@ -6032,6 +6710,7 @@ async fn try_direct_public_api(
     };
     match intent {
         IntentKind::Weather => resolve_weather(q, location, proxy_url).await,
+        IntentKind::AirQuality => resolve_air_quality(q, location, proxy_url).await,
         IntentKind::Geocode => resolve_geocode(q, proxy_url).await,
         IntentKind::News => resolve_news(q, proxy_url).await,
         IntentKind::Wiki => resolve_wiki(q, proxy_url).await,
@@ -6049,6 +6728,7 @@ async fn try_direct_public_api(
             None => Ok(None),
         },
         IntentKind::Github => resolve_github(q, proxy_url).await,
+        IntentKind::WorldBank => resolve_worldbank(q, proxy_url).await,
     }
 }
 
@@ -6090,7 +6770,7 @@ async fn web_public_api(
         .await;
     }
     Err(format!(
-        "No structured-data source matched \"{}\" — web_public_api covers weather/geocode/news/wiki/IP/FX/stock/GitHub lookups; for anything else use web_search instead of retrying this tool with the same query (auto-fallback to search is off when searchOnMiss:false).",
+        "No structured-data source matched \"{}\" — web_public_api covers weather/air quality/geocode/news/wiki/IP/FX/stock/GitHub/World-Bank lookups; for anything else use web_search instead of retrying this tool with the same query (auto-fallback to search is off when searchOnMiss:false).",
         q
     ))
 }
@@ -6641,6 +7321,25 @@ mod web_tier_2_3_tests {
         assert_eq!(classify_intent("苹果股价"), Some(IntentKind::Stock));
         assert_eq!(classify_intent("github 上最火的 AI 仓库"), Some(IntentKind::Github));
         assert_eq!(classify_intent("北京到上海机票"), None);
+    }
+
+    #[test]
+    fn classify_routes_air_quality_and_worldbank() {
+        assert_eq!(classify_intent("北京空气质量"), Some(IntentKind::AirQuality));
+        assert_eq!(classify_intent("北京PM2.5是多少"), Some(IntentKind::AirQuality));
+        assert_eq!(classify_intent("中国GDP是多少"), Some(IntentKind::WorldBank));
+        assert_eq!(classify_intent("美国人口总数"), Some(IntentKind::WorldBank));
+        assert_eq!(classify_intent("日本失业率"), Some(IntentKind::WorldBank));
+        // "人口老龄化" is an analysis question, not a population-count lookup.
+        assert_eq!(classify_intent("中国人口老龄化趋势"), None);
+    }
+
+    #[test]
+    fn worldbank_country_uses_word_boundaries_for_english() {
+        assert_eq!(worldbank_country("美国GDP"), Some(("US", "美国")));
+        assert_eq!(worldbank_country("us gdp"), Some(("US", "美国")));
+        assert_eq!(worldbank_country("中国人口"), Some(("CN", "中国")));
+        assert_eq!(worldbank_country("must know"), None);
     }
 
     #[test]
@@ -10025,14 +10724,171 @@ async fn probe_reachability() -> String {
     )
 }
 
-#[tauri::command]
-async fn sys_info(_workspace: String, location: Option<String>) -> Result<String, String> {
-    let tz = std::env::var("TZ").unwrap_or_else(|_| "UTC".to_string());
+/// Best-effort OS timezone (IANA name). macOS/Linux symlink /etc/localtime
+/// into …/zoneinfo/<TZ>; the tail is the IANA name (Asia/Shanghai). Falls back
+/// to the TZ env var (rarely set for macOS GUI apps) and finally "unknown".
+fn detect_timezone() -> String {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        if let Ok(target) = std::fs::read_link("/etc/localtime") {
+            let target = target.to_string_lossy();
+            if let Some(idx) = target.rfind("zoneinfo/") {
+                return target[idx + "zoneinfo/".len()..].to_string();
+            }
+        }
+    }
+    std::env::var("TZ")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
-    let lang = std::env::var("LANG")
+/// Best-effort OS language/locale (zh_CN, en_US, …). macOS reads the global
+/// AppleLocale preference (locale env vars are unset for GUI apps); other
+/// platforms fall back to the standard locale env vars set in most terminals.
+fn detect_language() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let output = silent_child(std::process::Command::new("defaults"))
+            .args(["read", "-g", "AppleLocale"])
+            .output()
+            .ok();
+        if let Some(output) = output {
+            let v = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .trim_matches('"')
+                .to_string();
+            if !v.is_empty() {
+                return v;
+            }
+        }
+    }
+    std::env::var("LANG")
         .or_else(|_| std::env::var("LC_ALL"))
         .or_else(|_| std::env::var("LC_CTYPE"))
-        .unwrap_or_else(|_| "unknown".to_string());
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Character encoding implied by the locale (en_US.UTF-8 → UTF-8). macOS and
+/// modern Linux default to UTF-8; Windows ANSI code pages are not probed here.
+fn detect_encoding(locale: &str) -> String {
+    if let Some(enc) = locale.split('.').nth(1) {
+        let enc = enc.trim();
+        if !enc.is_empty() {
+            return enc.to_uppercase();
+        }
+    }
+    "UTF-8".to_string()
+}
+
+/// Public IP + city-level geolocation result for sys_info.
+#[derive(Clone)]
+struct IpGeo {
+    ip_masked: String,
+    city: String,
+    region: String,
+    country: String,
+    timezone: String,
+}
+
+/// Public-IP geolocation is fetched ONCE per process and cached. It is the only
+/// network round-trip in sys_info that never changes meaningfully mid-session
+/// (a public IP is city-stable for the app's lifetime), so repeated sys_info
+/// calls must not re-pay the up-to-three-backend probe. The `time:` and
+/// `network reach:` lines stay live because they DO change.
+static IP_GEO_CACHE: tokio::sync::OnceCell<Option<IpGeo>> = tokio::sync::OnceCell::const_new();
+
+/// Cached wrapper around fetch_ip_geo: the first call probes the backends,
+/// later calls return the cached city-level result without touching the network.
+async fn detect_ip_geo() -> Option<IpGeo> {
+    IP_GEO_CACHE.get_or_init(fetch_ip_geo).await.clone()
+}
+
+/// Fetch the public IP + city geolocation for sys_info. The RAW IP is
+/// privacy-sensitive (sys_info text is injected into the LLM system prompt, so
+/// it would be sent to the model provider), therefore only a MASKED form is
+/// kept (last IPv4 octet / IPv6 hextets redacted). City/region/country/timezone
+/// are the parts that matter for geographic judgment and are not sensitive at
+/// city granularity.
+async fn fetch_ip_geo() -> Option<IpGeo> {
+    let backends: &[&str] = &[
+        "https://ipwho.is/",
+        "https://ipinfo.io/json",
+        "http://ip-api.com/json/?lang=zh-CN",
+    ];
+    for url in backends {
+        let client = match build_http_client(std::time::Duration::from_secs(3), None) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let body: serde_json::Value = match client
+            .get(*url)
+            .header("User-Agent", BROWSER_UA)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => match r.json().await {
+                Ok(v) => v,
+                Err(_) => continue,
+            },
+            _ => continue,
+        };
+        let get = |keys: &[&str]| -> String {
+            for k in keys {
+                if let Some(v) = body.get(k).and_then(|v| v.as_str()).map(|s| s.trim()) {
+                    if !v.is_empty() && v != "unknown" {
+                        return v.to_string();
+                    }
+                }
+            }
+            String::new()
+        };
+        let city = get(&["city"]);
+        let region = get(&["region", "regionName"]);
+        let country = get(&["country", "country_name"]);
+        let timezone = get(&["timezone"]);
+        let ip = get(&["ip", "query"]);
+        if city.is_empty() && timezone.is_empty() {
+            continue;
+        }
+        return Some(IpGeo {
+            ip_masked: mask_ip(&ip),
+            city,
+            region,
+            country,
+            timezone,
+        });
+    }
+    None
+}
+
+/// Redact the identifying tail of an IP so sys_info never leaks the exact
+/// public address to the model backend. IPv4 → last octet; IPv6 → last hextet.
+fn mask_ip(ip: &str) -> String {
+    if ip.is_empty() {
+        return "unknown".to_string();
+    }
+    if ip.contains(':') {
+        match ip.split(':').next() {
+            Some(first) if !first.is_empty() => format!("{first}:…"),
+            _ => "unknown".to_string(),
+        }
+    } else {
+        match ip.rsplit_once('.') {
+            Some((head, _)) => format!("{head}.x"),
+            None => "unknown".to_string(),
+        }
+    }
+}
+
+#[tauri::command]
+async fn sys_info(_workspace: String, location: Option<String>) -> Result<String, String> {
+    let lang = detect_language();
+    let encoding = detect_encoding(&lang);
 
     let loc = location
         .as_deref()
@@ -10105,13 +10961,70 @@ async fn sys_info(_workspace: String, location: Option<String>) -> Result<String
     let system_proxy = resolve_system_proxy_url().unwrap_or_else(|| "none".to_string());
     let env_proxy = env_proxy_summary();
     let vpn = detect_vpn_connections();
-    let reach = probe_reachability().await;
+    let (ip_geo, reach) = tokio::join!(detect_ip_geo(), probe_reachability());
+
+    let mut tz = detect_timezone();
+    if tz == "unknown" {
+        if let Some(g) = &ip_geo {
+            if !g.timezone.is_empty() {
+                tz = g.timezone.clone();
+            }
+        }
+    }
+    let ip_line = match &ip_geo {
+        Some(g) => {
+            let mut parts: Vec<String> = vec![g.ip_masked.clone()];
+            let mut loc_parts: Vec<String> = Vec::new();
+            for p in [&g.city, &g.region, &g.country] {
+                if !p.is_empty() {
+                    loc_parts.push(p.clone());
+                }
+            }
+            if !loc_parts.is_empty() {
+                parts.push(loc_parts.join(", "));
+            }
+            if !g.timezone.is_empty() {
+                parts.push(g.timezone.clone());
+            }
+            parts.join(" · ")
+        }
+        None => "unknown (offline or all geolocation backends blocked)".to_string(),
+    };
 
     let info = format!(
-        "timezone:  {}\nlanguage:  {}\ntime:      {}\nos:        {}\nlocation:  {}\nruntimes:  {}\nnetwork:   proxy: {}; env: {}; vpn: {}; reach: {}",
-        tz, lang, time, os_version, loc, runtimes, system_proxy, env_proxy, vpn, reach
+        "timezone:  {}\nlanguage:  {}\nencoding:  {}\nip:        {}\ntime:      {}\nos:        {}\nlocation:  {}\nruntimes:  {}\nnetwork:   proxy: {}; env: {}; vpn: {}; reach: {}",
+        tz, lang, encoding, ip_line, time, os_version, loc, runtimes, system_proxy, env_proxy, vpn, reach
     );
     Ok(info)
+}
+
+#[cfg(test)]
+mod sys_info_tests {
+    use super::*;
+
+    #[test]
+    fn masks_ipv4_last_octet() {
+        assert_eq!(mask_ip("58.246.12.34"), "58.246.12.x");
+        assert_eq!(mask_ip("8.8.8.8"), "8.8.8.x");
+    }
+
+    #[test]
+    fn masks_ipv6_beyond_first_hextet() {
+        assert_eq!(mask_ip("2001:db8::1"), "2001:…");
+    }
+
+    #[test]
+    fn mask_ip_handles_empty_and_malformed() {
+        assert_eq!(mask_ip(""), "unknown");
+        assert_eq!(mask_ip("not-an-ip"), "unknown");
+    }
+
+    #[test]
+    fn detects_encoding_from_locale_suffix() {
+        assert_eq!(detect_encoding("en_US.UTF-8"), "UTF-8");
+        assert_eq!(detect_encoding("zh_CN.GBK"), "GBK");
+        assert_eq!(detect_encoding("zh_CN"), "UTF-8");
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -10631,6 +11544,7 @@ pub fn run() {
             write_file_stream,
             edit_file,
             search_files,
+            find_files,
             code_searcher,
             list_files,
             create_directory,

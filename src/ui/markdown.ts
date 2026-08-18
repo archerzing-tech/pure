@@ -1688,7 +1688,8 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
       setDiagramState(slot, 'preview');
     } catch (err) {
       if (!isCurrentDiagramRender(slot, version)) continue;
-      const msg = err instanceof Error ? err.message : String(err);
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = raw === 'chart needs at least one data row' ? t('diagram.noData') : raw;
       setDiagramState(slot, 'error', msg);
     }
   }

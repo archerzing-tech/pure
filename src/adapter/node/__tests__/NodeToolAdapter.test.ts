@@ -4,7 +4,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeToolAdapter, detectNetworkSummary, detectRuntimeVersions } from '../NodeToolAdapter';
+import { NodeToolAdapter, detectNetworkSummary, detectRuntimeVersions, tokenizeFindQuery } from '../NodeToolAdapter';
 import type { ToolCall, ToolResult } from '../../../shared/types';
 
 function makeCall(command: string): ToolCall {
@@ -68,21 +68,21 @@ describe('NodeToolAdapter execute_command', () => {
     expect(resultOf(r).exitCode).not.toBe(0);
   });
 
-  it('rejects reads through a symlink that escapes the workspace', async () => {
+  it('allows reads through a symlink pointing outside the workspace', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'pure-node-outside-'));
     try {
       // Directory symlinks need an explicit 'dir' type on Windows (a missing
-      // type creates a file link and the escape check is bypassed); the type
-      // argument is ignored on POSIX.
+      // type creates a file link); the type argument is ignored on POSIX.
       symlinkSync(outside, join(workspace, 'linked'), 'dir');
+      writeFileSync(join(outside, 'secret.txt'), 'outside content');
 
       const r = await adapter.execute({
         id: 'call-symlink',
         index: 0,
         function: { name: 'read_file', arguments: JSON.stringify({ path: 'linked/secret.txt' }) },
       });
-      expect(r.success).toBe(false);
-      expect(r.error).toContain('Path escapes workspace');
+      expect(r.success).toBe(true);
+      expect(r.result).toContain('outside content');
     } finally {
       rmSync(outside, { recursive: true, force: true });
       // Windows: rmSync on a symlink raises EFAULT; unlink the link itself.
@@ -326,6 +326,107 @@ describe('NodeToolAdapter diff_files', () => {
     expect(r.success).toBe(false);
     expect(r.error).toBeTruthy();
   });
+});
+
+describe('NodeToolAdapter find_files', () => {
+  let workspace: string;
+  let adapter: NodeToolAdapter;
+
+  beforeAll(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pure-find-files-'));
+    adapter = new NodeToolAdapter({ workspace });
+    // Seed a small tree with a filename match and a content-only match.
+    writeFileSync(join(workspace, '学历证明.pdf'), 'certificate of education');
+    mkdirSync(join(workspace, 'docs'));
+    writeFileSync(join(workspace, 'docs', 'resume.txt'), '我的学历：清华大学硕士\n工作经历：五年\n');
+    writeFileSync(join(workspace, 'docs', 'notes.txt'), '无相关内容');
+  });
+
+  afterAll(() => {
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  const call = (args: Record<string, unknown>): ToolCall => ({
+    id: 'call-find',
+    index: 0,
+    function: { name: 'find_files', arguments: JSON.stringify(args) },
+  });
+
+  it('finds a file by CJK content after stripping stop words from the query', async () => {
+    const r = await adapter.execute(call({ query: '我的学历' }));
+    expect(r.success).toBe(true);
+    const out = String(r.result);
+    expect(out).toContain('resume.txt');
+    expect(out).toContain('1 处命中');
+  });
+
+  it('ranks a content hit above a filename-only match (strongest proof first)', async () => {
+    const r = await adapter.execute(call({ query: '学历' }));
+    expect(r.success).toBe(true);
+    const out = String(r.result);
+    // resume.txt has a content hit (stronger proof); 学历证明.pdf is a
+    // filename-only match and must rank after content hits.
+    expect(out.indexOf('resume.txt')).toBeLessThan(out.indexOf('学历证明.pdf'));
+    expect(out).toContain('1 处命中');
+    expect(out).toContain('仅文件名命中');
+  });
+
+  it('reports a fallback with guidance when nothing matches', async () => {
+    const r = await adapter.execute(call({ query: '太空旅行' }));
+    expect(r.success).toBe(true);
+    const out = String(r.result);
+    expect(out).toContain('未找到匹配文件');
+    expect(out).toContain('兜底建议');
+  });
+
+  it('rejects an empty query', async () => {
+    const r = await adapter.execute(call({ query: '  ' }));
+    expect(r.success).toBe(false);
+    expect(String(r.error)).toContain('query 不能为空');
+  });
+
+  it('rejects a query that tokenizes to only stop words', async () => {
+    const r = await adapter.execute(call({ query: '的的的' }));
+    expect(r.success).toBe(false);
+    expect(String(r.error)).toContain('无法从查询');
+  });
+
+  it('does not double-count a filename-only match that cannot be content-scanned', async () => {
+    const bin = join(workspace, '学历.bin');
+    writeFileSync(bin, Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff, 0xfe]));
+    try {
+      const r = await adapter.execute(call({ query: '学历' }));
+      expect(r.success).toBe(true);
+      const out = String(r.result);
+      expect(out).toContain('学历.bin');
+      expect(out).toContain('仅文件名命中');
+      expect(out).toContain('0 个跳过');
+    } finally {
+      unlinkSync(bin);
+    }
+  });
+});
+
+describe('tokenizeFindQuery', () => {
+  const cases: Array<[string, string[]]> = [
+    ['我的学历', ['学历']],
+    ['毕业证', ['业证', '毕业']],
+    ['太空旅行', ['太空', '旅行', '空旅']],
+    ['education', ['education']],
+    ['Education', ['education']],
+    ['abc', ['abc']],
+    ['ab', []],
+    ['a1', ['a1']],
+    ['123', ['123']],
+    ['发票 学历', ['发票', '学历']],
+    ['的的的', []],
+    ['abc学历', ['ab', 'bc', 'c学', '学历']],
+  ];
+  for (const [input, expected] of cases) {
+    it(`tokenizes ${JSON.stringify(input)}`, () => {
+      expect(tokenizeFindQuery(input)).toEqual(expected);
+    });
+  }
 });
 
 describe('detectRuntimeVersions', () => {

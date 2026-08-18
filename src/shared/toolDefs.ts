@@ -18,7 +18,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
     input_schema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'File path relative to workspace root (absolute paths inside the workspace are fine)' },
+        path: { type: 'string', description: 'File path — relative paths resolve from the workspace root; absolute paths anywhere on disk work too (e.g. C:/tmp/a.docx, ~/Documents/notes.txt). The workspace is only the default base for relative paths, not a confinement boundary.' },
         startLine: { type: 'number', description: 'First line to read (1-indexed, optional)' },
         endLine: { type: 'number', description: 'Last line to read (1-indexed, optional)' },
       },
@@ -31,7 +31,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
     input_schema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'File path relative to workspace root' },
+        path: { type: 'string', description: 'File path — relative paths resolve from the workspace root; absolute paths anywhere on disk work too. The workspace is only the default base for relative paths, not a confinement boundary.' },
         content: { type: 'string', description: 'Content to write to the file' },
       },
       required: ['path', 'content'],
@@ -43,7 +43,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
     input_schema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'File path relative to workspace root' },
+        path: { type: 'string', description: 'File path — relative paths resolve from the workspace root; absolute paths anywhere on disk work too. The workspace is only the default base for relative paths, not a confinement boundary.' },
         oldString: { type: 'string', description: 'Exact string to find and replace' },
         newString: { type: 'string', description: 'Replacement string' },
         allowMultiple: { type: 'boolean', description: 'If true, replace all occurrences. Default: false' },
@@ -64,6 +64,21 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
         caseSensitive: { type: 'boolean', description: 'Match case exactly. Default: false' },
       },
       required: ['pattern'],
+    },
+  },
+  {
+    name: 'find_files',
+    description: 'Smartly locate the files most likely to contain a topic or keyword (e.g. "学历", "education", "毕业证", "发票") without reading every file. Strategy: filename matches are ranked first (cheap, no content reads), then content hits across files are counted and the TOP candidate files are returned with a few snippet lines each (never full content). Works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK-encoded text. Use this FIRST when asked to find information spread across many files, then read_file only the top 1-2 candidates (optionally with startLine/endLine). Returns actionable fallback guidance when nothing matches.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The topic or keyword to find, e.g. "学历", "education", "毕业证". Fewer distinctive words work better than a long phrase.' },
+        path: { type: 'string', description: 'Directory to search in (relative to workspace), or a single file to search directly. Default: workspace root' },
+        filePattern: { type: 'string', description: 'Glob to filter files, e.g. "*.{ts,js}", "*.{docx,pdf}", "*.txt". Default: all files' },
+        maxResults: { type: 'number', description: 'Top candidate files to return (default 10, max 30)' },
+        caseSensitive: { type: 'boolean', description: 'Match case exactly. Default: false' },
+      },
+      required: ['query'],
     },
   },
   {
@@ -188,7 +203,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'web_public_api',
-    description: 'Structured-data lookup through curated no-key public APIs: weather, geocode, news, wiki, IP, FX, stock, GitHub. Use for concrete factual lookups like "北京天气", "100 usd to cny", or "苹果股价" — returns ready-to-use formatted data directly. When no structured source matches, it automatically falls back to web search (disable with searchOnMiss:false). Not for general discovery or ambiguous questions — use researcher_web for those.',
+    description: 'Structured-data lookup through curated no-key public APIs: weather, air quality, geocode, news, wiki, IP, FX, stock, GitHub, World Bank economic indicators (GDP / population / unemployment / inflation). Use for concrete factual lookups like "北京天气", "北京PM2.5", "中国GDP是多少", "100 usd to cny", or "苹果股价" — returns ready-to-use formatted data directly. When no structured source matches, it automatically falls back to web search (disable with searchOnMiss:false). Not for general discovery or ambiguous questions — use researcher_web for those.',
     input_schema: {
       type: 'object',
       properties: {
@@ -269,7 +284,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'sys_info',
-    description: 'Get operating system information: timezone, language, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
+    description: 'Get operating system information: timezone (IANA name), language/locale, character encoding, public IP (masked — last octet redacted) with city-level geolocation, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
     input_schema: { type: 'object', properties: {} },
   },
 ] as const satisfies readonly ToolDefinition[];
@@ -277,7 +292,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
 /** Side-effect / write classification per tool (same table the CLI and GUI
  * adapters used to maintain independently). */
 export const PUBLIC_TOOL_NAMES = new Set([
-  'read_file', 'write_file', 'edit_file', 'list_files', 'execute_command',
+  'read_file', 'write_file', 'edit_file', 'find_files', 'list_files', 'execute_command',
   'create_directory', 'diff_files', 'researcher_web', 'researcher_docs',
   'code_searcher', 'glob_files', 'replace_files', 'git_diff', 'git_log',
   'git_status', 'sys_info', 'generate_image', 'web_public_api', 'web_scrape',
@@ -326,6 +341,7 @@ const TOOL_METADATA_TABLE = {
   write_file: { sideEffects: true, isWrite: true },
   edit_file: { sideEffects: true, isWrite: true },
   search_files: { sideEffects: false, isWrite: false },
+  find_files: { sideEffects: false, isWrite: false },
   list_files: { sideEffects: false, isWrite: false },
   execute_command: { sideEffects: true, isWrite: true },
   git_diff: { sideEffects: false, isWrite: false },

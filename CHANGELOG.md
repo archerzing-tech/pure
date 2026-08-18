@@ -3,6 +3,18 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.11
+
+**路径边界移除 + find_files 智能定位 + 空气质量/经济指标直查 + sys_info 地理信息增强**
+
+- 文件工具路径边界移除：`resolve()` 不再把访问范围限制在工作区内，绝对路径可指向磁盘任意位置（工作区只是相对路径的默认基准）；保留悬空 symlink 拒绝、`..` 越过根目录报错等路径合法性防护；read_file/write_file/edit_file 的工具描述同步为「绝对路径任意位置可用」
+- 新增 find_files 工具（Rust + Node 双实现）：智能定位最可能包含主题词的文件——先按文件名关键词短路（零成本）、无命中时才对剩余文件按体积升序做受限内容扫描（预算 max×6+20）；CJK 查询分词为二元组并过滤「的/了/我」等停用字，无分词边界的中文查询（「我的学历」→「学历」）也能命中；每个候选只附前 3 行片段，绝不返回全文
+- web_public_api 新增两类零 key 直查：空气质量（北京 PM2.5/AQI，Open-Meteo）+ 世界银行经济指标（GDP/人均 GDP/人口/失业率/通胀，含中英文国家名词边界匹配）；「人口」需带计数信号才路由，避免误伤分析类问题
+- 公开 API 目录注入提示词：内置 public-apis / n0shake 两个目录地址，当内置 web_search/web_public_api/web_scrape 都拿不到数据时，模型可自行去目录找 no-key 端点调用（天气/酒店/交通/旅游/行业等），绝不编造
+- sys_info 新增地理位置字段：语言（macOS 读 AppleLocale）、时区（/etc/localtime 符号链接 → IANA 名）、编码（locale 字符集后缀）；IP 地理定位（ipwho.is → ipinfo.io → ip-api.com）返回**掩码 IP + 城市/省/国家/时区**，进程级缓存只请求一次（IP 属敏感信息，绝不透出完整地址）
+- 修复：信息类请求（制定规划/查询）不再误渲染成「项目目录」卡片；天气无真实数据时不再输出空图表（新增「暂无数据可绘制图表」友好文案）；记忆面板「运行时诊断 / 导出导入」卡片 padding 对齐
+- MCP 噪音消除：MCP 服务器的 stderr 不再实时打印（bunx 启动的 web-search 服务器会输出「Resolving dependencies」等良性进度），改为缓冲、仅在服务器请求中途退出时附在错误信息里报告
+
 ## v1.9.10
 
 **网络搜索全面增强 + 本地文件读取/搜索重做 + 系统环境预取注入 + 进度同步修复**

@@ -188,7 +188,7 @@ function isWebTool(name: string): boolean {
 // File-system tool family — gated by the `toolFS` settings toggle so users can
 // disable read/write/edit/search as a group from Settings → Tools.
 const FS_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'read_file', 'write_file', 'edit_file', 'search_files', 'list_files',
+  'read_file', 'write_file', 'edit_file', 'search_files', 'find_files', 'list_files',
   'glob_files', 'create_directory', 'diff_files', 'replace_files',
 ]);
 

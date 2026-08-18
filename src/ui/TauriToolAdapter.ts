@@ -242,6 +242,17 @@ export class TauriToolAdapter implements ToolAdapter {
           }) as string;
           return { id: toolCall.id, toolName: name, result: searchResult, success: true, duration: Date.now() - start };
         }
+        case 'find_files': {
+          const findResult = await this.call('find_files', {
+            workspace: ws,
+            query: String(args.query ?? ''),
+            path: args.path ?? null,
+            filePattern: args.filePattern ?? null,
+            maxResults: args.maxResults ?? 10,
+            caseSensitive: typeof args.caseSensitive === 'boolean' ? args.caseSensitive : null,
+          }) as string;
+          return { id: toolCall.id, toolName: name, result: findResult, success: true, duration: Date.now() - start };
+        }
         case 'list_files': {
           const listing = await this.call('list_files', {
             workspace: ws,

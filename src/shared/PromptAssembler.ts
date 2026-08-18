@@ -15,6 +15,7 @@ import {
   HUMAN_TONE_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
   LOGICAL_TRAPS_PROMPT,
+  PUBLIC_API_DIRECTORIES_PROMPT,
   SVG_OUTPUT_PROMPT,
   SYSTEM_CORE_PROMPT,
   TYPO_TOLERANCE_PROMPT,
@@ -103,19 +104,19 @@ export interface PromptMemoryContext {
 }
 
 const GUI_WEB_TOOLS_PROMPT = `Web tools:
-- web_search(query, maxResults?) — web search. With a Serper or Tavily API key in Settings → Tools it uses the API backends first (Serper = real Google index, best for Chinese AND English); otherwise free backends are probed in parallel — cn.bing.com + DuckDuckGo + Bing for Chinese queries, DuckDuckGo + Bing otherwise (the first backend to return results wins). If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
+- web_search(query, maxResults?) — web search. With a Serper or Tavily API key in Settings → Tools it uses the API backends first (Serper = real Google index, best for Chinese AND English); otherwise free backends are tried in order with a shared cookie session — cn.bing.com + Sogou + 360 + Baidu + Brave for Chinese queries, Bing + Brave otherwise, plus a Bing-via-Jina fallback when the rest fail; an intranet SearXNG instance (Settings → Tools → Web Tools) is tried first when configured, and the network state from sys_info() tells you which backends are reachable. If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.
 - web_fetch(url, maxChars?) — fetch and extract readable text from a text/HTML/JSON page. If web_fetch reports an unsupported content type, do NOT retry the same URL — use web_search instead or pick a different page.`;
 
 const GUI_SYS_INFO_PROMPT = `System:
-- sys_info() — timezone, language, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data. The user can set/override their location in Settings → General → Environment.`;
+- sys_info() — timezone (IANA name), language/locale, character encoding, public IP (masked) with city-level geolocation, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data. The user can set/override their location in Settings → General → Environment.`;
 
 const CLI_CAPABILITIES_PROMPT = `System:
-- sys_info() — timezone, language, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data.
+- sys_info() — timezone (IANA name), language/locale, character encoding, public IP (masked) with city-level geolocation, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data.
 
 Web tools:
 - researcher_web(prompt, maxSources?, fetchContent?) — research a web question and return cited sources, extracted evidence, retrieval time, and partial failures. Do not repeat an unchanged query after a failure.
 - researcher_docs(library, topic, version?, maxSources?, fetchContent?) — research version-aware official documentation and return cited evidence.
-- web_public_api(query, category?, location?) — structured-data lookup through curated no-key public APIs (weather, geocode, news, wiki, IP, FX, stock, GitHub). Use it for concrete factual lookups like "北京天气", "100 usd to cny", or "苹果股价" — the web_search alias also auto-routes these, and when no structured source matches this tool auto-falls back to web search (searchOnMiss:false opts out). Not for general discovery or ambiguous questions — use researcher_web.
+- web_public_api(query, category?, location?) — structured-data lookup through curated no-key public APIs (weather, air quality, geocode, news, wiki, IP, FX, stock, GitHub, World Bank economic indicators like GDP/population/unemployment/inflation). Use it for concrete factual lookups like "北京天气", "北京PM2.5", "中国GDP是多少", "100 usd to cny", or "苹果股价" — the web_search alias also auto-routes these, and when no structured source matches this tool auto-falls back to web search (searchOnMiss:false opts out). Not for general discovery or ambiguous questions — use researcher_web.
 - web_scrape(url, selector?, maxChars?) — fetch a KNOWN URL and extract readable text (navigation stripped; optional #id/.class/tag selector; RSS feeds and JSON auto-formatted; Jina Reader fallback for blocked, JS-heavy, or binary pages). Use when you already have the URL; use researcher_web when you need to find one.
 
 Diagram rendering:
@@ -151,8 +152,8 @@ function buildOutputStyle(surface: PromptSurface, imageGeneration = false): stri
 - Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").
 - Structure longer replies into clear sections — use Markdown headings (##) for each category, short paragraphs for each point, and lists where items fit. Wrap the KEY phrase(s) of each section in ==double equals== (e.g. ==西安到重庆==, ==3 小时 40 分==) so they render HIGHLIGHTED; keep the surrounding prose plain so the highlighted-vs-plain contrast is visible.
 ${visualOutput}
-- For a weather forecast or other time-sensitive data, call web_search FIRST and use the returned forecast data; never invent future weather. If the user did not provide a location, ask for it or state the location assumption clearly. Then include both a concise explanation and, when supported by the client, a fenced chart block so the result is useful.
-- Information queries (weather, news, facts, prices, directions, lookup) are ANSWERED INLINE — never persist web_search / web_fetch results to disk as data files (no weather.js, no *_raw.js, no "saved response" files). write_file / edit_file are for artifacts the user asked to create or modify, not for stashing fetched data. If you think data are worth keeping, summarize them in your reply instead.
+- For a weather forecast or other time-sensitive data, call web_search FIRST and use the returned forecast data; never invent future weather. If the user did not provide a location, ask for it or state the location assumption clearly. Then give a concise explanation and — ONLY when you actually retrieved real data points — a fenced chart block. If the search returned no usable data, say so plainly instead; NEVER emit a chart with empty, placeholder, or invented values.
+- Information queries (weather, news, facts, prices, directions, lookup, trip/itinerary planning) are ANSWERED INLINE — never persist web_search / web_fetch results to disk as data files (no weather.js, no *_raw.js, no "saved response" files) and never scaffold a project directory for an advice/planning request. write_file / edit_file are for artifacts the user asked to create or modify, not for stashing fetched data. If you think data are worth keeping, summarize them in your reply instead.
 - A bare "generate X", "show me X", "give me X", "what does X look like", or any "write me code for…" without a path means inline output — never reach for write_file.
 - COMPLETE runnable artifacts go to disk by default: when the user asks you to BUILD a full game, mini-game, web page/site, app, tool, script, or small project ("写一个小游戏", "做一个网页", "开发一个工具" — even without naming a path), WRITE it to a file instead of printing the whole source inline. Single-file artifact → a new file like index.html / game.html / app.py in the workspace; multi-file project → a new directory with the files. After writing, state the path(s) and how to run/open it.
 - When you do write a file, briefly state where it landed and confirm the user actually wanted persistence; the EXISTENCE of a workspace does NOT imply "save everything to disk".`;
@@ -266,6 +267,7 @@ export class PromptAssembler {
       fragment('typo_tolerance', TYPO_TOLERANCE_PROMPT, 55),
       fragment('logical_traps', LOGICAL_TRAPS_PROMPT, 70),
       fragment('capability_gap', CAPABILITY_GAP_PROMPT, 75),
+      fragment('public_api_directory', PUBLIC_API_DIRECTORIES_PROMPT, 62),
       fragment('environment', context.environment ?? '', 60),
       fragment('runtimes', context.runtimes ?? '', 45),
       fragment('network', context.network ?? '', 50),

@@ -133,6 +133,13 @@ function requestLooksLikeProject(request: string): boolean {
   return /(?:项目|工程|网站|网页应用|web\s*app|website|应用|app|dashboard|系统|project|coding)/i.test(request);
 }
 
+/** True when the request IMPERATIVELY asks to build code ("开发一个爬虫",
+ * "写一个脚本") even without a project noun. Distinguishes a real multi-file
+ * build from a lookup/planning request that only left stashed data files. */
+function requestLooksLikeBuild(request: string): boolean {
+  return /(?:请|帮我|麻烦你|给我)?(?:编写|编|写|开发|制作|创建|搭建|实现|构建|做一个|做个|写一个|写个|开发一个|实现一个|写段|搭一个|重构|重写|修复|部署|迁移)/i.test(request.slice(0, 80));
+}
+
 function requestLooksLikeFinalVisualOrDocument(request: string): boolean {
   return /(?:画|绘制|图片|图像|插画|海报|封面|文档|报告|word|ppt|excel|表格|pdf|markdown|文本)/i.test(request);
 }
@@ -195,7 +202,12 @@ export function planArtifactDisplay(items: ArtifactItem[], options: ArtifactDisp
   }
 
   if (!explicitScript && hasImplementationFiles && kept.every(item => isScriptOrSourceArtifact(item.path))) {
-    return kept.length === 1 ? { mode: 'none' } : { mode: 'project', items: kept };
+    // Only source/data files remain. A real multi-file build → directory link;
+    // a non-build request that only left stashed data behind → nothing.
+    if (request.length === 0 || requestLooksLikeBuild(request)) {
+      return kept.length === 1 ? { mode: 'none' } : { mode: 'project', items: kept };
+    }
+    return { mode: 'none' };
   }
 
   return compactArtifactFiles(kept);
