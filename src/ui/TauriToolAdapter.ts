@@ -110,7 +110,6 @@ export interface ImageGenContext {
   /** LLM-scoped proxy URL; generate_image hits the provider's image API. */
   proxyUrl?: string;
   proxyBypassProviders?: string[];
-  proxyBypassModels?: string[];
 }
 
 export class TauriToolAdapter implements ToolAdapter {
@@ -550,7 +549,6 @@ export class TauriToolAdapter implements ToolAdapter {
             size,
             proxyUrl: this.imageGen.proxyUrl ?? '',
             proxyBypassProviders: this.imageGen.proxyBypassProviders ?? [],
-            proxyBypassModels: this.imageGen.proxyBypassModels ?? [],
           }) as { images: GeneratedImage[] };
           const images = Array.isArray(payload?.images) ? payload.images : [];
           if (images.length === 0) {

@@ -231,22 +231,17 @@ async fn test_llm_connection(
     secret_key: Option<String>,
     proxy_url: Option<String>,
     proxy_bypass_providers: Option<Vec<String>>,
-    proxy_bypass_models: Option<Vec<String>>,
     provider: Option<String>,
-    model: Option<String>,
 ) -> Result<LlmConnectionProbe, String> {
     let api_key = api_key.unwrap_or_default();
     let secret_key = secret_key.unwrap_or_default();
     let proxy_url = proxy_url.unwrap_or_default();
     let proxy_bypass_providers = proxy_bypass_providers.unwrap_or_default();
-    let proxy_bypass_models = proxy_bypass_models.unwrap_or_default();
     let provider = provider.unwrap_or_default();
-    let model = model.unwrap_or_default();
     let secrets = load_secrets()?;
     let resolved_key = resolve_api_key(&secrets, &api_key, &secret_key);
     let effective_proxy = if proxy_url.trim().is_empty()
         || proxy_matches(&provider, &proxy_bypass_providers)
-        || proxy_matches(&model, &proxy_bypass_models)
     {
         None
     } else {
@@ -2424,8 +2419,9 @@ fn powershell_command_wrapped(command: &str) -> String {
 }
 
 /// Encode text as base64 of its UTF-16LE bytes — the transport PowerShell's
-/// `-EncodedCommand` expects. Kept platform-independent so it is unit-testable
-/// everywhere; the Windows-only callers wrap the command first.
+/// `-EncodedCommand` expects. Kept available in tests on every platform; the
+/// production helper is compiled only where the Windows caller exists.
+#[cfg(any(windows, test))]
 fn utf16le_base64(text: &str) -> String {
     let mut bytes: Vec<u8> = Vec::with_capacity(text.len() * 2);
     for unit in text.encode_utf16() {
@@ -8836,8 +8832,6 @@ struct ChatStreamArgs {
     proxy_url: String,
     #[serde(default, rename = "proxyBypassProviders")]
     proxy_bypass_providers: Vec<String>,
-    #[serde(default, rename = "proxyBypassModels")]
-    proxy_bypass_models: Vec<String>,
 }
 
 fn proxy_matches(value: &str, patterns: &[String]) -> bool {
@@ -8851,7 +8845,6 @@ fn proxy_matches(value: &str, patterns: &[String]) -> bool {
 fn llm_proxy_url(args: &ChatStreamArgs) -> Option<&str> {
     if args.proxy_url.trim().is_empty()
         || proxy_matches(&args.provider, &args.proxy_bypass_providers)
-        || proxy_matches(&args.model, &args.proxy_bypass_models)
     {
         None
     } else {
@@ -8972,7 +8965,7 @@ mod proxy_tests {
     }
 
     #[test]
-    fn provider_or_model_match_bypasses_llm_proxy() {
+    fn provider_match_bypasses_llm_proxy() {
         let mut args = ChatStreamArgs {
             messages: Vec::new(),
             provider: "ollama".to_string(),
@@ -8987,14 +8980,10 @@ mod proxy_tests {
             request_id: String::new(),
             proxy_url: "socks5://127.0.0.1:1080".to_string(),
             proxy_bypass_providers: vec!["ollama".to_string()],
-            proxy_bypass_models: Vec::new(),
         };
         assert!(llm_proxy_url(&args).is_none());
         args.provider = "qwen".to_string();
         args.proxy_bypass_providers.clear();
-        args.proxy_bypass_models = vec!["qwen2.5-coder".to_string()];
-        assert!(llm_proxy_url(&args).is_none());
-        args.proxy_bypass_models.clear();
         assert_eq!(llm_proxy_url(&args), Some("socks5://127.0.0.1:1080"));
     }
 
@@ -9633,14 +9622,11 @@ struct GenerateImageArgs {
     proxy_url: String,
     #[serde(default, rename = "proxyBypassProviders")]
     proxy_bypass_providers: Vec<String>,
-    #[serde(default, rename = "proxyBypassModels")]
-    proxy_bypass_models: Vec<String>,
 }
 
 fn image_proxy_url(args: &GenerateImageArgs) -> Option<&str> {
     if args.proxy_url.trim().is_empty()
         || proxy_matches(&args.provider, &args.proxy_bypass_providers)
-        || proxy_matches(&args.model, &args.proxy_bypass_models)
     {
         None
     } else {
@@ -9783,7 +9769,7 @@ mod generate_image_tests {
     }
 
     #[test]
-    fn proxy_bypass_matches_provider_or_model() {
+    fn proxy_bypass_matches_provider() {
         let args = GenerateImageArgs {
             provider: "openai".to_string(),
             model: "gpt-image-1".to_string(),
@@ -9795,14 +9781,10 @@ mod generate_image_tests {
             size: String::new(),
             proxy_url: "socks5://127.0.0.1:1080".to_string(),
             proxy_bypass_providers: vec!["openai".to_string()],
-            proxy_bypass_models: Vec::new(),
         };
         assert!(image_proxy_url(&args).is_none());
-        let mut args2 = GenerateImageArgs { proxy_bypass_providers: Vec::new(), ..args };
+        let args2 = GenerateImageArgs { proxy_bypass_providers: Vec::new(), ..args };
         assert_eq!(image_proxy_url(&args2), Some("socks5://127.0.0.1:1080"));
-        args2.proxy_bypass_providers = Vec::new();
-        args2.proxy_bypass_models = vec!["gpt-image".to_string()];
-        assert!(image_proxy_url(&args2).is_none());
     }
 }
 

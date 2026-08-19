@@ -380,12 +380,20 @@ function buildEnvironmentContext(config: PureConfig | null): string {
   return `Environment: reply in ${lang}; user location is ${city} (configured in Settings → General → Environment). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.`;
 }
 
+function buildModelIdentity(config: PureConfig | null): { provider: string; model: string } | undefined {
+  const provider = config?.provider?.trim();
+  if (!provider) return undefined;
+  const model = config?.model?.trim() || customDefaultModel(config?.customProviders, provider);
+  return model ? { provider, model } : undefined;
+}
+
 function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null, toolDefinitions: ToolDefinition[] = [], imageGeneration = false): string {
   return promptAssembler.buildSystemPrompt({
     surface: 'gui',
     capabilities: buildGuiCapabilities(hasWorkspace, temporaryWorkspace, { imageGeneration }),
     imageGeneration,
     toolDefinitions,
+    modelIdentity: buildModelIdentity(config),
     environment: buildEnvironmentContext(config),
     runtimes: buildRuntimesContext(),
     network: buildNetworkContext(),
@@ -613,7 +621,6 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
         : undefined,
       proxyUrl: effectiveProxyUrl(config.proxy, 'llm'),
       proxyBypassProviders: config.proxy?.bypassProviders ?? [],
-      proxyBypassModels: config.proxy?.bypassModels ?? [],
       extraBody,
       maxTokens,
     });
@@ -1077,7 +1084,6 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
     // the same proxy scope (and bypass rules) as chat traffic.
     proxyUrl: effectiveProxyUrl(config.proxy, 'llm'),
     proxyBypassProviders: config.proxy?.bypassProviders ?? [],
-    proxyBypassModels: config.proxy?.bypassModels ?? [],
   };
 }
 
@@ -1511,7 +1517,6 @@ export class ChatController {
       effectiveProxyUrl(config.proxy, 'tools'),
       effectiveProxyUrl(config.proxy, 'llm'),
       ...(config.proxy?.bypassProviders ?? []),
-      ...(config.proxy?.bypassModels ?? []),
       config.toolBrowser,
       config.toolCmd,
       config.toolGit,
@@ -2866,6 +2871,7 @@ export class ChatController {
         capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen }),
         imageGeneration: imageGen,
         toolDefinitions: finalPromptTools,
+        modelIdentity: buildModelIdentity(config),
         environment: buildEnvironmentContext(config),
         runtimes: buildRuntimesContext(),
         network: buildNetworkContext(),

@@ -140,12 +140,15 @@ export const PUBLIC_API_DIRECTORIES_PROMPT = `Public-API directories (consult ON
 - https://github.com/n0shake/Public-APIs — supplementary list of public JSON APIs by category.
 When a lookup fails or no built-in tool fits (e.g. hotel availability, transit schedules, industry statistics), find a suitable no-key public API in one of these directories, then fetch its documented endpoint directly with web_fetch / web_scrape (or execute_command curl when you need raw JSON). NEVER invent data; if only key-gated APIs fit, say so and ask whether the user can provide a key.`;
 
-/** 多图 SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The
- * GUI renders consecutive fenced ```svg blocks as a side-by-side grid (each
- * image ~half the chat width), so multi-image requests must yield one SVG
- * document per image — never several subjects squeezed into one canvas. */
-export const SVG_OUTPUT_PROMPT = `When the user asks for MULTIPLE images, icons, options, or variations (e.g. "生成两幅图", "两个图标", "A/B 两个方案", "several designs"):
-- Emit ONE separate fenced code block tagged svg PER image — each block contains exactly one root <svg>...</svg> document. NEVER combine several subjects into a single <svg>: a two-in-one SVG renders as ONE image, not two.
+/** SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The GUI
+ * renders fenced ```svg blocks inline as the PICTURE (single images full
+ * width, consecutive blocks as a side-by-side grid), so every image request
+ * must yield one SVG document per ```svg block — never a written file, plain
+ * text, or a non-svg code block. */
+export const SVG_OUTPUT_PROMPT = `The app renders fenced code blocks tagged svg as the PICTURE, inline in the chat — that is how you deliver any image/drawing/icon/illustration:
+- For ANY image request — single or MULTIPLE images, icons, options, or variations (e.g. "画一只鸟", "生成一个图标", "两幅图", "A/B 两个方案", "several designs") — emit ONE separate fenced code block tagged svg PER image, each block containing exactly one root <svg>...</svg> document. NEVER combine several subjects into a single <svg>: a two-in-one SVG renders as ONE image, not two.
+- NEVER use write_file / edit_file to save the picture as an .svg/.png file — the fenced svg block IS the deliverable and renders inline; writing a file only shows raw code instead of the picture.
+- NEVER emit the SVG as plain text or inside a non-svg code block (no \`\`\`xml, no \`\`\`html, no un-tagged block) — it must be tagged svg so the app renders it as the image.
 - Place the fenced blocks back to back with NO prose between them, so the app groups them into a side-by-side grid (each image about half the chat width, in one row).`;
 
 /** 文生图契约 — REPLACES the SVG output contract when the connected provider

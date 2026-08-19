@@ -5,6 +5,7 @@
 // come from ../shared/providers.ts.
 
 import { fetchAndDisplayVersion, checkForUpdatesManual } from './updater';
+import { copyTextToClipboard } from '../shared/clipboard';
 import { escapeHtml } from '../shared/html';
 import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
@@ -26,6 +27,7 @@ import {
   OPENAI_PRESET,
   OPENROUTER_PRESET,
   NVIDIA_PRESET,
+  nextCustomProviderId,
   PROVIDERS,
   providerDef,
   providerOverrideFor,
@@ -473,6 +475,15 @@ export class SettingsPanel {
     const llmGrid = document.getElementById('llm-provider-grid');
     llmGrid?.addEventListener('click', (event) => {
       const target = event.target as HTMLElement;
+      // Provider-id chip: copy the id (proxy bypass rules) without opening
+      // the card. Checked before every other action since the chip sits
+      // inside the card / panel buttons.
+      const idChip = target.closest<HTMLElement>('[data-copy-provider-id]');
+      if (idChip) {
+        event.stopPropagation();
+        void this.copyProviderId(idChip.dataset.copyProviderId ?? '');
+        return;
+      }
       // Expanded-panel actions.
       if (target.closest('#cfg-test-conn-btn')) {
         void this.testProviderConnection();
@@ -646,7 +657,7 @@ export class SettingsPanel {
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
       '#cfg-tavily-key', '#cfg-serper-key',
       '#cfg-mcp-exclude-prefixes',
-      '#cfg-proxy-enabled', '#cfg-proxy-mode', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-scheme', '#cfg-proxy-host', '#cfg-proxy-port', '#cfg-proxy-username', '#cfg-proxy-password', '#cfg-proxy-bypass-providers', '#cfg-proxy-bypass-models',
+      '#cfg-proxy-enabled', '#cfg-proxy-mode', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-scheme', '#cfg-proxy-host', '#cfg-proxy-port', '#cfg-proxy-username', '#cfg-proxy-password', '#cfg-proxy-bypass-providers',
       '#cfg-proxy-probe-0-enabled', '#cfg-proxy-probe-0-url', '#cfg-proxy-probe-1-enabled', '#cfg-proxy-probe-1-url', '#cfg-proxy-probe-2-enabled', '#cfg-proxy-probe-2-url',
       '#cfg-streaming-render',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
@@ -865,6 +876,7 @@ export class SettingsPanel {
           <span class="llm-provider-card-status${hasKey ? '' : ' llm-provider-card-status-empty'}">${escapeHtml(status)}</span>
         </span>
         <span class="llm-provider-card-name">${escapeHtml(label)}</span>
+        <span class="llm-provider-card-id" data-copy-provider-id="${escapeHtml(id)}" title="${t('llm.card.id.copy')}"><code>${escapeHtml(id)}</code><i aria-hidden="true">⧉</i></span>
         <span class="llm-provider-card-meta">${escapeHtml(defaultModel || '—')}</span>
       </button>`;
     };
@@ -942,6 +954,13 @@ export class SettingsPanel {
       </div>
       <div class="llm-provider-panel-body">
         <div class="llm-form-row">
+          <label class="llm-form-label" for="cfg-provider-id" data-i18n="llm.panel.id" data-i18n-title="llm.panel.id.hint" title="直连例外等场景使用的机器标识，点击复制">供应商 ID</label>
+          <div class="llm-form-input-group">
+            <input id="cfg-provider-id" class="setting-input llm-form-input" type="text" value="${escapeHtml(id)}" readonly aria-label="${t('llm.panel.id')}" />
+            <button id="cfg-copy-provider-id" class="setting-icon-btn" type="button" data-copy-provider-id="${escapeHtml(id)}" data-i18n-title="llm.card.id.copy" title="复制供应商 ID（用于代理直连例外）" aria-label="${t('llm.card.id.copy')}">⧉</button>
+          </div>
+        </div>
+        <div class="llm-form-row">
           <label class="llm-form-label" for="cfg-custom-name-edit" data-i18n="llm.panel.name">供应商名称</label>
           <input id="cfg-custom-name-edit" class="setting-input llm-form-input" type="text" value="${escapeHtml(label)}" placeholder="${escapeHtml(namePlaceholder)}" aria-label="${t('llm.panel.name')}" />
         </div>
@@ -1003,10 +1022,6 @@ export class SettingsPanel {
       || def?.baseURL
       || '').replace(/\/+$/, '');
     const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() || '';
-    const model = (document.getElementById('cfg-model') as HTMLInputElement | null)?.value.trim()
-      || custom?.defaultModel
-      || def?.defaultModel
-      || '';
     if (!baseURL) {
       this.toast(t('llm.custom.needURL'));
       return;
@@ -1036,9 +1051,7 @@ export class SettingsPanel {
             : undefined,
           proxyUrl: effectiveProxyUrl(proxy, 'llm') ?? '',
           proxyBypassProviders: proxy?.bypassProviders ?? [],
-          proxyBypassModels: proxy?.bypassModels ?? [],
           provider,
-          model,
         });
       } catch (err) {
         probe = { ok: false, error: (err as Error)?.message || String(err) };
@@ -1445,8 +1458,6 @@ export class SettingsPanel {
     }
     const proxyProvidersEl = document.getElementById('cfg-proxy-bypass-providers') as HTMLInputElement | null;
     if (proxyProvidersEl) proxyProvidersEl.value = proxy.bypassProviders.join(', ');
-    const proxyModelsEl = document.getElementById('cfg-proxy-bypass-models') as HTMLInputElement | null;
-    if (proxyModelsEl) proxyModelsEl.value = proxy.bypassModels.join(', ');
     proxy.probeUrls.forEach((probe, i) => {
       const enabledEl = document.getElementById(`cfg-proxy-probe-${i}-enabled`) as HTMLInputElement | null;
       const urlEl = document.getElementById(`cfg-proxy-probe-${i}-url`) as HTMLInputElement | null;
@@ -2094,15 +2105,6 @@ export class SettingsPanel {
     return out;
   }
 
-  /** Stable slug for a new custom provider; appends -2/-3… on collisions. */
-  private uniqueCustomId(customs: CustomProvider[], name: string): string {
-    const base = name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-').replace(/^-+|-+$/g, '') || 'custom';
-    let id = base;
-    let n = 2;
-    while (customs.some(p => p.id === id)) id = `${base}-${n++}`;
-    return id;
-  }
-
   /**
    * 用户自定义 chip：一键生成一张空白自定义供应商卡片（默认名，暂无地址），
    * 并打开它的配置卡 —— 名称 + Base URL 在下方填写。卡片不会自动启用；
@@ -2117,7 +2119,7 @@ export class SettingsPanel {
     if (existing) {
       id = existing.id;
     } else {
-      id = this.uniqueCustomId(customs, 'custom');
+      id = nextCustomProviderId(customs);
       const entry: CustomProvider = {
         id,
         name: t('llm.custom.defaultName'),
@@ -2515,7 +2517,6 @@ export class SettingsPanel {
         username: (document.getElementById('cfg-proxy-username') as HTMLInputElement | null)?.value ?? '',
         password: (document.getElementById('cfg-proxy-password') as HTMLInputElement | null)?.value ?? '',
         bypassProviders: normalizeProxyList((document.getElementById('cfg-proxy-bypass-providers') as HTMLInputElement | null)?.value),
-        bypassModels: normalizeProxyList((document.getElementById('cfg-proxy-bypass-models') as HTMLInputElement | null)?.value),
         probeUrls: [0, 1, 2].map((i) => ({
           url: (document.getElementById(`cfg-proxy-probe-${i}-url`) as HTMLInputElement | null)?.value ?? '',
           enabled: (document.getElementById(`cfg-proxy-probe-${i}-enabled`) as HTMLInputElement | null)?.checked ?? false,
@@ -2673,6 +2674,13 @@ export class SettingsPanel {
   }
 
   // ── Toast ──
+
+  /** Copy a provider id to the clipboard (proxy bypass rules / debugging). */
+  private async copyProviderId(id: string): Promise<void> {
+    if (!id) return;
+    const ok = await copyTextToClipboard(id);
+    this.toast(ok ? t('llm.id.copied').replace('{id}', id) : t('llm.card.id.copy'));
+  }
 
   private toast(msg: string) {
     const el = document.getElementById('toast')!;

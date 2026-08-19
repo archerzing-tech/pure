@@ -126,10 +126,10 @@ export function proxyMatches(value: string, patterns: readonly string[]): boolea
 
 export function shouldBypassProxy(
   provider: string,
-  model: string,
-  config: Pick<ProxyConfig, 'bypassProviders' | 'bypassModels'>,
+  _model: string,
+  config: Pick<ProxyConfig, 'bypassProviders'>,
 ): boolean {
-  return proxyMatches(provider, config.bypassProviders) || proxyMatches(model, config.bypassModels);
+  return proxyMatches(provider, config.bypassProviders);
 }
 
 /**

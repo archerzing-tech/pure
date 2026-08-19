@@ -42,7 +42,7 @@ import { buildShellContext } from './shared/shellEnv';
 import { parseSkillMarkdown } from './shared/skillFiles';
 import { mergeTranscriptWithTurn } from './shared/conversation';
 import { formatCliIntentAssessment, resolveCliAutoApprove } from './cliIntent';
-import { baseURLFor, customProviderFor, customProviderLabel, defaultModelFor, isCustomProviderId, promptBudgetForProvider, providerOverrideFor, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider, type ProviderOverride } from './shared/providers';
+import { baseURLFor, customProviderFor, customProviderLabel, defaultModelFor, isCustomProviderId, nextCustomProviderId, promptBudgetForProvider, providerOverrideFor, CUSTOM_PRESETS, OLLAMA_PRESET, type CustomProvider, type ProviderOverride } from './shared/providers';
 import type { BudgetConfig, EngineEvent, IStateStore, LLMAdapter, Message, ToolAdapter, ToolDefinition } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
 import { buildTaskContract, discoverWorkspace, formatTaskContract, workspaceProfileSummary, type TaskContract, type WorkspaceProfile } from './shared/delivery';
@@ -433,6 +433,7 @@ function assembleCliPrompt(
     surface: 'cli',
     capabilities: buildCliCapabilities(),
     toolDefinitions: toolsDefs,
+    modelIdentity: args.model ? { provider: args.provider, model: args.model } : undefined,
     environment: buildEnvironmentContext(),
     runtimes: buildRuntimesContext(),
     network: buildNetworkContext(),
@@ -1232,12 +1233,9 @@ async function runConfig(): Promise<void> {
         process.stdout.write(`  ${dim('API key is optional — press Enter to skip for local endpoints.')}\n`);
         const apiKeyRaw = await askMasked(`  ${bold('API key')} ${dim('(optional)')}: `);
         const apiKey = apiKeyRaw.trim();
-        const id = name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-').replace(/^-+|-+$/g, '') || 'custom';
-        let uniqueId = id;
-        let n = 2;
-        while (finalCustoms.some(p => p.id === uniqueId)) uniqueId = `${id}-${n++}`;
-        finalCustoms = [...finalCustoms, { id: uniqueId, name, baseURL, models, defaultModel: models[0], apiKey, hasApiKey: false }];
-        provider = uniqueId;
+        const id = nextCustomProviderId(finalCustoms);
+        finalCustoms = [...finalCustoms, { id, name, baseURL, models, defaultModel: models[0], apiKey, hasApiKey: false }];
+        provider = id;
       }
     } else {
       provider = providerKeys[providerIdx];

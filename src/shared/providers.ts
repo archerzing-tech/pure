@@ -302,6 +302,18 @@ export function customProviderFor(
   return customs.find((p) => p.id === id);
 }
 
+/** Return the next stable id for a manually added custom provider. */
+export function nextCustomProviderId(
+  customs: readonly Pick<CustomProvider, 'id'>[] | undefined | null,
+): string {
+  const used = new Set((customs ?? []).map((provider) => provider.id));
+  for (let n = 1; n <= 999; n += 1) {
+    const id = `custom${String(n).padStart(3, '0')}`;
+    if (!used.has(id)) return id;
+  }
+  throw new Error('No available custom provider id');
+}
+
 /** Find a built-in provider override by id (undefined when absent). */
 export function providerOverrideFor(
   overrides: Record<string, ProviderOverride> | undefined | null,

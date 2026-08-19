@@ -11,6 +11,7 @@ import {
   customDefaultModel,
   customProviderFor,
   customProviderLabel,
+  nextCustomProviderId,
   defaultModelFor,
   imageGenEnabled,
   imageGenModelFor,
@@ -85,6 +86,17 @@ describe('customProviderFor', () => {
     expect(customProviderFor(undefined, 'ollama')).toBeUndefined();
     expect(customProviderFor(null, 'ollama')).toBeUndefined();
     expect(customProviderFor([], undefined)).toBeUndefined();
+  });
+});
+
+describe('nextCustomProviderId', () => {
+  it('returns a zero-padded custom id and fills the first available slot', () => {
+    expect(nextCustomProviderId([])).toBe('custom001');
+    expect(nextCustomProviderId([{ id: 'custom001' }, { id: 'custom003' }])).toBe('custom002');
+  });
+
+  it('ignores legacy slug ids while avoiding exact custom-id collisions', () => {
+    expect(nextCustomProviderId([{ id: 'custom' }, { id: 'custom-2' }, { id: 'custom001' }])).toBe('custom002');
   });
 });
 

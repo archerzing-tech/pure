@@ -1716,6 +1716,25 @@ body {
   transform: translateY(0) scale(0.985);
   background: var(--bg-card);
 }
+
+/* Inline preview for model-written .svg pictures — spans the full card row
+   above the icon/text so the image renders in the chat even when the model
+   saved it with write_file instead of emitting a ```svg block. */
+.artifact-card-preview {
+  grid-column: 1 / -1;
+  display: block;
+  margin-bottom: 2px;
+  padding: 8px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--bg-hover);
+}
+.artifact-card-preview img {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+}
 .artifact-project-link {
   position: relative;
   display: grid;
@@ -10361,6 +10380,43 @@ button svg,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Provider id chip on the collapsed card — click copies the id for proxy
+   bypass rules without opening the card. */
+.llm-provider-card-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font: 600 11px var(--font-mono);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition), color var(--transition);
+}
+.llm-provider-card-id code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: inherit;
+}
+.llm-provider-card-id i {
+  font-style: normal;
+  font-size: 10px;
+  opacity: 0.55;
+  transition: opacity var(--transition);
+}
+.llm-provider-card-id:hover {
+  background: color-mix(in srgb, var(--accent-soft) 60%, var(--bg-hover));
+  color: var(--accent);
+}
+.llm-provider-card-id:hover i {
+  opacity: 1;
 }
 .llm-provider-add-card {
   align-items: center;

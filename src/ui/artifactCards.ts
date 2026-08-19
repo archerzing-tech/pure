@@ -311,6 +311,39 @@ function splitNamePath(path: string): { name: string; rest: string } {
 }
 
 /**
+ * Best-effort inline preview for a model-written .svg picture: read the file
+ * and render it as a thumbnail inside the card, so even when the model saves a
+ * picture with write_file (instead of emitting a ```svg block) the user still
+ * sees the image in the chat. Safe by construction — the SVG is rendered
+ * through an <img> data URL, which never executes scripts.
+ */
+async function previewSvgArtifact(path: string, card: HTMLElement): Promise<void> {
+  const resolved = resolvePathForOpen(path);
+  if (!resolved) return;
+  const isAbsolute = resolved.startsWith('/') || resolved.startsWith('~') || /^[A-Za-z]:[\\/]/.test(resolved);
+  if (!isAbsolute) return;
+  const idx = Math.max(resolved.lastIndexOf('/'), resolved.lastIndexOf('\\'));
+  if (idx <= 0) return;
+  const workspace = resolved.slice(0, idx);
+  try {
+    const content = await tauriInvoke<string>('read_file', { workspace, path: resolved });
+    if (!content || !/<svg[\s>]/i.test(content)) return;
+    const bytes = new TextEncoder().encode(content);
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    const preview = document.createElement('span');
+    preview.className = 'artifact-card-preview';
+    const img = document.createElement('img');
+    img.alt = '';
+    img.src = `data:image/svg+xml;base64,${btoa(bin)}`;
+    preview.appendChild(img);
+    card.insertBefore(preview, card.firstChild);
+  } catch {
+    // Preview is best-effort; the clickable card still works.
+  }
+}
+
+/**
  * Build one generated-file card. The native button semantics provide
  * Enter/Space activation and the hover hint makes the action discoverable.
  */
@@ -348,6 +381,12 @@ function createArtifactCard(item: ArtifactItem): HTMLButtonElement | null {
   kindEl.textContent = artifactKindLabel(path);
   actionEl.textContent = t('artifacts.openAction');
   card.addEventListener('click', () => openPathLink(path));
+  // Inline preview for model-written .svg pictures (the write_file fallback
+  // path) so the image still renders in the chat even when the model chose to
+  // save a file instead of emitting a ```svg block.
+  if (artifactExtension(path) === 'svg' && isTauriRuntime()) {
+    void previewSvgArtifact(path, card);
+  }
   return card;
 }
 
