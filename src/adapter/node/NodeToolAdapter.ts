@@ -2020,15 +2020,21 @@ function extraProbePathDirs(): string[] {
 
 /** PATH for runtime probes: inherited PATH plus the user-install directories
  * above (deduplicated, extras first so a user's nvm node wins over the system
- * node). Mirrors Rust probe_path. Windows inherits the full system PATH. */
+ * node). Mirrors Rust probe_path. Windows inherits the full system PATH
+ * (separated by `;`), so it returns the inherited PATH deduped as-is. */
 export function extendedProbePath(): string {
-  const inherited = (process.env.PATH ?? '').split(':').filter(Boolean);
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const inherited = (process.env.PATH ?? '').split(sep).filter(Boolean);
+  // Windows inherits the full system PATH; the per-user runtime dirs below
+  // are Unix-only (mirrors Rust probe_extra_path_dirs).
+  const extras = process.platform === 'win32' ? [] : extraProbePathDirs();
   const parts: string[] = [];
-  for (const dir of extraProbePathDirs()) {
+  for (const dir of extras) {
     if (!inherited.includes(dir) && !parts.includes(dir)) parts.push(dir);
   }
   parts.push(...inherited);
-  return parts.join(':');
+  // Dedupe the whole list — the inherited PATH may already repeat entries.
+  return [...new Set(parts)].join(sep);
 }
 
 function probeRuntimeVersions(): string[] {
