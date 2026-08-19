@@ -49,7 +49,9 @@ describe('NodeToolAdapter execute_command', () => {
   });
 
   it('reports failure with a non-zero exit code and stderr in the error', async () => {
-    const failCmd = process.platform === 'win32' ? 'echo boom 1>&2; exit 3' : 'echo boom >&2; exit 3';
+    // Windows PowerShell 5.1 rejects `1>&2` ("reserved for future use" — added
+    // in PS7), so write to stderr via [Console]::Error there.
+    const failCmd = process.platform === 'win32' ? '[Console]::Error.WriteLine("boom"); exit 3' : 'echo boom >&2; exit 3';
     const r = await adapter.execute(makeCall(failCmd));
     expect(r.success).toBe(false);
     expect(r.error).toContain('exit code 3');
@@ -493,8 +495,10 @@ describe('detectRuntimeVersions', () => {
 
 describe('extendedProbePath', () => {
   it('keeps every inherited PATH entry and dedupes', () => {
-    const parts = extendedProbePath().split(':').filter(Boolean);
-    const inherited = (process.env.PATH ?? '').split(':').filter(Boolean);
+    // PATH separator differs per platform (':' POSIX, ';' Windows).
+    const sep = process.platform === 'win32' ? ';' : ':';
+    const parts = extendedProbePath().split(sep).filter(Boolean);
+    const inherited = (process.env.PATH ?? '').split(sep).filter(Boolean);
     expect(inherited.every((dir) => parts.includes(dir))).toBe(true);
     expect(new Set(parts).size).toBe(parts.length);
   });
