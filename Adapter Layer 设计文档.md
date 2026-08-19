@@ -23,11 +23,11 @@ Adapter Layer 按职责分为 **5 个适配器类别**：
 
 | 类别 | 接口 | 职责 | 已有实现 | 待实现 |
 |:-----|:-----|:------|:---------|:-------|
-| **LLM Adapter** | `LLMAdapter` | 与大语言模型 API 通信 | Anthropic (`@anthropic-ai/sdk`), OpenAI (`openai`, 13 测试), Mock (脚本化测试) | Ollama |
+| **LLM Adapter** | `LLMAdapter` | 与大语言模型 API 通信 | Anthropic (`@anthropic-ai/sdk`), OpenAI (`openai`, 13 测试), Ollama (OpenAI 兼容适配器 + `OLLAMA_PRESET`, 本地 keyless), Mock (脚本化测试) | — |
 | **Tool Adapter** | `ToolAdapter` | 执行工具调用（文件/Shell/搜索） | NodeToolAdapter (fs + exec), Mock (内存文件) | ShellToolAdapter (Rust PTY), SandboxToolAdapter |
 | **Storage Adapter** | `IStateStore` | 会话状态持久化（检查点存储） | SQLiteStore (better-sqlite3), FSStore (Node.js fs, 18 测试) | WASMSQLiteStore (sql.js WASM) |
-| **Memory Adapter** | `IMemoryStore` | 跨会话长期记忆（偏好/错误模式/项目惯例） | — | FSStore 实现（计划中）、WASMEmbeddingStore（transformers.js WASM，计划） |
-| **MCP Transport** | `MCPSession`（Harness 层引用） | MCP Server 连接（JSON-RPC over stdio/HTTP/SSE） | StdioTransport (child_process, 8 测试), HttpClientTransport (fetch, 11 测试) | 无 |
+| **Memory Adapter** | `IMemoryStore` | 跨会话长期记忆（偏好/错误模式/项目惯例） | FSMemoryStore (JSONL), LocalStorageMemoryStore, WASMEmbeddingStore (transformers.js WASM) | — |
+| **MCP Transport** | `MCPSession`（Harness 层引用） | MCP Server 连接（JSON-RPC over stdio/HTTP/SSE） | StdioTransport (child_process), TauriStdioTransport (Tauri IPC), HttpTransport (SSE + POST) | — |
 
 ### 1.3 设计原则
 
@@ -51,7 +51,7 @@ Adapter Layer 按职责分为 **5 个适配器类别**：
 │  │  LLM Adapters (LLMAdapter)     │  API        │ Model Used                │  │
 │  │  ├─ AnthropicLLMAdapter        │  fetch/SSE  │ claude-sonnet-4-20250514  │  │
 │  │  ├─ OpenAIAdapter (已实现)     │  fetch/SSE  │ gpt-4o                    │  │
-│  │  ├─ OllamaAdapter (计划)       │  HTTP       │ llama3.1 (本地)           │  │
+│  │  ├─ Ollama (已实现)            │  OpenAI 兼容 │ 本地 keyless             │  │
 │  │  └─ MockLLMAdapter (测试)      │  —          │ 脚本化                    │  │
 │  └──────────────────────────────────────────────────────────────────────────┘  │
 │                                                                                 │
@@ -72,8 +72,9 @@ Adapter Layer 按职责分为 **5 个适配器类别**：
 │                                                                                 │
 │  ┌──────────────────────────────────────────────────────────────────────────┐  │
 │  │  MCP Transports              │  Protocol   │ 适用场景                   │  │
-│  │  ├─ StdioTransport (已实现)   │  stdio      │ child_process, 8 测试     │  │
-│  │  └─ HttpClientTransport (已实现)│ HTTP       │ fetch, 11 测试            │  │
+│  │  ├─ StdioTransport (已实现)   │  stdio      │ CLI child_process         │  │
+│  │  ├─ TauriStdioTransport (已实现)│ stdio      │ GUI Tauri IPC            │  │
+│  │  └─ HttpTransport (已实现)    │  SSE+POST   │ HTTP / 代理               │  │
 │  └──────────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -288,31 +289,9 @@ OpenAIAdapter implements LLMAdapter
 | 流式工具调用 | `content_block_start/delta/stop` | `delta.tool_calls[]` (index + function) |
 | 测试 | 15 测试（fetch mock） | 13 测试（fetch mock） |
 
-### 3.5 OllamaAdapter 实现指引（待实现）
+### 3.5 Ollama 接入（已实现 — OpenAI 兼容适配器）
 
-> **实现计划**：Phase 7（本地开发场景）
-
-```typescript
-// 参考骨架 — src/adapter/ollama/OllamaAdapter.ts
-// 使用 Ollama 的 HTTP API（兼容 OpenAI 格式，但也支持原生 API）
-
-export class OllamaAdapter implements LLMAdapter {
-  private baseUrl: string;
-  private model: string;
-
-  constructor(config?: { baseUrl?: string; model?: string }) {
-    this.baseUrl = config?.baseUrl ?? 'http://localhost:11434';
-    this.model = config?.model ?? 'llama3.1';
-  }
-
-  async *stream(messages, tools, signal): AsyncGenerator<LLMChunk> {
-    // 使用 Ollama chat API（与 OpenAI 兼容但建议用原生 API）
-    // 原生 API: POST /api/chat → SSE stream
-    // 工具支持：Ollama 3.1+ 支持 tool_calls，需要在 request 中传入 tools
-  }
-  // ...
-}
-```
+Ollama 通过 OpenAI 兼容端点接入，**无需独立 adapter**：`src/shared/providers.ts` 的 `OLLAMA_PRESET`（baseURL `http://localhost:11434/v1`，默认模型 `qwen2.5-coder:7b`）走 `OpenAICompatibleAdapter`，本地 keyless（不发送 `Authorization` 头，见 `src/adapter/openai/OpenAICompatibleAdapter.ts`）。GUI 设置 → LLM 有一键预设；CLI `pure config` 可添加任意 OpenAI 兼容供应商（Ollama / LM Studio / vLLM）。
 
 **注意事项**：
 - Ollama 的工具支持因模型而异（llama3.1+ 支持工具，但质量较低）。
@@ -642,8 +621,8 @@ class StdioSession {
 
 ### 6.2 StdioTransport（已实现）
 
-**文件**：`src/adapter/mcp/StdioTransport.ts`（160 行）
-**测试**：`src/adapter/mcp/__tests__/StdioTransport.test.ts`（8 个测试）
+**文件**：`src/adapter/mcp/StdioTransport.ts`（CLI 用，child_process）
+**测试**：`src/harness/mcp/__tests__/MCPClient.test.ts`（StdioTransport / TauriStdioTransport / HttpTransport 的发现与调用路径）
 
 从 `MCPClient.ts` 提取的独立 `StdioTransport` 类，实现 `MCPSession` 接口。
 
@@ -655,27 +634,26 @@ export class StdioTransport implements MCPSession {
 }
 ```
 
-### 6.3 HttpClientTransport（已实现）
+### 6.3 HttpTransport（已实现）
 
-**文件**：`src/adapter/mcp/HttpClientTransport.ts`（100 行）
-**测试**：`src/adapter/mcp/__tests__/HttpClientTransport.test.ts`（11 个测试）
+**文件**：`src/adapter/mcp/HttpTransport.ts`（175 行）
+**测试**：`src/harness/mcp/__tests__/MCPClient.test.ts`
 
-基于 `fetch()` 的 HTTP POST 传输，实现 `MCPSession` 接口。每个请求独立（无状态）。
+基于 `fetch()` 的 HTTP 传输：**SSE 用于 server→client 推送，POST 用于 client→server 请求**（JSON-RPC 2.0）。`EventSource` 订阅 `${baseUrl}/sse` 并自动重连；请求 30s 超时（AbortController）；Tauri 运行时经 `proxyUrl` 转发。`MCPClient` 在 `config.url` 含 `://` 时选用。
 
 ```typescript
-export class HttpClientTransport implements MCPSession {
-  constructor(private config: MCPServerConfig) {}
-  // 使用 fetch() 发送 JSON-RPC POST 请求
-  // 30s 超时 via AbortController
-  // 错误处理：HTTP status errors + JSON-RPC error 响应
-  // close() 只重置状态（无持久连接）
+export class HttpTransport implements MCPTransport {
+  constructor(url: string, proxyUrl = '') { ... }
+  // EventSource(`${baseUrl}/sse`) 收 server 推送，自动重连
+  // fetch POST 发 JSON-RPC 请求，30s 超时 via AbortController
+  // close() 关闭 EventSource 并拒绝所有 pending 请求
 }
 ```
 
-### 6.4 SSE Transport（待实现）
+### 6.4 SSE Transport（已实现）
 
 > **场景**：需要服务器推送事件的流式响应（如长时间运行的工具结果）。
-> 需要 `@modelcontextprotocol/sdk` 支持。
+> 由 `HttpTransport`（§6.3）覆盖：`EventSource` 订阅 `/sse` 端点接收 server 推送，`POST` 发请求，无需 `@modelcontextprotocol/sdk`。
 
 ---
 
@@ -805,8 +783,7 @@ function createLLMAdapter(type: 'anthropic' | 'openai' | 'ollama'): LLMAdapter {
 | **OpenAIAdapter** | `src/adapter/openai/__tests__/OpenAIAdapter.test.ts` | 13 | content/tool_call 流式、complete()、AbortSignal、fetch mock |
 | **SQLiteStore** | `src/adapter/storage/__tests__/SQLiteStore.test.ts` | 16 | CRUD 操作、序列化/反序列化、多会话隔离、错误恢复 |
 | **FSStore** | `src/adapter/storage/__tests__/FSStore.test.ts` | 18 | 镜像 SQLiteStore 测试 + 目录布局验证 + 文件系统损坏恢复 |
-| **StdioTransport** | `src/adapter/mcp/__tests__/StdioTransport.test.ts` | 8 | 生命周期、工具发现/调用、错误、清理 |
-| **HttpClientTransport** | `src/adapter/mcp/__tests__/HttpClientTransport.test.ts` | 11 | fetch mock、初始化/HTTP 错误/JSON-RPC 错误、工具调用、清理 |
+| **MCP Transports** | `src/harness/mcp/__tests__/MCPClient.test.ts` | — | StdioTransport 生命周期/工具发现/调用/错误/清理；HttpTransport (SSE+POST) 发现与调用；TauriStdioTransport 路由 |
 
 ### 9.2 集成测试
 
@@ -844,7 +821,7 @@ describe('security', () => {
 | 5 | `NodeToolAdapter` 缺失 `edit_file` 工具（原始草稿未规划） | 已添加，支持 `replace()` 和 `allowMultiple` |
 | 6 | `NodeToolAdapter` 'execute_command' 无超时 | 添加 `commandTimeout`（默认 30s）+ `maxBuffer`（10MB） |
 | 7 | Storage Adapter 接口 (`IStateStore`) 只有类型定义无实现 | SQLiteStore 已完成（16 测试），FSStore 已完成（18 测试） |
-| 8 | MCP Transport 与 Session 耦合在 `MCPClient.ts` 内 | 已拆分为独立 `StdioTransport` (8 测试) + `HttpClientTransport` (11 测试) |
+| 8 | MCP Transport 与 Session 耦合在 `MCPClient.ts` 内 | 已拆分为独立 `StdioTransport` + `TauriStdioTransport` + `HttpTransport` (SSE+POST)，经 `MCPClient` 按配置选用 |
 | 9 | `MockToolAdapter` 的 `getMetadata` 返回 `undefined` 给未知工具 | 保持 `undefined` 语义，`ToolRegistry` 兜底默认 |
 | 10 | `AnthropicLLMAdapter` 未处理 `AbortSignal`（stream 持续运行） | 添加 `signal.addEventListener('abort', () => stream.controller.abort())` |
 | 11 | `NodeToolAdapter` 的 glob 转正则实现缺失 `?` 单字符匹配 | 添加 `\\? → [^/]` 映射 |
@@ -856,8 +833,8 @@ describe('security', () => {
 | **LLMAdapter** 接口 | `pure Spec.md` §4 + `src/shared/types.ts` | `src/adapter/anthropic/`, `src/adapter/openai/` | Engine（`EngineContext.llm`）|
 | **ToolAdapter** 接口 | `pure Spec.md` §4 + `src/shared/types.ts` | `src/adapter/node/`, `src/adapter/mock/` | Engine（`EngineContext.tools`）, ToolRegistry |
 | **IStateStore** 接口 | `三层依赖关系总结.md`（共享类型索引） | `src/adapter/storage/SQLiteStore.ts`, `src/adapter/storage/FSStore.ts` | StateManager（Harness） |
-| **MCP StdioTransport** | `src/adapter/mcp/types.ts` | `src/adapter/mcp/StdioTransport.ts` | MCPClient（Harness） |
-| **MCP HttpClientTransport** | `src/adapter/mcp/types.ts` | `src/adapter/mcp/HttpClientTransport.ts` | MCPClient（Harness） |
+| **MCP StdioTransport** | `src/adapter/mcp/MCPTransport.ts` | `src/adapter/mcp/StdioTransport.ts`（CLI）、`src/adapter/mcp/TauriStdioTransport.ts`（GUI） | MCPClient（Harness） |
+| **MCP HttpTransport** | `src/adapter/mcp/MCPTransport.ts` | `src/adapter/mcp/HttpTransport.ts`（SSE + POST） | MCPClient（Harness） |
 | **VerifierAdapter** 接口 | `src/shared/VerifierAdapter.ts` | `src/coding-agent/Verifier.ts`（Coding Agent） | Engine（VERIFY 阶段） |
 
 ---
