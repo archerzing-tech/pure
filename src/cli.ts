@@ -38,6 +38,7 @@ import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
 import type { EvolutionConfig } from './adapter/memory/evolution';
 import { harvestUserPreferences } from './shared/memory';
 import { buildCliCapabilities, formatPromptBudgetDiagnostic, promptAssembler, resolvePromptBudget, type PromptSkill } from './shared/PromptAssembler';
+import { buildShellContext } from './shared/shellEnv';
 import { parseSkillMarkdown } from './shared/skillFiles';
 import { mergeTranscriptWithTurn } from './shared/conversation';
 import { formatCliIntentAssessment, resolveCliAutoApprove } from './cliIntent';
@@ -381,6 +382,13 @@ function buildNetworkContext(): string {
   return `\nEnvironment network (this machine): ${cachedNetwork}. Use it to choose what will actually work: if international is blocked, prefer domestic search engines (cn.bing.com / sogou / baidu / 360) and domestic sources, and expect Google/DuckDuckGo to fail; if a system/env proxy is listed, requests route through it when proxy is enabled.`;
 }
 
+// OS/shell pre-seed mirroring the GUI: the CLI backend (NodeToolAdapter)
+// executes through PowerShell on Windows and `sh -c` elsewhere, so the model
+// gets the matching command syntax instead of guessing `mkdir -p` on Windows.
+function buildShellContextLine(): string {
+  return buildShellContext(`${process.platform} ${process.arch}`);
+}
+
 /** Scan the app skills directory (~/.pure/skills/<name>/SKILL.md) and the
  * project's .agents/skills/<name>/SKILL.md, parse each SKILL.md frontmatter,
  * and return the bodies for system-prompt injection — the same directory the
@@ -428,6 +436,7 @@ function assembleCliPrompt(
     environment: buildEnvironmentContext(),
     runtimes: buildRuntimesContext(),
     network: buildNetworkContext(),
+    shell: buildShellContextLine(),
     skills: [...(loadConfig()?.hubSkills ?? []), ...loadAppSkills()],
     mode,
     budget: promptBudgetForProvider(args.customProviders, args.provider, args.model),

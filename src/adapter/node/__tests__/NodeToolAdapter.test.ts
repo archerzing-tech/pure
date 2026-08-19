@@ -4,7 +4,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeToolAdapter, detectNetworkSummary, detectRuntimeVersions, tokenizeFindQuery } from '../NodeToolAdapter';
+import { NodeToolAdapter, detectNetworkSummary, detectRuntimeVersions, encodePowerShellCommand, extendedProbePath, tokenizeFindQuery } from '../NodeToolAdapter';
 import type { ToolCall, ToolResult } from '../../../shared/types';
 
 function makeCall(command: string): ToolCall {
@@ -19,9 +19,12 @@ function resultOf(r: ToolResult): { stdout: string; stderr: string; exitCode: nu
   return r.result as { stdout: string; stderr: string; exitCode: number };
 }
 
-// POSIX shell syntax tests (redirects, `;`) only apply on Unix — Windows runs
-// cmd.exe via `cmd /C`, whose grammar differs. The cross-platform cases (plain
-// echo, unknown command, exit codes) still run everywhere.
+// The failure cases pick their command per platform: PowerShell runs via
+// `powershell -Command` (whose stderr redirect is `1>&2`, not sh's `>&2`),
+// while `exit N` works in both shells. The cross-platform cases (plain echo,
+// unknown command, exit codes) still run everywhere. `shOnly` remains only
+// for the diff_files case, whose Windows fallback reports missing paths
+// differently (git diff exit codes) rather than failing to parse syntax.
 const shOnly = process.platform === 'win32';
 
 describe('NodeToolAdapter execute_command', () => {
@@ -45,8 +48,9 @@ describe('NodeToolAdapter execute_command', () => {
     expect(resultOf(r).stdout).toContain('hello');
   });
 
-  it.skipIf(shOnly)('reports failure with a non-zero exit code and stderr in the error', async () => {
-    const r = await adapter.execute(makeCall('echo boom >&2; exit 3'));
+  it('reports failure with a non-zero exit code and stderr in the error', async () => {
+    const failCmd = process.platform === 'win32' ? 'echo boom 1>&2; exit 3' : 'echo boom >&2; exit 3';
+    const r = await adapter.execute(makeCall(failCmd));
     expect(r.success).toBe(false);
     expect(r.error).toContain('exit code 3');
     expect(r.error).toContain('boom'); // stderr visible in the failure message
@@ -54,11 +58,28 @@ describe('NodeToolAdapter execute_command', () => {
     expect(resultOf(r).stderr).toContain('boom');
   });
 
-  it.skipIf(shOnly)('keeps stdout in the result even when the command fails', async () => {
+  it('keeps stdout in the result even when the command fails', async () => {
     const r = await adapter.execute(makeCall('echo partial; exit 2'));
     expect(r.success).toBe(false);
     expect(r.error).toContain('exit code 2');
     expect(resultOf(r).stdout).toContain('partial');
+  });
+
+  // Windows-only: the exit-code wrapper (see NodeToolAdapter / Rust
+  // powershell_command_wrapped) must turn a failing NATIVE command and a
+  // failing cmdlet into a non-zero process exit code — without it, Windows
+  // PowerShell 5.1 reports 0 for both.
+  it.skipIf(process.platform !== 'win32')('propagates a failing native command exit code through PowerShell', async () => {
+    const r = await adapter.execute(makeCall('cmd /c exit 7'));
+    expect(r.success).toBe(false);
+    expect(resultOf(r).exitCode).not.toBe(0);
+    expect(r.error).toContain('exit code');
+  });
+
+  it.skipIf(process.platform !== 'win32')('reports a failing PowerShell cmdlet as a non-zero exit code', async () => {
+    const r = await adapter.execute(makeCall('Get-Content C:/definitely-missing-pure-test-file.txt'));
+    expect(r.success).toBe(false);
+    expect(resultOf(r).exitCode).not.toBe(0);
   });
 
   it('reports failure when the command is not found', async () => {
@@ -92,6 +113,20 @@ describe('NodeToolAdapter execute_command', () => {
         rmSync(join(workspace, 'linked'), { force: true });
       }
     }
+  });
+});
+
+describe('encodePowerShellCommand', () => {
+  it('round-trips through base64 UTF-16LE with the exit-code wrapper appended', () => {
+    const encoded = encodePowerShellCommand('Write-Output "hello world"');
+    const decoded = Buffer.from(encoded, 'base64').toString('utf16le');
+    expect(decoded).toBe('Write-Output "hello world"; if ($?) { exit $LASTEXITCODE } else { exit 1 }');
+  });
+
+  it('keeps double quotes and CJK intact (the point of -EncodedCommand)', () => {
+    const encoded = encodePowerShellCommand('Get-Content "C:\\数据\\x.txt"');
+    const decoded = Buffer.from(encoded, 'base64').toString('utf16le');
+    expect(decoded).toContain('"C:\\数据\\x.txt"');
   });
 });
 
@@ -453,6 +488,15 @@ describe('detectRuntimeVersions', () => {
       expect(entry).not.toContain('\n');
       expect(entry).not.toMatch(/ {2,}/);
     }
+  });
+});
+
+describe('extendedProbePath', () => {
+  it('keeps every inherited PATH entry and dedupes', () => {
+    const parts = extendedProbePath().split(':').filter(Boolean);
+    const inherited = (process.env.PATH ?? '').split(':').filter(Boolean);
+    expect(inherited.every((dir) => parts.includes(dir))).toBe(true);
+    expect(new Set(parts).size).toBe(parts.length);
   });
 });
 

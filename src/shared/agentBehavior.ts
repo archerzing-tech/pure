@@ -16,7 +16,9 @@ export const COMPLETION_LESSON_PROMPT = `Completion report (always include this 
 - **修复了什么**：说明本次修复的 bug、根因和处理方式；如果没有修复 bug，明确写“本次没有修复 bug”。
 - **验证结果**：只能写“通过”或“不通过”。写“通过”必须有真实执行过的命令或直接功能检查作为证据；测试失败、检查未执行、工具不可用或结果不确定时都写“不通过”，并说明原因和实际结果。列出实际运行的命令及其结果。
 - **后续限制**：只在仍有未解决问题时列出。
-Record a short reusable lesson for similar future requests; do not write vague "fixed it" summaries or claim verification that was not run.`;
+Record a short reusable lesson for similar future requests; do not write vague "fixed it" summaries or claim verification that was not run.
+
+When you discover a tool that works notably well on THIS machine (e.g. pnpm instead of npm, uv instead of pip, bun instead of node), or an approach/idea that proved especially effective, record it for future sessions by ending your reply with a \`[remember] <one line>\` marker — a tool name, or a concise "what worked and why". The system persists these across sessions and reuses them next time. Only mark genuinely valuable, reusable insights, never routine steps.`;
 
 /**
  * Incremental build protocol for multi-file projects. The contract the user

@@ -1121,8 +1121,11 @@ body {
 }
 /* A focused tool row spans the complete grid width. Because grid placement
    follows the original DOM order, earlier cards stay above it and later cards
-   flow below it without reordering the tool trace. */
-.bubble-row.tool-grid > .bubble-row.tool-row-row.tool-row-expanded {
+   flow below it without reordering the tool trace. A single-card round is
+   already full-width (auto-fit collapses to one track), so it also gets the
+   expanded layout by default — no "放大到整行" click needed. */
+.bubble-row.tool-grid > .bubble-row.tool-row-row.tool-row-expanded,
+.bubble-row.tool-grid > .bubble-row.tool-row-row:only-child {
   grid-column: 1 / -1;
 }
 
@@ -1253,6 +1256,11 @@ body {
 .tool-row-expanded .tool-row-expand-btn {
   color: var(--accent);
 }
+/* A single-card round is always full-width, so the maximize button is a no-op;
+   hide it rather than inviting a click that would change nothing. */
+.bubble-row.tool-grid > .bubble-row.tool-row-row:only-child .tool-row-expand-btn {
+  display: none;
+}
 @keyframes toolRowSpin {
   to { transform: rotate(360deg); }
 }
@@ -1300,10 +1308,12 @@ body {
   max-height: 320px;
   overflow-y: auto;
 }
-.tool-row-expanded .tool-row-scroll {
+.tool-row-expanded .tool-row-scroll,
+.bubble-row.tool-grid > .bubble-row.tool-row-row:only-child .tool-row-scroll {
   max-height: min(62vh, 560px);
 }
-.tool-row-expanded .tool-row-result {
+.tool-row-expanded .tool-row-result,
+.bubble-row.tool-grid > .bubble-row.tool-row-row:only-child .tool-row-result {
   max-height: min(48vh, 440px);
 }
 .tool-row-section + .tool-row-section {
@@ -4349,6 +4359,10 @@ body {
   color: var(--accent);
   background: var(--accent-soft);
 }
+.memory-type-tool_preference {
+  color: #7C3AED;
+  background: color-mix(in srgb, #7C3AED 12%, transparent);
+}
 .memory-type-error_pattern {
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 12%, transparent);
@@ -4364,6 +4378,33 @@ body {
 .memory-type-procedure {
   color: #D97706;
   background: color-mix(in srgb, #D97706 14%, transparent);
+}
+
+/* Platform badge — shown on tool_preference entries so the user sees which
+   OS the preference was verified on (darwin / win32 / linux). */
+.memory-badge-platform {
+  color: var(--text-tertiary);
+  background: color-mix(in srgb, var(--text-tertiary) 10%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--text-tertiary) 35%, transparent);
+}
+
+/* Per-entry delete button — pushed to the header's right edge, subtle until
+   hovered, danger-red on hover. */
+.memory-delete-btn {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition);
+}
+.memory-delete-btn:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
 /* Lifecycle badges — one hue per stage (score bars use .memory-bar-* below,

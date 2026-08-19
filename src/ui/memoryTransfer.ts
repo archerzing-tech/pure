@@ -31,7 +31,7 @@ export interface MemoryExportEnvelope {
 
 /** 有效记忆类型全集（导入校验用；与 IMemoryStore 的 MemoryType 一致）。 */
 const VALID_TYPES = new Set<MemoryType>([
-  'user_preference', 'error_pattern', 'successful_pattern', 'project_convention', 'procedure',
+  'user_preference', 'error_pattern', 'successful_pattern', 'project_convention', 'procedure', 'tool_preference',
 ]);
 
 /** 把一条记忆渲染成 JSON 条目：原始字段 + 实时健康分/生命周期快照。 */
@@ -82,6 +82,7 @@ const TYPE_LABEL: Record<MemoryType, string> = {
   successful_pattern: '成功经验',
   project_convention: '项目惯例',
   procedure: '流程',
+  tool_preference: '工具偏好',
 };
 
 const LIFECYCLE_LABEL: Record<MemoryLifecycle, string> = {
@@ -232,6 +233,7 @@ export function parseMemoryImport(text: string): MemoryEntry[] {
     if (typeof e.lastUsedAt === 'number' && Number.isFinite(e.lastUsedAt)) entry.lastUsedAt = e.lastUsedAt;
     if (typeof e.supersededBy === 'string' && e.supersededBy) entry.supersededBy = e.supersededBy;
     if (typeof e.dedupeKey === 'string' && e.dedupeKey) entry.dedupeKey = e.dedupeKey;
+    if (typeof e.platform === 'string' && e.platform) entry.platform = e.platform;
     // 结构化教训（error_pattern 携带）：迁移往返不丢 lesson（保真承诺的
     // 一部分）。MemoryLesson 五个必需字段必须都是字符串才保留 —— 缺任一
     // 字段视为损坏，整条 lesson 丢弃（而非导入残缺数据）。

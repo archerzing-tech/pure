@@ -3,6 +3,18 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.12-beta
+
+**机器级工具偏好 + sys_info 缓存 + 系统环境 PATH 增强**
+
+- 工具偏好改为机器级全局作用域：agent 在任意项目验证过的工具（pnpm / uv / bun …）跨项目常驻注入，不再依赖查询语义命中；带平台维度（darwin / win32 / linux），跨 OS 不串台
+- 旧版本按项目隔离写入的工具偏好自动一次性迁移进全局作用域（按工具去重、保留使用频率与取代链），升级无感
+- 用户明说「记住用 X」的偏好同样进入机器级作用域；设置 → 记忆面板新增「机器级」标签
+- sys_info 性能：静态字段（OS / 语言 / 时区 / 运行时）进程级缓存，动态字段（代理 / VPN / 可达性）按 TTL 刷新，启动时预热——首个工具调用不再等网络探测
+- 系统环境探测增强：PATH 补齐 nvm / bun / volta / fnm / asdf / Homebrew 等用户级运行时目录，Finder 启动的 GUI 也能找到 node / bun / python3
+- Windows 命令执行改走 PowerShell -EncodedCommand（base64 UTF-16LE），规避命令行引号转义损坏，失败命令正确报非零退出码
+- 修复：原生文件图标命令（get_file_icon）此前未注册进 Tauri 命令表导致静默失效，现已注册
+
 ## v1.9.11
 
 **路径边界移除 + find_files 智能定位 + 空气质量/经济指标直查 + sys_info 地理信息增强**

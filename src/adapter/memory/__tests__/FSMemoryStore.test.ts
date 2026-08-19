@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { FSMemoryStore } from '../FSMemoryStore';
 import { tokenize, searchMemories } from '../keywordSearch';
 import type { MemoryEntry } from '../IMemoryStore';
+import { GLOBAL_MEMORY_SCOPE } from '../../../shared/types';
 
 let root: string;
 let store: FSMemoryStore;
@@ -196,6 +197,38 @@ describe('FSMemoryStore.forget / decay', () => {
   });
 });
 
+describe('FSMemoryStore.removeById', () => {
+  it('removes exactly the targeted entry and reports success', async () => {
+    const idA = await store.add(base({ content: 'keep A', projectPath: '/proj/a' }));
+    const idB = await store.add(base({ content: 'delete B', projectPath: '/proj/a' }));
+    const removed = await store.removeById(idB);
+    expect(removed).toBe(true);
+    const hits = await store.search('delete', { projectPath: '/proj/a' });
+    expect(hits).toHaveLength(0);
+    const kept = await store.search('keep', { projectPath: '/proj/a' });
+    expect(kept).toHaveLength(1);
+    expect(kept[0].id).toBe(idA);
+  });
+
+  it('reports false for an unknown id and changes nothing', async () => {
+    await store.add(base({ content: 'stay', projectPath: '/proj/a' }));
+    const removed = await store.removeById('nope');
+    expect(removed).toBe(false);
+    const hits = await store.search('stay', { projectPath: '/proj/a' });
+    expect(hits).toHaveLength(1);
+  });
+
+  it('clears the supersededBy reference of the deleted entry\'s replacer', async () => {
+    const idNew = await store.add(base({ content: 'new approach', projectPath: '/proj/a' }));
+    const idOld = await store.add(base({ content: 'old approach', projectPath: '/proj/a', supersededBy: idNew }));
+    // 删除取代者（新条目）后，被取代的旧条目不应再残留指向已删除 id 的 supersededBy。
+    await store.removeById(idNew);
+    const kept = await store.search('old', { projectPath: '/proj/a' });
+    expect(kept).toHaveLength(1);
+    expect(kept[0].supersededBy).toBeUndefined();
+  });
+});
+
 describe('keywordSearch helpers', () => {
   it('tokenize handles latin and CJK', () => {
     const tokens = tokenize('TypeScript 支持 pnpm');
@@ -221,5 +254,77 @@ describe('keywordSearch helpers', () => {
     ];
     const hits = searchMemories(entries, 'pnpm', { projectPath: '/proj/a', k: 2 });
     expect(hits[0].id).toBe('1');
+  });
+});
+
+describe('FSMemoryStore.list filters', () => {
+  it('filters by type / platform and drops dormant entries with activeOnly', async () => {
+    await store.add(base({ projectPath: '/proj/a', type: 'tool_preference', content: 'Verified on darwin: the brew tool works', platform: 'darwin' }));
+    await store.add(base({ projectPath: '/proj/a', type: 'tool_preference', content: 'Verified on win32: the choco tool works', platform: 'win32' }));
+    await store.add(base({ projectPath: '/proj/a', type: 'user_preference', content: 'User prefers tabs' }));
+    // 休眠条目：activeOnly 下必须被过滤（实时健康分低于 dormantMax ——
+    // 70 天前的旧条目 recency 已把分数拖到 0.15 线以下）。
+    await store.add(base({ projectPath: '/proj/a', type: 'tool_preference', content: 'Verified on darwin: the stale tool works', platform: 'darwin', lifecycle: 'dormant', timestamp: Date.now() - 70 * 24 * 3600 * 1000 }));
+
+    const all = store.list('/proj/a');
+    expect(all).toHaveLength(4);
+
+    const darwin = store.list({ projectPath: '/proj/a', type: 'tool_preference', platform: 'darwin' });
+    expect(darwin.map(e => e.content)).toEqual([
+      'Verified on darwin: the brew tool works',
+      'Verified on darwin: the stale tool works',
+    ]);
+
+    const activeDarwin = store.list({ projectPath: '/proj/a', type: 'tool_preference', platform: 'darwin', activeOnly: true });
+    expect(activeDarwin.map(e => e.content)).toEqual(['Verified on darwin: the brew tool works']);
+  });
+
+  it('isolates the machine-global scope in its own storage bucket', async () => {
+    const id = await store.add(base({ projectPath: GLOBAL_MEMORY_SCOPE, type: 'tool_preference', content: 'Verified on darwin: the pnpm tool works', platform: 'darwin' }));
+    // 项目作用域看不到它；全局作用域看得到。
+    expect(store.list('/proj/a').some(e => e.id === id)).toBe(false);
+    expect(store.list({ projectPath: GLOBAL_MEMORY_SCOPE }).some(e => e.id === id)).toBe(true);
+  });
+});
+
+describe('legacy tool_preference migration', () => {
+  it('moves project-scoped tool preferences into the global scope, deduping by tool', async () => {
+    const mk = (projectPath: string, content: string, platform?: string, dedupeKey?: string) =>
+      base({ projectPath, type: 'tool_preference', content, platform, dedupeKey });
+    // 同工具在两个项目各一条（去重后应只保留一条）+ 另一工具 + 用户明说（无 platform/无 dedupeKey）
+    const a = await store.add(mk('/proj/a', 'Verified on darwin: the pnpm tool works on this machine', 'darwin', 'tool:darwin:pnpm'));
+    const b = await store.add(mk('/proj/b', 'Verified on darwin: the pnpm tool works on this machine', 'darwin', 'tool:darwin:pnpm'));
+    await store.add(mk('/proj/b', 'Verified on win32: the choco tool works on this machine', 'win32', 'tool:win32:choco'));
+    await store.add(mk('/proj/a', 'User wants to use the uv tool'));
+    await store.add(base({ projectPath: '/proj/a', type: 'user_preference', content: 'User prefers tabs' }));
+
+    // 新实例构造时执行迁移（旧实例缓存已失效，断言一律走新实例）
+    const migrated = new FSMemoryStore(root);
+
+    // 项目作用域不再有工具偏好；user_preference 不受影响
+    expect(migrated.list('/proj/a').filter(e => e.type === 'tool_preference')).toHaveLength(0);
+    expect(migrated.list('/proj/b').filter(e => e.type === 'tool_preference')).toHaveLength(0);
+    expect(migrated.list('/proj/a').some(e => e.content === 'User prefers tabs')).toBe(true);
+
+    const globalTools = migrated.list({ projectPath: GLOBAL_MEMORY_SCOPE, type: 'tool_preference' });
+    expect(globalTools.map(t => t.content).sort()).toEqual([
+      'User wants to use the uv tool',
+      'Verified on darwin: the pnpm tool works on this machine',
+      'Verified on win32: the choco tool works on this machine',
+    ]);
+    // 去重只保留两条之一（保留哪条取决于目录扫描顺序），条目归属全局作用域
+    expect([a, b]).toContain(globalTools.find(t => t.content.includes('pnpm'))!.id);
+    expect(globalTools.every(t => t.projectPath === GLOBAL_MEMORY_SCOPE)).toBe(true);
+    // meta 标记：只迁移一次
+    expect(migrated.getLastDecayInfo().migratedToolPrefsAt).toBeGreaterThan(0);
+    const again = new FSMemoryStore(root);
+    expect(again.list({ projectPath: GLOBAL_MEMORY_SCOPE, type: 'tool_preference' })).toHaveLength(3);
+  });
+
+  it('skips migration when no legacy tool preferences exist (no meta marker)', async () => {
+    await store.add(base({ projectPath: '/proj/a', type: 'user_preference', content: 'User prefers tabs' }));
+    const migrated = new FSMemoryStore(root);
+    expect(migrated.getLastDecayInfo().migratedToolPrefsAt).toBeUndefined();
+    expect(migrated.list('/proj/a')).toHaveLength(1);
   });
 });

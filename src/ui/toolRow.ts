@@ -562,11 +562,17 @@ export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void 
     const moved = Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5
       || Math.abs(sx - 1) > 0.005 || Math.abs(sy - 1) > 0.005;
     if (moved) {
+      // Promote the row to its own compositor layer for the transition and
+      // force GPU transforms (translate3d/scale3d). A long terminal output is
+      // a heavy subtree; without the layer hint WKWebView repaints it on the
+      // first frame and the maximize/collapse ease visibly stutters.
+      el.style.willChange = 'transform';
+      el.style.backfaceVisibility = 'hidden';
       el.style.transformOrigin = 'top left';
-      el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+      el.style.transform = `translate3d(${dx}px, ${dy}px, 0) scale3d(${sx}, ${sy}, 1)`;
       void el.offsetWidth;
       el.style.transition = 'transform 0.32s var(--ease-out)';
-      el.style.transform = 'translate(0, 0) scale(1, 1)';
+      el.style.transform = 'translate3d(0, 0, 0) scale3d(1, 1, 1)';
       let timer: ReturnType<typeof setTimeout>;
       const onEnd = (event: TransitionEvent): void => {
         if (event.target !== el || event.propertyName !== 'transform') return;
@@ -578,6 +584,8 @@ export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void 
         el.style.transition = '';
         el.style.transform = '';
         el.style.transformOrigin = '';
+        el.style.willChange = '';
+        el.style.backfaceVisibility = '';
         if (flipAnimations.get(el) === finish) flipAnimations.delete(el);
       };
       timer = setTimeout(finish, 360);

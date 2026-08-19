@@ -12,8 +12,10 @@ import { formatBytes } from '../shared/format';
 import { memoryStore } from './memoryStore';
 import { EVOLUTION_DEFAULTS, healthScore, lifecycleOf, resolveEvolutionConfig } from '../adapter/memory/evolution';
 import type { MemoryEntry } from '../adapter/memory/IMemoryStore';
+import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
 import { buildMemoryExportJson, buildMemoryExportMarkdown, parseMemoryImport } from './memoryTransfer';
 import { showToastHtml } from '../shared/toast';
+import { showConfirmModal } from './modal';
 import { buildExportSavedToast } from './statsExportToast';
 import {
   customProviderFor,
@@ -703,6 +705,32 @@ export class SettingsPanel {
         if (btn) btn.disabled = false;
         this.renderMemoryDiagnostics();
         this.renderMemoryDashboard();
+      }
+    });
+
+    // ── Memory: per-entry delete（记忆卡片的逐条删除，确认后移除）──
+    // 委托到容器而不是每卡绑定：卡片随衰减/删除重渲染，委托免于反复重建。
+    document.getElementById('memory-list')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-mem-del]');
+      if (!btn) return;
+      event.stopPropagation();
+      const id = btn.dataset.memDel || '';
+      if (!id) return;
+      const ok = await showConfirmModal({
+        title: t('memory.deleteTitle'),
+        message: t('memory.deleteConfirm'),
+        okLabel: t('memory.deleteOk'),
+        cancelLabel: t('common.cancel'),
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        await memoryStore.removeById(id);
+        this.toast(t('memory.deleted'));
+        this.renderMemoryDashboard();
+      } catch (err) {
+        console.error('[pure] memory delete failed:', err);
+        this.toast(t('memory.deleteFailed'));
       }
     });
 
@@ -1735,7 +1763,7 @@ export class SettingsPanel {
   // fallback text is escaped (entries are read from user-editable localStorage,
   // so an unexpected `type` must never reach innerHTML unescaped).
   private static readonly MEMORY_TYPES: ReadonlySet<string> = new Set([
-    'user_preference', 'error_pattern', 'successful_pattern', 'project_convention', 'procedure',
+    'user_preference', 'error_pattern', 'successful_pattern', 'project_convention', 'procedure', 'tool_preference',
   ]);
 
   /** 相对时间标签：刚刚 / {n} 分钟前 / {n} 小时前 / {n} 天前。 */
@@ -1831,15 +1859,27 @@ export class SettingsPanel {
           : '';
         const lastUsed = e.lastUsedAt ?? e.timestamp;
         const project = e.projectPath || '';
-        const projectShort = project.split('/').filter(Boolean).pop() || project;
+        // 机器级全局记忆（tool_preference 常驻注入作用域）不归属任何项目：
+        // 显示"机器级"标签而非哨兵字符串。
+        const isGlobalScope = project === GLOBAL_MEMORY_SCOPE;
+        const projectShort = isGlobalScope
+          ? t('memory.globalScope', '机器级')
+          : (project.split('/').filter(Boolean).pop() || project);
         const knownType = SettingsPanel.MEMORY_TYPES.has(e.type) ? e.type : undefined;
         const typeClass = knownType ? ` memory-type-${knownType}` : '';
         const typeLabel = escapeHtml(knownType ? t(`memory.type.${knownType}`, knownType) : e.type);
+        // 工具偏好额外显示平台徽章（darwin / win32 / linux），让用户一眼看出
+        // 这条偏好是在哪个系统上验证的；无 platform（用户明说）则不显示。
+        const platformBadge = e.type === 'tool_preference' && e.platform
+          ? `<span class="memory-badge memory-badge-platform" title="${escapeHtml(t('memory.platformTitle').replace('{p}', e.platform))}">${escapeHtml(e.platform)}</span>`
+          : '';
         return `<div class="memory-card">
           <div class="memory-card-header">
             <span class="memory-badge memory-badge-type${typeClass}">${typeLabel}</span>
+            ${platformBadge}
             <span class="memory-badge memory-badge-life memory-life-${lifecycle}">${t(`memory.lifecycle.${lifecycle}`, lifecycle)}</span>
             ${superseded}
+            <button type="button" class="memory-delete-btn" data-mem-del="${escapeHtml(e.id)}" title="${escapeHtml(t('memory.deleteTitle'))}" aria-label="${escapeHtml(t('memory.deleteTitle'))}">✕</button>
           </div>
           <div class="memory-content" title="${escapeHtml(e.content)}">${escapeHtml(this.truncateForMemory(e.content, 160))}</div>
           <div class="memory-meta">
@@ -1849,7 +1889,7 @@ export class SettingsPanel {
             </span>
             <span class="memory-meta-item">${t('memory.hits').replace('{n}', String(e.hitCount ?? 0))}</span>
             <span class="memory-meta-item">${t('memory.lastUsed').replace('{t}', this.relativeTime(lastUsed, now))}</span>
-            ${project ? `<span class="memory-meta-item memory-project" title="${escapeHtml(project)}">${escapeHtml(projectShort)}</span>` : ''}
+            ${project ? `<span class="memory-meta-item memory-project" title="${escapeHtml(isGlobalScope ? t('memory.globalScopeTitle') : project)}">${escapeHtml(projectShort)}</span>` : ''}
           </div>
         </div>`;
       })

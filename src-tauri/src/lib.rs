@@ -427,10 +427,11 @@ fn mcp_key(session_id: &str, name: &str) -> String {
 }
 
 /// Augment a PATH with the common per-user runtime dirs (bun, npm global,
-/// Homebrew) plus the system defaults. A Finder-launched app inherits a
-/// minimal PATH (/usr/bin:/bin:…) that omits per-user runtimes, so MCP
-/// servers launched with bunx/npx would fail to spawn without this. `existing`
-/// is the caller-supplied or inherited PATH to preserve as the base.
+/// Homebrew, nvm/cargo/volta/fnm/asdf installs) plus the system defaults. A
+/// Finder-launched app inherits a minimal PATH (/usr/bin:/bin:…) that omits
+/// per-user runtimes, so MCP servers launched with bunx/npx would fail to
+/// spawn without this. `existing` is the caller-supplied or inherited PATH to
+/// preserve as the base.
 fn augmented_mcp_path(existing: Option<&str>) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut dirs = vec![
@@ -443,9 +444,17 @@ fn augmented_mcp_path(existing: Option<&str>) -> String {
         "/usr/sbin".to_string(),
         "/sbin".to_string(),
     ];
+    // nvm / cargo / volta / fnm / asdf installs — the minimal PATH misses
+    // these too (see probe_extra_path_dirs). Unix-only: Windows GUI apps
+    // inherit the full system PATH.
+    #[cfg(unix)]
+    dirs.extend(probe_extra_path_dirs());
     if let Some(base) = existing.filter(|s| !s.is_empty()) {
         dirs.push(base.to_string());
     }
+    // Dedupe while preserving priority order (first occurrence wins).
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| seen.insert(d.clone()));
     dirs.join(":")
 }
 
@@ -2402,6 +2411,211 @@ fn extract_file_text(bytes: &[u8], path: &std::path::Path) -> (String, String) {
 }
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Windows PowerShell 5.1 exits 0 after `-Command` unless the script calls
+/// `exit` itself — a failing command would otherwise report as success. Wrap
+/// every command with an explicit exit: `$?` is false for BOTH a failing
+/// native command ($LASTEXITCODE set) and a failing cmdlet, so the wrapper
+/// reports either as non-zero. The specific code is normalized to 1, which is
+/// all the execute_command contract needs (0 vs non-zero; stderr carries the
+/// details).
+#[cfg(windows)]
+fn powershell_command_wrapped(command: &str) -> String {
+    format!("{}; if ($?) {{ exit $LASTEXITCODE }} else {{ exit 1 }}", command)
+}
+
+/// Encode text as base64 of its UTF-16LE bytes — the transport PowerShell's
+/// `-EncodedCommand` expects. Kept platform-independent so it is unit-testable
+/// everywhere; the Windows-only callers wrap the command first.
+fn utf16le_base64(text: &str) -> String {
+    let mut bytes: Vec<u8> = Vec::with_capacity(text.len() * 2);
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    base64::engine::general_purpose::STANDARD.encode(&bytes)
+}
+
+/// Encode a command for `powershell.exe -EncodedCommand` (base64 of UTF-16LE).
+/// Passing the command as a plain `-Command` argument subjects it to the
+/// Windows command-line quoting rules (CommandLineToArgvW-style `\"` escaping),
+/// which PowerShell re-parses differently — double quotes inside the command
+/// can silently break it. The encoded form carries the raw bytes untouched.
+/// The exit-code wrapper from powershell_command_wrapped rides along.
+#[cfg(windows)]
+fn powershell_encoded_command(command: &str) -> String {
+    utf16le_base64(&powershell_command_wrapped(command))
+}
+
+#[cfg(test)]
+mod powershell_command_tests {
+    use super::*;
+
+    #[test]
+    fn utf16le_base64_round_trips_ascii_and_double_quotes() {
+        let original = "Write-Output \"hello world\"";
+        let encoded = utf16le_base64(original);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .expect("base64 decodes");
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&units).unwrap(), original);
+    }
+
+    #[test]
+    fn utf16le_base64_handles_cjk() {
+        let original = "中文路径 \"C:\\数据\".txt";
+        let encoded = utf16le_base64(original);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .expect("base64 decodes");
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&units).unwrap(), original);
+    }
+}
+
+#[cfg(test)]
+mod sys_info_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn fake_volatile(marker: &str) -> SysInfoVolatile {
+        SysInfoVolatile {
+            system_proxy: format!("proxy-{}", marker),
+            env_proxy: "none".to_string(),
+            vpn: "none".to_string(),
+            reach: "domestic ok, international ok".to_string(),
+        }
+    }
+
+    fn make_probe(
+        calls: Arc<AtomicUsize>,
+        marker: &'static str,
+    ) -> impl std::future::Future<Output = SysInfoVolatile> {
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            fake_volatile(marker)
+        }
+    }
+
+    /// The GUI regression the TTL exists for: a proxy toggle must NOT show up
+    /// in sys_info immediately (the cached block serves), but MUST after the
+    /// TTL elapses (the next call re-probes).
+    #[tokio::test]
+    async fn volatile_cache_serves_within_ttl_and_refreshes_after() {
+        let cache: tokio::sync::Mutex<Option<(std::time::Instant, SysInfoVolatile)>> =
+            tokio::sync::Mutex::const_new(None);
+        let ttl = Duration::from_secs(300);
+        let t0 = std::time::Instant::now();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        // Cold call: probes once.
+        let v1 = cached_sys_info_volatile_impl(&cache, t0, ttl, make_probe(calls.clone(), "a")).await;
+        assert_eq!(v1.system_proxy, "proxy-a");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Just inside the TTL (proxy toggled 1s ago): cached block, no probe.
+        let v2 = cached_sys_info_volatile_impl(
+            &cache,
+            t0 + Duration::from_secs(299),
+            ttl,
+            make_probe(calls.clone(), "b"),
+        )
+        .await;
+        assert_eq!(v2.system_proxy, "proxy-a");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Just past the TTL: re-probes and refreshes the cache.
+        let v3 = cached_sys_info_volatile_impl(
+            &cache,
+            t0 + Duration::from_secs(301),
+            ttl,
+            make_probe(calls.clone(), "c"),
+        )
+        .await;
+        assert_eq!(v3.system_proxy, "proxy-c");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // The refreshed block now serves inside its own TTL window.
+        let v4 = cached_sys_info_volatile_impl(
+            &cache,
+            t0 + Duration::from_secs(400),
+            ttl,
+            make_probe(calls.clone(), "d"),
+        )
+        .await;
+        assert_eq!(v4.system_proxy, "proxy-c");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A stale probe result from a concurrent slow path must not clobber a
+    /// cache line another caller just refreshed.
+    #[tokio::test]
+    async fn concurrent_slow_path_keeps_the_fresher_cache_line() {
+        let cache: tokio::sync::Mutex<Option<(std::time::Instant, SysInfoVolatile)>> =
+            tokio::sync::Mutex::const_new(None);
+        let ttl = Duration::from_secs(300);
+        let t0 = std::time::Instant::now();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let (v1, v2) = tokio::join!(
+            cached_sys_info_volatile_impl(&cache, t0, ttl, make_probe(calls.clone(), "a")),
+            cached_sys_info_volatile_impl(&cache, t0, ttl, make_probe(calls.clone(), "b")),
+        );
+        // Both callers get a coherent result (either probe's)…
+        assert!(v1.system_proxy == "proxy-a" || v1.system_proxy == "proxy-b");
+        assert!(v2.system_proxy == "proxy-a" || v2.system_proxy == "proxy-b");
+        // …and the cache holds the last writer's value for the rest of the TTL.
+        let v3 = cached_sys_info_volatile_impl(
+            &cache,
+            t0 + Duration::from_secs(60),
+            ttl,
+            make_probe(calls.clone(), "c"),
+        )
+        .await;
+        assert_eq!(v3.system_proxy, v1.system_proxy);
+    }
+}
+
+#[cfg(test)]
+mod sys_info_manual_regression {
+    use super::*;
+
+    /// Manual GUI regression for the caching work: two real sys_info calls
+    /// through the same command path the frontend uses. Everything except the
+    /// live `time:` line must be identical (the second call is served from the
+    /// process-level caches), and the per-call timings are printed for a
+    /// sanity check (cold ≈ seconds, hot ≈ ms). Hits the network (ip geo +
+    /// reachability), so it is #[ignore]d by default:
+    ///   cargo test -- --ignored sys_info_manual
+    #[tokio::test]
+    #[ignore = "network: manual GUI sys_info regression"]
+    async fn real_sys_info_second_call_hits_cache() {
+        let t0 = std::time::Instant::now();
+        let first = sys_info(String::new(), None).await.expect("first sys_info succeeds");
+        let t1 = std::time::Instant::now();
+        let second = sys_info(String::new(), None).await.expect("second sys_info succeeds");
+        let t2 = std::time::Instant::now();
+        eprintln!(
+            "sys_info regression — first call: {:?}, second call: {:?}",
+            t1 - t0,
+            t2 - t1
+        );
+        fn strip_time(s: &str) -> Vec<&str> {
+            s.lines().filter(|l| !l.starts_with("time:")).collect()
+        }
+        assert_eq!(strip_time(&first), strip_time(&second));
+        assert!(first.contains("runtimes: ") && second.contains("runtimes: "));
+        assert!(first.contains("network:   proxy:") && second.contains("network:   proxy:"));
+    }
+}
+
 /// Execute a shell command and return all output at once.
 /// Uses tokio::process::Command so it does NOT block the async runtime.
 /// Returns structured `{ exitCode, stdout, stderr }` so the frontend can tell
@@ -2409,18 +2623,29 @@ fn extract_file_text(bytes: &[u8], path: &std::path::Path) -> (String, String) {
 /// squashing everything into a `success: true` string.
 #[tauri::command]
 async fn execute_command(workspace: String, command: String, proxy_url: Option<String>) -> Result<serde_json::Value, String> {
-    // Unix shells run `sh -c`, Windows runs `cmd /C` (no `sh` binary there).
+    // Unix shells run `sh -c`, Windows runs PowerShell (whose directory/file
+    // commands and quoting rules are the ones the model is instructed to use).
     let output = {
         #[cfg(unix)]
         let mut cmd = silent_child_tokio(TokioCommand::new("sh"));
         #[cfg(windows)]
-        let mut cmd = silent_child_tokio(TokioCommand::new("cmd"));
+        let mut cmd = silent_child_tokio(TokioCommand::new("powershell"));
         #[cfg(unix)]
         cmd.arg("-c");
         #[cfg(windows)]
-        cmd.arg("/C");
-        cmd.arg(&command)
-            .current_dir(&workspace);
+        cmd.args(["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
+        // -EncodedCommand (base64 UTF-16LE) bypasses the Windows command-line
+        // quoting mangling; the encoding also carries the exit-code wrapper.
+        #[cfg(windows)]
+        cmd.arg(powershell_encoded_command(&command));
+        #[cfg(not(windows))]
+        cmd.arg(&command);
+        // A Finder-launched app inherits a minimal PATH; inject the extended
+        // probe PATH so `node` / `bun` / `python3` / nvm / Homebrew commands
+        // actually resolve (see probe_extra_path_dirs).
+        #[cfg(unix)]
+        cmd.env("PATH", probe_path());
+        cmd.current_dir(&workspace);
         if let Some(resolved) = effective_proxy_url(proxy_url.as_deref().unwrap_or("")) {
             if !valid_proxy_url(&resolved) {
                 return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
@@ -2464,7 +2689,8 @@ type ChatStreamRegistry = Arc<StdMutex<BTreeMap<String, tokio::sync::oneshot::Se
 /// can kill the whole command tree. process_group(0) makes the child its own
 /// group leader (pgid == pid), which is what kill_process_group targets.
 fn spawn_shell_command(workspace: &str, command: &str, proxy_url: Option<&str>) -> std::io::Result<Child> {
-    // Unix shells run `sh -c`, Windows runs `cmd /C` (no `sh` binary there).
+    // Unix shells run `sh -c`, Windows runs PowerShell (whose directory/file
+    // commands and quoting rules are the ones the model is instructed to use).
     #[cfg(unix)]
     let mut cmd = {
         let mut c = silent_child_tokio(TokioCommand::new("sh"));
@@ -2473,12 +2699,24 @@ fn spawn_shell_command(workspace: &str, command: &str, proxy_url: Option<&str>) 
     };
     #[cfg(windows)]
     let mut cmd = {
-        let mut c = silent_child_tokio(TokioCommand::new("cmd"));
-        c.arg("/C");
+        let mut c = silent_child_tokio(TokioCommand::new("powershell"));
+        c.args(["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
         c
     };
-    cmd.arg(command)
-        .current_dir(workspace)
+    // -EncodedCommand (base64 UTF-16LE) bypasses the Windows command-line
+    // quoting mangling; the encoding also carries the exit-code wrapper.
+    #[cfg(windows)]
+    let encoded_command = powershell_encoded_command(command);
+    #[cfg(windows)]
+    cmd.arg(&encoded_command);
+    #[cfg(not(windows))]
+    cmd.arg(command);
+    // A Finder-launched app inherits a minimal PATH; inject the extended
+    // probe PATH so `node` / `bun` / `python3` / nvm / Homebrew commands
+    // actually resolve (see probe_extra_path_dirs).
+    #[cfg(unix)]
+    cmd.env("PATH", probe_path());
+    cmd.current_dir(workspace)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
@@ -4583,7 +4821,6 @@ Install the toolchain.
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod resolve_tests {
     use super::*;
 
@@ -4863,6 +5100,7 @@ mod file_text_extraction_tests {
     }
 }
 
+#[cfg(test)]
 mod write_file_stream_tests {
     use super::*;
 
@@ -10584,11 +10822,94 @@ fn request_system_permission(app: tauri::AppHandle, kind: String) -> Result<Stri
 }
 
 
+/// Directories where user-installed runtimes commonly live, MISSING from the
+/// minimal PATH a macOS GUI app inherits from Finder/LaunchServices
+/// (/usr/bin:/bin:/usr/sbin:/sbin). Without them, nvm / bun / volta / fnm /
+/// asdf / Homebrew installs would all report "not installed" even though the
+/// runtimes exist. Windows GUI apps inherit the full system PATH, so this
+/// only matters on Unix. Each entry is a best-effort candidate; missing
+/// directories are simply skipped by the spawn probe.
+#[cfg(unix)]
+fn probe_extra_path_dirs() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut dirs: Vec<String> = vec![
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+        format!("{home}/.bun/bin"),
+        format!("{home}/.volta/bin"),
+        format!("{home}/.local/bin"),
+        format!("{home}/.cargo/bin"),
+    ];
+    // nvm: ~/.nvm/versions/node/<version>/bin — every installed version.
+    if let Ok(entries) = std::fs::read_dir(format!("{home}/.nvm/versions/node")) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                dirs.push(entry.path().join("bin").to_string_lossy().to_string());
+            }
+        }
+    }
+    // fnm: ~/.local/share/fnm/node-versions/<version>/installation/bin.
+    if let Ok(entries) = std::fs::read_dir(format!("{home}/.local/share/fnm/node-versions")) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                dirs.push(
+                    entry
+                        .path()
+                        .join("installation/bin")
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+        }
+    }
+    // asdf: ~/.asdf/installs/{nodejs,bun}/<version>/bin.
+    for tool in ["nodejs", "bun"] {
+        if let Ok(entries) = std::fs::read_dir(format!("{home}/.asdf/installs/{tool}")) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    dirs.push(entry.path().join("bin").to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// PATH for runtime probes AND user commands: the inherited PATH plus the
+/// user-install directories above (deduplicated, extras first so a user's
+/// nvm node wins over the system node). Computed once per process — it is
+/// used by every execute_command spawn, so it must not re-scan the home
+/// directories per call.
+#[cfg(unix)]
+fn probe_path() -> String {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let inherited: Vec<String> = std::env::var("PATH")
+                .map(|p| p.split(':').map(|s| s.to_string()).collect())
+                .unwrap_or_default();
+            let mut parts: Vec<String> = Vec::new();
+            for dir in probe_extra_path_dirs() {
+                if !inherited.contains(&dir) && !parts.contains(&dir) {
+                    parts.push(dir);
+                }
+            }
+            parts.extend(inherited);
+            parts.join(":")
+        })
+        .clone()
+}
+
 /// Probe installed runtime versions (Node.js, Python, Rust) for sys_info.
 /// Each is a quick `--version` subprocess; a missing binary yields "not
 /// installed" instead of failing the whole sys_info call. python --version
-/// prints to stderr, so both streams are checked.
+/// prints to stderr, so both streams are checked. On Unix the probe runs with
+/// an extended PATH (see probe_path) so runtimes installed via nvm/bun/volta/
+/// fnm/asdf/Homebrew are found even though the GUI app's inherited PATH is
+/// minimal.
 fn detect_runtime_versions() -> Vec<String> {
+    #[cfg(unix)]
+    let probe_env_path = probe_path();
     let mut out: Vec<String> = Vec::new();
     for (label, args) in [
         ("node", vec!["--version"]),
@@ -10597,11 +10918,23 @@ fn detect_runtime_versions() -> Vec<String> {
         ("rustc", vec!["--version"]),
         ("git", vec!["--version"]),
     ] {
-        let version = silent_child(std::process::Command::new(label))
-            .args(&args)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
+        let version = {
+            #[cfg(unix)]
+            {
+                silent_child(std::process::Command::new(label))
+                    .env("PATH", &probe_env_path)
+                    .args(&args)
+                    .output()
+            }
+            #[cfg(not(unix))]
+            {
+                silent_child(std::process::Command::new(label))
+                    .args(&args)
+                    .output()
+            }
+        }
+        .ok()
+        .filter(|o| o.status.success())
             .map(|o| {
                 // Collapse whitespace so multi-line banners cannot break out of
                 // the system-prompt sentence (mirrors the Node adapter).
@@ -10885,10 +11218,182 @@ fn mask_ip(ip: &str) -> String {
     }
 }
 
-#[tauri::command]
-async fn sys_info(_workspace: String, location: Option<String>) -> Result<String, String> {
+/// Current local time as "YYYY-MM-DD HH:MM:SS TZ" for sys_info. Kept LIVE on
+/// every call (it is the one field that must be current) — the subprocess is
+/// cheap (~ms) next to the runtime/network probes that ARE cached below.
+fn detect_current_time() -> String {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        std::process::Command::new("date")
+            .arg("+%Y-%m-%d %H:%M:%S %Z")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string())
+    }
+    // Windows has no `date` binary; PowerShell formats the local time. The
+    // fixed command goes through -EncodedCommand like every other PowerShell
+    // invocation, so its quoting never touches the Windows command line.
+    #[cfg(windows)]
+    {
+        silent_child(std::process::Command::new("powershell"))
+            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+            .arg(utf16le_base64("Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'"))
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string())
+    }
+}
+
+/// Human OS version string for sys_info (macOS via sw_vers, Linux via uname,
+/// Windows from compile-time constants).
+fn detect_os_version() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .map(|o| {
+                let ver = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                let arch = std::env::consts::ARCH;
+                format!("macOS {} ({})", ver, arch)
+            })
+            .unwrap_or_else(|_| "macOS (unknown version)".to_string())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("uname")
+            .args(["-srm"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "Linux (unknown version)".to_string())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
+    }
+}
+
+// ── sys_info caching ──
+// Probing the full sys_info on EVERY tool call costs 5+ subprocess spawns
+// (runtime --version) and a 2s network round-trip (reachability) per call.
+// Most fields cannot change mid-session, so they are split into two tiers:
+//   * static   — OS, language, timezone, runtimes: computed ONCE per process.
+//   * volatile — system/env proxy, VPN, live reachability: refreshed on a TTL
+//                (they legitimately change, e.g. proxy toggled or VPN joined).
+// `time:` stays live on every call. The cache is warmed at app startup (see
+// run()) so the first tool call / prompt probe returns instantly.
+#[derive(Clone)]
+struct SysInfoStatic {
+    lang: String,
+    encoding: String,
+    tz: String,
+    os_version: String,
+    runtimes: String,
+}
+
+#[derive(Clone)]
+struct SysInfoVolatile {
+    system_proxy: String,
+    env_proxy: String,
+    vpn: String,
+    reach: String,
+}
+
+static SYS_INFO_STATIC: tokio::sync::OnceCell<SysInfoStatic> = tokio::sync::OnceCell::const_new();
+static SYS_INFO_VOLATILE: tokio::sync::Mutex<Option<(std::time::Instant, SysInfoVolatile)>> =
+    tokio::sync::Mutex::const_new(None);
+const SYS_INFO_VOLATILE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+async fn probe_sys_info_static() -> SysInfoStatic {
     let lang = detect_language();
     let encoding = detect_encoding(&lang);
+    let mut tz = detect_timezone();
+    // Timezone fallback: the geo backend reports a city timezone when the OS
+    // gives nothing (e.g. /etc/localtime unreadable).
+    if tz == "unknown" {
+        if let Some(g) = detect_ip_geo().await {
+            if !g.timezone.is_empty() {
+                tz = g.timezone.clone();
+            }
+        }
+    }
+    SysInfoStatic {
+        lang,
+        encoding,
+        tz,
+        os_version: detect_os_version(),
+        runtimes: detect_runtime_versions().join("  "),
+    }
+}
+
+async fn cached_sys_info_static() -> SysInfoStatic {
+    SYS_INFO_STATIC.get_or_init(probe_sys_info_static).await.clone()
+}
+
+/// The live probe behind the volatile cache (system/env proxy, VPN,
+/// reachability) — kept separate so tests can inject a fake probe.
+async fn probe_sys_info_volatile() -> SysInfoVolatile {
+    SysInfoVolatile {
+        system_proxy: resolve_system_proxy_url().unwrap_or_else(|| "none".to_string()),
+        env_proxy: env_proxy_summary(),
+        vpn: detect_vpn_connections(),
+        reach: probe_reachability().await,
+    }
+}
+
+/// TTL cache core, clock- and probe-injectable for tests. A call within the
+/// TTL of the last probe returns the cached block; after the TTL it probes
+/// again and refreshes. The slow path probes OUTSIDE the lock (an await in
+/// the lock would block other callers for the whole 2s reachability probe),
+/// then re-checks the TTL under the lock so a concurrent caller that just
+/// refreshed wins and the stale probe result is discarded.
+async fn cached_sys_info_volatile_impl(
+    cache: &tokio::sync::Mutex<Option<(std::time::Instant, SysInfoVolatile)>>,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+    probe: impl std::future::Future<Output = SysInfoVolatile>,
+) -> SysInfoVolatile {
+    // Fast path: a fresh-enough cached block.
+    {
+        let guard = cache.lock().await;
+        if let Some((at, cached)) = &*guard {
+            if now.duration_since(*at) < ttl {
+                return cached.clone();
+            }
+        }
+    }
+    // Slow path: probe outside the lock, then re-check the TTL so concurrent
+    // callers don't each store a fresh block when another just refreshed.
+    let fresh = probe.await;
+    let mut guard = cache.lock().await;
+    if let Some((at, cached)) = &*guard {
+        if now.duration_since(*at) < ttl {
+            return cached.clone();
+        }
+    }
+    *guard = Some((now, fresh.clone()));
+    fresh
+}
+
+async fn cached_sys_info_volatile() -> SysInfoVolatile {
+    cached_sys_info_volatile_impl(
+        &SYS_INFO_VOLATILE,
+        std::time::Instant::now(),
+        SYS_INFO_VOLATILE_TTL,
+        probe_sys_info_volatile(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn sys_info(_workspace: String, location: Option<String>) -> Result<String, String> {
+    // Static fields come from the process-wide cache (warmed at startup),
+    // volatile network fields from the TTL cache; only `time:` is live.
+    // Joined so the first (cold) call pays the runtime + reachability probes
+    // in parallel, like the pre-caching implementation did.
+    let (static_info, volatile) = tokio::join!(cached_sys_info_static(), cached_sys_info_volatile());
+    let ip_geo = detect_ip_geo().await;
+    let time = detect_current_time();
 
     let loc = location
         .as_deref()
@@ -10897,80 +11402,6 @@ async fn sys_info(_workspace: String, location: Option<String>) -> Result<String
         .map(|s| format!("{} (user-set)", s))
         .unwrap_or_else(|| "not set".to_string());
 
-    let time = {
-        #[cfg(target_os = "macos")]
-        let output = std::process::Command::new("date")
-            .arg("+%Y-%m-%d %H:%M:%S %Z")
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-        #[cfg(target_os = "linux")]
-        let output = std::process::Command::new("date")
-            .arg("+%Y-%m-%d %H:%M:%S %Z")
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-        // Windows has no `date` binary; PowerShell formats the local time.
-        #[cfg(windows)]
-        let output = silent_child(std::process::Command::new("powershell"))
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'",
-            ])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-        output
-    };
-
-    let os_version = {
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("sw_vers")
-                .arg("-productVersion")
-                .output()
-                .map(|o| {
-                    let ver = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    let arch = std::env::consts::ARCH;
-                    format!("macOS {} ({})", ver, arch)
-                })
-                .unwrap_or_else(|_| "macOS (unknown version)".to_string())
-        }
-        #[cfg(target_os = "linux")]
-        {
-            std::process::Command::new("uname")
-                .args(["-srm"])
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|_| "Linux (unknown version)".to_string())
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
-        }
-    };
-
-    let runtimes = detect_runtime_versions().join("  ");
-
-    // Network environment: what the machine itself looks like (system proxy /
-    // env proxy / VPN / direct reachability), NOT the app's proxy config — the
-    // model combines this with the Settings → 网络代理 state to pick working
-    // backends (e.g. "international blocked + system proxy set" → the proxy
-    // likely unlocks it, so web_search through the proxy should work).
-    let system_proxy = resolve_system_proxy_url().unwrap_or_else(|| "none".to_string());
-    let env_proxy = env_proxy_summary();
-    let vpn = detect_vpn_connections();
-    let (ip_geo, reach) = tokio::join!(detect_ip_geo(), probe_reachability());
-
-    let mut tz = detect_timezone();
-    if tz == "unknown" {
-        if let Some(g) = &ip_geo {
-            if !g.timezone.is_empty() {
-                tz = g.timezone.clone();
-            }
-        }
-    }
     let ip_line = match &ip_geo {
         Some(g) => {
             let mut parts: Vec<String> = vec![g.ip_masked.clone()];
@@ -10993,7 +11424,18 @@ async fn sys_info(_workspace: String, location: Option<String>) -> Result<String
 
     let info = format!(
         "timezone:  {}\nlanguage:  {}\nencoding:  {}\nip:        {}\ntime:      {}\nos:        {}\nlocation:  {}\nruntimes:  {}\nnetwork:   proxy: {}; env: {}; vpn: {}; reach: {}",
-        tz, lang, encoding, ip_line, time, os_version, loc, runtimes, system_proxy, env_proxy, vpn, reach
+        static_info.tz,
+        static_info.lang,
+        static_info.encoding,
+        ip_line,
+        time,
+        static_info.os_version,
+        loc,
+        static_info.runtimes,
+        volatile.system_proxy,
+        volatile.env_proxy,
+        volatile.vpn,
+        volatile.reach,
     );
     Ok(info)
 }
@@ -11535,6 +11977,16 @@ pub fn run() {
         .manage(McpRegistry::new(BTreeMap::new()))
         .manage(CommandRegistry::new(BTreeMap::new()))
         .manage(ChatStreamRegistry::new(StdMutex::new(BTreeMap::new())))
+        .setup(|_app| {
+            // Warm the sys_info caches at startup so the first tool call /
+            // prompt probe returns instantly instead of paying the full
+            // (runtime subprocesses + network reachability) probe on first
+            // use. Best-effort: a failure only means the caches fill lazily.
+            tauri::async_runtime::spawn(async {
+                let _ = sys_info(String::new(), None).await;
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // File tools
             read_file,
@@ -11553,6 +12005,7 @@ pub fn run() {
             replace_files,
             save_file,
             save_file_binary,
+            get_file_icon,
             // System info
             sys_info,
             detect_location,

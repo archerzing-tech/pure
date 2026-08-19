@@ -246,7 +246,8 @@ export type MemoryType =
   | 'error_pattern'
   | 'successful_pattern'
   | 'project_convention'
-  | 'procedure';
+  | 'procedure'
+  | 'tool_preference';
 
 export interface MemoryLesson {
   symptom: string;
@@ -271,6 +272,10 @@ export interface MemoryEntry {
   timestamp: number;
   sessionId: string;
   projectPath: string; // 记忆按项目隔离
+  /** 平台维度（tool_preference 专用，也兼容其他类型）：process.platform 风格
+   *  （darwin / win32 / linux / unknown）。注入时按当前平台过滤，保证"在
+   *  本平台验证过好用的工具"只在本平台被优先。 */
+  platform?: string;
   /** 综合健康分（1.0 = 新/最有用，0.0 = 已遗忘）。由 evolution.ts 从
    *  时间 × 可信度 × 使用频率 × 进化状态多维计算，decay() 定期重算。 */
   decayScore?: number;
@@ -290,6 +295,27 @@ export interface MemorySearchOptions {
   type?: MemoryType;
   k?: number; // 返回条数，默认 5
   projectPath?: string; // 限定项目，默认当前项目
+  /** 只返回匹配该平台的条目（tool_preference 按平台隔离用）。 */
+  platform?: string;
+}
+
+/**
+ * 机器级全局作用域哨兵：作为 tool_preference 条目的 projectPath 存储，表示该
+ * 记忆不归属任何项目（"这台机器上什么工具能用/想用"，任何项目都成立）。
+ * 机器级条目独立存储（FS：独立 hash 目录；localStorage：独立 projectPath），
+ * 常驻注入时读取此作用域，保证跨项目可见。
+ */
+export const GLOBAL_MEMORY_SCOPE = '__machine__';
+
+export interface MemoryListOptions {
+  /** 限定项目；缺省 = store 默认范围（FS：默认项目；localStorage：全部）。 */
+  projectPath?: string;
+  /** 只返回该类型的条目。 */
+  type?: MemoryType;
+  /** 只返回匹配该平台（platform 字段）的条目。 */
+  platform?: string;
+  /** 只返回未休眠（健康分 > dormantMax）的条目 —— 机器级常驻注入用。 */
+  activeOnly?: boolean;
 }
 
 export interface IMemoryStore {
@@ -299,8 +325,14 @@ export interface IMemoryStore {
   /** 检索相关记忆（Harness 会话开始时注入 <session_memory>） */
   search(query: string, opts?: MemorySearchOptions): Promise<MemoryEntry[]>;
 
+  /** 枚举记忆（GUI 记忆面板、机器级常驻注入用）。无查询语义、不记录命中。 */
+  list(opts?: MemoryListOptions): MemoryEntry[];
+
   /** 按会话批量清理 */
   forget(sessionId: string): Promise<void>;
+
+  /** 按 id 删除单条记忆（GUI 记忆面板的逐条删除）。返回是否真的删除了。 */
+  removeById(id: string): Promise<boolean>;
 
   /** 衰减旧记忆：将闲置超过 olderThan 的记忆按多维健康分重算，逐级降级，
    *  跌穿删除线或休眠超宽限期即删除（见 evolution.ts） */

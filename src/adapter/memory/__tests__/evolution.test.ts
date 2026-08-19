@@ -18,6 +18,7 @@ import {
   similarityTokens,
 } from '../evolution';
 import type { MemoryEntry, MemoryType } from '../IMemoryStore';
+import { GLOBAL_MEMORY_SCOPE } from '../../../shared/types';
 
 const DAY = 24 * 3600 * 1000;
 const NOW = Date.now();
@@ -38,6 +39,7 @@ describe('healthScore — 多维打分', () => {
     expect(healthScore(entry({ type: 'user_preference' }), NOW)).toBeCloseTo(0.72, 10);
     expect(healthScore(entry({ type: 'project_convention' }), NOW)).toBeCloseTo(0.6925, 10);
     expect(healthScore(entry({ type: 'error_pattern' }), NOW)).toBeCloseTo(0.665, 10);
+    expect(healthScore(entry({ type: 'tool_preference' }), NOW)).toBeCloseTo(0.665, 10);
   });
 
   it('时间维度：闲置 30 天（一个半衰期）分数减半', () => {
@@ -310,6 +312,26 @@ describe('LocalStorageMemoryStore 集成', () => {
     expect(info.lastUpdated).toBe(0);
     // 新实例也从 localStorage 读回同一 meta
     expect(new LocalStorageMemoryStore().getLastDecayInfo().lastDeleted).toBe(1);
+  });
+
+  it('迁移旧版项目作用域 tool_preference 到全局作用域（去重 + meta 标记）', async () => {
+    const store = new LocalStorageMemoryStore();
+    await store.add({ type: 'tool_preference', content: 'Verified on darwin: the pnpm tool works', timestamp: NOW, sessionId: 's1', projectPath: '/p', platform: 'darwin', dedupeKey: 'tool:darwin:pnpm' });
+    await store.add({ type: 'tool_preference', content: 'Verified on darwin: the pnpm tool works', timestamp: NOW, sessionId: 's2', projectPath: '/q', platform: 'darwin', dedupeKey: 'tool:darwin:pnpm' });
+    await store.add({ type: 'user_preference', content: 'User prefers tabs', timestamp: NOW, sessionId: 's1', projectPath: '/p' });
+
+    // 新实例构造时执行迁移（旧实例缓存已失效，断言一律走新实例）
+    const migrated = new LocalStorageMemoryStore();
+    expect(migrated.list('/p').some(e => e.type === 'tool_preference')).toBe(false);
+    expect(migrated.list('/q').some(e => e.type === 'tool_preference')).toBe(false);
+    expect(migrated.list('/p').some(e => e.content === 'User prefers tabs')).toBe(true);
+    const globals = migrated.list({ projectPath: GLOBAL_MEMORY_SCOPE, type: 'tool_preference' });
+    expect(globals).toHaveLength(1);
+    expect(globals[0].projectPath).toBe(GLOBAL_MEMORY_SCOPE);
+    expect(migrated.getLastDecayInfo().migratedToolPrefsAt).toBeGreaterThan(0);
+    // 幂等：meta 标记已设，新实例不再重复搬入
+    const again = new LocalStorageMemoryStore();
+    expect(again.list({ projectPath: GLOBAL_MEMORY_SCOPE, type: 'tool_preference' })).toHaveLength(1);
   });
 });
 

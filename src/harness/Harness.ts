@@ -24,6 +24,7 @@ import type {
   ToolDefinition,
   VerificationSummary,
 } from '../shared/types';
+import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
 
 export interface HarnessConfig {
   sessionId: string;
@@ -608,7 +609,7 @@ export class Harness {
         // by a heap of error patterns; fragment priority in the assembler
         // orders proven approaches above avoid-lists when budget-constrained.
         memories = await this.config.memory.search(userPrompt, {
-          k: 10,
+          k: 12,
           projectPath: this.projectPath(),
         });
       }
@@ -619,6 +620,37 @@ export class Harness {
     const preferences = memories
       .filter(m => m.type === 'user_preference')
       .map(m => m.content);
+    // Platform-verified tool preferences: only entries matching the CURRENT
+    // platform (or platform-agnostic user-stated ones) are injected, so "works
+    // on this machine" never leaks across OSes.
+    const currentPlatform = this.currentPlatform();
+    // Machine-global tool preferences are ALWAYS injected (not query-scoped):
+    // a tool verified on this machine in ANY project should be visible in
+    // every session, and tool names rarely share tokens with the user prompt
+    // (semantic/keyword retrieval would miss them). Only non-dormant entries
+    // qualify; per-project tool_preference entries (written before the global
+    // scope existed) still ride in via the search results below.
+    let globalToolPrefs: Awaited<ReturnType<IMemoryStore['list']>> = [];
+    try {
+      if (this.config.memory) {
+        globalToolPrefs = this.config.memory.list({
+          projectPath: GLOBAL_MEMORY_SCOPE,
+          type: 'tool_preference',
+          activeOnly: true,
+        });
+      }
+    } catch {
+      globalToolPrefs = [];
+    }
+    const toolPreferenceSeen = new Set<string>();
+    const toolPreferences: string[] = [];
+    for (const m of [...globalToolPrefs, ...memories]) {
+      if (m.type !== 'tool_preference') continue;
+      if (m.platform && m.platform !== currentPlatform) continue;
+      if (toolPreferenceSeen.has(m.content)) continue;
+      toolPreferenceSeen.add(m.content);
+      toolPreferences.push(m.content);
+    }
     // v1.9.7 — verified successes are injected with priority (they appear
     // before error patterns in <session_memory>), so the model prefers proven
     // approaches over unproven ones and treats failures as avoid-lists.
@@ -653,6 +685,7 @@ export class Harness {
         successes,
         errorPatterns,
         procedures,
+        toolPreferences,
         project: this.config.memory ? this.projectPath() : undefined,
         adaptiveStrategy: strategy.directive,
       },
@@ -830,6 +863,62 @@ export class Harness {
         dedupeKey: `procedure:${dedupeKey}`,
       });
     }
+    // Tool preferences: every distinct command tool this completed session ran
+    // is, on balance, part of the working set on this platform. Persisted as
+    // platform-bound tool_preference in the MACHINE-GLOBAL scope so future
+    // sessions on the same OS — in ANY project — prefer tools that actually
+    // work here (pnpm, uv, bun, …). Shell built-ins and trivial system
+    // utilities are filtered out; dedupeKey keeps one entry per platform+tool
+    // no matter how many sessions run it.
+    const platform = this.currentPlatform();
+    const commandTools = [...new Set((messages ?? [])
+      .filter(m => m.role === 'assistant' && m.toolCalls)
+      .flatMap(m => (m.toolCalls ?? []))
+      .filter(tc => tc.function?.name === 'execute_command')
+      .map(tc => {
+        try { return (JSON.parse(tc.function.arguments) as { command?: unknown })?.command; } catch { return undefined; }
+      })
+      .filter((c): c is string => typeof c === 'string')
+      .map(commandTool)
+      .filter((t): t is string => !!t))];
+    for (const tool of commandTools) {
+      await this.config.memory.add({
+        type: 'tool_preference',
+        content: `Verified on ${platform}: the ${tool} tool works on this machine`,
+        timestamp: Date.now(),
+        sessionId: this.config.sessionId,
+        projectPath: GLOBAL_MEMORY_SCOPE,
+        platform,
+        dedupeKey: `tool:${platform}:${tool}`,
+      }).catch(() => {});
+    }
+    // [remember] markers the model deliberately emitted: a tool name →
+    // platform-bound tool_preference in the machine-global scope (the model
+    // judged it notably good on THIS machine); any other concise insight →
+    // successful_pattern (a reusable approach/idea, project-scoped).
+    for (const item of parseRememberMarkers(finalOutput ?? '')) {
+      const tool = commandTool(item);
+      if (tool) {
+        await this.config.memory.add({
+          type: 'tool_preference',
+          content: `Notably good on ${platform}: the ${tool} tool (agent-verified)`,
+          timestamp: Date.now(),
+          sessionId: this.config.sessionId,
+          projectPath: GLOBAL_MEMORY_SCOPE,
+          platform,
+          dedupeKey: `tool:${platform}:${tool}`,
+        }).catch(() => {});
+      } else {
+        await this.config.memory.add({
+          type: 'successful_pattern',
+          content: `Effective approach: ${item.slice(0, 300)}`,
+          timestamp: Date.now(),
+          sessionId: this.config.sessionId,
+          projectPath: this.projectPath(),
+          dedupeKey: `remember:${item.trim().toLowerCase().slice(0, 80)}`,
+        }).catch(() => {});
+      }
+    }
     this.writtenLessonKeys.add(dedupeKey);
   }
 
@@ -855,6 +944,60 @@ export class Harness {
   private projectPath(): string {
     return this.config.projectPath ?? (typeof process !== 'undefined' ? process.cwd() : '');
   }
+
+  /** process.platform-style label (darwin / win32 / linux / unknown) for the
+   *  current host. GUI runs in a WebView (no process), so it falls back to the
+   *  user agent. tool_preference memories are bound to this so "works on THIS
+   *  machine" only applies on the same OS. */
+  private currentPlatform(): string {
+    if (typeof process !== 'undefined' && process.platform) return process.platform;
+    if (typeof navigator !== 'undefined') {
+      const ua = navigator.userAgent;
+      if (/Windows/i.test(ua)) return 'win32';
+      if (/Mac/i.test(ua)) return 'darwin';
+      if (/Linux/i.test(ua)) return 'linux';
+    }
+    return 'unknown';
+  }
+}
+
+/** Shell built-ins and trivial system utilities — present on every platform,
+ * so persisting them as a "tool preference" would be pure noise. This is a
+ * filter (what NOT to remember), not a whitelist (the model may remember any
+ * other tool it finds useful). */
+const TOOL_NOISE = new Set([
+  'cd', 'echo', 'pwd', 'export', 'ls', 'dir', 'cat', 'less', 'more', 'head', 'tail',
+  'grep', 'egrep', 'fgrep', 'find', 'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'touch',
+  'chmod', 'chown', 'chgrp', 'ln', 'curl', 'wget', 'which', 'where', 'type', 'source',
+  'exit', 'clear', 'printf', 'test', 'set', 'unset', 'alias', 'unalias', 'history',
+  'sleep', 'env', 'printenv', 'pushd', 'popd', 'sh', 'bash', 'zsh', 'ksh', 'true',
+  'false', 'read', 'wc', 'sort', 'uniq', 'cut', 'tr', 'sed', 'awk', 'diff', 'patch',
+  'tar', 'gzip', 'gunzip', 'zip', 'unzip', 'xargs', 'basename', 'dirname', 'time',
+]);
+
+/** First token of a command (the tool name), or undefined for shell noise /
+ *  non-tool syntax. Strips a leading `./` or `C:\` path prefix so `./node`
+ *  and `node` both yield "node". */
+function commandTool(command: string): string | undefined {
+  const first = command.trim().split(/\s+/)[0] ?? '';
+  const tool = first.replace(/^[./\\]+/, '');
+  if (!tool || TOOL_NOISE.has(tool)) return undefined;
+  if (!/^[a-zA-Z][a-zA-Z0-9._-]*$/.test(tool)) return undefined;
+  return tool;
+}
+
+/** Parse `[remember] …` markers the model appended to its final output. Each
+ *  marker is one line: a tool name (→ tool_preference) or a concise "what
+ *  worked and why" (→ successful_pattern). */
+function parseRememberMarkers(text: string): string[] {
+  const out: string[] = [];
+  const re = /\[remember\]([^\[]+)/gi;
+  let m: RegExpMatchArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const value = (m[1] ?? '').trim();
+    if (value) out.push(value);
+  }
+  return out;
 }
 
 /**

@@ -8,10 +8,11 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { IMemoryStore, MemoryEntry, MemorySearchOptions } from './IMemoryStore';
+import type { IMemoryStore, MemoryEntry, MemoryListOptions, MemorySearchOptions } from './IMemoryStore';
 import { searchMemories } from './keywordSearch';
-import { applyHits, decayEntry, findSupersedeTarget, healthScore, lifecycleOf, type EvolutionConfig } from './evolution';
+import { EVOLUTION, applyHits, decayEntry, findSupersedeTarget, healthScore, lifecycleOf, type EvolutionConfig } from './evolution';
 import type { MemoryDecayInfo } from './LocalStorageMemoryStore';
+import { GLOBAL_MEMORY_SCOPE } from '../../shared/types';
 
 function projectHash(projectPath: string): string {
   return createHash('sha256').update(projectPath).digest('hex').slice(0, 16);
@@ -42,6 +43,9 @@ export class FSMemoryStore implements IMemoryStore {
     this.rootPath = rootPath;
     this.defaultProject = defaultProject;
     this.evolution = evolution;
+    // 一次性迁移：把旧版本（v1.9.11 之前）按项目隔离写入的 tool_preference
+    // 搬进机器级全局作用域，避免与常驻注入重复。幂等 + meta 标记只跑一次。
+    this.migrateLegacyToolPreferences();
   }
 
   private projectDir(projectPath: string): string {
@@ -69,10 +73,23 @@ export class FSMemoryStore implements IMemoryStore {
     this.cache.set(projectPath || this.defaultProject, entries);
   }
 
-  /** Enumerate all entries for a project (used by WASMEmbeddingStore's search
-   *  to embed + rank the full set; not part of the IMemoryStore interface). */
-  list(projectPath?: string): MemoryEntry[] {
-    return this.load(projectPath ?? this.defaultProject);
+  /** Enumerate entries for a project (used by WASMEmbeddingStore's search to
+   *  embed + rank the full set, and by the Harness for machine-global
+   *  always-inject). Accepts a project path string (legacy) or filter
+   *  options; activeOnly drops dormant entries (健康分 ≤ dormantMax).
+   *  不记录命中（list 是枚举，不是检索）。 */
+  list(opts?: string | MemoryListOptions): MemoryEntry[] {
+    const project = typeof opts === 'string' ? opts : (opts?.projectPath ?? this.defaultProject);
+    let entries = this.load(project);
+    if (opts && typeof opts !== 'string') {
+      const now = Date.now();
+      const cfg = this.evolution;
+      const dormantMax = cfg?.dormantMax ?? EVOLUTION.DORMANT_MAX;
+      if (opts.type !== undefined) entries = entries.filter(e => e.type === opts.type);
+      if (opts.platform !== undefined) entries = entries.filter(e => e.platform === opts.platform);
+      if (opts.activeOnly) entries = entries.filter(e => healthScore(e, now, cfg) >= dormantMax);
+    }
+    return entries;
   }
 
   /** 上次衰减运行信息（诊断用；非 IMemoryStore 接口成员）。返回拷贝，
@@ -97,6 +114,58 @@ export class FSMemoryStore implements IMemoryStore {
       mkdirSync(this.rootPath, { recursive: true });
       writeFileSync(join(this.rootPath, 'meta.json'), JSON.stringify(info), 'utf-8');
     } catch { /* non-fatal */ }
+  }
+
+  /**
+   * 一次性迁移：旧版本把 tool_preference 按项目隔离写入；现在它们属于机器级
+   * 全局作用域（跨项目常驻注入）。扫描所有项目文件，把项目作用域的
+   * tool_preference 搬进全局文件并去重（dedupeKey 优先，其次 type+content+
+   * platform），保留原 id / 使用频率 / 取代链。meta.json 记 migratedToolPrefsAt
+   * 标记，之后进程不再扫描；无旧条目时也不写标记（空库扫描几乎零成本）。
+   */
+  private migrateLegacyToolPreferences(): void {
+    if (this.decayInfo?.migratedToolPrefsAt) return;
+    if (!existsSync(this.rootPath)) return;
+    const globalDir = projectHash(GLOBAL_MEMORY_SCOPE);
+    let global = this.loadFromFile(this.fileFor(GLOBAL_MEMORY_SCOPE));
+    const matches = (a: MemoryEntry, b: MemoryEntry): boolean =>
+      a.type === b.type && a.platform === b.platform && (
+        (!!a.dedupeKey && a.dedupeKey === b.dedupeKey) ||
+        (!a.dedupeKey && !b.dedupeKey && a.content === b.content)
+      );
+    const moved: MemoryEntry[] = [];
+    let foundAny = false;
+    for (const dir of readdirSync(this.rootPath)) {
+      if (dir === 'meta.json' || dir === globalDir) continue;
+      const file = join(this.rootPath, dir, 'memories.jsonl');
+      if (!existsSync(file)) continue;
+      const entries = this.loadFromFile(file);
+      const tools = entries.filter(e => e.type === 'tool_preference' && e.projectPath !== GLOBAL_MEMORY_SCOPE);
+      if (tools.length === 0) continue;
+      foundAny = true;
+      const kept = entries.filter(e => e.type !== 'tool_preference' || e.projectPath === GLOBAL_MEMORY_SCOPE);
+      for (const t of tools) {
+        // 跨项目 / 已有全局条目去重：同工具只保留一条（已有的优先，跳过迁移）。
+        if (global.some(g => matches(g, t)) || moved.some(m => matches(m, t))) continue;
+        t.projectPath = GLOBAL_MEMORY_SCOPE;
+        moved.push(t);
+      }
+      writeFileSync(file, kept.length ? `${kept.map(e => JSON.stringify(e)).join('\n')}\n` : '', 'utf-8');
+      // 缓存同步：该目录对应项目若在内存缓存中，原地移除已搬走的条目。
+      const cached = this.cachedForDir(dir);
+      if (cached) {
+        for (let i = cached.length - 1; i >= 0; i--) {
+          if (cached[i].type === 'tool_preference' && cached[i].projectPath !== GLOBAL_MEMORY_SCOPE) cached.splice(i, 1);
+        }
+      }
+    }
+    if (moved.length > 0) {
+      global = [...global, ...moved];
+      mkdirSync(this.projectDir(GLOBAL_MEMORY_SCOPE), { recursive: true });
+      writeFileSync(this.fileFor(GLOBAL_MEMORY_SCOPE), `${global.map(e => JSON.stringify(e)).join('\n')}\n`, 'utf-8');
+      this.cache.set(GLOBAL_MEMORY_SCOPE, global);
+    }
+    if (foundAny) this.writeDecayInfo({ ...this.decayInfo, migratedToolPrefsAt: Date.now() });
   }
 
   async add(entry: Omit<MemoryEntry, 'id'>): Promise<string> {
@@ -160,6 +229,31 @@ export class FSMemoryStore implements IMemoryStore {
     // Cache keys are project paths, dirs are hashes — nuke the whole mirror
     // (forget is rare; the next search re-reads from disk).
     this.cache.clear();
+  }
+
+  async removeById(id: string): Promise<boolean> {
+    if (!existsSync(this.rootPath)) return false;
+    let removed = false;
+    for (const dir of readdirSync(this.rootPath)) {
+      if (dir === 'meta.json') continue;
+      const file = join(this.rootPath, dir, 'memories.jsonl');
+      if (!existsSync(file)) continue;
+      const entries = this.loadFromFile(file);
+      const kept = entries.filter(e => e.id !== id);
+      if (kept.length === entries.length) continue;
+      // 被删除条目的取代者引用指向它时一并解除（与 LocalStorage 实现一致）。
+      for (const e of kept) {
+        if (e.supersededBy === id) {
+          delete e.supersededBy;
+          if (e.lifecycle === 'degraded') e.lifecycle = undefined;
+        }
+      }
+      const body = kept.map(e => JSON.stringify(e)).join('\n');
+      writeFileSync(file, body ? `${body}\n` : '', 'utf-8');
+      this.cache.clear();
+      removed = true;
+    }
+    return removed;
   }
 
   async decay(olderThan: number): Promise<void> {
