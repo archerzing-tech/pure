@@ -66,6 +66,7 @@ import { showToast } from '../shared/toast';
 import { mergeTranscriptWithTurn } from '../shared/conversation';
 import { t } from '../shared/i18n';
 import { effectiveProxyUrl } from '../shared/proxy';
+import { buildShellContext } from '../shared/shellEnv';
 import type { MCPClient } from '../harness/mcp/MCPClient';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import type {
@@ -388,6 +389,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
     environment: buildEnvironmentContext(config),
     runtimes: buildRuntimesContext(),
     network: buildNetworkContext(),
+    shell: buildShellContextLine(),
     skills: config?.hubSkills,
     budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model),
   });
@@ -444,11 +446,16 @@ function withAbortTimeout<T>(
 // runtimes exist on this machine (e.g. whether `node` is available before
 // proposing a Node script) and which network it sits on (system/env proxy,
 // VPN, domestic/international reachability — so web_search backends and
-// web_fetch targets are chosen for what actually works). A missing probe
-// (browser dev mode, Rust invoke failure) leaves the context empty — the
-// sys_info tool still reports both on demand in that case.
+// web_fetch targets are chosen for what actually works). The Rust side now
+// warms its own process-level cache at app startup (static fields permanent,
+// network fields TTL), so this front-end promise resolves instantly after
+// the first send AND every later sys_info tool call hits the same cache
+// instead of re-probing. A missing probe (browser dev mode, Rust invoke
+// failure) leaves the context empty — the sys_info tool still reports on
+// demand in that case.
 let cachedRuntimes = '';
 let cachedNetwork = '';
+let cachedOs = '';
 let runtimesProbe: Promise<string> | null = null;
 
 /** Kick off the one-shot environment probe (idempotent). Callers await the
@@ -471,9 +478,12 @@ export function ensureRuntimesProbed(signal?: AbortSignal): Promise<string> {
         cachedRuntimes = m?.[1]?.trim() ?? '';
         const n = raw.match(/^network:\s*(.+)$/m);
         cachedNetwork = n?.[1]?.trim() ?? '';
+        const o = raw.match(/^os:\s*(.+)$/m);
+        cachedOs = o?.[1]?.trim() ?? '';
       } catch {
         cachedRuntimes = '';
         cachedNetwork = '';
+        cachedOs = '';
       }
       return cachedRuntimes;
     })();
@@ -490,6 +500,10 @@ function buildRuntimesContext(): string {
 function buildNetworkContext(): string {
   if (!cachedNetwork) return '';
   return `\nEnvironment network (this machine): ${cachedNetwork}. Use it to choose what will actually work: if international is blocked, prefer domestic search engines (cn.bing.com / sogou / baidu / 360) and domestic sources, and expect Google/DuckDuckGo to fail; if a system/env proxy is listed, requests route through it when proxy is enabled in Settings → 网络代理.`;
+}
+
+function buildShellContextLine(): string {
+  return cachedOs ? buildShellContext(cachedOs) : '';
 }
 
 // Third-party skills installed from a Skill Hub (Settings → Skills → Skill
@@ -634,6 +648,11 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
 // so a tight deadline turns every request into a forced heuristic fallback.
 // The per-chunk idle clock below is the real safety valve for stalled streams.
 const PLAN_ANALYSIS_TIMEOUT_MS = 60000;
+// Build-mode requests (scaffold a whole project) enumerate the entire structure
+// before emitting the plan — on reasoning models that can exceed the plan-mode
+// budget and force every complex build into the generic-step fallback. Give
+// build mode a wider window; the idle clock still cuts a stalled stream early.
+const BUILD_ANALYSIS_TIMEOUT_MS = 120000;
 
 /**
  * App skills from ~/.pure/skills plus the workspace's .agents/skills (the
@@ -2249,7 +2268,7 @@ export class ChatController {
           // 流式分析 + 任务专属计划：模型按「我理解的需求 → 难度与复杂度 → 我准备怎么做」
           // 的顺序把思考流进思考卡（用户实时看到它怎么想），再输出任务专属计划。需要确认
           // 的关键细节由模型列为计划第一步，执行时自然提问——没有预制的澄清卡片。
-          const llmAnalysis = await generateTaskAnalysis(llm, userText, PLAN_ANALYSIS_TIMEOUT_MS, this.abortController?.signal, {
+          const llmAnalysis = await generateTaskAnalysis(llm, userText, analysis.mode === 'build' ? BUILD_ANALYSIS_TIMEOUT_MS : PLAN_ANALYSIS_TIMEOUT_MS, this.abortController?.signal, {
             context: wsContext,
             onThinking: (delta) => {
               taskAnalysisText += delta;
@@ -2850,6 +2869,7 @@ export class ChatController {
         environment: buildEnvironmentContext(config),
         runtimes: buildRuntimesContext(),
         network: buildNetworkContext(),
+        shell: buildShellContextLine(),
         skills: [...(config.hubSkills ?? []), ...appSkills],
         mode: analysis.mode,
         budget: promptBudgetForProvider(config.customProviders, config.provider, config.model),

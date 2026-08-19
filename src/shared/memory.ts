@@ -10,6 +10,7 @@
 // shared/types.ts directly, never from an adapter module (which only re-exports
 // it). See 三层依赖关系总结.md for the dependency direction.
 import type { MemoryEntry } from './types';
+import { GLOBAL_MEMORY_SCOPE } from './types';
 
 // ── Pattern matchers ──
 
@@ -64,6 +65,21 @@ const TOOL_PATTERNS: Array<[RegExp, string]> = [
   [/\bwasm\b/i, 'WASM'],
 ];
 
+// ── Explicit "remember this tool" patterns ──
+// "记住用 pnpm" / "remember uv" / "pnpm 比 npm 快" — the user explicitly asks
+// to persist a tool preference, which the cross-session memory should honor
+// regardless of the fixed pattern lists above (the user may name any tool,
+// not just the ones in TOOL_PATTERNS). These become `tool_preference` entries
+// WITHOUT a platform (a user-stated preference holds on any platform; only
+// agent-verified tool usage is platform-bound) and in the MACHINE-GLOBAL
+// scope (GLOBAL_MEMORY_SCOPE): "在这台机器上用 uv" holds in every project.
+const REMEMBER_TOOL_PATTERNS: Array<[RegExp, (m: RegExpMatchArray) => string | undefined]> = [
+  [/记住\s*(?:用|使用)?\s*([a-z][a-z0-9._-]{1,40})/i, (m) => m[1]],
+  [/\bremember\s+(?:using\s+)?([a-z][a-z0-9._-]{1,40})/i, (m) => m[1]],
+  [/\b([a-z][a-z0-9._-]{1,40})\s+比\s+([a-z][a-z0-9._-]{1,40})\s+(?:快|好|强|省时)/i, (m) => m[1]],
+  [/用\s+([a-z][a-z0-9._-]{1,40})\s+(?:更好|更快|更合适|更省)/i, (m) => m[1]],
+];
+
 // ── Harvester ──
 
 export interface HarvestContext {
@@ -104,6 +120,29 @@ export function harvestUserPreferences(
   }
   for (const [regex, label] of TOOL_PATTERNS) {
     if (regex.test(text)) push(`User prefers the ${label} tool`);
+  }
+  // Explicit "remember X" asks: honor the named tool even when it is not in
+  // the fixed lists (e.g. uv, pnpm, deno, rye). Deduped against the pattern
+  // harvest above so "remember pnpm" after "pnpm" does not double-write.
+  const pushTool = (tool: string) => {
+    const content = `User wants to use the ${tool} tool`;
+    if (seen.has(content)) return;
+    seen.add(content);
+    entries.push({
+      type: 'tool_preference',
+      content,
+      timestamp: Date.now(),
+      sessionId: ctx.sessionId,
+      // 工具偏好是机器级知识（"这台机器上用 uv"在任何项目都成立）—— 存到
+      // 全局作用域，常驻注入时跨项目可见（agent 验证的工具偏好同样如此，
+      // 见 Harness.writeSessionMemory）。
+      projectPath: GLOBAL_MEMORY_SCOPE,
+    });
+  };
+  for (const [regex, extract] of REMEMBER_TOOL_PATTERNS) {
+    const m = text.match(regex);
+    const tool = m ? extract(m) : undefined;
+    if (tool) pushTool(tool);
   }
   pushStyle(text, push);
 

@@ -242,5 +242,17 @@ describe('WASMEmbeddingStore', () => {
       expect(afterDecay.decayScore).toBeLessThan(1);
       expect(id).toBeTruthy();
     });
+
+    it('removeById deletes from the inner store and returns its outcome', async () => {
+      const { store, inner } = makeStore();
+      await store.add(entry({ content: 'prefers pnpm' }));
+      const id = await store.add(entry({ content: 'prefers uv' }));
+      expect(await store.removeById(id)).toBe(true);
+      expect(inner.list('/proj')).toHaveLength(1);
+      expect(inner.list('/proj')[0].content).toContain('pnpm');
+      // 未知 id → false，不误删。
+      expect(await store.removeById('nope')).toBe(false);
+      expect(inner.list('/proj')).toHaveLength(1);
+    });
   });
 });

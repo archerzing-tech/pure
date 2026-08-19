@@ -53,6 +53,9 @@ export interface PromptAssemblyContext {
    * reachability) so the model picks search backends and fetch targets that
    * actually work on this machine's network. */
   network?: string;
+  /** OS + shell guidance so execute_command uses the correct terminal syntax
+   * on this machine (PowerShell on Windows, POSIX sh on macOS/Linux). */
+  shell?: string;
   skills?: PromptSkill[];
   mode?: PromptTaskMode;
   budget?: PromptBudgetConfig;
@@ -97,7 +100,16 @@ export interface PromptMemoryContext {
   errorPatterns: string[];
   /** v1.9.7 — verified successful patterns, injected with priority so proven approaches are preferred over unproven ones. */
   successes?: string[];
+  /** Same-project proven approaches, injected with TOP priority. Unlike the
+   *  keyword-matched `successes`, these come from a query-independent fetch
+   *  scoped to the current project, so "reuse what worked in THIS project"
+   *  holds even when the new prompt is phrased differently. */
+  projectSuccesses?: string[];
   procedures?: string[];
+  /** Platform-verified tool preferences (from agent exploration / user asks),
+   *  filtered to the CURRENT platform. Injected so the model prefers tools
+   *  that actually work well on this machine — without being limited to them. */
+  toolPreferences?: string[];
   project?: string;
   /** Runtime-selected strategy compiled from current environment and feedback. */
   adaptiveStrategy?: string;
@@ -271,6 +283,7 @@ export class PromptAssembler {
       fragment('environment', context.environment ?? '', 60),
       fragment('runtimes', context.runtimes ?? '', 45),
       fragment('network', context.network ?? '', 50),
+      fragment('shell', context.shell ?? '', 58),
       fragment('skills', buildSkills(context.skills), 30),
       fragment('task_mode', buildMode(context.mode), 85),
     ].filter((item): item is PromptFragment => item !== null);
@@ -348,7 +361,9 @@ export class PromptAssembler {
       memory.preferences.length > 0
       || memory.errorPatterns.length > 0
       || (memory.successes?.length ?? 0) > 0
+      || (memory.projectSuccesses?.length ?? 0) > 0
       || (memory.procedures?.length ?? 0) > 0
+      || (memory.toolPreferences?.length ?? 0) > 0
       || Boolean(memory.adaptiveStrategy?.trim())
     );
     if (!hasMemory) return input.template;
@@ -356,6 +371,11 @@ export class PromptAssembler {
     const memoryFragments = [
       fragment('memory_project', memory?.project ? `Project: ${memory.project}` : '', 35),
       fragment('memory_preferences', memory?.preferences.length ? `User preferences:\n${memory.preferences.map((value) => `- ${value}`).join('\n')}` : '', 45),
+      fragment('memory_tools', memory?.toolPreferences?.length ? `Platform-verified tools (prefer these on this machine when the situation fits — you are not limited to them):\n${memory.toolPreferences.map((value) => `- ${value}`).join('\n')}` : '', 58),
+      // Same-project proven approaches rank FIRST among the success signals:
+      // they were verified in THIS project, so the model should reach for them
+      // before generic or cross-project approaches.
+      fragment('memory_project_successes', memory?.projectSuccesses?.length ? `Project-proven approaches (from past sessions in this project — prefer these when applicable):\n${memory.projectSuccesses.map((value) => `- ${value}`).join('\n')}` : '', 60),
       // v1.9.7 — proven successes rank ABOVE errors: when a verified approach
       // matches, the model should prefer it; error patterns are avoid-lists.
       fragment('memory_successes', memory?.successes?.length ? `Proven successful approaches (prefer these when the situation matches):\n${memory.successes.map((value) => `- ${value}`).join('\n')}` : '', 60),

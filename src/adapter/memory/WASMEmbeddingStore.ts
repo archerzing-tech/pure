@@ -24,7 +24,7 @@
 // NOTE: the official successor of the doc's `@xenova/transformers` is
 // `@huggingface/transformers` (same API: pipeline('feature-extraction', …)).
 
-import type { IMemoryStore, MemoryEntry, MemorySearchOptions } from './IMemoryStore';
+import type { IMemoryStore, MemoryEntry, MemoryListOptions, MemorySearchOptions } from './IMemoryStore';
 import { searchMemories } from './keywordSearch';
 import { EVOLUTION, healthScore, type EvolutionConfig } from './evolution';
 import type { MemoryDecayInfo } from './LocalStorageMemoryStore';
@@ -40,7 +40,7 @@ export interface WASMEmbeddingStoreOptions {
    * kind of concrete-store extension (settings-panel diagnostics).
    */
   store: IMemoryStore & {
-    list(projectPath?: string): MemoryEntry[];
+    list(projectPath?: string | MemoryListOptions): MemoryEntry[];
     getLastDecayInfo?(): MemoryDecayInfo;
     importEntries?(entries: MemoryEntry[]): Promise<{ imported: number; skipped: number }>;
   };
@@ -221,6 +221,13 @@ export class WASMEmbeddingStore implements IMemoryStore {
     return this.store.forget(sessionId);
   }
 
+  async removeById(id: string): Promise<boolean> {
+    // 与 forget 一致：删除后该条目的向量/内容缓存必须失效，否则下一次
+    // search 的 corpus 修剪（vecCache.size > all.length）可能残留陈旧条目。
+    this.vecCache.delete(id);
+    return this.store.removeById(id);
+  }
+
   async decay(olderThan: number): Promise<void> {
     return this.store.decay(olderThan);
   }
@@ -229,11 +236,11 @@ export class WASMEmbeddingStore implements IMemoryStore {
     await this.store.recordHits(entries);
   }
 
-  /** 枚举全部记忆（设置面板记忆库可视化用）。委托内层持久化 store；
-   *  非 IMemoryStore 接口成员，与 FSMemoryStore/LocalStorageMemoryStore
-   *  的 list() 扩展保持一致。 */
-  list(projectPath?: string): MemoryEntry[] {
-    return this.store.list(projectPath);
+  /** 枚举全部记忆（设置面板记忆库可视化、机器级常驻注入用）。委托内层
+   *  持久化 store，与 FSMemoryStore/LocalStorageMemoryStore 的 list()
+   *  过滤语义保持一致。 */
+  list(opts?: string | MemoryListOptions): MemoryEntry[] {
+    return this.store.list(opts);
   }
 
   /** 上次衰减运行信息（设置面板诊断区）。委托内层持久化 store。 */

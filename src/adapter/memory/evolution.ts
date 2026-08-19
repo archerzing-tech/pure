@@ -71,6 +71,7 @@ export const EVOLUTION = {
     procedure: 1.0,          // 已验证可复用的流程
     user_preference: 0.9,    // 用户的直接表述
     project_convention: 0.85,
+    tool_preference: 0.8,    // 本平台实测可用的工具（agent 验证过，但偏好可能变化）
     error_pattern: 0.8,      // 从失败中学到 —— 可能是暂时的
   } as Record<MemoryType, number>,
 
@@ -103,6 +104,7 @@ const SUPERSEDABLE_TYPES = new Set<MemoryType>([
   'successful_pattern',
   'user_preference',
   'project_convention',
+  'tool_preference',
 ]);
 
 // 无策略含义的英文功能词。剥离它们是为了让模板措辞（"When facing … apply the

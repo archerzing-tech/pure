@@ -23,6 +23,7 @@ import type {
   ToolAdapter,
   ToolResult,
 } from '../../shared/types';
+import { GLOBAL_MEMORY_SCOPE } from '../../shared/types';
 
 const STD_BUDGET: BudgetConfig = {
   maxTurns: 30,
@@ -101,6 +102,11 @@ class FakeMemoryStore implements IMemoryStore {
   async forget(sessionId: string): Promise<void> {
     this.entries = this.entries.filter(e => e.sessionId !== sessionId);
   }
+  async removeById(id: string): Promise<boolean> {
+    const before = this.entries.length;
+    this.entries = this.entries.filter(e => e.id !== id);
+    return this.entries.length !== before;
+  }
   async decay(_olderThan: number): Promise<void> {
     this.decayCalls++;
   }
@@ -113,6 +119,14 @@ class FakeMemoryStore implements IMemoryStore {
         t.lastUsedAt = Date.now();
       }
     }
+  }
+  list(opts?: { projectPath?: string; type?: MemoryEntry['type']; platform?: string; activeOnly?: boolean }): MemoryEntry[] {
+    const project = opts?.projectPath;
+    return this.entries
+      .filter(e => (project === undefined || e.projectPath === project))
+      .filter(e => (opts?.type === undefined || e.type === opts.type))
+      .filter(e => (opts?.platform === undefined || e.platform === opts.platform))
+      .filter(e => !opts?.activeOnly || e.lifecycle !== 'dormant');
   }
 }
 
@@ -439,6 +453,135 @@ describe('Harness cross-session memory (v0.10)', () => {
     expect(repeated[0].content).toContain('web_fetch');
     expect(repeated[0].content).toContain('Do not make this exact call again');
     expect(repeated[0].projectPath).toBe('/ws');
+  });
+
+  it('persists platform-bound tool preferences from executed commands (auto-discovery)', async () => {
+    const memStore = new FakeMemoryStore();
+    const execTool: ToolAdapter = {
+      execute: async (): Promise<ToolResult> => ({
+        id: 'call_1',
+        toolName: 'execute_command',
+        result: { exitCode: 0, stdout: 'added 1 package', stderr: '' },
+        success: true,
+        duration: 3,
+      }),
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'execute_command', description: 'run', input_schema: {} }],
+    };
+    let call = 0;
+    const toolLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        call++;
+        if (call === 1) {
+          const tc = { id: 'call_1', index: 0, function: { name: 'execute_command', arguments: '{"command":"pnpm install"}' } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'execute_command', arguments: tc.function.arguments };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'content', content: 'done' };
+          yield { type: 'done', content: 'done', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const harness = new Harness({
+      sessionId: 'sess-tools',
+      llm: toolLLM,
+      tools: execTool,
+      toolsDefs: [{ name: 'execute_command', description: 'run', input_schema: {} }],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('SYS', 'install deps'));
+
+    const tools = memStore.entries.filter(e => e.type === 'tool_preference');
+    expect(tools.some(t => t.content.includes('pnpm'))).toBe(true);
+    expect(tools[0].platform).toBe(process.platform);
+    expect(tools[0].dedupeKey).toBe(`tool:${process.platform}:pnpm`);
+    // 机器级全局作用域：跨项目可见，不归属当前项目。
+    expect(tools[0].projectPath).toBe(GLOBAL_MEMORY_SCOPE);
+  });
+
+  it('persists [remember] markers the model emitted (tool vs insight)', async () => {
+    const memStore = new FakeMemoryStore();
+    const llm = recordingLLM('Answer here\n[remember] uv\n[remember] 用缓存思路减少重复请求');
+    const harness = new Harness({
+      sessionId: 'sess-rem',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('SYS', 'do the thing'));
+
+    const tools = memStore.entries.filter(e => e.type === 'tool_preference');
+    expect(tools.some(t => t.content.includes('uv'))).toBe(true);
+    expect(tools[0].platform).toBe(process.platform);
+    // 工具偏好机器级全局；思路（successful_pattern）保持项目作用域。
+    expect(tools[0].projectPath).toBe(GLOBAL_MEMORY_SCOPE);
+    const insights = memStore.entries.filter(e => e.type === 'successful_pattern' && e.content.startsWith('Effective approach'));
+    expect(insights.some(i => i.content.includes('缓存思路'))).toBe(true);
+    expect(insights[0].projectPath).toBe('/ws');
+  });
+
+  it('injects only current-platform tool preferences into the system prompt', async () => {
+    const memStore = new FakeMemoryStore();
+    const now = Date.now();
+    await memStore.add({ type: 'tool_preference', content: 'Verified on darwin: the pnpm tool works on this machine', timestamp: now, sessionId: 's1', projectPath: '/ws', platform: 'darwin' });
+    await memStore.add({ type: 'tool_preference', content: 'Verified on win32: the choco tool works on this machine', timestamp: now, sessionId: 's1', projectPath: '/ws', platform: 'win32' });
+    const llm = recordingLLM('answer');
+    const harness = new Harness({
+      sessionId: 'sess-inj',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('BASE SYSTEM', 'tool works on this machine'));
+
+    const sys = llm.received[0][0].content;
+    expect(sys).toContain('Platform-verified tools');
+    if (process.platform === 'darwin') {
+      expect(sys).toContain('pnpm');
+      expect(sys).not.toContain('choco');
+    } else if (process.platform === 'win32') {
+      expect(sys).toContain('choco');
+      expect(sys).not.toContain('pnpm');
+    }
+  });
+
+  it('always injects machine-global tool preferences for the current platform', async () => {
+    const memStore = new FakeMemoryStore();
+    const now = Date.now();
+    await memStore.add({ type: 'tool_preference', content: 'Verified on darwin: the brew tool works on this machine', timestamp: now, sessionId: 's1', projectPath: GLOBAL_MEMORY_SCOPE, platform: 'darwin' });
+    await memStore.add({ type: 'tool_preference', content: 'Verified on win32: the choco tool works on this machine', timestamp: now, sessionId: 's1', projectPath: GLOBAL_MEMORY_SCOPE, platform: 'win32' });
+    // 休眠的全局条目不参与常驻注入（进化生命周期：睡着 ≠ 没了）。
+    await memStore.add({ type: 'tool_preference', content: 'Verified on darwin: the stale tool works on this machine', timestamp: now, sessionId: 's1', projectPath: GLOBAL_MEMORY_SCOPE, platform: 'darwin', lifecycle: 'dormant' });
+    const llm = recordingLLM('answer');
+    const harness = new Harness({
+      sessionId: 'sess-global-inj',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    // 用户提示与工具名零 token 重叠 —— 语义检索命中不了，常驻注入必须仍能看到。
+    await collect(harness.run('BASE SYSTEM', 'unrelated question about math'));
+
+    const sys = llm.received[0][0].content;
+    expect(sys).toContain('Platform-verified tools');
+    const mine = process.platform === 'darwin' ? 'brew' : 'choco';
+    const other = process.platform === 'darwin' ? 'choco' : 'brew';
+    expect(sys).toContain(mine);
+    expect(sys).not.toContain(other);
+    expect(sys).not.toContain('stale');
   });
 
   it('skips the do-not-retry memory when a repeated failure is later overcome (v0.12 transient exemption)', async () => {

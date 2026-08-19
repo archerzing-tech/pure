@@ -4,7 +4,7 @@
 // Fixes: handleWriteFile uses proper fs.mkdir() instead of fragile .ensure hack.
 
 import { basename, dirname, isAbsolute, join, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
-import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
@@ -18,10 +18,20 @@ import { pageCacheKey, PAGE_TTL_MS, searchCacheKey, SEARCH_TTL_MS, webCache } fr
 import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeViaJina, truncateText } from './webScrape';
 import { extractFileText, MAX_SEARCH_FILE_BYTES } from './fileText';
 
-/** Windows has no POSIX shell (`sh`) or `diff` binary — cmd.exe / Git for
+/** Windows has no POSIX shell (`sh`) or `diff` binary — PowerShell / Git for
  * Windows provide the equivalents. Module-level so every handler branches
  * consistently. */
 const IS_WINDOWS = process.platform === 'win32';
+
+/** Encode a command for powershell.exe -EncodedCommand (base64 of UTF-16LE),
+ * with the exit-code wrapper appended so a failing command reports non-zero
+ * (mirrors Rust powershell_encoded_command). The encoded form bypasses the
+ * Windows command-line quoting mangling (CommandLineToArgvW-style `\"`
+ * escaping) a plain -Command argument is subject to. Exported for tests. */
+export function encodePowerShellCommand(command: string): string {
+  return Buffer.from(`${command}; if ($?) { exit $LASTEXITCODE } else { exit 1 }`, 'utf16le').toString('base64');
+}
+
 const DEFAULT_MAX_LIST_RESULTS = 2000;
 const ABSOLUTE_MAX_LIST_RESULTS = 5000;
 
@@ -600,12 +610,27 @@ export class NodeToolAdapter implements ToolAdapter {
     const abort = createAbortController(signal, this.commandTimeout);
 
     try {
-      const shellArgs = IS_WINDOWS ? ['cmd', '/C', command] : ['sh', '-c', command];
+      // Windows commands run through powershell.exe -EncodedCommand: the
+      // base64-UTF-16LE form bypasses the command-line quoting mangling a
+      // plain -Command argument is subject to. The encoding also carries the
+      // exit-code wrapper — PowerShell 5.1 exits 0 after a plain -Command
+      // unless the script calls `exit` itself, and `$?` is false for both a
+      // failing native command and a failing cmdlet, so either reports as
+      // non-zero (mirrors Rust powershell_encoded_command).
+      const shellArgs = IS_WINDOWS
+        ? ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodePowerShellCommand(command)]
+        : ['sh', '-c', command];
+      // Inject the extended probe PATH on Unix so `node` / `bun` / nvm /
+      // Homebrew commands resolve even when this process inherited a minimal
+      // PATH (IDE integrated terminal, GUI-spawned launcher) — mirrors Rust
+      // execute_command. Windows inherits the full system PATH.
+      const spawnEnv = IS_WINDOWS ? undefined : { ...process.env, PATH: extendedProbePath() };
       const proc = Bun.spawn(shellArgs, {
         cwd: this.workspace,
         stdout: 'pipe',
         stderr: 'pipe',
         signal: abort.signal,
+        env: spawnEnv,
       });
 
       const stdout = (await new Response(proc.stdout).text()).trim();
@@ -1947,9 +1972,73 @@ function editStringNotFoundError(path: string, oldString: string): string {
 
 /** Probe installed runtime versions (node / bun / python3 / rustc / git --version),
  * mirroring detect_runtime_versions in src-tauri/src/lib.rs. python3 prints
- * to stderr, so both streams are checked. Never throws. */
+ * to stderr, so both streams are checked. Never throws. The result is cached
+ * per process: runtimes cannot change mid-run, so repeated sys_info calls
+ * must not re-spawn the five subprocesses. */
 export function detectRuntimeVersions(): string[] {
+  if (cachedRuntimeVersions === null) cachedRuntimeVersions = probeRuntimeVersions();
+  return cachedRuntimeVersions;
+}
+
+let cachedRuntimeVersions: string[] | null = null;
+
+/** Directories where user-installed runtimes commonly live, missing from a
+ * minimal inherited PATH (GUI-launched processes / IDE terminals). Mirrors
+ * Rust probe_extra_path_dirs; missing entries are simply skipped. */
+function extraProbePathDirs(): string[] {
+  const home = process.env.HOME ?? '';
+  const dirs = [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    `${home}/.bun/bin`,
+    `${home}/.volta/bin`,
+    `${home}/.local/bin`,
+    `${home}/.cargo/bin`,
+  ];
+  // nvm: ~/.nvm/versions/node/<version>/bin — every installed version.
+  try {
+    for (const entry of readdirSync(`${home}/.nvm/versions/node`, { withFileTypes: true })) {
+      if (entry.isDirectory()) dirs.push(`${home}/.nvm/versions/node/${entry.name}/bin`);
+    }
+  } catch {}
+  // fnm: ~/.local/share/fnm/node-versions/<version>/installation/bin.
+  try {
+    for (const entry of readdirSync(`${home}/.local/share/fnm/node-versions`, { withFileTypes: true })) {
+      if (entry.isDirectory()) dirs.push(`${home}/.local/share/fnm/node-versions/${entry.name}/installation/bin`);
+    }
+  } catch {}
+  // asdf: ~/.asdf/installs/{nodejs,bun}/<version>/bin.
+  for (const tool of ['nodejs', 'bun']) {
+    try {
+      for (const entry of readdirSync(`${home}/.asdf/installs/${tool}`, { withFileTypes: true })) {
+        if (entry.isDirectory()) dirs.push(`${home}/.asdf/installs/${tool}/${entry.name}/bin`);
+      }
+    } catch {}
+  }
+  return dirs;
+}
+
+/** PATH for runtime probes: inherited PATH plus the user-install directories
+ * above (deduplicated, extras first so a user's nvm node wins over the system
+ * node). Mirrors Rust probe_path. Windows inherits the full system PATH. */
+export function extendedProbePath(): string {
+  const inherited = (process.env.PATH ?? '').split(':').filter(Boolean);
+  const parts: string[] = [];
+  for (const dir of extraProbePathDirs()) {
+    if (!inherited.includes(dir) && !parts.includes(dir)) parts.push(dir);
+  }
+  parts.push(...inherited);
+  return parts.join(':');
+}
+
+function probeRuntimeVersions(): string[] {
   const out: string[] = [];
+  // The CLI usually inherits a full PATH, but a parent launcher (IDE
+  // integrated terminal, GUI-spawned process) may pass a minimal one that
+  // misses nvm/bun/volta/fnm/asdf/Homebrew installs (mirrors Rust).
+  const probeEnv = process.platform === 'win32'
+    ? undefined
+    : { ...process.env, PATH: extendedProbePath() };
   for (const [label, args] of [
     ['node', ['--version']],
     ['bun', ['--version']],
@@ -1959,7 +2048,7 @@ export function detectRuntimeVersions(): string[] {
   ] as const) {
     let version = 'not installed';
     try {
-      const r = Bun.spawnSync({ cmd: [label, ...args], stdout: 'pipe', stderr: 'pipe' });
+      const r = Bun.spawnSync({ cmd: [label, ...args], stdout: 'pipe', stderr: 'pipe', env: probeEnv });
       if (r.exitCode === 0) {
         // Collapse internal whitespace/newlines: version output lands in the
         // system prompt verbatim, so multi-line banners must not break out of
@@ -2044,17 +2133,28 @@ function detectEnvProxySummary(): string {
 
 /** Sync network summary (no live reachability — that needs async fetch and
  * belongs to sys_info). Exported so the CLI reuses it for its system prompt,
- * keeping the prompt pre-seed and sys_info output consistent. */
+ * keeping the prompt pre-seed and sys_info output consistent. Cached per
+ * process: the underlying probes spawn subprocesses (scutil / networksetup),
+ * and the summary cannot change mid-run. */
 export function detectNetworkSummary(): string {
-  return `proxy: ${detectSystemProxySync()}; env: ${detectEnvProxySummary()}; vpn: ${detectVpnSync()}`;
+  if (cachedNetworkSummary === null) {
+    cachedNetworkSummary = `proxy: ${detectSystemProxySync()}; env: ${detectEnvProxySummary()}; vpn: ${detectVpnSync()}`;
+  }
+  return cachedNetworkSummary;
 }
+
+let cachedNetworkSummary: string | null = null;
 
 /** Probe connectivity to a domestic and an international endpoint (2s bound
  * each, in parallel). Note: fetch() honors HTTP(S)_PROXY env vars, so on a
  * machine with env proxies set this reflects the env-proxy-routed view — the
  * CLI normally has none set, and the prompt pre-seed reports them separately.
- * Mirrors Rust probe_reachability. */
+ * Mirrors Rust probe_reachability. The result is cached for REACH_TTL_MS:
+ * reachability is network-state that changes slowly (VPN / proxy toggles),
+ * and the 2s probe must not re-run on every sys_info call. */
 async function detectReachability(): Promise<string> {
+  const now = Date.now();
+  if (cachedReach && now - cachedReach.at < REACH_TTL_MS) return cachedReach.value;
   const probe = async (url: string): Promise<boolean> => {
     try {
       const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(2000) });
@@ -2067,8 +2167,13 @@ async function detectReachability(): Promise<string> {
     probe('https://www.baidu.com/'),
     probe('https://www.google.com/generate_204'),
   ]);
-  return `domestic ${domestic ? 'ok' : 'blocked'}, international ${international ? 'ok' : 'blocked'}`;
+  const value = `domestic ${domestic ? 'ok' : 'blocked'}, international ${international ? 'ok' : 'blocked'}`;
+  cachedReach = { at: now, value };
+  return value;
 }
+
+let cachedReach: { at: number; value: string } | null = null;
+const REACH_TTL_MS = 300_000;
 
 /** Character encoding implied by the locale (en_US.UTF-8 → UTF-8). Modern
  * macOS/Linux default to UTF-8; Windows ANSI code pages are not probed. */

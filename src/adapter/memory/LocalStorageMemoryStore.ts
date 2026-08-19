@@ -3,9 +3,10 @@
 // server). Mirrors FSMemoryStore's semantics (per-project isolation, keyword
 // search, decay) with the browser's only sync persistence: localStorage.
 
-import type { IMemoryStore, MemoryEntry, MemorySearchOptions } from './IMemoryStore';
+import type { IMemoryStore, MemoryEntry, MemoryListOptions, MemorySearchOptions } from './IMemoryStore';
 import { searchMemories } from './keywordSearch';
-import { decayEntry, findSupersedeTarget, healthScore, lifecycleOf, type EvolutionConfig } from './evolution';
+import { EVOLUTION, decayEntry, findSupersedeTarget, healthScore, lifecycleOf, type EvolutionConfig } from './evolution';
+import { GLOBAL_MEMORY_SCOPE } from '../../shared/types';
 
 const STORAGE_KEY = 'pure_memories_v2';
 // 衰减运行元信息（设置面板记忆页诊断区用）：上次衰减时间 + 上次删除/更新条数。
@@ -19,6 +20,8 @@ export interface MemoryDecayInfo {
   lastDeleted?: number;
   /** 上次衰减更新（重算健康分/生命周期）的条目数。 */
   lastUpdated?: number;
+  /** 旧版本项目作用域 tool_preference 一次性迁移完成的时刻（见 migrateLegacyToolPreferences）。 */
+  migratedToolPrefsAt?: number;
 }
 
 function readMeta(): MemoryDecayInfo {
@@ -73,6 +76,41 @@ export class LocalStorageMemoryStore implements IMemoryStore {
 
   constructor(getConfig?: () => Partial<EvolutionConfig> | undefined) {
     this.getConfig = getConfig ?? (() => undefined);
+    // 一次性迁移：旧版本（v1.9.11 之前）按项目隔离写入的 tool_preference
+    // 搬进机器级全局作用域，避免与常驻注入重复。幂等 + meta 标记只跑一次。
+    this.migrateLegacyToolPreferences();
+  }
+
+  /**
+   * 一次性迁移：旧版本把 tool_preference 按项目隔离写入；现在它们属于机器级
+   * 全局作用域（跨项目常驻注入）。把项目作用域的 tool_preference 搬进全局
+   * 并去重（dedupeKey 优先，其次 type+content+platform），保留原 id / 使用
+   * 频率 / 取代链。meta 记 migratedToolPrefsAt 标记，之后不再扫描；无旧条目
+   * 时也不写标记（空库读取几乎零成本）。
+   */
+  private migrateLegacyToolPreferences(): void {
+    const meta = readMeta();
+    if (meta.migratedToolPrefsAt) return;
+    const all = this.read();
+    const tools = all.filter(e => e.type === 'tool_preference' && e.projectPath !== GLOBAL_MEMORY_SCOPE);
+    if (tools.length === 0) return;
+    const matches = (a: MemoryEntry, b: MemoryEntry): boolean =>
+      a.type === b.type && a.platform === b.platform && (
+        (!!a.dedupeKey && a.dedupeKey === b.dedupeKey) ||
+        (!a.dedupeKey && !b.dedupeKey && a.content === b.content)
+      );
+    const global = all.filter(e => e.projectPath === GLOBAL_MEMORY_SCOPE);
+    const moved: MemoryEntry[] = [];
+    for (const t of tools) {
+      // 跨项目 / 已有全局条目去重：同工具只保留一条（已有的优先，跳过迁移）。
+      if (global.some(g => matches(g, t)) || moved.some(m => matches(m, t))) continue;
+      moved.push({ ...t, projectPath: GLOBAL_MEMORY_SCOPE });
+    }
+    if (moved.length > 0) {
+      const kept = all.filter(e => e.type !== 'tool_preference' || e.projectPath === GLOBAL_MEMORY_SCOPE);
+      this.write([...kept, ...moved]);
+    }
+    writeMeta({ ...meta, migratedToolPrefsAt: Date.now() });
   }
 
   /** 读全部条目（命中内存缓存则不 parse）；返回的是缓存数组引用，调用方
@@ -89,11 +127,22 @@ export class LocalStorageMemoryStore implements IMemoryStore {
   }
 
   /** Enumerate entries, optionally scoped to a project (used by
-   *  WASMEmbeddingStore's search; not part of the IMemoryStore interface). */
-  list(projectPath?: string): MemoryEntry[] {
-    const all = this.read();
-    if (projectPath === undefined) return all;
-    return all.filter(e => e.projectPath === projectPath);
+   *  WASMEmbeddingStore's search and the Harness's machine-global
+   *  always-inject). Accepts a project path string (legacy) or filter
+   *  options; activeOnly drops dormant entries (健康分 ≤ dormantMax).
+   *  不记录命中（list 是枚举，不是检索）。 */
+  list(opts?: string | MemoryListOptions): MemoryEntry[] {
+    const project = typeof opts === 'string' ? opts : opts?.projectPath;
+    let all = project === undefined ? this.read() : this.read().filter(e => e.projectPath === project);
+    if (opts && typeof opts !== 'string') {
+      const now = Date.now();
+      const cfg = this.getConfig();
+      const dormantMax = cfg?.dormantMax ?? EVOLUTION.DORMANT_MAX;
+      if (opts.type !== undefined) all = all.filter(e => e.type === opts.type);
+      if (opts.platform !== undefined) all = all.filter(e => e.platform === opts.platform);
+      if (opts.activeOnly) all = all.filter(e => healthScore(e, now, cfg) >= dormantMax);
+    }
+    return all;
   }
 
   /** 上次衰减运行信息（设置面板记忆页诊断区）。非 IMemoryStore 接口成员。 */
@@ -203,6 +252,32 @@ export class LocalStorageMemoryStore implements IMemoryStore {
   async forget(sessionId: string): Promise<void> {
     const entries = this.read().filter(e => e.sessionId !== sessionId);
     this.write(entries);
+  }
+
+  async removeById(id: string): Promise<boolean> {
+    const all = this.read();
+    const idx = all.findIndex(e => e.id === id);
+    if (idx === -1) return false;
+    // 被删除条目的取代者引用（supersededBy）指向它时，一并解除——否则面板
+    // 上被取代徽章的悬浮提示会解析到不存在的 id。
+    let changed = true;
+    for (const e of all) {
+      if (e.supersededBy === id) {
+        delete e.supersededBy;
+        if (e.lifecycle === 'degraded') e.lifecycle = undefined;
+      }
+    }
+    all.splice(idx, 1);
+    // 与 importEntries 一致：裸 setItem，让配额异常冒泡（删除失败必须可见）。
+    const prev = this.cache;
+    this.cache = all;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+    } catch (err) {
+      this.cache = prev;
+      throw err;
+    }
+    return changed;
   }
 
   async decay(olderThan: number): Promise<void> {

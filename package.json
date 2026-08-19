@@ -1,6 +1,6 @@
 {
   "name": "pure",
-  "version": "1.9.11",
+  "version": "1.9.12-beta",
   "private": true,
   "type": "module",
   "scripts": {
