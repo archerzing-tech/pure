@@ -98,13 +98,12 @@ describe('RustLLMAdapter', () => {
       model: 'qwen2.5-coder:7b',
       proxyUrl: 'socks5://127.0.0.1:1080',
       proxyBypassProviders: ['ollama'],
-      proxyBypassModels: ['local-model'],
     }, deps);
     for await (const _chunk of adapter.stream(MSGS, [])) { /* drain */ }
     expect(lastArgs().args.provider).toBe('ollama');
     expect(lastArgs().args.proxyUrl).toBe('socks5://127.0.0.1:1080');
     expect(lastArgs().args.proxyBypassProviders).toEqual(['ollama']);
-    expect(lastArgs().args.proxyBypassModels).toEqual(['local-model']);
+    expect(lastArgs().args.proxyBypassModels).toBeUndefined();
     expect(lastArgs().args.apiKey).toBe('');
   });
 

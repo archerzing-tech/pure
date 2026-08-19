@@ -104,4 +104,13 @@ describe('LLM page layout (default-model bar + provider grid)', () => {
     expect(settings).toContain('models.length >= 2 ? models :');
     expect(settings).toContain('[...models, \'\', \'\'].slice(0, 2)');
   });
+
+  it('keeps proxy bypass rules at provider scope only', () => {
+    const settings = readFileSync(new URL('../settings.ts', import.meta.url), 'utf8');
+    expect(index).toContain('id="cfg-proxy-bypass-providers"');
+    expect(index).not.toContain('id="cfg-proxy-bypass-models"');
+    expect(settings).toContain('cfg-proxy-bypass-providers');
+    expect(settings).not.toContain('cfg-proxy-bypass-models');
+    expect(settings).not.toContain('bypassModels: normalizeProxyList');
+  });
 });

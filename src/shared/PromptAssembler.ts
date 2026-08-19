@@ -40,6 +40,8 @@ export interface PromptAssemblyContext {
   /** Definitions sent in the provider's separate tools payload. They are
    * counted by the compiler but are not duplicated into the system text. */
   toolDefinitions?: ToolDefinition[];
+  /** The actual provider/model requested for this turn, distinct from the app identity. */
+  modelIdentity?: { provider: string; model: string };
   /**
    * True when the connected provider exposes text-to-image (generate_image).
    * Swaps the SVG output contract for the image-generation contract: image
@@ -158,7 +160,7 @@ function buildOutputStyle(surface: PromptSurface, imageGeneration = false): stri
   const visualOutput = surface === 'gui'
     ? imageGeneration
       ? `- To SHOW a picture/icon/illustration/photo, call generate_image — the app renders the result as a real image. For hand-drawn diagrams (flowcharts, architecture, sequence), still emit fenced code blocks tagged svg / mermaid / puml.\n- ${CHART_DSL_PROMPT}`
-      : `- To SHOW a picture/diagram, emit it as a fenced code block tagged svg containing complete standalone SVG — the app renders it inline as an image (diagrams render too: mermaid for flowchart/gantt/sequence, puml for PlantUML).\n- ${CHART_DSL_PROMPT}`
+      : `- To SHOW a picture/diagram, emit it as a fenced code block tagged svg containing complete standalone SVG — the app renders it inline as an image (diagrams render too: mermaid for flowchart/gantt/sequence, puml for PlantUML). A picture request is DELIVERED as the fenced svg block itself — never save it with write_file as an .svg/.png file, and never emit SVG as plain text or in a non-svg code block.\n- ${CHART_DSL_PROMPT}`
     : '- For diagrams (processes, flows, architecture, sequences), emit a fenced code block tagged mermaid (graph/flowchart: A --> B) or puml/plantuml (activity: :step; --> / sequence: Alice -> Bob: message) — the CLI renders these as a wireframe with boxes and connecting lines. Keep the response readable in a terminal.';
   return `Output style:
 - Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").
@@ -230,6 +232,13 @@ function joinFragments(fragments: PromptFragment[]): string {
   return fragments.map((item) => item.content).join('\n\n');
 }
 
+function buildModelIdentity(identity?: { provider: string; model: string }): string {
+  const provider = identity?.provider.trim();
+  const model = identity?.model.trim();
+  if (!provider || !model) return '';
+  return `<model_identity>\nApplication: pure (the host application).\nProvider: ${provider}\nUnderlying model: ${model}\nWhen the user asks which large language model you are, answer with the underlying model and provider above. Do not answer only "pure": pure is the application, not the underlying model. If the user asks about the application, you may identify it separately as pure.\n</model_identity>`;
+}
+
 function buildTaskFragments(context: UserTurnContext): PromptFragment[] {
   const parts: Array<[string, string | undefined, number, boolean?]> = [
     ['traps', context.traps, 70],
@@ -266,6 +275,7 @@ export class PromptAssembler {
     const capabilities = context.capabilities.trim();
     return [
       fragment('system_core', SYSTEM_CORE_PROMPT, 120, true),
+      fragment('model_identity', buildModelIdentity(context.modelIdentity), 118, true),
       fragment('capabilities', `<capabilities>${capabilities ? `\n${capabilities}` : ''}\n</capabilities>`, 75),
       fragment('work_invariant', 'Work step by step. Read before you write. Verify after you change. Be concise.', 110, true),
       fragment('workflow', WORKFLOW_PROMPT, 90),

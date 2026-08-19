@@ -3,7 +3,7 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v1.9.12-beta
+## v1.9.12
 
 **机器级工具偏好 + sys_info 缓存 + 系统环境 PATH 增强**
 
@@ -14,6 +14,8 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - 系统环境探测增强：PATH 补齐 nvm / bun / volta / fnm / asdf / Homebrew 等用户级运行时目录，Finder 启动的 GUI 也能找到 node / bun / python3
 - Windows 命令执行改走 PowerShell -EncodedCommand（base64 UTF-16LE），规避命令行引号转义损坏，失败命令正确报非零退出码
 - 修复：原生文件图标命令（get_file_icon）此前未注册进 Tauri 命令表导致静默失效，现已注册
+- 设置 → 供应商卡片与展开面板新增「供应商 ID」展示：每个 provider 的机器标识（如 deepseek-openai / ollama）以代码样式 chip 显示，点击即复制，可直接粘贴到代理直连例外列表（直连例外只影响应用内配置的代理，系统 VPN / 环境变量代理不在应用管辖范围）
+- 修复：图片请求（如「画一只小鸟」）在无文生图能力的供应商下，模型有时会用 write_file 把图存成 .svg 文件而非输出 ```svg 代码块，导致聊天里只看到 SVG 源码 + 一个文件卡片，图片不渲染——现在 SVG 输出契约覆盖单图/多图并明确禁止 write_file 存图片、禁止非 svg 代码块；同时模型写出的 .svg 工件卡片会内联渲染缩略图，即使模型仍写文件也能在对话里看到图
 
 ## v1.9.11
 

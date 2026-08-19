@@ -144,7 +144,7 @@ describe('proxy configuration', () => {
     expect(normalizeProxyConfig({ hasPassword: 'yes' as unknown as boolean }).hasPassword).toBe(false);
   });
 
-  it('bypasses LLM traffic by provider or model name', () => {
+  it('bypasses all models of a provider, not individual model names', () => {
     const config = normalizeProxyConfig({
       enabled: true,
       url: 'socks5://127.0.0.1:1080',
@@ -152,7 +152,8 @@ describe('proxy configuration', () => {
       bypassModels: ['deepseek-r1:8b'],
     });
     expect(shouldBypassProxy('ollama', 'qwen2.5-coder:7b', config)).toBe(true);
-    expect(shouldBypassProxy('custom', 'deepseek-r1:8b', config)).toBe(true);
+    expect(shouldBypassProxy('ollama', 'llama3.1:8b', config)).toBe(true);
+    expect(shouldBypassProxy('custom', 'deepseek-r1:8b', config)).toBe(false);
     expect(shouldBypassProxy('qwen', 'qwen3-coder-next', config)).toBe(false);
   });
 

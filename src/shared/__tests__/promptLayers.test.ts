@@ -60,6 +60,16 @@ describe('L1 behavior contracts', () => {
     expect(SVG_OUTPUT_PROMPT).toContain('NO prose between them');
   });
 
+  it('bans saving picture files with write_file and non-svg code blocks', () => {
+    // Root cause of the "画一只鸟 → 弹出一个 .svg 文件而不是聊天里渲染图片" bug:
+    // the contract must cover SINGLE image requests too, and forbid the model
+    // from writing the picture to disk (or emitting it as plain text / other
+    // code-block languages) — the fenced svg block IS the deliverable.
+    expect(SVG_OUTPUT_PROMPT).toContain('ANY image request');
+    expect(SVG_OUTPUT_PROMPT).toContain('NEVER use write_file / edit_file to save the picture');
+    expect(SVG_OUTPUT_PROMPT).toContain('must be tagged svg');
+  });
+
   it('replaces the SVG contract with generate_image when the model supports text-to-image', () => {
     expect(IMAGE_GEN_OUTPUT_PROMPT).toContain('generate_image(prompt, n?, size?)');
     expect(IMAGE_GEN_OUTPUT_PROMPT).toContain('创作一个小狗图标');

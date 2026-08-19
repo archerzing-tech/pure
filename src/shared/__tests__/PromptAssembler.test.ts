@@ -42,6 +42,19 @@ describe('PromptAssembler', () => {
     expect(cli).toContain('researcher_web(prompt');
   });
 
+  it('separates the host application identity from the underlying model identity', () => {
+    const prompt = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: 'test',
+      modelIdentity: { provider: 'deepseek-openai', model: 'deepseek-v4-flash' },
+    });
+    expect(prompt).toContain('<model_identity>');
+    expect(prompt).toContain('Application: pure (the host application).');
+    expect(prompt).toContain('Provider: deepseek-openai');
+    expect(prompt).toContain('Underlying model: deepseek-v4-flash');
+    expect(prompt).toContain('Do not answer only "pure"');
+  });
+
   it('injects app-skill bodies alongside hub skills', () => {
     const assembly = assembler.buildSystemPrompt({
       surface: 'gui',

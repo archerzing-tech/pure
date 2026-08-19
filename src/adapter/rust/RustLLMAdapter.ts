@@ -38,7 +38,6 @@ export interface RustLLMConfig {
   secretKey?: string;
   proxyUrl?: string;
   proxyBypassProviders?: string[];
-  proxyBypassModels?: string[];
 }
 
 export interface RustLLMDeps {
@@ -139,7 +138,6 @@ export class RustLLMAdapter implements LLMAdapter {
           requestId,
           proxyUrl: this.config.proxyUrl ?? '',
           proxyBypassProviders: this.config.proxyBypassProviders ?? [],
-          proxyBypassModels: this.config.proxyBypassModels ?? [],
         },
         onChunk: channel,
       })
