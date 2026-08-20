@@ -516,7 +516,7 @@ export function createQualityGateCard(): QualityGateCardHandle {
     const entry = byPhase.get(phase);
     if (!entry) return;
     const { row, check, num, status: statusEl, evidence, evidenceBody, index } = entry;
-    row.classList.remove('pending', 'active', 'done', 'failed', 'unavailable');
+    row.classList.remove('pending', 'active', 'done', 'degraded', 'failed', 'unavailable');
     if (status === 'active') {
       row.classList.add('active');
       check.textContent = '';
@@ -545,6 +545,14 @@ export function createQualityGateCard(): QualityGateCardHandle {
       num.textContent = String(index + 1);
       statusEl.textContent = summary ?? '无法验证';
       activity.textContent = `${phaseLabels[phase]}无法形成证据：${summary ?? '无法验证'}`;
+    } else if (status === 'not_applicable') {
+      // No standard entry point exists (static page / plain script workspace):
+      // the check completes but as 不适用, styled like a soft degraded row.
+      row.classList.add('degraded');
+      check.textContent = '–';
+      num.textContent = String(index + 1);
+      statusEl.textContent = summary ?? '不适用';
+      activity.textContent = `${phaseLabels[phase]}不适用：${summary ?? '无标准检查入口'}`;
     } else {
       row.classList.add('failed');
       check.textContent = '✗';

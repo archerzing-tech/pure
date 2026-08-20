@@ -264,6 +264,10 @@ describe('PromptAssembler', () => {
     expect(prompt).not.toContain('ONE separate fenced code block tagged svg PER image');
     // The output-style line also routes pictures through the tool.
     expect(prompt).toContain('call generate_image');
+    // ...but attached-image QUESTIONS must never route to generation: the
+    // image-attachment input contract and the output contract both say so.
+    expect(prompt).toContain('answer directly from the attachment — do NOT call generate_image');
+    expect(prompt).toContain('do NOT call generate_image — inspect the attachment and answer directly');
     // Plain-chat mode with image generation still skips filesystem tools.
     const plain = assembler.buildSystemPrompt({
       surface: 'gui',

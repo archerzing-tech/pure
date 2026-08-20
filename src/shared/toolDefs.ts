@@ -307,7 +307,7 @@ export const PUBLIC_TOOL_NAMES = new Set([
  */
 export const IMAGE_GEN_TOOL_DEF: ToolDefinition = {
   name: 'generate_image',
-  description: 'Generate an image (PNG/JPEG) with the connected provider\'s text-to-image model and render it in the chat. Use this for icon/logo/illustration/photo/poster requests ("创作一个小狗图标", "生成一张 xxx 图片"). Never emit ```svg blocks for image requests while this tool is available — SVG is only for hand-drawn diagrams (flowcharts, architecture), and for falling back when this tool fails.',
+  description: 'Generate an image (PNG/JPEG) with the connected provider\'s text-to-image model and render it in the chat. Use this ONLY to CREATE new images from a text prompt — icon/logo/illustration/photo/poster requests ("创作一个小狗图标", "生成一张 xxx 图片"). This tool never explains or analyzes a picture: when the user attached an image and asks what it is / to describe or interpret it, answer directly from the attachment and do NOT call this tool. Never emit ```svg blocks for image requests while this tool is available — SVG is only for hand-drawn diagrams (flowcharts, architecture), and for falling back when this tool fails.',
   input_schema: {
     type: 'object',
     properties: {

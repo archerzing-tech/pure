@@ -9460,6 +9460,45 @@ button svg,
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary)) transparent;
 }
+
+/* Search history rows (stat-search-list) get the same scroll window as the
+   other history lists — without it the queries compress into an unreadable
+   squeezed column once a session accumulates many searches. */
+#context-panel #stat-search-list {
+  max-height: min(28vh, 220px);
+  min-height: 64px;
+  padding: 2px 4px 4px 0;
+  gap: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary)) transparent;
+}
+#context-panel #stat-search-list::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+  display: block;
+}
+#context-panel #stat-search-list::-webkit-scrollbar-track { background: transparent; }
+#context-panel #stat-search-list::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary));
+}
+#context-panel #stat-search-list::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+#context-panel #stat-search-list .stats-list-item {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 7px 10px;
+  background: color-mix(in srgb, var(--bg-card) 82%, var(--accent-soft));
+  font-size: 10.5px;
+  line-height: 1.5;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
 #context-panel #stat-write-list::-webkit-scrollbar {
   width: 7px;
   height: 7px;

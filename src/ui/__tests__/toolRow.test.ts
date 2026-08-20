@@ -1,7 +1,7 @@
 // src/ui/__tests__/toolRow.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded } from '../toolRow';
+import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded } from '../toolRow';
 import type { GeneratedImage } from '../../shared/types';
 
 // Minimal fake DOM sufficient for createToolRow + finalizeToolRow's image
@@ -120,6 +120,55 @@ describe('tool row focus layout', () => {
       expect(isToolRowExpanded(row)).toBe(false);
       expect(row.details.open).toBe(true);
       expect(row.expandButton.getAttribute('aria-pressed')).toBe('false');
+    } finally {
+      restore();
+    }
+  });
+
+  it('never re-opens a details the user collapsed when maximize toggles', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('execute_command', { command: 'bun test' });
+      row.details.open = false; // the user collapsed this row
+
+      row.expandButton.click();
+      expect(isToolRowExpanded(row)).toBe(true);
+      expect(row.details.open).toBe(false);
+
+      row.expandButton.click();
+      expect(isToolRowExpanded(row)).toBe(false);
+      expect(row.details.open).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not leave the compositor layer hint behind when nothing moves', () => {
+    const restore = installFakeDocument();
+    try {
+      // Activate the FLIP path: geometry + matchMedia must exist. Static
+      // geometry means the layout delta is zero (a single-card round that is
+      // already full-width), so no FLIP runs and the layer hint is dropped.
+      const rect = { width: 1000, height: 147, top: 100, left: 50, x: 50, y: 100, right: 1050, bottom: 247 };
+      const previousMatchMedia = (globalThis as any).matchMedia;
+      (globalThis as any).matchMedia = () => ({ matches: false });
+      const previousCreate = (globalThis as any).document.createElement;
+      (globalThis as any).document.createElement = (tag: string) => {
+        const el = previousCreate(tag);
+        el.getBoundingClientRect = () => rect;
+        return el;
+      };
+      try {
+        const row = createToolRow('execute_command', { command: 'bun test' });
+        setToolRowExpanded(row, true);
+        expect(row.el.classList.contains('tool-row-expanded')).toBe(true);
+        // No delta → no animation → the will-change promotion must be undone.
+        expect(row.el.style.willChange).toBe('');
+        expect(row.el.style.backfaceVisibility).toBe('');
+      } finally {
+        (globalThis as any).matchMedia = previousMatchMedia;
+        (globalThis as any).document.createElement = previousCreate;
+      }
     } finally {
       restore();
     }

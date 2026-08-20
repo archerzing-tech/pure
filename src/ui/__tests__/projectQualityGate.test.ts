@@ -170,6 +170,34 @@ describe('project quality gate', () => {
     expect(result.checks[1].status).toBe('passed');
   });
 
+  it('treats a no-manifest workspace as verify-not-applicable instead of blocking delivery', async () => {
+    // The user's reported dead rule: "生成 4 个网页大屏" (static HTML pages, no
+    // package.json/Cargo.toml) — the audit vacuously passes but the old verify
+    // path hard-blocked with "无法形成验证证据 → 禁止宣称完成".
+    const result = await runProjectQualityGate(adapter('VERDICT: PASS', [
+      { success: true, result: '[audit-not-applicable]' },
+      { success: true, result: '[verify-not-applicable] no standard test manifest' },
+    ]));
+    expect(result.passed).toBe(true);
+    expect(result.checks.map((check) => check.status)).toEqual(['passed', 'passed', 'not_applicable']);
+    expect(qualityGateSummary(result)).toContain('自动化验证不适用');
+    const evidence = qualityGateEvidence(result, false);
+    expect(evidence).toContain('自动化验证：不适用（无标准测试入口）');
+    expect(evidence).toContain('交付带有限制');
+    expect(evidence).not.toContain('禁止宣称完成');
+  });
+
+  it('accepts clean local review plus verify-not-applicable (static web page task)', async () => {
+    const result = await runProjectQualityGate(adapter('I think it is fine', [
+      { success: true, result: '[local-review] git diff --check\n[local-review] no credential pattern found' },
+      { success: true, result: '[audit-not-applicable]' },
+      { success: true, result: '[verify-not-applicable] no standard test manifest' },
+    ]));
+    expect(result.passed).toBe(true);
+    expect(result.checks.map((check) => check.status)).toEqual(['degraded', 'passed', 'not_applicable']);
+    expect(qualityGateSummary(result)).toContain('交付带有限制');
+  });
+
   it('records repair rounds and concrete issue history in delivery evidence', async () => {
     const result = await runProjectQualityGate(adapter('VERDICT: PASS', [
       { success: true, result: '[audit-tool] npm audit --json\\n{"vulnerabilities":{"x":{"severity":"high"}}}\\n[audit-exit] 1' },
@@ -331,12 +359,13 @@ describe('project quality gate', () => {
 });
 
 describe('verification command helpers', () => {
-  it('buildVerifyCommand covers npm, cargo, and Python stacks', () => {
+  it('buildVerifyCommand covers npm, cargo, Go, and Python stacks', () => {
     expect(buildVerifyCommand()).toContain('npm run typecheck');
     expect(buildVerifyCommand()).toContain('verify-missing-tests');
     expect(buildVerifyCommand()).toContain('hasTestFile');
     expect(buildVerifyCommand()).toContain('node_modules');
     expect(buildVerifyCommand()).toContain('cargo test');
+    expect(buildVerifyCommand()).toContain('go test ./...');
     expect(buildVerifyCommand()).toContain('pytest');
   });
 

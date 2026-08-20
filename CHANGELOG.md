@@ -3,6 +3,15 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.12-adv
+
+**质量门禁不适用态 + 附图片提问不再误触发图片生成 + 工具卡展开动画修复**
+
+- 交付质量门禁：verify 阶段遇到无标准测试入口（静态网页/纯脚本工作区）时如实标记为“不适用”而非硬性阻断——生成 4 个静态网页大屏不再被“禁止宣称完成”卡死；编码项目缺测试仍照常阻断并可自动修复（fallback 验证命令补 go test）
+- generate_image 工具描述与所有图片契约补上负面规则：用户上传图片问“是什么/描述一下”时直接看图作答，绝不调用 generate_image 生成新图
+- 工具卡放大/还原动画：合成层提升提前到布局变更之前、移除 details.open 冗余重赋值，消除 macOS WKWebView 下点击放大按钮“闪一下”的问题
+- 交付/图片/门禁修复配套测试 1430 项全绿
+
 ## v1.9.12
 
 **机器级工具偏好 + sys_info 缓存 + 系统环境 PATH 增强**

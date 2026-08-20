@@ -968,7 +968,7 @@ async function runCliDeliveryGate(
   const result = await runProjectQualityGate(tools, {
     profile,
     onPhase: (phase, status, summary) => {
-      const icon = status === 'active' ? '●' : status === 'passed' ? '✓' : status === 'failed' ? '✗' : '!';
+      const icon = status === 'active' ? '●' : status === 'passed' ? '✓' : status === 'failed' ? '✗' : status === 'not_applicable' ? '–' : '!';
       process.stdout.write(`  ${status === 'passed' ? green(icon) : status === 'failed' ? red(icon) : yellow(icon)} ${phase}: ${summary ?? status}\n`);
     },
     onCheck: (check) => {
