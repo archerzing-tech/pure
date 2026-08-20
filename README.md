@@ -237,6 +237,26 @@ bun run gui          # dev mode with hot reload
 bun run gui:build    # production build → src-tauri/target/release/bundle/
 ```
 
+### Real-browser plan/session regression
+
+The GUI includes a real Chromium/WebView-equivalent smoke test for plan progress. It starts Vite and an isolated headless Chrome profile when needed, seeds two sessions through the browser store, then exercises the actual sidebar restore path across a page reload and a session switch:
+
+```bash
+bun run verify:plan-session
+bun run verify:plan-progress  # multi-Todo + phase jump + completion states
+bun run verify:gates          # review-pause gate + plan-continuation delivery gate
+```
+
+The test requires Google Chrome at `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` (override with `--chrome=...`) and does not touch the normal browser profile. The existing restore-state check remains available as `bun run verify:outlines`.
+
+Pasted/dropped images are downscaled to at most ~2 megapixels before they ride into the model context and the persisted session snapshot (SVG/GIF/BMP stay untouched, small images pass through). To measure the actual payload and snapshot sizes for a given source image in a real browser, run:
+
+```bash
+bun run scripts/measure-paste-image.ts                # 4000×3000 PNG (default)
+bun run scripts/measure-paste-image.ts --type=jpeg    # photo-style JPEG source
+bun run scripts/measure-paste-image.ts --w=800 --h=600 # small image (no-op path)
+```
+
 ---
 
 ## Architecture
@@ -363,6 +383,15 @@ Install targets are shared by CLI and GUI and auto-load into the system prompt (
 | `~/.pure/tools/` | Real programs via pip/npm | `pip install --target ~/.pure/tools` OCR engine, `npm install --prefix ~/.pure/tools` |
 
 Community skills come from the `npx skills` ecosystem (`npx skills find <query>` / `npx skills add <owner/repo> --skill <name> --yes`) or any GitHub repo (download + unzip into `~/.pure/skills/`). Installing downloads third-party code, so it obeys the same permission mode as every other command execution.
+
+The GUI also supports dynamic capability recovery during a task:
+
+- `search_agent_skills(query)` searches public Skill Hubs and returns candidates with their source and install id;
+- `install_agent_skill(source, name)` downloads the candidate into `~/.pure/skills/<name>/SKILL.md`, exposes the instructions in the current tool round, and auto-injects them on later turns;
+- `search_mcp_servers(query)` aggregates the official MCP Registry with community search results from Smithery / mcp.so;
+- `connect_mcp_server(candidateId)` accepts only a candidate returned by the preceding search, requires high-risk permission approval before launching or opening the service, and registers its tools for the next reasoning iteration in the same turn.
+
+Community MCP results without a trusted launch recipe remain informational, and credentialed services must be configured before they can connect.
 
 #### Scrapling MCP server (optional)
 

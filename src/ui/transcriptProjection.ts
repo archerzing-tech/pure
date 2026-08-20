@@ -1,4 +1,5 @@
 import type { IntentAssessment } from '../coding-agent/types';
+import type { MessageImage } from '../shared/types';
 import {
   buildTranscriptToolExec,
   getTranscriptContent,
@@ -6,15 +7,14 @@ import {
   type ToolExecMeta,
   type StoredToolCallInfo,
   type TranscriptEntry,
-  type PlanCardSnapshot,
 } from './store';
 
 export type TranscriptReplayBlock =
-  | { type: 'user'; content: string }
+  | { type: 'user'; content: string; images: MessageImage[] }
   | { type: 'analysis'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'assessment'; assessment: IntentAssessment }
-  | { type: 'plan'; snapshot: PlanCardSnapshot }
+  | { type: 'plan' }
   | { type: 'assistant'; content: string; isPlanPause: boolean }
   | { type: 'tool'; exec: ToolExecMeta; stopped: boolean }
   | { type: 'artifact'; items: Array<{ path: string }>; userRequest?: string };
@@ -30,6 +30,12 @@ function stoppedTool(call: StoredToolCallInfo): TranscriptReplayBlock {
       args: call.args,
     },
   };
+}
+
+function visibleUserContent(content: string): string {
+  return content
+    .replace(/\s*\[(?:粘贴图片\/截图|Pasted screenshot\/image):[^\]]+\](?:\s*\n\s*(?:[~/]|[A-Za-z]:[\\/])[^\n]*)?/gi, '')
+    .trim();
 }
 
 function artifactsFromToolExecs(execs: ToolExecMeta[]): Array<{ path: string }> {
@@ -83,7 +89,9 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
     if (entry.role === 'user') {
       flushPending();
       lastUserRequest = entry.content ?? '';
-      if (entry.content) blocks.push({ type: 'user', content: entry.content });
+      if (entry.content || entry.images?.length) {
+        blocks.push({ type: 'user', content: visibleUserContent(entry.content ?? ''), images: entry.images ?? [] });
+      }
       continue;
     }
 
@@ -91,7 +99,7 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
     if (entry.analysis) blocks.push({ type: 'analysis', text: entry.analysis });
     // The plan card sits between the preflight analysis and the engine's
     // reasoning trace in the live transcript, so replay it at the same spot.
-    if (entry.planCard) blocks.push({ type: 'plan', snapshot: entry.planCard });
+    if (entry.planCard) blocks.push({ type: 'plan' });
     for (const text of getTranscriptThinkingSegments(entry)) {
       blocks.push({ type: 'thinking', text });
     }

@@ -4,10 +4,15 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { createPlanCard, createRestoredPlanCard, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers, QUALITY_GATE_STEPS, updatePlanCardPhase, updatePlanCardSubstep, completePlanCardSubstep, canCompletePlanCardSubsteps, completePlanCardSubsteps } from '../plan';
+import { createPlanCard, createRestoredPlanCard, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers, QUALITY_GATE_STEPS } from '../plan';
 import { t } from '../../shared/i18n';
 import type { Plan } from '../../coding-agent/types';
-import type { PlanCardSnapshot } from '../store';
+import { PlanProgressModel } from '../planProgress';
+
+function createProgressCard(plan: Plan): { handle: ReturnType<typeof createPlanCard>; progress: PlanProgressModel } {
+  const progress = new PlanProgressModel(plan);
+  return { handle: createPlanCard(plan, false, false, progress), progress };
+}
 
 describe('formatPlanForPrompt', () => {
   it('renders ordered steps into a prompt fragment', () => {
@@ -32,6 +37,10 @@ describe('formatPlanForPrompt', () => {
     expect(projectOut).toContain('## 计划 n 已完成');
     expect(projectOut).toContain('plain language');
     expect(projectOut).toContain('separate Todo list below the plan list');
+    expect(projectOut).toContain('strict stage protocol');
+    expect(projectOut).toContain('Do not call tools before the stage-start announcement');
+    expect(projectOut).toContain('The UI consumes that line as the single stage-complete event');
+    expect(projectOut).toContain('## 计划 n：<阶段名称>');
     expect(projectOut).not.toContain('TWO INDEPENDENT progress lists');
     expect(projectOut).not.toContain('at most ONE Todo');
   });
@@ -72,6 +81,7 @@ describe('formatPlanForPrompt', () => {
     // 否则执行期卡片/悬浮大纲停在第一步（只有首轮 formatPlanForPrompt 有该指令）。
     expect(continuation).toContain('## 计划 n：');
     expect(continuation).toContain('## 计划 n 已完成');
+    expect(continuation).toContain('没有开始播报就不要执行，没有完成播报就不要进入下一计划');
   });
 });
 
@@ -154,10 +164,13 @@ describe('right-sidebar command history layout', () => {
   it('keeps command rows readable inside their own scroll window', () => {
     const html = readFileSync(new URL('../../../index.html', import.meta.url), 'utf8');
     const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+    expect(html).toContain('id="stat-turns"');
     expect(html).toContain('class="stats-list-section stats-command-section"');
     expect(html).toContain('class="stats-list-section stats-write-section"');
     expect(html).toContain('id="stat-write-list" class="stats-list" role="region" data-i18n-aria-label="stats.fileWrites" aria-label="文件写入" aria-live="polite" tabindex="0"');
     expect(html).toContain('id="stat-cmd-list" class="stats-list" role="region" data-i18n-aria-label="stats.commands" aria-label="命令执行" aria-live="polite" tabindex="0"');
+    expect(html).toContain('id="stat-read-list" class="stats-list" role="region" data-i18n-aria-label="stats.fileReads" aria-label="文件读取" aria-live="polite" tabindex="0"');
+    expect(css).toContain('.stats-turns {');
     expect(css).toContain('#stat-write-list {');
     expect(css).toContain('#context-panel #stat-write-list {');
     expect(css).toContain('max-height: min(28vh, 260px);');
@@ -165,6 +178,11 @@ describe('right-sidebar command history layout', () => {
     expect(css).toContain('#context-panel #stat-write-list .stats-file-group {');
     expect(css).toContain('flex: 0 0 auto;');
     expect(css).toContain('min-height: 54px;');
+    expect(css).toContain('#stat-read-list {');
+    expect(css).toContain('max-height: min(32vh, 300px);');
+    expect(css).toContain('#context-panel #stat-read-list::-webkit-scrollbar-thumb');
+    expect(css).toContain('#context-panel #stat-read-list .stats-list-item {');
+    expect(css).toContain('white-space: normal;');
     expect(css).toContain('#stat-cmd-list {');
     expect(css).toContain('max-height: min(38vh, 360px);');
     expect(css).toContain('scrollbar-gutter: stable;');
@@ -227,30 +245,30 @@ describe('nested execution plan progression', () => {
           ] },
         ],
       };
-      const handle = createPlanCard(plan);
-      expect(handle.current).toBe(1);
-      expect(handle.currentSubstep).toBe(1);
-      expect(canCompletePlanCardSubsteps(handle)).toBe(false);
-      updatePlanCardPhase(handle, 3);
-      expect(handle.current).toBe(1);
-      updatePlanCardPhase(handle, 2);
-      expect(handle.current).toBe(1);
-      updatePlanCardSubstep(handle, 3);
-      expect(handle.currentSubstep).toBe(1);
-      updatePlanCardSubstep(handle, 1);
-      expect(handle.currentSubstep).toBe(1);
-      completePlanCardSubstep(handle, 1);
-      expect(handle.currentSubstep).toBe(2);
-      updatePlanCardSubstep(handle, 2);
-      completePlanCardSubstep(handle, 2);
-      expect(handle.currentSubstep).toBe(3);
-      updatePlanCardSubstep(handle, 3);
-      completePlanCardSubstep(handle, 3);
-      expect(handle.currentSubstep).toBe(4);
-      expect(canCompletePlanCardSubsteps(handle)).toBe(true);
-      completePlanCardSubsteps(handle);
-      updatePlanCardPhase(handle, 2);
-      expect(handle.current).toBe(2);
+      const { handle, progress } = createProgressCard(plan);
+      expect(progress.getSnapshot().currentPlan).toBe(1);
+      expect(progress.getSnapshot().currentTodo).toBe(1);
+      expect(progress.canCompleteCurrentTodos()).toBe(false);
+      progress.dispatch({ type: 'phaseStarted', planNumber: 3 });
+      expect(progress.getSnapshot().currentPlan).toBe(1);
+      progress.dispatch({ type: 'phaseStarted', planNumber: 2 });
+      expect(progress.getSnapshot().currentPlan).toBe(1);
+      progress.dispatch({ type: 'todoStarted', todoNumber: 3 });
+      expect(progress.getSnapshot().currentTodo).toBe(1);
+      progress.dispatch({ type: 'todoStarted', todoNumber: 1 });
+      expect(progress.getSnapshot().currentTodo).toBe(1);
+      progress.dispatch({ type: 'todoCompleted', todoNumber: 1 });
+      expect(progress.getSnapshot().currentTodo).toBe(2);
+      progress.dispatch({ type: 'todoStarted', todoNumber: 2 });
+      progress.dispatch({ type: 'todoCompleted', todoNumber: 2 });
+      expect(progress.getSnapshot().currentTodo).toBe(3);
+      progress.dispatch({ type: 'todoStarted', todoNumber: 3 });
+      progress.dispatch({ type: 'todoCompleted', todoNumber: 3 });
+      expect(progress.getSnapshot().currentTodo).toBe(4);
+      expect(progress.canCompleteCurrentTodos()).toBe(true);
+      progress.dispatch({ type: 'todosCompleted' });
+      progress.dispatch({ type: 'phaseStarted', planNumber: 2 });
+      expect(progress.getSnapshot().currentPlan).toBe(2);
     } finally {
       if (oldDocument === undefined) delete (globalThis as any).document;
       else (globalThis as any).document = oldDocument;
@@ -273,25 +291,25 @@ describe('nested execution plan progression', () => {
     };
     (globalThis as any).document = fakeDocument;
     try {
-      const handle = createPlanCard({ reasoning: 'last', steps: [
+      const { handle, progress } = createProgressCard({ reasoning: 'last', steps: [
         { id: '1', action: '一', description: '一', expectedOutcome: '一', todosRequired: false },
         { id: '2', action: '二', description: '二', expectedOutcome: '二', todosRequired: true, substeps: [
           { id: '1', action: '二·一', description: '', expectedOutcome: '' },
         ] },
       ] });
       // Plan 1 is atomic: its own completion marker advances to plan 2.
-      updatePlanCardPhase(handle, 2);
-      expect(handle.current).toBe(2);
+      progress.dispatch({ type: 'phaseStarted', planNumber: 2 });
+      expect(progress.getSnapshot().currentPlan).toBe(2);
       // The last plan's substep is never explicitly reported as done — the
       // model just emits `## 计划 2 已完成`. finishPlan force-completes the
       // substeps, then updatePlanCardPhase(3) must reach total + 1 (the
       // completed state) instead of being clamped to total.
-      completePlanCardSubsteps(handle, true);
-      expect(handle.currentSubstep).toBe(2);
-      expect(canCompletePlanCardSubsteps(handle)).toBe(true);
-      updatePlanCardPhase(handle, 3);
-      expect(handle.current).toBe(3);
-      expect(handle.current).toBe(handle.total + 1);
+      progress.dispatch({ type: 'todosCompleted', force: true });
+      expect(progress.getSnapshot().currentTodo).toBe(2);
+      expect(progress.canCompleteCurrentTodos()).toBe(true);
+      progress.dispatch({ type: 'phaseStarted', planNumber: 3 });
+      expect(progress.getSnapshot().currentPlan).toBe(3);
+      expect(progress.getSnapshot().currentPlan).toBe(handle.plan.steps.length + 1);
       // Every top-level row is done like finalizePlanCard.
       handle.stepEls.forEach((el) => expect(el.classList.contains('done')).toBe(true));
       expect(handle.checkEls[0].textContent).toBe('✓');
@@ -318,7 +336,7 @@ describe('nested execution plan progression', () => {
     };
     (globalThis as any).document = fakeDocument;
     try {
-      const handle = createPlanCard({ reasoning: 'force', steps: [
+      const { handle, progress } = createProgressCard({ reasoning: 'force', steps: [
         { id: '1', action: '一', description: '', expectedOutcome: '', todosRequired: true, substeps: [
           { id: '1', action: '子一', description: '', expectedOutcome: '' },
           { id: '2', action: '子二', description: '', expectedOutcome: '' },
@@ -326,11 +344,11 @@ describe('nested execution plan progression', () => {
       ] });
       // Nothing was ever started: the guarded call is a no-op, the forced one
       // completes every substep and moves the cursor past the last one.
-      completePlanCardSubsteps(handle);
-      expect(handle.currentSubstep).toBe(1);
-      completePlanCardSubsteps(handle, true);
-      expect(handle.currentSubstep).toBe(3);
-      expect(canCompletePlanCardSubsteps(handle)).toBe(true);
+      progress.dispatch({ type: 'todosCompleted' });
+      expect(progress.getSnapshot().currentTodo).toBe(1);
+      progress.dispatch({ type: 'todosCompleted', force: true });
+      expect(progress.getSnapshot().currentTodo).toBe(3);
+      expect(progress.canCompleteCurrentTodos()).toBe(true);
       handle.substepEls[0].forEach((row) => expect(row.classList.contains('done')).toBe(true));
     } finally {
       if (oldDocument === undefined) delete (globalThis as any).document;
@@ -354,28 +372,28 @@ describe('nested execution plan progression', () => {
     };
     (globalThis as any).document = fakeDocument;
     try {
-      const handle = createPlanCard({ reasoning: 'mixed', steps: [
+      const { handle, progress } = createProgressCard({ reasoning: 'mixed', steps: [
         { id: '1', action: '原子改动', description: '一次完成', expectedOutcome: '完成', todosRequired: false },
         { id: '2', action: '复杂改动', description: '拆开执行', expectedOutcome: '完成', todosRequired: true, substeps: [
           { id: '1', action: '第一项', description: '做一', expectedOutcome: '完成一' },
           { id: '2', action: '第二项', description: '做二', expectedOutcome: '完成二' },
         ] },
       ] });
-      expect(handle.currentTodosRequired).toBe(false);
-      expect(canCompletePlanCardSubsteps(handle)).toBe(true);
-      updatePlanCardPhase(handle, 2);
-      expect(handle.current).toBe(2);
-      expect(handle.currentTodosRequired).toBe(true);
-      updatePlanCardSubstep(handle, 1);
-      completePlanCardSubstep(handle, 1);
+      expect(progress.getSnapshot().plan.steps[progress.getSnapshot().currentPlan - 1]?.todosRequired !== false).toBe(false);
+      expect(progress.canCompleteCurrentTodos()).toBe(true);
+      progress.dispatch({ type: 'phaseStarted', planNumber: 2 });
+      expect(progress.getSnapshot().currentPlan).toBe(2);
+      expect(progress.getSnapshot().plan.steps[progress.getSnapshot().currentPlan - 1]?.todosRequired !== false).toBe(true);
+      progress.dispatch({ type: 'todoStarted', todoNumber: 1 });
+      progress.dispatch({ type: 'todoCompleted', todoNumber: 1 });
       expect(handle.substepEls[1][0].classList.contains('done')).toBe(true);
       expect(handle.substepNumEls[1][0].textContent).toBe('(1)');
       expect(srcForPlanPresentation()).toContain('plan-progress-substep-check');
       expect(handle.substepEls[1][1].classList.contains('active')).toBe(true);
-      expect(handle.currentSubstep).toBe(2);
-      completePlanCardSubstep(handle, 2);
-      expect(handle.currentSubstep).toBe(3);
-      expect(canCompletePlanCardSubsteps(handle)).toBe(true);
+      expect(progress.getSnapshot().currentTodo).toBe(2);
+      progress.dispatch({ type: 'todoCompleted', todoNumber: 2 });
+      expect(progress.getSnapshot().currentTodo).toBe(3);
+      expect(progress.canCompleteCurrentTodos()).toBe(true);
     } finally {
       if (oldDocument === undefined) delete (globalThis as any).document;
       else (globalThis as any).document = oldDocument;
@@ -423,12 +441,28 @@ function srcForPlanPresentation(): string {
 }
 
 describe('completed plan step presentation', () => {
+  it('keeps progress cursors out of the card rendering handle', () => {
+    const src = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
+    const start = src.indexOf('export interface PlanCardHandle');
+    const end = src.indexOf('// Refining-badge', start);
+    const contract = src.slice(start, end);
+    expect(contract).not.toContain('progressSource');
+    expect(contract).not.toContain('progressUnsubscribe');
+    expect(contract).not.toContain('currentPlan');
+    expect(contract).not.toContain('currentTodo');
+    expect(contract).not.toContain('currentSubstep');
+    expect(contract).not.toContain('substepStarted');
+    expect(contract).not.toContain('currentTodosRequired');
+  });
+
   it('uses the done state and strike-through styling for completed step text', () => {
     const src = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
     const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
     const plainCss = readFileSync(new URL('../plain-text-plan.css', import.meta.url), 'utf8');
     expect(src).toContain("el.classList.add('done')");
-    expect(src).toContain('if (!h.substepStarted)');
+    expect(src).toContain('renderPlanCardProgress');
+    expect(src).not.toContain('export function updatePlanCardPhase');
+    expect(src).not.toContain('export function completePlanCardSubsteps');
     expect(css).toContain('.plan-progress-step.done .plan-progress-step-action');
     expect(css).toContain('text-decoration: line-through');
     expect(css).toContain('.plan-progress-step-check');
@@ -441,7 +475,8 @@ describe('completed plan step presentation', () => {
 
   it('finalizes every plan step through the same done-state path', () => {
     const src = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
-    expect(src).toContain('setPlanPhase(h, h.total + 1)');
+    expect(src).toContain('source: PlanProgressModel');
+    expect(src).not.toContain('PlanCardSnapshot');
     expect(src).toContain("if (checks[i]) checks[i]!.textContent = '✓'");
   });
 });
@@ -491,10 +526,9 @@ describe('createRestoredPlanCard (session restore)', () => {
   it('rebuilds the card with its saved top-level progress', () => {
     const restore = installFakeDocument();
     try {
-      const card = createRestoredPlanCard({ plan, currentPlan: 2, currentTodo: 1, complete: false } satisfies PlanCardSnapshot);
+      const card = createRestoredPlanCard(new PlanProgressModel(plan, 'active', 2, 1));
       expect(card.plan).toBe(plan);
-      expect(card.total).toBe(2);
-      expect(card.current).toBe(2);
+      expect(card.plan.steps.length).toBe(2);
       expect(card.stepEls[0].classList.contains('done')).toBe(true);
       expect(card.stepEls[1].classList.contains('active')).toBe(true);
     } finally {
@@ -505,9 +539,8 @@ describe('createRestoredPlanCard (session restore)', () => {
   it('restores an advanced substep cursor inside the active plan', () => {
     const restore = installFakeDocument();
     try {
-      const card = createRestoredPlanCard({ plan, currentPlan: 1, currentTodo: 2, complete: false } satisfies PlanCardSnapshot);
-      expect(card.current).toBe(1);
-      expect(card.currentSubstep).toBe(2);
+      const card = createRestoredPlanCard(new PlanProgressModel(plan, 'active', 1, 2));
+      expect(card.plan.steps.length).toBe(2);
       expect(card.substepEls[0][0].classList.contains('done')).toBe(true);
       expect(card.substepEls[0][1].classList.contains('active')).toBe(true);
     } finally {
@@ -518,8 +551,8 @@ describe('createRestoredPlanCard (session restore)', () => {
   it('re-renders a completed snapshot with every step checked off', () => {
     const restore = installFakeDocument();
     try {
-      const card = createRestoredPlanCard({ plan, currentPlan: 3, currentTodo: 3, complete: true } satisfies PlanCardSnapshot);
-      expect(card.current).toBe(3); // total + 1, the finalize sentinel
+      const card = createRestoredPlanCard(new PlanProgressModel(plan, 'complete', 3, 3));
+      expect(card.plan.steps.length).toBe(2);
       expect(card.stepEls.every((el) => el.classList.contains('done'))).toBe(true);
       expect(card.checkEls.every((el) => el.textContent === '✓')).toBe(true);
       expect(card.substepEls[0].every((el) => el.classList.contains('done'))).toBe(true);

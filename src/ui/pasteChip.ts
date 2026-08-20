@@ -12,6 +12,7 @@ import { formatBytes } from '../shared/format';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { t } from '../shared/i18n';
 import { showToast } from '../shared/toast';
+import type { MessageImage } from '../shared/types';
 
 export interface PasteAttachment {
   id: string;
@@ -48,6 +49,16 @@ export const PASTE_FILE_THRESHOLD = 64 * 1024;
 
 /** Images larger than this are rejected (bounds memory + the base64 IPC). */
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+
+/** Cap for the image payload that rides into the model context and the
+ * persisted session snapshot: ~2 megapixels. A 12MP phone photo becomes
+ * ~1630×1225, cutting the base64 payload ~6× while staying sharp on screen.
+ * The on-disk tmp copy (Tauri) keeps the original bytes untouched. */
+export const MAX_IMAGE_PIXELS = 2 * 1024 * 1024;
+
+/** Raster formats we can downscale losslessly-ish; SVG stays vector, GIF keeps
+ * its animation, BMP is too rare to bother re-encoding. */
+const RASTER_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g|webp)(?:;|,)/i;
 
 // ── Upload limits (attach / drop / import) ──
 // Only text (code, logs, csv…), images, and document files (pdf/doc/docx/…)
@@ -135,12 +146,76 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+/** Aspect-preserving fit: the largest dimensions within `maxPixels`. */
+export function downscaleDimensions(
+  width: number,
+  height: number,
+  maxPixels = MAX_IMAGE_PIXELS,
+): { width: number; height: number } {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return { width, height };
+  const pixels = width * height;
+  if (pixels <= maxPixels) return { width, height };
+  const scale = Math.sqrt(maxPixels / pixels);
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+/**
+ * Downscale a raster image data URL to at most ~MAX_IMAGE_PIXELS before it
+ * rides into the model context / session snapshot. PNG and WebP keep their
+ * (lossless) format so text screenshots stay crisp; photos are re-encoded as
+ * JPEG (quality 0.85) which shrinks them dramatically. Fails OPEN: any decode
+ * or canvas problem returns the original URL unchanged.
+ */
+export async function downscaleImageDataUrl(dataUrl: string, maxPixels = MAX_IMAGE_PIXELS): Promise<string> {
+  if (!RASTER_IMAGE_DATA_URL.test(dataUrl)) return dataUrl;
+  try {
+    if (typeof Image === 'undefined' || typeof document === 'undefined') return dataUrl;
+    const image = new Image();
+    const loaded = new Promise<HTMLImageElement>((resolve, reject) => {
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('image decode failed'));
+      image.src = dataUrl;
+    });
+    const img = await loaded;
+    const natural = { width: img.naturalWidth || img.width, height: img.naturalHeight || img.height };
+    const target = downscaleDimensions(natural.width, natural.height, maxPixels);
+    if (target.width >= natural.width && target.height >= natural.height) return dataUrl;
+    const canvas = document.createElement('canvas');
+    canvas.width = target.width;
+    canvas.height = target.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0, target.width, target.height);
+    const mime = dataUrl.match(/^data:([^;,]+)/i)?.[1] ?? 'image/jpeg';
+    const outMime = mime === 'image/png' || mime === 'image/webp' ? mime : 'image/jpeg';
+    const out = canvas.toDataURL(outMime, 0.85);
+    // `data:,` (empty) or an unsupported webp encode must not replace the URL.
+    return out && out.startsWith('data:image/') ? out : dataUrl;
+  } catch {
+    return dataUrl;
+  }
+}
+
 /**
  * Build the outgoing user message: the typed text followed by every pasted
  * attachment. Text attachments inline their full content after a marker;
  * image attachments reference the saved tmp file (the text-only adapters in
  * use cannot see the picture, so the path is the honest artifact).
  */
+export function attachmentToMessageImage(attachment: PasteAttachment): MessageImage | null {
+  if (attachment.kind !== 'image' || !attachment.dataUrl) return null;
+  return {
+    dataUrl: attachment.dataUrl,
+    mimeType: attachment.mime || attachment.dataUrl.match(/^data:([^;,]+)/i)?.[1] || 'image/png',
+    name: attachment.name,
+    path: attachment.path || undefined,
+    sizeBytes: attachment.size,
+  };
+}
+
 export function composeMessageWithAttachments(text: string, attachments: PasteAttachment[]): string {
   if (attachments.length === 0) return text;
   const parts = [text];
@@ -170,6 +245,7 @@ export class PasteChipManager {
   private viewerEl: HTMLDivElement | null = null;
   private getSessionId: () => string;
   private onChanged: () => void;
+  private pendingReads = new Set<Promise<void>>();
 
   constructor(getSessionId: () => string, onChanged: () => void = () => {}) {
     this.getSessionId = getSessionId;
@@ -188,6 +264,13 @@ export class PasteChipManager {
 
   getAttachments(): PasteAttachment[] {
     return [...this.attachments];
+  }
+
+  /** Wait until pasted files have loaded their data URL and persisted bytes. */
+  async prepareForSend(): Promise<PasteAttachment[]> {
+    const pending = [...this.pendingReads];
+    if (pending.length > 0) await Promise.all(pending);
+    return this.getAttachments();
   }
 
   /** Whether any pasted file is waiting to be sent (enables send with no text). */
@@ -290,10 +373,12 @@ export class PasteChipManager {
       this.attachments.push(att);
       this.render();
       this.onChanged();
-      void (async () => {
+      const pending = (async () => {
         try {
           if (kind === 'image') {
-            att.dataUrl = await readFileAsDataUrl(file);
+            // Downscale before the payload rides into the model context / session
+            // snapshot; the browser File itself is the user's original copy.
+            att.dataUrl = await downscaleImageDataUrl(await readFileAsDataUrl(file));
           } else if (kind === 'text') {
             const raw = await file.slice(0, VIEWER_MAX_CHARS + 1).text();
             att.content = raw.slice(0, VIEWER_MAX_CHARS);
@@ -305,6 +390,8 @@ export class PasteChipManager {
           console.error('[pure] dropped browser file failed:', err);
         }
       })();
+      this.pendingReads.add(pending);
+      void pending.finally(() => this.pendingReads.delete(pending)).catch(() => {});
     }
   }
 
@@ -322,7 +409,7 @@ export class PasteChipManager {
       return;
     }
     const id = `drop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    this.attachments.push({
+    const att: PasteAttachment = {
       id,
       name: record.name,
       size: record.size,
@@ -333,9 +420,23 @@ export class PasteChipManager {
       mime: record.mime,
       truncated: record.truncated,
       openOnClick: true,
-    });
+    };
+    this.attachments.push(att);
     this.render();
     this.onChanged();
+    // Cap the in-context data URL for imported images too (the Rust record
+    // carries a full-resolution base64). The thumbnail renders immediately;
+    // the scaled version replaces it before the send path reads attachments.
+    if (record.kind === 'image' && record.dataUrl) {
+      const pending = downscaleImageDataUrl(record.dataUrl).then((scaled) => {
+        if (scaled && scaled !== att.dataUrl) {
+          att.dataUrl = scaled;
+          this.render();
+        }
+      });
+      this.pendingReads.add(pending);
+      void pending.finally(() => this.pendingReads.delete(pending)).catch(() => {});
+    }
   }
 
   /** Read pasted image files → thumbnail chip each + persist the bytes. */
@@ -356,15 +457,20 @@ export class PasteChipManager {
       this.attachments.push(att);
       this.render();
       this.onChanged();
-      void (async () => {
+      const pending = (async () => {
         try {
-          // 1) data URL drives the thumbnail + viewer (works in browser mode).
-          att.dataUrl = await readFileAsDataUrl(file);
+          // 1) data URL drives the thumbnail, transcript preview, and vision
+          // request. Downscale it so a multi-megapixel screenshot/photo does not
+          // blow up the LLM context or the persisted session snapshot.
+          const rawDataUrl = await readFileAsDataUrl(file);
+          att.dataUrl = await downscaleImageDataUrl(rawDataUrl);
           this.render();
-          // 2) Persist the raw bytes (base64 over IPC) in Tauri mode.
+          // 2) Persist the ORIGINAL raw bytes (base64 over IPC) in Tauri mode —
+          // the on-disk copy stays the user's exact image; only the in-context
+          // data URL is capped.
           if (isTauriRuntime()) {
             const core = await loadTauriCore();
-            const dataBase64 = att.dataUrl.slice(att.dataUrl.indexOf(',') + 1);
+            const dataBase64 = rawDataUrl.slice(rawDataUrl.indexOf(',') + 1);
             const path = await core?.invoke<string>('save_paste_image', { sessionId, name, dataBase64 });
             if (path) {
               att.path = path;
@@ -375,6 +481,8 @@ export class PasteChipManager {
           console.error('[pure] paste image failed:', err);
         }
       })();
+      this.pendingReads.add(pending);
+      void pending.finally(() => this.pendingReads.delete(pending)).catch(() => {});
     }
   }
 

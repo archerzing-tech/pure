@@ -20,6 +20,7 @@ import type {
   IStateStore,
   LLMAdapter,
   Message,
+  MessageImage,
   ToolAdapter,
   ToolDefinition,
   VerificationSummary,
@@ -125,6 +126,7 @@ export class Harness {
       llm: this.config.llm,
       tools: this.config.tools,
       toolsDefs: this.currentToolsDefs(),
+      toolsDefsProvider: this.config.toolsDefsProvider,
       budget: this.config.budget,
       verifier: this.config.verifier,
       hooks: this.config.hooks,
@@ -159,6 +161,7 @@ export class Harness {
     systemPrompt: string,
     userPrompt: string,
     signal?: AbortSignal,
+    images?: MessageImage[],
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.verificationPassed = false;
@@ -211,6 +214,7 @@ export class Harness {
             sessionId: this.config.sessionId,
             systemPrompt: effectiveSystemPrompt,
             userPrompt,
+            images,
             budget: this.config.budget,
           },
           this.buildContext(signal),
@@ -384,6 +388,7 @@ export class Harness {
     messages: Message[],
     newUserPrompt: string,
     signal?: AbortSignal,
+    images?: MessageImage[],
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.verificationPassed = false;
@@ -405,6 +410,7 @@ export class Harness {
       {
         sessionId: this.config.sessionId,
         newUserPrompt,
+        images,
         messages: msgs,
         budget: this.config.budget,
       },

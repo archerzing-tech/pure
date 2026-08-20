@@ -5,7 +5,8 @@
 //        can verify them before execution and escape the trap by switching
 //        approach after a failed round instead of repeating the same one.
 
-import type { AnalysisResult, IntentAssessment, RequestIntent, TaskComplexity, TaskMode, Plan, PlanStep, TrapWarning } from './types';
+import type { AnalysisResult, IntentAssessment, RequestIntent, SemanticRouteDecision, TaskComplexity, TaskMode, Plan, PlanStep, TrapWarning } from './types';
+import type { LLMAdapter, Message, MessageImage } from '../shared/types';
 import { repairJsonSource } from '../shared/parseRepair';
 
 /** Upper bound on LLM-plan steps kept in the review card / system prompt. */
@@ -13,9 +14,113 @@ const MAX_PLAN_STEPS = 10;
 const MAX_PLAN_SUBSTEPS = 8;
 
 export interface PlannerConfig {
-  /** Threshold for 'complex': > this many file ops triggers planning. */
+  /** Threshold for explicit, concrete file-operation evidence. */
   complexFileThreshold?: number;
-  /** Always plan when the user asks for it. */
+}
+
+const SEMANTIC_ROUTE_PROMPT = `You are the routing layer for a coding assistant. Understand the user's complete message semantically; do not classify from isolated words or a fixed keyword list. Decide what outcome the user is asking for: answer/explanation, research, advice, debugging, a small change, a broad refactor/migration, or creation of a runnable artifact. Distinguish feedback about an existing result from a request to create a new result. A clear creative request is not a reasonableness review merely because it is large, has several variants, or contains style constraints.
+
+Return ONLY one JSON object with this shape:
+{"intent":"question|research|add|modify|debug|refactor|migrate|delete|build","complexity":"simple|complex","mode":"yolo|plan|build","requiresPlan":false,"needsDeliveryGate":false,"assessment":{"riskLevel":"low|medium|high","reversibility":"reversible|partially-reversible|hard-to-reverse|irreversible","impact":"...","recommendation":"...","requiresProbe":false,"requiresConfirmation":false}}
+
+Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation only for an explicit destructive/irreversible action or a concrete safety boundary. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files.`;
+
+/** Action words that make even a very short message a concrete work request
+ * ("写个游戏", "改一下", "查查报错") — those still need the semantic router.
+ * Short acknowledgements/pleasantries carry none of them and can use the
+ * synchronous heuristic floor directly, avoiding a full LLM round-trip (and
+ * up to 12s of added latency) for messages that cannot meaningfully need
+ * routing. */
+const ROUTE_REQUIRING_ACTION = /(?:写|做|改|建|修|查|删|创建|制作|开发|实现|生成|设计|部署|研究|分析|解释|介绍|评估|汇总|检查|调试|编译|运行|测试|安装|下载|上传|重构|迁移|优化|升级|替换|增加|添加|移除|删除|搞|整|弄|build|create|write|make|fix|add|delete|remove|refactor|migrate|debug|analyze|explain|design|generate|install|test|run)/i;
+
+export function shouldBypassSemanticRoute(prompt: string, images?: MessageImage[] | null): boolean {
+  if (images?.length) return false;
+  const text = prompt.trim();
+  if (text.length > 12) return false;
+  if (/[?？]/.test(text)) return false;
+  return !ROUTE_REQUIRING_ACTION.test(text);
+}
+
+export async function inferSemanticRoute(
+  llm: LLMAdapter,
+  prompt: string,
+  signal?: AbortSignal,
+  images?: MessageImage[],
+  timeoutMs = 12_000,
+): Promise<SemanticRouteDecision | null> {
+  if (!prompt.trim() || signal?.aborted) return null;
+  const controller = new AbortController();
+  const forwardAbort = (): void => controller.abort();
+  signal?.addEventListener('abort', forwardAbort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const request: Message[] = [
+      { role: 'system', content: SEMANTIC_ROUTE_PROMPT },
+      { role: 'user', content: prompt, images },
+    ];
+    const response = await Promise.race([
+      llm.complete(request, [], controller.signal),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('semantic route timeout'));
+        }, timeoutMs);
+      }),
+    ]);
+    return parseSemanticRoute(String(response.content ?? ''));
+  } catch {
+    return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    signal?.removeEventListener('abort', forwardAbort);
+    controller.abort();
+  }
+}
+
+export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[0]);
+  } catch {
+    try {
+      parsed = JSON.parse(repairJsonSource(match[0]).source);
+    } catch {
+      return null;
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const value = parsed as Record<string, unknown>;
+  const intent = value.intent as RequestIntent;
+  const complexity = value.complexity as TaskComplexity;
+  const mode = value.mode as TaskMode;
+  const assessment = value.assessment;
+  if (!['question', 'research', 'add', 'modify', 'debug', 'refactor', 'migrate', 'delete', 'build'].includes(intent)
+    || !['simple', 'complex'].includes(complexity)
+    || !['yolo', 'plan', 'build'].includes(mode)
+    || !assessment || typeof assessment !== 'object') return null;
+  const a = assessment as Record<string, unknown>;
+  const riskLevel = a.riskLevel as IntentAssessment['riskLevel'];
+  const reversibility = a.reversibility as IntentAssessment['reversibility'];
+  if (!['low', 'medium', 'high'].includes(riskLevel)
+    || !['reversible', 'partially-reversible', 'hard-to-reverse', 'irreversible'].includes(reversibility)) return null;
+  return {
+    intent,
+    complexity,
+    mode,
+    requiresPlan: value.requiresPlan === true,
+    needsDeliveryGate: value.needsDeliveryGate === true,
+    assessment: {
+      intent,
+      riskLevel,
+      reversibility,
+      impact: typeof a.impact === 'string' ? a.impact : '',
+      recommendation: typeof a.recommendation === 'string' ? a.recommendation : '',
+      requiresProbe: a.requiresProbe === true,
+      requiresConfirmation: a.requiresConfirmation === true,
+    },
+  };
 }
 
 export class Planner {
@@ -29,13 +134,14 @@ export class Planner {
 
   /** Analyze a task prompt to determine complexity and optionally generate a plan. */
   analyzeTask(prompt: string): AnalysisResult {
-    const complexity = this.detectComplexity(prompt);
+    const heuristicComplexity = this.detectComplexity(prompt);
     const traps = this.detectTraps(prompt);
     const intent = assessIntent(prompt);
     const needsSafetyPlan = intent.requiresConfirmation;
+    const complexity: TaskComplexity = intent.riskLevel === 'medium' ? 'complex' : heuristicComplexity;
 
     if (complexity === 'complex' || needsSafetyPlan) {
-      const mode: TaskMode = needsSafetyPlan ? 'plan' : this.detectMode(prompt, complexity);
+      const mode: TaskMode = needsSafetyPlan || intent.riskLevel === 'medium' ? 'plan' : this.detectMode(prompt, complexity);
       return {
         complexity,
         // Build intent ("写一个小游戏", "搭建全栈项目") switches the agent into
@@ -58,11 +164,10 @@ export class Planner {
     };
   }
 
-  /** Map a task to its operating mode: simple → yolo; complex + build/artifact
-   * intent → build; complex otherwise → plan. */
-  private detectMode(prompt: string, complexity: TaskComplexity): TaskMode {
-    if (complexity !== 'complex') return 'yolo';
-    return detectProjectRequest(prompt) || detectArtifactRequest(prompt) ? 'build' : 'plan';
+  /** The model chooses build vs plan. The synchronous fallback never infers a
+   * user's desired outcome from artifact nouns or isolated verbs. */
+  private detectMode(_prompt: string, complexity: TaskComplexity): TaskMode {
+    return complexity === 'complex' ? 'plan' : 'yolo';
   }
 
   /**
@@ -157,8 +262,8 @@ export class Planner {
     // ("…怎么做性能优化？") must not suppress planning.
     const startsWithBuild = /^(?:请)?\s*(?:帮我|麻烦你|给我)?\s*(?:编写|写|做|开发|制作|创建|搭建|实现|构建|设计|生成|部署|重构|重写|迁移|规划)\s*/.test(trimmed);
     const cnQuestion = !startsWithBuild && (
-      /^(?:如何|怎么|怎样|能否|能不能|是否|请问|为什么|该不该|应不应该|(?:请)?帮我?(?:看看|查查|看下|分析|解释|介绍|讲讲|说说|告诉我|描述|总结|评估))/.test(trimmed) ||
-      /(?:怎么|如何|怎样|能否|能不能|是否|该不该|应不应该|为什么|吗|呢|什么(?!都|也|能))/.test(trimmed)
+      /^(?:如何|怎么|怎样|能否|能不能|是否|请问|为什么|怎么办|该怎么办|应该怎么办|该不该|应不应该|(?:请)?帮我?(?:看看|查查|看下|分析|解释|介绍|讲讲|说说|告诉我|描述|总结|评估))/.test(trimmed) ||
+      /(?:怎么办|该怎么办|应该怎么办|怎么|如何|怎样|能否|能不能|是否|该不该|应不应该|为什么|吗|呢|什么(?!都|也|能))/.test(trimmed)
     );
 
     // User explicitly asks for planning. A request to write a project plan or
@@ -197,6 +302,12 @@ export class Planner {
     if (scopeIndicators.some(p => p.test(lower))) {
       return 'complex';
     }
+
+    // Ordinary creation, advice, critique, research, and domain language are
+    // deliberately not classified here. The shared semantic router handles
+    // those from the complete request; this fallback stays direct rather than
+    // turning a noun such as “项目/网页/原型” into a plan by itself.
+    return 'simple';
 
     // ── Chinese project-scale requests ──
     // Any imperative request to create a project is a multi-step build, even
@@ -343,47 +454,52 @@ export class Planner {
 }
 
 /**
- * Assess the user's intent before execution. This is deliberately heuristic:
- * it does not reject a request, it chooses how much evidence and user control
- * should come before changing the workspace.
+ * Provide a conservative safety floor before semantic routing is available.
+ * This function intentionally does NOT decide whether ordinary language means
+ * advice, research, creation, debugging, or editing. Those are model-semantic
+ * decisions. Lexical checks remain only for explicit operations whose safety
+ * boundary must not depend on a model being available or correct.
  */
 export function assessIntent(prompt: string): IntentAssessment {
   const text = prompt.trim();
   const lower = text.toLowerCase();
   const chinese = /[\u4e00-\u9fff]/.test(text);
-  const isQuestion = /^(?:如何|怎么|怎样|能否|能不能|是否|为什么|请问|what|how|can|could|should|why)\b/i.test(text)
-    || /(?:吗|呢|怎么|如何|怎样|为什么)\s*[？?]?$/.test(text);
-  const destructive = /(?:删除|移除|清理|销毁|永久|不可逆|drop\s+(?:table|database)|destroy|rm\s+-rf|reset\s+--hard|force\s+push|delete\s+(?:all|the|entire)|remove\s+(?:all|the|entire))/i.test(lower);
+  const destructive = /(?:删除|移除|清理|销毁|不可逆|drop\s+(?:table|database)|destroy|rm\s+-rf|reset\s+--hard|force\s+push|delete\s+(?:all|the|entire)|remove\s+(?:all|the|entire))/i.test(lower);
   const migration = /(?:迁移|升级依赖|替换底层|切换框架|schema|database migration|migrat|upgrade dependencies|breaking change)/i.test(lower);
   const refactor = /(?:重构|重写|大规模修改|全量修改|refactor|rewrite|rewrite the whole|across the project)/i.test(lower);
-  const projectBuild = detectProjectRequest(text);
-  const artifactBuild = detectArtifactRequest(text);
-  const research = /(?:研究|调研|搜索|查找|解释|分析|介绍|research|search|explain|summarize|compare)/i.test(lower);
-  const debug = /(?:修复|排查|调试|报错|失败|bug|fix|debug|broken|failing)/i.test(lower);
-  const add = /(?:新增|添加|增加|实现|开发|implement|add|feature|create)/i.test(lower);
-  const modify = /(?:修改|改成|更新|调整|change|update|modify)/i.test(lower);
-
-  const intent: RequestIntent = isQuestion || research ? (research ? 'research' : 'question')
-    : destructive ? 'delete'
-      : migration ? 'migrate'
-        : refactor ? 'refactor'
-          : (projectBuild || artifactBuild) ? 'build'
-            : debug ? 'debug'
-              : add ? 'add'
-                : modify ? 'modify'
-                  : 'question';
-  // A new single-file artifact is normally reversible; a project-scale build
-  // needs a probe because it can affect existing structure and dependencies.
-  const riskLevel = destructive ? 'high' : (migration || refactor || projectBuild || /(?:认证|权限|数据库|生产|公共 API|auth|permission|database|production|public api)/i.test(lower)) ? 'medium' : 'low';
-  const reversibility = destructive ? 'irreversible' : (migration || /(?:数据库|生产|public api|database|production)/i.test(lower)) ? 'hard-to-reverse' : riskLevel === 'medium' ? 'partially-reversible' : 'reversible';
+  const riskLevel: IntentAssessment['riskLevel'] = destructive ? 'high' : migration || refactor ? 'medium' : 'low';
+  const intent: RequestIntent = destructive ? 'delete' : migration ? 'migrate' : refactor ? 'refactor' : 'question';
+  const reversibility: IntentAssessment['reversibility'] = destructive
+    ? 'irreversible'
+    : migration
+      ? 'hard-to-reverse'
+      : refactor
+        ? 'partially-reversible'
+        : 'reversible';
   const requiresProbe = riskLevel !== 'low';
   const requiresConfirmation = riskLevel === 'high';
   const impact = chinese
-    ? (destructive ? '可能删除或覆盖现有数据、文件或历史状态，影响范围需要先确认。' : riskLevel === 'medium' ? '可能波及多个模块、依赖关系或现有行为，直接改动可能造成回归。' : '预计只影响当前问题相关的局部内容。')
-    : (destructive ? 'This may delete or overwrite existing data, files, or history; the exact blast radius must be confirmed first.' : riskLevel === 'medium' ? 'This may affect multiple modules, dependencies, or existing behavior and could introduce regressions.' : 'The likely impact is limited to the content directly related to the request.');
+    ? (destructive
+      ? '可能删除或覆盖现有数据、文件或历史状态，影响范围需要先确认。'
+      : riskLevel === 'medium'
+        ? '可能波及现有模块、依赖关系或行为，先读取真实结构再决定改动。'
+        : '尚未根据关键词假定任务类型；由语义路由结合完整请求决定处理方式。')
+    : (destructive
+      ? 'This may delete or overwrite existing data, files, or history; confirm the blast radius first.'
+      : riskLevel === 'medium'
+        ? 'This may affect existing modules, dependencies, or behavior; inspect the real structure before changing it.'
+        : 'No ordinary task type is inferred from keywords; semantic routing will use the complete request.');
   const recommendation = chinese
-    ? (destructive ? '不要直接执行：先做只读检查并列出受影响对象，给出可恢复或更窄的替代方案，确认后再动手。' : riskLevel === 'medium' ? '先做最小只读探针，确认真实结构和依赖，再用小步修改并立即验证，不要一次性扩大范围。' : '可以直接处理；先读取相关内容，完成后做针对性验证。')
-    : (destructive ? 'Do not execute directly: inspect read-only first, list affected targets, propose a recoverable or narrower alternative, then ask for approval.' : riskLevel === 'medium' ? 'Run a minimal read-only probe first, confirm the real structure and dependencies, then make a small change and verify it before expanding scope.' : 'Direct execution is reasonable: read the relevant content first and run a focused verification afterward.');
+    ? (destructive
+      ? '先做只读检查并列出受影响对象，给出可恢复或更窄的替代方案，确认后再动手。'
+      : riskLevel === 'medium'
+        ? '先做最小只读探针，再按小步修改并立即验证。'
+        : '先由语义理解确定用户要得到的结果；如果只是建议或解释，直接回答，不要擅自修改文件。')
+    : (destructive
+      ? 'Inspect read-only first, list affected targets, propose a recoverable or narrower alternative, then ask for approval.'
+      : riskLevel === 'medium'
+        ? 'Run a minimal read-only probe, then make a small change and verify it.'
+        : 'Use semantic understanding of the complete request; if it asks for advice or explanation, answer directly instead of editing files.');
   return { intent, riskLevel, reversibility, impact, recommendation, requiresProbe, requiresConfirmation };
 }
 
@@ -440,7 +556,7 @@ export function detectArtifactRequest(prompt: string): boolean {
 
   // Build verbs — the request must IMPERATIVELY create something. Keeping the
   // list explicit avoids matching questions or analysis-only requests.
-  const buildVerb = /(?:请|帮我|麻烦你|给我)?(?:编写|编一个|写|写一个|写个|做|做一个|做个|开发|制作|创建|搭建|实现|搞一个|搞个|整一个|整个|设计|生成|做一个|给我写)/;
+  const buildVerb = /^(?:(?:请\s*)?(?:帮我|麻烦你|给我)|我想(?:要)?|希望(?:你)?|please\s+|can\s+you\s+)?(?:编写|编一个|写|写一个|写个|做|做一个|做个|开发|制作|创建|搭建|实现|搞一个|搞个|整一个|整个|设计|生成|做一个|给我写|重构|重写|迁移|build|create|make|write|develop|design|generate)/i;
   if (detectProjectRequest(p)) return true;
   // Artifact nouns that imply a runnable/complete deliverable.
   const artifact =

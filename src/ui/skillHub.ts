@@ -55,6 +55,18 @@ export interface SkillHubError {
 /** Default hub seeded in the UI — Vercel's official skills catalog. */
 export const DEFAULT_HUB_REPO = 'vercel-labs/agent-skills';
 
+export const SEARCH_HUB_REPOS = [
+  DEFAULT_HUB_REPO,
+  'nvidia/skills',
+  'youdotcom-oss/agent-skills',
+  'zapier/agent-skills',
+  'openclaw/agent-skills',
+] as const;
+
+export interface SkillSearchResult extends HubSkillSummary {
+  source: string;
+}
+
 /** Rewrite "owner/repo" or a bare repo name into a canonical GitHub repo
  * string. Accepts full https://github.com/owner/repo URLs too. */
 export function normalizeHubRepo(input: string): string {
@@ -197,11 +209,13 @@ export function splitSkillMarkdown(md: string): { description?: string; body: st
   return { description: desc, body: m[2].trim() };
 }
 
-/** Sanitize a skill id for use inside the `<skill name="…">` prompt tag:
- * keep only word chars, dashes, dots, slashes (directory-style ids) so a
- * hostile hub cannot break the tag with quotes or angle brackets. */
+/** Sanitize a skill id for use inside the `<skill name="…">` prompt tag and
+ * as the install directory name: keep only word chars, dashes, and dots so a
+ * hostile hub cannot break the tag with quotes/angle brackets, and the name
+ * always passes the Rust write_app_skill validation (which rejects slashes
+ * and path components like `.` / `..`). */
 export function sanitizeSkillName(name: string): string {
-  return name.replace(/[^A-Za-z0-9_.\-/]/g, '_');
+  return name.replace(/[^A-Za-z0-9_.-]/g, '_');
 }
 
 /** Build the HubSkill record persisted into PureConfig.hubSkills. */
@@ -218,4 +232,57 @@ export function makeHubSkill(
     body,
     enabled,
   };
+}
+
+/** Search the configured public skill hubs and return matching candidates. */
+const SEARCH_TOTAL_DEADLINE_MS = 20_000;
+
+export async function searchHubSkills(
+  query: string,
+  maxResults = 8,
+  repos: readonly string[] = SEARCH_HUB_REPOS,
+): Promise<SkillSearchResult[]> {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return [];
+  // The repos are fetched in parallel but each probes up to 5 index URLs with
+  // a 10s timeout each — without a total deadline a single unresponsive host
+  // would stall the whole search_agent_skills tool call for ~50s. Fail fast
+  // and return whatever matched so far (empty on timeout) instead.
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let indexes: Array<PromiseSettledResult<{ repo: string; index: HubIndex }>>;
+  try {
+    indexes = await Promise.race([
+      Promise.allSettled(repos.map(async (repo) => ({ repo, index: await fetchHubIndex(repo) }))),
+      new Promise<never>((_, reject) => {
+        deadlineTimer = setTimeout(() => reject(new Error('skill search timed out')), SEARCH_TOTAL_DEADLINE_MS);
+      }),
+    ]);
+  } catch {
+    return [];
+  } finally {
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+  }
+  const matches: SkillSearchResult[] = [];
+  for (const result of indexes) {
+    if (result.status !== 'fulfilled') continue;
+    const { repo, index } = result.value;
+    const summaries = [
+      ...index.skills,
+      ...index.groupings.flatMap((group) => group.skills),
+    ];
+    for (const summary of summaries) {
+      const haystack = `${summary.name} ${summary.description}`.toLowerCase();
+      if (!terms.some((term) => haystack.includes(term))) continue;
+      matches.push({ ...summary, source: normalizeHubRepo(repo) });
+    }
+  }
+  const seen = new Set<string>();
+  return matches
+    .filter((skill) => {
+      const key = `${skill.source}:${skill.name}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, Math.max(1, Math.min(20, maxResults)));
 }

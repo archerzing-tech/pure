@@ -5394,7 +5394,9 @@ fn web_cache_enabled() -> bool {
 
 fn app_skills_dir() -> PathBuf {
     let base = std::env::var("PURE_SKILLS_DIR").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
         format!("{}/.pure", home)
     });
     PathBuf::from(base).join("skills")
@@ -5458,6 +5460,31 @@ fn list_app_skills(workspace: String) -> Vec<serde_json::Value> {
     out
 }
 
+/// Persist a downloaded skill into the application-owned skills directory.
+/// The name is deliberately limited to one safe directory component so a
+/// community catalog cannot turn an install into an arbitrary file write.
+#[tauri::command]
+fn write_app_skill(name: String, description: String, body: String) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.len() > 120
+        || name == "."
+        || name == ".."
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err("skill name must contain only letters, numbers, '-', '_' or '.'".to_string());
+    }
+    if body.trim().is_empty() || body.len() > 2 * 1024 * 1024 {
+        return Err("skill body is empty or exceeds the 2MB limit".to_string());
+    }
+    let dir = app_skills_dir().join(name);
+    fs::create_dir_all(&dir).map_err(|e| format!("create skill directory: {}", e))?;
+    let description = description.trim().replace('\r', " ").replace('\n', " ");
+    let markdown = format!("---\nname: {}\ndescription: {}\n---\n\n{}\n", name, description, body.trim());
+    fs::write(dir.join("SKILL.md"), markdown).map_err(|e| format!("write SKILL.md: {}", e))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod app_skills_tests {
     use super::*;
@@ -5481,6 +5508,31 @@ mod app_skills_tests {
         assert!(parse_skill_markdown("just prose").is_none());
         assert!(parse_skill_markdown("---\nname: x\n---\n   \n").is_none());
         assert!(parse_skill_markdown("---\ndescription: no name\n---\nbody").is_none());
+    }
+
+    #[test]
+    fn write_app_skill_rejects_path_traversal_names() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("pure-skills-write-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prev = std::env::var("PURE_SKILLS_DIR").ok();
+        std::env::set_var("PURE_SKILLS_DIR", &base);
+
+        // `..` and `.` would escape the skills directory via PathBuf::join.
+        assert!(write_app_skill("..".to_string(), "d".to_string(), "body".to_string()).is_err());
+        assert!(write_app_skill(".".to_string(), "d".to_string(), "body".to_string()).is_err());
+        // Slashes are rejected (single safe directory component only).
+        assert!(write_app_skill("a/b".to_string(), "d".to_string(), "body".to_string()).is_err());
+        // A normal name still installs.
+        assert!(write_app_skill("vision-ocr".to_string(), "d".to_string(), "body".to_string()).is_ok());
+        let installed = app_skills_dir().join("vision-ocr").join("SKILL.md");
+        assert!(installed.exists());
+
+        match prev {
+            Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
+            None => std::env::remove_var("PURE_SKILLS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -11995,6 +12047,7 @@ pub fn run() {
             check_system_permission,
             request_system_permission,
             list_app_skills,
+            write_app_skill,
             test_llm_connection,
             test_proxy,
             detect_system_proxy,

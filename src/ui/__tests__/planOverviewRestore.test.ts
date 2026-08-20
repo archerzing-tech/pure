@@ -118,10 +118,38 @@ describe('PlanState.complete restore path (real DOM)', () => {
     expect(card.classList.contains('complete')).toBe(false);
   });
 
+  it('restores one canonical progress model for the outline and continuation state', () => {
+    const plan = samplePlan();
+    const progress = { plan, currentPlan: 2, currentTodo: 1, status: 'active' as const };
+    const chat = new ChatController();
+    chat.loadFromStorage({
+      ...snapshotWith(null),
+      transcript: [{
+        id: 'plan',
+        modelMessageIndex: 0,
+        role: 'assistant',
+        content: '执行中',
+        planCard: { plan, currentPlan: 2, currentTodo: 1, complete: false },
+      }],
+      uiState: { planProgress: progress, planState: null },
+    });
+
+    const restored = chat.getPlanProgressModel();
+    expect(restored).toBeTruthy();
+    // The canonical model normalizes the missing project-build flag to false.
+    expect(restored?.getSnapshot()).toEqual({ ...progress, projectBuild: false });
+    expect((chat as any).activeComplexPlan).toBe(plan);
+    expect(planOverview().el.querySelector('.plan-overview-progress')?.textContent).toBe('1/3');
+
+    restored!.dispatch({ type: 'completed' });
+    expect(planOverview().el.querySelector('.plan-overview-card')?.classList.contains('complete')).toBe(true);
+  });
+
   it('keeps the outline hidden when no plan state is restored', () => {
     const chat = new ChatController();
     chat.loadFromStorage(snapshotWith(null));
     expect(planOverview().el.hidden).toBe(true);
     expect((chat as any).activeComplexPlan).toBeNull();
+    expect(chat.getPlanProgressModel()).toBeNull();
   });
 });

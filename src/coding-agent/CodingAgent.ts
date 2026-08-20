@@ -24,6 +24,7 @@ import type {
   IMemoryStore,
   LLMAdapter,
   Message,
+  MessageImage,
   ToolAdapter,
   ToolDefinition,
   IStateStore,
@@ -202,8 +203,9 @@ export class CodingAgent {
     systemPrompt: string,
     userPrompt: string,
     signal?: AbortSignal,
+    images?: MessageImage[],
   ): AsyncGenerator<EngineEvent, void, void> {
-    yield* this.harness.run(systemPrompt, userPrompt, signal);
+    yield* this.harness.run(systemPrompt, userPrompt, signal, images);
   }
 
   /** Continue an existing session with a follow-up prompt. */
@@ -212,8 +214,9 @@ export class CodingAgent {
     messages: Message[],
     newUserPrompt: string,
     signal?: AbortSignal,
+    images?: MessageImage[],
   ): AsyncGenerator<EngineEvent, void, void> {
-    yield* this.harness.continueTurn(systemPrompt, messages, newUserPrompt, signal);
+    yield* this.harness.continueTurn(systemPrompt, messages, newUserPrompt, signal, images);
   }
 
   /** Get the underlying Harness instance (for advanced use). */

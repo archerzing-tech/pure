@@ -6,9 +6,14 @@
 
 import type { Message, ToolDefinition } from '../../shared/types';
 
+export type OpenAIWireContent = string | Array<
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+>;
+
 export interface OpenAIWireMessage {
   role: string;
-  content?: string | null;
+  content?: OpenAIWireContent | null;
   tool_call_id?: string;
   tool_calls?: Array<{
     id: string;
@@ -23,8 +28,16 @@ export function mapMessages(messages: Message[]): OpenAIWireMessage[] {
     switch (m.role) {
       case 'system':
         return { role: 'system', content: m.content };
-      case 'user':
-        return { role: 'user', content: m.content };
+      case 'user': {
+        if (!m.images?.length) return { role: 'user', content: m.content };
+        const content: OpenAIWireContent = [
+          ...(m.content ? [{ type: 'text' as const, text: m.content }] : []),
+          ...m.images
+            .filter((image) => image.dataUrl)
+            .map((image) => ({ type: 'image_url' as const, image_url: { url: image.dataUrl } })),
+        ];
+        return { role: 'user', content };
+      }
       case 'assistant':
         return {
           role: 'assistant',

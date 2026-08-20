@@ -47,6 +47,10 @@ export function scheduleStreamingRender(
 ): void {
   const generation = (streamGenerations.get(container) ?? 0) + 1;
   streamGenerations.set(container, generation);
+  if (markdownModule) {
+    markdownModule.scheduleStreamingRender(text, container, onRendered);
+    return;
+  }
   void loadMarkdown()
     .then((module) => {
       if (streamGenerations.get(container) !== generation) return;
@@ -55,6 +59,16 @@ export function scheduleStreamingRender(
     .catch(() => {
       // The caller already keeps the raw streaming text in the bubble.
     });
+}
+
+export function flushStreamingRender(container: HTMLElement, fallbackText = ''): void {
+  if (markdownModule) {
+    markdownModule.flushStreamingRender(container);
+    return;
+  }
+  // If the optional renderer has not finished loading yet, preserve the full
+  // latest text before the pending import is invalidated by cancellation.
+  if (fallbackText) container.textContent = fallbackText;
 }
 
 export function cancelStreamingRender(container: HTMLElement): void {

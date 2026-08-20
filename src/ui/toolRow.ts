@@ -526,6 +526,7 @@ const flipAnimations = new WeakMap<HTMLElement, () => void>();
 export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void {
   const el = row.el;
   if (el.classList.contains('tool-row-expanded') === expanded) return;
+  const detailsWasOpen = row.details.open;
 
   // FLIP the width/height change: capture the row's box, toggle the class
   // (grid-column 1/-1 + taller scroll window), then invert the layout delta
@@ -552,6 +553,7 @@ export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void 
 
   el.classList.toggle('tool-row-expanded', expanded);
   setToolRowExpandedLabel(row.expandButton, expanded);
+  row.details.open = detailsWasOpen;
 
   if (first && first.width > 0 && first.height > 0) {
     const last = el.getBoundingClientRect();

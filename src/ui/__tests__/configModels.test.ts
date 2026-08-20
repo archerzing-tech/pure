@@ -20,6 +20,16 @@ describe('provider model lists', () => {
     expect(modelListForProvider(cfg, 'qwen')).toEqual(['qwen3-coder-next']);
   });
 
+  it('does not resurrect a deleted registry default from an explicit library', () => {
+    const cfg = {
+      ...defaults(),
+      provider: 'deepseek-openai',
+      model: 'deepseek-reasoner',
+      providerModels: { 'deepseek-openai': ['deepseek-reasoner'] },
+    };
+    expect(modelListForProvider(cfg, 'deepseek-openai')).toEqual(['deepseek-reasoner']);
+  });
+
   it('preserves custom provider model lists as the compatibility source', () => {
     const cfg = {
       ...defaults(),

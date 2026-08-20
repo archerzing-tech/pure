@@ -67,6 +67,17 @@ export type TaskMode = 'yolo' | 'plan' | 'build';
 
 export type RequestIntent = 'question' | 'research' | 'add' | 'modify' | 'debug' | 'refactor' | 'migrate' | 'delete' | 'build';
 export type RiskLevel = 'low' | 'medium' | 'high';
+
+/** Model-produced routing decision. Ordinary task routing is semantic; the
+ * Planner only supplies a conservative safety floor when this is unavailable. */
+export interface SemanticRouteDecision {
+  intent: RequestIntent;
+  complexity: TaskComplexity;
+  mode: TaskMode;
+  requiresPlan: boolean;
+  needsDeliveryGate: boolean;
+  assessment: IntentAssessment;
+}
 export type Reversibility = 'reversible' | 'partially-reversible' | 'hard-to-reverse' | 'irreversible';
 
 /** A pre-execution assessment that keeps the agent from mechanically applying

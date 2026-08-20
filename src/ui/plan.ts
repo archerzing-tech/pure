@@ -3,12 +3,12 @@
 // Shown before a run when the Planner classifies a task as complex; the user
 // can approve (plan injected into the system prompt), skip planning, or cancel.
 
-import type { AnalysisResult, Plan, TaskMode } from '../coding-agent/types';
-import type { PlanCardSnapshot } from './store';
+import type { AnalysisResult, Plan } from '../coding-agent/types';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { showInlineCard } from './inlineCard';
 import type { QualityGateCheck, QualityGatePhase, QualityGateStatus } from './projectQualityGate';
+import { PlanProgressModel, type PlanProgressSnapshot } from './planProgress';
 
 export type PlanReviewDecision = 'approve' | 'skip' | 'cancel';
 
@@ -33,6 +33,8 @@ export function requestPlanReview(
   return run;
 }
 
+const PLAN_STAGE_PROTOCOL = `Use this strict stage protocol for every top-level plan item. Before any tool call or file change for plan n, first write two short user-facing lines in the conversation: one standalone control line exactly \"## 计划 n：<阶段名称>\" and then a natural sentence explaining what this stage is about and what you are going to do. The UI consumes that line as the single stage-start event and synchronizes the in-chat plan and floating outline together before execution begins. Do not call tools before the stage-start announcement. After the work and its meaningful verification are actually complete, write a standalone control line exactly \"## 计划 n 已完成\" and then briefly say what this stage completed. The UI consumes that line as the single stage-complete event. These supported progress markers are state events, not a generic progress estimate; they do not dictate execution granularity. Do not announce the next stage, call its tools, or claim the whole plan is complete before the current stage-complete line. If a stage needs user input, explain what is missing and pause without emitting its completion line. Never use a stage marker merely as a preview or example.`;
+
 /** Render an approved plan into a system-prompt fragment the LLM must follow.
  * Also instructs the model to write a `## 阶段 n/m` heading at the start of
  * each phase — the chat UI scans for that marker to show which phase of the
@@ -50,13 +52,17 @@ export function formatPlanForPrompt(plan: Plan, projectBuild = false, approved =
   // approved=true means the user has already approved the execution direction,
   // so the first response should begin useful work rather than wait for a second
   // approval. approved=false keeps the planning pause used by auto-detected plans.
+  // The strict stage protocol lives in ONE place (PLAN_STAGE_PROTOCOL below) —
+  // these branches only reference it, instead of restating it every time.
   const execution = approved
-    ? 'Use the approved plan as a flexible guide. Keep the overall plan and any active Todo list visibly separate. The user has already approved this plan, so start executing immediately. Briefly restate the user request, show the complete top-level plan list once and show a separate Todo list below the plan list for plan 1, then begin the most appropriate next action with real tool calls in this response when execution is approved; do not wait for another approval. Verify the result. When a plan card is active, report meaningful phase/completion progress with the supported markers so the UI can synchronize; markers describe progress only and do not dictate execution granularity. If the task needs information, ask one natural question and pause until the user answers. In later responses, continue with the next appropriate work, verify meaningful results. When a plan card is active, use the supported progress markers so the UI can synchronize; they do not dictate execution granularity. Emit `## 计划 n 已完成` when the plan work has actually been completed and verified' + (projectBuild ? ' (for a project, run the actual project verification command).' : '.') + ' The UI may reflect the completed plan in the separate plan list and activate the next plan. Before the next plan starts, show the updated plan context and continue with the next appropriate work when the execution context allows it. When todosRequired=false, treat the step as atomic unless the task itself reveals a reason to split it. Do not claim a plan or work item is complete without relevant verification evidence. Never claim a work item or plan is complete before its real verification. Use plain language and natural colleague-like sentences around the required markers.'
-    : 'Use the approved plan as a flexible guide. Keep the overall plan and any active Todo list visibly separate. First, briefly restate the user request in your own words and say naturally that you will think it through before planning. Then show the complete top-level plan list once and show a separate Todo list below the plan list for plan 1. IMPORTANT: this first planning response is a pause point — do not call tools or change files yet; end by telling the user what you recommend starting with. Only after the user sends the next message may you begin execution. If the task needs information, ask one natural question and pause until the user answers. In continuation responses, continue with the next appropriate work, verify meaningful results. When a plan card is active, use the supported progress markers so the UI can synchronize; they do not dictate execution granularity. Emit `## 计划 n 已完成` when the plan work has actually been completed and verified' + (projectBuild ? ' (for a project, run the actual project verification command).' : '.') + ' The UI may reflect the completed plan in the separate plan list and activate the next plan. Before the next plan starts, show the updated plan context and continue with the next appropriate work when the execution context allows it. When todosRequired=false, treat the step as atomic unless the task itself reveals a reason to split it; respect the current execution context. Do not claim a plan or work item is complete without relevant verification evidence. Never claim a work item or plan is complete before its real verification. Use plain language and natural colleague-like sentences around the required markers.';
+    ? 'Use the approved plan as a flexible guide. Keep the overall plan and any active Todo list visibly separate. The user has already approved this plan, so start executing immediately: briefly restate the request, show the complete top-level plan list once and a separate Todo list below the plan list for plan 1, then begin the most appropriate next action with real tool calls in this same response — do not wait for another approval. Verify the result. When a plan card is active, follow the strict stage protocol below. If the task needs information, ask one natural question and pause until the user answers. In later responses, continue with the next appropriate work and verify meaningful results. Emit `## 计划 n 已完成` when the plan work has actually been completed and verified' + (projectBuild ? ' (for a project, run the actual project verification command).' : '.') + ' The UI may reflect the completed plan in the separate plan list and activate the next plan. When todosRequired=false, treat the step as atomic unless the task itself reveals a reason to split it. Never claim a plan or work item is complete without relevant verification evidence. Use plain language and natural colleague-like sentences around the required markers.'
+    : 'Use the approved plan as a flexible guide. Keep the overall plan and any active Todo list visibly separate. First, briefly restate the user request in your own words and say naturally that you will think it through before planning. Then show the complete top-level plan list once and a separate Todo list below the plan list for plan 1. IMPORTANT: this first planning response is a pause point — do not call tools or change files yet; end by telling the user what you recommend starting with. Only after the user sends the next message may you begin execution. If the task needs information, ask one natural question and pause until the user answers. In continuation responses, continue with the next appropriate work and verify meaningful results. When a plan card is active, follow the strict stage protocol below. Emit `## 计划 n 已完成` when the plan work has actually been completed and verified' + (projectBuild ? ' (for a project, run the actual project verification command).' : '.') + ' The UI may reflect the completed plan in the separate plan list and activate the next plan. When todosRequired=false, treat the step as atomic unless the task itself reveals a reason to split it; respect the current execution context. Never claim a plan or work item is complete without relevant verification evidence. Use plain language and natural colleague-like sentences around the required markers.';
   const firstTurn = approved
     ? 'The plan is already approved, so do NOT wait for another go-ahead: restate the request, show the relevant plan context, then start the next appropriate work with real tool calls in this same response. End by reporting what you did and what remains.'
     : 'On the first response after this plan is approved, introduce the relevant plan context without executing tools; end by saying what you recommend starting with.';
-  return `\n\n## 整体安排\n${steps}\n${execution} Begin each active plan with an explicit line \"## 计划 n：<正在做什么>\" and close it with \"## 计划 n 已完成\" (for example, \"## 计划 1 已完成\"); keep the numbering consistent with the list above. Keep the plan list and the active Todo list as two separate plain-text lists. The UI uses present markers to reflect progress while keeping the plan context visible; markers are presentation/state signals, not execution rules. Do not use a card, tree menu, or nested plan structure. ${firstTurn} In later responses, continue with the work that remains and verify it where appropriate. Use completion markers only when they accurately describe the progress. If the current work requires an answer, ask one conversational question and pause without claiming completion. Finish by summarizing what changed.`;
+  // Only the format constraints that the protocol does not cover stay here;
+  // the stage-marker mechanics are stated once in PLAN_STAGE_PROTOCOL above.
+  return `\n\n## 整体安排\n${steps}\n${execution}\n\n${PLAN_STAGE_PROTOCOL}\n\nKeep the plan list and the active Todo list as two separate plain-text lists; do not use a card, tree menu, or nested plan structure. Before the next plan starts, show the updated plan context. ${firstTurn} Finish by summarizing what changed.`;
 }
 
 /** Build the assistant-side history entry for the first planning pause. */
@@ -78,7 +84,7 @@ export function formatPlanContinuation(plan: Plan, currentPlan: number, currentT
     const done = index + 1 < currentTodo;
     return `${done ? '✓ ~~' : '□ '}${index + 1}. ${todo.action}${done ? '~~ [已完成]' : index + 1 === currentTodo ? ' 👈 建议从这里继续' : ''}`;
   }).join('\n');
-  return `\n\n<plan_continuation>\n这是一个已经开始的复杂任务，不要重新生成计划，也不要从头开始。\n\n当前总计划：\n${planLines}\n\n当前阶段 Todos（阶段 ${currentPlan}）：\n${todos || '当前阶段没有拆分 Todo，请直接处理这一阶段。'}\n\n继续规则：把这里的计划和 Todo 当作当前上下文，根据实际依赖选择下一步工作；可以合并紧密相关的小项，也可以在需要信息时先提问并暂停。每个计划开始时用一行明确的「## 计划 n：<正在做什么>」开头、结束时用「## 计划 n 已完成」收尾（例如「## 计划 1 已完成」），编号与上面的列表保持一致；界面靠这些标记把执行大纲一步步往下推。完成后用自然语言说明真实进展，并在有帮助时使用完成标记。${projectBuild ? '项目级交付仍需提供真实验证证据。' : ''}\n</plan_continuation>`;
+  return `\n\n<plan_continuation>\n这是一个已经开始的复杂任务，不要重新生成计划，也不要从头开始。\n\n当前总计划：\n${planLines}\n\n当前阶段 Todos（阶段 ${currentPlan}）：\n${todos || '当前阶段没有拆分 Todo，请直接处理这一阶段。'}\n\n继续规则：把这里的计划和 Todo 当作当前上下文，根据实际依赖选择下一步工作；可以合并紧密相关的小项，也可以在需要信息时先提问并暂停。严格执行阶段协议：每个计划开始前先单独输出一行「## 计划 n：<正在做什么>」宣布阶段，之后才能调用工具；阶段真实完成并验证后，再单独输出「## 计划 n 已完成」并简要说明完成结果；编号与上面的列表保持一致，界面靠这两个阶段事件把执行大纲一步步往下推。没有开始播报就不要执行，没有完成播报就不要进入下一计划。用自然语言说明真实进展，并在有帮助时使用 Todo 标记。${projectBuild ? '项目级交付仍需提供真实验证证据。' : ''}\n</plan_continuation>`;
 }
 
 // ── Live plan-progress card (transcript) ──
@@ -100,16 +106,7 @@ export interface PlanCardHandle {
   substepNumEls: HTMLElement[][];
   /** One independent Todo list per top-level plan; never nested inside plan rows. */
   todoLists: HTMLElement[];
-  planLabels: string[];
-  todoTitleEl: HTMLElement;
-  todosRequired: boolean[];
-  total: number;
-  current: number;
-  currentSubstep: number;
-  /** Whether the active plan intentionally renders a Todo list. */
-  currentTodosRequired: boolean;
-  /** True once the model has explicitly reported the active substep. */
-  substepStarted: boolean;
+  todoTitleEls: HTMLElement[];
   /** Refining badge element, present while the LLM is still generating the plan. */
   refiningEl: HTMLElement | null;
   /** Human-readable live activity, kept visible while the transcript grows. */
@@ -126,7 +123,9 @@ export interface PlanCardHandle {
 // the DOM (card upgraded / discarded), so a timer can never outlive its badge.
 const refiningTimers = new WeakMap<HTMLElement, number>();
 
-export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false, fallback = false): PlanCardHandle {
+const planCardSubscriptions = new WeakMap<PlanCardHandle, () => void>();
+
+export function createPlanCard(plan: Plan, refining: boolean, fallback: boolean, source: PlanProgressModel): PlanCardHandle {
   const el = document.createElement('div');
   el.className = 'bubble-row plan-progress-row plan-text-progress-row';
 
@@ -291,14 +290,7 @@ export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false, fa
     substepEls,
     substepNumEls,
     todoLists,
-    planLabels: plan.steps.map((step) => step.action),
-    todoTitleEl: todoTitleEls[0] ?? document.createElement('div'),
-    todosRequired: plan.steps.map((step) => step.todosRequired !== false),
-    total: plan.steps.length,
-    current: 1,
-    currentSubstep: 1,
-    currentTodosRequired: plan.steps[0]?.todosRequired !== false,
-    substepStarted: false,
+    todoTitleEls,
     refiningEl: refining ? head.querySelector('.plan-progress-refining') : null,
     setActivity: (message: string): void => {
       activity.classList.remove('is-waiting');
@@ -309,21 +301,19 @@ export function createPlanCard(plan: Plan, mode?: TaskMode, refining = false, fa
       activity.textContent = `⏸ 已暂停：正在等你回复后开始第 ${planNumber} 项「${todoLabel}」`;
     },
   };
-  setPlanPhase(handle, 1);
+  bindPlanCardProgress(handle, source);
   return handle;
 }
 
 /** Update the existing plan card in place. The outer transcript row stays
  * mounted, so task progress remains visible throughout the turn instead of
  * looking like a one-time list that disappears during plan refinement. */
-export function updatePlanCard(h: PlanCardHandle, plan: Plan, mode?: TaskMode, refining = false, fallback = false): void {
-  const previousPhase = h.current;
-  const previousSubstep = h.currentSubstep;
-  const previousSubstepStarted = h.substepStarted;
-  const previousTodosRequired = h.currentTodosRequired;
+export function updatePlanCard(h: PlanCardHandle, plan: Plan, refining: boolean, fallback: boolean, source: PlanProgressModel): void {
+  unbindPlanCardProgress(h);
   const previousActivity = h.el.querySelector<HTMLElement>('.plan-progress-activity')?.textContent;
   clearPlanCardRefining(h);
-  const fresh = createPlanCard(plan, mode, refining, fallback);
+  const fresh = createPlanCard(plan, refining, fallback, source);
+  unbindPlanCardProgress(fresh);
   // The step list is replaced in place; instead of an abrupt cut (old steps
   // vanish, new steps pop in), cascade the FRESH steps in with the same
   // stagger the initial card uses. The children are brand-new nodes, so the
@@ -340,22 +330,40 @@ export function updatePlanCard(h: PlanCardHandle, plan: Plan, mode?: TaskMode, r
   h.substepEls = fresh.substepEls;
   h.substepNumEls = fresh.substepNumEls;
   h.todoLists = fresh.todoLists;
-  h.planLabels = fresh.planLabels;
-  h.todoTitleEl = fresh.todoTitleEl;
-  h.todosRequired = fresh.todosRequired;
-  h.total = fresh.total;
-  h.current = 1;
-  h.currentSubstep = 1;
-  h.currentTodosRequired = fresh.currentTodosRequired;
-  h.substepStarted = false;
+  h.todoTitleEls = fresh.todoTitleEls;
   h.refiningEl = fresh.refiningEl;
   h.setActivity = fresh.setActivity;
-  setPlanPhase(h, Math.max(1, Math.min(previousPhase, h.total)));
-  if (previousPhase === h.current && previousTodosRequired === h.currentTodosRequired && previousSubstepStarted) {
-    h.substepStarted = true;
-    setPlanSubstep(h, previousSubstep);
-  }
+  bindPlanCardProgress(h, source);
   if (previousActivity) h.setActivity(previousActivity);
+}
+
+function unbindPlanCardProgress(h: PlanCardHandle): void {
+  planCardSubscriptions.get(h)?.();
+  planCardSubscriptions.delete(h);
+}
+
+export function bindPlanCardProgress(h: PlanCardHandle, source: PlanProgressModel): void {
+  unbindPlanCardProgress(h);
+  planCardSubscriptions.set(h, source.subscribe((snapshot) => renderPlanCardProgress(h, snapshot)));
+}
+
+function renderPlanCardProgress(h: PlanCardHandle, snapshot: PlanProgressSnapshot): void {
+  h.plan = snapshot.plan;
+  const total = snapshot.plan.steps.length;
+  renderPlanPhase(h, snapshot.currentPlan);
+  if (snapshot.currentPlan > total) {
+    h.substepEls.forEach((rows) => renderPlanSubstepsComplete(rows));
+    h.setActivity('计划中的所有步骤已完成。');
+  } else if (snapshot.currentTodo > 1) {
+    renderPlanSubstep(h, snapshot.currentTodo, snapshot.currentPlan);
+  }
+  if (snapshot.status === 'waiting' && snapshot.currentPlan <= total) {
+    const label = h.plan.steps[snapshot.currentPlan - 1]?.action ?? '当前阶段';
+    h.setWaiting(snapshot.currentPlan, label);
+  } else if (snapshot.status === 'active') {
+    const activity = h.el.querySelector<HTMLElement>('.plan-progress-activity');
+    if (activity?.classList.contains('is-waiting')) h.setActivity('已恢复执行当前计划…');
+  }
 }
 
 /** Remove the "完善中…" refining badge in place — used when plan generation
@@ -605,16 +613,11 @@ export function createQualityGateCard(): QualityGateCardHandle {
   return { el, set, setEvidence, reset, setActivity, dispose };
 }
 
-function setPlanSubstep(h: PlanCardHandle, n: number): void {
-  const rows = h.substepEls[h.current - 1] ?? [];
-  const checks = h.substepEls[h.current - 1].map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
+function renderPlanSubstep(h: PlanCardHandle, n: number, planNumber: number): void {
+  const rows = h.substepEls[planNumber - 1] ?? [];
+  const checks = rows.map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
 
-  if (rows.length === 0) {
-    h.currentSubstep = 0;
-    h.substepStarted = false;
-    return;
-  }
-  h.currentSubstep = n;
+  if (rows.length === 0) return;
   rows.forEach((row, i) => {
     row.classList.remove('done', 'active', 'pending');
     if (i + 1 < n) {
@@ -642,22 +645,25 @@ function setPlanSubstep(h: PlanCardHandle, n: number): void {
  * resets the active plan's substep cursor. Exported so the marker scanner can
  * jump the card straight to a plan the model reported starting (skipping
  * several plans at once) instead of advancing one step per marker. */
-export function setPlanPhase(h: PlanCardHandle, n: number): void {
-  h.current = n;
-  h.currentTodosRequired = h.todosRequired[n - 1] !== false;
-  h.substepStarted = false;
+function renderPlanPhase(h: PlanCardHandle, n: number): void {
+  const total = h.plan.steps.length;
+  const currentStep = h.plan.steps[n - 1];
+  const currentTodosRequired = currentStep?.todosRequired !== false;
   const currentRows = h.substepEls[n - 1] ?? [];
   h.todoLists.forEach((todoList, planIndex) => {
-    if (planIndex === n - 1 && h.currentTodosRequired && currentRows.length > 0) todoList.classList.remove('plan-progress-todo-hidden');
+    if (planIndex === n - 1 && currentTodosRequired && currentRows.length > 0) todoList.classList.remove('plan-progress-todo-hidden');
     else todoList.classList.add('plan-progress-todo-hidden');
   });
-  if (n > h.total) {
-    h.todoTitleEl.textContent = '所有安排都完成了，我再确认一遍结果。';
-  } else if (!h.currentTodosRequired || currentRows.length === 0) {
-    h.todoTitleEl.textContent = `现在先处理「${h.planLabels[n - 1] ?? '这一件事'}」，这一步可以直接完成。`;
-  } else {
-    h.todoTitleEl.textContent = `现在先处理「${h.planLabels[n - 1] ?? '这一件事'}」的 Todos：`;
-  }
+  const title = n > total
+    ? '所有安排都完成了，我再确认一遍结果。'
+    : !currentTodosRequired || currentRows.length === 0
+      ? `现在先处理「${currentStep?.action ?? '这一件事'}」，这一步可以直接完成。`
+      : `现在先处理「${currentStep?.action ?? '这一件事'}」的 Todos：`;
+  const titleEl = h.todoTitleEls[n - 1] ?? h.todoTitleEls[0];
+  if (titleEl) titleEl.textContent = title;
+  h.substepEls.forEach((rows, i) => {
+    if (i < n - 1 || n > total) renderPlanSubstepsComplete(rows);
+  });
   h.stepEls.forEach((el, i) => {
     el.classList.remove('done', 'active', 'pending');
     if (i + 1 < n) {
@@ -673,115 +679,22 @@ export function setPlanPhase(h: PlanCardHandle, n: number): void {
       h.checkEls[i].textContent = '';
     }
   });
-  if (n <= h.total) setPlanSubstep(h, 1);
+  if (n <= total) renderPlanSubstep(h, 1, n);
 }
 
-/** Advance the card to a later top-level plan (never moves backwards).
- * A plan cannot be skipped while its visible substeps are still pending. */
-/** Restore a plan card from a cross-turn progress cursor. */
-export function restorePlanCardProgress(h: PlanCardHandle, currentPlan: number, currentTodo: number): void {
-  if (h.total === 0) return;
-  const phase = Math.max(1, Math.min(currentPlan, h.total));
-  setPlanPhase(h, phase);
-  const rows = h.substepEls[phase - 1] ?? [];
-  if (rows.length > 0 && currentTodo > 1) {
-    h.substepStarted = true;
-    h.currentSubstep = Math.min(currentTodo, rows.length + 1);
-    setPlanSubstep(h, h.currentSubstep);
-  }
-}
-
-export function updatePlanCardPhase(h: PlanCardHandle, n: number): void {
-  // total + 1 is the completed state (same as finalizePlanCard): the LAST
-  // plan's `## 计划 n 已完成` marker must be able to finish the card, or the
-  // card and the floating outline stay at N-1/N while the task is already
-  // done. Clamping to total made that impossible (n = total+1 → total ≠
-  // current+1 → the marker was silently dropped).
-  const clamped = Math.max(1, Math.min(n, h.total + 1));
-  if (clamped !== h.current + 1) return;
-  const currentSubsteps = h.substepEls[h.current - 1] ?? [];
-  if (h.currentTodosRequired && currentSubsteps.length > 0 && h.currentSubstep <= currentSubsteps.length) return;
-  setPlanPhase(h, clamped);
-}
-
-/** Advance the numbered substeps inside the active top-level plan.
- * Markers must be sequential: a later marker cannot skip an unseen substep. */
-export function updatePlanCardSubstep(h: PlanCardHandle, n: number): void {
-  const rows = h.substepEls[h.current - 1] ?? [];
-  if (!h.currentTodosRequired || rows.length === 0) return;
-  const clamped = Math.max(1, Math.min(n, rows.length));
-  // A start marker only activates the next Todo. Completion is a separate
-  // explicit marker so the previous Todo is crossed out at the real moment it
-  // finishes, rather than merely when the model mentions the next one.
-  if (clamped === h.currentSubstep && !h.substepStarted) {
-    h.substepStarted = true;
-    setPlanSubstep(h, clamped);
-  }
-}
-
-/** Mark one explicitly reported Todo complete, then activate the next Todo. */
-export function completePlanCardSubstep(h: PlanCardHandle, n: number): void {
-  const rows = h.substepEls[h.current - 1] ?? [];
-  const checks = h.substepEls[h.current - 1].map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
-
-  if (!h.currentTodosRequired || rows.length === 0) return;
-  const index = n - 1;
-  if (index < 0 || index >= rows.length || n !== h.currentSubstep) return;
-  // A natural-language completion line may be the first marker the UI sees;
-  // treat it as an implicit start of the current Todo instead of requiring the
-  // model to emit a redundant "开始子步骤" line first.
-  if (!h.substepStarted) {
-    h.substepStarted = true;
-    setPlanSubstep(h, n);
-  }
-  rows[index].classList.remove('active', 'pending');
-  rows[index].classList.add('done');
-  const check = rows[index].querySelector<HTMLElement>('.plan-progress-substep-check');
-  if (check) check.textContent = '✓';
-  h.substepStarted = true;
-  if (n < rows.length) {
-    h.currentSubstep = n + 1;
-    setPlanSubstep(h, h.currentSubstep);
-  } else {
-    h.currentSubstep = rows.length + 1;
-  }
-}
-
-/** Rebuild a plan card from a persisted snapshot so session restore renders
- * the card in place with its saved progress (and final all-done state). */
-export function createRestoredPlanCard(snapshot: PlanCardSnapshot): PlanCardHandle {
-  const card = createPlanCard(snapshot.plan, undefined, false);
-  restorePlanCardProgress(card, snapshot.currentPlan, snapshot.currentTodo);
-  if (snapshot.complete) {
-    finalizePlanCard(card);
-    card.setActivity('计划中的所有步骤已完成。');
-  }
-  return card;
-}
-
-/** Return true only after every visible substep has been explicitly entered. */
-export function canCompletePlanCardSubsteps(h: PlanCardHandle): boolean {
-  const rows = h.substepEls[h.current - 1] ?? [];
-  return !h.currentTodosRequired || rows.length === 0 || (h.substepStarted && h.currentSubstep > rows.length);
-}
-
-/** Check off every substep in the active top-level plan before moving on.
- * `force` completes them even when not every substep was explicitly entered —
- * used when the model reports a plan complete without granular Todo-done
- * markers and nothing follows that could force-advance the card (the LAST
- * plan has no `## 计划 n+1` start marker to trigger that branch). */
-export function completePlanCardSubsteps(h: PlanCardHandle, force = false): void {
-  if (!force && !canCompletePlanCardSubsteps(h)) return;
-  const rows = h.substepEls[h.current - 1] ?? [];
-  const checks = h.substepEls[h.current - 1].map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
-
+function renderPlanSubstepsComplete(rows: HTMLElement[]): void {
+  const checks = rows.map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
   rows.forEach((row, i) => {
     row.classList.remove('active', 'pending');
     row.classList.add('done');
     if (checks[i]) checks[i]!.textContent = '✓';
   });
-  if (rows.length > 0) h.currentSubstep = rows.length + 1;
-  h.substepStarted = true;
+}
+
+/** Rebuild a plan card from the already-restored session progress model. */
+export function createRestoredPlanCard(source: PlanProgressModel): PlanCardHandle {
+  const snapshot = source.getSnapshot();
+  return createPlanCard(snapshot.plan, false, false, source);
 }
 
 // A top-level marker is `## 第 2 步…`; a substep marker is `### 子步骤 2/3…`
@@ -844,19 +757,6 @@ export function matchPlanSubstepMarkers(text: string): number[] {
 export function matchPlanSubstepMarker(text: string): number | null {
   const markers = matchPlanSubstepMarkers(text);
   return markers.length > 0 ? Math.max(...markers) : null;
-}
-
-/** Mark every top-level plan and its substeps complete (called on run completion). */
-export function finalizePlanCard(h: PlanCardHandle): void {
-  setPlanPhase(h, h.total + 1);
-  h.substepEls.forEach((rows, planIndex) => {
-      const checks = rows.map((row) => row.querySelector<HTMLElement>('.plan-progress-substep-check'));
-    rows.forEach((row, i) => {
-      row.classList.remove('active', 'pending');
-      row.classList.add('done');
-      if (checks[i]) checks[i]!.textContent = '✓';
-    });
-  });
 }
 
 // Phase-marker regex: `## 阶段 1/4`, `步骤 2/4`, `## 第 1 步：搭建骨架`, `Step

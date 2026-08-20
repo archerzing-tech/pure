@@ -14,6 +14,7 @@ import {
   IMAGE_GEN_OUTPUT_PROMPT,
   HUMAN_TONE_PROMPT,
   FILE_TOOLS_CORE,
+  CAPABILITY_GAP_PROMPT,
   composeUserTurn,
   stripUserTurnContext,
 } from '../promptLayers';
@@ -101,6 +102,15 @@ describe('L1 behavior contracts', () => {
   it('reports finished work like a colleague, not a changelog', () => {
     expect(HUMAN_TONE_PROMPT).toContain('report back the way a colleague would');
     expect(HUMAN_TONE_PROMPT).toContain('changelog-style list');
+  });
+
+  it('uses dynamic capability tools for skills and MCP services', () => {
+    expect(CAPABILITY_GAP_PROMPT).toContain('search_agent_skills(query)');
+    expect(CAPABILITY_GAP_PROMPT).toContain('install_agent_skill(source, name)');
+    expect(CAPABILITY_GAP_PROMPT).toContain('search_mcp_servers(query)');
+    expect(CAPABILITY_GAP_PROMPT).toContain('connect_mcp_server(candidateId)');
+    expect(CAPABILITY_GAP_PROMPT).toContain('consider a specialist skill as one possible solution');
+    expect(CAPABILITY_GAP_PROMPT).toContain('official Registry recipe');
   });
 });
 

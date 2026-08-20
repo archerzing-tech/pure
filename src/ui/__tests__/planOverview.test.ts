@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { createPlanOverview, fitOverviewToHost, restoreStoredPosition, setOverviewPositionSession } from '../planOverview';
 import type { Plan } from '../../coding-agent/types';
+import { PlanProgressModel } from '../planProgress';
 
 function installFakeDocument(): () => void {
   const previous = (globalThis as any).document;
@@ -76,6 +77,17 @@ function installFakeDocument(): () => void {
   return () => { (globalThis as any).document = previous; };
 }
 
+function bindOverview(
+  overview: ReturnType<typeof createPlanOverview>,
+  status: 'active' | 'waiting' | 'complete' = 'active',
+  currentPlan = 1,
+  currentTodo = 1,
+): PlanProgressModel {
+  const source = new PlanProgressModel(samplePlan(), status, currentPlan, currentTodo);
+  overview.bindProgress(source);
+  return source;
+}
+
 function samplePlan(): Plan {
   return {
     steps: [
@@ -103,11 +115,24 @@ function stepClasses(root: any): string[] {
 }
 
 describe('planOverview floating outline card', () => {
+  it('exposes only model binding and rendering controls', () => {
+    const restore = installFakeDocument();
+    try {
+      const overview = createPlanOverview();
+      expect('show' in overview).toBe(false);
+      expect('update' in overview).toBe(false);
+      expect('setCurrent' in overview).toBe(false);
+      expect('setStatus' in overview).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
   it('renders a step list with the active step highlighted', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 2, 1, '拆模块');
+      bindOverview(overview, 'active', 2, 1);
       expect(overview.el.hidden).toBe(false);
       const classes = stepClasses(overview.el);
       expect(classes[0]).toBe('plan-overview-step done');
@@ -123,7 +148,7 @@ describe('planOverview floating outline card', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 2, 1, '实现功能');
+      bindOverview(overview, 'active', 2, 1);
       const card = cardOf(overview.el);
       const compact = overview.el.children[1] as any;
       expect(card.hidden).toBe(false);
@@ -147,13 +172,13 @@ describe('planOverview floating outline card', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 1, 1);
+      const source = bindOverview(overview, 'active', 1, 1);
       overview.setCollapsed(true);
-      overview.setStatus('waiting');
+      source.dispatch({ type: 'statusChanged', status: 'waiting' });
       const compact = overview.el.children[1] as any;
       expect(compact.children[0].textContent).toBe('1');
       expect(compact.className).toContain('awaiting');
-      overview.setStatus('complete');
+      source.dispatch({ type: 'completed' });
       expect(compact.children[0].textContent).toBe('3');
       expect(compact.className).toContain('complete');
     } finally {
@@ -165,8 +190,8 @@ describe('planOverview floating outline card', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 1, 1);
-      overview.setStatus('waiting');
+      const source = bindOverview(overview, 'active', 1, 1);
+      source.dispatch({ type: 'statusChanged', status: 'waiting' });
       expect(cardOf(overview.el).className).toContain('awaiting');
     } finally {
       restore();
@@ -177,12 +202,10 @@ describe('planOverview floating outline card', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 1, 1);
-      overview.setStatus('waiting');
+      const source = bindOverview(overview, 'active', 1, 1);
+      source.dispatch({ type: 'statusChanged', status: 'waiting' });
       expect(cardOf(overview.el).className).toContain('awaiting');
-      // The continuation path calls update(plan, 'active', ...): the awaiting
-      // visual must clear and the active one must take over.
-      overview.update(samplePlan(), 'active', 1, 1, '开始第一个 Todo');
+      source.dispatch({ type: 'statusChanged', status: 'active' });
       const card = cardOf(overview.el);
       expect(card.className).toContain('active');
       expect(card.className).not.toContain('awaiting');
@@ -195,8 +218,8 @@ describe('planOverview floating outline card', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 1, 1);
-      overview.setStatus('complete');
+      const source = bindOverview(overview, 'active', 1, 1);
+      source.dispatch({ type: 'completed' });
       const card = cardOf(overview.el);
       expect(card.className).toContain('complete');
       const doneRows = stepsOf(overview.el).filter((s: any) => s.className.includes('done'));
@@ -210,7 +233,7 @@ describe('planOverview floating outline card', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 1, 1);
+      bindOverview(overview, 'active', 1, 1);
       overview.clear();
       expect(overview.el.hidden).toBe(true);
     } finally {
@@ -218,12 +241,29 @@ describe('planOverview floating outline card', () => {
     }
   });
 
-  it('advances the current step with setCurrent', () => {
+  it('renders every model snapshot without maintaining a second progress cursor', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 1, 1);
-      overview.setCurrent(2, 1, '拆模块');
+      const source = new PlanProgressModel(samplePlan());
+      overview.bindProgress(source);
+      source.dispatch({ type: 'phaseStarted', planNumber: 2 });
+      expect(stepClasses(overview.el)[0]).toBe('plan-overview-step done');
+      expect(stepClasses(overview.el)[1]).toContain('active');
+      source.dispatch({ type: 'completed' });
+      expect(cardOf(overview.el).className).toContain('complete');
+      expect(cardOf(overview.el).children[0].children[1].textContent).toBe('3/3');
+    } finally {
+      restore();
+    }
+  });
+
+  it('advances the current step from a model phase event', () => {
+    const restore = installFakeDocument();
+    try {
+      const overview = createPlanOverview();
+      const source = bindOverview(overview, 'active', 1, 1);
+      source.dispatch({ type: 'phaseStarted', planNumber: 2 });
       const classes = stepClasses(overview.el);
       expect(classes[0]).toBe('plan-overview-step done');
       expect(classes[1]).toContain('active');
@@ -265,7 +305,7 @@ describe('planOverview drag to reposition', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 2, 1);
+      bindOverview(overview, 'active', 2, 1);
       setupHost(overview);
       const card = cardOf(overview.el);
       dispatch(card, 'pointerdown', { clientX: 100, clientY: 100 });
@@ -289,7 +329,7 @@ describe('planOverview drag to reposition', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 2, 1);
+      bindOverview(overview, 'active', 2, 1);
       setupHost(overview);
       overview.setCollapsed(true);
       const compact = overview.el.children[1] as any;
@@ -308,7 +348,7 @@ describe('planOverview drag to reposition', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 2, 1);
+      bindOverview(overview, 'active', 2, 1);
       const card = cardOf(overview.el);
       const compact = overview.el.children[1] as any;
       overview.setCollapsed(true);
@@ -350,7 +390,7 @@ describe('planOverview drag to reposition', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 2, 1);
+      bindOverview(overview, 'active', 2, 1);
       setupHost(overview);
       overview.el.style.right = '12px';
       const card = cardOf(overview.el);
@@ -374,7 +414,7 @@ describe('planOverview drag to reposition', () => {
     const restore = installFakeDocument();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 2, 1);
+      bindOverview(overview, 'active', 2, 1);
       overview.setCollapsed(true);
       const compact = overview.el.children[1] as any;
       // Plain press: no capture, so the subsequent click keeps its target.
@@ -431,7 +471,7 @@ describe('planOverview dragged-position persistence', () => {
     const restoreStorage = installFakeStorage();
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 2, 1);
+      bindOverview(overview, 'active', 2, 1);
       setupHost(overview);
       const card = cardOf(overview.el);
       dispatch(card, 'pointerdown', { clientX: 100, clientY: 100 });
@@ -529,7 +569,7 @@ describe('planOverview per-session position memory', () => {
     setOverviewPositionSession('s1');
     try {
       const overview = createPlanOverview();
-      overview.show(samplePlan(), 'active', 2, 1);
+      bindOverview(overview, 'active', 2, 1);
       setupHost(overview);
       const card = cardOf(overview.el);
       dispatch(card, 'pointerdown', { clientX: 100, clientY: 100 });

@@ -1,6 +1,23 @@
 import { describe, expect, it } from 'bun:test';
 import { compileRequestWorkflow } from '../requestWorkflow';
+import type { SemanticRouteDecision } from '../../coding-agent/types';
 
+const buildRoute: SemanticRouteDecision = {
+  intent: 'build',
+  complexity: 'complex',
+  mode: 'build',
+  requiresPlan: true,
+  needsDeliveryGate: true,
+  assessment: {
+    intent: 'build',
+    riskLevel: 'low',
+    reversibility: 'reversible',
+    impact: '隔离的原型文件',
+    recommendation: '先按独立方案实现并验证',
+    requiresProbe: true,
+    requiresConfirmation: false,
+  },
+};
 
 describe('compileRequestWorkflow', () => {
   it('keeps a direct question lightweight', () => {
@@ -15,8 +32,8 @@ describe('compileRequestWorkflow', () => {
 
   it('compiles the same probe and build context for GUI and CLI callers', () => {
     const prompt = 'Build a complete project for a team dashboard';
-    const gui = compileRequestWorkflow(prompt, { hasTools: true });
-    const cli = compileRequestWorkflow(prompt, { hasTools: true });
+    const gui = compileRequestWorkflow(prompt, { hasTools: true, semanticRoute: buildRoute });
+    const cli = compileRequestWorkflow(prompt, { hasTools: true, semanticRoute: buildRoute });
 
     expect(gui).toEqual(cli);
     expect(gui.stage).toBe('plan');
@@ -25,6 +42,30 @@ describe('compileRequestWorkflow', () => {
     expect(gui.needsProbe).toBe(true);
     expect(gui.needsDeliveryGate).toBe(true);
     expect(gui.userContext.buildProtocol).toContain('Incremental build protocol');
+  });
+
+  it('routes the HKT VIP interference-protection agent prototype into mock-backed build planning', () => {
+    const prompt = '创建一个HKT vip干扰保障agent应用，这个应用可以保障vip用户进入到保障区域后能，agent自动启动监控，保障流程。按照一个流程处理保障任务。你帮我创建一个项目原型，数据用mock';
+    const workflow = compileRequestWorkflow(prompt, { hasTools: true, semanticRoute: buildRoute });
+
+    expect(workflow.analysis.complexity).toBe('complex');
+    expect(workflow.analysis.mode).toBe('build');
+    expect(workflow.stage).toBe('plan');
+    expect(workflow.needsDeliveryGate).toBe(true);
+    expect(workflow.needsProbe).toBe(true);
+    expect(workflow.userContext.buildProtocol).toContain('Incremental build protocol');
+  });
+
+  it('keeps an outcome-improvement request on the conversational path from semantic context', () => {
+    const workflow = compileRequestWorkflow('当前 agent 制作的基于 web 的页面很难看，缺少优秀的时髦设计，应该怎么办？', { hasTools: true, semanticRoute: {
+      intent: 'question', complexity: 'simple', mode: 'yolo', requiresPlan: false, needsDeliveryGate: false,
+      assessment: { intent: 'question', riskLevel: 'low', reversibility: 'reversible', impact: '设计质量反馈', recommendation: '先给出设计方向和可选 skill', requiresProbe: false, requiresConfirmation: false },
+    } });
+
+    expect(workflow.stage).toBe('direct');
+    expect(workflow.needsDeliveryGate).toBe(false);
+    expect(workflow.userContext.buildProtocol).toBeUndefined();
+    expect(workflow.userContext.assessment).toBeUndefined();
   });
 
   it('raises a high-risk request to confirmation even when the task is otherwise simple', () => {
@@ -51,12 +92,47 @@ describe('compileRequestWorkflow', () => {
   });
 
   it('does not require a workspace probe when tools are unavailable', () => {
-    const workflow = compileRequestWorkflow('Refactor the authentication module', { hasTools: false });
+    const workflow = compileRequestWorkflow('Refactor the authentication module', { hasTools: false, semanticRoute: {
+      intent: 'refactor', complexity: 'complex', mode: 'plan', requiresPlan: true, needsDeliveryGate: false,
+      assessment: { intent: 'refactor', riskLevel: 'medium', reversibility: 'partially-reversible', impact: '可能影响认证模块', recommendation: '先读取结构再小步修改', requiresProbe: true, requiresConfirmation: false },
+    } });
 
-    expect(workflow.stage).toBe('direct');
+    expect(workflow.stage).toBe('plan');
     expect(workflow.probeRequired).toBe(true);
     expect(workflow.probeAvailable).toBe(false);
     expect(workflow.needsProbe).toBe(false);
     expect(workflow.analysis.intent.requiresProbe).toBe(true);
+  });
+
+  it('keeps the delivery gate on a continuing PROJECT build', () => {
+    const workflow = compileRequestWorkflow('继续', {
+      hasTools: true,
+      continuingPlan: true,
+      continuingProjectBuild: true,
+    });
+    expect(workflow.needsDeliveryGate).toBe(true);
+    expect(workflow.requiresPlanReview).toBe(true);
+  });
+
+  it('does not force the delivery gate on a continuing ordinary complex plan', () => {
+    const workflow = compileRequestWorkflow('继续', {
+      hasTools: true,
+      continuingPlan: true,
+      continuingProjectBuild: false,
+    });
+    expect(workflow.needsDeliveryGate).toBe(false);
+    // The continuation itself still never re-shows the plan-review card.
+    expect(workflow.requiresPlanReview).toBe(true);
+  });
+
+  it('keeps a semantic build route separate from reasonableness review', () => {
+    const workflow = compileRequestWorkflow('生成四个网络保障大屏的原型，风格不要互相参考', {
+      hasTools: true,
+      semanticRoute: buildRoute,
+    });
+    expect(workflow.stage).toBe('plan');
+    expect(workflow.needsDeliveryGate).toBe(true);
+    expect(workflow.userContext.buildProtocol).toContain('Incremental build protocol');
+    expect(workflow.userContext.traps).toBeUndefined();
   });
 });

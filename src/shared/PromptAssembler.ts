@@ -136,6 +136,8 @@ Web tools:
 Diagram rendering:
 - The CLI renders \`\`\`mermaid graph/flowchart and \`\`\`puml / \`\`\`plantuml blocks as a terminal WIREFRAME (boxes + connecting lines drawn with box-drawing characters) — no browser, no image. Prefer mermaid for process/flow diagrams, puml for activity/sequence. Emit them as normal fenced blocks; the client converts them.`;
 
+const GUI_IMAGE_INPUT_PROMPT = `Image attachments:\n- When the current user message includes a native image attachment, inspect that image directly and answer what it shows or means. Do NOT call web_scrape/web_fetch to find the image, do NOT treat the temporary file path as a web URL, and do NOT claim the image is missing.\n- If the provider/model explicitly rejects image content because it is text-only, say clearly that this selected model does not support image understanding and ask the user to switch to a vision-capable model; do not retry the same image through web scraping.`;
+
 const GUI_IMAGE_GEN_PROMPT = `\n\nImage generation:\n- generate_image(prompt, n?, size?) — text-to-image with the connected provider's image model. Use it for image/icon/illustration/photo/poster requests ("创作一个小狗图标", "生成一张 xxx 图片"); the result renders as a real picture in the chat. Pass n > 1 (up to 4) for multiple images or variations. NEVER emit fenced svg code blocks for image requests while this tool is available — SVG is only for hand-drawn diagrams, and the fallback when generate_image fails.`;
 
 export function buildGuiCapabilities(hasWorkspace: boolean, temporaryWorkspace = false, options: { imageGeneration?: boolean } = {}): string {
@@ -149,7 +151,7 @@ export function buildGuiCapabilities(hasWorkspace: boolean, temporaryWorkspace =
     ? `${GUI_WEB_TOOLS_PROMPT}\n\n${fileTools}\n\n${GUI_SYS_INFO_PROMPT}`
     : `${GUI_WEB_TOOLS_PROMPT}\n\n${GUI_SYS_INFO_PROMPT}`;
   const imageGen = options.imageGeneration ? GUI_IMAGE_GEN_PROMPT : '';
-  return `${workspaceNote}\n${tools}${imageGen}`;
+  return `${workspaceNote}\n${tools}\n\n${GUI_IMAGE_INPUT_PROMPT}${imageGen}`;
 }
 
 export function buildCliCapabilities(): string {
@@ -170,6 +172,7 @@ ${visualOutput}
 - Information queries (weather, news, facts, prices, directions, lookup, trip/itinerary planning) are ANSWERED INLINE — never persist web_search / web_fetch results to disk as data files (no weather.js, no *_raw.js, no "saved response" files) and never scaffold a project directory for an advice/planning request. write_file / edit_file are for artifacts the user asked to create or modify, not for stashing fetched data. If you think data are worth keeping, summarize them in your reply instead.
 - A bare "generate X", "show me X", "give me X", "what does X look like", or any "write me code for…" without a path means inline output — never reach for write_file.
 - COMPLETE runnable artifacts go to disk by default: when the user asks you to BUILD a full game, mini-game, web page/site, app, tool, script, or small project ("写一个小游戏", "做一个网页", "开发一个工具" — even without naming a path), WRITE it to a file instead of printing the whole source inline. Single-file artifact → a new file like index.html / game.html / app.py in the workspace; multi-file project → a new directory with the files. After writing, state the path(s) and how to run/open it.
+- When the user reports that an existing result is poor, or asks how to get a better result, first infer the outcome they want from the whole request and conversation. Choose a useful response that can combine diagnosis, concrete design directions, trade-offs, relevant specialist skills/tools, and an offer to inspect or implement the improvement. For visual or product-quality problems, make the advice concrete by discussing hierarchy, typography, spacing, color, content, interaction, and responsive behavior as relevant, then propose a small number of directions with trade-offs. Do not force a fixed advice-only or build-only route from isolated words. If the request is genuinely ambiguous, present the most useful options and ask one focused question; if implementation is clearly wanted, inspect the existing artifact and proceed through the normal plan, permission, and verification flow.
 - When you do write a file, briefly state where it landed and confirm the user actually wanted persistence; the EXISTENCE of a workspace does NOT imply "save everything to disk".`;
 }
 
