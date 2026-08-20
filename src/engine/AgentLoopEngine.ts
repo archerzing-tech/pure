@@ -166,7 +166,7 @@ export class AgentLoopEngine {
             interrupted = true; break;
           }
           if (action.kind !== 'degrade') {
-            messages.push({ role: 'user' as const, content: action.hint });
+            messages.push({ role: 'user' as const, content: action.hint, internal: true });
           }
           turnCount++; budget.incrementTurn();
           yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
@@ -234,11 +234,11 @@ export class AgentLoopEngine {
           // something material instead of re-issuing the identical call.
           for (const te of toolErrors) {
             const note = this.degradationNote(te);
-            messages.push({ role: 'user' as const, content: note });
+            messages.push({ role: 'user' as const, content: note, internal: true });
             budget.addTokens(note);
           }
           if (action.kind !== 'degrade') {
-            messages.push({ role: 'user' as const, content: action.hint });
+            messages.push({ role: 'user' as const, content: action.hint, internal: true });
           }
           turnCount++; budget.incrementTurn();
           yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
@@ -273,7 +273,7 @@ export class AgentLoopEngine {
         // THINK treats the failed call as a dead-end instead of re-issuing it.
         for (const te of toolErrors) {
           const note = this.degradationNote(te);
-          messages.push({ role: 'user' as const, content: note });
+          messages.push({ role: 'user' as const, content: note, internal: true });
           budget.addTokens(note);
         }
 
@@ -363,6 +363,7 @@ export class AgentLoopEngine {
               messages.push({
                 role: 'user' as const,
                 content: `Verification failed: ${result.feedback ?? ''}. Please review the output above and fix any issues.`,
+                internal: true,
               });
             }
             turnCount++;

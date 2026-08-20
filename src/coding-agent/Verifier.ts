@@ -119,7 +119,7 @@ export const LLMVerifyCheckName = 'llm-verify';
 export function extractUserTask(context: Message[]): string {
   for (let i = context.length - 1; i >= 0; i--) {
     const m = context[i];
-    if (m.role === 'user' && m.content.trim()) return m.content.trim();
+    if (m.role === 'user' && !m.internal && m.content.trim()) return m.content.trim();
   }
   return '';
 }

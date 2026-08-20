@@ -37,7 +37,7 @@ export interface TranscriptEntry {
 }
 
 export interface SessionUiState {
-  /** Canonical session-level plan cursor shared by the transcript card and floating outline. */
+  /** Canonical session-level plan cursor used by the transcript plan card. */
   planProgress?: PlanProgressSnapshot | null;
   /** Legacy cursor retained for migration and older exports. */
   planState?: PlanState | null;
@@ -49,7 +49,7 @@ export interface PlanState {
   todoNumber: number;
   started: boolean;
   /** True when the plan had finished: the cross-turn cursor is gone but the
-   * all-done floating outline must still come back on session restore. */
+   * completed chat plan card must still come back on session restore. */
   complete?: boolean;
 }
 

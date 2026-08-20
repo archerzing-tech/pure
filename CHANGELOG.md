@@ -3,6 +3,15 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.13
+
+**多阶段计划续跑稳定性 + 简化计划视图**
+
+- 修复多阶段原型任务在第 1/4、2/4 阶段结束时被误判为整个计划完成的问题；继续执行时保留原计划游标并推进到下一阶段
+- 修复 `llm-verify` 把引擎内部的重试/验证提示误当成用户诉求，避免出现“缺少 path / simpler approach”的错误验证建议
+- 移除右侧浮动执行大纲，保留聊天内计划卡、计划暂停/继续和会话恢复能力，减少重复投影导致的状态不同步
+- 补充计划续跑、内部恢复消息识别和聊天计划卡恢复测试；完整 Bun 回归测试通过
+
 ## v1.9.12-adv
 
 **质量门禁不适用态 + 附图片提问不再误触发图片生成 + 工具卡展开动画修复**
