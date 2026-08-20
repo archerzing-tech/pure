@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { createRequestReviewCard, formatRequestReviewSection, hasFlaggedReviewItems, flaggedReviewItems, type RequestReviewItem } from '../requestReview';
+import { createRequestReviewCard, formatRequestReviewSection, hasFlaggedReviewItems, shouldPauseForRequestReview, shouldShowRequestReview, flaggedReviewItems, type RequestReviewItem } from '../requestReview';
 
 function installFakeDocument(): { handlers: Map<any, Record<string, () => void>>; restore: () => void } {
   const previous = (globalThis as any).document;
@@ -44,6 +44,65 @@ const mixed: RequestReviewItem[] = [
 ];
 
 describe('requestReview card', () => {
+  it('shows a subjective scope concern without interrupting execution', () => {
+    const buildAssessment = {
+      intent: 'build' as const,
+      riskLevel: 'medium' as const,
+      reversibility: 'partially-reversible' as const,
+      impact: 'isolated prototype files',
+      recommendation: 'build incrementally',
+      requiresProbe: true,
+      requiresConfirmation: false,
+    };
+    const concern = [{ part: '生成四个独立原型', verdict: 'questionable' as const, reason: '范围较大' }];
+    // The model's concern is surfaced — the user gets to see it…
+    expect(shouldShowRequestReview(concern)).toBe(true);
+    // …but a subjective opinion never forces the turn to pause.
+    expect(shouldPauseForRequestReview(concern, buildAssessment, false)).toBe(false);
+  });
+
+  it('keeps real traps and destructive or migration risks pausing', () => {
+    const buildAssessment = {
+      intent: 'build' as const,
+      riskLevel: 'low' as const,
+      reversibility: 'reversible' as const,
+      impact: 'isolated prototype files',
+      recommendation: 'proceed',
+      requiresProbe: false,
+      requiresConfirmation: false,
+    };
+    const destructiveAssessment = {
+      ...buildAssessment,
+      intent: 'delete' as const,
+      riskLevel: 'high' as const,
+      reversibility: 'irreversible' as const,
+      requiresProbe: true,
+      requiresConfirmation: true,
+    };
+    const flagged = [{ part: '删除旧目录', verdict: 'unreasonable' as const, reason: '不可逆' }];
+    expect(shouldShowRequestReview(flagged)).toBe(true);
+    expect(shouldPauseForRequestReview(flagged, buildAssessment, true)).toBe(true);
+    expect(shouldPauseForRequestReview(flagged, destructiveAssessment, false)).toBe(true);
+  });
+
+  it('pauses only on a genuine blocker, never on an opinion', () => {
+    const buildAssessment = {
+      intent: 'build' as const,
+      riskLevel: 'low' as const,
+      reversibility: 'reversible' as const,
+      impact: 'isolated prototype files',
+      recommendation: 'proceed',
+      requiresProbe: false,
+      requiresConfirmation: false,
+    };
+    // Subjective doubts stay non-blocking, including under medium risk.
+    expect(shouldPauseForRequestReview([{ part: '风格差异大', verdict: 'questionable' as const, reason: '可能不统一' }], buildAssessment, false)).toBe(false);
+    expect(shouldPauseForRequestReview([{ part: '范围较大', verdict: 'questionable' as const, reason: '需要更多时间' }], { ...buildAssessment, riskLevel: 'medium' }, false)).toBe(false);
+    // An explicitly unreasonable verdict (infeasible / self-contradictory /
+    // destructive to existing work) does pause for a decision.
+    expect(shouldPauseForRequestReview([{ part: '删除被引用的目录', verdict: 'unreasonable' as const, reason: '迁移脚本在引用' }], buildAssessment, false)).toBe(true);
+  });
+
   it('flags only non-reasonable items', () => {
     expect(hasFlaggedReviewItems(mixed)).toBe(true);
     expect(hasFlaggedReviewItems([{ part: 'A', verdict: 'reasonable', reason: '' }])).toBe(false);

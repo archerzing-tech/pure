@@ -144,7 +144,7 @@ describe('projectTranscript', () => {
     }]);
 
     expect(types(blocks)).toEqual(['analysis', 'plan', 'thinking', 'assistant']);
-    expect(blocks[1]).toEqual({ type: 'plan', snapshot: { plan, currentPlan: 1, currentTodo: 1, complete: false } });
+    expect(blocks[1]).toEqual({ type: 'plan' });
   });
 
   it('replays plan assessment and artifact blocks around the assistant message', () => {

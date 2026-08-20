@@ -148,13 +148,16 @@ function diagramControls(): string {
 
 function diagramLoading(): string {
   return `<div class="diagram-loading" role="status" aria-live="polite" aria-label="${attr(t('diagram.loading'))}">` +
-    `<span class="diagram-loading-ring" aria-hidden="true"></span>` +
+    `<span class="diagram-loading-visual" aria-hidden="true">` +
+    `<span class="diagram-loading-ring"></span>` +
+    `<span class="diagram-loading-orbit"><i></i><i></i><i></i></span>` +
+    `</span>` +
     `<span class="diagram-loading-label">${esc(t('diagram.loading'))}</span>` +
     `</div>`;
 }
 
 export function diagramSlot(kind: DiagramKind, source: string, preview: string): string {
-  return `<div class="diagram-slot ${kind}-slot" data-diagram-kind="${kind}" data-state="loading" data-view="preview" data-raw="${attr(encodeRawAttr(source))}">` +
+  return `<div class="diagram-slot ${kind}-slot" data-diagram-kind="${kind}" data-state="loading" aria-busy="true" data-view="preview" data-raw="${attr(encodeRawAttr(source))}">` +
     diagramControls() + diagramLoading() +
     `<div class="diagram-preview ${kind}-target">${preview}</div>` +
     `<pre class="diagram-source ${kind}-source"><code class="hljs language-${kind}">${esc(source)}</code></pre>` +
@@ -320,6 +323,7 @@ function diagramRawOf(slot: HTMLElement): string {
 
 function setDiagramState(slot: HTMLElement, state: DiagramState, message = ''): void {
   slot.setAttribute('data-state', state);
+  slot.setAttribute('aria-busy', String(state === 'loading'));
   const error = slot.querySelector<HTMLElement>('.diagram-error');
   if (error) {
     error.innerHTML = state === 'error'
@@ -1809,6 +1813,17 @@ export async function renderMarkdown(
 // completion, so during streaming it appears as a plain code block.
 
 const STREAM_THROTTLE_MS = 100;
+const STREAM_LONG_TEXT_MS = 160;
+const STREAM_VERY_LONG_TEXT_MS = 220;
+
+export function streamRenderThrottleMs(textLength: number, renderCostMs = 0): number {
+  const sizeDelay = textLength >= 80_000
+    ? STREAM_VERY_LONG_TEXT_MS
+    : textLength >= 24_000
+      ? STREAM_LONG_TEXT_MS
+      : STREAM_THROTTLE_MS;
+  return Math.min(STREAM_VERY_LONG_TEXT_MS, Math.max(sizeDelay, renderCostMs >= 18 ? STREAM_LONG_TEXT_MS : sizeDelay));
+}
 
 const streamRenderer = new Renderer();
 streamRenderer.html = (token: { text: string; block?: boolean }): string => {
@@ -1845,6 +1860,7 @@ interface StreamState {
   timer: number | undefined;
   lastRenderedText: string;
   lastRenderTime: number;
+  renderCostMs: number;
   /** Newest text seen; the timer closure reads this so a coalesced render always commits the latest frame, never the stale one from schedule time. */
   latestText: string;
 }
@@ -1854,7 +1870,7 @@ const streamStates = new WeakMap<HTMLElement, StreamState>();
 function streamStateFor(container: HTMLElement): StreamState {
   let s = streamStates.get(container);
   if (!s) {
-    s = { timer: undefined, lastRenderedText: '', lastRenderTime: 0, latestText: '' };
+    s = { timer: undefined, lastRenderedText: '', lastRenderTime: 0, renderCostMs: 0, latestText: '' };
     streamStates.set(container, s);
   }
   return s;
@@ -2026,14 +2042,17 @@ export function scheduleStreamingRender(
     // Render the newest text the throttle window has seen, not the snapshot
     // from when the timer was scheduled (tokens keep arriving meanwhile).
     const latest = state.latestText;
+    const startedAt = Date.now();
     diffStreaming(container, latest);
+    state.renderCostMs = Date.now() - startedAt;
     state.lastRenderedText = latest;
     state.lastRenderTime = Date.now();
     onRendered?.();
   };
 
   const elapsed = Date.now() - state.lastRenderTime;
-  if (elapsed >= STREAM_THROTTLE_MS) {
+  const throttleMs = streamRenderThrottleMs(state.latestText.length, state.renderCostMs);
+  if (elapsed >= throttleMs) {
     // Leading edge (or first token): render immediately.
     if (state.timer != null) {
       clearTimeout(state.timer);
@@ -2046,7 +2065,7 @@ export function scheduleStreamingRender(
   // Inside the window: coalesce into one render at the boundary, always
   // carrying the newest text (doRender reads state.latestText).
   if (state.timer == null) {
-    state.timer = window.setTimeout(doRender, STREAM_THROTTLE_MS - elapsed);
+    state.timer = window.setTimeout(doRender, throttleMs - elapsed);
   }
 }
 
@@ -2055,6 +2074,20 @@ export function scheduleStreamingRender(
  * the Completed event handler before/after handing off to renderMarkdown,
  * so a late-firing throttled tick cannot race against the final pipeline.
  */
+export function flushStreamingRender(container: HTMLElement): void {
+  const state = streamStates.get(container);
+  if (!state) return;
+  if (state.timer != null) {
+    clearTimeout(state.timer);
+    state.timer = undefined;
+  }
+  if (state.latestText !== state.lastRenderedText) {
+    diffStreaming(container, state.latestText);
+    state.lastRenderedText = state.latestText;
+    state.lastRenderTime = Date.now();
+  }
+}
+
 export function cancelStreamingRender(container: HTMLElement): void {
   const state = streamStates.get(container);
   if (!state) return;
@@ -2067,6 +2100,7 @@ export function cancelStreamingRender(container: HTMLElement): void {
   // stream on this bubble starts with an immediate render.
   state.lastRenderedText = '';
   state.lastRenderTime = 0;
+  state.renderCostMs = 0;
 }
 
 // ── Theme coupling ──

@@ -3,9 +3,23 @@
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
+export interface MessageImage {
+  /** data: URL for the vision request and restored transcript thumbnail. */
+  dataUrl: string;
+  /** MIME type used by provider adapters and the UI. */
+  mimeType: string;
+  /** Original/persisted temporary filename. */
+  name?: string;
+  /** Absolute path in the application temporary space. */
+  path?: string;
+  sizeBytes?: number;
+}
+
 export interface Message {
   role: Role;
   content: string;
+  /** Images attached to this user message; adapters map these to native image blocks. */
+  images?: MessageImage[];
   toolCallId?: string;
   toolName?: string;
   name?: string;
@@ -115,12 +129,14 @@ export interface RunInput {
   sessionId: string;
   systemPrompt: string;
   userPrompt: string;
+  images?: MessageImage[];
   budget: BudgetConfig;
 }
 
 export interface RunContinueInput {
   sessionId: string;
   newUserPrompt: string;
+  images?: MessageImage[];
   messages: Message[];
   budget: BudgetConfig;
 }
@@ -149,6 +165,9 @@ export interface EngineContext {
   llm: LLMAdapter;
   tools?: ToolAdapter;
   toolsDefs: ToolDefinition[];
+  /** Recompute the LLM-visible tool list before each THINK iteration so
+   * dynamically connected MCP servers become usable without restarting the turn. */
+  toolsDefsProvider?: () => ToolDefinition[];
   verifier?: { evaluate(params: { output: string; context: Message[] }): Promise<{ passed: boolean; feedback?: string; evidence?: VerificationEvidence[] }> };
   budget: BudgetConfig;
   signal?: AbortSignal;

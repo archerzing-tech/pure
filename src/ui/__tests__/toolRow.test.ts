@@ -112,11 +112,13 @@ describe('tool row focus layout', () => {
       row.expandButton.click();
       expect(isToolRowExpanded(row)).toBe(true);
       expect(row.el.classList.contains('tool-row-expanded')).toBe(true);
+      expect(row.details.open).toBe(true);
       expect(row.expandButton.getAttribute('aria-pressed')).toBe('true');
       expect(row.expandButton.title).toBe('还原卡片大小');
 
       row.expandButton.click();
       expect(isToolRowExpanded(row)).toBe(false);
+      expect(row.details.open).toBe(true);
       expect(row.expandButton.getAttribute('aria-pressed')).toBe('false');
     } finally {
       restore();

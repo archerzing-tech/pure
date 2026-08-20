@@ -1,6 +1,62 @@
 import { describe, expect, it } from 'bun:test';
-import { createSessionSnapshot, createSessionSnapshotFromLegacy, dedupeFileWrites, groupFileWrites, limitStoredMessages, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
+import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
 import type { Message } from '../../shared/types';
+import type { Plan } from '../../coding-agent/types';
+
+describe('session stats persistence', () => {
+  it('round-trips the number of LLM interaction turns', () => {
+    const previousStorage = (globalThis as any).localStorage;
+    const values = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    };
+    try {
+      const sessionId = `stats-turns-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      saveSessionStats(sessionId, { turns: 4, searches: [], fileWrites: [], fileReads: [], commands: [] });
+      expect(loadSessionStats(sessionId).turns).toBe(4);
+    } finally {
+      (globalThis as any).localStorage = previousStorage;
+    }
+  });
+});
+
+describe('session plan progress persistence adapter', () => {
+  it('coalesces model snapshots and persists the latest canonical progress', async () => {
+    const previousStorage = (globalThis as any).localStorage;
+    const values = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    };
+    try {
+      const sessionId = `plan-progress-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const plan: Plan = {
+        steps: [
+          { id: '1', action: '准备', description: '', expectedOutcome: '' },
+          { id: '2', action: '实现', description: '', expectedOutcome: '' },
+        ],
+        reasoning: '',
+      };
+      const message: Message = { role: 'user', content: '执行计划' };
+      const base = createSessionSnapshot([message], [{ message, modelMessageIndex: 0 }]);
+      await saveSession(sessionId, base);
+      const persistence = createSessionPlanProgressPersistence(sessionId);
+      persistence.persist({ plan, currentPlan: 1, currentTodo: 1, status: 'active' });
+      persistence.persist({ plan, currentPlan: 2, currentTodo: 1, status: 'active' });
+      await persistence.flush();
+
+      const loaded = await loadSession(sessionId);
+      expect(loaded?.snapshot.uiState.planProgress?.currentPlan).toBe(2);
+      expect(loaded?.snapshot.uiState.planState?.planNumber).toBe(2);
+      persistence.dispose();
+    } finally {
+      (globalThis as any).localStorage = previousStorage;
+    }
+  });
+});
 
 describe('mergeStoredMetadata', () => {
   it('carries stored-only analysis and thinking over to a rebuilt transcript', () => {
@@ -39,6 +95,14 @@ describe('mergeStoredMetadata', () => {
 });
 
 describe('session snapshot separation', () => {
+  it('keeps uploaded images in both the model context and restored transcript entry', () => {
+    const image = { dataUrl: 'data:image/png;base64,AAAA', mimeType: 'image/png', name: 'shot.png', path: '/tmp/shot.png', sizeBytes: 4 };
+    const message: Message = { role: 'user', content: '请解析图片', images: [image] };
+    const snapshot = createSessionSnapshot([message], [{ message, modelMessageIndex: 0, content: '请解析图片', images: [image] }]);
+    expect(snapshot.modelContext.messages[0]?.images?.[0]).toEqual(image);
+    expect(snapshot.transcript[0]?.images?.[0]).toEqual(image);
+  });
+
   it('keeps UI display content out of modelContext', () => {
     const modelMessages: Message[] = [
       { role: 'assistant', content: '' },
@@ -167,6 +231,20 @@ describe('session snapshot separation', () => {
       content: '完成',
     }]);
     expect(mergeSessionSnapshotMetadata(snapshot, next).transcript[0]?.planCard).toEqual(card);
+  });
+
+  it('persists the canonical plan progress separately from the legacy cursor', () => {
+    const plan = { steps: [{ id: '1', action: '拆模块', description: '', expectedOutcome: '模块边界清晰' }, { id: '2', action: '验证', description: '', expectedOutcome: '验证通过' }], reasoning: '' };
+    const progress = { plan, currentPlan: 2, currentTodo: 1, status: 'active' as const };
+    const snapshot = createSessionSnapshot(
+      [{ role: 'assistant', content: '执行中' }],
+      [{ message: { role: 'assistant', content: '执行中' }, modelMessageIndex: 0, content: '执行中' }],
+      { planProgress: progress, planState: { plan, planNumber: 2, todoNumber: 1, started: true } },
+    );
+
+    expect(snapshot.uiState.planProgress).toEqual(progress);
+    expect(snapshot.uiState.planState?.planNumber).toBe(2);
+    expect(snapshot.modelContext.messages[0]).not.toHaveProperty('planProgress');
   });
 });
 

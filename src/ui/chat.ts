@@ -2,9 +2,9 @@
 // v0.6 — Uses CodingAgent/Harness instead of self-built ReAct loop.
 // Iterates over EngineEvents stream to update the UI reactively.
 
-import { loadConfig, hasConfiguredKey, customSecretKey, type PureConfig } from './config';
+import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, promptBudgetForProvider, imageGenEnabled, imageGenModelFor } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionStats, type PlanCardSnapshot } from './store';
+import { saveSession, loadLastSession, loadSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
@@ -15,7 +15,8 @@ import { CodingAgent } from '../coding-agent/CodingAgent';
 import { ContextEngine, type ContextCompactionResult } from '../harness/ContextEngine';
 import { isGitMutationCommand, Tags } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
-import { formatIntentPrompt, parsePlanJsonWithMeta } from '../coding-agent/Planner';
+import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
+import { formatIntentPrompt, inferSemanticRoute, parsePlanJsonWithMeta, shouldBypassSemanticRoute } from '../coding-agent/Planner';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createLLMOnlyVerifier, createDefaultVerifier } from '../coding-agent/Verifier';
@@ -26,32 +27,24 @@ import {
   formatPlanForPrompt,
   formatPlanContinuation,
   formatPlanPauseMessage,
-  restorePlanCardProgress,
   createPlanCard,
   updatePlanCard,
   clearPlanCardRefining,
-  setPlanPhase,
-  updatePlanCardPhase,
-  updatePlanCardSubstep,
-  completePlanCardSubstep,
-  canCompletePlanCardSubsteps,
-  completePlanCardSubsteps,
-  finalizePlanCard,
-  matchPlanPhaseMarker,
   matchPlanProgressMarkers,
   type PlanProgressMarker,
   createQualityGateCard,
   type PlanCardHandle,
 } from './plan';
+import { PlanProgressModel, type PlanProgressSnapshot } from './planProgress';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
-import { planOverview, setOverviewPositionSession, type PlanOverviewStatus } from './planOverview';
+import { planOverview, setOverviewPositionSession } from './planOverview';
 import { attachPlanPauseActions } from './planPauseActions';
-import { createRequestReviewCard, formatRequestReviewSection, hasFlaggedReviewItems, type RequestReviewCardHandle, type RequestReviewItem } from './requestReview';
+import { createRequestReviewCard, formatRequestReviewSection, shouldPauseForRequestReview, shouldShowRequestReview, type RequestReviewCardHandle, type RequestReviewItem } from './requestReview';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
 import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore } from '../shared/tauri';
-import { renderMarkdown, scheduleStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
+import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
 import { renderArtifactCards, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
@@ -67,7 +60,8 @@ import { mergeTranscriptWithTurn } from '../shared/conversation';
 import { t } from '../shared/i18n';
 import { effectiveProxyUrl } from '../shared/proxy';
 import { buildShellContext } from '../shared/shellEnv';
-import type { MCPClient } from '../harness/mcp/MCPClient';
+import { MCPClient } from '../harness/mcp/MCPClient';
+import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import type {
   LLMAdapter,
@@ -77,6 +71,7 @@ import type {
   ToolResult,
   ToolDefinition,
   Message,
+  MessageImage,
   BudgetConfig,
   GeneratedImage,
 } from '../shared/types';
@@ -269,6 +264,59 @@ export function bindUserBubbleSelectAll(bubble: HTMLElement): void {
     selection?.removeAllRanges();
     selection?.addRange(range);
   });
+}
+
+// The currently open viewer's close function. Replacing a viewer must first
+// run the previous close, otherwise its document keydown listener (and the
+// closure over the detached overlay) would leak on every double-open.
+let userImageViewerClose: (() => void) | null = null;
+
+export function openUserImageViewer(image: MessageImage, alt = image.name || '上传图片'): void {
+  userImageViewerClose?.();
+  userImageViewerClose = null;
+  const overlay = document.createElement('div');
+  overlay.className = 'user-image-viewer';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-label', alt);
+  const img = document.createElement('img');
+  img.src = image.dataUrl;
+  img.alt = alt;
+  img.className = 'user-image-viewer-img';
+  const onKeydown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') close();
+  };
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKeydown);
+    if (userImageViewerClose === close) userImageViewerClose = null;
+  };
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) close();
+  });
+  overlay.appendChild(img);
+  document.body.appendChild(overlay);
+  userImageViewerClose = close;
+  document.addEventListener('keydown', onKeydown);
+}
+
+export function renderUserImageAttachments(bubble: HTMLElement, images: MessageImage[]): void {
+  if (!images.length) return;
+  const gallery = document.createElement('div');
+  gallery.className = 'user-image-attachments';
+  for (const image of images) {
+    if (!image.dataUrl) continue;
+    const img = document.createElement('img');
+    img.className = 'user-image-thumb';
+    img.src = image.dataUrl;
+    img.alt = image.name || '上传图片';
+    img.title = '双击放大';
+    img.addEventListener('dblclick', (event) => {
+      event.stopPropagation();
+      openUserImageViewer(image, img.alt);
+    });
+    gallery.appendChild(img);
+  }
+  if (gallery.children.length > 0) bubble.appendChild(gallery);
 }
 
 export function parseToolCallBuffer(buf: string | undefined): { name?: string; args?: Record<string, unknown> } {
@@ -712,7 +760,7 @@ function limitMessageHistory(messages: Message[], max = MAX_MESSAGE_HISTORY): Me
 // heuristic plan from analyzeTask() is only a fallback when this call fails.
 const TASK_ANALYSIS_PROMPT = `You are a senior engineer thinking through a task before executing it. Think about THIS request, not a generic software task. Write natural, conversational reasoning first in the user's language. Do not use prescribed headings, a fixed number of sections, or a canned sequence. Explain what you understood, what is still unknown, why the scope is easy or difficult, and what you would do next in the order that makes sense for this request. Refer to concrete details from the request. For a Shandong 5G monitoring dashboard, distinguish province-wide city drill-down, live data freshness, data-source availability, alert/diagnosis logic, and whether the workspace is an empty prototype or an existing system. If a missing decision blocks implementation, say so plainly and ask only the smallest useful question at the point where it matters; do not pretend an invented assumption is settled.
 
-First, honestly review the REASONABLENESS of the user's request itself — not your plan. List every notable part of the request (requirements, constraints, tech choices, deadlines, scope) with a verdict: \"reasonable\" (feasible, no hidden cost → execute as asked), \"questionable\" (risky, depends on an unverified premise, or likely not what the user really wants → needs the user's decision), or \"unreasonable\" (infeasible, self-contradictory, wrong tool for the goal, destructive to existing work, or conflicts with the project reality → needs the user's decision). Do not rubber-stamp the request: call out impossible deadlines, wrong-technology choices, contradictory requirements, and scope that would destroy existing work. Do not flag trivial details either — only parts that genuinely need the user's decision. For questionable/unreasonable parts give a concrete suggestion (adjustment or alternative). If every part is fine, output an empty array. Output the machine-readable block before the JSON plan:
+Only perform a request-reasonableness review when there is a concrete blocker or safety boundary in the request itself: a genuine contradiction or impossible requirement, a destructive or irreversible operation, a migration/refactor risk, or a missing prerequisite that truly prevents execution. Do NOT review every requirement of an ordinary creative/build request, do NOT treat scope alone as unreasonable, and do NOT treat multiple independent variants with intentionally different styles as contradictory. If the request is a clear prototype or design deliverable, output an empty array and focus on understanding the goal and making a useful task-specific plan. For a real review, list only the specific part that needs a user decision with a verdict: \"questionable\" (risky or dependent on an unverified premise) or \"unreasonable\" (infeasible, self-contradictory, destructive, or blocked). Do not flag trivial details. For questionable/unreasonable parts give a concrete suggestion. Output the machine-readable block before the JSON plan:
 <request_review>
 [{\"part\":\"one part of the request\",\"verdict\":\"questionable\",\"reason\":\"why it needs a decision\",\"suggestion\":\"what I propose instead\"}]
 </request_review>
@@ -893,7 +941,7 @@ export async function generateTaskAnalysis(
   userText: string,
   timeoutMs: number = PLAN_ANALYSIS_TIMEOUT_MS,
   signal?: AbortSignal,
-  opts: { context?: string; onThinking?: (delta: string) => void } = {},
+  opts: { context?: string; onThinking?: (delta: string) => void; images?: MessageImage[] } = {},
 ): Promise<TaskAnalysisResult> {
   try {
     if (signal?.aborted) return { analysis: '', plan: null, repaired: false, llmIntent: null, review: [] };
@@ -903,7 +951,7 @@ export async function generateTaskAnalysis(
     if (opts.context) grounding.push(`The current workspace (use real files to make steps concrete):\n${opts.context}`);
     const messages: Message[] = [
       { role: 'system', content: TASK_ANALYSIS_PROMPT },
-      { role: 'user', content: grounding.length ? `${userText}\n\n${grounding.join('\n\n')}` : userText },
+      { role: 'user', content: grounding.length ? `${userText}\n\n${grounding.join('\n\n')}` : userText, images: opts.images },
     ];
     // Stream so the user sees the model reason about THIS task in real time;
     // each pending iterator read is raced against the remaining budget and the
@@ -1087,15 +1135,15 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
   };
 }
 
-function createToolAdapter(workspace: string, config: PureConfig, sessionId = ''): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy, 'tools'), imageGenContextFor(config), config.searxngUrl);
+function createToolAdapter(workspace: string, config: PureConfig, sessionId = '', capabilityHooks?: DynamicCapabilityHooks): ToolAdapter {
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy, 'tools'), imageGenContextFor(config), config.searxngUrl, capabilityHooks);
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.
   // generate_image is workspace-independent (it calls the provider's image
   // API), so it stays available in plain-chat mode like the web tools.
   const available = (name: string): boolean =>
-    isToolEnabled(name, config) && (!!workspace || isWebTool(name) || name === 'sys_info' || name === 'generate_image');
+    isToolEnabled(name, config) && (!!workspace || isWebTool(name) || name === 'sys_info' || name === 'generate_image' || DYNAMIC_CAPABILITY_TOOL_DEFS.some((tool) => tool.name === name));
   return {
     getTools: () => inner.getTools().filter((t) => available(t.name)),
     getMetadata: (name) => (available(name) ? inner.getMetadata(name) : undefined),
@@ -1169,6 +1217,12 @@ export class ChatController {
   // cursor advances; a completed plan keeps its final snapshot for that turn's
   // persist even though activeComplexPlan is cleared on completion.
   private activePlanCardSnapshot: PlanCardSnapshot | null = null;
+  private activePlanProgress: PlanProgressModel | null = null;
+  private activePlanProgressUnsubscribe?: () => void;
+  private activePlanProgressPersistence?: SessionPlanProgressPersistence;
+  /** Whether the active plan was approved as a project build — carried across
+   * continuation turns so the delivery gate follows the plan, not the prompt. */
+  private activePlanProjectBuild = false;
   // Background pre-compaction cache: the ContextEngine's LLM summarization —
   // the dominant pre-send cost once a long session crosses maxMessages — runs
   // after each completed turn (idle) instead of blocking the next send. The
@@ -1186,6 +1240,13 @@ export class ChatController {
   // sessionId), so a client must be torn down and rebuilt when either changes.
   private mcpSessionId = '';
   private mcpConfigSnapshot = '';
+  private dynamicMcpConnector: ((config: MCPServerConfig, signal?: AbortSignal) => Promise<DynamicMcpConnectionResult>) | null = null;
+  private readonly dynamicCapabilityHooks: DynamicCapabilityHooks = {
+    connectMcpServer: (config, signal) => {
+      if (!this.dynamicMcpConnector) return Promise.reject(new Error('Dynamic MCP connection is not ready'));
+      return this.dynamicMcpConnector(config, signal);
+    },
+  };
   // Generation counter: bumped on every session switch / new chat so an
   // in-flight send() loop notices it has been superseded (see send()).
   private generation = 0;
@@ -1228,10 +1289,73 @@ export class ChatController {
     return this.sessionId;
   }
 
+  getPlanProgressModel(): PlanProgressModel | null {
+    return this.activePlanProgress;
+  }
+
+  private applyPlanProgressSnapshot(snapshot: PlanProgressSnapshot): void {
+    const complete = snapshot.status === 'complete';
+    this.activePlanCardSnapshot = {
+      plan: snapshot.plan,
+      currentPlan: snapshot.currentPlan,
+      currentTodo: snapshot.currentTodo,
+      complete,
+    };
+    if (complete) {
+      this.activePlanNumber = snapshot.plan.steps.length;
+      this.activeTodoNumber = (snapshot.plan.steps.at(-1)?.substeps?.length ?? 0) + 1;
+      this.activePlanStarted = true;
+      this.activeComplexPlan = null;
+      return;
+    }
+    this.activeComplexPlan = snapshot.plan;
+    this.activePlanNumber = snapshot.currentPlan;
+    this.activeTodoNumber = snapshot.currentTodo;
+    this.activePlanStarted = snapshot.status !== 'waiting';
+  }
+
+  private detachActivePlanProgress(): void {
+    this.activePlanProgressUnsubscribe?.();
+    this.activePlanProgressUnsubscribe = undefined;
+    const persistence = this.activePlanProgressPersistence;
+    this.activePlanProgressPersistence = undefined;
+    if (persistence) {
+      void persistence.flush();
+      persistence.dispose();
+    }
+  }
+
+  private bindActivePlanProgress(
+    model: PlanProgressModel,
+    sessionId = this.sessionId,
+    workspace = this.workspace,
+  ): void {
+    this.detachActivePlanProgress();
+    this.activePlanProgress = model;
+    this.activePlanProjectBuild = model.getSnapshot().projectBuild === true;
+    this.applyPlanProgressSnapshot(model.getSnapshot());
+    const persistence = createSessionPlanProgressPersistence(sessionId, workspace);
+    this.activePlanProgressPersistence = persistence;
+    this.activePlanProgressUnsubscribe = model.subscribePersistence((snapshot) => {
+      if (this.activePlanProgress !== model) return;
+      this.applyPlanProgressSnapshot(snapshot);
+      persistence.persist(snapshot);
+    }, { emitCurrent: false });
+  }
+
   setSessionId(id: string) {
     this.cancelBackgroundPreCompaction();
     // A different conversation starts without the previous plan's outline.
     planOverview().clear();
+    this.detachActivePlanProgress();
+    this.activePlanProgress = null;
+    this.activePlanProjectBuild = false;
+    this.activeComplexPlan = null;
+    this.activePlanNumber = 1;
+    this.activeTodoNumber = 1;
+    this.activePlanStarted = false;
+    this.activePlanCardSnapshot = null;
+    this.activePlanProgress = null;
     this.sessionId = id;
     // Re-apply this session's remembered outline position.
     setOverviewPositionSession(id);
@@ -1282,6 +1406,7 @@ export class ChatController {
     this.deferredInitDone = false;
     this.mcpSessionId = '';
     this.mcpConfigSnapshot = '';
+    this.dynamicMcpConnector = null;
   }
 
   /** Subscribe to per-session stats updates (right-panel 统计 tab). */
@@ -1343,6 +1468,9 @@ export class ChatController {
    * or a turn is still streaming. */
   cancelPausedPlan(): boolean {
     if (!this.activeComplexPlan || this.streaming) return false;
+    this.detachActivePlanProgress();
+    this.activePlanProgress = null;
+    this.activePlanProjectBuild = false;
     this.activeComplexPlan = null;
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
@@ -1373,6 +1501,15 @@ export class ChatController {
   /** Current session's aggregated stats (token totals, cost, tool activity). */
   getSessionStats(): SessionStats {
     return this.sessionStats;
+  }
+
+  private updateTurnCount(turnCount: number, persist = false): void {
+    if (!Number.isFinite(turnCount)) return;
+    const next = Math.max(0, Math.floor(turnCount));
+    if (next <= (this.sessionStats.turns ?? 0)) return;
+    this.sessionStats.turns = next;
+    if (persist) this.persistStats();
+    else this.onStatsChanged?.(this.sessionStats);
   }
 
   /** Record a tool execution into the session's activity history (capped). */
@@ -1413,40 +1550,40 @@ export class ChatController {
   loadFromStorage(snapshot: SessionSnapshotV2) {
     const boundedMessages = limitConversationMessages(snapshot.modelContext.messages);
     this.messages = boundedMessages.map(m => ({ ...m }));
+    planOverview().clear();
+    this.detachActivePlanProgress();
+    this.activePlanProgress = null;
+    this.activePlanProjectBuild = false;
+    this.activeComplexPlan = null;
+    this.activePlanNumber = 1;
+    this.activeTodoNumber = 1;
+    this.activePlanStarted = false;
+    this.activePlanCardSnapshot = null;
+
     const savedPlanState = snapshot.uiState.planState;
-    if (savedPlanState) {
-      if (savedPlanState.complete) {
-        // A completed plan: the cross-turn cursor is gone (activeComplexPlan
-        // was nulled on completion), so the next turn plans fresh. Only the
-        // floating outline comes back, in its all-done state.
-        this.activeComplexPlan = null;
-        this.activePlanNumber = 1;
-        this.activeTodoNumber = 1;
-        this.activePlanStarted = false;
-        this.activePlanCardSnapshot = null;
-        planOverview().show(savedPlanState.plan, 'complete', savedPlanState.planNumber, savedPlanState.todoNumber, '');
-      } else {
-        this.activeComplexPlan = savedPlanState.plan;
-        this.activePlanNumber = savedPlanState.planNumber;
-        this.activeTodoNumber = savedPlanState.todoNumber;
-        this.activePlanStarted = savedPlanState.started;
-        // Re-show the floating outline for a restored plan: a paused plan
-        // (never started) comes back in the "waiting for reply" state, an
-        // in-progress one in the executing state with its persisted cursor.
-        planOverview().show(
-          this.activeComplexPlan,
-          this.activePlanStarted ? 'active' : 'waiting',
-          this.activePlanNumber,
-          this.activeTodoNumber,
-          '',
-        );
-      }
-    } else {
-      this.activeComplexPlan = null;
-      this.activePlanNumber = 1;
-      this.activeTodoNumber = 1;
-      this.activePlanStarted = false;
-      this.activePlanCardSnapshot = null;
+    const savedPlanCard = [...snapshot.transcript].reverse().find((entry) => entry.planCard)?.planCard;
+    const savedProgress = snapshot.uiState.planProgress !== undefined
+      ? snapshot.uiState.planProgress
+      : savedPlanState
+        ? {
+            plan: savedPlanState.plan,
+            currentPlan: savedPlanState.complete ? savedPlanState.plan.steps.length + 1 : savedPlanState.planNumber,
+            currentTodo: savedPlanState.todoNumber,
+            status: savedPlanState.complete ? 'complete' as const : savedPlanState.started ? 'active' as const : 'waiting' as const,
+          }
+        : savedPlanCard
+          ? {
+              plan: savedPlanCard.plan,
+              currentPlan: savedPlanCard.complete ? savedPlanCard.plan.steps.length + 1 : savedPlanCard.currentPlan,
+              currentTodo: savedPlanCard.currentTodo,
+              status: savedPlanCard.complete ? 'complete' as const : 'active' as const,
+            }
+          : null;
+    if (savedProgress) {
+      const restoredProgress = PlanProgressModel.fromSnapshot(savedProgress);
+      this.bindActivePlanProgress(restoredProgress);
+      if (savedProgress.status === 'complete') this.activePlanCardSnapshot = null;
+      planOverview().bindProgress(restoredProgress);
     }
     this.hasHistory = this.messages.length > 0;
   }
@@ -1523,12 +1660,12 @@ export class ChatController {
       config.toolFS,
     ]);
     if (this.sessionToolAdapter && this.sessionToolAdapterKey === key) return this.sessionToolAdapter;
-    this.sessionToolAdapter = createToolAdapter(workspace, config, sessionId);
+    this.sessionToolAdapter = createToolAdapter(workspace, config, sessionId, this.dynamicCapabilityHooks);
     this.sessionToolAdapterKey = key;
     return this.sessionToolAdapter;
   }
 
-  async send(userText: string) {
+  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText) {
     const chatEl = document.getElementById('chat')!;
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
@@ -1548,6 +1685,10 @@ export class ChatController {
     // then cancelled, the bubble is removed (see the cancel branch) so no
     // ghost message remains.
     const userBubble = this.addBubble('user', userText);
+    if (displayUserText !== userText || userImages.length > 0) {
+      userBubble.textContent = displayUserText;
+      renderUserImageAttachments(userBubble, userImages);
+    }
 
     // Snapshot the user-selected workspace separately from the effective tool
     // workspace. An empty user workspace uses an application-owned tmp folder,
@@ -1560,7 +1701,12 @@ export class ChatController {
     const gen = ++this.generation;
     // The plan-card snapshot belongs to this turn only; a follow-up simple
     // task must not re-attach a stale card from a previous complex plan.
-    this.activePlanCardSnapshot = null;
+    if (!this.activeComplexPlan) {
+      this.detachActivePlanProgress();
+      this.activePlanProgress = null;
+      this.activePlanCardSnapshot = null;
+      planOverview().clear();
+    }
     // Create the turn controller before any preflight await. Previously the
     // controller and streaming state were installed only after workspace
     // resolution, so Stop/Escape could not interrupt a slow startup probe.
@@ -1606,7 +1752,7 @@ export class ChatController {
     if (turnController.signal.aborted) {
       this.addStatusBubble('⏸ 已暂停：你的请求已保留在对话中。', true, false);
       void this.persistSession(
-        [...this.messages, { role: 'user', content: userText }],
+        [...this.messages, { role: 'user', content: userText, images: userImages }],
         new Map(),
         [],
         sendSessionId,
@@ -1628,7 +1774,7 @@ export class ChatController {
       this.addStatusBubble(pausedText, true, false);
       // 把被暂停的消息落盘（与运行中断路径一致），避免重载后“输入消失”。
       void this.persistSession(
-        [...this.messages, { role: 'user', content: userText }],
+        [...this.messages, { role: 'user', content: userText, images: userImages }],
         toolResults, thinkingPhases, sendSessionId, sendWorkspace,
       );
     };
@@ -1661,8 +1807,9 @@ export class ChatController {
     // already watched execute — not glued into the pre-tool bubble that now
     // sits above them (the ordering bug this fixes). Each segment keeps its
     // own raw text for the final markdown pass on Completed.
-    const assistantSegments: Array<{ el: HTMLDivElement; text: string }> = [];
-    let currentSegment: { el: HTMLDivElement; text: string } | null = null;
+    type AssistantSegment = { el: HTMLDivElement; text: string; mayContainToolCallXml: boolean; toolCallXmlTail: string };
+    const assistantSegments: AssistantSegment[] = [];
+    let currentSegment: AssistantSegment | null = null;
     // Files the agent actually wrote this turn (deduped). Folders created for
     // project scaffolding never become result cards. Collected from SUCCESSFUL
     // write/edit/replace tool results only.
@@ -1675,10 +1822,10 @@ export class ChatController {
       turnArtifacts.push({ path });
     };
     let toolRowSinceSegment = false;
-    const createSegment = (): { el: HTMLDivElement; text: string } => {
+    const createSegment = (): AssistantSegment => {
       const el = this.addBubble('assistant', '');
       el.classList.add('streaming');
-      const seg = { el, text: '' };
+      const seg = { el, text: '', mayContainToolCallXml: false, toolCallXmlTail: '' };
       assistantSegments.push(seg);
       currentSegment = seg;
       return seg;
@@ -1686,7 +1833,7 @@ export class ChatController {
     // Reuse the current bubble while no tool row has been inserted after it;
     // otherwise (or on the first text) start a fresh bubble at the end of the
     // transcript — i.e. below any tool rows that were just appended.
-    const ensureSegment = (): { el: HTMLDivElement; text: string } => {
+    const ensureSegment = (): AssistantSegment => {
       if (currentSegment && !toolRowSinceSegment) return currentSegment;
       toolRowSinceSegment = false;
       return createSegment();
@@ -1799,6 +1946,7 @@ export class ChatController {
       if (!thinkingCard || !thinkingPending) return;
       appendThinkingText(thinkingCard, thinkingPending);
       thinkingPending = '';
+      scrollChatToBottomIfPinned(chatEl);
     };
     // Drop the live trace on aborted turns (pre-flight cancel / plan gate
     // rejection / fatal error) — a "正在准备…" card must not linger as a
@@ -1838,6 +1986,12 @@ export class ChatController {
     // opens a fresh bubble below the tool rows (with its own caret).
     const finalizeStreamingSegments = (): void => {
       for (const seg of assistantSegments) {
+        const text = seg.mayContainToolCallXml ? stripToolCallXml(seg.text) : seg.text;
+        // A tool-call delta can arrive before the throttled markdown render for
+        // the latest text slice. Commit that slice before cancelling the timer,
+        // otherwise the tool row is inserted after the previous frame and the
+        // user sees a sentence cut off halfway through.
+        flushStreamingRender(seg.el, text);
         cancelStreamingRender(seg.el);
         seg.el.classList.remove('streaming');
       }
@@ -1958,6 +2112,7 @@ export class ChatController {
         toolsDefs: effectiveWorkspace ? undefined : [
           ...(config.toolBrowser ? WEB_TOOL_DEFS : []),
           ...SYS_INFO_DEFS,
+          ...DYNAMIC_CAPABILITY_TOOL_DEFS,
           ...(imageGen ? [IMAGE_GEN_TOOL_DEF] : []),
         ],
         budget: DEFAULT_BUDGET,
@@ -1989,11 +2144,45 @@ export class ChatController {
       if (imageGen) {
         codingAgent.toolRegistry.register({ ...IMAGE_GEN_TOOL_DEF, tags: [Tags.READ], riskLevel: 'low' });
       }
+      for (const tool of DYNAMIC_CAPABILITY_TOOL_DEFS) {
+        codingAgent.toolRegistry.register({
+          ...tool,
+          tags: tool.name === 'connect_mcp_server' ? [Tags.DESTRUCTIVE] : [Tags.READ],
+          riskLevel: tool.name === 'connect_mcp_server' ? 'high' : 'low',
+          serverName: 'pure-capabilities',
+        });
+      }
+      this.dynamicMcpConnector = async (server, signal): Promise<DynamicMcpConnectionResult> => {
+        let client = this.mcpClient;
+        if (!client) {
+          client = new MCPClient({
+            servers: [],
+            sessionId: sendSessionId,
+            onToolDiscovered: (tool) => codingAgent.toolRegistry.register(tool),
+            proxyUrl: effectiveProxyUrl(config.proxy, 'tools'),
+            excludedPrefixes: config.mcpExcludedPrefixes,
+          });
+          codingAgent.toolRegistry.setMCPExecutor(client);
+          this.mcpClient = client;
+          this.deferredInitDone = true;
+          this.mcpSessionId = sendSessionId;
+        }
+        await withAbortTimeout(client.connectServer(server), signal, 30_000, `MCP ${server.name} connection`);
+        const current = loadConfig() ?? config;
+        const servers = [...(current.mcpServers ?? [])];
+        const existing = servers.findIndex((item) => item.name === server.name);
+        if (existing >= 0) servers[existing] = server;
+        else servers.push(server);
+        persistConfig({ ...current, mcpServers: servers });
+        this.mcpConfigSnapshot = JSON.stringify([servers, effectiveProxyUrl(current.proxy, 'tools')]);
+        return { tools: client.getTools(), persisted: true };
+      };
       const promptTools = effectiveWorkspace
         ? codingAgent.toolRegistry.getTools()
         : [
             ...(config.toolBrowser ? WEB_TOOL_DEFS : []),
             ...SYS_INFO_DEFS,
+            ...DYNAMIC_CAPABILITY_TOOL_DEFS,
             ...(imageGen ? [IMAGE_GEN_TOOL_DEF] : []),
           ];
       systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen);
@@ -2019,11 +2208,26 @@ export class ChatController {
         config.taskMode && config.taskMode !== 'auto' ? config.taskMode : undefined;
       const continuingPlan = this.activeComplexPlan !== null && this.hasHistory && !forcedMode;
       const planPauseRequested = this.activeComplexPlan !== null && !this.hasHistory && !forcedMode;
+      // Semantic routing is the primary decision for ordinary turns. The
+      // synchronous Planner remains only a safety floor; it must not decide
+      // that a design critique is a build, or that a creative constraint needs
+      // a reasonableness card. Continuing plans skip this extra call and keep
+      // their already-approved route.
+      const semanticRoute = continuingPlan
+        ? null
+        : shouldBypassSemanticRoute(userText, userImages)
+          ? null
+          : await inferSemanticRoute(llm, userText, this.abortController?.signal, userImages);
       const workflow = compileRequestWorkflow(userText, {
         forcedMode,
         hasTools: !!effectiveWorkspace,
         continuingPlan,
         planPauseRequested,
+        // The delivery gate follows the approved plan's build-ness across
+        // turns, not the continuation prompt ("继续" must not silently lose
+        // the gate, and an ordinary complex plan must not gain it).
+        continuingProjectBuild: this.activePlanProjectBuild,
+        semanticRoute,
       });
       const analysis = workflow.analysis;
       let effectiveIntent: IntentAssessment = analysis.intent;
@@ -2090,11 +2294,11 @@ export class ChatController {
       const needsDeliveryGate = workflow.needsDeliveryGate;
       const needsIntentProbe = workflow.needsProbe;
       const shouldRunTaskAnalysis = !continuingPlan && (
-        needsDeliveryGate
+        workflow.requiresPlanReview
+        || needsDeliveryGate
         || effectiveIntent.requiresConfirmation
         || forcedMode === 'plan'
         || forcedMode === 'build'
-        || (analysis.complexity === 'complex' && !!analysis.plan)
       );
       // The live trace opened before the preflight doubles as the analysis
       // card — one continuous feedback row instead of two stacked cards.
@@ -2154,36 +2358,18 @@ export class ChatController {
       // `as PlanCardHandle | null`: TS control-flow can't see assignments made
       // inside the closures below (showPlanCard / discardPlanCard), so without
       // the widening cast it keeps narrowing the variable to null and the
-      // handlers that read planCard.current would see type `never`.
+      // handlers that read the plan model would see type `never`.
       let planCard: PlanCardHandle | null = null as PlanCardHandle | null;
-      // Keep the right-edge floating outline in step with the in-chat card.
-      const syncPlanOverview = (status: PlanOverviewStatus = 'active'): void => {
-        const overview = planOverview();
-        if (!planCard) {
-          overview.clear();
-          return;
-        }
-        // Mirror the card itself, not the cross-turn cursor: the cursor is
-        // nulled the moment the card advances past its last plan (completion),
-        // which used to leave the floating outline stuck on an earlier step
-        // even though the card was already all-done. Deriving from the card
-        // keeps both in lockstep and flips the outline to "complete" the
-        // instant the card finishes, without waiting for the turn-final path.
-        const plan = planCard.plan;
-        const done = planCard.current > planCard.total;
-        const todoNumber = planCard.currentSubstep;
-        const todoRows = planCard.substepEls[Math.min(planCard.current, planCard.total) - 1] ?? [];
-        const todoLabel = planCard.currentTodosRequired && todoNumber >= 1 && todoNumber <= todoRows.length
-          ? todoRows[todoNumber - 1]?.querySelector<HTMLElement>('.plan-progress-substep-action')?.textContent ?? ''
-          : '';
-        overview.update(plan, done ? 'complete' : status, Math.min(planCard.current, planCard.total), todoNumber, todoLabel);
-      };
+      let planProgress: PlanProgressModel | null = null;
       const discardPlanCard = (): void => {
         if (!planCard) return;
         clearPlanCardRefining(planCard);
         planCard.el.remove();
         planCard = null;
+        planProgress = null;
+        this.detachActivePlanProgress();
         this.activePlanCardSnapshot = null;
+        this.activePlanProgress = null;
         planOverview().clear();
       };
       // Analysis is useful for a real build even when no approval is needed.
@@ -2196,9 +2382,9 @@ export class ChatController {
         // 事前决策（是否进入计划分析）：先用规则层判断。真正的风险确认在 LLM 分析
         // 完成后用合并后的 effectiveIntent 重新落定（见下方 merge 之后的赋值）。
         let riskReview = effectiveIntent.requiresConfirmation;
-        const wantsPlan = needsDeliveryGate || riskReview || (forcedMode
-          ? forcedMode === 'plan' || forcedMode === 'build'
-          : analysis.complexity === 'complex' && !!analysis.plan);
+        const wantsPlan = workflow.requiresPlanReview || needsDeliveryGate || riskReview || Boolean(
+          forcedMode === 'plan' || forcedMode === 'build',
+        );
         if (wantsPlan) {
           // 检测到的复杂任务：只有一条诚实的模式气泡（说明会先分析再逐步执行），
           // 不再有“我先确认一下我理解的需求”这类未经 LLM 就宣称理解的开场白——
@@ -2230,20 +2416,21 @@ export class ChatController {
           // 升级走平滑过渡：旧骨架卡在原地淡出收起，新计划卡插入它原来的位置、淡入滑入，
           // 而不是生硬替换（尊重系统减弱动态设置——此时直接替换、不做动画）。
           const showPlanCard = (plan: Plan, refining = false, fallback = false): void => {
+            if (!planProgress) planProgress = new PlanProgressModel(plan, 'active', 1, 1, needsDeliveryGate);
+            else if (planProgress.getSnapshot().plan !== plan) planProgress.dispatch({ type: 'planReplaced', plan });
             if (planCard) {
               // Keep one stable, flat progress list in the transcript. Updating
               // its contents in place preserves the user's visual anchor and
               // makes later phase changes visible instead of replacing the
               // only plan card that appeared at the start.
-              updatePlanCard(planCard, plan, analysis.mode, refining, fallback);
+              updatePlanCard(planCard, plan, refining, fallback, planProgress);
             } else {
-              planCard = createPlanCard(plan, analysis.mode, refining, fallback);
+              planCard = createPlanCard(plan, refining, fallback, planProgress);
               chatEl.appendChild(planCard.el);
             }
-            // Right-edge outline: mirror the (possibly refining) plan card.
-            this.activeComplexPlan = plan;
-            this.activePlanCardSnapshot = { plan, currentPlan: 1, currentTodo: 1, complete: false };
-            syncPlanOverview();
+            this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
+            planOverview().bindProgress(planProgress);
+            // Right-edge outline: both views now subscribe to the same model.
             scrollChatToBottomIfPinned(chatEl);
           };
           // 不再先渲染固定的通用骨架卡：先挂一张思考卡，把 LLM 对这项任务的真实
@@ -2275,6 +2462,7 @@ export class ChatController {
           // 的关键细节由模型列为计划第一步，执行时自然提问——没有预制的澄清卡片。
           const llmAnalysis = await generateTaskAnalysis(llm, userText, analysis.mode === 'build' ? BUILD_ANALYSIS_TIMEOUT_MS : PLAN_ANALYSIS_TIMEOUT_MS, this.abortController?.signal, {
             context: wsContext,
+            images: userImages,
             onThinking: (delta) => {
               taskAnalysisText += delta;
               appendThinkingText(analysisCard, delta);
@@ -2321,11 +2509,12 @@ export class ChatController {
           // 卡上的意图/风险节点以合并后的 effectiveIntent 落定，不再先于任何思考弹出。
           maybeShowAssessment();
           // 诉求合理性分析卡：把模型对诉求本身的评审结论展示给用户。合理项直接
-          // 执行；存疑/不合理项会让本回合在执行前停下等用户决策（见 approvePlan
-          // 与暂停块）——评审结论始终可见，即使不触发暂停。
-          if (llmAnalysis.review.length > 0) {
+          // 执行；卡始终展示模型的存疑/不合理结论（可见但默认不打断），只有真实
+          // 安全边界或明确不合理项才会让本回合在执行前停下等用户决策
+          // （shouldPauseForRequestReview → reviewNeedsDecision → 暂停块）。
+          if (shouldShowRequestReview(llmAnalysis.review)) {
             reviewItems = llmAnalysis.review;
-            reviewNeedsDecision = hasFlaggedReviewItems(llmAnalysis.review);
+            reviewNeedsDecision = shouldPauseForRequestReview(llmAnalysis.review, effectiveIntent, analysis.traps.length > 0);
             reviewCard = createRequestReviewCard(llmAnalysis.review);
             chatEl.appendChild(reviewCard.el);
           }
@@ -2433,14 +2622,15 @@ export class ChatController {
           }
         } else if (continuingPlan && this.activeComplexPlan) {
             userPlan = formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate);
-            const restored = createPlanCard(this.activeComplexPlan, analysis.mode, false);
-            restorePlanCardProgress(restored, this.activePlanNumber, this.activeTodoNumber);
+            planProgress = new PlanProgressModel(this.activeComplexPlan, 'active', this.activePlanNumber, this.activeTodoNumber, this.activePlanProjectBuild);
+            const restored = createPlanCard(this.activeComplexPlan, false, false, planProgress);
             planCard = restored;
-            this.activePlanCardSnapshot = { plan: this.activeComplexPlan, currentPlan: this.activePlanNumber, currentTodo: this.activeTodoNumber, complete: false };
+            this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
+            planOverview().bindProgress(planProgress);
             chatEl.appendChild(planCard.el);
             this.addStatusBubble(`收到，我们继续处理第 ${this.activePlanNumber} 阶段的第 ${this.activeTodoNumber} 个 Todo，不重新规划。`, false, false);
             // 用户回复即明确“开工”：悬浮大纲卡从「等待回复」切回「正在执行」。
-            syncPlanOverview('active');
+            planProgress?.dispatch({ type: 'statusChanged', status: 'active' });
             scrollChatToBottomIfPinned(chatEl);
           } else if (forcedMode === 'plan' || forcedMode === 'build') {
         // The plan gate needs a real filesystem root (and the Planning skill);
@@ -2471,169 +2661,194 @@ export class ChatController {
       // (typecheck/tests/build…) and it succeeded while phase n was active. It is
       // required for project builds, but ordinary complex plans can advance from
       // explicit Todo completion alone.
-  const planTrack = { seg: null as { el: HTMLDivElement; text: string } | null, scanLen: 0, consumedMarkers: new Set<string>(), phaseVerifySeen: [] as boolean[], deferredMarkers: new Map<number, Array<Extract<PlanProgressMarker, { kind: 'substep' | 'substepDone' }>>>() };
+  const planTrack = { seg: null as { el: HTMLDivElement; text: string } | null, scanLen: 0, consumedMarkers: new Set<string>(), phaseVerifySeen: [] as boolean[], phaseStarted: new Set<number>(), phaseCompleted: new Set<number>(), protocolStarted: false, deferredMarkers: new Map<number, Array<Extract<PlanProgressMarker, { kind: 'substep' | 'substepDone' }>>>(), deferredPhase: null as number | null, deferredReason: null as 'protocol' | 'verify' | null, unblockDeferredOnWork: null as (() => void) | null };
       let projectQualityResult: ProjectQualityGateResult | null = null;
       if (needsDeliveryGate && !effectiveWorkspace) {
         // 计划已确认但没有可选工作区：结束本轮，评估卡明确收尾而不是停在“执行中”。
         assessmentFlow?.cancel('未选择工作区，计划已确认但本次不执行。');
         return;
       }
-      const syncActivePlanCursor = (card: PlanCardHandle): void => {
-        if (!this.activeComplexPlan || card.total === 0) return;
-        if (card.current > card.total) {
-          this.activePlanNumber = card.total;
-          this.activeTodoNumber = (card.substepEls[card.total - 1]?.length ?? 0) + 1;
-          this.activePlanStarted = true;
-          this.activePlanCardSnapshot = { plan: card.plan, currentPlan: this.activePlanNumber, currentTodo: this.activeTodoNumber, complete: true };
-          this.activeComplexPlan = null;
-          return;
-        } else {
-          this.activePlanNumber = card.current;
-          this.activeTodoNumber = card.currentTodosRequired && card.substepEls[card.current - 1]?.length
-            ? Math.max(1, card.currentSubstep)
-            : 1;
-        }
-        this.activePlanStarted = true;
-        this.activePlanCardSnapshot = { plan: card.plan, currentPlan: this.activePlanNumber, currentTodo: this.activeTodoNumber, complete: false };
-      };
       const trackPlanPhase = (seg: { el: HTMLDivElement; text: string }) => {
         if (!planCard) return;
-        const card = planCard;         if (planTrack.seg !== seg) { planTrack.seg = seg; planTrack.scanLen = 0; planTrack.consumedMarkers.clear(); }
+        const card = planCard;
+        const modelSnapshot = (): PlanProgressSnapshot | null => planProgress?.getSnapshot() ?? null;
+        if (planTrack.seg !== seg) { planTrack.seg = seg; planTrack.scanLen = 0; planTrack.consumedMarkers.clear(); }
         if (planTrack.scanLen >= seg.text.length) return;
         // Overlap window keeps the previous 24 chars in the slice so a marker
         // split across token boundaries ("## 阶段 " + "2/4") is still seen whole.
         const tail = seg.text.slice(Math.max(0, planTrack.scanLen - 24));
         planTrack.scanLen = seg.text.length;         const markers = matchPlanProgressMarkers(tail);
          const finishPlan = (planNumber: number): void => {
-          if (planNumber !== card.current) return;
+          const finishSnapshot = modelSnapshot();
+          if (!finishSnapshot || planNumber !== finishSnapshot.currentPlan) return;
           if (needsDeliveryGate && !planTrack.phaseVerifySeen[planNumber]) {
             card.setActivity(`计划 ${planNumber} 已报告完成，等待真实验证结果…`);
             return;
           }
-          const isLastPlan = planNumber >= card.total;
+          const isLastPlan = planNumber >= finishSnapshot.plan.steps.length;
           // Earlier plans keep waiting for granular Todo-done markers (or the
           // next plan's start marker, which force-advances); the LAST plan has
           // no following marker, so the model's explicit completion claim must
           // finish its remaining Todos itself — otherwise the card and the
           // floating outline stay at N-1/N after the work is done.
-          if (!isLastPlan && !canCompletePlanCardSubsteps(card)) {
+          if (!isLastPlan && !(planProgress?.canCompleteCurrentTodos() ?? false)) {
             card.setActivity(`计划 ${planNumber} 仍有 Todo 未完成，暂不进入下一计划…`);
             return;
           }
-          completePlanCardSubsteps(card, isLastPlan);
+          planProgress?.dispatch({ type: 'todosCompleted', force: isLastPlan });
           card.setActivity(isLastPlan
             ? `计划 ${planNumber} 已完成，整个计划收尾中…`
             : `计划 ${planNumber} 已完成，正在准备下一个计划…`);
-          updatePlanCardPhase(card, planNumber + 1);
+          planProgress?.dispatch({ type: 'phaseStarted', planNumber: planNumber + 1 });
           consumeDeferredSubsteps(planNumber, planNumber + 1);
         };
         const consumeTodoMarker = (marker: Extract<PlanProgressMarker, { kind: 'substep' | 'substepDone' }>): void => {
-          const activePlan = card.current;
-          const totalTodos = card.substepEls[activePlan - 1]?.length ?? 0;
-          const todoLabel = card.substepEls[activePlan - 1]?.[marker.number - 1]
-            ?.querySelector<HTMLElement>('.plan-progress-substep-action')?.textContent;
+          const todoSnapshot = modelSnapshot();
+          if (!todoSnapshot) return;
+          const activePlan = todoSnapshot.currentPlan;
+          const activeStep = todoSnapshot.plan.steps[activePlan - 1];
+          const todos = activeStep?.substeps ?? [];
+          const totalTodos = todos.length;
+          const todoLabel = todos[marker.number - 1]?.action;
           if (marker.kind === 'substepDone') {
-            const wasCurrentTodo = card.currentTodosRequired && marker.number >= 1 && marker.number <= totalTodos && card.currentSubstep === marker.number && card.substepStarted;
-            completePlanCardSubstep(card, marker.number);
+            const wasCurrentTodo = activeStep?.todosRequired !== false && marker.number >= 1 && marker.number <= totalTodos && todoSnapshot.currentTodo === marker.number && planProgress?.isTodoStarted(marker.number) === true;
+            planProgress?.dispatch({ type: 'todoCompleted', todoNumber: marker.number });
             if (wasCurrentTodo) {
-              card.setActivity(`计划 ${activePlan} 的 Todo ${marker.number} 已完成${card.currentSubstep <= totalTodos ? '，开始下一项…' : '，Todos 已全部完成，等待计划收尾…'}`);
+              const nextTodo = planProgress?.getSnapshot().currentTodo ?? marker.number + 1;
+              card.setActivity(`计划 ${activePlan} 的 Todo ${marker.number} 已完成${nextTodo <= totalTodos ? '，开始下一项…' : '，Todos 已全部完成，等待计划收尾…'}`);
             }
           } else {
-            updatePlanCardSubstep(card, marker.number);
+            planProgress?.dispatch({ type: 'todoStarted', todoNumber: marker.number });
             card.setActivity(`正在执行计划 ${activePlan} 的 Todo ${marker.number}${todoLabel ? `：${todoLabel}` : ''}…`);
           }
-          if ((!needsDeliveryGate || planTrack.phaseVerifySeen[activePlan]) && canCompletePlanCardSubsteps(card)) {
-            finishPlan(activePlan);
+          if ((!needsDeliveryGate || planTrack.phaseVerifySeen[activePlan]) && (planProgress?.canCompleteCurrentTodos() ?? false)) {
+            card.setActivity(`计划 ${activePlan} 的 Todos 和验证已完成，等待“计划 ${activePlan} 已完成”播报…`);
           }
-          syncActivePlanCursor(card);
-        };         let deferredForPhase: number | null = null;
+          };
+         // Strict-protocol safety net: the projection must follow the actual
+         // build, not stall forever on a missing `## 计划 n 已完成` line. When a
+         // later plan was announced but blocked (completion never announced),
+         // the first real tool call for the announced plan advances the card
+         // with implicit completion of everything before it. Delivery-gated
+         // (project build) phases still wait for their real verification
+         // evidence — that requirement is deliberate, not a protocol gap.
+         planTrack.unblockDeferredOnWork = (): void => {
+           const target = planTrack.deferredPhase;
+           if (target === null) return;
+           const snapshot = modelSnapshot();
+           if (!snapshot || !planTrack.phaseStarted.has(target) || target <= snapshot.currentPlan) return;
+           if (planTrack.deferredReason === 'verify') return;
+           planProgress?.dispatch({ type: 'phaseJumped', planNumber: target });
+           planTrack.deferredPhase = null;
+           planTrack.deferredReason = null;
+           const after = modelSnapshot();
+           if (after && after.currentPlan === target) {
+             const stepLabel = after.plan.steps[target - 1]?.action;
+             const todosRequired = after.plan.steps[target - 1]?.todosRequired !== false;
+             card.setActivity(`已开始计划 ${target}${stepLabel ? `：${stepLabel}` : ''}${todosRequired ? '，正在执行它的 Todos…' : '，正在执行原子任务…'}`);
+             const queued = planTrack.deferredMarkers.get(target) ?? [];
+             planTrack.deferredMarkers.delete(target);
+             for (const todoMarker of queued) consumeTodoMarker(todoMarker);
+           }
+         };
          const tailStart = Math.max(0, planTrack.scanLen - tail.length);
          for (const marker of markers) {
            const markerKey = `${marker.kind}:${marker.number}:${tailStart + marker.index}`;
            if (planTrack.consumedMarkers.has(markerKey)) continue;
            planTrack.consumedMarkers.add(markerKey);
            if (marker.kind === 'phase') {
-            const before = card.current;
-            updatePlanCardPhase(card, marker.number);
-            if (card.current === marker.number) {
-              const stepLabel = card.stepEls[marker.number - 1]?.querySelector<HTMLElement>('.plan-progress-step-action')?.textContent;
-              card.setActivity(`已开始计划 ${marker.number}${stepLabel ? `：${stepLabel}` : ''}${card.currentTodosRequired ? '，正在执行它的 Todos…' : '，正在执行原子任务…'}`);
+            const markerText = tail.slice(marker.index, marker.end);
+            const isProtocolStart = /(?:计划|Plan)\s*\d+\s*(?=[:：])/i.test(markerText);
+            if (isProtocolStart) {
+              planTrack.phaseStarted.add(marker.number);
+              planTrack.protocolStarted = true;
+            }
+            const beforeSnapshot = modelSnapshot();
+            if (!beforeSnapshot) continue;
+            const before = beforeSnapshot.currentPlan;
+            planProgress?.dispatch({ type: 'phaseStarted', planNumber: marker.number });
+            const afterStart = modelSnapshot();
+            if (afterStart?.currentPlan === marker.number) {
+              const stepLabel = afterStart.plan.steps[marker.number - 1]?.action;
+              const todosRequired = afterStart.plan.steps[marker.number - 1]?.todosRequired !== false;
+              card.setActivity(`已开始计划 ${marker.number}${stepLabel ? `：${stepLabel}` : ''}${todosRequired ? '，正在执行它的 Todos…' : '，正在执行原子任务…'}`);
               const queued = planTrack.deferredMarkers.get(marker.number) ?? [];
               planTrack.deferredMarkers.delete(marker.number);
               for (const todoMarker of queued) consumeTodoMarker(todoMarker);
-              deferredForPhase = null;
+              planTrack.deferredPhase = null;
+              planTrack.deferredReason = null;
             } else if (marker.number > before) {
-              // The model explicitly started a later plan: treat that as
-              // implicit completion of the current plan's Todos and advance,
-              // so the card (and the floating outline mirroring it) follows
-              // the build instead of stalling on step 1 whenever the model
-              // reports plan-level progress without granular Todo-done lines.
-              // Project builds still wait for the finished phase's real
-              // verification evidence before moving on.
-              if (needsDeliveryGate && !planTrack.phaseVerifySeen[before]) {
-                card.setActivity(`计划 ${before} 已报告完成，等待真实验证结果…`);
-                deferredForPhase = marker.number;
+              // The model explicitly started a later plan, but a later stage may
+              // start only after the current stage has emitted its explicit
+              // completion event. This keeps both progress views driven by the
+              // conversation protocol instead of tool timing.
+              if (planTrack.protocolStarted && !planTrack.phaseCompleted.has(before)) {
+                card.setActivity(`计划 ${before} 尚未播报完成，暂不进入计划 ${marker.number}…`);
+                planTrack.deferredPhase = marker.number;
+                planTrack.deferredReason = 'protocol';
+              } else if (needsDeliveryGate && !planTrack.phaseVerifySeen[before]) {
+                card.setActivity(`计划 ${before} 已播报完成，等待真实验证结果…`);
+                planTrack.deferredPhase = marker.number;
+                planTrack.deferredReason = 'verify';
               } else {
-                const rows = card.substepEls[before - 1] ?? [];
-                rows.forEach((row) => {
-                  row.classList.remove('active', 'pending');
-                  row.classList.add('done');
-                  const check = row.querySelector<HTMLElement>('.plan-progress-substep-check');
-                  if (check) check.textContent = '✓';
-                });
-                if (card.currentTodosRequired && rows.length > 0) {
-                  card.substepStarted = true;
-                  card.currentSubstep = rows.length + 1;
-                }
                 // Jump straight to the reported plan instead of one step per
-                // marker: updatePlanCardPhase only advances by exactly one, so
+                // marker: a single-step imperative updater would advance by exactly one, so
                 // a model that reports "## 计划 3：" while the card is on plan
                 // 1 would otherwise leave the card (and the floating outline
                 // mirroring it) stuck on the old step while the transcript
                 // already shows plan 3 work. Everything in between is
                 // implicitly done. total + 1 (beyond the list) completes.
-                setPlanPhase(card, Math.max(before + 1, Math.min(marker.number, card.total + 1)));
-                if (card.current === marker.number) {
-                  const stepLabel = card.stepEls[marker.number - 1]?.querySelector<HTMLElement>('.plan-progress-step-action')?.textContent;
-                  card.setActivity(`已开始计划 ${marker.number}${stepLabel ? `：${stepLabel}` : ''}${card.currentTodosRequired ? '，正在执行它的 Todos…' : '，正在执行原子任务…'}`);
+                planProgress?.dispatch({ type: 'phaseJumped', planNumber: Math.max(before + 1, Math.min(marker.number, beforeSnapshot.plan.steps.length + 1)) });
+                const afterJump = modelSnapshot();
+                if (afterJump?.currentPlan === marker.number) {
+                  const stepLabel = afterJump.plan.steps[marker.number - 1]?.action;
+                  const todosRequired = afterJump.plan.steps[marker.number - 1]?.todosRequired !== false;
+                  card.setActivity(`已开始计划 ${marker.number}${stepLabel ? `：${stepLabel}` : ''}${todosRequired ? '，正在执行它的 Todos…' : '，正在执行原子任务…'}`);
                   const queued = planTrack.deferredMarkers.get(marker.number) ?? [];
                   planTrack.deferredMarkers.delete(marker.number);
                   for (const todoMarker of queued) consumeTodoMarker(todoMarker);
-                  deferredForPhase = null;
+                  planTrack.deferredPhase = null;
+                  planTrack.deferredReason = null;
                 } else {
-                  deferredForPhase = marker.number;
+                  planTrack.deferredPhase = marker.number;
+                  planTrack.deferredReason = 'protocol';
                 }
               }
             }
           } else if (marker.kind === 'phaseDone') {
+            const markerText = tail.slice(marker.index, marker.end);
+            if (/(?:计划|Plan)\s*\d+\s*(?:完成|已完成)/i.test(markerText)) {
+              planTrack.phaseCompleted.add(marker.number);
+              planTrack.protocolStarted = true;
+            }
             finishPlan(marker.number);
-            deferredForPhase = null;
-          } else if (deferredForPhase !== null) {
-            const queued = planTrack.deferredMarkers.get(deferredForPhase) ?? [];
+            planTrack.deferredPhase = null;
+            planTrack.deferredReason = null;
+          } else if (planTrack.deferredPhase !== null) {
+            const queued = planTrack.deferredMarkers.get(planTrack.deferredPhase) ?? [];
             queued.push(marker);
-            planTrack.deferredMarkers.set(deferredForPhase, queued);
+            planTrack.deferredMarkers.set(planTrack.deferredPhase, queued);
           } else {
             consumeTodoMarker(marker);
           }
         }
-        consumeDeferredSubsteps(planCard.current, planCard.current + 1);
-        syncActivePlanCursor(planCard);
-        syncPlanOverview();
+        const afterMarkers = planProgress?.getSnapshot();
+        if (afterMarkers) consumeDeferredSubsteps(afterMarkers.currentPlan, afterMarkers.currentPlan + 1);
       };
       const consumeDeferredSubsteps = (finishedPlan: number, targetPlan: number): void => {
         if (!planCard) return;
+        const snapshot = planProgress?.getSnapshot();
         const queued = planTrack.deferredMarkers.get(targetPlan);
-        if (!queued || (needsDeliveryGate && !planTrack.phaseVerifySeen[finishedPlan]) || planCard.current !== finishedPlan || !canCompletePlanCardSubsteps(planCard)) return;
-        completePlanCardSubsteps(planCard);
-        updatePlanCardPhase(planCard, targetPlan);
-        if (planCard.current !== targetPlan) return;
+        if (!snapshot || !queued || !planTrack.phaseCompleted.has(finishedPlan) || (needsDeliveryGate && !planTrack.phaseVerifySeen[finishedPlan]) || snapshot.currentPlan !== finishedPlan || !(planProgress?.canCompleteCurrentTodos() ?? false)) return;
+        planProgress?.dispatch({ type: 'todosCompleted' });
+        planProgress?.dispatch({ type: 'phaseStarted', planNumber: targetPlan });
+        if (planProgress?.getSnapshot().currentPlan !== targetPlan) return;
         planTrack.deferredMarkers.delete(targetPlan);
         planCard.setActivity(`计划 ${finishedPlan} 已完成${needsDeliveryGate ? '并验证' : ''}，正在执行计划 ${targetPlan}…`);
         for (const marker of queued) {
-          const todo = planCard.substepEls[targetPlan - 1]?.[marker.number - 1]
-            ?.querySelector<HTMLElement>('.plan-progress-substep-action')?.textContent;
-          if (marker.kind === 'substepDone') completePlanCardSubstep(planCard, marker.number);
-          else updatePlanCardSubstep(planCard, marker.number);
+          const todo = snapshot.plan.steps[targetPlan - 1]?.substeps?.[marker.number - 1]?.action;
+          if (marker.kind === 'substepDone') planProgress?.dispatch({ type: 'todoCompleted', todoNumber: marker.number });
+          else planProgress?.dispatch({ type: 'todoStarted', todoNumber: marker.number });
           planCard.setActivity(`正在执行计划 ${targetPlan} 的 Todo ${marker.number}${todo ? `：${todo}` : ''}…`);
         }
       };
@@ -2808,7 +3023,7 @@ export class ChatController {
           + (reviewNeedsDecision ? formatRequestReviewSection(reviewItems) : '');
         const pauseSnapshot: Message[] = [
           ...this.messages,
-          { role: 'user', content: userText },
+          { role: 'user', content: userText, images: userImages },
           { role: 'assistant', content: pauseMessage },
         ];
         this.messages = pauseSnapshot;
@@ -2830,8 +3045,7 @@ export class ChatController {
           () => this.cancelPausedPlan(),
         );
         const firstLabel = this.activeComplexPlan.steps[0]?.action ?? '当前阶段';
-        planCard?.setWaiting(1, firstLabel);
-        syncPlanOverview('waiting');
+        planProgress?.dispatch({ type: 'statusChanged', status: 'waiting' });
         // 一个脉冲状态气泡放在最后：明确告诉用户“一切就绪，等你回复开工”，
         // 避免输入框恢复后看起来像流程悄悄停止了。评审待决策时文案指向评审卡。
         this.addStatusBubble(reviewNeedsDecision
@@ -2849,6 +3063,7 @@ export class ChatController {
           taskAnalysisText,
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
+          displayUserText,
         );
         return;
       }
@@ -2905,10 +3120,9 @@ export class ChatController {
       // the plan, or a follow-up after the previous plan finished), clear the
       // outline so the previous task's list cannot keep floating over
       // unrelated work — the outline mirrors the CURRENT turn only.
-      syncPlanOverview();
       const events = this.hasHistory
-        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal)
-        : codingAgent.run(systemPrompt, userTurn, turnSignal);
+        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages)
+        : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages);
       for await (const event of events) {
 
         // Session switched mid-stream (sidebar click / new chat): stop writing
@@ -2917,6 +3131,11 @@ export class ChatController {
         // guard also covers slow-abort cases where a straggler still yields.
         if (gen !== this.generation) break;
         switch (event.type) {
+          case 'YieldControl': {
+            this.updateTurnCount(event.payload.turnNumber, true);
+            break;
+          }
+
           case 'StateChange': {
             if (event.payload.to === 'VERIFY') {
               assessmentFlow?.setPhase('verify', event.payload.reason ?? '执行阶段完成，正在验证结果…');
@@ -2945,7 +3164,12 @@ export class ChatController {
                 // approved-plan phase card advances as the run progresses.
                 trackPlanPhase(seg);
                 // Strip leaked <tool_calls> XML before it ever reaches the DOM.
-                const text = stripToolCallXml(seg.text);
+                const xmlProbe = `${seg.toolCallXmlTail}${delta}`;
+                if (!seg.mayContainToolCallXml && /<(?:tool_calls|invoke\b|parameter\b)/i.test(xmlProbe)) {
+                  seg.mayContainToolCallXml = true;
+                }
+                seg.toolCallXmlTail = xmlProbe.slice(-32);
+                const text = seg.mayContainToolCallXml ? stripToolCallXml(seg.text) : seg.text;
                 if (streamingRenderEnabled) {
                   // diffStreaming owns the DOM: setting textContent here would
                   // wipe the rendered blocks on every token and defeat the
@@ -2962,9 +3186,14 @@ export class ChatController {
                   seg.el.textContent = text;
                 }
               }
-              scrollChatToBottomIfPinned(chatEl);
+              if (!streamingRenderEnabled) scrollChatToBottomIfPinned(chatEl);
             } else {
               // ── Tool call delta → append/update inline tool row ──
+              // A tool call for an announced-but-blocked later plan is hard
+              // evidence the model actually started it — let the projection
+              // catch up instead of waiting forever for the missing
+              // completion line (see planTrack.unblockDeferredOnWork).
+              planTrack.unblockDeferredOnWork?.();
               const toolName = event.payload.toolCallName ||
                 (event.payload.toolCallBuffer || '').match(/"name"\s*:\s*"([^"]+)"/)?.[1];
               const toolCallId = event.payload.toolCallId;
@@ -3043,7 +3272,6 @@ export class ChatController {
             if (thinkingFlushTimer === undefined) {
               thinkingFlushTimer = window.setTimeout(flushThinking, THINKING_FLUSH_MS);
             }
-            scrollChatToBottomIfPinned(chatEl);
             break;
           }
 
@@ -3117,28 +3345,33 @@ export class ChatController {
             if (planCard) {
                 const cmd = String(resultArgs?.command ?? '');
               if (event.payload.result.success && event.payload.toolName === 'execute_command' && isVerificationCommand(cmd)) {
-                const finishedPhase = planCard.current;
-                if (!planTrack.phaseVerifySeen[finishedPhase]) {
+                const progressSnapshot = planProgress?.getSnapshot();
+                const finishedPhase = progressSnapshot?.currentPlan ?? 0;
+                if (finishedPhase > 0 && !planTrack.phaseVerifySeen[finishedPhase]) {
                   planTrack.phaseVerifySeen[finishedPhase] = true;
-                  if (canCompletePlanCardSubsteps(planCard)) {
-                    completePlanCardSubsteps(planCard);
-                    planCard.setActivity(`计划 ${finishedPhase} 的子步骤和验证都已完成，正在准备下一个计划…`);
-                    updatePlanCardPhase(planCard, finishedPhase + 1);
-                  } else {
-                    planCard.setActivity(`计划 ${finishedPhase} 的验证已通过，等待剩余子步骤完成后再进入下一个计划…`);
+                  if ((planProgress?.canCompleteCurrentTodos() ?? false)) {
+                    planProgress?.dispatch({ type: 'todosCompleted' });
+                    if (planTrack.phaseCompleted.has(finishedPhase)) {
+                      const isLastPhase = finishedPhase >= (progressSnapshot?.plan.steps.length ?? 0);
+                      planCard.setActivity(isLastPhase
+                        ? `计划 ${finishedPhase} 已完成，整个计划收尾中…`
+                        : `计划 ${finishedPhase} 已完成并验证，正在准备下一个计划…`);
+                      planProgress?.dispatch({ type: 'phaseStarted', planNumber: finishedPhase + 1 });
+                    } else {
+                      planCard.setActivity(`计划 ${finishedPhase} 的验证已通过，等待对话播报“计划 ${finishedPhase} 已完成”…`);
+                    }              } else {
+                planCard.setActivity(`计划 ${finishedPhase} 的验证已通过，等待剩余子步骤完成后再播报完成…`);
                   }
                   consumeDeferredSubsteps(finishedPhase, finishedPhase + 1);
-                  syncActivePlanCursor(planCard);
-                  syncPlanOverview();
-                }
+
+                      }
               } else if (event.payload.result.success) {
                 planCard.setActivity(`已完成 ${event.payload.toolName}，正在继续处理当前计划…`);
               } else {
                 planCard.setActivity(`${event.payload.toolName} 未完成：${event.payload.result.error ?? '请查看工具输出'}`);
               }
-              syncActivePlanCursor(planCard);
-              syncPlanOverview();
-            }
+
+              }
             this.recordToolActivity(
               toolName,
               resultArgs,
@@ -3179,31 +3412,26 @@ export class ChatController {
 
           case 'Error':
             if (event.payload.recoverable) {
-              assessmentFlow?.setPhase('verify', `验证反馈：${event.payload.message}，正在调整方案…`);
+              assessmentFlow?.setPhase('verify', '正在调整输出…');
             } else {
               assessmentFlow?.fail(`流程未完成：${event.payload.message}`);
             }
-            // Error events (VERIFY_FAILED, LLM_STREAM_ERROR, …). Recoverable
-            // ones (e.g. VERIFY_FAILED → the engine loops back to THINK with a
-            // reflection hint) are an INTERNAL retry, not a user-facing failure
-            // — render them as a neutral pulsing "correcting output" notice so
-            // the transcript doesn't scream ERROR while the agent is simply
-            // iterating. Unrecoverable errors (LLM_STREAM_ERROR, policy stop)
-            // keep the full-width danger styling. Either way the engine may
-            // not yield Completed/Interrupted, so close the thinking card here.
-            endThinking();
+            // Recoverable verifier failures are internal retries. Keep one
+            // continuous thinking card alive while the engine changes its
+            // approach; exposing the policy code as a transcript card makes a
+            // normal recovery look like a user-facing failure.
             const recoverable = event.payload.recoverable === true;
-            this.addStatusBubble(
-              recoverable
-                ? `↻ ${event.payload.code}: ${event.payload.message}`
-                : `⚠️ ${event.payload.code}: ${event.payload.message}`,
-              recoverable,   // pending: accent-pulse neutral notice
-              !recoverable,  // isError: danger-styled bubble
-            );
+            if (recoverable) {
+              if (thinkingCard) setThinkingLabel(thinkingCard, '正在调整输出…');
+              break;
+            }
+            endThinking();
+            this.addStatusBubble(`⚠️ ${event.payload.code}: ${event.payload.message}`, false, true);
             scrollChatToBottomIfPinned(chatEl);
             break;
 
           case 'Completed': {
+            this.updateTurnCount(event.payload.turnCount);
             // 本轮是否真的执行过工具（写文件/跑命令）：模型提问/确认轮没有 tool 消息，
             // 那不是交付完成而是“等待用户回答”——不触发交付验证卡，评估卡保持执行等待。
             const hasToolWork = (event.payload.messages ?? []).some((m) => m.role === 'tool');
@@ -3326,6 +3554,16 @@ export class ChatController {
             const turnAsksForInput = finalAnswer.length > 0 && /[?？]\s*$/.test(finalAnswer);
             const planFinished = planCard && hasToolWork && !event.payload.interrupted
               && !turnAsksForInput && gen === this.generation && !this.pausePlanCard;
+            const legacyPlanFinished = planCard && !planTrack.protocolStarted;
+            const completionSnapshot = planProgress?.getSnapshot();
+            const protocolPlanFinished = planCard && completionSnapshot && planTrack.phaseCompleted.has(completionSnapshot.plan.steps.length);
+            // Last-resort finalize under the strict stage protocol: the model
+            // announced (and did real tool work for) the last plan but never
+            // emitted its `## 计划 n 已完成` line. Real completed work must not
+            // leave the card and floating outline stuck on the last step.
+            const toolFinishedLastPlan = planCard && completionSnapshot
+              && planTrack.protocolStarted && planTrack.phaseStarted.has(completionSnapshot.plan.steps.length)
+              && completionSnapshot.currentPlan === completionSnapshot.plan.steps.length && hasToolWork;
             // A final turn often contains NO tool calls at all (pure summary
             // after the last plan's work, or a plain user ack after the model
             // asked a closing question). If the card already reached the last
@@ -3336,14 +3574,15 @@ export class ChatController {
             const turnText = finalAnswer || assistantSegments.map((segment) => segment.text).join('').trim();
             const planSummarized = planCard && !hasToolWork && !event.payload.interrupted
               && !turnAsksForInput && gen === this.generation && !this.pausePlanCard
-              && planCard.current === planCard.total && turnText.length > 0;
-            if ((planFinished || planSummarized) && planCard) {
-              finalizePlanCard(planCard);
-              if (this.activeComplexPlan) syncActivePlanCursor(planCard);
+              && completionSnapshot !== undefined
+              && completionSnapshot.currentPlan === completionSnapshot.plan.steps.length && turnText.length > 0;
+            const planCompletionCandidate = (planFinished || planSummarized) && planCard;
+            if (planCompletionCandidate && (protocolPlanFinished || legacyPlanFinished || planSummarized || toolFinishedLastPlan) && planCard) {
+              planProgress?.dispatch({ type: 'completed' });
+              if (this.activeComplexPlan)
               planCard.setActivity(qualityPassed
                 ? '计划中的所有步骤已完成，交付检查也已结束。'
                 : '计划中的所有步骤已完成，但交付检查未通过，项目暂不交付。');
-              planOverview().setStatus('complete');
             }
             // Cancel any throttled streaming render on every segment so a
             // late-firing tick from before completion cannot race with the
@@ -3540,6 +3779,7 @@ export class ChatController {
           taskAnalysisText,
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
+          displayUserText,
         );
       }
     } catch (err: any) {
@@ -3579,6 +3819,7 @@ export class ChatController {
           taskAnalysisText,
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
+          displayUserText,
         );
       } else if (thinkingPhases.length > 0 && gen === this.generation) {
         const partialOutput = assistantSegments.map(segment => segment.text).filter(Boolean).join('\n\n');
@@ -3598,6 +3839,7 @@ export class ChatController {
           taskAnalysisText,
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
+          displayUserText,
         );
       }
       const lastSeg = assistantSegments.length ? assistantSegments[assistantSegments.length - 1] : null;
@@ -3606,8 +3848,12 @@ export class ChatController {
           lastSeg.el.textContent = t('chat.cancelled', '(cancelled)');
         }
       } else if (lastSeg) {
-        // Localized error prefix; the raw message is kept verbatim after it.
-        lastSeg.el.textContent = t('chat.error', 'Error: {msg}').replace('{msg}', err.message || err);
+        const rawError = String(err?.message || err);
+        const imageError = userImages.length > 0 && /image|vision|multimodal|content[_ -]?type|unsupported|400/i.test(rawError);
+        const visibleError = imageError
+          ? '当前模型或接口拒绝了图片输入，可能不支持视觉理解。请切换到支持图片的模型后重试；本次不会再通过 web_scrape 查找图片。'
+          : rawError;
+        lastSeg.el.textContent = t('chat.error', 'Error: {msg}').replace('{msg}', visibleError);
         lastSeg.el.classList.add('error');
       } else {
         // Failure before bubbles were created (e.g. plan review threw) — toast it.
@@ -3615,7 +3861,11 @@ export class ChatController {
         // inline setTimeout here could hide a NEWER toast early) and keep the
         // message up for 8s: actionable failures like an invalid API key must
         // not scroll out of sight in 2.5s.
-        showToast(t('chat.error', 'Error: {msg}').replace('{msg}', err?.message || err), 8000);
+        const rawError = String(err?.message || err);
+        const visibleError = userImages.length > 0 && /image|vision|multimodal|content[_ -]?type|unsupported|400/i.test(rawError)
+          ? '当前模型或接口拒绝了图片输入，可能不支持视觉理解。请切换到支持图片的模型后重试；本次不会再通过 web_scrape 查找图片。'
+          : rawError;
+        showToast(t('chat.error', 'Error: {msg}').replace('{msg}', visibleError), 8000);
       }
     } finally {
       if (liveToolOutputFrame !== undefined) {
@@ -3657,6 +3907,9 @@ export class ChatController {
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;
     this.activePlanCardSnapshot = null;
+    this.detachActivePlanProgress();
+    this.activePlanProgress = null;
+    this.activePlanProjectBuild = false;
     this.pausePlanCard = null;
     this.pauseAssessmentFlow = null;
     // Drop the right-edge execution outline — the new conversation has none.
@@ -3700,13 +3953,15 @@ export class ChatController {
     taskAnalysisText = '',
     renderedAssistantTexts: string[] = [],
     artifacts: Array<{ path: string }> = [],
+    visibleUserText = '',
   ) {
     if (messages.length <= 0) return;
+    await this.activePlanProgressPersistence?.flush();
     let assistantIndex = 0;
     let renderedAssistantIndex = 0;
     let analysisAttached = false;
     let planCardAttached = false;
-    // A completed plan nulls activeComplexPlan (see syncActivePlanCursor), so
+    // A completed plan nulls activeComplexPlan, so
     // the cross-turn cursor alone would leave the finished plan with no
     // persisted state and the floating outline would not survive a reload.
     // The final card snapshot (complete: true) stands in for the cursor so the
@@ -3779,7 +4034,8 @@ export class ChatController {
       return [{
         message: m,
         modelMessageIndex: index,
-        content: m.content,
+        content: m.role === 'user' && index === latestUserIndex && visibleUserText ? visibleUserText : m.content,
+        images: m.images,
         analysis,
         artifacts: m.role === 'assistant' && index === lastAssistantIndex && artifacts.length > 0 ? artifacts : undefined,
         thinkingPhases: phases.length > 0 ? phases : undefined,
@@ -3796,7 +4052,19 @@ export class ChatController {
     // and reasoning trace of every earlier turn on the next persist — the
     // "analysis shows live but disappears from history" bug. Load the last
     // saved session and carry those fields over by message position.
-    const nextSnapshot = createSessionSnapshot(canonicalMessages, transcriptDrafts);
+    const progressSnapshot = this.activePlanProgress?.getSnapshot()
+      ?? (turnPlanState
+        ? {
+            plan: turnPlanState.plan,
+            currentPlan: turnPlanState.complete ? turnPlanState.plan.steps.length + 1 : turnPlanState.planNumber,
+            currentTodo: turnPlanState.todoNumber,
+            status: turnPlanState.complete ? 'complete' as const : turnPlanState.started ? 'active' as const : 'waiting' as const,
+          }
+        : null);
+    const nextSnapshot = createSessionSnapshot(canonicalMessages, transcriptDrafts, {
+      planProgress: progressSnapshot,
+      planState: turnPlanState,
+    });
     let previousSnapshot: SessionSnapshotV2 | null = null;
     try {
       previousSnapshot = (await loadSession(sessionId))?.snapshot ?? null;
@@ -3884,7 +4152,7 @@ export class ChatController {
       }
     }
 
-  private addBubble(role: 'user' | 'assistant', content: string): HTMLDivElement {
+  private addBubble(role: 'user' | 'assistant', content: string, images: MessageImage[] = []): HTMLDivElement {
     const chatEl = document.getElementById('chat')!;
     const wrapper = document.createElement('div');
     wrapper.className = `bubble-row ${role}`;
@@ -3899,6 +4167,7 @@ export class ChatController {
     // and gain the double-click select-all shortcut.
     if (role === 'user') {
       bubble.textContent = content;
+      renderUserImageAttachments(bubble, images);
       bindUserBubbleSelectAll(bubble);
     } else {
       bindAssistantBubbleCopy(bubble);

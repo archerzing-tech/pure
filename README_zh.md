@@ -231,6 +231,17 @@ bun run gui          # 开发模式，带热重载
 bun run gui:build    # 生产构建 → src-tauri/target/release/bundle/
 ```
 
+### 真实浏览器计划/会话回归
+
+GUI 提供真实 Chromium/WebView 等价环境下的计划进度冒烟测试：必要时自动启动 Vite 和隔离的无头 Chrome 配置，写入两个会话，然后通过真实侧边栏恢复路径验证页面刷新和会话切换后浮动窗口与聊天卡仍显示同一计划状态：
+
+```bash
+bun run verify:plan-session
+bun run verify:plan-progress  # 多 Todo、跳阶段、完成态
+```
+
+测试默认使用 `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`（可用 `--chrome=...` 覆盖），不会触碰日常浏览器配置。原有恢复状态检查仍可通过 `bun run verify:outlines` 执行。
+
 ---
 
 ## 架构
@@ -356,6 +367,15 @@ Pure 的 Agent 不会假装拥有它没有的能力。当请求需要当前工�
 | `~/.pure/tools/` | 真实程序（pip/npm） | `pip install --target ~/.pure/tools` 装 OCR 引擎、`npm install --prefix ~/.pure/tools` |
 
 社区技能来自 `npx skills` 生态（`npx skills find <关键词>` / `npx skills add <owner/repo> --skill <name> --yes`）或任意 GitHub 仓库（下载后解压到 `~/.pure/skills/`）。安装会下载第三方代码，因此与其它命令执行一样遵循当前权限模式。
+
+GUI 还支持 Agent 在当前任务中动态补齐能力：
+
+- `search_agent_skills(query)` 聚合公开 Skill Hub，返回候选来源和安装信息；
+- `install_agent_skill(source, name)` 自动下载并写入 `~/.pure/skills/<name>/SKILL.md`，当前轮通过工具结果加载，后续轮次自动注入；
+- `search_mcp_servers(query)` 聚合官方 MCP Registry 与 Smithery / mcp.so 等社区搜索结果；
+- `connect_mcp_server(candidateId)` 只接受刚搜索到的可验证候选，启动或连接前必须经过高风险权限确认，连接后的 MCP 工具会在当前轮下一次思考前动态注册。
+
+没有可信启动配方的社区 MCP 结果只作为参考，不会被 Agent 猜测执行；需要密钥的服务也必须先完成凭据配置。
 
 #### Scrapling MCP 服务器（可选）
 

@@ -7,10 +7,19 @@
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, type DiagramKind } from '../markdown';
 import { buildChartOption } from '../echartsChart';
 
 // ── ==text== highlight extension ──
+
+describe('streaming render scheduling', () => {
+  it('backs off only the preview cadence as text and render cost grow', () => {
+    expect(streamRenderThrottleMs(1000)).toBe(100);
+    expect(streamRenderThrottleMs(24_000)).toBe(160);
+    expect(streamRenderThrottleMs(80_000)).toBe(220);
+    expect(streamRenderThrottleMs(1000, 18)).toBe(160);
+  });
+});
 
 describe('highlightExt (==text== → <mark>)', () => {
   const md = new Marked({ gfm: true, breaks: true });
@@ -222,8 +231,11 @@ describe('diagramSlot', () => {
   it('starts with a ring loading placeholder and keeps the raw source for recovery', () => {
     const html = diagramSlot('svg', '<svg><text>secret</text></svg>', '');
     expect(html).toContain('data-state="loading"');
+    expect(html).toContain('aria-busy="true"');
     expect(html).toContain('data-view="preview"');
+    expect(html).toContain('diagram-loading-visual');
     expect(html).toContain('diagram-loading-ring');
+    expect(html).toContain('diagram-loading-orbit');
     expect(html).toContain('diagram-loading-label');
     expect(html).toContain('secret');
   });

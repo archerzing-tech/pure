@@ -5,20 +5,13 @@
 // conversation scrolls. Driven entirely by chat.ts through the singleton API
 // below — it owns no plan state of its own.
 
-import type { Plan } from '../coding-agent/types';
-
-export type PlanOverviewStatus = 'active' | 'waiting' | 'complete';
+import type { PlanProgressModel, PlanProgressSnapshot } from './planProgress';
 
 export interface PlanOverviewHandle {
   el: HTMLElement;
-  /** Show the overview for a plan (scaffold or final). */
-  show(plan: Plan, status?: PlanOverviewStatus, currentPlan?: number, currentTodo?: number, todoLabel?: string): void;
-  /** In-place refresh with the same plan (LLM upgrade) — keeps progress. */
-  update(plan: Plan, status?: PlanOverviewStatus, currentPlan?: number, currentTodo?: number, todoLabel?: string): void;
-  setStatus(status: PlanOverviewStatus): void;
-  setCurrent(planNumber: number, todoNumber?: number, todoLabel?: string): void;
   setCollapsed(collapsed: boolean): void;
   clear(): void;
+  bindProgress(source: PlanProgressModel): void;
 }
 
 export function createPlanOverview(): PlanOverviewHandle {
@@ -69,13 +62,14 @@ export function createPlanOverview(): PlanOverviewHandle {
   el.append(card, compact);
 
   let collapsed = false;
+  let progressUnsubscribe: (() => void) | undefined;
   function setCollapsed(next: boolean): void {
     collapsed = next;
     card.hidden = collapsed;
     compact.hidden = !collapsed;
     el.classList.toggle('is-collapsed', collapsed);
     compact.setAttribute('aria-expanded', String(!collapsed));
-    if (plan) render();
+    if (progressSnapshot) render();
     fitOverviewToHost(el);
   }
 
@@ -88,9 +82,34 @@ export function createPlanOverview(): PlanOverviewHandle {
   let justDragged = false;
   let lastDragPos: { left: number; top: number } | null = null;
 
+  const hostOrigin = (): { left: number; top: number } => {
+    const rect = el.parentElement?.getBoundingClientRect?.();
+    return {
+      left: typeof rect?.left === 'number' ? rect.left : 0,
+      top: typeof rect?.top === 'number' ? rect.top : 0,
+    };
+  };
+
+  const localPosition = (): { left: number; top: number } => {
+    const rect = el.getBoundingClientRect?.();
+    const host = el.parentElement?.getBoundingClientRect?.();
+    if (rect && host && (rect.width > 0 || rect.height > 0)) {
+      return {
+        left: rect.left - (typeof host.left === 'number' ? host.left : 0),
+        top: rect.top - (typeof host.top === 'number' ? host.top : 0),
+      };
+    }
+    return { left: el.offsetLeft, top: el.offsetTop };
+  };
+
+  const applyLocalPosition = (left: number, top: number): void => {
+    const origin = hostOrigin();
+    el.style.right = 'auto';
+    el.style.left = `${left + origin.left}px`;
+    el.style.top = `${top + origin.top}px`;
+  };
+
   const clampDrag = (left: number, top: number): { left: number; top: number } => {
-    // Clamp inside the anchor host (#view-container) so the card can't be
-    // flung off-screen; without a host (unit tests) pass raw values through.
     const hostRect = el.parentElement?.getBoundingClientRect?.();
     if (!hostRect) return { left, top };
     const maxLeft = Math.max(0, hostRect.width - el.offsetWidth);
@@ -109,8 +128,8 @@ export function createPlanOverview(): PlanOverviewHandle {
       handle,
       startX: ev.clientX,
       startY: ev.clientY,
-      origLeft: el.offsetLeft,
-      origTop: el.offsetTop,
+      origLeft: localPosition().left,
+      origTop: localPosition().top,
       moved: false,
     };
   };
@@ -134,8 +153,7 @@ export function createPlanOverview(): PlanOverviewHandle {
     if (s.moved) {
       const clamped = clampDrag(s.origLeft + dx, s.origTop + dy);
       lastDragPos = clamped;
-      el.style.left = `${clamped.left}px`;
-      el.style.top = `${clamped.top}px`;
+      applyLocalPosition(clamped.left, clamped.top);
     }
   };
 
@@ -167,14 +185,13 @@ export function createPlanOverview(): PlanOverviewHandle {
   close.addEventListener('click', () => { if (!justDragged) setCollapsed(true); });
   compact.addEventListener('click', () => { if (!justDragged) setCollapsed(false); });
 
-  const state = { currentPlan: 1, currentTodo: 1, todoLabel: '' };
-  let plan: Plan | null = null;
-  let status: PlanOverviewStatus = 'active';
+  let progressSnapshot: PlanProgressSnapshot | null = null;
 
   const render = (): void => {
-    if (!plan) return;
+    if (!progressSnapshot) return;
+    const { plan, currentPlan, status } = progressSnapshot;
     const total = plan.steps.length;
-    const doneCount = Math.max(0, Math.min(state.currentPlan - 1, total));
+    const doneCount = Math.max(0, Math.min(currentPlan - 1, total));
     progress.textContent = status === 'complete' ? `${total}/${total}` : `${doneCount}/${total}`;
     steps.textContent = '';
     plan.steps.forEach((step, i) => {
@@ -185,10 +202,10 @@ export function createPlanOverview(): PlanOverviewHandle {
       const check = document.createElement('span');
       check.className = 'plan-overview-step-check';
       check.setAttribute('aria-hidden', 'true');
-      if (status === 'complete' || n < state.currentPlan) {
+      if (status === 'complete' || n < currentPlan) {
         row.classList.add('done');
         check.textContent = '✓';
-      } else if (n === state.currentPlan) {
+      } else if (n === currentPlan) {
         row.classList.add(status === 'waiting' ? 'awaiting' : 'active');
         check.textContent = String(n);
       } else {
@@ -205,7 +222,7 @@ export function createPlanOverview(): PlanOverviewHandle {
     compact.classList.remove('complete', 'awaiting', 'active');
     const currentStep = status === 'complete'
       ? total
-      : Math.max(1, Math.min(state.currentPlan, total));
+      : Math.max(1, Math.min(currentPlan, total));
     compactStep.textContent = String(currentStep);
     compactStep.setAttribute('aria-label', `当前第 ${currentStep} 步，共 ${total} 步`);
     if (status === 'complete') {
@@ -224,47 +241,28 @@ export function createPlanOverview(): PlanOverviewHandle {
     compact.setAttribute('aria-label', compact.title);
   };
 
-  const apply = (
-    next: Plan,
-    nextStatus: PlanOverviewStatus = 'active',
-    currentPlan = 1,
-    currentTodo = 1,
-    todoLabel = '',
-  ): void => {
-    plan = next;
-    status = nextStatus;
-    state.currentPlan = currentPlan;
-    state.currentTodo = currentTodo;
-    state.todoLabel = todoLabel;
+  const applyProgress = (snapshot: PlanProgressSnapshot): void => {
+    progressSnapshot = snapshot;
     render();
     el.hidden = false;
     fitOverviewToHost(el);
   };
 
+  const detachProgress = (): void => {
+    progressUnsubscribe?.();
+    progressUnsubscribe = undefined;
+  };
+
   return {
     el,
-    show: (next, nextStatus = 'active', currentPlan = 1, currentTodo = 1, todoLabel = '') => {
-      apply(next, nextStatus, currentPlan, currentTodo, todoLabel);
-    },
-    update: (next, nextStatus = 'active', currentPlan = 1, currentTodo = 1, todoLabel = '') => {
-      apply(next, nextStatus, currentPlan, currentTodo, todoLabel);
-    },
-    setStatus: (next) => {
-      status = next;
-      render();
-      el.hidden = false;
-      fitOverviewToHost(el);
-    },
-    setCurrent: (planNumber, todoNumber, todoLabel) => {
-      state.currentPlan = planNumber;
-      if (todoNumber !== undefined) state.currentTodo = todoNumber;
-      if (todoLabel !== undefined) state.todoLabel = todoLabel;
-      render();
-      fitOverviewToHost(el);
-    },
     setCollapsed,
+    bindProgress: (source) => {
+      detachProgress();
+      progressUnsubscribe = source.subscribe(applyProgress);
+    },
     clear: () => {
-      plan = null;
+      detachProgress();
+      progressSnapshot = null;
       setCollapsed(false);
       el.hidden = true;
     },
@@ -291,24 +289,38 @@ export function fitOverviewToHost(el: HTMLElement): void {
 
   const maxLeft = Math.max(0, hostRect.width - el.offsetWidth);
   const maxTop = Math.max(0, hostRect.height - el.offsetHeight);
-  const left = Math.min(Math.max(0, el.offsetLeft), maxLeft);
-  const top = Math.min(Math.max(0, el.offsetTop), maxTop);
+  const current = (() => {
+    const rect = el.getBoundingClientRect?.();
+    if (rect && (rect.width > 0 || rect.height > 0)) {
+      return {
+        left: rect.left - (typeof hostRect.left === 'number' ? hostRect.left : 0),
+        top: rect.top - (typeof hostRect.top === 'number' ? hostRect.top : 0),
+      };
+    }
+    return { left: el.offsetLeft, top: el.offsetTop };
+  })();
+  const left = Math.min(Math.max(0, current.left), maxLeft);
+  const top = Math.min(Math.max(0, current.top), maxTop);
   const needsInlinePosition = el.style.left !== '' || el.style.right === 'auto'
-    || left !== el.offsetLeft || top !== el.offsetTop;
+    || left !== current.left || top !== current.top;
   if (needsInlinePosition) {
+    const originLeft = typeof hostRect.left === 'number' ? hostRect.left : 0;
+    const originTop = typeof hostRect.top === 'number' ? hostRect.top : 0;
     el.style.right = 'auto';
-    el.style.left = `${left}px`;
-    el.style.top = `${top}px`;
+    el.style.left = `${left + originLeft}px`;
+    el.style.top = `${top + originTop}px`;
   }
 
   const card = el.querySelector<HTMLElement>('.plan-overview-card');
   const steps = el.querySelector<HTMLElement>('.plan-overview-steps');
   if (!card || card.hidden || !steps) return;
   const availableHeight = Math.max(0, hostRect.height - top - 12);
-  card.style.maxHeight = `${availableHeight}px`;
+  const maxCardHeight = `${availableHeight}px`;
+  if (card.style.maxHeight !== maxCardHeight) card.style.maxHeight = maxCardHeight;
   const head = el.querySelector<HTMLElement>('.plan-overview-head');
   const headHeight = head?.offsetHeight ?? 0;
-  steps.style.maxHeight = `${Math.max(0, availableHeight - headHeight - 14)}px`;
+  const maxStepsHeight = `${Math.max(0, availableHeight - headHeight - 14)}px`;
+  if (steps.style.maxHeight !== maxStepsHeight) steps.style.maxHeight = maxStepsHeight;
 }
 
 /** Point the outline's position memory at a session. Call on session switch so
@@ -349,6 +361,8 @@ export function restoreStoredPosition(el: HTMLElement, sessionId?: string | null
     const maxTop = Math.max(0, hostRect.height - el.offsetHeight);
     left = Math.min(Math.max(0, left), maxLeft);
     top = Math.min(Math.max(0, top), maxTop);
+    left += typeof hostRect.left === 'number' ? hostRect.left : 0;
+    top += typeof hostRect.top === 'number' ? hostRect.top : 0;
   }
   el.style.right = 'auto';
   el.style.left = `${left}px`;
@@ -356,7 +370,18 @@ export function restoreStoredPosition(el: HTMLElement, sessionId?: string | null
 }
 
 /** Get (and lazily create) the singleton floating overview card. */
+// Detach the previous singleton's document/window subscriptions when it is
+// recreated (e.g. HMR / tests swapping the document): without this, the old
+// ResizeObserver and resize listener would keep a stale handle alive forever.
+let overviewCleanup: (() => void) | null = null;
+
 export function planOverview(): PlanOverviewHandle {
+  if (overview?.el.ownerDocument && overview.el.ownerDocument !== document) {
+    overview.clear();
+    overviewCleanup?.();
+    overviewCleanup = null;
+    overview = null;
+  }
   if (overview) return overview;
   const handle = createPlanOverview();
   // Anchor it to the app shell so it outlives per-transcript DOM clears.
@@ -364,14 +389,45 @@ export function planOverview(): PlanOverviewHandle {
   host.appendChild(handle.el);
   // Remember where the user parked the widget across launches / sessions.
   restoreStoredPosition(handle.el, positionSession);
-  const fit = () => fitOverviewToHost(handle.el);
-  if (typeof window !== 'undefined') window.addEventListener('resize', fit);
-  if (typeof ResizeObserver !== 'undefined') {
-    const observer = new ResizeObserver(fit);
-    observer.observe(host);
-    const chatView = document.getElementById('chat-view');
-    if (chatView) observer.observe(chatView);
+  // Window dragging can emit resize and ResizeObserver notifications faster
+  // than the WebView can paint. Coalesce all fits into one frame so the
+  // floating card never causes a read/write layout loop during resizing.
+  let fitScheduled = false;
+  const scheduleFit = (): void => {
+    if (fitScheduled) return;
+    fitScheduled = true;
+    const run = () => {
+      fitScheduled = false;
+      fitOverviewToHost(handle.el);
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+    else setTimeout(run, 0);
+  };
+
+  let resizeEndTimer: ReturnType<typeof setTimeout> | undefined;
+  const onWindowResize = (): void => {
+    document.documentElement.classList.add('window-resizing');
+    if (resizeEndTimer) clearTimeout(resizeEndTimer);
+    resizeEndTimer = setTimeout(() => {
+      resizeEndTimer = undefined;
+      document.documentElement.classList.remove('window-resizing');
+    }, 140);
+    scheduleFit();
+  };
+  const cleanups: Array<() => void> = [];
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', onWindowResize, { passive: true });
+    cleanups.push(() => {
+      window.removeEventListener('resize', onWindowResize);
+      if (resizeEndTimer) clearTimeout(resizeEndTimer);
+    });
   }
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(scheduleFit);
+    observer.observe(host);
+    cleanups.push(() => observer.disconnect());
+  }
+  overviewCleanup = () => { for (const fn of cleanups) fn(); };
   overview = handle;
   return handle;
 }

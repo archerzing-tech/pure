@@ -178,6 +178,18 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
  * the original user prompt or after `tool` results — so consecutive `user`
  * turns must be merged here, otherwise `deepseek-anthropic` fails with 400.
  */
+function parseAnthropicImageSource(dataUrl: string, mimeType: string): { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } | null {
+  if (!dataUrl) return null;
+  if (!dataUrl.startsWith('data:')) return { type: 'url', url: dataUrl };
+  const comma = dataUrl.indexOf(',');
+  if (comma < 0) return null;
+  const header = dataUrl.slice(5, comma);
+  const data = dataUrl.slice(comma + 1);
+  const mediaType = header.split(';')[0] || mimeType || 'image/png';
+  if (!data) return null;
+  return { type: 'base64', media_type: mediaType, data };
+}
+
 export function mapAnthropicMessages(
   messages: Message[],
 ): { system: string; conversationMessages: Anthropic.MessageParam[] } {
@@ -205,6 +217,19 @@ export function mapAnthropicMessages(
       systemParts.push(m.content);
     } else if (m.role === 'user') {
       appendToUser(m.content);
+      if (m.images?.length) {
+        const last = lastMessage();
+        if (last?.role === 'user') {
+          const blocks = Array.isArray(last.content)
+            ? (last.content as Anthropic.ContentBlockParam[])
+            : (last.content.trim() ? [{ type: 'text' as const, text: last.content }] : []);
+          for (const image of m.images) {
+            const source = parseAnthropicImageSource(image.dataUrl, image.mimeType);
+            if (source) blocks.push({ type: 'image', source } as Anthropic.ContentBlockParam);
+          }
+          last.content = blocks;
+        }
+      }
     } else if (m.role === 'assistant') {
       const content: Anthropic.ContentBlockParam[] = [];
       if (m.content) {

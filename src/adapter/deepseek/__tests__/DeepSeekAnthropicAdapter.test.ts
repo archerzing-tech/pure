@@ -39,6 +39,19 @@ describe('mapAnthropicMessages — consecutive user merging', () => {
     expect(blocks[1]).toMatchObject({ type: 'text', text: 'Tool failed, retry with a different approach' });
   });
 
+  it('maps a native data URL image into an Anthropic base64 image block', () => {
+    const { conversationMessages } = mapAnthropicMessages([{
+      role: 'user',
+      content: 'What is in this image?',
+      images: [{ dataUrl: 'data:image/png;base64,AAAA', mimeType: 'image/png', name: 'shot.png' }],
+    }]);
+    expect(conversationMessages[0]).toMatchObject({ role: 'user' });
+    expect(conversationMessages[0].content).toEqual([
+      { type: 'text', text: 'What is in this image?' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+    ]);
+  });
+
   it('keeps alternating roles unchanged for a normal tool round', () => {
     const messages: Message[] = [
       { role: 'system', content: 'sys' },

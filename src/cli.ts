@@ -20,6 +20,7 @@ import { SQLiteStore } from './adapter/storage/SQLiteStore';
 import { ContextEngine } from './harness/ContextEngine';
 import { createDefaultVerifier } from './coding-agent/Verifier';
 import { compileRequestWorkflow, type RequestWorkflowStage } from './shared/requestWorkflow';
+import { inferSemanticRoute, shouldBypassSemanticRoute } from './coding-agent/Planner';
 import type { IntentAssessment, TaskMode } from './coding-agent/types';
 import { DefaultHookRouter } from './engine/HookRouter';
 import { DefaultFailurePolicy } from './engine/FailurePolicy';
@@ -1335,7 +1336,10 @@ async function runOneShot(args: CliArgs) {
   // Logical-trap pre-scan: if the request itself is contradictory/impossible,
   // warn the user and inject the trap notice into the system prompt so the
   // model verifies the premise instead of following it into a failure loop.
-  const workflow = compileRequestWorkflow(args.prompt, { hasTools });
+  const semanticRoute = shouldBypassSemanticRoute(args.prompt)
+    ? null
+    : await inferSemanticRoute(adapter, args.prompt);
+  const workflow = compileRequestWorkflow(args.prompt, { hasTools, semanticRoute });
   const analysis = workflow.analysis;
   const traps = analysis.traps;
   if (traps.length > 0) {
@@ -1528,7 +1532,10 @@ async function runRepl(args: CliArgs) {
 
     // Trap pre-scan per REPL turn (same as one-shot): surface the warning and
     // inject it into the system prompt so the model verifies the premise.
-    const workflow = compileRequestWorkflow(input, { hasTools: toolsDefs.length > 0 });
+    const semanticRoute = shouldBypassSemanticRoute(input)
+      ? null
+      : await inferSemanticRoute(adapter, input, currentAbort.signal);
+    const workflow = compileRequestWorkflow(input, { hasTools: toolsDefs.length > 0, semanticRoute });
     const analysis = workflow.analysis;
     const traps = analysis.traps;
     if (traps.length > 0) {

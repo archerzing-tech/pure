@@ -9,8 +9,9 @@
 // in-memory cache keeps reads synchronous; localStorage (`pure_stats:<id>`)
 // is only the fallback for plain Vite dev.
 
-import type { Message, TokenUsage, GeneratedImage } from '../shared/types';
+import type { Message, MessageImage, TokenUsage, GeneratedImage } from '../shared/types';
 import type { IntentAssessment, Plan } from '../coding-agent/types';
+import type { PlanProgressSnapshot } from './planProgress';
 
 export const SESSION_SNAPSHOT_VERSION = 2;
 
@@ -19,6 +20,8 @@ export interface TranscriptEntry {
   modelMessageIndex: number;
   role: 'user' | 'assistant' | 'tool';
   content: string | null;
+  /** User-uploaded images shown in the restored conversation bubble. */
+  images?: MessageImage[];
   displayOverride?: boolean;
   toolCallId?: string;
   toolName?: string;
@@ -34,6 +37,9 @@ export interface TranscriptEntry {
 }
 
 export interface SessionUiState {
+  /** Canonical session-level plan cursor shared by the transcript card and floating outline. */
+  planProgress?: PlanProgressSnapshot | null;
+  /** Legacy cursor retained for migration and older exports. */
   planState?: PlanState | null;
 }
 
@@ -64,6 +70,7 @@ export interface TranscriptDraft {
   message: Message;
   modelMessageIndex: number;
   content?: string | null;
+  images?: MessageImage[];
   displayOverride?: boolean;
   analysis?: string;
   thinking?: string;
@@ -130,6 +137,7 @@ export interface ToolExecMeta {
 export interface StoredMessage {
   role: string;
   content: string | null;
+  images?: MessageImage[];
   tool_calls?: unknown[];
   tool_call_id?: string;
   name?: string;
@@ -197,6 +205,7 @@ function modelMessageFromStored(message: StoredMessage): Message {
   return {
     role: message.role as Message['role'],
     content: typeof message.content === 'string' ? message.content : '',
+    images: message.images,
     toolCalls: message.tool_calls as Message['toolCalls'],
     toolCallId: message.tool_call_id,
     toolName: message.name,
@@ -233,6 +242,7 @@ function legacyToTranscriptDrafts(messages: StoredMessage[]): TranscriptDraft[] 
       modelMessageIndex: index,
       content: message.role === 'assistant' ? getStoredDisplayContent(message) : message.content,
       displayOverride: message.role === 'assistant' && !!message.displayContent,
+      images: message.images,
       analysis: message.analysis,
       thinking: message.thinking,
       thinkingPhases: message.thinkingPhases,
@@ -248,6 +258,7 @@ function legacyToTranscriptDrafts(messages: StoredMessage[]): TranscriptDraft[] 
 export function createSessionSnapshot(
   modelMessages: Message[],
   source: TranscriptDraft[] | StoredMessage[],
+  uiState: Partial<SessionUiState> = {},
 ): SessionSnapshotV2 {
   const drafts = source.length > 0 && 'message' in source[0]
     ? source as TranscriptDraft[]
@@ -264,6 +275,7 @@ export function createSessionSnapshot(
       modelMessageIndex: draft.modelMessageIndex,
       role: message.role as TranscriptEntry['role'],
       content: draft.content ?? message.content,
+      images: draft.images ?? message.images,
       displayOverride: draft.displayOverride,
       toolCallId: message.toolCallId,
       toolName: message.toolName,
@@ -283,7 +295,7 @@ export function createSessionSnapshot(
     version: SESSION_SNAPSHOT_VERSION,
     modelContext: { messages: modelMessages },
     transcript,
-    uiState: { planState: latestPlanState ?? null },
+    uiState: { planState: latestPlanState ?? null, ...uiState },
   };
 }
 
@@ -310,6 +322,7 @@ export function mergeSessionSnapshotMetadata(
     return {
       ...entry,
       content: entry.displayOverride ? entry.content : (prior.content || entry.content),
+      images: entry.images ?? prior.images,
       displayOverride: entry.displayOverride || prior.displayOverride,
       analysis: entry.analysis ?? prior.analysis,
       thinking: entry.thinking ?? prior.thinking,
@@ -488,6 +501,8 @@ export interface SessionStats {
   provider?: string;
   /** Aggregated billing usage across every turn in this session. */
   usage?: TokenUsage;
+  /** Number of internal LLM interaction rounds in the latest agent run. */
+  turns?: number;
   /** web_search history (query + timestamp). */
   searches: Array<{ query: string; ts: number }>;
   /** One latest entry per normalized file path. */
@@ -558,7 +573,8 @@ export function groupFileWrites(
 }
 
 function normalizeStats(stats: SessionStats): SessionStats {
-  return { ...stats, fileWrites: dedupeFileWrites(stats.fileWrites ?? []) };
+  const turns = Number.isFinite(stats.turns) ? Math.max(0, Math.floor(stats.turns as number)) : 0;
+  return { ...stats, turns, fileWrites: dedupeFileWrites(stats.fileWrites ?? []) };
 }
 
 /** Update one file's activity without adding a duplicate sidebar row. */
@@ -579,6 +595,7 @@ function normalizeLoadedStats(data: Partial<SessionStats>): SessionStats {
   return normalizeStats({
     provider: data.provider,
     usage: data.usage,
+    turns: data.turns,
     searches: data.searches ?? [],
     fileWrites: data.fileWrites ?? [],
     fileReads: data.fileReads ?? [],
@@ -756,6 +773,78 @@ function lsDeleteAll() {
 // spam the user on every message — at most one warning per 30s window.
 let lastDiskSaveWarning = 0;
 
+export interface SessionPlanProgressPersistence {
+  persist(snapshot: PlanProgressSnapshot): void;
+  flush(): Promise<void>;
+  dispose(): void;
+}
+
+export async function persistSessionPlanProgress(
+  sessionId: string,
+  progress: PlanProgressSnapshot,
+  workspace = '',
+): Promise<void> {
+  const loaded = await loadSession(sessionId);
+  if (!loaded) return;
+  const complete = progress.status === 'complete';
+  const planState: PlanState = {
+    plan: progress.plan,
+    planNumber: progress.currentPlan,
+    todoNumber: progress.currentTodo,
+    started: progress.status !== 'waiting',
+    ...(complete ? { complete: true } : {}),
+  };
+  const snapshot: SessionSnapshotV2 = {
+    ...loaded.snapshot,
+    uiState: {
+      ...loaded.snapshot.uiState,
+      planProgress: progress,
+      planState,
+    },
+  };
+  await saveSession(sessionId, snapshot, workspace);
+}
+
+export function createSessionPlanProgressPersistence(
+  sessionId: string,
+  workspace = '',
+): SessionPlanProgressPersistence {
+  let pending: PlanProgressSnapshot | null = null;
+  let scheduled = false;
+  let disposed = false;
+  let chain = Promise.resolve();
+
+  const runPending = (): void => {
+    scheduled = false;
+    const next = pending;
+    pending = null;
+    if (!next || disposed) return;
+    chain = chain
+      .then(() => persistSessionPlanProgress(sessionId, next, workspace))
+      .catch(() => {});
+  };
+
+  return {
+    persist(snapshot): void {
+      if (disposed) return;
+      pending = snapshot;
+      if (!scheduled) {
+        scheduled = true;
+        queueMicrotask(runPending);
+      }
+    },
+    flush(): Promise<void> {
+      if (scheduled) runPending();
+      return chain;
+    },
+    dispose(): void {
+      disposed = true;
+      pending = null;
+      scheduled = false;
+    },
+  };
+}
+
 /**
  * Persist a session. On the desktop the canonical copy lives on disk via the
  * Rust save_session command; a write failure (permissions, disk full, I/O
@@ -878,7 +967,7 @@ function cacheStats(id: string, stats: SessionStats): void {
 }
 
 function emptyStats(): SessionStats {
-  return { searches: [], fileWrites: [], fileReads: [], commands: [] };
+  return { turns: 0, searches: [], fileWrites: [], fileReads: [], commands: [] };
 }
 
 export function loadSessionStats(sessionId: string): SessionStats {

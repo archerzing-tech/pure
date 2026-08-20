@@ -5,6 +5,8 @@
 // model flags as questionable / unreasonable pause the plan BEFORE execution
 // and let the user decide (adjust per suggestion, or proceed as requested).
 
+import type { IntentAssessment } from '../coding-agent/types';
+
 export type RequestReviewVerdict = 'reasonable' | 'questionable' | 'unreasonable';
 
 export interface RequestReviewItem {
@@ -34,9 +36,40 @@ const VERDICT_LABELS: Record<RequestReviewVerdict, string> = {
   unreasonable: '不合理',
 };
 
-/** True when any part needs the user's decision before execution. */
+/** True when any part is not plain "reasonable". */
 export function hasFlaggedReviewItems(review: RequestReviewItem[]): boolean {
   return review.some((item) => item.verdict !== 'reasonable');
+}
+
+/**
+ * Whether the review card is worth SHOWING at all. The model flagged a part
+ * of the request as questionable or unreasonable — that concern is exactly
+ * what the user should see, so the card is informational by default. It only
+ * BLOCKS execution when shouldPauseForRequestReview also says the turn must
+ * stop for a decision.
+ */
+export function shouldShowRequestReview(review: RequestReviewItem[]): boolean {
+  return hasFlaggedReviewItems(review);
+}
+
+/**
+ * Whether the flagged concerns force a user DECISION before execution. A
+ * model's subjective doubt about scope or taste ("需求较大", "风格差异大") stays
+ * visible but non-blocking — interrupting a clear request over an opinion is
+ * worse than showing the note. Only a genuine safety boundary (logical trap,
+ * high risk, destructive / migration / refactor intent) or an explicitly
+ * unreasonable verdict (infeasible, self-contradictory, destructive to
+ * existing work) actually pauses the turn.
+ */
+export function shouldPauseForRequestReview(
+  review: RequestReviewItem[],
+  assessment: IntentAssessment,
+  hasLogicalTrap: boolean,
+): boolean {
+  if (!hasFlaggedReviewItems(review)) return false;
+  if (hasLogicalTrap || assessment.requiresConfirmation || assessment.riskLevel === 'high') return true;
+  if (assessment.intent === 'delete' || assessment.intent === 'migrate' || assessment.intent === 'refactor') return true;
+  return review.some((item) => item.verdict === 'unreasonable');
 }
 
 export function flaggedReviewItems(review: RequestReviewItem[]): RequestReviewItem[] {

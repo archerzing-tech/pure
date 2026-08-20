@@ -1,17 +1,17 @@
 #!/usr/bin/env bun
 // scripts/verify-outline-restore.ts
-// Real-browser verification of the session-restore floating-outline states
-// (src/ui/chat.ts loadFromStorage → planOverview().show). Seeds a finished /
-// in-progress / paused session into localStorage, reloads the app, clicks the
-// session in the sidebar (the real restore path), then asserts the floating
-// outline and the in-transcript plan card render the expected state.
+// Real-browser verification of session restore and the shared plan-progress
+// projection (src/ui/chat.ts loadFromStorage → planOverview().bindProgress).
+// It seeds sessions into the browser store, reloads the app, clicks sessions in
+// the sidebar (the real restore/switch path), then asserts the floating outline
+// and the in-transcript plan card render the same persisted state.
 //
 // Self-contained: it starts `bun run dev` and a headless Chrome when they are
 // not already running, and stops only the processes it started. Requires a
 // desktop Chrome binary (defaults to the standard macOS path).
 //
 // Usage:
-//   bun run scripts/verify-outline-restore.ts [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]
+//   bun run scripts/verify-outline-restore.ts [--scenario=restore|session|progress|all] [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]
 
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,6 +31,8 @@ const argValue = (name: string): string | undefined => {
   return flag ? flag.slice(name.length + 1) : undefined;
 };
 const requestedStates = (argValue('--state') ?? 'all').split(',');
+const scenario = argValue('--scenario') ?? 'all';
+const gateScenario = argValue('--gate') ?? 'all';
 const outDir = argValue('--out') ?? '/tmp/pure-outline-verify';
 const appUrl = argValue('--app-url') ?? 'http://localhost:1420/';
 const cdpPort = Number(argValue('--cdp-port') ?? 9222);
@@ -154,8 +156,8 @@ function killByPort(port: number): void {
 }
 
 async function main(): Promise<number> {
-  if (STATES.length === 0) {
-    console.error('Usage: bun run scripts/verify-outline-restore.ts [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]');
+  if (STATES.length === 0 || !['restore', 'session', 'progress', 'gates', 'all'].includes(scenario)) {
+    console.error('Usage: bun run scripts/verify-outline-restore.ts [--scenario=restore|session|progress|gates|all] [--gate=review|delivery|all] [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]');
     return 2;
   }
   try { appendFileSync(LOG_FILE, `\n=== run ${new Date().toISOString()} ===\n`); } catch {}
@@ -242,7 +244,7 @@ async function main(): Promise<number> {
   // failure can never orphan the vite / Chrome this script started. ──
   let failures = 0;
   try {
-  for (const state of STATES) {
+  if (scenario === 'restore' || scenario === 'all') for (const state of STATES) {
     const expected = EXPECTED[state];
     const sid = `verify-session-${state}`;
     const label = state === 'complete' ? '已完成' : state === 'active' ? '进行中' : '暂停';
@@ -325,6 +327,403 @@ async function main(): Promise<number> {
     writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
     log(`[verify] screenshot: ${shotPath}`);
   }
+
+  // ── Browser-level refresh + session-switch regression ──
+  // This deliberately uses two distinct plans rather than only checking that
+  // a widget is visible: stale model subscriptions would otherwise pass the
+  // visibility assertion while still showing session A after switching to B.
+  if (scenario === 'session' || scenario === 'all') {
+    const planA = {
+      steps: [
+        { id: 'a-1', action: 'A-需求', description: '读取会话 A 的目标', expectedOutcome: 'A 目标明确' },
+        { id: 'a-2', action: 'A-实现', description: '执行会话 A 的实现', expectedOutcome: 'A 完成' },
+        { id: 'a-3', action: 'A-验证', description: '验证会话 A 的结果', expectedOutcome: 'A 可交付' },
+      ],
+      reasoning: 'browser session A',
+    };
+    const planB = {
+      steps: [
+        { id: 'b-1', action: 'B-需求', description: '读取会话 B 的目标', expectedOutcome: 'B 目标明确' },
+        { id: 'b-2', action: 'B-实现', description: '执行会话 B 的实现', expectedOutcome: 'B 完成' },
+        { id: 'b-3', action: 'B-验证', description: '验证会话 B 的结果', expectedOutcome: 'B 可交付' },
+      ],
+      reasoning: 'browser session B',
+    };
+    const makeData = (id: string, title: string, plan: typeof planA, progress: { currentPlan: number; currentTodo: number; status: 'active' | 'complete' }) => {
+      const complete = progress.status === 'complete';
+      const snapshot = {
+        version: 2,
+        modelContext: { messages: [{ role: 'user', content: title }] },
+        transcript: [{
+          id: `${id}-plan`, modelMessageIndex: 0, role: 'assistant', content: `${title} 执行中。`,
+          planCard: { plan, currentPlan: complete ? plan.steps.length + 1 : progress.currentPlan, currentTodo: progress.currentTodo, complete },
+        }],
+        uiState: {
+          planProgress: { plan, currentPlan: complete ? plan.steps.length + 1 : progress.currentPlan, currentTodo: progress.currentTodo, status: progress.status },
+          planState: { plan, planNumber: complete ? plan.steps.length + 1 : progress.currentPlan, todoNumber: progress.currentTodo, started: true, ...(complete ? { complete: true } : {}) },
+        },
+      };
+      return { id, title, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 1, workspace: '', snapshot };
+    };
+    const sessionA = makeData('browser-session-a', '浏览器会话 A', planA, { currentPlan: 2, currentTodo: 1, status: 'active' });
+    const sessionB = makeData('browser-session-b', '浏览器会话 B', planB, { currentPlan: 4, currentTodo: 1, status: 'complete' });
+    const seedSessions = `(() => {
+      const entries = ${JSON.stringify([sessionA, sessionB])};
+      localStorage.setItem('pure_sessions', JSON.stringify(entries.map(({ snapshot: _snapshot, ...meta }) => meta)));
+      for (const entry of entries) {
+        localStorage.setItem('pure_session:' + entry.id, JSON.stringify({ snapshot: entry.snapshot, updatedAt: entry.updatedAt, messageCount: entry.messageCount, workspace: entry.workspace }));
+      }
+      localStorage.setItem('pure_last_session', 'browser-session-a');
+      return entries.map((entry) => entry.id);
+    })()`;
+    await evaluate(seedSessions);
+
+    const reload = async (label: string): Promise<void> => {
+      await send('Page.reload');
+      await waitFor(async () => {
+        const href = await evaluate('location.href');
+        return typeof href === 'string' && href.startsWith(appUrl) && (await evaluate('document.readyState')) === 'complete';
+      }, 25000, `${label} reload`);
+      await waitFor(async () => {
+        const count = await evaluate(`document.querySelectorAll('.sidebar-session-item[data-sid="browser-session-a"], .sidebar-session-item[data-sid="browser-session-b"]').length`);
+        return Number(count) === 2;
+      }, 25000, `${label} session list`);
+    };
+    const readSessionView = async (): Promise<{ outline: string; outlineClass: string; chat: string; chatClass: string }> => JSON.parse(String(await evaluate(`(() => {
+      const overview = document.querySelector('.plan-overview');
+      const card = document.querySelector('.plan-progress-text-plan');
+      return JSON.stringify({
+        outline: overview?.querySelector('.plan-overview-steps')?.textContent?.trim() ?? '',
+        outlineClass: overview?.querySelector('.plan-overview-card')?.className ?? '',
+        chat: card?.textContent?.trim() ?? '',
+        chatClass: card?.querySelector('.plan-progress-step.active')?.textContent?.trim() ?? '',
+      });
+    })()`)));
+    const assertSessionView = async (sid: string, expectedLabel: string, expectedClass: string): Promise<boolean> => {
+      await waitFor(async () => {
+        const visible = await evaluate("(() => { const el = document.querySelector('.plan-overview'); return !!el && !el.hidden; })()");
+        const view = await readSessionView();
+        return visible === true && view.outline.includes(expectedLabel) && view.chat.includes(expectedLabel);
+      }, 25000, `${sid} shared plan projection`);
+      const view = await readSessionView();
+      const pass = view.outline.includes(expectedLabel)
+        && view.chat.includes(expectedLabel)
+        && view.outlineClass.includes(expectedClass);
+      log(`  [${pass ? 'PASS' : 'FAIL'}] ${sid} → refresh/switch shared projection: ${JSON.stringify(view)}`);
+      if (!pass) failures++;
+      return pass;
+    };
+
+    await reload('session seed');
+    await evaluate(`document.querySelector('.sidebar-session-item[data-sid="browser-session-a"]').click()`);
+    await assertSessionView('browser-session-a', 'A-实现', 'active');
+
+    // Reload after selecting A, then take the normal sidebar restore path.
+    await reload('selected A');
+    await evaluate(`document.querySelector('.sidebar-session-item[data-sid="browser-session-a"]').click()`);
+    await assertSessionView('browser-session-a', 'A-实现', 'active');
+
+    // Switching to B must replace both projections; A's model/subscription
+    // must no longer be able to keep the old plan in the floating window.
+    await evaluate(`document.querySelector('.sidebar-session-item[data-sid="browser-session-b"]').click()`);
+    await assertSessionView('browser-session-b', 'B-验证', 'complete');
+    log('[verify] browser refresh + session switch: OK');
+  }
+
+  // ── Browser-level multi-Todo / phase-jump / completion regression ──
+  if (scenario === 'progress' || scenario === 'all') {
+    const progressPlan = {
+      steps: [
+        {
+          id: 'p-1', action: '多 Todo 阶段', description: '验证 Todo 顺序', expectedOutcome: 'Todo 状态一致',
+          todosRequired: true,
+          substeps: [
+            { id: 'p-1-1', action: 'Todo 一', description: '已完成 Todo', expectedOutcome: '完成' },
+            { id: 'p-1-2', action: 'Todo 二', description: '当前 Todo', expectedOutcome: '执行中' },
+            { id: 'p-1-3', action: 'Todo 三', description: '待处理 Todo', expectedOutcome: '待处理' },
+          ],
+        },
+        { id: 'p-2', action: '中间阶段', description: '用于验证跳阶段', expectedOutcome: '可跳过' },
+        {
+          id: 'p-3', action: '跳阶段后的验证', description: '当前阶段和完成态', expectedOutcome: '验证完成',
+          todosRequired: true,
+          substeps: [{ id: 'p-3-1', action: '验证 Todo', description: '当前验证项', expectedOutcome: '通过' }],
+        },
+      ],
+      reasoning: 'browser plan progress states',
+    };
+    const makeProgressData = (
+      id: string,
+      title: string,
+      currentPlan: number,
+      currentTodo: number,
+      status: 'active' | 'complete',
+    ) => {
+      const complete = status === 'complete';
+      const cursor = complete ? progressPlan.steps.length + 1 : currentPlan;
+      const snapshot = {
+        version: 2,
+        modelContext: { messages: [{ role: 'user', content: title }] },
+        transcript: [{
+          id: `${id}-plan`, modelMessageIndex: 0, role: 'assistant', content: `${title}。`,
+          planCard: { plan: progressPlan, currentPlan: cursor, currentTodo, complete },
+        }],
+        uiState: {
+          planProgress: { plan: progressPlan, currentPlan: cursor, currentTodo, status },
+          planState: { plan: progressPlan, planNumber: cursor, todoNumber: currentTodo, started: true, ...(complete ? { complete: true } : {}) },
+        },
+      };
+      return { id, title, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 1, workspace: '', snapshot };
+    };
+    const progressSessions = [
+      makeProgressData('progress-session-todos', '多 Todo GUI 验证', 1, 2, 'active'),
+      makeProgressData('progress-session-jump', '跳阶段 GUI 验证', 3, 1, 'active'),
+      makeProgressData('progress-session-complete', '完成态 GUI 验证', 4, 2, 'complete'),
+    ];
+    await evaluate(`(() => {
+      const entries = ${JSON.stringify(progressSessions)};
+      localStorage.setItem('pure_sessions', JSON.stringify(entries.map(({ snapshot: _snapshot, ...meta }) => meta)));
+      for (const entry of entries) {
+        localStorage.setItem('pure_session:' + entry.id, JSON.stringify({ snapshot: entry.snapshot, updatedAt: entry.updatedAt, messageCount: entry.messageCount, workspace: entry.workspace }));
+      }
+      localStorage.setItem('pure_last_session', entries[0].id);
+      return entries.map((entry) => entry.id);
+    })()`);
+
+    await send('Page.reload');
+    await waitFor(async () => {
+      const href = await evaluate('location.href');
+      return typeof href === 'string' && href.startsWith(appUrl) && (await evaluate('document.readyState')) === 'complete';
+    }, 25000, 'progress scenario reload');
+    await waitFor(async () => {
+      const count = await evaluate(`document.querySelectorAll('.sidebar-session-item[data-sid="progress-session-todos"], .sidebar-session-item[data-sid="progress-session-jump"], .sidebar-session-item[data-sid="progress-session-complete"]').length`);
+      return Number(count) === 3;
+    }, 25000, 'progress scenario session list');
+
+    const readProgressView = async (): Promise<{
+      outlineClass: string;
+      outlineProgress: string;
+      outlineSteps: string[];
+      cardTopSteps: string[];
+      visibleTodos: string[];
+      allTodos: string[];
+    }> => JSON.parse(String(await evaluate(`(() => {
+      const overview = document.querySelector('.plan-overview');
+      const card = document.querySelector('.plan-progress-text-plan');
+      const row = card?.parentElement;
+      const classes = (selector, root = card) => Array.from(root?.querySelectorAll(selector) ?? []).map((el) => el.className);
+      return JSON.stringify({
+        outlineClass: overview?.querySelector('.plan-overview-card')?.className ?? '',
+        outlineProgress: overview?.querySelector('.plan-overview-progress')?.textContent ?? '',
+        outlineSteps: classes('.plan-overview-step', overview),
+        cardTopSteps: classes('.plan-progress-steps > .plan-progress-step'),
+        visibleTodos: classes('.plan-progress-text-todos:not(.plan-progress-todo-hidden) .plan-progress-substep', row),
+        allTodos: classes('.plan-progress-text-todos .plan-progress-substep', row),
+      });
+    })()`)));
+    const assertProgressView = async (
+      sid: string,
+      action: string,
+      expected: { outlineClass: string; outlineProgress: string; outlineSteps: string[]; cardTopSteps: string[]; visibleTodos: string[]; allTodos: string[] },
+    ): Promise<void> => {
+      await evaluate(`document.querySelector('.sidebar-session-item[data-sid="${sid}"]').click()`);
+      await waitFor(async () => {
+        const visible = await evaluate("(() => { const el = document.querySelector('.plan-overview'); return !!el && !el.hidden; })()");
+        const view = await readProgressView();
+        return visible === true && view.cardTopSteps.length === 3 && view.outlineProgress === expected.outlineProgress;
+      }, 25000, `${sid} progress render`);
+      const view = await readProgressView();
+      const actual = {
+        outlineClass: view.outlineClass,
+        outlineProgress: view.outlineProgress,
+        outlineSteps: view.outlineSteps,
+        cardTopSteps: view.cardTopSteps,
+        visibleTodos: view.visibleTodos,
+        allTodos: view.allTodos,
+      };
+      const pass = view.outlineClass.includes(expected.outlineClass)
+        && JSON.stringify(actual) === JSON.stringify(expected);
+      log(`  [${pass ? 'PASS' : 'FAIL'}] ${sid} → ${action}: ${JSON.stringify(actual)}`);
+      if (!pass) failures++;
+    };
+
+    await assertProgressView('progress-session-todos', '多 Todo 当前项同步', {
+      outlineClass: 'plan-overview-card active',
+      outlineProgress: '0/3',
+      outlineSteps: ['plan-overview-step active', 'plan-overview-step pending', 'plan-overview-step pending'],
+      cardTopSteps: ['plan-progress-step active', 'plan-progress-step pending', 'plan-progress-step pending'],
+      visibleTodos: ['plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row active', 'plan-progress-substep plan-progress-todo-row pending'],
+      allTodos: ['plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row active', 'plan-progress-substep plan-progress-todo-row pending', 'plan-progress-substep plan-progress-todo-row pending'],
+    });
+    await assertProgressView('progress-session-jump', '跳阶段后两侧同步', {
+      outlineClass: 'plan-overview-card active',
+      outlineProgress: '2/3',
+      outlineSteps: ['plan-overview-step done', 'plan-overview-step done', 'plan-overview-step active'],
+      cardTopSteps: ['plan-progress-step done', 'plan-progress-step done', 'plan-progress-step active'],
+      visibleTodos: ['plan-progress-substep plan-progress-todo-row active'],
+      allTodos: ['plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row active'],
+    });
+    await assertProgressView('progress-session-complete', '完成态全部同步', {
+      outlineClass: 'plan-overview-card complete',
+      outlineProgress: '3/3',
+      outlineSteps: ['plan-overview-step done', 'plan-overview-step done', 'plan-overview-step done'],
+      cardTopSteps: ['plan-progress-step done', 'plan-progress-step done', 'plan-progress-step done'],
+      visibleTodos: [],
+      allTodos: ['plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row done'],
+    });
+    log(`[verify] browser multi-Todo + phase jump + completion: ${failures === 0 ? 'OK' : 'MISMATCH'}`);
+  }
+
+  // ── Browser-level gate assertions ──
+  // The review-pause gate (shouldPauseForRequestReview → decision card) and
+  // the plan-continuation delivery gate (continuingProjectBuild →
+  // needsDeliveryGate → continuation prompt) are turn-time logic, so they are
+  // exercised against the app's OWN compiled modules inside the live page
+  // (same Vite module graph the browser is running) with realistic seeded
+  // inputs, then the DOM consequences are asserted on real rendered cards.
+  if (scenario === 'gates' || scenario === 'all') {
+    const gate = gateScenario;
+    const gatesOk = async (): Promise<boolean> => {
+      // 1) Review gate decisions + real card DOM.
+      if (gate === 'all' || gate === 'review') {
+        const review = await evaluate(`(async () => {
+          const { shouldShowRequestReview, shouldPauseForRequestReview, createRequestReviewCard } = await import('/src/ui/requestReview.ts');
+          const buildAssessment = { intent: 'build', riskLevel: 'low', reversibility: 'reversible', impact: '', recommendation: '', requiresProbe: false, requiresConfirmation: false };
+          const destructiveAssessment = { ...buildAssessment, intent: 'delete', riskLevel: 'high', reversibility: 'irreversible', requiresConfirmation: true };
+          const subjective = [{ part: '需求范围较大', verdict: 'questionable', reason: '需要更长时间', suggestion: '先做核心部分' }];
+          const unreasonable = [{ part: '直接删除被引用的目录', verdict: 'unreasonable', reason: '迁移脚本还在引用它', suggestion: '先归档再删除' }];
+          const trap = [{ part: '同时保持旧版接口', verdict: 'questionable', reason: '与删除旧模块互相矛盾' }];
+
+          // Render the real card for the subjective concern (show-only: no pause).
+          const host = document.createElement('div');
+          host.id = 'gate-review-show';
+          const card = createRequestReviewCard(subjective);
+          host.appendChild(card.el);
+          document.body.appendChild(host);
+
+          // Render the real card for the unreasonable concern (pause: buttons).
+          const host2 = document.createElement('div');
+          host2.id = 'gate-review-pause';
+          const card2 = createRequestReviewCard(unreasonable);
+          host2.appendChild(card2.el);
+          document.body.appendChild(host2);
+
+          return {
+            showSubjective: shouldShowRequestReview(subjective),
+            pauseSubjective: shouldPauseForRequestReview(subjective, buildAssessment, false),
+            pauseTrap: shouldPauseForRequestReview(trap, buildAssessment, true),
+            pauseDestructive: shouldPauseForRequestReview(subjective, destructiveAssessment, false),
+            pauseUnreasonable: shouldPauseForRequestReview(unreasonable, buildAssessment, false),
+            pauseAllReasonable: shouldPauseForRequestReview([{ part: '保留新接口', verdict: 'reasonable', reason: '一致' }], destructiveAssessment, true),
+          };
+        })()`);
+
+        // Subjective concern renders the card, but WITHOUT decision buttons
+        // (the turn does not pause for an opinion).
+        const showDom = await evaluate(`(() => {
+          const host = document.getElementById('gate-review-show');
+          const item = host?.querySelector('.request-review-item');
+          return {
+            card: !!host?.querySelector('.request-review-card'),
+            itemClass: item?.className ?? '',
+            actions: !!host?.querySelector('.request-review-actions'),
+          };
+        })()`);
+
+        // Unreasonable concern pauses: the same card gains the decision bar
+        // only when chat.ts calls enableDecisions (the pause path). Assert the
+        // real wiring: no bar on the show-only card, bar + buttons on the
+        // paused card after enableDecisions runs.
+        const pauseDom = await evaluate(`(async () => {
+          const { createRequestReviewCard } = await import('/src/ui/requestReview.ts');
+          const host = document.getElementById('gate-review-pause');
+          const card = createRequestReviewCard([{ part: '直接删除被引用的目录', verdict: 'unreasonable', reason: '迁移脚本还在引用它', suggestion: '先归档再删除' }]);
+          host.appendChild(card.el);
+          const before = !!host.querySelector('.request-review-actions');
+          card.enableDecisions(() => true, () => true);
+          const after = !!host.querySelector('.request-review-actions');
+          const buttons = Array.from(host.querySelectorAll('.request-review-actions button')).map((b) => b.textContent);
+          card.setDecided('已决策');
+          const afterDecide = !!host.querySelector('.request-review-actions');
+          return { before, after, buttons, afterDecide };
+        })()`);
+
+        const checks: Array<[string, boolean]> = [
+          ['主观担忧 → 展示', review.showSubjective, true],
+          ['主观担忧 → 不暂停', !review.pauseSubjective, true],
+          ['逻辑陷阱 → 暂停', review.pauseTrap, true],
+          ['破坏性/高风险 → 暂停', review.pauseDestructive, true],
+          ['不合理判定 → 暂停', review.pauseUnreasonable, true],
+          ['全合理 → 不暂停（即使高风险）', !review.pauseAllReasonable, true],
+          ['主观卡渲染（含存疑样式）', showDom.card && showDom.itemClass.includes('request-review-questionable'), true],
+          ['主观卡不渲染决策按钮', !showDom.actions, true],
+          ['暂停卡初始无决策按钮', !pauseDom.before, true],
+          ['暂停卡 enableDecisions 后出现决策按钮', pauseDom.after, true],
+          ['决策按钮文案正确', pauseDom.buttons.length === 2 && pauseDom.buttons[0]?.includes('采纳建议') && pauseDom.buttons[1]?.includes('仍按原诉求'), true],
+          ['决策后按钮移除', !pauseDom.afterDecide, true],
+        ];
+        let ok = true;
+        for (const [name, actual, want] of checks) {
+          const pass = actual === want;
+          if (!pass) ok = false;
+          log(`  [${pass ? 'PASS' : 'FAIL'}] review gate → ${name}: ${JSON.stringify(actual)}`);
+        }
+        log(`[verify] review gate (shouldPauseForRequestReview + card DOM): ${ok ? 'OK' : 'MISMATCH'}`);
+        if (!ok) return false;
+      }
+
+      // 2) Plan-continuation delivery gate: continuingProjectBuild decides
+      // needsDeliveryGate, and the continuation prompt carries the delivery
+      // requirement only for build plans.
+      if (gate === 'all' || gate === 'delivery') {
+        const delivery = await evaluate(`(async () => {
+          const { compileRequestWorkflow } = await import('/src/shared/requestWorkflow.ts');
+          const { formatPlanContinuation } = await import('/src/ui/plan.ts');
+          const plan = { steps: [
+            { id: '1', action: 'A-需求', description: '读目标', expectedOutcome: '明确' },
+            { id: '2', action: 'A-实现', description: '写代码', expectedOutcome: '完成' },
+            { id: '3', action: 'A-验证', description: '跑验证', expectedOutcome: '通过' },
+          ], reasoning: 'browser gate delivery' };
+          const continuation = '继续执行';
+          const ordinary = compileRequestWorkflow(continuation, { continuingPlan: true, continuingProjectBuild: false });
+          const build = compileRequestWorkflow(continuation, { continuingPlan: true, continuingProjectBuild: true });
+          const newTurn = compileRequestWorkflow('继续执行', { continuingPlan: false, continuingProjectBuild: false });
+          const contPlain = formatPlanContinuation(plan, 2, 1, false);
+          const contBuild = formatPlanContinuation(plan, 2, 1, true);
+          return {
+            ordinaryGate: ordinary.needsDeliveryGate,
+            buildGate: build.needsDeliveryGate,
+            newTurnGate: newTurn.needsDeliveryGate,
+            plainHasRequirement: contPlain.includes('项目级交付仍需提供真实验证证据'),
+            buildHasRequirement: contBuild.includes('项目级交付仍需提供真实验证证据'),
+            buildHasMarker: contBuild.includes('## 计划 n：'),
+          };
+        })()`);
+
+        const checks: Array<[string, boolean]> = [
+          ['普通续跑 → 不开启交付门槛', !delivery.ordinaryGate, true],
+          ['构建续跑 → 开启交付门槛', delivery.buildGate, true],
+          ['首轮非构建 → 不开启交付门槛', !delivery.newTurnGate, true],
+          ['普通续跑提示词 → 无交付要求', !delivery.plainHasRequirement, true],
+          ['构建续跑提示词 → 含交付要求', delivery.buildHasRequirement, true],
+          ['构建续跑提示词 → 保留阶段标记指令', delivery.buildHasMarker, true],
+        ];
+        let ok = true;
+        for (const [name, actual, want] of checks) {
+          const pass = actual === want;
+          if (!pass) ok = false;
+          log(`  [${pass ? 'PASS' : 'FAIL'}] delivery gate → ${name}: ${JSON.stringify(actual)}`);
+        }
+        log(`[verify] plan-continuation delivery gate (continuingProjectBuild → needsDeliveryGate): ${ok ? 'OK' : 'MISMATCH'}`);
+        if (!ok) return false;
+      }
+      return true;
+    };
+
+    const pass = await gatesOk();
+    if (!pass) failures++;
+    log(`[verify] browser gate checks: ${pass ? 'OK' : 'MISMATCH'}`);
+  }
   try { ws.close(); } catch {}
   await fetch(`http://127.0.0.1:${cdpPort}/json/close/${tab.id}`, { method: 'PUT' }).catch(() => {});
   } finally {
@@ -346,7 +745,7 @@ async function main(): Promise<number> {
     console.error(`[verify] ${failures} state(s) mismatched`);
     return 1;
   }
-  log('[verify] all restore states OK');
+  log('[verify] all requested browser checks OK');
   return 0;
 }
 

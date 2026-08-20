@@ -42,6 +42,16 @@ describe('PromptAssembler', () => {
     expect(cli).toContain('researcher_web(prompt');
   });
 
+  it('lets the model choose between advice, skills, and implementation from the whole request context', () => {
+    const prompt = assembler.buildSystemPrompt({ surface: 'gui', capabilities: buildGuiCapabilities(true) });
+
+    expect(prompt).toContain('first infer the outcome they want from the whole request and conversation');
+    expect(prompt).toContain('relevant specialist skills/tools');
+    expect(prompt).toContain('Do not force a fixed advice-only or build-only route from isolated words');
+    expect(prompt).toContain('present the most useful options and ask one focused question');
+    expect(prompt).not.toContain('Do NOT create or modify a page unless the user explicitly asks');
+  });
+
   it('separates the host application identity from the underlying model identity', () => {
     const prompt = assembler.buildSystemPrompt({
       surface: 'gui',

@@ -298,7 +298,7 @@ export function modelListForProvider(cfg: PureConfig, provider: string): string[
   // the registry's default model list (so new registry entries never get
   // mixed into a library the user deliberately built).
   if (stored && stored.length > 0) {
-    return uniqueModels([...stored, current, defaultModelFor(provider)]);
+    return uniqueModels([...stored, current]);
   }
   return uniqueModels([...(def?.models ?? [defaultModelFor(provider)]), current]);
 }

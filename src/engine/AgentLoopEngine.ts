@@ -19,7 +19,7 @@ export class AgentLoopEngine {
     const budget = new BudgetManager(input.budget);
     const messages: Message[] = [
       { role: 'system', content: input.systemPrompt },
-      { role: 'user', content: input.userPrompt },
+      { role: 'user', content: input.userPrompt, images: input.images },
     ];
     budget.addTokens(input.systemPrompt + input.userPrompt);
 
@@ -31,7 +31,7 @@ export class AgentLoopEngine {
     ctx: EngineContext,
   ): AsyncGenerator<EngineEvent, void, void> {
     const budget = new BudgetManager(input.budget);
-    const messages: Message[] = [...input.messages, { role: 'user' as const, content: input.newUserPrompt }];
+    const messages: Message[] = [...input.messages, { role: 'user' as const, content: input.newUserPrompt, images: input.images }];
     budget.addTokens(input.newUserPrompt);
     for (const m of input.messages) budget.addTokens(m.content);
 
@@ -45,7 +45,6 @@ export class AgentLoopEngine {
     turnCount: number,
   ): AsyncGenerator<EngineEvent, void, void> {
     const sid = () => `st_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const hasTools = ctx.tools && ctx.toolsDefs.length > 0;
     const completedSteps: string[] = [];
     let finalOutput: string | undefined;
     let interrupted = false;
@@ -112,7 +111,9 @@ export class AgentLoopEngine {
       let toolCalls: ToolCall[] = [];
 
       try {
-        const toolsDefs = hasTools ? ctx.toolsDefs : [];
+        const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
+        const hasTools = !!ctx.tools && currentToolsDefs.length > 0;
+        const toolsDefs = hasTools ? currentToolsDefs : [];
         for await (const chunk of ctx.llm.stream(messages, toolsDefs, ctx.signal)) {
           switch (chunk.type) {
             case 'content':

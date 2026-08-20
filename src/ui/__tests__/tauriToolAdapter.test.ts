@@ -151,6 +151,53 @@ function toolCall(name: string, args: Record<string, unknown>): ToolCall {
   return { id: `test_${name}`, index: 0, function: { name, arguments: JSON.stringify(args) } };
 }
 
+describe('dynamic capability tools', () => {
+  it('aggregates official MCP candidates and community search results', async () => {
+    const invoke = async (command: string) => {
+      if (command === 'web_fetch') {
+        return JSON.stringify({
+          servers: [{
+            server: {
+              name: 'com.example/crm',
+              title: 'CRM MCP',
+              description: 'CRM records',
+              version: '1.0.0',
+              remotes: [{ type: 'streamable-http', url: 'https://example.com/crm/mcp' }],
+            },
+          }],
+        });
+      }
+      if (command === 'web_search') return '1. Community CRM MCP\n   hosted directory\n   https://mcp.so/crm';
+      throw new Error(`unexpected command: ${command}`);
+    };
+    const adapter = new TauriToolAdapter('/ws', '', '', '', invoke);
+    const result = await adapter.execute(toolCall('search_mcp_servers', { query: 'CRM', maxResults: 5 }));
+    expect(result.success).toBe(true);
+    const payload = JSON.parse(String(result.result)) as { directories: string[]; candidates: Array<{ id: string; source: string; config?: unknown }> };
+    expect(payload.directories).toEqual(['official-registry', 'community-search']);
+    expect(payload.candidates.some((candidate) => candidate.id === 'mcp:com.example/crm:1.0.0' && candidate.config)).toBe(true);
+    expect(payload.candidates.some((candidate) => candidate.source === 'community-search')).toBe(true);
+  });
+
+  it('connects only a searched MCP candidate and returns newly discovered tools', async () => {
+    let connectedName = '';
+    const invoke = async (command: string) => command === 'web_fetch'
+      ? JSON.stringify({ servers: [{ server: { name: 'com.example/crm', version: '1.0.0', remotes: [{ type: 'streamable-http', url: 'https://example.com/mcp' }] } }] })
+      : 'No results found';
+    const adapter = new TauriToolAdapter('/ws', '', '', '', invoke, 'session-1', '', undefined, '', {
+      connectMcpServer: async (config) => {
+        connectedName = config.name;
+        return { tools: [{ name: `${config.name}__lookup`, description: 'lookup', input_schema: { type: 'object' } }], persisted: true };
+      },
+    });
+    await adapter.execute(toolCall('search_mcp_servers', { query: 'CRM' }));
+    const result = await adapter.execute(toolCall('connect_mcp_server', { candidateId: 'mcp:com.example/crm:1.0.0' }));
+    expect(result.success).toBe(true);
+    expect(connectedName).toBe('com.example/crm');
+    expect(String(result.result)).toContain('com.example/crm__lookup');
+  });
+});
+
 describe('Tauri Tier-2/3 web tool execution paths', () => {
   it('forwards web_public_api with the search keys, location, and searchOnMiss', async () => {
     let seen: Record<string, unknown> = {};

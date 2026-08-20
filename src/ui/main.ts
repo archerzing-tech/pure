@@ -6,7 +6,7 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, shouldCancelForEscape } from './chat';
+import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
@@ -32,7 +32,7 @@ import { renderArtifactCards } from './artifactCards';
 import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
-import { PasteChipManager, composeMessageWithAttachments } from './pasteChip';
+import { PasteChipManager, attachmentToMessageImage, composeMessageWithAttachments } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { showConfirmModal } from './modal';
 import { WorkspaceController } from './workspace';
@@ -723,6 +723,7 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
         const bubble = document.createElement('div');
         bubble.className = 'bubble';
         bubble.textContent = stripUserTurnContext(block.content);
+        renderUserImageAttachments(bubble, block.images);
         bindUserBubbleSelectAll(bubble);
         linkifyPaths(bubble);
         wrapper.appendChild(bubble);
@@ -736,7 +737,10 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
         chatEl.appendChild(flow.el);
         chat.registerPausedAssessment(flow);
       } else if (block.type === 'plan') {
-        chatEl.appendChild(createRestoredPlanCard(block.snapshot).el);
+        const progress = chat.getPlanProgressModel();
+        if (!progress) continue;
+        const restoredPlanCard = createRestoredPlanCard(progress);
+        chatEl.appendChild(restoredPlanCard.el);
       } else if (block.type === 'assistant') {
         const wrapper = document.createElement('div');
         wrapper.className = 'bubble-row assistant';
@@ -1140,14 +1144,17 @@ async function doSend(text: string) {
     void openSettings();
     return;
   }
-  // Large pasted content rides along with the typed text (each attachment is
-  // prefixed with a [粘贴文件] marker). Chips are cleared ONLY after a
-  // successful send — on failure the user keeps them for a retry.
-  const fullText = composeMessageWithAttachments(text, pasteChips.getAttachments());
+  // Snapshot attachments before sending. Images are awaited so the vision
+  // payload is complete, then the composer is cleared before the request starts;
+  // the submitted image lives in the transcript instead of remaining attached
+  // to the input bar.
+  const attachments = await pasteChips.prepareForSend();
+  const fullText = composeMessageWithAttachments(text, attachments);
+  const images = attachments.map(attachmentToMessageImage).filter((image): image is NonNullable<typeof image> => image !== null);
+  pasteChips.clear();
   try {
     enterChatMode();
-    await chat.send(fullText);
-    pasteChips.clear();
+    await chat.send(fullText, images, text);
   } catch (err: any) {
     showToast(`${t('toast.sendFailed')}: ${err?.message || err}`);
     console.error('[pure] sendMessage failed:', err);
@@ -1318,6 +1325,7 @@ function renderSessionStats() {
     if (el) el.textContent = v;
   };
 
+  setText('stat-turns', String(stats.turns ?? 0));
   setText('stat-input', formatTokens(stats.usage?.promptTokens));
   setText('stat-output', formatTokens(stats.usage?.completionTokens));
   setText('stat-cost', formatCostUsd(cost));
@@ -1501,6 +1509,7 @@ function buildStatsExportJson(stats: SessionStats, provider: string, meta?: Sess
       createdAt: meta?.createdAt,
       provider,
       usage: stats.usage ?? null,
+      turns: stats.turns ?? 0,
       totalTokens: (stats.usage?.promptTokens ?? 0) + (stats.usage?.completionTokens ?? 0),
       cacheHitRate: total > 0 ? Math.round((hit / total) * 1000) / 10 : null,
       costUsd: cost,
@@ -1530,6 +1539,7 @@ function buildStatsExportMarkdown(stats: SessionStats, provider: string, meta?: 
     ...(meta?.createdAt ? [`> 创建于 ${formatTs(meta.createdAt)}`] : []),
     ...(meta?.title || meta?.createdAt ? [''] : []),
     `- **Provider**: \`${provider}\``,
+    `- **模型交互轮次**: ${stats.turns ?? 0}`,
     `- **输入 tokens**: ${formatTokens(stats.usage?.promptTokens)}`,
     `- **输出 tokens**: ${formatTokens(stats.usage?.completionTokens)}`,
     `- **缓存命中**: ${formatTokens(hit)}（${rate}）`,
@@ -1587,6 +1597,7 @@ function buildStatsExportCsv(stats: SessionStats, provider: string, meta?: Sessi
   if (meta?.title) rows.push(['summary', 'session_title', '', meta.title].map(csvField).join(','));
   if (meta?.createdAt) rows.push(['summary', 'session_created', '', formatTs(meta.createdAt)].map(csvField).join(','));
   rows.push(['summary', 'provider', '', provider].map(csvField).join(','));
+  rows.push(['summary', 'llm_turns', '', String(stats.turns ?? 0)].map(csvField).join(','));
   rows.push(['summary', 'input_tokens', '', String(stats.usage?.promptTokens ?? 0)].map(csvField).join(','));
   rows.push(['summary', 'output_tokens', '', String(stats.usage?.completionTokens ?? 0)].map(csvField).join(','));
   rows.push(['summary', 'cache_hit_tokens', '', String(hit)].map(csvField).join(','));

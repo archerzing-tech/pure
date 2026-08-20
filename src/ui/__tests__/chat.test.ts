@@ -532,6 +532,19 @@ describe('send feedback timing', () => {
     expect(resolveWorkspace).toBeGreaterThan(paint);
   });
 
+  it('flushes the latest assistant text before inserting a tool card', () => {
+    const chatSrc = readSource(new URL('../chat.ts', import.meta.url));
+    const loaderSrc = readSource(new URL('../markdownLoader.ts', import.meta.url));
+    const finalize = chatSrc.indexOf('const finalizeStreamingSegments = (): void => {');
+    const flush = chatSrc.indexOf('flushStreamingRender(seg.el, text);', finalize);
+    const cancel = chatSrc.indexOf('cancelStreamingRender(seg.el);', finalize);
+
+    expect(chatSrc).toContain('flushStreamingRender, cancelStreamingRender');
+    expect(loaderSrc).toContain('export function flushStreamingRender(container: HTMLElement, fallbackText = \'\'): void');
+    expect(flush).toBeGreaterThan(finalize);
+    expect(cancel).toBeGreaterThan(flush);
+  });
+
   it('deduplicates overlapping plan-marker scans by absolute stream position', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     expect(src).toContain('consumedMarkers: new Set<string>()');
@@ -645,7 +658,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   it('updates the existing plan list instead of replacing it after LLM refinement', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false, fallback = false): void => {');
-    const update = src.indexOf('updatePlanCard(planCard, plan, analysis.mode, refining, fallback);', show);
+    const update = src.indexOf('updatePlanCard(planCard, plan, refining, fallback, planProgress);', show);
     const oldReplace = src.indexOf('old.classList.add(\'plan-card-leaving\')', show);
     expect(show).toBeGreaterThan(-1);
     expect(update).toBeGreaterThan(show);
@@ -681,7 +694,7 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
     // the user sees.
     const fallback = src.indexOf('实时分析未完成，已回退到通用步骤');
     expect(fallback).toBeGreaterThan(analysisCall);
-    expect(src).toMatch(/createPlanCard\(plan, analysis\.mode, refining, fallback\)/);
+    expect(src).toMatch(/createPlanCard\(plan, refining, fallback, planProgress\)/);
   });
 
   it('shows the assessment card only after the first LLM round-trip (real thinking first)', () => {
@@ -765,6 +778,12 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
     expect(src.indexOf('我理解的需求：${')).toBe(-1);
   });
 
+  it('keeps recoverable verifier retries out of the transcript as user-facing error cards', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    expect(src).toContain("if (thinkingCard) setThinkingLabel(thinkingCard, '正在调整输出…');");
+    expect(src).not.toContain('↻ ${event.payload.code}: ${event.payload.message}');
+  });
+
   it('labels the thinking card with honest phase text instead of rotating fake hints', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const cardSrc = readSource(new URL('../thinkingCard.ts', import.meta.url));
@@ -790,12 +809,12 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
   it('keeps one flat plan row mounted while refining updates its contents', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false, fallback = false): void => {');
-    const update = src.indexOf('updatePlanCard(planCard, plan, analysis.mode, refining, fallback);', show);
+    const update = src.indexOf('updatePlanCard(planCard, plan, refining, fallback, planProgress);', show);
     const oldReplace = src.indexOf('old.classList.add(\'plan-card-leaving\')', show);
     expect(show).toBeGreaterThan(-1);
     expect(update).toBeGreaterThan(show);
     expect(oldReplace).toBe(-1);
-    expect(src).toContain('updatePlanCard(planCard, plan, analysis.mode, refining, fallback);');
+    expect(src).toContain('updatePlanCard(planCard, plan, refining, fallback, planProgress);');
     const planSrc = readSource(new URL('../plan.ts', import.meta.url));
     expect(planSrc).toContain('export function updatePlanCard');
   });
@@ -889,31 +908,35 @@ describe('plan overview completion state', () => {
     // 一致），而不是模型是否恰好发出了 `## 计划 n 已完成` 标记——漏发时大纲
     // 不能永远停在第一步。
     const planFinished = src.indexOf('const planFinished = planCard && hasToolWork');
-    const finalize = src.indexOf('finalizePlanCard(planCard);', planFinished);
-    const setComplete = src.indexOf("planOverview().setStatus('complete');", planFinished);
+    const complete = src.indexOf("planProgress?.dispatch({ type: 'completed' });", planFinished);
     expect(planFinished).toBeGreaterThan(-1);
-    expect(finalize).toBeGreaterThan(planFinished);
-    expect(setComplete).toBeGreaterThan(finalize);
+    expect(complete).toBeGreaterThan(planFinished);
     // 提问/确认轮（末句以问号结尾）不能误判为完成。
     expect(src).toContain('const turnAsksForInput = finalAnswer.length > 0 && /[?？]\\s*$/.test(finalAnswer);');
     expect(src).toContain('&& !turnAsksForInput && gen === this.generation && !this.pausePlanCard;');
   });
 
-  it('keeps the floating outline in lockstep with the card after the final plan', () => {
+  it('binds the floating outline and chat card to one progress model', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 标记把游标推进到末尾后 activeComplexPlan 会置空；但大纲必须镜像卡片自身
-    // （planCard.plan + current > total），而不是读取会被置空的游标——否则大纲会
-    // 停在之前的步骤上，和已经全部打勾的卡片不同步。
-    const guard = src.indexOf('const syncPlanOverview = (status: PlanOverviewStatus = \'active\'): void => {');
-    expect(guard).toBeGreaterThan(-1);
-    const cardPlan = src.indexOf('const plan = planCard.plan;', guard);
-    const done = src.indexOf('const done = planCard.current > planCard.total;', guard);
-    const update = src.indexOf("overview.update(plan, done ? 'complete' : status, Math.min(planCard.current, planCard.total), todoNumber, todoLabel);", guard);
-    expect(cardPlan).toBeGreaterThan(guard);
-    expect(done).toBeGreaterThan(cardPlan);
-    expect(update).toBeGreaterThan(done);
-    // 只有 planCard 消失的分支才允许 clear()；不再有依赖 activeComplexPlan 的早退。
-    expect(src.indexOf('overview.clear();', guard)).toBeLessThan(cardPlan);
+    expect(src).toContain('let planProgress: PlanProgressModel | null = null;');
+    expect(src).toContain('createPlanCard(plan, refining, fallback, planProgress);');
+    expect(src).toContain('updatePlanCard(planCard, plan, refining, fallback, planProgress);');
+    expect(src).toContain('planOverview().bindProgress(planProgress);');
+    expect(src).toContain("planProgress?.dispatch({ type: 'completed' });");
+    expect(src).not.toContain('overview.update(plan, done ? \'complete\' : status');
+  });
+
+  it('uses conversation stage announcements as the only protocol-driven top-level cursor events', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    expect(src).toContain('phaseStarted: new Set<number>()');
+    expect(src).toContain('phaseCompleted: new Set<number>()');
+    expect(src).toContain('protocolStarted: false');
+    expect(src).toContain('planTrack.phaseStarted.add(marker.number)');
+    expect(src).toContain('planTrack.phaseCompleted.add(marker.number)');
+    expect(src).toContain('等待对话播报');
+    expect(src).toContain('!planTrack.phaseCompleted.has(finishedPlan)');
+    expect(src).toContain('const legacyPlanFinished = planCard && !planTrack.protocolStarted;');
+    expect(src).toContain('const protocolPlanFinished = planCard && completionSnapshot && planTrack.phaseCompleted.has(completionSnapshot.plan.steps.length);');
   });
 
   it('jumps the card straight to a later plan the model reports starting', () => {
@@ -926,14 +949,11 @@ describe('plan overview completion state', () => {
     expect(guard).toBeGreaterThan(-1);
     const forceAdvance = src.indexOf('The model explicitly started a later plan', guard);
     const verifyGate = src.indexOf('needsDeliveryGate && !planTrack.phaseVerifySeen[before]', guard);
-    const completeSubsteps = src.indexOf('card.substepEls[before - 1] ?? []', guard);
-    // 强制推进分支直接 setPlanPhase 跳到标记计划（total + 1 为完成态），
-    // 不再经过只能 +1 的 updatePlanCardPhase。
-    const jump = src.indexOf('setPlanPhase(card, Math.max(before + 1', completeSubsteps);
+    // 事件模型先经过协议/验证门禁，再用 phaseJumped 事件一次性落到目标计划。
+    const jump = src.indexOf("planProgress?.dispatch({ type: 'phaseJumped', planNumber: Math.max(before + 1", verifyGate);
     expect(forceAdvance).toBeGreaterThan(guard);
     expect(verifyGate).toBeGreaterThan(forceAdvance);
-    expect(completeSubsteps).toBeGreaterThan(verifyGate);
-    expect(jump).toBeGreaterThan(completeSubsteps);
+    expect(jump).toBeGreaterThan(verifyGate);
   });
 
   it('completes the last plan from its own completion marker (no N-1/N stall)', () => {
@@ -943,8 +963,8 @@ describe('plan overview completion state', () => {
     // 调用——无工具收尾轮（纯总结 / 用户确认）会让卡片和大纲永远停在 N-1/N。
     const finishPlan = src.indexOf('const finishPlan = (planNumber: number): void => {');
     expect(finishPlan).toBeGreaterThan(-1);
-    const lastPlan = src.indexOf('const isLastPlan = planNumber >= card.total;', finishPlan);
-    const forceComplete = src.indexOf('completePlanCardSubsteps(card, isLastPlan);', finishPlan);
+    const lastPlan = src.indexOf('const isLastPlan = planNumber >= finishSnapshot.plan.steps.length;', finishPlan);
+    const forceComplete = src.indexOf("planProgress?.dispatch({ type: 'todosCompleted', force: isLastPlan });", finishPlan);
     const lastActivity = src.indexOf('整个计划收尾中…', finishPlan);
     expect(lastPlan).toBeGreaterThan(finishPlan);
     expect(forceComplete).toBeGreaterThan(lastPlan);
@@ -959,18 +979,16 @@ describe('plan overview completion state', () => {
     const planFinished = src.indexOf('const planFinished = planCard && hasToolWork');
     expect(planFinished).toBeGreaterThan(-1);
     const summarized = src.indexOf('const planSummarized = planCard && !hasToolWork', planFinished);
-    const lastPlan = src.indexOf('planCard.current === planCard.total', summarized);
+    const lastPlan = src.indexOf('completionSnapshot.currentPlan === completionSnapshot.plan.steps.length', summarized);
     const turnText = src.indexOf('turnText.length > 0', summarized);
     const combined = src.indexOf('(planFinished || planSummarized) && planCard', summarized);
     expect(summarized).toBeGreaterThan(planFinished);
     expect(lastPlan).toBeGreaterThan(summarized);
     expect(turnText).toBeGreaterThan(lastPlan);
     expect(combined).toBeGreaterThan(turnText);
-    // 完成后仍是同一套收尾：finalizePlanCard → setStatus('complete')。
-    const finalize = src.indexOf('finalizePlanCard(planCard);', combined);
-    const setComplete = src.indexOf("planOverview().setStatus('complete');", combined);
-    expect(finalize).toBeGreaterThan(combined);
-    expect(setComplete).toBeGreaterThan(finalize);
+    // 完成后由唯一进度模型进入终态，两个视图通过订阅同时刷新。
+    const complete = src.indexOf("planProgress?.dispatch({ type: 'completed' });", combined);
+    expect(complete).toBeGreaterThan(combined);
   });
 
   it('clears the floating outline when a turn has no plan card', () => {
@@ -980,8 +998,8 @@ describe('plan overview completion state', () => {
     // 继续悬浮在新任务上。
     const anchor = src.indexOf('the outline mirrors the CURRENT turn only.');
     expect(anchor).toBeGreaterThan(-1);
-    const sync = src.indexOf('syncPlanOverview();', anchor);
-    expect(sync).toBeGreaterThan(anchor);
+    expect(src).toContain('planOverview().bindProgress(planProgress);');
+    expect(src).not.toContain('syncPlanOverview');
     // 旧的条件同步（必须同时有计划卡和 activeComplexPlan）必须已删除。
     expect(src.indexOf('if (planCard && this.activeComplexPlan) syncPlanOverview', anchor)).toBe(-1);
   });
@@ -1000,16 +1018,32 @@ describe('plan overview completion state', () => {
     expect(planState).toBeGreaterThan(completeFlag);
   });
 
+  it('routes every plan model change through the session persistence adapter', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    expect(src).toContain('createSessionPlanProgressPersistence(sessionId, workspace)');
+    expect(src).toContain('model.subscribePersistence');
+    expect(src).toContain('await this.activePlanProgressPersistence?.flush();');
+    expect(src).not.toContain('syncActivePlanCursor');
+  });
+
   it('restores the floating outline in the complete state for a finished plan', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const guard = src.indexOf('const savedPlanState = snapshot.uiState.planState;');
     expect(guard).toBeGreaterThan(-1);
-    const completeBranch = src.indexOf('if (savedPlanState.complete) {', guard);
-    const cursorNull = src.indexOf('this.activeComplexPlan = null;', completeBranch);
-    const show = src.indexOf("planOverview().show(savedPlanState.plan, 'complete'", completeBranch);
-    expect(completeBranch).toBeGreaterThan(guard);
-    expect(cursorNull).toBeGreaterThan(completeBranch);
-    expect(show).toBeGreaterThan(cursorNull);
+    const progress = src.indexOf('const savedProgress = snapshot.uiState.planProgress', guard);
+    const bind = src.indexOf('planOverview().bindProgress(restoredProgress);', progress);
+    expect(progress).toBeGreaterThan(guard);
+    expect(bind).toBeGreaterThan(progress);
+    expect(src).toContain('this.bindActivePlanProgress(restoredProgress);');
+    expect(src).toContain("status: savedPlanState.complete ? 'complete' as const");
+  });
+
+  it('restores the transcript plan card directly from the session progress model', () => {
+    const src = readSource(new URL('../main.ts', import.meta.url));
+    expect(src).toContain('const progress = chat.getPlanProgressModel();');
+    expect(src).toContain('const restoredPlanCard = createRestoredPlanCard(progress);');
+    expect(src).not.toContain('bindPlanCardProgress(restoredPlanCard, progress);');
+    expect(src).not.toContain('createRestoredPlanCard(block.snapshot)');
   });
 
   it('persists every reasoning phase for the matching assistant message', () => {
@@ -1022,7 +1056,7 @@ describe('plan overview completion state', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 大纲位置按会话记忆：构造函数、setSessionId（切会话）、restoreLastSession、
     // clear()（新建会话）四处都要同步当前 session，切换后重新套用该会话的位置。
-    expect(src).toContain("import { planOverview, setOverviewPositionSession, type PlanOverviewStatus } from './planOverview';");
+    expect(src).toContain("import { planOverview, setOverviewPositionSession } from './planOverview';");
     const hooks = src.split('setOverviewPositionSession(').length - 1;
     expect(hooks).toBe(4);
     const ctor = src.indexOf('setOverviewPositionSession(this.sessionId);');

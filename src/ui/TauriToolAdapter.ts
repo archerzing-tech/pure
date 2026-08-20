@@ -6,6 +6,9 @@
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition, GeneratedImage } from '../shared/types';
 import type { Channel } from '@tauri-apps/api/core';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA, isPublicToolName } from '../shared/toolDefs';
+import { DYNAMIC_CAPABILITY_TOOL_DEFS, isDynamicCapabilityTool, type DynamicCapabilityHooks } from '../shared/dynamicCapabilityTools';
+import { mcpRegistrySearchUrl, parseMcpRegistryPayload, communityMcpCandidates, type McpCandidate } from '../shared/mcpRegistry';
+import { fetchSkillBody, searchHubSkills, splitSkillMarkdown, sanitizeSkillName } from './skillHub';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../shared/research';
 export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
@@ -13,7 +16,7 @@ import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotE
 
 // ── Tool definitions (single source of truth: shared/toolDefs.ts) ──
 
-const TOOL_DEFINITIONS: ToolDefinition[] = [...BUILT_IN_TOOL_DEFS];
+const TOOL_DEFINITIONS: ToolDefinition[] = [...BUILT_IN_TOOL_DEFS, ...DYNAMIC_CAPABILITY_TOOL_DEFS];
 
 /** Web-only subset of TOOL_DEFINITIONS — exported so chat.ts can pin this
  * exact list as the LLM-visible toolsDef in plain-chat mode without
@@ -125,8 +128,10 @@ export class TauriToolAdapter implements ToolAdapter {
   private snapshotSequence = 0;
   private readonly maxSnapshotBytes = 8 * 1024 * 1024;
   private readonly imageGen?: ImageGenContext;
+  private readonly capabilityHooks?: DynamicCapabilityHooks;
+  private readonly mcpCandidates = new Map<string, McpCandidate>();
 
-  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '') {
+  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks) {
     this.workspace = workspace;
     this.tavilyApiKey = tavilyApiKey;
     this.serperApiKey = serperApiKey;
@@ -136,6 +141,7 @@ export class TauriToolAdapter implements ToolAdapter {
     this.invokeFn = invoke ?? null;
     this.sessionId = sessionId;
     this.imageGen = imageGen;
+    this.capabilityHooks = capabilityHooks;
   }
 
   private call(command: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -145,10 +151,13 @@ export class TauriToolAdapter implements ToolAdapter {
   }
 
   getTools(): ToolDefinition[] {
-    return (tauriInvoke || this.invokeFn) ? TOOL_DEFINITIONS.filter((tool) => isPublicToolName(tool.name)) : [];
+    return (tauriInvoke || this.invokeFn)
+      ? TOOL_DEFINITIONS.filter((tool) => isPublicToolName(tool.name) || isDynamicCapabilityTool(tool.name))
+      : [];
   }
 
   getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined {
+    if (toolName === 'connect_mcp_server' || toolName === 'install_agent_skill') return { sideEffects: true, isWrite: true };
     return TOOL_METADATA[toolName];
   }
 
@@ -177,6 +186,74 @@ export class TauriToolAdapter implements ToolAdapter {
 
     try {
       switch (name) {
+        case 'search_agent_skills': {
+          const query = String(args.query ?? '').trim();
+          if (!query) return { id: toolCall.id, toolName: name, error: 'search_agent_skills requires a query', success: false, duration: Date.now() - start };
+          const maxResults = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults) ? Math.min(20, Math.max(1, Math.floor(args.maxResults))) : 8;
+          const candidates = await searchHubSkills(query, maxResults);
+          return { id: toolCall.id, toolName: name, result: JSON.stringify({ query, candidates }, null, 2), success: true, duration: Date.now() - start };
+        }
+        case 'install_agent_skill': {
+          const source = String(args.source ?? '').trim();
+          const nameArg = String(args.name ?? '').trim();
+          if (!/^[A-Za-z0-9_.-]+$/.test(nameArg)) {
+            return { id: toolCall.id, toolName: name, error: 'install_agent_skill rejected an unsafe skill name', success: false, duration: Date.now() - start };
+          }
+          const raw = await fetchSkillBody(source, nameArg);
+          if (!raw) return { id: toolCall.id, toolName: name, error: `SKILL.md not found for ${source}/${nameArg}`, success: false, duration: Date.now() - start };
+          const split = splitSkillMarkdown(raw);
+          const body = split.body.trim();
+          if (!body) return { id: toolCall.id, toolName: name, error: 'Downloaded SKILL.md has no instruction body', success: false, duration: Date.now() - start };
+          const path = await this.call('write_app_skill', {
+            name: sanitizeSkillName(nameArg),
+            description: split.description ?? '',
+            body,
+          }) as string;
+          const promptBody = body.length > 30_000 ? `${body.slice(0, 30_000)}\n[skill body truncated; continue using the installed skill on the next turn]` : body;
+          return {
+            id: toolCall.id,
+            toolName: name,
+            result: `Installed skill ${nameArg} from ${source} at ${path}. Apply these instructions to the current task, then verify the result:\n\n<installed_skill name="${sanitizeSkillName(nameArg)}">\n${promptBody}\n</installed_skill>`,
+            success: true,
+            duration: Date.now() - start,
+          };
+        }
+        case 'search_mcp_servers': {
+          const query = String(args.query ?? '').trim();
+          if (!query) return { id: toolCall.id, toolName: name, error: 'search_mcp_servers requires a query', success: false, duration: Date.now() - start };
+          const maxResults = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults) ? Math.min(20, Math.max(1, Math.floor(args.maxResults))) : 8;
+          const officialRaw = await this.call('web_fetch', {
+            workspace: this.workspace,
+            url: mcpRegistrySearchUrl(query, Math.max(12, maxResults * 2)),
+            maxChars: 100_000,
+            proxyUrl: this.proxyUrl,
+          }) as string;
+          const official = parseMcpRegistryPayload(officialRaw, maxResults);
+          let community = [] as McpCandidate[];
+          try {
+            const communityRaw = await this.call('web_search', buildWebSearchArgs(this.workspace, {
+              query: `${query} MCP server (Smithery OR mcp.so)`,
+              maxResults: Math.min(8, maxResults),
+            }, this.tavilyApiKey, this.serperApiKey, this.proxyUrl, this.location, this.searxngUrl)) as string;
+            community = communityMcpCandidates(parseWebSearchText(communityRaw), maxResults);
+          } catch {
+            // The official Registry remains useful when community search is unavailable.
+          }
+          const candidates = [...official, ...community].slice(0, maxResults);
+          this.mcpCandidates.clear();
+          candidates.forEach((candidate) => this.mcpCandidates.set(candidate.id, candidate));
+          return { id: toolCall.id, toolName: name, result: JSON.stringify({ query, directories: ['official-registry', 'community-search'], candidates }, null, 2), success: true, duration: Date.now() - start };
+        }
+        case 'connect_mcp_server': {
+          const candidateId = String(args.candidateId ?? '').trim();
+          const candidate = this.mcpCandidates.get(candidateId);
+          if (!candidate) return { id: toolCall.id, toolName: name, error: 'Unknown MCP candidate. Search again and use the returned candidateId.', success: false, duration: Date.now() - start };
+          if (!candidate.config) return { id: toolCall.id, toolName: name, error: candidate.installHint ?? 'This MCP candidate has no directly usable connection recipe; configure it manually first.', success: false, duration: Date.now() - start };
+          if (candidate.requiresAuth) return { id: toolCall.id, toolName: name, error: 'This MCP candidate requires credentials. Configure its secret or use a no-key package/remote recipe first.', success: false, duration: Date.now() - start };
+          if (!this.capabilityHooks) return { id: toolCall.id, toolName: name, error: 'Dynamic MCP connection is not available in this runtime.', success: false, duration: Date.now() - start };
+          const connected = await this.capabilityHooks.connectMcpServer(candidate.config, signal);
+          return { id: toolCall.id, toolName: name, result: JSON.stringify({ candidateId, name: candidate.title, persisted: connected.persisted, tools: connected.tools.map((tool) => tool.name) }), success: true, duration: Date.now() - start };
+        }
         case 'read_file': {
           const content = await this.call('read_file', { workspace: ws, path: String(args.path ?? '') }) as string;
           const s = typeof args.startLine === 'number' ? args.startLine - 1 : 0;

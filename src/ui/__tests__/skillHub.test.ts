@@ -115,7 +115,9 @@ describe('splitSkillMarkdown', () => {
 describe('sanitizeSkillName', () => {
   it('keeps safe ids and neutralizes hostile characters', () => {
     expect(sanitizeSkillName('web-design-guidelines')).toBe('web-design-guidelines');
-    expect(sanitizeSkillName('foo.bar/baz-1')).toBe('foo.bar/baz-1');
+    // Slashes are replaced (not kept): the Rust write_app_skill validator
+    // rejects '/', so a directory-style hub id must not survive the sanitizer.
+    expect(sanitizeSkillName('foo.bar/baz-1')).toBe('foo.bar_baz-1');
     expect(sanitizeSkillName('bad">x')).toBe('bad__x');
     expect(sanitizeSkillName('a b<c>')).toBe('a_b_c_');
   });
