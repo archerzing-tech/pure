@@ -160,6 +160,7 @@ export const SVG_OUTPUT_PROMPT = `The app renders fenced code blocks tagged svg 
  * as the automatic fallback when the image tool is unavailable or fails. */
 export const IMAGE_GEN_OUTPUT_PROMPT = `When the user asks for images, icons, illustrations, photos, posters, or variations (e.g. "创作一个小狗图标", "生成一张 xxx 图片", "两个图标", "A/B 两个方案"):
 - Call the generate_image(prompt, n?, size?) tool — the connected model supports text-to-image, and generated images render as real pictures in the chat. Pass n > 1 (up to 4) for multiple images or variations instead of making repeated calls.
+- generate_image only CREATES a new image from a text prompt. When the user has attached an image and asks what it is, to describe it, or to analyze/explain it ("这张图是什么", "描述一下这个图片"), do NOT call generate_image — inspect the attachment and answer directly.
 - NEVER emit fenced svg code blocks for image requests while generate_image is available — SVG is only for hand-drawn diagrams (flowcharts, architecture sketches) you construct yourself.
 - If generate_image FAILS (provider error, unsupported endpoint), fall back to svg code blocks as before so the user still gets a picture.`;
 

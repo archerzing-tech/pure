@@ -167,11 +167,16 @@ describe('right-sidebar command history layout', () => {
     expect(html).toContain('id="stat-turns"');
     expect(html).toContain('class="stats-list-section stats-command-section"');
     expect(html).toContain('class="stats-list-section stats-write-section"');
+    expect(html).toContain('id="stat-search-list" class="stats-list" role="region" data-i18n-aria-label="stats.searches" aria-label="搜索历史" aria-live="polite" tabindex="0"');
     expect(html).toContain('id="stat-write-list" class="stats-list" role="region" data-i18n-aria-label="stats.fileWrites" aria-label="文件写入" aria-live="polite" tabindex="0"');
     expect(html).toContain('id="stat-cmd-list" class="stats-list" role="region" data-i18n-aria-label="stats.commands" aria-label="命令执行" aria-live="polite" tabindex="0"');
     expect(html).toContain('id="stat-read-list" class="stats-list" role="region" data-i18n-aria-label="stats.fileReads" aria-label="文件读取" aria-live="polite" tabindex="0"');
     expect(css).toContain('.stats-turns {');
     expect(css).toContain('#stat-write-list {');
+    expect(css).toContain('#context-panel #stat-search-list {');
+    expect(css).toContain('max-height: min(28vh, 220px);');
+    expect(css).toContain('#context-panel #stat-search-list::-webkit-scrollbar-thumb');
+    expect(css).toContain('#context-panel #stat-search-list .stats-list-item {');
     expect(css).toContain('#context-panel #stat-write-list {');
     expect(css).toContain('max-height: min(28vh, 260px);');
     expect(css).toContain('#context-panel #stat-write-list::-webkit-scrollbar-thumb');

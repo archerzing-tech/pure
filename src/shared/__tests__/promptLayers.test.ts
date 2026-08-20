@@ -79,6 +79,16 @@ describe('L1 behavior contracts', () => {
     expect(IMAGE_GEN_OUTPUT_PROMPT).toContain('fall back to svg code blocks');
   });
 
+  it('never routes attached-image questions (what is this / describe it) to generate_image', () => {
+    // Root cause of the "user pastes an image, asks what it is, and the agent
+    // generates a NEW image" bug: every image contract stated only the positive
+    // half ("image requests → generate_image"), so a question containing 图片
+    // pattern-matched into generation. The negative half must be explicit.
+    expect(IMAGE_GEN_OUTPUT_PROMPT).toContain('only CREATES a new image from a text prompt');
+    expect(IMAGE_GEN_OUTPUT_PROMPT).toContain('do NOT call generate_image');
+    expect(IMAGE_GEN_OUTPUT_PROMPT).toContain('inspect the attachment and answer directly');
+  });
+
   it('documents every chart family in the chart DSL and bans script-drawn charts', () => {
     expect(CHART_DSL_PROMPT).toContain('type:');
     expect(CHART_DSL_PROMPT).toContain('scatter');

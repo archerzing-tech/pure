@@ -2,7 +2,7 @@ import type { ToolAdapter, ToolCall, ToolResult } from '../shared/types';
 import { buildVerificationPlan, classifyDeliveryFailure, type DeliveryEvidence, type DeliveryFailureKind, type WorkspaceProfile } from '../shared/delivery';
 
 export type QualityGatePhase = 'review' | 'audit' | 'verify';
-export type QualityGateStatus = 'passed' | 'degraded' | 'failed' | 'unavailable';
+export type QualityGateStatus = 'passed' | 'degraded' | 'failed' | 'unavailable' | 'not_applicable';
 
 export interface QualityGateCheck {
   phase: QualityGatePhase;
@@ -358,7 +358,7 @@ export function buildVerifyCommand(profile?: WorkspaceProfile): string {
     if (missingTests) commands.push("echo '[verify-missing-tests] project must expose a test script and discoverable test files'; exit 1");
     if (commands.length > 0) return `${commands.join(' && ')} && echo '[verify-complete]'`;
   }
-  return `# npm run typecheck is the npm-equivalent command when no Bun lockfile is present\nif [ -f package.json ]; then if [ -f bun.lock ] || [ -f bun.lockb ]; then runner='bun run'; else runner='npm run'; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.typecheck ? 0 : 1)" >/dev/null 2>&1; then $runner typecheck; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.lint ? 0 : 1)" >/dev/null 2>&1; then $runner lint; fi; if node -e "const fs=require('fs'); const p=require('./package.json'); const skip=new Set(['node_modules','.git','dist','build','target','.next']); const hasTestFile=(dir)=>fs.readdirSync(dir,{withFileTypes:true}).some(e=>{ if(skip.has(e.name)) return false; const full=dir+'/'+e.name; return e.isDirectory() ? hasTestFile(full) : /(?:^|[./])(?:__tests__[/\\]|[^/\\]+[.](?:test|spec)[.][cm]?[jt]sx?$)/.test(full); }); process.exit(p.scripts?.test && hasTestFile('.') ? 0 : 1)" >/dev/null 2>&1; then if [ "$runner" = 'bun run' ]; then bun run test; else npm test; fi; else echo '[verify-missing-tests] package.json must contain a test script and a discoverable test file/directory'; exit 1; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.build ? 0 : 1)" >/dev/null 2>&1; then $runner build; fi; elif [ -f Cargo.toml ]; then cargo check && cargo test && cargo build; elif [ -f pyproject.toml ] || [ -f pytest.ini ]; then if command -v pytest >/dev/null 2>&1; then pytest; else echo '[verify-unavailable] pytest is not installed'; exit 127; fi; else echo '[verify-not-applicable] no standard test manifest'; fi`;
+  return `# npm run typecheck is the npm-equivalent command when no Bun lockfile is present\nif [ -f package.json ]; then if [ -f bun.lock ] || [ -f bun.lockb ]; then runner='bun run'; else runner='npm run'; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.typecheck ? 0 : 1)" >/dev/null 2>&1; then $runner typecheck; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.lint ? 0 : 1)" >/dev/null 2>&1; then $runner lint; fi; if node -e "const fs=require('fs'); const p=require('./package.json'); const skip=new Set(['node_modules','.git','dist','build','target','.next']); const hasTestFile=(dir)=>fs.readdirSync(dir,{withFileTypes:true}).some(e=>{ if(skip.has(e.name)) return false; const full=dir+'/'+e.name; return e.isDirectory() ? hasTestFile(full) : /(?:^|[./])(?:__tests__[/\\]|[^/\\]+[.](?:test|spec)[.][cm]?[jt]sx?$)/.test(full); }); process.exit(p.scripts?.test && hasTestFile('.') ? 0 : 1)" >/dev/null 2>&1; then if [ "$runner" = 'bun run' ]; then bun run test; else npm test; fi; else echo '[verify-missing-tests] package.json must contain a test script and a discoverable test file/directory'; exit 1; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.build ? 0 : 1)" >/dev/null 2>&1; then $runner build; fi;  elif [ -f Cargo.toml ]; then cargo check && cargo test && cargo build; elif [ -f go.mod ]; then go test ./...; elif [ -f pyproject.toml ] || [ -f pytest.ini ]; then if command -v pytest >/dev/null 2>&1; then pytest; else echo '[verify-unavailable] pytest is not installed'; exit 127; fi; else echo '[verify-not-applicable] no standard test manifest'; fi`;
 }
 
 /** True when a shell command is a verification/check invocation (typecheck,
@@ -397,12 +397,17 @@ async function runVerification(
   if (output.includes('[verify-missing-tests]')) {
     return { phase: 'verify', status: 'failed', summary: '编码项目没有可执行的自动化测试入口，不能交付', output, repairable: true };
   }
-  return {
-    phase: 'verify',
-    status: output.includes('[verify-not-applicable]') ? 'unavailable' : 'passed',
-    summary: output.includes('[verify-not-applicable]') ? '未发现标准自动化验证入口，无法形成验证证据' : '自动化验证通过',
-    output,
-  };
+  if (output.includes('[verify-not-applicable]')) {
+    // No package.json/Cargo.toml/pyproject.toml at all — a static page, HTML
+    // demo or plain script workspace where no standard test framework exists.
+    // Like the audit phase's vacuous pass for a manifest with zero third-party
+    // dependencies, this is NOT a blocking gap: there is nothing to run.
+    // Report it honestly as 不适用 instead of the misleading "通过" and instead
+    // of the old hard block ("无法形成验证证据 → 禁止宣称完成") that refused to
+    // deliver a finished static web page.
+    return { phase: 'verify', status: 'not_applicable', summary: '未发现标准自动化验证入口（无 package.json/Cargo.toml 等测试清单），视为不适用', output };
+  }
+  return { phase: 'verify', status: 'passed', summary: '自动化验证通过', output };
 }
 
 function buildDeliveryEvidence(checks: QualityGateCheck[]): DeliveryEvidence[] {
@@ -463,6 +468,7 @@ export async function runProjectQualityGate(
   // as a passing review-with-limitations instead of a hard failure.
   const accepted = checks.every((check) =>
     check.status === 'passed'
+    || check.status === 'not_applicable'
     || (check.status === 'degraded' && check.reviewMode === 'local' && !check.repairable),
   );
   return finish(checks.length === 3 && accepted);
@@ -483,9 +489,15 @@ export function buildRepairPrompt(result: ProjectQualityGateResult): string {
 export function qualityGateSummary(result: ProjectQualityGateResult): string {
   if (!result.passed) return result.checks.map((check) => `${check.phase}: ${check.summary}`).join('；');
   const review = result.checks.find((check) => check.phase === 'review');
-  return review?.reviewMode === 'local'
-    ? '本地静态审查已完成；完整代码审查工具未完成，交付带有限制'
-    : '代码审查、依赖/安全审计、自动化验证全部通过';
+  const verify = result.checks.find((check) => check.phase === 'verify');
+  const reviewLimited = review?.reviewMode === 'local';
+  const verifyNotApplicable = verify?.status === 'not_applicable';
+  if (reviewLimited && verifyNotApplicable) {
+    return '本地静态审查已完成；完整代码审查工具未完成；自动化验证不适用（无标准测试入口），交付带有限制';
+  }
+  if (reviewLimited) return '本地静态审查已完成；完整代码审查工具未完成，交付带有限制';
+  if (verifyNotApplicable) return '代码审查与依赖/安全审计通过；自动化验证不适用（无标准测试入口），交付带有限制';
+  return '代码审查、依赖/安全审计、自动化验证全部通过';
 }
 
 export function qualityGateEvidence(
@@ -500,11 +512,20 @@ export function qualityGateEvidence(
     verify: '自动化验证',
   };
   const lines = result.checks.map((check) => {
-    const status = check.status === 'passed' ? '通过' : check.status === 'degraded' ? '降级完成' : check.status === 'failed' ? '失败' : '不可用';
-    const mode = check.phase === 'review' && check.reviewMode === 'local' ? '（本地静态审查，非完整代码审查）' : '';
+    const status = check.status === 'passed' ? '通过' : check.status === 'degraded' ? '降级完成' : check.status === 'failed' ? '失败' : check.status === 'not_applicable' ? '不适用' : '不可用';
+    const mode = check.phase === 'review' && check.reviewMode === 'local'
+      ? '（本地静态审查，非完整代码审查）'
+      : check.phase === 'verify' && check.status === 'not_applicable'
+        ? '（无标准测试入口）'
+        : '';
     return `${labels[check.phase]}：${status}${mode}`;
   });
   const rounds = repairRounds > 0 ? `自动修复与复查 ${repairRounds} 轮` : '首次检查';
   const issueLog = repairIssues.length > 0 ? ` 问题记录：${repairIssues.join('；')}` : '';
-  return `交付质量记录（${rounds}）：${lines.join('；')}。${result.passed ? (result.checks.some((check) => check.status === 'degraded') ? '项目完成了可执行的降级检查，但仍有审查限制。' : '项目允许交付。') : '项目未通过质量门禁，禁止宣称完成。'}${issueLog}`;
+  let tail: string;
+  if (!result.passed) tail = '项目未通过质量门禁，禁止宣称完成。';
+  else if (result.checks.some((check) => check.status === 'not_applicable')) tail = '自动化验证不适用（无标准测试入口），交付带有限制。';
+  else if (result.checks.some((check) => check.status === 'degraded')) tail = '项目完成了可执行的降级检查，但仍有审查限制。';
+  else tail = '项目允许交付。';
+  return `交付质量记录（${rounds}）：${lines.join('；')}。${tail}${issueLog}`;
 }

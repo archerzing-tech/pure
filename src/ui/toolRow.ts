@@ -526,7 +526,6 @@ const flipAnimations = new WeakMap<HTMLElement, () => void>();
 export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void {
   const el = row.el;
   if (el.classList.contains('tool-row-expanded') === expanded) return;
-  const detailsWasOpen = row.details.open;
 
   // FLIP the width/height change: capture the row's box, toggle the class
   // (grid-column 1/-1 + taller scroll window), then invert the layout delta
@@ -551,9 +550,18 @@ export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void 
 
   const first = canAnimate ? el.getBoundingClientRect() : null;
 
+  // Promote the row to its own compositor layer BEFORE the layout change so
+  // the layer is born in the pre-toggle (collapsed) state. Creating it after
+  // the grid reflow makes WKWebView rasterize the FINAL expanded box first and
+  // paint one untransformed frame — the visible "闪一下" flash on macOS. The
+  // already-promoted layer just re-rasterizes in place when the class toggles.
+  if (canAnimate) {
+    el.style.willChange = 'transform';
+    el.style.backfaceVisibility = 'hidden';
+  }
+
   el.classList.toggle('tool-row-expanded', expanded);
   setToolRowExpandedLabel(row.expandButton, expanded);
-  row.details.open = detailsWasOpen;
 
   if (first && first.width > 0 && first.height > 0) {
     const last = el.getBoundingClientRect();
@@ -564,12 +572,9 @@ export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void 
     const moved = Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5
       || Math.abs(sx - 1) > 0.005 || Math.abs(sy - 1) > 0.005;
     if (moved) {
-      // Promote the row to its own compositor layer for the transition and
-      // force GPU transforms (translate3d/scale3d). A long terminal output is
+      // Force GPU transforms (translate3d/scale3d). A long terminal output is
       // a heavy subtree; without the layer hint WKWebView repaints it on the
       // first frame and the maximize/collapse ease visibly stutters.
-      el.style.willChange = 'transform';
-      el.style.backfaceVisibility = 'hidden';
       el.style.transformOrigin = 'top left';
       el.style.transform = `translate3d(${dx}px, ${dy}px, 0) scale3d(${sx}, ${sy}, 1)`;
       void el.offsetWidth;
@@ -593,7 +598,15 @@ export function setToolRowExpanded(row: ToolRowHandle, expanded: boolean): void 
       timer = setTimeout(finish, 360);
       el.addEventListener('transitionend', onEnd);
       flipAnimations.set(el, finish);
+    } else if (canAnimate) {
+      // No measurable layout delta (already full-width) — drop the layer hint
+      // so the row is never left permanently promoted.
+      el.style.willChange = '';
+      el.style.backfaceVisibility = '';
     }
+  } else if (canAnimate) {
+    el.style.willChange = '';
+    el.style.backfaceVisibility = '';
   }
 }
 
