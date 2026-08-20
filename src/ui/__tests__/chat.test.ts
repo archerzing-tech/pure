@@ -916,12 +916,12 @@ describe('plan overview completion state', () => {
     expect(src).toContain('&& !turnAsksForInput && gen === this.generation && !this.pausePlanCard;');
   });
 
-  it('binds the floating outline and chat card to one progress model', () => {
+  it('keeps the chat plan card as the only live plan projection', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     expect(src).toContain('let planProgress: PlanProgressModel | null = null;');
     expect(src).toContain('createPlanCard(plan, refining, fallback, planProgress);');
     expect(src).toContain('updatePlanCard(planCard, plan, refining, fallback, planProgress);');
-    expect(src).toContain('planOverview().bindProgress(planProgress);');
+    expect(src).not.toContain('planOverview().bindProgress(planProgress);');
     expect(src).toContain("planProgress?.dispatch({ type: 'completed' });");
     expect(src).not.toContain('overview.update(plan, done ? \'complete\' : status');
   });
@@ -935,7 +935,10 @@ describe('plan overview completion state', () => {
     expect(src).toContain('planTrack.phaseCompleted.add(marker.number)');
     expect(src).toContain('等待对话播报');
     expect(src).toContain('!planTrack.phaseCompleted.has(finishedPlan)');
-    expect(src).toContain('const legacyPlanFinished = planCard && !planTrack.protocolStarted;');
+    expect(src).toContain('const legacyPlanFinished = planCard && !planTrack.protocolStarted');
+    expect(src).toContain('completionSnapshot.currentPlan >= completionSnapshot.plan.steps.length;');
+    expect(src).toContain('const canAdvancePlan = planFinished && completionSnapshot !== undefined');
+    expect(src).toContain("planProgress.dispatch({ type: 'phaseStarted', planNumber: nextPlan });");
     expect(src).toContain('const protocolPlanFinished = planCard && completionSnapshot && planTrack.phaseCompleted.has(completionSnapshot.plan.steps.length);');
   });
 
@@ -991,20 +994,17 @@ describe('plan overview completion state', () => {
     expect(complete).toBeGreaterThan(combined);
   });
 
-  it('clears the floating outline when a turn has no plan card', () => {
+  it('does not mount a floating outline when a turn has no plan card', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 执行开始前的安全网现在无条件同步：有计划卡则镜像执行态，没有（简单任务、
-    // 强制模式弃用旧计划、旧计划完成后的话题延续）就清掉，旧任务的大纲不能
-    // 继续悬浮在新任务上。
-    const anchor = src.indexOf('the outline mirrors the CURRENT turn only.');
-    expect(anchor).toBeGreaterThan(-1);
-    expect(src).toContain('planOverview().bindProgress(planProgress);');
+    // The floating outline is no longer part of ChatController's lifecycle;
+    // the transcript plan card is the only live plan projection.
+    expect(src).not.toContain("from './planOverview'");
+    expect(src).not.toContain('planOverview()');
+    expect(src).not.toContain('setOverviewPositionSession(');
     expect(src).not.toContain('syncPlanOverview');
-    // 旧的条件同步（必须同时有计划卡和 activeComplexPlan）必须已删除。
-    expect(src.indexOf('if (planCard && this.activeComplexPlan) syncPlanOverview', anchor)).toBe(-1);
   });
 
-  it('persists the completed plan state so the finished outline survives a reload', () => {
+  it('persists the completed plan state for chat-card restoration', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 完成态：activeComplexPlan 已被置空，但快照带 complete: true，仍要落盘
     // planState——否则还原时大纲不会以 complete 状态重现。
@@ -1026,16 +1026,16 @@ describe('plan overview completion state', () => {
     expect(src).not.toContain('syncActivePlanCursor');
   });
 
-  it('restores the floating outline in the complete state for a finished plan', () => {
+  it('restores the chat plan card state without a floating outline integration', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const guard = src.indexOf('const savedPlanState = snapshot.uiState.planState;');
     expect(guard).toBeGreaterThan(-1);
     const progress = src.indexOf('const savedProgress = snapshot.uiState.planProgress', guard);
-    const bind = src.indexOf('planOverview().bindProgress(restoredProgress);', progress);
     expect(progress).toBeGreaterThan(guard);
-    expect(bind).toBeGreaterThan(progress);
     expect(src).toContain('this.bindActivePlanProgress(restoredProgress);');
     expect(src).toContain("status: savedPlanState.complete ? 'complete' as const");
+    expect(src).not.toContain("from './planOverview'");
+    expect(src).not.toContain('planOverview().bindProgress');
   });
 
   it('restores the transcript plan card directly from the session progress model', () => {
@@ -1052,21 +1052,11 @@ describe('plan overview completion state', () => {
     expect(src).toContain('thinkingPhases: phases.length > 0 ? phases : undefined');
   });
 
-  it('syncs the outline position memory with the active session', () => {
+  it('does not create or synchronize a floating outline from ChatController', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 大纲位置按会话记忆：构造函数、setSessionId（切会话）、restoreLastSession、
-    // clear()（新建会话）四处都要同步当前 session，切换后重新套用该会话的位置。
-    expect(src).toContain("import { planOverview, setOverviewPositionSession } from './planOverview';");
-    const hooks = src.split('setOverviewPositionSession(').length - 1;
-    expect(hooks).toBe(4);
-    const ctor = src.indexOf('setOverviewPositionSession(this.sessionId);');
-    const setSession = src.indexOf('setOverviewPositionSession(id);');
-    const restore = src.indexOf('setOverviewPositionSession(saved.sessionId);');
-    const clear = src.indexOf('setOverviewPositionSession(this.sessionId);', setSession);
-    expect(ctor).toBeGreaterThan(-1);
-    expect(setSession).toBeGreaterThan(-1);
-    expect(restore).toBeGreaterThan(-1);
-    expect(clear).toBeGreaterThan(-1);
+    expect(src).not.toContain("from './planOverview'");
+    expect(src).not.toContain('planOverview()');
+    expect(src).not.toContain('setOverviewPositionSession(');
   });
 });
 

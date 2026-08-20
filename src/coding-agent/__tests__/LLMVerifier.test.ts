@@ -48,6 +48,14 @@ describe('extractUserTask', () => {
     expect(extractUserTask(CTX)).toBe('Now also handle empty input.');
   });
 
+  it('ignores internal recovery instructions when selecting the user request', () => {
+    expect(extractUserTask([
+      { role: 'user', content: '帮我生成4版网络保障的大屏 web 原型' },
+      { role: 'assistant', content: '已完成第一版。' },
+      { role: 'user', content: 'Attempt 2: Please retry with a simpler approach.', internal: true },
+    ])).toBe('帮我生成4版网络保障的大屏 web 原型');
+  });
+
   it('returns empty string when there is no user message', () => {
     expect(extractUserTask([{ role: 'system', content: 'x' }, { role: 'assistant', content: 'y' }])).toBe('');
   });

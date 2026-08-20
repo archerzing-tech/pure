@@ -79,33 +79,23 @@ describe('PlanState.complete restore path (real DOM)', () => {
     expect(loaded?.snapshot.uiState.planState?.complete).toBe(true);
     expect(loaded?.snapshot.uiState.planState?.plan).toEqual(plan);
 
-    // A fresh session reload rebuilds the floating outline all-done.
+    // A fresh session reload keeps the completed state for the chat plan card
+    // without mounting the removed floating outline.
     const restored = new ChatController();
     restored.loadFromStorage(loaded!.snapshot);
-    const el = planOverview().el;
-    expect(el.hidden).toBe(false);
-    const card = el.querySelector('.plan-overview-card')!;
-    expect(card.classList.contains('complete')).toBe(true);
-    expect(el.querySelectorAll('.plan-overview-step.done').length).toBe(3);
-    expect(el.querySelector('.plan-overview-progress')!.textContent).toBe('3/3');
-    // The continuation cursor must NOT come back for a finished plan.
+    expect(restored.getPlanProgressModel()?.getSnapshot().status).toBe('complete');
     expect((restored as any).activeComplexPlan).toBeNull();
     expect((restored as any).activePlanCardSnapshot).toBeNull();
   });
 
-  it('restores an in-progress plan with its executing outline and continuation cursor', () => {
+  it('restores an in-progress plan with its chat-card continuation cursor', () => {
     const chat = new ChatController();
     const plan = samplePlan();
     chat.loadFromStorage(snapshotWith(planStateOf({ plan, planNumber: 2, todoNumber: 1, started: true })));
     expect((chat as any).activeComplexPlan).toBe(plan);
     expect((chat as any).activePlanNumber).toBe(2);
-    const el = planOverview().el;
-    expect(el.hidden).toBe(false);
-    const card = el.querySelector('.plan-overview-card')!;
-    expect(card.classList.contains('active')).toBe(true);
-    expect(card.classList.contains('complete')).toBe(false);
-    expect(el.querySelectorAll('.plan-overview-step.done').length).toBe(1);
-    expect(el.querySelector('.plan-overview-progress')!.textContent).toBe('1/3');
+    expect(chat.getPlanProgressModel()?.getSnapshot().currentPlan).toBe(2);
+    expect(chat.getPlanProgressModel()?.getSnapshot().status).toBe('active');
   });
 
   it('restores a paused plan in the waiting state with its cursor', () => {
@@ -113,12 +103,11 @@ describe('PlanState.complete restore path (real DOM)', () => {
     const plan = samplePlan();
     chat.loadFromStorage(snapshotWith(planStateOf({ plan, planNumber: 1, todoNumber: 1, started: false })));
     expect((chat as any).activeComplexPlan).toBe(plan);
-    const card = planOverview().el.querySelector('.plan-overview-card')!;
-    expect(card.classList.contains('awaiting')).toBe(true);
-    expect(card.classList.contains('complete')).toBe(false);
+    expect((chat as any).activePlanNumber).toBe(1);
+    expect((chat as any).activePlanStarted).toBe(false);
   });
 
-  it('restores one canonical progress model for the outline and continuation state', () => {
+  it('restores one canonical progress model for the chat-card continuation state', () => {
     const plan = samplePlan();
     const progress = { plan, currentPlan: 2, currentTodo: 1, status: 'active' as const };
     const chat = new ChatController();
@@ -139,16 +128,16 @@ describe('PlanState.complete restore path (real DOM)', () => {
     // The canonical model normalizes the missing project-build flag to false.
     expect(restored?.getSnapshot()).toEqual({ ...progress, projectBuild: false });
     expect((chat as any).activeComplexPlan).toBe(plan);
-    expect(planOverview().el.querySelector('.plan-overview-progress')?.textContent).toBe('1/3');
+    expect((chat as any).activePlanNumber).toBe(2);
 
     restored!.dispatch({ type: 'completed' });
-    expect(planOverview().el.querySelector('.plan-overview-card')?.classList.contains('complete')).toBe(true);
+    expect((chat as any).activeComplexPlan).toBeNull();
+    expect(restored!.getSnapshot().status).toBe('complete');
   });
 
-  it('keeps the outline hidden when no plan state is restored', () => {
+  it('keeps the chat plan state empty when no plan state is restored', () => {
     const chat = new ChatController();
     chat.loadFromStorage(snapshotWith(null));
-    expect(planOverview().el.hidden).toBe(true);
     expect((chat as any).activeComplexPlan).toBeNull();
     expect(chat.getPlanProgressModel()).toBeNull();
   });

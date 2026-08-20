@@ -18,6 +18,8 @@ export interface MessageImage {
 export interface Message {
   role: Role;
   content: string;
+  /** Internal recovery instructions are context for the agent, not a new user request. */
+  internal?: boolean;
   /** Images attached to this user message; adapters map these to native image blocks. */
   images?: MessageImage[];
   toolCallId?: string;

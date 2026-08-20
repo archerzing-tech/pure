@@ -33,7 +33,7 @@ export function requestPlanReview(
   return run;
 }
 
-const PLAN_STAGE_PROTOCOL = `Use this strict stage protocol for every top-level plan item. Before any tool call or file change for plan n, first write two short user-facing lines in the conversation: one standalone control line exactly \"## 计划 n：<阶段名称>\" and then a natural sentence explaining what this stage is about and what you are going to do. The UI consumes that line as the single stage-start event and synchronizes the in-chat plan and floating outline together before execution begins. Do not call tools before the stage-start announcement. After the work and its meaningful verification are actually complete, write a standalone control line exactly \"## 计划 n 已完成\" and then briefly say what this stage completed. The UI consumes that line as the single stage-complete event. These supported progress markers are state events, not a generic progress estimate; they do not dictate execution granularity. Do not announce the next stage, call its tools, or claim the whole plan is complete before the current stage-complete line. If a stage needs user input, explain what is missing and pause without emitting its completion line. Never use a stage marker merely as a preview or example.`;
+const PLAN_STAGE_PROTOCOL = `Use this strict stage protocol for every top-level plan item. Before any tool call or file change for plan n, first write two short user-facing lines in the conversation: one standalone control line exactly \"## 计划 n：<阶段名称>\" and then a natural sentence explaining what this stage is about and what you are going to do. The UI consumes that line as the single stage-start event and synchronizes the in-chat plan card before execution begins. Do not call tools before the stage-start announcement. After the work and its meaningful verification are actually complete, write a standalone control line exactly \"## 计划 n 已完成\" and then briefly say what this stage completed. The UI consumes that line as the single stage-complete event for the in-chat plan card. These supported progress markers are state events, not a generic progress estimate; they do not dictate execution granularity. Do not announce the next stage, call its tools, or claim the whole plan is complete before the current stage-complete line. If a stage needs user input, explain what is missing and pause without emitting its completion line. Never use a stage marker merely as a preview or example.`;
 
 /** Render an approved plan into a system-prompt fragment the LLM must follow.
  * Also instructs the model to write a `## 阶段 n/m` heading at the start of
@@ -95,9 +95,9 @@ export function formatPlanContinuation(plan: Plan, currentPlan: number, currentT
 
 export interface PlanCardHandle {
   el: HTMLElement;
-  /** The plan this card renders — kept on the handle so the floating outline
-   * and the persisted snapshot can keep mirroring the card even after the
-   * cross-turn cursor is cleared (activeComplexPlan → null on completion). */
+  /** The plan this card renders — kept on the handle so the persisted snapshot
+   * can keep restoring the card after the cross-turn cursor is cleared
+   * (activeComplexPlan → null on completion). */
   plan: Plan;
   stepEls: HTMLElement[]; // top-level plan rows
   numEls: HTMLElement[];  // top-level number labels

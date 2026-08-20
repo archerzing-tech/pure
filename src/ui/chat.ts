@@ -38,7 +38,6 @@ import {
 import { PlanProgressModel, type PlanProgressSnapshot } from './planProgress';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
-import { planOverview, setOverviewPositionSession } from './planOverview';
 import { attachPlanPauseActions } from './planPauseActions';
 import { createRequestReviewCard, formatRequestReviewSection, shouldPauseForRequestReview, shouldShowRequestReview, type RequestReviewCardHandle, type RequestReviewItem } from './requestReview';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
@@ -1271,8 +1270,6 @@ export class ChatController {
 
   constructor() {
     this.sessionId = `session_${Date.now()}`;
-    // The outline's position memory follows the active session.
-    setOverviewPositionSession(this.sessionId);
     this.permissionManager = new PermissionManager();
     this.sessionStats = loadSessionStats(this.sessionId);
   }
@@ -1345,8 +1342,6 @@ export class ChatController {
 
   setSessionId(id: string) {
     this.cancelBackgroundPreCompaction();
-    // A different conversation starts without the previous plan's outline.
-    planOverview().clear();
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
@@ -1357,8 +1352,6 @@ export class ChatController {
     this.activePlanCardSnapshot = null;
     this.activePlanProgress = null;
     this.sessionId = id;
-    // Re-apply this session's remembered outline position.
-    setOverviewPositionSession(id);
     this.contextEngine = undefined;
     this.preCompactedMessages = null;
     this.preCompactSourceMessages = null;
@@ -1451,7 +1444,7 @@ export class ChatController {
 
   /** Resume a paused plan from the pause-bubble shortcut. Reuses the normal
    * continuation pipeline: a synthetic "继续" turn hits the continuation
-   * branch (no re-planning) and flips the floating outline back to executing.
+   * branch (no re-planning) and flips the chat plan card back to executing.
    * Returns false (and locks nothing) when a turn is already streaming. */
   continuePausedPlan(): boolean {
     if (this.streaming) return false;
@@ -1462,7 +1455,7 @@ export class ChatController {
   }
 
   /** Abandon a paused plan from the pause-bubble shortcut: clears the plan
-   * cursor, drops the floating outline, flips the in-transcript pause cards to
+   * cursor, flips the in-transcript pause cards to
    * a cancelled state, and persists so a reload does not restore the paused
    * state. Returns false (and locks nothing) when there is nothing to cancel
    * or a turn is still streaming. */
@@ -1482,7 +1475,6 @@ export class ChatController {
     this.pausePlanCard?.setActivity('已取消本次执行计划。');
     this.pausePlanCard = null;
     this.pauseAssessmentFlow = null;
-    planOverview().clear();
     const chatEl = document.getElementById('chat')!;
     this.addStatusBubble('已取消本次执行计划，未执行任何改动。如需继续，请重新描述需求。', true, false);
     scrollChatToBottomIfPinned(chatEl);
@@ -1550,7 +1542,6 @@ export class ChatController {
   loadFromStorage(snapshot: SessionSnapshotV2) {
     const boundedMessages = limitConversationMessages(snapshot.modelContext.messages);
     this.messages = boundedMessages.map(m => ({ ...m }));
-    planOverview().clear();
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
@@ -1583,7 +1574,6 @@ export class ChatController {
       const restoredProgress = PlanProgressModel.fromSnapshot(savedProgress);
       this.bindActivePlanProgress(restoredProgress);
       if (savedProgress.status === 'complete') this.activePlanCardSnapshot = null;
-      planOverview().bindProgress(restoredProgress);
     }
     this.hasHistory = this.messages.length > 0;
   }
@@ -1593,7 +1583,6 @@ export class ChatController {
     const saved = await loadLastSession();
     if (!saved) return null;
     this.sessionId = saved.sessionId;
-    setOverviewPositionSession(saved.sessionId);
     this.sessionStats = loadSessionStats(saved.sessionId);
     this.generation++;
     // Route through setWorkspace so the clickable-path resolver stays in sync,
@@ -1705,7 +1694,6 @@ export class ChatController {
       this.detachActivePlanProgress();
       this.activePlanProgress = null;
       this.activePlanCardSnapshot = null;
-      planOverview().clear();
     }
     // Create the turn controller before any preflight await. Previously the
     // controller and streaming state were installed only after workspace
@@ -2370,7 +2358,6 @@ export class ChatController {
         this.detachActivePlanProgress();
         this.activePlanCardSnapshot = null;
         this.activePlanProgress = null;
-        planOverview().clear();
       };
       // Analysis is useful for a real build even when no approval is needed.
       // Approval is a separate safety decision, not a consequence of the word
@@ -2429,8 +2416,6 @@ export class ChatController {
               chatEl.appendChild(planCard.el);
             }
             this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
-            planOverview().bindProgress(planProgress);
-            // Right-edge outline: both views now subscribe to the same model.
             scrollChatToBottomIfPinned(chatEl);
           };
           // 不再先渲染固定的通用骨架卡：先挂一张思考卡，把 LLM 对这项任务的真实
@@ -2626,10 +2611,9 @@ export class ChatController {
             const restored = createPlanCard(this.activeComplexPlan, false, false, planProgress);
             planCard = restored;
             this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
-            planOverview().bindProgress(planProgress);
             chatEl.appendChild(planCard.el);
             this.addStatusBubble(`收到，我们继续处理第 ${this.activePlanNumber} 阶段的第 ${this.activeTodoNumber} 个 Todo，不重新规划。`, false, false);
-            // 用户回复即明确“开工”：悬浮大纲卡从「等待回复」切回「正在执行」。
+            // 用户回复即明确“开工”：聊天中的计划卡从「等待回复」切回「正在执行」。
             planProgress?.dispatch({ type: 'statusChanged', status: 'active' });
             scrollChatToBottomIfPinned(chatEl);
           } else if (forcedMode === 'plan' || forcedMode === 'build') {
@@ -2689,8 +2673,8 @@ export class ChatController {
           // Earlier plans keep waiting for granular Todo-done markers (or the
           // next plan's start marker, which force-advances); the LAST plan has
           // no following marker, so the model's explicit completion claim must
-          // finish its remaining Todos itself — otherwise the card and the
-          // floating outline stay at N-1/N after the work is done.
+          // finish its remaining Todos itself — otherwise the chat plan card
+          // stays at N-1/N after the work is done.
           if (!isLastPlan && !(planProgress?.canCompleteCurrentTodos() ?? false)) {
             card.setActivity(`计划 ${planNumber} 仍有 Todo 未完成，暂不进入下一计划…`);
             return;
@@ -2794,8 +2778,8 @@ export class ChatController {
                 // Jump straight to the reported plan instead of one step per
                 // marker: a single-step imperative updater would advance by exactly one, so
                 // a model that reports "## 计划 3：" while the card is on plan
-                // 1 would otherwise leave the card (and the floating outline
-                // mirroring it) stuck on the old step while the transcript
+                // 1 would otherwise leave the chat card
+                // mirroring it stuck on the old step while the transcript
                 // already shows plan 3 work. Everything in between is
                 // implicitly done. total + 1 (beyond the list) completes.
                 planProgress?.dispatch({ type: 'phaseJumped', planNumber: Math.max(before + 1, Math.min(marker.number, beforeSnapshot.plan.steps.length + 1)) });
@@ -3115,11 +3099,10 @@ export class ChatController {
       );
       // Safety net: whenever a plan card exists and the engine is about to
       // run (any pre-flight path — continuation, approval, forced mode), the
-      // floating outline must be in the executing state, never stale-waiting.
+      // chat plan card must be in the executing state, never stale-waiting.
       // When the turn has NO plan card (simple task, forced mode abandoning
-      // the plan, or a follow-up after the previous plan finished), clear the
-      // outline so the previous task's list cannot keep floating over
-      // unrelated work — the outline mirrors the CURRENT turn only.
+      // the plan, or a follow-up after the previous plan finished), do not
+      // attach any stale plan presentation to the new turn.
       const events = this.hasHistory
         ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages)
         : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages);
@@ -3554,13 +3537,18 @@ export class ChatController {
             const turnAsksForInput = finalAnswer.length > 0 && /[?？]\s*$/.test(finalAnswer);
             const planFinished = planCard && hasToolWork && !event.payload.interrupted
               && !turnAsksForInput && gen === this.generation && !this.pausePlanCard;
-            const legacyPlanFinished = planCard && !planTrack.protocolStarted;
             const completionSnapshot = planProgress?.getSnapshot();
+            // A missing stage marker may only finish the CURRENT stage. The old
+            // fallback treated every tool-bearing turn as the whole-plan
+            // completion, which cleared activeComplexPlan after version 1/4.
+            const legacyPlanFinished = planCard && !planTrack.protocolStarted
+              && completionSnapshot !== undefined
+              && completionSnapshot.currentPlan >= completionSnapshot.plan.steps.length;
             const protocolPlanFinished = planCard && completionSnapshot && planTrack.phaseCompleted.has(completionSnapshot.plan.steps.length);
             // Last-resort finalize under the strict stage protocol: the model
             // announced (and did real tool work for) the last plan but never
             // emitted its `## 计划 n 已完成` line. Real completed work must not
-            // leave the card and floating outline stuck on the last step.
+            // leave the chat card stuck on the last step.
             const toolFinishedLastPlan = planCard && completionSnapshot
               && planTrack.protocolStarted && planTrack.phaseStarted.has(completionSnapshot.plan.steps.length)
               && completionSnapshot.currentPlan === completionSnapshot.plan.steps.length && hasToolWork;
@@ -3568,16 +3556,24 @@ export class ChatController {
             // after the last plan's work, or a plain user ack after the model
             // asked a closing question). If the card already reached the last
             // plan, that work finished in an earlier turn — only the finalize
-            // step remained. Without this the card and the floating outline
-            // stay at N-1/N forever whenever the last turn ran no tools, which
-            // is exactly the "进度和浮动窗口不同步" the UI kept showing.
+            // step remained. Without this the chat card would stay at N-1/N
+            // forever whenever the last turn ran no tools; this is the stale
+            // progress state this path used to show.
             const turnText = finalAnswer || assistantSegments.map((segment) => segment.text).join('').trim();
             const planSummarized = planCard && !hasToolWork && !event.payload.interrupted
               && !turnAsksForInput && gen === this.generation && !this.pausePlanCard
               && completionSnapshot !== undefined
               && completionSnapshot.currentPlan === completionSnapshot.plan.steps.length && turnText.length > 0;
             const planCompletionCandidate = (planFinished || planSummarized) && planCard;
-            if (planCompletionCandidate && (protocolPlanFinished || legacyPlanFinished || planSummarized || toolFinishedLastPlan) && planCard) {
+            const canAdvancePlan = planFinished && completionSnapshot !== undefined
+              && completionSnapshot.currentPlan < completionSnapshot.plan.steps.length;
+            if (canAdvancePlan && planProgress && planCard) {
+              const finishedPlan = completionSnapshot.currentPlan;
+              const nextPlan = finishedPlan + 1;
+              planProgress.dispatch({ type: 'todosCompleted', force: true });
+              planProgress.dispatch({ type: 'phaseStarted', planNumber: nextPlan });
+              planCard.setActivity(`计划 ${finishedPlan} 已完成，已准备计划 ${nextPlan}；回复“继续”开始下一阶段。`);
+            } else if (planCompletionCandidate && (protocolPlanFinished || legacyPlanFinished || planSummarized || toolFinishedLastPlan) && planCard) {
               planProgress?.dispatch({ type: 'completed' });
               if (this.activeComplexPlan)
               planCard.setActivity(qualityPassed
@@ -3912,16 +3908,12 @@ export class ChatController {
     this.activePlanProjectBuild = false;
     this.pausePlanCard = null;
     this.pauseAssessmentFlow = null;
-    // Drop the right-edge execution outline — the new conversation has none.
-    planOverview().clear();
     // Invalidate any background pre-compaction from the previous session.
     this.preCompactedMessages = null;
     this.preCompactSourceMessages = null;
     this.preCompactSessionId = '';
     this.preCompactMessageCount = 0;
     this.sessionId = `session_${Date.now()}`;
-    // A fresh session has no saved outline position: reset to the default corner.
-    setOverviewPositionSession(this.sessionId);
     // New chat = a fresh session: drop any session-scoped tool approvals.
     this.permissionManager.clearCache();
     // Fresh session → fresh stats view.
@@ -3963,9 +3955,9 @@ export class ChatController {
     let planCardAttached = false;
     // A completed plan nulls activeComplexPlan, so
     // the cross-turn cursor alone would leave the finished plan with no
-    // persisted state and the floating outline would not survive a reload.
+    // persisted state and the chat plan card would not survive a reload.
     // The final card snapshot (complete: true) stands in for the cursor so the
-    // all-done outline can be restored; an in-progress plan keeps its cursor.
+    // completed chat card can be restored; an in-progress plan keeps its cursor.
     const turnPlanState = this.activeComplexPlan
       ? { plan: this.activeComplexPlan, planNumber: this.activePlanNumber, todoNumber: this.activeTodoNumber, started: this.activePlanStarted }
       : this.activePlanCardSnapshot?.complete
