@@ -902,10 +902,10 @@ describe('user bubble double-click select-all', () => {
 });
 
 describe('plan overview completion state', () => {
-  it('finalizes the floating outline on completion without depending on phase markers', () => {
+  it('finalizes the chat plan card on completion without depending on phase markers', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 完成收尾的证据来自本轮真实工具执行 + 正常结束（hasToolWork 与提问轮约定
-    // 一致），而不是模型是否恰好发出了 `## 计划 n 已完成` 标记——漏发时大纲
+    // 一致），而不是模型是否恰好发出了 `## 计划 n 已完成` 标记——漏发时卡片
     // 不能永远停在第一步。
     const planFinished = src.indexOf('const planFinished = planCard && hasToolWork');
     const complete = src.indexOf("planProgress?.dispatch({ type: 'completed' });", planFinished);
@@ -963,7 +963,7 @@ describe('plan overview completion state', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // `## 计划 n 已完成`（最后一个计划）以前永远无法把卡片推到完成态：
     // updatePlanCardPhase 把 total+1 截到 total，而收尾门禁又要求本轮有工具
-    // 调用——无工具收尾轮（纯总结 / 用户确认）会让卡片和大纲永远停在 N-1/N。
+    // 调用——无工具收尾轮（纯总结 / 用户确认）会让卡片永远停在 N-1/N。
     const finishPlan = src.indexOf('const finishPlan = (planNumber: number): void => {');
     expect(finishPlan).toBeGreaterThan(-1);
     const lastPlan = src.indexOf('const isLastPlan = planNumber >= finishSnapshot.plan.steps.length;', finishPlan);
@@ -988,11 +988,11 @@ describe('plan overview completion state', () => {
     expect(canAdvance).toBeGreaterThan(-1);
   });
 
-  it('finalizes a no-tool final turn at the last plan so the outline catches up', () => {
+  it('finalizes a no-tool final turn at the last plan so the card catches up', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 收尾轮没有工具调用（工作在前一轮已全部完成，本轮只是总结或被用户确认）
-    // 时，只要卡片已在最后一个计划上，就按完成收尾——否则卡片与浮动大纲永远
-    // 停在 N-1/N，和已经完成的任务不同步。
+    // 时，只要卡片已在最后一个计划上，就按完成收尾——否则卡片永远停在 N-1/N，
+    // 和已经完成的任务不同步。
     const planFinished = src.indexOf('const planFinished = planCard && hasToolWork');
     expect(planFinished).toBeGreaterThan(-1);
     const summarized = src.indexOf('const planSummarized = planCard && !hasToolWork', planFinished);
@@ -1003,12 +1003,12 @@ describe('plan overview completion state', () => {
     expect(lastPlan).toBeGreaterThan(summarized);
     expect(turnText).toBeGreaterThan(lastPlan);
     expect(combined).toBeGreaterThan(turnText);
-    // 完成后由唯一进度模型进入终态，两个视图通过订阅同时刷新。
+    // 完成后由唯一进度模型进入终态，卡片通过订阅刷新。
     const complete = src.indexOf("planProgress?.dispatch({ type: 'completed' });", combined);
     expect(complete).toBeGreaterThan(combined);
   });
 
-  it('does not mount a floating outline when a turn has no plan card', () => {
+  it('keeps the transcript plan card as the only live plan projection', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // The floating outline is no longer part of ChatController's lifecycle;
     // the transcript plan card is the only live plan projection.
@@ -1021,7 +1021,7 @@ describe('plan overview completion state', () => {
   it('persists the completed plan state for chat-card restoration', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 完成态：activeComplexPlan 已被置空，但快照带 complete: true，仍要落盘
-    // planState——否则还原时大纲不会以 complete 状态重现。
+    // planState——否则还原时卡片不会以 complete 状态重现。
     const turnPlanState = src.indexOf('const turnPlanState = this.activeComplexPlan');
     expect(turnPlanState).toBeGreaterThan(-1);
     const completeBranch = src.indexOf('this.activePlanCardSnapshot?.complete', turnPlanState);
@@ -1040,7 +1040,7 @@ describe('plan overview completion state', () => {
     expect(src).not.toContain('syncActivePlanCursor');
   });
 
-  it('restores the chat plan card state without a floating outline integration', () => {
+  it('restores the chat plan card state from the saved session progress', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const guard = src.indexOf('const savedPlanState = snapshot.uiState.planState;');
     expect(guard).toBeGreaterThan(-1);
@@ -1066,7 +1066,7 @@ describe('plan overview completion state', () => {
     expect(src).toContain('thinkingPhases: phases.length > 0 ? phases : undefined');
   });
 
-  it('does not create or synchronize a floating outline from ChatController', () => {
+  it('keeps ChatController free of planOverview wiring', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     expect(src).not.toContain("from './planOverview'");
     expect(src).not.toContain('planOverview()');

@@ -233,14 +233,16 @@ bun run gui:build    # 生产构建 → src-tauri/target/release/bundle/
 
 ### 真实浏览器计划/会话回归
 
-GUI 提供真实 Chromium/WebView 等价环境下的计划进度冒烟测试：必要时自动启动 Vite 和隔离的无头 Chrome 配置，写入两个会话，然后通过真实侧边栏恢复路径验证页面刷新和会话切换后浮动窗口与聊天卡仍显示同一计划状态：
+GUI 提供真实 Chromium/WebView 等价环境下的计划进度冒烟测试：必要时自动启动 Vite 和隔离的无头 Chrome 配置，写入会话，然后通过真实侧边栏恢复路径验证页面刷新和会话切换后聊天计划卡仍显示同一计划状态：
 
 ```bash
-bun run verify:plan-session
+bun run verify:plan-restore   # 恢复的计划卡状态（完成 / 进行中 / 暂停）
+bun run verify:plan-session   # 刷新 + 会话切换后的投影
 bun run verify:plan-progress  # 多 Todo、跳阶段、完成态
+bun run verify:gates          # 评审暂停门禁 + 计划续跑交付门禁
 ```
 
-测试默认使用 `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`（可用 `--chrome=...` 覆盖），不会触碰日常浏览器配置。原有恢复状态检查仍可通过 `bun run verify:outlines` 执行。
+测试默认使用 `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`（可用 `--chrome=...` 覆盖），不会触碰日常浏览器配置。每个场景还会断言已删除的浮动大纲不会再出现。
 
 ---
 

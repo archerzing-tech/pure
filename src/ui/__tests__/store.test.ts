@@ -201,7 +201,7 @@ describe('session snapshot separation', () => {
     expect(mergeSessionSnapshotMetadata(previous, next).uiState.planState).toBeNull();
   });
 
-  it('persists a completed plan state with the complete flag so the outline can be restored', () => {
+  it('persists a completed plan state with the complete flag so the chat plan card can be restored', () => {
     const plan = { steps: [{ id: '1', action: '拆模块', description: '', expectedOutcome: '模块边界清晰' }], reasoning: '' };
     const modelMessages: Message[] = [{ role: 'assistant', content: '完成' }];
     const snapshot = createSessionSnapshot(modelMessages, [{

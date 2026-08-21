@@ -3528,12 +3528,12 @@ export class ChatController {
             }
             const qualityPassed = !needsDeliveryGate || (projectQualityResult?.passed === true && gen === this.generation);
             // 计划完成的收尾不能只依赖模型的 `## 计划 n 已完成` 标记：模型漏发时
-            // 大纲会永远停在第一步。只要回合正常结束、本轮真实执行过工具（与上方
+            // 卡片会永远停在第一步。只要回合正常结束、本轮真实执行过工具（与上方
             // hasToolWork 同一约定：提问/确认轮没有 tool 消息）、末句不是提问、且
             // 没有显式暂停，就按完成收尾——标记仍负责执行中的逐步推进。
-            // 交付门禁的结果不参与收尾判定：步骤确实执行完了，计划卡与漂浮大纲卡
-            // 就该推进到完成态（否则门禁一旦未通过，大纲会永远停在最后一步，和对话
-            // 窗口内已经完成的步骤不一致）；门禁是否通过单独用气泡展示。
+            // 交付门禁的结果不参与收尾判定：步骤确实执行完了，计划卡就该推进到
+            // 完成态（否则门禁一旦未通过，卡片会永远停在最后一步，和对话窗口内
+            // 已经完成的步骤不一致）；门禁是否通过单独用气泡展示。
             const finalAnswer = String(event.payload.finalOutput ?? '').trim();
             const turnAsksForInput = finalAnswer.length > 0 && /[?？]\s*$/.test(finalAnswer);
             const planFinished = planCard && hasToolWork && !event.payload.interrupted
