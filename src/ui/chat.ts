@@ -2667,6 +2667,10 @@ export class ChatController {
           if (!finishSnapshot || planNumber !== finishSnapshot.currentPlan) return;
           if (needsDeliveryGate && !planTrack.phaseVerifySeen[planNumber]) {
             card.setActivity(`计划 ${planNumber} 已报告完成，等待真实验证结果…`);
+            // 交付门禁阶段：模型播报完成但没有自己的验证命令时，调度阶段验证
+            // backstop 补齐证据（成功后会重放 finishPlan 推进游标）；否则游标
+            // 会永远停在这个阶段，整个计划永远到不了完成态。
+            schedulePhaseBackstop(planNumber);
             return;
           }
           const isLastPlan = planNumber >= finishSnapshot.plan.steps.length;
@@ -2687,6 +2691,9 @@ export class ChatController {
           planTrack.completedPlan = planNumber;
           consumeDeferredSubsteps(planNumber, planNumber + 1);
         };
+        // backstop 验证成功时需要重放 finishPlan 的推进逻辑；它定义在本闭包内，
+        // 通过外层句柄转发（backstop 在外层 send() 作用域，无法直接引用）。
+        retryPhaseAdvance = finishPlan;
         const consumeTodoMarker = (marker: Extract<PlanProgressMarker, { kind: 'substep' | 'substepDone' }>): void => {
           const todoSnapshot = modelSnapshot();
           if (!todoSnapshot) return;
@@ -2842,6 +2849,9 @@ export class ChatController {
       // without evidence, we run the stack's standard check once (debounced so
       // an immediately-following model tool call wins). Failures surface here;
       // the final delivery gate remains the hard block.
+      // finishPlan 定义在 trackPlanPhase 闭包内；backstop 成功后通过该句柄重放
+      // 它的推进逻辑（外层作用域无法直接引用闭包内的 const）。
+      let retryPhaseAdvance: ((planNumber: number) => void) | null = null;
       let phaseBackstopTimer: number | undefined;
       const schedulePhaseBackstop = (finishedPhase: number): void => {
         // Read-only verification commands only run under auto permission mode —
@@ -2875,6 +2885,12 @@ export class ChatController {
               if (gen !== this.generation || this.abortController?.signal.aborted) return;
               const out = String(res.result ?? '');
               const ok = res.success && !out.includes('[verify-unavailable]') && !out.includes('[verify-not-applicable]');
+              if (ok && !planTrack.phaseVerifySeen[finishedPhase]) {
+                // 真实验证证据到手：记录并重放完成路径，游标才能前进（finishPlan
+                // 无证据时直接返回，这正是交付门禁阶段卡死、计划无法执行完的原因）。
+                planTrack.phaseVerifySeen[finishedPhase] = true;
+                retryPhaseAdvance?.(finishedPhase);
+              }
               this.addStatusBubble(
                 ok
                   ? `✅ 阶段 ${finishedPhase} 自动验证通过`
@@ -3107,6 +3123,9 @@ export class ChatController {
       const events = this.hasHistory
         ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages)
         : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages);
+      // 本轮是否至少有一个工具真实成功：全失败的工具轮既不能推进阶段，也不能
+      // 作为“阶段完成”的证据（hasToolWork 只表示模型调用了工具，含失败）。
+      let hasToolSuccess = false;
       for await (const event of events) {
 
         // Session switched mid-stream (sidebar click / new chat): stop writing
@@ -3260,6 +3279,7 @@ export class ChatController {
           }
 
           case 'ToolResult': {
+            if (event.payload.result.success) hasToolSuccess = true;
             const status = event.payload.result.success ? '✓' : '✗';
             const toolName = event.payload.toolName;
             const duration = event.payload.duration;
@@ -3536,7 +3556,7 @@ export class ChatController {
             // 已经完成的步骤不一致）；门禁是否通过单独用气泡展示。
             const finalAnswer = String(event.payload.finalOutput ?? '').trim();
             const turnAsksForInput = finalAnswer.length > 0 && /[?？]\s*$/.test(finalAnswer);
-            const planFinished = planCard && hasToolWork && !event.payload.interrupted
+            const planFinished = planCard && hasToolSuccess && !event.payload.interrupted
               && !turnAsksForInput && gen === this.generation && !this.pausePlanCard;
             const completionSnapshot = planProgress?.getSnapshot();
             // A missing stage marker may only finish the CURRENT stage. The old
@@ -3552,7 +3572,7 @@ export class ChatController {
             // leave the chat card stuck on the last step.
             const toolFinishedLastPlan = planCard && completionSnapshot
               && planTrack.protocolStarted && planTrack.phaseStarted.has(completionSnapshot.plan.steps.length)
-              && completionSnapshot.currentPlan === completionSnapshot.plan.steps.length && hasToolWork;
+              && completionSnapshot.currentPlan === completionSnapshot.plan.steps.length && hasToolSuccess;
             // A final turn often contains NO tool calls at all (pure summary
             // after the last plan's work, or a plain user ack after the model
             // asked a closing question). If the card already reached the last
@@ -3573,9 +3593,24 @@ export class ChatController {
             if (canAdvancePlan && planProgress && planCard) {
               const finishedPlan = completionSnapshot.currentPlan;
               const nextPlan = finishedPlan + 1;
-              planProgress.dispatch({ type: 'todosCompleted', force: true });
-              planProgress.dispatch({ type: 'phaseStarted', planNumber: nextPlan });
-              planCard.setActivity(`计划 ${finishedPlan} 已完成，已准备计划 ${nextPlan}；回复“继续”开始下一阶段。`);
+              // 兜底推进必须带真实证据，不能把只做了一半的阶段当成完成：
+              // 当前阶段 Todo 已全部完成、或模型已显式播报下一阶段（隐式完成
+              // 当前阶段）；构建计划还需要验证证据（模型自跑验证 / phase backstop
+              // / 本轮交付门禁通过）。绝不 force 清空未完成的 Todo。
+              const todosDone = planProgress.canCompleteCurrentTodos();
+              const nextAnnounced = planTrack.phaseStarted.has(nextPlan);
+              const evidenced = !needsDeliveryGate
+                || planTrack.phaseVerifySeen[finishedPlan]
+                || qualityPassed === true;
+              if ((todosDone || nextAnnounced) && evidenced) {
+                if (todosDone) planProgress.dispatch({ type: 'todosCompleted' });
+                planProgress.dispatch({ type: nextAnnounced && !todosDone ? 'phaseJumped' : 'phaseStarted', planNumber: nextPlan });
+                planCard.setActivity(`计划 ${finishedPlan} 已完成，已准备计划 ${nextPlan}；回复“继续”开始下一阶段。`);
+              } else {
+                planCard.setActivity(todosDone
+                  ? `计划 ${finishedPlan} 的工作已完成，等待验证结果后继续…`
+                  : `计划 ${finishedPlan} 的工作尚未全部完成，继续处理当前计划…`);
+              }
             } else if (planCompletionCandidate && (protocolPlanFinished || legacyPlanFinished || planSummarized || toolFinishedLastPlan) && planCard) {
               planProgress?.dispatch({ type: 'completed' });
               if (this.activeComplexPlan)
