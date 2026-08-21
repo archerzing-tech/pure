@@ -1,17 +1,18 @@
 #!/usr/bin/env bun
-// scripts/verify-outline-restore.ts
-// Real-browser verification of session restore and the shared plan-progress
-// projection (src/ui/chat.ts loadFromStorage → planOverview().bindProgress).
+// scripts/verify-plan-restore.ts
+// Real-browser verification of session restore and the in-chat plan-card
+// projection (src/ui/chat.ts loadFromStorage → main.ts createRestoredPlanCard).
 // It seeds sessions into the browser store, reloads the app, clicks sessions in
-// the sidebar (the real restore/switch path), then asserts the floating outline
-// and the in-transcript plan card render the same persisted state.
+// the sidebar (the real restore/switch path), then asserts the transcript plan
+// card renders the persisted state — and that the removed floating outline
+// never comes back.
 //
 // Self-contained: it starts `bun run dev` and a headless Chrome when they are
 // not already running, and stops only the processes it started. Requires a
 // desktop Chrome binary (defaults to the standard macOS path).
 //
 // Usage:
-//   bun run scripts/verify-outline-restore.ts [--scenario=restore|session|progress|all] [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]
+//   bun run scripts/verify-plan-restore.ts [--scenario=restore|session|progress|gates|all] [--state=complete|active|waiting|all] [--gate=review|delivery|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]
 
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,7 @@ import { join } from 'node:path';
 
 // Progress goes to the console AND a log file, so a run that gets killed
 // (e.g. by an external timeout) still leaves a readable trace behind.
-const LOG_FILE = '/tmp/pure-verify-outlines.log';
+const LOG_FILE = '/tmp/pure-verify-plans.log';
 function log(message: string): void {
   console.log(message);
   try { appendFileSync(LOG_FILE, `${message}\n`); } catch {}
@@ -33,7 +34,7 @@ const argValue = (name: string): string | undefined => {
 const requestedStates = (argValue('--state') ?? 'all').split(',');
 const scenario = argValue('--scenario') ?? 'all';
 const gateScenario = argValue('--gate') ?? 'all';
-const outDir = argValue('--out') ?? '/tmp/pure-outline-verify';
+const outDir = argValue('--out') ?? '/tmp/pure-plan-verify';
 const appUrl = argValue('--app-url') ?? 'http://localhost:1420/';
 const cdpPort = Number(argValue('--cdp-port') ?? 9222);
 const chromePath = argValue('--chrome') ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -42,54 +43,41 @@ const keepServers = argv.includes('--keep');
 const projectRoot = new URL('../', import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-type OutlineState = 'complete' | 'active' | 'waiting';
+type PlanState = 'complete' | 'active' | 'waiting';
 
-const STATES: OutlineState[] = requestedStates.includes('all')
+const STATES: PlanState[] = requestedStates.includes('all')
   ? ['complete', 'active', 'waiting']
-  : (requestedStates as OutlineState[]);
+  : (requestedStates as PlanState[]);
 
-// Expected DOM outcomes per state, matching loadFromStorage's branches:
-//  - complete → planOverview().show(plan, 'complete', …) — all steps done
-//  - started  → planOverview().show(plan, 'active', …) — cursor on planNumber
-//  - !started → planOverview().show(plan, 'waiting', …) — cursor on plan 1
-const EXPECTED: Record<OutlineState, {
+// Expected outcomes per state, matching loadFromStorage's branches and the
+// restored transcript card rendered by main.ts:
+//  - complete → plan card fully done (all steps done, no active step)
+//  - started  → plan card active with the cursor on planNumber
+//  - !started → plan card showing the cursor on plan 1
+const EXPECTED: Record<PlanState, {
   planState: { planNumber: number; todoNumber: number; started: boolean; complete: boolean };
   planCard: { currentPlan: number; currentTodo: number; complete: boolean };
-  cardClass: string;
-  doneSteps: number;
-  activeSteps: number;
-  awaitingSteps: number;
-  progress: string;
-  checks: string[];
   cardDoneSteps: number;
   cardActiveSteps: number;
+  cardStepClasses: string[];
 }> = {
   complete: {
     planState: { planNumber: 3, todoNumber: 2, started: true, complete: true },
     planCard: { currentPlan: 3, currentTodo: 2, complete: true },
-    cardClass: 'plan-overview-card complete',
-    doneSteps: 3, activeSteps: 0, awaitingSteps: 0,
-    progress: '3/3',
-    checks: ['✓', '✓', '✓'],
     cardDoneSteps: 3, cardActiveSteps: 0,
+    cardStepClasses: ['done', 'done', 'done'],
   },
   active: {
     planState: { planNumber: 2, todoNumber: 1, started: true, complete: false },
     planCard: { currentPlan: 2, currentTodo: 1, complete: false },
-    cardClass: 'plan-overview-card active',
-    doneSteps: 1, activeSteps: 1, awaitingSteps: 0,
-    progress: '1/3',
-    checks: ['✓', '2', '3'],
     cardDoneSteps: 1, cardActiveSteps: 1,
+    cardStepClasses: ['done', 'active', 'pending'],
   },
   waiting: {
     planState: { planNumber: 1, todoNumber: 1, started: false, complete: false },
     planCard: { currentPlan: 1, currentTodo: 1, complete: false },
-    cardClass: 'plan-overview-card awaiting',
-    doneSteps: 0, activeSteps: 0, awaitingSteps: 1,
-    progress: '0/3',
-    checks: ['1', '2', '3'],
     cardDoneSteps: 0, cardActiveSteps: 1,
+    cardStepClasses: ['active', 'pending', 'pending'],
   },
 };
 
@@ -157,7 +145,7 @@ function killByPort(port: number): void {
 
 async function main(): Promise<number> {
   if (STATES.length === 0 || !['restore', 'session', 'progress', 'gates', 'all'].includes(scenario)) {
-    console.error('Usage: bun run scripts/verify-outline-restore.ts [--scenario=restore|session|progress|gates|all] [--gate=review|delivery|all] [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]');
+    console.error('Usage: bun run scripts/verify-plan-restore.ts [--scenario=restore|session|progress|gates|all] [--gate=review|delivery|all] [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]');
     return 2;
   }
   try { appendFileSync(LOG_FILE, `\n=== run ${new Date().toISOString()} ===\n`); } catch {}
@@ -279,39 +267,29 @@ async function main(): Promise<number> {
 
     await evaluate(`document.querySelector('.sidebar-session-item[data-sid="${sid}"]').click()`);
     await waitFor(async () => {
-      const visible = await evaluate("(() => { const o = document.querySelector('.plan-overview'); return o ? o.hidden === false : false; })()");
-      return visible === true;
-    }, 25000, `${label} outline visible`);
+      const n = await evaluate("(() => { const card = document.querySelector('.plan-progress-text-plan'); return card ? card.querySelectorAll('.plan-progress-step').length : 0; })()");
+      return Number(n) === 3;
+    }, 25000, `${label} restored plan card`);
 
     const stateResult = JSON.parse(await evaluate(`(() => {
-      const ov = document.querySelector('.plan-overview');
-      const card = ov ? ov.querySelector('.plan-overview-card') : null;
-      const steps = ov ? Array.from(ov.querySelectorAll('.plan-overview-step')) : [];
+      const card = document.querySelector('.plan-progress-text-plan');
+      const steps = card ? Array.from(card.querySelectorAll('.plan-progress-step')) : [];
       const doneSteps = steps.filter((s) => s.classList.contains('done')).length;
       const activeSteps = steps.filter((s) => s.classList.contains('active')).length;
-      const awaitingSteps = steps.filter((s) => s.classList.contains('awaiting')).length;
-      const progress = ov ? (ov.querySelector('.plan-overview-progress')?.textContent ?? null) : null;
-      const checks = steps.map((s) => s.querySelector('.plan-overview-step-check')?.textContent ?? '');
-      const planCards = Array.from(document.querySelectorAll('.plan-progress-text-plan'));
-      const cardDone = planCards[0] ? Array.from(planCards[0].querySelectorAll('.plan-progress-step.done')).length : -1;
-      const cardActive = planCards[0] ? Array.from(planCards[0].querySelectorAll('.plan-progress-step.active')).length : -1;
       return JSON.stringify({
-        outlineVisible: ov ? ov.hidden === false : null,
-        cardClass: card ? card.className : null,
-        doneSteps, activeSteps, awaitingSteps, progress, checks, cardDone, cardActive,
+        cardRendered: !!card,
+        cardStepClasses: steps.map((s) => [...s.classList].find((c) => c === 'done' || c === 'active' || c === 'pending') ?? ''),
+        cardDone: doneSteps, cardActive: activeSteps,
+        noOutline: document.querySelector('.plan-overview') === null,
       });
     })()`));
 
     const checks: Array<[string, unknown, unknown]> = [
-      ['outline visible', stateResult.outlineVisible, true],
-      ['card class', stateResult.cardClass, expected.cardClass],
-      ['done steps', stateResult.doneSteps, expected.doneSteps],
-      ['active steps', stateResult.activeSteps, expected.activeSteps],
-      ['awaiting steps', stateResult.awaitingSteps, expected.awaitingSteps],
-      ['progress', stateResult.progress, expected.progress],
-      ['step checks', stateResult.checks, expected.checks],
-      ['plan card done steps', stateResult.cardDone, expected.cardDoneSteps],
-      ['plan card active steps', stateResult.cardActive, expected.cardActiveSteps],
+      ['plan card rendered', stateResult.cardRendered, true],
+      ['card step classes', stateResult.cardStepClasses, expected.cardStepClasses],
+      ['card done steps', stateResult.cardDone, expected.cardDoneSteps],
+      ['card active steps', stateResult.cardActive, expected.cardActiveSteps],
+      ['no floating outline', stateResult.noOutline, true],
     ];
     let stateOk = true;
     for (const [name, actual, want] of checks) {
@@ -320,7 +298,7 @@ async function main(): Promise<number> {
       log(`  [${pass ? 'PASS' : 'FAIL'}] ${label} → ${name}: ${JSON.stringify(actual)}${pass ? '' : ` (expected ${JSON.stringify(want)})`}`);
     }
     if (!stateOk) failures++;
-    log(`[verify] ${label} outline: ${stateOk ? 'OK' : 'MISMATCH'}`);
+    log(`[verify] ${label} plan card: ${stateOk ? 'OK' : 'MISMATCH'}`);
 
     const shot = await send('Page.captureScreenshot', { format: 'png' });
     const shotPath = join(outDir, `${state}.png`);
@@ -330,8 +308,8 @@ async function main(): Promise<number> {
 
   // ── Browser-level refresh + session-switch regression ──
   // This deliberately uses two distinct plans rather than only checking that
-  // a widget is visible: stale model subscriptions would otherwise pass the
-  // visibility assertion while still showing session A after switching to B.
+  // a card is present: stale model subscriptions would otherwise pass the
+  // presence assertion while still showing session A after switching to B.
   if (scenario === 'session' || scenario === 'all') {
     const planA = {
       steps: [
@@ -389,26 +367,26 @@ async function main(): Promise<number> {
         return Number(count) === 2;
       }, 25000, `${label} session list`);
     };
-    const readSessionView = async (): Promise<{ outline: string; outlineClass: string; chat: string; chatClass: string }> => JSON.parse(String(await evaluate(`(() => {
-      const overview = document.querySelector('.plan-overview');
+    const readSessionView = async (): Promise<{ chat: string; chatDone: number; chatActive: number; noOutline: boolean }> => JSON.parse(String(await evaluate(`(() => {
       const card = document.querySelector('.plan-progress-text-plan');
+      const steps = card ? Array.from(card.querySelectorAll('.plan-progress-step')) : [];
       return JSON.stringify({
-        outline: overview?.querySelector('.plan-overview-steps')?.textContent?.trim() ?? '',
-        outlineClass: overview?.querySelector('.plan-overview-card')?.className ?? '',
         chat: card?.textContent?.trim() ?? '',
-        chatClass: card?.querySelector('.plan-progress-step.active')?.textContent?.trim() ?? '',
+        chatDone: steps.filter((s) => s.classList.contains('done')).length,
+        chatActive: steps.filter((s) => s.classList.contains('active')).length,
+        noOutline: document.querySelector('.plan-overview') === null,
       });
     })()`)));
-    const assertSessionView = async (sid: string, expectedLabel: string, expectedClass: string): Promise<boolean> => {
+    const assertSessionView = async (sid: string, expectedLabel: string, expected: { done: number; active: number }): Promise<boolean> => {
       await waitFor(async () => {
-        const visible = await evaluate("(() => { const el = document.querySelector('.plan-overview'); return !!el && !el.hidden; })()");
         const view = await readSessionView();
-        return visible === true && view.outline.includes(expectedLabel) && view.chat.includes(expectedLabel);
-      }, 25000, `${sid} shared plan projection`);
+        return view.chat.includes(expectedLabel) && view.chatDone === expected.done && view.chatActive === expected.active;
+      }, 25000, `${sid} restored plan card`);
       const view = await readSessionView();
-      const pass = view.outline.includes(expectedLabel)
-        && view.chat.includes(expectedLabel)
-        && view.outlineClass.includes(expectedClass);
+      const pass = view.chat.includes(expectedLabel)
+        && view.chatDone === expected.done
+        && view.chatActive === expected.active
+        && view.noOutline === true;
       log(`  [${pass ? 'PASS' : 'FAIL'}] ${sid} → refresh/switch shared projection: ${JSON.stringify(view)}`);
       if (!pass) failures++;
       return pass;
@@ -416,17 +394,17 @@ async function main(): Promise<number> {
 
     await reload('session seed');
     await evaluate(`document.querySelector('.sidebar-session-item[data-sid="browser-session-a"]').click()`);
-    await assertSessionView('browser-session-a', 'A-实现', 'active');
+    await assertSessionView('browser-session-a', 'A-实现', { done: 1, active: 1 });
 
     // Reload after selecting A, then take the normal sidebar restore path.
     await reload('selected A');
     await evaluate(`document.querySelector('.sidebar-session-item[data-sid="browser-session-a"]').click()`);
-    await assertSessionView('browser-session-a', 'A-实现', 'active');
+    await assertSessionView('browser-session-a', 'A-实现', { done: 1, active: 1 });
 
-    // Switching to B must replace both projections; A's model/subscription
-    // must no longer be able to keep the old plan in the floating window.
+    // Switching to B must replace the projection; A's model/subscription
+    // must no longer be able to keep the old plan in the transcript.
     await evaluate(`document.querySelector('.sidebar-session-item[data-sid="browser-session-b"]').click()`);
-    await assertSessionView('browser-session-b', 'B-验证', 'complete');
+    await assertSessionView('browser-session-b', 'B-验证', { done: 3, active: 0 });
     log('[verify] browser refresh + session switch: OK');
   }
 
@@ -501,72 +479,54 @@ async function main(): Promise<number> {
     }, 25000, 'progress scenario session list');
 
     const readProgressView = async (): Promise<{
-      outlineClass: string;
-      outlineProgress: string;
-      outlineSteps: string[];
       cardTopSteps: string[];
       visibleTodos: string[];
       allTodos: string[];
+      noOutline: boolean;
     }> => JSON.parse(String(await evaluate(`(() => {
-      const overview = document.querySelector('.plan-overview');
       const card = document.querySelector('.plan-progress-text-plan');
       const row = card?.parentElement;
       const classes = (selector, root = card) => Array.from(root?.querySelectorAll(selector) ?? []).map((el) => el.className);
       return JSON.stringify({
-        outlineClass: overview?.querySelector('.plan-overview-card')?.className ?? '',
-        outlineProgress: overview?.querySelector('.plan-overview-progress')?.textContent ?? '',
-        outlineSteps: classes('.plan-overview-step', overview),
         cardTopSteps: classes('.plan-progress-steps > .plan-progress-step'),
         visibleTodos: classes('.plan-progress-text-todos:not(.plan-progress-todo-hidden) .plan-progress-substep', row),
         allTodos: classes('.plan-progress-text-todos .plan-progress-substep', row),
+        noOutline: document.querySelector('.plan-overview') === null,
       });
     })()`)));
     const assertProgressView = async (
       sid: string,
       action: string,
-      expected: { outlineClass: string; outlineProgress: string; outlineSteps: string[]; cardTopSteps: string[]; visibleTodos: string[]; allTodos: string[] },
+      expected: { cardTopSteps: string[]; visibleTodos: string[]; allTodos: string[] },
     ): Promise<void> => {
       await evaluate(`document.querySelector('.sidebar-session-item[data-sid="${sid}"]').click()`);
       await waitFor(async () => {
-        const visible = await evaluate("(() => { const el = document.querySelector('.plan-overview'); return !!el && !el.hidden; })()");
         const view = await readProgressView();
-        return visible === true && view.cardTopSteps.length === 3 && view.outlineProgress === expected.outlineProgress;
+        return view.cardTopSteps.length === 3;
       }, 25000, `${sid} progress render`);
       const view = await readProgressView();
       const actual = {
-        outlineClass: view.outlineClass,
-        outlineProgress: view.outlineProgress,
-        outlineSteps: view.outlineSteps,
         cardTopSteps: view.cardTopSteps,
         visibleTodos: view.visibleTodos,
         allTodos: view.allTodos,
+        noOutline: view.noOutline,
       };
-      const pass = view.outlineClass.includes(expected.outlineClass)
-        && JSON.stringify(actual) === JSON.stringify(expected);
+      const pass = JSON.stringify(actual) === JSON.stringify({ ...expected, noOutline: true });
       log(`  [${pass ? 'PASS' : 'FAIL'}] ${sid} → ${action}: ${JSON.stringify(actual)}`);
       if (!pass) failures++;
     };
 
     await assertProgressView('progress-session-todos', '多 Todo 当前项同步', {
-      outlineClass: 'plan-overview-card active',
-      outlineProgress: '0/3',
-      outlineSteps: ['plan-overview-step active', 'plan-overview-step pending', 'plan-overview-step pending'],
       cardTopSteps: ['plan-progress-step active', 'plan-progress-step pending', 'plan-progress-step pending'],
       visibleTodos: ['plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row active', 'plan-progress-substep plan-progress-todo-row pending'],
       allTodos: ['plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row active', 'plan-progress-substep plan-progress-todo-row pending', 'plan-progress-substep plan-progress-todo-row pending'],
     });
-    await assertProgressView('progress-session-jump', '跳阶段后两侧同步', {
-      outlineClass: 'plan-overview-card active',
-      outlineProgress: '2/3',
-      outlineSteps: ['plan-overview-step done', 'plan-overview-step done', 'plan-overview-step active'],
+    await assertProgressView('progress-session-jump', '跳阶段后卡片同步', {
       cardTopSteps: ['plan-progress-step done', 'plan-progress-step done', 'plan-progress-step active'],
       visibleTodos: ['plan-progress-substep plan-progress-todo-row active'],
       allTodos: ['plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row active'],
     });
     await assertProgressView('progress-session-complete', '完成态全部同步', {
-      outlineClass: 'plan-overview-card complete',
-      outlineProgress: '3/3',
-      outlineSteps: ['plan-overview-step done', 'plan-overview-step done', 'plan-overview-step done'],
       cardTopSteps: ['plan-progress-step done', 'plan-progress-step done', 'plan-progress-step done'],
       visibleTodos: [],
       allTodos: ['plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row done', 'plan-progress-substep plan-progress-todo-row done'],

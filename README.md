@@ -239,15 +239,16 @@ bun run gui:build    # production build → src-tauri/target/release/bundle/
 
 ### Real-browser plan/session regression
 
-The GUI includes a real Chromium/WebView-equivalent smoke test for plan progress. It starts Vite and an isolated headless Chrome profile when needed, seeds two sessions through the browser store, then exercises the actual sidebar restore path across a page reload and a session switch:
+The GUI includes a real Chromium/WebView-equivalent smoke test for plan progress. It starts Vite and an isolated headless Chrome profile when needed, seeds sessions through the browser store, then exercises the actual sidebar restore path across a page reload and a session switch:
 
 ```bash
-bun run verify:plan-session
+bun run verify:plan-restore   # restored plan-card states (complete / active / waiting)
+bun run verify:plan-session   # refresh + session-switch projection
 bun run verify:plan-progress  # multi-Todo + phase jump + completion states
 bun run verify:gates          # review-pause gate + plan-continuation delivery gate
 ```
 
-The test requires Google Chrome at `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` (override with `--chrome=...`) and does not touch the normal browser profile. The existing restore-state check remains available as `bun run verify:outlines`.
+The test requires Google Chrome at `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` (override with `--chrome=...`) and does not touch the normal browser profile. Every scenario also asserts that the removed floating execution outline never comes back.
 
 Pasted/dropped images are downscaled to at most ~2 megapixels before they ride into the model context and the persisted session snapshot (SVG/GIF/BMP stay untouched, small images pass through). To measure the actual payload and snapshot sizes for a given source image in a real browser, run:
 

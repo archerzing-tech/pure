@@ -3,31 +3,12 @@ import { readFileSync } from 'node:fs';
 
 const index = readFileSync(new URL('../../../index.html', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
-const planOverview = readFileSync(new URL('../planOverview.ts', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 
 function sectionBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
   const endIndex = source.indexOf(end, startIndex + start.length);
   return startIndex >= 0 && endIndex >= 0 ? source.slice(startIndex, endIndex) : '';
 }
-
-describe('window resize stability', () => {
-  it('coalesces floating overview fitting and pauses decorative effects while resizing', () => {
-    expect(planOverview).toContain('let fitScheduled = false;');
-    expect(planOverview).toContain('const observer = new ResizeObserver(scheduleFit);');
-    expect(planOverview).not.toContain('observer.observe(chatView);');
-    expect(styles).toContain('html.window-resizing *');
-    expect(styles).toContain('transition: none !important;');
-    expect(styles).toContain('animation-play-state: paused !important;');
-  });
-
-  it('keeps the floating overview outside the transcript scroll layer', () => {
-    const overviewRule = styles.slice(styles.indexOf('.plan-overview {'), styles.indexOf('.plan-overview-card {'));
-    expect(overviewRule).toContain('position: fixed;');
-    expect(overviewRule).toContain('z-index: 40;');
-    expect(planOverview).toContain('applyLocalPosition(clamped.left, clamped.top);');
-  });
-});
 
 describe('LLM page layout (default-model bar + provider grid)', () => {
   it('starts with the default-model bar, then the provider grid', () => {
