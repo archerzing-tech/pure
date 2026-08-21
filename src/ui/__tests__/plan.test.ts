@@ -41,6 +41,8 @@ describe('formatPlanForPrompt', () => {
     expect(projectOut).toContain('Do not call tools before the stage-start announcement');
     expect(projectOut).toContain('The UI consumes that line as the single stage-complete event');
     expect(projectOut).toContain('## 计划 n：<阶段名称>');
+    expect(projectOut).toContain('### 子步骤 k 已完成');
+    expect(projectOut).toContain('子步骤 k：<子步骤名称>');
     expect(projectOut).not.toContain('TWO INDEPENDENT progress lists');
     expect(projectOut).not.toContain('at most ONE Todo');
   });
@@ -82,6 +84,7 @@ describe('formatPlanForPrompt', () => {
     expect(continuation).toContain('## 计划 n：');
     expect(continuation).toContain('## 计划 n 已完成');
     expect(continuation).toContain('没有开始播报就不要执行，没有完成播报就不要进入下一计划');
+    expect(continuation).toContain('### 子步骤 k 已完成');
   });
 });
 

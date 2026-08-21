@@ -937,7 +937,7 @@ describe('plan overview completion state', () => {
     expect(src).toContain('!planTrack.phaseCompleted.has(finishedPlan)');
     expect(src).toContain('const legacyPlanFinished = planCard && !planTrack.protocolStarted');
     expect(src).toContain('completionSnapshot.currentPlan >= completionSnapshot.plan.steps.length;');
-    expect(src).toContain('const canAdvancePlan = planFinished && completionSnapshot !== undefined');
+    expect(src).toContain('shouldAdvancePlanAtTurnEnd(planFinished === true, completionSnapshot, planTrack.completedPlan)');
     expect(src).toContain("planProgress.dispatch({ type: 'phaseStarted', planNumber: nextPlan });");
     expect(src).toContain('const protocolPlanFinished = planCard && completionSnapshot && planTrack.phaseCompleted.has(completionSnapshot.plan.steps.length);');
   });
@@ -972,6 +972,20 @@ describe('plan overview completion state', () => {
     expect(lastPlan).toBeGreaterThan(finishPlan);
     expect(forceComplete).toBeGreaterThan(lastPlan);
     expect(lastActivity).toBeGreaterThan(forceComplete);
+  });
+
+  it('does not double-advance the plan cursor at turn completion', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // finishPlan 收到 `## 计划 n 已完成` 时已经把游标推进到 n+1，并记录到
+    // completedPlan；回合收尾的兜底（shouldAdvancePlanAtTurnEnd）据此不再推进
+    // 一次，否则“一轮一阶段”会把下一阶段整段跳过。
+    const finishPlan = src.indexOf('const finishPlan = (planNumber: number): void => {');
+    expect(finishPlan).toBeGreaterThan(-1);
+    const advance = src.indexOf("planProgress?.dispatch({ type: 'phaseStarted', planNumber: planNumber + 1 });", finishPlan);
+    const record = src.indexOf('planTrack.completedPlan = planNumber;', advance);
+    expect(record).toBeGreaterThan(advance);
+    const canAdvance = src.indexOf('shouldAdvancePlanAtTurnEnd(planFinished === true, completionSnapshot, planTrack.completedPlan)');
+    expect(canAdvance).toBeGreaterThan(-1);
   });
 
   it('finalizes a no-tool final turn at the last plan so the outline catches up', () => {

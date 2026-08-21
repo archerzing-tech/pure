@@ -35,7 +35,7 @@ import {
   createQualityGateCard,
   type PlanCardHandle,
 } from './plan';
-import { PlanProgressModel, type PlanProgressSnapshot } from './planProgress';
+import { PlanProgressModel, shouldAdvancePlanAtTurnEnd, type PlanProgressSnapshot } from './planProgress';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
 import { attachPlanPauseActions } from './planPauseActions';
@@ -2645,7 +2645,7 @@ export class ChatController {
       // (typecheck/tests/build…) and it succeeded while phase n was active. It is
       // required for project builds, but ordinary complex plans can advance from
       // explicit Todo completion alone.
-  const planTrack = { seg: null as { el: HTMLDivElement; text: string } | null, scanLen: 0, consumedMarkers: new Set<string>(), phaseVerifySeen: [] as boolean[], phaseStarted: new Set<number>(), phaseCompleted: new Set<number>(), protocolStarted: false, deferredMarkers: new Map<number, Array<Extract<PlanProgressMarker, { kind: 'substep' | 'substepDone' }>>>(), deferredPhase: null as number | null, deferredReason: null as 'protocol' | 'verify' | null, unblockDeferredOnWork: null as (() => void) | null };
+  const planTrack = { seg: null as { el: HTMLDivElement; text: string } | null, scanLen: 0, consumedMarkers: new Set<string>(), phaseVerifySeen: [] as boolean[], phaseStarted: new Set<number>(), phaseCompleted: new Set<number>(), protocolStarted: false, deferredMarkers: new Map<number, Array<Extract<PlanProgressMarker, { kind: 'substep' | 'substepDone' }>>>(), deferredPhase: null as number | null, deferredReason: null as 'protocol' | 'verify' | null, completedPlan: null as number | null, unblockDeferredOnWork: null as (() => void) | null };
       let projectQualityResult: ProjectQualityGateResult | null = null;
       if (needsDeliveryGate && !effectiveWorkspace) {
         // 计划已确认但没有可选工作区：结束本轮，评估卡明确收尾而不是停在“执行中”。
@@ -2684,6 +2684,7 @@ export class ChatController {
             ? `计划 ${planNumber} 已完成，整个计划收尾中…`
             : `计划 ${planNumber} 已完成，正在准备下一个计划…`);
           planProgress?.dispatch({ type: 'phaseStarted', planNumber: planNumber + 1 });
+          planTrack.completedPlan = planNumber;
           consumeDeferredSubsteps(planNumber, planNumber + 1);
         };
         const consumeTodoMarker = (marker: Extract<PlanProgressMarker, { kind: 'substep' | 'substepDone' }>): void => {
@@ -3565,8 +3566,10 @@ export class ChatController {
               && completionSnapshot !== undefined
               && completionSnapshot.currentPlan === completionSnapshot.plan.steps.length && turnText.length > 0;
             const planCompletionCandidate = (planFinished || planSummarized) && planCard;
-            const canAdvancePlan = planFinished && completionSnapshot !== undefined
-              && completionSnapshot.currentPlan < completionSnapshot.plan.steps.length;
+            // 完成标记驱动的一次推进（finishPlan）已把游标推到 completedPlan+1，
+            // 回合收尾的兜底不能再推进一次——否则"一轮一阶段"时会把下一阶段整段跳过。
+            const canAdvancePlan = completionSnapshot !== undefined
+              && shouldAdvancePlanAtTurnEnd(planFinished === true, completionSnapshot, planTrack.completedPlan);
             if (canAdvancePlan && planProgress && planCard) {
               const finishedPlan = completionSnapshot.currentPlan;
               const nextPlan = finishedPlan + 1;
