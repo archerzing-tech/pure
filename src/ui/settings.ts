@@ -660,6 +660,7 @@ export class SettingsPanel {
       '#cfg-proxy-enabled', '#cfg-proxy-mode', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-scheme', '#cfg-proxy-host', '#cfg-proxy-port', '#cfg-proxy-username', '#cfg-proxy-password', '#cfg-proxy-bypass-providers',
       '#cfg-proxy-probe-0-enabled', '#cfg-proxy-probe-0-url', '#cfg-proxy-probe-1-enabled', '#cfg-proxy-probe-1-url', '#cfg-proxy-probe-2-enabled', '#cfg-proxy-probe-2-url',
       '#cfg-streaming-render',
+      '#cfg-auto-continue',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle',
       // Memory evolution thresholds (number inputs save on change/blur).
@@ -1400,6 +1401,8 @@ export class SettingsPanel {
 
     const streamingRenderEl = document.getElementById('cfg-streaming-render') as HTMLInputElement | null;
     if (streamingRenderEl) streamingRenderEl.checked = cfg.streamingRender;
+    const autoContinueEl = document.getElementById('cfg-auto-continue') as HTMLInputElement | null;
+    if (autoContinueEl) autoContinueEl.checked = cfg.autoContinue;
 
     (document.getElementById('cfg-fontsize') as HTMLSelectElement).value = cfg.fontSize;
     (document.getElementById('cfg-density') as HTMLSelectElement).value = cfg.density;
@@ -2526,6 +2529,9 @@ export class SettingsPanel {
       hubSkills,
       mcpServers: [...this.mcpServers],
       streamingRender: (document.getElementById('cfg-streaming-render') as HTMLInputElement | null)?.checked ?? true,
+      autoContinue: (document.getElementById('cfg-auto-continue') as HTMLInputElement | null)?.checked ?? false,
+      // Preserve the max-rounds cap (not exposed in the panel).
+      autoContinueMaxRounds: (loadConfig() ?? defaults()).autoContinueMaxRounds,
       // The composer's mode selector lives outside this form — carry its value
       // through so a settings save never silently resets a user's mode choice.
       taskMode: (loadConfig() ?? defaults()).taskMode,

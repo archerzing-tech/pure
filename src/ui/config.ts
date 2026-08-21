@@ -102,7 +102,8 @@ export interface PureConfig {
    * became a functional gate (was a decorative no-op defaulting to false);
    * legacy configs that stored the old meaningless `false` are migrated to
    * `true` so existing users keep web tools. v7: proxy defaults and per-scope
-   * proxy switches were made explicit.
+   * proxy switches were made explicit. v13: added autoContinue /
+   * autoContinueMaxRounds (long-task auto-continue, default off).
    */
   configVersion: number;
   /**
@@ -122,6 +123,21 @@ export interface PureConfig {
    * plan/build always run it.
    */
   taskMode: 'auto' | 'yolo' | 'plan' | 'build';
+  /**
+   * Long-task auto-continue (see docs/auto-continue-design.md): when enabled,
+   * a complex plan task automatically keeps executing after each stage
+   * boundary instead of waiting for a manual "继续". Default off — off keeps
+   * the historical per-stage human confirmation rhythm. Works in every
+   * permission mode; in confirm mode a pending permission prompt is a natural
+   * stop point (the turn stays streaming until the user decides).
+   */
+  autoContinue: boolean;
+  /**
+   * Max auto rounds per user message (loop protection; also enforced by stall
+   * detection). Not exposed in the settings panel — kept as a config field for
+   * power users / future UI.
+   */
+  autoContinueMaxRounds: number;
   /**
    * Memory evolution thresholds (Settings → Memory → 遗忘速度). Engine units:
    * recencyHalfLifeMs / dormantGraceMs in milliseconds, scores in 0..1 — the
@@ -208,7 +224,9 @@ export function defaults(): PureConfig {
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', username: '', password: '', hasPassword: false, bypassProviders: [], bypassModels: [] }),
     streamingRender: true,
     taskMode: 'auto',
-    configVersion: 12,
+    autoContinue: false,
+    autoContinueMaxRounds: 8,
+    configVersion: 13,
   };
 }
 
@@ -596,6 +614,14 @@ export function loadConfig(): PureConfig | null {
         }
         cfg.configVersion = 12;
         if (hadAnthropic) needsPersist = true;
+      }
+      // Config v13: long-task auto-continue (autoContinue /
+      // autoContinueMaxRounds, Settings → General). Purely additive — legacy
+      // configs keep running with the default (off); the bump just records the
+      // schema so future migrations can assume the fields exist.
+      if ((parsed.configVersion ?? 1) < 13) {
+        cfg.configVersion = 13;
+        needsPersist = true;
       }
       if (isTauriRuntime() && cfg.apiKey) {
         // Legacy migration: move a key previously persisted to localStorage
