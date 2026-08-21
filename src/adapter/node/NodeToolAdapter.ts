@@ -17,6 +17,7 @@ import { cachedDirectPublicApi, quota } from './publicApis';
 import { pageCacheKey, PAGE_TTL_MS, searchCacheKey, SEARCH_TTL_MS, webCache } from './webCache';
 import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeViaJina, truncateText } from './webScrape';
 import { extractFileText, MAX_SEARCH_FILE_BYTES } from './fileText';
+import { BROWSER_UA } from '../../shared/platformUa';
 
 /** Windows has no POSIX shell (`sh`) or `diff` binary — PowerShell / Git for
  * Windows provide the equivalents. Module-level so every handler branches
@@ -2309,11 +2310,6 @@ function createAbortController(parent: AbortSignal | undefined, timeoutMs: numbe
     },
   };
 }
-
-// Browser User-Agent: search engines and many sites block the bare "Pure/1.0"
-// string, which surfaced as a wall of generic HTTP errors. A real browser UA
-// keeps both search backends and web_fetch targets responsive.
-const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 // ── Shared cookie jar for HTML search backends ──
 // Reusing session cookies (Baidu's BAIDUID, Bing's MUID, Sogou's SUV, …)
