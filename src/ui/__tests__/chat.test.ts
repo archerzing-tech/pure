@@ -959,19 +959,47 @@ describe('plan overview completion state', () => {
     expect(jump).toBeGreaterThan(verifyGate);
   });
 
-  it('completes the last plan from its own completion marker (no N-1/N stall)', () => {
+  it('finishes the last plan from its own completion marker only when its Todos are done', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // `## 计划 n 已完成`（最后一个计划）以前永远无法把卡片推到完成态：
-    // updatePlanCardPhase 把 total+1 截到 total，而收尾门禁又要求本轮有工具
-    // 调用——无工具收尾轮（纯总结 / 用户确认）会让卡片永远停在 N-1/N。
+    // `## 计划 n 已完成`（最后一个计划）在 Todo 全部真实完成时推进到完成态
+    // （total + 1）；Todo 未完成时只更新文案，绝不 force 清空——收尾证据由
+    // 回合末判定把关，避免“只做了一半就播报完成”被当成整计划完成。
     const finishPlan = src.indexOf('const finishPlan = (planNumber: number): void => {');
     expect(finishPlan).toBeGreaterThan(-1);
     const lastPlan = src.indexOf('const isLastPlan = planNumber >= finishSnapshot.plan.steps.length;', finishPlan);
-    const forceComplete = src.indexOf("planProgress?.dispatch({ type: 'todosCompleted', force: isLastPlan });", finishPlan);
+    const todosGate = src.indexOf("if (!(planProgress?.canCompleteCurrentTodos() ?? false)) {", finishPlan);
     const lastActivity = src.indexOf('整个计划收尾中…', finishPlan);
     expect(lastPlan).toBeGreaterThan(finishPlan);
-    expect(forceComplete).toBeGreaterThan(lastPlan);
-    expect(lastActivity).toBeGreaterThan(forceComplete);
+    expect(todosGate).toBeGreaterThan(lastPlan);
+    expect(lastActivity).toBeGreaterThan(todosGate);
+    // 不再对最后计划 force 清空未完成 Todo。
+    expect(src.slice(finishPlan, lastActivity)).not.toContain('force: isLastPlan');
+  });
+
+  it('requires real completion evidence before marking the plan done', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 收尾判定不再只信模型播报：最后阶段 Todo 真实完成、或有逐阶段验证证据、
+    // 或构建计划交付门禁通过，才 dispatch completed。
+    const branch = src.indexOf('} else if (planCompletionCandidate');
+    expect(branch).toBeGreaterThan(-1);
+    const seg = src.slice(branch, branch + 1600);
+    expect(seg).toContain('const lastTodosDone =');
+    expect(seg).toContain('const lastVerified = planTrack.phaseVerifySeen[lastPlanNumber] === true;');
+    expect(seg).toContain('lastTodosDone || lastVerified || (needsDeliveryGate && qualityPassed === true)');
+  });
+
+  it('keeps the plan context when the delivery gate fails', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 交付门禁未通过时不 dispatch completed：activeComplexPlan 保留，下一轮
+    // “修复/继续”走原计划续跑而不是丢失计划卡后重新分析。
+    const branch = src.indexOf('} else if (planCompletionCandidate');
+    expect(branch).toBeGreaterThan(-1);
+    const seg = src.slice(branch, branch + 1600);
+    const blocked = seg.indexOf('const deliveryBlocked = needsDeliveryGate && !qualityPassed;');
+    expect(blocked).toBeGreaterThan(-1);
+    const completed = seg.indexOf("planProgress?.dispatch({ type: 'completed' });");
+    expect(completed).toBeGreaterThan(blocked);
+    expect(seg.slice(blocked, completed)).toContain('不把计划标记为完成');
   });
 
   it('does not double-advance the plan cursor at turn completion', () => {
