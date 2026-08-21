@@ -170,6 +170,8 @@ const translations: Record<Language, Record<string, string>> = {
     'general.streaming.hint': '逐字格式化助手的回复',
     'general.autoContinue': '长任务自动续跑',
     'general.autoContinue.hint': '复杂计划任务每完成一个阶段后自动继续执行，无需手动回复「继续」',
+    'general.autoContinueRounds': '单条消息最大续跑轮数',
+    'general.autoContinueRounds.hint': '自动续跑最多连续执行的轮数（1–20，默认 8），触顶即停，防止无限循环',
 
     // ── Environment (Settings → General) ──
     'env.title': '环境上下文',
@@ -646,6 +648,7 @@ const translations: Record<Language, Record<string, string>> = {
     'plan.refining.files': '正在参考工作区文件…',
     'plan.refining.analyzing': '正在分析你的需求…',
     'plan.refining.planning': '正在生成专属执行计划…',
+    'plan.autoContinue.badge': '自动续跑中',
     'plan.mode.build': 'Build 模式',
     'plan.mode.plan': 'Plan 模式',
     'plan.mode.yolo': 'YOLO 模式',
@@ -906,6 +909,8 @@ const translations: Record<Language, Record<string, string>> = {
     'general.streaming.hint': 'Format assistant reply progressively',
     'general.autoContinue': 'Auto-continue long tasks',
     'general.autoContinue.hint': 'Automatically keep executing after each plan stage instead of waiting for “继续”',
+    'general.autoContinueRounds': 'Max auto rounds per message',
+    'general.autoContinueRounds.hint': 'How many auto-continue rounds may chain per message (1–20, default 8); stops at the cap to prevent endless looping',
 
     // ── Environment (Settings → General) ──
     'env.title': 'Environment',
@@ -1382,6 +1387,7 @@ const translations: Record<Language, Record<string, string>> = {
     'plan.refining.files': 'Scanning the workspace…',
     'plan.refining.analyzing': 'Analyzing your request…',
     'plan.refining.planning': 'Drafting your plan…',
+    'plan.autoContinue.badge': 'Auto-continuing',
     'plan.mode.build': 'Build mode',
     'plan.mode.plan': 'Plan mode',
     'plan.mode.yolo': 'YOLO mode',

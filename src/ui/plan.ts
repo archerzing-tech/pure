@@ -115,6 +115,16 @@ export interface PlanCardHandle {
    * the first-Todo pause point so the card reads as paused-and-ready instead
    * of silently stopped or actively running. */
   setWaiting(planNumber: number, todoLabel: string): void;
+  /** Live auto-continue badge element (「自动续跑中 N/M」) on the card head. */
+  autoContinueEl: HTMLElement;
+  /** Current badge state (round/max), or null while no auto chain runs.
+   * Persisted across updatePlanCard upgrades so a mid-chain card rebind keeps
+   * the badge instead of dropping it when the card is rebuilt in place. */
+  autoContinueState: { round: number; max: number } | null;
+  /** Show the auto-continue badge on the card head. */
+  setAutoContinue(round: number, max: number): void;
+  /** Hide the auto-continue badge (chain ended / user took over). */
+  clearAutoContinue(): void;
 }
 
 // Refining-badge text-rotation timers, keyed by the badge element. The hint
@@ -148,6 +158,14 @@ export function createPlanCard(plan: Plan, refining: boolean, fallback: boolean,
   const count = document.createElement('span');
   count.className = 'plan-progress-count';
   count.textContent = `大概分成 ${plan.steps.length} 件事`;
+  // Live auto-continue badge: shown while an auto-continue chain is running
+  // (「自动续跑中 N/M」), hidden otherwise. chat.ts drives it via
+  // setAutoContinue / clearAutoContinue; the state survives updatePlanCard.
+  const autoBadge = document.createElement('span');
+  autoBadge.className = 'plan-progress-auto-continue';
+  autoBadge.setAttribute('role', 'status');
+  autoBadge.setAttribute('aria-live', 'polite');
+  autoBadge.hidden = true;
   const headParts: HTMLElement[] = [title];
   if (refining) {
     // Scaffold period: the LLM is still working out the real steps. Animated
@@ -191,6 +209,7 @@ export function createPlanCard(plan: Plan, refining: boolean, fallback: boolean,
     refiningTimers.set(badge, timer);
   }
   headParts.push(count);
+  headParts.push(autoBadge);
   head.append(...headParts);
 
   const activity = document.createElement('div');
@@ -300,6 +319,21 @@ export function createPlanCard(plan: Plan, refining: boolean, fallback: boolean,
       activity.classList.add('is-waiting');
       activity.textContent = `⏸ 已暂停：正在等你回复后开始第 ${planNumber} 项「${todoLabel}」`;
     },
+    autoContinueEl: autoBadge,
+    autoContinueState: null,
+    // These closures write through `handle` (not a captured local) so the state
+    // and element stay the single source of truth on the handle object —
+    // updatePlanCard can swap autoContinueEl to the fresh badge and re-apply
+    // without the closures going stale.
+    setAutoContinue: (round: number, max: number): void => {
+      handle.autoContinueState = { round, max };
+      handle.autoContinueEl.hidden = false;
+      handle.autoContinueEl.textContent = `${t('plan.autoContinue.badge', '自动续跑中')} ${round}/${max}`;
+    },
+    clearAutoContinue: (): void => {
+      handle.autoContinueState = null;
+      handle.autoContinueEl.hidden = true;
+    },
   };
   bindPlanCardProgress(handle, source);
   return handle;
@@ -333,6 +367,13 @@ export function updatePlanCard(h: PlanCardHandle, plan: Plan, refining: boolean,
   h.todoTitleEls = fresh.todoTitleEls;
   h.refiningEl = fresh.refiningEl;
   h.setActivity = fresh.setActivity;
+  // Keep the auto-continue badge alive across the in-place upgrade: point the
+  // (original) setAutoContinue/clearAutoContinue closures at the fresh badge
+  // element, then re-apply the persisted round/max state so a mid-chain card
+  // rebind doesn't drop the indicator.
+  h.autoContinueEl = fresh.autoContinueEl;
+  if (h.autoContinueState) h.setAutoContinue(h.autoContinueState.round, h.autoContinueState.max);
+  else h.clearAutoContinue();
   bindPlanCardProgress(h, source);
   if (previousActivity) h.setActivity(previousActivity);
 }

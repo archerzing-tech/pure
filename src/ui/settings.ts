@@ -17,6 +17,7 @@ import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
 import { buildMemoryExportJson, buildMemoryExportMarkdown, parseMemoryImport } from './memoryTransfer';
 import { showToastHtml } from '../shared/toast';
 import { showConfirmModal } from './modal';
+import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { buildExportSavedToast } from './statsExportToast';
 import {
   customProviderFor,
@@ -646,6 +647,10 @@ export class SettingsPanel {
     });
     document.getElementById('cfg-proxy-mode')?.addEventListener('change', () => this.updateProxyModeVisibility());
 
+    // The max-rounds field only makes sense while auto-continue is on — reveal
+    // it when the toggle is checked, hide it otherwise.
+    document.getElementById('cfg-auto-continue')?.addEventListener('change', () => this.updateAutoContinueVisibility());
+
     // Auto-save on all input/select/checkbox changes
     const autoSaveSelectors = [
       // LLM fields (api key / name / base URL / image gen / model editor) are
@@ -661,6 +666,7 @@ export class SettingsPanel {
       '#cfg-proxy-probe-0-enabled', '#cfg-proxy-probe-0-url', '#cfg-proxy-probe-1-enabled', '#cfg-proxy-probe-1-url', '#cfg-proxy-probe-2-enabled', '#cfg-proxy-probe-2-url',
       '#cfg-streaming-render',
       '#cfg-auto-continue',
+      '#cfg-auto-continue-rounds',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle',
       // Memory evolution thresholds (number inputs save on change/blur).
@@ -1300,6 +1306,15 @@ export class SettingsPanel {
     });
   }
 
+  /** Show/hide the max-rounds field based on the auto-continue toggle: the cap
+   *  is meaningless while the feature is off, so it stays collapsed then. */
+  private updateAutoContinueVisibility(): void {
+    const on = (document.getElementById('cfg-auto-continue') as HTMLInputElement | null)?.checked ?? false;
+    document.querySelectorAll('.auto-continue-rounds-row').forEach(el => {
+      el.classList.toggle('hidden', !on);
+    });
+  }
+
   // ── Theme ──
 
   private applyTheme(theme: string) {
@@ -1403,6 +1418,9 @@ export class SettingsPanel {
     if (streamingRenderEl) streamingRenderEl.checked = cfg.streamingRender;
     const autoContinueEl = document.getElementById('cfg-auto-continue') as HTMLInputElement | null;
     if (autoContinueEl) autoContinueEl.checked = cfg.autoContinue;
+    const autoContinueRoundsEl = document.getElementById('cfg-auto-continue-rounds') as HTMLInputElement | null;
+    if (autoContinueRoundsEl) autoContinueRoundsEl.value = String(cfg.autoContinueMaxRounds ?? DEFAULT_AUTO_CONTINUE_MAX_ROUNDS);
+    this.updateAutoContinueVisibility();
 
     (document.getElementById('cfg-fontsize') as HTMLSelectElement).value = cfg.fontSize;
     (document.getElementById('cfg-density') as HTMLSelectElement).value = cfg.density;
@@ -2530,8 +2548,10 @@ export class SettingsPanel {
       mcpServers: [...this.mcpServers],
       streamingRender: (document.getElementById('cfg-streaming-render') as HTMLInputElement | null)?.checked ?? true,
       autoContinue: (document.getElementById('cfg-auto-continue') as HTMLInputElement | null)?.checked ?? false,
-      // Preserve the max-rounds cap (not exposed in the panel).
-      autoContinueMaxRounds: (loadConfig() ?? defaults()).autoContinueMaxRounds,
+      // Max auto rounds per user message (Settings → General, next to the
+      // auto-continue toggle). Clamp to 1..20 so a typed value can't zero out
+      // the chain or spin it forever.
+      autoContinueMaxRounds: Math.min(20, Math.max(1, parseInt((document.getElementById('cfg-auto-continue-rounds') as HTMLInputElement | null)?.value ?? '', 10) || DEFAULT_AUTO_CONTINUE_MAX_ROUNDS)),
       // The composer's mode selector lives outside this form — carry its value
       // through so a settings save never silently resets a user's mode choice.
       taskMode: (loadConfig() ?? defaults()).taskMode,

@@ -587,3 +587,92 @@ describe('plan refining badge (3s hint rotation)', () => {
     }
   });
 });
+
+describe('plan auto-continue badge', () => {
+  function installFakeDocument(): () => void {
+    const previous = (globalThis as any).document;
+    (globalThis as any).document = {
+      createElement: (tag: string) => {
+        const children: any[] = [];
+        const classes = new Set<string>();
+        const element: any = {
+          tagName: tag.toUpperCase(),
+          children,
+          childNodes: children,
+          className: '',
+          dataset: {},
+          isConnected: true,
+          hidden: false,
+          classList: {
+            add: (...names: string[]) => names.forEach((name) => classes.add(name)),
+            remove: (...names: string[]) => names.forEach((name) => classes.delete(name)),
+            contains: (name: string) => classes.has(name),
+          },
+          append: (...items: any[]) => items.forEach((item) => children.push(item)),
+          appendChild: (item: any) => { children.push(item); return item; },
+          querySelector: () => null,
+          setAttribute: () => {},
+          textContent: '',
+        };
+        return element;
+      },
+    };
+    return () => { (globalThis as any).document = previous; };
+  }
+
+  const plan: Plan = {
+    reasoning: 'r',
+    steps: [
+      { id: '1', action: '计划一', description: 'd', expectedOutcome: 'o' },
+      { id: '2', action: '计划二', description: 'd', expectedOutcome: 'o' },
+    ],
+  };
+
+  it('starts hidden and shows the round/max text on setAutoContinue', () => {
+    const restore = installFakeDocument();
+    try {
+      const card = createPlanCard(plan, false, false, new PlanProgressModel(plan));
+      expect(card.autoContinueState).toBeNull();
+      expect(card.autoContinueEl.hidden).toBe(true);
+      card.setAutoContinue(2, 8);
+      expect(card.autoContinueState).toEqual({ round: 2, max: 8 });
+      expect(card.autoContinueEl.hidden).toBe(false);
+      expect(card.autoContinueEl.textContent).toBe(`${t('plan.autoContinue.badge')} 2/8`);
+    } finally {
+      restore();
+    }
+  });
+
+  it('clearAutoContinue hides the badge and resets the state', () => {
+    const restore = installFakeDocument();
+    try {
+      const card = createPlanCard(plan, false, false, new PlanProgressModel(plan));
+      card.setAutoContinue(1, 8);
+      card.clearAutoContinue();
+      expect(card.autoContinueState).toBeNull();
+      expect(card.autoContinueEl.hidden).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('updatePlanCard swaps the badge element and re-applies the persisted state', () => {
+    const restore = installFakeDocument();
+    try {
+      const card = createPlanCard(plan, false, false, new PlanProgressModel(plan));
+      card.setAutoContinue(3, 8);
+      const src = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
+      expect(src).toContain('h.autoContinueEl = fresh.autoContinueEl;');
+      expect(src).toContain('h.setAutoContinue(h.autoContinueState.round, h.autoContinueState.max)');
+    } finally {
+      restore();
+    }
+  });
+
+  it('chat.ts drives the badge on auto rounds and clears it on takeover', () => {
+    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    expect(src).toContain('this.activePlanCardHandle?.setAutoContinue(round, max);');
+    expect(src).toContain('this.activePlanCardHandle?.clearAutoContinue();');
+    expect(src).toContain('if (scheduled) this.activePlanCardHandle?.setAutoContinue(this.autoContinue.roundCount + 1, max);');
+  });
+});

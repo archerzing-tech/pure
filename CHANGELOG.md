@@ -3,6 +3,15 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.14-alpha
+
+**自动续跑徽标 + 设置面板轮数配置 + 发布流水线重构**
+
+- 计划卡头部新增自动续跑状态徽标「自动续跑中 N/M」，实时显示当前轮数与上限；链结束/计划完成/用户接管时自动熄灭
+- 设置面板（设置 → 长任务自动续跑）暴露 `autoContinueMaxRounds`（1–20，默认 8），关闭时行收起；自动续跑气泡文案改为 `🔁 自动续跑 N/M：继续处理计划 X`
+- 修复徽标 `.plan-progress-auto-continue` 的 `display: inline-flex` 覆盖 `[hidden]` 导致清除后仍可见的问题；同步修复轮数输入行 `.hidden` 被父级 `.setting-row` flex 覆盖的问题
+- 发布流水线重排：Windows 64 构建在前（创建 release + Windows 产物），macOS Intel 构建在后（产出完整包含自动更新），移除 ARM 构建
+
 ## v1.9.13
 
 **多阶段计划续跑稳定性 + 简化计划视图**

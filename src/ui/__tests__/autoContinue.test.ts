@@ -111,6 +111,22 @@ describe('AutoContinueScheduler — round budget', () => {
     await wait(5);
     expect(fired).toBe(2);
   });
+
+  it('roundCount reflects how many rounds have fired and resets on cancel', async () => {
+    const s = new AutoContinueScheduler();
+    let fired = 0;
+    expect(s.roundCount).toBe(0);
+    expect(s.schedule(signals(), 3, 1, () => fired++)).toBe(true);
+    await wait(5);
+    expect(fired).toBe(1);
+    expect(s.roundCount).toBe(1);
+    expect(s.schedule(signals(), 3, 1, () => fired++)).toBe(true);
+    await wait(5);
+    expect(fired).toBe(2);
+    expect(s.roundCount).toBe(2);
+    s.cancel();
+    expect(s.roundCount).toBe(0);
+  });
 });
 
 describe('AutoContinueScheduler — abort semantics', () => {

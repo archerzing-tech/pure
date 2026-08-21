@@ -53,6 +53,12 @@ export class AutoContinueScheduler {
     return this.timer !== null;
   }
 
+  /** Auto rounds already fired for the current user message (0 = none yet).
+   *  Exposed so the UI can show a round/max hint on each 🔁 continuation. */
+  get roundCount(): number {
+    return this.round;
+  }
+
   /** Clear any pending continuation and reset the round budget + stall cursor. */
   cancel(): void {
     this.token++;

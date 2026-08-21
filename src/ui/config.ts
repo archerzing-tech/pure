@@ -134,8 +134,8 @@ export interface PureConfig {
   autoContinue: boolean;
   /**
    * Max auto rounds per user message (loop protection; also enforced by stall
-   * detection). Not exposed in the settings panel — kept as a config field for
-   * power users / future UI.
+   * detection). Edited in Settings → General next to the auto-continue toggle
+   * (1..20, default 8).
    */
   autoContinueMaxRounds: number;
   /**

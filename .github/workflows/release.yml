@@ -5,120 +5,17 @@ on:
     tags: ['v*']
 
 jobs:
-  release:
-    runs-on: macos-latest
-    permissions:
-      contents: write
-    # secrets can't be read inside `if:` expressions, so mirror the Apple
-    # signing secret's presence into a job-level env var we CAN branch on.
-    env:
-      HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
-
-    steps:
-      # Node 24 runtime (v4 pinned node20, which GitHub now deprecates — v4
-      # still runs but emits a deprecation annotation on every release).
-      - uses: actions/checkout@v5
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Run tests
-        run: bun test
-
-      - name: Build CLI binary (macOS arm64)
-        run: bun run cli:build
-
-      # ── Release summary: pull this version's section from CHANGELOG.md ──
-      # The changelog lives in CHANGELOG.md (not the README); each tag's
-      # section becomes the GitHub release body, plus the download note.
-      - name: Prepare release notes
-        id: notes
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          NOTES="$(awk -v v="## v${VERSION}" 'BEGIN{f=0} $0==v{f=1; next} f && /^## v/{exit} f{print}' CHANGELOG.md)"
-          if [ -z "$NOTES" ]; then
-            NOTES="See the changelog: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md"
-          fi
-          NOTES="${NOTES}"$'\n\n---\n\nDownload the macOS DMG, the Windows installer (.exe), or the CLI binary (`pure` / `pure.exe`) below.'
-          {
-            echo 'body<<EOF'
-            echo "$NOTES"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      # ── Build & publish GUI via Tauri's official action ──
-      # Two variants, selected by whether the Apple signing secrets exist:
-      #   * Signed   (APPLE_CERTIFICATE present)  → codesign + notarize
-      #   * Unsigned (APPLE_CERTIFICATE missing)  → plain build, no signing
-      # CRITICAL: do NOT pass empty APPLE_* env vars — tauri-bundler sees an
-      # empty APPLE_CERTIFICATE as "present" and runs `security import` with an
-      # empty cert, failing the whole release. The unsigned variant omits them.
-      - name: Build and publish GUI (signed)
-        if: env.HAS_APPLE_SIGNING == 'true'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Pure v__VERSION__'
-          releaseBody: ${{ steps.notes.outputs.body }}
-          releaseDraft: false
-          prerelease: false
-
-      - name: Build and publish GUI (unsigned)
-        if: env.HAS_APPLE_SIGNING == 'false'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Pure v__VERSION__'
-          releaseBody: ${{ steps.notes.outputs.body }}
-          releaseDraft: false
-          prerelease: false
-
-      # ── Attach CLI binary to the release created by tauri-action ──
-      - name: Upload CLI binary
-        # v3 = Node 24 runtime (v2 pinned node20 → deprecation annotation).
-        # v3.0.0's only breaking change is the runtime move; tag_name/files
-        # inputs are unchanged.
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: pure
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ── Windows 10+ GUI + CLI build ──
-  # Runs right after the arm64 release job (which creates the GitHub release),
-  # and BEFORE the macOS Intel job so the two architecture uploads stay ordered
-  # and never race each other on the same release.
-  # Produces an NSIS installer (.exe) — the Windows update artifacts
-  # (createUpdaterArtifacts) are built alongside it. A native Windows runner is
-  # required: Tauri cannot cross-compile the NSIS/MSI bundle from macOS.
+  # ── Windows 10+ GUI + CLI build (runs FIRST and creates the GitHub release) ──
+  # Builds the Windows x86_64 installer (.exe) + CLI on a native Windows runner
+  # (Tauri cannot cross-compile the NSIS/MSI bundle from macOS). tauri-action
+  # creates the release for the tag if it does not exist yet, then uploads the
+  # NSIS installer plus the Windows updater artifacts (createUpdaterArtifacts)
+  # and the windows-x86_64 entry of latest.json. The macOS Intel job runs after
+  # this one: the release already exists, and tauri-action merges the Intel
+  # platform entry into the same latest.json (see tauri-action's
+  # upload-version-json.ts — it reads the existing asset and keeps its
+  # platforms map before adding its own).
   windows-release:
-    needs: release
     runs-on: windows-latest
     permissions:
       contents: write
@@ -187,14 +84,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── macOS Intel GUI build ──
-  # macos-latest is now Apple Silicon, so it only produces an arm64 DMG.
-  # Build the Intel installer on the last Intel-hosted macOS runner as a
-  # separate asset. Only the DMG is published here; the arm64 job remains the
-  # source of latest.json so updater metadata is not overwritten by a second
-  # architecture job. Runs after the Windows job so release uploads stay
-  # ordered.
+  # macos-latest is now Apple Silicon, so the Intel installer is built on the
+  # last Intel-hosted macOS runner (macos-13) as the SOLE macOS build — no ARM
+  # version is produced. It publishes the full macOS bundle (app + dmg + the
+  # .app.tar.gz updater artifacts), so it is the source of the darwin-x86_64
+  # entry in latest.json and macOS auto-update keeps working. Runs after the
+  # Windows job so release uploads stay ordered and the two platforms merge
+  # into one latest.json.
   macos-x64-release:
-    needs: [release, windows-release]
+    needs: windows-release
     runs-on: macos-13
     permissions:
       contents: write
@@ -231,7 +129,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Pure v__VERSION__'
-          args: '--bundles dmg'
           releaseDraft: false
           prerelease: false
 
@@ -245,7 +142,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Pure v__VERSION__'
-          args: '--bundles dmg'
           releaseDraft: false
           prerelease: false
 
