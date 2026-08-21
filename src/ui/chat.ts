@@ -1218,6 +1218,10 @@ export class ChatController {
   // persist even though activeComplexPlan is cleared on completion.
   private activePlanCardSnapshot: PlanCardSnapshot | null = null;
   private activePlanProgress: PlanProgressModel | null = null;
+  // Live handle of the plan card currently in the transcript. A continuation
+  // turn rebinds THIS card to a fresh progress model (updatePlanCard) instead
+  // of appending a duplicate card per round.
+  private activePlanCardHandle: PlanCardHandle | null = null;
   private activePlanProgressUnsubscribe?: () => void;
   private activePlanProgressPersistence?: SessionPlanProgressPersistence;
   /** Whether the active plan was approved as a project build — carried across
@@ -1704,7 +1708,11 @@ export class ChatController {
     // must NOT reset the budget — it IS the chain.
     this.abortController?.abort();
     this.verifierAbort?.abort();
-    if (!isAuto) this.autoContinue.cancel();
+    if (!isAuto) {
+      this.autoContinue.cancel();
+      // A manual send takes over the chain: drop the in-flight badge right away.
+      this.activePlanCardHandle?.clearAutoContinue();
+    }
     const gen = ++this.generation;
     // The plan-card snapshot belongs to this turn only; a follow-up simple
     // task must not re-attach a stale card from a previous complex plan.
@@ -2373,6 +2381,7 @@ export class ChatController {
         planCard.el.remove();
         planCard = null;
         planProgress = null;
+        this.activePlanCardHandle = null;
         this.detachActivePlanProgress();
         this.activePlanCardSnapshot = null;
         this.activePlanProgress = null;
@@ -2433,6 +2442,7 @@ export class ChatController {
               planCard = createPlanCard(plan, refining, fallback, planProgress);
               chatEl.appendChild(planCard.el);
             }
+            this.activePlanCardHandle = planCard;
             this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
             scrollChatToBottomIfPinned(chatEl);
           };
@@ -2623,29 +2633,44 @@ export class ChatController {
               );
             }
           }
-        } else if (continuingPlan && this.activeComplexPlan) {
-            userPlan = formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate);
-            planProgress = new PlanProgressModel(this.activeComplexPlan, 'active', this.activePlanNumber, this.activeTodoNumber, this.activePlanProjectBuild);
-            const restored = createPlanCard(this.activeComplexPlan, false, false, planProgress);
-            planCard = restored;
-            this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
-            chatEl.appendChild(planCard.el);
-            this.addStatusBubble(`收到，我们继续处理第 ${this.activePlanNumber} 阶段的第 ${this.activeTodoNumber} 个 Todo，不重新规划。`, false, false);
-            // 用户回复即明确“开工”：聊天中的计划卡从「等待回复」切回「正在执行」。
-            planProgress?.dispatch({ type: 'statusChanged', status: 'active' });
-            scrollChatToBottomIfPinned(chatEl);
-          } else if (forcedMode === 'plan' || forcedMode === 'build') {
-        // The plan gate needs a real filesystem root (and the Planning skill);
-        // without it a forced plan/build would silently do nothing. Surface the
-        // mismatch instead of ignoring the user's mode choice.
-        if (!needsDeliveryGate) {
-          this.addStatusBubble(
-            effectiveWorkspace
-              ? t('plan.modeDisabled', '🧭 计划/构建模式已被禁用（设置 → Skills → Planning），本次按普通对话继续')
-              :              t('plan.modeNoWorkspace', '🧭 计划/构建模式需要先选择工作区，本次按普通对话继续'),
-          );
+        } else if (forcedMode === 'plan' || forcedMode === 'build') {
+          // The plan gate needs a real filesystem root (and the Planning skill);
+          // without it a forced plan/build would silently do nothing. Surface the
+          // mismatch instead of ignoring the user's mode choice.
+          if (!needsDeliveryGate) {
+            this.addStatusBubble(
+              effectiveWorkspace
+                ? t('plan.modeDisabled', '🧭 计划/构建模式已被禁用（设置 → Skills → Planning），本次按普通对话继续')
+                : t('plan.modeNoWorkspace', '🧭 计划/构建模式需要先选择工作区，本次按普通对话继续'),
+            );
+          }
         }
-      }
+      } else if (continuingPlan && this.activeComplexPlan) {
+        // Continuation turn (auto-continue round or a user follow-up while a
+        // plan is active): shouldRunTaskAnalysis is false by definition here,
+        // so this branch MUST live outside that block. It used to be its
+        // else-arm — dead code, since !continuingPlan gates the whole block —
+        // leaving planProgress null for the entire round: stage markers had no
+        // model to advance, the card froze on the first turn's state, and 🔁
+        // rounds looped until maxRounds.
+        userPlan = formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate);
+        planProgress = new PlanProgressModel(this.activeComplexPlan, 'active', this.activePlanNumber, this.activeTodoNumber, this.activePlanProjectBuild);
+        const existingCard = this.activePlanCardHandle?.el.isConnected ? this.activePlanCardHandle : null;
+        if (existingCard) {
+          // One stable progress list per transcript: rebind the SAME card to
+          // the fresh model instead of stacking a duplicate every round.
+          updatePlanCard(existingCard, this.activeComplexPlan, false, false, planProgress);
+          planCard = existingCard;
+        } else {
+          planCard = createPlanCard(this.activeComplexPlan, false, false, planProgress);
+          chatEl.appendChild(planCard.el);
+        }
+        this.activePlanCardHandle = planCard;
+        this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
+        this.addStatusBubble(`收到，我们继续处理第 ${this.activePlanNumber} 阶段的第 ${this.activeTodoNumber} 个 Todo，不重新规划。`, false, false);
+        // 用户回复即明确“开工”：聊天中的计划卡从「等待回复」切回「正在执行」。
+        planProgress?.dispatch({ type: 'statusChanged', status: 'active' });
+        scrollChatToBottomIfPinned(chatEl);
       }
 
       if (needsDeliveryGate && !effectiveWorkspace) {
@@ -3774,7 +3799,13 @@ export class ChatController {
               hasToolSuccess,
               currentPlan: completionSnapshot?.currentPlan ?? -1,
               currentTodo: completionSnapshot?.currentTodo ?? -1,
-              planTerminal: planMarkedCompleted || (needsDeliveryGate && !qualityPassed),
+              // planTerminal must ALSO catch marker-driven completion: the last
+              // stage's `## 计划 n 已完成` goes through finishPlan → phaseStarted
+              // beyond the list → applyCompleted, which nulls activeComplexPlan
+              // without ever dispatching the turn-end 'completed' action.
+              planTerminal: planMarkedCompleted
+                || (this.activeComplexPlan === null && this.activePlanCardSnapshot?.complete === true)
+                || (needsDeliveryGate && !qualityPassed),
             };
             break;
           }
@@ -3981,13 +4012,25 @@ export class ChatController {
       if (ownsTurn && pendingAuto !== null && gen === this.generation) {
         const cfgNow = loadConfig();
         if (cfgNow?.autoContinue === true) {
-          this.autoContinue.schedule(
+          const max = cfgNow.autoContinueMaxRounds ?? DEFAULT_AUTO_CONTINUE_MAX_ROUNDS;
+          const scheduled = this.autoContinue.schedule(
             pendingAuto,
-            cfgNow.autoContinueMaxRounds ?? DEFAULT_AUTO_CONTINUE_MAX_ROUNDS,
+            max,
             AUTO_CONTINUE_DELAY_MS,
             () => this.fireAutoContinue(),
           );
+          // Reflect the chain state on the plan card: a scheduled next round
+          // keeps the badge (advanced to the pending round), the chain ending
+          // (terminal / budget / stall) clears it.
+          if (scheduled) this.activePlanCardHandle?.setAutoContinue(this.autoContinue.roundCount + 1, max);
+          else this.activePlanCardHandle?.clearAutoContinue();
+        } else {
+          // Auto-continue turned off mid-chain — drop the badge.
+          this.activePlanCardHandle?.clearAutoContinue();
         }
+      } else {
+        // No eligible signals / superseded turn: the chain is over.
+        this.activePlanCardHandle?.clearAutoContinue();
       }
     }
   }
@@ -4009,6 +4052,7 @@ export class ChatController {
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;
     this.activePlanCardSnapshot = null;
+    this.activePlanCardHandle = null;
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
@@ -4040,11 +4084,13 @@ export class ChatController {
     this.verifierAbort?.abort();
     // Stop / Escape take the human back: kill any pending auto-continue too.
     this.autoContinue.cancel();
+    this.activePlanCardHandle?.clearAutoContinue();
   }
 
   /** Cancel a pending auto-continue (user started typing / any other takeover). */
   cancelAutoContinue(): void {
     this.autoContinue.cancel();
+    this.activePlanCardHandle?.clearAutoContinue();
   }
 
   /** Fire the next auto round. Runs from the scheduler timer; re-checks that
@@ -4054,7 +4100,13 @@ export class ChatController {
     const cfg = loadConfig();
     if (!cfg || cfg.autoContinue !== true) return;
     if (!this.activeComplexPlan || this.pausePlanCard) return;
-    void this.send('继续', [], `🔁 自动续跑：继续处理计划 ${this.activePlanNumber}`, true);
+    // Round/max hint: the scheduler already bumped its counter to this round,
+    // so the bubble tells the user how far along the auto chain is — and the
+    // plan card shows the same N/M on its live badge.
+    const round = this.autoContinue.roundCount;
+    const max = cfg.autoContinueMaxRounds ?? DEFAULT_AUTO_CONTINUE_MAX_ROUNDS;
+    this.activePlanCardHandle?.setAutoContinue(round, max);
+    void this.send('继续', [], `🔁 自动续跑 ${round}/${max}：继续处理计划 ${this.activePlanNumber}`, true);
   }
 
   private async persistSession(

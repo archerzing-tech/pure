@@ -346,6 +346,12 @@
                     <div class="setting-info"><span class="setting-label" data-i18n="general.autoContinue">Auto-continue long tasks</span><span class="setting-hint" data-i18n="general.autoContinue.hint">Keep executing after each plan stage instead of waiting for “继续”</span></div>
                     <label class="toggle"><input type="checkbox" id="cfg-auto-continue" /><span class="toggle-slider"></span></label>
                   </div>
+                  <div class="setting-row auto-continue-rounds-row" hidden>
+                    <div class="setting-info"><span class="setting-label" data-i18n="general.autoContinueRounds">Max auto rounds</span><span class="setting-hint" data-i18n="general.autoContinueRounds.hint">Cap on auto-continue rounds per message</span></div>
+                    <div class="setting-input-group auto-continue-rounds-input">
+                      <input id="cfg-auto-continue-rounds" class="setting-input" type="number" min="1" max="20" step="1" value="8" />
+                    </div>
+                  </div>
                 </div>
                 <h3 class="settings-section-title" data-i18n="env.title">Environment</h3>
                 <div class="settings-section">

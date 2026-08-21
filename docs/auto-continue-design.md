@@ -16,6 +16,7 @@
 - `PureConfig.autoContinueMaxRounds: number`（默认 **8**）
 - `configVersion` 12 → 13
 - Settings → General 新增「长任务自动续跑」开关（`#cfg-auto-continue`），复用 `#cfg-streaming-render` 的 apply/collect 模式。
+- 开关下方暴露「单条消息最大续跑轮数」（`#cfg-auto-continue-rounds`，1–20，默认 8，仅开关开启时显示）——`autoContinueMaxRounds` 不再是隐藏字段。
 - 关闭时：与现状完全一致（每阶段边界照旧"回复继续"），零回归。
 
 ## 3. 触发条件（每轮结束后同时满足才排程下一轮）
@@ -41,7 +42,8 @@
   - Stop / Escape（`chat.cancel()`）；
   - 切换会话 / 新建对话 / `clear()`；
   - 配置被改回关闭（触发时复查 `loadConfig()`，关闭则不续）。
-- **自动轮标记**：自动轮调用 `send('继续', [], '🔁 自动续跑：继续处理计划 X', true)`——模型侧收到干净的"继续"（continuation 分支会构建完整续跑提示），界面侧用户气泡显示 🔁 标记；`isAuto` 参数保证不重置轮数预算。
+- **自动轮标记**：自动轮调用 `send('继续', [], '🔁 自动续跑 N/M：继续处理计划 X', true)`——模型侧收到干净的"继续"（continuation 分支会构建完整续跑提示），界面侧用户气泡显示 🔁 标记并带轮数可视提示（`N/M`，N 为已触发的自动轮序号，M 为 `autoContinueMaxRounds`）；`isAuto` 参数保证不重置轮数预算。
+- **计划卡实时徽标**：链运行期间计划卡头部显示「自动续跑中 N/M」徽标（`plan-progress-auto-continue`，脉冲圆点 + 文案），由 `chat.ts` 通过 `PlanCardHandle.setAutoContinue` / `clearAutoContinue` 驱动：`fireAutoContinue()` 开跑时点亮，`send()` 收尾排程下一轮时推进为 `(roundCount+1)/M`，链结束（终态 / 触顶 / 停滞 / 配置关闭）或用户接管（Stop / 输入 / 新发送）时熄灭。`updatePlanCard` 原位重建卡片时保留徽标状态，续跑轮不会把指示器冲掉。
 
 ## 5. 循环保护
 
@@ -55,12 +57,13 @@
 
 | 文件 | 改动 |
 | --- | --- |
-| `src/ui/autoContinue.ts` | 新增：`AutoContinueSignals` 类型 + `AutoContinueScheduler` 纯逻辑（排程/取消/停滞检测/轮数预算） |
+| `src/ui/autoContinue.ts` | 新增：`AutoContinueSignals` 类型 + `AutoContinueScheduler` 纯逻辑（排程/取消/停滞检测/轮数预算）+ `roundCount` getter（供界面显示轮数） |
+| `src/ui/plan.ts` | `PlanCardHandle` 新增 `setAutoContinue` / `clearAutoContinue` / `autoContinueState` / `autoContinueEl`；创建时渲染隐藏徽标，`updatePlanCard` 保留并重放状态 |
 | `src/ui/config.ts` | `autoContinue` / `autoContinueMaxRounds` 字段、defaults()、configVersion 13 |
-| `src/ui/settings.ts` | `#cfg-auto-continue` 的 autosave 选择器、apply、collect |
-| `index.html` | General 页新增开关行 |
-| `src/shared/i18n.ts` | `general.autoContinue` / `general.autoContinue.hint`（中/英） |
-| `src/ui/chat.ts` | send() 入口 `isAuto` 参数 + 中止语义；Completed case 记录信号；finally 排程；`cancel()`/`clear()`/`setSessionId()` 清理；`cancelAutoContinue()` 公开方法 |
+| `src/ui/settings.ts` | `#cfg-auto-continue` / `#cfg-auto-continue-rounds` 的 autosave 选择器、apply、collect、可见性切换 |
+| `index.html` | General 页新增开关行 + 轮数上限输入行 |
+| `src/shared/i18n.ts` | `general.autoContinue` / `general.autoContinue.hint` / `general.autoContinueRounds` / `general.autoContinueRounds.hint`（中/英） |
+| `src/ui/chat.ts` | send() 入口 `isAuto` 参数 + 中止语义；Completed case 记录信号；finally 排程；`cancel()`/`clear()`/`setSessionId()` 清理；`cancelAutoContinue()` 公开方法；`fireAutoContinue()` 气泡带 `N/M` 轮数 |
 | `src/ui/main.ts` | 两个 composer 的 input 监听挂 `chat.cancelAutoContinue()` |
 | `src/ui/__tests__/autoContinue.test.ts` | 单测：触发/中止/触顶/停滞/confirm 语义 |
 

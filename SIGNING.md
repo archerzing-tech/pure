@@ -400,9 +400,9 @@ For an out-of-band check, verify with `minisign` (Tauri's updater format is mini
 # Install once
 brew install minisign
 
-# Download the artifact + signature (asset names from the GitHub release, e.g. pure_aarch64.app.tar.gz)
-curl -L -o pure.app.tar.gz https://releases.pure.app/.../pure_aarch64.app.tar.gz
-curl -L -o pure.app.tar.gz.sig https://releases.pure.app/.../pure_aarch64.app.tar.gz.sig
+# Download the artifact + signature (asset names from the GitHub release, e.g. pure_x64.app.tar.gz — the release builds only the macOS Intel build; the macOS ARM build was removed)
+curl -L -o pure.app.tar.gz https://releases.pure.app/.../pure_x64.app.tar.gz
+curl -L -o pure.app.tar.gz.sig https://releases.pure.app/.../pure_x64.app.tar.gz.sig
 
 # Extract the pubkey from tauri.conf.json to a temp file
 python3 -c "import json,base64; open('/tmp/pure.pub','w').write(base64.b64decode(json.load(open('src-tauri/tauri.conf.json'))['plugins']['updater']['pubkey']).decode())"

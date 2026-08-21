@@ -1,6 +1,6 @@
 {
   "name": "pure",
-  "version": "1.9.13",
+  "version": "1.9.14-alpha",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,6 +16,8 @@
     "verify:plan-session": "bun run scripts/verify-plan-restore.ts --scenario=session",
     "verify:plan-progress": "bun run scripts/verify-plan-restore.ts --scenario=progress",
     "verify:gates": "bun run scripts/verify-plan-restore.ts --scenario=gates",
+    "verify:auto-continue": "bun run scripts/verify-auto-continue.ts",
+    "verify:auto-continue-abort": "bun run scripts/verify-auto-continue.ts --scenario=abort",
     "eval:baseline": "bun run scripts/run-evals.ts",
     "typecheck": "bun run --no-run tsc --noEmit",
     "build": "bun run typecheck && npx vite build && bun run cli:build",
