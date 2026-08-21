@@ -214,3 +214,24 @@ export class PlanProgressModel {
     }
   }
 }
+
+/**
+ * Decide whether a normally-finished, tool-bearing turn should advance the plan
+ * cursor by one stage. `completedPlan` is the plan number whose
+ * `## 计划 n 已完成` marker already advanced the cursor this turn (null when
+ * none did). When the cursor already moved past a completed stage
+ * (`currentPlan === completedPlan + 1`), advancing again would skip the next
+ * stage — so the fallback only fires when the stage just worked on still needs
+ * an implicit push.
+ */
+export function shouldAdvancePlanAtTurnEnd(
+  planFinished: boolean,
+  snapshot: PlanProgressSnapshot | undefined,
+  completedPlan: number | null,
+): boolean {
+  if (!planFinished || !snapshot) return false;
+  if (snapshot.currentPlan >= snapshot.plan.steps.length) return false;
+  const markerAdvanced = completedPlan !== null
+    && snapshot.currentPlan === completedPlan + 1;
+  return !markerAdvanced;
+}

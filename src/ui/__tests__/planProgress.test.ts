@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { PlanProgressModel, type PlanProgressSnapshot } from '../planProgress';
+import { PlanProgressModel, shouldAdvancePlanAtTurnEnd, type PlanProgressSnapshot } from '../planProgress';
 import type { Plan } from '../../coding-agent/types';
 
 function plan(): Plan {
@@ -93,5 +93,45 @@ describe('PlanProgressModel', () => {
     });
 
     expect(restored.getSnapshot()).toMatchObject({ currentPlan: 3, currentTodo: 3, status: 'complete' });
+  });
+});
+
+describe('shouldAdvancePlanAtTurnEnd', () => {
+  function threeStepPlan(): Plan {
+    return {
+      reasoning: '',
+      steps: [
+        { id: '1', action: '一', description: '', expectedOutcome: '' },
+        { id: '2', action: '二', description: '', expectedOutcome: '' },
+        { id: '3', action: '三', description: '', expectedOutcome: '' },
+      ],
+    };
+  }
+
+  function snapshotAt(currentPlan: number, currentTodo = 1): PlanProgressSnapshot {
+    return new PlanProgressModel(threeStepPlan(), 'active', currentPlan, currentTodo).getSnapshot();
+  }
+
+  it('does not advance again when the completion marker already moved the cursor (no skipped stage)', () => {
+    // 模型本轮发出 `## 计划 1 已完成`：finishPlan 已把游标推到 2，并记录
+    // completedPlan = 1。此时回合正常结束若再推进一次就会从 2 跳到 3，
+    // 第 2 阶段被整段跳过——这是本次要防住的跳阶段回归。
+    const snapshot = snapshotAt(2);
+    expect(shouldAdvancePlanAtTurnEnd(true, snapshot, 1)).toBe(false);
+  });
+
+  it('advances one stage as the fallback when the model omitted the completion marker', () => {
+    // 模型做了第 1 阶段的工作但漏发 `## 计划 1 已完成`：游标仍在 1，
+    // completedPlan 为 null，兜底应推进一格到第 2 阶段。
+    expect(shouldAdvancePlanAtTurnEnd(true, snapshotAt(1), null)).toBe(true);
+  });
+
+  it('does not advance on the last plan or when the turn did not finish a stage', () => {
+    // 已在最后一个计划上：完成态交给 planProgress.dispatch({type:'completed'})。
+    expect(shouldAdvancePlanAtTurnEnd(true, snapshotAt(3), null)).toBe(false);
+    // 本轮没有真实完成工作（提问/中断等），不该推进。
+    expect(shouldAdvancePlanAtTurnEnd(false, snapshotAt(1), null)).toBe(false);
+    // 没有计划快照，更不该推进。
+    expect(shouldAdvancePlanAtTurnEnd(true, undefined, null)).toBe(false);
   });
 });
