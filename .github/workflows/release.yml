@@ -110,87 +110,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── macOS Intel GUI build ──
-  # macos-latest is now Apple Silicon, so it only produces an arm64 DMG.
-  # Build the Intel installer on the last Intel-hosted macOS runner as a
-  # separate asset. Only the DMG is published here; the arm64 job remains the
-  # source of latest.json so updater metadata is not overwritten by a second
-  # architecture job.
-  macos-x64-release:
-    needs: release
-    runs-on: macos-13
-    permissions:
-      contents: write
-    env:
-      HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Build and publish GUI (signed, Intel)
-        if: env.HAS_APPLE_SIGNING == 'true'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Pure v__VERSION__'
-          args: '--bundles dmg'
-          releaseDraft: false
-          prerelease: false
-
-      - name: Build and publish GUI (unsigned, Intel)
-        if: env.HAS_APPLE_SIGNING == 'false'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Pure v__VERSION__'
-          args: '--bundles dmg'
-          releaseDraft: false
-          prerelease: false
-
-      - name: Build CLI binary (macOS x86_64)
-        run: bun run cli:build && mv pure pure_x86_64
-
-      - name: Upload CLI binary (macOS x86_64)
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: pure_x86_64
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   # ── Windows 10+ GUI + CLI build ──
-  # Runs AFTER both macOS architecture jobs so the release it publishes to
-  # already exists and the architecture uploads do not race each other.
+  # Runs right after the arm64 release job (which creates the GitHub release),
+  # and BEFORE the macOS Intel job so the two architecture uploads stay ordered
+  # and never race each other on the same release.
   # Produces an NSIS installer (.exe) — the Windows update artifacts
   # (createUpdaterArtifacts) are built alongside it. A native Windows runner is
   # required: Tauri cannot cross-compile the NSIS/MSI bundle from macOS.
   windows-release:
-    needs: [release, macos-x64-release]
+    needs: release
     runs-on: windows-latest
     permissions:
       contents: write
@@ -255,5 +183,79 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           files: pure.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── macOS Intel GUI build ──
+  # macos-latest is now Apple Silicon, so it only produces an arm64 DMG.
+  # Build the Intel installer on the last Intel-hosted macOS runner as a
+  # separate asset. Only the DMG is published here; the arm64 job remains the
+  # source of latest.json so updater metadata is not overwritten by a second
+  # architecture job. Runs after the Windows job so release uploads stay
+  # ordered.
+  macos-x64-release:
+    needs: [release, windows-release]
+    runs-on: macos-13
+    permissions:
+      contents: write
+    env:
+      HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build and publish GUI (signed, Intel)
+        if: env.HAS_APPLE_SIGNING == 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Pure v__VERSION__'
+          args: '--bundles dmg'
+          releaseDraft: false
+          prerelease: false
+
+      - name: Build and publish GUI (unsigned, Intel)
+        if: env.HAS_APPLE_SIGNING == 'false'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Pure v__VERSION__'
+          args: '--bundles dmg'
+          releaseDraft: false
+          prerelease: false
+
+      - name: Build CLI binary (macOS x86_64)
+        run: bun run cli:build && mv pure pure_x86_64
+
+      - name: Upload CLI binary (macOS x86_64)
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: pure_x86_64
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
