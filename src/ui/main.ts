@@ -903,6 +903,8 @@ const profileGlobal = window as unknown as { __pureInputProfile: () => void };
 profileGlobal.__pureInputProfile = dumpInputProfiles;
 
 landingPrompt.addEventListener('input', () => {
+  // Typing = human takeover: stop any pending auto-continue chain.
+  chat.cancelAutoContinue();
   profileInput('landing', () => {
     // Only write when the height actually changed — see autoResizePrompt() for
     // why per-keystroke forced layout stalls sidebar animations.
@@ -930,6 +932,8 @@ landingPrompt.addEventListener('keydown', (e) => {
 // ── Chat (bottom) input auto-resize ──
 
 promptEl.addEventListener('input', () => {
+  // Typing = human takeover: stop any pending auto-continue chain.
+  chat.cancelAutoContinue();
   profileInput('chat', () => {
     autoResizePrompt();
     if (!chat.isStreaming()) {

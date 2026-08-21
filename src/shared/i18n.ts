@@ -168,6 +168,8 @@ const translations: Record<Language, Record<string, string>> = {
     'general.language.hint': '界面语言',
     'general.streaming': '流式渲染',
     'general.streaming.hint': '逐字格式化助手的回复',
+    'general.autoContinue': '长任务自动续跑',
+    'general.autoContinue.hint': '复杂计划任务每完成一个阶段后自动继续执行，无需手动回复「继续」',
 
     // ── Environment (Settings → General) ──
     'env.title': '环境上下文',
@@ -902,6 +904,8 @@ const translations: Record<Language, Record<string, string>> = {
     'general.language.hint': 'Interface language',
     'general.streaming': 'Streaming render',
     'general.streaming.hint': 'Format assistant reply progressively',
+    'general.autoContinue': 'Auto-continue long tasks',
+    'general.autoContinue.hint': 'Automatically keep executing after each plan stage instead of waiting for “继续”',
 
     // ── Environment (Settings → General) ──
     'env.title': 'Environment',

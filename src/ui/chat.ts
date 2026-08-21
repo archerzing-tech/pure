@@ -36,6 +36,7 @@ import {
   type PlanCardHandle,
 } from './plan';
 import { PlanProgressModel, shouldAdvancePlanAtTurnEnd, type PlanProgressSnapshot } from './planProgress';
+import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
 import { attachPlanPauseActions } from './planPauseActions';
@@ -1254,6 +1255,12 @@ export class ChatController {
   // "等待你回复" state. Cleared on continue / cancel / clear.
   private pausePlanCard: PlanCardHandle | null = null;
   private pauseAssessmentFlow: AssessmentFlowHandle | null = null;
+  // Long-task auto-continue (docs/auto-continue-design.md): the scheduler owns
+  // the pending round timer + per-user-message budget; pendingAutoContinue
+  // carries the last completed round's signals from the engine loop to send()'s
+  // finally, where streaming is released and the schedule actually happens.
+  private autoContinue = new AutoContinueScheduler();
+  private pendingAutoContinue: AutoContinueSignals | null = null;
   // Session-scoped permission manager: CodingAgent creates its own per send,
   // which would reset the "始终允许(本次会话)" cache after every turn. Hoisted
   // here so approvals last the whole chat session; cleared on new chat.
@@ -1342,6 +1349,9 @@ export class ChatController {
 
   setSessionId(id: string) {
     this.cancelBackgroundPreCompaction();
+    // Session switch = human takeover: stop any pending auto-continue chain.
+    this.autoContinue.cancel();
+    this.pendingAutoContinue = null;
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
@@ -1654,12 +1664,15 @@ export class ChatController {
     return this.sessionToolAdapter;
   }
 
-  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText) {
+  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false) {
     const chatEl = document.getElementById('chat')!;
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
     const config = loadConfig();
     if (!hasConfiguredKey(config)) return;
+    // A fresh turn's signals supersede any that were never consumed (defensive;
+    // the finally of a completed turn always consumes them).
+    this.pendingAutoContinue = null;
 
     // A previous turn may have queued an idle pre-compaction pass. Cancel it
     // before handling this input so an optimization can never compete with the
@@ -1686,7 +1699,12 @@ export class ChatController {
     const sendSessionId = this.sessionId;
     const sendWorkspace = this.workspace;
 
-    this.cancel();
+    // Supersede any in-flight turn (abort + release). A user send also cancels
+    // any pending auto-continue (full budget reset); an auto-continue round
+    // must NOT reset the budget — it IS the chain.
+    this.abortController?.abort();
+    this.verifierAbort?.abort();
+    if (!isAuto) this.autoContinue.cancel();
     const gen = ++this.generation;
     // The plan-card snapshot belongs to this turn only; a follow-up simple
     // task must not re-attach a stale card from a previous complex plan.
@@ -3557,6 +3575,9 @@ export class ChatController {
             const planFinished = planCard && hasToolSuccess && !event.payload.interrupted
               && !turnAsksForInput && gen === this.generation && !this.pausePlanCard;
             const completionSnapshot = planProgress?.getSnapshot();
+            // True when the turn-end finalize actually dispatched 'completed'
+            // (needed by the auto-continue terminal gate below).
+            let planMarkedCompleted = false;
             // A missing stage marker may only finish the CURRENT stage. The old
             // fallback treated every tool-bearing turn as the whole-plan
             // completion, which cleared activeComplexPlan after version 1/4.
@@ -3624,6 +3645,7 @@ export class ChatController {
                 planCard.setActivity('所有阶段已完成，但交付检查未通过；回复后可继续修复并重新验证。');
               } else if (lastTodosDone || lastVerified || (needsDeliveryGate && qualityPassed === true)) {
                 planProgress?.dispatch({ type: 'completed' });
+                planMarkedCompleted = true;
                 if (this.activeComplexPlan)
                   planCard.setActivity('计划中的所有步骤已完成，交付检查也已结束。');
               } else {
@@ -3739,6 +3761,21 @@ export class ChatController {
             } else if (assessmentFlow && needsDeliveryGate && !hasToolWork && !event.payload.interrupted) {
               assessmentFlow.setPhase('execute', '本轮没有产生文件改动（如需确认细节，模型会直接提问），等待你的回复后继续。');
             }
+            // Long-task auto-continue (docs/auto-continue-design.md): record
+            // this round's signals; send()'s finally schedules the next round
+            // once streaming is released and the session persisted. planTerminal
+            // stops the chain at completion / delivery-gate block — a completed
+            // plan has activeComplexPlan nulled, so a continuation must never
+            // fire after it (it would re-analyze "继续" as a fresh task).
+            this.pendingAutoContinue = {
+              planActive: planCard !== undefined,
+              cleanEnd: planCard !== undefined && gen === this.generation && !this.pausePlanCard,
+              asksForInput: turnAsksForInput,
+              hasToolSuccess,
+              currentPlan: completionSnapshot?.currentPlan ?? -1,
+              currentTodo: completionSnapshot?.currentTodo ?? -1,
+              planTerminal: planMarkedCompleted || (needsDeliveryGate && !qualityPassed),
+            };
             break;
           }
 
@@ -3932,7 +3969,26 @@ export class ChatController {
       // turn's finally can land mid-stream of the new turn and flicker the UI
       // back to "not generating". releaseSupersededTurn() is idempotent for
       // the already-released early-return paths.
+      const ownsTurn = this.abortController === turnController;
       releaseSupersededTurn();
+      // Long-task auto-continue: schedule the next round only when THIS turn
+      // still owns the controller (a newer send superseding us cancels the
+      // chain) and the round recorded eligible signals. Streaming is already
+      // released here and the session persisted, so the fire-time checks are
+      // race-free; the scheduler's token guards against any late cancel().
+      const pendingAuto = this.pendingAutoContinue;
+      this.pendingAutoContinue = null;
+      if (ownsTurn && pendingAuto !== null && gen === this.generation) {
+        const cfgNow = loadConfig();
+        if (cfgNow?.autoContinue === true) {
+          this.autoContinue.schedule(
+            pendingAuto,
+            cfgNow.autoContinueMaxRounds ?? DEFAULT_AUTO_CONTINUE_MAX_ROUNDS,
+            AUTO_CONTINUE_DELAY_MS,
+            () => this.fireAutoContinue(),
+          );
+        }
+      }
     }
   }
 
@@ -3982,6 +4038,23 @@ export class ChatController {
     // Also stop any in-flight async verification: the turn's stream already
     // finished, so only this controller can interrupt the verifier's LLM call.
     this.verifierAbort?.abort();
+    // Stop / Escape take the human back: kill any pending auto-continue too.
+    this.autoContinue.cancel();
+  }
+
+  /** Cancel a pending auto-continue (user started typing / any other takeover). */
+  cancelAutoContinue(): void {
+    this.autoContinue.cancel();
+  }
+
+  /** Fire the next auto round. Runs from the scheduler timer; re-checks that
+   * the chain is still wanted (config on, plan still active) before re-entering
+   * send(). No streaming check needed — any user send/Stop cleared the timer. */
+  private fireAutoContinue(): void {
+    const cfg = loadConfig();
+    if (!cfg || cfg.autoContinue !== true) return;
+    if (!this.activeComplexPlan || this.pausePlanCard) return;
+    void this.send('继续', [], `🔁 自动续跑：继续处理计划 ${this.activePlanNumber}`, true);
   }
 
   private async persistSession(
