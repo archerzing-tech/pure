@@ -2674,16 +2674,14 @@ export class ChatController {
             return;
           }
           const isLastPlan = planNumber >= finishSnapshot.plan.steps.length;
-          // Earlier plans keep waiting for granular Todo-done markers (or the
-          // next plan's start marker, which force-advances); the LAST plan has
-          // no following marker, so the model's explicit completion claim must
-          // finish its remaining Todos itself — otherwise the chat plan card
-          // stays at N-1/N after the work is done.
-          if (!isLastPlan && !(planProgress?.canCompleteCurrentTodos() ?? false)) {
+          // 所有阶段一视同仁：Todo 未真实完成时，完成播报只更新文案、不推进
+          // 游标。最后计划不再 force 清空未完成 Todo——收尾证据由回合末判定把关，
+          // 否则“只做了一半就播报完成”会被当成整计划完成。
+          if (!(planProgress?.canCompleteCurrentTodos() ?? false)) {
             card.setActivity(`计划 ${planNumber} 仍有 Todo 未完成，暂不进入下一计划…`);
             return;
           }
-          planProgress?.dispatch({ type: 'todosCompleted', force: isLastPlan });
+          planProgress?.dispatch({ type: 'todosCompleted' });
           card.setActivity(isLastPlan
             ? `计划 ${planNumber} 已完成，整个计划收尾中…`
             : `计划 ${planNumber} 已完成，正在准备下一个计划…`);
@@ -3612,11 +3610,25 @@ export class ChatController {
                   : `计划 ${finishedPlan} 的工作尚未全部完成，继续处理当前计划…`);
               }
             } else if (planCompletionCandidate && (protocolPlanFinished || legacyPlanFinished || planSummarized || toolFinishedLastPlan) && planCard) {
-              planProgress?.dispatch({ type: 'completed' });
-              if (this.activeComplexPlan)
-              planCard.setActivity(qualityPassed
-                ? '计划中的所有步骤已完成，交付检查也已结束。'
-                : '计划中的所有步骤已完成，但交付检查未通过，项目暂不交付。');
+              // 收尾判定加独立证据（审计第 3 项）：不能只信模型一句“已完成”——
+              // 最后阶段的 Todo 要真实完成、或有逐阶段验证证据（phaseVerifySeen）、
+              // 构建计划交付门禁通过也算。证据不足时只更新文案，不 dispatch completed。
+              const lastPlanNumber = completionSnapshot?.plan.steps.length ?? 0;
+              const lastTodosDone = (planProgress?.canCompleteCurrentTodos() ?? false);
+              const lastVerified = planTrack.phaseVerifySeen[lastPlanNumber] === true;
+              const deliveryBlocked = needsDeliveryGate && !qualityPassed;
+              if (deliveryBlocked) {
+                // 交付门禁未通过（审计第 4 项）：不把计划标记为完成，保留续跑
+                // 上下文（activeComplexPlan 不被清空），下一轮“修复/继续”仍走
+                // 原计划续跑，而不是丢失计划卡后重新分析。
+                planCard.setActivity('所有阶段已完成，但交付检查未通过；回复后可继续修复并重新验证。');
+              } else if (lastTodosDone || lastVerified || (needsDeliveryGate && qualityPassed === true)) {
+                planProgress?.dispatch({ type: 'completed' });
+                if (this.activeComplexPlan)
+                  planCard.setActivity('计划中的所有步骤已完成，交付检查也已结束。');
+              } else {
+                planCard.setActivity('最后阶段的工作或验证尚未完成，继续处理当前计划。');
+              }
             }
             // Cancel any throttled streaming render on every segment so a
             // late-firing tick from before completion cannot race with the
