@@ -907,7 +907,7 @@ describe('plan overview completion state', () => {
     // 完成收尾的证据来自本轮真实工具执行 + 正常结束（hasToolWork 与提问轮约定
     // 一致），而不是模型是否恰好发出了 `## 计划 n 已完成` 标记——漏发时卡片
     // 不能永远停在第一步。
-    const planFinished = src.indexOf('const planFinished = planCard && hasToolWork');
+    const planFinished = src.indexOf('const planFinished = planCard && hasToolSuccess');
     const complete = src.indexOf("planProgress?.dispatch({ type: 'completed' });", planFinished);
     expect(planFinished).toBeGreaterThan(-1);
     expect(complete).toBeGreaterThan(planFinished);
@@ -938,7 +938,7 @@ describe('plan overview completion state', () => {
     expect(src).toContain('const legacyPlanFinished = planCard && !planTrack.protocolStarted');
     expect(src).toContain('completionSnapshot.currentPlan >= completionSnapshot.plan.steps.length;');
     expect(src).toContain('shouldAdvancePlanAtTurnEnd(planFinished === true, completionSnapshot, planTrack.completedPlan)');
-    expect(src).toContain("planProgress.dispatch({ type: 'phaseStarted', planNumber: nextPlan });");
+    expect(src).toContain("'phaseJumped' : 'phaseStarted', planNumber: nextPlan });");
     expect(src).toContain('const protocolPlanFinished = planCard && completionSnapshot && planTrack.phaseCompleted.has(completionSnapshot.plan.steps.length);');
   });
 
@@ -988,12 +988,44 @@ describe('plan overview completion state', () => {
     expect(canAdvance).toBeGreaterThan(-1);
   });
 
+  it('never force-advances a stage whose work is incomplete', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 回合收尾兜底（canAdvancePlan）只在实际证据齐备时推进：当前阶段 Todo 全部
+    // 完成、或模型已播报下一阶段、且构建计划已有验证证据。未完成的工作绝不能被
+    // force 清空后当成“阶段已完成”跳过。
+    const fallback = src.indexOf('if (canAdvancePlan && planProgress && planCard) {');
+    expect(fallback).toBeGreaterThan(-1);
+    const evidence = src.indexOf('const todosDone = planProgress.canCompleteCurrentTodos();', fallback);
+    expect(evidence).toBeGreaterThan(-1);
+    const announced = src.indexOf('const nextAnnounced = planTrack.phaseStarted.has(nextPlan);', evidence);
+    expect(announced).toBeGreaterThan(-1);
+    expect(src.indexOf("'phaseJumped' : 'phaseStarted'", announced)).toBeGreaterThan(announced);
+    // 证据不足时只更新活动文案，不再无条件 force 清空未完成 Todo。
+    const blockEnd = src.indexOf('} else if (planCompletionCandidate', fallback);
+    expect(blockEnd).toBeGreaterThan(fallback);
+    expect(src.slice(fallback, blockEnd)).not.toContain('force: true');
+  });
+
+  it('wires the phase verification backstop so a blocked stage can advance on evidence', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 交付门禁阶段：finishPlan 无验证证据时不推进，但会调度 backstop；backstop
+    // 验证通过后写入 phaseVerifySeen 并重放推进——否则阶段永远卡死、计划无法执行完。
+    const blocked = src.indexOf('等待真实验证结果…');
+    expect(blocked).toBeGreaterThan(-1);
+    expect(src.slice(blocked, blocked + 500)).toContain('schedulePhaseBackstop(planNumber);');
+    const backstop = src.indexOf('const schedulePhaseBackstop = (finishedPhase: number): void => {');
+    expect(backstop).toBeGreaterThan(-1);
+    const tail = src.slice(backstop, backstop + 2500);
+    expect(tail).toContain('planTrack.phaseVerifySeen[finishedPhase] = true;');
+    expect(tail).toContain('retryPhaseAdvance?.(finishedPhase);');
+  });
+
   it('finalizes a no-tool final turn at the last plan so the card catches up', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 收尾轮没有工具调用（工作在前一轮已全部完成，本轮只是总结或被用户确认）
     // 时，只要卡片已在最后一个计划上，就按完成收尾——否则卡片永远停在 N-1/N，
     // 和已经完成的任务不同步。
-    const planFinished = src.indexOf('const planFinished = planCard && hasToolWork');
+    const planFinished = src.indexOf('const planFinished = planCard && hasToolSuccess');
     expect(planFinished).toBeGreaterThan(-1);
     const summarized = src.indexOf('const planSummarized = planCard && !hasToolWork', planFinished);
     const lastPlan = src.indexOf('completionSnapshot.currentPlan === completionSnapshot.plan.steps.length', summarized);
