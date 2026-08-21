@@ -291,7 +291,7 @@ export function describeWmoCode(code: number, zh: boolean): string {
 
 // ── Resolver implementations (each returns null on any failure) ──
 
-const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+import { BROWSER_UA } from '../../shared/platformUa';
 
 async function fetchJson(url: string, timeoutMs = 8000, headers: Record<string, string> = {}): Promise<any | null> {
   try {

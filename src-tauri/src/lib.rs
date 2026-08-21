@@ -3025,8 +3025,14 @@ fn diff_files(workspace: String, path_a: String, path_b: String) -> Result<Strin
 // the agent into repeated searches. cn.bing.com returns real Chinese results
 // with the SAME b_algo markup, so it is tried FIRST for CJK queries. A
 // browser User-Agent + redirect following keeps the endpoints responsive.
+// Platform-appropriate: Windows IP sending a macOS UA is a contradiction
+// signal that advanced bot detection (Cloudflare, etc.) flags.
+// Chrome version tracks current stable (verified via Google versionhistory API).
+#[cfg(target_os = "windows")]
+const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.54 Safari/537.36";
 
-const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
+#[cfg(not(target_os = "windows"))]
+const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.54 Safari/537.36";
 
 // ── Charset-aware HTTP body decoding ──
 // `Response::text()` only honors a Content-Type charset when one is declared

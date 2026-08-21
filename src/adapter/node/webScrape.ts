@@ -13,8 +13,7 @@
 //      pages — free tier, no key required (PURE_JINA_API_KEY raises limits).
 
 import { parseRssItems } from './publicApis';
-
-const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+import { BROWSER_UA } from '../../shared/platformUa';
 
 /** Block-level noise tags removed before text extraction. The capture group
  * is REQUIRED for the `<\/\1>` backreference (a non-capturing alternation
