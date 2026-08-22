@@ -34,6 +34,7 @@ import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from '
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { PasteChipManager, attachmentToMessageImage, composeMessageWithAttachments } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
+import { memoryStore } from './memoryStore';
 import { showConfirmModal } from './modal';
 import { WorkspaceController } from './workspace';
 import { SessionSidebar } from './sessionSidebar';
@@ -493,6 +494,11 @@ function deferToIdle(fn: () => void): void {
   // immediately instead of waiting for the idle bootstrap callback.
   workspace.init();
   dismissBootSplash();
+  // Preload the memory embedder (WASM + model) in the background so the first
+  // message of a new chat never blocks on the one-time load — the user is
+  // reading the landing page while this warms up. Best-effort; a failure just
+  // means the next search pays the load as before.
+  void memoryStore.warmUp().catch(() => {});
 
   deferToIdle(async () => {
     // Feature styles are a separate CSS chunk. Await it before the deferred

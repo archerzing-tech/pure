@@ -6997,6 +6997,145 @@ button svg,
   overflow-x: auto;
 }
 
+/* ── Leaflet + OpenStreetMap (```map) ── */
+.bubble .map-slot {
+  width: 100%;
+  margin: 12px 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  overflow: hidden;
+}
+.bubble .map-slot[data-map-state="loading"] {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg-card) 88%, var(--accent-soft));
+}
+.bubble .map-slot[data-map-state="loading"] .map-toolbar,
+.bubble .map-slot[data-map-state="loading"] .map-canvas,
+.bubble .map-slot[data-map-state="loading"] .map-error,
+.bubble .map-slot[data-map-state="loading"] .map-source {
+  display: none;
+}
+.bubble .map-slot .map-loading {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+}
+.bubble .map-slot[data-map-state="loading"] .map-loading {
+  display: flex;
+}
+.map-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+}
+.map-toolbar-title {
+  font: 600 12px var(--font-sans);
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+.map-source-toggle {
+  font: 600 12px var(--font-sans);
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+.map-source-toggle:hover {
+  background: color-mix(in srgb, var(--accent-soft) 40%, transparent);
+}
+.map-canvas {
+  height: 340px;
+  width: 100%;
+  background: #e8e8e8;
+  z-index: 1;
+}
+.map-slot .map-source {
+  margin: 0;
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  padding: 0;
+  pointer-events: none;
+}
+.map-slot.show-source .map-source {
+  max-height: 320px;
+  padding: 12px;
+  opacity: 1;
+  overflow: auto;
+  border-top: 1px solid var(--border-light);
+}
+.map-slot .map-error {
+  display: none;
+  padding: 12px;
+  flex-direction: column;
+  gap: 6px;
+  font: 13px/1.5 var(--font-sans);
+  color: var(--danger);
+}
+.map-slot[data-map-state="error"] .map-error {
+  display: flex;
+}
+.map-slot .map-error strong {
+  font-weight: 600;
+}
+.map-slot .diagram-retry {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-xs);
+  background: var(--bg-card);
+  color: var(--text);
+  font: 600 12px var(--font-sans);
+  cursor: pointer;
+}
+.map-slot .diagram-retry:hover {
+  background: var(--accent-soft);
+}
+.map-pin-wrap {
+  background: transparent;
+  border: 0;
+}
+.map-pin {
+  position: relative;
+  width: 28px;
+  height: 36px;
+}
+.map-pin svg {
+  display: block;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
+}
+.map-pin-label {
+  position: absolute;
+  top: -22px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font: 600 11px var(--font-sans);
+  color: #fff;
+  background: rgba(17, 24, 39, 0.78);
+  padding: 2px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+.map-pin-popup-label {
+  margin-top: 2px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
 .bubble .svg-gallery {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

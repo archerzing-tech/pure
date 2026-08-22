@@ -8,6 +8,22 @@ import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
 import { suggestFilename, highlightExt, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, type DiagramKind } from '../markdown';
+
+// ```map blocks render as a dedicated leaflet slot (not a plain code block).
+describe('map code blocks', () => {
+  it('renders a ```map block as a .map-slot', () => {
+    const html = renderer.code({ text: '{"markers":[{"lat":1,"lng":2}]}', lang: 'map', type: 'code', raw: '{"markers":[{"lat":1,"lng":2}]}' } as never);
+    expect(html).toContain('class="map-slot"');
+    expect(html).toContain('map-canvas');
+    expect(html).not.toContain('<pre><code');
+  });
+
+  it('treats an un-tagged JSON block as a plain code block', () => {
+    const html = renderer.code({ text: '{"a":1}', lang: 'json', type: 'code', raw: '{"a":1}' } as never);
+    expect(html).toContain('<pre><code');
+    expect(html).not.toContain('map-slot');
+  });
+});
 import { buildChartOption } from '../echartsChart';
 
 // ── ==text== highlight extension ──

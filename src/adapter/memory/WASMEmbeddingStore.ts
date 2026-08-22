@@ -255,6 +255,22 @@ export class WASMEmbeddingStore implements IMemoryStore {
   }
 
   /**
+   * Background warm-up: preload the embedder (WASM runtime + model) OFF the
+   * critical path so the user's first message never blocks on the one-time
+   * load. Only touches the model when there is a non-empty corpus (mirrors
+   * search()'s zero-cost gate) and never throws — a failed warm-up just means
+   * the next search() pays the load, exactly as before.
+   */
+  async warmUp(): Promise<void> {
+    try {
+      if (this.store.list().length === 0) return;
+      await this.getEmbedder();
+    } catch {
+      // Best-effort only: the lazy path in search() handles failures.
+    }
+  }
+
+  /**
    * Lazy transformers.js pipeline. First call imports the package and loads
    * the model; subsequent calls reuse the promise. A FAILED load clears the
    * cached promise (see loadEmbedder) so the next search retries instead of

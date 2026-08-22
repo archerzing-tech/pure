@@ -10,6 +10,7 @@ import { promptObservability, promptVersion, type PromptObservability } from './
 import {
   CAPABILITY_GAP_PROMPT,
   CHART_DSL_PROMPT,
+  MAP_DSL_PROMPT,
   COMPLETION_PROMPT,
   FILE_TOOLS_CORE,
   HUMAN_TONE_PROMPT,
@@ -161,8 +162,8 @@ export function buildCliCapabilities(): string {
 function buildOutputStyle(surface: PromptSurface, imageGeneration = false): string {
   const visualOutput = surface === 'gui'
     ? imageGeneration
-      ? `- To SHOW a picture/icon/illustration/photo, call generate_image — the app renders the result as a real image. To EXPLAIN an image the user attached (what it is, what it shows), answer directly and never call generate_image. For hand-drawn diagrams (flowcharts, architecture, sequence), still emit fenced code blocks tagged svg / mermaid / puml.\n- ${CHART_DSL_PROMPT}`
-      : `- To SHOW a picture/diagram, emit it as a fenced code block tagged svg containing complete standalone SVG — the app renders it inline as an image (diagrams render too: mermaid for flowchart/gantt/sequence, puml for PlantUML). A picture request is DELIVERED as the fenced svg block itself — never save it with write_file as an .svg/.png file, and never emit SVG as plain text or in a non-svg code block.\n- ${CHART_DSL_PROMPT}`
+      ? `- To SHOW a picture/icon/illustration/photo, call generate_image — the app renders the result as a real image. To EXPLAIN an image the user attached (what it is, what it shows), answer directly and never call generate_image. For hand-drawn diagrams (flowcharts, architecture, sequence), still emit fenced code blocks tagged svg / mermaid / puml.\n- ${CHART_DSL_PROMPT}\n- ${MAP_DSL_PROMPT}`
+      : `- To SHOW a picture/diagram, emit it as a fenced code block tagged svg containing complete standalone SVG — the app renders it inline as an image (diagrams render too: mermaid for flowchart/gantt/sequence, puml for PlantUML). A picture request is DELIVERED as the fenced svg block itself — never save it with write_file as an .svg/.png file, and never emit SVG as plain text or in a non-svg code block.\n- ${CHART_DSL_PROMPT}\n- ${MAP_DSL_PROMPT}`
     : '- For diagrams (processes, flows, architecture, sequences), emit a fenced code block tagged mermaid (graph/flowchart: A --> B) or puml/plantuml (activity: :step; --> / sequence: Alice -> Bob: message) — the CLI renders these as a wireframe with boxes and connecting lines. Keep the response readable in a terminal.';
   return `Output style:
 - Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").

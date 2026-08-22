@@ -1043,7 +1043,7 @@ describe('plan overview completion state', () => {
     expect(src.slice(blocked, blocked + 500)).toContain('schedulePhaseBackstop(planNumber);');
     const backstop = src.indexOf('const schedulePhaseBackstop = (finishedPhase: number): void => {');
     expect(backstop).toBeGreaterThan(-1);
-    const tail = src.slice(backstop, backstop + 2500);
+    const tail = src.slice(backstop, backstop + 3000);
     expect(tail).toContain('planTrack.phaseVerifySeen[finishedPhase] = true;');
     expect(tail).toContain('retryPhaseAdvance?.(finishedPhase);');
   });
@@ -1166,5 +1166,23 @@ describe('generate_image text-to-image wiring', () => {
     expect(storeSrc).toContain('resultImages?: GeneratedImage[];');
     const toolRowSrc = readSource(new URL('../toolRow.ts', import.meta.url));
     expect(toolRowSrc).toContain("resultKind === 'image' && meta.resultImages?.length");
+  });
+
+  it('shows a waiting card during slow-model gaps between tool results and the next step', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // After a ToolResult finalizes, a debounced watchdog opens a "正在思考下一步…"
+    // card so a slow model's silent re-read of the result never reads as stuck.
+    const gapCard = src.indexOf('scheduleToolGapCard');
+    expect(gapCard).toBeGreaterThan(-1);
+    expect(src).toContain("setThinkingLabel(thinkingCard, '正在思考下一步…');");
+    // The watchdog is debounced (back-to-back tool calls don't flash a card).
+    expect(src).toContain('const TOOL_GAP_DEBOUNCE_MS = 600;');
+    // ToolResult finalization arms it; the next reasoning/token/tool event
+    // cancels it (endThinking / cancelToolGapCard) so it never lingers.
+    expect(src).toContain('scheduleToolGapCard();');
+    expect(src).toContain('cancelToolGapCard();');
+    // A clean turn end cancels any armed watchdog (no ghost card after Completed).
+    const endThinking = src.indexOf('const endThinking = () => {');
+    expect(src.slice(endThinking, endThinking + 300)).toContain('cancelToolGapCard();');
   });
 });
