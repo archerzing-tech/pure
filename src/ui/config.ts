@@ -143,6 +143,8 @@ export interface PureConfig {
    * fetch_map_tile evicts the oldest tiles past this byte budget.
    */
   mapTileCacheMB: number;
+  /** Optional TianDiTu browser key; empty keeps the source disabled. */
+  mapTileKey: string;
   /**
    * Memory evolution thresholds (Settings → Memory → 遗忘速度). Engine units:
    * recencyHalfLifeMs / dormantGraceMs in milliseconds, scores in 0..1 — the
@@ -235,6 +237,7 @@ export function defaults(): PureConfig {
     autoContinue: false,
     autoContinueMaxRounds: 8,
     mapTileCacheMB: DEFAULT_MAP_TILE_CACHE_MB,
+    mapTileKey: '',
     configVersion: 13,
   };
 }

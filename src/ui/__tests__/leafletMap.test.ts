@@ -3,7 +3,26 @@
 // leaflet instance needed, so it runs headlessly in bun).
 
 import { describe, it, expect } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { parseMapSource } from '../mapSpec';
+
+const leafletSource = readFileSync(new URL('../leafletMap.ts', import.meta.url), 'utf8');
+
+describe('map tile delivery chain', () => {
+  it('keeps domestic sources ahead of global fallbacks and avoids OSM volunteer tiles', () => {
+    expect(leafletSource).toContain("label: 'tianditu'");
+    expect(leafletSource).toContain('tianditu.gov.cn/vec_w/wmts');
+    expect(leafletSource).toContain("label: 'amap-standard'");
+    expect(leafletSource).toContain('style=7');
+    expect(leafletSource).toContain("label: 'amap'");
+    expect(leafletSource).toContain("label: 'tencent'");
+    expect(leafletSource).toContain("label: 'esri'");
+    expect(leafletSource).toContain("label: 'carto'");
+    expect(leafletSource).toContain('preferCanvas: true');
+    expect(leafletSource).toContain('groupMarkers');
+    expect(leafletSource).not.toContain('openstreetmap.org');
+  });
+});
 
 describe('parseMapSource', () => {
   it('parses a full map spec with markers and a route', () => {

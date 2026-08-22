@@ -68,6 +68,19 @@ body {
   transition: background var(--transition), color var(--transition);
 }
 
+.composer-select {
+  color-scheme: light;
+}
+
+.composer-select option {
+  background-color: var(--bg-card);
+  color: var(--text);
+}
+
+[data-theme="dark"] .composer-select {
+  color-scheme: dark;
+}
+
 /* Windows: grayscale AA (antialiased) makes small CJK glyphs look blurry;
    restore Chromium's default subpixel (ClearType) rendering there. */
 [data-platform="win"] body {

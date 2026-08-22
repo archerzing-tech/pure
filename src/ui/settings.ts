@@ -727,7 +727,7 @@ export class SettingsPanel {
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle',
       // Map-tile cache cap (number input saves on change/blur).
-      '#cfg-map-tile-cache-mb',
+      '#cfg-map-tile-cache-mb', '#cfg-map-tianditu-key',
       // Memory evolution thresholds (number inputs save on change/blur).
       '#cfg-mem-half-life', '#cfg-mem-active-min', '#cfg-mem-dormant-max',
       '#cfg-mem-delete-floor', '#cfg-mem-grace', '#cfg-mem-supersede-sim'
@@ -1482,6 +1482,8 @@ export class SettingsPanel {
     this.updateAutoContinueVisibility();
     const mapTileCacheMbEl = document.getElementById('cfg-map-tile-cache-mb') as HTMLInputElement | null;
     if (mapTileCacheMbEl) mapTileCacheMbEl.value = String(cfg.mapTileCacheMB ?? DEFAULT_MAP_TILE_CACHE_MB);
+    const mapTianDiTuKeyEl = document.getElementById('cfg-map-tianditu-key') as HTMLInputElement | null;
+    if (mapTianDiTuKeyEl) mapTianDiTuKeyEl.value = cfg.mapTileKey ?? '';
 
     (document.getElementById('cfg-fontsize') as HTMLSelectElement).value = cfg.fontSize;
     (document.getElementById('cfg-density') as HTMLSelectElement).value = cfg.density;
@@ -2614,6 +2616,7 @@ export class SettingsPanel {
       // the chain or spin it forever.
       autoContinueMaxRounds: Math.min(20, Math.max(1, parseInt((document.getElementById('cfg-auto-continue-rounds') as HTMLInputElement | null)?.value ?? '', 10) || DEFAULT_AUTO_CONTINUE_MAX_ROUNDS)),
       mapTileCacheMB: Math.min(2000, Math.max(10, parseInt((document.getElementById('cfg-map-tile-cache-mb') as HTMLInputElement | null)?.value ?? '', 10) || DEFAULT_MAP_TILE_CACHE_MB)),
+      mapTileKey: (document.getElementById('cfg-map-tianditu-key') as HTMLInputElement | null)?.value.trim().slice(0, 128) ?? '',
       // The composer's mode selector lives outside this form — carry its value
       // through so a settings save never silently resets a user's mode choice.
       taskMode: (loadConfig() ?? defaults()).taskMode,

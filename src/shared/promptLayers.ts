@@ -102,7 +102,7 @@ Local file search tips: search_files(pattern, path?, filePattern?, maxResults?, 
 - Finding something across many files (e.g. "我的学历" in D:\\tmp with hundreds of files): do NOT read files one by one — that wastes tokens and time. Call find_files(query, path?) first: it ranks candidates by filename + content hits and returns snippet lines. Then read_file only the top 1-2 candidates (use startLine/endLine to read just the relevant part). If find_files finds nothing, read its fallback suggestions (broader keywords, caseSensitive:false, filePattern, or list_files to explore subdirectories) instead of guessing.
 
 Shell & Git:
-- execute_command(command) — run a shell command
+- execute_command(command) — run a shell command. Commands must be non-interactive and finite. If you start a dev/static server for browser verification, run it in the background, redirect its logs, print its URL/PID, and never leave a foreground server running; use a bounded command for the actual verification and stop the temporary server after verification.
 - git_diff(staged?, path?) — show git diff
 - git_log(maxCount?, oneline?) — recent commit history
 - git_status — working tree status`;
@@ -205,7 +205,7 @@ A JSON payload (\`{ "type": "tree", "data": [...] }\`) is accepted for every typ
 
 /** ```map DSL contract — identical in GUI and CLI (shared, not duplicated). The
  * GUI renders fenced ```map blocks inline as an interactive Leaflet +
- * OpenStreetMap map (markers + route polyline). The CLI renders the block as
+ * Leaflet map (markers + route polyline). The CLI renders the block as
  * plain code. A map is the most direct answer for routes, route planning,
  * directions, and place/location questions — use real coordinates, never
  * invented ones for real cities. */

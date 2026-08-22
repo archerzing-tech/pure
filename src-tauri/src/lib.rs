@@ -2804,7 +2804,7 @@ async fn execute_command_stream_inner(
     let ch_stdout = on_output.clone();
     let ch_stderr = on_output.clone();
 
-    let stdout_task = tokio::spawn(async move {
+    let mut stdout_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
         loop {
@@ -2822,7 +2822,7 @@ async fn execute_command_stream_inner(
         }
     });
 
-    let stderr_task = tokio::spawn(async move {
+    let mut stderr_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
         let mut line = String::new();
         loop {
@@ -2840,10 +2840,46 @@ async fn execute_command_stream_inner(
         }
     });
 
-    // Wait for both readers to finish independently
-    let _ = tokio::join!(stdout_task, stderr_task);
+    // Wait for the shell first. A background server may keep inherited pipes
+    // open after the shell exits, so waiting for EOF before waiting for the
+    // child would deadlock the tool forever.
+    let wait_result = tokio::time::timeout(COMMAND_STREAM_TIMEOUT, child.wait()).await;
+    let timed_out = wait_result.is_err();
+    if timed_out && pid != 0 {
+        let _ = kill_process_group(pid as i32);
+    }
+    let exit_status = match wait_result {
+        Ok(Ok(status)) => status.code().unwrap_or(-1),
+        Ok(Err(_)) => -1,
+        Err(_) => tokio::time::timeout(COMMAND_TERMINATION_TIMEOUT, child.wait())
+            .await
+            .ok()
+            .and_then(|result| result.ok())
+            .and_then(|status| status.code())
+            .unwrap_or(-1),
+    };
 
-    let wait_result = child.wait().await;
+    // Drain normal output briefly, but never let a descendant that inherited
+    // the pipes hold the tool open after the shell has finished. Abort a
+    // reader that outlives the drain window instead of detaching it forever.
+    let (stdout_done, stderr_done) = tokio::join!(
+        tokio::time::timeout(COMMAND_PIPE_DRAIN_TIMEOUT, &mut stdout_task),
+        tokio::time::timeout(COMMAND_PIPE_DRAIN_TIMEOUT, &mut stderr_task),
+    );
+    if stdout_done.is_err() {
+        stdout_task.abort();
+    }
+    if stderr_done.is_err() {
+        stderr_task.abort();
+    }
+
+    if timed_out {
+        let timeout_line = serde_json::json!({
+            "type": "stderr",
+            "content": format!("Command timed out after {}s and was terminated.", COMMAND_STREAM_TIMEOUT.as_secs()),
+        });
+        let _ = on_output.send(timeout_line.to_string());
+    }
 
     // Always unregister, even when wait failed (the process may already be
     // gone) — a stale entry would make a later kill_command target a reused
@@ -2853,20 +2889,15 @@ async fn execute_command_stream_inner(
         reg.remove(id);
     }
 
-    // Now get the exit code (on_output is still available since only clones were moved)
-    let exit_code = wait_result
-        .map_err(|e| format!("wait: {}", e))?
-        .code()
-        .unwrap_or(-1);
-    let done = serde_json::json!({ "type": "exit", "code": exit_code });
+    let done = serde_json::json!({ "type": "exit", "code": if timed_out { 124 } else { exit_status } });
     let _ = on_output.send(done.to_string());
 
-    Ok(exit_code)
+    Ok(if timed_out { 124 } else { exit_status })
 }
 
 /// Execute a shell command with streaming output via Channel (safe concurrent reader pattern).
-/// Uses `tokio::spawn` + `tokio::join!` so both stdout and stderr are read independently
-/// — no data loss when one pipe closes before the other. The command is registered in the
+/// Uses independent reader tasks so stdout and stderr are drained concurrently — no data
+/// loss when one pipe closes before the other. The command is registered in the
 /// CommandRegistry under `id` while it runs, so the GUI can cancel it (kill_command) when
 /// the user stops the turn.
 #[tauri::command]
@@ -5293,6 +5324,33 @@ mod command_cancel_tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn returns_when_a_background_child_inherits_the_output_pipes() {
+        let registry = StdMutex::new(BTreeMap::<String, u32>::new());
+        let ch = Channel::new(|_: tauri::ipc::InvokeResponseBody| Ok(()));
+        let marker = std::env::temp_dir().join(format!("pure-stream-pipe-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let escaped = marker.to_string_lossy().replace('\'', "'\\''");
+        let command = format!("sleep 30 & echo $! > '{}'; echo ready", escaped);
+        let started = std::time::Instant::now();
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            execute_command_stream_inner(&registry, "background-pipe", ".", &command, &ch, None),
+        )
+        .await
+        .expect("a shell that exits must not be held open by a background child")
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        if let Ok(pid) = std::fs::read_to_string(&marker).map(|text| text.trim().parse::<i32>()) {
+            if let Ok(pid) = pid {
+                let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+        let _ = std::fs::remove_file(marker);
+    }
+
     #[tokio::test]
     async fn kill_command_terminates_a_registered_streaming_command() {
         let registry = Arc::new(StdMutex::new(BTreeMap::<String, u32>::new()));
@@ -5416,6 +5474,40 @@ fn map_tile_cache_path(url: &str) -> PathBuf {
     map_tile_cache_dir().join(format!("{:x}.png", fnv1a64(url)))
 }
 
+const MAP_TILE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+fn map_tile_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+#[derive(serde::Serialize)]
+struct MapTilePayload {
+    data: String,
+    mime: String,
+}
+
+fn map_tile_payload(bytes: &[u8]) -> Result<MapTilePayload, String> {
+    let Some(mime) = map_tile_mime(bytes) else {
+        return Err("tile response was not a supported image".to_string());
+    };
+    Ok(MapTilePayload {
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        mime: mime.to_string(),
+    })
+}
+
 /// Remove the oldest tiles (by mtime) until the cache fits the byte budget.
 fn evict_map_tile_cache(dir: &PathBuf, max_bytes: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -5446,24 +5538,26 @@ fn evict_map_tile_cache(dir: &PathBuf, max_bytes: u64) {
 }
 
 /// Fetch one map tile, serving it from the local disk cache when available and
-/// otherwise fetching + caching it. Returns the PNG bytes as a base64 string.
+/// otherwise fetching + caching it. Only real image bytes are cached, so an HTML
+/// block page or JSON error can never poison the offline tile cache.
 #[tauri::command]
 async fn fetch_map_tile(
     url: String,
     proxy_url: Option<String>,
     max_bytes: Option<u64>,
-) -> Result<String, String> {
+) -> Result<MapTilePayload, String> {
     let path = map_tile_cache_path(&url);
     if let Ok(bytes) = std::fs::read(&path) {
         if !bytes.is_empty() {
-            return Ok(base64::engine::general_purpose::STANDARD.encode(&bytes));
+            if let Ok(payload) = map_tile_payload(&bytes) {
+                return Ok(payload);
+            }
+            let _ = std::fs::remove_file(&path);
         }
     }
     let client = build_http_client(std::time::Duration::from_secs(8), proxy_url.as_deref())?;
     let resp = client
         .get(&url)
-        // OSM's tile policy requires an identifying User-Agent; a bare reqwest
-        // client sends none and can be rate-limited or blocked outright.
         .header("User-Agent", BROWSER_UA)
         .send()
         .await
@@ -5472,13 +5566,19 @@ async fn fetch_map_tile(
     if !status.is_success() {
         return Err(format!("tile HTTP {}", status.as_u16()));
     }
+    if resp.content_length().is_some_and(|size| size > MAP_TILE_MAX_BYTES as u64) {
+        return Err("tile response exceeded 8 MB".to_string());
+    }
     let bytes = resp.bytes().await.map_err(|e| format!("tile read: {}", e))?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    if bytes.len() > MAP_TILE_MAX_BYTES {
+        return Err("tile response exceeded 8 MB".to_string());
+    }
+    let payload = map_tile_payload(&bytes)?;
     let dir = map_tile_cache_dir();
     if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, &bytes).is_ok() {
         evict_map_tile_cache(&dir, max_bytes.unwrap_or(MAP_TILE_CACHE_DEFAULT_MAX_BYTES));
     }
-    Ok(b64)
+    Ok(payload)
 }
 
 /// Settings → General: current offline basemap tile cache footprint. Also
@@ -5548,6 +5648,15 @@ mod map_tile_cache_tests {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(mtime))
             .unwrap();
+    }
+
+    #[test]
+    fn tile_payload_rejects_non_image_bytes_and_preserves_supported_mime() {
+        assert!(map_tile_payload(b"<html>blocked</html>").is_err());
+        let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0, 1];
+        let payload = map_tile_payload(&jpeg).unwrap();
+        assert_eq!(payload.mime, "image/jpeg");
+        assert_eq!(payload.data, base64::engine::general_purpose::STANDARD.encode(jpeg));
     }
 
     #[test]
@@ -5624,7 +5733,8 @@ mod map_tile_cache_tests {
         let png = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
         std::fs::write(&path, &png).unwrap();
         let got = fetch_map_tile(url.to_string(), None, None).await.unwrap();
-        assert_eq!(got, base64::engine::general_purpose::STANDARD.encode(&png));
+        assert_eq!(got.data, base64::engine::general_purpose::STANDARD.encode(&png));
+        assert_eq!(got.mime, "image/png");
         std::env::remove_var("PURE_CACHE_DIR");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9191,6 +9301,10 @@ fn llm_proxy_url(args: &ChatStreamArgs) -> Option<&str> {
 // UI-side parse throttle (TOOL_CALL_REFRESH_MS, src/ui/chat.ts) sits at 120ms
 // on top of this, so the WebView only re-parses roughly every other event.
 const TOOL_CALL_EMIT_MS: u128 = 100;
+
+const COMMAND_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const COMMAND_TERMINATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const COMMAND_PIPE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 // ── LLM stream cancellation (mirror of the CommandRegistry/kill_command
 //    pattern: register a oneshot cancel channel under `requestId`, fire it

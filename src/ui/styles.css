@@ -6997,8 +6997,9 @@ button svg,
   overflow-x: auto;
 }
 
-/* ── Leaflet + OpenStreetMap (```map) ── */
+/* ── Leaflet map tiles (```map) ── */
 .bubble .map-slot {
+  position: relative;
   width: 100%;
   margin: 12px 0;
   border: 1px solid var(--border-light);
@@ -7008,12 +7009,18 @@ button svg,
 }
 .bubble .map-slot[data-map-state="loading"] {
   min-height: 240px;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   background: color-mix(in srgb, var(--bg-card) 88%, var(--accent-soft));
 }
-.bubble .map-slot[data-map-state="loading"] .map-toolbar,
-.bubble .map-slot[data-map-state="loading"] .map-canvas-wrap,
+.bubble .map-slot[data-map-state="loading"] .map-canvas-wrap {
+  position: absolute;
+  inset: 0;
+  display: block;
+  height: 480px;
+  visibility: hidden;
+}
 .bubble .map-slot[data-map-state="loading"] .map-route-warning,
 .bubble .map-slot[data-map-state="loading"] .map-error,
 .bubble .map-slot[data-map-state="loading"] .map-source {
@@ -7021,6 +7028,7 @@ button svg,
 }
 .bubble .map-slot .map-loading {
   display: none;
+  min-height: 200px;
   flex-direction: column;
   align-items: center;
   justify-content: center;
@@ -7029,6 +7037,11 @@ button svg,
 }
 .bubble .map-slot[data-map-state="loading"] .map-loading {
   display: flex;
+  animation: mapLoadingFade 1.8s ease-in-out infinite;
+}
+@keyframes mapLoadingFade {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
 }
 .map-toolbar {
   display: flex;
@@ -7049,6 +7062,7 @@ button svg,
   align-items: center;
   gap: 4px;
 }
+.map-refresh,
 .map-source-toggle,
 .map-expand {
   font: 600 12px var(--font-sans);
@@ -7059,12 +7073,23 @@ button svg,
   border-radius: var(--radius-xs);
   cursor: pointer;
 }
+.map-refresh:hover,
 .map-source-toggle:hover,
 .map-expand:hover {
   background: color-mix(in srgb, var(--accent-soft) 40%, transparent);
 }
 .map-canvas-wrap {
   position: relative;
+  opacity: 0;
+  transform: scale(0.985);
+  transition: opacity 0.28s var(--ease-out), transform 0.28s var(--ease-out);
+}
+.map-slot[data-map-state="preview"] .map-canvas-wrap {
+  opacity: 1;
+  transform: scale(1);
+}
+.map-slot[data-map-state="error"] .map-canvas-wrap {
+  display: none;
 }
 .map-canvas {
   height: 480px;
@@ -7180,9 +7205,22 @@ button svg,
 .map-slot .diagram-retry:hover {
   background: var(--accent-soft);
 }
-.map-pin-wrap {
+.map-pin-wrap,
+.map-cluster-wrap {
   background: transparent;
   border: 0;
+}
+.map-cluster {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 3px solid rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  background: #2563eb;
+  color: #fff;
+  font: 700 12px/1 var(--font-sans);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.35);
 }
 .map-pin {
   position: relative;
@@ -7849,6 +7887,18 @@ button svg,
   0%, 100% { opacity: 0.45; }
   50% { opacity: 1; }
 }
+@media (prefers-reduced-motion: reduce) {
+  .bubble .map-slot[data-map-state="loading"] .map-loading,
+  .diagram-loading-ring,
+  .diagram-loading-orbit,
+  .diagram-loading-orbit i,
+  .diagram-loading-label {
+    animation: none;
+  }
+  .map-canvas-wrap {
+    transition: none;
+  }
+}
 /* The download action is NO longer a header bar above the image: it floats as
    a compact save pill pinned to the slot's top-right corner, fading in only
    while the pointer hovers the rendered picture (or the button is focused via
@@ -8333,6 +8383,7 @@ button svg,
   border: 0;
   background-color: transparent;
   color: var(--text-secondary);
+  color-scheme: light;
   font: 500 12px/1.4 var(--font-sans);
   padding: 5px 22px 5px 9px;
   border-radius: 8px;
@@ -8350,6 +8401,15 @@ button svg,
   background-color: var(--bg-hover);
   color: var(--text);
   outline: none;
+}
+
+.composer-select option {
+  background-color: var(--bg-card);
+  color: var(--text);
+}
+
+[data-theme="dark"] .composer-select {
+  color-scheme: dark;
 }
 
 .composer-select-model {

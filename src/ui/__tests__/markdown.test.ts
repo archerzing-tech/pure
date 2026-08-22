@@ -15,7 +15,23 @@ describe('map code blocks', () => {
     const html = renderer.code({ text: '{"markers":[{"lat":1,"lng":2}]}', lang: 'map', type: 'code', raw: '{"markers":[{"lat":1,"lng":2}]}' } as never);
     expect(html).toContain('class="map-slot"');
     expect(html).toContain('map-canvas');
+    expect(html).toContain('class="map-refresh"');
+    expect(html).toContain('刷新地图');
     expect(html).not.toContain('<pre><code');
+  });
+
+  it('exposes a manual refresh action when the basemap cannot load', () => {
+    const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+    const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+    expect(src).toContain("leafletMapMod?.clearMapTileMemoryCache()");
+    expect(src).toContain("refresh?.addEventListener('click', () => retryMapSlot(slot))");
+    expect(src).toContain("t('map.tileLoadFailed')");
+    expect(css).toContain('.bubble .map-slot[data-map-state="loading"] .map-canvas-wrap {\n  position: absolute;');
+    expect(css).toContain('visibility: hidden;');
+    expect(css).toContain('animation: mapLoadingFade 1.8s ease-in-out infinite;');
+    expect(css).toContain('.map-slot[data-map-state="preview"] .map-canvas-wrap');
+    expect(src).toContain("} else if (status === 'ready') {");
+    expect(src).not.toContain("setMapState(slot, 'preview');\n    } catch (err)");
   });
 
   it('treats an un-tagged JSON block as a plain code block', () => {
