@@ -9,12 +9,40 @@
 
 import { t } from '../shared/i18n';
 
+/** Collapse verbatim-repeated reasoning blocks into one occurrence.
+ * Reasoning models occasionally loop internally and emit the same sentence or
+ * paragraph over and over ("I'll call sys_info() now:" × 4). Detect the shortest
+ * period that reproduces the whole block sequence and keep only one period, so
+ * the user sees a clean thought trace instead of a stuck loop. Only collapses
+ * EXACT repetitions — varied reasoning is left untouched. */
+export function collapseRepeatedReasoning(text: string): string {
+  if (!text) return text;
+  const blocks = text
+    .split(/\n\s*\n/)
+    .map(b => b.trim())
+    .filter(b => b.length > 0);
+  if (blocks.length < 3) return text;
+  for (let period = 1; period <= Math.floor(blocks.length / 2); period++) {
+    let periodic = true;
+    for (let i = period; i < blocks.length; i++) {
+      if (blocks[i] !== blocks[i % period]) {
+        periodic = false;
+        break;
+      }
+    }
+    if (periodic) {
+      return blocks.slice(0, period).join('\n\n');
+    }
+  }
+  return text;
+}
+
 export function appendStoredThinking(text: string, parent: HTMLElement): void {
   const handle = createThinkingCard();
   handle.card.classList.remove('thinking');
   handle.card.classList.add('complete');
   handle.card.querySelector('.thinking-dots')?.remove();
-  handle.textEl.textContent = text;
+  handle.textEl.textContent = collapseRepeatedReasoning(text);
   parent.appendChild(handle.el);
 }
 
@@ -120,6 +148,9 @@ export function appendThinkingText(handle: ThinkingCardHandle, text: string): vo
 
 /** Mark the thinking phase as complete while preserving its transcript row. */
 export function finalizeThinkingCard(handle: ThinkingCardHandle): void {
+  // Collapse any verbatim loop the model emitted before the card is reviewed
+  // (the live stream may briefly show the repeats; the final card is clean).
+  handle.textEl.textContent = collapseRepeatedReasoning(handle.textEl.textContent);
   handle.card.classList.remove('thinking');
   handle.card.classList.add('complete');
   const label = handle.card.querySelector<HTMLElement>('.thinking-label');

@@ -9,6 +9,29 @@ import { safeParseArgs } from '../shared/format';
 import { BudgetManager } from './BudgetManager';
 import { FileLockManager } from './FileLockManager';
 
+// v1.9.15 — research-loop guard: successful web searches never trip the
+// failure policy (empty/relevance-gated-out result sets return success so the
+// model sees "rephrase, don't repeat" guidance), so a niche or ambiguous query
+// can loop through many rephrased searches with no escalation. Count
+// consecutive tool rounds made up ENTIRELY of web-research tools and inject a
+// wrap-up directive once the streak crosses the limit.
+const WEB_RESEARCH_TOOLS = new Set([
+  'web_search',
+  'web_fetch',
+  'web_scrape',
+  'web_public_api',
+  'researcher_web',
+  'researcher_docs',
+  'web_researcher',
+]);
+
+function isWebResearchTool(name: string): boolean {
+  const base = name.includes('__') ? name.slice(name.lastIndexOf('__') + 2) : name;
+  return WEB_RESEARCH_TOOLS.has(base);
+}
+
+const RESEARCH_ROUND_LIMIT = 4;
+
 export class AgentLoopEngine {
   private fileLock = new FileLockManager();
 
@@ -54,6 +77,9 @@ export class AgentLoopEngine {
     // the GUI can accumulate per-session token totals + cost.
     let turnUsage: TokenUsage | undefined;
     let verification: VerificationSummary = { status: 'not_run', evidence: [] };
+    // Consecutive tool rounds made up entirely of web-research tools (see the
+    // research-loop guard above). Reset by any non-research tool or answer.
+    let researchStreak = 0;
 
     while (true) {
       if (ctx.signal?.aborted) {
@@ -275,6 +301,20 @@ export class AgentLoopEngine {
           const note = this.degradationNote(te);
           messages.push({ role: 'user' as const, content: note, internal: true });
           budget.addTokens(note);
+        }
+
+        // v1.9.15 — research-loop guard: after several consecutive all-web
+        // research rounds, tell the model to stop searching and synthesize from
+        // the evidence it already has. The streak resets on any non-research
+        // tool round (real work) and after the nudge, so it re-fires if the
+        // model keeps researching instead of answering.
+        const allResearch = toolCalls.length > 0 && toolCalls.every((tc) => isWebResearchTool(tc.function.name));
+        researchStreak = allResearch ? researchStreak + 1 : 0;
+        if (researchStreak >= RESEARCH_ROUND_LIMIT) {
+          researchStreak = 0;
+          const wrapUp = `You have made ${RESEARCH_ROUND_LIMIT} consecutive web research rounds for this request. Stop issuing more searches and deliver a complete, well-organized answer now from the evidence you have already gathered. If a specific fact is still missing, state the assumption or the gap plainly instead of searching again.`;
+          messages.push({ role: 'user' as const, content: wrapUp, internal: true });
+          budget.addTokens(wrapUp);
         }
 
         turnCount++;

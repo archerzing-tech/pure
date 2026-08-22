@@ -287,6 +287,40 @@ describe('AgentLoopEngine', () => {
     expect(completed!.payload.turnCount).toBe(3); // initial + 2 tool rounds
   });
 
+  it('injects a wrap-up directive after consecutive web-research rounds', async () => {
+    const engine = new AgentLoopEngine();
+    const tools: ToolDefinition[] = [
+      { name: 'web_search', description: 'search', input_schema: { type: 'object', properties: { query: { type: 'string' } } } },
+      { name: 'researcher_web', description: 'research', input_schema: { type: 'object', properties: { prompt: { type: 'string' } } } },
+      { name: 'web_fetch', description: 'fetch', input_schema: { type: 'object', properties: { url: { type: 'string' } } } },
+    ];
+    const ctx = baseCtx({
+      llm: multiRoundLLM(
+        [
+          { toolName: 'web_search', toolArgs: '{"query":"a"}' },
+          { toolName: 'web_search', toolArgs: '{"query":"b"}' },
+          { toolName: 'researcher_web', toolArgs: '{"prompt":"c"}' },
+          { toolName: 'web_fetch', toolArgs: '{"url":"https://x"}' },
+        ],
+        'Final answer.',
+      ),
+      tools: echoToolAdapter(tools),
+      toolsDefs: tools,
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-research-cap', systemPrompt: 'You are helpful.', userPrompt: 'Research this', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const completed = events.find(e => e.type === 'Completed') as any;
+    expect(completed).toBeDefined();
+    const messages = completed.payload.messages as Message[];
+    const wrapUp = messages.find((m) => m.role === 'user' && m.content.includes('consecutive web research rounds'));
+    expect(wrapUp).toBeDefined();
+    expect(wrapUp!.content).toContain('Stop issuing more searches');
+  });
+
   // ═══ LLM error handling ═══
 
   it('emits Error event when LLM stream throws', async () => {

@@ -10,8 +10,10 @@ import {
   COMPLETION_PROMPT,
   TYPO_TOLERANCE_PROMPT,
   LOGICAL_TRAPS_PROMPT,
+  PLAUSIBILITY_REVIEW_PROMPT,
   SVG_OUTPUT_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
+  MAP_DSL_PROMPT,
   HUMAN_TONE_PROMPT,
   FILE_TOOLS_CORE,
   CAPABILITY_GAP_PROMPT,
@@ -52,6 +54,20 @@ describe('L1 behavior contracts', () => {
   it('shares typo tolerance and logical-traps defense', () => {
     expect(TYPO_TOLERANCE_PROMPT).toContain('Smart typo tolerance');
     expect(LOGICAL_TRAPS_PROMPT).toContain('Logical traps & approach switching');
+  });
+
+  it('reviews answers against real-world geography/physics/chemistry/math/history', () => {
+    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('Plausibility & real-world consistency review');
+    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('Geography');
+    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('Physics');
+    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('Chemistry');
+    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('Math');
+    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('History');
+    // Route direction is a concrete case: waypoints must advance toward the goal.
+    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('西安→上海');
+    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('宝鸡/甘南');
+    // Fiction / alternate-history requests opt out of the review.
+    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('skip this review');
   });
 
   it('tells multi-image requests to emit one SVG per image (never a collage)', () => {
@@ -100,6 +116,18 @@ describe('L1 behavior contracts', () => {
     // Charts/pictures are delivered as fenced blocks — never a script that draws them.
     expect(CHART_DSL_PROMPT).toContain('NEVER write a Python/matplotlib');
     expect(CHART_DSL_PROMPT).toContain('IS the deliverable');
+  });
+
+  it('keeps maps on the Leaflet JSON contract and never falls back to SVG', () => {
+    // Root cause of the "map not rendering → model re-emits it as SVG" bug:
+    // the SVG picture contract is prominent, so the model conflated maps with
+    // SVG and "fixed" a broken map by switching formats. The map DSL must state
+    // Leaflet explicitly and forbid SVG so the recovery path is a valid map block.
+    expect(MAP_DSL_PROMPT).toContain('interactive Leaflet map');
+    expect(MAP_DSL_PROMPT).toContain('A MAP IS NEVER SVG');
+    expect(MAP_DSL_PROMPT).toContain('renders it with Leaflet, not SVG');
+    expect(MAP_DSL_PROMPT).toContain('NEVER switch to SVG');
+    expect(MAP_DSL_PROMPT).toContain('re-emitting a valid');
   });
 
   it('asks for a human, conversational tone without canned boilerplate', () => {
@@ -167,6 +195,13 @@ describe('composeUserTurn (L2)', () => {
     const out = composeUserTurn('delete it', { assessment: '<intent_assessment>high risk</intent_assessment>' });
     expect(out).toContain('<intent_assessment>high risk</intent_assessment>');
     expect(out.endsWith('delete it')).toBe(true);
+  });
+
+  it('includes the plausibility-review override beside the request', () => {
+    const out = composeUserTurn('写一个架空的故事', { plausibilityOverride: '<plausibility_review_override>skip</plausibility_review_override>' });
+    expect(out.startsWith('<task_context>')).toBe(true);
+    expect(out).toContain('<plausibility_review_override>skip</plausibility_review_override>');
+    expect(out.endsWith('写一个架空的故事')).toBe(true);
   });
 
   it('ignores empty fragments', () => {

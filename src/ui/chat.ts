@@ -19,7 +19,7 @@ import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type Dynamic
 import { formatIntentPrompt, inferSemanticRoute, parsePlanJsonWithMeta, shouldBypassSemanticRoute } from '../coding-agent/Planner';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
-import { createLLMOnlyVerifier, createDefaultVerifier } from '../coding-agent/Verifier';
+import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS } from '../coding-agent/SubagentOrchestrator';
 import { requestPermission } from './permission';
 import {
@@ -1193,11 +1193,6 @@ function yieldToNextPaint(signal?: AbortSignal): Promise<void> {
 export class ChatController {
   private streaming = false;
   private abortController: AbortController | null = null;
-  /** Abort controller for the fire-and-forget LLM verification (P1-1) launched
-   *  after a turn completes. Cancelled alongside the turn controller so a new
-   *  send / session switch / Stop stops the verifier LLM call (and its token
-   *  burn) instead of letting it run to completion. */
-  private verifierAbort: AbortController | null = null;
   private onStreamingChange?: (streaming: boolean) => void;
   private workspace: string = '';
   private effectiveWorkspace: string = '';
@@ -1707,7 +1702,6 @@ export class ChatController {
     // any pending auto-continue (full budget reset); an auto-continue round
     // must NOT reset the budget — it IS the chain.
     this.abortController?.abort();
-    this.verifierAbort?.abort();
     if (!isAuto) {
       this.autoContinue.cancel();
       // A manual send takes over the chain: drop the in-flight badge right away.
@@ -2102,6 +2096,7 @@ export class ChatController {
       let userBuildProtocol: string | undefined;
       let userPlan: string | undefined;
       let userAssessment: string | undefined;
+      let userPlausibilityOverride: string | undefined;
       let taskContract: TaskContract | undefined;
 
       const llm = createLLMAdapter(config);
@@ -2182,12 +2177,9 @@ export class ChatController {
         mcpExcludedPrefixes: config.mcpExcludedPrefixes,
         proxyUrl: effectiveProxyUrl(config.proxy, 'tools'),
         permissionManager: this.permissionManager,
-        // P1-1 (async verification): the engine's `verifier` stays PURELY
-        // rule-based (non-empty-output check — a hard failure there must still
-        // trigger an in-engine rewrite). The LLM re-check of the final output
-        // no longer blocks the turn: it runs fire-and-forget after Completed
-        // (see the Completed handler) and a failed verdict only appends a
-        // suggestion bubble instead of rewriting the displayed answer.
+        // The engine verifier stays purely rule-based (non-empty-output check);
+        // a hard failure there triggers an in-engine rewrite. No LLM re-check of
+        // the final output surfaces internal verifier feedback to the user.
         verifier: createDefaultVerifier(),
       });
       // Text-to-image support: computed once per send from the connected
@@ -2242,13 +2234,6 @@ export class ChatController {
       systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen);
       this.contextEngine = codingAgent.getHarness().getContextEngine();
 
-      // LLM-only verifier for the post-Completed async check (P1-1). Created
-      // once per send when the Code Review skill is enabled; invoked
-      // fire-and-forget so it can never delay the turn-complete UI.
-      const llmVerifyVerifier = (config.skills?.['code-review'] ?? true)
-        ? createLLMOnlyVerifier(llm)
-        : undefined;
-
       // ── Logical-trap pre-scan (runs in plain-chat AND workspace mode):
       // contradictory / impossible / trick premises are flagged before the
       // run and injected into the system prompt so the model verifies the
@@ -2287,6 +2272,7 @@ export class ChatController {
       let effectiveIntent: IntentAssessment = analysis.intent;
       if (workflow.userContext.traps) userTraps = workflow.userContext.traps;
       userAssessment = workflow.userContext.assessment;
+      userPlausibilityOverride = workflow.userContext.plausibilityOverride;
 
       // 主动评估卡绝不在此刻同步弹出：这里只有规则启发式，还不是真实思考。卡片延后
       // 到 LLM 真正完成分析之后才出现（maybeShowAssessment）——thinking 卡先行展示
@@ -3195,6 +3181,7 @@ export class ChatController {
         plan: userPlan,
         contract: taskContract ? formatTaskContract(taskContract) : undefined,
         assessment: userAssessment,
+        plausibilityOverride: userPlausibilityOverride,
       });
       systemPrompt = assembly.systemPrompt;
       const userTurn = assembly.userPrompt ?? userText;
@@ -3552,7 +3539,7 @@ export class ChatController {
                 : '本轮没有产生文件改动（如需确认细节，模型会直接提问），等待你的回复后继续…');
             }
             endThinking();
-            let completionMessages = event.payload.messages ?? this.messages;              let qualityRepairOutput = '';
+            let completionMessages = event.payload.messages ?? this.messages;
               let qualityRepairRan = false;
               let qualityRepairRounds = 0;
               const qualityRepairIssues: string[] = [];
@@ -3610,7 +3597,6 @@ export class ChatController {
                 const repair = await runQualityRepair(completionMessages, projectQualityResult);
                 qualityRepairRan = qualityRepairRan || repair.completed;
                 completionMessages = repair.messages;
-                qualityRepairOutput = repair.output;
                 if (gen !== this.generation || this.abortController?.signal.aborted) return;
                 if (!repair.completed) {
                   qualityRepairIssues.push(`第 ${round} 轮修复未完成：修复 agent 未返回可继续验证的完成结果。`);
@@ -3796,42 +3782,6 @@ export class ChatController {
             this.sessionStats.provider = config.provider;
             this.persistStats();
 
-            // P1-1 (async verification): the LLM re-check of the answer runs
-            // AFTER the stream — fire-and-forget so the UI flips back to Send
-            // immediately (setStreaming(false) below is not delayed by an LLM
-            // round-trip). A failed verdict does NOT rewrite the answer the
-            // user just read; it only appends a neutral suggestion bubble.
-            // Skipped on interrupted turns (user Stop) and stale generations.
-            const qualityEvidence = projectQualityResult ? qualityGateEvidence(projectQualityResult, qualityRepairRan, qualityRepairRounds, qualityRepairIssues) : '';
-            const verifyOutput = [event.payload.finalOutput, qualityRepairOutput, qualityEvidence, assistantSegments.map(s => s.text).filter(Boolean).join('\n\n')]
-              .filter(Boolean)
-              .join('\n\n');
-            if (llmVerifyVerifier && verifyOutput && !event.payload.interrupted && gen === this.generation) {
-              const verifyCtx = completionMessages ?? this.messages;
-              // Only append the suggestion while the transcript is still at the
-              // completed answer: if the user has already sent a follow-up, a
-              // late-arriving bubble would land out of chronological order.
-              const msgCountAtComplete = this.messages.length;
-              void (async () => {
-                // A dedicated controller lets cancel() interrupt the verifier's
-                // LLM call (new send / session switch / Stop) instead of
-                // burning tokens to completion — the turn controller is already
-                // released by the time this async check runs.
-                const verifierAbort = new AbortController();
-                this.verifierAbort = verifierAbort;
-                try {
-                  const verdict = await llmVerifyVerifier.evaluate({ output: verifyOutput, context: verifyCtx, signal: verifierAbort.signal });
-                  if (this.verifierAbort === verifierAbort) this.verifierAbort = null;
-                  if (!verdict.passed && gen === this.generation && this.messages.length <= msgCountAtComplete) {
-                    this.addStatusBubble(`🔎 验证建议: ${verdict.feedback ?? ''}`, true);
-                    scrollChatToBottomIfPinned(chatEl);
-                  }
-                } catch {
-                  // A broken verifier call must never break the session.
-                  if (this.verifierAbort === verifierAbort) this.verifierAbort = null;
-                }
-              })();
-            }
             // Smart artifact display: files the agent generated this turn become
             // clickable cards after the final answer — one card per artifact when
             // few (open with default app / reveal in file manager), collapsing to
@@ -4157,9 +4107,6 @@ export class ChatController {
 
   cancel() {
     this.abortController?.abort();
-    // Also stop any in-flight async verification: the turn's stream already
-    // finished, so only this controller can interrupt the verifier's LLM call.
-    this.verifierAbort?.abort();
     // Stop / Escape take the human back: kill any pending auto-continue too.
     this.autoContinue.cancel();
     this.activePlanCardHandle?.clearAutoContinue();

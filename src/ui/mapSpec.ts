@@ -10,12 +10,23 @@ export interface MapMarker {
   label?: string;
 }
 
+import {
+  validateRoute,
+  describeViolations,
+  type GeographicViolation,
+} from '../shared/geographicValidation';
+import { repairJsonSource } from '../shared/parseRepair';
+
 export interface MapSpec {
   title?: string;
   center?: [number, number];
   zoom?: number;
   markers?: MapMarker[];
   route?: Array<[number, number]>;
+  /** Programmatic direction violations (empty when valid). */
+  routeWarnings?: GeographicViolation[];
+  /** Human-readable warning summary for the map banner. */
+  routeWarningText?: string;
 }
 
 function isFiniteNumber(v: unknown): v is number {
@@ -41,17 +52,21 @@ export function parseMapSource(raw: string): { spec: MapSpec; repaired?: boolean
   const trimmed = (raw ?? '').trim().replace(/^```(?:map|leaflet)\s*/i, '').replace(/```\s*$/g, '');
   let parsed: unknown;
   let repaired = false;
+  let source = trimmed;
   try {
-    parsed = JSON.parse(trimmed);
+    parsed = JSON.parse(source);
   } catch {
-    const match = trimmed.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('map 数据需要是一个 JSON 对象（{ "markers": [...], "route": [...] }）');
-    try {
-      parsed = JSON.parse(match[0]);
-      repaired = true;
-    } catch (err) {
-      throw err instanceof Error ? err : new Error('map JSON 解析失败');
+    // Smart repair — the same parser the chart path uses. Handles prose
+    // wrappers, leading/side comments (the "// …" the model often prepends),
+    // trailing commas, single quotes, unquoted keys, full-width punctuation,
+    // and nested fences. Parse-gated: only accepted if it parses cleanly.
+    const result = repairJsonSource(source);
+    if (!result.repaired) {
+      throw new Error('map 数据需要是一个 JSON 对象（{ "markers": [...], "route": [...] }）');
     }
+    parsed = JSON.parse(result.source);
+    repaired = true;
+    source = result.source;
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('map 数据需要是一个 JSON 对象');
@@ -93,5 +108,16 @@ export function parseMapSource(raw: string): { spec: MapSpec; repaired?: boolean
   if (!spec.markers && !spec.route && !spec.center) {
     throw new Error('map 数据缺少可渲染内容（需要 markers、route 或 center）');
   }
-  return { spec, repaired, repairedSource: repaired ? trimmed : undefined };
+
+  // Programmatic geographic validation: check that route waypoints head
+  // toward the destination (bearing deviation > 90° = heading away).
+  if (spec.route && spec.route.length >= 3) {
+    const vr = validateRoute(spec.route);
+    if (!vr.valid) {
+      spec.routeWarnings = vr.violations;
+      spec.routeWarningText = describeViolations(vr);
+    }
+  }
+
+  return { spec, repaired, repairedSource: repaired ? source : undefined };
 }

@@ -3,7 +3,7 @@
 // and the logical-trap detection that primes premise verification.
 
 import { describe, it, expect } from 'bun:test';
-import { Planner, assessIntent, detectArtifactRequest, detectProjectRequest, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
+import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
 import type { LLMAdapter } from '../../shared/types';
 
 describe('Planner', () => {
@@ -417,5 +417,43 @@ describe('parsePlanJson (LLM plan parsing)', () => {
     const plan = parsePlanJson(`[${many}]`);
     expect(plan?.steps).toHaveLength(10);
     expect(plan!.steps[9]).toMatchObject({ id: '10', action: 'S9' });
+  });
+});
+
+describe('detectFictionIntent', () => {
+  it('detects explicit ignore-facts opt-outs', () => {
+    expect(detectFictionIntent('不用管事实，随便写一个故事')).toBe(true);
+    expect(detectFictionIntent('不考虑现实，给我一个架空的世界观')).toBe(true);
+    expect(detectFictionIntent('不用考虑物理规律')).toBe(true);
+    expect(detectFictionIntent("ignore physics and just make it up")).toBe(true);
+    expect(detectFictionIntent("don't care about facts")).toBe(true);
+  });
+
+  it('detects explicit fiction markers', () => {
+    expect(detectFictionIntent('帮我虚构一个古代王朝的历史')).toBe(true);
+    expect(detectFictionIntent('写一个架空历史的故事')).toBe(true);
+    expect(detectFictionIntent('编造一个平行世界的设定')).toBe(true);
+    expect(detectFictionIntent('write an alternate history novel')).toBe(true);
+  });
+
+  it('detects genre creation but not factual genre questions', () => {
+    expect(detectFictionIntent('写一个科幻小说')).toBe(true);
+    expect(detectFictionIntent('write a fantasy story')).toBe(true);
+    expect(detectFictionIntent('介绍科幻小说的历史')).toBe(false);
+    expect(detectFictionIntent('解释相对论')).toBe(false);
+  });
+
+  it('does not flag ordinary factual requests', () => {
+    expect(detectFictionIntent('规划一条从西安到上海的骑行路线')).toBe(false);
+    expect(detectFictionIntent('解释这个文件的作用')).toBe(false);
+    expect(detectFictionIntent('帮我写一个打地鼠小游戏')).toBe(false);
+    expect(detectFictionIntent('What does this file do?')).toBe(false);
+    // "别" as "other" (别的/别的历史) must not read as "don't".
+    expect(detectFictionIntent('介绍一下别的历史人物')).toBe(false);
+  });
+
+  it('assessIntent propagates the detection', () => {
+    expect(assessIntent('不用管事实，写一个架空的故事').skipPlausibilityReview).toBe(true);
+    expect(assessIntent('规划一条从西安到上海的骑行路线').skipPlausibilityReview).toBe(false);
   });
 });

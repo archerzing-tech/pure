@@ -321,7 +321,9 @@ async function ensureMermaid(): Promise<MermaidAPI> {
  */
 function diagramRawOf(slot: HTMLElement): string {
   return slot.querySelector<HTMLElement>('.diagram-source code')?.textContent
+    ?? slot.querySelector<HTMLElement>('.map-source code')?.textContent
     ?? slot.getAttribute('data-raw')
+    ?? slot.getAttribute('data-map-raw')
     ?? '';
 }
 
@@ -609,7 +611,7 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
       slot.setAttribute('data-processed', 'true');
-      setDiagramState(slot, 'error', err instanceof Error ? err.message : String(err));
+      setDiagramState(slot, 'error', t('diagram.loadFailed'));
     }
     return;
   }
@@ -652,8 +654,7 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
           continue;
         } catch { /* repaired source also failed → show the original error */ }
       }
-      const msg = err instanceof Error ? err.message : String(err);
-      setDiagramState(slot, 'error', msg);
+      setDiagramState(slot, 'error', t('diagram.renderFailed'));
     }
   }
 }
@@ -891,7 +892,7 @@ async function renderSvgNodes(container: HTMLElement): Promise<void> {
     }
     const src = diagramRawOf(slot);
     if (!src.trim()) {
-      setDiagramState(slot, 'error', '(empty SVG)');
+      setDiagramState(slot, 'error', t('diagram.svgEmpty'));
       continue;
     }
     let svg = sanitizeSvgSource(src);
@@ -906,7 +907,7 @@ async function renderSvgNodes(container: HTMLElement): Promise<void> {
       }
     }
     if (!svg) {
-      setDiagramState(slot, 'error', 'SVG sanitization produced no output');
+      setDiagramState(slot, 'error', t('diagram.svgFailed'));
       continue;
     }
     // Commit to this render BEFORE touching the DOM: a stale attempt (already
@@ -1672,18 +1673,17 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
 
   let mod: typeof import('./echartsChart');
   try {
-    mod = await ensureEchartsChart();
-  } catch (err) {
+    mod = await ensureEchartsChart();    } catch (err) {
+      for (const { slot, version } of attempts) {
+        if (!isCurrentDiagramRender(slot, version)) continue;
+        setDiagramState(slot, 'error', t('diagram.loadFailed'));
+      }
+      return;
+    }
+
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
-      setDiagramState(slot, 'error', err instanceof Error ? err.message : String(err));
-    }
-    return;
-  }
-
-  for (const { slot, version } of attempts) {
-    if (!isCurrentDiagramRender(slot, version)) continue;
-    const target = slot.querySelector<HTMLElement>('.chart-target');
+      const target = slot.querySelector<HTMLElement>('.chart-target');
     if (!target) {
       setDiagramState(slot, 'error', t('diagram.missingTarget'));
       continue;
@@ -1697,7 +1697,7 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
     } catch (err) {
       if (!isCurrentDiagramRender(slot, version)) continue;
       const raw = err instanceof Error ? err.message : String(err);
-      const msg = raw === 'chart needs at least one data row' ? t('diagram.noData') : raw;
+      const msg = raw === 'chart needs at least one data row' ? t('diagram.noData') : raw === 'empty chart source' ? t('diagram.chartEmptySource') : t('diagram.chartParseFailed');
       setDiagramState(slot, 'error', msg);
     }
   }
@@ -1713,13 +1713,25 @@ function mapSlot(source: string): string {
   return `<div class="map-slot" data-map-state="loading" data-map-raw="${attr(encodeRawAttr(source))}">` +
     `<div class="map-toolbar">` +
       `<span class="map-toolbar-title">${esc(t('map.title'))}</span>` +
-      `<button type="button" class="map-source-toggle" title="${attr(t('map.sourceToggle'))}" aria-label="${attr(t('map.sourceToggle'))}">${esc(t('map.sourceToggle'))}</button>` +
+      `<div class="map-toolbar-actions">` +
+        `<button type="button" class="map-source-toggle" title="${attr(t('map.sourceToggle'))}" aria-label="${attr(t('map.sourceToggle'))}">${esc(t('map.sourceToggle'))}</button>` +
+        `<button type="button" class="map-expand" title="${attr(t('map.expand'))}" aria-label="${attr(t('map.expand'))}">${esc(t('map.expand'))}</button>` +
+      `</div>` +
     `</div>` +
     `<div class="map-loading" role="status" aria-live="polite">` +
       `<span class="diagram-loading-visual" aria-hidden="true"><span class="diagram-loading-ring"></span><span class="diagram-loading-orbit"><i></i><i></i><i></i></span></span>` +
       `<span class="diagram-loading-label">${esc(t('map.loading'))}</span>` +
     `</div>` +
-    `<div class="map-canvas"></div>` +
+    `<div class="map-canvas-wrap">` +
+      `<div class="map-canvas"></div>` +
+      `<button type="button" class="map-expand-hint" aria-label="${attr(t('map.expand'))}">` +
+        `<span class="map-expand-hint-inner">` +
+          `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>` +
+          `<span>${esc(t('map.expand'))}</span>` +
+        `</span>` +
+      `</button>` +
+    `</div>` +
+    `<div class="map-route-warning" role="alert" aria-live="polite"></div>` +
     `<div class="map-error" role="alert"></div>` +
     `<pre class="map-source"><code class="hljs language-json">${esc(source)}</code></pre>` +
     `</div>`;
@@ -1783,7 +1795,7 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
   } catch (err) {
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
-      setMapState(slot, 'error', err instanceof Error ? err.message : String(err));
+      setMapState(slot, 'error', t('diagram.loadFailed'));
     }
     return;
   }
@@ -1800,10 +1812,27 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
       mod.renderMapInto(canvas, spec);
       if (!isCurrentDiagramRender(slot, version)) continue;
       if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
+      // Programmatic route-direction warning: surfaced as a visible banner
+      // on the map when waypoints head away from the destination.
+      if (spec.routeWarningText) {
+        const warnEl = slot.querySelector<HTMLElement>('.map-route-warning');
+        if (warnEl) {
+          warnEl.textContent = '';
+          const icon = document.createElement('span');
+          icon.className = 'map-route-warning-icon';
+          icon.textContent = '⚠️';
+          warnEl.appendChild(icon);
+          const msg = document.createElement('span');
+          msg.className = 'map-route-warning-text';
+          msg.textContent = spec.routeWarningText;
+          warnEl.appendChild(msg);
+        }
+      }
       setMapState(slot, 'preview');
     } catch (err) {
       if (!isCurrentDiagramRender(slot, version)) continue;
-      setMapState(slot, 'error', err instanceof Error ? err.message : String(err));
+      const raw = err instanceof Error ? err.message : String(err);
+      setMapState(slot, 'error', raw.includes('map 数据') ? raw : t('diagram.renderFailed'));
     }
   }
 }
@@ -1820,6 +1849,27 @@ function bindMapControls(container: HTMLElement): void {
           ? t('map.sourceHide')
           : t('map.sourceToggle');
       });
+    }
+    // Expand → fullscreen interactive map. The inline card stays static; the
+    // lightbox is the only place the map accepts pan / zoom / tap. Both the
+    // toolbar button and the hover hint over the canvas trigger it.
+    const openLightbox = (): void => {
+      const canvas = slot.querySelector<HTMLElement>('.map-canvas');
+      if (!canvas) return;
+      // Re-parse the raw source so the lightbox shows the same repaired JSON
+      // (and the same route-direction warnings) as the inline preview.
+      void ensureLeafletMap().then((mod) => {
+        try {
+          const { spec } = mod.parseMapSource(mapRawOf(slot));
+          mod.openMapLightbox(spec);
+        } catch {
+          // A broken source would already be showing an inline error; opening
+          // the lightbox on top of that would just re-throw, so ignore it.
+        }
+      });
+    };
+    for (const btn of slot.querySelectorAll<HTMLButtonElement>('.map-expand, .map-expand-hint')) {
+      btn.addEventListener('click', openLightbox);
     }
     slot.addEventListener('click', (event) => {
       if (!(event.target as Element | null)?.closest('.diagram-retry')) return;
