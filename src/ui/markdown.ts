@@ -197,6 +197,10 @@ renderer.code = (token: { text: string; lang?: string }): string => {
     return diagramSlot('chart', code, '');
   }
 
+  if (lang === 'map' || lang === 'leaflet') {
+    return mapSlot(code);
+  }
+
   // Other code blocks: emit <pre><code>; hljs tags inside after parse. The code
   // must be HTML-escaped here — marked hands us the raw source, and inserting it
   // unescaped would let `<<` sequences (generics, HTML samples, `<<img onerror>`) be
@@ -1699,6 +1703,136 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
   }
 }
 
+// ── Leaflet + OpenStreetMap maps (```map) ──
+// A ```map fenced block carries a JSON payload (markers / route / center) and
+// renders as an interactive map. Dedicated slot (not diagram-slot) because the
+// map is a live DOM widget, not a rasterizable image — no PNG export / popup
+// viewer, just a canvas + a "view data" toggle. Lazy-loaded via leafletMap.ts.
+
+function mapSlot(source: string): string {
+  return `<div class="map-slot" data-map-state="loading" data-map-raw="${attr(encodeRawAttr(source))}">` +
+    `<div class="map-toolbar">` +
+      `<span class="map-toolbar-title">${esc(t('map.title'))}</span>` +
+      `<button type="button" class="map-source-toggle" title="${attr(t('map.sourceToggle'))}" aria-label="${attr(t('map.sourceToggle'))}">${esc(t('map.sourceToggle'))}</button>` +
+    `</div>` +
+    `<div class="map-loading" role="status" aria-live="polite">` +
+      `<span class="diagram-loading-visual" aria-hidden="true"><span class="diagram-loading-ring"></span><span class="diagram-loading-orbit"><i></i><i></i><i></i></span></span>` +
+      `<span class="diagram-loading-label">${esc(t('map.loading'))}</span>` +
+    `</div>` +
+    `<div class="map-canvas"></div>` +
+    `<div class="map-error" role="alert"></div>` +
+    `<pre class="map-source"><code class="hljs language-json">${esc(source)}</code></pre>` +
+    `</div>`;
+}
+
+function mapRawOf(slot: HTMLElement): string {
+  return slot.querySelector<HTMLElement>('.map-source code')?.textContent
+    ?? slot.getAttribute('data-map-raw')
+    ?? '';
+}
+
+function setMapState(slot: HTMLElement, state: 'loading' | 'preview' | 'error', message = ''): void {
+  slot.setAttribute('data-map-state', state);
+  slot.setAttribute('aria-busy', String(state === 'loading'));
+  const error = slot.querySelector<HTMLElement>('.map-error');
+  if (error) {
+    error.innerHTML = state === 'error'
+      ? `<strong>${esc(t('diagram.renderFailed'))}</strong><span>${esc(message)}</span>` +
+        `<button type="button" class="diagram-retry">${esc(t('diagram.retry'))}</button>`
+      : '';
+  }
+  if (state !== 'preview') {
+    slot.querySelector('.diagram-repaired')?.remove();
+    repairedSources.delete(slot);
+  }
+}
+
+type LeafletMapModule = typeof import('./leafletMap');
+let leafletMapMod: LeafletMapModule | null = null;
+
+async function ensureLeafletMap(): Promise<LeafletMapModule> {
+  if (!leafletMapMod) {
+    leafletMapMod = await withTimeout(import('./leafletMap'));
+  }
+  return leafletMapMod;
+}
+
+async function renderMapNodes(container: HTMLElement): Promise<void> {
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.map-slot:not([data-processed])'));
+  if (slots.length === 0) return;
+  const attempts = slots.map((slot) => ({ slot, version: nextDiagramRenderVersion(slot) }));
+
+  for (const { slot, version } of attempts) {
+    if (!isCurrentDiagramRender(slot, version)) continue;
+    slot.setAttribute('data-processed', 'true');
+    setMapState(slot, 'loading');
+  }
+  // Yield two frames so the slot is laid out before leaflet measures it — a
+  // 0-width canvas would otherwise render a distorted/blank map.
+  await new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+
+  let mod: LeafletMapModule;
+  try {
+    mod = await ensureLeafletMap();
+  } catch (err) {
+    for (const { slot, version } of attempts) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      setMapState(slot, 'error', err instanceof Error ? err.message : String(err));
+    }
+    return;
+  }
+
+  for (const { slot, version } of attempts) {
+    if (!isCurrentDiagramRender(slot, version)) continue;
+    const canvas = slot.querySelector<HTMLElement>('.map-canvas');
+    if (!canvas) {
+      setMapState(slot, 'error', t('diagram.missingTarget'));
+      continue;
+    }
+    try {
+      const { spec, repaired, repairedSource } = mod.parseMapSource(mapRawOf(slot));
+      mod.renderMapInto(canvas, spec);
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
+      setMapState(slot, 'preview');
+    } catch (err) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      setMapState(slot, 'error', err instanceof Error ? err.message : String(err));
+    }
+  }
+}
+
+function bindMapControls(container: HTMLElement): void {
+  for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.map-slot'))) {
+    if (slot.hasAttribute('data-map-controls-bound')) continue;
+    slot.setAttribute('data-map-controls-bound', 'true');
+    const toggle = slot.querySelector<HTMLButtonElement>('.map-source-toggle');
+    if (toggle) {
+      toggle.addEventListener('click', () => {
+        slot.classList.toggle('show-source');
+        toggle.textContent = slot.classList.contains('show-source')
+          ? t('map.sourceHide')
+          : t('map.sourceToggle');
+      });
+    }
+    slot.addEventListener('click', (event) => {
+      if (!(event.target as Element | null)?.closest('.diagram-retry')) return;
+      const canvas = slot.querySelector<HTMLElement>('.map-canvas');
+      if (!canvas) return;
+      slot.removeAttribute('data-processed');
+      setMapState(slot, 'loading');
+      const host = slot.parentElement ?? slot;
+      void renderMapNodes(host);
+    });
+  }
+}
+
 // ── hljs: synchronous per-bubble ──
 
 function highlightAll(container: HTMLElement): void {
@@ -1706,6 +1840,10 @@ function highlightAll(container: HTMLElement): void {
     'pre code.hljs, pre code[class*="language-"]',
   );
   for (const el of Array.from(els)) {
+    // Same freeze guard as streaming: hljs on a giant single block (a whole
+    // HTML file as one fence) can block the main thread for seconds. Keep it
+    // as readable plain text instead of freezing the app.
+    if (el.textContent && el.textContent.length > STREAM_HLJS_SKIP_ABOVE) continue;
     try {
       hljs.highlightElement(el);
     } catch {
@@ -1780,6 +1918,7 @@ export async function renderMarkdown(
   // their double-click handler now, not at the end of the whole pipeline.
   bindVectorPopup(container);
   await renderChartNodes(container);
+  await renderMapNodes(container);
 
   // Start PlantUML listeners before awaiting Mermaid so a slow Mermaid render
   // cannot extend the PlantUML spinner beyond its own bounded timeout.
@@ -1790,6 +1929,7 @@ export async function renderMarkdown(
 
   // 5) Bind the post-render preview/source controls and diagram viewers.
   bindDiagramControls(container);
+  bindMapControls(container);
   bindMermaidPopup(container);
   bindPumlPopup(container);
   bindVectorPopup(container);
@@ -1815,6 +1955,11 @@ export async function renderMarkdown(
 const STREAM_THROTTLE_MS = 100;
 const STREAM_LONG_TEXT_MS = 160;
 const STREAM_VERY_LONG_TEXT_MS = 220;
+// Streaming renders re-highlight a still-growing code block every tick; past
+// this size hljs becomes the dominant cost and saturates the main thread
+// ("app froze / unresponsive"). Above it we skip streaming hljs — the final
+// renderMarkdown pass highlights the completed block exactly once.
+const STREAM_HLJS_SKIP_ABOVE = 30_000;
 
 export function streamRenderThrottleMs(textLength: number, renderCostMs = 0): number {
   const sizeDelay = textLength >= 80_000
@@ -1964,10 +2109,18 @@ function diffStreaming(container: HTMLElement, text: string): void {
 
     // Highlight freshly-mounted code blocks only. Pre-existing hljs spans on
     // unchanged siblings are left intact.
+    // A growing code block is re-rendered (and would be re-highlighted) on
+    // every throttled tick; hljs on a multi-hundred-KB block (a whole HTML
+    // file as one fence) can take hundreds of ms per tick, saturating the
+    // main thread and freezing the app. Skip streaming hljs above a size
+    // threshold — the completion render (renderMarkdown) highlights it once.
     if (newEl.tagName === 'PRE' && newEl.firstElementChild?.tagName === 'CODE') {
-      try {
-        hljs.highlightElement(newEl.firstElementChild as HTMLElement);
-      } catch { /* keep raw text on parser failure */ }
+      const codeEl = newEl.firstElementChild as HTMLElement;
+      if (codeEl.textContent && codeEl.textContent.length <= STREAM_HLJS_SKIP_ABOVE) {
+        try {
+          hljs.highlightElement(codeEl);
+        } catch { /* keep raw text on parser failure */ }
+      }
     }
 
     if (oldEl) container.replaceChild(newEl, oldEl);

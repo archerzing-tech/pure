@@ -1962,10 +1962,40 @@ export class ChatController {
       thinkingPending = '';
       scrollChatToBottomIfPinned(chatEl);
     };
+    // Tool-result gap watchdog: after a tool row finalizes (✓/✗), the model
+    // must re-read the result and decide the next step — on slow models this
+    // gap can last many seconds with NOTHING on screen, which reads as a
+    // stuck/hung session. After a short debounce (so back-to-back tool calls
+    // don't flash a card) we open a "正在思考下一步…" waiting card with live
+    // dots; the next ReasoningDelta / TokenDelta / ToolCallStart cancels it
+    // and takes over with real content.
+    let toolGapTimer: number | undefined;
+    const TOOL_GAP_DEBOUNCE_MS = 600;
+    const scheduleToolGapCard = (): void => {
+      if (toolGapTimer !== undefined) return;
+      toolGapTimer = window.setTimeout(() => {
+        toolGapTimer = undefined;
+        if (gen !== this.generation || this.abortController?.signal.aborted) return;
+        if (thinkingCard) return;
+        // A tool row still executing (image generation, a long command) already
+        // shows its own spinner — never stack a "正在思考下一步…" card on top.
+        if (pendingRows.size > 0 || pendingByName.size > 0) return;
+        thinkingCard = openThinkingCard();
+        setThinkingLabel(thinkingCard, '正在思考下一步…');
+        scrollChatToBottomIfPinned(chatEl);
+      }, TOOL_GAP_DEBOUNCE_MS);
+    };
+    const cancelToolGapCard = (): void => {
+      if (toolGapTimer !== undefined) {
+        clearTimeout(toolGapTimer);
+        toolGapTimer = undefined;
+      }
+    };
     // Drop the live trace on aborted turns (pre-flight cancel / plan gate
     // rejection / fatal error) — a "正在准备…" card must not linger as a
     // ghost when the turn never produced output.
     const removeThinkingCard = (): void => {
+      cancelToolGapCard();
       if (thinkingFlushTimer !== undefined) {
         clearTimeout(thinkingFlushTimer);
         thinkingFlushTimer = undefined;
@@ -1977,6 +2007,7 @@ export class ChatController {
       }
     };
     const endThinking = () => {
+      cancelToolGapCard();
       if (thinkingFlushTimer !== undefined) {
         clearTimeout(thinkingFlushTimer);
         thinkingFlushTimer = undefined;
@@ -1988,6 +2019,15 @@ export class ChatController {
         thinkingPending = '';
       }
       if (!thinkingCard) return;
+      // Non-reasoning models (standard GPT-4, Claude, …) never emit
+      // ReasoningDelta — the card was opened with a "正在思考…" label but
+      // received zero text. Finalizing it leaves an empty "思考完成" ghost
+      // that cluttered the transcript. Drop it instead.
+      if (!thinkingCard.textEl.textContent) {
+        thinkingCard.el.remove();
+        thinkingCard = null;
+        return;
+      }
       finalizeThinkingCard(thinkingCard);
       thinkingCard = null;
     };
@@ -2708,7 +2748,16 @@ export class ChatController {
          const finishPlan = (planNumber: number): void => {
           const finishSnapshot = modelSnapshot();
           if (!finishSnapshot || planNumber !== finishSnapshot.currentPlan) return;
-          if (needsDeliveryGate && !planTrack.phaseVerifySeen[planNumber]) {
+          // A workspace with no standard verification manifest (static page /
+          // HTML demo / plain script — profile.verification empty) has nothing
+          // to run for a phase check. The delivery gate treats that as a
+          // non-blocking vacuous pass, so the phase cursor must not wait on
+          // phaseVerifySeen either — it would freeze multi-stage static builds
+          // on the first stage forever.
+          const noStandardVerification = needsDeliveryGate
+            && workspaceProfile !== undefined
+            && workspaceProfile.verification.length === 0;
+          if (needsDeliveryGate && !planTrack.phaseVerifySeen[planNumber] && !noStandardVerification) {
             card.setActivity(`计划 ${planNumber} 已报告完成，等待真实验证结果…`);
             // 交付门禁阶段：模型播报完成但没有自己的验证命令时，调度阶段验证
             // backstop 补齐证据（成功后会重放 finishPlan 推进游标）；否则游标
@@ -2819,7 +2868,7 @@ export class ChatController {
                 card.setActivity(`计划 ${before} 尚未播报完成，暂不进入计划 ${marker.number}…`);
                 planTrack.deferredPhase = marker.number;
                 planTrack.deferredReason = 'protocol';
-              } else if (needsDeliveryGate && !planTrack.phaseVerifySeen[before]) {
+              } else if (needsDeliveryGate && !planTrack.phaseVerifySeen[before] && !(workspaceProfile !== undefined && workspaceProfile.verification.length === 0)) {
                 card.setActivity(`计划 ${before} 已播报完成，等待真实验证结果…`);
                 planTrack.deferredPhase = marker.number;
                 planTrack.deferredReason = 'verify';
@@ -2872,7 +2921,8 @@ export class ChatController {
         if (!planCard) return;
         const snapshot = planProgress?.getSnapshot();
         const queued = planTrack.deferredMarkers.get(targetPlan);
-        if (!snapshot || !queued || !planTrack.phaseCompleted.has(finishedPlan) || (needsDeliveryGate && !planTrack.phaseVerifySeen[finishedPlan]) || snapshot.currentPlan !== finishedPlan || !(planProgress?.canCompleteCurrentTodos() ?? false)) return;
+        const noStandardVerification = workspaceProfile !== undefined && workspaceProfile.verification.length === 0;
+        if (!snapshot || !queued || !planTrack.phaseCompleted.has(finishedPlan) || (needsDeliveryGate && !planTrack.phaseVerifySeen[finishedPlan] && !noStandardVerification) || snapshot.currentPlan !== finishedPlan || !(planProgress?.canCompleteCurrentTodos() ?? false)) return;
         planProgress?.dispatch({ type: 'todosCompleted' });
         planProgress?.dispatch({ type: 'phaseStarted', planNumber: targetPlan });
         if (planProgress?.getSnapshot().currentPlan !== targetPlan) return;
@@ -2925,7 +2975,10 @@ export class ChatController {
               }, this.abortController?.signal);
               if (gen !== this.generation || this.abortController?.signal.aborted) return;
               const out = String(res.result ?? '');
-              const ok = res.success && !out.includes('[verify-unavailable]') && !out.includes('[verify-not-applicable]');
+              // [verify-not-applicable] = no standard test manifest (static page/
+              // HTML demo). The delivery gate treats it as a non-blocking pass, so
+              // the backstop must not stall the plan cursor on it either.
+              const ok = res.success && !out.includes('[verify-unavailable]');
               if (ok && !planTrack.phaseVerifySeen[finishedPhase]) {
                 // 真实验证证据到手：记录并重放完成路径，游标才能前进（finishPlan
                 // 无证据时直接返回，这正是交付门禁阶段卡死、计划无法执行完的原因）。
@@ -3229,6 +3282,12 @@ export class ChatController {
                   // happens once on Completed.
                   seg.el.textContent = text;
                 }
+                // Text streaming is itself visible feedback — no gap card
+                // needed while tokens are arriving. (Re-arming here caused the
+                // card to keep popping during long image rendering: every
+                // token cancelled + re-armed the debounce, and every pause
+                // longer than the debounce re-opened it. The gap card is only
+                // for the silence AFTER a tool result, armed in ToolResult.)
               }
               if (!streamingRenderEnabled) scrollChatToBottomIfPinned(chatEl);
             } else {
@@ -3302,6 +3361,7 @@ export class ChatController {
           case 'ReasoningDelta': {
             const content = event.payload.content;
             if (!content) break;
+            cancelToolGapCard();
             // Reasoning can resume after tool rows (each LLM iteration), so a
             // fresh card opens below whatever was appended since the last one.
             if (!thinkingCard) thinkingCard = openThinkingCard();
@@ -3452,6 +3512,10 @@ export class ChatController {
               this.addToolStatusBubble(toolName, status, duration);
             }
             scrollChatToBottomIfPinned(chatEl);
+            // The model now re-reads the tool result and plans the next step —
+            // on slow models this gap is silent. Open a waiting card (debounced)
+            // so the session never looks frozen between tool calls.
+            scheduleToolGapCard();
             break;
           }
 
@@ -3643,7 +3707,10 @@ export class ChatController {
               // / 本轮交付门禁通过）。绝不 force 清空未完成的 Todo。
               const todosDone = planProgress.canCompleteCurrentTodos();
               const nextAnnounced = planTrack.phaseStarted.has(nextPlan);
+              const noStandardVerification = workspaceProfile !== undefined
+                && workspaceProfile.verification.length === 0;
               const evidenced = !needsDeliveryGate
+                || noStandardVerification
                 || planTrack.phaseVerifySeen[finishedPlan]
                 || qualityPassed === true;
               if ((todosDone || nextAnnounced) && evidenced) {
@@ -3770,7 +3837,11 @@ export class ChatController {
             // few (open with default app / reveal in file manager), collapsing to
             // a single project-directory card when many. Skipped on stale
             // generations (user switched sessions while the turn was streaming).
-            if (gen === this.generation && (!needsDeliveryGate || projectQualityResult?.passed === true) && turnArtifacts.length > 0) {
+            // The Interrupted handler already rendered the artifact cards for
+            // an aborted turn (the engine always yields Completed right after
+            // Interrupted) — rendering them again here would duplicate the
+            // project-directory card. Normal completions still render here.
+            if (gen === this.generation && !event.payload.interrupted && (!needsDeliveryGate || projectQualityResult?.passed === true) && turnArtifacts.length > 0) {
               const artifactRow = document.createElement('div');
               artifactRow.className = 'bubble-row artifact-row';
               chatEl.appendChild(artifactRow);
@@ -3792,6 +3863,9 @@ export class ChatController {
             // stops the chain at completion / delivery-gate block — a completed
             // plan has activeComplexPlan nulled, so a continuation must never
             // fire after it (it would re-analyze "继续" as a fresh task).
+            const lastPlanIndex = completionSnapshot?.plan.steps.length ?? 0;
+            const onFinalStage = completionSnapshot !== undefined
+              && completionSnapshot.currentPlan >= lastPlanIndex;
             this.pendingAutoContinue = {
               planActive: planCard !== undefined,
               cleanEnd: planCard !== undefined && gen === this.generation && !this.pausePlanCard,
@@ -3803,9 +3877,13 @@ export class ChatController {
               // stage's `## 计划 n 已完成` goes through finishPlan → phaseStarted
               // beyond the list → applyCompleted, which nulls activeComplexPlan
               // without ever dispatching the turn-end 'completed' action.
+              // A failed delivery gate only stops the chain on the FINAL stage.
+              // Mid-plan stages are partial work (e.g. stage 1 "set up project
+              // structure" has no complete code to review); blocking the chain
+              // there froze multi-stage builds on stage 1 forever.
               planTerminal: planMarkedCompleted
                 || (this.activeComplexPlan === null && this.activePlanCardSnapshot?.complete === true)
-                || (needsDeliveryGate && !qualityPassed),
+                || (needsDeliveryGate && !qualityPassed && onFinalStage),
             };
             break;
           }

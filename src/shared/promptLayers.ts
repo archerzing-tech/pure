@@ -177,6 +177,28 @@ export const CHART_DSL_PROMPT = `To SHOW data as a chart, emit a fenced code blo
 - tree | treemap | sunburst — indentation defines the hierarchy (2 spaces per level), the first line is the root; for treemap/sunburst end a line with a number to set its value (\`  电子 500\`).
 A JSON payload (\`{ "type": "tree", "data": [...] }\`) is accepted for every type. NEVER write a Python/matplotlib or other script to draw a chart or picture — the fenced chart / svg / mermaid / puml block IS the deliverable and renders inline as the image.`;
 
+/** ```map DSL contract — identical in GUI and CLI (shared, not duplicated). The
+ * GUI renders fenced ```map blocks inline as an interactive Leaflet +
+ * OpenStreetMap map (markers + route polyline). The CLI renders the block as
+ * plain code. A map is the most direct answer for routes, route planning,
+ * directions, and place/location questions — use real coordinates, never
+ * invented ones for real cities. */
+export const MAP_DSL_PROMPT = `To SHOW a route, route plan, directions, or places on a map, emit a fenced code block tagged map containing ONE JSON payload:
+{
+  "title": "西安 → 上海 骑行路线",
+  "center": [34.3416, 108.9398],
+  "zoom": 6,
+  "markers": [
+    { "lat": 34.3416, "lng": 108.9398, "title": "西安", "label": "起点" },
+    { "lat": 31.2304, "lng": 121.4737, "title": "上海", "label": "终点" }
+  ],
+  "route": [[34.3416, 108.9398], [31.2304, 121.4737]]
+}
+- markers: name the places (lat/lng in WGS84 decimal degrees, latitude first).
+- route: an ordered list of [lat, lng] points forming the path (polyline); a few key waypoints are enough.
+- Use REAL coordinates — for real cities look them up (web_search) when unsure; never invent them.
+- The map block IS the deliverable — never save it as a file or draw it with a script.`;
+
 /** 拟人化沟通基调 — identical in GUI and CLI (shared, not duplicated). The
  * agent should sound like a thoughtful human colleague — natural, warm, direct
  * — and narrate its work instead of emitting canned boilerplate. */

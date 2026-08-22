@@ -27,6 +27,23 @@ import type {
 } from '../shared/types';
 import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
 
+// Bounded wait for the memory retrieval that feeds the system prompt. The
+// embedder's one-time load (WASM + ~80MB model) happens lazily inside the
+// first search; capping it here keeps that cold load off the first token's
+// critical path. A timeout degrades to the plain system prompt (memories are
+// an enhancement, never a prerequisite).
+const MEMORY_SEARCH_TIMEOUT_MS = 1500;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      promise.finally(() => clearTimeout(timer)).catch(() => {});
+    }),
+  ]);
+}
+
 export interface HarnessConfig {
   sessionId: string;
   llm: LLMAdapter;
@@ -614,10 +631,17 @@ export class Harness {
         // v1.9.7 — k=10 so verified successes/procedures are not squeezed out
         // by a heap of error patterns; fragment priority in the assembler
         // orders proven approaches above avoid-lists when budget-constrained.
-        memories = await this.config.memory.search(userPrompt, {
-          k: 12,
-          projectPath: this.projectPath(),
-        });
+        // The search is raced against a timeout: the embedder's one-time load
+        // (WASM + ~80MB model) must never delay the first LLM token — a slow
+        // search degrades to the plain system prompt (same as a failure).
+        memories = await withTimeout(
+          this.config.memory.search(userPrompt, {
+            k: 12,
+            projectPath: this.projectPath(),
+          }),
+          MEMORY_SEARCH_TIMEOUT_MS,
+          'memory search',
+        );
       }
     } catch {
       memories = [];

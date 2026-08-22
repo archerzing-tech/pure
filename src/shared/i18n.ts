@@ -69,6 +69,12 @@ const translations: Record<Language, Record<string, string>> = {
     'diagram.repaired.repairedLabel': '修复后',
     'diagram.repaired.close': '关闭 (Esc)',
 
+    // ── Map (```map blocks) ──
+    'map.title': '地图',
+    'map.loading': '正在加载地图…',
+    'map.sourceToggle': '查看数据',
+    'map.sourceHide': '收起数据',
+
     // ── Thinking card ──
     'thinking.thinking': '思考',
     'thinking.done': '思考完成',
@@ -807,6 +813,10 @@ const translations: Record<Language, Record<string, string>> = {
     'diagram.repaired.original': 'Original',
     'diagram.repaired.repairedLabel': 'Repaired',
     'diagram.repaired.close': 'Close (Esc)',
+    'map.title': 'Map',
+    'map.loading': 'Loading map…',
+    'map.sourceToggle': 'View data',
+    'map.sourceHide': 'Hide data',
 
     // ── Thinking card ──
     'thinking.thinking': 'Thinking',
