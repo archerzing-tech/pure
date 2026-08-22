@@ -621,31 +621,71 @@ import { isTauriRuntime, tauriInvoke } from '../shared/tauri';
 import { t } from '../shared/i18n';
 import { showToast } from '../shared/toast';
 const tauriAvailable = isTauriRuntime();
+const TAURI_IO_TIMEOUT_MS = 10_000;
+
+function withTauriTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${label} timed out after ${TAURI_IO_TIMEOUT_MS}ms`));
+    }, TAURI_IO_TIMEOUT_MS);
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function resolveWithin(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    promise.then(finish, finish);
+  });
+}
 
 // ── Tauri backend (filesystem via Rust commands) ──
 
 async function tauriSave(sessionId: string, snapshot: SessionSnapshotV2, workspace: string): Promise<void> {
-  await tauriInvoke('save_session', { sessionId, snapshot, workspace });
+  await withTauriTimeout(tauriInvoke('save_session', { sessionId, snapshot, workspace }), 'save_session');
 }
 
 async function tauriSaveWorkspace(sessionId: string, workspace: string): Promise<void> {
-  await tauriInvoke('save_session_workspace', { sessionId, workspace });
+  await withTauriTimeout(tauriInvoke('save_session_workspace', { sessionId, workspace }), 'save_session_workspace');
 }
 
 async function tauriLoadLast(): Promise<{ sessionId: string; snapshot: SessionSnapshotV2; workspace: string } | null> {
-  const data: any = await tauriInvoke('load_last_session');
+  const data: any = await withTauriTimeout(tauriInvoke('load_last_session'), 'load_last_session');
   if (!data) return null;
   return { sessionId: data.sessionId, snapshot: normalizeSessionSnapshot(data.snapshot ?? data), workspace: data.workspace ?? '' };
 }
 
 async function tauriLoad(sessionId: string): Promise<LoadedSession | null> {
-  const data: any = await tauriInvoke('load_session', { sessionId });
+  const data: any = await withTauriTimeout(tauriInvoke('load_session', { sessionId }), 'load_session');
   if (!data) return null;
   return { snapshot: normalizeSessionSnapshot(data.snapshot ?? data), workspace: data.workspace ?? '' };
 }
 
 async function tauriLoadList(): Promise<SessionMeta[]> {
-  const list: any[] = await tauriInvoke('load_session_list');
+  const list: any[] = await withTauriTimeout(tauriInvoke('load_session_list'), 'load_session_list');
   return list.map((s: any) => ({
     id: s.id,
     title: s.title,
@@ -833,9 +873,9 @@ export function createSessionPlanProgressPersistence(
         queueMicrotask(runPending);
       }
     },
-    flush(): Promise<void> {
+      flush(): Promise<void> {
       if (scheduled) runPending();
-      return chain;
+      return resolveWithin(chain, 5_000);
     },
     dispose(): void {
       disposed = true;
