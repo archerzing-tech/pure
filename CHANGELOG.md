@@ -3,10 +3,11 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v1.9.14-beta
+## v1.9.14
 
-**地图弹窗增强 + 悬浮展开提示**
+**地图加载体验与国内服务适配**
 
+- 地图瓦片加载期间显示连续 loading 动画，首个瓦片成功后再平滑淡入地图画布，避免对话窗口出现空白误判
 - 内联静态地图上增加「展开」悬浮提示遮罩，鼠标移入显示半透明遮罩 + 展开图标，点击直接打开交互弹窗
 - 地图弹窗增加公制比例尺（左下角）与实时缩放级别读数（右下角），方便判断距离
 - 地图弹窗鼠标悬停实时显示经纬度坐标，跟随光标移动（GCJ-02 源自动转回 WGS-84）

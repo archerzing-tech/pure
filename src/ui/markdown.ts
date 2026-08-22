@@ -1703,7 +1703,7 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
   }
 }
 
-// ── Leaflet + OpenStreetMap maps (```map) ──
+// ── Leaflet maps (```map) ──
 // A ```map fenced block carries a JSON payload (markers / route / center) and
 // renders as an interactive map. Dedicated slot (not diagram-slot) because the
 // map is a live DOM widget, not a rasterizable image — no PNG export / popup
@@ -1714,6 +1714,7 @@ function mapSlot(source: string): string {
     `<div class="map-toolbar">` +
       `<span class="map-toolbar-title">${esc(t('map.title'))}</span>` +
       `<div class="map-toolbar-actions">` +
+        `<button type="button" class="map-refresh" title="${attr(t('map.refresh'))}" aria-label="${attr(t('map.refresh'))}">${esc(t('map.refresh'))}</button>` +
         `<button type="button" class="map-source-toggle" title="${attr(t('map.sourceToggle'))}" aria-label="${attr(t('map.sourceToggle'))}">${esc(t('map.sourceToggle'))}</button>` +
         `<button type="button" class="map-expand" title="${attr(t('map.expand'))}" aria-label="${attr(t('map.expand'))}">${esc(t('map.expand'))}</button>` +
       `</div>` +
@@ -1809,7 +1810,16 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
     }
     try {
       const { spec, repaired, repairedSource } = mod.parseMapSource(mapRawOf(slot));
-      mod.renderMapInto(canvas, spec);
+      mod.renderMapInto(canvas, spec, {
+        onTileStatus: (status, message) => {
+          if (!isCurrentDiagramRender(slot, version)) return;
+          if (status === 'error') {
+            setMapState(slot, 'error', message || t('map.tileLoadFailed'));
+          } else if (status === 'ready') {
+            setMapState(slot, 'preview');
+          }
+        },
+      });
       if (!isCurrentDiagramRender(slot, version)) continue;
       if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
       // Programmatic route-direction warning: surfaced as a visible banner
@@ -1828,7 +1838,6 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
           warnEl.appendChild(msg);
         }
       }
-      setMapState(slot, 'preview');
     } catch (err) {
       if (!isCurrentDiagramRender(slot, version)) continue;
       const raw = err instanceof Error ? err.message : String(err);
@@ -1837,10 +1846,22 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
   }
 }
 
+function retryMapSlot(slot: HTMLElement): void {
+  const canvas = slot.querySelector<HTMLElement>('.map-canvas');
+  if (!canvas) return;
+  leafletMapMod?.clearMapTileMemoryCache();
+  slot.removeAttribute('data-processed');
+  setMapState(slot, 'loading');
+  const host = slot.parentElement ?? slot;
+  void renderMapNodes(host);
+}
+
 function bindMapControls(container: HTMLElement): void {
   for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.map-slot'))) {
     if (slot.hasAttribute('data-map-controls-bound')) continue;
     slot.setAttribute('data-map-controls-bound', 'true');
+    const refresh = slot.querySelector<HTMLButtonElement>('.map-refresh');
+    refresh?.addEventListener('click', () => retryMapSlot(slot));
     const toggle = slot.querySelector<HTMLButtonElement>('.map-source-toggle');
     if (toggle) {
       toggle.addEventListener('click', () => {
@@ -1873,12 +1894,7 @@ function bindMapControls(container: HTMLElement): void {
     }
     slot.addEventListener('click', (event) => {
       if (!(event.target as Element | null)?.closest('.diagram-retry')) return;
-      const canvas = slot.querySelector<HTMLElement>('.map-canvas');
-      if (!canvas) return;
-      slot.removeAttribute('data-processed');
-      setMapState(slot, 'loading');
-      const host = slot.parentElement ?? slot;
-      void renderMapNodes(host);
+      retryMapSlot(slot);
     });
   }
 }

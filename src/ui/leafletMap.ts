@@ -23,7 +23,7 @@ export type { MapMarker, MapSpec };
 
 // Track live map instances per canvas so re-render disposes cleanly and the
 // ResizeObserver never leaks across bubbles.
-const mapInstances = new WeakMap<HTMLElement, { map: L.Map; observer: ResizeObserver | null }>();
+const mapInstances = new WeakMap<HTMLElement, { map: L.Map; observer: ResizeObserver | null; tileTimer: ReturnType<typeof setTimeout> | null }>();
 
 const PIN_HTML = (label: string): string =>
   `<div class="map-pin">${label ? `<span class="map-pin-label">${escapeHtml(label)}</span>` : ''}` +
@@ -55,37 +55,63 @@ function coordPopupContent(lat: number, lng: number): string {
 }
 
 // ── Tile source chain ──
-// Ordered reachability chain for the basemap. WGS-84 sources come first; the
-// China-native AMap / Tencent sources (GCJ-02) are the last resort so the map
-// still renders when every global source is geo-blocked or rate-limited. Each
-// tile tries the sources in order and the first one to load becomes the active
-// source for the whole map (markers/route are re-projected to match it).
+// Ordered reachability chain for the basemap. China-native sources come first
+// for the app's primary dashboard use case, followed by global providers. OSM's
+// volunteer-run tile server is intentionally not used: its public policy does
+// not permit this application's tile traffic. Each tile tries the sources in
+// order and the first one to load becomes active for the whole map.
 interface TileSource {
   label: string;
   template: string;
   subdomains: string;
   gcj02: boolean;
+  requiresKey?: boolean;
 }
 
 const TILE_SOURCES: TileSource[] = [
-  { label: 'osm', template: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', subdomains: 'abc', gcj02: false },
-  { label: 'esri', template: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', subdomains: '', gcj02: false },
-  { label: 'carto', template: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', subdomains: 'abcd', gcj02: false },
+  { label: 'tianditu', template: 'https://t{s}.tianditu.gov.cn/vec_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=vec&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk={key}', subdomains: '01234567', gcj02: false, requiresKey: true },
+  { label: 'amap-standard', template: 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}', subdomains: '1234', gcj02: true },
   { label: 'amap', template: 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', subdomains: '1234', gcj02: true },
   { label: 'tencent', template: 'https://rt{s}.map.gtimg.com/tile?z={z}&x={x}&y={y}&styleid=3&version=115', subdomains: '0123', gcj02: true },
+  { label: 'esri', template: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', subdomains: '', gcj02: false },
+  { label: 'carto', template: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', subdomains: 'abcd', gcj02: false },
 ];
 
 const MEMORY_TILE_CACHE_MAX = 600;
 
-function resolveTileUrl(source: TileSource, coords: L.Coords): string {
+function resolveTileUrl(source: TileSource, coords: L.Coords, key = ''): string {
   const s = source.subdomains
     ? source.subdomains[Math.abs(coords.x + coords.y) % source.subdomains.length]
     : '';
   return source.template
     .replace('{s}', s)
+    .replace('{key}', encodeURIComponent(key))
     .replace('{z}', String(coords.z))
     .replace('{x}', String(coords.x))
     .replace('{y}', String(coords.y));
+}
+
+interface MarkerGroup {
+  points: MapMarker[];
+  center: [number, number];
+}
+
+function groupMarkers(markers: MapMarker[]): MarkerGroup[] {
+  if (markers.length <= 80) return markers.map((point) => ({ points: [point], center: [point.lat, point.lng] }));
+  const buckets = new Map<string, MapMarker[]>();
+  for (const point of markers) {
+    const key = `${Math.floor(point.lat * 4)}:${Math.floor(point.lng * 4)}`;
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(point);
+    buckets.set(key, bucket);
+  }
+  return Array.from(buckets.values()).map((points) => ({
+    points,
+    center: [
+      points.reduce((sum, point) => sum + point.lat, 0) / points.length,
+      points.reduce((sum, point) => sum + point.lng, 0) / points.length,
+    ],
+  }));
 }
 
 // Session-memory tile cache (data URLs): a fast path above the Rust disk cache
@@ -104,6 +130,7 @@ function cacheTileDataUrl(url: string, dataUrl: string): void {
 interface TileFetchConfig {
   proxyUrl: string;
   maxBytes: number;
+  tileKey: string;
 }
 
 interface TileConfigResolvers {
@@ -142,6 +169,7 @@ async function resolveTileConfig(): Promise<TileFetchConfig> {
   return {
     proxyUrl: cfg?.proxy ? tileConfigResolvers.effectiveProxyUrl(cfg.proxy, 'tools') : '',
     maxBytes: (cfg?.mapTileCacheMB ?? tileConfigResolvers.defaultMapTileCacheMB) * 1024 * 1024,
+    tileKey: cfg?.mapTileKey?.trim() ?? '',
   };
 }
 
@@ -161,8 +189,9 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 async function loadTile(url: string): Promise<string> {
   if (isTauriRuntime()) {
     const { proxyUrl, maxBytes } = await resolveTileConfig();
-    const b64 = await tauriInvoke<string>('fetch_map_tile', { url, proxyUrl, maxBytes });
-    return `data:image/png;base64,${b64}`;
+    const payload = await tauriInvoke<{ data: string; mime: string } | string>('fetch_map_tile', { url, proxyUrl, maxBytes });
+    if (typeof payload === 'string') return `data:image/png;base64,${payload}`;
+    return `data:${payload.mime || 'image/png'};base64,${payload.data}`;
   }
   const resp = await fetch(url, { mode: 'cors', signal: AbortSignal.timeout(8000) });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -176,6 +205,7 @@ class ChainedTileLayer extends L.TileLayer {
   private sources: TileSource[];
   private active = 0;
   private onChange: ((source: TileSource) => void) | null = null;
+  private onTileReady: (() => void) | null = null;
 
   constructor(sources: TileSource[], options: L.TileLayerOptions) {
     super(sources[0].template, options);
@@ -184,6 +214,10 @@ class ChainedTileLayer extends L.TileLayer {
 
   setSourceChangeHandler(fn: (source: TileSource) => void): void {
     this.onChange = fn;
+  }
+
+  setTileReadyHandler(fn: () => void): void {
+    this.onTileReady = fn;
   }
 
   protected createTile(coords: L.Coords, done: L.DoneCallback): HTMLElement {
@@ -196,8 +230,9 @@ class ChainedTileLayer extends L.TileLayer {
         return;
       }
       const source = this.sources[index];
-      const url = resolveTileUrl(source, coords);
-      const settle = (err?: Error): void => {
+      const load = (key: string): void => {
+        const url = resolveTileUrl(source, coords, key);
+        const settle = (err?: Error): void => {
         if (err) {
           attempt(index + 1);
           return;
@@ -205,23 +240,32 @@ class ChainedTileLayer extends L.TileLayer {
         if (index !== this.active) {
           this.active = index;
           this.onChange?.(source);
+          }
+          this.onTileReady?.();
+          done(undefined, img);
+        };
+        const cached = tileMemoryCache.get(url);
+        if (cached) {
+          img.onload = () => settle();
+          img.onerror = () => settle(new Error('cached tile failed'));
+          img.src = cached;
+          return;
         }
-        done(undefined, img);
+        loadTile(url)
+          .then((dataUrl) => {
+            cacheTileDataUrl(url, dataUrl);
+            img.onload = () => settle();
+            img.onerror = () => settle(new Error('tile failed'));
+            img.src = dataUrl;
+          })
+          .catch(() => attempt(index + 1));
       };
-      const cached = tileMemoryCache.get(url);
-      if (cached) {
-        img.onload = () => settle();
-        img.onerror = () => settle(new Error('cached tile failed'));
-        img.src = cached;
+      if (!source.requiresKey) {
+        load('');
         return;
       }
-      loadTile(url)
-        .then((dataUrl) => {
-          cacheTileDataUrl(url, dataUrl);
-          img.onload = () => settle();
-          img.onerror = () => settle(new Error('tile failed'));
-          img.src = dataUrl;
-        })
+      void resolveTileConfig()
+        .then(({ tileKey }) => tileKey ? load(tileKey) : attempt(index + 1))
         .catch(() => attempt(index + 1));
     };
     attempt(this.active);
@@ -234,6 +278,7 @@ class ChainedTileLayer extends L.TileLayer {
  * so the user can pan, zoom, and tap markers/spots. */
 export interface RenderMapOptions {
   interactive?: boolean;
+  onTileStatus?: (status: 'loading' | 'ready' | 'error', message?: string) => void;
 }
 
 /**
@@ -248,6 +293,7 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
   const existing = mapInstances.get(target);
   if (existing) {
     existing.observer?.disconnect();
+    if (existing.tileTimer !== null) clearTimeout(existing.tileTimer);
     existing.map.remove();
     mapInstances.delete(target);
   }
@@ -263,6 +309,7 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
     zoomControl: interactive,
     // No Leaflet logo / attribution control: the map card stays clean.
     attributionControl: false,
+    preferCanvas: true,
   });
 
   const overlays = L.layerGroup().addTo(map);
@@ -285,19 +332,34 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
   function renderOverlays(): void {
     overlays.clearLayers();
     const points: L.LatLngExpression[] = [];
-    for (const m of spec.markers ?? []) {
-      const [lat, lng] = project(m.lat, m.lng);
-      points.push([lat, lng]);
-      const label = m.label ?? m.title ?? '';
-      const icon = L.divIcon({
-        className: 'map-pin-wrap',
-        html: PIN_HTML(label),
-        iconSize: [28, 36],
-        iconAnchor: [14, 34],
-        popupAnchor: [0, -34],
-      });
+    for (const group of groupMarkers(spec.markers ?? [])) {
+      const [lat, lng] = project(group.center[0], group.center[1]);
+      points.push(...group.points.map((point) => project(point.lat, point.lng)));
+      const isCluster = group.points.length > 1;
+      const first = group.points[0];
+      const label = first.label ?? first.title ?? '';
+      const icon = isCluster
+        ? L.divIcon({
+            className: 'map-cluster-wrap',
+            html: `<div class="map-cluster">${group.points.length}</div>`,
+            iconSize: [38, 38],
+            iconAnchor: [19, 19],
+          })
+        : L.divIcon({
+            className: 'map-pin-wrap',
+            html: PIN_HTML(label),
+            iconSize: [28, 36],
+            iconAnchor: [14, 34],
+            popupAnchor: [0, -34],
+          });
       const marker = L.marker([lat, lng], { icon });
-      if (interactive) marker.bindPopup(markerPopupContent(m));
+      if (interactive) {
+        if (isCluster) {
+          marker.on('click', () => map.setView([lat, lng], Math.min(map.getZoom() + 2, 18)));
+        } else {
+          marker.bindPopup(markerPopupContent(first));
+        }
+      }
       marker.addTo(overlays);
     }
     if (spec.route && spec.route.length >= 2) {
@@ -308,6 +370,7 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
       points.push(...route);
       L.polyline(route, {
         color: '#3b82f6',
+        renderer: L.canvas(),
         weight: 4,
         opacity: 0.85,
         lineCap: 'round',
@@ -319,7 +382,17 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
 
   // maxNativeZoom caps real tile requests at 18 so zooming in past a China
   // basemap's native ceiling over-zooms its last zoom level instead of blanking.
+  let tileReady = false;
+  let tileTimer: ReturnType<typeof setTimeout> | null = null;
+  const markTileReady = (): void => {
+    if (tileReady) return;
+    tileReady = true;
+    if (tileTimer !== null) clearTimeout(tileTimer);
+    tileTimer = null;
+    options.onTileStatus?.('ready');
+  };
   const tiles = new ChainedTileLayer(TILE_SOURCES, { maxZoom: 19, maxNativeZoom: 18 });
+  tiles.setTileReadyHandler(markTileReady);
   tiles.setSourceChangeHandler((source) => {
     if (source.gcj02 !== gcj02) {
       gcj02 = source.gcj02;
@@ -327,6 +400,11 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
     }
   });
   tiles.addTo(map);
+  options.onTileStatus?.('loading');
+  tileTimer = setTimeout(() => {
+    tileTimer = null;
+    if (!tileReady) options.onTileStatus?.('error', t('map.tileLoadFailed'));
+  }, 12000);
 
   renderOverlays();
 
@@ -380,7 +458,7 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
     });
     observer.observe(target);
   }
-  mapInstances.set(target, { map, observer });
+  mapInstances.set(target, { map, observer, tileTimer });
 }
 
 /** Dispose any live map on a canvas (used when a bubble is removed). */
@@ -388,8 +466,13 @@ export function disposeMap(target: HTMLElement): void {
   const existing = mapInstances.get(target);
   if (!existing) return;
   existing.observer?.disconnect();
+  if (existing.tileTimer !== null) clearTimeout(existing.tileTimer);
   existing.map.remove();
   mapInstances.delete(target);
+}
+
+export function clearMapTileMemoryCache(): void {
+  tileMemoryCache.clear();
 }
 
 /** Open a fullscreen lightbox with an INTERACTIVE copy of the map. The inline

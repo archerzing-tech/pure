@@ -77,6 +77,8 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Map (```map blocks) ──
     'map.title': '地图',
     'map.loading': '正在加载地图…',
+    'map.refresh': '刷新地图',
+    'map.tileLoadFailed': '地图瓦片加载失败，请点击“刷新地图”重试',
     'map.sourceToggle': '查看数据',
     'map.sourceHide': '收起数据',
     'map.expand': '展开地图',
@@ -755,6 +757,8 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Map tile cache (Settings → General) ──
     'mapCache.title': '地图瓦片缓存',
     'mapCache.desc': '本地缓存看过的地图瓦片，断网也能查看；设置缓存大小上限',
+    'mapCache.tiandituKey': '天地图密钥',
+    'mapCache.tiandituKeyHint': '可选；填写后会加入国内瓦片备用链',
     'mapCache.usage': '当前占用',
     'mapCache.usageNone': '无瓦片缓存',
     'mapCache.mbHint': '缓存上限（MB）',
@@ -841,6 +845,8 @@ const translations: Record<Language, Record<string, string>> = {
     'diagram.loadFailed': 'Diagram module failed to load',
     'map.title': 'Map',
     'map.loading': 'Loading map…',
+    'map.refresh': 'Refresh map',
+    'map.tileLoadFailed': 'Map tiles failed to load. Click “Refresh map” to try again.',
     'map.sourceToggle': 'View data',
     'map.sourceHide': 'Hide data',
     'map.expand': 'Expand map',
@@ -1519,6 +1525,8 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Map tile cache (Settings → General) ──
     'mapCache.title': 'Map tile cache',
     'mapCache.desc': 'Caches viewed basemap tiles locally for offline viewing; set the cache size cap',
+    'mapCache.tiandituKey': 'TianDiTu key',
+    'mapCache.tiandituKeyHint': 'Optional; enables TianDiTu in the domestic tile fallback chain',
     'mapCache.usage': 'Current usage',
     'mapCache.usageNone': 'No cached tiles',
     'mapCache.mbHint': 'Cache cap (MB)',

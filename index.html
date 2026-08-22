@@ -399,6 +399,10 @@
                     <div class="setting-info"><span class="setting-label" data-i18n="mapCache.title">Map tile cache</span><span class="setting-hint" data-i18n="mapCache.desc">Caches viewed basemap tiles locally for offline viewing; set the cache size cap</span></div>
                   </div>
                   <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="mapCache.tiandituKey">天地图密钥</span><span class="setting-hint" data-i18n="mapCache.tiandituKeyHint">可选；填写后会加入国内瓦片备用链</span></div>
+                    <input id="cfg-map-tianditu-key" class="setting-input" type="password" autocomplete="off" data-i18n-title="mapCache.tiandituKeyHint" title="天地图密钥（可选）" />
+                  </div>
+                  <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="mapCache.usage">Current usage</span><span class="setting-hint" id="map-tile-usage">—</span></div>
                     <div class="setting-input-group tmp-clean-group">
                       <input id="cfg-map-tile-cache-mb" class="setting-input" type="number" min="10" max="2000" value="200" data-i18n-title="mapCache.mbHint" title="Cache cap (MB)" />
