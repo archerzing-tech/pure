@@ -210,6 +210,22 @@ renderer.code = (token: { text: string; lang?: string }): string => {
   return `<pre><code${lang ? ` class="language-${attr(lang)}"` : ''}>${esc(code)}</code></pre>`;
 };
 
+/**
+ * Accept map fences written as either a fenced code block (```map … ```) or a
+ * `:::map … :::` container. Some clients (notably Windows setups) emit the
+ * container form; rewrite any *closed* `:::map` / `:::leaflet` container into the
+ * fenced form so the rest of the pipeline — which only treats `lang === 'map'`
+ * code blocks as maps — renders it identically. Unclosed streaming fragments are
+ * left untouched until the closing `:::` arrives, matching ``` fence behavior.
+ */
+export function normalizeMapFence(src: string): string {
+  return src.replace(
+    /(^|\n)([ \t]*):::[ \t]*(map|leaflet)\b[^\n]*\n([\s\S]*?)\n[ \t]*:::[ \t]*(?=\n|$)/gi,
+    (_match, lead: string, indent: string, lang: string, body: string) =>
+      `${lead}${indent}\`\`\`${lang.toLowerCase()}\n${body}\n${indent}\`\`\``,
+  );
+}
+
 // Raw HTML in assistant output: render it as escaped text instead of live
 // markup. Models sometimes emit stray <div>/<br>/<b> tags in prose or in
 // "show me how this looks" examples; letting marked inject them unescaped would
@@ -1942,7 +1958,7 @@ export async function renderMarkdown(
   // 1) Parse to HTML synchronously (renders fenced-code overrides inline).
   // marked always appends a trailing \n; trim it — with white-space:pre-wrap on
   // the bubble, that trailing newline would render as a visible blank line.
-  const html = (md.parse(text, { async: false }) as string).replace(/\n+$/, '');
+  const html = (md.parse(normalizeMapFence(text), { async: false }) as string).replace(/\n+$/, '');
   // Defense-in-depth: the custom renderer already escapes raw HTML and
   // restricts link/image schemes, but sanitize the final HTML anyway so any
   // future renderer gap (or a marked default renderer, e.g. <img>) can never
@@ -2131,7 +2147,7 @@ function diffStreaming(container: HTMLElement, text: string): void {
   let tokens: Token[];
   try {
     // marked 18: lexer is on the Marked instance, returns top-level block tokens.
-    tokens = mdStream.lexer(text) as unknown as Token[];
+    tokens = mdStream.lexer(normalizeMapFence(text)) as unknown as Token[];
   } catch (err) {
     // Partial markdown can occasionally trip the lexer — keep the last-frame
     // DOM (whose data-md-raw was already correct for the prior tick).
