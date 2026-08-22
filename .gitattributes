@@ -1,0 +1,5 @@
+# Force LF line endings on checkout so cross-platform CI (e.g. the Windows
+# release runner, which defaults to core.autocrlf=true) reads source files with
+# the same newlines as macOS/Linux. Tests that assert on exact CSS/TS source
+# contents (src/ui/__tests__/markdown.test.ts) otherwise fail on CRLF checkouts.
+* text=auto eol=lf
