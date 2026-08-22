@@ -3,7 +3,7 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v1.9.14-beta5
+## v1.9.14-beta
 
 **地图弹窗增强 + 悬浮展开提示**
 
