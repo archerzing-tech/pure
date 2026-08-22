@@ -36,6 +36,8 @@ interface MessageGroup {
   retainable: boolean;
 }
 
+const SUMMARY_TIMEOUT_MS = 60_000;
+
 function estimateTokens(messages: Message[]): number {
   let sum = 0;
   for (const message of messages) sum += Math.ceil((message.content?.length ?? 0) / 4);
@@ -142,7 +144,20 @@ export class ContextEngine {
       try {
         const summaryInput = priorSummary ? [priorSummary, ...evicted] : evicted;
         const summaryPrompt = `Summarize the key information from this conversation. Include decisions made, code patterns discussed, file paths mentioned, user preferences, and unresolved work. Do not invent facts.\n\n${summaryInput.map(message => `${message.role}: ${(message.content ?? '').slice(0, 500)}`).join('\n')}`;
-        const summary = await this.config.llm.complete([{ role: 'user', content: summaryPrompt }], []);
+        const controller = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const summaryPromise = this.config.llm.complete([{ role: 'user', content: summaryPrompt }], [], controller.signal);
+        const summary = await Promise.race([
+          summaryPromise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              controller.abort();
+              reject(new Error(`conversation summary timed out after ${SUMMARY_TIMEOUT_MS}ms`));
+            }, SUMMARY_TIMEOUT_MS);
+          }),
+        ]).finally(() => {
+          if (timer !== undefined) clearTimeout(timer);
+        });
         if (priorSummary) ordered.splice(baseSystemMessages.length, 1);
         ordered.splice(baseSystemMessages.length, 0, {
           role: 'system',

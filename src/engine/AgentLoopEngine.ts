@@ -3,7 +3,7 @@
 // Fixes: BudgetWarning events, completedSteps/lastState tracking, note injection for recoverable errors,
 //        VERIFY_FAILED → loop back to THINK with reflection note instead of completing.
 
-import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult } from '../shared/types';
+import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, ToolDefinition } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
 import { safeParseArgs } from '../shared/format';
 import { BudgetManager } from './BudgetManager';
@@ -31,6 +31,91 @@ function isWebResearchTool(name: string): boolean {
 }
 
 const RESEARCH_ROUND_LIMIT = 4;
+const LLM_STREAM_IDLE_TIMEOUT_MS = 120_000;
+const TOOL_EXECUTION_TIMEOUT_MS = 180_000;
+const VERIFIER_TIMEOUT_MS = 60_000;
+
+function makeLifecycleError(name: 'AbortError' | 'TimeoutError', message: string): Error {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
+export function runWithDeadline<T>(
+  operation: () => Promise<T> | T,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  label: string,
+  onTimeout?: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(makeLifecycleError('AbortError', `${label} aborted`)));
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    timer = setTimeout(() => {
+      onTimeout?.();
+      finish(() => reject(makeLifecycleError('TimeoutError', `${label} timed out after ${timeoutMs}ms`)));
+    }, Math.max(1, timeoutMs));
+    Promise.resolve().then(operation).then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
+export async function* streamWithDeadline(
+  llm: LLMAdapter,
+  messages: Message[],
+  tools: ToolDefinition[],
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): AsyncGenerator<Extract<import('../shared/types').LLMChunk, { type: string }>, void, void> {
+  const linkedController = new AbortController();
+  const forwardAbort = (): void => linkedController.abort();
+  signal?.addEventListener('abort', forwardAbort, { once: true });
+  const iterator = llm.stream(messages, tools, linkedController.signal)[Symbol.asyncIterator]();
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  try {
+    while (true) {
+      const remaining = Math.min(
+        deadline - Date.now(),
+        LLM_STREAM_IDLE_TIMEOUT_MS,
+      );
+      if (remaining <= 0) {
+        linkedController.abort();
+        throw makeLifecycleError('TimeoutError', 'LLM stream exceeded its deadline');
+      }
+      const next = await runWithDeadline(
+        () => iterator.next(),
+        signal,
+        remaining,
+        'LLM stream read',
+        () => linkedController.abort(),
+      );
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    signal?.removeEventListener('abort', forwardAbort);
+    linkedController.abort();
+    void iterator.return?.();
+  }
+}
 
 export class AgentLoopEngine {
   private fileLock = new FileLockManager();
@@ -140,7 +225,8 @@ export class AgentLoopEngine {
         const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
         const hasTools = !!ctx.tools && currentToolsDefs.length > 0;
         const toolsDefs = hasTools ? currentToolsDefs : [];
-        for await (const chunk of ctx.llm.stream(messages, toolsDefs, ctx.signal)) {
+        const streamTimeoutMs = Math.max(1, budget.remaining().time);
+        for await (const chunk of streamWithDeadline(ctx.llm, messages, toolsDefs, ctx.signal, streamTimeoutMs)) {
           switch (chunk.type) {
             case 'content':
               content += chunk.content;
@@ -355,7 +441,12 @@ export class AgentLoopEngine {
       let verifyPassed = true;
       if (ctx.verifier) {
         try {
-          const result = await ctx.verifier.evaluate({ output: content, context: messages });
+          const result = await runWithDeadline(
+            () => ctx.verifier!.evaluate({ output: content, context: messages }),
+            ctx.signal,
+            Math.min(VERIFIER_TIMEOUT_MS, Math.max(1, budget.remaining().time)),
+            'verification',
+          );
           const evidence = result.evidence ?? [{
             id: `verifier_round_${turnCount}`,
             checkName: 'verifier',
@@ -416,6 +507,11 @@ export class AgentLoopEngine {
             continue;
           }
         } catch (err: any) {
+          if (ctx.signal?.aborted || err?.name === 'AbortError') {
+            yield { type: 'Interrupted', payload: { reason: 'aborted', lastState: 'VERIFY', completedSteps, messages, turnCount }, timestamp: Date.now() };
+            interrupted = true;
+            break;
+          }
           verification = {
             status: 'incomplete',
             evidence: [{
@@ -502,8 +598,21 @@ export class AgentLoopEngine {
         const lm = ctx.lockManager ?? this.fileLock;
         if (path) await lm.acquireRead(path, ctx.signal);
         try {
-          const result = await ctx.tools!.execute(tc, ctx.signal);
-          return { toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id };
+          const toolController = new AbortController();
+          const forwardAbort = (): void => toolController.abort();
+          ctx.signal?.addEventListener('abort', forwardAbort, { once: true });
+          try {
+            const result = await runWithDeadline(
+              () => ctx.tools!.execute(tc, toolController.signal),
+              ctx.signal,
+              Math.min(TOOL_EXECUTION_TIMEOUT_MS, Math.max(1, budget.remaining().time)),
+              `tool ${tc.function.name}`,
+              () => toolController.abort(),
+            );
+            return { toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id };
+          } finally {
+            ctx.signal?.removeEventListener('abort', forwardAbort);
+          }
         } finally {
           // Release even when the tool itself throws — a leaked lock would
           // deadlock every later write to the same path.
@@ -523,8 +632,21 @@ export class AgentLoopEngine {
         const lm = ctx.lockManager ?? this.fileLock;
         if (path) await lm.acquireWrite(path, ctx.signal);
         try {
-          const result = await ctx.tools!.execute(tc, ctx.signal);
-          results.push({ toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id });
+          const toolController = new AbortController();
+          const forwardAbort = (): void => toolController.abort();
+          ctx.signal?.addEventListener('abort', forwardAbort, { once: true });
+          try {
+            const result = await runWithDeadline(
+              () => ctx.tools!.execute(tc, toolController.signal),
+              ctx.signal,
+              Math.min(TOOL_EXECUTION_TIMEOUT_MS, Math.max(1, budget.remaining().time)),
+              `tool ${tc.function.name}`,
+              () => toolController.abort(),
+            );
+            results.push({ toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id });
+          } finally {
+            ctx.signal?.removeEventListener('abort', forwardAbort);
+          }
         } finally {
           if (path) lm.release(path);
         }
