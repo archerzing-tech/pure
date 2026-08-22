@@ -454,6 +454,43 @@ export class Planner {
 }
 
 /**
+ * Detect whether the user is asking for fictional / alternate-history /
+ * "ignore the rules" content — the case where the plausibility &
+ * real-world consistency review must be skipped. Deterministic heuristic
+ * (the model must NOT be the judge of this), deliberately conservative:
+ * it fires only on explicit opt-outs of real-world constraints or explicit
+ * fiction-creation markers, never on a bare genre noun in a factual question
+ * ("介绍科幻小说的历史" stays reviewed).
+ */
+export function detectFictionIntent(prompt: string): boolean {
+  const lower = prompt.toLowerCase();
+
+  // 1. Explicit opt-out of real-world constraints — strongest signal.
+  //    "不用管事实", "不考虑现实/物理/规律", "ignore physics", "make it up".
+  if (
+    /(?:(?:不用|无需|不需要|不必)(?:管|考虑|符合|在意|在乎|讲究)?|别(?:管|考虑|符合|在意|在乎|讲究))\s*(?:事实|现实|真实|逻辑|物理|化学|数学|时间线|历史|规律|合理性|严谨)/i.test(prompt)
+    || /(?:忽略|无视|不考虑|不管|不讲究|不追求|不严谨)\s*(?:事实|现实|真实|逻辑|物理|化学|数学|时间线|历史|规律|合理性)/i.test(prompt)
+    || /(?:ignore|disregard|don'?t\s+care\s+about|no\s+need\s+to\s+(?:be|follow|respect))\s*(?:the\s+)?(?:facts?|reality|realism|physics|chemistry|math(?:ematics)?|timeline|history|logic|rules?|science|accuracy|plausibility)/i.test(lower)
+    || /(?:make\s+it\s+up|make\s+something\s+up|don'?t\s+worry\s+about\s+(?:accuracy|facts|realism|physics|reality|rules|logic))/i.test(lower)
+  ) return true;
+
+  // 2. Creation-oriented fiction markers — unambiguously fictional.
+  if (
+    /(?:虚构|架空|编造|乱编|随便编|编一个|编个|天马行空|脑洞|平行世界|平行宇宙|异世界|架空的|架空世界|架空历史)/i.test(prompt)
+    || /\b(?:fiction|fictional|alternate[ -]history|alternate[ -]universe|make[- ]?believe|worldbuilding)\b/i.test(lower)
+    || /\b(?:write|make\s+up|invent)\s+(?:a\s+|some\s+)?(?:fiction|fictional|fantasy|fantastical|mythical)\b/i.test(lower)
+  ) return true;
+
+  // 3. Genre creation: a creation verb + an unambiguous fiction genre noun
+  //    ("写一个科幻小说", "write a fantasy story") — but NOT "介绍科幻".
+  const creationVerb = /(?:写|编|创作|编写|生成|制作|构思|设计|给我写|帮我写|来一个|give\s+me|write|create|invent|generate|draft)/i;
+  const fictionGenre = /(?:科幻|奇幻|玄幻|魔幻|魔法|神话|童话|穿越|架空)\s*(?:小说|故事|剧|剧本|剧情|设定|世界|世界观)|(?:sci[- ]?fi|science[- ]?fiction|fantasy|fairy[- ]?tale|myth(?:ology)?)\s*(?:story|stories|novel|tale|fiction|world)/i;
+  if (creationVerb.test(prompt) && fictionGenre.test(prompt)) return true;
+
+  return false;
+}
+
+/**
  * Provide a conservative safety floor before semantic routing is available.
  * This function intentionally does NOT decide whether ordinary language means
  * advice, research, creation, debugging, or editing. Those are model-semantic
@@ -500,7 +537,18 @@ export function assessIntent(prompt: string): IntentAssessment {
       : riskLevel === 'medium'
         ? 'Run a minimal read-only probe, then make a small change and verify it.'
         : 'Use semantic understanding of the complete request; if it asks for advice or explanation, answer directly instead of editing files.');
-  return { intent, riskLevel, reversibility, impact, recommendation, requiresProbe, requiresConfirmation };
+  return {
+    intent,
+    riskLevel,
+    reversibility,
+    impact,
+    recommendation,
+    requiresProbe,
+    requiresConfirmation,
+    // Deterministic fiction detection: when set, the plausibility review is
+    // skipped programmatically (see requestWorkflow.ts).
+    skipPlausibilityReview: detectFictionIntent(text),
+  };
 }
 
 export function formatIntentPrompt(assessment: IntentAssessment): string {

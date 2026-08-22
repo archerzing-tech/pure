@@ -6,7 +6,7 @@ import {
 } from '../coding-agent/Planner';
 import type { AnalysisResult, IntentAssessment, SemanticRouteDecision, TaskMode } from '../coding-agent/types';
 import { INCREMENTAL_BUILD_PROMPT } from './agentBehavior';
-import type { UserTurnContext } from './promptLayers';
+import { SKIP_PLAUSIBILITY_REVIEW_PROMPT, type UserTurnContext } from './promptLayers';
 
 export type RequestWorkflowStage = 'direct' | 'probe' | 'plan' | 'confirm';
 
@@ -65,6 +65,9 @@ function mergeSemanticAssessment(
     requiresConfirmation: heuristic.requiresConfirmation || semantic.requiresConfirmation || riskLevel === 'high',
     impact: semantic.impact || heuristic.impact,
     recommendation: semantic.recommendation || heuristic.recommendation,
+    // Fiction detection is deterministic (Planner heuristic) and must never be
+    // lost to a semantic route that does not produce the field.
+    skipPlausibilityReview: heuristic.skipPlausibilityReview === true,
   };
 }
 
@@ -111,6 +114,9 @@ export function compileRequestWorkflow(
       ? formatIntentPrompt(analysis.intent)
       : undefined,
     buildProtocol: buildRequested ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,
+    plausibilityOverride: analysis.intent.skipPlausibilityReview
+      ? SKIP_PLAUSIBILITY_REVIEW_PROMPT
+      : undefined,
   };
   const stage: RequestWorkflowStage = analysis.intent.requiresConfirmation
     ? 'confirm'

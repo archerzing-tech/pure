@@ -13,6 +13,11 @@
 # copied to `/Applications/pure.app` and re-registered with LaunchServices.
 # Skipped automatically when `APPLE_DEVELOPER_IDENTITY` is set or `CI` is
 # set so production builds never clobber your local install.
+#
+# Skip updater signing: set `PURE_SKIP_UPDATER_SIGN=1` (in .env.local, the
+# env, or the shell) to build WITHOUT the auto-updater sidecar signature.
+# `tauri build` then runs with createUpdaterArtifacts disabled, so a missing
+# or rotated signing key no longer aborts an otherwise-complete local build.
 
 set -euo pipefail
 
@@ -70,7 +75,13 @@ fi
 # Build the app + UI bundle, then ad-hoc sign + remove xattr quarantine for
 # double-click from Finder. Both env vars and the surrounding bash process
 # stay alive through these children.
-bun run gui:build
+if [[ "${PURE_SKIP_UPDATER_SIGN:-0}" == "1" ]]; then
+  echo ""
+  echo "⏭  UPDATER SIGN: skipped (PURE_SKIP_UPDATER_SIGN=1)"
+  bun run tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+else
+  bun run gui:build
+fi
 bun run sign:mac
 
 # ── Optional local deploy to /Applications/pure.app ────────────────────────

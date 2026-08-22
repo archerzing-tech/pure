@@ -139,6 +139,11 @@ export interface PureConfig {
    */
   autoContinueMaxRounds: number;
   /**
+   * Offline basemap tile cache size cap in MB (Settings → General). The Rust
+   * fetch_map_tile evicts the oldest tiles past this byte budget.
+   */
+  mapTileCacheMB: number;
+  /**
    * Memory evolution thresholds (Settings → Memory → 遗忘速度). Engine units:
    * recencyHalfLifeMs / dormantGraceMs in milliseconds, scores in 0..1 — the
    * settings panel converts days↔ms and percent↔fraction. Undefined (or
@@ -148,6 +153,9 @@ export interface PureConfig {
 }
 
 export const STORAGE_KEY = 'pure_config';
+
+/** Default offline basemap tile cache budget (MB). */
+export const DEFAULT_MAP_TILE_CACHE_MB = 200;
 
 /**
  * Built-in MCP servers shipped with pure. `web-search` wraps the
@@ -226,6 +234,7 @@ export function defaults(): PureConfig {
     taskMode: 'auto',
     autoContinue: false,
     autoContinueMaxRounds: 8,
+    mapTileCacheMB: DEFAULT_MAP_TILE_CACHE_MB,
     configVersion: 13,
   };
 }

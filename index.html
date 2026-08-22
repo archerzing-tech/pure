@@ -394,6 +394,22 @@
                     </div>
                   </div>
                 </div>
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="mapCache.title">Map tile cache</span><span class="setting-hint" data-i18n="mapCache.desc">Caches viewed basemap tiles locally for offline viewing; set the cache size cap</span></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="mapCache.usage">Current usage</span><span class="setting-hint" id="map-tile-usage">—</span></div>
+                    <div class="setting-input-group tmp-clean-group">
+                      <input id="cfg-map-tile-cache-mb" class="setting-input" type="number" min="10" max="2000" value="200" data-i18n-title="mapCache.mbHint" title="Cache cap (MB)" />
+                      <button id="map-tile-cache-clear" class="setting-btn secondary" data-i18n="mapCache.clearBtn">Clear all</button>
+                    </div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="mapCache.dir">Cache directory</span><span class="setting-hint" id="map-tile-dir">—</span></div>
+                    <button id="map-tile-cache-open" class="setting-btn secondary" data-i18n="mapCache.openBtn">Open in file manager</button>
+                  </div>
+                </div>
               </div>
               <!-- LLM -->
               <div class="settings-page" data-page="llm">

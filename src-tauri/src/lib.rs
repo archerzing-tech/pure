@@ -5392,6 +5392,280 @@ fn web_cache_enabled() -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Map tile disk cache (~/.pure/cache/map-tiles) — serves fetched tiles from
+//  disk so previously-viewed areas render offline. Tiles are immutable at a
+//  given z/x/y, so there is no TTL: the cache is bounded by a byte budget
+//  (Settings → General) with oldest-first eviction instead. Fetched through
+//  reqwest (honoring the app proxy) so the WebView never has to worry about
+//  tile-server CORS.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MAP_TILE_CACHE_DEFAULT_MAX_BYTES: u64 = 200 * 1024 * 1024;
+
+fn map_tile_cache_dir() -> PathBuf {
+    let base = std::env::var("PURE_CACHE_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        format!("{}/.pure", home)
+    });
+    PathBuf::from(base).join("cache").join("map-tiles")
+}
+
+fn map_tile_cache_path(url: &str) -> PathBuf {
+    map_tile_cache_dir().join(format!("{:x}.png", fnv1a64(url)))
+}
+
+/// Remove the oldest tiles (by mtime) until the cache fits the byte budget.
+fn evict_map_tile_cache(dir: &PathBuf, max_bytes: u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let size = meta.len();
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        total += size;
+        files.push((mtime, size, path));
+    }
+    if total <= max_bytes {
+        return;
+    }
+    files.sort_by_key(|(mtime, _, _)| *mtime);
+    for (_, size, path) in files.into_iter() {
+        if total <= max_bytes {
+            break;
+        }
+        let _ = std::fs::remove_file(&path);
+        total = total.saturating_sub(size);
+    }
+}
+
+/// Fetch one map tile, serving it from the local disk cache when available and
+/// otherwise fetching + caching it. Returns the PNG bytes as a base64 string.
+#[tauri::command]
+async fn fetch_map_tile(
+    url: String,
+    proxy_url: Option<String>,
+    max_bytes: Option<u64>,
+) -> Result<String, String> {
+    let path = map_tile_cache_path(&url);
+    if let Ok(bytes) = std::fs::read(&path) {
+        if !bytes.is_empty() {
+            return Ok(base64::engine::general_purpose::STANDARD.encode(&bytes));
+        }
+    }
+    let client = build_http_client(std::time::Duration::from_secs(8), proxy_url.as_deref())?;
+    let resp = client
+        .get(&url)
+        // OSM's tile policy requires an identifying User-Agent; a bare reqwest
+        // client sends none and can be rate-limited or blocked outright.
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| format!("tile fetch: {}", e))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("tile HTTP {}", status.as_u16()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("tile read: {}", e))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let dir = map_tile_cache_dir();
+    if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, &bytes).is_ok() {
+        evict_map_tile_cache(&dir, max_bytes.unwrap_or(MAP_TILE_CACHE_DEFAULT_MAX_BYTES));
+    }
+    Ok(b64)
+}
+
+/// Settings → General: current offline basemap tile cache footprint. Also
+/// returns the on-disk directory so the panel can show it and open it in the
+/// file manager.
+#[tauri::command]
+fn map_tile_cache_usage() -> Result<serde_json::Value, String> {
+    let dir = map_tile_cache_dir();
+    let mut files: u64 = 0;
+    let mut bytes: u64 = 0;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_file() {
+                files += 1;
+                bytes += meta.len();
+            }
+        }
+    }
+    Ok(serde_json::json!({ "files": files, "bytes": bytes, "dir": dir.to_string_lossy() }))
+}
+
+/// Settings → General: clear the offline basemap tile cache.
+#[tauri::command]
+fn clear_map_tile_cache() -> Result<serde_json::Value, String> {
+    let dir = map_tile_cache_dir();
+    let mut deleted: u64 = 0;
+    let mut freed_bytes: u64 = 0;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                deleted += 1;
+                freed_bytes += meta.len();
+            }
+        }
+    }
+    Ok(serde_json::json!({ "deleted": deleted, "freedBytes": freed_bytes }))
+}
+
+#[cfg(test)]
+mod map_tile_cache_tests {
+    use super::*;
+
+    /// Serializes the env-dependent tests below: PURE_CACHE_DIR is process-global
+    /// and the test runner executes tests on parallel threads.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pure-maptile-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_tile_with_mtime(dir: &PathBuf, name: &str, size: usize, age_secs: u64) {
+        let path = dir.join(name);
+        std::fs::write(&path, vec![0u8; size]).unwrap();
+        let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(age_secs);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(mtime))
+            .unwrap();
+    }
+
+    #[test]
+    fn evict_removes_oldest_first_until_within_budget() {
+        let dir = temp_dir("evict-oldest");
+        write_tile_with_mtime(&dir, "oldest.png", 10, 100);
+        write_tile_with_mtime(&dir, "middle.png", 20, 200);
+        write_tile_with_mtime(&dir, "newest.png", 30, 300);
+        // 60 bytes total, 35-byte budget: oldest (10) then middle (20) go,
+        // leaving only the newest 30-byte tile.
+        evict_map_tile_cache(&dir, 35);
+        let remaining: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(remaining, vec!["newest.png".to_string()]);
+        assert_eq!(std::fs::metadata(dir.join("newest.png")).unwrap().len(), 30);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evict_keeps_everything_when_under_budget() {
+        let dir = temp_dir("evict-under");
+        write_tile_with_mtime(&dir, "a.png", 10, 100);
+        write_tile_with_mtime(&dir, "b.png", 20, 200);
+        evict_map_tile_cache(&dir, 100);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evict_clears_all_when_budget_is_zero() {
+        let dir = temp_dir("evict-zero");
+        write_tile_with_mtime(&dir, "a.png", 10, 100);
+        write_tile_with_mtime(&dir, "b.png", 20, 200);
+        evict_map_tile_cache(&dir, 0);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evict_ignores_missing_directory() {
+        let dir = temp_dir("evict-missing");
+        let missing = dir.join("nope");
+        evict_map_tile_cache(&missing, 10);
+        assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_path_is_stable_hashed_and_unique_per_url() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("path");
+        std::env::set_var("PURE_CACHE_DIR", &dir);
+        let p1 = map_tile_cache_path("https://tile.example/1/2/3.png");
+        let p2 = map_tile_cache_path("https://tile.example/1/2/3.png");
+        let p3 = map_tile_cache_path("https://tile.example/1/2/4.png");
+        assert_eq!(p1, p2);
+        assert_ne!(p1, p3);
+        assert_eq!(p1.extension().and_then(|e| e.to_str()), Some("png"));
+        assert!(p1.starts_with(map_tile_cache_dir()));
+        std::env::remove_var("PURE_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn fetch_map_tile_serves_disk_cache_without_network() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("fetch-hit");
+        std::env::set_var("PURE_CACHE_DIR", &dir);
+        let url = "https://tile.example/1/2/3.png";
+        let path = map_tile_cache_path(url);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let png = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+        std::fs::write(&path, &png).unwrap();
+        let got = fetch_map_tile(url.to_string(), None, None).await.unwrap();
+        assert_eq!(got, base64::engine::general_purpose::STANDARD.encode(&png));
+        std::env::remove_var("PURE_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn usage_counts_files_and_bytes() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("usage");
+        std::env::set_var("PURE_CACHE_DIR", &dir);
+        let cache = map_tile_cache_dir();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("a.png"), vec![0u8; 3]).unwrap();
+        std::fs::write(cache.join("b.png"), vec![0u8; 5]).unwrap();
+        std::fs::write(cache.join("ignored.txt"), vec![0u8; 7]).unwrap();
+        let v = map_tile_cache_usage().unwrap();
+        assert_eq!(v["files"], 3);
+        assert_eq!(v["bytes"], 15);
+        assert_eq!(v["dir"], cache.to_string_lossy().as_ref());
+        std::env::remove_var("PURE_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_removes_all_tiles_and_reports_freed_bytes() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("clear");
+        std::env::set_var("PURE_CACHE_DIR", &dir);
+        let cache = map_tile_cache_dir();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("a.png"), vec![0u8; 4]).unwrap();
+        std::fs::write(cache.join("b.png"), vec![0u8; 6]).unwrap();
+        let res = clear_map_tile_cache().unwrap();
+        assert_eq!(res["deleted"], 2);
+        assert_eq!(res["freedBytes"], 10);
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+        std::env::remove_var("PURE_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  App skills directory (~/.pure/skills) — capability-gap auto-loading
 //  Skills installed there (manually or by the agent per the capability-gap
 //  protocol) are injected into the system prompt like Skill Hub skills.
@@ -10149,24 +10423,42 @@ fn save_session_workspace_sync(session_id: &str, workspace: &str) -> Result<(), 
 
 #[tauri::command]
 fn delete_session(session_id: String) -> Result<(), String> {
-    let dir = sessions_dir().join(&session_id);
+    // Drop the session from the index synchronously so the sidebar refreshes
+    // immediately; the heavier filesystem cleanup (session dir + tmp workspace)
+    // runs on a background thread and must not block the UI.
+    remove_session_from_index(&session_id)?;
+    let id = session_id.clone();
+    std::thread::spawn(move || {
+        let _ = cleanup_session_files(&id);
+    });
+    Ok(())
+}
+
+fn remove_session_from_index(session_id: &str) -> Result<(), String> {
+    let index_path = sessions_dir().join("index.json");
+    if !index_path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&index_path).unwrap_or_default();
+    let mut list: Vec<SessionMeta> = serde_json::from_str(&raw).unwrap_or_default();
+    list.retain(|s| s.id != session_id);
+    fs::write(
+        &index_path,
+        serde_json::to_string_pretty(&list).unwrap_or_default(),
+    )
+    .map_err(|e| format!("write: {}", e))
+}
+
+/// Remove one session's durable files: the session directory and the
+/// application tmp workspace (generated files + pasted/dropped inputs).
+fn cleanup_session_files(session_id: &str) -> Result<(), String> {
+    let dir = sessions_dir().join(session_id);
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|e| format!("remove: {}", e))?;
     }
-    let tmp_dir = application_tmp_dir().join(safe_session_component(&session_id));
+    let tmp_dir = application_tmp_dir().join(safe_session_component(session_id));
     if tmp_dir.exists() {
         fs::remove_dir_all(&tmp_dir).map_err(|e| format!("remove tmp workspace: {}", e))?;
-    }
-    let index_path = sessions_dir().join("index.json");
-    if index_path.exists() {
-        let raw = fs::read_to_string(&index_path).unwrap_or_default();
-        let mut list: Vec<SessionMeta> = serde_json::from_str(&raw).unwrap_or_default();
-        list.retain(|s| s.id != session_id);
-        fs::write(
-            &index_path,
-            serde_json::to_string_pretty(&list).unwrap_or_default(),
-        )
-        .map_err(|e| format!("write: {}", e))?;
     }
     Ok(())
 }
@@ -10190,22 +10482,30 @@ fn delete_all_sessions() -> Result<(), String> {
         vec![]
     };
 
-    for entry in fs::read_dir(&dir).map_err(|e| format!("read_dir: {}", e))? {
-        let entry = entry.map_err(|e| format!("entry: {}", e))?;
-        let path = entry.path();
-        if path.is_dir() {
-            fs::remove_dir_all(&path).map_err(|e| format!("remove: {}", e))?;
+    // Empty the index synchronously (sidebar updates at once), then remove the
+    // directories in the background. Only tmp workspaces of persisted sessions
+    // are removed; the tmp root itself is left alone because an active or
+    // unsaved session may still be using another temporary directory.
+    fs::write(&index_path, "[]").map_err(|e| format!("write: {}", e))?;
+    std::thread::spawn(move || {
+        let _ = cleanup_all_session_files(&dir, &session_ids);
+    });
+    Ok(())
+}
+
+fn cleanup_all_session_files(dir: &std::path::Path, session_ids: &[String]) -> Result<(), String> {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(&path);
+            }
         }
     }
-    fs::write(&index_path, "[]").map_err(|e| format!("write: {}", e))?;
-
-    // Remove only temp workspaces belonging to persisted sessions. Do not
-    // recursively delete the whole tmp root: an active or unsaved session may
-    // still be using another temporary directory.
     for session_id in session_ids {
-        let tmp_dir = application_tmp_dir().join(safe_session_component(&session_id));
+        let tmp_dir = application_tmp_dir().join(safe_session_component(session_id));
         if tmp_dir.exists() {
-            fs::remove_dir_all(&tmp_dir).map_err(|e| format!("remove tmp workspace: {}", e))?;
+            let _ = fs::remove_dir_all(&tmp_dir);
         }
     }
     Ok(())
@@ -12062,6 +12362,10 @@ pub fn run() {
             web_fetch,
             web_public_api,
             web_scrape,
+            // Map tile disk cache (offline basemap)
+            fetch_map_tile,
+            map_tile_cache_usage,
+            clear_map_tile_cache,
             // Command execution
             execute_command,
             execute_command_stream,
@@ -12577,7 +12881,9 @@ mod session_stats_tests {
             assert!(sessions_dir().join("sess-1").join("stats.json").exists());
 
             // 3) delete_session removes the stats file together with the directory.
-            delete_session("sess-1".to_string()).unwrap();
+            // The heavy cleanup is backgrounded, so assert the synchronous helper
+            // directly (delete_session itself only drops the index synchronously).
+            cleanup_session_files("sess-1").unwrap();
             assert!(load_session_stats("sess-1".to_string()).unwrap().is_none());
 
             // 4) Bulk load collects every session into a map keyed by id.

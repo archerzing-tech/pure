@@ -327,21 +327,34 @@ export class WASMEmbeddingStore implements IMemoryStore {
           return Array.from(out.data as Float32Array);
         },
         embedBatch: async (texts: string[]): Promise<number[][]> => {
-          // Batched inference: ONE WASM call for the whole array instead of
-          // N sequential extractor() invocations — the ~10-50× speedup that
-          // makes full-corpus recall feel instant. The model returns a
-          // [batch, dim] tensor; slice it back into per-text vectors.
-          if (texts.length === 1) {
-            const out = await extractor(texts[0], { pooling: 'mean', normalize: true });
-            return [Array.from(out.data as Float32Array)];
-          }
-          const out = await extractor(texts, { pooling: 'mean', normalize: true });
-          const data = out.data as Float32Array;
-          const dims = out.dims as number[] | undefined;
-          const dim = dims?.[1] ?? (data.length > 0 ? data.length / texts.length : 0);
+          // Batched inference in SMALL chunks instead of one giant WASM call.
+          // transformers.js runs the model single-threaded on the main thread
+          // when the app is not cross-origin isolated (always true in the Tauri
+          // webview), so an un-chunked full-corpus batch blocks the UI for
+          // seconds and the 1.5s search timeout can never fire during the block
+          // (a hard freeze). Yielding between chunks keeps the app responsive
+          // and lets the timeout degrade to keyword search on schedule.
+          const EMBED_CHUNK_SIZE = 8;
           const result: number[][] = [];
-          for (let i = 0; i < texts.length; i++) {
-            result.push(Array.from(data.slice(i * dim, (i + 1) * dim)));
+          for (let i = 0; i < texts.length; i += EMBED_CHUNK_SIZE) {
+            const chunk = texts.slice(i, i + EMBED_CHUNK_SIZE);
+            if (chunk.length === 1) {
+              const out = await extractor(chunk[0], { pooling: 'mean', normalize: true });
+              result.push(Array.from(out.data as Float32Array));
+            } else {
+              const out = await extractor(chunk, { pooling: 'mean', normalize: true });
+              const data = out.data as Float32Array;
+              const dims = out.dims as number[] | undefined;
+              const dim = dims?.[1] ?? (data.length > 0 ? data.length / chunk.length : 0);
+              for (let j = 0; j < chunk.length; j++) {
+                result.push(Array.from(data.slice(j * dim, (j + 1) * dim)));
+              }
+            }
+            if (i + EMBED_CHUNK_SIZE < texts.length) {
+              // Yield to the event loop between chunks (macrotask) so pending
+              // paints + input run and the memory-search timeout can fire.
+              await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            }
           }
           return result;
         },

@@ -134,6 +134,11 @@ describe('PromptAssembler', () => {
     expect(assembler.buildUserPrompt('ship it', context)).toBe(composeUserTurn('ship it', context));
   });
 
+  it('carries the plausibility-review override through the user turn', () => {
+    const context = { plausibilityOverride: '<plausibility_review_override>skip</plausibility_review_override>' };
+    expect(assembler.buildUserPrompt('写一个架空的故事', context)).toContain('<plausibility_review_override>skip</plausibility_review_override>');
+  });
+
   it('preserves retrieved-memory composition for the Harness path', () => {
     const prompt = assembler.composeMemoryPrompt({
       template: 'Base',

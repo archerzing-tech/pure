@@ -494,11 +494,17 @@ function deferToIdle(fn: () => void): void {
   // immediately instead of waiting for the idle bootstrap callback.
   workspace.init();
   dismissBootSplash();
-  // Preload the memory embedder (WASM + model) in the background so the first
-  // message of a new chat never blocks on the one-time load — the user is
-  // reading the landing page while this warms up. Best-effort; a failure just
-  // means the next search pays the load as before.
-  void memoryStore.warmUp().catch(() => {});
+  // Preload the memory embedder (WASM + model) so the first message of a new
+  // chat never blocks on the one-time load. Deferred to an idle slot (NOT run
+  // inline on the critical path): the transformers.js module evaluation + WASM
+  // runtime init are CPU-heavy on the main thread, and on slower Intel Macs
+  // running them right after the splash competed with the user's first click —
+  // notably the native folder picker, whose AppKit init then had to wait and
+  // felt frozen. Best-effort; a failure just means the next search pays the
+  // load as before.
+  deferToIdle(() => {
+    void memoryStore.warmUp().catch(() => {});
+  });
 
   deferToIdle(async () => {
     // Feature styles are a separate CSS chunk. Await it before the deferred
@@ -926,6 +932,8 @@ landingPrompt.addEventListener('input', () => {
 });
 
 landingPrompt.addEventListener('keydown', (e) => {
+  // 输入法组字（拼音→汉字）时，Enter 是确认候选字，绝不能当成发送。
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     handleLandingSendOrStop();
@@ -1029,6 +1037,8 @@ document.addEventListener('contextmenu', (e) => {
 });
 
 promptEl.addEventListener('keydown', (e) => {
+  // 输入法组字（拼音→汉字）时，Enter 是确认候选字，绝不能当成发送。
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     if (chat.isStreaming()) {

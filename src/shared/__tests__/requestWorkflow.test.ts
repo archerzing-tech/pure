@@ -135,4 +135,44 @@ describe('compileRequestWorkflow', () => {
     expect(workflow.userContext.buildProtocol).toContain('Incremental build protocol');
     expect(workflow.userContext.traps).toBeUndefined();
   });
+
+  it('injects the plausibility-review override for detected fiction requests', () => {
+    const workflow = compileRequestWorkflow('不用管事实，帮我编一个架空世界的故事', { hasTools: true });
+    expect(workflow.analysis.intent.skipPlausibilityReview).toBe(true);
+    expect(workflow.userContext.plausibilityOverride).toContain('<plausibility_review_override>');
+    expect(workflow.userContext.plausibilityOverride).toContain('SKIP the plausibility');
+    // Fiction is a creative question, not a safety boundary: no plan / probe.
+    expect(workflow.stage).toBe('direct');
+    expect(workflow.needsProbe).toBe(false);
+  });
+
+  it('preserves the fiction skip even when a semantic route is present', () => {
+    const workflow = compileRequestWorkflow('不用管事实，写一个科幻小说', {
+      hasTools: true,
+      semanticRoute: {
+        intent: 'build',
+        complexity: 'complex',
+        mode: 'build',
+        requiresPlan: true,
+        needsDeliveryGate: true,
+        assessment: {
+          intent: 'build',
+          riskLevel: 'low',
+          reversibility: 'reversible',
+          impact: '隔离的原型',
+          recommendation: '直接实现',
+          requiresProbe: false,
+          requiresConfirmation: false,
+        },
+      },
+    });
+    expect(workflow.analysis.intent.skipPlausibilityReview).toBe(true);
+    expect(workflow.userContext.plausibilityOverride).toBeDefined();
+  });
+
+  it('does not inject the override for ordinary factual requests', () => {
+    const workflow = compileRequestWorkflow('规划一条从西安到上海的骑行路线', { hasTools: true });
+    expect(workflow.analysis.intent.skipPlausibilityReview).toBe(false);
+    expect(workflow.userContext.plausibilityOverride).toBeUndefined();
+  });
 });

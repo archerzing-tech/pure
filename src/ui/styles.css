@@ -7007,13 +7007,14 @@ button svg,
   overflow: hidden;
 }
 .bubble .map-slot[data-map-state="loading"] {
-  min-height: 180px;
+  min-height: 240px;
   display: grid;
   place-items: center;
   background: color-mix(in srgb, var(--bg-card) 88%, var(--accent-soft));
 }
 .bubble .map-slot[data-map-state="loading"] .map-toolbar,
-.bubble .map-slot[data-map-state="loading"] .map-canvas,
+.bubble .map-slot[data-map-state="loading"] .map-canvas-wrap,
+.bubble .map-slot[data-map-state="loading"] .map-route-warning,
 .bubble .map-slot[data-map-state="loading"] .map-error,
 .bubble .map-slot[data-map-state="loading"] .map-source {
   display: none;
@@ -7043,7 +7044,13 @@ button svg,
   color: var(--text-muted);
   letter-spacing: 0.02em;
 }
-.map-source-toggle {
+.map-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.map-source-toggle,
+.map-expand {
   font: 600 12px var(--font-sans);
   color: var(--accent);
   background: transparent;
@@ -7052,14 +7059,83 @@ button svg,
   border-radius: var(--radius-xs);
   cursor: pointer;
 }
-.map-source-toggle:hover {
+.map-source-toggle:hover,
+.map-expand:hover {
   background: color-mix(in srgb, var(--accent-soft) 40%, transparent);
 }
+.map-canvas-wrap {
+  position: relative;
+}
 .map-canvas {
-  height: 340px;
+  height: 480px;
   width: 100%;
   background: #e8e8e8;
   z-index: 1;
+  /* The inline transcript card is a STATIC preview: pan/zoom/tap live only in
+     the fullscreen lightbox, so the canvas (and every leaflet child) ignores
+     pointer events. The hover hint + toolbar 展开地图 button sit OUTSIDE the
+     canvas and open the interactive lightbox. */
+  pointer-events: none;
+}
+.map-canvas * {
+  pointer-events: none !important;
+}
+/* Hover hint over the static preview: a translucent veil + expand icon tells
+   the user this map is a thumbnail and tapping it opens the interactive view. */
+.map-expand-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: rgba(15, 23, 42, 0.42);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s var(--ease-out);
+}
+.map-canvas-wrap:hover .map-expand-hint,
+.map-expand-hint:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.map-expand-hint-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  font: 600 13px var(--font-sans);
+  letter-spacing: 0.02em;
+}
+/* Only offer the expand hint once the map actually rendered (loading shows the
+   spinner, error shows the failure box — a blank canvas shouldn't invite a tap). */
+.map-slot:not([data-map-state="preview"]) .map-expand-hint {
+  display: none;
+}
+.map-route-warning {
+  display: none;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 12px;
+  font: 13px/1.5 var(--font-sans);
+  color: #92640d;
+  background: color-mix(in srgb, #f5a623 10%, var(--bg-card));
+  border-bottom: 1px solid color-mix(in srgb, #f5a623 25%, transparent);
+}
+.map-route-warning:not(:empty) {
+  display: flex;
+}
+.map-route-warning-icon {
+  flex-shrink: 0;
+  font-size: 15px;
+  line-height: 1.3;
+}
+.map-route-warning-text {
+  flex: 1;
 }
 .map-slot .map-source {
   margin: 0;
@@ -7134,6 +7210,112 @@ button svg,
   margin-top: 2px;
   font-size: 12px;
   opacity: 0.8;
+}
+.map-popup-coords {
+  margin-top: 2px;
+  font: 500 11px/1.4 var(--font-mono);
+  opacity: 0.7;
+}
+.leaflet-popup-content-wrapper {
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+}
+.leaflet-popup-content {
+  font: 13px/1.5 var(--font-sans);
+}
+[data-theme="dark"] .leaflet-popup-content-wrapper,
+[data-theme="dark"] .leaflet-popup-tip {
+  background: #1f2437;
+  color: #e5e7eb;
+}
+
+/* ── Map lightbox: the interactive fullscreen copy of the inline preview ── */
+.map-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: modalOverlayIn 0.2s var(--ease-out);
+}
+.map-lightbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.map-lightbox-title {
+  font: 600 14px var(--font-sans);
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.map-lightbox-close {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.map-lightbox-close:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+.map-lightbox-canvas {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: #e8e8e8;
+}
+/* Scale bar + live zoom readout inside the interactive lightbox. */
+.map-lightbox-canvas .leaflet-control-scale-line {
+  background: rgba(255, 255, 255, 0.88);
+  color: #334155;
+  border-color: rgba(15, 23, 42, 0.18);
+  font: 500 11px var(--font-sans);
+}
+[data-theme="dark"] .map-lightbox-canvas .leaflet-control-scale-line {
+  background: rgba(31, 36, 55, 0.88);
+  color: #e5e7eb;
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.map-lightbox-canvas .map-zoom-level {
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.88);
+  color: #334155;
+  font: 600 12px var(--font-mono);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+}
+[data-theme="dark"] .map-lightbox-canvas .map-zoom-level {
+  background: rgba(31, 36, 55, 0.88);
+  color: #e5e7eb;
+}
+.map-lightbox-canvas .map-cursor-coords {
+  position: absolute;
+  z-index: 1000;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.82);
+  color: #f0fdf4;
+  font: 500 11px var(--font-mono);
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .bubble .svg-gallery {

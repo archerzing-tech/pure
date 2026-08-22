@@ -24,6 +24,10 @@
 # Recommended .env.local form (keeps the key on disk; Tauri reads it at build):
 #   TAURI_SIGNING_PRIVATE_KEY=file://$HOME/.tauri/pure.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD=...             # only if -w was used when generating
+#
+# Local-build opt-out: set PURE_SKIP_UPDATER_SIGN=1 (in .env.local or the
+# shell) to skip the key requirement entirely — used with build-gui-mac.sh's
+# matching switch so `tauri build` also disables createUpdaterArtifacts.
 
 # ── Detect sourced vs executed ──
 # When sourced via `. script.sh` or `source script.sh`:
@@ -53,6 +57,16 @@ if [[ -f .env.local ]]; then
   # shellcheck disable=SC1091
   source .env.local
   set +a
+fi
+
+# ── 1.5 Local build opt-out (checked AFTER .env.local so the flag can live
+#       there). Skip the key entirely — no loud failure, no decryption. ──
+if [[ "${PURE_SKIP_UPDATER_SIGN:-0}" == "1" ]]; then
+  printf '\033[33m⏭\033[0m PURE_SKIP_UPDATER_SIGN=1 — skipping updater signing key load\n'
+  if [[ "${_SOURCED}" -eq 1 ]]; then
+    return 0
+  fi
+  exit 0
 fi
 
 # ── 2. Fall back to Tauri's default unencrypted key location ──

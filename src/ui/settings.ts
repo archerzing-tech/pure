@@ -38,6 +38,7 @@ import { composeProxyUrl, effectiveProxyUrl, isUsableProxyUrl, normalizeProxyCon
 import { probeLlmEndpoint } from '../shared/llmProbe';
 import {
   defaults,
+  DEFAULT_MAP_TILE_CACHE_MB,
   hasConfiguredKey,
   withDefaultModel,
   invalidateConfigCache,
@@ -93,6 +94,8 @@ export class SettingsPanel {
   private mcpServers: PureConfig['mcpServers'] = [];
   /** Bound in the constructor; refreshes the paste-file footprint on open. */
   private refreshTmpUsage: () => Promise<void> = async () => {};
+  /** Bound in the constructor; refreshes the offline map-tile cache footprint. */
+  private refreshMapTileUsage: () => Promise<void> = async () => {};
   /**
    * Provider whose expanded configuration panel is open (null = all cards
    * collapsed). Only one panel can be expanded at a time; the grid renders
@@ -133,6 +136,7 @@ export class SettingsPanel {
     document.getElementById('settings-back-btn')?.focus();
     // Refresh the paste-file footprint every time the panel opens.
     void this.refreshTmpUsage();
+    void this.refreshMapTileUsage();
   }
 
   close() {
@@ -236,6 +240,59 @@ export class SettingsPanel {
         console.error('[pure] tmp_paste_usage failed:', err);
       }
     };
+
+    // ── Map tile cache: usage + one-click clear + open directory (Tauri only) ──
+    const mapTileUsageEl = document.getElementById('map-tile-usage');
+    const mapTileDirEl = document.getElementById('map-tile-dir');
+    const mapTileClearBtn = document.getElementById('map-tile-cache-clear') as HTMLButtonElement | null;
+    const mapTileOpenBtn = document.getElementById('map-tile-cache-open') as HTMLButtonElement | null;
+    let mapTileCacheDir: string | undefined;
+
+    this.refreshMapTileUsage = async () => {
+      if (!mapTileUsageEl || !isTauriRuntime()) return;
+      try {
+        const core = await loadTauriCore();
+        const usage = await core?.invoke<{ files: number; bytes: number; dir: string }>('map_tile_cache_usage');
+        mapTileUsageEl.textContent = usage && usage.files > 0
+          ? `${usage.files} · ${formatBytes(usage.bytes)}`
+          : t('mapCache.usageNone');
+        mapTileCacheDir = usage?.dir;
+        if (mapTileDirEl) mapTileDirEl.textContent = mapTileCacheDir ?? '—';
+        if (mapTileOpenBtn) mapTileOpenBtn.disabled = !mapTileCacheDir;
+      } catch (err) {
+        console.error('[pure] map_tile_cache_usage failed:', err);
+      }
+    };
+
+    mapTileOpenBtn?.addEventListener('click', async () => {
+      if (!isTauriRuntime() || !mapTileCacheDir) return;
+      try {
+        const core = await loadTauriCore();
+        await core?.invoke('open_path', { path: mapTileCacheDir });
+      } catch (err) {
+        console.error('[pure] open map tile cache dir failed:', err);
+        this.toast(t('mapCache.openFailed'));
+      }
+    });
+
+    mapTileClearBtn?.addEventListener('click', async () => {
+      if (!isTauriRuntime()) return;
+      mapTileClearBtn.disabled = true;
+      try {
+        const core = await loadTauriCore();
+        const res = await core?.invoke<{ deleted: number; freedBytes: number }>('clear_map_tile_cache');
+        const deleted = res?.deleted ?? 0;
+        this.toast(deleted > 0
+          ? t('mapCache.cleared').replace('{n}', String(deleted)).replace('{size}', formatBytes(res?.freedBytes ?? 0))
+          : t('mapCache.nothing'));
+      } catch (err) {
+        console.error('[pure] clear_map_tile_cache failed:', err);
+        this.toast(t('mapCache.clearFailed'));
+      } finally {
+        mapTileClearBtn.disabled = false;
+        void this.refreshMapTileUsage();
+      }
+    });
 
     // ── Skill Hub: browse + install third-party skills ──
     const hubRepoSelect = document.getElementById('hub-repo') as HTMLSelectElement | null;
@@ -669,6 +726,8 @@ export class SettingsPanel {
       '#cfg-auto-continue-rounds',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle',
+      // Map-tile cache cap (number input saves on change/blur).
+      '#cfg-map-tile-cache-mb',
       // Memory evolution thresholds (number inputs save on change/blur).
       '#cfg-mem-half-life', '#cfg-mem-active-min', '#cfg-mem-dormant-max',
       '#cfg-mem-delete-floor', '#cfg-mem-grace', '#cfg-mem-supersede-sim'
@@ -1421,6 +1480,8 @@ export class SettingsPanel {
     const autoContinueRoundsEl = document.getElementById('cfg-auto-continue-rounds') as HTMLInputElement | null;
     if (autoContinueRoundsEl) autoContinueRoundsEl.value = String(cfg.autoContinueMaxRounds ?? DEFAULT_AUTO_CONTINUE_MAX_ROUNDS);
     this.updateAutoContinueVisibility();
+    const mapTileCacheMbEl = document.getElementById('cfg-map-tile-cache-mb') as HTMLInputElement | null;
+    if (mapTileCacheMbEl) mapTileCacheMbEl.value = String(cfg.mapTileCacheMB ?? DEFAULT_MAP_TILE_CACHE_MB);
 
     (document.getElementById('cfg-fontsize') as HTMLSelectElement).value = cfg.fontSize;
     (document.getElementById('cfg-density') as HTMLSelectElement).value = cfg.density;
@@ -2552,6 +2613,7 @@ export class SettingsPanel {
       // auto-continue toggle). Clamp to 1..20 so a typed value can't zero out
       // the chain or spin it forever.
       autoContinueMaxRounds: Math.min(20, Math.max(1, parseInt((document.getElementById('cfg-auto-continue-rounds') as HTMLInputElement | null)?.value ?? '', 10) || DEFAULT_AUTO_CONTINUE_MAX_ROUNDS)),
+      mapTileCacheMB: Math.min(2000, Math.max(10, parseInt((document.getElementById('cfg-map-tile-cache-mb') as HTMLInputElement | null)?.value ?? '', 10) || DEFAULT_MAP_TILE_CACHE_MB)),
       // The composer's mode selector lives outside this form — carry its value
       // through so a settings save never silently resets a user's mode choice.
       taskMode: (loadConfig() ?? defaults()).taskMode,

@@ -16,6 +16,7 @@ import {
   HUMAN_TONE_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
   LOGICAL_TRAPS_PROMPT,
+  PLAUSIBILITY_REVIEW_PROMPT,
   PUBLIC_API_DIRECTORIES_PROMPT,
   SVG_OUTPUT_PROMPT,
   SYSTEM_CORE_PROMPT,
@@ -251,6 +252,9 @@ function buildTaskFragments(context: UserTurnContext): PromptFragment[] {
     ['clarifications', context.clarifications, 100, true],
     ['contract', context.contract, 80],
     ['assessment', context.assessment, 90],
+    // Fiction override is required: a detected fiction request must always
+    // carry the skip directive, even when the budget is tight.
+    ['plausibility_override', context.plausibilityOverride, 100, true],
   ];
   return parts
     .map(([id, content, priority, required]) => fragment(id, content ?? '', priority, required))
@@ -292,6 +296,7 @@ export class PromptAssembler {
       fragment('tool_calling', buildToolCallingRules(context.surface), 115, true),
       fragment('typo_tolerance', TYPO_TOLERANCE_PROMPT, 55),
       fragment('logical_traps', LOGICAL_TRAPS_PROMPT, 70),
+      fragment('plausibility_review', PLAUSIBILITY_REVIEW_PROMPT, 72),
       fragment('capability_gap', CAPABILITY_GAP_PROMPT, 75),
       fragment('public_api_directory', PUBLIC_API_DIRECTORIES_PROMPT, 62),
       fragment('environment', context.environment ?? '', 60),

@@ -68,12 +68,19 @@ const translations: Record<Language, Record<string, string>> = {
     'diagram.repaired.original': '原始源码',
     'diagram.repaired.repairedLabel': '修复后',
     'diagram.repaired.close': '关闭 (Esc)',
+    'diagram.chartEmptySource': '图表内容为空',
+    'diagram.chartParseFailed': '图表数据格式无法识别，请检查数据是否符合 chart DSL 或 JSON 格式',
+    'diagram.svgEmpty': 'SVG 图形内容为空',
+    'diagram.svgFailed': 'SVG 图形处理失败',
+    'diagram.loadFailed': '图形模块加载失败',
 
     // ── Map (```map blocks) ──
     'map.title': '地图',
     'map.loading': '正在加载地图…',
     'map.sourceToggle': '查看数据',
     'map.sourceHide': '收起数据',
+    'map.expand': '展开地图',
+    'map.close': '关闭',
 
     // ── Thinking card ──
     'thinking.thinking': '思考',
@@ -745,6 +752,20 @@ const translations: Record<Language, Record<string, string>> = {
     'tmp.nothing': '没有需要清理的粘贴文件',
     'tmp.cleanFailed': '清理失败',
 
+    // ── Map tile cache (Settings → General) ──
+    'mapCache.title': '地图瓦片缓存',
+    'mapCache.desc': '本地缓存看过的地图瓦片，断网也能查看；设置缓存大小上限',
+    'mapCache.usage': '当前占用',
+    'mapCache.usageNone': '无瓦片缓存',
+    'mapCache.mbHint': '缓存上限（MB）',
+    'mapCache.clearBtn': '一键清空',
+    'mapCache.dir': '缓存目录',
+    'mapCache.openBtn': '在文件管理器中打开',
+    'mapCache.openFailed': '打开缓存目录失败',
+    'mapCache.cleared': '已清空 {n} 张瓦片，释放 {size}',
+    'mapCache.nothing': '没有可清空的瓦片缓存',
+    'mapCache.clearFailed': '清空失败',
+
     // ── Session list ──
     'session.loadError': '无法加载会话',
     'session.sessionDeleteBtn': '删除',
@@ -813,10 +834,17 @@ const translations: Record<Language, Record<string, string>> = {
     'diagram.repaired.original': 'Original',
     'diagram.repaired.repairedLabel': 'Repaired',
     'diagram.repaired.close': 'Close (Esc)',
+    'diagram.chartEmptySource': 'Chart content is empty',
+    'diagram.chartParseFailed': 'Chart data format is not recognized — check that it follows the chart DSL or JSON format',
+    'diagram.svgEmpty': 'SVG graphic content is empty',
+    'diagram.svgFailed': 'SVG graphic processing failed',
+    'diagram.loadFailed': 'Diagram module failed to load',
     'map.title': 'Map',
     'map.loading': 'Loading map…',
     'map.sourceToggle': 'View data',
     'map.sourceHide': 'Hide data',
+    'map.expand': 'Expand map',
+    'map.close': 'Close',
 
     // ── Thinking card ──
     'thinking.thinking': 'Thinking',
@@ -1487,6 +1515,20 @@ const translations: Record<Language, Record<string, string>> = {
     'tmp.cleaned': 'Cleaned {n} pasted files, freed {size}',
     'tmp.nothing': 'Nothing to clean',
     'tmp.cleanFailed': 'Cleanup failed',
+
+    // ── Map tile cache (Settings → General) ──
+    'mapCache.title': 'Map tile cache',
+    'mapCache.desc': 'Caches viewed basemap tiles locally for offline viewing; set the cache size cap',
+    'mapCache.usage': 'Current usage',
+    'mapCache.usageNone': 'No cached tiles',
+    'mapCache.mbHint': 'Cache cap (MB)',
+    'mapCache.clearBtn': 'Clear all',
+    'mapCache.dir': 'Cache directory',
+    'mapCache.openBtn': 'Open in file manager',
+    'mapCache.openFailed': 'Failed to open cache directory',
+    'mapCache.cleared': 'Cleared {n} tiles, freed {size}',
+    'mapCache.nothing': 'Nothing to clear',
+    'mapCache.clearFailed': 'Clear failed',
 
     // ── Session list ──
     'session.loadError': 'Could not load sessions',

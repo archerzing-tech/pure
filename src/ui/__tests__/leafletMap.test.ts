@@ -41,6 +41,29 @@ describe('parseMapSource', () => {
     expect(spec.route).toEqual([[0, 0], [1, 1]]);
   });
 
+  it('recovers JSON preceded by a // comment line', () => {
+    const { spec, repaired } = parseMapSource(
+      '// 酒泉骑行路线\n{"markers":[{"lat":39.73,"lng":98.49,"title":"酒泉"}]}',
+    );
+    expect(repaired).toBe(true);
+    expect(spec.markers).toHaveLength(1);
+    expect(spec.markers![0].title).toBe('酒泉');
+  });
+
+  it('recovers JSON with inline // comments', () => {
+    const { spec, repaired } = parseMapSource(
+      '{\n  "title": "骑行去酒泉", // 标题\n  "route": [[39.73, 98.49], [39.73, 98.5]] // 路线\n}',
+    );
+    expect(repaired).toBe(true);
+    expect(spec.title).toBe('骑行去酒泉');
+    expect(spec.route).toHaveLength(2);
+  });
+
+  it('fails with a friendly error (not a raw JSON parse error) for unrepairable input', () => {
+    expect(() => parseMapSource('// just a comment, no JSON')).toThrow('map 数据需要是一个 JSON 对象');
+    expect(() => parseMapSource('/not/json')).toThrow('map 数据需要是一个 JSON 对象');
+  });
+
   it('drops invalid markers and route points instead of failing', () => {
     const { spec } = parseMapSource(JSON.stringify({
       markers: [
@@ -61,5 +84,34 @@ describe('parseMapSource', () => {
     expect(() => parseMapSource('"hello"')).toThrow();
     expect(() => parseMapSource('{"title":"only a title"}')).toThrow();
     expect(() => parseMapSource('not json at all')).toThrow();
+  });
+
+  it('attaches routeWarnings when a waypoint heads away from destination', () => {
+    // Xi'an → Baoji (west) when destination is Shanghai (east)
+    const { spec } = parseMapSource(JSON.stringify({
+      title: '西安 → 上海',
+      route: [
+        [34.26, 108.94],
+        [34.37, 107.24],
+        [31.23, 121.47],
+      ],
+    }));
+    expect(spec.routeWarnings).toBeDefined();
+    expect(spec.routeWarnings!.length).toBeGreaterThanOrEqual(1);
+    expect(spec.routeWarnings![0].waypointIndex).toBe(1);
+    expect(spec.routeWarnings![0].deviation).toBeGreaterThan(90);
+    expect(spec.routeWarningText).toContain('偏离目的地方向');
+  });
+
+  it('leaves routeWarnings absent when route is valid', () => {
+    const { spec } = parseMapSource(JSON.stringify({
+      route: [
+        [34.34, 108.94],
+        [33.5, 114.0],
+        [31.23, 121.47],
+      ],
+    }));
+    expect(spec.routeWarnings).toBeUndefined();
+    expect(spec.routeWarningText).toBeUndefined();
   });
 });

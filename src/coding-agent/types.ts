@@ -92,6 +92,13 @@ export interface IntentAssessment {
   requiresProbe: boolean;
   /** The user must explicitly approve the proposed direction before execution. */
   requiresConfirmation: boolean;
+  /**
+   * Deterministic fiction / alternate-history / ignore-facts detection from
+   * the Planner (detectFictionIntent). When true the plausibility &
+   * real-world consistency review is skipped programmatically — not left to
+   * the model's judgment. Never inferred from the semantic route JSON.
+   */
+  skipPlausibilityReview?: boolean;
 }
 
 /**
