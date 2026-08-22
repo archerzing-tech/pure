@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, type DiagramKind } from '../markdown';
 
 // ```map blocks render as a dedicated leaflet slot (not a plain code block).
 describe('map code blocks', () => {
@@ -38,6 +38,39 @@ describe('map code blocks', () => {
     const html = renderer.code({ text: '{"a":1}', lang: 'json', type: 'code', raw: '{"a":1}' } as never);
     expect(html).toContain('<pre><code');
     expect(html).not.toContain('map-slot');
+  });
+});
+
+// `:::map … :::` container form (some clients / Windows emit this instead of a
+// ```map fenced block) must render as a map slot, identical to the fenced form.
+describe(':::map container fence compatibility', () => {
+  const mapMd = (body: string): string =>
+    new Marked({ gfm: true, breaks: true, renderer }).parse(normalizeMapFence(body)) as string;
+
+  it('rewrites a closed :::map container into a ```map fenced block', () => {
+    const src = ':::map\n{"markers":[{"lat":1,"lng":2}]}\n:::';
+    expect(normalizeMapFence(src)).toBe('```map\n{"markers":[{"lat":1,"lng":2}]}\n```');
+  });
+
+  it('renders a :::map container as a .map-slot (same as ```map)', () => {
+    const html = mapMd(':::map\n{"markers":[{"lat":1,"lng":2}]}\n:::');
+    expect(html).toContain('class="map-slot"');
+    expect(html).toContain('map-canvas');
+    expect(html).toContain('class="map-refresh"');
+    expect(html).not.toContain('<pre><code');
+  });
+
+  it('also handles :::leaflet and a trailing label on the opening fence', () => {
+    const html = mapMd(':::leaflet Route\n{"route":[[1,2],[3,4]]}\n:::');
+    expect(html).toContain('class="map-slot"');
+    expect(html).toContain('map-canvas');
+  });
+
+  it('leaves an unclosed :::map fragment untouched until the closing ::: arrives', () => {
+    const partial = ':::map\n{"markers":[{"lat":1,"lng":2}]}';
+    expect(normalizeMapFence(partial)).toBe(partial);
+    // A non-map container (e.g. :::note) is not rewritten.
+    expect(normalizeMapFence(':::note\nhi\n:::')).toBe(':::note\nhi\n:::');
   });
 });
 import { buildChartOption } from '../echartsChart';
