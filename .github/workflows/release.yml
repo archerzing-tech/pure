@@ -73,7 +73,7 @@ jobs:
           releaseBody: ${{ steps.notes.outputs.body }}
           args: '--bundles nsis'
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
       - name: Upload CLI binary (Windows)
         uses: softprops/action-gh-release@v3
@@ -130,7 +130,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'Pure v__VERSION__'
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
       - name: Build and publish GUI (unsigned, Intel)
         if: env.HAS_APPLE_SIGNING == 'false'
@@ -143,7 +143,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'Pure v__VERSION__'
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
       - name: Build CLI binary (macOS x86_64)
         run: bun run cli:build && mv pure pure_x86_64
