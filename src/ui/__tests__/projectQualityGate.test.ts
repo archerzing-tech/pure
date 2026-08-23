@@ -63,27 +63,42 @@ describe('project quality gate', () => {
     expect(parseProjectAuditResult('[audit-exit] 1').status).toBe('unavailable');
   });
 
+  it('builds platform-compatible local review commands', () => {
+    const posix = buildLocalReviewCommand('posix');
+    const windows = buildLocalReviewCommand('windows');
+    expect(posix).toContain('if [');
+    expect(posix).toContain('find . -type f');
+    expect(windows).toContain('$workspaceRoot');
+    expect(windows).toContain('Get-ChildItem -Recurse -File');
+    expect(windows).toContain('[local-review] no credential pattern found');
+    expect(windows).not.toContain('if [');
+    expect(windows).not.toContain('&&');
+    expect(windows).not.toContain('find . -type f');
+  });
   it('builds a local review command that works inside and outside Git', () => {
-    const command = buildLocalReviewCommand();
+    const command = buildLocalReviewCommand('posix');
     expect(command).toContain('git rev-parse --show-toplevel');
     expect(command).toContain('not a standalone git repository; skipping Git diff/status checks');
     expect(command).toContain('find . -type f');
     expect(command).not.toContain('git init');
   });
 
-  it.skipIf(process.platform === 'win32')('actually completes local review in a non-Git workspace', async () => {
-    const workspace = mkdtempSync(join(tmpdir(), 'pure-quality-non-git-'));
+
+  it.skipIf(process.platform !== 'win32')('actually completes the PowerShell local review in a non-Git workspace', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'pure-quality-windows-'));
     try {
       writeFileSync(join(workspace, 'index.html'), '<!doctype html>');
       const tools = new NodeToolAdapter({ workspace, commandTimeout: 10_000 });
       const result = await tools.execute({
-        id: 'local-review-non-git',
+        id: 'local-review-windows',
         index: 0,
-        function: { name: 'execute_command', arguments: JSON.stringify({ command: buildLocalReviewCommand() }) },
+        function: { name: 'execute_command', arguments: JSON.stringify({ command: buildLocalReviewCommand('windows') }) },
       });
       expect(result.success).toBe(true);
-      expect(String((result.result as { stdout?: string })?.stdout ?? result.result)).toContain('not a standalone git repository');
-      expect(String((result.result as { stdout?: string })?.stdout ?? result.result)).not.toContain('Not a git repository. Use --no-index');
+      const output = String((result.result as { stdout?: string; stderr?: string })?.stdout ?? result.result);
+      expect(output).toContain('[local-review] not a standalone git repository');
+      expect(output).toContain('[local-review] no credential pattern found');
+      expect(String((result.result as { stderr?: string })?.stderr ?? '')).not.toContain('CLIXML');
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
@@ -273,7 +288,7 @@ describe('project quality gate', () => {
   });
 
   it('treats whitespace findings in the local review as non-blocking notes', () => {
-    const command = buildLocalReviewCommand();
+    const command = buildLocalReviewCommand('posix');
     // git diff --check failures must not exit 1 — the scan continues to the
     // credential check and the review still completes as a degraded pass.
     expect(command).toContain("else echo '[local-review] diff check found whitespace issues (non-blocking)'");
