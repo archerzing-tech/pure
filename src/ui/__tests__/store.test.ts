@@ -3,6 +3,15 @@ import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPl
 import type { Message } from '../../shared/types';
 import type { Plan } from '../../coding-agent/types';
 
+describe('long text attachment metadata', () => {
+  it('round-trips attachment metadata in a session snapshot', () => {
+    const attachments = [{ id: 'a1', name: 'pasted.txt', path: '/tmp/pasted.txt', size: 350, kind: 'text' as const }];
+    const message: Message = { role: 'user', content: '已附加长文本文件：pasted.txt', attachments };
+    const snapshot = createSessionSnapshot([message], [{ message, modelMessageIndex: 0, content: message.content, attachments }]);
+    expect(snapshot.modelContext.messages[0].attachments).toEqual(attachments);
+    expect(snapshot.transcript[0].attachments).toEqual(attachments);
+  });
+});
 describe('session stats persistence', () => {
   it('round-trips the number of LLM interaction turns', () => {
     const previousStorage = (globalThis as any).localStorage;

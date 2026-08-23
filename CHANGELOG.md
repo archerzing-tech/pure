@@ -3,7 +3,16 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v1.9.14
+## v1.9.15-beta
+
+**长文本临时文件附件与跨平台交付验证**
+
+- 超过 350 个 Unicode 字符的直接输入会自动保存为会话临时文本文件，并以文件卡片显示
+- Agent 通过 `read_file` 按需读取长文本，避免把大段原文重复塞入模型上下文
+- 提交后的长文本附件支持查看、会话元数据持久化和临时文件过期提示
+- Windows 的 audit、verify、嵌套项目验证统一使用 PowerShell，macOS/Linux 保留 POSIX shell
+- 清理无害的 PowerShell 启动 CLIXML 噪声，同时保留真实命令错误
+
 
 **地图加载体验与国内服务适配**
 

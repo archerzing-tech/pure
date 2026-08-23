@@ -1663,7 +1663,7 @@ export class ChatController {
     return this.sessionToolAdapter;
   }
 
-  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false) {
+  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false, userAttachments: import('../shared/types').MessageAttachment[] = [], attachmentViewer?: (attachment: import('../shared/types').MessageAttachment) => void) {
     const chatEl = document.getElementById('chat')!;
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
@@ -1686,9 +1686,20 @@ export class ChatController {
     // then cancelled, the bubble is removed (see the cancel branch) so no
     // ghost message remains.
     const userBubble = this.addBubble('user', userText);
+    const userMessageAttachments = userAttachments.length > 0 ? userAttachments : undefined;
+    const openUserAttachment = attachmentViewer;
+
     if (displayUserText !== userText || userImages.length > 0) {
       userBubble.textContent = displayUserText;
       renderUserImageAttachments(userBubble, userImages);
+      for (const attachment of userAttachments) {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'paste-chip paste-chip-text';
+        card.textContent = `${attachment.name} · ${attachment.size} 字符`;
+        card.addEventListener('click', () => openUserAttachment?.(attachment));
+        userBubble.appendChild(card);
+      }
     }
 
     // Snapshot the user-selected workspace separately from the effective tool
@@ -1760,7 +1771,7 @@ export class ChatController {
     if (turnController.signal.aborted) {
       this.addStatusBubble('⏸ 已暂停：你的请求已保留在对话中。', true, false);
       void this.persistSession(
-        [...this.messages, { role: 'user', content: userText, images: userImages }],
+        [...this.messages, { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments }],
         new Map(),
         [],
         sendSessionId,
@@ -1782,7 +1793,7 @@ export class ChatController {
       this.addStatusBubble(pausedText, true, false);
       // 把被暂停的消息落盘（与运行中断路径一致），避免重载后“输入消失”。
       void this.persistSession(
-        [...this.messages, { role: 'user', content: userText, images: userImages }],
+        [...this.messages, { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments }],
         toolResults, thinkingPhases, sendSessionId, sendWorkspace,
       );
     };
@@ -3104,7 +3115,7 @@ export class ChatController {
           + (reviewNeedsDecision ? formatRequestReviewSection(reviewItems) : '');
         const pauseSnapshot: Message[] = [
           ...this.messages,
-          { role: 'user', content: userText, images: userImages },
+          { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments },
           { role: 'assistant', content: pauseMessage },
         ];
         this.messages = pauseSnapshot;
@@ -4228,6 +4239,7 @@ export class ChatController {
         modelMessageIndex: index,
         content: m.role === 'user' && index === latestUserIndex && visibleUserText ? visibleUserText : m.content,
         images: m.images,
+        attachments: m.attachments,
         analysis,
         artifacts: m.role === 'assistant' && index === lastAssistantIndex && artifacts.length > 0 ? artifacts : undefined,
         thinkingPhases: phases.length > 0 ? phases : undefined,
