@@ -50,7 +50,7 @@ import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, type ThinkingCardHandle } from './thinkingCard';
-import { buildRepairPrompt, buildVerifyCommand, hasRepairableQualityFindings, isVerificationCommand, qualityGateEvidence, qualityGateSummary, runProjectQualityGate, type ProjectQualityGateResult } from './projectQualityGate';
+import { buildRepairPrompt, buildVerifyCommand, hasRepairableQualityFindings, isVerificationCommand, projectCdPrefix, projectDirectoryFor, qualityGateEvidence, qualityGateSummary, runProjectQualityGate, type ProjectQualityGateResult } from './projectQualityGate';
 import { buildTaskContract, discoverWorkspace, formatTaskContract, isBareWorkspace, workspaceProfileSummary, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { parseResearchResult } from '../shared/research';
 import { repairJsonSource } from '../shared/parseRepair';
@@ -2957,7 +2957,7 @@ export class ChatController {
               const res = await adapter.execute({
                 id: `phase_verify_${finishedPhase}_${Date.now()}`,
                 index: 0,
-                function: { name: 'execute_command', arguments: JSON.stringify({ command: buildVerifyCommand() }) },
+                function: { name: 'execute_command', arguments: JSON.stringify({ command: `${projectCdPrefix(workspaceProfile ? projectDirectoryFor(workspaceProfile) : '.')}${buildVerifyCommand(workspaceProfile)}` }) },
               }, this.abortController?.signal);
               if (gen !== this.generation || this.abortController?.signal.aborted) return;
               const out = String(res.result ?? '');

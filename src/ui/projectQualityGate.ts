@@ -262,8 +262,16 @@ async function runReview(
   }  return { phase: 'review', status: verdict.status, summary: verdict.summary, output, reviewMode: 'agent', repairable: verdict.status === 'failed' };
 }
 
-export function buildAuditCommand(): string {
+export function buildAuditCommand(platform?: 'windows' | 'posix'): string {
+  return (platform ?? detectRuntimeShell()) === 'windows' ? buildPowerShellAuditCommand() : buildPosixAuditCommand();
+}
+
+function buildPosixAuditCommand(): string {
   return `if [ -f package.json ]; then if [ -f bun.lock ] || [ -f bun.lockb ]; then if command -v bun >/dev/null 2>&1; then echo '[audit-tool] bun audit --json'; bun audit --json; status=$?; echo "[audit-exit] $status"; exit 0; else echo '[audit-unavailable] bun is not installed'; fi; elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then if command -v npm >/dev/null 2>&1; then echo '[audit-tool] npm audit --json --audit-level=moderate --ignore-scripts'; npm audit --json --audit-level=moderate --ignore-scripts; status=$?; echo "[audit-exit] $status"; exit 0; else echo '[audit-unavailable] npm is not installed'; fi; else if node -e "const p=require('./package.json'); const deps={...(p.dependencies||{}),...(p.devDependencies||{})}; process.exit(Object.keys(deps).length?1:0)" >/dev/null 2>&1; then echo '[audit-not-applicable] package.json has no third-party dependencies to audit'; else echo '[audit-unavailable] package.json has no lockfile for a reproducible audit'; fi; fi; elif [ -f Cargo.toml ]; then if [ ! -f Cargo.lock ]; then echo '[audit-unavailable] Cargo.lock is missing'; elif command -v cargo-audit >/dev/null 2>&1; then echo '[audit-tool] cargo audit --json'; cargo audit --json; status=$?; echo "[audit-exit] $status"; exit 0; elif cargo --list 2>/dev/null | grep -qE '(^|[[:space:]])audit([[:space:]]|$)'; then echo '[audit-tool] cargo audit --json'; cargo audit --json; status=$?; echo "[audit-exit] $status"; exit 0; else echo '[audit-unavailable] cargo-audit is not installed'; fi; else echo '[audit-not-applicable] no supported dependency manifest'; fi`;
+}
+
+function buildPowerShellAuditCommand(): string {
+  return `$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'Continue'; if (Test-Path -LiteralPath 'package.json') { if ((Test-Path -LiteralPath 'bun.lock') -or (Test-Path -LiteralPath 'bun.lockb')) { if (Get-Command bun -ErrorAction SilentlyContinue) { Write-Output '[audit-tool] bun audit --json'; & bun audit --json; $status = $LASTEXITCODE; Write-Output \"[audit-exit] $status\"; exit 0 } else { Write-Output '[audit-unavailable] bun is not installed' } } elseif ((Test-Path -LiteralPath 'package-lock.json') -or (Test-Path -LiteralPath 'npm-shrinkwrap.json')) { if (Get-Command npm -ErrorAction SilentlyContinue) { Write-Output '[audit-tool] npm audit --json --audit-level=moderate --ignore-scripts'; & npm audit --json --audit-level=moderate --ignore-scripts; $status = $LASTEXITCODE; Write-Output \"[audit-exit] $status\"; exit 0 } else { Write-Output '[audit-unavailable] npm is not installed' } } else { $package = Get-Content -Raw -LiteralPath 'package.json' | ConvertFrom-Json; $deps = @($package.dependencies.PSObject.Properties.Name) + @($package.devDependencies.PSObject.Properties.Name); if ($deps.Count -eq 0) { Write-Output '[audit-not-applicable] package.json has no third-party dependencies to audit' } else { Write-Output '[audit-unavailable] package.json has no lockfile for a reproducible audit' } } } elseif (Test-Path -LiteralPath 'Cargo.toml') { if (-not (Test-Path -LiteralPath 'Cargo.lock')) { Write-Output '[audit-unavailable] Cargo.lock is missing' } elseif (Get-Command cargo-audit -ErrorAction SilentlyContinue) { Write-Output '[audit-tool] cargo audit --json'; & cargo audit --json; $status = $LASTEXITCODE; Write-Output \"[audit-exit] $status\"; exit 0 } else { Write-Output '[audit-unavailable] cargo-audit is not installed' } } else { Write-Output '[audit-not-applicable] no supported dependency manifest' }; exit 0`;
 }
 
 export function parseProjectAuditResult(output: string): { status: QualityGateStatus; summary: string } {
@@ -316,8 +324,10 @@ export function projectDirectoryFor(profile?: WorkspaceProfile): string {
 
 /** Wrap a shell command so it runs inside a project subdirectory. Empty for
  * the workspace root (the common case) so existing behavior is unchanged. */
-export function projectCdPrefix(projectDir: string): string {
+export function projectCdPrefix(projectDir: string, platform?: 'windows' | 'posix'): string {
   if (!projectDir || projectDir === '.') return '';
+  const shell = platform ?? detectRuntimeShell();
+  if (shell === 'windows') return `if (-not (Test-Path -LiteralPath '${projectDir.replaceAll("'", "''")}' -PathType Container)) { exit 127 }; Set-Location -LiteralPath '${projectDir.replaceAll("'", "''")}'; `;
   return `cd '${projectDir.replaceAll("'", "'\\''")}' 2>/dev/null || exit 127; `;
 }
 
@@ -350,7 +360,8 @@ async function runAudit(
     }
     onActivity?.(audited.timedOut ? '项目审计工具超时，切换到本地只读审计…' : '项目审计工具未返回可验证结论，切换到本地只读审计…');
   }
-  const command = `${projectCdPrefix(projectDir)}${buildAuditCommand()}`;
+  const shell = detectRuntimeShell();
+  const command = `${projectCdPrefix(projectDir, shell)}${buildAuditCommand(shell)}`;
   const { result, timedOut } = await executeCommand(tools, command, 'audit', signal, timeoutMs);
   const output = resultText(result);
   if (timedOut) {
@@ -367,7 +378,13 @@ async function runAudit(
 /** Detect the standard verification command for the workspace's stack.
  * The discovered profile is preferred so Bun projects use Bun, npm projects use
  * npm, and declared lint/build scripts are not silently skipped. */
-export function buildVerifyCommand(profile?: WorkspaceProfile): string {
+export function buildVerifyCommand(profile?: WorkspaceProfile, platform?: 'windows' | 'posix'): string {
+  const shell = platform ?? detectRuntimeShell();
+  if (shell === 'windows') return buildPowerShellVerifyCommand(profile);
+  return buildPosixVerifyCommand(profile);
+}
+
+function buildPosixVerifyCommand(profile?: WorkspaceProfile): string {
   if (profile) {
     const specs = buildVerificationPlan(profile);
     const commands = specs.filter((spec) => spec.command).map((spec) => `echo '[verify-step] ${spec.id}'; ${spec.command}`);
@@ -375,7 +392,18 @@ export function buildVerifyCommand(profile?: WorkspaceProfile): string {
     if (missingTests) commands.push("echo '[verify-missing-tests] project must expose a test script and discoverable test files'; exit 1");
     if (commands.length > 0) return `${commands.join(' && ')} && echo '[verify-complete]'`;
   }
-  return `# npm run typecheck is the npm-equivalent command when no Bun lockfile is present\nif [ -f package.json ]; then if [ -f bun.lock ] || [ -f bun.lockb ]; then runner='bun run'; else runner='npm run'; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.typecheck ? 0 : 1)" >/dev/null 2>&1; then $runner typecheck; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.lint ? 0 : 1)" >/dev/null 2>&1; then $runner lint; fi; if node -e "const fs=require('fs'); const p=require('./package.json'); const skip=new Set(['node_modules','.git','dist','build','target','.next']); const hasTestFile=(dir)=>fs.readdirSync(dir,{withFileTypes:true}).some(e=>{ if(skip.has(e.name)) return false; const full=dir+'/'+e.name; return e.isDirectory() ? hasTestFile(full) : /(?:^|[./])(?:__tests__[/\\]|[^/\\]+[.](?:test|spec)[.][cm]?[jt]sx?$)/.test(full); }); process.exit(p.scripts?.test && hasTestFile('.') ? 0 : 1)" >/dev/null 2>&1; then if [ "$runner" = 'bun run' ]; then bun run test; else npm test; fi; else echo '[verify-missing-tests] package.json must contain a test script and a discoverable test file/directory'; exit 1; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.build ? 0 : 1)" >/dev/null 2>&1; then $runner build; fi;  elif [ -f Cargo.toml ]; then cargo check && cargo test && cargo build; elif [ -f go.mod ]; then go test ./...; elif [ -f pyproject.toml ] || [ -f pytest.ini ]; then if command -v pytest >/dev/null 2>&1; then pytest; else echo '[verify-unavailable] pytest is not installed'; exit 127; fi; else echo '[verify-not-applicable] no standard test manifest'; fi`;
+  return `# npm run typecheck is the npm-equivalent command when no Bun lockfile is present\nif [ -f package.json ]; then if [ -f bun.lock ] || [ -f bun.lockb ]; then runner='bun run'; else runner='npm run'; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.typecheck ? 0 : 1)" >/dev/null 2>&1; then $runner typecheck; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.lint ? 0 : 1)" >/dev/null 2>&1; then $runner lint; fi; if node -e "const fs=require('fs'); const p=require('./package.json'); const skip=new Set(['node_modules','.git','dist','build','target','.next']); const hasTestFile=(dir)=>fs.readdirSync(dir,{withFileTypes:true}).some(e=>{ if(skip.has(e.name)) return false; const full=dir+'/'+e.name; return e.isDirectory() ? hasTestFile(full) : /(?:^|[./])(?:__tests__[/\\]|[^/\\]+[.](?:test|spec)[.][cm]?[jt]sx?$)/.test(full); }); process.exit(p.scripts?.test && hasTestFile('.') ? 0 : 1)" >/dev/null 2>&1; then if [ "$runner" = 'bun run' ]; then bun run test; else npm test; fi; else echo '[verify-missing-tests] package.json must contain a test script and a discoverable test file/directory'; exit 1; fi; if node -e "const p=require('./package.json'); process.exit(p.scripts?.build ? 0 : 1)" >/dev/null 2>&1; then $runner build; fi; elif [ -f Cargo.toml ]; then cargo check && cargo test && cargo build; elif [ -f go.mod ]; then go test ./...; elif [ -f pyproject.toml ] || [ -f pytest.ini ]; then if command -v pytest >/dev/null 2>&1; then pytest; else echo '[verify-unavailable] pytest is not installed'; exit 127; fi; else echo '[verify-not-applicable] no standard test manifest'; fi`;
+}
+
+function buildPowerShellVerifyCommand(profile?: WorkspaceProfile): string {
+  if (profile) {
+    const specs = buildVerificationPlan(profile);
+    const steps = specs.filter((spec) => spec.command).map((spec) => `Write-Output '[verify-step] ${spec.id}'; & ${spec.command}; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`);
+    const missingTests = profile.projectType !== 'unknown' && (!profile.scripts.test || !profile.testFilesFound);
+    if (missingTests) steps.push("Write-Output '[verify-missing-tests] project must expose a test script and discoverable test files'; exit 1");
+    if (steps.length > 0) return `${steps.join('; ')}; Write-Output '[verify-complete]'; exit 0`;
+  }
+  return `$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'Continue'; if (Test-Path -LiteralPath 'package.json') { $runner = if ((Test-Path -LiteralPath 'bun.lock') -or (Test-Path -LiteralPath 'bun.lockb')) { 'bun' } else { 'npm' }; $package = Get-Content -Raw -LiteralPath 'package.json' | ConvertFrom-Json; if ($package.scripts.typecheck) { & $runner run typecheck; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }; if ($package.scripts.lint) { & $runner run lint; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }; $testFiles = Get-ChildItem -Recurse -File | Where-Object { $_.FullName -notmatch '(?:^|[\\/])(?:node_modules|dist|build|target|\.git)(?:[\\/]|$)' -and $_.Name -match '(?:\.test|\.spec)\.[cm]?[jt]sx?$|(?:^|test_).+\.py$' }; if (-not $package.scripts.test -or -not $testFiles) { Write-Output '[verify-missing-tests] package.json must contain a test script and a discoverable test file/directory'; exit 1 }; if ($runner -eq 'bun') { & bun test } else { & npm test }; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; if ($package.scripts.build) { & $runner run build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } } elseif (Test-Path -LiteralPath 'Cargo.toml') { & cargo check; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & cargo test; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & cargo build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } elseif (Test-Path -LiteralPath 'go.mod') { & go test ./...; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } elseif ((Test-Path -LiteralPath 'pyproject.toml') -or (Test-Path -LiteralPath 'pytest.ini')) { if (-not (Get-Command pytest -ErrorAction SilentlyContinue)) { Write-Output '[verify-unavailable] pytest is not installed'; exit 127 }; & pytest; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } else { Write-Output '[verify-not-applicable] no standard test manifest' }; Write-Output '[verify-complete]'; exit 0`;
 }
 
 /** True when a shell command is a verification/check invocation (typecheck,
@@ -393,7 +421,8 @@ async function runVerification(
   profile?: WorkspaceProfile,
   projectDir = '.',
 ): Promise<QualityGateCheck> {
-  const command = `${projectCdPrefix(projectDir)}${buildVerifyCommand(profile)}`;
+  const shell = detectRuntimeShell();
+  const command = `${projectCdPrefix(projectDir, shell)}${buildVerifyCommand(profile, shell)}`;
   onActivity?.('正在执行类型检查与自动化测试，等待验证结果…');
   const { result, timedOut } = await executeCommand(tools, command, 'verify', signal, timeoutMs);
   const output = resultText(result);
