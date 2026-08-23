@@ -9,7 +9,7 @@
 // in-memory cache keeps reads synchronous; localStorage (`pure_stats:<id>`)
 // is only the fallback for plain Vite dev.
 
-import type { Message, MessageImage, TokenUsage, GeneratedImage } from '../shared/types';
+import type { Message, MessageAttachment, MessageImage, TokenUsage, GeneratedImage } from '../shared/types';
 import type { IntentAssessment, Plan } from '../coding-agent/types';
 import type { PlanProgressSnapshot } from './planProgress';
 
@@ -22,6 +22,7 @@ export interface TranscriptEntry {
   content: string | null;
   /** User-uploaded images shown in the restored conversation bubble. */
   images?: MessageImage[];
+  attachments?: MessageAttachment[];
   displayOverride?: boolean;
   toolCallId?: string;
   toolName?: string;
@@ -71,6 +72,7 @@ export interface TranscriptDraft {
   modelMessageIndex: number;
   content?: string | null;
   images?: MessageImage[];
+  attachments?: MessageAttachment[];
   displayOverride?: boolean;
   analysis?: string;
   thinking?: string;
@@ -138,6 +140,7 @@ export interface StoredMessage {
   role: string;
   content: string | null;
   images?: MessageImage[];
+  attachments?: MessageAttachment[];
   tool_calls?: unknown[];
   tool_call_id?: string;
   name?: string;
@@ -243,6 +246,7 @@ function legacyToTranscriptDrafts(messages: StoredMessage[]): TranscriptDraft[] 
       content: message.role === 'assistant' ? getStoredDisplayContent(message) : message.content,
       displayOverride: message.role === 'assistant' && !!message.displayContent,
       images: message.images,
+      attachments: message.attachments,
       analysis: message.analysis,
       thinking: message.thinking,
       thinkingPhases: message.thinkingPhases,
@@ -276,6 +280,7 @@ export function createSessionSnapshot(
       role: message.role as TranscriptEntry['role'],
       content: draft.content ?? message.content,
       images: draft.images ?? message.images,
+      attachments: draft.attachments ?? message.attachments,
       displayOverride: draft.displayOverride,
       toolCallId: message.toolCallId,
       toolName: message.toolName,
@@ -323,6 +328,7 @@ export function mergeSessionSnapshotMetadata(
       ...entry,
       content: entry.displayOverride ? entry.content : (prior.content || entry.content),
       images: entry.images ?? prior.images,
+      attachments: entry.attachments ?? prior.attachments,
       displayOverride: entry.displayOverride || prior.displayOverride,
       analysis: entry.analysis ?? prior.analysis,
       thinking: entry.thinking ?? prior.thinking,

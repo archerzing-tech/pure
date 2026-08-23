@@ -50,8 +50,12 @@ describe('classifyUploadFile (upload limits)', () => {
     expect(classifyUploadFile('big.pdf', 'application/pdf', UPLOAD_LIMITS.MAX_UPLOAD_BYTES + 1)).toBeNull();
   });
 });
-
 describe('guessPasteName', () => {
+  it('uses the 350 code-point boundary consistently', () => {
+    expect(PASTE_FILE_THRESHOLD).toBe(350);
+    expect([...('😀'.repeat(350))].length).toBe(350);
+  });
+
   it('detects JSON payloads', () => {
     expect(guessPasteName('{"a": 1, "b": [1,2,3]}')).toMatch(/\.json$/);
     expect(guessPasteName('[{"x":1},{"x":2}]')).toMatch(/\.json$/);
@@ -82,28 +86,43 @@ describe('composeMessageWithAttachments', () => {
     expect(composeMessageWithAttachments('', [])).toBe('');
   });
 
+  it('references saved text files without inlining their body', () => {
+    const a = att('long.txt', 'SECRET LONG BODY');
+    const out = composeMessageWithAttachments('review this', [a]);
+    expect(out).toContain('/tmp/x/long.txt');
+    expect(out).toContain('read_file');
+    expect(out).not.toContain('SECRET LONG BODY');
+  });
+
+  it('uses an explicit memory fallback when a text file has no path', () => {
+    const a = { ...att('long.txt', 'FALLBACK BODY'), path: '' };
+    const out = composeMessageWithAttachments('', [a]);
+    expect(out).toContain('浏览器开发模式内存回退');
+    expect(out).toContain('FALLBACK BODY');
+  });
   it('appends each attachment after a marker with name and size', () => {
     const a = att('pasted-x.txt', 'file body');
     const out = composeMessageWithAttachments('please review', [a]);
     expect(out).toContain('please review');
     expect(out).toContain('[粘贴文件: pasted-x.txt');
-    expect(out).toContain('file body');
+    expect(out).not.toContain('file body');
     expect(out.indexOf('[粘贴文件')).toBeGreaterThan(-1);
-    expect(out.indexOf('file body')).toBeGreaterThan(out.indexOf('[粘贴文件'));
   });
 
-  it('joins multiple attachments in order', () => {
+  it('joins multiple attachment references in order', () => {
     const a1 = att('one.txt', 'ONE');
     const a2 = att('two.csv', 'TWO');
     const out = composeMessageWithAttachments('hi', [a1, a2]);
-    expect(out.indexOf('ONE')).toBeLessThan(out.indexOf('TWO'));
+    expect(out.indexOf('/tmp/x/one.txt')).toBeLessThan(out.indexOf('/tmp/x/two.csv'));
+    expect(out).not.toContain('ONE');
+    expect(out).not.toContain('TWO');
   });
 
   it('skips empty parts so a bare attachment message still composes', () => {
     const a = att('x.log', 'log data');
     const out = composeMessageWithAttachments('   ', [a]);
-    expect(out).toContain('log data');
-    expect(out.startsWith('[粘贴文件')).toBe(true);
+    expect(out).not.toContain('log data');
+    expect(out).toContain('/tmp/x/x.log');
   });
 
   it('references images by path instead of inlining binary', () => {
@@ -175,7 +194,7 @@ describe('attachment presentation metadata', () => {
 });
 
 describe('paste threshold', () => {
-  it('exposes the 64KB cutoff the manager compares against', () => {
-    expect(PASTE_FILE_THRESHOLD).toBe(64 * 1024);
+  it('exposes the 350 code-point cutoff the manager compares against', () => {
+    expect(PASTE_FILE_THRESHOLD).toBe(350);
   });
 });
