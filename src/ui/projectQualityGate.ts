@@ -1,5 +1,6 @@
 import type { ToolAdapter, ToolCall, ToolResult } from '../shared/types';
 import { buildVerificationPlan, classifyDeliveryFailure, type DeliveryEvidence, type DeliveryFailureKind, type WorkspaceProfile } from '../shared/delivery';
+import { detectShellPlatform } from '../shared/shellEnv';
 
 export type QualityGatePhase = 'review' | 'audit' | 'verify';
 export type QualityGateStatus = 'passed' | 'degraded' | 'failed' | 'unavailable' | 'not_applicable';
@@ -167,8 +168,24 @@ async function executeWithTimeout(
   }
 }
 
-export function buildLocalReviewCommand(): string {
-  return `workspace_root=$(pwd -P); git_root=$(git rev-parse --show-toplevel 2>/dev/null || true); if [ -n \"$git_root\" ] && [ \"$git_root\" = \"$workspace_root\" ]; then printf '%s\\n' '[local-review] git diff --check'; if git diff --check; then echo '[local-review] diff check passed'; else echo '[local-review] diff check found whitespace issues (non-blocking)'; fi; printf '%s\\n' '[local-review] changed files'; git status --short; printf '%s\\n' '[local-review] diff summary'; git diff --stat; else echo '[local-review] not a standalone git repository; skipping Git diff/status checks'; printf '%s\\n' '[local-review] files in workspace'; find . -type f ! -path './.git/*' ! -path './node_modules/*' ! -path './dist/*' ! -name '*.lock' -print | sort; fi; printf '%s\\n' '[local-review] suspicious credential scan'; matches=$(find . -type f ! -path './.git/*' ! -path './node_modules/*' ! -path './dist/*' ! -name '*.lock' -exec grep -nI -E '(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' {} + 2>/dev/null); scan_status=$?; if [ $scan_status -gt 1 ]; then echo '[local-review] credential scan could not complete'; exit 2; elif [ -n \"$matches\" ]; then printf '%s\\n' \"$matches\"; echo '[local-review] possible credential pattern found'; exit 1; else echo '[local-review] no credential pattern found'; fi`;
+export function buildLocalReviewCommand(platform?: 'windows' | 'posix'): string {
+  const shell = platform ?? detectRuntimeShell();
+  return shell === 'windows' ? buildPowerShellLocalReviewCommand() : buildPosixLocalReviewCommand();
+}
+
+function detectRuntimeShell(): 'windows' | 'posix' {
+  const processPlatform = typeof process !== 'undefined' ? process.platform : '';
+  if (processPlatform) return detectShellPlatform(processPlatform);
+  const browserPlatform = typeof navigator !== 'undefined' ? `${navigator.userAgent} ${navigator.platform}` : '';
+  return detectShellPlatform(browserPlatform);
+}
+
+function buildPosixLocalReviewCommand(): string {
+  return `workspace_root=$(pwd -P); git_root=$(git rev-parse --show-toplevel 2>/dev/null || true); if [ -n "$git_root" ] && [ "$git_root" = "$workspace_root" ]; then printf '%s\\n' '[local-review] git diff --check'; if git diff --check; then echo '[local-review] diff check passed'; else echo '[local-review] diff check found whitespace issues (non-blocking)'; fi; printf '%s\\n' '[local-review] changed files'; git status --short; printf '%s\\n' '[local-review] diff summary'; git diff --stat; else echo '[local-review] not a standalone git repository; skipping Git diff/status checks'; printf '%s\\n' '[local-review] files in workspace'; find . -type f ! -path './.git/*' ! -path './node_modules/*' ! -path './dist/*' ! -name '*.lock' -print | sort; fi; printf '%s\\n' '[local-review] suspicious credential scan'; matches=$(find . -type f ! -path './.git/*' ! -path './node_modules/*' ! -path './dist/*' ! -name '*.lock' -exec grep -nI -E '(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' {} + 2>/dev/null); scan_status=$?; if [ $scan_status -gt 1 ]; then echo '[local-review] credential scan could not complete'; exit 2; elif [ -n "$matches" ]; then printf '%s\\n' "$matches"; echo '[local-review] possible credential pattern found'; exit 1; else echo '[local-review] no credential pattern found'; fi`;
+}
+
+function buildPowerShellLocalReviewCommand(): string {
+  return `$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'Continue'; $workspaceRoot = (Get-Location).Path; $gitRoot = (& git rev-parse --show-toplevel 2>$null | Select-Object -First 1); if ($LASTEXITCODE -eq 0 -and $gitRoot -and ((Resolve-Path $gitRoot).Path -eq $workspaceRoot)) { Write-Output '[local-review] git diff --check'; & git diff --check; if ($LASTEXITCODE -eq 0) { Write-Output '[local-review] diff check passed' } else { Write-Output '[local-review] diff check found whitespace issues (non-blocking)' }; Write-Output '[local-review] changed files'; & git status --short; Write-Output '[local-review] diff summary'; & git diff --stat } else { Write-Output '[local-review] not a standalone git repository; skipping Git diff/status checks'; Write-Output '[local-review] files in workspace'; Get-ChildItem -Recurse -File | Where-Object { $_.FullName -notmatch '(?:^|[\\/])(?:\.git|node_modules|dist|build|target)(?:[\\/]|$)' -and $_.Extension -notin @('.lock','.lockb') } | ForEach-Object { $_.FullName.Substring($workspaceRoot.Length + 1) } | Sort-Object }; Write-Output '[local-review] suspicious credential scan'; $matches = Get-ChildItem -Recurse -File | Where-Object { $_.FullName -notmatch '(?:^|[\\/])(?:\.git|node_modules|dist|build|target)(?:[\\/]|$)' -and $_.Extension -notin @('.lock','.lockb') } | Select-String -Pattern 'sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY' -ErrorAction SilentlyContinue; if ($matches) { $matches | ForEach-Object { Write-Output $_.Line }; Write-Output '[local-review] possible credential pattern found'; exit 1 } else { Write-Output '[local-review] no credential pattern found' }; exit 0`;
 }
 
 async function runLocalReview(
