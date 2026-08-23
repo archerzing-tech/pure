@@ -3,6 +3,15 @@
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
+export interface MessageAttachment {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+  kind: 'text' | 'image' | 'doc' | 'binary';
+  truncated?: boolean;
+}
+
 export interface MessageImage {
   /** data: URL for the vision request and restored transcript thumbnail. */
   dataUrl: string;
@@ -22,6 +31,7 @@ export interface Message {
   internal?: boolean;
   /** Images attached to this user message; adapters map these to native image blocks. */
   images?: MessageImage[];
+  attachments?: MessageAttachment[];
   toolCallId?: string;
   toolName?: string;
   name?: string;
