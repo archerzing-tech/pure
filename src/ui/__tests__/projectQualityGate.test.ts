@@ -331,9 +331,10 @@ describe('project quality gate', () => {
     };
     const profile = { projectType: 'node' as const, packageManager: 'npm' as const, manifests: ['my-app/package.json'], scripts: { test: 'node --test' } as Record<string, string>, testFilesFound: true, gitRepository: false, relevantFiles: ['my-app/package.json'], verification: [] };
     const result = await runProjectQualityGate(tools, { profile });
+    const projectPrefix = projectCdPrefix('my-app');
     expect(result.passed).toBe(true);
-    expect(commands.some((c) => c.includes("Set-Location -LiteralPath 'my-app'") && c.includes('audit-tool'))).toBe(true);
-    expect(commands.some((c) => c.includes("Set-Location -LiteralPath 'my-app'") && c.includes('verify-step'))).toBe(true);
+    expect(commands.some((c) => c.includes(projectPrefix) && c.includes('audit-tool'))).toBe(true);
+    expect(commands.some((c) => c.includes(projectPrefix) && c.includes('verify-step'))).toBe(true);
   });
 
   it('stops and blocks delivery when the audit command ignores cancellation and times out', async () => {
@@ -440,8 +441,8 @@ describe('verification command helpers', () => {
       writeFileSync(join(workspace, 'smoke.test.js'), 'test');
       const profile = {
         projectType: 'node' as const,
-        packageManager: 'npm' as const,
-        manifests: ['package.json', 'package-lock.json'],
+        packageManager: 'bun' as const,
+        manifests: ['package.json', 'bun.lock'],
         scripts: { test: 'node -e "process.exit(2)"' },
         testFilesFound: true,
         gitRepository: false,
