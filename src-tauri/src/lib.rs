@@ -2437,6 +2437,19 @@ fn utf16le_base64(text: &str) -> String {
 /// can silently break it. The encoded form carries the raw bytes untouched.
 /// The exit-code wrapper from powershell_command_wrapped rides along.
 #[cfg(windows)]
+fn strip_powershell_startup_progress(stderr: String) -> String {
+    let trimmed = stderr.trim();
+    if !trimmed.starts_with("#< CLIXML") || trimmed.contains("<S S=\"Error\">") {
+        return stderr;
+    }
+    if trimmed.contains("<AV>Preparing modules for first use.</AV>") {
+        String::new()
+    } else {
+        stderr
+    }
+}
+
+#[cfg(windows)]
 fn powershell_encoded_command(command: &str) -> String {
     utf16le_base64(&powershell_command_wrapped(command))
 }
@@ -2656,10 +2669,15 @@ async fn execute_command(workspace: String, command: String, proxy_url: Option<S
             .map_err(|e| format!("execute_command: {}", e))?
     };
 
+    #[cfg(windows)]
+    let stderr = strip_powershell_startup_progress(String::from_utf8_lossy(&output.stderr).to_string());
+    #[cfg(not(windows))]
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
     Ok(serde_json::json!({
         "exitCode": output.status.code().unwrap_or(-1),
         "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-        "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+        "stderr": stderr,
     }))
 }
 

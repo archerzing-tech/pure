@@ -318,7 +318,7 @@ describe('project quality gate', () => {
   it('audits and verifies inside the discovered project directory', async () => {
     expect(projectDirectoryFor({ projectType: 'node', packageManager: 'npm', manifests: ['my-app/package.json'], scripts: {}, testFilesFound: false, gitRepository: false, relevantFiles: ['my-app/package.json'], verification: [] })).toBe('my-app');
     expect(projectDirectoryFor({ projectType: 'node', packageManager: 'npm', manifests: ['package.json'], scripts: {}, testFilesFound: false, gitRepository: false, relevantFiles: ['package.json'], verification: [] })).toBe('.');
-    expect(projectCdPrefix('my-app')).toContain("cd 'my-app'");
+    expect(projectCdPrefix('my-app', 'posix')).toContain("cd 'my-app'");
     expect(projectCdPrefix('.')).toBe('');
     const commands: string[] = [];
     const tools = adapter('VERDICT: PASS', []);
@@ -332,8 +332,8 @@ describe('project quality gate', () => {
     const profile = { projectType: 'node' as const, packageManager: 'npm' as const, manifests: ['my-app/package.json'], scripts: { test: 'node --test' } as Record<string, string>, testFilesFound: true, gitRepository: false, relevantFiles: ['my-app/package.json'], verification: [] };
     const result = await runProjectQualityGate(tools, { profile });
     expect(result.passed).toBe(true);
-    expect(commands.some((c) => c.includes("cd 'my-app'") && c.includes('audit-tool'))).toBe(true);
-    expect(commands.some((c) => c.includes("cd 'my-app'") && c.includes('verify-step'))).toBe(true);
+    expect(commands.some((c) => c.includes("Set-Location -LiteralPath 'my-app'") && c.includes('audit-tool'))).toBe(true);
+    expect(commands.some((c) => c.includes("Set-Location -LiteralPath 'my-app'") && c.includes('verify-step'))).toBe(true);
   });
 
   it('stops and blocks delivery when the audit command ignores cancellation and times out', async () => {
@@ -374,20 +374,70 @@ describe('project quality gate', () => {
 });
 
 describe('verification command helpers', () => {
+  it('builds platform-compatible audit, verify, and directory commands', () => {
+    const audit = buildAuditCommand('windows');
+    const verify = buildVerifyCommand(undefined, 'windows');
+    const nested = projectCdPrefix('my-app', 'windows');
+    expect(audit).toContain('Test-Path -LiteralPath');
+    expect(audit).toContain('[audit-exit]');
+    expect(verify).toContain('verify-complete');
+    expect(verify).toContain('ConvertFrom-Json');
+    expect(nested).toContain('Set-Location -LiteralPath');
+    for (const command of [audit, verify, nested]) {
+      expect(command).not.toContain('if [');
+      expect(command).not.toContain('&&');
+      expect(command).not.toContain('||');
+      expect(command).not.toContain('/dev/null');
+    }
+    expect(buildAuditCommand('posix')).toContain('if [ -f package.json ]');
+    expect(buildVerifyCommand(undefined, 'posix')).toContain('if [ -f package.json ]');
+    expect(projectCdPrefix('my-app', 'posix')).toContain('2>/dev/null || exit 127');
+  });
   it('buildVerifyCommand covers npm, cargo, Go, and Python stacks', () => {
-    expect(buildVerifyCommand()).toContain('npm run typecheck');
-    expect(buildVerifyCommand()).toContain('verify-missing-tests');
-    expect(buildVerifyCommand()).toContain('hasTestFile');
-    expect(buildVerifyCommand()).toContain('node_modules');
-    expect(buildVerifyCommand()).toContain('cargo test');
-    expect(buildVerifyCommand()).toContain('go test ./...');
-    expect(buildVerifyCommand()).toContain('pytest');
+    expect(buildVerifyCommand(undefined, 'posix')).toContain('npm run typecheck');
+    expect(buildVerifyCommand(undefined, 'posix')).toContain('verify-missing-tests');
+    expect(buildVerifyCommand(undefined, 'posix')).toContain('hasTestFile');
+    expect(buildVerifyCommand(undefined, 'posix')).toContain('node_modules');
+    expect(buildVerifyCommand(undefined, 'posix')).toContain('cargo test');
+    expect(buildVerifyCommand(undefined, 'posix')).toContain('go test ./...');
+    expect(buildVerifyCommand(undefined, 'posix')).toContain('pytest');
   });
 
-  it.skipIf(process.platform === 'win32')('preserves a profile verification failure instead of echoing completion', async () => {
+  it.skipIf(process.platform !== 'win32')('runs Windows audit and verification without CLIXML', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'pure-quality-windows-gate-'));
+    try {
+      writeFileSync(join(workspace, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' }, dependencies: {} }));
+      writeFileSync(join(workspace, 'smoke.test.js'), 'test');
+      const profile = {
+        projectType: 'node' as const,
+        packageManager: 'npm' as const,
+        manifests: ['package.json'],
+        scripts: { test: 'node -e "process.exit(0)"' },
+        testFilesFound: true,
+        gitRepository: false,
+        relevantFiles: ['package.json'],
+        verification: [],
+      };
+      const tools = new NodeToolAdapter({ workspace, commandTimeout: 10_000 });
+      const audit = await tools.execute({ id: 'windows-audit', index: 0, function: { name: 'execute_command', arguments: JSON.stringify({ command: buildAuditCommand('windows') }) } });
+      const verify = await tools.execute({ id: 'windows-verify', index: 0, function: { name: 'execute_command', arguments: JSON.stringify({ command: buildVerifyCommand(profile, 'windows') }) } });
+      const nested = await tools.execute({ id: 'windows-nested', index: 0, function: { name: 'execute_command', arguments: JSON.stringify({ command: `${projectCdPrefix('.', 'windows')}Write-Output ok` }) } });
+      for (const result of [audit, verify, nested]) {
+        expect(result.success).toBe(true);
+        expect(String((result.result as { stderr?: string })?.stderr ?? '')).not.toContain('CLIXML');
+      }
+      expect(String((audit.result as { stdout?: string })?.stdout)).toContain('[audit-unavailable] package.json has no lockfile');
+      expect(String((verify.result as { stdout?: string })?.stdout)).toContain('[verify-complete]');
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves a profile verification failure instead of echoing completion', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'pure-quality-verify-'));
     try {
       writeFileSync(join(workspace, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(2)"' } }));
+      writeFileSync(join(workspace, 'smoke.test.js'), 'test');
       const profile = {
         projectType: 'node' as const,
         packageManager: 'npm' as const,
