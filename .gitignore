@@ -9,3 +9,5 @@ src-tauri/target/
 pure
 .playwright-mcp/
 public/
+
+.freebuff/

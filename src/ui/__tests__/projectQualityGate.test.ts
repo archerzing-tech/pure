@@ -94,7 +94,7 @@ describe('project quality gate', () => {
         index: 0,
         function: { name: 'execute_command', arguments: JSON.stringify({ command: buildLocalReviewCommand('windows') }) },
       });
-      expect(result.success).toBe(true);
+      expect(result).toMatchObject({ success: true });
       const output = String((result.result as { stdout?: string; stderr?: string })?.stdout ?? result.result);
       expect(output).toContain('[local-review] not a standalone git repository');
       expect(output).toContain('[local-review] no credential pattern found');
