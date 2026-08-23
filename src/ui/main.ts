@@ -32,7 +32,7 @@ import { renderArtifactCards } from './artifactCards';
 import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
-import { PasteChipManager, attachmentToMessageImage, composeMessageWithAttachments } from './pasteChip';
+import { PasteChipManager, PASTE_FILE_THRESHOLD, attachmentToMessageImage, composeMessageWithAttachments } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { memoryStore } from './memoryStore';
 import { showConfirmModal } from './modal';
@@ -43,10 +43,9 @@ import { loadDeferredStyles } from './deferredStyles';
 
 const chat = new ChatController();
 
-// ── Oversized-paste chips (see pasteChip.ts) ──
-// Pastes above 64KB become a file chip (saved to ~/.pure/tmp/<session-id>/)
-// instead of jamming the textarea; double-click opens a viewer. Both the
-// bottom input bar and the landing input mount a chip row sharing one list.
+// Long text submissions are converted into the same temporary text-file chip
+// used by oversized pastes, so the model receives a read_file reference rather
+// than the entire prompt body.
 const pasteChips = new PasteChipManager(() => chat.getSessionId(), () => {
   // Attachments enable send-with-no-text and tint the composer attach button.
   const has = pasteChips.hasAttachments();
@@ -736,6 +735,14 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
         bubble.className = 'bubble';
         bubble.textContent = stripUserTurnContext(block.content);
         renderUserImageAttachments(bubble, block.images);
+        for (const attachment of block.attachments) {
+          const card = document.createElement('button');
+          card.type = 'button';
+          card.className = 'paste-chip paste-chip-text';
+          card.textContent = `${attachment.name} · ${attachment.size} 字符`;
+          card.addEventListener('click', () => pasteChips.openStoredAttachment(attachment));
+          bubble.appendChild(card);
+        }
         bindUserBubbleSelectAll(bubble);
         linkifyPaths(bubble);
         wrapper.appendChild(bubble);
@@ -1169,12 +1176,20 @@ async function doSend(text: string) {
   // the submitted image lives in the transcript instead of remaining attached
   // to the input bar.
   const attachments = await pasteChips.prepareForSend();
-  const fullText = composeMessageWithAttachments(text, attachments);
-  const images = attachments.map(attachmentToMessageImage).filter((image): image is NonNullable<typeof image> => image !== null);
+  const hasSameTextAttachment = attachments.some((a) => a.kind === 'text' && a.content === text);
+  const longTextAttachment = [...text].length > PASTE_FILE_THRESHOLD && !hasSameTextAttachment
+    ? pasteChips.addLongText(text)
+    : null;
+  const outgoingAttachments = longTextAttachment ? await pasteChips.prepareForSend() : attachments;
+  const fullText = composeMessageWithAttachments(longTextAttachment || hasSameTextAttachment ? '' : text, outgoingAttachments);
+  const images = outgoingAttachments.map(attachmentToMessageImage).filter((image): image is NonNullable<typeof image> => image !== null);
+  const displayText = longTextAttachment || hasSameTextAttachment ? `已附加长文本文件：${outgoingAttachments.find((a) => a.kind === 'text' && a.content === text)?.name ?? '文本文件'}` : text;
+  const attachmentMetadata = outgoingAttachments.map((a) => ({ id: a.id, name: a.name, path: a.path, size: a.size, kind: a.kind, truncated: a.truncated }));
+  const openAttachment = (attachment: import('../shared/types').MessageAttachment) => pasteChips.openStoredAttachment(attachment);
   pasteChips.clear();
   try {
     enterChatMode();
-    await chat.send(fullText, images, text);
+    await chat.send(fullText, images, displayText, false, attachmentMetadata, openAttachment);
   } catch (err: any) {
     showToast(`${t('toast.sendFailed')}: ${err?.message || err}`);
     console.error('[pure] sendMessage failed:', err);

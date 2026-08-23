@@ -45,7 +45,8 @@ export interface DroppedFileRecord {
 }
 
 /** Text pastes at or above this length become file chips instead of text. */
-export const PASTE_FILE_THRESHOLD = 64 * 1024;
+export const PASTE_FILE_THRESHOLD = 350;
+export const LONG_TEXT_MEMORY_FALLBACK_LIMIT = 4 * 1024 * 1024;
 
 /** Images larger than this are rejected (bounds memory + the base64 IPC). */
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -229,7 +230,12 @@ export function composeMessageWithAttachments(text: string, attachments: PasteAt
       const marker = t('paste.attachmentMarker')
         .replace('{name}', a.name)
         .replace('{size}', formatBytes(a.size));
-      parts.push(`${marker}\n${a.content}`);
+      if (a.path) {
+        parts.push(`${marker}\n${a.path}\n请先使用 read_file 读取这个文件的内容，再继续处理用户请求。`);
+      } else {
+        const fallback = a.content.slice(0, LONG_TEXT_MEMORY_FALLBACK_LIMIT);
+        parts.push(`${marker}\n[浏览器开发模式内存回退，文件未成功保存]\n${fallback}`);
+      }
     }
   }
   return parts.filter(p => p.trim().length > 0).join('\n\n');
@@ -273,6 +279,31 @@ export class PasteChipManager {
     return this.getAttachments();
   }
 
+  /** Convert directly typed long text into the same file attachment used by paste. */
+  addLongText(text: string): PasteAttachment | null {
+    if ([...text].length <= PASTE_FILE_THRESHOLD) return null;
+    const id = `text-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const name = guessPasteName(text).replace(/\.(\w+)$/, `-${id.slice(-6)}.$1`);
+    const attachment: PasteAttachment = { id, name, size: text.length, content: text, path: '', kind: 'text', dataUrl: '' };
+    this.attachments.push(attachment);
+    this.render();
+    this.onChanged();
+    const sessionId = this.getSessionId();
+    if (isTauriRuntime()) {
+      const pending = (async () => {
+        try {
+          const core = await loadTauriCore();
+          const path = await core?.invoke<string>('save_paste_file', { sessionId, name, content: text });
+          if (path) { attachment.path = path; this.render(); this.onChanged(); }
+        } catch (error) {
+          console.error('[pure] save long text failed:', error);
+        }
+      })();
+      this.pendingReads.add(pending);
+      void pending.finally(() => this.pendingReads.delete(pending)).catch(() => {});
+    }
+    return attachment;
+  }
   /** Whether any pasted file is waiting to be sent (enables send with no text). */
   hasAttachments(): boolean {
     return this.attachments.length > 0;
@@ -313,7 +344,7 @@ export class PasteChipManager {
     }
     // 2) Oversized text paste → file chip (sync path, disk write async).
     const text = e.clipboardData?.getData('text') ?? '';
-    if (text.length < PASTE_FILE_THRESHOLD) return false;
+    if ([...text].length <= PASTE_FILE_THRESHOLD) return false;
     e.preventDefault();
     // A random suffix keeps two pastes inside the same second from colliding
     // on disk (the second save would otherwise overwrite the first).
@@ -327,19 +358,22 @@ export class PasteChipManager {
     // must not redirect the file into the newly-opened session's tmp dir.
     const sessionId = this.getSessionId();
     if (isTauriRuntime()) {
-      void (async () => {
+      const pending = (async () => {
         try {
           const core = await loadTauriCore();
           const path = await core?.invoke<string>('save_paste_file', { sessionId, name, content: text });
           if (path) {
             att.path = path;
             this.render();
+            this.onChanged();
           }
         } catch (err) {
           // Keep the chip (memory copy still works) — just no disk file.
           console.error('[pure] save_paste_file failed:', err);
         }
       })();
+      this.pendingReads.add(pending);
+      void pending.finally(() => this.pendingReads.delete(pending)).catch(() => {});
     }
     return true;
   }
@@ -543,6 +577,9 @@ export class PasteChipManager {
     }
   }
 
+  openStoredAttachment(attachment: { name: string; path: string; size: number; kind: PasteAttachment['kind'] }): void {
+    this.openViewer({ id: `stored-${attachment.name}`, name: attachment.name, path: attachment.path, size: attachment.size, kind: attachment.kind, content: '', dataUrl: '' });
+  }
   private openViewer(att: PasteAttachment): void {
     this.closeViewer();
     // Documents are not viewable in-app — hand them to the OS default app.
@@ -646,6 +683,22 @@ export class PasteChipManager {
     overlay.append(header, body);
     document.body.appendChild(overlay);
     this.viewerEl = overlay;
+    if (att.kind === 'text' && att.path && !att.content && isTauriRuntime()) {
+      void (async () => {
+        try {
+          const core = await loadTauriCore();
+          const absolute = att.path.replace(/\\/g, '/');
+          const separator = absolute.lastIndexOf('/');
+          const workspace = separator > 0 ? absolute.slice(0, separator) : absolute;
+          const content = await core?.invoke<string>('read_file', { workspace, path: absolute });
+          const pre = body.querySelector('.paste-viewer-pre');
+          if (pre && typeof content === 'string') pre.textContent = content.slice(0, VIEWER_MAX_CHARS);
+        } catch {
+          const pre = body.querySelector('.paste-viewer-pre');
+          if (pre) pre.textContent = t('paste.fileExpired');
+        }
+      })();
+    }
     // Click on the backdrop closes; clicks inside (scroll etc.) do not.
     overlay.addEventListener('mousedown', (e) => {
       if (e.target === overlay) this.closeViewer();
@@ -665,7 +718,6 @@ export class PasteChipManager {
     document.removeEventListener('keydown', this.onViewerKeydown);
   }
 
-  /** Hand a persisted attachment to the OS default app (docs, binaries). */
   private async openWithDefault(path: string): Promise<void> {
     if (!isTauriRuntime() || !path) return;
     try {

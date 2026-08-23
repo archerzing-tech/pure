@@ -1,5 +1,5 @@
 import type { IntentAssessment } from '../coding-agent/types';
-import type { MessageImage } from '../shared/types';
+import type { MessageAttachment, MessageImage } from '../shared/types';
 import {
   buildTranscriptToolExec,
   getTranscriptContent,
@@ -10,7 +10,7 @@ import {
 } from './store';
 
 export type TranscriptReplayBlock =
-  | { type: 'user'; content: string; images: MessageImage[] }
+  | { type: 'user'; content: string; images: MessageImage[]; attachments: MessageAttachment[] }
   | { type: 'analysis'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'assessment'; assessment: IntentAssessment }
@@ -89,8 +89,8 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
     if (entry.role === 'user') {
       flushPending();
       lastUserRequest = entry.content ?? '';
-      if (entry.content || entry.images?.length) {
-        blocks.push({ type: 'user', content: visibleUserContent(entry.content ?? ''), images: entry.images ?? [] });
+      if (entry.content || entry.images?.length || entry.attachments?.length) {
+        blocks.push({ type: 'user', content: visibleUserContent(entry.content ?? ''), images: entry.images ?? [], attachments: entry.attachments ?? [] });
       }
       continue;
     }
