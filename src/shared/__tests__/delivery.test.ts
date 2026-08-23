@@ -48,6 +48,10 @@ describe('delivery workspace discovery', () => {
     expect(profile.verification.find((spec) => spec.id === 'test')).toMatchObject({ required: false, command: 'npm run test' });
     const contract = buildTaskContract('implement the feature', profile);
     expect(contract.acceptanceCriteria.some((criterion) => criterion.id === 'test' && criterion.required === false)).toBe(true);
+    expect(contract.acceptanceCriteria.some((criterion) => criterion.id === 'test-infrastructure' && criterion.required === true)).toBe(true);
+    expect(formatTaskContract(contract)).toContain('选择合适的测试 runner');
+    expect(formatTaskContract(contract)).toContain('smoke/focused');
+    expect(formatTaskContract(contract)).toContain('实际运行测试');
     expect(formatTaskContract(contract)).toContain('<delivery_contract>');
     expect(formatTaskContract(contract)).toContain('npm run test');
   });

@@ -3,7 +3,7 @@
 // and the logical-trap detection that primes premise verification.
 
 import { describe, it, expect } from 'bun:test';
-import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
+import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
 import type { LLMAdapter } from '../../shared/types';
 
 describe('Planner', () => {
@@ -145,18 +145,25 @@ describe('Planner', () => {
     expect(r.complexity).toBe('simple');
   });
 
+  it('requires a test strategy in artifact build instructions', () => {
+    const prompt = formatArtifactPrompt();
+    expect(prompt).toContain('choose the project-appropriate test runner');
+    expect(prompt).toContain('at least one focused smoke/unit/integration test');
+    expect(prompt).toContain('happy-dom');
+    expect(prompt).toContain('run the actual test command');
+    expect(prompt).toContain('Do not replace automated tests with manual inspection');
+  });
   it('does not turn dissatisfaction with an existing result into an artifact build request by itself', () => {
     const prompt = '当前agent 制作的基于web的页面 都很难看，缺少优秀的时髦的设计，应该怎么办';
     expect(detectArtifactRequest(prompt)).toBe(false);
     expect(new Planner().analyzeTask(prompt)).toMatchObject({ complexity: 'simple', mode: 'yolo' });
   });
 
-  it('keeps project nouns out of the synchronous fallback router', () => {
+  it('routes project creation through the synchronous build fallback while excluding questions', () => {
     expect(detectProjectRequest('帮我创建一个项目')).toBe(true);
-    expect(new Planner().analyzeTask('帮我创建一个项目').complexity).toBe('simple');
-    expect(new Planner().analyzeTask('帮我创建一个项目').mode).toBe('yolo');
+    expect(new Planner().analyzeTask('帮我创建一个项目')).toMatchObject({ complexity: 'complex', mode: 'build' });
     expect(detectProjectRequest('怎么创建一个项目？')).toBe(false);
-    expect(new Planner().analyzeTask('怎么创建一个项目？').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('怎么创建一个项目？')).toMatchObject({ complexity: 'simple', mode: 'yolo' });
   });
 
   it('detects project requests with a project name between the verb and the noun', () => {
@@ -173,31 +180,39 @@ describe('Planner', () => {
     expect(detectProjectRequest('创建成功，项目已就绪')).toBe(false);
   });
 
-  it('leaves English project creation to semantic routing while excluding questions and docs', () => {
-    expect(new Planner().analyzeTask('Create a project for a habit tracker.').mode).toBe('yolo');
-    expect(new Planner().analyzeTask('Build a website for the team dashboard.').mode).toBe('yolo');
+  it('routes English project creation through build fallback while excluding questions and docs', () => {
+    expect(new Planner().analyzeTask('Create a project for a habit tracker.')).toMatchObject({ complexity: 'complex', mode: 'build' });
+    expect(new Planner().analyzeTask('Build a website for the team dashboard.')).toMatchObject({ complexity: 'complex', mode: 'build' });
     expect(new Planner().analyzeTask('How do I create a project?').complexity).toBe('simple');
     expect(new Planner().analyzeTask('Write a project plan document.').complexity).toBe('simple');
     expect(new Planner().analyzeTask('帮我创建一个项目的技术方案。').complexity).toBe('simple');
   });
 
-  it('does not use scale adjectives to force a complex route', () => {
+  it('treats new project builds as complex even without scale adjectives', () => {
     const r = new Planner().analyzeTask('帮我制作一个大型工程，包含完整的项目管理功能。');
-    expect(r.complexity).toBe('simple');
-    expect(r.plan).toBeUndefined();
+    expect(r.complexity).toBe('complex');
+    expect(r.mode).toBe('build');
+    expect(r.plan).toBeDefined();
   });
 
-  it('lets semantic routing choose build while keeping structural scope as a fallback', () => {
-    expect(new Planner().analyzeTask('帮我制作一个大型工程，包含完整的项目管理功能。').mode).toBe('yolo');
-    expect(new Planner().analyzeTask('搭建一个完整的全栈项目。').mode).toBe('yolo');
+  it('uses build fallback for project creation and keeps how-to questions conversational', () => {
+    expect(new Planner().analyzeTask('帮我制作一个大型工程，包含完整的项目管理功能。').mode).toBe('build');
+    expect(new Planner().analyzeTask('搭建一个完整的全栈项目。').mode).toBe('build');
     expect(new Planner().analyzeTask('请帮我搭建一个全栈项目，怎么做性能优化？').mode).toBe('yolo');
     expect(new Planner().analyzeTask('Implement a new feature across multiple files in the project.').mode).toBe('plan');
   });
 
-  it('does not fabricate a from-scratch plan before semantic understanding', () => {
+  it('creates a build plan with a test strategy before implementation', () => {
     const r = new Planner().analyzeTask('创建一个5G的监控大屏项目，可以实时监控省市的实时网络现状，给出告警和分析。');
-    expect(r.mode).toBe('yolo');
-    expect(r.plan).toBeUndefined();
+    expect(r.mode).toBe('build');
+    expect(r.plan).toBeDefined();
+    const actions = r.plan!.steps.map((step) => step.action).join(' ');
+    const details = r.plan!.steps.map((step) => `${step.description} ${step.expectedOutcome}`).join(' ');
+    expect(actions).toContain('测试策略');
+    expect(actions).toContain('测试入口');
+    expect(actions).toContain('运行测试');
+    expect(details).toContain('smoke');
+    expect(details).toContain('失败');
   });
 
   it('keeps broad refactors on the safety-aware plan fallback', () => {
@@ -206,9 +221,9 @@ describe('Planner', () => {
     expect(r.plan!.steps.map((s) => s.action)).toEqual(['确认范围', '完成改动', '验证结果']);
   });
 
-  it('does not turn Chinese build vocabulary into complexity by itself', () => {
-    expect(new Planner().analyzeTask('搭建一个完整的全栈项目。').complexity).toBe('simple');
-    expect(new Planner().analyzeTask('从零开始构建一个多文件系统。').complexity).toBe('simple');
+  it('classifies project creation as complex in the fallback router', () => {
+    expect(new Planner().analyzeTask('搭建一个完整的全栈项目。').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('从零开始构建一个多文件系统。').complexity).toBe('complex');
   });
 
   it('keeps single-file Chinese artifacts simple', () => {
@@ -246,10 +261,10 @@ describe('Planner', () => {
   it('uses concrete scope or safety evidence rather than build vocabulary', () => {
     expect(new Planner().analyzeTask('重构整个项目。').complexity).toBe('complex');
     expect(new Planner().analyzeTask('迁移整个项目到 monorepo。').complexity).toBe('complex');
-    expect(new Planner().analyzeTask('搭建整个项目。').complexity).toBe('simple');
-    expect(new Planner().analyzeTask('从零开始做一个项目。').complexity).toBe('simple');
-    expect(new Planner().analyzeTask('从头搭建一个网站。').complexity).toBe('simple');
-    expect(new Planner().analyzeTask('搭建一个大型网站。').complexity).toBe('simple');
+    expect(new Planner().analyzeTask('搭建整个项目。').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('从零开始做一个项目。').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('从头搭建一个网站。').complexity).toBe('complex');
+    expect(new Planner().analyzeTask('搭建一个大型网站。').complexity).toBe('complex');
   });
 
   it('keeps build questions conversational until semantic routing decides otherwise', () => {

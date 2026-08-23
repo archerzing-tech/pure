@@ -30,6 +30,14 @@ describe('compileRequestWorkflow', () => {
     expect(workflow.userContext.assessment).toBeUndefined();
   });
 
+  it('keeps fallback project builds on the delivery-gated build path without semantic routing', () => {
+    const workflow = compileRequestWorkflow('帮我创建一个项目', { hasTools: true });
+    expect(workflow.analysis.mode).toBe('build');
+    expect(workflow.stage).toBe('plan');
+    expect(workflow.needsDeliveryGate).toBe(true);
+    expect(workflow.needsProbe).toBe(true);
+    expect(workflow.userContext.buildProtocol).toContain('test strategy');
+  });
   it('compiles the same probe and build context for GUI and CLI callers', () => {
     const prompt = 'Build a complete project for a team dashboard';
     const gui = compileRequestWorkflow(prompt, { hasTools: true, semanticRoute: buildRoute });

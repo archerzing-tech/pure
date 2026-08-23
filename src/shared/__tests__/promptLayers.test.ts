@@ -256,7 +256,12 @@ describe('INCREMENTAL_BUILD_PROMPT (humanized build reporting)', () => {
     expect(INCREMENTAL_BUILD_PROMPT).toContain('live plan card can reflect optional progress markers');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('overall plan context separate from any optional progress list');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('For other complex work');
-    expect(INCREMENTAL_BUILD_PROMPT).toContain('meaningful protection');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('choose and state a test strategy before implementation');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('create the project test entry');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('at least one focused smoke/unit/integration test');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('happy-dom');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('manual click-through is not an automated test');
+    expect(INCREMENTAL_BUILD_PROMPT).not.toContain('meaningful protection');
     expect(INCREMENTAL_BUILD_PROMPT).not.toContain('dedicated test step');
     expect(INCREMENTAL_BUILD_PROMPT).not.toContain('at least three rounds');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('concrete failing checks and evidence');

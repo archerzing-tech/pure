@@ -166,8 +166,8 @@ export class Planner {
 
   /** The model chooses build vs plan. The synchronous fallback never infers a
    * user's desired outcome from artifact nouns or isolated verbs. */
-  private detectMode(_prompt: string, complexity: TaskComplexity): TaskMode {
-    return complexity === 'complex' ? 'plan' : 'yolo';
+  private detectMode(prompt: string, complexity: TaskComplexity): TaskMode {
+    return detectProjectRequest(prompt) ? 'build' : complexity === 'complex' ? 'plan' : 'yolo';
   }
 
   /**
@@ -303,70 +303,17 @@ export class Planner {
       return 'complex';
     }
 
-    // Ordinary creation, advice, critique, research, and domain language are
-    // deliberately not classified here. The shared semantic router handles
-    // those from the complete request; this fallback stays direct rather than
-    // turning a noun such as “项目/网页/原型” into a plan by itself.
-    return 'simple';
-
-    // ── Chinese project-scale requests ──
-    // Any imperative request to create a project is a multi-step build, even
-    // when the user does not add words such as "完整" or "大型". A project is
-    // not equivalent to a one-file artifact: it needs structure, implementation
-    // phases, and verification before the agent should touch the workspace.
+    // Project creation is inherently multi-step. Keep this before the
+    // conservative fallback so semantic-router failures still enter a build
+    // plan; detectProjectRequest excludes questions and documentation requests.
     if (detectProjectRequest(prompt)) {
       return 'complex';
     }
 
-    // A multi-phase build needs ALL THREE elements in one clause: an
-    // imperative build verb + a scale word + a project noun ("制作一个大型工
-    // 程", "搭建完整的全栈项目"). Requiring the scale word kills the old
-    // false positives where a bare verb + noun matched ("写个项目方案", "做个
-    // 系统介绍") — those are small or documentation requests. The project noun
-    // must NOT be a document object: when a doc word (方案/总结/文档/介绍/报
-    // 告…) follows it, the request is producing paperwork, not a system.
-    // Questions stay simple too: both leading question prefixes ("如何/怎
-    // 么…", "请帮我看看…") AND question words anywhere in the prompt ("…怎么
-    // 设计？") mean the user is ASKING about a large system, not building one.
-    if (!cnQuestion) {
-      // Document nouns — when one follows the matched project noun (possibly
-      // via 的/技术/开发/测试…, "项目的技术方案", "工程的开发文档"), the
-      // "build" is really a documentation task and stays simple.
-      const cnDoc = '(?:方案|总结|文档|介绍|报告|说明|计划|清单|列表|简介|笔记|心得|草案|书|表|设计稿|规划|大纲|教程)';
-      const docExclusion = `(?!\\s*(?:的)?\\s*[^，。！？;；\\n]{0,4}?${cnDoc})`;
-      const cnBuild = new RegExp(
-        `(?:编写|写|做|开发|制作|创建|搭建|实现|构建|设计|生成|部署|重构|重写|迁移|规划)` +
-        `\\s*(?:一个|一套|个|套)?\\s*` +
-        `(?:(?:大型|完整|全栈|复杂|多文件|整个|从零|从头|多模块|整套|一站式)(?:的)?\\s*){1,3}` +
-        `(?:工程|项目|系统|网站|应用|平台|框架|架构|小程序|脚手架|软件|服务)` +
-        docExclusion
-      );
-      if (cnBuild.test(trimmed)) {
-        return 'complex';
-      }
-      // Scale word + project noun as a fused phrase ("全栈项目", "多模块系
-      // 统") — but only when a build verb appears somewhere in the request, so
-      // consultations ("全栈项目的技术选型") don't trigger a plan dialog.
-      const cnScope = new RegExp(
-        `(?:大型|完整|全栈|复杂|多文件|多模块|整套|一站式)\\s*的?\\s*` +
-        `(?:工程|项目|系统|网站|应用|平台|框架|架构|小程序|脚手架|软件|服务)` +
-        docExclusion
-      );
-      if (/(?:编写|写|做|开发|制作|创建|搭建|实现|构建|设计|生成|部署|重构|重写|迁移)/.test(trimmed) && cnScope.test(trimmed)) {
-        return 'complex';
-      }
-      // From-scratch idioms embed their own build intent ("从零开始做一个项
-      // 目", "从头搭建一个网站") — the noun is still required so "从零开始学
-      // 习" stays simple, and the same doc-exclusion applies ("从零搭建一个网
-      // 站的教程" is a doc request, not a build).
-      if (new RegExp(
-        `(?:从零|从头)\\s*(?:开始)?\\s*(?:做一个?|搭建一个?|构建一个?|开发一个?|实现一个?|写一个?|重写一个?|重构一个?)\\s*(?:工程|项目|系统|网站|应用|平台|框架|架构|小程序|脚手架|软件|服务)` +
-        docExclusion
-      ).test(trimmed)) {
-        return 'complex';
-      }
-    }
-
+    // Ordinary creation, advice, critique, research, and domain language are
+    // deliberately not classified here. The shared semantic router handles
+    // those from the complete request; this fallback stays direct rather than
+    // turning a noun such as “项目/网页/原型” into a plan by itself.
     return 'simple';
   }
 
@@ -395,27 +342,33 @@ export class Planner {
           },
           {
             id: '2',
-            action: '搭建项目骨架',
-            description: '确定技术栈与目录结构，建立可运行的起点。',
-            expectedOutcome: '项目可启动，结构清晰。',
+            action: '确定技术栈与测试策略',
+            description: '根据交付物选择运行方式和测试框架，先定义测试入口、测试目录与首个主流程 smoke test。Web/DOM 项目优先选择适配的 DOM 测试环境。',
+            expectedOutcome: '技术栈、测试 runner、test script 和首个测试场景已明确。',
           },
           {
             id: '3',
-            action: '分模块实现核心功能',
-            description: '按功能拆分逐块实现，每完成一块保持可运行。',
-            expectedOutcome: '核心功能逐一落地。',
+            action: '搭建包含测试入口的项目骨架',
+            description: '建立目录、依赖和可运行脚本，同时写入测试配置与最小测试文件，不把测试基础设施留到收尾阶段。',
+            expectedOutcome: '项目和测试命令都能启动，最小测试可以被发现。',
           },
           {
             id: '4',
-            action: '联调集成与验证',
-            description: '把模块连起来运行真实场景，检查关键流程是否可用。',
-            expectedOutcome: '整体可用，关键路径验证通过。',
+            action: '分模块实现并同步编写测试',
+            description: '按功能拆分实现，每个关键路径配套 focused/unit/integration 测试，保持实现和测试一起演进。',
+            expectedOutcome: '核心功能落地，关键行为有自动化保护。',
           },
           {
             id: '5',
+            action: '运行测试、检查与构建并修复失败',
+            description: '实际执行 test、typecheck/lint（如有）和 build；任何失败都根据证据修复后重新运行，不能用手工检查替代自动化测试。',
+            expectedOutcome: '测试与项目验证命令真实通过，或明确记录无法解决的阻断。',
+          },
+          {
+            id: '6',
             action: '收尾与交付',
-            description: '补齐必要说明，指出仍存在的限制。',
-            expectedOutcome: '交付物完整，使用方式清楚。',
+            description: '补齐运行说明和测试说明，报告真实执行过的命令、结果与仍存在的限制。',
+            expectedOutcome: '交付物完整，用户知道如何运行和验证项目。',
           },
         ],
         reasoning: '这是从零构建的任务：先理解清楚要做什么，再搭骨架、逐模块实现，最后联调验证，保证结果可用。',
@@ -570,7 +523,8 @@ export function detectProjectRequest(prompt: string): boolean {
   const p = prompt.trim();
   if (!p) return false;
   const question = /^(?:如何|怎么|怎样|能否|能不能|是否|请问|为什么|what|how|can|could|should)\b/i.test(p)
-    || /(?:怎么|如何|怎样|吗|呢|what|how)\s*(?:创建|搭建|开发|做|build|create|scaffold|develop)/i.test(p);
+    || /(?:怎么|如何|怎样|吗|呢|什么|为什么|能否|能不能|应该怎么办|what|how)\s*(?:创建|搭建|开发|做|build|create|scaffold|develop)/i.test(p)
+    || /(?:怎么|如何|怎样|吗|呢|为什么|能否|能不能|应该怎么办)[^。！？?!]{0,24}(?:$|[。！？?!])/i.test(p);
   if (question) return false;
   // The deliverable noun may follow a project NAME, not just a quantifier —
   // e.g. "创建一个5G保障大屏监控项目" puts "5G保障大屏监控" between the verb
@@ -623,7 +577,7 @@ export function detectArtifactRequest(prompt: string): boolean {
  * the instruction explicit for this particular request.
  */
 export function formatArtifactPrompt(): string {
-  return `\n\n<artifact_output_rule>\nThis request asks you to BUILD a complete runnable artifact (a game, web page, app, tool, script, or small project). Write it to a file on disk — do NOT dump the full source code in your reply.\n- Single-file artifact (HTML page, single JS/CSS file, small script): write it as a new file in the workspace, e.g. index.html, game.html, app.py, or a sensible name derived from the request.\n- Multi-file project: create a directory and write the files into it (entry point + assets), e.g. ./mini-game/index.html.\nAfter writing, briefly tell the user the file path(s) and how to run/open the artifact (e.g. open the HTML in a browser). If no workspace is configured, say so and ask for one instead of printing the code.\n</artifact_output_rule>`;
+  return `\n\n<artifact_output_rule>\nThis request asks you to BUILD a complete runnable artifact (a game, web page, app, tool, script, or small project). Write it to a file on disk — do NOT dump the full source code in your reply.\n- Single-file artifact (HTML page, single JS/CSS file, small script): write it as a new file in the workspace, e.g. index.html, game.html, app.py, or a sensible name derived from the request.\n- Multi-file project: create a directory and write the files into it (entry point + assets), e.g. ./mini-game/index.html. Before implementing feature code, choose the project-appropriate test runner and create a runnable test script plus at least one focused smoke/unit/integration test for the main path. For Web/DOM projects, use an appropriate DOM test environment such as happy-dom when needed; for other stacks use the stack's standard test runner. Do not replace automated tests with manual inspection unless the user explicitly opts out.\nAfter writing, run the actual test command (and typecheck/lint/build when the project provides them), fix failures, then briefly tell the user the file path(s), how to run/open the artifact, and the commands and results used to verify it. If no workspace is configured, say so and ask for one instead of printing the code.\n</artifact_output_rule>`;
 }
 
 /** Result of parsing an LLM plan payload, with a repair flag for callers that
