@@ -72,6 +72,12 @@ export function tokenizeFindQuery(query: string): string[] {
   return [...out].sort();
 }
 
+export function stripPowerShellStartupProgress(stderr: string): string {
+  const text = stderr.trim();
+  if (!/^#< CLIXML/i.test(text) || /<S\s+S="Error">/i.test(text)) return stderr;
+  return /<AV>Preparing modules for first use\.<\/AV>/i.test(text) ? '' : stderr;
+}
+
 /** Size of a file for ordering find_files scans, or Number.MAX_SAFE_INTEGER
  * if the stat fails (unreadable files sort last and get skipped). */
 function statSafeSize(p: string): number {
@@ -635,7 +641,7 @@ export class NodeToolAdapter implements ToolAdapter {
       });
 
       const stdout = (await new Response(proc.stdout).text()).trim();
-      const stderr = (await new Response(proc.stderr).text()).trim();
+      const stderr = stripPowerShellStartupProgress((await new Response(proc.stderr).text()).trim());
       await proc.exited;
       const exitCode = proc.exitCode ?? -1;
 
