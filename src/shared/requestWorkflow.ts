@@ -88,6 +88,7 @@ export function compileRequestWorkflow(
     plan: detected.plan,
   };
   const needsDeliveryGate = options.forcedMode === 'build'
+    || analysis.mode === 'build'
     || semantic?.needsDeliveryGate === true
     || options.continuingProjectBuild === true;
   const probeRequired = assessment.requiresProbe
@@ -104,7 +105,8 @@ export function compileRequestWorkflow(
     || semantic?.requiresPlan
     || (!semantic && analysis.complexity === 'complex' && analysis.plan),
   );
-  const buildRequested = semantic?.intent === 'build'
+  const buildRequested = analysis.mode === 'build'
+    || semantic?.intent === 'build'
     || semantic?.needsDeliveryGate === true
     || options.forcedMode === 'build'
     || Boolean(options.continuingPlan || options.planPauseRequested);

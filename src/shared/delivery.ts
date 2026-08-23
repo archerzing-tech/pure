@@ -289,6 +289,15 @@ export function buildTaskContract(request: string, profile: WorkspaceProfile): T
     verification: spec.command,
     required: spec.required,
   }));
+  const missingTestInfrastructure = profile.projectType !== 'unknown'
+    && (!profile.scripts.test || !profile.testFilesFound);
+  if (missingTestInfrastructure) {
+    acceptanceCriteria.unshift({
+      id: 'test-infrastructure',
+      description: '必须先补齐项目测试基础设施：选择合适的测试 runner，加入可执行的 test script，并创建至少一个覆盖主流程的 smoke/focused 测试文件；完成后实际运行测试。',
+      required: true,
+    });
+  }
   if (profile.explorationComplete === false) {
     acceptanceCriteria.unshift({
       id: 'explore',
