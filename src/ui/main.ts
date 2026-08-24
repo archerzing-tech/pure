@@ -23,6 +23,7 @@ import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { providerDef, PROVIDERS, defaultModelFor, customProviderLabel, type ProviderId } from '../shared/providers';
+import { ComposerSelect, type ComposerSelectOption } from './composerSelect';
 import { renderMarkdown, stripToolCallXml } from './markdownLoader';
 import { createToolRow, finalizeToolRow, markToolRowStopped } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
@@ -32,7 +33,7 @@ import { renderArtifactCards } from './artifactCards';
 import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
-import { PasteChipManager, PASTE_FILE_THRESHOLD, attachmentToMessageImage, composeMessageWithAttachments } from './pasteChip';
+import { PasteChipManager, PASTE_FILE_THRESHOLD, attachmentToMessageImage, composeMessageWithAttachments, renderAttachmentCard } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { memoryStore } from './memoryStore';
 import { showConfirmModal } from './modal';
@@ -241,38 +242,64 @@ const sidebarSettingsBtn = document.getElementById('sidebar-settings-btn') as HT
 const MODE_SELECT_IDS = ['composer-mode-select', 'landing-mode-select'] as const;
 const MODEL_SELECT_IDS = ['composer-model-select', 'landing-model-select'] as const;
 
-function populateModeSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
+// Custom in-page dropdowns (ComposerSelect) replace the former native
+// <select> elements: macOS WKWebView under Tauri's drag-drop handler dismisses
+// native select popups instantly, which made models unselectable.
+const modeSelects = new Map<string, ComposerSelect>();
+const modelSelects = new Map<string, ComposerSelect>();
+
+function ensureComposerSelects(): void {
+  for (const id of MODE_SELECT_IDS) {
+    if (modeSelects.has(id)) continue;
+    const host = document.getElementById(id);
+    if (!host) continue;
+    modeSelects.set(id, new ComposerSelect(host, (value) => {
+      const cfg = loadConfig() ?? defaults();
+      cfg.taskMode = value as PureConfig['taskMode'];
+      persistConfig(cfg);
+      invalidateConfigCache();
+      showToast(t('composer.modeSaved'));
+    }, t('composer.mode.title')));
+  }
+  for (const id of MODEL_SELECT_IDS) {
+    if (modelSelects.has(id)) continue;
+    const host = document.getElementById(id);
+    if (!host) continue;
+    modelSelects.set(id, new ComposerSelect(host, (value) => {
+      const cfg = loadConfig() ?? defaults();
+      const providerId = value.split('::')[0] || value;
+      const model = value.split('::')[1];
+      cfg.provider = providerId as ProviderId;
+      cfg.model = model !== undefined ? (modelListForProvider(cfg, providerId)[Number(model)] ?? defaultModelFor(providerId)) : defaultModelFor(providerId);
+      persistConfig(cfg);
+      invalidateConfigCache();
+      // updateSidebarModel() cascades into the status footer + context panel.
+      updateSidebarModel();
+      showToast(t('composer.modelSaved'));
+    }, t('composer.model.title')));
+  }
+}
+
+function populateModeSelect(cs: ComposerSelect, cfg: PureConfig): void {
   const modes: Array<[PureConfig['taskMode'], string]> = [
     ['auto', t('composer.mode.auto')],
     ['yolo', t('composer.mode.yolo')],
     ['plan', t('composer.mode.plan')],
     ['build', t('composer.mode.build')],
   ];
-  sel.innerHTML = '';
-  for (const [value, label] of modes) {
-    const opt = document.createElement('option');
-    opt.value = value;
-    opt.textContent = label;
-    sel.appendChild(opt);
-  }
-  sel.value = cfg.taskMode ?? 'auto';
+  cs.setOptions(modes.map(([value, label]) => ({ value, label })), cfg.taskMode ?? 'auto');
 }
 
-function populateModelSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
+function populateModelSelect(cs: ComposerSelect, cfg: PureConfig): void {
   const customs = cfg.customProviders ?? [];
   const currentModel = cfg.model?.trim() || '';
-  sel.innerHTML = '';
+  const options: ComposerSelectOption[] = [];
   let selectedValue = '';
   const appendProviderModels = (provider: string, label: string): void => {
     const models = modelListForProvider(cfg, provider);
     models.forEach((model, index) => {
-      const opt = document.createElement('option');
-      opt.value = `${provider}::${index}`;
-      opt.dataset.provider = provider;
-      opt.dataset.model = model;
-      opt.textContent = `${label} · ${model}`;
-      sel.appendChild(opt);
-      if (provider === cfg.provider && model === currentModel) selectedValue = opt.value;
+      options.push({ value: `${provider}::${index}`, label: model, hint: label });
+      if (provider === cfg.provider && model === currentModel) selectedValue = `${provider}::${index}`;
     });
   };
   for (const p of PROVIDERS) {
@@ -283,60 +310,23 @@ function populateModelSelect(sel: HTMLSelectElement, cfg: PureConfig): void {
     if (!providerHasKey(cfg, c.id)) continue;
     appendProviderModels(c.id, c.name);
   }
-  if (!selectedValue) {
-    const first = sel.options[0];
-    if (first) selectedValue = first.value;
-  }
-  sel.value = selectedValue;
+  cs.setOptions(options, selectedValue || undefined);
 }
 
 function populateComposerSelects(): void {
+  ensureComposerSelects();
   const cfg = loadConfig() ?? defaults();
-  for (const id of MODE_SELECT_IDS) {
-    const sel = document.getElementById(id) as HTMLSelectElement | null;
-    if (sel) populateModeSelect(sel, cfg);
+  for (const cs of modeSelects.values()) {
+    cs.setTriggerTitle(t('composer.mode.title'));
+    populateModeSelect(cs, cfg);
   }
-  for (const id of MODEL_SELECT_IDS) {
-    const sel = document.getElementById(id) as HTMLSelectElement | null;
-    if (sel) populateModelSelect(sel, cfg);
+  for (const cs of modelSelects.values()) {
+    cs.setTriggerTitle(t('composer.model.title'));
+    populateModelSelect(cs, cfg);
   }
-}
-
-function wireModeSelect(sel: HTMLSelectElement): void {
-  sel.addEventListener('change', () => {
-    const cfg = loadConfig() ?? defaults();
-    cfg.taskMode = sel.value as PureConfig['taskMode'];
-    persistConfig(cfg);
-    invalidateConfigCache();
-    showToast(t('composer.modeSaved'));
-  });
-}
-
-function wireModelSelect(sel: HTMLSelectElement): void {
-  sel.addEventListener('change', () => {
-    const cfg = loadConfig() ?? defaults();
-    const opt = sel.selectedOptions[0];
-    const raw = sel.value;
-    const providerId = opt?.dataset.provider || raw.split('::')[0] || raw;
-    cfg.provider = providerId as ProviderId;
-    cfg.model = opt?.dataset.model || defaultModelFor(providerId);
-    persistConfig(cfg);
-    invalidateConfigCache();
-    // updateSidebarModel() cascades into the status footer + context panel.
-    updateSidebarModel();
-    showToast(t('composer.modelSaved'));
-  });
 }
 
 function wireComposerSelects(): void {
-  for (const id of MODE_SELECT_IDS) {
-    const sel = document.getElementById(id) as HTMLSelectElement | null;
-    if (sel) wireModeSelect(sel);
-  }
-  for (const id of MODEL_SELECT_IDS) {
-    const sel = document.getElementById(id) as HTMLSelectElement | null;
-    if (sel) wireModelSelect(sel);
-  }
   populateComposerSelects();
 }
 
@@ -736,12 +726,7 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
         bubble.textContent = stripUserTurnContext(block.content);
         renderUserImageAttachments(bubble, block.images);
         for (const attachment of block.attachments) {
-          const card = document.createElement('button');
-          card.type = 'button';
-          card.className = 'paste-chip paste-chip-text';
-          card.textContent = `${attachment.name} · ${attachment.size} 字符`;
-          card.addEventListener('click', () => pasteChips.openStoredAttachment(attachment));
-          bubble.appendChild(card);
+          bubble.appendChild(renderAttachmentCard(attachment, () => pasteChips.openStoredAttachment(attachment)));
         }
         bindUserBubbleSelectAll(bubble);
         linkifyPaths(bubble);

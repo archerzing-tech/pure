@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, generateTaskAnalysis, parseTaskAnalysisText, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, parseIntentAssessmentBlock, mergeIntentAssessments, parseRequestReviewBlock } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview } from '../chat';
 import { limitStoredMessages, MAX_PERSISTED_MESSAGES } from '../store';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 
@@ -133,285 +133,6 @@ describe('assistant bubble copy feedback', () => {
   });
 });
 
-describe('generateTaskAnalysis (streamed LLM analysis + task-specific plan)', () => {
-  function fakeLlm(content: string, delay = 0): LLMAdapter {
-    return {
-      async *stream() {
-        if (delay) await new Promise(r => setTimeout(r, delay));
-        yield { type: 'content', content } as any;
-      },
-      async complete(): Promise<LLMResponse> {
-        if (delay) await new Promise(r => setTimeout(r, delay));
-        return { content, toolCalls: undefined };
-      },
-    } as LLMAdapter;
-  }
-
-  it('streams the analysis and returns the task-specific plan', async () => {
-    const llm = fakeLlm('<analysis>这是一个山东省5G监控系统，需要实时监控所有城市的现网状态，难度高，涉及数据接入、可视化与风险分析。</analysis>\n```json\n[{"action":"设计数据模型","description":"定义城市与网络状态数据"},{"action":"搭建监控大屏","description":"实现地图可视化和城市下钻"},{"action":"补充测试并验证","description":"为关键行为补充测试并运行"}]```');
-    const deltas: string[] = [];
-    const result = await generateTaskAnalysis(llm, '创建山东省5G监控系统', 200, undefined, { onThinking: (d) => deltas.push(d) });
-    expect(deltas.join('')).toContain('山东省5G监控系统');
-    expect(result.analysis).toContain('山东省5G监控系统');
-    expect(result.analysis).toContain('难度高');
-    expect(result.plan).not.toBeNull();
-    expect(result.repaired).toBe(false);
-    expect(result.plan!.steps[0]).toMatchObject({ action: '设计数据模型' });
-  });
-
-  it('keeps machine-readable plan metadata out of the visible thinking trace', async () => {
-    const llm = fakeLlm('先确认数据是否真实可接入。\n```json\n[{"action":"接入数据","description":"d"}]```');
-    const deltas: string[] = [];
-    await generateTaskAnalysis(llm, '创建监控大屏', 200, undefined, { onThinking: (d) => deltas.push(d) });
-    const visible = deltas.join('');
-    expect(visible).toContain('先确认数据是否真实可接入');
-    expect(visible).not.toContain('```');
-    expect(visible).not.toContain('接入数据');
-  });
-
-  it('parses a bare JSON array (no <analysis>/fence) for backward compatibility', async () => {
-    const llm = fakeLlm('[{"action":"Inspect","description":"Read auth module"},{"action":"Rewrite","description":"Replace token logic"}]');
-    const result = await generateTaskAnalysis(llm, '重构认证模块');
-    expect(result.plan).not.toBeNull();
-    expect(result.repaired).toBe(false);
-    expect(result.plan!.steps).toHaveLength(2);
-    expect(result.plan!.steps.at(-1)).toMatchObject({ action: 'Rewrite', todosRequired: false });
-    expect(result.plan!.steps[0]).toMatchObject({ action: 'Inspect', description: 'Read auth module' });
-  });
-
-  it('flags a repaired plan so callers can keep it out of the context window', async () => {
-    // Slightly-broken plan JSON: parseable only after repair. The plan is
-    // still returned (for the review card), but `repaired: true` tells the
-    // caller to skip re-injecting the reconstructed text into the LLM prompt.
-    const llm = fakeLlm("[{action: 'Inspect', description: 'Read auth module',},]");
-    const result = await generateTaskAnalysis(llm, '重构认证模块');
-    expect(result.plan).not.toBeNull();
-    expect(result.repaired).toBe(true);
-    expect(result.plan!.steps[0]).toMatchObject({ action: 'Inspect' });
-  });
-
-  it('returns null (fallback to heuristic) when the LLM returns malformed output', async () => {
-    const llm = fakeLlm('sorry, I cannot plan that');
-    expect((await generateTaskAnalysis(llm, 'x')).plan).toBeNull();
-  });
-
-  it('returns null (fallback to heuristic) when the LLM call times out', async () => {
-    // 500ms delay > the 50ms analysis timeout — must resolve to null, not hang.
-    const llm = fakeLlm('[]', 500);
-    expect((await generateTaskAnalysis(llm, 'x', 50)).plan).toBeNull();
-  });
-
-  it('stops streaming thinking deltas once the timeout fires (no generator leak)', async () => {
-    // A slow stream that keeps yielding after the timeout: the in-loop timeout
-    // flag must stop consumption, so onThinking never fires again.
-    const deltas: string[] = [];
-    const llm: LLMAdapter = {
-      async *stream() {
-        await new Promise(r => setTimeout(r, 80));
-        for (let i = 0; i < 5; i++) {
-          yield { type: 'content', content: `chunk-${i}` } as any;
-        }
-      },
-      complete: async () => ({ content: '[]', toolCalls: undefined }),
-    } as LLMAdapter;
-    const result = await generateTaskAnalysis(llm, 'x', 30, undefined, { onThinking: (d) => deltas.push(d) });
-    expect(result.plan).toBeNull();
-    expect(deltas.join('')).not.toContain('chunk-');
-  });
-
-  it('cleans the timeout when the LLM completes before the deadline', async () => {
-    const llm = fakeLlm('[]');
-    const before = performance.now();
-    expect((await generateTaskAnalysis(llm, 'x', 200)).plan).toBeNull();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(performance.now() - before).toBeLessThan(100);
-  });
-
-  it('surfaces analysis + plan from streamed reasoning when content is empty (reasoning-first models)', async () => {
-    // DeepSeek/Qwen reasoning models put the natural analysis into
-    // `reasoning_content` and can leave `content` empty. The analysis must
-    // still reach the user (thinking card + persisted replay), not degrade to
-    // the "分析未完成" fallback.
-    const analysisProse = '<analysis>这是一个山东省5G监控系统，需要接入各省市现网数据，难度高。</analysis>';
-    const llm: LLMAdapter = {
-      async *stream() {
-        yield { type: 'reasoning', content: '好的，我来分析这个请求。' } as any;
-        yield { type: 'reasoning', content: analysisProse } as any;
-        yield { type: 'reasoning', content: '```json\n[{"action":"设计数据模型","description":"定义省市与网络状态数据"},{"action":"搭建监控大屏","description":"实现地图可视化和城市下钻"}]\n```' } as any;
-      },
-      complete: async () => ({ content: '', toolCalls: undefined }),
-    } as LLMAdapter;
-    const deltas: string[] = [];
-    const result = await generateTaskAnalysis(llm, '创建山东省5G监控系统', 200, undefined, { onThinking: (d) => deltas.push(d) });
-    expect(result.analysis).toContain('山东省5G监控系统');
-    expect(result.plan).not.toBeNull();
-    expect(result.plan!.steps).toHaveLength(2);
-    expect(deltas.join('')).toContain('我来分析这个请求');
-    expect(deltas.join('')).toContain('山东省5G监控系统');
-  });
-
-  it('merges analysis from reasoning with a plan delivered in content', async () => {
-    // Reasoning-first model that still emits the JSON plan in `content`: each
-    // field takes its first usable source instead of forcing the fallback.
-    const llm: LLMAdapter = {
-      async *stream() {
-        yield { type: 'reasoning', content: '<analysis>先确认数据源是否真实可接入，再决定架构。</analysis>' } as any;
-        yield { type: 'content', content: '```json\n[{"action":"接入数据","description":"建立数据接入管道"}]```' } as any;
-      },
-      complete: async () => ({ content: '', toolCalls: undefined }),
-    } as LLMAdapter;
-    const result = await generateTaskAnalysis(llm, '创建监控大屏', 200);
-    expect(result.analysis).toContain('数据源');
-    expect(result.plan?.steps[0].action).toBe('接入数据');
-  });
-});
-
-describe('parseTaskAnalysisText (analysis + plan extraction)', () => {
-  it('splits <analysis> prose from the fenced plan JSON and strips the tags', () => {
-    const r = parseTaskAnalysisText('<analysis>这是一个监控系统，覆盖全省各地市。</analysis>\n```json\n[{"action":"A","description":"d"}]```', 'x');
-    expect(r.analysis).toContain('监控系统');
-    expect(r.analysis).not.toContain('<analysis>');
-    expect(r.analysis).not.toContain('json');
-    expect(r.plan?.steps).toHaveLength(1);
-  });
-
-  it('keeps the bare-array legacy contract (no analysis, no fence)', () => {
-    const r = parseTaskAnalysisText('[{"action":"A","description":"d"}]', 'x');
-    expect(r.analysis).toBe('');
-    expect(r.plan?.steps).toHaveLength(1);
-  });
-
-  it('returns null plan for prose-only output', () => {
-    const r = parseTaskAnalysisText('我先梳理一下这个任务……', 'x');
-    expect(r.plan).toBeNull();
-  });
-
-  it('parses the model\'s <intent_assessment> block for the safety card', () => {
-    const r = parseTaskAnalysisText(
-      '<analysis>这是一个监控系统。</analysis>\n```json\n[{"action":"A","description":"d"}]```\n<intent_assessment>\n{"intent":"build","riskLevel":"high","reversibility":"irreversible","impact":"覆盖历史数据","recommendation":"先列影响再确认","requiresProbe":true,"requiresConfirmation":true}\n</intent_assessment>',
-      'x',
-    );
-    expect(r.llmIntent).not.toBeNull();
-    expect(r.llmIntent?.intent).toBe('build');
-    expect(r.llmIntent?.riskLevel).toBe('high');
-    expect(r.llmIntent?.reversibility).toBe('irreversible');
-    expect(r.llmIntent?.requiresConfirmation).toBe(true);
-  });
-
-  it('degrades to null llmIntent when the block is missing', () => {
-    const r = parseTaskAnalysisText('[{"action":"A","description":"d"}]', 'x');
-    expect(r.llmIntent).toBeNull();
-  });
-
-  it('degrades to null llmIntent on an invalid enum value', () => {
-    const block = '<intent_assessment>{"intent":"build","riskLevel":"extreme","reversibility":"reversible"}</intent_assessment>';
-    expect(parseIntentAssessmentBlock(block)).toBeNull();
-  });
-});
-
-describe('parseRequestReviewBlock (诉求合理性评审)', () => {
-  const sample = (items: unknown): string =>
-    `<request_review>\n${JSON.stringify(items)}\n</request_review>`;
-
-  it('parses mixed verdicts with reasons and suggestions', () => {
-    const review = parseRequestReviewBlock(sample([
-      { part: '直接删除旧版本目录', verdict: 'unreasonable', reason: '旧目录里还有迁移脚本在引用', suggestion: '先归档再删除' },
-      { part: '两天内完成全量迁移', verdict: 'questionable', reason: '依赖数据清洗，工期不确定', suggestion: '先做数据量评估' },
-      { part: '保留新功能接口', verdict: 'reasonable', reason: '与现有架构一致' },
-    ]));
-    expect(review).toHaveLength(3);
-    expect(review[0].verdict).toBe('unreasonable');
-    expect(review[0].suggestion).toBe('先归档再删除');
-    expect(review[1].verdict).toBe('questionable');
-    expect(review[2].verdict).toBe('reasonable');
-    expect(review[2].suggestion).toBeUndefined();
-  });
-
-  it('returns [] when the block is missing (no gate)', () => {
-    expect(parseRequestReviewBlock('只有分析文字，没有评审块')).toEqual([]);
-    expect(parseRequestReviewBlock('[{"action":"A"}]')).toEqual([]);
-  });
-
-  it('returns [] on an empty array (everything reasonable)', () => {
-    expect(parseRequestReviewBlock(sample([]))).toEqual([]);
-  });
-
-  it('drops items with invalid verdicts or empty parts, keeps valid ones', () => {
-    const review = parseRequestReviewBlock(sample([
-      { part: '保留新接口', verdict: 'reasonable', reason: '一致' },
-      { part: '某条可疑项', verdict: 'maybe', reason: '非法判定' },
-      { verdict: 'unreasonable', reason: '缺少 part' },
-    ]));
-    expect(review).toHaveLength(1);
-    expect(review[0].part).toBe('保留新接口');
-  });
-
-  it('returns [] on malformed JSON inside the block', () => {
-    expect(parseRequestReviewBlock('<request_review>{broken json</request_review>')).toEqual([]);
-    expect(parseRequestReviewBlock('<request_review>{"verdict":"reasonable"}</request_review>')).toEqual([]);
-  });
-
-  it('strips the review block from the visible analysis text', () => {
-    const text = `<analysis>我理解你的诉求。</analysis>\n${sample([{ part: 'X', verdict: 'questionable', reason: 'Y', suggestion: 'Z' }])}\n\`\`\`json\n[{"action":"A","description":"d"}]\`\`\``;
-    const r = parseTaskAnalysisText(text, 'x');
-    expect(r.analysis).toContain('我理解你的诉求');
-    expect(r.analysis).not.toContain('request_review');
-    expect(r.analysis).not.toContain('questionable');
-    expect(r.review).toHaveLength(1);
-    expect(r.review[0].verdict).toBe('questionable');
-  });
-});
-
-describe('mergeIntentAssessments (LLM judgment with rules-layer conservative fallback)', () => {
-  const heuristic = {
-    intent: 'modify' as const,
-    riskLevel: 'low' as const,
-    reversibility: 'reversible' as const,
-    impact: '规则影响',
-    recommendation: '规则建议',
-    requiresProbe: false,
-    requiresConfirmation: false,
-  };
-
-  it('lets the LLM raise risk above the rules layer (rules never lower)', () => {
-    const llm = { ...heuristic, riskLevel: 'high' as const, requiresConfirmation: true };
-    const merged = mergeIntentAssessments(heuristic, llm);
-    expect(merged.riskLevel).toBe('high');
-    expect(merged.requiresConfirmation).toBe(true);
-    expect(merged.requiresProbe).toBe(true); // high risk implies probe
-  });
-
-  it('keeps the rules-layer high risk when the LLM under-rates it', () => {
-    const rulesHigh = { ...heuristic, riskLevel: 'high' as const, requiresConfirmation: true };
-    const llm = { ...heuristic, riskLevel: 'low' as const, requiresConfirmation: false };
-    const merged = mergeIntentAssessments(rulesHigh, llm);
-    expect(merged.riskLevel).toBe('high');
-    expect(merged.requiresConfirmation).toBe(true);
-  });
-
-  it('takes the worse reversibility of the two sides', () => {
-    const llm = { ...heuristic, reversibility: 'irreversible' as const };
-    expect(mergeIntentAssessments(heuristic, llm).reversibility).toBe('irreversible');
-  });
-
-  it('prefers the LLM intent/impact/recommendation when present', () => {
-    const llm = { ...heuristic, intent: 'refactor' as const, impact: '模型影响', recommendation: '模型建议' };
-    const merged = mergeIntentAssessments(heuristic, llm);
-    expect(merged.intent).toBe('refactor');
-    expect(merged.impact).toBe('模型影响');
-    expect(merged.recommendation).toBe('模型建议');
-  });
-
-  it('falls back to the heuristic untouched when the LLM gives no assessment', () => {
-    expect(mergeIntentAssessments(heuristic, null)).toEqual(heuristic);
-  });
-
-  it('requires confirmation when EITHER side demands it (conservative union)', () => {
-    const llm = { ...heuristic, requiresConfirmation: true };
-    expect(mergeIntentAssessments(heuristic, llm).requiresConfirmation).toBe(true);
-  });
-});
-
 describe('Escape cancellation guard', () => {
   it('only cancels a live turn for Escape', () => {
     expect(shouldCancelForEscape('Escape', true)).toBe(true);
@@ -419,38 +140,9 @@ describe('Escape cancellation guard', () => {
     expect(shouldCancelForEscape('Escape', false)).toBe(false);
   });
 
-  it('does not produce a plan after the signal is already aborted', async () => {
-    const controller = new AbortController();
-    controller.abort();
-    const llm = {
-      complete: async () => ({ content: '[{"action":"x","description":"x","expectedOutcome":"x"}]' }),
-    } as any;
-    expect((await generateTaskAnalysis(llm, 'build', 10, controller.signal)).plan).toBeNull();
-  });
-
-  it('returns from a stalled analysis stream at the timeout instead of hanging the GUI', async () => {
-    const started = Date.now();
-    const llm = {
-      async *stream() {
-        await new Promise<void>(() => {});
-        yield { type: 'content', content: 'never arrives' };
-      },
-    } as any;
-    const result = await generateTaskAnalysis(llm, 'build', 20);
-    expect(result.plan).toBeNull();
-    expect(Date.now() - started).toBeLessThan(500);
-  });
 });
 
-describe('TASK_ANALYSIS_PROMPT keeps reasoning natural and task-specific', () => {
-  it('does not prescribe fixed headings or a fixed plan count', () => {
-    const src = readSource(new URL('../chat.ts', import.meta.url));
-    expect(src).toContain('natural, conversational reasoning');
-    expect(src).toContain('Do not use prescribed headings, a fixed number of sections');
-    expect(src).toContain('Choose the number and granularity from the work itself');
-    expect(src).toContain('Do NOT invent file contents or claim that an external data source exists');
-  });
-
+describe('plan pre-flight keeps its honest shape', () => {
   it('has no fixed pre-plan clarify card and no clarify interview round-trip', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 用户要求：不再在思考前弹固定的“开工前先确认几个问题”卡——问题由模型在
@@ -458,6 +150,21 @@ describe('TASK_ANALYSIS_PROMPT keeps reasoning natural and task-specific', () =>
     expect(src.indexOf('requestClarifications(')).toBe(-1);
     expect(src.indexOf('generateClarifyingQuestions(')).toBe(-1);
     expect(src.indexOf('开工前先确认几个问题')).toBe(-1);
+  });
+
+  it('no longer runs the LLM real-time pre-analysis (removed entirely)', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 实时分析从未稳定成功（10/10 项目全部超时/空输出），只会拖慢启动并把
+    // “实时分析未完成，已回退到通用步骤”的噪音留给用户。整条链路必须删干净。
+    expect(src.indexOf('generateTaskAnalysis')).toBe(-1);
+    expect(src.indexOf('TASK_ANALYSIS_PROMPT')).toBe(-1);
+    expect(src.indexOf('<intent_assessment>')).toBe(-1);
+    expect(src.indexOf('<request_review>')).toBe(-1);
+    expect(src.indexOf('mergeIntentAssessments')).toBe(-1);
+    expect(src.indexOf('实时分析未完成')).toBe(-1);
+    expect(src.indexOf('已回退到通用步骤')).toBe(-1);
+    // 计划直接来自本地规则分析。
+    expect(src).toContain('let planForReview: Plan = analysis.plan ?? {');
   });
 });
 
@@ -485,35 +192,23 @@ describe('proactive safety review gate', () => {
   });
 });
 
-describe('LLM-informed risk calibration (P0: model judgment settles the safety card)', () => {
-  it('asks the model for an <intent_assessment> block after the plan JSON', () => {
+describe('rules-layer risk calibration settles the safety card', () => {
+  it('derives the safety gate purely from Planner heuristics', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    expect(src.indexOf('TASK_ANALYSIS_PROMPT')).toBeGreaterThan(-1);
-    expect(src.indexOf('<intent_assessment>')).toBeGreaterThan(-1);
-    expect(src.indexOf('requiresConfirmation MUST be true when riskLevel is high')).toBeGreaterThan(-1);
-  });
-
-  it('merges the LLM assessment into effectiveIntent before the card appears', () => {
-    const src = readSource(new URL('../chat.ts', import.meta.url));
-    const merge = src.indexOf('effectiveIntent = mergeIntentAssessments(analysis.intent, llmAnalysis.llmIntent);');
-    expect(src).toContain('userAssessment = formatIntentPrompt(effectiveIntent);');
-    const call = src.indexOf('maybeShowAssessment();', merge);
+    const riskReview = src.indexOf('const riskReview = effectiveIntent.requiresConfirmation;');
     const card = src.indexOf('assessmentFlow = createAssessmentFlowCard(effectiveIntent);');
-    const riskReview = src.indexOf('let riskReview = effectiveIntent.requiresConfirmation;');
-    expect(merge).toBeGreaterThan(-1);
-    expect(call).toBeGreaterThan(merge); // 合并先于评估卡真正创建
-    expect(card).toBeGreaterThan(-1);
     expect(riskReview).toBeGreaterThan(-1);
+    expect(card).toBeGreaterThan(-1);
   });
 
-  it('reopens the confirm gate when the model raises risk after the merge (no stale rules-only decision)', () => {
+  it('keeps the heuristic judgment end to end with no post-hoc recompute path', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const merge = src.indexOf('effectiveIntent = mergeIntentAssessments(analysis.intent, llmAnalysis.llmIntent);');
-    const recheck = src.indexOf('riskReview = effectiveIntent.requiresConfirmation;', merge);
-    const gate = src.indexOf('const needsInteractiveApproval = riskReview || forcedMode === \'plan\' || forcedMode === \'build\';', recheck);
-    expect(merge).toBeGreaterThan(-1);
-    expect(recheck).toBeGreaterThan(merge);
-    expect(gate).toBeGreaterThan(recheck);
+    // 规则层判断在预检早期落定 userAssessment（workflow.userContext.assessment），
+    // 之后不再有任何“合并后重算”的路径。
+    expect(src.indexOf('userAssessment = workflow.userContext.assessment;')).toBeGreaterThan(-1);
+    expect(src.indexOf('userAssessment = formatIntentPrompt(effectiveIntent);')).toBe(-1);
+    const gate = src.indexOf("const needsInteractiveApproval = riskReview || forcedMode === 'plan' || forcedMode === 'build';");
+    expect(gate).toBeGreaterThan(src.indexOf('const riskReview = effectiveIntent.requiresConfirmation;'));
   });
 });
 
@@ -650,63 +345,54 @@ describe('pickHistoryMessages (background pre-compaction reuse)', () => {
 
 // Plan-gate timing contract (user-facing): on a detected complex task, a
 // thinking card must open SYNCHRONOUSLY right after the humanized intro —
-// before ANY LLM round-trip in the gate — so the user watches the model's
-// real analysis of THIS task stream in, and the task-specific plan card
-// renders only when that analysis lands. The fixed generic scaffold survives
-// ONLY as the failure/timeout fallback, never as the first thing shown.
-describe('plan-gate timing (thinking card before LLM calls)', () => {
-  it('updates the existing plan list instead of replacing it after LLM refinement', () => {
+// before the workspace probe — so the user never stares at a frozen
+// transcript. The plan comes straight from the local rule-based Planner and
+// its card renders as soon as the probe lands; there is no LLM pre-analysis
+// round-trip and no generic-scaffold fallback messaging.
+describe('plan-gate timing (thinking card before preflight work)', () => {
+  it('updates the existing plan list in place instead of replacing the card', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false, fallback = false): void => {');
-    const update = src.indexOf('updatePlanCard(planCard, plan, refining, fallback, planProgress);', show);
+    const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false): void => {');
+    const update = src.indexOf('updatePlanCard(planCard, plan, refining, planProgress);', show);
     const oldReplace = src.indexOf('old.classList.add(\'plan-card-leaving\')', show);
     expect(show).toBeGreaterThan(-1);
     expect(update).toBeGreaterThan(show);
     expect(oldReplace).toBe(-1);
   });
 
-  it('opens the thinking card before any preflight await (runtime probe, workspace probing, model analysis)', () => {
+  it('opens the thinking card before any preflight await (runtime probe, workspace probing)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // The eager trace opens right before the runtime probe — before the
-    // workspace scan and model analysis — so the user never stares at a
-    // frozen transcript between the user bubble and the first token. The
-    // analysis path reuses that same card instead of stacking a second one.
+    // workspace scan — so the user never stares at a frozen transcript between
+    // the user bubble and the first token. The plan gate reuses that same card.
     const eager = src.indexOf("thinkingCard = openThinkingCard();\n      setThinkingLabel(thinkingCard, '正在准备…');");
     const reuse = src.indexOf('const earlyAnalysisCard = shouldRunTaskAnalysis ? thinkingCard : null;');
     const firstProbe = src.indexOf('await discoverWorkspace(');
-    const firstContextRead = src.indexOf('await buildWorkspaceContext(');
-    const firstAnalysis = src.indexOf('await generateTaskAnalysis(');
     expect(eager).toBeGreaterThan(-1);
     expect(reuse).toBeGreaterThan(-1);
     expect(firstProbe).toBeGreaterThan(eager);
-    expect(firstContextRead).toBeGreaterThan(eager);
-    expect(firstAnalysis).toBeGreaterThan(eager);
   });
 
-  it('renders the task-specific plan card only after the LLM analysis lands', () => {
+  it('renders the heuristic plan card directly with no LLM pre-analysis round-trip', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const analysisCall = src.indexOf('await generateTaskAnalysis(');
-    const planRender = src.indexOf('showPlanCard(planForReview);\n');
-    expect(analysisCall).toBeGreaterThan(-1);
-    expect(planRender).toBeGreaterThan(analysisCall);
-    // The generic scaffold survives ONLY in the fallback branch, explicitly
-    // flagged as a fallback via a warning status bubble — never the first thing
-    // the user sees.
-    const fallback = src.indexOf('实时分析未完成，已回退到通用步骤');
-    expect(fallback).toBeGreaterThan(analysisCall);
-    expect(src).toMatch(/createPlanCard\(plan, refining, fallback, planProgress\)/);
+    // 计划直接来自本地规则分析（Planner）：探针完成后立即渲染计划卡，
+    // 不再有 LLM 分析等待与“回退到通用步骤”的兜底分支。
+    const probe = src.indexOf('await discoverWorkspace(');
+    const planRender = src.indexOf('showPlanCard(planForReview);');
+    expect(probe).toBeGreaterThan(-1);
+    expect(planRender).toBeGreaterThan(probe);
+    expect(src).toMatch(/createPlanCard\(plan, refining, planProgress\)/);
+    expect(src.indexOf('已回退到通用步骤')).toBe(-1);
   });
 
-  it('shows the assessment card only after the first LLM round-trip (real thinking first)', () => {
+  it('shows the assessment card after the workspace probe, never synchronously at send start', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // The assessment card must never be created synchronously from the
-    // heuristic before any model interaction — it appears only after the LLM
-    // analysis has streamed (thinking card) and the interview ran.
-    const firstLlm = src.indexOf('await generateTaskAnalysis(');
+    // 评估卡由规则层判断驱动：探针完成后（maybeShowAssessment 首次调用）
+    // 才出现，绝不在 send() 一开始就同步弹出。
+    const probe = src.indexOf('await discoverWorkspace(');
     const cardCall = src.indexOf('maybeShowAssessment();');
-    expect(firstLlm).toBeGreaterThan(-1);
     expect(cardCall).toBeGreaterThan(-1);
-    expect(cardCall).toBeGreaterThan(firstLlm);
+    expect(cardCall).toBeGreaterThan(probe);
     // The old instant-heuristic card ("已识别为 … 请求，正在评估影响范围…") must be gone.
     expect(src.indexOf('已识别为 ${analysis.intent.intent} 请求')).toBe(-1);
   });
@@ -746,18 +432,32 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
 
   it('runs the delivery gate only when the turn did real tool work, never on a question-only turn', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 模型提问/确认轮（无 tool 消息）不是交付完成：不触发“交付前测试与审计”卡，
+    // 模型提问/确认轮（无 tool 消息）不是交付完成：不触发回合末交付验证，
     // 评估卡保持执行等待而不是跳到验证结果。
     expect(src).toContain("const hasToolWork = (event.payload.messages ?? []).some((m) => m.role === 'tool');");
     expect(src).toContain('if (needsDeliveryGate && hasToolWork && !event.payload.interrupted && gen === this.generation) {');
-    expect(src).toContain("(!needsDeliveryGate || (hasToolWork && projectQualityResult?.passed === true))");
+    expect(src).toContain("(!needsDeliveryGate || (hasToolWork && deliveryResult?.passed === true))");
     expect(src).toContain("assessmentFlow.setPhase('execute', '本轮没有产生文件改动（如需确认细节，模型会直接提问），等待你的回复后继续。'");
   });
 
-  it('presents probe findings only after the LLM analysis, never before thinking', () => {
+  it('backstops the agent-driven delivery pipeline with the deterministic mechanical re-run', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 探针结论（探索/契约气泡）只能在 reportProbeFindings 内出现，而它由
-    // maybeShowAssessment 调用——后者只在 LLM 分析（thinking 卡）完成后触发。
+    // 回合末必须真实重跑机械验证（runDeliveryVerification），失败后用真实失败
+    // 输出驱动有界修复轮（runDeliveryFixRound），每轮修复后重新验证。
+    const backstop = src.indexOf('await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal)');
+    const fixRound = src.indexOf('await runDeliveryFixRound(completionMessages, deliveryResult)');
+    expect(backstop).toBeGreaterThan(-1);
+    expect(fixRound).toBeGreaterThan(backstop);
+    expect(src).toContain('const qualityPassed = !needsDeliveryGate || (deliveryResult?.passed === true && gen === this.generation);');
+    // 旧的 LLM VERDICT 门禁卡不再出现在 GUI 流程里。
+    expect(src.indexOf('createQualityGateCard')).toBe(-1);
+    expect(src.indexOf('runProjectQualityGate')).toBe(-1);
+  });
+
+  it('presents probe findings once, only via reportProbeFindings', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 探针结论（探索/契约气泡）只能在 reportProbeFindings 内出现，由
+    // maybeShowAssessment 在预检（工作区扫描）完成后统一呈现。
     const report = src.indexOf('const reportProbeFindings = (): void => {');
     const exploration = src.indexOf('已完成项目探索');
     const contract = src.indexOf('已建立任务契约');
@@ -766,7 +466,6 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
     expect(contract).toBeGreaterThan(report);
     expect(src.indexOf('reportProbeFindings();')).toBeGreaterThan(-1);
     expect(src).toContain('workflow.probeRequired && !workflow.probeAvailable');
-    expect(src.indexOf('maybeShowAssessment();')).toBeGreaterThan(src.indexOf('await generateTaskAnalysis('));
   });
 
   it('never shows a fake "I understood" intro bubble before the LLM speaks', () => {
@@ -792,31 +491,18 @@ describe('plan-gate timing (thinking card before LLM calls)', () => {
     expect(cardSrc).not.toContain('startThinkingHints');
     expect(cardSrc).not.toContain('正在理解你的需求');
     expect(cardSrc).not.toContain('正在准备好执行计划');
-    // 改为在真实阶段边界设置诚实标签。
-    // 分析期只有一个诚实标签；引擎循环等待首 token 时是“正在思考…”。
-    expect(src).toContain("setThinkingLabel(analysisCard, '正在分析你的请求…')");
+    // 改为在真实阶段边界设置诚实标签：预检探查期与引擎循环等待首 token 时。
+    expect(src).toContain("setThinkingLabel(earlyAnalysisCard, '正在读取工作区，并结合你的目标判断…')");
     expect(src).toContain("setThinkingLabel(thinkingCard, '正在思考…')");
+    expect(src.indexOf('正在分析你的请求…')).toBe(-1);
   });
 
   it('passes explicit approval into the plan prompt so execution starts immediately', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 本轮无需等待“开工”消息（确认卡已批准 / forced-yolo 直接放行）时，模型第一轮
     // 必须立即执行——否则模型第一轮不调用工具，引擎空转完成，计划卡还停在第一步
-    // 就突然出现“交付前测试与审计”卡、评估卡跳到“验证结果”。
+    // 就突然进入交付验证、评估卡跳到“验证结果”。
     expect(src).toContain('formatPlanForPrompt(planForReview, needsDeliveryGate, !pauseAfterPlanning)');
-  });
-
-  it('keeps one flat plan row mounted while refining updates its contents', () => {
-    const src = readSource(new URL('../chat.ts', import.meta.url));
-    const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false, fallback = false): void => {');
-    const update = src.indexOf('updatePlanCard(planCard, plan, refining, fallback, planProgress);', show);
-    const oldReplace = src.indexOf('old.classList.add(\'plan-card-leaving\')', show);
-    expect(show).toBeGreaterThan(-1);
-    expect(update).toBeGreaterThan(show);
-    expect(oldReplace).toBe(-1);
-    expect(src).toContain('updatePlanCard(planCard, plan, refining, fallback, planProgress);');
-    const planSrc = readSource(new URL('../plan.ts', import.meta.url));
-    expect(planSrc).toContain('export function updatePlanCard');
   });
 });
 
@@ -919,8 +605,8 @@ describe('plan overview completion state', () => {
   it('keeps the chat plan card as the only live plan projection', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     expect(src).toContain('let planProgress: PlanProgressModel | null = null;');
-    expect(src).toContain('createPlanCard(plan, refining, fallback, planProgress);');
-    expect(src).toContain('updatePlanCard(planCard, plan, refining, fallback, planProgress);');
+    expect(src).toContain('createPlanCard(plan, refining, planProgress);');
+    expect(src).toContain('updatePlanCard(planCard, plan, refining, planProgress);');
     expect(src).not.toContain('planOverview().bindProgress(planProgress);');
     expect(src).toContain("planProgress?.dispatch({ type: 'completed' });");
     expect(src).not.toContain('overview.update(plan, done ? \'complete\' : status');
@@ -933,7 +619,7 @@ describe('plan overview completion state', () => {
     expect(src).toContain('protocolStarted: false');
     expect(src).toContain('planTrack.phaseStarted.add(marker.number)');
     expect(src).toContain('planTrack.phaseCompleted.add(marker.number)');
-    expect(src).toContain('等待对话播报');
+    expect(src).toContain('已完成”播报…');
     expect(src).toContain('!planTrack.phaseCompleted.has(finishedPlan)');
     expect(src).toContain('const legacyPlanFinished = planCard && !planTrack.protocolStarted');
     expect(src).toContain('completionSnapshot.currentPlan >= completionSnapshot.plan.steps.length;');
@@ -946,17 +632,18 @@ describe('plan overview completion state', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 执行期卡片靠 `## 计划 n：` 标记推进。旧逻辑在“当前计划的 Todo 未全部
     // 标记完成”时直接卡在第一步；现在模型明确进入更后面的计划时，把它当作
-    // 当前计划隐式完成并直接跳到标记指出的计划（而不是每标记只前进一步），
-    // 项目构建仍等真实验证证据。
+    // 当前计划隐式完成并直接跳到标记指出的计划（而不是每标记只前进一步）。
+    // 协议门禁仍然生效：当前计划未播报完成时只暂缓（deferredReason='protocol'），
+    // 验证证据统一由回合末确定性交付验证把关，不再阻塞游标。
     const guard = src.indexOf("if (marker.kind === 'phase') {", src.indexOf('const trackPlanPhase'));
     expect(guard).toBeGreaterThan(-1);
     const forceAdvance = src.indexOf('The model explicitly started a later plan', guard);
-    const verifyGate = src.indexOf('needsDeliveryGate && !planTrack.phaseVerifySeen[before]', guard);
-    // 事件模型先经过协议/验证门禁，再用 phaseJumped 事件一次性落到目标计划。
-    const jump = src.indexOf("planProgress?.dispatch({ type: 'phaseJumped', planNumber: Math.max(before + 1", verifyGate);
+    const protocolGate = src.indexOf("planTrack.deferredReason = 'protocol';", forceAdvance);
+    // 事件模型先经过协议门禁，再用 phaseJumped 事件一次性落到目标计划。
+    const jump = src.indexOf("planProgress?.dispatch({ type: 'phaseJumped', planNumber: Math.max(before + 1", protocolGate);
     expect(forceAdvance).toBeGreaterThan(guard);
-    expect(verifyGate).toBeGreaterThan(forceAdvance);
-    expect(jump).toBeGreaterThan(verifyGate);
+    expect(protocolGate).toBeGreaterThan(forceAdvance);
+    expect(jump).toBeGreaterThan(protocolGate);
   });
 
   it('finishes the last plan from its own completion marker only when its Todos are done', () => {
@@ -978,14 +665,13 @@ describe('plan overview completion state', () => {
 
   it('requires real completion evidence before marking the plan done', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 收尾判定不再只信模型播报：最后阶段 Todo 真实完成、或有逐阶段验证证据、
-    // 或构建计划交付门禁通过，才 dispatch completed。
+    // 收尾判定不再只信模型播报：最后阶段 Todo 真实完成、或构建计划回合末
+    // 交付验证通过，才 dispatch completed。
     const branch = src.indexOf('} else if (planCompletionCandidate');
     expect(branch).toBeGreaterThan(-1);
     const seg = src.slice(branch, branch + 1600);
     expect(seg).toContain('const lastTodosDone =');
-    expect(seg).toContain('const lastVerified = planTrack.phaseVerifySeen[lastPlanNumber] === true;');
-    expect(seg).toContain('lastTodosDone || lastVerified || (needsDeliveryGate && qualityPassed === true)');
+    expect(seg).toContain('lastTodosDone || (needsDeliveryGate && qualityPassed === true)');
   });
 
   it('keeps the plan context when the delivery gate fails', () => {
@@ -1034,18 +720,39 @@ describe('plan overview completion state', () => {
     expect(src.slice(fallback, blockEnd)).not.toContain('force: true');
   });
 
-  it('wires the phase verification backstop so a blocked stage can advance on evidence', () => {
+  it('injects the agent-driven delivery pipeline prompt for project builds', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 交付门禁阶段：finishPlan 无验证证据时不推进，但会调度 backstop；backstop
-    // 验证通过后写入 phaseVerifySeen 并重放推进——否则阶段永远卡死、计划无法执行完。
-    const blocked = src.indexOf('等待真实验证结果…');
-    expect(blocked).toBeGreaterThan(-1);
-    expect(src.slice(blocked, blocked + 500)).toContain('schedulePhaseBackstop(planNumber);');
-    const backstop = src.indexOf('const schedulePhaseBackstop = (finishedPhase: number): void => {');
-    expect(backstop).toBeGreaterThan(-1);
-    const tail = src.slice(backstop, backstop + 3000);
-    expect(tail).toContain('planTrack.phaseVerifySeen[finishedPhase] = true;');
-    expect(tail).toContain('retryPhaseAdvance?.(finishedPhase);');
+    // 检视→typecheck→单测→e2e 作为计划最后阶段下发给模型；UI 工程附带设计先行协议。
+    const inject = src.indexOf('formatDeliveryPipeline(workspaceProfile, workflow.needsDesignPhase)');
+    expect(inject).toBeGreaterThan(-1);
+    const gate = src.indexOf('deliveryPipeline: needsDeliveryGate');
+    expect(gate).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(inject);
+    // 旧的“交付前测试与审计”节点必须删干净。
+    expect(src.indexOf('交付前测试与审计')).toBe(-1);
+  });
+
+  it('pauses UI builds at the design-ready marker until the user confirms the mockup', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 有界面的工程：模型发出 `## 设计稿已就绪：<file>` 后，GUI 读取文件渲染
+    // 预览卡（iframe），评估卡停在等待态，自动续跑链路被 planTerminal 硬停。
+    const marker = src.indexOf('parseDesignReadyMarker(finalAnswer)');
+    expect(marker).toBeGreaterThan(-1);
+    const card = src.indexOf('createDesignPreviewCard(html, designMockupFile', marker);
+    expect(card).toBeGreaterThan(marker);
+    const awaitPhase = src.indexOf("assessmentFlow.awaitPhase('execute', '设计稿已就绪，等待你在预览卡确认后开始实现…')", card);
+    expect(awaitPhase).toBeGreaterThan(card);
+    expect(src.indexOf('|| designPreviewShown,')).toBeGreaterThan(-1);
+  });
+
+  it('no longer stalls the plan cursor on per-phase verification gates', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 逐阶段验证门禁（phaseVerifySeen / schedulePhaseBackstop）已被回合末的
+    // 确定性交付验证取代：计划游标不再因缺少阶段内验证证据而卡死，机械检查
+    // 统一在回合结束由 runDeliveryVerification 真实重跑。
+    expect(src.indexOf('phaseVerifySeen')).toBe(-1);
+    expect(src.indexOf('schedulePhaseBackstop')).toBe(-1);
+    expect(src.indexOf('await runDeliveryVerification(')).toBeGreaterThan(-1);
   });
 
   it('finalizes a no-tool final turn at the last plan so the card catches up', () => {

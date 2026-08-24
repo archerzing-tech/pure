@@ -1,7 +1,8 @@
 // src/ui/pasteChip.ts
 // Paste handling for content the textarea should not swallow:
-//   • TEXT pastes ≥ PASTE_FILE_THRESHOLD chars → saved to the session tmp
-//     workspace (~/.pure/tmp/<session-id>/) and shown as a file chip.
+//   • TEXT pastes ≥ PASTE_FILE_THRESHOLD chars → saved to the app workspace
+//     (~/.pure/workspace/<session-id>/, named pure-<timestamp>.txt) and shown
+//     as a file chip.
 //   • IMAGE pastes (screenshots, copied pictures) → saved the same way and
 //     shown as a THUMBNAIL chip (a textarea can't hold an image at all).
 // Double-clicking a chip opens a fullscreen viewer (text in a <pre>, images
@@ -12,6 +13,7 @@ import { formatBytes } from '../shared/format';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { t } from '../shared/i18n';
 import { showToast } from '../shared/toast';
+import { copyTextToClipboard } from '../shared/clipboard';
 import type { MessageImage } from '../shared/types';
 
 export interface PasteAttachment {
@@ -44,8 +46,9 @@ export interface DroppedFileRecord {
   isDirectory?: boolean;
 }
 
-/** Text pastes at or above this length become file chips instead of text. */
-export const PASTE_FILE_THRESHOLD = 350;
+/** Text pastes at or above this length become file chips instead of text
+ * (0.5k characters — below that the textarea handles it inline). */
+export const PASTE_FILE_THRESHOLD = 500;
 export const LONG_TEXT_MEMORY_FALLBACK_LIMIT = 4 * 1024 * 1024;
 
 /** Images larger than this are rejected (bounds memory + the base64 IPC). */
@@ -90,10 +93,31 @@ const CLOSE_ICON_SVG =
   '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
   '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
 
+const COPY_ICON_SVG =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+  '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+
 /** Timestamp used in paste filenames (second granularity is fine — a random
  * suffix is appended by the caller to disambiguate same-second pastes). */
 function pasteStamp(): string {
   return new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
+}
+
+/** Local-time stamp for pure-paste filenames: YYYYMMDD-HHMMSS. */
+export function pureStamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/**
+ * Canonical filename for saved long text: pure-<timestamp>-<rand>.txt.
+ * The random suffix keeps two saves inside the same second from colliding
+ * on disk (the second write would otherwise overwrite the first).
+ */
+export function purePasteName(): string {
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `pure-${pureStamp()}-${rand}.txt`;
 }
 
 /** Extension for an image MIME type (.png / .jpg / .gif / .webp / …). */
@@ -118,23 +142,60 @@ export function fileIconOf(name: string, kind: PasteAttachment['kind']): string 
   return '📄';
 }
 
+const EYE_ICON_SVG =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+
+/** Minimal shape of a persisted attachment (transcript cards). */
+export interface StoredAttachmentLike {
+  name: string;
+  path: string;
+  size: number;
+  kind: PasteAttachment['kind'];
+}
+
+function attachmentKindLabel(kind: PasteAttachment['kind']): string {
+  return t(`paste.kind.${kind}`) || '文件';
+}
+
 /**
- * Pick a sensible extension for a pasted text blob based on its head: JSON
- * objects / arrays, markdown fences or headings, and uniform-delimiter tables
- * (CSV / TSV) get their own extension; everything else falls back to .txt.
+ * Shared transcript attachment card: icon tile + name + "kind · size" meta
+ * line + view hint. Used by BOTH the live send path (chat.ts) and the session
+ * restore path (main.ts) so a reloaded transcript renders identical cards.
  */
-export function guessPasteName(content: string): string {
-  const head = content.slice(0, 2000).trim();
-  const base = `pasted-${pasteStamp()}`;
-  if (/^[\{\[]/.test(head) && /["']/.test(head)) return `${base}.json`;
-  if (head.includes('```') || /^#{1,6}\s/m.test(head)) return `${base}.md`;
-  const lines = head.split('\n').filter(l => l.trim().length > 0);
-  if (lines.length >= 2) {
-    const count = (l: string) => l.split(/[,;\t]/).length;
-    const first = count(lines[0]);
-    if (first >= 2 && lines.every(l => count(l) === first)) return `${base}.csv`;
-  }
-  return `${base}.txt`;
+export function renderAttachmentCard(attachment: StoredAttachmentLike, onOpen: () => void): HTMLButtonElement {
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = `attachment-card attachment-card-${attachment.kind}`;
+  card.title = `${attachment.path || t('paste.memory')}\n${t('paste.viewContent')}`;
+  const icon = document.createElement('span');
+  icon.className = 'attachment-card-icon';
+  icon.textContent = fileIconOf(attachment.name, attachment.kind);
+  icon.setAttribute('aria-hidden', 'true');
+  const body = document.createElement('span');
+  body.className = 'attachment-card-body';
+  const name = document.createElement('span');
+  name.className = 'attachment-card-name';
+  name.textContent = attachment.name;
+  const meta = document.createElement('span');
+  meta.className = 'attachment-card-meta';
+  meta.textContent = `${attachmentKindLabel(attachment.kind)} · ${formatBytes(attachment.size)}${attachment.path ? '' : ` · ${t('paste.memory')}`}`;
+  body.append(name, meta);
+  const eye = document.createElement('span');
+  eye.className = 'attachment-card-eye';
+  eye.innerHTML = EYE_ICON_SVG;
+  eye.setAttribute('aria-hidden', 'true');
+  card.append(icon, body, eye);
+  card.setAttribute('role', 'button');
+  card.tabIndex = 0;
+  card.addEventListener('click', onOpen);
+  card.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') {
+      ev.preventDefault();
+      onOpen();
+    }
+  });
+  return card;
 }
 
 /** Read a pasted File as a data: URL (used for thumbnails and the viewer). */
@@ -231,7 +292,7 @@ export function composeMessageWithAttachments(text: string, attachments: PasteAt
         .replace('{name}', a.name)
         .replace('{size}', formatBytes(a.size));
       if (a.path) {
-        parts.push(`${marker}\n${a.path}\n请先使用 read_file 读取这个文件的内容，再继续处理用户请求。`);
+        parts.push(`${marker}\n${a.path}\n请先用 read_file 按原样读取上面的绝对路径（这是应用保存的附件文件，路径可直接使用，不要改写成相对路径或拼接工作区前缀），再继续处理用户请求。`);
       } else {
         const fallback = a.content.slice(0, LONG_TEXT_MEMORY_FALLBACK_LIMIT);
         parts.push(`${marker}\n[浏览器开发模式内存回退，文件未成功保存]\n${fallback}`);
@@ -283,7 +344,7 @@ export class PasteChipManager {
   addLongText(text: string): PasteAttachment | null {
     if ([...text].length <= PASTE_FILE_THRESHOLD) return null;
     const id = `text-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const name = guessPasteName(text).replace(/\.(\w+)$/, `-${id.slice(-6)}.$1`);
+    const name = purePasteName();
     const attachment: PasteAttachment = { id, name, size: text.length, content: text, path: '', kind: 'text', dataUrl: '' };
     this.attachments.push(attachment);
     this.render();
@@ -349,7 +410,7 @@ export class PasteChipManager {
     // A random suffix keeps two pastes inside the same second from colliding
     // on disk (the second save would otherwise overwrite the first).
     const id = `paste-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const name = guessPasteName(text).replace(/\.(\w+)$/, `-${id.slice(-6)}.$1`);
+    const name = purePasteName();
     const att: PasteAttachment = { id, name, size: text.length, content: text, path: '', kind: 'text', dataUrl: '' };
     this.attachments.push(att);
     this.render();
@@ -616,6 +677,24 @@ export class PasteChipManager {
     meta.className = 'paste-viewer-meta';
     meta.textContent = `${formatBytes(att.size)}${att.path ? ` · ${att.path}` : ''}`;
     title.append(nameEl, meta);
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'paste-viewer-copy';
+    copyBtn.type = 'button';
+    copyBtn.title = t('paste.copy');
+    copyBtn.setAttribute('aria-label', t('paste.copy'));
+    if (att.kind !== 'text') copyBtn.hidden = true;
+    copyBtn.innerHTML = COPY_ICON_SVG;
+    copyBtn.addEventListener('click', async () => {
+      const pre = this.viewerEl?.querySelector('.paste-viewer-pre');
+      if (!pre?.textContent) return;
+      const copied = await copyTextToClipboard(pre.textContent);
+      if (copied) {
+        copyBtn.textContent = '✓';
+        setTimeout(() => { copyBtn.innerHTML = COPY_ICON_SVG; }, 1200);
+      } else {
+        console.error('[pure] viewer copy failed');
+      }
+    });
     const closeBtn = document.createElement('button');
     closeBtn.className = 'paste-viewer-close';
     closeBtn.type = 'button';
@@ -623,7 +702,10 @@ export class PasteChipManager {
     closeBtn.setAttribute('aria-label', t('paste.close'));
     closeBtn.innerHTML = CLOSE_ICON_SVG;
     closeBtn.addEventListener('click', () => this.closeViewer());
-    header.append(title, closeBtn);
+    const actions = document.createElement('div');
+    actions.className = 'paste-viewer-actions';
+    actions.append(copyBtn, closeBtn);
+    header.append(title, actions);
 
     const body = document.createElement('div');
     body.className = 'paste-viewer-body';

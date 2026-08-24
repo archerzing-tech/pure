@@ -5,6 +5,7 @@ import {
   Planner,
 } from '../coding-agent/Planner';
 import type { AnalysisResult, IntentAssessment, SemanticRouteDecision, TaskMode } from '../coding-agent/types';
+import { detectUiDesignRequest } from './delivery';
 import { INCREMENTAL_BUILD_PROMPT } from './agentBehavior';
 import { SKIP_PLAUSIBILITY_REVIEW_PROMPT, type UserTurnContext } from './promptLayers';
 
@@ -31,6 +32,10 @@ export interface CompiledRequestWorkflow {
   analysis: AnalysisResult;
   stage: RequestWorkflowStage;
   needsDeliveryGate: boolean;
+  /** UI-building requests go through a design-first phase: the agent produces
+   * a static design mockup and waits for user confirmation before writing any
+   * implementation code. */
+  needsDesignPhase: boolean;
   probeRequired: boolean;
   probeAvailable: boolean;
   needsProbe: boolean;
@@ -91,6 +96,11 @@ export function compileRequestWorkflow(
     || analysis.mode === 'build'
     || semantic?.needsDeliveryGate === true
     || options.continuingProjectBuild === true;
+  // Design-first applies to project builds that look like UI work. A
+  // continuing build keeps its original routing decision (the marker only
+  // matters for the FIRST implementation turn).
+  const needsDesignPhase = needsDeliveryGate && !options.continuingPlan
+    && detectUiDesignRequest(prompt);
   const probeRequired = assessment.requiresProbe
     || semantic?.requiresPlan === true
     || needsDeliveryGate;
@@ -131,6 +141,7 @@ export function compileRequestWorkflow(
     analysis,
     stage,
     needsDeliveryGate,
+    needsDesignPhase,
     probeRequired,
     probeAvailable,
     needsProbe,

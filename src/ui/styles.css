@@ -7404,6 +7404,111 @@ button svg,
   border-radius: calc(var(--radius-sm) - 1px);
 }
 
+/* Attachment card in the transcript (live send + restored sessions): icon
+   tile, name, "kind · size" meta line, and a view hint on the right. */
+.attachment-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+  max-width: min(340px, 100%);
+  min-height: 44px;
+  padding: 6px 12px 6px 6px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-card) 92%, var(--accent-soft));
+  box-shadow: var(--shadow-sm);
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition), transform var(--transition);
+}
+
+.attachment-card:hover,
+.attachment-card:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft);
+  box-shadow: var(--shadow-md);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.attachment-card-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  font-size: 18px;
+  background: var(--accent-soft);
+}
+
+.attachment-card-body {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.attachment-card-name {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-card-meta {
+  overflow: hidden;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-card-eye {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  opacity: 0.55;
+  transition: opacity var(--transition), color var(--transition);
+}
+
+.attachment-card:hover .attachment-card-eye,
+.attachment-card:focus-visible .attachment-card-eye {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.paste-viewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Copy button inside the attachment viewer header. */
+.paste-viewer-copy {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition);
+}
+
+.paste-viewer-copy:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 /* ── Attachment chips and merged composer ── */
 .paste-chips {
   display: flex;
@@ -8375,45 +8480,126 @@ button svg,
   background: var(--accent-soft);
 }
 
-/* Mode / model dropdowns: frameless selects with a soft hover chip and a
-   chevron drawn via background-image (no <select> chrome). */
-.composer-select {
-  appearance: none;
-  -webkit-appearance: none;
-  border: 0;
-  background-color: transparent;
-  color: var(--text-secondary);
-  color-scheme: light;
-  font: 500 12px/1.4 var(--font-sans);
-  padding: 5px 22px 5px 9px;
-  border-radius: 8px;
-  cursor: pointer;
-  max-width: 180px;
+/* Mode / model dropdowns: CUSTOM in-page dropdowns (ComposerSelect). Native
+   <select> popups are dismissed instantly by WKWebView under Tauri's drag-drop
+   handler, so the trigger + listbox are drawn in-page instead. */
+.composer-select-host {
+  display: inline-flex;
   min-width: 0;
-  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239B9995' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 7px center;
+  max-width: 180px;
 }
 
-.composer-select:hover,
-.composer-select:focus-visible {
+.composer-select-host.composer-select-model {
+  max-width: 230px;
+}
+
+.cs-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 8px;
+  background-color: transparent;
+  color: var(--text-secondary);
+  font: 500 12px/1.4 var(--font-sans);
+  cursor: pointer;
+  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out);
+}
+
+.cs-trigger:hover,
+.cs-trigger:focus-visible,
+.cs-trigger.open {
   background-color: var(--bg-hover);
   color: var(--text);
   outline: none;
 }
 
-.composer-select option {
-  background-color: var(--bg-card);
+.cs-trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.cs-trigger-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cs-trigger-chevron {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: #9b9995;
+  transition: transform 0.15s var(--ease-out);
+}
+
+.cs-trigger.open .cs-trigger-chevron {
+  transform: rotate(180deg);
+}
+
+.cs-popup {
+  position: fixed;
+  z-index: 1200;
+  min-width: 200px;
+  max-width: 340px;
+  max-height: min(360px, 60vh);
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-card) 97%, transparent);
+  box-shadow: var(--shadow-lg);
+  animation: csPopIn 0.14s var(--ease-out) both;
+}
+
+@keyframes csPopIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.cs-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cs-item.active {
+  background: var(--bg-hover);
   color: var(--text);
 }
 
-[data-theme="dark"] .composer-select {
-  color-scheme: dark;
+.cs-item[aria-selected="true"] {
+  color: var(--text);
+  font-weight: 600;
 }
 
-.composer-select-model {
-  max-width: 230px;
+.cs-item-check-slot {
+  display: grid;
+  place-items: center;
+  flex: 0 0 14px;
+  color: var(--accent);
+}
+
+.cs-item-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cs-item-hint {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: 10px;
 }
 
 .composer-spacer {
@@ -11139,3 +11325,49 @@ button svg,
 [data-theme="dark"] .provider-mark-openai { background: #1d3b2c; color: #7fd6a4; }
 [data-theme="dark"] .provider-mark-openrouter { background: #2e2850; color: #b4a6f0; }
 [data-theme="dark"] .provider-mark-nvidia { background: #203b1d; color: #8fd67e; }
+
+/* ── Design-first preview card (UI builds: mockup review before implementation) ── */
+.design-preview-row { display: flex; justify-content: flex-start; }
+.design-preview-card {
+  width: min(560px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.design-preview-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px; font-weight: 600;
+}
+.design-preview-file {
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--surface-alt, rgba(127,127,127,.12));
+  padding: 2px 8px; border-radius: 999px;
+}
+.design-preview-note { padding: 10px 14px 0; font-size: 12.5px; color: var(--text-secondary); line-height: 1.55; }
+.design-preview-frame {
+  display: block; width: calc(100% - 24px);
+  height: 380px; margin: 10px 12px 0;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: #fff;
+}
+[data-theme="dark"] .design-preview-frame { background: #fff; }
+.design-preview-actions { display: flex; justify-content: flex-end; padding: 10px 14px 14px; }
+.design-preview-confirm {
+  border: none; cursor: pointer;
+  padding: 7px 14px; border-radius: 9px;
+  font-size: 12.5px; font-weight: 600;
+  background: var(--accent); color: var(--accent-contrast, #fff);
+  transition: opacity var(--transition), transform var(--transition);
+}
+.design-preview-confirm:hover:not(:disabled) { transform: translateY(-1px); }
+.design-preview-confirm:disabled { opacity: .6; cursor: default; }
+.design-preview-row.confirmed .design-preview-card { border-color: var(--success); }
+@media (prefers-reduced-motion: reduce) {
+  .design-preview-confirm { transition: none; }
+}

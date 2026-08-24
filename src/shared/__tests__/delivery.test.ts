@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, discoverWorkspace, formatTaskContract, isBareWorkspace } from '../delivery';
+import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, formatDeliveryPipeline, formatTaskContract, DESIGN_READY_MARKER, isBareWorkspace, parseDesignReadyMarker } from '../delivery';
 import type { ToolAdapter, ToolCall, ToolResult } from '../types';
 
 function adapter(listing: string, packageJson = ''): ToolAdapter {
@@ -101,5 +101,27 @@ describe('delivery failure classification', () => {
     expect(classifyDeliveryFailure('expected 2 received 1')).toBe('test_failure');
     expect(classifyDeliveryFailure('TS2345: type error')).toBe('typecheck_failure');
     expect(classifyDeliveryFailure('vite build failed')).toBe('build_failure');
+  });
+});
+
+describe('design-first phase (UI builds)', () => {
+  it('detects UI-building requests for the design-first phase', () => {
+    expect(detectUiDesignRequest('帮设计4个不同风格的企业网站，企业是卖三蹦子小电动车的')).toBe(true);
+    expect(detectUiDesignRequest('做一个后台管理系统 dashboard')).toBe(true);
+    expect(detectUiDesignRequest('修复这个页面的报错 bug')).toBe(false);
+  });
+
+  it('carries the design protocol in formatDeliveryPipeline only when requested', () => {
+    const withDesign = formatDeliveryPipeline(undefined, true);
+    expect(withDesign).toContain('设计先行');
+    expect(withDesign).toContain(DESIGN_READY_MARKER);
+    const withoutDesign = formatDeliveryPipeline(undefined, false);
+    expect(withoutDesign.indexOf('设计先行')).toBe(-1);
+  });
+
+  it('extracts the mockup file from the ready marker, null when absent', () => {
+    expect(parseDesignReadyMarker('前言\n## 设计稿已就绪：design.html\n停在这里等待确认。')).toBe('design.html');
+    expect(parseDesignReadyMarker('没有标记的普通回复')).toBeNull();
+    expect(parseDesignReadyMarker('## 设计稿已就绪：\n(无文件名)')).toBeNull();
   });
 });

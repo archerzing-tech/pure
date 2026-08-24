@@ -325,9 +325,196 @@ export function buildTaskContract(request: string, profile: WorkspaceProfile): T
 export function formatTaskContract(contract: TaskContract): string {
   const criteria = contract.acceptanceCriteria
     .map((criterion) => `- ${criterion.id}：${criterion.description}${criterion.verification ? `（验证：${criterion.verification}）` : ''}`)
-    .join('\\n');
-  const scope = contract.scope.map((item) => `- ${item}`).join('\\n');
-  const constraints = contract.constraints.map((item) => `- ${item}`).join('\\n');
-  const outOfScope = contract.outOfScope.map((item) => `- ${item}`).join('\\n');
+    .join('\n');
+  const scope = contract.scope.map((item) => `- ${item}`).join('\n');
+  const constraints = contract.constraints.map((item) => `- ${item}`).join('\n');
+  const outOfScope = contract.outOfScope.map((item) => `- ${item}`).join('\n');
   return `<delivery_contract>\n目标：${contract.goal}\n范围：\n${scope}\n验收标准：\n${criteria}\n约束：\n${constraints}\n不包含：\n${outOfScope}\n</delivery_contract>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Delivery verification pipeline (agent-driven loop + deterministic backstop)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Replaces the old post-hoc "交付前测试与审计" gate (LLM VERDICT parsing +
+// separate audit runner), which was brittle and slow. The model now runs the
+// pipeline ITSELF as the final plan stage (Claude-Code-style verification
+// loop), and the GUI re-runs only the mechanical checks at turn end as a
+// deterministic stop-gate with a bounded auto-fix loop.
+
+/** Design-phase marker the model emits when a UI design mockup is ready for
+ * user review. The GUI scans assistant output for this line, renders the
+ * mockup in a preview card, and pauses implementation until the user
+ * confirms. */
+export const DESIGN_READY_MARKER = '## 设计稿已就绪：';
+
+/** Extract the design mockup file name from a DESIGN_READY_MARKER line in the
+ * assistant output (e.g. `## 设计稿已就绪：design.html` → `design.html`).
+ * Returns null when the marker is absent or names no file. */
+export function parseDesignReadyMarker(text: string): string | null {
+  const match = text.match(/##\s*设计稿已就绪：[^\S\n]*([^\s\n]+)/);
+  return match ? match[1] : null;
+}
+
+/** True when the request looks like a UI-building task that should go through
+ * the design-first phase (design mockup → user confirmation → implement). */
+export function detectUiDesignRequest(prompt: string): boolean {
+  return /(?:网页|网站|站点|页面|界面|前端|落地页|官网|首页|后台|管理端|控制台|仪表盘|大屏|可视化|dashboard|landing|web\s*app|web\s*site|website|网页应用|html|css|ui|ux|界面设计|交互设计|视觉|样式|海报|海报页|小程序|h5)/i.test(prompt)
+    && !/(?:修复|修一下|bug|报错|重构(?!.*界面)|重构成|优化性能|性能优化)/i.test(prompt);
+}
+
+/**
+ * Build the delivery-pipeline prompt injected into the user turn for project
+ * build tasks. The pipeline IS the final plan stage: the model reviews its own
+ * code, then runs typecheck → unit tests → e2e/build checks with the exact
+ * commands discovered from the workspace, fixing root causes and re-running
+ * until everything passes. Evidence (command + real result) is mandatory.
+ */
+export function formatDeliveryPipeline(profile: WorkspaceProfile | undefined, needsDesignPhase = false): string {
+  const commands = profile && profile.verification.length > 0
+    ? profile.verification.map((spec) => `- ${spec.label}：\`${spec.command}\`${spec.required ? '' : '（可选）'}`).join('\n')
+    : '- 先探明项目的验证入口（package.json scripts / Cargo.toml / pyproject.toml），没有标准入口时先补齐测试基础设施再验证。';
+  const designSection = needsDesignPhase
+    ? `\n设计先行（必须遵守）：这是有界面的工程，写任何实现代码之前，先创建一个自包含的静态设计稿 design.html（内联 CSS，不依赖构建工具，展示布局、配色、字体和关键界面/组件的实际视觉效果），然后单独输出一行控制标记「${DESIGN_READY_MARKER}design.html」并立即停止，等待用户在预览卡中确认。用户确认前禁止开始实现；用户提出调整意见时先修改设计稿再重新等确认。确认后严格按照 design.html 的设计实现。`
+    : '';
+  return `<delivery_pipeline>
+交付验证管线（项目交付的唯一完成标准，按顺序执行）：
+1. 代码检视：实现完成后，用 git_diff / 重读改动文件的方式审查自己的代码——正确性、边界条件、与需求的一致性；发现的问题当场修复。
+2. Typecheck：运行项目声明的类型/编译检查。
+3. 单元测试：运行项目的自动化测试；没有测试基础设施时先补齐再运行。
+4. 端到端验证：运行构建/启动/端到端检查，确认产物真实可用。
+
+本工作区发现的验证命令（必须真实执行，不得跳过或虚构结果）：
+${commands}
+
+规则：
+- 任何一步失败：定位根因并修复，然后从失败的那一步重新执行——循环直到全部通过，禁止带着失败的检查宣布完成。
+- 每一步在回复中给出真实证据（执行的命令 + 关键结果摘要），禁止只说"已通过"。
+- 把交付验证管线作为计划的最后一个阶段执行（阶段名：交付验证），四个步骤用子步骤标记逐步推进。
+- 工具、权限或网络原因导致某步无法执行时，如实标记为受阻并说明原因，不得伪造通过。${designSection}
+</delivery_pipeline>`;
+}
+
+// ── Deterministic delivery verification (end-of-turn backstop) ──
+
+/** Heuristic: does this shell command look like a verification step
+ * (typecheck / test / build / lint)? Used to recognize the model's own
+ * verification commands in the live tool stream. */
+export function isVerificationCommand(command: string): boolean {
+  return /(?:npm run (?:typecheck|test|build|lint|check|verify)|npm test|bun (?:test|run (?:typecheck|test|build|lint|check))|pnpm (?:test|run (?:typecheck|test|build|lint|check))|tsc(?: --noEmit)?|cargo (?:test|build|check|clippy)|pytest|python -m pytest|vitest|jest|go test|make (?:test|check)|flutter test|flutter analyze)/i.test(command);
+}
+
+export interface DeliveryStepResult {
+  id: string;
+  label: string;
+  command: string;
+  status: 'passed' | 'failed' | 'skipped';
+  exitCode?: number;
+  durationMs: number;
+  output: string;
+  failureKind?: DeliveryFailureKind;
+}
+
+export interface DeliveryVerificationResult {
+  passed: boolean;
+  steps: DeliveryStepResult[];
+}
+
+const DELIVERY_STEP_TIMEOUT_MS = 180_000;
+const DELIVERY_OUTPUT_MAX_CHARS = 6_000;
+
+function deliveryCall(toolName: string, args: Record<string, unknown>): ToolCall {
+  return {
+    id: `delivery_${toolName}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    index: 0,
+    function: { name: toolName, arguments: JSON.stringify(args) },
+  };
+}
+
+/**
+ * Run the workspace's mechanical verification specs (typecheck → lint → test →
+ * build) one by one and collect real evidence for each. This is the
+ * deterministic stop-gate behind the agent-driven pipeline: it never parses
+ * model claims, only command results. A missing verification plan or a
+ * bare/static workspace counts as not_applicable → passed (nothing mechanical
+ * to verify), matching the honest "no standard entry" reporting upstream.
+ */
+export async function runDeliveryVerification(
+  tools: ToolAdapter,
+  profile: WorkspaceProfile | undefined,
+  signal?: AbortSignal,
+  onStep?: (step: DeliveryStepResult) => void,
+): Promise<DeliveryVerificationResult> {
+  if (!profile || profile.verification.length === 0) {
+    return { passed: true, steps: [] };
+  }
+  const steps: DeliveryStepResult[] = [];
+  for (const spec of profile.verification) {
+    if (signal?.aborted) break;
+    const start = Date.now();
+    let result: ToolResult | null = null;
+    try {
+      result = await new Promise<ToolResult | null>((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => finish(null), spec.timeoutMs ?? DELIVERY_STEP_TIMEOUT_MS);
+        const onAbort = (): void => finish(null);
+        const finish = (value: ToolResult | null): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          resolve(value);
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        tools.execute(deliveryCall('execute_command', { command: spec.command }), signal).then(finish, () => finish(null));
+      });
+    } catch {
+      result = null;
+    }
+    const durationMs = Date.now() - start;
+    const output = (typeof result?.result === 'string' ? result.result : result?.error ?? '').slice(0, DELIVERY_OUTPUT_MAX_CHARS);
+    const timedOut = result === null && !signal?.aborted;
+    const environmentBlocked = !timedOut && result !== null
+      && classifyDeliveryFailure(output, result.success ? 0 : 1) === 'tool_unavailable';
+    const step: DeliveryStepResult = result === null || result.success !== true
+      ? {
+        id: spec.id,
+        label: spec.label,
+        command: spec.command,
+        status: (signal?.aborted || (environmentBlocked && !spec.required)) ? 'skipped' : 'failed',
+        exitCode: result ? -1 : undefined,
+        durationMs,
+        output: timedOut ? `命令超时（>${Math.round((spec.timeoutMs ?? DELIVERY_STEP_TIMEOUT_MS) / 1000)}s）` : output,
+        failureKind: timedOut ? 'timeout' : result ? classifyDeliveryFailure(output, 1) : 'tool_unavailable',
+      }
+      : {
+        id: spec.id,
+        label: spec.label,
+        command: spec.command,
+        status: 'passed',
+        exitCode: 0,
+        durationMs,
+        output,
+      };
+    steps.push(step);
+    onStep?.(step);
+    if (step.status === 'failed' && spec.required) break;
+  }
+  return { passed: steps.every((s) => s.status !== 'failed'), steps };
+}
+
+/** Compact human-readable summary of a backstop run for status bubbles. */
+export function deliveryVerificationSummary(result: DeliveryVerificationResult): string {
+  if (result.steps.length === 0) return '本工作区没有标准机械验证入口（静态页面或空工作区）';
+  return result.steps
+    .map((s) => `${s.status === 'passed' ? '✅' : s.status === 'skipped' ? '⏭️' : '❌'} ${s.label}（${s.command}）`)
+    .join('；');
+}
+
+/** Build the fix-round prompt sent back to the model when the deterministic
+ * backstop fails. Carries the REAL failing output so the model fixes root
+ * causes instead of guessing. */
+export function formatDeliveryFixPrompt(result: DeliveryVerificationResult): string {
+  const failures = result.steps.filter((s) => s.status === 'failed');
+  const lines = failures.map((s) => `### ${s.label} 失败（${s.command}）\n\`\`\`\n${s.output || '(无输出)'}\n\`\`\``).join('\n\n');
+  return `交付验证未通过，以下是真实失败输出：\n\n${lines}\n\n请修复根因（不要掩盖或跳过失败），然后重新运行失败的检查以及它之后的所有检查，直到交付验证管线全部通过。`;
 }

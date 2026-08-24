@@ -148,7 +148,7 @@ export function buildGuiCapabilities(hasWorkspace: boolean, temporaryWorkspace =
       ? '\nWorkspace: no user workspace is selected, so file changes go to an isolated application temporary workspace for this session.'
       : ''
     : '\nWorkspace: none selected — no local filesystem or shell access. Open Settings → Tools to add a workspace.';
-  const fileTools = `${FILE_TOOLS_CORE}\n\nPath rule: pass file and directory paths relative to the selected workspace root (for example src/app.ts, not the workspace absolute path). The backend also accepts an absolute path only when it is inside the selected workspace; never invent or prepend the workspace twice.`;
+  const fileTools = `${FILE_TOOLS_CORE}\n\nPath rule: pass file and directory paths relative to the selected workspace root when a relative path is natural (for example src/app.ts). Absolute paths anywhere on disk are ALSO accepted exactly as given — including attachment files Pure saved for you under the app-managed ".pure/workspace" directory inside the user home (pasted long text, dropped attachments); read those with their exact absolute path, never rewritten to a relative path or prefixed with the workspace.`;
   const tools = hasWorkspace
     ? `${GUI_WEB_TOOLS_PROMPT}\n\n${fileTools}\n\n${GUI_SYS_INFO_PROMPT}`
     : `${GUI_WEB_TOOLS_PROMPT}\n\n${GUI_SYS_INFO_PROMPT}`;
