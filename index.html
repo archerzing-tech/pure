@@ -140,11 +140,11 @@
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                     </button>
                     <button id="landing-compact-btn" class="input-copy-btn compact-context-btn" type="button" data-i18n-title="context.compact.title" data-i18n-aria-label="context.compact.title" title="压缩上下文" aria-label="压缩上下文">⌁</button>
-                    <select id="landing-mode-select" class="composer-select" data-i18n-title="composer.mode.title" title="任务模式" aria-label="任务模式"></select>
+                    <div id="landing-mode-select" class="composer-select-host" data-i18n-title="composer.mode.title" title="任务模式" aria-label="任务模式"></div>
                     <button id="landing-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
                       <svg class="wp-folder-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                     </button>
-                    <select id="landing-model-select" class="composer-select composer-select-model" data-i18n-title="composer.model.title" title="模型" aria-label="模型"></select>
+                    <div id="landing-model-select" class="composer-select-host composer-select-model" data-i18n-title="composer.model.title" title="模型" aria-label="模型"></div>
                     <button id="landing-undo-write-btn" class="input-copy-btn undo-write-btn" type="button" title="撤销最近一次写入" aria-label="撤销最近一次写入" hidden>↶</button>
                     <span class="composer-spacer"></span>
                     <button id="landing-send-btn" data-i18n-title="input.send.title" data-i18n-aria-label="input.send.title" aria-label="发送">
@@ -174,11 +174,11 @@
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
                 <button id="compact-btn" class="input-copy-btn compact-context-btn" type="button" data-i18n-title="context.compact.title" data-i18n-aria-label="context.compact.title" title="压缩上下文" aria-label="压缩上下文">⌁</button>
-                <select id="composer-mode-select" class="composer-select" data-i18n-title="composer.mode.title" title="任务模式" aria-label="任务模式"></select>
+                <div id="composer-mode-select" class="composer-select-host" data-i18n-title="composer.mode.title" title="任务模式" aria-label="任务模式"></div>
                 <button id="input-ws-btn" class="input-ws-btn" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
                   <svg class="wp-folder-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 </button>
-                <select id="composer-model-select" class="composer-select composer-select-model" data-i18n-title="composer.model.title" title="模型" aria-label="模型"></select>
+                <div id="composer-model-select" class="composer-select-host composer-select-model" data-i18n-title="composer.model.title" title="模型" aria-label="模型"></div>
                 <button id="undo-write-btn" class="input-copy-btn undo-write-btn" type="button" title="撤销最近一次写入" aria-label="撤销最近一次写入" hidden>↶</button>
                 <span class="composer-spacer"></span>
                 <button id="send-btn" data-i18n-title="input.send.title" data-i18n-aria-label="input.send.title" aria-label="发送" disabled>
@@ -384,7 +384,7 @@
                 </div>
                 <div class="settings-section">
                   <div class="setting-row">
-                    <div class="setting-info"><span class="setting-label" data-i18n="tmp.title">Temp pasted files</span><span class="setting-hint" data-i18n="tmp.desc">Clean pasted files in ~/.pure/tmp older than N days</span></div>
+                    <div class="setting-info"><span class="setting-label" data-i18n="tmp.title">Temp pasted files</span><span class="setting-hint" data-i18n="tmp.desc">Clean pasted files in ~/.pure/workspace older than N days</span></div>
                   </div>
                   <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="tmp.usage">Current usage</span><span class="setting-hint" id="tmp-usage">—</span></div>

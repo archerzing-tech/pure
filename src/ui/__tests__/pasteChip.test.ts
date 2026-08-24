@@ -1,17 +1,28 @@
 // src/ui/__tests__/pasteChip.test.ts
 
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
+import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import {
   PASTE_FILE_THRESHOLD,
-  guessPasteName,
+  purePasteName,
+  pureStamp,
   imageExtOf,
   fileIconOf,
   composeMessageWithAttachments,
   classifyUploadFile,
   isDocFileName,
   UPLOAD_LIMITS,
+  renderAttachmentCard,
   type PasteAttachment,
 } from '../pasteChip';
+
+beforeAll(() => {
+  if (typeof document === 'undefined') GlobalRegistrator.register();
+});
+
+afterAll(() => {
+  if (typeof document !== 'undefined') GlobalRegistrator.unregister();
+});
 
 function att(name: string, content: string): PasteAttachment {
   return { id: 'a1', name, size: content.length, content, path: '/tmp/x/' + name, kind: 'text', dataUrl: '' };
@@ -50,33 +61,47 @@ describe('classifyUploadFile (upload limits)', () => {
     expect(classifyUploadFile('big.pdf', 'application/pdf', UPLOAD_LIMITS.MAX_UPLOAD_BYTES + 1)).toBeNull();
   });
 });
-describe('guessPasteName', () => {
-  it('uses the 350 code-point boundary consistently', () => {
-    expect(PASTE_FILE_THRESHOLD).toBe(350);
-    expect([...('😀'.repeat(350))].length).toBe(350);
+describe('purePasteName', () => {
+  it('uses the 500 code-point boundary consistently (0.5k)', () => {
+    expect(PASTE_FILE_THRESHOLD).toBe(500);
+    expect([...('😀'.repeat(500))].length).toBe(500);
   });
 
-  it('detects JSON payloads', () => {
-    expect(guessPasteName('{"a": 1, "b": [1,2,3]}')).toMatch(/\.json$/);
-    expect(guessPasteName('[{"x":1},{"x":2}]')).toMatch(/\.json$/);
+  it('produces the pure-<timestamp>.txt naming scheme', () => {
+    expect(purePasteName()).toMatch(/^pure-\d{8}-\d{6}-[a-z0-9]{4}\.txt$/);
   });
 
-  it('detects markdown fences and headings', () => {
-    expect(guessPasteName('```ts\nconst a = 1\n```')).toMatch(/\.md$/);
-    expect(guessPasteName('# Title\n\nsome body')).toMatch(/\.md$/);
+  it('stamps names with the local time and avoids same-second collisions', () => {
+    expect(pureStamp()).toMatch(/^\d{8}-\d{6}$/);
+    const seen = new Set<string>();
+    for (let i = 0; i < 50; i++) seen.add(purePasteName());
+    expect(seen.size).toBe(50);
+  });
+});
+
+describe('renderAttachmentCard', () => {
+  it('builds a clickable card with icon, name, and kind/size meta', () => {
+    const card = renderAttachmentCard(
+      { name: 'pure-20260824-120000-ab12.txt', path: '/tmp/pure-20260824-120000-ab12.txt', size: 2048, kind: 'text' },
+      () => {},
+    );
+    expect(card.className).toContain('attachment-card');
+    expect(card.className).toContain('attachment-card-text');
+    expect(card.querySelector('.attachment-card-name')?.textContent).toBe('pure-20260824-120000-ab12.txt');
+    expect(card.querySelector('.attachment-card-meta')?.textContent).toContain('2.0 KB');
+    const icon = card.querySelector<HTMLElement>('.attachment-card-icon');
+    expect(icon?.textContent?.length).toBeGreaterThan(0);
+    expect(card.querySelector('.attachment-card-eye')).not.toBeNull();
   });
 
-  it('detects uniform CSV/TSV tables', () => {
-    expect(guessPasteName('a,b,c\n1,2,3\n4,5,6')).toMatch(/\.csv$/);
-    expect(guessPasteName('a\tb\n1\t2\n3\t4')).toMatch(/\.csv$/);
-  });
-
-  it('falls back to .txt for plain prose', () => {
-    expect(guessPasteName('just some plain pasted text across\nmultiple lines here')).toMatch(/\.txt$/);
-  });
-
-  it('produces names with a timestamp prefix', () => {
-    expect(guessPasteName('hello world')).toMatch(/^pasted-\d{8}-\d{6}\.txt$/);
+  it('fires the open handler on click', () => {
+    let opened = false;
+    const card = renderAttachmentCard(
+      { name: 'notes.md', path: '/tmp/notes.md', size: 10, kind: 'text' },
+      () => { opened = true; },
+    );
+    card.click();
+    expect(opened).toBe(true);
   });
 });
 
@@ -194,7 +219,7 @@ describe('attachment presentation metadata', () => {
 });
 
 describe('paste threshold', () => {
-  it('exposes the 350 code-point cutoff the manager compares against', () => {
-    expect(PASTE_FILE_THRESHOLD).toBe(350);
+  it('exposes the 500 code-point cutoff the manager compares against', () => {
+    expect(PASTE_FILE_THRESHOLD).toBe(500);
   });
 });

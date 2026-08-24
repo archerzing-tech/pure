@@ -255,6 +255,11 @@ export interface UserTurnContext {
   clarifications?: string;
   /** Structured delivery contract discovered for THIS request/workspace. */
   contract?: string;
+  /** formatDeliveryPipeline() output — the agent-driven delivery verification
+   * pipeline (code review → typecheck → tests → e2e/build) with the exact
+   * commands discovered from THIS workspace, plus the design-first protocol
+   * for UI builds. */
+  deliveryPipeline?: string;
   /** Freebuff-style intent/risk assessment for THIS request. */
   assessment?: string;
   /** SKIP_PLAUSIBILITY_REVIEW_PROMPT — injected when the Planner
@@ -280,6 +285,7 @@ export function composeUserTurn(text: string, ctx: UserTurnContext = {}): string
   if (ctx.plan) parts.push(ctx.plan);
   if (ctx.clarifications) parts.push(ctx.clarifications);
   if (ctx.contract) parts.push(ctx.contract);
+  if (ctx.deliveryPipeline) parts.push(ctx.deliveryPipeline);
   if (ctx.assessment) parts.push(ctx.assessment);
   if (ctx.plausibilityOverride) parts.push(ctx.plausibilityOverride);
   if (parts.length === 0) return text;

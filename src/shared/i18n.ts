@@ -87,10 +87,7 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Thinking card ──
     'thinking.thinking': '思考',
     'thinking.done': '思考完成',
-    'thinking.failed': '分析未完成',
-    'thinking.failedNote': '\n（实时分析未返回内容，已回退到通用步骤；执行中会结合实际情况调整。）',
-    'thinking.planned': '已生成任务计划',
-    'thinking.show': '查看思考过程',
+                'thinking.show': '查看思考过程',
 
     // ── Code block actions ──
     'codeBlock.copy': '复制',
@@ -743,10 +740,17 @@ const translations: Record<Language, Record<string, string>> = {
     'paste.imageTooLarge': '图片超过 25MB，未添加',
     'paste.binaryInfo': '这是 {type} 文件，已保存到应用临时目录。可从上方路径打开。',
     'paste.unknownType': '未知类型',
+    'paste.kind.text': '文本文件',
+    'paste.kind.image': '图片',
+    'paste.kind.doc': '文档',
+    'paste.kind.binary': '文件',
+    'paste.viewContent': '查看内容',
+    'paste.copy': '复制内容',
+    'paste.copied': '已复制到剪贴板',
 
     // ── Temp paste files (Settings → General) ──
     'tmp.title': '临时粘贴文件',
-    'tmp.desc': '清理 ~/.pure/tmp 下超过 N 天的粘贴文件（不影响会话工作区文件）',
+    'tmp.desc': '清理 ~/.pure/workspace 下超过 N 天的粘贴文件（不影响会话工作区文件）',
     'tmp.usage': '当前占用',
     'tmp.usageNone': '无粘贴文件',
     'tmp.daysHint': '保留天数',
@@ -856,10 +860,7 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Thinking card ──
     'thinking.thinking': 'Thinking',
     'thinking.done': 'Thinking complete',
-    'thinking.failed': 'Analysis incomplete',
-    'thinking.failedNote': '\n(Real-time analysis returned no content; fell back to generic steps. Execution will adapt to what it finds.)',
-    'thinking.planned': 'Plan ready',
-    'thinking.show': 'Show thinking',
+                'thinking.show': 'Show thinking',
 
     // ── Code block actions ──
     'codeBlock.copy': 'Copy',
@@ -1512,10 +1513,17 @@ const translations: Record<Language, Record<string, string>> = {
     'paste.imageTooLarge': 'Image over 25MB, not attached',
     'paste.binaryInfo': 'This is a {type} file. It was saved in the app temp directory; use the path above to open it.',
     'paste.unknownType': 'unknown type',
+    'paste.kind.text': 'Text file',
+    'paste.kind.image': 'Image',
+    'paste.kind.doc': 'Document',
+    'paste.kind.binary': 'File',
+    'paste.viewContent': 'View content',
+    'paste.copy': 'Copy content',
+    'paste.copied': 'Copied to clipboard',
 
     // ── Temp paste files (Settings → General) ──
     'tmp.title': 'Temp pasted files',
-    'tmp.desc': 'Delete pasted files older than N days in ~/.pure/tmp (session workspace files are untouched)',
+    'tmp.desc': 'Delete pasted files older than N days in ~/.pure/workspace (session workspace files are untouched)',
     'tmp.usage': 'Current usage',
     'tmp.usageNone': 'No pasted files',
     'tmp.daysHint': 'Days to keep',
