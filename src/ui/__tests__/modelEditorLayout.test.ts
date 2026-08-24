@@ -53,8 +53,9 @@ describe('LLM page layout (default-model bar + provider grid)', () => {
     expect(styles).toContain('.llm-test-conn-btn {');
     expect(styles).toContain('.llm-test-conn-btn.llm-model-test-ok {');
     expect(styles).toContain('.llm-test-conn-btn.llm-model-test-fail {');
-    expect(styles).toContain('.composer-select option {\n  background-color: var(--bg-card);\n  color: var(--text);\n}');
-    expect(styles).toContain('[data-theme="dark"] .composer-select {\n  color-scheme: dark;\n}');
+    expect(styles).toContain('.cs-trigger {');
+    expect(styles).toContain('.cs-popup {\n  position: fixed;');
+    expect(styles).toContain('.cs-item[aria-selected="true"] {');
     expect(styles).toContain('.llm-model-row {');
     expect(styles).toContain('.llm-model-row-id {');
     expect(styles).toContain('.llm-model-row-name {');

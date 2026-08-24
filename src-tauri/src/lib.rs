@@ -5450,10 +5450,8 @@ fn cache_hash_key(parts: &[&str]) -> String {
 }
 
 fn web_cache_file() -> PathBuf {
-    let base = std::env::var("PURE_CACHE_DIR").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        format!("{}/.pure", home)
-    });
+    let base =
+        std::env::var("PURE_CACHE_DIR").unwrap_or_else(|_| format!("{}/.pure", pure_home_dir()));
     PathBuf::from(base).join("cache").join("web-cache.json")
 }
 
@@ -5479,12 +5477,7 @@ fn web_cache_enabled() -> bool {
 const MAP_TILE_CACHE_DEFAULT_MAX_BYTES: u64 = 200 * 1024 * 1024;
 
 fn map_tile_cache_dir() -> PathBuf {
-    let base = std::env::var("PURE_CACHE_DIR").unwrap_or_else(|_| {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".to_string());
-        format!("{}/.pure", home)
-    });
+    let base = std::env::var("PURE_CACHE_DIR").unwrap_or_else(|_| format!("{}/.pure", pure_home_dir()));
     PathBuf::from(base).join("cache").join("map-tiles")
 }
 
@@ -5801,12 +5794,7 @@ mod map_tile_cache_tests {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn app_skills_dir() -> PathBuf {
-    let base = std::env::var("PURE_SKILLS_DIR").unwrap_or_else(|_| {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".to_string());
-        format!("{}/.pure", home)
-    });
+    let base = std::env::var("PURE_SKILLS_DIR").unwrap_or_else(|_| format!("{}/.pure", pure_home_dir()));
     PathBuf::from(base).join("skills")
 }
 
@@ -8736,12 +8724,24 @@ async fn mcp_list(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Application Temporary Workspace (~/.pure/tmp/<session-id>/)
+//  Application Workspace (~/.pure/workspace/<session-id>/)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// User home directory. Windows does NOT set `HOME` (only `USERPROFILE`), so
+/// checking `HOME` alone would silently fall back to the process CWD and turn
+/// every saved path into a CWD-relative path the agent cannot resolve.
+fn pure_home_dir() -> String {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string())
+}
+
+/// Application-owned space for per-session working directories and input
+/// artifacts (pasted text, dropped files). Everything lives under
+/// ~/.pure/workspace so the agent can read every attachment with its exact
+/// absolute path (the GUI prompt tells the model these paths are valid).
 fn application_tmp_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".pure").join("tmp")
+    PathBuf::from(pure_home_dir()).join(".pure").join("workspace")
 }
 
 fn safe_session_component(session_id: &str) -> String {
@@ -8806,7 +8806,7 @@ fn decode_paste_image(data_base64: &str) -> Result<Vec<u8>, String> {
 
 /// The GUI turns oversized paste events (see pasteChip.ts, 64KB threshold)
 /// into a file chip instead of stuffing hundreds of KB into the textarea;
-/// this persists the content under ~/.pure/tmp/<session-id>/ and the chip
+/// this persists the content under ~/.pure/workspace/<session-id>/ and the chip
 /// double-click viewer reads it back from memory (path kept for reference).
 #[tauri::command]
 fn save_paste_file(session_id: String, name: String, content: String) -> Result<String, String> {
@@ -8819,7 +8819,7 @@ fn save_paste_file(session_id: String, name: String, content: String) -> Result<
 }
 
 /// The GUI turns pasted screenshots/images (see pasteChip.ts) into a thumbnail
-/// chip and persists the raw bytes here under ~/.pure/tmp/<session-id>/.
+/// chip and persists the raw bytes here under ~/.pure/workspace/<session-id>/.
 #[tauri::command]
 fn save_paste_image(
     session_id: String,
@@ -9021,7 +9021,7 @@ fn import_dropped_file_inner(
 
 /// Copy a user-dropped file into the application-owned session tmp directory.
 /// The source path comes from the OS drag/drop API, while the destination is
-/// always sanitized and collision-safe inside ~/.pure/tmp/<session-id>/.
+/// always sanitized and collision-safe inside ~/.pure/workspace/<session-id>/.
 #[tauri::command]
 fn import_dropped_file(
     session_id: String,
@@ -9038,12 +9038,12 @@ fn import_dropped_file(
 // ═══════════════════════════════════════════════════════════════════════════
 //  Temp paste-file cleanup (Settings → General → 清理临时文件)
 // ═══════════════════════════════════════════════════════════════════════════
-// Only `pasted-*` and `dropped-*` files (our own input artifacts) are ever
-// deleted — project files the agent wrote into a session tmp workspace (no user
-// workspace selected) are left alone. Input files live at <tmp>/<session-id>/
+// Only `pure-*`, `pasted-*` and `dropped-*` files (our own input artifacts) are
+// ever deleted — project files the agent wrote into a session tmp workspace (no
+// user workspace selected) are left alone. Input files live at <tmp>/<session-id>/
 // root, so the scan walks the session dirs one level deep.
 
-const PASTE_PREFIXES: &[&str] = &["pasted-", "dropped-"];
+const PASTE_PREFIXES: &[&str] = &["pasted-", "dropped-", "pure-"];
 
 struct PasteFileInfo {
     path: std::path::PathBuf,
@@ -9158,8 +9158,7 @@ fn cleanup_tmp_pastes(days: u64) -> Result<serde_json::Value, String> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn secrets_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".pure").join("secrets.json")
+    PathBuf::from(pure_home_dir()).join(".pure").join("secrets.json")
 }
 
 fn load_secrets() -> Result<serde_json::Value, String> {
@@ -9233,8 +9232,7 @@ fn secret_list() -> Result<Vec<String>, String> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".pure").join("config.json")
+    PathBuf::from(pure_home_dir()).join(".pure").join("config.json")
 }
 
 /// Read the user-editable app config. `Ok(None)` when the file is missing
@@ -10288,8 +10286,7 @@ struct SessionMeta {
 }
 
 fn sessions_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".pure").join("sessions")
+    PathBuf::from(pure_home_dir()).join(".pure").join("sessions")
 }
 
 fn workspace_override_path(session_id: &str) -> PathBuf {

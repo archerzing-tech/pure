@@ -4,14 +4,14 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { createPlanCard, createRestoredPlanCard, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers, QUALITY_GATE_STEPS } from '../plan';
+import { createPlanCard, createRestoredPlanCard, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers } from '../plan';
 import { t } from '../../shared/i18n';
 import type { Plan } from '../../coding-agent/types';
 import { PlanProgressModel } from '../planProgress';
 
 function createProgressCard(plan: Plan): { handle: ReturnType<typeof createPlanCard>; progress: PlanProgressModel } {
   const progress = new PlanProgressModel(plan);
-  return { handle: createPlanCard(plan, false, false, progress), progress };
+  return { handle: createPlanCard(plan, false, progress), progress };
 }
 
 describe('formatPlanForPrompt', () => {
@@ -127,39 +127,12 @@ describe('matchPlanPhaseMarker', () => {
   });
 });
 
-describe('QUALITY_GATE_STEPS (delivery checklist card)', () => {
-  it('keeps the quality gate visibly alive with activity, elapsed time, and cleanup hooks', () => {
+describe('delivery pipeline replaces the old quality-gate checklist card', () => {
+  it('keeps plan.ts free of the removed gate card implementation', () => {
     const src = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
-    const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
-    expect(src).toContain('quality-gate-live');
-    expect(src).toContain('quality-gate-evidence');
-    expect(src).toContain("status === 'degraded'");
-    expect(src).toContain('setEvidence(check: QualityGateCheck)');
-    expect(src).toContain('后台运行中');
-    expect(src).toContain('已用时');
-    expect(src).toContain('const setActivity = (message: string)');
-    expect(src).toContain("dispose(outcome: 'passed' | 'failed' | 'cancelled')");
-    expect(src).toContain('clearInterval(timer)');
-    expect(src).toContain("检查已取消");
-    expect(src).toContain("!el.isConnected");
-    expect(src).toContain('Do not start the timer here');
-    expect(css).toContain('.quality-gate-live.active .quality-gate-live-dot');
-    expect(css).toContain('@keyframes quality-gate-pulse');
-    expect(css).toContain('@keyframes quality-gate-sweep');
-    expect(css).toContain('prefers-reduced-motion');
-    expect(css).toContain('.quality-gate-live.failed .quality-gate-live-dot');
-  });
-
-  it('lists the verification steps in gate execution order', () => {
-    expect(QUALITY_GATE_STEPS.map((s) => s.phase)).toEqual(['review', 'audit', 'verify']);
-  });
-
-  it('describes each step in user-facing language, not internal phrasing', () => {
-    for (const step of QUALITY_GATE_STEPS) {
-      expect(step.action.length).toBeGreaterThan(0);
-      expect(step.description.length).toBeGreaterThan(10);
-      expect(step.description).not.toMatch(/Understand|Plan|Implement|Verify|How to/i);
-    }
+    expect(src.indexOf('createQualityGateCard')).toBe(-1);
+    expect(src.indexOf('quality-gate-live')).toBe(-1);
+    expect(src.indexOf('quality-gate-evidence')).toBe(-1);
   });
 });
 
@@ -476,7 +449,7 @@ describe('completed plan step presentation', () => {
     expect(css).toContain('.plan-progress-step-check');
     expect(plainCss).toContain('.plan-progress-steps > .plan-progress-step');
     expect(plainCss).toContain('.plan-progress-substep-check');
-    expect(src).toContain("check.textContent = '✓'");
+    expect(src).toContain("h.checkEls[i].textContent = '✓'");
     expect(src).toContain('row.append(check, num, body)');
     expect(src).not.toContain("h.numEls[i].textContent = '✓'");
   });
@@ -631,7 +604,7 @@ describe('plan auto-continue badge', () => {
   it('starts hidden and shows the round/max text on setAutoContinue', () => {
     const restore = installFakeDocument();
     try {
-      const card = createPlanCard(plan, false, false, new PlanProgressModel(plan));
+      const card = createPlanCard(plan, false, new PlanProgressModel(plan));
       expect(card.autoContinueState).toBeNull();
       expect(card.autoContinueEl.hidden).toBe(true);
       card.setAutoContinue(2, 8);
@@ -646,7 +619,7 @@ describe('plan auto-continue badge', () => {
   it('clearAutoContinue hides the badge and resets the state', () => {
     const restore = installFakeDocument();
     try {
-      const card = createPlanCard(plan, false, false, new PlanProgressModel(plan));
+      const card = createPlanCard(plan, false, new PlanProgressModel(plan));
       card.setAutoContinue(1, 8);
       card.clearAutoContinue();
       expect(card.autoContinueState).toBeNull();
@@ -659,7 +632,7 @@ describe('plan auto-continue badge', () => {
   it('updatePlanCard swaps the badge element and re-applies the persisted state', () => {
     const restore = installFakeDocument();
     try {
-      const card = createPlanCard(plan, false, false, new PlanProgressModel(plan));
+      const card = createPlanCard(plan, false, new PlanProgressModel(plan));
       card.setAutoContinue(3, 8);
       const src = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
       expect(src).toContain('h.autoContinueEl = fresh.autoContinueEl;');

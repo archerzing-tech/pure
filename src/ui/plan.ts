@@ -7,7 +7,6 @@ import type { AnalysisResult, Plan } from '../coding-agent/types';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { showInlineCard } from './inlineCard';
-import type { QualityGateCheck, QualityGatePhase, QualityGateStatus } from './projectQualityGate';
 import { PlanProgressModel, type PlanProgressSnapshot } from './planProgress';
 
 export type PlanReviewDecision = 'approve' | 'skip' | 'cancel';
@@ -55,8 +54,8 @@ export function formatPlanForPrompt(plan: Plan, projectBuild = false, approved =
   // The strict stage protocol lives in ONE place (PLAN_STAGE_PROTOCOL below) —
   // these branches only reference it, instead of restating it every time.
   const execution = approved
-    ? 'Use the approved plan as a flexible guide. Keep the overall plan and any active Todo list visibly separate. The user has already approved this plan, so start executing immediately: briefly restate the request, show the complete top-level plan list once and a separate Todo list below the plan list for plan 1, then begin the most appropriate next action with real tool calls in this same response — do not wait for another approval. Verify the result. When a plan card is active, follow the strict stage protocol below. If the task needs information, ask one natural question and pause until the user answers. In later responses, continue with the next appropriate work and verify meaningful results. Emit `## 计划 n 已完成` when the plan work has actually been completed and verified' + (projectBuild ? ' (for a project, run the actual project verification command).' : '.') + ' The UI may reflect the completed plan in the separate plan list and activate the next plan. When todosRequired=false, treat the step as atomic unless the task itself reveals a reason to split it. Never claim a plan or work item is complete without relevant verification evidence. Use plain language and natural colleague-like sentences around the required markers.'
-    : 'Use the approved plan as a flexible guide. Keep the overall plan and any active Todo list visibly separate. First, briefly restate the user request in your own words and say naturally that you will think it through before planning. Then show the complete top-level plan list once and a separate Todo list below the plan list for plan 1. IMPORTANT: this first planning response is a pause point — do not call tools or change files yet; end by telling the user what you recommend starting with. Only after the user sends the next message may you begin execution. If the task needs information, ask one natural question and pause until the user answers. In continuation responses, continue with the next appropriate work and verify meaningful results. When a plan card is active, follow the strict stage protocol below. Emit `## 计划 n 已完成` when the plan work has actually been completed and verified' + (projectBuild ? ' (for a project, run the actual project verification command).' : '.') + ' The UI may reflect the completed plan in the separate plan list and activate the next plan. When todosRequired=false, treat the step as atomic unless the task itself reveals a reason to split it; respect the current execution context. Never claim a plan or work item is complete without relevant verification evidence. Use plain language and natural colleague-like sentences around the required markers.';
+    ? 'Use the approved plan as a flexible guide. Keep the overall plan and any active Todo list visibly separate. The user has already approved this plan, so start executing immediately: briefly restate the request, show the complete top-level plan list once and a separate Todo list below the plan list for plan 1, then begin the most appropriate next action with real tool calls in this same response — do not wait for another approval. Verify the result. When a plan card is active, follow the strict stage protocol below. If the task needs information, ask one natural question and pause until the user answers. In later responses, continue with the next appropriate work and verify meaningful results. Emit `## 计划 n 已完成` when the plan work has actually been completed and verified' + (projectBuild ? ' (for a project build, the LAST plan stage must be the delivery verification pipeline: code review, then typecheck, then unit tests, then e2e/build checks — fix failures and re-run until ALL pass).' : '.') + ' The UI may reflect the completed plan in the separate plan list and activate the next plan. When todosRequired=false, treat the step as atomic unless the task itself reveals a reason to split it. Never claim a plan or work item is complete without relevant verification evidence. Use plain language and natural colleague-like sentences around the required markers.'
+    : 'Use the approved plan as a flexible guide. Keep the overall plan and any active Todo list visibly separate. First, briefly restate the user request in your own words and say naturally that you will think it through before planning. Then show the complete top-level plan list once and a separate Todo list below the plan list for plan 1. IMPORTANT: this first planning response is a pause point — do not call tools or change files yet; end by telling the user what you recommend starting with. Only after the user sends the next message may you begin execution. If the task needs information, ask one natural question and pause until the user answers. In continuation responses, continue with the next appropriate work and verify meaningful results. When a plan card is active, follow the strict stage protocol below. Emit `## 计划 n 已完成` when the plan work has actually been completed and verified' + (projectBuild ? ' (for a project build, the LAST plan stage must be the delivery verification pipeline: code review, then typecheck, then unit tests, then e2e/build checks — fix failures and re-run until ALL pass).' : '.') + ' The UI may reflect the completed plan in the separate plan list and activate the next plan. When todosRequired=false, treat the step as atomic unless the task itself reveals a reason to split it; respect the current execution context. Never claim a plan or work item is complete without relevant verification evidence. Use plain language and natural colleague-like sentences around the required markers.';
   const firstTurn = approved
     ? 'The plan is already approved, so do NOT wait for another go-ahead: restate the request, show the relevant plan context, then start the next appropriate work with real tool calls in this same response. End by reporting what you did and what remains.'
     : 'On the first response after this plan is approved, introduce the relevant plan context without executing tools; end by saying what you recommend starting with.';
@@ -135,7 +134,7 @@ const refiningTimers = new WeakMap<HTMLElement, number>();
 
 const planCardSubscriptions = new WeakMap<PlanCardHandle, () => void>();
 
-export function createPlanCard(plan: Plan, refining: boolean, fallback: boolean, source: PlanProgressModel): PlanCardHandle {
+export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgressModel): PlanCardHandle {
   const el = document.createElement('div');
   el.className = 'bubble-row plan-progress-row plan-text-progress-row';
 
@@ -147,14 +146,9 @@ export function createPlanCard(plan: Plan, refining: boolean, fallback: boolean,
   const title = document.createElement('span');
   title.className = 'plan-progress-title';
   const firstAction = plan.steps[0]?.action?.trim();
-  // A fallback card (real-time analysis failed/timed out) must not claim the
-  // steps came from a judgment that never happened — say plainly that these
-  // are generic steps and execution will adapt.
-  title.textContent = fallback
-    ? '当前为通用步骤（实时分析未完成），执行中会结合实际情况调整：'
-    : plan.steps.length === 1 && firstAction
-      ? `先从「${firstAction}」开始：`
-      : '根据刚才的判断，接下来按这个顺序推进：';
+  title.textContent = plan.steps.length === 1 && firstAction
+    ? `先从「${firstAction}」开始：`
+    : '根据刚才的判断，接下来按这个顺序推进：';
   const count = document.createElement('span');
   count.className = 'plan-progress-count';
   count.textContent = `大概分成 ${plan.steps.length} 件事`;
@@ -342,11 +336,11 @@ export function createPlanCard(plan: Plan, refining: boolean, fallback: boolean,
 /** Update the existing plan card in place. The outer transcript row stays
  * mounted, so task progress remains visible throughout the turn instead of
  * looking like a one-time list that disappears during plan refinement. */
-export function updatePlanCard(h: PlanCardHandle, plan: Plan, refining: boolean, fallback: boolean, source: PlanProgressModel): void {
+export function updatePlanCard(h: PlanCardHandle, plan: Plan, refining: boolean, source: PlanProgressModel): void {
   unbindPlanCardProgress(h);
   const previousActivity = h.el.querySelector<HTMLElement>('.plan-progress-activity')?.textContent;
   clearPlanCardRefining(h);
-  const fresh = createPlanCard(plan, refining, fallback, source);
+  const fresh = createPlanCard(plan, refining, source);
   unbindPlanCardProgress(fresh);
   // The step list is replaced in place; instead of an abrupt cut (old steps
   // vanish, new steps pop in), cascade the FRESH steps in with the same
@@ -419,248 +413,6 @@ export function clearPlanCardRefining(h: PlanCardHandle): void {
   h.refiningEl = null;
 }
 
-// ── Delivery quality-gate checklist card ──
-// Project builds finish with a test/audit phase. Mirroring the plan card, a
-// live checklist in the transcript lists the verification steps UP FRONT (so
-// the user sees what will be tested/audited before it runs) and checks each
-// one off as the gate reports it: review → audit → verify.
-
-export interface QualityGateCardHandle {
-  el: HTMLElement;
-  /** Update one step's row: 'active' while running, final status when done. */
-  set(phase: QualityGatePhase, status: QualityGateStatus | 'active', summary?: string): void;
-  /** Attach the actual tool/command output to the completed step. */
-  setEvidence(check: QualityGateCheck): void;
-  /** Put every step back to pending (repair → full re-run cycle). */
-  reset(): void;
-  /** Update the live explanation while the gate is waiting on a tool. */
-  setActivity(message: string): void;
-  /** Stop the live elapsed-time heartbeat when the gate run is over. */
-  dispose(outcome: 'passed' | 'failed' | 'cancelled'): void;
-}
-
-// User-facing verification steps, in the order the gate runs them. Kept as
-// exported data so tests can guard against internal phrasing creeping back in.
-export const QUALITY_GATE_STEPS: Array<{ phase: QualityGatePhase; action: string; description: string }> = [
-  { phase: 'review', action: '代码审查', description: '用审查工具检查本次生成的全部代码，确认没有阻断交付的问题' },
-  { phase: 'audit', action: '依赖/安全审计', description: '审计项目依赖与安全配置，确认没有高危漏洞' },
-  { phase: 'verify', action: '自动化验证', description: '运行类型检查与测试，确认项目能正常构建并全部通过' },
-];
-
-export function createQualityGateCard(): QualityGateCardHandle {
-  const el = document.createElement('div');
-  el.className = 'bubble-row plan-progress-row';
-
-  const card = document.createElement('div');
-  card.className = 'plan-progress-card quality-gate-card';
-
-  const head = document.createElement('div');
-  head.className = 'plan-progress-head';
-  const title = document.createElement('span');
-  title.className = 'plan-progress-title';
-  title.textContent = '🧪 交付前测试与审计';
-  const live = document.createElement('span');
-  live.className = 'quality-gate-live';
-  live.setAttribute('role', 'status');
-  live.setAttribute('aria-live', 'polite');
-  live.innerHTML = '<i class="quality-gate-live-dot" aria-hidden="true"></i><span class="quality-gate-live-text">后台运行中 · 已用时 0s</span>';
-  const count = document.createElement('span');
-  count.className = 'plan-progress-count';
-  count.textContent = `共 ${QUALITY_GATE_STEPS.length} 步`;
-  head.append(title, live, count);
-
-  const activity = document.createElement('div');
-  activity.className = 'quality-gate-activity';
-  activity.setAttribute('aria-live', 'polite');
-  activity.textContent = '正在准备交付检查…';
-
-  const steps = document.createElement('div');
-  steps.className = 'plan-progress-steps';
-  const numEls: HTMLElement[] = [];
-  const statusEls: HTMLElement[] = [];
-  const byPhase = new Map<QualityGatePhase, { row: HTMLElement; check: HTMLElement; num: HTMLElement; status: HTMLElement; evidence: HTMLDetailsElement; evidenceBody: HTMLElement; index: number }>();
-
-  QUALITY_GATE_STEPS.forEach((s, i) => {
-    const row = document.createElement('div');
-    row.className = 'plan-progress-step pending';
-    const check = document.createElement('span');
-    check.className = 'plan-progress-step-check';
-    check.setAttribute('aria-hidden', 'true');
-    check.textContent = '';
-    const num = document.createElement('span');
-    num.className = 'plan-progress-step-num';
-    num.textContent = String(i + 1);
-    const body = document.createElement('div');
-    body.className = 'plan-progress-step-body';
-    const action = document.createElement('span');
-    action.className = 'plan-progress-step-action';
-    action.textContent = s.action;
-    const desc = document.createElement('span');
-    desc.className = 'plan-progress-step-desc';
-    desc.textContent = s.description;
-    const status = document.createElement('span');
-    status.className = 'plan-progress-step-status';
-    const evidence = document.createElement('details');
-    evidence.className = 'quality-gate-evidence';
-    const evidenceSummary = document.createElement('summary');
-    evidenceSummary.textContent = '查看检查反馈';
-    const evidenceBody = document.createElement('pre');
-    evidenceBody.className = 'quality-gate-evidence-body';
-    evidenceBody.textContent = '等待检查结果…';
-    evidence.append(evidenceSummary, evidenceBody);
-    body.append(action, desc, status, evidence);
-    row.append(check, num, body);
-    steps.appendChild(row);
-    numEls.push(num);
-    statusEls.push(status);
-    byPhase.set(s.phase, { row, check, num, status, evidence, evidenceBody, index: i });
-  });
-
-  card.append(head, activity, steps);
-  el.appendChild(card);
-
-  const startedAt = Date.now();
-  let timer: number | undefined;
-  let disposed = false;
-  const phaseLabels: Record<QualityGatePhase, string> = {
-    review: '代码审查',
-    audit: '依赖/安全审计',
-    verify: '自动化验证',
-  };
-  const phaseActivities: Record<QualityGatePhase, string> = {
-    review: '正在调用代码审查工具，检查当前工作区的代码与配置…',
-    audit: '正在扫描依赖清单与安全审计结果…',
-    verify: '正在运行类型检查与自动化测试…',
-  };
-  const elapsed = (): string => {
-    const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-    return `${seconds}s`;
-  };
-  const refreshLive = (): void => {
-    if (disposed) return;
-    if (!el.isConnected) {
-      disposed = true;
-      if (timer !== undefined) {
-        window.clearInterval(timer);
-        timer = undefined;
-      }
-      return;
-    }
-    const liveText = live.querySelector('.quality-gate-live-text');
-    if (liveText) liveText.textContent = `后台运行中 · 已用时 ${elapsed()}`;
-  };
-  const startHeartbeat = (): void => {
-    if (timer === undefined) timer = window.setInterval(refreshLive, 1000);
-    refreshLive();
-  };
-  const set = (phase: QualityGatePhase, status: QualityGateStatus | 'active', summary?: string): void => {
-    const entry = byPhase.get(phase);
-    if (!entry) return;
-    const { row, check, num, status: statusEl, evidence, evidenceBody, index } = entry;
-    row.classList.remove('pending', 'active', 'done', 'degraded', 'failed', 'unavailable');
-    if (status === 'active') {
-      row.classList.add('active');
-      check.textContent = '';
-      num.textContent = String(index + 1);
-      statusEl.textContent = '进行中…';
-      evidence.open = false;
-      evidenceBody.textContent = '检查正在运行，结果会显示在这里…';
-      activity.textContent = `${phaseActivities[phase]} · 已用时 ${elapsed()}`;
-      live.classList.add('active');
-      startHeartbeat();
-    } else if (status === 'passed') {
-      row.classList.add('done');
-      check.textContent = '✓';
-      num.textContent = String(index + 1);
-      statusEl.textContent = summary ?? '通过';
-      activity.textContent = `${phaseLabels[phase]}已完成：${summary ?? '通过'} · 总耗时 ${elapsed()}`;
-    } else if (status === 'degraded') {
-      row.classList.add('degraded');
-      check.textContent = '△';
-      num.textContent = String(index + 1);
-      statusEl.textContent = summary ?? '降级完成';
-      activity.textContent = `${phaseLabels[phase]}已降级完成：${summary ?? '完整工具未完成'}`;
-    } else if (status === 'unavailable') {
-      row.classList.add('unavailable');
-      check.textContent = '!';
-      num.textContent = String(index + 1);
-      statusEl.textContent = summary ?? '无法验证';
-      activity.textContent = `${phaseLabels[phase]}无法形成证据：${summary ?? '无法验证'}`;
-    } else if (status === 'not_applicable') {
-      // No standard entry point exists (static page / plain script workspace):
-      // the check completes but as 不适用, styled like a soft degraded row.
-      row.classList.add('degraded');
-      check.textContent = '–';
-      num.textContent = String(index + 1);
-      statusEl.textContent = summary ?? '不适用';
-      activity.textContent = `${phaseLabels[phase]}不适用：${summary ?? '无标准检查入口'}`;
-    } else {
-      row.classList.add('failed');
-      check.textContent = '✗';
-      num.textContent = String(index + 1);
-      statusEl.textContent = summary ?? '未通过';
-      activity.textContent = `${phaseLabels[phase]}未通过：${summary ?? '未通过'}`;
-    }
-  };
-
-  const setActivity = (message: string): void => {
-    if (disposed) return;
-    activity.textContent = `${message} · 已用时 ${elapsed()}`;
-    live.classList.add('active');
-    startHeartbeat();
-  };
-
-  const setEvidence = (check: QualityGateCheck): void => {
-    const entry = byPhase.get(check.phase);
-    if (!entry) return;
-    set(check.phase, check.status, check.summary);
-    const output = check.output?.trim();
-    entry.evidenceBody.textContent = output || '该检查没有返回可展示的详细输出。';
-    entry.evidence.hidden = false;
-    entry.evidence.open = Boolean(output);
-  };
-
-  const reset = (): void => {
-    // A failed gate may enter a repair → full re-run cycle. The first run's
-    // dispose() stops its heartbeat, so reset must explicitly revive the card
-    // before the second run starts; otherwise the UI would say the task ended
-    // while the retry was still working.
-    disposed = false;
-    for (const entry of byPhase.values()) {
-      entry.row.classList.remove('active', 'done', 'degraded', 'failed', 'unavailable');
-      entry.row.classList.add('pending');
-      entry.check.textContent = '';
-      entry.num.textContent = String(entry.index + 1);
-      entry.status.textContent = '';
-      entry.evidence.hidden = false;
-      entry.evidence.open = false;
-      entry.evidenceBody.textContent = '等待重新检查结果…';
-    }
-    activity.textContent = '正在重新执行全部交付检查…';
-    live.classList.remove('complete', 'failed', 'cancelled');
-    live.classList.add('active');
-    startHeartbeat();
-  };
-
-  const dispose = (outcome: 'passed' | 'failed' | 'cancelled'): void => {
-    disposed = true;
-    if (timer !== undefined) {
-      window.clearInterval(timer);
-      timer = undefined;
-    }
-    live.classList.remove('active', 'complete', 'failed', 'cancelled');
-    live.classList.add(outcome === 'passed' ? 'complete' : outcome);
-    const outcomeText = outcome === 'passed' ? '检查通过' : outcome === 'cancelled' ? '检查已取消' : '检查未通过';
-    const liveText = live.querySelector('.quality-gate-live-text');
-    if (liveText) liveText.textContent = `${outcomeText} · 总耗时 ${elapsed()}`;
-  };
-
-  // Do not start the timer here: the card is not attached to the transcript
-  // until createQualityGateCard() returns. The first onPhase/onActivity call
-  // starts it after the card is mounted; starting earlier would trigger the
-  // detached-card guard and permanently mark the handle disposed.
-  return { el, set, setEvidence, reset, setActivity, dispose };
-}
 
 function renderPlanSubstep(h: PlanCardHandle, n: number, planNumber: number): void {
   const rows = h.substepEls[planNumber - 1] ?? [];
@@ -743,7 +495,7 @@ function renderPlanSubstepsComplete(rows: HTMLElement[]): void {
 /** Rebuild a plan card from the already-restored session progress model. */
 export function createRestoredPlanCard(source: PlanProgressModel): PlanCardHandle {
   const snapshot = source.getSnapshot();
-  return createPlanCard(snapshot.plan, false, false, source);
+  return createPlanCard(snapshot.plan, false, source);
 }
 
 // A top-level marker is `## 第 2 步…`; a substep marker is `### 子步骤 2/3…`
