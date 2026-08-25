@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard } from '../thinkingCard';
+import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard, dismissThinkingHint } from '../thinkingCard';
 
 beforeAll(() => {
   if (typeof document === 'undefined') GlobalRegistrator.register();
@@ -95,6 +95,33 @@ describe('live thinking card timer (long-silence feedback)', () => {
     await sleep(150);
     expect(handle.card.querySelector('.thinking-hint')).toBeNull();
     stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('dismissThinkingHint fades the hint out and removes it; idempotent when absent', async () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60, hintText: '等待中…' });
+    await sleep(120);
+    expect(handle.card.querySelector('.thinking-hint')).not.toBeNull();
+
+    dismissThinkingHint(handle);
+    // Fading state is marked immediately, element leaves the DOM shortly after.
+    expect(handle.card.querySelector('.thinking-hint')?.classList.contains('fading')).toBe(true);
+    await sleep(500);
+    expect(handle.card.querySelector('.thinking-hint')).toBeNull();
+
+    // No hint present → safe no-op.
+    dismissThinkingHint(handle);
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('finalize removes a lingering hint outright', async () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60 });
+    await sleep(120);
+    finalizeThinkingCard(handle);
+    expect(handle.card.querySelector('.thinking-hint')).toBeNull();
     handle.el.remove();
   });
 

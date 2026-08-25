@@ -126,6 +126,17 @@ export function stopThinkingTimer(handle: ThinkingCardHandle): void {
   handle.card.querySelector('.thinking-timer')?.remove();
 }
 
+/** Fade the slow-response hint out and remove it. Called once real reasoning
+ *  or answer text starts flowing — the hint describes a silent wait, so its
+ *  job is done the moment the stream resumes. Idempotent; safe when absent. */
+export function dismissThinkingHint(handle: ThinkingCardHandle): void {
+  const hint = handle.body.querySelector<HTMLElement>('.thinking-hint');
+  if (!hint || hint.dataset.dismissing === '1') return;
+  hint.dataset.dismissing = '1';
+  hint.classList.add('fading');
+  window.setTimeout(() => hint.remove(), 400);
+}
+
 export function createThinkingCard(): ThinkingCardHandle {
   const el = document.createElement('div');
   el.className = 'bubble-row thinking-row';
@@ -212,6 +223,9 @@ export function finalizeThinkingCard(handle: ThinkingCardHandle): void {
   // Collapse any verbatim loop the model emitted before the card is reviewed
   // (the live stream may briefly show the repeats; the final card is clean).
   handle.textEl.textContent = collapseRepeatedReasoning(handle.textEl.textContent);
+  // A lingering slow-response hint is obsolete the moment the phase ends —
+  // remove it outright (no fade needed on a finalizing card).
+  handle.body.querySelector('.thinking-hint')?.remove();
   const chip = handle.card.querySelector<HTMLElement>('.thinking-timer');
   const elapsedLabel = chip?.textContent ?? '';
   stopThinkingTimer(handle);
