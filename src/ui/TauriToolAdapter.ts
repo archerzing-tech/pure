@@ -12,6 +12,7 @@ import { fetchSkillBody, searchHubSkills, splitSkillMarkdown, sanitizeSkillName 
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../shared/research';
 export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
+import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotEntry, WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 
 // ── Tool definitions (single source of truth: shared/toolDefs.ts) ──
@@ -339,6 +340,25 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: listing, success: true, duration: Date.now() - start };
         }
         case 'execute_command': {
+          // background:true → long-lived process (dev/static server, watcher).
+          // The Rust channel has no native detach mode, so the command travels
+          // wrapped in a self-detaching launcher (writes a wrapper file, starts
+          // it hidden, echoes PURE_BG_PID) and finishes in well under a second.
+          // The wrapper redirects all server output into a log file, so nothing
+          // holds the tool call's pipes open.
+          if (args.background === true) {
+            const plan = buildBackgroundLaunchPlan(String(args.command ?? ''));
+            const launch = await this.call('execute_command', { workspace: ws, command: plan.detachCommand, proxyUrl: this.proxyUrl }) as { exitCode: number; stdout: string; stderr: string };
+            const pid = parseBackgroundPid(launch.stdout ?? '');
+            return {
+              id: toolCall.id,
+              toolName: name,
+              result: buildBackgroundResult(pid, plan.logFile),
+              success: pid !== null,
+              error: pid === null ? `background launch did not report a PID${launch.stderr ? `: ${launch.stderr.slice(0, 300)}` : ''}` : undefined,
+              duration: Date.now() - start,
+            };
+          }
           // Stream the command's output as it is produced so a long-running
           // command (bundle, install, test) shows live progress in the tool
           // row instead of waiting silently for the full buffered result.

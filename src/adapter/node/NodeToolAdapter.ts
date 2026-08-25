@@ -4,12 +4,13 @@
 // Fixes: handleWriteFile uses proper fs.mkdir() instead of fragile .ensure hack.
 
 import { basename, dirname, isAbsolute, join, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
+import { buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript } from '../../shared/backgroundCommand';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
 import { isPublicToolName } from '../../shared/toolDefs';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotEntry, WorkspaceSnapshotPort } from '../../shared/workspaceSnapshot';
@@ -614,6 +615,12 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleExecuteCommand(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
     const command = String(args.command);
+    // background:true → long-lived process (dev/static server, watcher).
+    // Spawns detached and returns immediately with the PID + log file instead
+    // of blocking until commandTimeout kills the server.
+    if (args.background === true) {
+      return this.handleBackgroundCommand(command, start);
+    }
     const abort = createAbortController(signal, this.commandTimeout);
 
     try {
@@ -675,6 +682,47 @@ export class NodeToolAdapter implements ToolAdapter {
       return this.fail(null!, start, err?.message ?? 'Command execution failed');
     } finally {
       abort.cleanup();
+    }
+  }
+
+  /**
+   * background:true — start a long-lived process detached and return at once.
+   * The wrapper script redirects all output into a temp log file, so the
+   * spawned child holds no pipes back to us: it survives this process exiting
+   * AND survives turn aborts (a server must keep serving after the task ends).
+   * Deliberately NOT wired to `signal` for the same reason.
+   */
+  private async handleBackgroundCommand(command: string, start: number): Promise<ToolResult> {
+    const plan = buildBackgroundLaunchPlan(command, { isWindows: IS_WINDOWS });
+    let scriptFile = plan.scriptFile;
+    if (!IS_WINDOWS) {
+      writeFileSync(scriptFile, buildWrapperScript(command, plan.logFile), { mode: 0o755 });
+    } else {
+      // Node path runs cmd.exe (the plan's .ps1 file is only for the Tauri
+      // incantation), so generate the cmd wrapper under its own name.
+      scriptFile = scriptFile.replace(/\.ps1$/, '.cmd');
+      writeFileSync(scriptFile, buildWrapperScript(command, plan.logFile, { isWindows: true }));
+    }
+    const shellArgs = IS_WINDOWS ? ['cmd', '/c', scriptFile] : ['sh', scriptFile];
+    try {
+      const proc = Bun.spawn(shellArgs, {
+        cwd: this.workspace,
+        stdin: 'ignore',
+        stdout: 'ignore',
+        stderr: 'ignore',
+        detached: true,
+        env: IS_WINDOWS ? undefined : { ...process.env, PATH: extendedProbePath() },
+      });
+      proc.unref();
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'execute_command',
+        result: buildBackgroundResult(proc.pid ?? null, plan.logFile),
+        success: true,
+        duration: Date.now() - start,
+      };
+    } catch (err: any) {
+      return this.fail(null!, start, `background launch failed: ${err?.message ?? err}`, 'execute_command');
     }
   }
 
