@@ -116,6 +116,58 @@ describe('live thinking card timer (long-silence feedback)', () => {
     handle.el.remove();
   });
 
+  it('dismissThinkingHint with a delay lingers 1s after output shows, then fades', async () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 40, hintText: '等待中…' });
+    await sleep(100);
+    const hint = handle.card.querySelector('.thinking-hint');
+    expect(hint).not.toBeNull();
+    // Output became visible → schedule dismissal with a linger window.
+    dismissThinkingHint(handle, 120);
+    // Still fully visible during the dwell (no fading class yet)…
+    expect(hint?.classList.contains('fading')).toBe(false);
+    await sleep(60);
+    expect(hint?.classList.contains('fading')).toBe(false);
+    // …fading starts once the dwell elapses…
+    await sleep(100);
+    expect(hint?.classList.contains('fading')).toBe(true);
+    // …and the element leaves the DOM after the fade completes.
+    await sleep(500);
+    expect(handle.card.querySelector('.thinking-hint')).toBeNull();
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('the first delayed call anchors the deadline; later deltas never extend it', async () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 40, hintText: '等待中…' });
+    await sleep(100);
+    const hint = handle.card.querySelector('.thinking-hint')!;
+    dismissThinkingHint(handle, 150);
+    await sleep(50);
+    // A second delta arrives mid-dwell — must be a no-op.
+    dismissThinkingHint(handle, 10_000);
+    await sleep(200);
+    expect(hint.classList.contains('fading')).toBe(true);
+    await sleep(500);
+    expect(handle.card.querySelector('.thinking-hint')).toBeNull();
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('finalize keeps a mid-linger hint alive (its own fade owns removal)', async () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 40 });
+    await sleep(100);
+    dismissThinkingHint(handle, 150);
+    finalizeThinkingCard(handle);
+    // Not removed outright — the scheduled linger still finishes the job.
+    expect(handle.body.querySelector('.thinking-hint')).not.toBeNull();
+    await sleep(600);
+    expect(handle.body.querySelector('.thinking-hint')).toBeNull();
+    handle.el.remove();
+  });
+
   it('finalize removes a lingering hint outright', async () => {
     const handle = attachedCard();
     startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60 });

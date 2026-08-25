@@ -201,4 +201,18 @@ describe('projectTranscript', () => {
       userRequest: '做一个项目',
     });
   });
+
+  it('emits artifact card when the transcript ends on a tool result (interrupted session)', () => {
+    // Regression: completedTools were only drained into turnArtifactPaths
+    // inside the assistant branch, so a transcript ending on a tool entry
+    // (interrupted session) silently dropped the artifact card.
+    const entries: TranscriptEntry[] = [
+      { id: 'u1', modelMessageIndex: 0, role: 'user', content: '写一个文件' },
+      { id: 'a1', modelMessageIndex: 1, role: 'assistant', content: '', toolCalls: [{ id: 'w1', toolName: 'write_file', args: { path: 'output.txt' } }] },
+      { id: 't1', modelMessageIndex: 2, role: 'tool', content: 'written', toolCallId: 'w1', toolName: 'write_file' },
+    ];
+
+    const blocks = projectTranscript(entries);
+    expect(blocks.at(-1)).toMatchObject({ type: 'artifact', items: [{ path: 'output.txt' }] });
+  });
 });
