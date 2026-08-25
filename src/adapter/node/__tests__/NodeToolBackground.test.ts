@@ -53,6 +53,8 @@ function writeScript(body: string): string {
 }
 
 describe('execute_command background:true (real detached server)', () => {
+  // Real-process integration on shared CI runners: cold spawns + polling can
+  // exceed bun's 5s default per-test timeout, so give both explicit headroom.
   it('returns immediately with a pid, writes to the log, and keeps the server up', async () => {
     // A tiny HTTP server: long-lived by construction (never exits on its own).
     const server = writeScript(`Bun.serve({ port: ${PORT}, fetch: () => new Response("pure-bg-ok") });\n`);
@@ -97,7 +99,7 @@ describe('execute_command background:true (real detached server)', () => {
       dead = await fetch(`http://127.0.0.1:${PORT}/`).then(() => false).catch(() => true);
     }
     expect(dead).toBe(true);
-  });
+  }, 30_000);
 
   it('log file captures output written before detach (wrapper redirection)', async () => {
     const marker = `bg-marker-${Date.now()}`;
@@ -125,7 +127,7 @@ describe('execute_command background:true (real detached server)', () => {
       killTree(payload.pid);
       try { rmSync(script, { force: true }); } catch { /* best effort */ }
     }
-  });
+  }, 30_000);
 });
 
 /** Read a log file tolerating concurrent writes (a partial trailing line must

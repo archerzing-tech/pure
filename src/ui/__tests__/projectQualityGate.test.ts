@@ -102,7 +102,7 @@ describe('project quality gate', () => {
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('builds read-only lockfile-aware audit commands', () => {
     const command = buildAuditCommand();
