@@ -2758,7 +2758,26 @@ export class SettingsPanel {
     // are the source of truth until commit/blur).
     const caretInRows = document.activeElement instanceof HTMLElement
       && !!document.activeElement.closest('#cfg-model-list');
-    if (this.editingProvider && !caretInRows) this.renderProviderGrid();
+    if (this.editingProvider && !caretInRows) {
+      // The rebuilt panel renders #cfg-apikey value-less by design (the raw
+      // secret never persists in markup), so a debounced save firing mid-edit
+      // would visually swallow what was just pasted/typed. Capture the
+      // in-progress state and restore it into the fresh input — type=password
+      // keeps it masked as ●●●●.
+      const keyBefore = document.getElementById('cfg-apikey') as HTMLInputElement | null;
+      const keyValue = keyBefore?.value ?? '';
+      const keyTouched = keyBefore?.dataset.touched === '1';
+      const keyHadFocus = !!keyBefore && document.activeElement === keyBefore;
+      this.renderProviderGrid();
+      if ((keyValue || keyTouched || keyHadFocus)) {
+        const keyAfter = document.getElementById('cfg-apikey') as HTMLInputElement | null;
+        if (keyAfter) {
+          if (keyValue && !keyAfter.value) keyAfter.value = keyValue;
+          if (keyTouched) keyAfter.dataset.touched = '1';
+          if (keyHadFocus) keyAfter.focus();
+        }
+      }
+    }
     this.renderDefaultBar();
 
     this.onSave();
