@@ -8804,16 +8804,32 @@ fn decode_paste_image(data_base64: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("decode paste image: {}", e))
 }
 
-/// The GUI turns oversized paste events (see pasteChip.ts, 64KB threshold)
-/// into a file chip instead of stuffing hundreds of KB into the textarea;
-/// this persists the content under ~/.pure/workspace/<session-id>/ and the chip
-/// double-click viewer reads it back from memory (path kept for reference).
+/// Resolve where a pasted long-text file lands. When the session already has a
+/// user-selected workspace the file goes there; otherwise it falls back to the
+/// application-owned per-session tmp dir (~/.pure/workspace/<hex-session-id>/).
+fn paste_save_dir(session_id: &str, workspace_dir: Option<&str>) -> PathBuf {
+    if let Some(dir) = workspace_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    application_tmp_dir().join(safe_session_component(session_id))
+}
+
+/// The GUI turns oversized text input (see pasteChip.ts, 500-char threshold)
+/// into a file chip instead of stuffing hundreds of KB into the textarea.
+/// The file lands in the user-selected session workspace when one was chosen
+/// before the overflow, otherwise under ~/.pure/workspace/<session-id>/; the
+/// chip double-click viewer reads it back from memory (path kept for reference).
 #[tauri::command]
-fn save_paste_file(session_id: String, name: String, content: String) -> Result<String, String> {
+fn save_paste_file(
+    session_id: String,
+    name: String,
+    content: String,
+    workspace_dir: Option<String>,
+) -> Result<String, String> {
     if session_id.trim().is_empty() {
         return Err("session id is required".to_string());
     }
-    let dir = application_tmp_dir().join(safe_session_component(&session_id));
+    let dir = paste_save_dir(&session_id, workspace_dir.as_deref());
     fs::create_dir_all(&dir).map_err(|e| format!("create paste dir: {}", e))?;
     write_paste_file(&dir, &name, &content)
 }
@@ -12681,6 +12697,29 @@ mod save_paste_file_tests {
         let dir = temp_paste_dir("empty-name");
         let path = write_paste_file(&dir, "/", "x").unwrap();
         assert!(path.ends_with("pasted.txt"));
+    }
+
+    #[test]
+    fn paste_save_dir_prefers_user_selected_workspace() {
+        let selected = temp_paste_dir("ws-selected");
+        let resolved = paste_save_dir(
+            "session-a",
+            Some(selected.to_str().expect("temp dir is valid UTF-8")),
+        );
+        assert_eq!(resolved, selected);
+        // The written file lands inside the user-selected workspace.
+        fs::create_dir_all(&resolved).unwrap();
+        let path = write_paste_file(&resolved, "pure-x.txt", "body").unwrap();
+        assert!(std::path::Path::new(&path).starts_with(&selected));
+    }
+
+    #[test]
+    fn paste_save_dir_falls_back_to_app_tmp_when_blank_or_missing() {
+        let expected = application_tmp_dir().join(safe_session_component("session-b"));
+        assert_eq!(paste_save_dir("session-b", None), expected);
+        // Whitespace-only selection counts as "no workspace chosen".
+        assert_eq!(paste_save_dir("session-b", Some("   ")), expected);
+        assert_eq!(paste_save_dir("session-b", Some("")), expected);
     }
 
     #[test]

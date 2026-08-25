@@ -52,7 +52,7 @@ const pasteChips = new PasteChipManager(() => chat.getSessionId(), () => {
   const has = pasteChips.hasAttachments();
   document.querySelectorAll('.attach-btn').forEach(b => b.classList.toggle('has-attachments', has));
   enableInputIfReady();
-});  pasteChips.mount(document.getElementById('composer-box')!);
+}, () => chat.getWorkspace());  pasteChips.mount(document.getElementById('composer-box')!);
   pasteChips.mount(document.getElementById('landing-input-wrap')!);
 
 // ── App controllers ──
@@ -556,6 +556,10 @@ function enterChatMode() {
   if (hasStartedChat) return;
   hasStartedChat = true;
   chatView.classList.remove('landing');
+  // The composer model selector was populated at startup with the initial
+  // config; the user may have changed the model on the landing selector since
+  // then — sync it so the chat input shows the correct model.
+  populateComposerSelects();
   updateContextPanelStage();
   promptEl.focus();
 }

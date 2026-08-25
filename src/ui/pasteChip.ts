@@ -1,8 +1,9 @@
 // src/ui/pasteChip.ts
 // Paste handling for content the textarea should not swallow:
-//   • TEXT pastes ≥ PASTE_FILE_THRESHOLD chars → saved to the app workspace
-//     (~/.pure/workspace/<session-id>/, named pure-<timestamp>.txt) and shown
-//     as a file chip.
+//   • TEXT pastes ≥ PASTE_FILE_THRESHOLD chars → saved to the user-selected
+//     session workspace when one is already chosen, otherwise to the app
+//     workspace (~/.pure/workspace/<session-id>/), named pure-<timestamp>.txt,
+//     and shown as a file chip.
 //   • IMAGE pastes (screenshots, copied pictures) → saved the same way and
 //     shown as a THUMBNAIL chip (a textarea can't hold an image at all).
 // Double-clicking a chip opens a fullscreen viewer (text in a <pre>, images
@@ -311,12 +312,14 @@ export class PasteChipManager {
   private hosts = new Map<HTMLElement, HTMLDivElement>();
   private viewerEl: HTMLDivElement | null = null;
   private getSessionId: () => string;
+  private getWorkspace: () => string;
   private onChanged: () => void;
   private pendingReads = new Set<Promise<void>>();
 
-  constructor(getSessionId: () => string, onChanged: () => void = () => {}) {
+  constructor(getSessionId: () => string, onChanged: () => void = () => {}, getWorkspace: () => string = () => '') {
     this.getSessionId = getSessionId;
     this.onChanged = onChanged;
+    this.getWorkspace = getWorkspace;
   }
 
   /** Insert a chip row as the first child of `host` (renders the shared list). */
@@ -350,11 +353,16 @@ export class PasteChipManager {
     this.render();
     this.onChanged();
     const sessionId = this.getSessionId();
+    // Capture the user-selected workspace NOW — same rationale as the session
+    // id in consumePaste: the write completes asynchronously and must land in
+    // the workspace that was active when the text overflowed. Empty string →
+    // backend falls back to the application tmp workspace.
+    const workspaceDir = this.getWorkspace().trim();
     if (isTauriRuntime()) {
       const pending = (async () => {
         try {
           const core = await loadTauriCore();
-          const path = await core?.invoke<string>('save_paste_file', { sessionId, name, content: text });
+          const path = await core?.invoke<string>('save_paste_file', { sessionId, name, content: text, workspaceDir });
           if (path) { attachment.path = path; this.render(); this.onChanged(); }
         } catch (error) {
           console.error('[pure] save long text failed:', error);
@@ -417,12 +425,15 @@ export class PasteChipManager {
     this.onChanged();
     // Capture the session id NOW — a session switch before the write completes
     // must not redirect the file into the newly-opened session's tmp dir.
+    // Same for the user-selected workspace: when one is already chosen it wins
+    // over the application tmp workspace; empty → backend default applies.
     const sessionId = this.getSessionId();
+    const workspaceDir = this.getWorkspace().trim();
     if (isTauriRuntime()) {
       const pending = (async () => {
         try {
           const core = await loadTauriCore();
-          const path = await core?.invoke<string>('save_paste_file', { sessionId, name, content: text });
+          const path = await core?.invoke<string>('save_paste_file', { sessionId, name, content: text, workspaceDir });
           if (path) {
             att.path = path;
             this.render();
