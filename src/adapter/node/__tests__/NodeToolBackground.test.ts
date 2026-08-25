@@ -103,19 +103,19 @@ describe('execute_command background:true (real detached server)', () => {
 
   it('log file captures output written before detach (wrapper redirection)', async () => {
     const marker = `bg-marker-${Date.now()}`;
-    // Print the marker, then exit. Deliberately NOT an idle interval: on
-    // Windows Bun block-buffers non-TTY stdout and an eternally-alive process
-    // never flushes it, so the log would stay empty until process end. Exit
-    // flushes; the tool call still races the child, which is the point.
-    const script = writeScript(`console.log("${marker}");\n`);
-    const result = await call(`"${BUN}" ${JSON.stringify(script)}`);
+    // Shell-native echo exercises EXACTLY the wrapper redirection chain
+    // (inner command stdout → `>> logFile`) with zero runtime-buffering
+    // variables: bun block-buffers non-TTY stdout on Windows and CI runners'
+    // real-time scanners delay freshly-written scripts, either of which left
+    // this log empty while the identical flow worked locally.
+    const result = await call(`echo ${marker}`);
     const payload = JSON.parse(String(result.result)) as BackgroundPayload;
     expect(result.success).toBe(true);
     try {
       let content = '';
-      // Long window: a cold bun.exe start under Windows Defender real-time
-      // scanning can take seconds, and the log file stays read-locked (EBUSY)
-      // while the writer holds it — both are absorbed by keep-polling.
+      // Short poll: cmd/sh echo is synchronous and the wrapper exits as soon
+      // as redirection closes — but CI file systems occasionally lag, and the
+      // log may be read-locked (EBUSY) while the writer holds it open.
       for (let i = 0; i < 30 && !content.includes(marker); i++) {
         await new Promise((r) => setTimeout(r, 250));
         if (existsSync(payload.logFile)) {
@@ -125,7 +125,6 @@ describe('execute_command background:true (real detached server)', () => {
       expect(content).toContain(marker);
     } finally {
       killTree(payload.pid);
-      try { rmSync(script, { force: true }); } catch { /* best effort */ }
     }
   }, 30_000);
 });

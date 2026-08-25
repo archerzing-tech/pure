@@ -88,7 +88,9 @@ describe('project quality gate', () => {
     const workspace = mkdtempSync(join(tmpdir(), 'pure-quality-windows-'));
     try {
       writeFileSync(join(workspace, 'index.html'), '<!doctype html>');
-      const tools = new NodeToolAdapter({ workspace, commandTimeout: 10_000 });
+      // Runner-local PowerShell scans can outgrow the default 10s under load;
+      // exit -1 here meant OUR timeout, not a product failure.
+      const tools = new NodeToolAdapter({ workspace, commandTimeout: 30_000 });
       const result = await tools.execute({
         id: 'local-review-windows',
         index: 0,
