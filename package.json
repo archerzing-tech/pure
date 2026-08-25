@@ -19,6 +19,7 @@
     "verify:auto-continue": "bun run scripts/verify-auto-continue.ts",
     "verify:auto-continue-abort": "bun run scripts/verify-auto-continue.ts --scenario=abort",
     "eval:baseline": "bun run scripts/run-evals.ts",
+    "e2e:apikey": "bun run scripts/e2e-settings-apikey.ts",
     "typecheck": "bun run --no-run tsc --noEmit",
     "build": "bun run typecheck && npx vite build && bun run cli:build",
     "build:cli": "bun run cli:build",
