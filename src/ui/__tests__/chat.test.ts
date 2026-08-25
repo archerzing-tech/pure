@@ -424,6 +424,24 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     expect(src).toMatch(/if \(gen !== this\.generation\) \{\s*userBubble\.remove\(\);\s*return;\s*\}/);
   });
 
+  it('commits a preflight-paused request into the live history so 继续 has context', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 回归：预检阶段被停止时，请求此前只落盘、不进 this.messages —— 同一会话里
+    // 再发「继续」时模型完全看不到原始任务。所有暂停路径必须经由
+    // commitPausedUserTurn 提交进内存历史并置 hasHistory，下次发送走 continueTurn。
+    const commit = src.indexOf('const commitPausedUserTurn = (');
+    expect(commit).toBeGreaterThan(-1);
+    expect(src.slice(commit)).toContain('this.hasHistory = true');
+    // keepOrDropUserBubble 委托给 commitPausedUserTurn（不再只 persistSession）。
+    const keeper = src.indexOf('const keepOrDropUserBubble = (pausedText: string): void => {', commit);
+    expect(keeper).toBeGreaterThan(commit);
+    expect(src.slice(keeper, keeper + 600)).toContain('commitPausedUserTurn(toolResults, thinkingPhases)');
+    // 工作区解析期间的中断分支同样提交（该分支在 toolResults 声明前返回）。
+    expect(src).toContain('commitPausedUserTurn(new Map(), []);');
+    // 流中出错且已有部分输出的收尾快照也必须写回内存历史。
+    expect(src).toMatch(/const interruptedSnapshot: Message\[\] = limitMessageHistory\(\[\s*\.\.\.this\.messages,\s*\{ role: 'user', content: userText \},/);
+  });
+
   it('wires the abort signal into the plan-review dialog', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 停止按钮在计划确认显示期间必须生效，否则 send() 会永久挂起。
@@ -906,9 +924,19 @@ describe('generate_image text-to-image wiring', () => {
     expect(src).toContain("case 'FailurePolicyDecision': {");
     expect(src).toContain('模型请求失败，正在重试');
     // The silence-waiter label resets once real reasoning arrives, and the
-    // slow-response hint fades out with it.
+    // slow-response hint lingers 1s after visible output, then fades.
     expect(src).toContain("classList.contains('waiting')");
     expect(src).toContain("setThinkingLabel(thinkingCard, t('thinking.thinking'))");
-    expect(src).toContain('dismissThinkingHint(thinkingCard);');
+    // ReasoningDelta dismisses OUTSIDE the waiting-branch (plain first-token
+    // waits must dismiss too), anchored at the first visible delta.
+    expect(src).toContain('dismissThinkingHint(thinkingCard, HINT_LINGER_MS);');
+    // Answer-token models schedule the linger BEFORE endThinking so a showing
+    // hint survives finalize and completes its own fade.
+    const tokenDelta = src.indexOf("case 'TokenDelta': {");
+    expect(tokenDelta).toBeGreaterThan(-1);
+    const linger = src.indexOf('dismissThinkingHint(thinkingCard, HINT_LINGER_MS);', tokenDelta);
+    const endThinkingCall = src.indexOf('endThinking();', tokenDelta);
+    expect(linger).toBeGreaterThan(-1);
+    expect(linger).toBeLessThan(endThinkingCall);
   });
 });

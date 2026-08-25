@@ -1621,7 +1621,7 @@ export class SettingsPanel {
     list.querySelectorAll('.mcp-server-delete').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const idx = parseInt(btn.getAttribute('data-index') || '');
+        const idx = parseInt(btn.getAttribute('data-index') || '', 10);
         if (!isNaN(idx)) this.removeMcpServer(idx);
       });
     });
