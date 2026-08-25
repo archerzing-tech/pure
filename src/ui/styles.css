@@ -2540,6 +2540,29 @@ body {
   color: var(--text);
 }
 
+/* Elapsed-seconds chip beside the label on live thinking cards — ticking time
+   proves the session is alive during long silent waits (deep reasoning, LLM
+   retries). tabular-nums keeps the width stable second to second. */
+.thinking-timer {
+  flex-shrink: 0;
+  margin-left: 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+/* One-time slow-response hint inserted into the card body after a long
+   silence with no reasoning text yet — honest, no progress theater. */
+.thinking-hint {
+  margin: 2px 0 6px;
+  padding: 5px 8px;
+  border-left: 2px solid var(--warning, #d97706);
+  background: color-mix(in srgb, var(--warning, #d97706) 8%, transparent);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
 /* Down-arrow affordance — hints the compact chip is expandable; flips up
    (pointing at the body) once the reasoning is expanded. */
 .thinking-chevron {

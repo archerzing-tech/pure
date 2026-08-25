@@ -1,9 +1,19 @@
 // src/ui/__tests__/thinkingCard.test.ts
-// Covers collapseRepeatedReasoning: the guard against reasoning models looping
-// internally and emitting the same sentence/paragraph over and over.
+// Covers collapseRepeatedReasoning (the guard against reasoning models looping
+// internally) and the live-card elapsed timer / slow-response hint that keep a
+// long "正在思考下一步…" from reading as a hung session.
 
-import { describe, it, expect } from 'bun:test';
-import { collapseRepeatedReasoning } from '../thinkingCard';
+import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard } from '../thinkingCard';
+
+beforeAll(() => {
+  if (typeof document === 'undefined') GlobalRegistrator.register();
+});
+
+afterAll(() => {
+  if (typeof document !== 'undefined') GlobalRegistrator.unregister();
+});
 
 describe('collapseRepeatedReasoning', () => {
   it('collapses a repeated two-sentence loop to a single period', () => {
@@ -41,5 +51,75 @@ describe('collapseRepeatedReasoning', () => {
   it('does not collapse a two-block text that is not a repeat', () => {
     const text = 'Block A.\n\nBlock B.';
     expect(collapseRepeatedReasoning(text)).toBe(text);
+  });
+});
+
+describe('live thinking card timer (long-silence feedback)', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  function attachedCard() {
+    const handle = createThinkingCard();
+    document.body.appendChild(handle.el);
+    return handle;
+  }
+
+  it('ticks an elapsed-seconds chip beside the label', async () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 30 });
+    const chip = () => handle.card.querySelector<HTMLElement>('.thinking-timer')!;
+    expect(chip()).not.toBeNull();
+    expect(chip().textContent).toBe('0s');
+    await sleep(120);
+    const secs = parseInt(chip().textContent ?? 'x', 10);
+    expect(secs).toBeGreaterThanOrEqual(2);
+    stopThinkingTimer(handle);
+    expect(handle.card.querySelector('.thinking-timer')).toBeNull();
+    handle.el.remove();
+  });
+
+  it('inserts the slow-response hint once the silence crosses the threshold with no reasoning text', async () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 80, hintText: '仍在等待模型…' });
+    await sleep(200);
+    expect(handle.card.querySelector('.thinking-hint')?.textContent).toContain('仍在等待模型');
+    // The hint sits ABOVE the reasoning scroll window inside the body.
+    expect(handle.body.firstElementChild?.className).toBe('thinking-hint');
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('never hints once real reasoning text has arrived', async () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60 });
+    handle.textEl.textContent = '真实推理内容';
+    await sleep(150);
+    expect(handle.card.querySelector('.thinking-hint')).toBeNull();
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('finalize freezes the duration into the done label and removes the chip', async () => {
+    const handle = attachedCard();
+    document.body.appendChild(handle.el); // already appended; keep reference
+    startThinkingTimer(handle, { intervalMs: 20 });
+    handle.textEl.textContent = '推理正文';
+    await sleep(90); // ≥ ~4 ticks at 20ms
+    finalizeThinkingCard(handle);
+    expect(handle.card.querySelector('.thinking-timer')).toBeNull();
+    expect(handle.card.classList.contains('complete')).toBe(true);
+    expect(handle.card.querySelector<HTMLElement>('.thinking-label')!.textContent).toMatch(/· \d+s$/);
+    handle.el.remove();
+  });
+
+  it('stopThinkingTimer is idempotent and safe on detached cards', () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 20 });
+    stopThinkingTimer(handle);
+    stopThinkingTimer(handle);
+    handle.el.remove();
+    // Removing the card cancels its own interval on the next tick — no throw.
+    const detached = createThinkingCard();
+    startThinkingTimer(detached, { intervalMs: 20 });
+    stopThinkingTimer(detached);
   });
 });
