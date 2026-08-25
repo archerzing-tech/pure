@@ -2552,7 +2552,8 @@ body {
 }
 
 /* One-time slow-response hint inserted into the card body after a long
-   silence with no reasoning text yet — honest, no progress theater. */
+   silence with no reasoning text yet — honest, no progress theater.
+   Dismissed with a short fade the moment real content resumes. */
 .thinking-hint {
   margin: 2px 0 6px;
   padding: 5px 8px;
@@ -2561,6 +2562,11 @@ body {
   font-size: 11.5px;
   line-height: 1.5;
   color: var(--text-secondary);
+  transition: opacity 0.35s var(--ease-out), transform 0.35s var(--ease-out);
+}
+.thinking-hint.fading {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 
 /* Down-arrow affordance — hints the compact chip is expandable; flips up

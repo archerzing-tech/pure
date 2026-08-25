@@ -905,8 +905,10 @@ describe('generate_image text-to-image wiring', () => {
     // a retry re-streams the whole context and used to look exactly like a hang.
     expect(src).toContain("case 'FailurePolicyDecision': {");
     expect(src).toContain('模型请求失败，正在重试');
-    // The silence-waiter label resets once real reasoning arrives.
+    // The silence-waiter label resets once real reasoning arrives, and the
+    // slow-response hint fades out with it.
     expect(src).toContain("classList.contains('waiting')");
     expect(src).toContain("setThinkingLabel(thinkingCard, t('thinking.thinking'))");
+    expect(src).toContain('dismissThinkingHint(thinkingCard);');
   });
 });
