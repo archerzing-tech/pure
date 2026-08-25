@@ -266,6 +266,10 @@ describe('INCREMENTAL_BUILD_PROMPT (humanized build reporting)', () => {
     expect(INCREMENTAL_BUILD_PROMPT).toContain('overall plan context separate from any optional progress list');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('For other complex work');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('choose and state a test strategy before implementation');
+    // NEW TASK RULE: a fresh user request after a finished plan restarts
+    // numbering instead of appending "计划6" to the old plan's stages.
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('NEW TASK RULE');
+    expect(INCREMENTAL_BUILD_PROMPT).toContain('restart heading numbers');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('create the project test entry');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('at least one focused smoke/unit/integration test');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('happy-dom');
