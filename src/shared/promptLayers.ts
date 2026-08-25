@@ -102,7 +102,10 @@ Local file search tips: search_files(pattern, path?, filePattern?, maxResults?, 
 - Finding something across many files (e.g. "我的学历" in D:\\tmp with hundreds of files): do NOT read files one by one — that wastes tokens and time. Call find_files(query, path?) first: it ranks candidates by filename + content hits and returns snippet lines. Then read_file only the top 1-2 candidates (use startLine/endLine to read just the relevant part). If find_files finds nothing, read its fallback suggestions (broader keywords, caseSensitive:false, filePattern, or list_files to explore subdirectories) instead of guessing.
 
 Shell & Git:
-- execute_command(command) — run a shell command. Commands must be non-interactive and finite. If you start a dev/static server for browser verification, run it in the background, redirect its logs, print its URL/PID, and never leave a foreground server running; use a bounded command for the actual verification and stop the temporary server after verification.
+- execute_command(command, background?) — run a shell command; plain calls must be non-interactive and finite. background:true starts a long-lived process (dev/static server, watcher) DETACHED: it returns {pid, logFile} immediately instead of timing out after 30s. Serving & previewing a project ("启动服务打开页面") — pick the right vehicle FIRST:
+  * Single self-contained .html file (no build step, no server-only APIs) → open it directly via its file:// path — no service needed.
+  * Anything with a dev-server script (package.json scripts / vite / webpack / next / flask / fastapi…) or pages using fetch(), ES modules, or CORS-sensitive assets → MUST go through http://localhost: install dependencies first (finite command), then start the server with background:true, poll with a bounded probe ("curl -s -o /dev/null -w %{http_code} http://localhost:<port>") until it answers, open the page for the user (macOS "open <url>", Linux "xdg-open <url>", Windows PowerShell "Start-Process <url>"), and report the URL + how to stop it (kill <pid>).
+  Never leave a foreground server running, never let a server start time out, and never fake a preview by opening file:// for something that needs a server.
 - git_diff(staged?, path?) — show git diff
 - git_log(maxCount?, oneline?) — recent commit history
 - git_status — working tree status`;

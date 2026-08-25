@@ -96,11 +96,12 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'execute_command',
-    description: 'Execute a shell command in the workspace directory. Returns stdout, stderr, and exit code.',
+    description: 'Execute a shell command in the workspace directory. Returns stdout, stderr, and exit code. With background:true, starts a long-lived process (dev/static server, watcher) detached: returns {pid, logFile} immediately instead of waiting for exit.',
     input_schema: {
       type: 'object',
       properties: {
         command: { type: 'string', description: 'Shell command to execute' },
+        background: { type: 'boolean', description: 'Run detached without waiting for exit — required for dev/static servers, watchers, and any command that never exits. Verify afterwards with a bounded probe (curl the port), then report the URL.' },
       },
       required: ['command'],
     },
