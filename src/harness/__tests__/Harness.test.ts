@@ -530,8 +530,13 @@ describe('Harness cross-session memory (v0.10)', () => {
   it('injects only current-platform tool preferences into the system prompt', async () => {
     const memStore = new FakeMemoryStore();
     const now = Date.now();
-    await memStore.add({ type: 'tool_preference', content: 'Verified on darwin: the pnpm tool works on this machine', timestamp: now, sessionId: 's1', projectPath: '/ws', platform: 'darwin' });
-    await memStore.add({ type: 'tool_preference', content: 'Verified on win32: the choco tool works on this machine', timestamp: now, sessionId: 's1', projectPath: '/ws', platform: 'win32' });
+    // Seed THIS runner's platform plus a foreign one — CI runs on linux where
+    // hardcoded darwin/win32 pairs would inject nothing and fail the section
+    // assertion below.
+    const mine = process.platform;
+    const other = mine === 'darwin' ? 'win32' : 'darwin';
+    await memStore.add({ type: 'tool_preference', content: `Verified on ${mine}: the pnpm tool works on this machine`, timestamp: now, sessionId: 's1', projectPath: '/ws', platform: mine });
+    await memStore.add({ type: 'tool_preference', content: `Verified on ${other}: the choco tool works on this machine`, timestamp: now, sessionId: 's1', projectPath: '/ws', platform: other });
     const llm = recordingLLM('answer');
     const harness = new Harness({
       sessionId: 'sess-inj',
@@ -546,22 +551,19 @@ describe('Harness cross-session memory (v0.10)', () => {
 
     const sys = llm.received[0][0].content;
     expect(sys).toContain('Platform-verified tools');
-    if (process.platform === 'darwin') {
-      expect(sys).toContain('pnpm');
-      expect(sys).not.toContain('choco');
-    } else if (process.platform === 'win32') {
-      expect(sys).toContain('choco');
-      expect(sys).not.toContain('pnpm');
-    }
+    expect(sys).toContain('pnpm');
+    expect(sys).not.toContain('choco');
   });
 
   it('always injects machine-global tool preferences for the current platform', async () => {
     const memStore = new FakeMemoryStore();
     const now = Date.now();
-    await memStore.add({ type: 'tool_preference', content: 'Verified on darwin: the brew tool works on this machine', timestamp: now, sessionId: 's1', projectPath: GLOBAL_MEMORY_SCOPE, platform: 'darwin' });
-    await memStore.add({ type: 'tool_preference', content: 'Verified on win32: the choco tool works on this machine', timestamp: now, sessionId: 's1', projectPath: GLOBAL_MEMORY_SCOPE, platform: 'win32' });
+    const mine = process.platform;
+    const other = mine === 'darwin' ? 'win32' : 'darwin';
+    await memStore.add({ type: 'tool_preference', content: `Verified on ${mine}: the brew tool works on this machine`, timestamp: now, sessionId: 's1', projectPath: GLOBAL_MEMORY_SCOPE, platform: mine });
+    await memStore.add({ type: 'tool_preference', content: `Verified on ${other}: the choco tool works on this machine`, timestamp: now, sessionId: 's1', projectPath: GLOBAL_MEMORY_SCOPE, platform: other });
     // 休眠的全局条目不参与常驻注入（进化生命周期：睡着 ≠ 没了）。
-    await memStore.add({ type: 'tool_preference', content: 'Verified on darwin: the stale tool works on this machine', timestamp: now, sessionId: 's1', projectPath: GLOBAL_MEMORY_SCOPE, platform: 'darwin', lifecycle: 'dormant' });
+    await memStore.add({ type: 'tool_preference', content: `Verified on ${mine}: the stale tool works on this machine`, timestamp: now, sessionId: 's1', projectPath: GLOBAL_MEMORY_SCOPE, platform: mine, lifecycle: 'dormant' });
     const llm = recordingLLM('answer');
     const harness = new Harness({
       sessionId: 'sess-global-inj',
@@ -577,10 +579,8 @@ describe('Harness cross-session memory (v0.10)', () => {
 
     const sys = llm.received[0][0].content;
     expect(sys).toContain('Platform-verified tools');
-    const mine = process.platform === 'darwin' ? 'brew' : 'choco';
-    const other = process.platform === 'darwin' ? 'choco' : 'brew';
-    expect(sys).toContain(mine);
-    expect(sys).not.toContain(other);
+    expect(sys).toContain('brew');
+    expect(sys).not.toContain('choco');
     expect(sys).not.toContain('stale');
   });
 
