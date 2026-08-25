@@ -6,6 +6,7 @@
 import { basename, dirname, isAbsolute, join, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
@@ -694,14 +695,22 @@ export class NodeToolAdapter implements ToolAdapter {
    */
   private async handleBackgroundCommand(command: string, start: number): Promise<ToolResult> {
     const plan = buildBackgroundLaunchPlan(command, { isWindows: IS_WINDOWS });
+    // The plan's Windows paths are %TEMP% literals — placeholders for the
+    // Tauri/PowerShell channel where $env:TEMP resolves ON the target machine
+    // at launch time. This adapter runs in a real Node/Bun process and writes
+    // + reports those files DIRECTLY, so it must expand them here (writing to
+    // a literal `%TEMP%\...` path fails with ENOENT).
+    const winTemp = IS_WINDOWS ? tmpdir() : '';
     let scriptFile = plan.scriptFile;
+    let logFile = plan.logFile;
     if (!IS_WINDOWS) {
-      writeFileSync(scriptFile, buildWrapperScript(command, plan.logFile), { mode: 0o755 });
+      writeFileSync(scriptFile, buildWrapperScript(command, logFile), { mode: 0o755 });
     } else {
       // Node path runs cmd.exe (the plan's .ps1 file is only for the Tauri
       // incantation), so generate the cmd wrapper under its own name.
-      scriptFile = scriptFile.replace(/\.ps1$/, '.cmd');
-      writeFileSync(scriptFile, buildWrapperScript(command, plan.logFile, { isWindows: true }));
+      scriptFile = scriptFile.replace(/^%TEMP%/, winTemp).replace(/\.ps1$/, '.cmd');
+      logFile = logFile.replace(/^%TEMP%/, winTemp);
+      writeFileSync(scriptFile, buildWrapperScript(command, logFile, { isWindows: true }));
     }
     const shellArgs = IS_WINDOWS ? ['cmd', '/c', scriptFile] : ['sh', scriptFile];
     try {
@@ -717,7 +726,7 @@ export class NodeToolAdapter implements ToolAdapter {
       return {
         id: `tool_${Date.now()}`,
         toolName: 'execute_command',
-        result: buildBackgroundResult(proc.pid ?? null, plan.logFile),
+        result: buildBackgroundResult(proc.pid ?? null, logFile),
         success: true,
         duration: Date.now() - start,
       };
