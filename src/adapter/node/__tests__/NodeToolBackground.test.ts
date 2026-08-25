@@ -101,9 +101,11 @@ describe('execute_command background:true (real detached server)', () => {
 
   it('log file captures output written before detach (wrapper redirection)', async () => {
     const marker = `bg-marker-${Date.now()}`;
-    // Print the marker immediately, then idle — proves early output lands in
-    // the log while the process is still running detached.
-    const script = writeScript(`console.log("${marker}"); setInterval(function () {}, 60000);\n`);
+    // Print the marker, then exit. Deliberately NOT an idle interval: on
+    // Windows Bun block-buffers non-TTY stdout and an eternally-alive process
+    // never flushes it, so the log would stay empty until process end. Exit
+    // flushes; the tool call still races the child, which is the point.
+    const script = writeScript(`console.log("${marker}");\n`);
     const result = await call(`"${BUN}" ${JSON.stringify(script)}`);
     const payload = JSON.parse(String(result.result)) as BackgroundPayload;
     expect(result.success).toBe(true);
