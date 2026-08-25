@@ -404,6 +404,8 @@ describe('verification command helpers', () => {
     expect(buildVerifyCommand(undefined, 'posix')).toContain('pytest');
   });
 
+  // Three sequential npm/node spawns on a cold Windows runner take well over
+  // bun's 5s default test timeout — give the integration explicit headroom.
   it.skipIf(process.platform !== 'win32')('runs Windows audit and verification without CLIXML', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'pure-quality-windows-gate-'));
     try {
@@ -432,7 +434,7 @@ describe('verification command helpers', () => {
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('preserves a profile verification failure instead of echoing completion', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'pure-quality-verify-'));
