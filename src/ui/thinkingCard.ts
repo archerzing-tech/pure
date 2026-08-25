@@ -67,6 +67,65 @@ export function setThinkingLabel(handle: ThinkingCardHandle, text: string): void
   label.textContent = text;
 }
 
+// ── Live elapsed-time feedback ──
+// A silent wait reads as a hung session ("正在思考下一步" could sit static for
+// minutes with only animated dots). The timer chip ticks every second next to
+// the label so the user can SEE time advancing, and after hintAfterMs with no
+// reasoning text yet, one honest hint explains what long silences usually are
+// (deep reasoning / network retries). No fake progress theater beyond that —
+// matching the no-rotation policy documented above.
+
+const THINKING_TIMER_DEFAULTS = { intervalMs: 1000, hintAfterMs: 15000 };
+
+const timerIntervals = new WeakMap<ThinkingCardHandle, number>();
+
+/** Tick an elapsed-seconds chip beside the label until the card finalizes,
+ *  detaches (interval self-cancels), or stopThinkingTimer runs. */
+export function startThinkingTimer(
+  handle: ThinkingCardHandle,
+  opts: { intervalMs?: number; hintAfterMs?: number; hintText?: string } = {},
+): void {
+  stopThinkingTimer(handle);
+  const { intervalMs, hintAfterMs } = { ...THINKING_TIMER_DEFAULTS, ...opts };
+  const hintText = opts.hintText
+    ?? '模型响应较慢：可能在深度推理或网络重试中，会话并未卡死；可随时停止本轮。';
+  const label = handle.card.querySelector<HTMLElement>('.thinking-label');
+  if (!label || !handle.card.isConnected) return;
+  const chip = document.createElement('span');
+  chip.className = 'thinking-timer';
+  chip.textContent = '0s';
+  label.insertAdjacentElement('afterend', chip);
+  const startedAt = Date.now();
+  let hinted = false;
+  const iv = window.setInterval(() => {
+    // Self-cleanup for cards removed without stopThinkingTimer (abort paths).
+    if (!handle.card.isConnected) {
+      stopThinkingTimer(handle);
+      return;
+    }
+    const ms = Date.now() - startedAt;
+    chip.textContent = `${Math.floor(ms / intervalMs)}s`;
+    if (!hinted && ms >= hintAfterMs && !handle.textEl.textContent) {
+      hinted = true;
+      const hint = document.createElement('div');
+      hint.className = 'thinking-hint';
+      hint.textContent = hintText;
+      handle.body.insertBefore(hint, handle.scrollEl);
+    }
+  }, intervalMs);
+  timerIntervals.set(handle, iv);
+}
+
+/** Remove the timer chip and cancel its interval (idempotent). */
+export function stopThinkingTimer(handle: ThinkingCardHandle): void {
+  const iv = timerIntervals.get(handle);
+  if (iv !== undefined) {
+    clearInterval(iv);
+    timerIntervals.delete(handle);
+  }
+  handle.card.querySelector('.thinking-timer')?.remove();
+}
+
 export function createThinkingCard(): ThinkingCardHandle {
   const el = document.createElement('div');
   el.className = 'bubble-row thinking-row';
@@ -146,14 +205,22 @@ export function appendThinkingText(handle: ThinkingCardHandle, text: string): vo
   }
 }
 
-/** Mark the thinking phase as complete while preserving its transcript row. */
+/** Mark the thinking phase as complete while preserving its transcript row.
+ *  The live timer chip is replaced by a frozen total ("思考完成 · 42s") so the
+ *  transcript keeps the duration as reviewable information. */
 export function finalizeThinkingCard(handle: ThinkingCardHandle): void {
   // Collapse any verbatim loop the model emitted before the card is reviewed
   // (the live stream may briefly show the repeats; the final card is clean).
   handle.textEl.textContent = collapseRepeatedReasoning(handle.textEl.textContent);
+  const chip = handle.card.querySelector<HTMLElement>('.thinking-timer');
+  const elapsedLabel = chip?.textContent ?? '';
+  stopThinkingTimer(handle);
   handle.card.classList.remove('thinking');
   handle.card.classList.add('complete');
   const label = handle.card.querySelector<HTMLElement>('.thinking-label');
-  if (label) label.textContent = t('thinking.done');
+  if (label) {
+    const secs = parseInt(elapsedLabel, 10);
+    label.textContent = Number.isFinite(secs) && secs >= 1 ? `${t('thinking.done')} · ${elapsedLabel}` : t('thinking.done');
+  }
   handle.card.querySelector('.thinking-dots')?.remove();
 }

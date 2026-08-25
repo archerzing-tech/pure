@@ -892,4 +892,21 @@ describe('generate_image text-to-image wiring', () => {
     const endThinking = src.indexOf('const endThinking = () => {');
     expect(src.slice(endThinking, endThinking + 300)).toContain('cancelToolGapCard();');
   });
+
+  it('keeps long silences legible: elapsed timer, retry surfacing, label reset', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // Every live thinking card starts the elapsed-seconds timer on open.
+    const openCard = src.indexOf('const openThinkingCard = ');
+    expect(openCard).toBeGreaterThan(-1);
+    expect(src.slice(openCard, openCard + 260)).toContain('startThinkingTimer(card);');
+    // Abort paths stop the timer explicitly.
+    expect(src).toContain('stopThinkingTimer(thinkingCard);');
+    // Engine LLM retries are surfaced on the card instead of staying silent —
+    // a retry re-streams the whole context and used to look exactly like a hang.
+    expect(src).toContain("case 'FailurePolicyDecision': {");
+    expect(src).toContain('模型请求失败，正在重试');
+    // The silence-waiter label resets once real reasoning arrives.
+    expect(src).toContain("classList.contains('waiting')");
+    expect(src).toContain("setThinkingLabel(thinkingCard, t('thinking.thinking'))");
+  });
 });

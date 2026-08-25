@@ -48,7 +48,7 @@ import { renderArtifactCards, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
-import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, type ThinkingCardHandle } from './thinkingCard';
+import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, startThinkingTimer, stopThinkingTimer, type ThinkingCardHandle } from './thinkingCard';
 import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, runDeliveryVerification, workspaceProfileSummary, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
@@ -1606,6 +1606,10 @@ export class ChatController {
     // first content/tool delta, and nulled so a later reasoning phase (after
     // tool results) opens a fresh card below whatever it followed.
     let thinkingCard: ThinkingCardHandle | null = null;
+    // Consecutive LLM retry/reflect/degrade notices this turn (FailurePolicy
+    // decisions) — shown on the live thinking card so silent retries become
+    // visible feedback.
+    let llmRetryNotices = 0;
     // Reasoning deltas are batched into 50ms flushes before touching the DOM:
     // reasoning streams (DeepSeek/Qwen/GLM) can deliver hundreds of deltas per
     // second, and a per-delta append + scroll forces a layout read every time
@@ -1641,6 +1645,9 @@ export class ChatController {
         if (pendingRows.size > 0 || pendingByName.size > 0) return;
         thinkingCard = openThinkingCard();
         setThinkingLabel(thinkingCard, '正在思考下一步…');
+        // Mark the card as a silence-waiter so the first real reasoning delta
+        // resets this label back to the default thinking state.
+        thinkingCard.card.classList.add('waiting');
         scrollChatToBottomIfPinned(chatEl);
       }, TOOL_GAP_DEBOUNCE_MS);
     };
@@ -1661,6 +1668,7 @@ export class ChatController {
       }
       thinkingPending = '';
       if (thinkingCard) {
+        stopThinkingTimer(thinkingCard);
         thinkingCard.el.remove();
         thinkingCard = null;
       }
@@ -1711,9 +1719,12 @@ export class ChatController {
     };
     // createThinkingCard() builds the element tree but does NOT attach it —
     // append to the transcript here, right below whatever was last added.
+    // Every live card gets an elapsed-time chip: a long "正在思考下一步…" with
+    // only dots reads as a hung session, ticking seconds prove it is alive.
     const openThinkingCard = (): ThinkingCardHandle => {
       const card = createThinkingCard();
       chatEl.appendChild(card.el);
+      startThinkingTimer(card);
       return card;
     };
 
@@ -2675,6 +2686,29 @@ export class ChatController {
             break;
           }
 
+          case 'FailurePolicyDecision': {
+            // The engine retries failed LLM calls SILENTLY from the UI's point
+            // of view (a retry re-streams the whole context) — one of the main
+            // causes of long "正在思考下一步…" silences. Surface it on the live
+            // card so the user can tell a retry from a hang.
+            const kind = event.payload?.action?.kind;
+            if (kind === 'retry' || kind === 'reflect') {
+              llmRetryNotices++;
+              cancelToolGapCard();
+              if (!thinkingCard) {
+                thinkingCard = openThinkingCard();
+                thinkingCard.card.classList.add('waiting');
+                scrollChatToBottomIfPinned(chatEl);
+              }
+              setThinkingLabel(thinkingCard, `模型请求失败，正在重试（连续第 ${llmRetryNotices} 次）…`);
+            } else if (kind === 'degrade') {
+              llmRetryNotices++;
+              if (thinkingCard) setThinkingLabel(thinkingCard, `连续失败，已降级处理（第 ${llmRetryNotices} 次）…`);
+            }
+            // kind === 'stop' surfaces via the Interrupted event path below.
+            break;
+          }
+
           case 'TokenDelta': {
             if (!event.payload.isToolCall) {
               const delta = event.payload.content;
@@ -2791,6 +2825,12 @@ export class ChatController {
             // Reasoning can resume after tool rows (each LLM iteration), so a
             // fresh card opens below whatever was appended since the last one.
             if (!thinkingCard) thinkingCard = openThinkingCard();
+            // First real reasoning after a silence-waiter/retry label resets
+            // the card back to its default thinking state.
+            if (thinkingCard.card.classList.contains('waiting')) {
+              thinkingCard.card.classList.remove('waiting');
+              setThinkingLabel(thinkingCard, t('thinking.thinking'));
+            }
             // Phase tracking runs per-delta (persistence); the DOM append is
             // throttled, so "card empty" must also consider the pending buffer
             // to avoid opening a duplicate phase while text is only buffered.
