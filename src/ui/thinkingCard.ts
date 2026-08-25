@@ -126,15 +126,31 @@ export function stopThinkingTimer(handle: ThinkingCardHandle): void {
   handle.card.querySelector('.thinking-timer')?.remove();
 }
 
+/** Linger window between real output becoming visible on screen and the
+ * slow-response hint starting its fade-out (the CSS fade adds ~0.35s on top).
+ * The hint explains a silent wait; once output is actually rendering, one
+ * readable second remains before it goes away. */
+export const HINT_LINGER_MS = 1000;
+
 /** Fade the slow-response hint out and remove it. Called once real reasoning
- *  or answer text starts flowing — the hint describes a silent wait, so its
- *  job is done the moment the stream resumes. Idempotent; safe when absent. */
-export function dismissThinkingHint(handle: ThinkingCardHandle): void {
+ * or answer text starts flowing. With `delayMs > 0` the hint lingers that long
+ * AFTER the first visible output before fading — and the first call anchors
+ * that deadline (later deltas are no-ops, they never push it further out).
+ * Idempotent; safe when absent. */
+export function dismissThinkingHint(handle: ThinkingCardHandle, delayMs = 0): void {
   const hint = handle.body.querySelector<HTMLElement>('.thinking-hint');
   if (!hint || hint.dataset.dismissing === '1') return;
+  // Mark scheduled IMMEDIATELY so repeated deltas can't reschedule, and so
+  // finalizeThinkingCard leaves an already-fading hint to its own timer.
   hint.dataset.dismissing = '1';
-  hint.classList.add('fading');
-  window.setTimeout(() => hint.remove(), 400);
+  const startFade = (): void => {
+    // Card (and hint) may have left the DOM mid-dwell (abort / session switch).
+    if (!hint.isConnected) return;
+    hint.classList.add('fading');
+    window.setTimeout(() => hint.remove(), 400);
+  };
+  if (delayMs > 0) window.setTimeout(startFade, delayMs);
+  else startFade();
 }
 
 export function createThinkingCard(): ThinkingCardHandle {
@@ -224,8 +240,10 @@ export function finalizeThinkingCard(handle: ThinkingCardHandle): void {
   // (the live stream may briefly show the repeats; the final card is clean).
   handle.textEl.textContent = collapseRepeatedReasoning(handle.textEl.textContent);
   // A lingering slow-response hint is obsolete the moment the phase ends —
-  // remove it outright (no fade needed on a finalizing card).
-  handle.body.querySelector('.thinking-hint')?.remove();
+  // remove it outright UNLESS a delayed dismissal is already scheduled (output
+  // resumed and the hint is mid-linger): that timer owns the fade now.
+  const hint = handle.body.querySelector<HTMLElement>('.thinking-hint');
+  if (hint && hint.dataset.dismissing !== '1') hint.remove();
   const chip = handle.card.querySelector<HTMLElement>('.thinking-timer');
   const elapsedLabel = chip?.textContent ?? '';
   stopThinkingTimer(handle);

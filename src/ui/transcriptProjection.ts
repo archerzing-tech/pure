@@ -136,6 +136,15 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
     }
   }
 
+  // Drain any completed tool results that arrived after the last assistant
+  // entry (e.g. an interrupted session ending on a tool result) so their
+  // artifact cards are not silently dropped.
+  if (completedTools.length > 0) {
+    for (const artifact of artifactsFromToolExecs(completedTools)) {
+      if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
+    }
+    completedTools.length = 0;
+  }
   flushPending();
   flushTurnArtifacts();
   return blocks;

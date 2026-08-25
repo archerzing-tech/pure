@@ -48,7 +48,7 @@ import { renderArtifactCards, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
-import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, type ThinkingCardHandle } from './thinkingCard';
+import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
 import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, runDeliveryVerification, workspaceProfileSummary, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
@@ -1410,6 +1410,28 @@ export class ChatController {
       this.setStreaming(false);
       this.abortController = null;
     };
+    // A turn paused BEFORE the engine ran (Stop/Escape during pre-flight) keeps
+    // its request as a visible bubble AND must enter the live model history.
+    // Persisting to disk alone left `this.messages` without the request, so a
+    // follow-up like "继续" reached the LLM with no trace of the original task
+    // and the model answered that it did not know what to continue. Committing
+    // here (+ hasHistory) makes the NEXT send resume via continueTurn with the
+    // paused request in context; reloads were already covered by the disk write.
+    // Tool meta/phases come in as parameters because early abort sites run
+    // before their declarations below (a direct reference would be a TDZ error).
+    const commitPausedUserTurn = (
+      turnToolResults: Map<string, ToolExecMeta>,
+      phases: Array<{ text: string; assistantIndex: number }>,
+    ): Message[] => {
+      const pausedMessages = limitMessageHistory([
+        ...this.messages,
+        { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments },
+      ]);
+      this.messages = pausedMessages;
+      this.hasHistory = true;
+      void this.persistSession(pausedMessages, turnToolResults, phases, sendSessionId, sendWorkspace);
+      return pausedMessages;
+    };
     // Do not let path-linkification, scrolling, workspace resolution, or any
     // other preflight work run in the same event turn as the user's click.
     // Long transcripts make even small DOM/layout work visible; yielding here
@@ -1443,13 +1465,7 @@ export class ChatController {
     }
     if (turnController.signal.aborted) {
       this.addStatusBubble('⏸ 已暂停：你的请求已保留在对话中。', true, false);
-      void this.persistSession(
-        [...this.messages, { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments }],
-        new Map(),
-        [],
-        sendSessionId,
-        sendWorkspace,
-      );
+      commitPausedUserTurn(new Map(), []);
       releaseSupersededTurn();
       return;
     }
@@ -1464,11 +1480,9 @@ export class ChatController {
         return;
       }
       this.addStatusBubble(pausedText, true, false);
-      // 把被暂停的消息落盘（与运行中断路径一致），避免重载后“输入消失”。
-      void this.persistSession(
-        [...this.messages, { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments }],
-        toolResults, thinkingPhases, sendSessionId, sendWorkspace,
-      );
+      // 把被暂停的消息落盘（与运行中断路径一致），避免重载后“输入消失”，
+      // 并提交进内存历史，让同会话的后续输入（如「继续」）仍能看到原始请求。
+      commitPausedUserTurn(toolResults, thinkingPhases);
     };
 
     // Generation guard: if the user navigates to another session / starts a
@@ -2732,6 +2746,10 @@ export class ChatController {
             if (!event.payload.isToolCall) {
               const delta = event.payload.content;
               if (delta) {
+                // Answer text is now visibly streaming: schedule the hint's
+                // 1s linger BEFORE endThinking finalizes the card, so a showing
+                // hint survives finalize and completes its own fade.
+                if (thinkingCard) dismissThinkingHint(thinkingCard, HINT_LINGER_MS);
                 // First visible answer token closes the thinking phase.
                 endThinking();
                 const seg = ensureSegment();
@@ -2845,13 +2863,17 @@ export class ChatController {
             // fresh card opens below whatever was appended since the last one.
             if (!thinkingCard) thinkingCard = openThinkingCard();
             // First real reasoning after a silence-waiter/retry label resets
-            // the card back to its default thinking state; the slow-response
-            // hint (if showing) fades out — its wait is over.
+            // the card back to its default thinking state.
             if (thinkingCard.card.classList.contains('waiting')) {
               thinkingCard.card.classList.remove('waiting');
               setThinkingLabel(thinkingCard, t('thinking.thinking'));
-              dismissThinkingHint(thinkingCard);
             }
+            // The slow-response hint describes a silent wait: now that
+            // reasoning is visibly streaming it lingers 1s, then fades. Called
+            // OUTSIDE the waiting-branch so a plain first-token wait (no
+            // 'waiting' class) dismisses its hint too — previously that hint
+            // hung around until the phase ended.
+            dismissThinkingHint(thinkingCard, HINT_LINGER_MS);
             // Phase tracking runs per-delta (persistence); the DOM append is
             // throttled, so "card empty" must also consider the pending buffer
             // to avoid opening a duplicate phase while text is only buffered.
@@ -3454,11 +3476,15 @@ export class ChatController {
         );
       } else if (thinkingPhases.length > 0 && gen === this.generation) {
         const partialOutput = assistantSegments.map(segment => segment.text).filter(Boolean).join('\n\n');
-        const interruptedSnapshot: Message[] = [
+        // Same commit semantics as the Interrupted event: the paused request +
+        // partial answer enter the live history so a follow-up can continue.
+        const interruptedSnapshot: Message[] = limitMessageHistory([
           ...this.messages,
           { role: 'user', content: userText },
           { role: 'assistant', content: partialOutput },
-        ];
+        ]);
+        this.messages = interruptedSnapshot;
+        this.hasHistory = true;
         await this.persistSession(
           interruptedSnapshot,
           toolResults,
