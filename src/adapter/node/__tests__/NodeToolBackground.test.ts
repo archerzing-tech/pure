@@ -111,8 +111,11 @@ describe('execute_command background:true (real detached server)', () => {
     expect(result.success).toBe(true);
     try {
       let content = '';
-      for (let i = 0; i < 20 && !content.includes(marker); i++) {
-        await new Promise((r) => setTimeout(r, 200));
+      // Long window: a cold bun.exe start under Windows Defender real-time
+      // scanning can take seconds, and the log file stays read-locked (EBUSY)
+      // while the writer holds it — both are absorbed by keep-polling.
+      for (let i = 0; i < 30 && !content.includes(marker); i++) {
+        await new Promise((r) => setTimeout(r, 250));
         if (existsSync(payload.logFile)) {
           content = readLog(payload.logFile);
         }
