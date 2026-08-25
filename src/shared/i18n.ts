@@ -634,6 +634,10 @@ const translations: Record<Language, Record<string, string>> = {
 
     // ── Chat transcript runtime bubbles ──
     'chat.interrupted': '⏹ 已中断：{reason}',
+    'chat.interrupted.rateLimited': '请求过于频繁（API 限流），请稍后重试',
+    'chat.interrupted.serverError': '服务暂时不可用，请稍后重试',
+    'chat.interrupted.networkError': '网络连接失败，请检查网络后重试',
+    'chat.interrupted.generic': '操作被中断，请重试或切换任务',
     'chat.cancelled': '（已取消）',
     'chat.error': '错误：{msg}',
     'chat.newContent': '↓ 有新内容',
@@ -1407,6 +1411,10 @@ const translations: Record<Language, Record<string, string>> = {
 
     // ── Chat transcript runtime bubbles ──
     'chat.interrupted': '⏹ Interrupted: {reason}',
+    'chat.interrupted.rateLimited': 'Rate limited — please try again later',
+    'chat.interrupted.serverError': 'Service temporarily unavailable — please try again later',
+    'chat.interrupted.networkError': 'Network connection failed — please check your connection',
+    'chat.interrupted.generic': 'Operation interrupted — please retry or try a different approach',
     'chat.cancelled': '(cancelled)',
     'chat.error': 'Error: {msg}',
     'chat.newContent': '↓ New content',

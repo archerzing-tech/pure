@@ -90,6 +90,25 @@ const TRAP_TYPE_LABELS: Record<TrapWarning['type'], string> = {
 // Mirrors the 100ms streaming-render throttle (markdown.ts).
 const TOOL_CALL_REFRESH_MS = 120;
 
+// ── Interrupt-reason sanitization ──
+// FailurePolicy.stop reasons are written as instructions FOR the model (they
+// contain raw HTTP error text, tool names, and directives like "stop making it").
+// Surfacing them verbatim leaks internals to the user.  This helper replaces
+// the reason with a localized, user-friendly summary.
+function sanitizeInterruptedReason(raw: string): string {
+  const lower = raw.toLowerCase();
+  if (/429|rate.?limit|rate.?exceeded|too many request/i.test(lower)) {
+    return t('chat.interrupted.rateLimited', 'Rate limited — please try again later');
+  }
+  if (/5\d{2}|server.?error|internal.?server/i.test(lower)) {
+    return t('chat.interrupted.serverError', 'Service temporarily unavailable — please try again later');
+  }
+  if (/ECONNREFUSED|ETIMEDOUT|ECONNRESET|network|fetch.?fail|ENOTFOUND/i.test(lower)) {
+    return t('chat.interrupted.networkError', 'Network connection failed — please check your connection');
+  }
+  return t('chat.interrupted.generic', 'Operation interrupted — please retry or try a different approach');
+}
+
 // Kept as a compatibility hook for the app shell. Transcript rows must not be
 // removed from the live DOM: deleting them made upward scrolling show missing
 // history and also raced session restore. Performance is handled by throttled
@@ -3318,6 +3337,16 @@ export class ChatController {
             for (const seg of assistantSegments) cancelStreamingRender(seg.el);
             resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
             for (const seg of assistantSegments) seg.el.classList.remove('streaming');
+            // Re-render each segment through the full markdown pipeline so
+            // interrupted sessions get code highlighting, mermaid diagrams,
+            // and path linkification — same treatment as Completed.
+            for (const seg of assistantSegments) {
+              if (!seg.text) continue;
+              void renderMarkdown(stripToolCallXml(seg.text), seg.el).then(() => {
+                if (gen !== this.generation) return;
+                scrollChatToBottomIfPinned(chatEl);
+              });
+            }
             const hasContent = assistantSegments.some(s => s.el.textContent || s.el.children.length > 0);
             const lastSeg = assistantSegments.length ? assistantSegments[assistantSegments.length - 1] : null;
             if (event.payload.reason !== 'aborted') {
@@ -3325,7 +3354,7 @@ export class ChatController {
               // separate status row instead of flattening a bubble to text.
               // Runtime interrupt notices follow the UI language (were hard-
               // coded English) — see chat.* keys in i18n.ts.
-              const interrupted = t('chat.interrupted', '⏹ Interrupted: {reason}').replace('{reason}', event.payload.reason);
+              const interrupted = t('chat.interrupted', '⏹ Interrupted: {reason}').replace('{reason}', sanitizeInterruptedReason(event.payload.reason));
               if (hasContent) {
                 this.addStatusBubble(interrupted);
               } else if (lastSeg) {
