@@ -172,4 +172,33 @@ describe('projectTranscript', () => {
     expect(blocks[1]).toMatchObject({ type: 'assistant', content: '计划已暂停', isPlanPause: true });
     expect(blocks[2]).toEqual({ type: 'artifact', items: [{ path: 'src/app.ts' }] });
   });
+
+  it('emits ONE deduplicated artifact card per user turn at the turn boundary', () => {
+    // Regression: a multi-stage coding project used to render the project-
+    // directory card after EVERY assistant message on restore, while live
+    // streaming shows it once at turn end — history did not match live.
+    const entries: TranscriptEntry[] = [
+      { id: 'u1', modelMessageIndex: 0, role: 'user', content: '做一个项目' },
+      { id: 'a1', modelMessageIndex: 1, role: 'assistant', content: '', toolCalls: [{ id: 'w1', toolName: 'write_file', args: { path: 'index.html' } }] },
+      { id: 't1', modelMessageIndex: 2, role: 'tool', content: 'ok', toolCallId: 'w1', toolName: 'write_file' },
+      { id: 'a2', modelMessageIndex: 3, role: 'assistant', content: '第1步完成' },
+      { id: 'a3', modelMessageIndex: 4, role: 'assistant', content: '', toolCalls: [{ id: 'w2', toolName: 'write_file', args: { path: 'index.html' } }, { id: 'w3', toolName: 'write_file', args: { path: 'style.css' } }] },
+      { id: 't3', modelMessageIndex: 5, role: 'tool', content: 'ok', toolCallId: 'w3', toolName: 'write_file' },
+      { id: 'a4', modelMessageIndex: 6, role: 'assistant', content: '全部完成' },
+      { id: 'u2', modelMessageIndex: 7, role: 'user', content: '从新设计4个UI界面' },
+    ];
+
+    const blocks = projectTranscript(entries);
+    const artifactIdx = blocks.map(b => b.type === 'artifact');
+    expect(artifactIdx.filter(Boolean)).toHaveLength(1); // exactly ONE card
+    // It lands at the turn boundary (before the next user message)…
+    expect(blocks[blocks.length - 1].type).toBe('user');
+    expect(blocks[blocks.length - 2]).toMatchObject({ type: 'artifact' });
+    // …with the turn's files deduplicated into a single list.
+    expect(blocks[blocks.length - 2]).toEqual({
+      type: 'artifact',
+      items: [{ path: 'index.html' }, { path: 'style.css' }],
+      userRequest: '做一个项目',
+    });
+  });
 });

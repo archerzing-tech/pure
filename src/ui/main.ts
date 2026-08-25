@@ -714,62 +714,70 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
       }
       flushReplayTools();
 
-      if (block.type === 'user') {
-        const wrapper = document.createElement('div');
-        wrapper.className = 'bubble-row user';
-        const label = document.createElement('span');
-        label.className = 'bubble-label';
-        label.textContent = t('context.role.you');
-        wrapper.appendChild(label);
-        const bubble = document.createElement('div');
-        bubble.className = 'bubble';
-        bubble.textContent = stripUserTurnContext(block.content);
-        renderUserImageAttachments(bubble, block.images);
-        for (const attachment of block.attachments) {
-          bubble.appendChild(renderAttachmentCard(attachment, () => pasteChips.openStoredAttachment(attachment)));
+      // Per-block isolation: one broken block (e.g. markdown that trips the
+      // renderer, a malformed card payload) must not abort the whole restore —
+      // it used to truncate everything AFTER it, so reviewing a long project
+      // history silently lost all later messages. Log and keep going.
+      try {
+        if (block.type === 'user') {
+          const wrapper = document.createElement('div');
+          wrapper.className = 'bubble-row user';
+          const label = document.createElement('span');
+          label.className = 'bubble-label';
+          label.textContent = t('context.role.you');
+          wrapper.appendChild(label);
+          const bubble = document.createElement('div');
+          bubble.className = 'bubble';
+          bubble.textContent = stripUserTurnContext(block.content);
+          renderUserImageAttachments(bubble, block.images);
+          for (const attachment of block.attachments) {
+            bubble.appendChild(renderAttachmentCard(attachment, () => pasteChips.openStoredAttachment(attachment)));
+          }
+          bindUserBubbleSelectAll(bubble);
+          linkifyPaths(bubble);
+          wrapper.appendChild(bubble);
+          chatEl.appendChild(wrapper);
+        } else if (block.type === 'analysis' || block.type === 'thinking') {
+          appendStoredThinking(block.text, chatEl);
+        } else if (block.type === 'assessment') {
+          const flow = createAssessmentFlowCard(block.assessment);
+          flow.completePhase('gate');
+          flow.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
+          chatEl.appendChild(flow.el);
+          chat.registerPausedAssessment(flow);
+        } else if (block.type === 'plan') {
+          const progress = chat.getPlanProgressModel();
+          if (!progress) continue;
+          const restoredPlanCard = createRestoredPlanCard(progress);
+          chatEl.appendChild(restoredPlanCard.el);
+        } else if (block.type === 'assistant') {
+          const wrapper = document.createElement('div');
+          wrapper.className = 'bubble-row assistant';
+          const label = document.createElement('span');
+          label.className = 'bubble-label';
+          label.textContent = t('context.role.pure');
+          wrapper.appendChild(label);
+          const bubble = document.createElement('div');
+          bubble.className = block.isPlanPause ? 'bubble plan-pause-message' : 'bubble';
+          bindAssistantBubbleCopy(bubble);
+          wrapper.appendChild(bubble);
+          chatEl.appendChild(wrapper);
+          await renderMarkdown(stripToolCallXml(block.content), bubble, { yieldBeforeParse: false });
+          if (block.isPlanPause) {
+            attachPlanPauseActions(
+              wrapper,
+              () => chat.continuePausedPlan(),
+              () => chat.cancelPausedPlan(),
+            );
+          }
+        } else if (block.type === 'artifact') {
+          const artifactRow = document.createElement('div');
+          artifactRow.className = 'bubble-row artifact-row';
+          chatEl.appendChild(artifactRow);
+          renderArtifactCards(artifactRow, block.items, chat.getEffectiveWorkspace() || '.', { userRequest: block.userRequest });
         }
-        bindUserBubbleSelectAll(bubble);
-        linkifyPaths(bubble);
-        wrapper.appendChild(bubble);
-        chatEl.appendChild(wrapper);
-      } else if (block.type === 'analysis' || block.type === 'thinking') {
-        appendStoredThinking(block.text, chatEl);
-      } else if (block.type === 'assessment') {
-        const flow = createAssessmentFlowCard(block.assessment);
-        flow.completePhase('gate');
-        flow.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
-        chatEl.appendChild(flow.el);
-        chat.registerPausedAssessment(flow);
-      } else if (block.type === 'plan') {
-        const progress = chat.getPlanProgressModel();
-        if (!progress) continue;
-        const restoredPlanCard = createRestoredPlanCard(progress);
-        chatEl.appendChild(restoredPlanCard.el);
-      } else if (block.type === 'assistant') {
-        const wrapper = document.createElement('div');
-        wrapper.className = 'bubble-row assistant';
-        const label = document.createElement('span');
-        label.className = 'bubble-label';
-        label.textContent = t('context.role.pure');
-        wrapper.appendChild(label);
-        const bubble = document.createElement('div');
-        bubble.className = block.isPlanPause ? 'bubble plan-pause-message' : 'bubble';
-        bindAssistantBubbleCopy(bubble);
-        wrapper.appendChild(bubble);
-        chatEl.appendChild(wrapper);
-        await renderMarkdown(stripToolCallXml(block.content), bubble, { yieldBeforeParse: false });
-        if (block.isPlanPause) {
-          attachPlanPauseActions(
-            wrapper,
-            () => chat.continuePausedPlan(),
-            () => chat.cancelPausedPlan(),
-          );
-        }
-      } else if (block.type === 'artifact') {
-        const artifactRow = document.createElement('div');
-        artifactRow.className = 'bubble-row artifact-row';
-        chatEl.appendChild(artifactRow);
-        renderArtifactCards(artifactRow, block.items, chat.getEffectiveWorkspace() || '.', { userRequest: block.userRequest });
+      } catch (blockErr) {
+        console.warn('[pure] restore: skipping unrenderable transcript block', block.type, blockErr);
       }
 
       await yieldIfNeeded();

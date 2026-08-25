@@ -59,6 +59,20 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
   const completedTools: ToolExecMeta[] = [];
   let lastUserRequest = '';
 
+  // Live rendering shows ONE artifact/project-directory card per turn, after
+  // the final answer. The restore projection must match: accumulate the
+  // turn's written files (deduped by path) and emit a single artifact block
+  // at the turn boundary — never one card per assistant message.
+  const turnArtifactPaths = new Map<string, { path: string }>();
+
+  const flushTurnArtifacts = (): void => {
+    if (turnArtifactPaths.size === 0) return;
+    blocks.push(lastUserRequest
+      ? { type: 'artifact', items: [...turnArtifactPaths.values()], userRequest: lastUserRequest }
+      : { type: 'artifact', items: [...turnArtifactPaths.values()] });
+    turnArtifactPaths.clear();
+  };
+
   const flushPending = (): void => {
     for (const call of pending.values()) blocks.push(stoppedTool(call));
     pending.clear();
@@ -87,7 +101,10 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
     }
 
     if (entry.role === 'user') {
+      // Turn boundary: the previous turn's artifact card lands here, before
+      // the next request starts — exactly where live streaming put it.
       flushPending();
+      flushTurnArtifacts();
       lastUserRequest = entry.content ?? '';
       if (entry.content || entry.images?.length || entry.attachments?.length) {
         blocks.push({ type: 'user', content: visibleUserContent(entry.content ?? ''), images: entry.images ?? [], attachments: entry.attachments ?? [] });
@@ -110,11 +127,8 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
     if (content) {
       blocks.push({ type: 'assistant', content, isPlanPause: !!entry.isPlanPause });
     }
-    const artifacts = entry.artifacts?.length ? entry.artifacts : artifactsFromToolExecs(completedTools);
-    if (artifacts.length) {
-      blocks.push(lastUserRequest
-        ? { type: 'artifact', items: artifacts, userRequest: lastUserRequest }
-        : { type: 'artifact', items: artifacts });
+    for (const artifact of (entry.artifacts?.length ? entry.artifacts : artifactsFromToolExecs(completedTools))) {
+      if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
     }
     completedTools.length = 0;
     for (const call of entry.toolCalls ?? []) {
@@ -123,5 +137,6 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
   }
 
   flushPending();
+  flushTurnArtifacts();
   return blocks;
 }
