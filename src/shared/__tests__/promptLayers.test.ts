@@ -239,8 +239,17 @@ describe('FILE_TOOLS_CORE (L1 shared tool list)', () => {
   it('lists the full file + shell/git tool set', () => {
     expect(FILE_TOOLS_CORE).toContain('read_file(path, startLine?, endLine?)');
     expect(FILE_TOOLS_CORE).toContain('replace_files(files[], oldString, newString, allowMultiple?)');
-    expect(FILE_TOOLS_CORE).toContain('execute_command(command) — run a shell command');
+    expect(FILE_TOOLS_CORE).toContain('execute_command(command, background?) — run a shell command');
     expect(FILE_TOOLS_CORE).toContain('git_status — working tree status');
+  });
+
+  it('teaches the serve-and-preview decision: static file vs web server', () => {
+    // The "启动服务打开页面" protocol: the model must pick the right vehicle
+    // instead of faking a preview or letting a server time out.
+    expect(FILE_TOOLS_CORE).toContain('Single self-contained .html file');
+    expect(FILE_TOOLS_CORE).toContain('MUST go through http://localhost');
+    expect(FILE_TOOLS_CORE).toContain('background:true');
+    expect(FILE_TOOLS_CORE).toContain('never fake a preview by opening file:// for something that needs a server');
   });
 });
 
