@@ -116,4 +116,23 @@ describe('LLM page layout (default-model bar + provider grid)', () => {
     expect(settings).not.toContain('cfg-proxy-bypass-models');
     expect(settings).not.toContain('bypassModels: normalizeProxyList');
   });
+
+  it('autoSave re-render must not swallow the in-progress API key', () => {
+    // The panel template renders #cfg-apikey value-less (raw secrets never
+    // persist in markup), so the debounced autoSave path has to capture the
+    // in-progress key/touched/focus around renderProviderGrid() and restore
+    // them — otherwise a paste vanishes ~300ms after input stops.
+    const settings = readFileSync(new URL('../settings.ts', import.meta.url), 'utf8');
+    const autoSave = sectionBetween(settings, 'private autoSave()', '\n  }');
+    const capture = autoSave.indexOf("document.getElementById('cfg-apikey')");
+    const rerender = autoSave.indexOf('this.renderProviderGrid()');
+    const restore = autoSave.indexOf('keyAfter.value = keyValue');
+    expect(capture).toBeGreaterThan(-1);
+    expect(rerender).toBeGreaterThan(capture);
+    expect(restore).toBeGreaterThan(rerender);
+    // Touched flag and focus survive the rebuild too (touched drives the
+    // clear-field-revokes-key flow; focus keeps typing seamless).
+    expect(autoSave).toContain("keyAfter.dataset.touched = '1'");
+    expect(autoSave).toContain('keyAfter.focus()');
+  });
 });
