@@ -3,6 +3,14 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.16
+
+**产物文件版本化副本 + 计划上下文沿用 + 对话渲染修复**
+
+- 生成的文件按版本号物理复制出 `-v1`/`-v2` 副本，便于多次迭代产物并存对照，且产物卡片显示对应的版本号
+- 同一任务的「新诉求」沿用既有计划上下文进行自然处理，不再重置整段计划
+- 修复对话窗口两处渲染/续跑问题，提升长会话的展示稳定性与续跑可靠性
+
 ## v1.9.15
 
 **长文本附件工作空间感知 + 中断上下文保留 + 慢响应提示优化**

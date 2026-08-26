@@ -3,7 +3,7 @@
 **Pure** 是一个本地优先的 AI 编程助手，核心只有两个坚持：**用一个不会轻易停下来的闭环完成任务，用会进化但不会无限膨胀的记忆延续经验**。它的 Agent Loop 灵感来自 JavaScript 引擎中的 Event Loop：借鉴事件驱动、分阶段调度和持续推进的思路，让编码任务不断消费工具结果，直到获得可验证的完成证据。Pure 可以读取、写入和编辑文件，执行 Shell 命令，并在配置 verifier 时验证结果，再把紧凑的项目经验带到下一次会话 — 这一切都通过快速的终端 CLI 或原生 macOS 桌面应用完成。它的对话窗口是会话状态的映射，不是长期记忆的直接倾倒：已保存的会话转录会被映射成界面内容，而检索到的记忆只留在模型上下文中，除非界面明确把它展示出来。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.13-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.16-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
