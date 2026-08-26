@@ -26,6 +26,9 @@ import { t } from '../shared/i18n';
 export interface ArtifactItem {
   /** Generated file path as the tool received it. */
   path: string;
+  /** 1-based version of this generated/modified file (v1, v2, …). Undefined for
+   * replayed/legacy artifacts whose version is unknown. */
+  version?: number;
 }
 
 export const MAX_FILE_CARDS = 10;
@@ -360,7 +363,7 @@ function createArtifactCard(item: ArtifactItem): HTMLButtonElement | null {
   card.setAttribute('aria-label', `${t('artifacts.openFile')}: ${path}`);
   card.innerHTML =
     `<span class="artifact-icon artifact-icon-loading ${meta.cls}">${meta.svg}</span>` +
-    `<span class="artifact-text"><span class="artifact-name"></span><span class="artifact-path"></span><span class="artifact-meta"><span class="artifact-kind"></span><span class="artifact-action"></span></span></span>` +
+    `<span class="artifact-text"><span class="artifact-name"><span class="artifact-version-badge"></span><span class="artifact-name-text"></span></span><span class="artifact-path"></span><span class="artifact-meta"><span class="artifact-kind"></span><span class="artifact-action"></span></span></span>` +
     `<span class="artifact-open-hint" aria-hidden="true">${OPEN_HINT_ICON}</span>`;
   const iconEl = card.querySelector<HTMLElement>('.artifact-icon')!;
   void nativeFileIcon(path).then((icon) => {
@@ -372,11 +375,17 @@ function createArtifactCard(item: ArtifactItem): HTMLButtonElement | null {
     iconEl.classList.remove('artifact-icon-loading');
   });
   const nameEl = card.querySelector<HTMLElement>('.artifact-name')!;
+  const nameTextEl = card.querySelector<HTMLElement>('.artifact-name-text')!;
+  const versionEl = card.querySelector<HTMLElement>('.artifact-version-badge')!;
   const pathEl = card.querySelector<HTMLElement>('.artifact-path')!;
   const kindEl = card.querySelector<HTMLElement>('.artifact-kind')!;
   const actionEl = card.querySelector<HTMLElement>('.artifact-action')!;
   const { name, rest } = splitNamePath(path);
-  nameEl.textContent = name || path;
+  nameTextEl.textContent = name || path;
+  if (item.version && item.version >= 1) {
+    versionEl.textContent = `v${item.version}`;
+    versionEl.classList.add('is-visible');
+  }
   pathEl.textContent = rest;
   kindEl.textContent = artifactKindLabel(path);
   actionEl.textContent = t('artifacts.openAction');
