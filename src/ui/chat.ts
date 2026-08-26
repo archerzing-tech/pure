@@ -1541,6 +1541,17 @@ export class ChatController {
     // transcript — i.e. below any tool rows that were just appended.
     const ensureSegment = (): AssistantSegment => {
       if (currentSegment && !toolRowSinceSegment) return currentSegment;
+      // New text is arriving after a tool row was inserted. In the normal
+      // protocol a tool's ToolResult finalizes its row (✓/✗) before any
+      // follow-up text streams, so any row still in `pending` here was cut off
+      // mid-execution — e.g. a provider timeout that triggered an internal
+      // retry: its result will never arrive. Leave it as a blinking "in
+      // progress" row and the new text reads as a contradiction (a tool still
+      // running above content that already continues the turn). Resolve the
+      // orphaned rows (⏹ stopped) so they close cleanly beneath the new text.
+      if (pendingRows.size > 0 || pendingByName.size > 0) {
+        resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
+      }
       toolRowSinceSegment = false;
       return createSegment();
     };
@@ -1954,8 +1965,19 @@ export class ChatController {
       // The shared compiler keeps this preflight identical between GUI and CLI.
       const forcedMode: TaskMode | undefined =
         config.taskMode && config.taskMode !== 'auto' ? config.taskMode : undefined;
-      const continuingPlan = this.activeComplexPlan !== null && this.hasHistory && !forcedMode;
-      const planPauseRequested = this.activeComplexPlan !== null && !this.hasHistory && !forcedMode;
+      // A plan that already reached its final "## 计划 n 已完成" (or the
+      // turn-end completion dispatch) is DONE — its progress model status is
+      // 'complete'. A subsequent user message ("页面很丑，改一下" / a brand-new
+      // tweak) must NOT be treated as a continuation of that finished plan: the
+      // old plan card stays in the transcript as history, but the request is a
+      // fresh task that may or may not spawn its own new plan. Treating a
+      // finished plan as still-active made the agent answer "收到，我们继续处理
+      // 第 x 阶段的第 y 个 Todo" even though the project was already delivered.
+      const activePlanFinished =
+        this.activePlanProgress?.getSnapshot().status === 'complete' ||
+        this.activePlanCardSnapshot?.complete === true;
+      const continuingPlan = !activePlanFinished && this.activeComplexPlan !== null && this.hasHistory && !forcedMode;
+      const planPauseRequested = !activePlanFinished && this.activeComplexPlan !== null && !this.hasHistory && !forcedMode;
       // Semantic routing is the primary decision for ordinary turns. The
       // synchronous Planner remains only a safety floor; it must not decide
       // that a design critique is a build, or that a creative constraint needs
