@@ -42,7 +42,7 @@ import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmen
 import { attachPlanPauseActions } from './planPauseActions';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
-import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
 import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
 import { renderArtifactCards, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
@@ -74,6 +74,17 @@ import type {
   GeneratedImage,
 } from '../shared/types';
 import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, TaskMode, IntentAssessment } from '../coding-agent/types';
+
+// Insert a `-v{n}` segment before the extension (or append it for extension-less
+// files) so a written file `a/b/index.html` snapshots to `a/b/index-v1.html`.
+// This mirrors the version badge shown on the artifact card.
+function versionedCopyPath(path: string, version: number): string {
+  const norm = path.trim();
+  const dot = norm.lastIndexOf('.');
+  const slash = Math.max(norm.lastIndexOf('/'), norm.lastIndexOf('\\'));
+  if (dot <= slash + 1) return `${norm}-v${version}`;
+  return `${norm.slice(0, dot)}-v${version}${norm.slice(dot)}`;
+}
 
 // Friendly labels for the logical-trap status bubble (raw type ids like
 // 'self-contradiction' are cryptic to users).
@@ -3034,10 +3045,25 @@ export class ChatController {
               // Bump the per-session version counter for each file actually
               // written/edited so the artifact card can show v1/v2/… (the
               // revision the card reflects when a file is updated repeatedly).
-              const bumpVersion = (p: string): void => {
+              const bumpVersion = (p: string): number => {
                 const norm = p.trim().toLowerCase().replaceAll('\\', '/').replace(/^\.\//, '');
-                if (!norm) return;
-                this.fileWriteVersions.set(norm, (this.fileWriteVersions.get(norm) ?? 0) + 1);
+                if (!norm) return 0;
+                const v = (this.fileWriteVersions.get(norm) ?? 0) + 1;
+                this.fileWriteVersions.set(norm, v);
+                // Snapshot the freshly written file as a physical `-v{n}` copy
+                // on disk so the user can compare revisions (v1, v2, …). The
+                // copy is a raw byte copy via the `copy_file` command, so it
+                // preserves binaries (images, etc.) and never recurses back
+                // through the write_file tool.
+                if (effectiveWorkspace && isTauriRuntime()) {
+                  const dst = versionedCopyPath(p, v);
+                  void tauriInvoke('copy_file', { workspace: effectiveWorkspace, src: p, dst }).catch(
+                    () => {
+                      /* best-effort snapshot; ignore copy failures */
+                    },
+                  );
+                }
+                return v;
               };
               if (toolName === 'write_file' || toolName === 'edit_file') {
                 if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) {
