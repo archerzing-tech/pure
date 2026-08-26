@@ -19,6 +19,23 @@ function resultOf(r: ToolResult): { stdout: string; stderr: string; exitCode: nu
   return r.result as { stdout: string; stderr: string; exitCode: number };
 }
 
+// Windows file-locking (Defender scan, or a still-exiting subprocess holding a
+// handle) can make a single rmSync throw EBUSY/EPERM. Retry briefly so that
+// afterAll cleanup never fails the whole suite on an environment race.
+function safeRm(p: string, tries = 5): void {
+  for (let i = 0; i < tries; i++) {
+    try {
+      rmSync(p, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      if (i === tries - 1) throw e;
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code !== 'EBUSY' && code !== 'ENOTEMPTY' && code !== 'EPERM') throw e;
+      Bun.sleepSync(200);
+    }
+  }
+}
+
 // The failure cases pick their command per platform: PowerShell runs via
 // `powershell -Command` (whose stderr redirect is `1>&2`, not sh's `>&2`),
 // while `exit N` works in both shells. The cross-platform cases (plain echo,
@@ -37,7 +54,7 @@ describe('NodeToolAdapter execute_command', () => {
   });
 
   afterAll(() => {
-    rmSync(workspace, { recursive: true, force: true });
+    safeRm(workspace);
   });
 
   it('reports success with exitCode 0 for a clean command', async () => {
@@ -89,7 +106,7 @@ describe('NodeToolAdapter execute_command', () => {
     expect(r.success).toBe(false);
     // sh reports the failure on stderr; the exit code must be non-zero.
     expect(resultOf(r).exitCode).not.toBe(0);
-  });
+  }, 30000);
 
   it('allows reads through a symlink pointing outside the workspace', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'pure-node-outside-'));
@@ -142,7 +159,7 @@ describe('NodeToolAdapter edit_file', () => {
   });
 
   afterAll(() => {
-    rmSync(workspace, { recursive: true, force: true });
+    safeRm(workspace);
   });
 
   const edit = (path: string, oldString: string, newString: string): ToolCall => ({
@@ -196,7 +213,7 @@ describe('NodeToolAdapter list_files', () => {
   });
 
   afterAll(() => {
-    rmSync(workspace, { recursive: true, force: true });
+    safeRm(workspace);
   });
 
   const call = (args: Record<string, unknown>): ToolCall => ({
@@ -272,7 +289,7 @@ describe('NodeToolAdapter workspace snapshots', () => {
   });
 
   afterAll(() => {
-    rmSync(workspace, { recursive: true, force: true });
+    safeRm(workspace);
   });
 
   const call = (name: string, args: Record<string, unknown>): ToolCall => ({
@@ -329,7 +346,7 @@ describe('NodeToolAdapter diff_files', () => {
   });
 
   afterAll(() => {
-    rmSync(workspace, { recursive: true, force: true });
+    safeRm(workspace);
   });
 
   const diffCall = (pathA: string, pathB: string): ToolCall => ({
@@ -380,7 +397,7 @@ describe('NodeToolAdapter find_files', () => {
   });
 
   afterAll(() => {
-    rmSync(workspace, { recursive: true, force: true });
+    safeRm(workspace);
   });
 
   const call = (args: Record<string, unknown>): ToolCall => ({
