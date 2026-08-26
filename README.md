@@ -3,7 +3,7 @@
 **Pure** is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. Its Agent Loop is inspired by the Event Loop in JavaScript engines: it borrows the idea of event-driven phases that keep progressing until the work reaches a verified outcome, then applies it to tool-driven coding tasks. Pure reads, writes, and edits files, executes shell commands, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app. Its conversation window is a projection of session state, not a direct dump of long-term memory: stored transcript data is mapped into UI blocks, while retrieved memory stays in the model context unless the UI explicitly represents it.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.13-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.9.16-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
