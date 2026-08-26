@@ -704,6 +704,26 @@ fn write_file(workspace: String, path: String, content: String) -> Result<String
     Ok(format!("Wrote {} bytes to {}", content.len(), path))
 }
 
+/// Byte-for-byte file copy used by the GUI to snapshot generated files as
+/// versioned copies (`-v1`, `-v2`, …). Unlike routing the copy through
+/// `write_file` (which re-encodes content as a UTF-8 string and would corrupt
+/// binaries such as images), this is a raw `fs::copy` so any file type is
+/// preserved. Both paths are resolved the same way `write_file` resolves them,
+/// so relative paths join the workspace and absolute paths pass through.
+#[tauri::command]
+fn copy_file(workspace: String, src: String, dst: String) -> Result<String, String> {
+    let src_full = resolve(&workspace, &src)?;
+    let dst_full = resolve(&workspace, &dst)?;
+    if !src_full.exists() {
+        return Err(format!("copy_file: source does not exist: {}", src));
+    }
+    if let Some(parent) = dst_full.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+    }
+    fs::copy(&src_full, &dst_full).map_err(|e| format!("copy_file: {}", e))?;
+    Ok(format!("Copied {} -> {}", src, dst))
+}
+
 /// Write a file with live progress events over a Channel — the GUI tool row
 /// shows "正在写入 … 45% (230/512 KB)" instead of a silent "等待输出" wait
 /// until the whole (possibly large) write completes. The content is written
@@ -12479,6 +12499,7 @@ pub fn run() {
             remove_path,
             write_file,
             write_file_stream,
+            copy_file,
             edit_file,
             search_files,
             find_files,
