@@ -108,13 +108,28 @@ const TOOL_CALL_REFRESH_MS = 120;
 // the reason with a localized, user-friendly summary.
 function sanitizeInterruptedReason(raw: string): string {
   const lower = raw.toLowerCase();
+  // ── Engine-issued structural stops (exact / stable codes) ──
+  if (raw === 'max_turns' || /^max.?turns?$/i.test(raw)) {
+    return t('chat.interrupted.maxTurns', 'Stopped: this turn reached the maximum number of steps — split the task or start a new session');
+  }
+  if (/budget/i.test(raw)) {
+    return t('chat.interrupted.budget', 'Stopped: this turn hit its step/token/time budget — compact the context or start a new session');
+  }
+  if (/hook aborted/i.test(raw)) {
+    return t('chat.interrupted.policy', 'Stopped by a safety/policy check');
+  }
+  // FailurePolicy stop reasons ("N consecutive failures ...").
+  if (/consecutive failures|keeps failing|same error|switch to a fundamentally different approach/i.test(raw)) {
+    return t('chat.interrupted.repeatedFailures', 'Stopped after repeated failed attempts — please check the task or try a different approach');
+  }
+  // ── Provider / transport errors ──
   if (/429|rate.?limit|rate.?exceeded|too many request/i.test(lower)) {
     return t('chat.interrupted.rateLimited', 'Rate limited — please try again later');
   }
-  if (/5\d{2}|server.?error|internal.?server/i.test(lower)) {
+  if (/5\d{2}|server.?error|internal.?server|overload|unavailable|bad gateway|gateway timeout|service (is )?(temp|current|busy)|model (is )?busy/i.test(lower)) {
     return t('chat.interrupted.serverError', 'Service temporarily unavailable — please try again later');
   }
-  if (/ECONNREFUSED|ETIMEDOUT|ECONNRESET|network|fetch.?fail|ENOTFOUND/i.test(lower)) {
+  if (/ECONNREFUSED|ETIMEDOUT|ECONNRESET|network|fetch.?fail|ENOTFOUND|timeout|timed out|connection/i.test(lower)) {
     return t('chat.interrupted.networkError', 'Network connection failed — please check your connection');
   }
   return t('chat.interrupted.generic', 'Operation interrupted — please retry or try a different approach');
