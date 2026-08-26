@@ -109,6 +109,25 @@ function sanitizeInterruptedReason(raw: string): string {
   return t('chat.interrupted.generic', 'Operation interrupted — please retry or try a different approach');
 }
 
+// ── Explicit continuation detection ──
+// A plan stays in the transcript as context, but a NEW user request mid-plan
+// ("页面太丑改一下" / "加个登录按钮") must be handled naturally — NOT forced into
+// the "继续处理第 x 阶段第 y 个 Todo" continuation frame. Only an explicit
+// "继续 / 接着做 / continue …" instruction should keep that rigid frame; a
+// plain new request just lets the model understand and act on the existing
+// context. Heuristic, not a parser: matched against the trimmed, lowercased
+// message so mixed-case and trailing punctuation are tolerated.
+const CONTINUATION_PREFIX = /^(继续|接着|往下|继续往下|继续做|接着做|往下做|继续吧|接着吧|go\s*on|continue|resume|keep\s*going|carry\s*on)/;
+function isExplicitContinuation(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  if (CONTINUATION_PREFIX.test(t)) return true;
+  // Whole message is just a continuation word (strip surrounding punctuation).
+  return ['继续', '接着', '往下', 'continue', 'resume', 'go on', 'keep going'].includes(
+    t.replace(/[。.，,！!？?~～\s]/g, ''),
+  );
+}
+
 // Kept as a compatibility hook for the app shell. Transcript rows must not be
 // removed from the live DOM: deleting them made upward scrolling show missing
 // history and also raced session restore. Performance is handled by throttled
@@ -900,6 +919,12 @@ export class ChatController {
   /** Whether the active plan was approved as a project build — carried across
    * continuation turns so the delivery gate follows the plan, not the prompt. */
   private activePlanProjectBuild = false;
+  /** Per-session count of how many times each generated/modified file has been
+   * written (write_file / edit_file / replace_files) this session. Drives the
+   * "v1 / v2 / …" version badge on artifact cards so the user can see which
+   * revision a card reflects when a file is updated several times. Keyed by a
+   * normalized path; reset on a new chat (clear()). */
+  private fileWriteVersions = new Map<string, number>();
   // Background pre-compaction cache: the ContextEngine's LLM summarization —
   // the dominant pre-send cost once a long session crosses maxMessages — runs
   // after each completed turn (idle) instead of blocking the next send. The
@@ -1525,7 +1550,8 @@ export class ChatController {
       const key = path;
       if (artifactSeen.has(key)) return;
       artifactSeen.add(key);
-      turnArtifacts.push({ path });
+      const norm = path.trim().toLowerCase().replaceAll('\\', '/').replace(/^\.\//, '');
+      turnArtifacts.push({ path, version: this.fileWriteVersions.get(norm) ?? 1 });
     };
     let toolRowSinceSegment = false;
     const createSegment = (): AssistantSegment => {
@@ -2275,7 +2301,11 @@ export class ChatController {
         // leaving planProgress null for the entire round: stage markers had no
         // model to advance, the card froze on the first turn's state, and 🔁
         // rounds looped until maxRounds.
-        userPlan = formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate);
+        // 明确的“继续/接着做”才注入续跑框架（计划作为上下文、模型按 Todo 推进）；
+        // 中途的“新诉求”则不注入，让模型直接基于既有对话与计划卡自然理解处理。
+        userPlan = isExplicitContinuation(userText)
+          ? formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate)
+          : undefined;
         planProgress = new PlanProgressModel(this.activeComplexPlan, 'active', this.activePlanNumber, this.activeTodoNumber, this.activePlanProjectBuild);
         const existingCard = this.activePlanCardHandle?.el.isConnected ? this.activePlanCardHandle : null;
         if (existingCard) {
@@ -2289,7 +2319,11 @@ export class ChatController {
         }
         this.activePlanCardHandle = planCard;
         this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
-        this.addStatusBubble(`收到，我们继续处理第 ${this.activePlanNumber} 阶段的第 ${this.activeTodoNumber} 个 Todo，不重新规划。`, false, false);
+        // 仅当是明确续跑指令时才输出“继续处理第 x 阶段第 y 个 Todo”的生硬框架；
+        // 中途的新诉求沿用计划上下文，但不套用该文案，直接自然处理。
+        if (isExplicitContinuation(userText)) {
+          this.addStatusBubble(`收到，我们继续处理第 ${this.activePlanNumber} 阶段的第 ${this.activeTodoNumber} 个 Todo，不重新规划。`, false, false);
+        }
         // 用户回复即明确“开工”：聊天中的计划卡从「等待回复」切回「正在执行」。
         planProgress?.dispatch({ type: 'statusChanged', status: 'active' });
         scrollChatToBottomIfPinned(chatEl);
@@ -2997,11 +3031,25 @@ export class ChatController {
             // Collect written artifacts for the end-of-turn file cards: only
             // successful writes count (a failed write_file created nothing).
             if (event.payload.result.success && resultArgs) {
+              // Bump the per-session version counter for each file actually
+              // written/edited so the artifact card can show v1/v2/… (the
+              // revision the card reflects when a file is updated repeatedly).
+              const bumpVersion = (p: string): void => {
+                const norm = p.trim().toLowerCase().replaceAll('\\', '/').replace(/^\.\//, '');
+                if (!norm) return;
+                this.fileWriteVersions.set(norm, (this.fileWriteVersions.get(norm) ?? 0) + 1);
+              };
               if (toolName === 'write_file' || toolName === 'edit_file') {
-                if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) addArtifact(resultArgs.path);
+                if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) {
+                  bumpVersion(resultArgs.path);
+                  addArtifact(resultArgs.path);
+                }
               } else if (toolName === 'replace_files' && Array.isArray(resultArgs.files)) {
                 for (const f of resultArgs.files) {
-                  if (typeof f === 'string' && f.trim()) addArtifact(f);
+                  if (typeof f === 'string' && f.trim()) {
+                    bumpVersion(f);
+                    addArtifact(f);
+                  }
                 }
               }
             }
@@ -3621,6 +3669,7 @@ export class ChatController {
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
+    this.fileWriteVersions.clear();
     this.pausePlanCard = null;
     this.pauseAssessmentFlow = null;
     // Invalidate any background pre-compaction from the previous session.
