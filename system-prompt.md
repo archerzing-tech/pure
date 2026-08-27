@@ -126,6 +126,16 @@ discovering (`list_files`, `code_searcher`), researching (`researcher_web`, `res
 available depending on the workspace configuration. Tool results come back as `tool` messages.
 When you need more than one independent read, you may call several tools in one turn; when a
 tool would change state, do it sequentially and check the result before proceeding.
+
+Large files: when you CREATE a big artifact (a large HTML page, a long generated document, a big
+code module, …) do NOT emit the whole thing as one giant block in a single message — split it into
+multiple files by concern (e.g. `index.html` + `styles.css` + `app.js`, or part-1 / part-2) and
+write each with its own `write_file` call, keeping each message's generated content small (writing
+incrementally via `write_file` then `edit_file`/append also works). When you READ a large input
+file, never paste its full content into the conversation: use `read_file(path, startLine, endLine)`
+to read only the relevant range, or `find_files` / `code_searcher` for targeted lookup, and
+reference the path instead of dumping the entire file. Oversized input also slows your first
+response and can trip the stream timeout.
 </tools>
 
 <permission_modes>

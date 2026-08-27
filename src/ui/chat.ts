@@ -108,6 +108,10 @@ const TOOL_CALL_REFRESH_MS = 120;
 // the reason with a localized, user-friendly summary.
 function sanitizeInterruptedReason(raw: string): string {
   const lower = raw.toLowerCase();
+  // ── User stop / frontend-or-network disconnect (signal aborted) ──
+  if (raw === 'aborted') {
+    return t('chat.interrupted.aborted', 'Cancelled (stopped by user, or network/connection dropped)');
+  }
   // ── Engine-issued structural stops (exact / stable codes) ──
   if (raw === 'max_turns' || /^max.?turns?$/i.test(raw)) {
     return t('chat.interrupted.maxTurns', 'Stopped: this turn reached the maximum number of steps — split the task or start a new session');
@@ -121,6 +125,12 @@ function sanitizeInterruptedReason(raw: string): string {
   // FailurePolicy stop reasons ("N consecutive failures ...").
   if (/consecutive failures|keeps failing|same error|switch to a fundamentally different approach/i.test(raw)) {
     return t('chat.interrupted.repeatedFailures', 'Stopped after repeated failed attempts — please check the task or try a different approach');
+  }
+  // ── Stream idle / first-token timeout (huge output buffering OR huge input
+  //    → slow time-to-first-token). This is the "两次流式输出超时" case: the
+  //    engine's LLM_STREAM_IDLE_TIMEOUT_MS fired, not a network drop.
+  if (/deadline|exceeded its deadline|stream.*(timeout|timed out)|first.?token|ttft|took too long/i.test(lower)) {
+    return t('chat.interrupted.streamTimeout', 'Generation timed out: the model took too long (output too large or input file too large). Split the task into smaller steps, generate the file in parts, or compress/summarize oversized input first.');
   }
   // ── Provider / transport errors ──
   if (/429|rate.?limit|rate.?exceeded|too many request/i.test(lower)) {
