@@ -90,14 +90,16 @@ async function execute(
   signal?: AbortSignal,
 ): Promise<ToolResult | null> {
   if (signal?.aborted) return null;
+  const local = new AbortController();
+  let onOuterAbort: (() => void) | undefined;
   try {
     return await new Promise<ToolResult | null>((resolve) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout>;
-      const onAbort = (): void => finish(null);
       const cleanup = (): void => {
         clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
+        local.abort();
+        if (onOuterAbort) signal?.removeEventListener('abort', onOuterAbort);
       };
       const finish = (value: ToolResult | null): void => {
         if (settled) return;
@@ -105,12 +107,15 @@ async function execute(
         cleanup();
         resolve(value);
       };
+      onOuterAbort = (): void => finish(null);
+      signal?.addEventListener('abort', onOuterAbort, { once: true });
       timer = setTimeout(() => finish(null), DISCOVERY_TOOL_TIMEOUT_MS);
-      signal?.addEventListener('abort', onAbort, { once: true });
-      tools.execute(call(toolName, args), signal).then(finish, () => finish(null));
+      tools.execute(call(toolName, args), local.signal).then(finish, () => finish(null));
     });
   } catch {
     return null;
+  } finally {
+    if (onOuterAbort) signal?.removeEventListener('abort', onOuterAbort);
   }
 }
 
@@ -455,17 +460,19 @@ export async function runDeliveryVerification(
     try {
       result = await new Promise<ToolResult | null>((resolve) => {
         let settled = false;
-        const timer = setTimeout(() => finish(null), spec.timeoutMs ?? DELIVERY_STEP_TIMEOUT_MS);
+        const local = new AbortController();
         const onAbort = (): void => finish(null);
+        const timer = setTimeout(() => finish(null), spec.timeoutMs ?? DELIVERY_STEP_TIMEOUT_MS);
         const finish = (value: ToolResult | null): void => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
+          local.abort();
           signal?.removeEventListener('abort', onAbort);
           resolve(value);
         };
         signal?.addEventListener('abort', onAbort, { once: true });
-        tools.execute(deliveryCall('execute_command', { command: spec.command }), signal).then(finish, () => finish(null));
+        tools.execute(deliveryCall('execute_command', { command: spec.command }), local.signal).then(finish, () => finish(null));
       });
     } catch {
       result = null;
