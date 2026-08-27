@@ -32,6 +32,41 @@ function isWebResearchTool(name: string): boolean {
 
 const RESEARCH_ROUND_LIMIT = 4;
 const LLM_STREAM_IDLE_TIMEOUT_MS = 120_000;
+// First-token budget is far more lenient than inter-chunk idle: a huge prompt
+// (large input file / giant attachment) makes the provider's time-to-first-token
+// (TTFT) long, and a big generation can also stall before the first byte. Killing
+// the stream on a 120s TTFT wrongly aborts legitimate large tasks — only treat a
+// *gap between delivered chunks* as a real stall.
+const LLM_STREAM_FIRST_TOKEN_TIMEOUT_MS = 300_000;
+// Tool results (read_file of a big file, a giant build/test dump, …) are folded
+// into the LLM context verbatim. A huge result both inflates the prompt (slow
+// first-token / TTFT → stream timeout) and can blow the context window. Cap the
+// slice that enters the conversation; the full output already lives on disk or
+// can be re-read in ranges. read_file gets a tailored nudge to read by range.
+const TOOL_RESULT_MAX_CHARS = 40_000;
+function capToolResult(text: string, toolName: string): string {
+  if (text.length <= TOOL_RESULT_MAX_CHARS) return text;
+  const omitted = text.length - TOOL_RESULT_MAX_CHARS;
+  const notice = toolName === 'read_file'
+    ? `\n\n« Tool result too large — ${omitted.toLocaleString()} chars omitted. The full content is NOT in context: use read_file with startLine/endLine to read only the parts you need, instead of loading the entire large file at once (it slows the response and can trip the stream timeout). »`
+    : `\n\n« Tool result too large — ${omitted.toLocaleString()} chars omitted. Fetch it in pages/ranges if you need the rest. »`;
+  return text.slice(0, TOOL_RESULT_MAX_CHARS) + notice;
+}
+// On a stream idle-timeout while the model is still producing plain text (no
+// half-formed tool call), keep what we have and let it continue seamlessly
+// instead of hard-aborting. Cap so a pathological stall can't loop forever.
+const MAX_STREAM_RESUMES = 2;
+const STREAM_RESUME_HINT = '[system] The previous response generation was cut off by a stream timeout. Continue EXACTLY from where the last assistant message ended — do NOT repeat any already-generated content, just complete the remainder (and close any open code block).';
+// Heuristic truncation check for a SILENT cut: a generation that ends with an
+// unterminated fenced code block (``` opened but never closed) was almost
+// certainly cut off mid-stream — e.g. token-limit truncation of an HTML page
+// wrapped in a ```html fence. The provider still emits a clean `done`, so the
+// engine would otherwise treat the partial content as complete (the silent
+// truncation the user hit). A balanced fence count means a real completion.
+function contentLooksTruncated(text: string): boolean {
+  const fenceCount = (text.match(/```/g) ?? []).length;
+  return fenceCount % 2 === 1;
+}
 const TOOL_EXECUTION_TIMEOUT_MS = 180_000;
 const VERIFIER_TIMEOUT_MS = 60_000;
 
@@ -90,15 +125,19 @@ export async function* streamWithDeadline(
   signal?.addEventListener('abort', forwardAbort, { once: true });
   const iterator = llm.stream(messages, tools, linkedController.signal)[Symbol.asyncIterator]();
   const deadline = Date.now() + Math.max(1, timeoutMs);
+  let firstChunk = true;
   try {
     while (true) {
+      const idleCap = firstChunk ? LLM_STREAM_FIRST_TOKEN_TIMEOUT_MS : LLM_STREAM_IDLE_TIMEOUT_MS;
       const remaining = Math.min(
         deadline - Date.now(),
-        LLM_STREAM_IDLE_TIMEOUT_MS,
+        idleCap,
       );
       if (remaining <= 0) {
         linkedController.abort();
-        throw makeLifecycleError('TimeoutError', 'LLM stream exceeded its deadline');
+        throw makeLifecycleError('TimeoutError', firstChunk
+          ? 'LLM stream exceeded its first-token deadline'
+          : 'LLM stream exceeded its deadline');
       }
       const next = await runWithDeadline(
         () => iterator.next(),
@@ -108,6 +147,7 @@ export async function* streamWithDeadline(
         () => linkedController.abort(),
       );
       if (next.done) return;
+      firstChunk = false;
       yield next.value;
     }
   } finally {
@@ -165,6 +205,10 @@ export class AgentLoopEngine {
     // Consecutive tool rounds made up entirely of web-research tools (see the
     // research-loop guard above). Reset by any non-research tool or answer.
     let researchStreak = 0;
+    // Survives THINK re-entries within one turn: caps how many times a stream
+    // idle-timeout may be auto-resumed (see the THINK catch) so a pathological
+    // stall can't loop forever.
+    let streamResumes = 0;
 
     while (true) {
       if (ctx.signal?.aborted) {
@@ -220,6 +264,14 @@ export class AgentLoopEngine {
       let content = '';
       let reasoningText = '';
       let toolCalls: ToolCall[] = [];
+      // Set as soon as the stream starts emitting a tool call. A timeout mid
+      // tool-call-argument can't be safely resumed (the partial call would be
+      // corrupt), so the auto-resume branch below only fires for plain text.
+      let sawToolCall = false;
+      // Set once the terminal `done` chunk arrives. If the stream ends WITHOUT a
+      // `done` (silent connection close), it stays false and we treat the
+      // accumulated text as truncated.
+      let sawDone = false;
 
       try {
         const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
@@ -240,9 +292,11 @@ export class AgentLoopEngine {
               yield { type: 'ReasoningDelta', payload: { content: chunk.content, stateId: sid() }, timestamp: Date.now() };
               break;
             case 'tool_call_delta':
+              sawToolCall = true;
               yield { type: 'TokenDelta', payload: { content: chunk.arguments ?? '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name }, timestamp: Date.now() };
               break;
             case 'tool_call':
+              sawToolCall = true;
               // BUG-6: surface the completed tool-call id for streaming
               // adapters that emit it mid-stream (Anthropic-style). The UI
               // keys its toasts by toolCallId, not toolName — parallel
@@ -255,6 +309,8 @@ export class AgentLoopEngine {
             case 'done':
               content = chunk.content || content;
               toolCalls = chunk.toolCalls;
+              sawDone = true;
+              if (chunk.toolCalls.length > 0) sawToolCall = true;
               // BUG-6: the `done` chunk is the single guaranteed source of the
               // final tool calls (every adapter emits it per the LLMAdapter
               // contract, even ones that never stream `tool_call` chunks).
@@ -266,7 +322,43 @@ export class AgentLoopEngine {
               break;
           }
         }
+
+        // Silent-truncation guard: the stream ended but the answer is NOT
+        // complete. Two cases:
+        //  - no terminal `done` arrived (connection closed without error), or
+        //  - a `done` arrived but the text ends inside an unterminated code
+        //    fence (token-limit truncation of an HTML page / long doc).
+        // Either way the partial content must not be treated as the final answer.
+        // Resume it exactly like a stream timeout — keep what we have and let the
+        // model finish the remainder (capped by MAX_STREAM_RESUMES).
+        const silentlyTruncated =
+          (sawDone && !sawToolCall && content.length > 0 && contentLooksTruncated(content)) ||
+          (!sawDone && !sawToolCall && content.length > 0);
+        if (silentlyTruncated && streamResumes < MAX_STREAM_RESUMES) {
+          streamResumes++;
+          messages.push({ role: 'assistant' as const, content });
+          messages.push({ role: 'user' as const, content: STREAM_RESUME_HINT, internal: true });
+          turnCount++; budget.incrementTurn();
+          yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+          continue;
+        }
       } catch (err: any) {
+        const isTimeout = err?.name === 'TimeoutError';
+        // Auto-resume: the idle deadline fired while the model was STILL
+        // producing plain text (we have a non-empty partial, and no half-formed
+        // tool call). Keep the partial answer, nudge the model to continue
+        // exactly where it stopped, and re-enter the THINK loop — turning a
+        // fatal "stream timeout" into a seamless continuation. Without this the
+        // same timeout would hit repeatedly and then hard-abort (the
+        // "两次流式输出超时" the user hit on large HTML / large output).
+        if (isTimeout && streamResumes < MAX_STREAM_RESUMES && content.length > 0 && !sawToolCall) {
+          streamResumes++;
+          messages.push({ role: 'assistant' as const, content });
+          messages.push({ role: 'user' as const, content: STREAM_RESUME_HINT, internal: true });
+          turnCount++; budget.incrementTurn();
+          yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+          continue;
+        }
         failures.push({ type: 'llm_error', message: err?.message ?? String(err), turnNumber: turnCount });
         if (ctx.failurePolicy) {
           const action = ctx.failurePolicy.decide(failures);
@@ -333,9 +425,10 @@ export class AgentLoopEngine {
           }
           // Append tool results so the LLM sees them on retry
           for (const tr of toolResults) {
-            const resultText = tr.result.success
+            const rawText = tr.result.success
               ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
               : `Error: ${tr.result.error}`;
+            const resultText = capToolResult(rawText, tr.toolName);
             messages.push({ role: 'tool', content: resultText, toolCallId: tr.toolCallId, toolName: tr.toolName });
             budget.addTokens(resultText);
           }
@@ -374,9 +467,10 @@ export class AgentLoopEngine {
         completedSteps.push('OBSERVE');
 
         for (const tr of toolResults) {
-          const resultText = tr.result.success
+          const rawText = tr.result.success
             ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
             : `Error: ${tr.result.error}`;
+          const resultText = capToolResult(rawText, tr.toolName);
           messages.push({ role: 'tool', content: resultText, toolCallId: tr.toolCallId, toolName: tr.toolName });
           budget.addTokens(resultText);
         }
