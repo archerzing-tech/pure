@@ -3,6 +3,13 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.18
+
+**中断与超时清理的正确性修复**
+
+- 引擎：用户点击「停止」时立即中断，不再把 abort 误判为失败而走重试策略（避免向对话历史注入多余内部提示）
+- delivery：流水线超时/中止时真正终止底层工具调用，而非仅丢弃结果导致后台僵尸进程
+
 ## v1.9.17
 
 **大文件生成/输入的中断治理（流式超时与静默截断）**
