@@ -343,6 +343,11 @@ export class AgentLoopEngine {
           continue;
         }
       } catch (err: any) {
+        if (ctx.signal?.aborted) {
+          yield { type: 'Interrupted', payload: { reason: 'aborted', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+          interrupted = true;
+          break;
+        }
         const isTimeout = err?.name === 'TimeoutError';
         // Auto-resume: the idle deadline fired while the model was STILL
         // producing plain text (we have a non-empty partial, and no half-formed
