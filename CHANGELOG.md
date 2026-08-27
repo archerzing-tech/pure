@@ -3,6 +3,16 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v1.9.17
+
+**大文件生成/输入的中断治理（流式超时与静默截断）**
+
+- 流式空闲超时区分首 token（300s）与 chunk 间（120s），大输入高延迟不再误杀
+- 流式空闲超时或静默截断（未闭合代码围栏、无 done 收尾）自动续跑，最多 2 次，避免大 HTML 生成中途失败
+- 工具结果进入上下文前按 40KB 截断，超大 read_file 提示分段读取，压住大输入导致的超时与上下文膨胀
+- 中断原因新增 streamTimeout / aborted 友好文案，替换笼统的「操作被中断，请重试或切换任务」
+- prompt 规则与 system-prompt.md 约束模型拆分大文件、按需读取大输入
+
 ## v1.9.16
 
 **产物文件版本化副本 + 计划上下文沿用 + 对话渲染修复**
