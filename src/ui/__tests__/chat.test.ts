@@ -462,7 +462,7 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 回合末必须真实重跑机械验证（runDeliveryVerification），失败后用真实失败
     // 输出驱动有界修复轮（runDeliveryFixRound），每轮修复后重新验证。
-    const backstop = src.indexOf('await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal)');
+    const backstop = src.indexOf('await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep)');
     const fixRound = src.indexOf('await runDeliveryFixRound(completionMessages, deliveryResult)');
     expect(backstop).toBeGreaterThan(-1);
     expect(fixRound).toBeGreaterThan(backstop);
