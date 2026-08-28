@@ -25,20 +25,17 @@ Return ONLY one JSON object with this shape:
 
 Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation only for an explicit destructive/irreversible action or a concrete safety boundary. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files.`;
 
-/** Action words that make even a very short message a concrete work request
- * ("写个游戏", "改一下", "查查报错") — those still need the semantic router.
- * Short acknowledgements/pleasantries carry none of them and can use the
- * synchronous heuristic floor directly, avoiding a full LLM round-trip (and
- * up to 12s of added latency) for messages that cannot meaningfully need
- * routing. */
-const ROUTE_REQUIRING_ACTION = /(?:写|做|改|建|修|查|删|创建|制作|开发|实现|生成|设计|部署|研究|分析|解释|介绍|评估|汇总|检查|调试|编译|运行|测试|安装|下载|上传|重构|迁移|优化|升级|替换|增加|添加|移除|删除|搞|整|弄|build|create|write|make|fix|add|delete|remove|refactor|migrate|debug|analyze|explain|design|generate|install|test|run)/i;
+/** 只有非常短、明显是客套/承接语（不含任何实质任务内容）时才跳过语义路由。
+ * 其余一律交给语义路由去理解“完整语句 + 对话上下文”，而不是用一张“动作词关键词
+ * 表”去猜用户想做什么。这样“项目跑不起来”这类没有动作词的短消息也会走语义理解，
+ * 不再被关键词启发式误判。 */
+const PLEASANTRY_BYPASS = /^(?:好的|好|谢谢|感谢|多谢|谢谢您|感谢您|ok|okay|yes|yeah|对的|对|对呀|继续|接着|收到|明白|明白了|嗯|棒|赞|辛苦了|thanks|thank you|sure|continue|got it|noted|righteous|好的[。.，,！!?？]?|谢谢[。.，,！!?？]?)$/i;
 
 export function shouldBypassSemanticRoute(prompt: string, images?: MessageImage[] | null): boolean {
   if (images?.length) return false;
   const text = prompt.trim();
-  if (text.length > 12) return false;
-  if (/[?？]/.test(text)) return false;
-  return !ROUTE_REQUIRING_ACTION.test(text);
+  if (text.length > 16) return false;
+  return PLEASANTRY_BYPASS.test(text);
 }
 
 export async function inferSemanticRoute(
@@ -261,6 +258,12 @@ export class Planner {
     // "写一个…"): then the build intent dominates, and a trailing question
     // ("…怎么做性能优化？") must not suppress planning.
     const startsWithBuild = /^(?:请)?\s*(?:帮我|麻烦你|给我)?\s*(?:编写|写|做|开发|制作|创建|搭建|实现|构建|设计|生成|部署|重构|重写|迁移|规划)\s*/.test(trimmed);
+    // 纯破坏性单步命令（删除/清空整个项目）走“确认闸”处理，不应因为“整个项目”这种
+    // 范围词被升级成多步复杂计划——范围词只在“需要逐文件改动一大片”时才有意义。
+    const destructive = /(?:删除|移除|销毁|清空|drop\s+(?:table|database)|destroy|delete|rm\s|reset\s+--hard|force\s+push)/i.test(lower);
+    // 只读/查询类动作（查看/了解/解释/分析/总结/读…）即便目标范围是“整个项目”也只是
+    // 一次查看，不该被范围词升级成多步复杂计划；真正的改动广度由语义路由判断。
+    const readOnly = /(?:查看|查一下|查查|看下|看看|了解|理解|解释|说明|介绍|总结|概括|研究|调研|分析|评估|阅读|读一下|describe|explain|summar|analyz|understand|look at|inspect|view|read)/i.test(lower);
     const cnQuestion = !startsWithBuild && (
       /^(?:如何|怎么|怎样|能否|能不能|是否|请问|为什么|怎么办|该怎么办|应该怎么办|该不该|应不应该|(?:请)?帮我?(?:看看|查查|看下|分析|解释|介绍|讲讲|说说|告诉我|描述|总结|评估))/.test(trimmed) ||
       /(?:怎么办|该怎么办|应该怎么办|怎么|如何|怎样|能否|能不能|是否|该不该|应不应该|为什么|吗|呢|什么(?!都|也|能))/.test(trimmed)
@@ -291,6 +294,14 @@ export class Planner {
       return 'complex';
     }
 
+    // 广义改动动词（重构/重写/迁移/跨整个项目…）意味着多步、跨文件的改动范围，属于
+    // “工作量/范围”证据而非把用户意图归类为某种固定类型——据此判定为复杂。它和具体的
+    // 破坏/只读动作无关，疑问句也不触发。
+    if (!cnQuestion && !destructive && !readOnly
+      && /(?:重构|重写|rewrite|refactor|迁移|migrate|across the (?:entire )?project|整个项目重|重?构.*项目)/i.test(lower)) {
+      return 'complex';
+    }
+
     // Scope indicators
     const scopeIndicators = [
       /multiple\s+files/i,
@@ -299,7 +310,7 @@ export class Planner {
       /from\s+scratch/i,
     ];
 
-    if (scopeIndicators.some(p => p.test(lower))) {
+    if (!cnQuestion && !destructive && !readOnly && scopeIndicators.some(p => p.test(lower))) {
       return 'complex';
     }
 
@@ -317,21 +328,14 @@ export class Planner {
     return 'simple';
   }
 
-  private generatePlan(prompt: string, mode: TaskMode): Plan {
-    // Minimal fallback only. Task-specific decomposition, step count, and Todo
-    // granularity belong to the LLM analysis; this keeps the UI usable when
-    // that analysis is unavailable without prescribing a workflow.
-    //
-    // A genuine from-scratch build (creating a NEW project/artifact — NOT a
-    // refactor/rewrite/migration of an existing codebase) follows the natural
-    // build arc: understand the need, scaffold, implement module by module,
-    // integrate and verify, deliver. A brand-new requirement must never read as
-    // an edit of existing code ("确认范围/完成改动/验证结果"). Positive
-    // creation signals gate this so a rebuild request ("重构整个项目") or a
-    // trailing question ("…怎么做性能优化？") keeps the generic template.
-    const isFreshBuild = mode === 'build'
-      && /(?:创建|搭建|制作|开发|实现|构建|生成|新建|从零|从头|新建一个|构建一个|开发一个|生成一个|写一个|做一个|create|build|make|develop|implement|construct|generate|set up|scaffold|from scratch)/i.test(prompt);
-    if (isFreshBuild) {
+  /**
+   * 计划结构由语义路由给出的 mode（build / plan / yolo）决定，而不是用关键词把
+   * 用户意图重新归类为“创建 / 提问 / 其他”三种固定模板。只有当语义层面判定为
+   * build 时才走构建式计划；其余一律用中性、不预设任务类型的通用步骤。
+   * 具体的任务拆解属于 LLM 语义分析的职责，这里只在那层不可用时兜个底。
+   */
+  generatePlan(prompt: string, mode: TaskMode): Plan {
+    if (mode === 'build') {
       return {
         steps: [
           {
@@ -371,45 +375,31 @@ export class Planner {
             expectedOutcome: '交付物完整，用户知道如何运行和验证项目。',
           },
         ],
-        reasoning: '这是从零构建的任务：先理解清楚要做什么，再搭骨架、逐模块实现，最后联调验证，保证结果可用。',
+        reasoning: '这是一次构建型任务：先理解清楚要做什么，再搭骨架、逐模块实现，最后联调验证，保证结果可用。',
       };
     }
 
-    // 提问 / 排查类请求（项目做完了运行不起来、看看这段代码为什么报错…）不应被套用
-    // “确认范围 / 完成改动 / 验证结果”这种编辑式模板——先理解诉求，必要时再动手。
-    const isQuestion = /[?？]/.test(prompt)
-      || /(为什么|怎么|如何|什么|是否|能否|帮我看|看看|排查|定位|运行不起来|跑不起来|报错|失败|什么意思|怎么回事|为啥|哪里|是不是|什么情况)/.test(prompt.toLowerCase());
-    if (isQuestion) {
-      return {
-        steps: [{
-          id: '1',
-          action: '先理解你的诉求，判断是要解释、排查还是要改动',
-          description: '看清请求的真实目标与已知条件，再决定下一步，不要一上来就改文件。',
-          expectedOutcome: '诉求与边界清楚后再行动。',
-        }],
-        reasoning: '提问 / 排查类请求，不套用构建或编辑式计划。',
-      };
-    }
-
+    // 非构建类：中性通用步骤，不把请求归类为“确认范围 / 完成改动 / 验证结果”这类
+    // 预设编辑模板，也不按关键词判断是提问还是改动——交给实际执行时结合上下文决定。
     return {
       steps: [
         {
           id: '1',
-          action: '确认范围',
-          description: '查看与请求直接相关的内容，确认目标和约束。',
-          expectedOutcome: '改动范围和关键未知点清楚。',
+          action: '先理解这次请求真正想要的结果',
+          description: '结合上下文确认目标、约束与已知条件，不急于套用固定模板。',
+          expectedOutcome: '目标与边界清楚。',
         },
         {
           id: '2',
-          action: '完成改动',
-          description: '根据已确认的范围选择合适的实现方式。',
-          expectedOutcome: '请求中的核心结果已经实现。',
+          action: '用最小动作验证关键假设',
+          description: '先读相关代码或跑最小探针，确认理解无误再扩展改动。',
+          expectedOutcome: '关键未知点被证据消除。',
         },
         {
           id: '3',
-          action: '验证结果',
-          description: '根据实际风险运行相关检查，并说明仍存在的限制。',
-          expectedOutcome: '有真实证据支持交付或继续处理。',
+          action: '按小步推进并持续验证',
+          description: '每步都可运行、可验证，必要时回头调整方向，最后说明仍存在的限制。',
+          expectedOutcome: '结果可靠、可被验证。',
         },
       ],
       reasoning: this.getComplexReasoning(prompt),
@@ -460,11 +450,11 @@ export function detectFictionIntent(prompt: string): boolean {
 }
 
 /**
- * Provide a conservative safety floor before semantic routing is available.
- * This function intentionally does NOT decide whether ordinary language means
- * advice, research, creation, debugging, or editing. Those are model-semantic
- * decisions. Lexical checks remain only for explicit operations whose safety
- * boundary must not depend on a model being available or correct.
+ * 语义路由不可用时的“安全兜底策略”：用关键词识别明确的高风险 / 不可逆操作
+ * （删除、销毁、重构、迁移、force push…），把这些归为需要探针 / 确认的安全护栏。
+ * 它只是兜底——一旦语义路由可用，完整的意图 / 风险判断以语义路由为准（见
+ * requestWorkflow.ts 的 mergeSemanticAssessment），关键词不再覆盖语义结论。
+ * 普通任务的意图分类仍交由语义路由结合“完整语句 + 上下文”决定。
  */
 export function assessIntent(prompt: string): IntentAssessment {
   const text = prompt.trim();
@@ -488,13 +478,13 @@ export function assessIntent(prompt: string): IntentAssessment {
     ? (destructive
       ? '可能删除或覆盖现有数据、文件或历史状态，影响范围需要先确认。'
       : riskLevel === 'medium'
-        ? '可能波及现有模块、依赖关系或行为，先读取真实结构再决定改动。'
-        : '尚未根据关键词假定任务类型；由语义路由结合完整请求决定处理方式。')
+        ? '改动可能波及现有模块、依赖关系或行为，先读取真实结构再决定改动。'
+        : '不根据关键词假定任务类型；由语义路由结合完整请求决定处理方式。')
     : (destructive
       ? 'This may delete or overwrite existing data, files, or history; confirm the blast radius first.'
       : riskLevel === 'medium'
         ? 'This may affect existing modules, dependencies, or behavior; inspect the real structure before changing it.'
-        : 'No ordinary task type is inferred from keywords; semantic routing will use the complete request.');
+        : 'No task type is inferred from keywords; semantic routing will use the complete request.');
   const recommendation = chinese
     ? (destructive
       ? '先做只读检查并列出受影响对象，给出可恢复或更窄的替代方案，确认后再动手。'
