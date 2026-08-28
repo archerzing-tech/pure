@@ -342,19 +342,23 @@ GUI 设置 → LLM 页面支持一个供应商配置多个大模型。默认界�
 
 ### Web 搜索与抓取 Key（CLI，全部可选）
 
-不配置任何 key，CLI 也能通过免费 HTML 后端（Sogou / cn.bing.com / DuckDuckGo / Bing）搜索，并通过免 key 公共 API 回答结构化查询（天气、地理编码、新闻、维基、IP、汇率、股票、GitHub）。可选 key 提升质量与稳定性——配置的多个后端按「第一个出结果者胜」降级，失败/被限流的后端会进入短暂冷却而不是反复重试：
+不配置任何 key，CLI 也能通过免费后端搜索——DuckDuckGo Instant Answer / Wikipedia / Google News RSS 结构化查询、中文走 Sogou / cn.bing.com / 360 / Baidu、英文走 Bing / Brave / Mojeek，末级还有 Bing→Google→DuckDuckGo 经 Jina Reader 的兜底链——并通过免 key 公共 API 回答结构化查询（天气、地理编码、新闻、维基、IP、汇率、股票、GitHub）。可选 key 提升质量与稳定性——配置的多个后端按「第一个出结果者胜」降级，失败/被限流的后端会进入短暂冷却而不是反复重试：
 
 | 环境变量 | 用途 | 免费额度 | 申请链接 |
 |---|---|---|---|
 | `SERPER_API_KEY` | Google SERP 后端（中英文索引最好） | 2500 次（一次性） | [serper.dev](https://serper.dev) |
 | `TAVILY_API_KEY` | Tavily 搜索后端 | 1000 次/月 | [tavily.com](https://tavily.com) |
 | `EXA_API_KEY` | Exa 神经搜索后端 | 开户 $20 + 每月 $10 循环 | [exa.ai](https://exa.ai) |
-| `PURE_JINA_API_KEY` | `web_scrape` 兜底（r.jina.ai） | 免 key 可用，带 key 提高限额 | [jina.ai](https://jina.ai) |
+| `PURE_JINA_API_KEY` | `web_scrape`/`web_fetch` 兜底（r.jina.ai） | 免 key 可用，带 key 提高限额 | [jina.ai](https://jina.ai) |
+| `FIRECRAWL_API_KEY` | `web_scrape`/`web_fetch` 兜底（最难反爬/JS 重页面） | 有限免费额度 | [firecrawl.dev](https://firecrawl.dev) |
+| `SEARXNG_URL` | 内网/自建 SearXNG 实例（需开启 JSON 格式），公共引擎不可达时的标准解法 | — | [docs.searxng.org](https://docs.searxng.org) |
 | `PURE_LOCATION` | 天气查询缺城市时的默认城市 | — | — |
 
-GUI 设置 → 工具 → Web 工具页内置 Serper / Tavily 配置项，附一键申请链接；其余 CLI key 通过环境变量设置。
+GUI 设置 → 工具 → Web 工具页内置 Serper / Tavily / SearXNG 配置项，附一键申请链接；其余 CLI key 通过环境变量设置。
 
 Web 工具结果带缓存，重复查询不会反复消耗免费额度：`web_search`（15 分钟）、`web_public_api`（按类别——天气/新闻/股票分钟级、地理编码/维基周级）、`web_scrape`/`web_fetch`（1 小时）统一读写 `~/.pure/cache/web-cache.json`，CLI 与 GUI 共享同一文件与 key 方案。缓存文件有上限（200 条、最旧优先淘汰、单值 30 KB）且容忍损坏。`PURE_WEB_CACHE=off` 关闭缓存，`PURE_CACHE_DIR` 可改目录。
+
+`web_fetch` / `web_scrape` 抓取已知 URL 走多级回退链，直抓失败/被墙/被删/需渲染的页面也能尽力拿到内容：直抓（浏览器请求头、瞬时错误重试、meta-refresh 跳转跟随；CLI 侧对文本型 PDF 直接提取）→ Jina Reader → Wayback Machine（最近存档快照）→ Firecrawl（可选 key）。`download_file` 自动携带同源 Referer 与浏览器 UA、优先采用服务器 Content-Disposition 文件名，失败依次换用 原生多线程 → curl → aria2c → wget → fetch 多种方式重试。
 
 #### 能力缺口自动补齐（视觉 / OCR / PDF / 音频…）
 

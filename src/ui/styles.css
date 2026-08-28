@@ -11613,3 +11613,28 @@ button svg,
 .agent-activity.failed .agent-activity-note {
   color: var(--danger);
 }
+/* Delegated-task summary + elapsed/token meta line above the tool list. */
+.agent-activity-body {
+  margin-top: 4px;
+}
+.agent-activity-task {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-activity-meta {
+  color: var(--text-tertiary, #9B968F);
+  font-size: 11px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+/* Timed-out / cancelled badge — distinct amber tone from a plain failure. */
+.agent-activity.timed-out {
+  border-left-color: var(--warning, #E8A33D);
+}
+.agent-activity.timed-out .agent-activity-dot { background: var(--warning, #E8A33D); }
+.agent-activity.timed-out .agent-activity-badge {
+  background: color-mix(in srgb, var(--warning, #E8A33D) 14%, transparent);
+  color: var(--warning, #E8A33D);
+}

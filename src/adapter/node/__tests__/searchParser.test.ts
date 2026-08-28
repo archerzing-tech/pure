@@ -13,6 +13,7 @@ import {
   parseSo360Results,
   parseBaiduResults,
   parseBraveResults,
+  parseMojeekResults,
   parseJinaMarkdownResults,
   resolveBingCkUrl,
   normalizeQueryForRetry,
@@ -27,6 +28,11 @@ import {
   readResponseText,
   charsetFromContentType,
   sniffHtmlCharset,
+  googleNewsSearch,
+  ddgInstantSearch,
+  wikipediaSearch,
+  jinaGoogleSearch,
+  jinaDuckDuckGoSearch,
 } from '../NodeToolAdapter';
 
 describe('Bing HTML result parser (mirrors Rust web_search_tests)', () => {
@@ -538,5 +544,115 @@ describe('SearXNG JSON backend', () => {
   it('throws when SEARXNG_URL is not set', async () => {
     delete process.env.SEARXNG_URL;
     await expect(searxngSearch('query', 10)).rejects.toThrow('SEARXNG_URL');
+  });
+});
+
+describe('Google News RSS backend', () => {
+  it('parses news RSS items into SearchResult', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(`<rss version="2.0"><channel><item><title>Rust 1.85 发布</title><link>https://news.example.com/1</link><pubDate>Wed, 28 Aug 2026 10:00:00 GMT</pubDate><description>新的工具链稳定发布。</description></item><item><title>Second item</title><link>https://news.example.com/2</link><description>s2</description></item></channel></rss>`, { status: 200 })
+    ) as unknown as typeof fetch;
+    try {
+      const results = await googleNewsSearch('rust', 10);
+      expect(results.length).toBe(2);
+      expect(results[0].title).toContain('Rust');
+      expect(results[0].url).toBe('https://news.example.com/1');
+      expect(results[0].snippet).toContain('工具链');
+      expect(results[1].title).toBe('Second item');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe('DuckDuckGo Instant Answer API', () => {
+  it('maps abstract + related topics to SearchResult', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({
+        Heading: 'Rust (programming language)',
+        AbstractText: 'A systems programming language.',
+        AbstractURL: 'https://en.wikipedia.org/wiki/Rust_(programming_language)',
+        RelatedTopics: [
+          { Text: 'Rust (band) — a band', FirstURL: 'https://duckduckgo.com/Rust_(band)' },
+          { Topics: [{ Text: 'Rust (fungus)', FirstURL: 'https://duckduckgo.com/Rust_(fungus)' }] },
+        ],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    ) as unknown as typeof fetch;
+    try {
+      const results = await ddgInstantSearch('rust', 10);
+      expect(results.length).toBe(3);
+      expect(results[0].title).toContain('Rust');
+      expect(results[0].url).toBe('https://en.wikipedia.org/wiki/Rust_(programming_language)');
+      expect(results[1].url).toBe('https://duckduckgo.com/Rust_(band)');
+      expect(results[2].url).toBe('https://duckduckgo.com/Rust_(fungus)');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe('Wikipedia search API', () => {
+  it('maps search hits, stripping HTML snippet highlights', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({
+        query: { search: [
+          { title: 'Rust (programming language)', snippet: 'A <span class="searchmatch">systems</span> programming language.' },
+          { title: 'Rust', snippet: 'A genus of fungi.' },
+        ] },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    ) as unknown as typeof fetch;
+    try {
+      const results = await wikipediaSearch('rust programming language', 10);
+      expect(results.length).toBe(2);
+      expect(results[0].title).toBe('Rust (programming language)');
+      expect(results[0].snippet).toContain('systems');
+      expect(results[0].snippet).not.toContain('<span');
+      expect(results[0].url).toBe('https://en.wikipedia.org/wiki/Rust_(programming_language)');
+      expect(results[1].snippet).toBe('A genus of fungi.');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe('Mojeek parser (mirrors Rust parse_mojeek_results)', () => {
+  it('parses .result blocks with title/ob anchors and .s snippets', () => {
+    const html = `<ul class="results-standard"><li class="result"><div class="results-top"><h2><a class="title" href="https://rust-lang.org/">Rust Programming Language</a></h2></div><p class="s">A language empowering everyone to build reliable software.</p></li>
+<li class="result"><h2><a class="ob" href="https://example.com/2">Two</a></h2><p class="s">s2</p></li></ul>`;
+    const results = parseMojeekResults(html, 10);
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe('Rust Programming Language');
+    expect(results[0].url).toBe('https://rust-lang.org/');
+    expect(results[0].snippet).toContain('empowering');
+    expect(results[1].url).toBe('https://example.com/2');
+  });
+});
+
+describe('Jina-rendered Google / DuckDuckGo backends', () => {
+  it('renders each engine through r.jina.ai and parses the markdown', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes('r.jina.ai/https://www.google.com/search?q=')) {
+        return new Response(`## [Rust Programming Language](https://rust-lang.org/)\n\nA language empowering everyone.`, { status: 200 });
+      }
+      if (url.includes('r.jina.ai/https://html.duckduckgo.com/html/?q=')) {
+        return new Response(`## [DDG result](https://ddg.example/1)\n\nsnippet one`, { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    }) as unknown as typeof fetch;
+    try {
+      const google = await jinaGoogleSearch('rust language', 10);
+      expect(google.length).toBe(1);
+      expect(google[0].url).toBe('https://rust-lang.org/');
+      const ddg = await jinaDuckDuckGoSearch('rust language', 10);
+      expect(ddg.length).toBe(1);
+      expect(ddg[0].url).toBe('https://ddg.example/1');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

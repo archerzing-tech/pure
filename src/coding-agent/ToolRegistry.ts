@@ -120,6 +120,16 @@ export class ToolRegistry implements ToolAdapter {
       .map(({ name, description, input_schema }) => ({ name, description, input_schema }));
   }
 
+  /** Subagent tools (Tags.AGENT) — the parent LLM's delegation surface. These
+   * are deliberately NOT part of getTools() (the public tool list); callers
+   * that want the model to actually spawn subagents must merge them into the
+   * model-visible tool list (CodingAgent / CLI createHarness do). */
+  getSubagentTools(): ToolDefinition[] {
+    return this.tools
+      .filter(({ tags }) => tags.includes(Tags.AGENT))
+      .map(({ name, description, input_schema }) => ({ name, description, input_schema }));
+  }
+
   getSnapshotPort(): WorkspaceSnapshotPort | undefined {
     return this.delegate.getSnapshotPort?.();
   }

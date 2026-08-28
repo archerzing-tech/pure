@@ -3,6 +3,28 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.1.0-beta
+
+**多 Agent 委派接通 + 并行/深度/预算/持久化 + GUI 可视化 + 死代码清理（CLI + GUI 两侧）**
+
+- 多 Agent 接通：子 agent 工具此前被公共工具白名单过滤、模型根本看不到——现通过 `ToolRegistry.getSubagentTools()` 合并进模型可见工具列表（CLI 与 GUI），系统提示改用真实子 agent 名并给出委派触发条件
+- 并行：只读子 agent（code_reviewer / project_auditor / task_planner / deep_thinker / ui_designer / researcher）并发运行，写文件的 code_editor 与跑命令的 bash_executor 保持串行（`SubagentOrchestrator.getMetadata` 按 tags 分类，引擎复用既有 reads/writes 划分）
+- 深度：`EngineContext` 加 depth/maxDepth，默认单层，子 agent 嵌套超限即拒，防止无限递归
+- 质量：子 agent 运行补 verifier（此前不验证就 TERMINATE）与 toolsDefsProvider（每轮重算而非 spawn 快照）
+- 预算：子 agent 用受限独立预算（不继承父全部配额），完成回传 token 供显示
+- 持久化：子 agent 以「父会话 + agent 名 + 任务哈希」稳定 sessionId，可接 stateStore 在中断/重新委派时续跑（CLI 有 stateStore 生效；GUI 注入后自动可用）
+- GUI 可视化：活动卡片新增「委托:<任务摘要>」+「耗时 Xs · N tokens」+ 状态徽章着色（含 ⏱ 超时区分），清理死状态映射；CLI 接子 agent 进度，委派可见
+- 角色去重：合并 planner→task_planner、web_researcher→researcher，收敛为 8 个职责清晰角色
+- 清理：删除从未被接线的多 Agent 占位模块 `AgentCoordinator` / `AgentMessage` / `TaskDispatcher` / `DynamicPipeline`（其 `executeTask` 实为模拟实现），同步清理 `docs/multi-agent-design.md` 的 Phase 2-4 陈旧描述与 types.ts 孤立导出（AgentRole / AgentRoleType / SubagentTask），避免"设计已实现"的误读
+- GUI 端子 agent checkpoint：新增共享内存 `MemoryStateStore`（IStateStore 实现），GUI 每会话注入，子任务在同一对话内「停止→继续」可续跑；CLI 沿用 SQLite/FS store；子 agent sessionId 改用下划线分隔（`sub_<parent>_<role>_<hash>` 兼容 FSStore 路径校验）
+
+**网络搜索 / 抓取 / 下载全链路兜底增强（CLI + GUI 两侧）**
+
+- 搜索：新增免费结构化后端 DuckDuckGo Instant Answer / Wikipedia / Google News RSS（并行首胜），非中文新增 Mojeek；末级 Jina 兜底由 Bing 扩展为 Bing→Google→DuckDuckGo 链，并加后端冷却；Rust(GUI) 侧补齐 Exa 与轻量冷却，镜像全部新后端与解析器
+- 抓取：`web_fetch` / `web_scrape` 统一为多级回退链——直抓（浏览器请求头、429/5xx 重试、meta-refresh 跳转跟随）→ Jina Reader → Wayback Machine（最近存档快照）→ Firecrawl（可选 key，此前仅文档声称存在）；CLI 侧对文本型 PDF 直接提取（内置 JS 提取器 + pdftotext 兜底）；`web_fetch` 从无回退变为与 `web_scrape` 同等健壮
+- 下载：`download_file` 自动携带同源 Referer 与浏览器 UA（防盗链）、优先采用服务器 Content-Disposition 文件名、原生路径加防悬挂超时、失败换用 curl → aria2c → wget → fetch 多种方式重试、已知 Content-Length 校验；GUI 的 shell 下载命令同样补 Referer/UA/重试参数与 wget 兜底
+- 配置/文档：`.env.example` 补全 web 相关环境变量（含 FIRECRAWL_API_KEY / SEARXNG_URL）；README 中英文补全后端与回退链说明；工具描述与系统提示同步更新
+
 ## v2.0.0-beta
 
 **多 Agent 可视化与中断可解释性**
