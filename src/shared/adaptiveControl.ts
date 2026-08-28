@@ -22,6 +22,11 @@ export interface AdaptiveControlInput {
   learnedProcedures?: string[];
   recentFailures?: string[];
   verification?: VerificationSummary;
+  /** When the shared semantic router has already understood the request, feed
+   * its tags/complexity here so delegation (看人下菜) is driven by semantic
+   * understanding rather than re-scanning keywords. Keyword inference in
+   * parseIntent remains only as a fallback when this is absent. */
+  semantic?: { tags?: string[]; complexity?: AdaptiveStrategy['complexity'] };
 }
 
 export interface AdaptiveStrategy {
@@ -85,6 +90,25 @@ function fileMentions(prompt: string): number {
   const fileHits = prompt.match(/\b[\w\-./]+\.(tsx?|jsx?|py|go|rs|java|vue|css|html?|md|json|yml|yaml)\b/g) ?? [];
   const wordHits = (prompt.match(/文件|file/g) ?? []).length;
   return fileHits.length + wordHits;
+}
+
+/** 把语义路由给出的意图标签映射成看人下菜用的意图标记；仅在没有语义信号时，
+ * 才回退到 parseIntent 的关键词推断。这样任务分派由“理解”驱动，而非关键词归类。 */
+function intentFromTags(tags: string[]): RequestIntent {
+  const t = new Set(tags.map((x) => x.toLowerCase()));
+  const has = (...keys: string[]) => keys.some((k) => t.has(k));
+  return {
+    quick: has('quick'),
+    planning: has('planning', 'plan'),
+    refactor: has('refactor'),
+    multiFile: has('multi-file', 'multifile', 'whole-project', 'whole', 'repository'),
+    research: has('research'),
+    design: has('design', 'ui', 'ux'),
+    audit: has('audit', 'security'),
+    review: has('review'),
+    parallelRequested: has('parallel', 'concurrent'),
+    serialRequested: has('serial', 'step-by-step', 'sequential'),
+  };
 }
 
 function estimateComplexity(prompt: string, intent: RequestIntent): AdaptiveStrategy['complexity'] {
@@ -209,8 +233,10 @@ export class AdaptiveControlPlane {
       || input.verification?.status === 'failed'
       || input.verification?.status === 'incomplete';
     const hasCapability = environment.hasWorkspace && environment.toolCount > 0;
-    const intent = parseIntent(input.prompt);
-    const complexity = estimateComplexity(input.prompt, intent);
+    const intent = input.semantic?.tags && input.semantic.tags.length > 0
+      ? intentFromTags(input.semantic.tags)
+      : parseIntent(input.prompt);
+    const complexity = input.semantic?.complexity ?? estimateComplexity(input.prompt, intent);
     const recommendedRoles = recommendRoles(intent, complexity);
     const parallelRoles = recommendedRoles.filter((r) => PARALLEL_SAFE_ROLES.has(r));
     const broadExploration = hasEvidenceOfFailure || (procedures.length === 0 && input.prompt.length > 240);

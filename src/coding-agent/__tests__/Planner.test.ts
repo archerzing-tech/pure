@@ -28,7 +28,9 @@ describe('Planner', () => {
     expect(result.plan).toBeDefined();
   });
 
-  it('recommends a read-only probe for broad but recoverable changes', () => {
+  it('recommends a read-only probe for broad but recoverable changes (fallback safety net)', () => {
+    // 语义路由不可用时，关键词兜底仍要把“重构 / 迁移”这类波及面大的改动标记为中等风险、
+    // 需要探针——这是安全兜底策略，不是把用户意图归类为固定类型。
     const assessment = assessIntent('把认证模块重构成新的实现');
     expect(assessment.intent).toBe('refactor');
     expect(assessment.riskLevel).toBe('medium');
@@ -117,20 +119,20 @@ describe('Planner', () => {
     expect(r.mode).toBe('plan');
     expect(r.plan).toBeDefined();
     expect(r.plan!.steps.length).toBeGreaterThan(0);
-    expect(r.plan!.steps[0]).toMatchObject({ action: '确认范围' });
+    expect(r.plan!.steps[0].action).toContain('先理解');
     expect(r.plan!.steps[0].substeps).toBeUndefined();
   });
 
   it('writes heuristic plan steps in user-facing language, not internal labels', () => {
     // The fallback plan shown in the review card must read like plain
     // instructions for the user, never internal jargon (Understand/Plan/
-    // Implement/Verify, How to…).
+    // Implement/Verify, How to…). It no longer buckets the request into a
+    // fixed "确认范围/完成改动/验证结果" template by keyword.
     const r = new Planner().analyzeTask('重构整个项目');
     const all = r.plan!.steps.map((s) => `${s.action} ${s.description}`).join(' ');
     expect(all).not.toMatch(/\b(Understand|Plan|Implement|Verify|How to)\b/i);
-    expect(r.plan!.steps[0].action).toBe('确认范围');
-    expect(r.plan!.steps.map((s) => s.action)).toEqual(['确认范围', '完成改动', '验证结果']);
-    expect(r.plan!.steps.at(-1)).toMatchObject({ action: '验证结果' });
+    expect(r.plan!.steps[0].action).toContain('先理解');
+    expect(r.plan!.steps.length).toBeGreaterThan(0);
     expect(r.plan!.steps.every((step) => step.todosRequired !== true)).toBe(true);
   });
 
@@ -218,7 +220,8 @@ describe('Planner', () => {
   it('keeps broad refactors on the safety-aware plan fallback', () => {
     const r = new Planner().analyzeTask('重构整个项目');
     expect(r.mode).toBe('plan');
-    expect(r.plan!.steps.map((s) => s.action)).toEqual(['确认范围', '完成改动', '验证结果']);
+    expect(r.plan).toBeDefined();
+    expect(r.plan!.steps[0].action).toContain('先理解');
   });
 
   it('classifies project creation as complex in the fallback router', () => {

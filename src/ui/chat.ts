@@ -1025,46 +1025,19 @@ function traceToAgentCall(callId: string): void {
  * “项目做完了运行不起来，你给看看”的排查请求，不该被当成从零构建来对待。
  */
 function deriveFallbackPlan(prompt: string): Plan {
+  // 兜底计划：只引用用户这次请求的真实文本，按“先理解、再小步验证”的通用方式推进，
+  // 绝不根据关键词把请求归类为“提问 / 创建 / 其他”之类的固定类型再去套模板。
   const summary = prompt.replace(/\s+/g, ' ').trim();
   const display = summary.length > 64 ? `${summary.slice(0, 64)}…` : summary;
-  const p = prompt.toLowerCase();
-  const isQuestion = /[?？]/.test(prompt)
-    || /(为什么|怎么|如何|什么|是否|能否|帮我看|看看|排查|定位|运行不起来|跑不起来|报错|失败|什么意思|怎么回事|为啥|哪里|是不是|什么情况)/.test(p);
-  const isFreshBuild = /(创建|搭建|构建|新建|从零|从头|开发|做一个|生成|create|build|scaffold|from scratch)/i.test(p) && !isQuestion;
-
-  if (isQuestion) {
-    return {
-      steps: [{
-        id: '1',
-        action: `先弄清你想让我做什么：${display || '你的请求'}`,
-        description: '判断这是要我解释、要排查，还是要改文件——不要一上来就动手。需要的话先确认目标再行动。',
-        expectedOutcome: '诉求与边界清楚后再开始。',
-        todosRequired: false,
-      }],
-      reasoning: '提问 / 排查类请求：先理解诉求，不套用构建式计划。',
-    };
-  }
-  if (isFreshBuild) {
-    return {
-      steps: [{
-        id: '1',
-        action: '明确目标与可验证范围，先搭最小可运行骨架',
-        description: '确认要交付什么、怎么验证，再逐模块推进；第一步就要能跑、能验证。',
-        expectedOutcome: '得到一个可运行、可验证的最小结果后再继续。',
-        todosRequired: false,
-      }],
-      reasoning: '创建类任务：从最小可运行骨架开始，边做边验证。',
-    };
-  }
   return {
     steps: [{
       id: '1',
-      action: `先确认「${display || '你的请求'}」的范围与约束`,
-      description: '看清与请求直接相关的内容，再决定怎么改、要不要改。',
-      expectedOutcome: '改动范围和关键未知点清楚。',
+      action: `先看清这次请求真正想要的结果：${display || '你的请求'}`,
+      description: '结合对话上下文理解目标、约束与已知条件，再决定怎么动手；不要套用任何固定模板。',
+      expectedOutcome: '目标与边界清楚后再开始。',
       todosRequired: false,
     }],
-    reasoning: '保守起点：先确认范围，再按实际情况推进。',
+    reasoning: '没有可用的计划分析时，先按这次请求的真实语义理解目标，而不是把请求归类为某种固定任务类型。',
   };
 }
 
