@@ -11424,3 +11424,102 @@ button svg,
 @media (prefers-reduced-motion: reduce) {
   .design-preview-confirm { transition: none; }
 }
+
+/* ── Multi-agent activity card ──
+   Shows which subagent the CodingAgent delegated a sub-task to and what it is
+   doing right now, so the multi-agent system is visible instead of a black box. */
+.agent-activity {
+  margin: 6px 0 6px 22px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-card, #FBFAF9);
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.agent-activity-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.agent-activity-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+.agent-activity.working .agent-activity-dot {
+  animation: agent-pulse 1.1s ease-in-out infinite;
+}
+@keyframes agent-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+.agent-activity-name {
+  font-weight: 600;
+  color: var(--accent);
+}
+.agent-activity-role {
+  color: var(--text-secondary);
+  font-size: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-activity-badge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft, #F1EFFC);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.agent-activity.working .agent-activity-badge {
+  background: var(--accent-soft, #F1EFFC);
+  color: var(--accent);
+}
+.agent-activity.done {
+  border-left-color: var(--success);
+}
+.agent-activity.done .agent-activity-dot { background: var(--success); }
+.agent-activity.done .agent-activity-name { color: var(--success); }
+.agent-activity.done .agent-activity-badge {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+.agent-activity.failed {
+  border-left-color: var(--danger);
+}
+.agent-activity.failed .agent-activity-dot { background: var(--danger); }
+.agent-activity.failed .agent-activity-name { color: var(--danger); }
+.agent-activity.failed .agent-activity-badge {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+.agent-activity-tools {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 4px 0 0 4px;
+  border-top: 1px dashed var(--border-light, #EDEBE7);
+  color: var(--text-secondary);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+.agent-activity-tools li {
+  padding: 1px 0;
+}
+.agent-activity-note {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit !important;
+}
+.agent-activity.failed .agent-activity-note {
+  color: var(--danger);
+}
