@@ -443,123 +443,28 @@ export interface AgentResult {
 
 ---
 
-## 7. Phase 2 & 3 实现总结
+## 7. 实现状态（截至 v2.1.0-beta）
 
-### 7.1 已完成组件
+> **诚实状态更新**：本设计文档的 §4 曾规划 Phase 2/3/4（Agent 消息协议、多 Agent 协调器、智能任务分配、动态 Pipeline）。这些组件最初以占位文件落地，但**从未被任何运行时代码接线**（`AgentCoordinator`/`AgentMessage`/`TaskDispatcher`/`DynamicPipeline` 全部是无引用的死代码，其 `executeTask` 甚至是模拟实现）。它们已于 v2.1.0-beta 移除。真实的多 Agent 运行路径是**单个父 LLM 通过工具调用委派子 Agent**（`SubagentOrchestrator`），而非一条独立的协作调度流水线。
 
-| 文件 | 说明 |
-|------|------|
-| `src/coding-agent/AgentMessage.ts` | Agent间消息协议：消息类型、状态定义、消息生成器 |
-| `src/coding-agent/AgentCoordinator.ts` | 多Agent协调器：任务队列、依赖管理、结果聚合 |
-| `src/coding-agent/TaskDispatcher.ts` | 智能任务分配：根据任务类型选择合适的Agent Pipeline |
-| `src/coding-agent/DynamicPipeline.ts` | 动态Pipeline：支持调整、并行执行、错误恢复 |
+### 7.1 当前实际实现（live）
 
-### 7.2 Phase 4 核心功能
+| 文件 | 职责 | 状态 |
+|------|------|------|
+| `src/coding-agent/SubagentOrchestrator.ts` | 父 LLM 调子 Agent 工具 → 每个子 Agent 新起独立 `AgentLoopEngine` 循环，返回结果 | ✅ 已接线 |
+| `src/coding-agent/ToolRegistry.ts` | 扁平标签工具注册 + AGENT 工具路由 + 权限门 | ✅ 已接线 |
+| `src/coding-agent/CodingAgent.ts` | 组装引擎/Harness/权限/子 Agent | ✅ 已接线 |
+| `src/harness/SubagentRegistry.ts` | 子 Agent 定义注册 | ✅ 已接线 |
 
-#### 动态调整决策
-```typescript
-interface AdjustmentDecision {
-  shouldAdjust: boolean;
-  type: 'add' | 'remove' | 'reorder' | 'replace' | 'none';
-  reason: string;
-  newAgents?: AgentRoleType[];
-  suggestion?: string;
-}
+### 7.2 委派模型（running）
 
-// 根据错误类型自动调整Pipeline
-- 网络/超时错误 → 添加 researcher 收集信息
-- 规划失败 → 简化流程直接执行
-- 编辑失败 → 添加 thinker 分析问题
-- 测试失败 → 跳过测试阶段
-```
+- 父模型在工具列表里看到子 Agent 工具（`code_reviewer`/`project_auditor`/`task_planner`/`code_editor`/`deep_thinker`/`ui_designer`/`bash_executor`/`researcher`），自行决定要不要委派、委派给谁。
+- **并行**：只读子 Agent（researcher/code_reviewer/project_auditor/task_planner/deep_thinker/ui_designer）可并发；写/命令（code_editor/bash_executor）串行。
+- **深度**：默认单层，`EngineContext.maxDepth` 显式限制嵌套。
+- **子 Agent 预算**：独立受限预算（不继承父全部配额），完成回传 token。
+- **持久化**：子 Agent 以「父会话 + 角色 + 任务哈希」稳定 sessionId，接 stateStore 可在中断/重新委派时续跑（CLI 生效；GUI 注入后可用）。
 
-#### 并行执行支持
-```typescript
-// 可并行的Agent组合
-parallelizableGroups: [
-  [RESEARCHER, UI_DESIGNER],  // 研究和UI设计可以并行
-]
-
-// 获取可并行执行的Agent
-getParallelizableAgents(): AgentRoleType[]
-canParallelize(): boolean
-```
-
-#### 错误恢复策略
-```typescript
-// 自动重试机制
-maxRetries: 2  // 失败后自动重试2次
-
-// 执行状态追踪
-ExecutionState: PENDING | RUNNING | SUCCESS | FAILED | RETRYING | SKIPPED
-```
-
-### 7.3 使用示例
-
-```typescript
-import { DynamicPipelineController, analyzeTaskForPipeline } from './DynamicPipeline';
-
-// 1. 分析任务
-const analysis = analyzeTaskForPipeline("重构这个模块");
-console.log(analysis.recommendedPipeline); // coding_pipeline
-console.log(analysis.suggestions); // ["建议启用审查阶段"]
-
-// 2. 创建控制器
-const controller = new DynamicPipelineController({ maxRetries: 3 });
-
-// 3. 初始化执行
-controller.initExecution("重构模块", [PLANNER, EDITOR, REVIEWER], 'coding_pipeline');
-
-// 4. 执行并处理结果
-let agent = controller.getNextAgent();
-while (agent) {
-  controller.startAgent(agent);
-  // ... 执行agent ...
-  if (success) {
-    controller.completeAgent(agent, output);
-  } else {
-    const decision = controller.failAgent(agent, error);
-    if (decision.shouldAdjust) {
-      controller.applyAdjustment(decision);
-    }
-  }
-  agent = controller.getNextAgent();
-}
-```
-
----
-
-## 8. 已完成功能清单
-
-```typescript
-// TaskDispatcher.ts
-
-export const PIPELINES = {
-  coding_pipeline: [PLANNER, EDITOR, REVIEWER, BASHER],      // 规划→编辑→审查→测试
-  research_pipeline: [RESEARCHER, THINKER],                 // 研究→深度分析
-  ui_design_pipeline: [UI_DESIGNER, EDITOR, REVIEWER],     // 设计→实现→审查
-  analysis_pipeline: [THINKER, RESEARCHER],                // 深度思考→研究
-  simple_pipeline: [EDITOR],                               // 直接执行
-};
-```
-
-### 7.3 使用示例
-
-```typescript
-import { classifyTask, buildPipelineContext, generatePipelineInstructions } from './TaskDispatcher';
-
-// 1. 分类任务
-const category = classifyTask("帮我重构这个模块");
-// → 'coding'
-
-// 2. 获取执行Pipeline
-const context = buildPipelineContext("帮我重构这个模块");
-// → { agents: [PLANNER, EDITOR, REVIEWER, BASHER], tools: [...], ... }
-
-// 3. 生成执行指令
-const instructions = generatePipelineInstructions(context);
-// → "任务：帮我重构这个模块\n执行流程：planner → editor → reviewer → basher\n..."
-```
+> Phase 5 规划（结果缓存/性能监控/学习优化）仍为**未实现**的未来项，见 §9。
 
 ---
 

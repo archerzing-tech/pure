@@ -3299,19 +3299,45 @@ async fn search_backend_brave(query: &str, max: usize, proxy_url: Option<&str>) 
     Ok(parse_brave_results(&html, max))
 }
 
-/// Last-resort universal backend: Bing rendered through Jina Reader
-/// (`r.jina.ai`, free tier ~20 req/min, no key). Jina fetches Bing from its
-/// own infrastructure, so this works when every local engine is blocked or
-/// rate-limited (China / restrictive networks), as long as r.jina.ai itself
-/// is reachable. Used only after all other backends have failed, because it
-/// is rate-limited and slower. PURE_JINA_API_KEY (if set) raises the limits.
-async fn search_backend_jina_bing(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+/// Lightweight per-backend cooldown: a failed / rate-limited free backend sits
+/// in a short cooldown so the next query skips it instead of re-hitting the
+/// same dead endpoint. Mirrors the Node BackendQuota.isBlocked/markBlocked.
+fn backend_cooldowns() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static COOLDOWNS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    COOLDOWNS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn backend_blocked(label: &str) -> bool {
+    backend_cooldowns()
+        .lock()
+        .unwrap()
+        .get(label)
+        .map_or(false, |until| *until > std::time::Instant::now())
+}
+
+fn backend_mark_blocked(label: &str, secs: u64) {
+    backend_cooldowns()
+        .lock()
+        .unwrap()
+        .insert(
+            label.to_string(),
+            std::time::Instant::now() + std::time::Duration::from_secs(secs),
+        );
+}
+
+/// Shared Jina Reader render for search engines: fetch `<engine><encoded query>`
+/// through r.jina.ai (free tier, PURE_JINA_API_KEY raises limits) and parse the
+/// returned markdown. Used by every last-resort engine.
+async fn search_backend_jina_render(
+    query: &str,
+    max: usize,
+    engine_search_url: &str,
+    proxy_url: Option<&str>,
+) -> Result<Vec<SearchResult>, String> {
     let jina_key = std::env::var("PURE_JINA_API_KEY").ok().filter(|k| !k.is_empty());
     let mut req = build_search_client(std::time::Duration::from_secs(15), proxy_url)?
-        .get(format!(
-            "https://r.jina.ai/https://www.bing.com/search?q={}",
-            urlencoding(query)
-        ))
+        .get(format!("https://r.jina.ai/{}{}", engine_search_url, urlencoding(query)))
         .header("User-Agent", BROWSER_UA)
         .header("X-Return-Format", "markdown")
         .header("Accept", "text/plain");
@@ -3324,6 +3350,307 @@ async fn search_backend_jina_bing(query: &str, max: usize, proxy_url: Option<&st
     }
     let text = resp.text().await.map_err(|e| format!("read: {}", e))?;
     Ok(parse_jina_markdown_results(&text, max))
+}
+
+/// Last-resort universal backends: Bing / Google / DuckDuckGo rendered through
+/// Jina Reader (`r.jina.ai`, free tier ~20 req/min, no key). Jina fetches each
+/// engine from its own infrastructure, so this works when every local engine is
+/// blocked or rate-limited (China / restrictive networks), as long as r.jina.ai
+/// itself is reachable. Tried in sequence, Bing first. PURE_JINA_API_KEY (if
+/// set) raises the limits.
+async fn search_backend_jina_bing(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    search_backend_jina_render(query, max, "https://www.bing.com/search?q=", proxy_url).await
+}
+
+async fn search_backend_jina_google(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    search_backend_jina_render(query, max, "https://www.google.com/search?q=", proxy_url).await
+}
+
+async fn search_backend_jina_ddg(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    search_backend_jina_render(query, max, "https://html.duckduckgo.com/html/?q=", proxy_url).await
+}
+
+/// Google News RSS backend (free, no key): recent news matching the query in
+/// structured RSS. Reachable on more networks than full search engines, and
+/// the parser is shared with the web_public_api news intent. Mirrors Node
+/// googleNewsSearch().
+async fn search_backend_google_news_rss(
+    query: &str,
+    max: usize,
+    proxy_url: Option<&str>,
+) -> Result<Vec<SearchResult>, String> {
+    let chinese = is_chinese_query(query);
+    let (hl, gl, ceid) = if chinese {
+        ("zh-CN", "CN", "CN:zh-Hans")
+    } else {
+        ("en-US", "US", "US:en")
+    };
+    let client = build_search_client(std::time::Duration::from_secs(8), proxy_url)?;
+    let url = format!(
+        "https://news.google.com/rss/search?q={}&hl={}&gl={}&ceid={}",
+        urlencoding(query),
+        hl,
+        gl,
+        ceid
+    );
+    let resp = client
+        .get(&url)
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let xml = resp.text().await.map_err(|e| format!("read: {}", e))?;
+    Ok(parse_rss_items(&xml, max)
+        .into_iter()
+        .map(|item| SearchResult {
+            title: item.title,
+            snippet: item.description,
+            url: item.link,
+        })
+        .collect())
+}
+
+/// DuckDuckGo Instant Answer API (free, no key): structured facts/definitions
+/// for direct queries. Returns an empty set for non-answer queries, so it drops
+/// out harmlessly. Mirrors Node ddgInstantSearch().
+async fn search_backend_ddg_instant(
+    query: &str,
+    max: usize,
+    proxy_url: Option<&str>,
+) -> Result<Vec<SearchResult>, String> {
+    let client = build_search_client(std::time::Duration::from_secs(8), proxy_url)?;
+    let url = format!(
+        "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
+        urlencoding(query)
+    );
+    let resp = client
+        .get(&url)
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("read: {}", e))?;
+    Ok(parse_ddg_instant_results(&body, max, query))
+}
+
+fn parse_ddg_instant_results(body: &serde_json::Value, max: usize, query: &str) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    let heading = body.get("Heading").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let abstract_text = body.get("AbstractText").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let abstract_url = body.get("AbstractURL").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if !abstract_text.is_empty() && !abstract_url.is_empty() {
+        out.push(SearchResult {
+            title: if heading.is_empty() { query.to_string() } else { heading },
+            snippet: abstract_text,
+            url: abstract_url,
+        });
+    }
+    if let Some(topics) = body.get("RelatedTopics").and_then(|v| v.as_array()) {
+        for topic in topics {
+            if out.len() >= max {
+                break;
+            }
+            if let Some(nested) = topic.get("Topics").and_then(|v| v.as_array()) {
+                for sub in nested {
+                    if out.len() >= max {
+                        break;
+                    }
+                    if let (Some(text), Some(first)) = (
+                        sub.get("Text").and_then(|v| v.as_str()),
+                        sub.get("FirstURL").and_then(|v| v.as_str()),
+                    ) {
+                        let t = text.to_string();
+                        out.push(SearchResult {
+                            title: t.chars().take(80).collect(),
+                            snippet: t,
+                            url: first.to_string(),
+                        });
+                    }
+                }
+            } else if let (Some(text), Some(first)) = (
+                topic.get("Text").and_then(|v| v.as_str()),
+                topic.get("FirstURL").and_then(|v| v.as_str()),
+            ) {
+                let t = text.to_string();
+                out.push(SearchResult {
+                    title: t.chars().take(80).collect(),
+                    snippet: t,
+                    url: first.to_string(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Wikipedia search API (free, no key): fact-oriented page hits; CJK queries
+/// hit zh.wikipedia.org. Mirrors Node wikipediaSearch().
+async fn search_backend_wikipedia(
+    query: &str,
+    max: usize,
+    proxy_url: Option<&str>,
+) -> Result<Vec<SearchResult>, String> {
+    let host = if is_chinese_query(query) {
+        "zh.wikipedia.org"
+    } else {
+        "en.wikipedia.org"
+    };
+    let client = build_search_client(std::time::Duration::from_secs(8), proxy_url)?;
+    let url = format!(
+        "https://{}/w/api.php?action=query&list=search&srsearch={}&format=json&srlimit={}",
+        host,
+        urlencoding(query),
+        max.min(10)
+    );
+    let resp = client
+        .get(&url)
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("read: {}", e))?;
+    Ok(parse_wikipedia_results(&body, max, host))
+}
+
+fn parse_wikipedia_results(body: &serde_json::Value, max: usize, host: &str) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    if let Some(search) = body.get("query").and_then(|q| q.get("search")).and_then(|v| v.as_array()) {
+        for hit in search {
+            if out.len() >= max {
+                break;
+            }
+            let title = hit.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if title.is_empty() {
+                continue;
+            }
+            let snippet = html_decode(&strip_html_tags(hit.get("snippet").and_then(|v| v.as_str()).unwrap_or("")))
+                .trim()
+                .to_string();
+            let url = format!("https://{}/wiki/{}", host, urlencoding(&title.replace(' ', "_")));
+            out.push(SearchResult { title, snippet, url });
+        }
+    }
+    out
+}
+
+/// Mojeek (free, no key): independent, bot-friendly index serving clean HTML —
+/// a useful extra non-CJK backend. Mirrors Node parseMojeekResults().
+async fn search_backend_mojeek(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    let client = build_search_client(std::time::Duration::from_secs(8), proxy_url)?;
+    let url = format!("https://www.mojeek.com/search?q={}", urlencoding(query));
+    let resp = client
+        .get(&url)
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let html = response_text_with_charset(resp).await.map_err(|e| format!("read: {}", e))?;
+    Ok(parse_mojeek_results(&html, max))
+}
+
+fn parse_mojeek_results(html: &str, max: usize) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    let marker = "<li class=\"result";
+    let mut rest = html;
+    while out.len() < max {
+        let Some(idx) = rest.find(marker) else {
+            break;
+        };
+        let tail = &rest[idx..];
+        let next = tail[marker.len()..]
+            .find(marker)
+            .map(|i| i + marker.len())
+            .unwrap_or(tail.len());
+        let block = &tail[..next];
+        if let Some(r) = parse_mojeek_block(block) {
+            out.push(r);
+        }
+        rest = &tail[next..];
+    }
+    out
+}
+
+fn parse_mojeek_block(block: &str) -> Option<SearchResult> {
+    let anchor_re = regex::Regex::new(r#"(?is)<a[^>]*class="[^"]*(?:title|ob)[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>"#).ok()?;
+    let caps = anchor_re.captures(block)?;
+    let url = html_decode(&caps[1]).trim().to_string();
+    let title = html_decode(&strip_html_tags(&caps[2])).trim().to_string();
+    if title.is_empty() || url.is_empty() {
+        return None;
+    }
+    let snippet = regex::Regex::new(r#"(?is)<p[^>]*class="[^"]*s[^"]*"[^>]*>([\s\S]*?)</p>"#)
+        .ok()?
+        .captures(block)
+        .map(|c| html_decode(&strip_html_tags(&c[1])).trim().to_string())
+        .unwrap_or_default();
+    Some(SearchResult { title, snippet, url })
+}
+
+/// Exa neural-search backend (opt-in via EXA_API_KEY): semantic + keyword
+/// hybrid search with page contents and publish dates. Mirrors Node
+/// exaSearch().
+async fn search_backend_exa(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
+    let api_key = std::env::var("EXA_API_KEY").ok().filter(|k| !k.is_empty()).ok_or_else(|| "EXA_API_KEY not set".to_string())?;
+    let client = build_http_client(std::time::Duration::from_secs(10), proxy_url)?;
+    let resp = client
+        .post("https://api.exa.ai/search")
+        .header("x-api-key", &api_key)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "query": query,
+            "numResults": max,
+            "type": "auto",
+            "contents": { "text": { "maxCharacters": 600 } }
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("read: {}", e))?;
+    Ok(parse_exa_results(&body, max))
+}
+
+fn parse_exa_results(body: &serde_json::Value, max: usize) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    if let Some(results) = body.get("results").and_then(|v| v.as_array()) {
+        for item in results {
+            if out.len() >= max {
+                break;
+            }
+            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if title.is_empty() || url.is_empty() {
+                continue;
+            }
+            let date = item.get("publishedDate").and_then(|v| v.as_str()).unwrap_or("");
+            let suffix = if date.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", &date[..date.len().min(10)])
+            };
+            let snippet = item.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            out.push(SearchResult {
+                title: format!("{}{}", title, suffix),
+                snippet,
+                url,
+            });
+        }
+    }
+    out
 }
 
 /// SearXNG metasearch backend (intranet / self-hosted / power users): a JSON
@@ -3426,7 +3753,10 @@ fn configured_backend_names(serper_api_key: Option<&str>, api_key: Option<&str>)
     if api_key.map_or(false, |k| !k.is_empty()) {
         names.push("Tavily");
     }
-    names.extend(["Sogou", "cn.bing.com", "360", "Baidu", "DuckDuckGo", "Bing", "Brave"]);
+    if std::env::var("EXA_API_KEY").map_or(false, |k| !k.is_empty()) {
+        names.push("Exa");
+    }
+    names.extend(["DuckDuckGo Instant", "Wikipedia", "Google News RSS", "Sogou", "cn.bing.com", "360", "Baidu", "DuckDuckGo", "Bing", "Brave", "Mojeek"]);
     names.join(", ")
 }
 
@@ -3566,6 +3896,53 @@ fn parse_tavily_results(body: &serde_json::Value, max: usize) -> Vec<SearchResul
 /// slower. Only adds latency when cn.bing.com is still in flight.
 const CN_BING_GRACE_MS: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// Probe the structured free backends (DuckDuckGo Instant Answer, Wikipedia,
+/// Google News RSS) IN PARALLEL — first non-empty set wins. Each answers a
+/// different query shape (facts/definitions, encyclopedic pages, current news)
+/// at near-API quality with no quota. A failed / rate-limited backend cools
+/// down so it is not re-probed on every query. Returns (results, failures,
+/// any_empty).
+async fn probe_structured_backends(
+    query: &str,
+    max: usize,
+    proxy_url: Option<&str>,
+) -> (Vec<SearchResult>, Vec<String>, bool) {
+    use futures_util::stream::FuturesUnordered;
+    use futures_util::StreamExt;
+
+    let mut probes: Vec<(
+        String,
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<SearchResult>, String>> + Send>>,
+    )> = Vec::new();
+    if !backend_blocked("DuckDuckGo Instant") {
+        probes.push(("DuckDuckGo Instant".into(), Box::pin(search_backend_ddg_instant(query, max, proxy_url))));
+    }
+    if !backend_blocked("Wikipedia") {
+        probes.push(("Wikipedia".into(), Box::pin(search_backend_wikipedia(query, max, proxy_url))));
+    }
+    if !backend_blocked("Google News RSS") {
+        probes.push(("Google News RSS".into(), Box::pin(search_backend_google_news_rss(query, max, proxy_url))));
+    }
+
+    let mut pending: FuturesUnordered<_> = probes
+        .into_iter()
+        .map(|(label, fut)| async move { (label, fut.await) })
+        .collect();
+    let mut failed: Vec<String> = Vec::new();
+    let mut any_empty = false;
+    while let Some((label, outcome)) = pending.next().await {
+        match outcome {
+            Ok(r) if !r.is_empty() => return (r, failed, any_empty),
+            Ok(_) => any_empty = true,
+            Err(e) => {
+                backend_mark_blocked(&label, 30);
+                failed.push(format!("{}: {}", label, e));
+            }
+        }
+    }
+    (Vec::new(), failed, any_empty)
+}
+
 /// Tier-2 fast path + search backends, shared by the `web_search` command and
 /// `web_public_api`'s auto-fallback (searchOnMiss). Mirrors the Node
 /// handleWebSearch + web_search dispatch in NodeToolAdapter.ts.
@@ -3632,6 +4009,20 @@ async fn web_search_inner(
             }
         }
     }
+    // Exa neural-search backend (opt-in via EXA_API_KEY env).
+    if results.is_empty()
+        && !backend_blocked("Exa")
+        && std::env::var("EXA_API_KEY").map_or(false, |k| !k.trim().is_empty())
+    {
+        match search_backend_exa(query, max, proxy_url).await {
+            Ok(r) if !r.is_empty() => results = r,
+            Ok(_) => any_empty = true,
+            Err(e) => {
+                backend_mark_blocked("Exa", 300);
+                failed.push(format!("Exa: {}", e));
+            }
+        }
+    }
 
     // SearXNG metasearch backend (opt-in): intranet / self-hosted instances
     // aggregate dozens of upstream engines behind one JSON endpoint — the
@@ -3645,6 +4036,18 @@ async fn web_search_inner(
                 Err(e) => failed.push(format!("SearXNG: {}", e)),
             }
         }
+    }
+
+    // Structured free backends (no key): DuckDuckGo Instant Answer, Wikipedia
+    // search API, and Google News RSS, probed IN PARALLEL — first non-empty set
+    // wins. Each answers a different query shape (facts/definitions,
+    // encyclopedic pages, current news) at near-API quality with no quota.
+    if results.is_empty() {
+        let (structured, structured_failed, structured_empty) =
+            probe_structured_backends(query, max, proxy_url).await;
+        results = structured;
+        any_empty = any_empty || structured_empty;
+        failed.extend(structured_failed);
     }
 
     // Free HTML backends — probed ONLY when the API backends produced nothing
@@ -3676,15 +4079,32 @@ async fn web_search_inner(
         }
     }
 
-    // Last resort: Bing rendered through Jina Reader (r.jina.ai, free tier).
-    // Jina fetches Bing from its own infrastructure, so this works when every
-    // local engine is blocked / rate-limited (China, restrictive networks) as
-    // long as r.jina.ai is reachable. Slower + rate-limited, hence last.
+    // Last resort: engines rendered through Jina Reader (r.jina.ai, free tier)
+    // — Bing, then Google, then DuckDuckGo. Jina fetches each from its own
+    // infrastructure, so this works when every local engine is blocked /
+    // rate-limited (China, restrictive networks) as long as r.jina.ai is
+    // reachable. Each engine cools down on failure so it is not re-hit every
+    // query. Slower + rate-limited, hence last.
     if results.is_empty() {
-        match search_backend_jina_bing(query, max, proxy_url).await {
-            Ok(r) if !r.is_empty() => results = r,
-            Ok(_) => any_empty = true,
-            Err(e) => failed.push(format!("Bing via Jina: {}", e)),
+        for (label, fut) in [
+            ("Bing via Jina".to_string(), Box::pin(search_backend_jina_bing(query, max, proxy_url)) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<SearchResult>, String>> + Send>>),
+            ("Google via Jina".to_string(), Box::pin(search_backend_jina_google(query, max, proxy_url))),
+            ("DDG via Jina".to_string(), Box::pin(search_backend_jina_ddg(query, max, proxy_url))),
+        ] {
+            if !results.is_empty() {
+                break;
+            }
+            if backend_blocked(&label) {
+                continue;
+            }
+            match fut.await {
+                Ok(r) if !r.is_empty() => results = r,
+                Ok(_) => any_empty = true,
+                Err(e) => {
+                    backend_mark_blocked(&label, 60);
+                    failed.push(format!("{}: {}", label, e));
+                }
+            }
         }
     }
 
@@ -3759,6 +4179,7 @@ async fn probe_html_backends(
         probes.push(("DuckDuckGo".into(), Box::pin(search_backend_duckduckgo(query, max, proxy_url))));
         probes.push(("Bing".into(), Box::pin(search_backend_bing(query, max, proxy_url))));
         probes.push(("Brave".into(), Box::pin(search_backend_brave(query, max, proxy_url))));
+        probes.push(("Mojeek".into(), Box::pin(search_backend_mojeek(query, max, proxy_url))));
     }
 
     let mut pending: FuturesUnordered<_> = probes
@@ -4738,19 +5159,19 @@ mod web_search_tests {
     fn configured_backend_names_reflects_api_keys() {
         assert_eq!(
             configured_backend_names(None, None),
-            "Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave"
+            "DuckDuckGo Instant, Wikipedia, Google News RSS, Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave, Mojeek"
         );
         assert_eq!(
             configured_backend_names(Some("k"), None),
-            "Serper, Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave"
+            "Serper, DuckDuckGo Instant, Wikipedia, Google News RSS, Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave, Mojeek"
         );
         assert_eq!(
             configured_backend_names(Some("k"), Some("")),
-            "Serper, Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave"
+            "Serper, DuckDuckGo Instant, Wikipedia, Google News RSS, Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave, Mojeek"
         );
         assert_eq!(
             configured_backend_names(Some("k"), Some("t")),
-            "Serper, Tavily, Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave"
+            "Serper, Tavily, DuckDuckGo Instant, Wikipedia, Google News RSS, Sogou, cn.bing.com, 360, Baidu, DuckDuckGo, Bing, Brave, Mojeek"
         );
     }
 
@@ -4888,6 +5309,86 @@ Install the toolchain.
         assert_eq!(results[0].title, "Rust");
         assert_eq!(results[0].url, "https://rust-lang.org/");
         assert_eq!(results[1].snippet, "s2");
+    }
+
+    #[test]
+    fn parses_ddg_instant_results_with_abstract_and_related_topics() {
+        let body = serde_json::json!({
+            "Heading": "Rust (programming language)",
+            "AbstractText": "A systems programming language.",
+            "AbstractURL": "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            "RelatedTopics": [
+                { "Text": "Rust (band)", "FirstURL": "https://duckduckgo.com/Rust_(band)" },
+                { "Topics": [{ "Text": "Rust (fungus)", "FirstURL": "https://duckduckgo.com/Rust_(fungus)" }] }
+            ]
+        });
+        let results = parse_ddg_instant_results(&body, 10, "rust");
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].title, "Rust (programming language)");
+        assert_eq!(results[0].url, "https://en.wikipedia.org/wiki/Rust_(programming_language)");
+        assert_eq!(results[1].url, "https://duckduckgo.com/Rust_(band)");
+        assert_eq!(results[2].url, "https://duckduckgo.com/Rust_(fungus)");
+    }
+
+    #[test]
+    fn parses_wikipedia_results_and_strips_snippet_highlights() {
+        let body = serde_json::json!({
+            "query": {
+                "search": [
+                    { "title": "Rust (programming language)", "snippet": "A <span class=\"searchmatch\">systems</span> programming language." },
+                    { "title": "Rust", "snippet": "A genus of fungi." }
+                ]
+            }
+        });
+        let results = parse_wikipedia_results(&body, 10, "en.wikipedia.org");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust (programming language)");
+        assert!(!results[0].snippet.contains("<span"));
+        assert!(results[0].snippet.contains("systems"));
+        // Parens are URL-encoded like the Node mirror (encodeURIComponent).
+        assert_eq!(results[0].url, "https://en.wikipedia.org/wiki/Rust_%28programming_language%29");
+    }
+
+    #[test]
+    fn parses_mojeek_results_with_title_and_ob_anchors() {
+        let html = r#"<ul class="results-standard"><li class="result"><div class="results-top"><h2><a class="title" href="https://rust-lang.org/">Rust Programming Language</a></h2></div><p class="s">A language empowering everyone to build reliable software.</p></li>
+<li class="result"><h2><a class="ob" href="https://example.com/2">Two</a></h2><p class="s">s2</p></li></ul>"#;
+        let results = parse_mojeek_results(html, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust Programming Language");
+        assert_eq!(results[0].url, "https://rust-lang.org/");
+        assert!(results[0].snippet.contains("empowering"));
+        assert_eq!(results[1].url, "https://example.com/2");
+    }
+
+    #[test]
+    fn parses_exa_results_with_publish_date_in_title() {
+        let body = serde_json::json!({
+            "results": [
+                { "title": "Exa result one", "url": "https://exa.example/1", "text": "content one", "publishedDate": "2026-08-10T00:00:00.000Z" },
+                { "title": "Exa result two", "url": "https://exa.example/2", "text": "content two" },
+                { "title": "No url", "text": "x" }
+            ]
+        });
+        let results = parse_exa_results(&body, 10);
+        assert_eq!(results.len(), 2);
+        assert!(results[0].title.contains("Exa result one"));
+        assert!(results[0].title.contains("2026-08-10"));
+        assert_eq!(results[1].snippet, "content two");
+    }
+
+    #[test]
+    fn detects_meta_refresh_redirect_targets() {
+        assert_eq!(
+            extract_meta_refresh_url(r#"<meta http-equiv="refresh" content="0; url=https://example.com/new" />"#).as_deref(),
+            Some("https://example.com/new")
+        );
+        assert_eq!(
+            extract_meta_refresh_url(r#"<meta content="0;url=https://a.com/" http-equiv="refresh">"#).as_deref(),
+            Some("https://a.com/")
+        );
+        assert_eq!(extract_meta_refresh_url("<html><body>plain</body></html>"), None);
+        assert_eq!(extract_meta_refresh_url(r#"<meta http-equiv="refresh" content="5">"#), None);
     }
 }
 
@@ -7790,10 +8291,207 @@ async fn scrape_via_jina(url: &str, proxy_url: Option<&str>) -> Result<Option<St
     Ok((!text.trim().is_empty()).then_some(text))
 }
 
-/// Jina Reader renders pages the direct fetch cannot (blocked, JS-heavy,
-/// binary) — free tier, no key required. Used by web_scrape AND web_fetch.
+/// Wayback Machine fallback: locate the closest snapshot of `url` and fetch its
+/// captured HTML. Tries the archive.org availability API first, then the latest
+/// snapshot timegate directly. Returns None when no snapshot exists or the
+/// fetch fails — callers fall through to the next tier.
+async fn scrape_via_wayback(url: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
+    let client = build_http_client(std::time::Duration::from_secs(20), proxy_url)?;
+    // 1) archive.org availability API → closest snapshot.
+    let avail_url = format!("https://archive.org/wayback/available?url={}", urlencoding(url));
+    let resp = client
+        .get(&avail_url)
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if resp.status().is_success() {
+        if let Ok(body) = resp.json::<serde_json::Value>().await {
+            let closest = body.get("archived_snapshots").and_then(|s| s.get("closest"));
+            let status_ok = closest
+                .and_then(|c| c.get("status"))
+                .and_then(|s| s.as_str())
+                .map_or(true, |s| s == "200");
+            if let Some(snap) = closest.and_then(|c| c.get("url")).and_then(|u| u.as_str()) {
+                if status_ok {
+                    let page = client.get(snap).header("User-Agent", BROWSER_UA).send().await;
+                    if let Ok(p) = page {
+                        if p.status().is_success() {
+                            let text = p.text().await.unwrap_or_default();
+                            if !text.trim().is_empty() {
+                                return Ok(Some(text));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 2) Latest snapshot timegate (redirects to the newest capture).
+    let timegate = format!("https://web.archive.org/web/{}", urlencoding(url));
+    if let Ok(p) = client
+        .get(&timegate)
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+    {
+        if p.status().is_success() {
+            let text = p.text().await.unwrap_or_default();
+            if !text.trim().is_empty() {
+                return Ok(Some(text));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Firecrawl fallback (opt-in FIRECRAWL_API_KEY): server-side rendering + clean
+/// markdown for the hardest anti-bot / JS-heavy pages. Returns None without a
+/// key (that tier is simply skipped) or on any failure.
+async fn scrape_via_firecrawl(url: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
+    let key = std::env::var("FIRECRAWL_API_KEY").ok().filter(|k| !k.is_empty());
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let client = build_http_client(std::time::Duration::from_secs(30), proxy_url)?;
+    let resp = client
+        .post("https://api.firecrawl.dev/v1/scrape")
+        .header("Authorization", format!("Bearer {}", key))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "url": url, "formats": ["markdown"] }))
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("read: {}", e))?;
+    let ok = body.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+    let md = body
+        .get("data")
+        .and_then(|d| d.get("markdown"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if ok && !md.is_empty() {
+        Ok(Some(md))
+    } else {
+        Ok(None)
+    }
+}
+
+/// The multi-tier fallback chain for web_fetch / web_scrape, tried in order:
+/// Jina Reader (r.jina.ai) → Wayback Machine → Firecrawl (opt-in key). Returns
+/// the first tier that yields content, or None when all fail.
 async fn scrape_fallback(url: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
-    scrape_via_jina(url, proxy_url).await
+    if let Some(text) = scrape_via_jina(url, proxy_url).await? {
+        return Ok(Some(text));
+    }
+    if let Some(text) = scrape_via_wayback(url, proxy_url).await? {
+        return Ok(Some(text));
+    }
+    scrape_via_firecrawl(url, proxy_url).await
+}
+
+/// Detect a `<meta http-equiv="refresh" content="0; url=…">` redirect target
+/// (either attribute order, quoted/unquoted URL). Returns None when absent.
+fn extract_meta_refresh_url(html: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"(?is)<meta[^>]*>"#).ok()?;
+    for caps in re.captures_iter(html) {
+        let tag = &caps[0];
+        if !tag.to_lowercase().contains("http-equiv") || !tag.to_lowercase().contains("refresh") {
+            continue;
+        }
+        // The value delimiter must match the OPENING quote — a double-quoted
+        // value may contain single quotes (e.g. url='/rel/path') and vice versa.
+        let content = regex::Regex::new(r#"(?is)content\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
+            .ok()?
+            .captures(tag)
+            .and_then(|c| c.get(1).or_else(|| c.get(2)))
+            .map(|m| m.as_str().to_string());
+        let content = match content {
+            Some(c) => c,
+            None => continue,
+        };
+        let um = regex::Regex::new(r#"(?is)(?:^|;)\s*url\s*=\s*(.+)"#)
+            .ok()?
+            .captures(&content)?;
+        let target = um.get(1)?.as_str().trim().to_string();
+        let trimmed = target
+            .strip_prefix('\'')
+            .and_then(|t| t.strip_suffix('\''))
+            .or_else(|| target.strip_prefix('"').and_then(|t| t.strip_suffix('"')))
+            .unwrap_or(&target);
+        if !trimmed.is_empty() {
+            return Some(decode_basic_entities(trimmed));
+        }
+    }
+    None
+}
+
+/// Resolve a possibly-relative meta-refresh target against the page URL.
+fn resolve_redirect_target(base: &str, target: &str) -> String {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return target.to_string();
+    }
+    if target.starts_with('/') {
+        if let Some((scheme, rest)) = base.split_once("://") {
+            if let Some(host) = rest.split('/').next() {
+                return format!("{}://{}{}", scheme, host, target);
+            }
+        }
+    }
+    target.to_string()
+}
+
+/// Direct fetch with browser-like headers, one transient-error retry, and
+/// meta-refresh redirect following (up to 3 hops). Returns the final page as
+/// (body, content_type, ok) where `ok` is whether the last response was 2xx;
+/// non-2xx bodies are returned as-is so callers can fall through to the
+/// rendering tiers.
+async fn fetch_page_with_follow(
+    url: &str,
+    proxy_url: Option<&str>,
+) -> Result<(String, String, bool), String> {
+    let client = build_http_client(std::time::Duration::from_secs(30), proxy_url)?;
+    let mut current = url.to_string();
+    let mut hops = 0u8;
+    let mut retried = false;
+    loop {
+        let resp = client
+            .get(&current)
+            .header("User-Agent", BROWSER_UA)
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .send()
+            .await
+            .map_err(|e| format!("request: {}", e))?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = response_text_with_charset(resp).await.map_err(|e| format!("read: {}", e))?;
+        // Retry transient 429/5xx once.
+        if (status.as_u16() == 429 || status.as_u16() >= 500) && !retried {
+            retried = true;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        }
+        if status.is_success() {
+            if let Some(target) = extract_meta_refresh_url(&body) {
+                let next = resolve_redirect_target(&current, &target);
+                if next != current && hops < 3 {
+                    current = next;
+                    hops += 1;
+                    continue;
+                }
+            }
+        }
+        return Ok((body, content_type, status.is_success()));
+    }
 }
 
 #[tauri::command]
@@ -7817,36 +8515,23 @@ async fn web_scrape(
         return Ok(hit);
     }
 
-    let client = build_http_client(std::time::Duration::from_secs(30), proxy_url.as_deref())?;
-    let resp = client
-        .get(&url)
-        .header("User-Agent", BROWSER_UA)
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
-        .await
-        .map_err(|e| format!("request: {}", e))?;
+    let (body, content_type, ok) = fetch_page_with_follow(&url, proxy_url.as_deref()).await?;
 
-    if !resp.status().is_success() {
-        // Blocked / anti-bot page: Jina Reader fallback.
+    if !ok {
+        // Blocked / anti-bot / removed page: the rendering tiers.
         if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
             let page = truncate_text(&fallback, max);
             web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
             return Ok(page);
         }
         return Err(format!(
-            "Fetch failed: HTTP {} — the page may block non-browser clients. Do NOT retry web_scrape on this URL; use web_search to find a mirror or a different page.",
-            resp.status()
+            "No readable content could be obtained from {} on any tier (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_scrape on this URL; use web_search to find a mirror or a different page.",
+            url
         ));
     }
 
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
     if !is_textual_content_type(&content_type) {
-        // Binary payloads (PDFs, images) can still be read via Jina Reader.
+        // Binary payloads (PDFs, images) still read via the rendering tiers.
         if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
             let page = truncate_text(&fallback, max);
             web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
@@ -7858,7 +8543,6 @@ async fn web_scrape(
         ));
     }
 
-    let body = response_text_with_charset(resp).await?;
     let text = if is_feed_body(&body) {
         format_feed_text(&body)
     } else if content_type.to_lowercase().contains("json")
@@ -7878,7 +8562,7 @@ async fn web_scrape(
             return Ok(page);
         }
         return Err(format!(
-            "No readable text could be extracted from {} — the page is likely JavaScript-rendered or blank. Do NOT retry web_scrape on this URL; use web_search to find the information elsewhere.",
+            "No readable text could be extracted from {} on any tier (direct / Jina Reader / Wayback / Firecrawl) — the page is likely JavaScript-rendered or blank. Do NOT retry web_scrape on this URL; use web_search to find the information elsewhere.",
             url
         ));
     }
@@ -8179,32 +8863,19 @@ async fn web_fetch(
         return Ok(hit);
     }
 
-    let client = build_http_client(std::time::Duration::from_secs(30), proxy_url.as_deref())?;
+    let (html, content_type, ok) = fetch_page_with_follow(&url, proxy_url.as_deref()).await?;
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", BROWSER_UA)
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
-        .await
-        .map_err(|e| format!("request: {}", e))?;
-
-    if !resp.status().is_success() {
-        // Blocked / anti-bot page: Jina Reader fallback.
+    if !ok {
+        // Blocked / anti-bot / removed page: the rendering tiers.
         if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
             let page = truncate_text(&fallback, max);
             web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
             return Ok(page);
         }
-        return Err(format!("Fetch failed: HTTP {}", resp.status()));
+        return Err(format!(
+            "Fetch failed on all tiers (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_fetch on this URL; use web_search to find a mirror or a different source."
+        ));
     }
-
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
 
     // Accept any text-ish media type so the model doesn't hit the same
     // "unsupported content type" wall repeatedly on JSON/XML/JS/CSV pages or
@@ -8214,7 +8885,7 @@ async fn web_fetch(
     if !is_textual_content_type(&content_type) {
         // Empty content-type never reaches this branch (helper returns true),
         // so content_type is always a non-empty binary type here. Binary
-        // payloads (PDFs, images) can still be read via Jina Reader.
+        // payloads (PDFs, images) can still be read via the rendering tiers.
         if let Some(fallback) = scrape_fallback(&url, proxy_url.as_deref()).await? {
             let page = truncate_text(&fallback, max);
             web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
@@ -8226,7 +8897,6 @@ async fn web_fetch(
         ));
     }
 
-    let html = response_text_with_charset(resp).await?;
     let text = strip_html_full(&html);
 
     let safe_end = text

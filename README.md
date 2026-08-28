@@ -356,20 +356,23 @@ The GUI Settings → LLM page supports multiple models per provider. The compact
 
 ### Web search & scraping keys (CLI, all optional)
 
-Without any key, the CLI already searches via free HTML backends — Sogou / cn.bing.com / 360 / Baidu for Chinese queries, Bing / Brave for English, plus a Bing-via-Jina fallback (r.jina.ai, no key needed) — and answers structured lookups (weather, air quality, geocode, news, wiki, IP, FX, stock, GitHub, World Bank economic indicators, flight status) via no-key public APIs. Requests share a cookie session (fewer captchas), complex queries are normalized and retried automatically, and an intranet SearXNG instance can be plugged in for networks where public engines are unreachable. Optional keys raise quality and reliability — the first configured backend that answers wins, and failed/rate-limited backends enter a short cooldown instead of being retried:
+Without any key, the CLI already searches via free backends — DuckDuckGo Instant Answer / Wikipedia / Google News RSS structured lookups, Sogou / cn.bing.com / 360 / Baidu for Chinese queries, Bing / Brave / Mojeek for English, plus a last-resort Bing→Google→DuckDuckGo-via-Jina chain (r.jina.ai, no key needed) — and answers structured lookups (weather, air quality, geocode, news, wiki, IP, FX, stock, GitHub, World Bank economic indicators, flight status) via no-key public APIs. Requests share a cookie session (fewer captchas), complex queries are normalized and retried automatically, and an intranet SearXNG instance can be plugged in for networks where public engines are unreachable. Optional keys raise quality and reliability — the first configured backend that answers wins, and failed/rate-limited backends enter a short cooldown instead of being retried:
 
 | Env var | Purpose | Free tier | Get key |
 |---|---|---|---|
 | `SERPER_API_KEY` | Google SERP backend (best CN+EN index) | 2,500 queries (one-time) | [serper.dev](https://serper.dev) |
 | `TAVILY_API_KEY` | Tavily search backend | 1,000 searches/month | [tavily.com](https://tavily.com) |
 | `EXA_API_KEY` | Exa neural search backend | $20 on signup + $10/month recurring | [exa.ai](https://exa.ai) |
-| `PURE_JINA_API_KEY` | `web_scrape` fallback (r.jina.ai) | works without a key; key raises limits | [jina.ai](https://jina.ai) |
+| `PURE_JINA_API_KEY` | `web_scrape`/`web_fetch` fallback (r.jina.ai) | works without a key; key raises limits | [jina.ai](https://jina.ai) |
+| `FIRECRAWL_API_KEY` | `web_scrape`/`web_fetch` fallback for the hardest anti-bot / JS-heavy pages | limited free tier | [firecrawl.dev](https://firecrawl.dev) |
 | `SEARXNG_URL` | Intranet/self-hosted SearXNG instance (JSON format), tried before the public backends | — | [docs.searxng.org](https://docs.searxng.org) |
 | `PURE_LOCATION` | Default city for weather without one | — | — |
 
 The GUI Settings → Tools → Web Tools page shows the same Serper / Tavily / SearXNG fields with one-click signup links; the CLI-only keys are set as environment variables.
 
 Results are cached so repeated queries don't burn free-tier quota: `web_search` (15 min), `web_public_api` (per intent — weather/news/stock are minutes-fresh, geocode/wiki are weeks-fresh), and `web_scrape`/`web_fetch` (1 hour) all read and write `~/.pure/cache/web-cache.json`, shared between CLI and GUI with the same key scheme. The file is bounded (200 entries, oldest-first eviction, 30 KB per value) and tolerates corruption. `PURE_WEB_CACHE=off` disables the cache; `PURE_CACHE_DIR` overrides its directory.
+
+`web_fetch` and `web_scrape` fetch known URLs through a multi-tier fallback chain so a page is obtained even when the direct fetch is blocked, removed, or requires rendering: direct fetch (browser headers, transient-error retry, meta-refresh redirect follow, direct text extraction for text-based PDFs on the CLI) → Jina Reader → Wayback Machine (closest archived snapshot) → Firecrawl (opt-in key). `download_file` carries a same-origin Referer + browser UA, prefers the server's Content-Disposition file name, and falls back across the native multi-threaded downloader → curl → aria2c → wget → plain fetch.
 
 #### Capability-gap auto-install (vision, OCR, PDF, audio, …)
 
