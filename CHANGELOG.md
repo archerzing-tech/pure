@@ -3,6 +3,14 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.0.0-beta
+
+**多 Agent 可视化与中断可解释性**
+
+- 多 Agent：子 agent 被委派时，对话流内显示实时活动卡片——当前工作的 agent 名称、角色、状态（思考中/执行中/观察中/验证中/收尾中）、调用的工具与最终结果（完成/失败），让多 Agent 协作过程可见而非黑盒
+- 中断可解释性：当 `FailurePolicy` 因「连续多次尝试均失败」而停止时，UI 显示真实失败原因（重复的调用、所在工具、具体错误信息），不再只显示笼统的「连续多次尝试均失败，已停止」
+- 稳定性：多 Agent 进度回调与核心生成任务解耦——UI 渲染异常被吞掉，绝不影响代码 / 图片 / 规划的生成与回传
+
 ## v1.9.18
 
 **中断与超时清理的正确性修复**

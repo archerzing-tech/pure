@@ -17,6 +17,36 @@ import type {
 import type { SubagentDefinition, SubagentResult } from './types';
 import { Tags } from './ToolRegistry';
 
+/**
+ * A single progress snapshot emitted by the orchestrator while a subagent runs.
+ * The host UI turns these into a live "which agent is working" view.
+ */
+export interface SubagentActivity {
+  /** Parent tool-call id that spawned this subagent (stable UI key). */
+  callId: string;
+  /** Subagent definition name, e.g. 'code_editor'. */
+  agentName: string;
+  /** Human description of the subagent's role. */
+  agentRole?: string;
+  /** Current engine state of the subagent (THINK / ACT / OBSERVE / ...). */
+  state?: string;
+  /** Last tool the subagent invoked. */
+  toolName?: string;
+  /** Outcome: true = finished successfully, false = failed / interrupted. */
+  success?: boolean;
+  error?: string;
+  output?: string;
+}
+
+/** Optional UI progress sink — lets the host surface multi-agent activity. */
+export interface SubagentProgress {
+  onStart?: (a: SubagentActivity) => void;
+  onState?: (a: SubagentActivity) => void;
+  onTool?: (a: SubagentActivity) => void;
+  onDone?: (a: SubagentActivity) => void;
+  onError?: (a: SubagentActivity) => void;
+}
+
 export interface SubagentOrchestratorConfig {
   llm: LLMAdapter;
   parentTools?: ToolAdapter;
@@ -24,6 +54,8 @@ export interface SubagentOrchestratorConfig {
   /** Optional: recompute the tool list when spawning each subagent. */
   parentToolsDefsProvider?: () => ToolDefinition[];
   defaultBudget: BudgetConfig;
+  /** Optional UI progress sink — lets the host show which subagent is working. */
+  progress?: SubagentProgress;
 }
 
 export class SubagentOrchestrator implements ToolAdapter {
@@ -69,6 +101,31 @@ export class SubagentOrchestrator implements ToolAdapter {
 
     const startTime = Date.now();
 
+    // UI progress sink: emit a live "which agent is working" trace so the host
+    // UI can show the multi-agent nature of the run instead of a black box.
+    // CRITICAL: a display/UI error MUST NOT break the agent's actual work
+    // (code/image/plan generation) — every emit is swallowed. The orchestrator's
+    // return value (the ToolResult handed back to the parent agent) is never
+    // touched by these callbacks, so message pass-through stays intact.
+    const progress = this.config.progress;
+    const activity = (): SubagentActivity => ({
+      callId: toolCall.id,
+      agentName: def.name,
+      agentRole: def.description,
+    });
+    const emit = (
+      cb: ((a: SubagentActivity) => void) | undefined,
+      extra: Partial<SubagentActivity> = {},
+    ): void => {
+      if (!cb) return;
+      try {
+        cb({ ...activity(), ...extra });
+      } catch {
+        // Host UI failed to render — ignore so the subagent keeps working.
+      }
+    };
+    emit(progress?.onStart);
+
     // Parse args — slightly-broken LLM JSON is repaired first, so a single
     // trailing comma or unquoted key no longer drops the whole prompt payload.
     const args = parseToolArguments(toolCall.function.arguments);
@@ -104,12 +161,16 @@ export class SubagentOrchestrator implements ToolAdapter {
       )) {
         if (event.type === 'TokenDelta') {
           tokensUsed++;
-        }
-        if (event.type === 'Completed') {
+        } else if (event.type === 'StateChange') {
+          emit(progress?.onState, { state: event.payload.to });
+        } else if (event.type === 'ToolResult') {
+          emit(progress?.onTool, { toolName: event.payload.toolName });
+        } else if (event.type === 'Completed') {
           finalOutput = event.payload.finalOutput;
-        }
-        if (event.type === 'Interrupted') {
+          emit(progress?.onDone, { success: true, output: finalOutput });
+        } else if (event.type === 'Interrupted') {
           if (combinedSignal.aborted) {
+            emit(progress?.onDone, { success: false, error: 'timed out or cancelled' });
             return {
               id: toolCall.id,
               toolName: def.name,
@@ -118,9 +179,10 @@ export class SubagentOrchestrator implements ToolAdapter {
               duration: Date.now() - startTime,
             };
           }
+          emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput });
           break;
-        }
-        if (event.type === 'Error') {
+        } else if (event.type === 'Error') {
+          emit(progress?.onError, { error: event.payload.message });
           return {
             id: toolCall.id,
             toolName: def.name,
@@ -148,6 +210,7 @@ export class SubagentOrchestrator implements ToolAdapter {
         duration: Date.now() - startTime,
       };
     } catch (err: any) {
+      emit(progress?.onError, { error: err?.message ?? String(err) });
       return {
         id: toolCall.id,
         toolName: def.name,
