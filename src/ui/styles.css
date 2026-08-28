@@ -1407,6 +1407,96 @@ body {
   padding: 0 2px 4px;
 }
 
+/* download_file: live progress bar + pause button inside the tool row. */
+.download-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 2px 4px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 8px;
+}
+.download-track {
+  flex: 1 1 auto;
+  height: 8px;
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.download-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #fff));
+  border-radius: 99px;
+  transition: width 0.25s ease;
+}
+.download-label {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg);
+  min-width: 120px;
+  text-align: right;
+  white-space: nowrap;
+}
+.download-pause-btn {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+.download-pause-btn:hover { border-color: var(--accent); color: var(--accent); }
+.download-pause-btn:disabled { opacity: 0.5; cursor: default; }
+.download-done .download-fill { background: var(--accent); }
+
+/* download_file: completion quick-access card. */
+.download-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 2px 2px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface, #fff));
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  border-radius: 10px;
+}
+.download-card-icon {
+  font-size: 20px;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+.download-card-meta { flex: 1 1 auto; min-width: 0; }
+.download-card-name {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.download-card-sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
+  margin-top: 2px;
+}
+.download-card-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.download-card-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+.download-card-btn:hover { border-color: var(--accent); color: var(--accent); }
+
 /* Live output lines streamed into the Output panel while a command runs
    (execute_command_stream). Monospace console text; stderr tinted so the two
    streams stay distinguishable at a glance. */
