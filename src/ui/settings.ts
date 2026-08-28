@@ -1086,7 +1086,7 @@ export class SettingsPanel {
     const baseURL = ((document.getElementById('cfg-baseurl') as HTMLInputElement | null)?.value.trim()
       || custom?.baseURL
       || def?.baseURL
-      || '').replace(/\/+$/, '');
+      || '').replace(/([^:])\/+$/, '$1');
     const apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() || '';
     if (!baseURL) {
       this.toast(t('llm.custom.needURL'));
@@ -2138,7 +2138,7 @@ export class SettingsPanel {
     if (idx < 0) return list;
     const entry = { ...list[idx] };
     const name = (document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null)?.value.trim();
-    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement | null)?.value.trim().replace(/\/+$/, '') ?? '';
+    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement | null)?.value.trim().replace(/([^:])\/+$/, '$1') ?? '';
     const model = (document.getElementById('cfg-model') as HTMLInputElement | null)?.value.trim() ?? '';
     if (name) entry.name = name;
     if (baseURL) entry.baseURL = baseURL;
@@ -2181,7 +2181,7 @@ export class SettingsPanel {
       return out;
     }
     const name = (document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null)?.value.trim() || '';
-    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement | null)?.value.trim().replace(/\/+$/, '') ?? '';
+    const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement | null)?.value.trim().replace(/([^:])\/+$/, '$1') ?? '';
     const next = { ...(prev[editing] ?? {}) };
     if (name) next.name = name; else delete next.name;
     if (baseURL) next.baseURL = baseURL; else delete next.baseURL;
@@ -2244,7 +2244,7 @@ export class SettingsPanel {
       // Normalize: strip trailing slash, then try /v1/models first (the
       // OpenAI-compatible standard); fall back to just /models for servers
       // that serve the list at a different path.
-      const normalized = baseURL.replace(/\/+$/, '');
+      const normalized = baseURL.replace(/([^:])\/+$/, '$1');
       const candidates = normalized.endsWith('/v1')
         ? [normalized + '/models', normalized.replace(/\/v1$/, '') + '/models']
         : [normalized + '/models', normalized.replace(/\/v1\/?.*$/, '') + '/v1/models'];
@@ -2756,9 +2756,18 @@ export class SettingsPanel {
     // the grid re-render while the caret is inside a model row: the panel is
     // rebuilt from config and would kill the focus mid-typing (the row inputs
     // are the source of truth until commit/blur).
-    const caretInRows = document.activeElement instanceof HTMLElement
-      && !!document.activeElement.closest('#cfg-model-list');
-    if (this.editingProvider && !caretInRows) {
+    // Skip the grid re-render while the caret is inside a field that is the
+    // source of truth during typing — model rows, and the free-text name /
+    // Base URL / image-gen-model inputs. Rebuilding those inputs mid-edit would
+    // drop focus and swallow the keystrokes the user just entered (e.g. pasting
+    // a Base URL then continuing to type would lose both focus and text).
+    const activeEl = document.activeElement as HTMLElement | null;
+    const caretInRows = !!activeEl?.closest('#cfg-model-list');
+    const caretInPanelField = !!activeEl
+      && (activeEl.id === 'cfg-baseurl'
+        || activeEl.id === 'cfg-custom-name-edit'
+        || activeEl.id === 'cfg-imagegen-model');
+    if (this.editingProvider && !caretInRows && !caretInPanelField) {
       // The rebuilt panel renders #cfg-apikey value-less by design (the raw
       // secret never persists in markup), so a debounced save firing mid-edit
       // would visually swallow what was just pasted/typed. Capture the
