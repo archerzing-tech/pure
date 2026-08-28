@@ -25,6 +25,7 @@ export const Tags = {
   FS: 'fs',
   SEARCH: 'search',
   MCP: 'mcp',
+  DOWNLOAD: 'download',
 } as const;
 
 // ── Built-in tool definitions with tags ──
@@ -58,6 +59,7 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   web_fetch: { tags: [Tags.READ], riskLevel: 'low' },
   web_public_api: { tags: [Tags.SEARCH, Tags.READ], riskLevel: 'low' },
   web_scrape: { tags: [Tags.READ], riskLevel: 'low' },
+  download_file: { tags: [Tags.DOWNLOAD, Tags.WRITE], riskLevel: 'medium' },
   glob_files: { tags: [Tags.FS, Tags.READ, Tags.SEARCH], riskLevel: 'low' },
   replace_files: { tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE], riskLevel: 'medium' },
 };

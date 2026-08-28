@@ -37,7 +37,7 @@ import {
 import { renderAttachmentCard } from './pasteChip';
 import { PlanProgressModel, shouldAdvancePlanAtTurnEnd, type PlanProgressSnapshot } from './planProgress';
 import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
-import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
+import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, setDownloadProgressListener, cancelDownload, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
 import { attachPlanPauseActions } from './planPauseActions';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
@@ -45,7 +45,8 @@ import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
 import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
 import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
 import { renderArtifactCards, type ArtifactItem } from './artifactCards';
-import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
+import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
+import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
@@ -53,6 +54,7 @@ import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, fo
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
 import { copyTextToClipboard } from '../shared/clipboard';
+import { formatBytes } from '../shared/format';
 import { showToast } from '../shared/toast';
 import { mergeTranscriptWithTurn } from '../shared/conversation';
 import { t } from '../shared/i18n';
@@ -61,6 +63,7 @@ import { buildShellContext } from '../shared/shellEnv';
 import { MCPClient } from '../harness/mcp/MCPClient';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
+import type { DownloadProgressEvent } from './TauriToolAdapter';
 import type {
   LLMAdapter,
   EngineEvent,
@@ -1027,6 +1030,95 @@ function finishAgentCard(card: AgentCardHandle, outcome: 'done' | 'failed', badg
 
 // ── ChatController ──
 
+interface DownloadBarState {
+  wrap: HTMLElement;
+  fill: HTMLElement;
+  label: HTMLElement;
+  pauseBtn: HTMLButtonElement;
+  lastDownloaded: number;
+  lastTs: number;
+}
+
+/** Pause/cancel a running download. On the Tauri build this kills the native
+ * command (SIGKILL); the partial file is kept so a resume re-run continues. On
+ * the Node build it pauses the in-process controller. */
+function pauseDownload(toolCallId: string): void {
+  try {
+    downloadHub.pause(toolCallId);
+  } catch {
+    /* node build only */
+  }
+  cancelDownload(toolCallId).catch(() => {});
+}
+
+function createDownloadBarEl(row: ToolRowHandle, toolCallId: string): DownloadBarState {
+  const wrap = document.createElement('div');
+  wrap.className = 'download-progress';
+  const track = document.createElement('div');
+  track.className = 'download-track';
+  const fill = document.createElement('div');
+  fill.className = 'download-fill';
+  track.appendChild(fill);
+  const label = document.createElement('div');
+  label.className = 'download-label';
+  label.textContent = '准备下载…';
+  const pauseBtn = document.createElement('button');
+  pauseBtn.className = 'download-pause-btn';
+  pauseBtn.type = 'button';
+  pauseBtn.textContent = '停止';
+  pauseBtn.addEventListener('click', () => {
+    pauseDownload(toolCallId);
+    pauseBtn.textContent = '已停止';
+    pauseBtn.disabled = true;
+  });
+  wrap.append(track, label, pauseBtn);
+  row.el.appendChild(wrap);
+  return { wrap, fill, label, pauseBtn, lastDownloaded: 0, lastTs: 0 };
+}
+
+/** Completion card for a finished download: quick-access to open the file, open
+ * its folder, or copy the path. */
+function createDownloadCard(path: string, size: number, via?: string): HTMLElement {
+  const card = document.createElement('div');
+  card.className = 'download-card';
+  const icon = document.createElement('span');
+  icon.className = 'download-card-icon';
+  icon.textContent = '⬇';
+  const meta = document.createElement('div');
+  meta.className = 'download-card-meta';
+  const name = document.createElement('div');
+  name.className = 'download-card-name';
+  name.textContent = path.split(/[\\/]/).pop() || path;
+  const sub = document.createElement('div');
+  sub.className = 'download-card-sub';
+  sub.textContent = `${formatBytes(size)}${via ? ` · 通过 ${via}` : ''}`;
+  meta.append(name, sub);
+  const actions = document.createElement('div');
+  actions.className = 'download-card-actions';
+  const openFile = document.createElement('button');
+  openFile.type = 'button';
+  openFile.className = 'download-card-btn';
+  openFile.textContent = '打开文件';
+  openFile.addEventListener('click', () => openPathLink(path));
+  const openFolder = document.createElement('button');
+  openFolder.type = 'button';
+  openFolder.className = 'download-card-btn';
+  openFolder.textContent = '打开所在文件夹';
+  openFolder.addEventListener('click', () => openPathLink(path.replace(/[\\/][^\\/]+$/, '')));
+  const copyPath = document.createElement('button');
+  copyPath.type = 'button';
+  copyPath.className = 'download-card-btn';
+  copyPath.textContent = '复制路径';
+  copyPath.addEventListener('click', () => {
+    copyTextToClipboard(path);
+    copyPath.textContent = '已复制';
+    window.setTimeout(() => (copyPath.textContent = '复制路径'), 1500);
+  });
+  actions.append(openFile, openFolder, copyPath);
+  card.append(icon, meta, actions);
+  return card;
+}
+
 export class ChatController {
   private streaming = false;
   private abortController: AbortController | null = null;
@@ -1839,6 +1931,44 @@ export class ChatController {
       queued.push({ kind, line });
       liveToolOutputQueue.set(toolCallId, queued);
       scheduleLiveToolOutputFlush();
+    });
+    // Live download progress: download_file streams machine-readable progress
+    // (via downloadHub on the Node build, or setDownloadProgressListener on the
+    // Tauri build). Render it as a progress bar inside the tool row.
+    const downloadBars = new Map<string, DownloadBarState>();
+    setDownloadProgressListener((toolCallId, p) => {
+      if (gen !== this.generation) return;
+      const entry = pendingRows.get(toolCallId);
+      if (!entry) return;
+      const row = entry.row;
+      let bar = downloadBars.get(toolCallId);
+      if (!bar) {
+        if (row.toolName !== 'download_file') return;
+        bar = createDownloadBarEl(row, toolCallId);
+        downloadBars.set(toolCallId, bar);
+      }
+      const now = performance.now();
+      let speed = p.speed;
+      if (speed === 0 && bar.lastTs > 0) {
+        const dt = (now - bar.lastTs) / 1000;
+        if (dt > 0) speed = (p.downloaded - bar.lastDownloaded) / dt;
+      }
+      bar.lastDownloaded = p.downloaded;
+      bar.lastTs = now;
+      const pct = p.percent >= 0 ? p.percent : 0;
+      bar.fill.style.width = `${pct}%`;
+      const sizeStr = p.total > 0 ? `${formatBytes(p.downloaded)} / ${formatBytes(p.total)}` : formatBytes(p.downloaded);
+      const speedStr = speed > 0 ? ` · ${formatBytes(speed)}/s` : '';
+      const viaStr = p.via ? ` · ${p.via}` : '';
+      if (p.state === 'done') {
+        bar.wrap.classList.add('download-done');
+        bar.pauseBtn.style.display = 'none';
+        bar.label.textContent = `完成 · ${formatBytes(p.downloaded)}`;
+      } else if (p.state === 'error') {
+        bar.label.textContent = '下载出错';
+      } else {
+        bar.label.textContent = `${pct}%${p.total > 0 ? '' : '?'}${speedStr}${viaStr} · ${sizeStr}`;
+      }
     });
     // toolCallId → outcome, replayed as status rows (StoredMessage.toolExec)
     // when the session is restored from storage.
@@ -3153,6 +3283,7 @@ export class ChatController {
             let resultItems: Array<{ title: string; snippet: string; url: string }> | undefined;
             let resultImages: GeneratedImage[] | undefined;
             let resultPreview = '';
+            let downloadMeta: { path: string; size: number; via?: string } | null = null;
             if (event.payload.result.success) {
               if (toolName === 'generate_image') {
                 // The full base64 payloads never ride in ToolResult.result
@@ -3172,6 +3303,18 @@ export class ChatController {
               } else if (toolName === 'web_fetch') {
                 resultKind = 'fetch';
                 resultPreview = resultText.slice(0, 800);
+              } else if (toolName === 'download_file') {
+                try {
+                  const parsed = JSON.parse(resultText) as { kind?: string; path?: string; size?: number; via?: string };
+                  if (parsed && parsed.path) {
+                    downloadMeta = { path: parsed.path, size: Number(parsed.size ?? 0), via: parsed.via };
+                    resultPreview = `已下载到 ${parsed.path}（${formatBytes(Number(parsed.size ?? 0))}）`;
+                  } else {
+                    resultPreview = resultText.slice(0, 800);
+                  }
+                } catch {
+                  resultPreview = resultText.slice(0, 800);
+                }
               } else if (toolName === 'execute_command') {
                 // Bash output was already streamed into the row live; keep the
                 // trace on finalize (streaming was about progress, not
@@ -3272,6 +3415,9 @@ export class ChatController {
                 resultImages,
                 resultText: resultPreview,
               });
+              if (downloadMeta && event.payload.result.success) {
+                pending.row.el.appendChild(createDownloadCard(downloadMeta.path, downloadMeta.size, downloadMeta.via));
+              }
               pendingRows.delete(event.payload.toolCallId);
               pendingByName.delete(toolName);
             } else {
@@ -3829,6 +3975,7 @@ export class ChatController {
       // listener; otherwise it keeps the whole last turn alive until the next
       // send (and, after a chat.clear(), detached bubbles stay in memory).
       setToolOutputListener(null);
+      setDownloadProgressListener(null);
       // Release the streaming state ONLY if this turn still owns the
       // controller. An unconditional setStreaming(false) here could run AFTER
       // a newer send has already installed its own turn controller + set

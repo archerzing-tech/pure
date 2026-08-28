@@ -73,6 +73,99 @@ export function setToolOutputListener(fn: ToolOutputListener | null): void {
   toolOutputListener = fn;
 }
 
+// ── Download progress side channel ──
+// download_file reuses execute_command_stream on the native shell; the download
+// wrapper prints machine-readable JSON progress lines that chat.ts renders as a
+// live progress bar. Keyed by tool call id, matching the engine's ToolResult.
+
+export interface DownloadProgressEvent {
+  downloaded: number;
+  total: number;
+  percent: number;
+  speed: number;
+  state: 'downloading' | 'paused' | 'done' | 'error';
+  filename?: string;
+  path?: string;
+  via?: string;
+}
+
+export type DownloadProgressListener = (toolCallId: string, p: DownloadProgressEvent) => void;
+
+let downloadProgressListener: DownloadProgressListener | null = null;
+
+export function setDownloadProgressListener(fn: DownloadProgressListener | null): void {
+  downloadProgressListener = fn;
+}
+
+/** Pause/cancel a running download: the Rust backend SIGKILLs the command's
+ * process group. The partial file is kept, so a re-run with resume:true
+ * continues from where it stopped (curl -C - / aria2c -c). */
+export function cancelDownload(id: string): Promise<void> {
+  const invoke = tauriInvoke ?? null;
+  if (!invoke) return Promise.resolve();
+  return invoke('kill_command', { id }).then(
+    () => undefined,
+    () => undefined,
+  );
+}
+
+// ── download_file helpers ──
+// The download runs as a native shell command via execute_command_stream. A small
+// POSIX wrapper resolves the destination ($HOME / $PWD available on the Rust side),
+// picks aria2c (parallel + resume) or curl (resume via -C -), and prints
+// machine-readable JSON progress lines on stdout that the channel forwards to the
+// UI. Total size comes from a HEAD; speed is derived by the UI from deltas.
+
+function shellQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+/** Map the tool's destination arg to a shell-expandable directory expression.
+ * User input is sanitized so it can't inject shell metacharacters. */
+function resolveDownloadOutSpec(destination: string): string {
+  if (destination && destination.startsWith('/')) {
+    const safe = destination.replace(/[^A-Za-z0-9_.\-\/]/g, '_');
+    return safe;
+  }
+  if (destination === 'workspace') return '$PWD';
+  if (destination && destination !== 'downloads') {
+    const safe = destination.replace(/[^A-Za-z0-9_.\-\/]/g, '_');
+    return `$HOME/Downloads/${safe}`;
+  }
+  return '$HOME/Downloads';
+}
+
+function buildDownloadCommand(url: string, outSpec: string, connections: number, filenameArg: string, resume: boolean): string {
+  const u = shellQuote(url);
+  const name = shellQuote(filenameArg);
+  const conns = Math.max(1, Math.min(16, connections | 0));
+  const resumeFlag = resume ? '-C - ' : '';
+  const lines: string[] = [];
+  lines.push('url=' + u);
+  lines.push('outdir="$(eval echo "${' + outSpec + '}")"');
+  lines.push('mkdir -p "$outdir"');
+  lines.push('if [ -n ' + name + ' ]; then fname=' + name + '; else fname=$(basename "$url" | sed \'s/[?].*//\'); [ -z "$fname" ] && fname=download; fi');
+  lines.push('fpath="$outdir/$fname"');
+  lines.push('total=$(curl -sI "$url" | tr -d \'\\r\' | awk \'{l=tolower($0)} l ~ /^content-length:/{c=$2} END{print c+0}\')');
+  lines.push('if command -v aria2c >/dev/null 2>&1; then DL="aria2c -x ' + conns + ' -s ' + conns + ' -k 1M -c -d \\"$outdir\\" -o \\"$fname\\" \\"$url\\""; VIA=aria2c; else DL="curl -L ' + resumeFlag + '-o \\"$fpath\\" \\"$url\\""; VIA=curl; fi');
+  lines.push('( eval "$DL" >/dev/null 2>&1 & PID=$!; while kill -0 $PID 2>/dev/null; do sz=$( (stat -f%z "$fpath" 2>/dev/null) || (stat -c%s "$fpath" 2>/dev/null) || echo 0 ); echo "{\\"type\\":\\"dl\\",\\"downloaded\\":$sz,\\"total\\":${total:-0},\\"filename\\":\\"$fname\\",\\"via\\":\\"$VIA\\"}"; sleep 0.3; done; wait $PID; code=$?; fsz=$( (stat -f%z "$fpath" 2>/dev/null) || (stat -c%s "$fpath" 2>/dev/null) || echo 0 ); echo "{\\"type\\":\\"done\\",\\"code\\":$code,\\"path\\":\\"$fpath\\",\\"filename\\":\\"$fname\\",\\"size\\":$fsz,\\"via\\":\\"$VIA\\"}" )');
+  return lines.join('; ');
+}
+
+function parseDownloadDone(stdout: string): { code: number; path?: string; size?: number; filename?: string; via?: string } | null {
+  for (const line of stdout.split('\n')) {
+    const t = line.trim();
+    if (!t.startsWith('{"type":"done"')) continue;
+    try {
+      const o = JSON.parse(t);
+      if (o && o.type === 'done') return o;
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
 // ── Generated-image side channel ──
 // generate_image's ToolResult.result carries ONLY compact metadata (the engine
 // JSON-serializes it back into the LLM's tool message, so base64 image payloads
@@ -426,6 +519,101 @@ export class TauriToolAdapter implements ToolAdapter {
             ...(exec.stderr ? [{ kind: 'stderr' as const, line: exec.stderr }] : []),
           ];
           return { id: toolCall.id, toolName: name, ...buildCommandResult(exec.exitCode, execLines), duration: Date.now() - start };
+        }
+        case 'download_file': {
+          const url = String(args.url ?? '').trim();
+          if (!/^https?:\/\//i.test(url)) {
+            return { id: toolCall.id, toolName: 'download_file', result: '请提供以 http(s):// 开头的下载链接', success: false, duration: Date.now() - start };
+          }
+          const destination = typeof args.destination === 'string' ? args.destination.trim() : '';
+          const filenameArg = typeof args.filename === 'string' ? args.filename.trim() : '';
+          const connections = Math.max(1, Math.min(16, Number(args.connections) || 4));
+          const resume = args.resume !== false;
+          const outSpec = resolveDownloadOutSpec(destination);
+          const cmd = buildDownloadCommand(url, outSpec, connections, filenameArg, resume);
+          const emit = (p: DownloadProgressEvent): void => downloadProgressListener?.(toolCall.id, p);
+
+          if (tauriChannel && !this.invokeFn) {
+            const channel = new tauriChannel<string>();
+            // Captured from the async channel closure via a holder object (a bare
+            // closure-captured `let` gets narrowed to never by control-flow analysis).
+            const doneHolder: { value: { code: number; path?: string; size?: number; filename?: string; via?: string } | null } = { value: null };
+            channel.onmessage = (raw: string) => {
+              let parsed: { type?: string; content?: unknown } | null = null;
+              try { parsed = JSON.parse(raw); } catch { parsed = null; }
+              if (!parsed || parsed.type !== 'stdout') return;
+              const line = String(parsed.content ?? '');
+              let ev: { type?: string; downloaded?: number; total?: number; filename?: string; via?: string } | null = null;
+              try { ev = JSON.parse(line); } catch { ev = null; }
+              if (!ev) return;
+              if (ev.type === 'dl') {
+                const total = Number(ev.total ?? -1);
+                emit({
+                  downloaded: Number(ev.downloaded ?? 0),
+                  total,
+                  percent: total > 0 ? Math.min(100, Math.floor((Number(ev.downloaded ?? 0) / total) * 100)) : -1,
+                  speed: 0,
+                  state: 'downloading',
+                  filename: ev.filename,
+                  via: ev.via,
+                });
+              } else if (ev.type === 'done') {
+                doneHolder.value = ev as { code: number; path?: string; size?: number; filename?: string; via?: string };
+              }
+            };
+            let cancelled = false;
+            const onAbort = () => {
+              cancelled = true;
+              if (tauriInvoke || this.invokeFn) this.call('kill_command', { id: toolCall.id }).catch(() => {});
+            };
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
+            try {
+              const code = (await this.call('execute_command_stream', {
+                id: toolCall.id,
+                workspace: ws,
+                command: cmd,
+                proxyUrl: this.proxyUrl,
+                onOutput: channel,
+              })) as number;
+              if (cancelled) {
+                return { id: toolCall.id, toolName: 'download_file', result: '下载已取消。', error: '下载已取消。', success: false, duration: Date.now() - start };
+              }
+              const done = doneHolder.value;
+              const path = done?.path;
+              const size = Number(done?.size ?? 0);
+              emit({ downloaded: size, total: size, percent: 100, speed: 0, state: 'done', path, filename: done?.filename, via: done?.via });
+              if (code === 0 && path) {
+                return {
+                  id: toolCall.id,
+                  toolName: 'download_file',
+                  result: JSON.stringify({ kind: 'download', path, size, durationMs: Date.now() - start, via: done?.via ?? 'shell' }),
+                  success: true,
+                  duration: Date.now() - start,
+                };
+              }
+              return { id: toolCall.id, toolName: 'download_file', result: `下载失败（退出码 ${code}）`, success: false, duration: Date.now() - start };
+            } finally {
+              signal?.removeEventListener('abort', onAbort);
+            }
+          }
+          // Fallback (no channel): run buffered and parse the done line from stdout.
+          const exec = (await this.call('execute_command', { workspace: ws, command: cmd, proxyUrl: this.proxyUrl })) as {
+            exitCode: number;
+            stdout: string;
+            stderr: string;
+          };
+          const doneFb = parseDownloadDone(exec.stdout ?? '');
+          if (exec.exitCode === 0 && doneFb?.path) {
+            return {
+              id: toolCall.id,
+              toolName: 'download_file',
+              result: JSON.stringify({ kind: 'download', path: doneFb.path, size: Number(doneFb.size ?? 0), durationMs: Date.now() - start, via: doneFb.via ?? 'shell' }),
+              success: true,
+              duration: Date.now() - start,
+            };
+          }
+          return { id: toolCall.id, toolName: 'download_file', result: `下载失败（退出码 ${exec.exitCode}）`, success: false, duration: Date.now() - start };
         }
         case 'git_diff': {
           const diff = await this.call('git_diff', { workspace: ws, staged: args.staged ?? false, path: args.path ?? null }) as string;
