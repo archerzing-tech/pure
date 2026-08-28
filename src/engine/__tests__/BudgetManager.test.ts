@@ -26,26 +26,34 @@ describe('BudgetManager', () => {
     expect(bm.check()).toBe('warning');
   });
 
-  it('returns exceeded when over turn limit after grace', () => {
-    const bm = new BudgetManager({ ...BASE, maxTurns: 5, graceTurns: 1 });
+  it('returns exceeded when the HARD turn cap is hit after grace', () => {
+    const bm = new BudgetManager({ ...BASE, maxTurns: 5, hardMaxTurns: 5, graceTurns: 1 });
     for (let i = 0; i < 5; i++) bm.incrementTurn();
     expect(bm.check()).toBe('warning'); // first grace turn
     bm.incrementTurn();
     expect(bm.check()).toBe('exceeded'); // grace exhausted
   });
 
-  it('returns exceeded immediately when tokens exceed absolute limit', () => {
-    const bm = new BudgetManager({ ...BASE, maxTotalTokens: 100, graceTurns: 0 });
+  it('returns exceeded immediately when the HARD token cap is hit', () => {
+    const bm = new BudgetManager({ ...BASE, maxTotalTokens: 100, hardMaxTokens: 100, graceTurns: 0 });
     bm.addTokens('x'.repeat(500)); // ~125 tokens > 100 → immediate exceed
     expect(bm.check()).toBe('exceeded');
   });
 
-  it('respects grace turns when approaching turn limit', () => {
-    const bm = new BudgetManager({ ...BASE, maxTurns: 3, graceTurns: 2, maxTotalTokens: 999_999 });
+  it('respects grace turns when approaching the HARD turn cap', () => {
+    const bm = new BudgetManager({ ...BASE, maxTurns: 3, hardMaxTurns: 3, graceTurns: 2, maxTotalTokens: 999_999 });
     for (let i = 0; i < 3; i++) bm.incrementTurn();
     expect(bm.check()).toBe('warning'); // grace 1/2
     expect(bm.check()).toBe('warning'); // grace 2/2
     expect(bm.check()).toBe('exceeded'); // grace exhausted
+  });
+
+  it('soft budget only warns and continues (elastic) when no hard cap is set', () => {
+    const bm = new BudgetManager({ ...BASE, maxTurns: 3, graceTurns: 0 });
+    for (let i = 0; i < 3; i++) bm.incrementTurn();
+    expect(bm.check()).toBe('warning'); // warn once
+    for (let i = 0; i < 20; i++) bm.incrementTurn();
+    expect(bm.check()).toBe('ok'); // never hard-stops, keeps running
   });
 
   it('token counting approximates ~4 chars per token', () => {

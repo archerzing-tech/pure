@@ -335,11 +335,14 @@ function renderLogo() {
   console.log('');
 }
 
+// Elastic by default: no hard caps are set, so the agent is never hard-stopped
+// mid-task by a step / token / time limit — it runs to completion. maxTurns is
+// a soft "warn once" threshold only; raise it so very long tasks don't even warn.
 const DEFAULT_BUDGET: BudgetConfig = {
-  maxTurns: 50,
-  maxTotalTokens: 1_000_000,
-  maxExecutionTime: 3_600_000,
-  warningThreshold: 0.8,
+  maxTurns: 1000,
+  maxTotalTokens: 4_000_000,
+  maxExecutionTime: 7_200_000,
+  warningThreshold: 0.9,
   graceTurns: 3,
 };
 

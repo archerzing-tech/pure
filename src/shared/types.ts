@@ -135,6 +135,15 @@ export interface BudgetConfig {
   maxExecutionTime: number;
   warningThreshold: number;
   graceTurns: number;
+  /**
+   * Optional HARD caps. When omitted (0 / undefined) the soft limits above only
+   * emit a warning and the run CONTINUES (elastic budget) — the agent is never
+   * hard-stopped mid-task by a step / token / time limit. Set a hard cap only
+   * where a deterministic ceiling is required (e.g. evaluations).
+   */
+  hardMaxTurns?: number;
+  hardMaxTokens?: number;
+  hardMaxTime?: number;
 }
 
 export interface RunInput {
