@@ -1019,6 +1019,55 @@ function traceToAgentCall(callId: string): void {
   window.setTimeout(() => el.classList.remove('agent-trace-flash'), 1600);
 }
 
+/**
+ * 规则分析没能给出具体计划时的起步步骤兜底。关键：按用户真实诉求生成，而不是
+ * 套用与上下文无关的“探明工作区现状，完成第一处真实改动”这类固定话术——一个
+ * “项目做完了运行不起来，你给看看”的排查请求，不该被当成从零构建来对待。
+ */
+function deriveFallbackPlan(prompt: string): Plan {
+  const summary = prompt.replace(/\s+/g, ' ').trim();
+  const display = summary.length > 64 ? `${summary.slice(0, 64)}…` : summary;
+  const p = prompt.toLowerCase();
+  const isQuestion = /[?？]/.test(prompt)
+    || /(为什么|怎么|如何|什么|是否|能否|帮我看|看看|排查|定位|运行不起来|跑不起来|报错|失败|什么意思|怎么回事|为啥|哪里|是不是|什么情况)/.test(p);
+  const isFreshBuild = /(创建|搭建|构建|新建|从零|从头|开发|做一个|生成|create|build|scaffold|from scratch)/i.test(p) && !isQuestion;
+
+  if (isQuestion) {
+    return {
+      steps: [{
+        id: '1',
+        action: `先弄清你想让我做什么：${display || '你的请求'}`,
+        description: '判断这是要我解释、要排查，还是要改文件——不要一上来就动手。需要的话先确认目标再行动。',
+        expectedOutcome: '诉求与边界清楚后再开始。',
+        todosRequired: false,
+      }],
+      reasoning: '提问 / 排查类请求：先理解诉求，不套用构建式计划。',
+    };
+  }
+  if (isFreshBuild) {
+    return {
+      steps: [{
+        id: '1',
+        action: '明确目标与可验证范围，先搭最小可运行骨架',
+        description: '确认要交付什么、怎么验证，再逐模块推进；第一步就要能跑、能验证。',
+        expectedOutcome: '得到一个可运行、可验证的最小结果后再继续。',
+        todosRequired: false,
+      }],
+      reasoning: '创建类任务：从最小可运行骨架开始，边做边验证。',
+    };
+  }
+  return {
+    steps: [{
+      id: '1',
+      action: `先确认「${display || '你的请求'}」的范围与约束`,
+      description: '看清与请求直接相关的内容，再决定怎么改、要不要改。',
+      expectedOutcome: '改动范围和关键未知点清楚。',
+      todosRequired: false,
+    }],
+    reasoning: '保守起点：先确认范围，再按实际情况推进。',
+  };
+}
+
 function createAgentCard(a: SubagentActivity): AgentCardHandle {
   const rail = getAgentRail();
   const root = document.createElement('div');
@@ -2579,18 +2628,10 @@ export class ChatController {
             ? this.addStatusBubble(t('plan.modeForced', '已按你的选择进入 {mode} 模式，正在生成执行计划…').replace('{mode}', modeLabel(analysis.mode)))
             : null;
           // 计划直接来自本地规则分析（Planner.analyzeTask）：不再做 LLM 实时预分析。
-          // 规则分析没有给出计划时（如强制计划模式遇到简单任务），用一条诚实的
-          // 最小起步步骤兜底，执行中由模型按实际情况推进，绝不假装“已经想清楚”。
-          let planForReview: Plan = analysis.plan ?? {
-            steps: [{
-              id: '1',
-              action: '探明工作区现状，完成第一处真实改动',
-              description: '本次未生成更细的任务计划：从最小的一步做起，边做边按实际情况调整。',
-              expectedOutcome: '得到可验证的中间结果后再继续推进。',
-              todosRequired: false,
-            }],
-            reasoning: '基于规则分析的保守起点。',
-          };
+          // 规则分析没有给出计划时（如强制计划模式遇到简单任务），用一条按用户真实
+          // 诉求生成的起步步骤兜底，执行中由模型按实际情况推进，绝不假装“已经想清楚”，
+          // 也绝不套用与上下文无关的“探明工作区现状”之类固定话术。
+          let planForReview: Plan = analysis.plan ?? deriveFallbackPlan(userText);
           const showPlanCard = (plan: Plan, refining = false): void => {
             if (!planProgress) planProgress = new PlanProgressModel(plan, 'active', 1, 1, needsDeliveryGate);
             else if (planProgress.getSnapshot().plan !== plan) planProgress.dispatch({ type: 'planReplaced', plan });

@@ -163,8 +163,8 @@ describe('plan pre-flight keeps its honest shape', () => {
     expect(src.indexOf('mergeIntentAssessments')).toBe(-1);
     expect(src.indexOf('实时分析未完成')).toBe(-1);
     expect(src.indexOf('已回退到通用步骤')).toBe(-1);
-    // 计划直接来自本地规则分析。
-    expect(src).toContain('let planForReview: Plan = analysis.plan ?? {');
+    // 计划直接来自本地规则分析；没有计划时用按诉求生成的兜底，而非固定模板。
+    expect(src).toContain('let planForReview: Plan = analysis.plan ?? deriveFallbackPlan(userText)');
   });
 });
 
