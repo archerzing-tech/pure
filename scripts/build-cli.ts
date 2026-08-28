@@ -8,19 +8,27 @@ import { spawnSync } from 'node:child_process';
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8')) as { version: string };
 const version = pkg.version;
 
+// PURE_CLI_TARGET lets CI cross-compile the CLI for a different arch than the
+// host (e.g. build a bun-darwin-x64 binary on an Apple Silicon runner so the
+// published macOS CLI stays x86_64-compatible). Falls back to the host arch.
+const cliTarget = process.env.PURE_CLI_TARGET?.trim();
+
+const bunArgs = [
+  'build',
+  '--compile',
+  'src/cli.ts',
+  '--outfile',
+  'pure',
+  '--external',
+  '@huggingface/transformers',
+  '--define',
+  `process.env.PURE_CLI_VERSION="${version}"`,
+];
+if (cliTarget) bunArgs.push('--target', cliTarget);
+
 const result = spawnSync(
   'bun',
-  [
-    'build',
-    '--compile',
-    'src/cli.ts',
-    '--outfile',
-    'pure',
-    '--external',
-    '@huggingface/transformers',
-    '--define',
-    `process.env.PURE_CLI_VERSION="${version}"`,
-  ],
+  bunArgs,
   { stdio: 'inherit' },
 );
 
