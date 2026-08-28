@@ -1,4 +1,5 @@
 import {
+  detectFictionIntent,
   formatArtifactPrompt,
   formatIntentPrompt,
   formatTrapPrompt,
@@ -43,32 +44,35 @@ export interface CompiledRequestWorkflow {
   userContext: UserTurnContext;
 }
 
-const RISK_ORDER: Record<IntentAssessment['riskLevel'], number> = { low: 0, medium: 1, high: 2 };
-const REVERSIBILITY_ORDER: Record<IntentAssessment['reversibility'], number> = {
-  reversible: 0,
-  'partially-reversible': 1,
-  'hard-to-reverse': 2,
-  irreversible: 3,
-};
-
-function mergeSemanticAssessment(
-  heuristic: IntentAssessment,
-  semantic: IntentAssessment,
-): IntentAssessment {
-  // 语义路由可用时，意图 / 风险 / 可逆性 / 影响 / 建议一律以语义结论为准，关键词启发式
-  // 不再“覆盖”它（即不再把语义判定为低风险的请求又用关键词拔高）。关键词只保留两件事：
-  // 1) 确定性的虚构检测标记（必须绝不丢失）；
-  // 2) 安全开关的“更谨慎”兜底——探针 / 确认在任一方要求时即开启。
+/**
+ * 语义路由可用时，构造分析结果直接以语义结论为准。这里不运行任何关键词启发式去“归类”
+ * 用户意思——关键词逻辑只在语义路由不可用时（见下方 else 分支）作为最后的兜底。
+ * 仍保留两类确定性的安全扫描（逻辑陷阱、虚构检测），它们不是意图分类，只是永不丢失
+ * 的安全网。
+ */
+function buildSemanticAnalysis(
+  planner: Planner,
+  prompt: string,
+  semantic: SemanticRouteDecision,
+  options: RequestWorkflowOptions,
+): AnalysisResult {
+  const semanticMode = options.forcedMode ?? semantic.mode ?? 'yolo';
+  const wantsPlan = semantic.complexity === 'complex'
+    || semantic.assessment.requiresConfirmation
+    || semanticMode === 'build'
+    || options.forcedMode === 'build'
+    || semantic.needsDeliveryGate === true;
   return {
-    ...semantic,
-    intent: semantic.intent,
-    riskLevel: semantic.riskLevel,
-    reversibility: semantic.reversibility,
-    impact: semantic.impact || heuristic.impact,
-    recommendation: semantic.recommendation || heuristic.recommendation,
-    requiresProbe: heuristic.requiresProbe || semantic.requiresProbe,
-    requiresConfirmation: heuristic.requiresConfirmation || semantic.requiresConfirmation,
-    skipPlausibilityReview: heuristic.skipPlausibilityReview === true,
+    complexity: semantic.complexity,
+    mode: semanticMode,
+    plan: wantsPlan ? planner.generatePlan(prompt, semanticMode) : undefined,
+    reasoning: '本轮由语义路由结合完整请求与上下文理解目标，决定是否需要计划、探针或直接回答；关键词启发式仅作为语义路由不可用时的兜底。',
+    traps: planner.detectTraps(prompt),
+    intent: {
+      ...semantic.assessment,
+      // 确定性虚构检测：必须绝不丢失，因此即便语义路由存在也由这里兜底写入。
+      skipPlausibilityReview: detectFictionIntent(prompt),
+    },
   };
 }
 
@@ -77,29 +81,16 @@ export function compileRequestWorkflow(
   options: RequestWorkflowOptions = {},
 ): CompiledRequestWorkflow {
   const planner = options.planner ?? new Planner();
-  const detected = planner.analyzeTask(prompt);
   const semantic = options.semanticRoute ?? null;
-  const assessment = semantic ? mergeSemanticAssessment(detected.intent, semantic.assessment) : detected.intent;
-  // 计划结构跟随语义路由给出的 mode（build / plan / yolo），而不是再用关键词把
-  // 用户意图重新归类为某种固定模板。只有当语义层面判定需要计划/构建时才生成计划。
-  const semanticMode = options.forcedMode ?? semantic?.mode ?? detected.mode;
-  const analysisComplexity = semantic?.complexity ?? detected.complexity;
-  const wantsPlan = analysisComplexity === 'complex'
-    || assessment.requiresConfirmation
-    || semanticMode === 'build'
-    || options.forcedMode === 'build'
-    || semantic?.needsDeliveryGate === true;
-  const analysisPlan = semantic
-    ? (wantsPlan ? planner.generatePlan(prompt, semanticMode) : undefined)
-    : detected.plan;
-  const analysis: AnalysisResult = {
-    ...detected,
-    complexity: analysisComplexity,
-    mode: semanticMode,
-    intent: assessment,
-    reasoning: semantic ? '本轮先由模型结合完整请求理解目标，再决定是否需要计划、探针或直接回答。' : detected.reasoning,
-    plan: analysisPlan,
-  };
+
+  // 语义路由可用 → 它是理解用户意图的唯一来源，不调用任何关键词分类逻辑。
+  // 语义路由不可用（null）→ 才退回关键词启发式（planner.analyzeTask），这是最后的兜底。
+  const analysis: AnalysisResult = semantic
+    ? buildSemanticAnalysis(planner, prompt, semantic, options)
+    : planner.analyzeTask(prompt);
+  // forcedMode 是外部显式覆盖，无论走语义路径还是关键词兜底都要生效。
+  if (options.forcedMode) analysis.mode = options.forcedMode;
+  const assessment = analysis.intent;
   const needsDeliveryGate = options.forcedMode === 'build'
     || analysis.mode === 'build'
     || semantic?.needsDeliveryGate === true
