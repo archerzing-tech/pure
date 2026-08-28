@@ -8,7 +8,9 @@ import { parseToolArguments } from '../shared/parseRepair';
 import type {
   BudgetConfig,
   EngineContext,
+  IStateStore,
   LLMAdapter,
+  Message,
   ToolAdapter,
   ToolCall,
   ToolDefinition,
@@ -16,6 +18,11 @@ import type {
 } from '../shared/types';
 import type { SubagentDefinition, SubagentResult } from './types';
 import { Tags } from './ToolRegistry';
+import { createDefaultVerifier, type Verifier } from './Verifier';
+
+/** Terminal outcome of a subagent, used by the UI to color the badge and by
+ * the orchestrator to distinguish a timeout/cancel from an ordinary failure. */
+export type SubagentStatus = 'running' | 'done' | 'failed' | 'timed_out';
 
 /**
  * A single progress snapshot emitted by the orchestrator while a subagent runs.
@@ -36,6 +43,20 @@ export interface SubagentActivity {
   success?: boolean;
   error?: string;
   output?: string;
+  /** High-level lifecycle status (filled by onStart/onDone/onError). */
+  status?: SubagentStatus;
+  /** Wall-clock duration of the subagent run (ms), filled on done/error. */
+  durationMs?: number;
+  /** LLM tokens consumed (chunk count), filled on done/error. */
+  tokensUsed?: number;
+  /** Truncated summary of the delegated task (args.prompt/task) for the card header. */
+  inputSnippet?: string;
+  /** Epoch ms when the subagent started. */
+  startedAt?: number;
+  /** Subagent's hard timeout budget (ms). */
+  timeoutMs?: number;
+  /** Parent tool-call id that spawned this subagent (chain-of-delegation). */
+  parentCallId?: string;
 }
 
 /** Optional UI progress sink — lets the host surface multi-agent activity. */
@@ -56,6 +77,22 @@ export interface SubagentOrchestratorConfig {
   defaultBudget: BudgetConfig;
   /** Optional UI progress sink — lets the host show which subagent is working. */
   progress?: SubagentProgress;
+  /** Optional limited budget for each subagent. When omitted, a constrained
+   * budget is derived from defaultBudget so a single subagent cannot burn the
+   * parent's entire allocation. */
+  subagentBudget?: BudgetConfig;
+  /** Optional checkpoint store: gives subagents a stable sessionId + resume so a
+   * re-delegated identical sub-task continues instead of starting fresh. */
+  stateStore?: IStateStore;
+  /** Parent session id (used to build the stable subagent sessionId). */
+  parentSessionId?: string;
+  /** Nesting depth of the caller (0 = top-level). The orchestrator refuses to
+   * spawn a subagent when depth+1 would exceed maxDepth. */
+  depth?: number;
+  maxDepth?: number;
+  /** Optional verifier for subagents (defaults to the built-in rule checks so a
+   * subagent also verifies its output instead of ending unverified). */
+  verifier?: Verifier;
 }
 
 export class SubagentOrchestrator implements ToolAdapter {
@@ -83,12 +120,64 @@ export class SubagentOrchestrator implements ToolAdapter {
     return tools;
   }
 
-  getMetadata(_toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined {
-    return { sideEffects: true, isWrite: false };
+  /** Parallel/serial classification: read-only subagents (no WRITE/SHELL/
+   * DESTRUCTIVE tag) may run concurrently in the parent's `reads` pool; agents
+   * that edit files or run commands stay serial (`sideEffects: true`) so they
+   * never race on shared filesystem state. */
+  getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined {
+    const def = this.defs.get(toolName);
+    if (!def) return { sideEffects: true, isWrite: false };
+    const tags = def.tags ?? [];
+    const mutates = tags.includes(Tags.WRITE) || tags.includes(Tags.SHELL) || tags.includes(Tags.DESTRUCTIVE);
+    return { sideEffects: mutates, isWrite: false };
+  }
+
+  /** Derive a constrained per-subagent budget from the parent's, so a single
+   * subagent cannot burn the whole allocation. Independent (not net-shared)
+   * — the parent's wall-clock deadline still brackets the subagent via the
+   * engine's runWithDeadline. */
+  private subagentBudget(): BudgetConfig {
+    const b = this.config.subagentBudget ?? this.config.defaultBudget;
+    return {
+      maxTurns: Math.min(b.maxTurns, 6),
+      maxTotalTokens: Math.min(b.maxTotalTokens, 20000),
+      maxExecutionTime: Math.min(b.maxExecutionTime, 90_000),
+      warningThreshold: b.warningThreshold ?? 0.8,
+      graceTurns: b.graceTurns ?? 1,
+    };
+  }
+
+  /** FNV-1a 64-bit over the UTF-8 bytes of a string (stable, no Date/random —
+   * reused so a re-delegated identical sub-task maps to the same sessionId).
+   * Mirrors the webCache hashKey convention. */
+  private stableHash(parts: string[]): string {
+    let h = 0xcbf29ce484222325n;
+    for (const p of parts) {
+      for (const b of new TextEncoder().encode(p)) {
+        h ^= BigInt(b);
+        h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
+      }
+    }
+    return h.toString(16);
+  }
+
+  private inputSnippet(args: Record<string, unknown>): string {
+    const raw = (typeof args.prompt === 'string' ? args.prompt
+      : typeof args.task === 'string' ? args.task
+      : typeof args.question === 'string' ? args.question
+      : typeof args.topic === 'string' ? args.topic
+      : typeof args.instructions === 'string' ? args.instructions
+      : '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
   }
 
   async execute(toolCall: ToolCall, parentSignal?: AbortSignal): Promise<ToolResult> {
     const def = this.defs.get(toolCall.function.name);
+    const startTime = Date.now();
+    const done = (durationMs: number): number => Date.now() - startTime;
+
     if (!def) {
       return {
         id: toolCall.id,
@@ -99,7 +188,18 @@ export class SubagentOrchestrator implements ToolAdapter {
       };
     }
 
-    const startTime = Date.now();
+    // Recursion budget: refuse to nest deeper than maxDepth (default 1).
+    const maxDepth = this.config.maxDepth ?? 1;
+    const depth = (this.config.depth ?? 0) + 1;
+    if (depth > maxDepth) {
+      return {
+        id: toolCall.id,
+        toolName: def.name,
+        error: `子 agent 嵌套超过层级限制 (depth ${depth} > maxDepth ${maxDepth}) — 子 agent 不再委派子 agent。`,
+        success: false,
+        duration: 0,
+      };
+    }
 
     // UI progress sink: emit a live "which agent is working" trace so the host
     // UI can show the multi-agent nature of the run instead of a black box.
@@ -108,10 +208,13 @@ export class SubagentOrchestrator implements ToolAdapter {
     // return value (the ToolResult handed back to the parent agent) is never
     // touched by these callbacks, so message pass-through stays intact.
     const progress = this.config.progress;
+    const timeoutMs = def.defaultTimeoutMs;
     const activity = (): SubagentActivity => ({
       callId: toolCall.id,
       agentName: def.name,
       agentRole: def.description,
+      timeoutMs,
+      parentCallId: toolCall.id,
     });
     const emit = (
       cb: ((a: SubagentActivity) => void) | undefined,
@@ -124,27 +227,44 @@ export class SubagentOrchestrator implements ToolAdapter {
         // Host UI failed to render — ignore so the subagent keeps working.
       }
     };
-    emit(progress?.onStart);
 
     // Parse args — slightly-broken LLM JSON is repaired first, so a single
     // trailing comma or unquoted key no longer drops the whole prompt payload.
     const args = parseToolArguments(toolCall.function.arguments);
+    emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, status: 'running' });
 
     // Build combined signal: parent abort OR timeout
-    const timeoutMs = def.defaultTimeoutMs;
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const combinedSignal = parentSignal
       ? AbortSignal.any([parentSignal, timeoutSignal])
       : timeoutSignal;
 
-    // Construct EngineContext for the subagent
+    const budget = this.subagentBudget();
+
+    // Construct EngineContext for the subagent — enrich it so the subagent also
+    // verifies (default rule-based verifier) and re-computes its tool list
+    // each THINK instead of a spawn-time snapshot.
     const ctx: EngineContext = {
       llm: this.config.llm,
       tools: this.config.parentTools,
       toolsDefs: this.config.parentToolsDefsProvider?.() ?? this.config.parentToolsDefs ?? [],
-      budget: this.config.defaultBudget,
+      toolsDefsProvider: this.config.parentToolsDefsProvider,
+      budget,
       signal: combinedSignal,
+      verifier: this.config.verifier ?? createDefaultVerifier(),
+      depth,
+      maxDepth: this.config.maxDepth ?? 1,
     };
+
+    // Stable subagent sessionId for checkpoint resume; only meaningful when a
+    // stateStore is configured (CLI). Same parent session + agent + task input
+    // → same sessionId → a re-delegated identical sub-task continues. Use
+    // `_`/`.`/`-` only — FSStore rejects sessionIds with `:` or other path
+    // characters (path-traversal guard).
+    const parentSessionId = (this.config.parentSessionId ?? 'cli').replace(/[^A-Za-z0-9._-]/g, '_');
+    const sessionId = this.config.stateStore
+      ? `sub_${parentSessionId}_${def.name}_${this.stableHash([def.name, JSON.stringify(args)])}`
+      : `subagent_${def.name}_${startTime}`;
 
     try {
       const systemPrompt = def.createSystemPrompt(args);
@@ -155,10 +275,36 @@ export class SubagentOrchestrator implements ToolAdapter {
       let finalOutput: string | undefined;
       let tokensUsed = 0;
 
-      for await (const event of this.engine.run(
-        { sessionId: `subagent_${def.name}_${Date.now()}`, systemPrompt, userPrompt, budget: this.config.defaultBudget },
-        ctx,
-      )) {
+      const persist = async (label: string, messages: Message[] | undefined, turnCount: number): Promise<void> => {
+        const store = this.config.stateStore;
+        if (!store || !messages || messages.length === 0) return;
+        try {
+          await store.saveCheckpoint(sessionId, {
+            version: 1,
+            label,
+            state: { messages, turnCount },
+            createdAt: Date.now(),
+          });
+        } catch {
+          // Persistence is best-effort — a read-only store must not break the run.
+        }
+      };
+
+      // Resume: when a checkpoint for this stable sessionId exists, continue the
+      // previous sub-run instead of starting fresh (mirrors parent Harness.run).
+      const saved = this.config.stateStore?.loadSession(sessionId)?.state;
+      const resumedMessages = saved && saved.messages.length > 0 ? saved.messages : undefined;
+      const stream = resumedMessages
+        ? this.engine.continue(
+            { sessionId, newUserPrompt: userPrompt, messages: resumedMessages, budget },
+            ctx,
+          )
+        : this.engine.run(
+            { sessionId, systemPrompt, userPrompt, budget },
+            ctx,
+          );
+
+      for await (const event of stream) {
         if (event.type === 'TokenDelta') {
           tokensUsed++;
         } else if (event.type === 'StateChange') {
@@ -167,28 +313,30 @@ export class SubagentOrchestrator implements ToolAdapter {
           emit(progress?.onTool, { toolName: event.payload.toolName });
         } else if (event.type === 'Completed') {
           finalOutput = event.payload.finalOutput;
-          emit(progress?.onDone, { success: true, output: finalOutput });
+          await persist('subagent_completed', event.payload.messages, event.payload.turnCount ?? 0);
+          emit(progress?.onDone, { success: true, output: finalOutput, status: 'done', durationMs: done(0), tokensUsed });
         } else if (event.type === 'Interrupted') {
+          await persist('subagent_interrupted', event.payload.messages, event.payload.turnCount ?? 0);
           if (combinedSignal.aborted) {
-            emit(progress?.onDone, { success: false, error: 'timed out or cancelled' });
+            emit(progress?.onDone, { success: false, error: 'timed out or cancelled', status: 'timed_out', durationMs: done(0), tokensUsed });
             return {
               id: toolCall.id,
               toolName: def.name,
               result: { aborted: true, reason: 'timeout or cancelled', finalOutput },
               success: false,
-              duration: Date.now() - startTime,
+              duration: done(0),
             };
           }
-          emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput });
+          emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput, status: 'failed', durationMs: done(0), tokensUsed });
           break;
         } else if (event.type === 'Error') {
-          emit(progress?.onError, { error: event.payload.message });
+          emit(progress?.onError, { error: event.payload.message, status: 'failed', durationMs: done(0), tokensUsed });
           return {
             id: toolCall.id,
             toolName: def.name,
             error: event.payload.message,
             success: false,
-            duration: Date.now() - startTime,
+            duration: done(0),
           };
         }
       }
@@ -198,7 +346,7 @@ export class SubagentOrchestrator implements ToolAdapter {
         agentName: def.name,
         success: true,
         output: finalOutput,
-        duration: Date.now() - startTime,
+        duration: done(0),
         tokensUsed,
       };
 
@@ -207,16 +355,16 @@ export class SubagentOrchestrator implements ToolAdapter {
         toolName: def.name,
         result: result,
         success: true,
-        duration: Date.now() - startTime,
+        duration: done(0),
       };
     } catch (err: any) {
-      emit(progress?.onError, { error: err?.message ?? String(err) });
+      emit(progress?.onError, { error: err?.message ?? String(err), status: 'failed', durationMs: done(0), tokensUsed: 0 });
       return {
         id: toolCall.id,
         toolName: def.name,
         error: err?.message ?? String(err),
         success: false,
-        duration: Date.now() - startTime,
+        duration: done(0),
       };
     }
   }
@@ -277,57 +425,6 @@ Check:
 Distinguish a vulnerability/finding from an unavailable audit tool, missing lockfile, network failure, or inconclusive result. Do not call an unavailable check a pass. Report evidence under concise headings, then end with exactly one line: AUDIT: PASS when no blocking finding remains and all required checks have evidence, otherwise AUDIT: FAIL.${filesHint}`;
     },
     defaultTimeoutMs: 120_000,
-  },
-  {
-    name: 'web_researcher',
-    description: 'Research a topic online and summarize findings. Use for documentation lookup, API references, or technical research.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        prompt: { type: 'string', description: 'The research question or topic to investigate' },
-      },
-      required: ['prompt'],
-    },
-    tags: [Tags.AGENT, Tags.READ],
-    riskLevel: 'low',
-    createSystemPrompt: (_input: Record<string, unknown>) => {
-      return `You are a web researcher. For the given topic:
-1. Identify the key concepts and terminology
-2. Find authoritative sources and documentation
-3. Summarize findings clearly and concisely
-4. Include relevant code examples or API signatures where applicable
-5. Note any version-specific considerations
-
-Be thorough but concise. Organize findings under clear headings.`;
-    },
-    defaultTimeoutMs: 180_000,
-  },
-  {
-    name: 'planner',
-    description: 'Break down a complex task into ordered steps. Use before starting multi-file or multi-step work.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        prompt: { type: 'string', description: 'The task to plan' },
-        context: { type: 'string', description: 'Additional context (files, constraints, preferences)' },
-      },
-      required: ['prompt'],
-    },
-    tags: [Tags.AGENT, Tags.PLAN, Tags.READ],
-    riskLevel: 'low',
-    createSystemPrompt: (input: Record<string, unknown>) => {
-      const ctx = typeof input.context === 'string' ? `\nAdditional context: ${input.context}` : '';
-      return `You are a task planner. Break down the given task into ordered, actionable steps.${ctx}
-
-For each step provide:
-1. What to do (concrete action)
-2. Which files to touch (if known)
-3. Expected outcome
-4. Dependencies on other steps
-
-Keep steps atomic — each step should be one clear action. Order steps logically.`;
-    },
-    defaultTimeoutMs: 60_000,
   },
 ];
 
@@ -555,7 +652,7 @@ ${description ? `命令用途：${description}` : ''}
 研究范围：${scope || '无限制'}
 
 研究方法：
-1. 使用 web_search 和 web_fetch 工具查找相关信息
+1. 使用 researcher_web、web_public_api 和 web_scrape 工具查找相关信息（researcher_web 一站式研究并带回引用来源与证据，web_public_api 适合天气/汇率/股票等结构化查询，web_scrape 适合已知 URL 的页面抓取）
 2. 识别关键概念和术语
 3. 查找权威来源和官方文档
 4. 整理发现，用清晰简洁的方式总结

@@ -114,6 +114,12 @@ export class CodingAgent {
       parentToolsDefsProvider: () => this.toolRegistry.getTools(),
       defaultBudget: config.budget,
       progress: config.subagentProgress,
+      // Subagent resume + bounded budget: propagate the parent session id and
+      // (when a stateStore exists) so a re-delegated identical sub-task can
+      // continue, and so a single subagent can't burn the whole parent budget.
+      parentSessionId: config.sessionId,
+      stateStore: config.stateStore,
+      verifier: config.verifier,
     };
     this.subagentOrchestrator = new SubagentOrchestrator(orchConfig);
 
@@ -162,17 +168,28 @@ export class CodingAgent {
 
     const promptCompiler = config.promptAssembler ?? new PromptAssembler(config.observability);
 
+    // Model-visible tools = public tools + subagent tools. Subagent tools are
+    // AGENT-tagged and filtered OUT of getTools() (the public list); without
+    // merging them in here the parent LLM can never see or call them, which
+    // makes the whole multi-agent system unreachable. Nested delegation is not
+    // exposed: subagents get their own (public-only) tool list via
+    // parentToolsDefsProvider, so a subagent cannot spawn a subagent (P0 keeps
+    // delegation single-level).
+    const modelToolsDefs = (): ToolDefinition[] => [
+      ...this.toolRegistry.getTools(),
+      ...this.toolRegistry.getSubagentTools(),
+    ];
     this.harness = new Harness({
       sessionId: config.sessionId,
       llm: config.llm,
       tools: this.toolRegistry,
-      toolsDefs: config.toolsDefs ?? this.toolRegistry.getTools(),
+      toolsDefs: config.toolsDefs ?? modelToolsDefs(),
       // Recompute the tool list on every run so tools registered after
       // construction (subagents, MCP tools discovered asynchronously) are
       // visible to the LLM. Only active when the caller did NOT pin toolsDefs
       // (e.g. `[]` in plain-chat mode without a workspace must stay zero tools).
       toolsDefsProvider: config.toolsDefs === undefined
-        ? () => this.toolRegistry.getTools()
+        ? modelToolsDefs
         : undefined,
       budget: config.budget,
       stateStore: config.stateStore,

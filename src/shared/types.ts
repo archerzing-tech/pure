@@ -143,6 +143,10 @@ export interface RunInput {
   userPrompt: string;
   images?: MessageImage[];
   budget: BudgetConfig;
+  /** Optional persistence: when set, the engine saves a checkpoint on
+   * Completed/Interrupted so a re-run of the same sub-task (stable sessionId)
+   * can continue instead of starting fresh. Used by SubagentOrchestrator. */
+  stateStore?: IStateStore;
 }
 
 export interface RunContinueInput {
@@ -186,6 +190,13 @@ export interface EngineContext {
   hooks?: HookRouter;
   failurePolicy?: FailurePolicy;
   lockManager?: LockManager;
+  /** Nesting depth of the current run: 0 = top-level parent, 1 = a subagent
+   * spawned by the parent, etc. Set by SubagentOrchestrator; used to enforce
+   * a recursion budget (see maxDepth). */
+  depth?: number;
+  /** Hard cap on nested delegation depth (default 1 = single-level). When
+   * depth would exceed maxDepth, the orchestrator refuses to spawn. */
+  maxDepth?: number;
 }
 
 export interface LockManager {

@@ -14,6 +14,7 @@ export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotEntry, WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
+import { BROWSER_UA } from '../shared/platformUa';
 
 // ── Tool definitions (single source of truth: shared/toolDefs.ts) ──
 
@@ -142,12 +143,18 @@ function buildDownloadCommand(url: string, outSpec: string, connections: number,
   const resumeFlag = resume ? '-C - ' : '';
   const lines: string[] = [];
   lines.push('url=' + u);
+  // Same-origin Referer — many CDNs / hotlink-protected hosts reject clients
+  // that don't send one, a common "download fails silently" cause.
+  lines.push('origin=$(printf "%s" "$url" | sed \'s#\\([a-z][a-z]*://[^/]*\\).*#\\1#\')');
   lines.push('outdir="$(eval echo "${' + outSpec + '}")"');
   lines.push('mkdir -p "$outdir"');
-  lines.push('if [ -n ' + name + ' ]; then fname=' + name + '; else fname=$(basename "$url" | sed \'s/[?].*//\'); [ -z "$fname" ] && fname=download; fi');
+  lines.push('UA=' + shellQuote(BROWSER_UA));
+  // File name: explicit arg → server Content-Disposition (one extra HEAD) →
+  // URL basename → 'download'.
+  lines.push('if [ -n ' + name + ' ]; then fname=' + name + '; else fname=$(curl -sI "$url" | tr -d \'\\r\' | awk -F\'filename=\' \'tolower($0) ~ /^content-disposition:/{split($2,a,";"); gsub(/[" ]/,"",a[1]); print a[1]}\'); [ -z "$fname" ] && fname=$(basename "$url" | sed \'s/[?].*//\'); [ -z "$fname" ] && fname=download; fi');
   lines.push('fpath="$outdir/$fname"');
   lines.push('total=$(curl -sI "$url" | tr -d \'\\r\' | awk \'{l=tolower($0)} l ~ /^content-length:/{c=$2} END{print c+0}\')');
-  lines.push('if command -v aria2c >/dev/null 2>&1; then DL="aria2c -x ' + conns + ' -s ' + conns + ' -k 1M -c -d \\"$outdir\\" -o \\"$fname\\" \\"$url\\""; VIA=aria2c; else DL="curl -L ' + resumeFlag + '-o \\"$fpath\\" \\"$url\\""; VIA=curl; fi');
+  lines.push('if command -v aria2c >/dev/null 2>&1; then DL="aria2c -x ' + conns + ' -s ' + conns + ' -k 1M -c --max-tries=5 --timeout=30 --retry-wait=3 --header=\\"Referer: $origin\\" --user-agent=\\"$UA\\" -d \\"$outdir\\" -o \\"$fname\\" \\"$url\\""; VIA=aria2c; else if command -v wget >/dev/null 2>&1; then DL="wget -c -q --tries=5 --timeout=30 --header=\\"Referer: $origin\\" --user-agent=\\"$UA\\" -O \\"$fpath\\" \\"$url\\""; VIA=wget; else DL="curl -L ' + resumeFlag + '--retry 3 --retry-delay 2 -H \\"Referer: $origin\\" -A \\"$UA\\" -o \\"$fpath\\" \\"$url\\""; VIA=curl; fi; fi');
   lines.push('( eval "$DL" >/dev/null 2>&1 & PID=$!; while kill -0 $PID 2>/dev/null; do sz=$( (stat -f%z "$fpath" 2>/dev/null) || (stat -c%s "$fpath" 2>/dev/null) || echo 0 ); echo "{\\"type\\":\\"dl\\",\\"downloaded\\":$sz,\\"total\\":${total:-0},\\"filename\\":\\"$fname\\",\\"via\\":\\"$VIA\\"}"; sleep 0.3; done; wait $PID; code=$?; fsz=$( (stat -f%z "$fpath" 2>/dev/null) || (stat -c%s "$fpath" 2>/dev/null) || echo 0 ); echo "{\\"type\\":\\"done\\",\\"code\\":$code,\\"path\\":\\"$fpath\\",\\"filename\\":\\"$fname\\",\\"size\\":$fsz,\\"via\\":\\"$VIA\\"}" )');
   return lines.join('; ');
 }

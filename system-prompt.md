@@ -121,9 +121,15 @@ is done.
 
 <tools>
 You have tools for reading (`read_file`), writing (`write_file`), editing (`edit_file`),
-discovering (`list_files`, `code_searcher`), researching (`researcher_web`, `researcher_docs`), running (`execute_command`), delegating
-(`spawn_subagent`), and planning (`show_plan`). Additional tools from MCP servers may be
-available depending on the workspace configuration. Tool results come back as `tool` messages.
+discovering (`list_files`, `code_searcher`), researching (`researcher_web`, `researcher_docs`), running (`execute_command`), and
+delegating to subagents. Subagent tools (typically `web_researcher`, `code_reviewer`, `planner`,
+`project_auditor`; sessions may add `task_planner`, `code_editor`, `deep_thinker`, `ui_designer`,
+`bash_executor`, `researcher`) run a fresh agent loop with its own isolated context and return a
+structured result into this conversation. Delegate ONLY when a sub-task is independently scoped
+and benefits from a separate context — research, review, audit, planning, or a focused edit; do
+NOT delegate simple lookups you can do inline, and do NOT delegate a sub-task that depends on
+decisions or context only this conversation holds (pass that context explicitly in the subagent's
+arguments). Tool results come back as `tool` messages.
 When you need more than one independent read, you may call several tools in one turn; when a
 tool would change state, do it sequentially and check the result before proceeding.
 

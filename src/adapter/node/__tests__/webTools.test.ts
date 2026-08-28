@@ -224,6 +224,69 @@ describe('CLI Tier-2/3 web tool wiring', () => {
     expect(result.error).toContain('researcher_web');
   });
 
+  it('web_fetch falls back to Wayback when direct fetch and Jina both fail', async () => {
+    mockFetchByUrl({
+      'https://example.com/removed': { body: 'Forbidden', status: 403 },
+      'https://r.jina.ai/': { body: '', status: 503 },
+      'https://archive.org/wayback/available': {
+        body: { archived_snapshots: { closest: { url: 'https://web.archive.org/web/20260828000000/https://example.com/removed', status: '200' } } },
+      },
+      'https://web.archive.org/web/': { body: '<html><body><h1>Archived copy</h1><p>captured content</p></body></html>', contentType: 'text/html' },
+    });
+    const result = await adapter.execute(call('web_fetch', { url: 'https://example.com/removed' }));
+    expect(result.success).toBe(true);
+    expect(String(result.result)).toContain('captured content');
+  });
+
+  it('web_scrape falls through to Wayback when Jina is unavailable', async () => {
+    mockFetchByUrl({
+      'https://example.com/old': { body: 'Unavailable For Legal Reasons', status: 451 },
+      'https://r.jina.ai/': { body: '', status: 503 },
+      'https://archive.org/wayback/available': {
+        body: { archived_snapshots: { closest: { url: 'https://web.archive.org/web/20260828000000/https://example.com/old', status: '200' } } },
+      },
+      'https://web.archive.org/web/': { body: '<html><body><p>archived body</p></body></html>', contentType: 'text/html' },
+    });
+    const result = await adapter.execute(call('web_scrape', { url: 'https://example.com/old' }));
+    expect(result.success).toBe(true);
+    expect(String(result.result)).toContain('archived body');
+  });
+
+  it('web_fetch follows a meta-refresh redirect to the real page', async () => {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.startsWith('https://example.com/landing')) {
+        return new Response('<html><head><meta http-equiv="refresh" content="0; url=https://example.com/real"></head><body></body></html>', { status: 200, headers: { 'Content-Type': 'text/html' } });
+      }
+      if (url.startsWith('https://example.com/real')) {
+        return new Response('<html><body><main><h1>Real content here</h1></main></body></html>', { status: 200, headers: { 'Content-Type': 'text/html' } });
+      }
+      return new Response('', { status: 404 });
+    }) as unknown as typeof fetch;
+    const result = await adapter.execute(call('web_fetch', { url: 'https://example.com/landing' }));
+    expect(result.success).toBe(true);
+    expect(String(result.result)).toContain('Real content here');
+  });
+
+  it('web_scrape extracts text directly from a fetched PDF without Jina', async () => {
+    const { deflateSync } = await import('node:zlib');
+    const content = 'BT /F1 12 Tf 72 720 Td (Direct PDF extraction works) Tj ET';
+    const deflated = deflateSync(new TextEncoder().encode(content));
+    const head = new TextEncoder().encode('%PDF-1.4\n4 0 obj\n<< /Filter /FlateDecode >>\nstream\n');
+    const tail = new TextEncoder().encode('\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF');
+    const pdfBytes = new Uint8Array([...head, ...deflated, ...tail]);
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.startsWith('https://example.com/paper.pdf')) {
+        return new Response(pdfBytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } });
+      }
+      return new Response('', { status: 404 });
+    }) as unknown as typeof fetch;
+    const result = await adapter.execute(call('web_scrape', { url: 'https://example.com/paper.pdf' }));
+    expect(result.success).toBe(true);
+    expect(String(result.result)).toContain('Direct PDF extraction works');
+  });
+
   it('skips an API backend in cooldown instead of calling it', async () => {
     const called: string[] = [];
     globalThis.fetch = (async (input: any) => {
