@@ -641,6 +641,7 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.interrupted.maxTurns': '已达到本轮最大步数上限，已停止。可把任务拆小，或开启新会话',
     'chat.interrupted.policy': '被安全 / 策略检查中止',
     'chat.interrupted.repeatedFailures': '连续多次尝试均失败，已停止。请检查任务或更换方式后再试',
+    'chat.interrupted.repeatedFailuresCause': '失败原因：{detail}',
     'chat.interrupted.aborted': '已取消（用户停止，或网络/连接中断）',
     'chat.interrupted.streamTimeout': '生成超时：模型响应过久（输出内容过大或输入文件过大）。建议把任务拆小、分段生成文件，或先压缩/摘要超大输入',
     'chat.interrupted.generic': '操作被中断，请重试或切换任务',
