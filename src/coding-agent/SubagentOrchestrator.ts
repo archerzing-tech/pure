@@ -267,3 +267,240 @@ Keep steps atomic — each step should be one clear action. Order steps logicall
     defaultTimeoutMs: 60_000,
   },
 ];
+
+// ── Extended coding agent roles (Phase 1) ──
+// These agents form the core multi-agent collaboration system for coding tasks.
+// They are designed to work together: planner → editor → reviewer → basher.
+
+export const CODING_AGENT_ROLES: SubagentDefinition[] = [
+  // === 规划器 (Task Planner) ===
+  // Breaks down complex tasks into ordered, actionable steps
+  {
+    name: 'task_planner',
+    description: '制定详细的修改计划，决定修改哪些文件及执行顺序。用于复杂的多文件修改或重构任务。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: '用户任务描述' },
+        context: { type: 'string', description: '项目上下文信息（当前代码结构、技术栈等）' },
+        constraints: { type: 'string', description: '约束条件（如代码风格、技术要求）' },
+      },
+      required: ['task'],
+    },
+    tags: [Tags.AGENT, Tags.PLAN],
+    riskLevel: 'low',
+    createSystemPrompt: (input: Record<string, unknown>) => {
+      const task = String(input.task || '');
+      const context = String(input.context || '无');
+      const constraints = String(input.constraints || '无');
+      return `你是一个专业的任务规划师。分析任务并制定详细的修改计划。
+
+任务：${task}
+上下文：${context}
+约束：${constraints}
+
+请制定包含以下信息的计划：
+1. 步骤编号和具体动作
+2. 涉及的文件列表（按依赖顺序）
+3. 每个步骤的预期结果
+4. 步骤间的依赖关系
+
+保持步骤原子化，每个步骤一个清晰动作。`;
+    },
+    defaultTimeoutMs: 60_000,
+  },
+
+  // === 编辑器 (Code Editor) ===
+  // Executes precise code modifications based on plans
+  {
+    name: 'code_editor',
+    description: '根据计划执行精确的代码修改。先读取文件，然后按指令修改。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        plan: { type: 'string', description: '执行计划（JSON格式或文字描述）' },
+        files: { type: 'string', description: '需要修改的文件列表（逗号分隔）' },
+        instructions: { type: 'string', description: '具体的修改指令' },
+      },
+      required: ['instructions'],
+    },
+    tags: [Tags.AGENT, Tags.WRITE],
+    riskLevel: 'medium',
+    createSystemPrompt: (input: Record<string, unknown>) => {
+      const plan = String(input.plan || '无特定计划');
+      const files = String(input.files || '待确定');
+      const instructions = String(input.instructions || '');
+      return `你是一个精确的代码编辑器。根据计划执行代码修改。
+
+计划：${plan}
+需要修改的文件：${files}
+修改指令：${instructions}
+
+执行时请：
+1. 先读取目标文件的当前内容
+2. 精确执行计划中的修改
+3. 保持代码风格一致
+4. 必要时添加注释说明修改原因
+
+只使用 write_file、edit_file 或 replace_files 工具修改文件。`;
+    },
+    defaultTimeoutMs: 180_000,
+  },
+
+  // === 思考器 (Deep Thinker) ===
+  // Handles complex reasoning and multi-step analysis
+  {
+    name: 'deep_thinker',
+    description: '专门处理复杂、需要深度推理的问题。用于算法分析、架构设计决策等。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: '复杂问题描述' },
+        context: { type: 'string', description: '相关上下文信息' },
+        approach: { type: 'string', description: '思考方式：分析|推理|创造|评估' },
+      },
+      required: ['question'],
+    },
+    tags: [Tags.AGENT],
+    riskLevel: 'low',
+    createSystemPrompt: (input: Record<string, unknown>) => {
+      const question = String(input.question || '');
+      const context = String(input.context || '无');
+      const approach = String(input.approach || '全面分析');
+      return `你是一个深度思考专家。处理复杂问题和需要多步推理的场景。
+
+问题：${question}
+上下文：${context}
+思考方式：${approach}
+
+请进行深度分析：
+1. 分解问题为多个子问题
+2. 分析各子问题的关系和依赖
+3. 探索多种解决路径
+4. 评估每个路径的优劣
+5. 给出推荐方案及详细理由
+
+请以结构化的方式输出你的思考过程和结论。`;
+    },
+    defaultTimeoutMs: 180_000,
+  },
+
+  // === UI设计器 (UI Designer) ===
+  // Handles interface design, layout planning, and interaction design
+  {
+    name: 'ui_designer',
+    description: '负责界面设计、布局规划和交互设计。处理UI/UX相关的需求。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        requirement: { type: 'string', description: 'UI需求描述' },
+        design_type: { type: 'string', description: '设计类型：interface|layout|interaction|both' },
+        context: { type: 'string', description: '现有设计上下文或参考' },
+      },
+      required: ['requirement'],
+    },
+    tags: [Tags.AGENT],
+    riskLevel: 'low',
+    createSystemPrompt: (input: Record<string, unknown>) => {
+      const requirement = String(input.requirement || '');
+      const designType = String(input.design_type || 'both');
+      const context = String(input.context || '新设计');
+      return `你是一个专业的UI设计师。
+
+需求：${requirement}
+设计类型：${designType}
+现有上下文：${context}
+
+请提供完整的设计方案：
+
+**1. 界面设计**
+- 视觉元素（颜色、字体、图标）
+- 整体风格和调性
+
+**2. 布局设计**
+- 页面结构
+- 层次和优先级
+- 响应式策略
+
+**3. 交互设计**
+- 用户操作流程
+- 状态和反馈机制
+- 动画和过渡效果
+
+使用清晰的格式输出，便于开发者实现。对于代码相关的内容，提供具体的代码示例。`;
+    },
+    defaultTimeoutMs: 120_000,
+  },
+
+  // === 执行器 (Bash Executor) ===
+  // Executes terminal commands with safety checks
+  {
+    name: 'bash_executor',
+    description: '执行终端命令，返回执行结果。用于运行测试、构建脚本等。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: '要执行的命令' },
+        cwd: { type: 'string', description: '工作目录（可选）' },
+        description: { type: 'string', description: '命令用途说明' },
+      },
+      required: ['command'],
+    },
+    tags: [Tags.AGENT, Tags.SHELL],
+    riskLevel: 'high',
+    createSystemPrompt: (input: Record<string, unknown>) => {
+      const description = String(input.description || '');
+      return `你是一个命令执行专家。安全地执行终端命令。
+
+${description ? `命令用途：${description}` : ''}
+
+请注意：
+1. 解释将要执行的命令的作用
+2. 使用 execute_command 工具执行
+3. 分析结果是否成功
+4. 如有错误，提供诊断信息和修复建议
+
+避免执行破坏性命令（如 rm -rf 除非明确要求）。`;
+    },
+    defaultTimeoutMs: 120_000,
+  },
+
+  // === 研究者 (Researcher) ===
+  // Researches topics and summarizes findings
+  {
+    name: 'researcher',
+    description: '研究主题并总结发现，包括查阅网络资源和文档。用于技术调研、API研究等。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        topic: { type: 'string', description: '研究主题或问题' },
+        sources: { type: 'string', description: '优先的信息来源类型：web|docs|both' },
+        scope: { type: 'string', description: '研究范围或限制' },
+      },
+      required: ['topic'],
+    },
+    tags: [Tags.AGENT, Tags.SEARCH, Tags.READ],
+    riskLevel: 'low',
+    createSystemPrompt: (input: Record<string, unknown>) => {
+      const topic = String(input.topic || '');
+      const sources = String(input.sources || 'both');
+      const scope = String(input.scope || '');
+      return `你是一个专业的研究员。
+
+研究主题：${topic}
+信息来源：${sources}
+研究范围：${scope || '无限制'}
+
+研究方法：
+1. 使用 web_search 和 web_fetch 工具查找相关信息
+2. 识别关键概念和术语
+3. 查找权威来源和官方文档
+4. 整理发现，用清晰简洁的方式总结
+5. 包含相关的代码示例或API签名
+6. 标注版本相关注意事项和最佳实践
+
+保持研究全面但简洁，使用清晰的标题组织。最终输出结构化的研究报告。`;
+    },
+    defaultTimeoutMs: 180_000,
+  },
+];

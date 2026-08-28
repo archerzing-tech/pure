@@ -161,6 +161,18 @@ export interface PermissionRequestInfo {
 
 // ── Subagent types ──
 
+export const AgentRole = {
+  PLANNER: 'planner',
+  EDITOR: 'editor',
+  REVIEWER: 'reviewer',
+  THINKER: 'thinker',
+  UI_DESIGNER: 'ui_designer',
+  BASHER: 'basher',
+  RESEARCHER: 'researcher',
+} as const;
+
+export type AgentRoleType = typeof AgentRole[keyof typeof AgentRole];
+
 export interface SubagentDefinition extends TaggedTool {
   createSystemPrompt: (input: Record<string, unknown>) => string;
   defaultTimeoutMs: number;
