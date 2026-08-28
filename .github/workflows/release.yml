@@ -83,17 +83,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── macOS Intel GUI build ──
-  # macos-latest is now Apple Silicon, so the Intel installer is built on the
-  # last Intel-hosted macOS runner (macos-13) as the SOLE macOS build — no ARM
-  # version is produced. It publishes the full macOS bundle (app + dmg + the
-  # .app.tar.gz updater artifacts), so it is the source of the darwin-x86_64
-  # entry in latest.json and macOS auto-update keeps working. Runs after the
-  # Windows job so release uploads stay ordered and the two platforms merge
-  # into one latest.json.
+  # ── macOS Intel (x86_64) GUI build ──
+  # GitHub removed the Intel-hosted `macos-13` runner, so it can no longer be
+  # used to build the Intel installer (the job would sit queued forever and the
+  # run get cancelled). Instead we build on the available Apple Silicon runner
+  # (`macos-latest`) and CROSS-COMPILE to x86_64-apple-darwin. This still
+  # produces a genuine Intel bundle (app + dmg + .app.tar.gz updater artifacts)
+  # and remains the source of the darwin-x86_64 entry in latest.json, so macOS
+  # auto-update keeps working on Intel Macs (via Rosetta for Apple Silicon).
+  # A job timeout fails fast instead of hanging ~24h if a runner is unavailable.
   macos-x64-release:
     needs: windows-release
-    runs-on: macos-13
+    runs-on: macos-latest
+    timeout-minutes: 90
     permissions:
       contents: write
     env:
@@ -107,13 +109,15 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Setup Rust
+      - name: Setup Rust (with x86_64 target for cross-compile)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
 
       - name: Install dependencies
         run: bun install
 
-      - name: Build and publish GUI (signed, Intel)
+      - name: Build and publish GUI (signed, Intel cross-compiled)
         if: env.HAS_APPLE_SIGNING == 'true'
         uses: tauri-apps/tauri-action@v0
         env:
@@ -131,8 +135,9 @@ jobs:
           releaseName: 'Pure v__VERSION__'
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+          args: --target x86_64-apple-darwin
 
-      - name: Build and publish GUI (unsigned, Intel)
+      - name: Build and publish GUI (unsigned, Intel cross-compiled)
         if: env.HAS_APPLE_SIGNING == 'false'
         uses: tauri-apps/tauri-action@v0
         env:
@@ -144,8 +149,11 @@ jobs:
           releaseName: 'Pure v__VERSION__'
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+          args: --target x86_64-apple-darwin
 
-      - name: Build CLI binary (macOS x86_64)
+      - name: Build CLI binary (macOS x86_64, cross-compiled on ARM host)
+        env:
+          PURE_CLI_TARGET: bun-darwin-x64
         run: bun run cli:build && mv pure pure_x86_64
 
       - name: Upload CLI binary (macOS x86_64)
