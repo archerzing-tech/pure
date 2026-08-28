@@ -581,7 +581,7 @@ export function loadConfig(): PureConfig | null {
       // per-provider overrides entered in the connection drawer stay.
       if ((parsed.configVersion ?? 1) < 11) {
         const overrides = { ...(cfg.providerOverrides ?? {}) };
-        const normalize = (url: string) => url.trim().replace(/\/+$/, '').toLowerCase();
+        const normalize = (url: string) => url.trim().replace(/([^:])\/+$/, '$1').toLowerCase();
         const registryURLs = new Set(PROVIDERS.map((p) => normalize(p.baseURL)));
         for (const [pid, ovr] of Object.entries(overrides)) {
           if (!ovr?.baseURL) continue;
