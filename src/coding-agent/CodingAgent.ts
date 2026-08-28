@@ -11,7 +11,7 @@ import { Planner } from './Planner';
 import { PermissionManager } from './PermissionManager';
 import { Verifier, createDefaultVerifier } from './Verifier';
 import { ToolRegistry } from './ToolRegistry';
-import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, type SubagentOrchestratorConfig } from './SubagentOrchestrator';
+import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentOrchestratorConfig } from './SubagentOrchestrator';
 import { MCPClient, type MCPClientConfig } from '../harness/mcp/MCPClient';
 import { PromptAssembler, resolvePromptBudget, type PromptBudgetConfig } from '../shared/PromptAssembler';
 import type { PromptObservability } from '../shared/promptObservability';
@@ -118,7 +118,9 @@ export class CodingAgent {
     this.toolRegistry.setSubagentExecutor(this.subagentOrchestrator);
 
     // Register subagents in all three registries
-    const subagents = config.subagents ?? BUILT_IN_SUBAGENTS;
+    // Include both original BUILT_IN_SUBAGENTS and the new CODING_AGENT_ROLES
+    const allSubagents = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES];
+    const subagents = config.subagents ?? allSubagents;
     for (const def of subagents) {
       this.subagentRegistry.register(def);
       this.subagentOrchestrator.register(def);
