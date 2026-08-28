@@ -270,11 +270,13 @@ export function shouldCancelForEscape(key: string, streaming: boolean): boolean 
   return streaming && key === 'Escape';
 }
 
+// Elastic by default: no hard caps set, so the GUI agent never hard-stops on a
+// step / token / time limit. maxTurns is a soft "warn once" threshold only.
 const DEFAULT_BUDGET: BudgetConfig = {
-  maxTurns: 50,
-  maxTotalTokens: 1_000_000,
-  maxExecutionTime: 3_600_000,
-  warningThreshold: 0.8,
+  maxTurns: 1000,
+  maxTotalTokens: 4_000_000,
+  maxExecutionTime: 7_200_000,
+  warningThreshold: 0.9,
   graceTurns: 3,
 };
 
@@ -991,10 +993,40 @@ interface AgentCardHandle {
   meta: HTMLElement;
 }
 
+/** Lazy right-side rail that hosts the live multi-agent activity cards. */
+function getAgentRail(): HTMLElement {
+  let rail = document.getElementById('agent-rail');
+  if (!rail) {
+    rail = document.createElement('div');
+    rail.id = 'agent-rail';
+    rail.className = 'agent-rail';
+    rail.setAttribute('aria-label', '多 agent 活动面板');
+    const chatView = document.getElementById('chat-view');
+    (chatView ?? document.body).appendChild(rail);
+    chatView?.classList.add('agent-rail-open');
+  }
+  rail.classList.add('open');
+  return rail;
+}
+
+/** Word-comment style trace-back: clicking a card scrolls the transcript to the
+ * exact tool row where that subagent was invoked and flashes it. */
+function traceToAgentCall(callId: string): void {
+  const el = document.querySelector(`[data-agent-callid="${CSS.escape(callId)}"]`) as HTMLElement | null;
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('agent-trace-flash');
+  window.setTimeout(() => el.classList.remove('agent-trace-flash'), 1600);
+}
+
 function createAgentCard(a: SubagentActivity): AgentCardHandle {
-  const chatEl = document.getElementById('chat')!;
+  const rail = getAgentRail();
   const root = document.createElement('div');
   root.className = 'agent-activity working';
+  root.dataset.callId = a.callId;
+  root.style.cursor = 'pointer';
+  root.title = '点击在对话中定位该子 agent 的处理位置';
+  root.addEventListener('click', () => traceToAgentCall(a.callId));
 
   const head = document.createElement('div');
   head.className = 'agent-activity-head';
@@ -1034,8 +1066,8 @@ function createAgentCard(a: SubagentActivity): AgentCardHandle {
   tools.className = 'agent-activity-tools';
 
   root.append(head, body, tools);
-  chatEl.appendChild(root);
-  scrollChatToBottomIfPinned(chatEl);
+  rail.appendChild(root);
+  rail.scrollTop = rail.scrollHeight;
   return { root, badge, tools, meta };
 }
 
@@ -1062,8 +1094,8 @@ function finishAgentCard(
     li.textContent = note;
     card.tools.appendChild(li);
   }
-  const chatEl = document.getElementById('chat')!;
-  scrollChatToBottomIfPinned(chatEl);
+  const rail = document.getElementById('agent-rail');
+  if (rail) rail.scrollTop = rail.scrollHeight;
 }
 
 // ── ChatController ──
@@ -2232,6 +2264,11 @@ export class ChatController {
         return keep.length === allSubagents.length ? undefined : keep;
       })();
 
+      // Names of every subagent the model may delegate to — used to tag a
+      // subagent's tool row so its activity card can trace back to it (Word-
+      // comment style) and so trivial requests can stay single-agent.
+      const subagentNames = new Set((subagents ?? allSubagents).map((d) => d.name));
+
       // Refresh mode + handler for this turn so a settings change (e.g.
       // toggling "自动放行命令") takes effect immediately on the next send
       // while keeping the session's approval cache alive.
@@ -3245,6 +3282,7 @@ export class ChatController {
                       const row = appendToolRow(toolName, args);
                       toolRowSinceSegment = true;
                       entry = { row, toolName, args, toolCallId };
+                      if (subagentNames.has(toolName)) row.el.dataset.agentCallId = toolCallId;
                       pendingRows.set(toolCallId, entry);
                     }
                   }
@@ -3457,6 +3495,7 @@ export class ChatController {
             liveToolOutputQueue.delete(event.payload.toolCallId);
             const pending = pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName);
             if (pending) {
+              if (pending.toolCallId && subagentNames.has(pending.toolName)) pending.row.el.dataset.agentCallId = pending.toolCallId;
               finalizeToolRow(pending.row, {
                 success: event.payload.result.success,
                 duration,

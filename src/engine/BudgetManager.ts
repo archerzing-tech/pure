@@ -13,6 +13,7 @@ export class BudgetManager {
   private toolCallCount = 0;
   private startTime: number;
   private warningIssued = false;
+  private exceededWarned = false;
   private graceTurnsUsed = 0;
   public readonly gracePeriodEnd: number;
 
@@ -41,13 +42,16 @@ export class BudgetManager {
   check(): BudgetStatus {
     const elapsed = Date.now() - this.startTime;
 
-    if (elapsed > this.config.maxExecutionTime) return 'exceeded';
-    if (this.tokensUsed > this.config.maxTotalTokens) return 'exceeded';
-
-    const turnRatio = this.turnCount / this.config.maxTurns;
-    const tokenRatio = this.tokensUsed / this.config.maxTotalTokens;
-
-    if (turnRatio >= 1 || tokenRatio >= 1) {
+    // HARD caps (opt-in). When none are set the run is elastic and never stops
+    // on its own — only a user abort or a hard cap can end it.
+    const hardTurns = this.config.hardMaxTurns ?? 0;
+    const hardTokens = this.config.hardMaxTokens ?? 0;
+    const hardTime = this.config.hardMaxTime ?? 0;
+    const hardHit =
+      (hardTurns > 0 && this.turnCount >= hardTurns) ||
+      (hardTokens > 0 && this.tokensUsed >= hardTokens) ||
+      (hardTime > 0 && elapsed >= hardTime);
+    if (hardHit) {
       if (this.graceTurnsUsed < this.config.graceTurns) {
         this.graceTurnsUsed++;
         return 'warning';
@@ -55,7 +59,21 @@ export class BudgetManager {
       return 'exceeded';
     }
 
-    if (turnRatio >= this.config.warningThreshold || tokenRatio >= this.config.warningThreshold) {
+    // SOFT limits: warn once, then continue. The agent is never hard-stopped by
+    // the soft budget, so a long but productive task runs to completion.
+    const turnRatio = this.turnCount / this.config.maxTurns;
+    const tokenRatio = this.tokensUsed / this.config.maxTotalTokens;
+    const timeRatio = elapsed / this.config.maxExecutionTime;
+
+    if (turnRatio >= 1 || tokenRatio >= 1 || timeRatio >= 1) {
+      if (!this.exceededWarned) {
+        this.exceededWarned = true;
+        return 'warning';
+      }
+      return 'ok';
+    }
+
+    if (turnRatio >= this.config.warningThreshold || tokenRatio >= this.config.warningThreshold || timeRatio >= this.config.warningThreshold) {
       if (!this.warningIssued) {
         this.warningIssued = true;
         return 'warning';

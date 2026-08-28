@@ -506,7 +506,10 @@ export class AgentLoopEngine {
         budget.incrementTurn();
         yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
 
-        if (turnCount > ctx.budget.maxTurns) {
+        // Hard step cap (opt-in). With no hardMaxTurns set the budget is elastic
+        // and the agent keeps working past the soft maxTurns instead of stopping.
+        const hardMaxTurns = ctx.budget.hardMaxTurns ?? 0;
+        if (hardMaxTurns > 0 && turnCount >= hardMaxTurns) {
           yield { type: 'Interrupted', payload: { reason: 'max_turns', lastState: 'OBSERVE', completedSteps, messages, turnCount }, timestamp: Date.now() };
           interrupted = true;
           break;
