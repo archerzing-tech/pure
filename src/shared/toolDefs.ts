@@ -230,6 +230,21 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: 'download_file',
+    description: '下载网络资源（文件 / 压缩包 / 模型权重 / 数据集 / 安装包 / 图片 / 视频等）到本机。支持大文件、多线程加速、断点续传、暂停/继续，失败自动换多种方式重试。当用户说"下载 xxx"或给出 http(s) 链接（如 http://example.com/a.zip）时使用。url 必填；destination 可为绝对路径，或 "downloads"（默认用户下载目录）/ "workspace"（当前项目目录）；filename 可指定文件名；connections 并行线程数（默认 4，服务器支持 Range 时启用分块加速）；resume 是否断点续传（默认 true）。完成后返回本机完整文件路径。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: '资源 URL（以 http:// 或 https:// 开头）' },
+        destination: { type: 'string', description: '保存目录：绝对路径，或 "downloads"（默认用户下载文件夹）/ "workspace"（当前项目目录）；留空则保存到用户下载目录' },
+        filename: { type: 'string', description: '可选文件名，默认从 URL 推断' },
+        connections: { type: 'number', description: '并行下载线程数（默认 4，仅当服务器支持 Range 时启用分块加速；设为 1 则单线程）' },
+        resume: { type: 'boolean', description: '是否支持断点续传（默认 true）' },
+      },
+      required: ['url'],
+    },
+  },
+  {
     name: 'glob_files',
     description: 'Find files matching a glob pattern. Returns sorted file paths relative to workspace.',
     input_schema: {
@@ -296,7 +311,7 @@ export const PUBLIC_TOOL_NAMES = new Set([
   'read_file', 'write_file', 'edit_file', 'find_files', 'list_files', 'execute_command',
   'create_directory', 'diff_files', 'researcher_web', 'researcher_docs',
   'code_searcher', 'glob_files', 'replace_files', 'git_diff', 'git_log',
-  'git_status', 'sys_info', 'generate_image', 'web_public_api', 'web_scrape',
+  'git_status', 'sys_info', 'generate_image', 'web_public_api', 'web_scrape', 'download_file',
 ]);
 
 /**
@@ -362,6 +377,7 @@ const TOOL_METADATA_TABLE = {
   sys_info: { sideEffects: false, isWrite: false },
   // Image generation hits a paid provider API but never touches the workspace.
   generate_image: { sideEffects: false, isWrite: false },
+  download_file: { sideEffects: true, isWrite: true },
 } satisfies Readonly<Record<(typeof BUILT_IN_TOOL_DEFS)[number]['name'], ToolSideEffectMetadata>>;
 
 export const TOOL_METADATA: Readonly<Record<string, ToolSideEffectMetadata>> = TOOL_METADATA_TABLE;

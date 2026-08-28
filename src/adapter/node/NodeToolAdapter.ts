@@ -5,8 +5,11 @@
 
 import { basename, dirname, isAbsolute, join, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { open, stat, writeFile, readFile, rename, unlink, mkdir, rm } from 'node:fs/promises';
+import { tmpdir, homedir } from 'node:os';
+import * as http from 'node:http';
+import * as https from 'node:https';
+import { spawn } from 'node:child_process';
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
@@ -14,6 +17,7 @@ import { formatCommandError, safeParseArgs } from '../../shared/format';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript } from '../../shared/backgroundCommand';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
 import { isPublicToolName } from '../../shared/toolDefs';
+import { downloadHub, type DownloadProgress, type DownloadController } from '../../shared/downloadHub';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotEntry, WorkspaceSnapshotPort } from '../../shared/workspaceSnapshot';
 import { cachedDirectPublicApi, quota } from './publicApis';
 import { pageCacheKey, PAGE_TTL_MS, searchCacheKey, SEARCH_TTL_MS, webCache } from './webCache';
@@ -178,6 +182,7 @@ export class NodeToolAdapter implements ToolAdapter {
           return await this.handleWebSearch(args, start);
         }
         case 'web_fetch': return await this.handleWebFetch(args, signal, start);
+        case 'download_file': return await this.handleDownloadFile(args, signal, start, toolCall.id);
         case 'web_public_api': return await this.handleWebPublicApi(args, start);
         case 'web_scrape': return await this.handleWebScrape(args, signal, start);
         case 'glob_files': return await this.handleGlobFiles(args, start);
@@ -1522,6 +1527,344 @@ export class NodeToolAdapter implements ToolAdapter {
       };
     } finally {
       abort.cleanup();
+    }
+  }
+
+  // ── download_file: 资源下载（多线程加速 / 断点续传 / 暂停 / 失败换方式重试）──
+  // 通过 downloadHub 上报实时进度并接收暂停/继续/取消指令；引擎只在完成时回传
+  // 一个 ToolResult，所以进度用独立通道推给 GUI。
+
+  private requestOnce(
+    urlStr: string,
+    opts: { method?: string; headers?: Record<string, string>; signal?: AbortSignal },
+  ): Promise<http.IncomingMessage> {
+    return new Promise((resolve, reject) => {
+      let u: URL;
+      try {
+        u = new URL(urlStr);
+      } catch {
+        reject(new Error(`无效 URL: ${urlStr}`));
+        return;
+      }
+      const lib = u.protocol === 'https:' ? https : http;
+      const req = lib.request(
+        u,
+        {
+          method: opts.method ?? 'GET',
+          headers: { 'User-Agent': BROWSER_UA, ...(opts.headers ?? {}) },
+          signal: opts.signal,
+        },
+        (res) => {
+          const status = res.statusCode ?? 0;
+          if (status >= 300 && status < 400 && res.headers.location) {
+            res.resume();
+            const next = new URL(res.headers.location, u).toString();
+            this.requestOnce(next, opts).then(resolve, reject);
+            return;
+          }
+          resolve(res);
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  private async getHead(url: string, signal?: AbortSignal): Promise<{ length: number; acceptRanges: boolean }> {
+    try {
+      const res = await this.requestOnce(url, { method: 'HEAD', signal });
+      if ((res.statusCode ?? 0) >= 400) {
+        res.resume();
+        const r2 = await this.requestOnce(url, { method: 'GET', headers: { Range: 'bytes=0-0' }, signal });
+        const len = Number((r2.headers['content-range']?.split('/')[1] ?? r2.headers['content-length'] ?? 0) || 0);
+        const ar = r2.headers['accept-ranges'] === 'bytes' || !!r2.headers['content-range'];
+        r2.resume();
+        return { length: len, acceptRanges: ar };
+      }
+      const len = Number(res.headers['content-length'] ?? 0) || 0;
+      const ar = res.headers['accept-ranges'] === 'bytes';
+      res.resume();
+      return { length: len, acceptRanges: ar };
+    } catch {
+      return { length: -1, acceptRanges: false };
+    }
+  }
+
+  private async getRangeBuffer(url: string, start: number, end: number, signal?: AbortSignal): Promise<Buffer> {
+    const res = await this.requestOnce(url, { method: 'GET', headers: { Range: `bytes=${start}-${end}` }, signal });
+    if ((res.statusCode ?? 200) >= 400) {
+      res.resume();
+      throw new Error(`HTTP ${res.statusCode}`);
+    }
+    const chunks: Buffer[] = [];
+    for await (const c of res as unknown as AsyncIterable<Buffer>) chunks.push(c as Buffer);
+    return Buffer.concat(chunks);
+  }
+
+  /** Single-connection streaming download with pause/resume + resume support. */
+  private async streamRange(
+    url: string,
+    outPath: string,
+    startOffset: number,
+    controller: DownloadController,
+    emit: (p: Partial<DownloadProgress>) => void,
+    total: number,
+    filename: string,
+  ): Promise<number> {
+    const fd = await open(outPath, startOffset > 0 ? 'r+' : 'w');
+    let written = startOffset;
+    let lastEmit = Date.now();
+    let lastBytes = written;
+    try {
+      while (!controller.aborted) {
+        if (controller.paused) {
+          await controller.waitWhilePaused();
+          if (controller.aborted) break;
+        }
+        const headers: Record<string, string> = {};
+        if (written > 0) headers.Range = `bytes=${written}-`;
+        let res: http.IncomingMessage;
+        try {
+          res = await this.requestOnce(url, { method: 'GET', headers, signal: controller.signal });
+        } catch (err) {
+          if (controller.paused && !controller.aborted) {
+            await controller.waitWhilePaused();
+            continue;
+          }
+          throw err;
+        }
+        if ((res.statusCode ?? 200) >= 400 && (res.statusCode ?? 200) !== 206) {
+          res.resume();
+          throw new Error(`HTTP ${res.statusCode}`);
+        }
+        let stopped = false;
+        try {
+          for await (const chunk of res as unknown as AsyncIterable<Buffer>) {
+            if (controller.paused) {
+              stopped = true;
+              (res as unknown as { destroy?: () => void }).destroy?.();
+              break;
+            }
+            await fd.write(chunk, 0, chunk.length, written);
+            written += chunk.length;
+            const now = Date.now();
+            if (now - lastEmit > 250 || (total > 0 && written >= total)) {
+              const dt = (now - lastEmit) / 1000;
+              const speed = dt > 0 ? (written - lastBytes) / dt : 0;
+              lastEmit = now;
+              lastBytes = written;
+              emit({ downloaded: written, total, percent: total > 0 ? Math.min(100, Math.floor((written / total) * 100)) : -1, speed, state: controller.paused ? 'paused' : 'downloading', filename });
+            }
+          }
+        } catch (err) {
+          res.resume();
+          if (controller.paused && !controller.aborted) {
+            await controller.waitWhilePaused();
+            continue;
+          }
+          throw err;
+        }
+        if (stopped) continue;
+        break;
+      }
+    } finally {
+      await fd.close();
+    }
+    return written;
+  }
+
+  /** Parallel chunked download (aria2-like) with per-chunk pause/resume. */
+  private async downloadChunked(
+    url: string,
+    outPath: string,
+    total: number,
+    connections: number,
+    controller: DownloadController,
+    emit: (p: Partial<DownloadProgress>) => void,
+    filename: string,
+  ): Promise<number> {
+    const chunkSize = Math.ceil(total / connections);
+    const fd = await open(outPath, 'w');
+    const done = new Array<boolean>(connections).fill(false);
+    let written = 0;
+    const runOne = async (i: number): Promise<void> => {
+      if (done[i]) return;
+      const s = i * chunkSize;
+      const e = Math.min(total - 1, s + chunkSize - 1);
+      let buf: Buffer;
+      try {
+        buf = await this.getRangeBuffer(url, s, e, controller.signal);
+      } catch (err) {
+        if (controller.paused && !controller.aborted) return;
+        throw err;
+      }
+      await fd.write(buf, 0, buf.length, s);
+      done[i] = true;
+      written += buf.length;
+      emit({ downloaded: written, total, percent: Math.min(100, Math.floor((written / total) * 100)), state: controller.paused ? 'paused' : 'downloading', filename });
+    };
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < connections; i++) workers.push(runOne(i));
+    await Promise.all(workers);
+    while (done.includes(false) && !controller.aborted) {
+      if (controller.paused) await controller.waitWhilePaused();
+      if (controller.aborted) break;
+      for (let i = 0; i < connections; i++) if (!done[i]) await runOne(i);
+    }
+    await fd.close();
+    if (controller.aborted && done.includes(false)) throw new Error('已取消');
+    return total;
+  }
+
+  private async downloadNative(
+    url: string,
+    outPath: string,
+    opts: { connections: number; resume: boolean; controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string },
+  ): Promise<{ ok: boolean; size?: number; via?: string; error?: string }> {
+    try {
+      const head = await this.getHead(url, opts.controller.signal);
+      const total = head.length ?? -1;
+      let startOffset = 0;
+      if (opts.resume) {
+        try {
+          const st = await stat(outPath);
+          startOffset = st.size;
+          if (total > 0 && startOffset >= total) return { ok: true, size: startOffset, via: 'native-resume' };
+        } catch {
+          /* no partial yet */
+        }
+      }
+      const canRange = head.acceptRanges && total > 0;
+      const chunked = canRange && total > 1024 * 1024 && opts.connections > 1 && startOffset === 0;
+      if (chunked) {
+        try {
+          const size = await this.downloadChunked(url, outPath, total, opts.connections, opts.controller, opts.emit, opts.filename);
+          return { ok: true, size, via: 'native-chunked' };
+        } catch (e: unknown) {
+          if (opts.controller.paused || opts.controller.aborted) {
+            const size = await this.streamRange(url, outPath, (await stat(outPath)).size, opts.controller, opts.emit, total, opts.filename);
+            return { ok: true, size, via: 'native-resume' };
+          }
+          return { ok: false, error: (e as Error)?.message };
+        }
+      }
+      const size = await this.streamRange(url, outPath, startOffset, opts.controller, opts.emit, total, opts.filename);
+      return { ok: true, size, via: startOffset > 0 ? 'native-resume' : 'native' };
+    } catch (e: unknown) {
+      return { ok: false, error: (e as Error)?.message };
+    }
+  }
+
+  private commandExists(cmd: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const probe = spawn(process.platform === 'win32' ? 'where' : 'which', [cmd]);
+      probe.on('error', () => resolve(false));
+      probe.on('close', (code) => resolve(code === 0));
+    });
+  }
+
+  private async downloadViaCurl(
+    url: string,
+    outPath: string,
+    opts: { resume: boolean; controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string },
+  ): Promise<{ ok: boolean; size?: number; error?: string }> {
+    const hasCurl = await this.commandExists('curl');
+    if (!hasCurl) return { ok: false, error: 'curl 不可用' };
+    return new Promise((resolve) => {
+      const args = ['-L', '--retry', '3', '--retry-delay', '1', '-C', '-', '-o', outPath, url];
+      const child = spawn('curl', args, { signal: opts.controller.signal } as { signal: AbortSignal });
+      child.on('error', (e) => resolve({ ok: false, error: e.message }));
+      child.on('close', async (code) => {
+        if (code === 0) {
+          try {
+            const st = await stat(outPath);
+            resolve({ ok: true, size: st.size });
+          } catch {
+            resolve({ ok: false, error: '无法读取下载文件' });
+          }
+        } else {
+          resolve({ ok: false, error: `curl 退出码 ${code}` });
+        }
+      });
+    });
+  }
+
+  private async downloadViaFetch(
+    url: string,
+    outPath: string,
+    controller: DownloadController,
+    emit: (p: Partial<DownloadProgress>) => void,
+  ): Promise<{ ok: boolean; size?: number; error?: string }> {
+    try {
+      const res = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': BROWSER_UA } });
+      if (!res.ok || !res.body) return { ok: false, error: `HTTP ${res.status}` };
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > 50 * 1024 * 1024) return { ok: false, error: '文件过大，fetch 兜底仅支持小文件' };
+      await writeFile(outPath, buf);
+      emit({ downloaded: buf.length, total: buf.length, percent: 100, speed: 0, state: 'done' });
+      return { ok: true, size: buf.length };
+    } catch (e: unknown) {
+      return { ok: false, error: (e as Error)?.message };
+    }
+  }
+
+  private downloadOk(outPath: string, size: number, duration: number, via: string, toolCallId: string): ToolResult {
+    const summary = { kind: 'download', path: outPath, size, durationMs: duration, via };
+    downloadHub.emitProgress(toolCallId, { downloaded: size, total: size, percent: 100, speed: 0, state: 'done', filename: basename(outPath), via });
+    return { id: toolCallId, toolName: 'download_file', result: JSON.stringify(summary), success: true, duration };
+  }
+
+  private async handleDownloadFile(
+    args: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    start: number,
+    toolCallId: string,
+  ): Promise<ToolResult> {
+    const url = String(args.url ?? '').trim();
+    if (!/^https?:\/\//i.test(url)) return this.fail(null, start, '请提供以 http(s):// 开头的下载链接');
+
+    const destination = typeof args.destination === 'string' ? args.destination.trim() : '';
+    const filenameArg = typeof args.filename === 'string' ? args.filename.trim() : '';
+    const connections = Math.max(1, Math.min(16, Number(args.connections) || 4));
+    const resume = args.resume !== false;
+
+    const home = homedir();
+    let outDir: string;
+    if (destination && isAbsolute(destination)) outDir = destination;
+    else if (destination === 'workspace') outDir = process.cwd();
+    else if (destination && destination !== 'downloads') outDir = join(home, 'Downloads', destination);
+    else outDir = join(home, 'Downloads');
+
+    let filename = filenameArg;
+    if (!filename) {
+      try {
+        filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || '');
+      } catch {
+        /* ignore */
+      }
+      filename = (filename || 'download').replace(/[^\w.\-\u4e00-\u9fa5]+/g, '_');
+    }
+    if (!filename) filename = 'download';
+    const outPath = join(outDir, filename);
+    await mkdir(outDir, { recursive: true });
+
+    const controller = downloadHub.registerController(toolCallId);
+    if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
+    const emit = (p: Partial<DownloadProgress>): void =>
+      downloadHub.emitProgress(toolCallId, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'downloading', filename, ...p } as DownloadProgress);
+
+    try {
+      const native = await this.downloadNative(url, outPath, { connections, resume, controller, emit, filename });
+      if (native.ok) return this.downloadOk(outPath, native.size ?? 0, Date.now() - start, native.via ?? 'native', toolCallId);
+      const curl = await this.downloadViaCurl(url, outPath, { resume, controller, emit, filename });
+      if (curl.ok) return this.downloadOk(outPath, curl.size ?? 0, Date.now() - start, 'curl', toolCallId);
+      const fetched = await this.downloadViaFetch(url, outPath, controller, emit);
+      if (fetched.ok) return this.downloadOk(outPath, fetched.size ?? 0, Date.now() - start, 'fetch', toolCallId);
+      return this.fail(null, start, `下载失败：${native.error || curl.error || fetched.error || '未知错误'}`);
+    } catch (err: unknown) {
+      return this.fail(null, start, `下载异常：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      downloadHub.dispose(toolCallId);
     }
   }
 
