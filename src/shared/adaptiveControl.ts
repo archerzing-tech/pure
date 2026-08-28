@@ -36,6 +36,95 @@ export interface AdaptiveStrategy {
   signals: string[];
   rationale: string;
   directive: string;
+  /** Estimated task complexity, used to decide whether / how to delegate. */
+  complexity: 'trivial' | 'simple' | 'moderate' | 'complex';
+  /** Detected intent tags (planning / research / design / audit / quick / …). */
+  intentTags: string[];
+  /** Subagents the model should prefer for THIS request (看人下菜). */
+  recommendedRoles: string[];
+  /** Of those, the ones that are independent + read-only and may run in parallel. */
+  parallelRoles: string[];
+}
+
+// ── Content-aware delegation signals (看人下菜) ──
+// The old strategy picked delegation almost purely from toolCount; it ignored
+// WHAT the user actually asked. These helpers read the request so the agent
+// delegates (or stays local) the way a thoughtful engineer would.
+
+export interface RequestIntent {
+  quick: boolean;
+  planning: boolean;
+  refactor: boolean;
+  multiFile: boolean;
+  research: boolean;
+  design: boolean;
+  audit: boolean;
+  review: boolean;
+  parallelRequested: boolean;
+  serialRequested: boolean;
+}
+
+function parseIntent(prompt: string): RequestIntent {
+  const p = prompt.toLowerCase();
+  const has = (...kw: string[]) => kw.some((k) => p.includes(k));
+  return {
+    quick: has('简单', '快速', '小改', '顺手', '修一下', 'quick', 'just ', 'tiny', 'small fix', '小任务'),
+    planning: has('规划', '计划', '方案', '拆解', 'plan', 'roadmap', '规划一下'),
+    refactor: has('重构', '重排', '重组', 'refactor', 'restructure'),
+    multiFile: has('多文件', '多个文件', '整个项目', '跨文件', 'multi-file', 'whole project', 'repository'),
+    research: has('调研', '研究', '查一', '调查', '了解', '资料', 'research', 'investigate', 'look up'),
+    design: has('设计', '界面', '前端', '视觉', '交互', 'ui', 'ux', 'design', 'layout'),
+    audit: has('审计', '安全', '漏洞', '扫描', 'audit', 'security', 'vulnerab'),
+    review: has('审查', '评审', '复查', 'review', 'check the code'),
+    parallelRequested: has('并行', '分头', '同时', '一起做', 'parallel', 'concurrently'),
+    serialRequested: has('逐步', '串行', '顺序', '先', 'step by step', 'sequentially'),
+  };
+}
+
+function fileMentions(prompt: string): number {
+  const fileHits = prompt.match(/\b[\w\-./]+\.(tsx?|jsx?|py|go|rs|java|vue|css|html?|md|json|yml|yaml)\b/g) ?? [];
+  const wordHits = (prompt.match(/文件|file/g) ?? []).length;
+  return fileHits.length + wordHits;
+}
+
+function estimateComplexity(prompt: string, intent: RequestIntent): AdaptiveStrategy['complexity'] {
+  let score = 0;
+  if (intent.quick) score -= 2;
+  if (intent.refactor || intent.multiFile || intent.planning) score += 2;
+  if (intent.research) score += 1;
+  if (intent.design) score += 1;
+  if (intent.audit) score += 1;
+  const len = prompt.length;
+  if (len > 400) score += 1;
+  if (len > 900) score += 1;
+  const fm = fileMentions(prompt);
+  if (fm >= 2) score += 2;
+  if (fm >= 4) score += 1;
+  if (score <= 0) return 'trivial';
+  if (score <= 1) return 'simple';
+  if (score <= 3) return 'moderate';
+  return 'complex';
+}
+
+// Roles that are independent + read-only and therefore safe to run in parallel.
+const PARALLEL_SAFE_ROLES = new Set([
+  'researcher', 'deep_thinker', 'project_auditor', 'code_reviewer', 'ui_designer',
+]);
+
+function recommendRoles(intent: RequestIntent, complexity: AdaptiveStrategy['complexity']): string[] {
+  const roles: string[] = [];
+  if (intent.planning || intent.refactor || intent.multiFile) {
+    roles.push('task_planner', 'code_editor', 'code_reviewer');
+  }
+  if (intent.research) roles.push('researcher', 'deep_thinker');
+  if (intent.design) roles.push('ui_designer');
+  if (intent.audit) roles.push('project_auditor', 'code_reviewer');
+  if (intent.review) roles.push('code_reviewer');
+  if (roles.length === 0) {
+    if (complexity === 'complex') roles.push('task_planner', 'researcher');
+    else if (complexity === 'moderate') roles.push('code_reviewer');
+  }
+  return Array.from(new Set(roles));
 }
 
 function timePhase(now: number, timezone?: string): AdaptiveStrategy['timePhase'] {
@@ -93,6 +182,10 @@ function buildDirective(strategy: Omit<AdaptiveStrategy, 'directive'>): string {
     : strategy.delegation === 'targeted'
       ? 'Delegate only an independent, well-scoped investigation when it reduces context or execution risk.'
       : 'Do not delegate by default; keep the loop local unless new evidence makes delegation useful.';
+  const roles = strategy.recommendedRoles.length > 0
+    ? `\n- Preferred subagents for this request: ${strategy.recommendedRoles.join(', ')}.${strategy.parallelRoles.length > 0 ? ` Run these in parallel when independent: ${strategy.parallelRoles.join(', ')}.` : ''}`
+    : '';
+  const complexityLine = `\n- Task complexity: ${strategy.complexity}.${strategy.intentTags.length > 0 ? ` Intent: ${strategy.intentTags.join(', ')}.` : ''}`;
   const recovery = strategy.recovery === 'switch-approach'
     ? 'Treat prior failures as evidence: change the hypothesis, tool, or scope instead of repeating the failed path.'
     : strategy.recovery === 'use-verified-procedure'
@@ -103,7 +196,7 @@ function buildDirective(strategy: Omit<AdaptiveStrategy, 'directive'>): string {
     : strategy.autonomy === 'assisted'
       ? 'Proceed on safe local work, but surface missing capability or decisions before crossing a boundary.'
       : 'Do not claim autonomous progress when the workspace or required capability is unavailable.';
-  return `<adaptive_strategy>\nRuntime-selected strategy (not a fixed task plan):\n- Signals: ${strategy.signals.join(', ')}\n- Exploration: ${strategy.exploration}\n- Verification: ${strategy.verification}\n- Delegation: ${strategy.delegation}\n- Recovery: ${strategy.recovery}\n- Autonomy: ${strategy.autonomy}\n- Confidence: ${strategy.confidence.toFixed(2)}\n- Rationale: ${strategy.rationale}\n${exploration}\n${verification}\n${delegation}\n${recovery}\n${autonomy}\nRevise this strategy when workspace evidence, tool results, or verification contradict it. Never weaken permission, path, budget, or external-side-effect safeguards.\n</adaptive_strategy>`;
+  return `<adaptive_strategy>\nRuntime-selected strategy (not a fixed task plan):\n- Signals: ${strategy.signals.join(', ')}\n- Exploration: ${strategy.exploration}\n- Verification: ${strategy.verification}\n- Delegation: ${strategy.delegation}\n- Recovery: ${strategy.recovery}\n- Autonomy: ${strategy.autonomy}\n- Confidence: ${strategy.confidence.toFixed(2)}\n- Rationale: ${strategy.rationale}\n${exploration}\n${verification}\n${delegation}${complexityLine}${roles}\n${recovery}\n${autonomy}\nRevise this strategy when workspace evidence, tool results, or verification contradict it. Never weaken permission, path, budget, or external-side-effect safeguards.\n</adaptive_strategy>`;
 }
 
 export class AdaptiveControlPlane {
@@ -116,7 +209,11 @@ export class AdaptiveControlPlane {
       || input.verification?.status === 'failed'
       || input.verification?.status === 'incomplete';
     const hasCapability = environment.hasWorkspace && environment.toolCount > 0;
-    const broadExploration = hasEvidenceOfFailure || procedures.length === 0 && input.prompt.length > 240;
+    const intent = parseIntent(input.prompt);
+    const complexity = estimateComplexity(input.prompt, intent);
+    const recommendedRoles = recommendRoles(intent, complexity);
+    const parallelRoles = recommendedRoles.filter((r) => PARALLEL_SAFE_ROLES.has(r));
+    const broadExploration = hasEvidenceOfFailure || (procedures.length === 0 && input.prompt.length > 240);
     const exploration: AdaptiveExploration = broadExploration ? 'broad' : 'targeted';
     const verification: AdaptiveVerification = !environment.verifierAvailable
       ? 'focused'
@@ -125,13 +222,21 @@ export class AdaptiveControlPlane {
         : procedures.length > 0
           ? 'standard'
           : 'focused';
+    // Content-aware delegation (看人下菜): decide HOW to delegate from what the
+    // user actually asked, not just from how many tools are loaded.
     const delegation: AdaptiveDelegation = !hasCapability
       ? 'none'
-      : hasEvidenceOfFailure && environment.toolCount >= 4
-        ? 'parallel'
-        : environment.toolCount >= 2
-          ? 'targeted'
-          : 'none';
+      : hasEvidenceOfFailure
+        ? (environment.toolCount >= 3 ? 'parallel' : 'targeted')
+        : intent.quick || complexity === 'trivial'
+          ? 'none'
+          : complexity === 'simple'
+            ? 'targeted'
+            : complexity === 'complex'
+              ? (intent.parallelRequested || ((intent.research || intent.audit || intent.design) && environment.toolCount >= 2)
+                ? 'parallel'
+                : 'targeted')
+              : 'targeted';
     const recovery: AdaptiveRecovery = hasEvidenceOfFailure
       ? 'switch-approach'
       : procedures.length > 0
@@ -160,9 +265,13 @@ export class AdaptiveControlPlane {
       delegation,
       recovery,
       autonomy,
-      confidence: Math.min(0.95, 0.45 + (environment.verifierAvailable ? 0.12 : 0) + (procedures.length > 0 ? 0.12 : 0) + (failures.length > 0 ? 0.1 : 0)),
+      confidence: Math.min(0.95, 0.45 + (environment.verifierAvailable ? 0.12 : 0) + (procedures.length > 0 ? 0.12 : 0) + (failures.length > 0 ? 0.1 : 0) + (complexity === 'complex' ? 0.05 : 0)),
       signals,
       rationale,
+      complexity,
+      intentTags: Object.entries(intent).filter(([, v]) => v).map(([k]) => k),
+      recommendedRoles,
+      parallelRoles,
     };
     return { ...base, directive: buildDirective(base) };
   }

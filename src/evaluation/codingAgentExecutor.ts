@@ -32,6 +32,11 @@ const EVAL_BUDGET: BudgetConfig = {
   maxExecutionTime: 20 * 60 * 1000,
   warningThreshold: 0.8,
   graceTurns: 2,
+  // Hard caps keep evaluations deterministic: the run stops at the ceiling
+  // instead of running elastic/indefinitely.
+  hardMaxTurns: 30,
+  hardMaxTokens: 200_000,
+  hardMaxTime: 20 * 60 * 1000,
 };
 
 function createAdapter(options: CodingAgentEvaluationExecutorOptions): LLMAdapter {

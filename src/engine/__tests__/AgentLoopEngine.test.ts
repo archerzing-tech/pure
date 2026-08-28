@@ -24,6 +24,12 @@ const STD_BUDGET: BudgetConfig = {
   maxExecutionTime: 600_000,
   warningThreshold: 0.8,
   graceTurns: 3,
+  // The elastic default has no hard cap, so the engine only stops on completion /
+  // failure policy / abort. Tests that previously terminated on the soft budget
+  // cap still need a deterministic ceiling — provide one here.
+  hardMaxTurns: 60,
+  hardMaxTokens: 400_000,
+  hardMaxTime: 1_200_000,
 };
 
 // ── Mock LLM factories ──
@@ -350,7 +356,7 @@ describe('AgentLoopEngine', () => {
     const engine = new AgentLoopEngine();
     const ctx = baseCtx({
       llm: textLLM('A'.repeat(500)),
-      budget: { ...STD_BUDGET, maxTotalTokens: 10, graceTurns: 0 },
+      budget: { ...STD_BUDGET, maxTotalTokens: 10, hardMaxTokens: 10, graceTurns: 0 },
     });
 
     const events = await collect(engine.run(
@@ -372,7 +378,7 @@ describe('AgentLoopEngine', () => {
       ),
       tools: echoToolAdapter([READ_FILE_TOOL]),
       toolsDefs: [READ_FILE_TOOL],
-      budget: { ...STD_BUDGET, maxTurns: 2, graceTurns: 0 },
+      budget: { ...STD_BUDGET, maxTurns: 2, hardMaxTurns: 2, graceTurns: 0 },
     });
 
     const events = await collect(engine.run(
