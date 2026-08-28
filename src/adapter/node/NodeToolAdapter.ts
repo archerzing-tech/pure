@@ -19,9 +19,10 @@ import { filterResearchSources, isOfficialDocumentationSource, makeResearchPaylo
 import { isPublicToolName } from '../../shared/toolDefs';
 import { downloadHub, type DownloadProgress, type DownloadController } from '../../shared/downloadHub';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotEntry, WorkspaceSnapshotPort } from '../../shared/workspaceSnapshot';
-import { cachedDirectPublicApi, quota } from './publicApis';
+import { cachedDirectPublicApi, parseRssItems, quota } from './publicApis';
 import { pageCacheKey, PAGE_TTL_MS, searchCacheKey, SEARCH_TTL_MS, webCache } from './webCache';
 import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeViaJina, truncateText } from './webScrape';
+import { extractMetaRefreshUrl, extractPdfText, extractPdfViaPdftotext, fetchWithRetry, refererFor, resolveRedirectTarget, scrapeViaFirecrawl, scrapeViaWayback } from './fetchFallback';
 import { extractFileText, MAX_SEARCH_FILE_BYTES } from './fileText';
 import { BROWSER_UA } from '../../shared/platformUa';
 
@@ -1264,12 +1265,35 @@ export class NodeToolAdapter implements ToolAdapter {
       }
     }
 
+    // 5) Structured free backends (no key): DuckDuckGo Instant Answer,
+    // Wikipedia search API, and Google News RSS. Each answers a different query
+    // shape (facts/definitions, encyclopedic pages, current news) at near-API
+    // quality with no quota — probed in parallel, first relevant set wins.
+    // A failed/rate-limited backend sits in cooldown (guarded) so it is not
+    // re-probed on every query.
+    if (results.length === 0) {
+      const structured: Array<{ label: string; fetch: () => Promise<SearchResult[]> }> = [
+        { label: 'DuckDuckGo Instant', fetch: guarded('DuckDuckGo Instant', () => ddgInstantSearch(query, maxResults)) },
+        { label: 'Wikipedia', fetch: guarded('Wikipedia', () => wikipediaSearch(query, maxResults)) },
+        { label: 'Google News RSS', fetch: guarded('Google News RSS', () => googleNewsSearch(query, maxResults)) },
+      ];
+      const outcome = await firstRelevantResult(query, structured);
+      if (outcome.results) {
+        results = outcome.results;
+      } else {
+        failed.push(...outcome.failed);
+        anyEmpty = anyEmpty || outcome.anyEmpty;
+        irrelevant += outcome.irrelevant;
+      }
+    }
+
     // Free HTML backends, probed IN PARALLEL by firstRelevantResult below
     // (first set that passes the CJK relevance gate wins). CJK queries probe
     // the China-relevant engines — Sogou, cn.bing.com, 360 (so.com), Baidu —
     // plus the international ones as safety nets; non-CJK probes DuckDuckGo,
-    // Bing and Brave. All fetches ride the shared cookie jar (searchFetch) so
-    // session cookies from earlier searches keep anti-bot challenges at bay.
+    // Bing, Brave and Mojeek. All fetches ride the shared cookie jar
+    // (searchFetch) so session cookies from earlier searches keep anti-bot
+    // challenges at bay.
     const backends: Array<{ label: string; fetch: () => Promise<SearchResult[]> }> = [
       ...(cjk
         ? [
@@ -1366,13 +1390,25 @@ export class NodeToolAdapter implements ToolAdapter {
                 return parseBraveResults(await readResponseText(resp), maxResults);
               }),
             },
+            {
+              label: 'Mojeek',
+              fetch: guarded('Mojeek', async () => {
+                const resp = await searchFetch(`https://www.mojeek.com/search?q=${encodeURIComponent(query)}`, {
+                  headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9' },
+                  redirect: 'follow',
+                  signal: AbortSignal.timeout(8000),
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                return parseMojeekResults(await readResponseText(resp), maxResults);
+              }),
+            },
           ]),
     ];
     // A failed/rate-limited backend sits in cooldown (30s) so the next query
     // skips it instead of re-hitting the same dead endpoint.
     const activeBackends = backends.filter((b) => !quota.isBlocked(b.label));
 
-    // 5) Free HTML backends, probed IN PARALLEL — first relevant set wins
+    // 6) Free HTML backends, probed IN PARALLEL — first relevant set wins
     // ("first win"), so a dead/slow/irrelevant backend no longer serializes
     // the search.
     if (results.length === 0 && activeBackends.length > 0) {
@@ -1390,7 +1426,7 @@ export class NodeToolAdapter implements ToolAdapter {
       failed.push('free HTML backends in cooldown (recent failures)');
     }
 
-    // 6) One normalized retry: syntactically heavy queries (quotes,
+    // 7) One normalized retry: syntactically heavy queries (quotes,
     // operators, Chinese punctuation) make engines fail or return nothing
     // even when the intent is findable — strip the noise once and re-probe
     // the HTML backends before giving up.
@@ -1411,21 +1447,33 @@ export class NodeToolAdapter implements ToolAdapter {
       }
     }
 
-    // 7) Last resort: Bing rendered through Jina Reader (r.jina.ai, free
-    // tier ~20 req/min). Jina fetches Bing from its own infrastructure, so
-    // this works when every local engine is blocked / rate-limited (China,
-    // restrictive networks) as long as r.jina.ai is reachable. Slower +
-    // rate-limited, hence last.
+    // 8) Last resort: engines rendered through Jina Reader (r.jina.ai, free
+    // tier ~20 req/min) — Bing, then Google, then DuckDuckGo. Jina fetches each
+    // from its own infrastructure, so this works when every local engine is
+    // blocked / rate-limited (China, restrictive networks) as long as r.jina.ai
+    // is reachable. Each engine is rate-limited via the shared quota: a failed
+    // or over-budget engine cools down instead of being re-hit every query.
     if (results.length === 0) {
-      try {
-        const r = await jinaBingSearch(query, maxResults);
-        if (r.length > 0) {
-          results = dedupeResults(r);
-        } else {
-          anyEmpty = true;
+      const jinaEngines: Array<{ label: string; run: () => Promise<SearchResult[]> }> = [
+        { label: 'Bing via Jina', run: () => jinaBingSearch(query, maxResults) },
+        { label: 'Google via Jina', run: () => jinaGoogleSearch(query, maxResults) },
+        { label: 'DDG via Jina', run: () => jinaDuckDuckGoSearch(query, maxResults) },
+      ];
+      for (const engine of jinaEngines) {
+        if (results.length > 0) break;
+        if (quota.isBlocked(engine.label)) continue;
+        try {
+          const r = await engine.run();
+          if (quota.registerUse(engine.label, 60_000, 20)) quota.markBlocked(engine.label, 60_000);
+          if (r.length > 0) {
+            results = dedupeResults(r);
+          } else {
+            anyEmpty = true;
+          }
+        } catch (err: any) {
+          quota.markBlocked(engine.label, 60_000);
+          failed.push(`${engine.label}: ${err?.message ?? String(err)}`);
         }
-      } catch (err: any) {
-        failed.push(`Bing via Jina: ${err?.message ?? String(err)}`);
       }
     }
 
@@ -1467,6 +1515,85 @@ export class NodeToolAdapter implements ToolAdapter {
     };
   }
 
+  /**
+   * The shared "get the page ANYWAY" chain composed by web_fetch and web_scrape:
+   *   1. direct fetch (browser headers, transient-error retry, meta-refresh
+   *      follow, feed/JSON formatting, direct PDF text extraction)
+   *   2. Jina Reader (r.jina.ai) — blocked / JS-heavy / binary pages
+   *   3. Wayback Machine — the closest archived snapshot of a dead/blocked page
+   *   4. Firecrawl (opt-in FIRECRAWL_API_KEY) — the hardest anti-bot pages
+   * Returns { text, via } on success or null when every tier failed, so both
+   * callers degrade uniformly instead of failing on the first obstacle.
+   */
+  private async fetchPageWithFallbacks(
+    url: string,
+    opts: { selector?: string; signal?: AbortSignal },
+  ): Promise<{ text: string; via: string } | null> {
+    // 1) Direct fetch.
+    try {
+      const resp = await fetchWithRetry(url, { signal: opts.signal });
+      if (resp.ok) {
+        const contentType = resp.headers.get('content-type') || '';
+        if (/pdf/i.test(contentType) || /\.pdf($|\?)/i.test(url)) {
+          // PDF payloads: extract text directly before falling through to the
+          // rendering tiers (which can also read PDFs but cost rate-limited
+          // free quota).
+          const pdfText = await this.extractPdfDirect(await resp.arrayBuffer());
+          if (pdfText) return { text: pdfText, via: 'pdf' };
+        } else if (isTextualContentType(contentType)) {
+          let html = await readResponseText(resp);
+          // Landing pages that JS-redirect via <meta http-equiv="refresh"> extract
+          // to nothing — follow up to 3 hops until the page carries real content.
+          for (let hop = 0; hop < 3; hop++) {
+            const target = extractMetaRefreshUrl(html);
+            if (!target) break;
+            const nextUrl = resolveRedirectTarget(url, target);
+            if (nextUrl === url) break;
+            const nextResp = await fetchWithRetry(nextUrl, { signal: opts.signal });
+            if (!nextResp.ok) break;
+            html = await readResponseText(nextResp);
+          }
+          const text = formatPageBody(html, contentType, opts.selector);
+          if (text.trim()) return { text: text.trim(), via: 'direct' };
+        }
+      }
+    } catch {
+      /* fall through to the next tier */
+    }
+
+    // 2) Jina Reader renders blocked / JS-heavy / binary pages as text.
+    const jina = await scrapeViaJina(url, process.env.PURE_JINA_API_KEY);
+    if (jina) return { text: jina.trim(), via: 'jina' };
+
+    // 3) Wayback Machine: the closest archived snapshot of a dead/blocked page.
+    const wayback = await scrapeViaWayback(url);
+    if (wayback) {
+      const text = formatPageBody(wayback, '', opts.selector);
+      if (text.trim()) return { text: text.trim(), via: 'wayback' };
+    }
+
+    // 4) Firecrawl (opt-in key): server-side rendering for the hardest pages.
+    const firecrawl = await scrapeViaFirecrawl(url, process.env.FIRECRAWL_API_KEY);
+    if (firecrawl) return { text: firecrawl.trim(), via: 'firecrawl' };
+
+    return null;
+  }
+
+  /** Direct PDF text: JS extractor first, then the poppler CLI if installed. */
+  private async extractPdfDirect(bytes: ArrayBuffer): Promise<string | null> {
+    const text = extractPdfText(new Uint8Array(bytes));
+    if (text) return text;
+    try {
+      const tmp = join(tmpdir(), `pure-pdf-${Date.now()}-${Math.random().toString(36).slice(2)}.pdf`);
+      await writeFile(tmp, Buffer.from(bytes));
+      const viaPoppler = await extractPdfViaPdftotext(tmp);
+      await rm(tmp, { force: true }).catch(() => {});
+      return viaPoppler;
+    } catch {
+      return null;
+    }
+  }
+
   private async handleWebFetch(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
     const url = String(args.url);
     const maxChars = typeof args.maxChars === 'number' ? args.maxChars : 20000;
@@ -1485,37 +1612,16 @@ export class NodeToolAdapter implements ToolAdapter {
         duration: Date.now() - start,
       };
     }
-    const abort = createAbortController(signal, 30000);
+    // The full chain (direct + Jina + Wayback + Firecrawl) needs a wider budget
+    // than a single direct fetch; the user-cancel signal still aborts it.
+    const abort = createAbortController(signal, 60000);
 
     try {
-      const resp = await fetch(url, {
-        headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9' },
-        signal: abort.signal,
-      });
-
-      if (!resp.ok) {
-        return this.fail(null!, start, `Fetch failed: HTTP ${resp.status}`);
+      const outcome = await this.fetchPageWithFallbacks(url, { signal: abort.signal });
+      if (!outcome) {
+        return this.fail(null!, start, `Fetch failed on all tiers (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_fetch on this URL; use researcher_web to find a mirror or a different source.`);
       }
-
-      const contentType = resp.headers.get('content-type') || '';
-      // Accept any text-ish media type (text/*, JSON, XML, JS, …) so repeated
-      // web_fetch calls don't keep hitting the same "unsupported content type"
-      // wall on common real-world pages; reject only clearly binary payloads.
-      // The error guides the model toward recovery instead of blind retries.
-      if (!isTextualContentType(contentType)) {
-        // Empty content-type never reaches this branch (helper returns true),
-        // so contentType is always a non-empty binary type here.
-        return this.fail(null!, start, `Unsupported content type: ${contentType} — the URL serves a non-text payload, so web_fetch cannot extract readable text from it. Do NOT retry web_fetch on this URL; instead use web_search to find a text/HTML page with the information, or pick a different URL.`);
-      }
-
-      const html = await readResponseText(resp);
-      // Decode HTML entities at the PIPELINE level (mirrors the Rust web_fetch
-      // path, whose strip_html_full html-decodes after stripping). NOT inside
-      // the shared stripHtml — that helper also feeds the DDG/Bing parsers,
-      // which decode AFTER stripping themselves; decoding there would
-      // double-decode (&amp;copy; → ©).
-      const text = extractReadableText(html);
-      const truncated = text.length > maxChars ? text.slice(0, maxChars) + '\n\n[truncated]' : text;
+      const truncated = outcome.text.length > maxChars ? outcome.text.slice(0, maxChars) + '\n\n[truncated]' : outcome.text;
       webCache().set(pageKey, truncated || '(empty page)', PAGE_TTL_MS);
 
       return {
@@ -1534,6 +1640,18 @@ export class NodeToolAdapter implements ToolAdapter {
   // 通过 downloadHub 上报实时进度并接收暂停/继续/取消指令；引擎只在完成时回传
   // 一个 ToolResult，所以进度用独立通道推给 GUI。
 
+  /** Browser-like request headers for a download: UA + Accept, a same-origin
+   * Referer (many CDNs / hotlink-protected hosts reject referer-less clients)
+   * and any cookies the shared jar holds for the host. */
+  private downloadHeaders(url: string, extra?: Record<string, string>): Record<string, string> {
+    const headers: Record<string, string> = { 'User-Agent': BROWSER_UA, Accept: '*/*' };
+    const referer = refererFor(url);
+    if (referer) headers.Referer = referer;
+    const cookies = cookieHeaderFor(url);
+    if (cookies) headers.Cookie = cookies;
+    return { ...headers, ...(extra ?? {}) };
+  }
+
   private requestOnce(
     urlStr: string,
     opts: { method?: string; headers?: Record<string, string>; signal?: AbortSignal },
@@ -1551,7 +1669,7 @@ export class NodeToolAdapter implements ToolAdapter {
         u,
         {
           method: opts.method ?? 'GET',
-          headers: { 'User-Agent': BROWSER_UA, ...(opts.headers ?? {}) },
+          headers: this.downloadHeaders(urlStr, opts.headers),
           signal: opts.signal,
         },
         (res) => {
@@ -1565,12 +1683,16 @@ export class NodeToolAdapter implements ToolAdapter {
           resolve(res);
         },
       );
+      // Stall guard: a server that stops sending data (no bytes for 60s) is
+      // treated as a failure so the caller can fall through to the next
+      // download method instead of hanging forever.
+      req.setTimeout(60_000, () => req.destroy(new Error('下载超时（长时间无数据）')));
       req.on('error', reject);
       req.end();
     });
   }
 
-  private async getHead(url: string, signal?: AbortSignal): Promise<{ length: number; acceptRanges: boolean }> {
+  private async getHead(url: string, signal?: AbortSignal): Promise<{ length: number; acceptRanges: boolean; disposition?: string }> {
     try {
       const res = await this.requestOnce(url, { method: 'HEAD', signal });
       if ((res.statusCode ?? 0) >= 400) {
@@ -1578,13 +1700,15 @@ export class NodeToolAdapter implements ToolAdapter {
         const r2 = await this.requestOnce(url, { method: 'GET', headers: { Range: 'bytes=0-0' }, signal });
         const len = Number((r2.headers['content-range']?.split('/')[1] ?? r2.headers['content-length'] ?? 0) || 0);
         const ar = r2.headers['accept-ranges'] === 'bytes' || !!r2.headers['content-range'];
+        const disposition = parseContentDispositionFilename(r2.headers['content-disposition']);
         r2.resume();
-        return { length: len, acceptRanges: ar };
+        return { length: len, acceptRanges: ar, disposition };
       }
       const len = Number(res.headers['content-length'] ?? 0) || 0;
       const ar = res.headers['accept-ranges'] === 'bytes';
+      const disposition = parseContentDispositionFilename(res.headers['content-disposition']);
       res.resume();
-      return { length: len, acceptRanges: ar };
+      return { length: len, acceptRanges: ar, disposition };
     } catch {
       return { length: -1, acceptRanges: false };
     }
@@ -1720,16 +1844,17 @@ export class NodeToolAdapter implements ToolAdapter {
     url: string,
     outPath: string,
     opts: { connections: number; resume: boolean; controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string },
-  ): Promise<{ ok: boolean; size?: number; via?: string; error?: string }> {
+  ): Promise<{ ok: boolean; size?: number; via?: string; error?: string; expected?: number }> {
     try {
       const head = await this.getHead(url, opts.controller.signal);
       const total = head.length ?? -1;
+      const expected = total > 0 ? total : undefined;
       let startOffset = 0;
       if (opts.resume) {
         try {
           const st = await stat(outPath);
           startOffset = st.size;
-          if (total > 0 && startOffset >= total) return { ok: true, size: startOffset, via: 'native-resume' };
+          if (total > 0 && startOffset >= total) return { ok: true, size: startOffset, via: 'native-resume', expected };
         } catch {
           /* no partial yet */
         }
@@ -1739,20 +1864,39 @@ export class NodeToolAdapter implements ToolAdapter {
       if (chunked) {
         try {
           const size = await this.downloadChunked(url, outPath, total, opts.connections, opts.controller, opts.emit, opts.filename);
-          return { ok: true, size, via: 'native-chunked' };
+          return { ok: true, size, via: 'native-chunked', expected };
         } catch (e: unknown) {
           if (opts.controller.paused || opts.controller.aborted) {
             const size = await this.streamRange(url, outPath, (await stat(outPath)).size, opts.controller, opts.emit, total, opts.filename);
-            return { ok: true, size, via: 'native-resume' };
+            return { ok: true, size, via: 'native-resume', expected };
           }
           return { ok: false, error: (e as Error)?.message };
         }
       }
       const size = await this.streamRange(url, outPath, startOffset, opts.controller, opts.emit, total, opts.filename);
-      return { ok: true, size, via: startOffset > 0 ? 'native-resume' : 'native' };
+      return { ok: true, size, via: startOffset > 0 ? 'native-resume' : 'native', expected };
     } catch (e: unknown) {
       return { ok: false, error: (e as Error)?.message };
     }
+  }
+
+  /** Infer a download file name: URL basename first, refined by the server's
+   * Content-Disposition header when present (best-effort, 8s budget). */
+  private async inferDownloadFilename(url: string): Promise<string> {
+    let filename = '';
+    try {
+      filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || '');
+    } catch {
+      /* ignore */
+    }
+    try {
+      const head = await this.getHead(url, AbortSignal.timeout(8000));
+      if (head.disposition) filename = head.disposition;
+    } catch {
+      /* best-effort */
+    }
+    filename = (filename || 'download').replace(/[^\w.\-一-龥]+/g, '_');
+    return filename || 'download';
   }
 
   private commandExists(cmd: string): Promise<boolean> {
@@ -1789,6 +1933,63 @@ export class NodeToolAdapter implements ToolAdapter {
     });
   }
 
+  private async downloadViaAria2(
+    url: string,
+    outPath: string,
+    opts: { controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string },
+  ): Promise<{ ok: boolean; size?: number; error?: string }> {
+    const hasAria2 = await this.commandExists('aria2c');
+    if (!hasAria2) return { ok: false, error: 'aria2c 不可用' };
+    return new Promise((resolve) => {
+      const args = [
+        '-x', '8', '-s', '8', '-k', '1M', '-c',
+        '--max-tries=5', '--timeout=30', '--retry-wait=3',
+        '--file-allocation=none', '--console-log-level=warn',
+        '-d', dirname(outPath), '-o', basename(outPath), url,
+      ];
+      const child = spawn('aria2c', args, { signal: opts.controller.signal } as { signal: AbortSignal });
+      child.on('error', (e) => resolve({ ok: false, error: e.message }));
+      child.on('close', async (code) => {
+        if (code === 0) {
+          try {
+            const st = await stat(outPath);
+            resolve({ ok: true, size: st.size });
+          } catch {
+            resolve({ ok: false, error: '无法读取下载文件' });
+          }
+        } else {
+          resolve({ ok: false, error: `aria2c 退出码 ${code}` });
+        }
+      });
+    });
+  }
+
+  private async downloadViaWget(
+    url: string,
+    outPath: string,
+    opts: { controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string },
+  ): Promise<{ ok: boolean; size?: number; error?: string }> {
+    const hasWget = await this.commandExists('wget');
+    if (!hasWget) return { ok: false, error: 'wget 不可用' };
+    return new Promise((resolve) => {
+      const args = ['-c', '-q', '--tries=5', '--timeout=30', '-O', outPath, url];
+      const child = spawn('wget', args, { signal: opts.controller.signal } as { signal: AbortSignal });
+      child.on('error', (e) => resolve({ ok: false, error: e.message }));
+      child.on('close', async (code) => {
+        if (code === 0) {
+          try {
+            const st = await stat(outPath);
+            resolve({ ok: true, size: st.size });
+          } catch {
+            resolve({ ok: false, error: '无法读取下载文件' });
+          }
+        } else {
+          resolve({ ok: false, error: `wget 退出码 ${code}` });
+        }
+      });
+    });
+  }
+
   private async downloadViaFetch(
     url: string,
     outPath: string,
@@ -1796,7 +1997,7 @@ export class NodeToolAdapter implements ToolAdapter {
     emit: (p: Partial<DownloadProgress>) => void,
   ): Promise<{ ok: boolean; size?: number; error?: string }> {
     try {
-      const res = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': BROWSER_UA } });
+      const res = await fetch(url, { signal: controller.signal, headers: this.downloadHeaders(url) });
       if (!res.ok || !res.body) return { ok: false, error: `HTTP ${res.status}` };
       const buf = Buffer.from(await res.arrayBuffer());
       if (buf.length > 50 * 1024 * 1024) return { ok: false, error: '文件过大，fetch 兜底仅支持小文件' };
@@ -1808,8 +2009,12 @@ export class NodeToolAdapter implements ToolAdapter {
     }
   }
 
-  private downloadOk(outPath: string, size: number, duration: number, via: string, toolCallId: string): ToolResult {
-    const summary = { kind: 'download', path: outPath, size, durationMs: duration, via };
+  private downloadOk(outPath: string, size: number, duration: number, via: string, toolCallId: string, expected?: number): ToolResult {
+    // Known content-length but a shorter file → the transfer did not complete
+    // cleanly; surface it (informational, not a hard failure).
+    const sizeMismatch = typeof expected === 'number' && expected > 0 && size < expected;
+    const summary: Record<string, unknown> = { kind: 'download', path: outPath, size, durationMs: duration, via };
+    if (sizeMismatch) summary.sizeMismatch = true;
     downloadHub.emitProgress(toolCallId, { downloaded: size, total: size, percent: 100, speed: 0, state: 'done', filename: basename(outPath), via });
     return { id: toolCallId, toolName: 'download_file', result: JSON.stringify(summary), success: true, duration };
   }
@@ -1835,14 +2040,11 @@ export class NodeToolAdapter implements ToolAdapter {
     else if (destination && destination !== 'downloads') outDir = join(home, 'Downloads', destination);
     else outDir = join(home, 'Downloads');
 
+    // File name: explicit arg \u2192 URL basename refined by the server's
+    // Content-Disposition header (best-effort) \u2192 'download'.
     let filename = filenameArg;
     if (!filename) {
-      try {
-        filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || '');
-      } catch {
-        /* ignore */
-      }
-      filename = (filename || 'download').replace(/[^\w.\-\u4e00-\u9fa5]+/g, '_');
+      filename = await this.inferDownloadFilename(url);
     }
     if (!filename) filename = 'download';
     const outPath = join(outDir, filename);
@@ -1854,13 +2056,28 @@ export class NodeToolAdapter implements ToolAdapter {
       downloadHub.emitProgress(toolCallId, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'downloading', filename, ...p } as DownloadProgress);
 
     try {
+      const errors: string[] = [];
+      // 1) Native multi-threaded downloader (Range + resume + pause).
       const native = await this.downloadNative(url, outPath, { connections, resume, controller, emit, filename });
-      if (native.ok) return this.downloadOk(outPath, native.size ?? 0, Date.now() - start, native.via ?? 'native', toolCallId);
+      if (native.ok) return this.downloadOk(outPath, native.size ?? 0, Date.now() - start, native.via ?? 'native', toolCallId, native.expected);
+      errors.push(native.error ?? '');
+      // 2) curl (resume via -C -).
       const curl = await this.downloadViaCurl(url, outPath, { resume, controller, emit, filename });
       if (curl.ok) return this.downloadOk(outPath, curl.size ?? 0, Date.now() - start, 'curl', toolCallId);
+      errors.push(curl.error ?? '');
+      // 3) aria2c (parallel + resume), when installed.
+      const aria2 = await this.downloadViaAria2(url, outPath, { controller, emit, filename });
+      if (aria2.ok) return this.downloadOk(outPath, aria2.size ?? 0, Date.now() - start, 'aria2c', toolCallId);
+      errors.push(aria2.error ?? '');
+      // 4) wget (resume via -c), when installed.
+      const wget = await this.downloadViaWget(url, outPath, { controller, emit, filename });
+      if (wget.ok) return this.downloadOk(outPath, wget.size ?? 0, Date.now() - start, 'wget', toolCallId);
+      errors.push(wget.error ?? '');
+      // 5) Plain fetch (small files only).
       const fetched = await this.downloadViaFetch(url, outPath, controller, emit);
       if (fetched.ok) return this.downloadOk(outPath, fetched.size ?? 0, Date.now() - start, 'fetch', toolCallId);
-      return this.fail(null, start, `下载失败：${native.error || curl.error || fetched.error || '未知错误'}`);
+      errors.push(fetched.error ?? '');
+      return this.fail(null, start, `下载失败：${errors.filter(Boolean).join('；') || '未知错误'}`);
     } catch (err: unknown) {
       return this.fail(null, start, `下载异常：${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -1912,69 +2129,21 @@ export class NodeToolAdapter implements ToolAdapter {
     if (cachedPage !== undefined) {
       return this.okResult('web_scrape', cachedPage, start);
     }
-    const abort = createAbortController(signal, 30000);
+    // The full chain (direct + Jina + Wayback + Firecrawl) needs a wider budget
+    // than a single direct fetch; the user-cancel signal still aborts it.
+    const abort = createAbortController(signal, 60000);
 
     try {
-      const resp = await fetch(url, {
-        headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9' },
-        signal: abort.signal,
-      });
-
-      if (!resp.ok) {
-        // Blocked / anti-bot page: Jina Reader fallback.
-        const fallback = await this.scrapeFallback(url);
-        if (fallback) {
-          const page = truncateText(fallback, maxChars);
-          webCache().set(pageKey, page, PAGE_TTL_MS);
-          return this.okResult('web_scrape', page, start);
-        }
-        return this.fail(null!, start, `Fetch failed: HTTP ${resp.status} — the page may block non-browser clients. Do NOT retry web_scrape on this URL; use researcher_web to find a mirror or a different page.`, 'web_scrape');
+      const outcome = await this.fetchPageWithFallbacks(url, { selector, signal: abort.signal });
+      if (!outcome) {
+        return this.fail(null!, start, `No readable content could be obtained from ${url} on any tier (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_scrape on this URL; use researcher_web to find a mirror or a different page.`, 'web_scrape');
       }
-
-      const contentType = resp.headers.get('content-type') || '';
-      if (!isTextualContentType(contentType)) {
-        // Binary payloads (PDFs, images) can still be read via Jina Reader.
-        const fallback = await this.scrapeFallback(url);
-        if (fallback) {
-          const page = truncateText(fallback, maxChars);
-          webCache().set(pageKey, page, PAGE_TTL_MS);
-          return this.okResult('web_scrape', page, start);
-        }
-        return this.fail(null!, start, `Unsupported content type: ${contentType} — the URL serves a non-text payload, so web_scrape cannot extract readable text from it. Do NOT retry web_scrape on this URL; use researcher_web to find a text/HTML page with the information, or pick a different URL.`, 'web_scrape');
-      }
-
-      const body = await readResponseText(resp);
-      let text = '';
-      if (isFeedBody(body)) {
-        text = formatFeedText(body);
-      } else if (/json/i.test(contentType) || /^\s*[\[{]/.test(body)) {
-        text = formatJsonBody(body);
-      } else {
-        text = extractScrapeText(body, selector);
-      }
-      text = text.trim();
-      if (!text) {
-        // JS-heavy or blank page: the static HTML carried no readable text.
-        const fallback = await this.scrapeFallback(url);
-        if (fallback) {
-          const page = truncateText(fallback, maxChars);
-          webCache().set(pageKey, page, PAGE_TTL_MS);
-          return this.okResult('web_scrape', page, start);
-        }
-        return this.fail(null!, start, `No readable text could be extracted from ${url} — the page is likely JavaScript-rendered or blank. Do NOT retry web_scrape on this URL; use researcher_web to find the information elsewhere.`, 'web_scrape');
-      }
-      const page = truncateText(text, maxChars);
+      const page = truncateText(outcome.text, maxChars);
       webCache().set(pageKey, page, PAGE_TTL_MS);
       return this.okResult('web_scrape', page, start);
     } finally {
       abort.cleanup();
     }
-  }
-
-  /** Jina Reader renders pages the direct fetch cannot (blocked, JS-heavy,
-   * binary) — free tier, no key required. */
-  private async scrapeFallback(url: string): Promise<string | null> {
-    return scrapeViaJina(url, process.env.PURE_JINA_API_KEY);
   }
 
   private okResult(toolName: string, result: string, start: number): ToolResult {
@@ -2972,13 +3141,87 @@ export async function searxngSearch(query: string, maxResults: number): Promise<
     .map((r) => ({ title: r.title!, snippet: r.content ?? '', url: r.url! }));
 }
 
-/** Last-resort universal backend: Bing rendered through Jina Reader
- * (`r.jina.ai`, free tier ~20 req/min, no key). Jina fetches Bing from its
- * own infrastructure, so this works when every local engine is blocked or
- * rate-limited (China / restrictive networks), as long as r.jina.ai itself
- * is reachable. PURE_JINA_API_KEY (if set) raises the limits. Mirrors the
- * Rust search_backend_jina_bing in lib.rs. */
-export async function jinaBingSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+/** Google News RSS backend (free, no key): recent news matching the query in
+ * structured RSS. Reachable on more networks than full search engines, and the
+ * parser is shared with the web_public_api news intent. News-leaning results —
+ * the relevance gate drops them for off-topic queries. Mirrors Rust
+ * search_backend_google_news_rss. */
+export async function googleNewsSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  const cjk = containsCJK(query);
+  const hl = cjk ? 'zh-CN' : 'en-US';
+  const gl = cjk ? 'CN' : 'US';
+  const ceid = cjk ? 'CN:zh-Hans' : 'US:en';
+  const resp = await searchFetch(
+    `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=${hl}&gl=${gl}&ceid=${ceid}`,
+    { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(8000) },
+  );
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const items = parseRssItems(await resp.text(), maxResults);
+  return items.map((item) => ({ title: item.title, snippet: item.description, url: item.link }));
+}
+
+/** DuckDuckGo Instant Answer API (free, no key): structured facts/definitions
+ * for direct queries ("what is X"). Returns zero results for non-answer
+ * queries, so it is a cheap structured tier that drops out harmlessly. Mirrors
+ * Rust search_backend_ddg_instant. */
+export async function ddgInstantSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  const resp = await searchFetch(
+    `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`,
+    { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(8000) },
+  );
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = (await resp.json()) as {
+    Heading?: string; AbstractText?: string; AbstractURL?: string;
+    RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>;
+  };
+  const out: SearchResult[] = [];
+  if (data.AbstractText && data.AbstractURL) {
+    out.push({ title: data.Heading || query, snippet: data.AbstractText, url: data.AbstractURL });
+  }
+  const related = Array.isArray(data.RelatedTopics) ? data.RelatedTopics : [];
+  for (const topic of related) {
+    if (!topic || typeof topic !== 'object') continue;
+    if (Array.isArray(topic.Topics)) {
+      for (const sub of topic.Topics) {
+        if (sub?.Text && sub.FirstURL && out.length < maxResults) {
+          out.push({ title: sub.Text.slice(0, 80), snippet: sub.Text, url: sub.FirstURL });
+        }
+      }
+    } else if (topic.Text && topic.FirstURL && out.length < maxResults) {
+      out.push({ title: topic.Text.slice(0, 80), snippet: topic.Text, url: topic.FirstURL });
+    }
+  }
+  return out;
+}
+
+/** Wikipedia search API (free, no key): fact-oriented page hits. Snippets come
+ * with `<span class="searchmatch">` highlights — stripped here. CJK queries hit
+ * zh.wikipedia.org. Mirrors Rust search_backend_wikipedia. */
+export async function wikipediaSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  const cjk = containsCJK(query);
+  const host = cjk ? 'zh.wikipedia.org' : 'en.wikipedia.org';
+  const resp = await searchFetch(
+    `https://${host}/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=${Math.min(maxResults, 10)}`,
+    { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(8000) },
+  );
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = (await resp.json()) as { query?: { search?: Array<{ title?: string; snippet?: string }> } };
+  const hits = data.query?.search ?? [];
+  const out: SearchResult[] = [];
+  for (const hit of hits) {
+    if (out.length >= maxResults) break;
+    const title = String(hit.title ?? '').trim();
+    if (!title) continue;
+    const snippet = stripHtml(String(hit.snippet ?? '')).trim();
+    out.push({ title, snippet, url: `https://${host}/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}` });
+  }
+  return out;
+}
+
+/** Shared Jina Reader render: fetch <engineUrl><encodedQuery> through
+ * r.jina.ai (free tier, PURE_JINA_API_KEY raises limits) and parse the
+ * returned markdown into results. Used by every last-resort engine. */
+async function jinaRenderSearch(query: string, maxResults: number, engineUrl: string): Promise<SearchResult[]> {
   const headers: Record<string, string> = {
     'User-Agent': BROWSER_UA,
     'X-Return-Format': 'markdown',
@@ -2986,12 +3229,28 @@ export async function jinaBingSearch(query: string, maxResults: number): Promise
   };
   const apiKey = process.env.PURE_JINA_API_KEY?.trim();
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  const resp = await searchFetch(`https://r.jina.ai/https://www.bing.com/search?q=${encodeURIComponent(query)}`, {
+  const resp = await searchFetch(`https://r.jina.ai/${engineUrl}${encodeURIComponent(query)}`, {
     headers,
     signal: AbortSignal.timeout(15000),
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return parseJinaMarkdownResults(await resp.text(), maxResults);
+}
+
+/** Last-resort universal backends: Bing / Google / DuckDuckGo rendered through
+ * Jina Reader (`r.jina.ai`, free tier ~20 req/min, no key). Jina fetches each
+ * engine from its own infrastructure, so this works when every local engine is
+ * blocked or rate-limited (China / restrictive networks), as long as r.jina.ai
+ * itself is reachable. Tried in sequence, Bing first. Mirrors the Rust
+ * search_backend_jina_bing / search_backend_jina_google / search_backend_jina_ddg. */
+export async function jinaBingSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  return jinaRenderSearch(query, maxResults, 'https://www.bing.com/search?q=');
+}
+export async function jinaGoogleSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  return jinaRenderSearch(query, maxResults, 'https://www.google.com/search?q=');
+}
+export async function jinaDuckDuckGoSearch(query: string, maxResults: number): Promise<SearchResult[]> {
+  return jinaRenderSearch(query, maxResults, 'https://html.duckduckgo.com/html/?q=');
 }
 
 /** Human-readable list of the actually-configured backends for the
@@ -3003,10 +3262,13 @@ export function searchBackendNames(cjk: boolean): string {
     ...(process.env.TAVILY_API_KEY?.trim() ? ['Tavily'] : []),
     ...(process.env.EXA_API_KEY?.trim() ? ['Exa'] : []),
     ...(process.env.SEARXNG_URL?.trim() ? ['SearXNG'] : []),
+    'DuckDuckGo Instant',
+    'Wikipedia',
+    'Google News RSS',
     ...(cjk ? ['Sogou', 'cn.bing.com', '360', 'Baidu'] : []),
     'DuckDuckGo',
     'Bing',
-    ...(cjk ? [] : ['Brave']),
+    ...(cjk ? [] : ['Brave', 'Mojeek']),
   ];
   return names.join(', ');
 }
@@ -3581,6 +3843,40 @@ export function parseDuckDuckGoResults(html: string, maxResults: number): Search
   return results;
 }
 
+/** Parse Mojeek results (`<li class="result">` blocks with an `<a class="title">`
+ * or `<a class="ob">` anchor and a `<p class="s">` snippet). Mojeek is an
+ * independent, bot-friendly index serving clean HTML — a useful extra non-CJK
+ * backend. Mirrors the Rust parse_mojeek_results. */
+export function parseMojeekResults(html: string, maxResults: number): SearchResult[] {
+  const results: SearchResult[] = [];
+  const marker = '<li class="result';
+  let rest = html;
+  while (results.length < maxResults) {
+    const idx = rest.indexOf(marker);
+    if (idx === -1) break;
+    const tail = rest.slice(idx);
+    const next = tail.indexOf(marker, marker.length);
+    const end = next === -1 ? tail.length : next;
+    const block = tail.slice(0, end);
+    const parsed = parseMojeekBlock(block);
+    if (parsed) results.push(parsed);
+    rest = tail.slice(end);
+  }
+  return results;
+}
+
+function parseMojeekBlock(block: string): SearchResult | undefined {
+  const aMatch = block.match(/<a[^>]*class="[^"]*(?:title|ob)[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+  if (!aMatch) return undefined;
+  const url = decodeHtmlEntities(aMatch[1].trim());
+  const title = decodeHtmlEntities(stripHtml(aMatch[2])).trim();
+  if (!title || !url) return undefined;
+  let snippet = '';
+  const sMatch = block.match(/<p[^>]*class="[^"]*s[^"]*"[^>]*>([\s\S]*?)<\/p>/i);
+  if (sMatch) snippet = decodeHtmlEntities(stripHtml(sMatch[1])).trim();
+  return { title, snippet, url };
+}
+
 /** True when a Content-Type header is a text-like payload web_fetch can read.
  * Accepts text/* and common text-bearing application subtypes (JSON, XML, JS,
  * SVG, RSS/Atom, form data); a missing/empty header is treated as text so the
@@ -3728,4 +4024,28 @@ export function stripHtml(html: string): string {
  * stripHtml.test.ts. */
 export function extractReadableText(html: string): string {
   return decodeHtmlEntities(stripHtml(html).trim());
+}
+
+/** Format a fetched body for the fallback chain: RSS/Atom → numbered list,
+ * JSON → pretty-printed, otherwise noise-stripped readable text with an
+ * optional selector. Shared by the direct and Wayback tiers. */
+function formatPageBody(html: string, contentType: string, selector?: string): string {
+  if (isFeedBody(html)) return formatFeedText(html);
+  if (/json/i.test(contentType) || /^\s*[\[{]/.test(html)) return formatJsonBody(html);
+  return extractScrapeText(html, selector);
+}
+
+/** Extract a file name from a `Content-Disposition: attachment; filename="…"` /
+ * `filename*=UTF-8''…` header. Returns undefined when absent. */
+function parseContentDispositionFilename(header: string | undefined): string | undefined {
+  if (!header) return undefined;
+  const m = header.match(/filename\*?=(?:UTF-8''|utf-8'')?"?([^";]+)/i);
+  if (!m) return undefined;
+  let name = m[1].trim();
+  try {
+    name = decodeURIComponent(name);
+  } catch {
+    /* keep raw */
+  }
+  return name || undefined;
 }

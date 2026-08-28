@@ -27,7 +27,7 @@ import { DefaultFailurePolicy } from './engine/FailurePolicy';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
-import { SubagentOrchestrator, BUILT_IN_SUBAGENTS } from './coding-agent/SubagentOrchestrator';
+import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler } from './cli_permission';
 import { dim, bold, red, green, yellow, cyan, purple, frameGray } from './termcolors';
@@ -752,6 +752,44 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
   }
 }
 
+/** Terminal rendering for subagent activity — so the user can SEE the
+ * multi-agent delegation (which agent is working, when it finishes, how long
+ * it took) instead of only the final tool result line. Printed as indented
+ * progress lines that commit immediately (not part of the streaming answer). */
+const cliSubagentProgress: SubagentProgress = {
+  onStart: (a) => {
+    const task = a.inputSnippet ? ` — ${a.inputSnippet}` : '';
+    process.stdout.write(`  ${cyan(`◈ ${a.agentName}`)} ${dim(`${a.agentRole}`)}${dim(task)}\n`);
+  },
+  onState: (a) => {
+    if (a.state) process.stdout.write(`    ${dim(`↳ ${agentStateToCli(a.state)}`)}\n`);
+  },
+  onTool: (a) => {
+    if (a.toolName) process.stdout.write(`    ${dim(`↳ 调用 ${a.toolName}`)}\n`);
+  },
+  onDone: (a) => {
+    const ms = typeof a.durationMs === 'number' ? ` ${dim(`(${(a.durationMs / 1000).toFixed(1)}s`)}` : '';
+    const tokens = typeof a.tokensUsed === 'number' ? ` · ${a.tokensUsed} tok` : '';
+    const mark = a.status === 'timed_out' ? yellow('⏱ 超时') : a.success ? '✓' : red('✗');
+    process.stdout.write(`  ${green(`◈ ${a.agentName}`)} ${mark}${ms}${tokens}${ms ? ')' : ''}\n`);
+  },
+  onError: (a) => {
+    const note = a.error ? ` ${dim(`↳ ${a.error.slice(0, 80)}`)}` : '';
+    process.stdout.write(`  ${red(`◈ ${a.agentName}`)} ✗${note}\n`);
+  },
+};
+
+function agentStateToCli(state: string): string {
+  switch (state) {
+    case 'THINK': return '思考中';
+    case 'ACT': return '执行中';
+    case 'OBSERVE': return '观察中';
+    case 'VERIFY': return '验证中';
+    case 'TERMINATE': return '收尾中';
+    default: return state;
+  }
+}
+
 async function createTools(
   workspace: string,
   autoApprove = false,
@@ -1032,21 +1070,28 @@ async function createHarness(args: CliArgs) {
   const createdTools = await createTools(args.workspace, args.autoApprove, sessionId, args.mcpServers, args.mcpExcludedPrefixes);
   const tools = createdTools.tools;
   let toolsDefs = createdTools.toolsDefs;
+  const store = args.resume ? createStore(args) : undefined;
   if (tools && tools instanceof ToolRegistry) {
     const orchestrator = new SubagentOrchestrator({
       llm: adapter,
       parentTools: tools,
       parentToolsDefsProvider: () => tools.getTools(),
       defaultBudget: DEFAULT_BUDGET,
+      // Subagent resume (CLI has a stateStore) + bounded budget + live progress
+      // so the terminal shows which subagent is working.
+      parentSessionId: sessionId,
+      stateStore: store,
+      progress: cliSubagentProgress,
     });
     for (const def of BUILT_IN_SUBAGENTS) {
       orchestrator.register(def);
       tools.register(def);
     }
     tools.setSubagentExecutor(orchestrator);
-    toolsDefs = tools.getTools();
+    // Model-visible tools = public tools + subagent tools, so the parent LLM
+    // can actually delegate (getTools() alone filters subagents out).
+    toolsDefs = [...tools.getTools(), ...tools.getSubagentTools()];
   }
-  const store = args.resume ? createStore(args) : undefined;
   // Project-scoped memory: resolved workspace (same as createTools uses).
   const projectPath = args.workspace
     ? (args.workspace.startsWith('/') ? args.workspace : `${process.cwd()}/${args.workspace}`)

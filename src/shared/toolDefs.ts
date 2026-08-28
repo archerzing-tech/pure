@@ -192,7 +192,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'web_fetch',
-    description: 'Legacy compatibility tool for fetching readable page text. Hidden from new model tool lists.',
+    description: 'Legacy compatibility tool for fetching readable page text — follows meta-refresh redirects and falls back across Jina Reader / Wayback Machine / Firecrawl when the direct fetch is blocked or binary. Hidden from new model tool lists.',
     input_schema: {
       type: 'object',
       properties: {
@@ -218,7 +218,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'web_scrape',
-    description: 'Fetch a KNOWN URL and extract readable text: strips navigation/boilerplate, supports an optional #id/.class/tag selector, auto-formats RSS/Atom feeds and JSON, and falls back to Jina Reader (free) then Firecrawl (optional key) for blocked, JS-heavy, or binary pages (e.g. PDFs). Use when you already have the URL; use researcher_web when you need to find one.',
+    description: 'Fetch a KNOWN URL and extract readable text: strips navigation/boilerplate, supports an optional #id/.class/tag selector, auto-formats RSS/Atom feeds and JSON, follows meta-refresh redirects, extracts text-based PDFs directly, and falls back across Jina Reader (free) → Wayback Machine → Firecrawl (optional key) for blocked, removed, JS-heavy, or binary pages. Use when you already have the URL; use researcher_web when you need to find one.',
     input_schema: {
       type: 'object',
       properties: {
@@ -231,7 +231,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'download_file',
-    description: '下载网络资源（文件 / 压缩包 / 模型权重 / 数据集 / 安装包 / 图片 / 视频等）到本机。支持大文件、多线程加速、断点续传、暂停/继续，失败自动换多种方式重试。当用户说"下载 xxx"或给出 http(s) 链接（如 http://example.com/a.zip）时使用。url 必填；destination 可为绝对路径，或 "downloads"（默认用户下载目录）/ "workspace"（当前项目目录）；filename 可指定文件名；connections 并行线程数（默认 4，服务器支持 Range 时启用分块加速）；resume 是否断点续传（默认 true）。完成后返回本机完整文件路径。',
+    description: '下载网络资源（文件 / 压缩包 / 模型权重 / 数据集 / 安装包 / 图片 / 视频等）到本机。支持大文件、多线程加速、断点续传、暂停/继续；自动携带同源 Referer 与浏览器 UA 以绕过防盗链；优先采用服务器 Content-Disposition 文件名；失败依次换用 原生多线程 → curl → aria2c → wget → fetch 多种方式重试。当用户说"下载 xxx"或给出 http(s) 链接（如 http://example.com/a.zip）时使用。url 必填；destination 可为绝对路径，或 "downloads"（默认用户下载目录）/ "workspace"（当前项目目录）；filename 可指定文件名；connections 并行线程数（默认 4，服务器支持 Range 时启用分块加速）；resume 是否断点续传（默认 true）。完成后返回本机完整文件路径。',
     input_schema: {
       type: 'object',
       properties: {

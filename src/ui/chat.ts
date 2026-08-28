@@ -20,8 +20,9 @@ import { formatIntentPrompt, inferSemanticRoute, shouldBypassSemanticRoute } fro
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
-import { BUILT_IN_SUBAGENTS, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
+import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
 import { requestPermission } from './permission';
+import { MemoryStateStore } from '../adapter/storage/MemoryStateStore';
 import {
   requestPlanReview,
   formatPlanForPrompt,
@@ -75,6 +76,8 @@ import type {
   MessageImage,
   BudgetConfig,
   GeneratedImage,
+  IStateStore,
+  Checkpoint,
 } from '../shared/types';
 import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, TaskMode, IntentAssessment } from '../coding-agent/types';
 
@@ -958,14 +961,21 @@ function yieldToNextPaint(signal?: AbortSignal): Promise<void> {
 function agentStateLabel(state?: string): string {
   switch (state) {
     case 'THINK': return '思考中';
-    case 'PLAN': return '规划中';
     case 'ACT': return '执行中';
-    case 'TOOL': return '调用工具';
     case 'OBSERVE': return '观察中';
     case 'VERIFY': return '验证中';
-    case 'TERMINATE':
-    case 'DONE': return '收尾中';
+    case 'TERMINATE': return '收尾中';
     default: return state ? state : '工作中';
+  }
+}
+
+/** A compact status label for the card badge, driven by SubagentStatus. */
+function agentStatusLabel(a: SubagentActivity): string {
+  switch (a.status) {
+    case 'done': return '✓ 完成';
+    case 'failed': return '✗ 失败';
+    case 'timed_out': return '⏱ 超时';
+    default: return agentStateLabel(a.state) || '工作中';
   }
 }
 
@@ -978,6 +988,7 @@ interface AgentCardHandle {
   root: HTMLElement;
   badge: HTMLElement;
   tools: HTMLElement;
+  meta: HTMLElement;
 }
 
 function createAgentCard(a: SubagentActivity): AgentCardHandle {
@@ -1005,19 +1016,46 @@ function createAgentCard(a: SubagentActivity): AgentCardHandle {
 
   head.append(dot, name, role, badge);
 
+  // Meta line (duration / tokens) populated on done — capped here to a visible slot.
+  const meta = document.createElement('span');
+  meta.className = 'agent-activity-meta';
+
+  const body = document.createElement('div');
+  body.className = 'agent-activity-body';
+  if (a.inputSnippet) {
+    const task = document.createElement('div');
+    task.className = 'agent-activity-task';
+    task.textContent = `委托: ${a.inputSnippet}`;
+    body.appendChild(task);
+  }
+  body.appendChild(meta);
+
   const tools = document.createElement('ul');
   tools.className = 'agent-activity-tools';
 
-  root.append(head, tools);
+  root.append(head, body, tools);
   chatEl.appendChild(root);
   scrollChatToBottomIfPinned(chatEl);
-  return { root, badge, tools };
+  return { root, badge, tools, meta };
 }
 
-function finishAgentCard(card: AgentCardHandle, outcome: 'done' | 'failed', badgeText: string, note?: string): void {
+function finishAgentCard(
+  card: AgentCardHandle,
+  outcome: 'done' | 'failed',
+  badgeText: string,
+  note?: string,
+  a?: SubagentActivity,
+): void {
   card.root.classList.remove('working');
   card.root.classList.add(outcome);
+  if (a?.status === 'timed_out') card.root.classList.add('timed-out');
   card.badge.textContent = badgeText;
+  if (a && (typeof a.durationMs === 'number' || typeof a.tokensUsed === 'number')) {
+    const parts: string[] = [];
+    if (typeof a.durationMs === 'number') parts.push(`耗时 ${(a.durationMs / 1000).toFixed(1)}s`);
+    if (typeof a.tokensUsed === 'number') parts.push(`${a.tokensUsed} tok`);
+    card.meta.textContent = parts.join(' · ');
+  }
   if (note) {
     const li = document.createElement('li');
     li.className = 'agent-activity-note';
@@ -1216,6 +1254,9 @@ export class ChatController {
   private sessionToolAdapter?: ToolAdapter;
   private sessionToolAdapterKey = '';
   private onSnapshotChanged?: (available: boolean) => void;
+  // In-memory subagent checkpoint store for this conversation — lets a sub-task
+  // resume after a user stop + continue within the same session.
+  private subagentStore = new MemoryStateStore();
 
   constructor() {
     this.sessionId = `session_${Date.now()}`;
@@ -1684,13 +1725,15 @@ export class ChatController {
         if (gen !== this.generation) return;
         const card = agentCards.get(a.callId);
         if (!card) return;
-        finishAgentCard(card, a.success ? 'done' : 'failed', a.success ? '✓ 完成' : '✗ 失败', a.output ? truncate(a.output, 240) : undefined);
+        const outcome = a.success ? 'done' : 'failed';
+        const note = a.output ? truncate(a.output, 240) : (a.error ? `错误：${truncate(a.error, 240)}` : undefined);
+        finishAgentCard(card, outcome, agentStatusLabel(a), note, a);
       },
       onError: (a) => {
         if (gen !== this.generation) return;
         const card = agentCards.get(a.callId);
         if (!card) return;
-        finishAgentCard(card, 'failed', '✗ 出错', a.error ? `错误：${truncate(a.error, 240)}` : '未知错误');
+        finishAgentCard(card, 'failed', agentStatusLabel(a) || '✗ 出错', a.error ? `错误：${truncate(a.error, 240)}` : '未知错误', a);
       },
     };
     // The plan-card snapshot belongs to this turn only; a follow-up simple
@@ -2174,15 +2217,19 @@ export class ChatController {
       // ↔ web-research, code_reviewer ↔ code-review, planner ↔ planning).
       // `undefined` keeps the full built-in set (CodingAgent defaults to
       // BUILT_IN_SUBAGENTS).
+      // BUILT_IN_SUBAGENTS (code_reviewer / project_auditor) plus the coding
+      // roles (task_planner / code_editor / deep_thinker / ui_designer /
+      // bash_executor / researcher). Skill toggles gate by role name.
+      const allSubagents = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES];
       const subagents = (() => {
-        const keep = BUILT_IN_SUBAGENTS.filter((def) => {
-          if (def.name === 'web_researcher') return config.skills?.['web-research'] ?? true;
+        const keep = allSubagents.filter((def) => {
+          if (def.name === 'task_planner') return config.skills?.planning ?? true;
           if (def.name === 'code_reviewer') return config.skills?.['code-review'] ?? true;
-          if (def.name === 'planner') return config.skills?.planning ?? true;
           if (def.name === 'project_auditor') return config.skills?.['code-review'] ?? true;
+          if (def.name === 'researcher') return config.skills?.['web-research'] ?? true;
           return true;
         });
-        return keep.length === BUILT_IN_SUBAGENTS.length ? undefined : keep;
+        return keep.length === allSubagents.length ? undefined : keep;
       })();
 
       // Refresh mode + handler for this turn so a settings change (e.g.
@@ -2217,6 +2264,9 @@ export class ChatController {
         llm,
         toolAdapter,
         subagents,
+        // In-memory subagent checkpoint store: lets the GUI resume a sub-task
+        // after a stop + continue in this same conversation.
+        stateStore: this.subagentStore,
         // With either a user workspace or an application temporary workspace,
         // defer to the live ToolRegistry so filesystem tools, subagents, and
         // MCP tools registered after construction are visible to the LLM.
@@ -3010,7 +3060,7 @@ export class ChatController {
         assessmentFlow.setPhase('execute', '已通过评估闸门，开始按确认范围小步执行…');
       }
       const finalPromptTools = effectiveWorkspace
-        ? codingAgent.toolRegistry.getTools()
+        ? [...codingAgent.toolRegistry.getTools(), ...codingAgent.toolRegistry.getSubagentTools()]
         : promptTools;
       // App skills (~/.pure/skills, installed by the capability-gap protocol)
       // join the enabled Skill Hub skills in the system prompt. TTL-cached: a
