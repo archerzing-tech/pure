@@ -11,7 +11,7 @@ import { Planner } from './Planner';
 import { PermissionManager } from './PermissionManager';
 import { Verifier, createDefaultVerifier } from './Verifier';
 import { ToolRegistry } from './ToolRegistry';
-import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentOrchestratorConfig } from './SubagentOrchestrator';
+import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentOrchestratorConfig, type SubagentProgress } from './SubagentOrchestrator';
 import { MCPClient, type MCPClientConfig } from '../harness/mcp/MCPClient';
 import { PromptAssembler, resolvePromptBudget, type PromptBudgetConfig } from '../shared/PromptAssembler';
 import type { PromptObservability } from '../shared/promptObservability';
@@ -70,6 +70,8 @@ export interface CodingAgentConfig {
   /** Custom failure policy — defaults to the built-in escalating policy. */
   failurePolicy?: FailurePolicy;
   subagents?: SubagentDefinition[];
+  /** Optional UI sink to surface which subagent is currently working. */
+  subagentProgress?: SubagentProgress;
   mcpServers?: MCPServerConfig[];
   /** Tool-name prefixes to hide from MCP discovery (see MCPClientConfig). */
   mcpExcludedPrefixes?: string[];
@@ -111,6 +113,7 @@ export class CodingAgent {
       parentTools: this.toolRegistry,
       parentToolsDefsProvider: () => this.toolRegistry.getTools(),
       defaultBudget: config.budget,
+      progress: config.subagentProgress,
     };
     this.subagentOrchestrator = new SubagentOrchestrator(orchConfig);
 

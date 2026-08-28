@@ -20,7 +20,7 @@ import { formatIntentPrompt, inferSemanticRoute, shouldBypassSemanticRoute } fro
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
-import { BUILT_IN_SUBAGENTS } from '../coding-agent/SubagentOrchestrator';
+import { BUILT_IN_SUBAGENTS, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
 import { requestPermission } from './permission';
 import {
   requestPlanReview,
@@ -106,6 +106,24 @@ const TOOL_CALL_REFRESH_MS = 120;
 // contain raw HTTP error text, tool names, and directives like "stop making it").
 // Surfacing them verbatim leaks internals to the user.  This helper replaces
 // the reason with a localized, user-friendly summary.
+
+/**
+ * Pull the concrete failure cause out of a FailurePolicy stop reason. The raw
+ * reason is written for the model (English, with "stop making it" directives),
+ * so we keep only the diagnostic prefix — the repeated call, its tool, and the
+ * actual error text — and drop the instructional tail. Returns '' when nothing
+ * recognizable is present.
+ */
+function extractFailureCause(raw: string): string {
+  // Identical-call loop stop: `3 consecutive failures of the identical call (tool: X): "msg". This exact call keeps failing…`
+  const identical = raw.match(/^\s*(\d+\s+consecutive failures of the identical call(?: \(tool: [^)]+\))?: ".*?")/);
+  if (identical) return identical[1];
+  // Generic ceiling stop: `6 consecutive failures. Last: msg. Please review…`
+  const ceiling = raw.match(/^\s*(\d+\s+consecutive failures\. Last: .*?)\./);
+  if (ceiling) return ceiling[1];
+  return '';
+}
+
 function sanitizeInterruptedReason(raw: string): string {
   const lower = raw.toLowerCase();
   // ── User stop / frontend-or-network disconnect (signal aborted) ──
@@ -122,9 +140,16 @@ function sanitizeInterruptedReason(raw: string): string {
   if (/hook aborted/i.test(raw)) {
     return t('chat.interrupted.policy', 'Stopped by a safety/policy check');
   }
-  // FailurePolicy stop reasons ("N consecutive failures ...").
+  // FailurePolicy stop reasons ("N consecutive failures ..."). These already
+  // contain the concrete cause (the repeated tool + its real error text), so
+  // surface it instead of replacing it with a vague summary — the user must
+  // know WHY the run was halted, not just that it stopped.
   if (/consecutive failures|keeps failing|same error|switch to a fundamentally different approach/i.test(raw)) {
-    return t('chat.interrupted.repeatedFailures', 'Stopped after repeated failed attempts — please check the task or try a different approach');
+    const cause = extractFailureCause(raw);
+    const base = t('chat.interrupted.repeatedFailures', 'Stopped after repeated failed attempts — please check the task or try a different approach');
+    return cause
+      ? `${base}\n${t('chat.interrupted.repeatedFailuresCause', '失败原因：{detail}').replace('{detail}', cause)}`
+      : base;
   }
   // ── Stream idle / first-token timeout (huge output buffering OR huge input
   //    → slow time-to-first-token). This is the "两次流式输出超时" case: the
@@ -921,6 +946,85 @@ function yieldToNextPaint(signal?: AbortSignal): Promise<void> {
   });
 }
 
+// ── Multi-agent activity visualization ──
+// When the CodingAgent delegates a sub-task to a subagent, the orchestrator
+// emits SubagentActivity snapshots. These helpers turn them into a live
+// "which agent is working" card in the transcript so the user can see the
+// multi-agent system in action instead of a black box.
+
+function agentStateLabel(state?: string): string {
+  switch (state) {
+    case 'THINK': return '思考中';
+    case 'PLAN': return '规划中';
+    case 'ACT': return '执行中';
+    case 'TOOL': return '调用工具';
+    case 'OBSERVE': return '观察中';
+    case 'VERIFY': return '验证中';
+    case 'TERMINATE':
+    case 'DONE': return '收尾中';
+    default: return state ? state : '工作中';
+  }
+}
+
+function truncate(text: string, max: number): string {
+  const t = (text ?? '').trim();
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+interface AgentCardHandle {
+  root: HTMLElement;
+  badge: HTMLElement;
+  tools: HTMLElement;
+}
+
+function createAgentCard(a: SubagentActivity): AgentCardHandle {
+  const chatEl = document.getElementById('chat')!;
+  const root = document.createElement('div');
+  root.className = 'agent-activity working';
+
+  const head = document.createElement('div');
+  head.className = 'agent-activity-head';
+
+  const dot = document.createElement('span');
+  dot.className = 'agent-activity-dot';
+
+  const name = document.createElement('span');
+  name.className = 'agent-activity-name';
+  name.textContent = a.agentName;
+
+  const role = document.createElement('span');
+  role.className = 'agent-activity-role';
+  if (a.agentRole) role.textContent = `· ${a.agentRole}`;
+
+  const badge = document.createElement('span');
+  badge.className = 'agent-activity-badge';
+  badge.textContent = '工作中';
+
+  head.append(dot, name, role, badge);
+
+  const tools = document.createElement('ul');
+  tools.className = 'agent-activity-tools';
+
+  root.append(head, tools);
+  chatEl.appendChild(root);
+  scrollChatToBottomIfPinned(chatEl);
+  return { root, badge, tools };
+}
+
+function finishAgentCard(card: AgentCardHandle, outcome: 'done' | 'failed', badgeText: string, note?: string): void {
+  card.root.classList.remove('working');
+  card.root.classList.add(outcome);
+  card.badge.textContent = badgeText;
+  if (note) {
+    const li = document.createElement('li');
+    li.className = 'agent-activity-note';
+    li.textContent = note;
+    card.tools.appendChild(li);
+  }
+  const chatEl = document.getElementById('chat')!;
+  scrollChatToBottomIfPinned(chatEl);
+}
+
 // ── ChatController ──
 
 export class ChatController {
@@ -1461,6 +1565,42 @@ export class ChatController {
       this.activePlanCardHandle?.clearAutoContinue();
     }
     const gen = ++this.generation;
+
+    // Live multi-agent activity cards: each subagent spawned by the orchestrator
+    // gets a visible "which agent is working" card in the transcript.
+    const agentCards = new Map<string, AgentCardHandle>();
+    const subagentProgress: SubagentProgress = {
+      onStart: (a) => {
+        if (gen !== this.generation || agentCards.has(a.callId)) return;
+        agentCards.set(a.callId, createAgentCard(a));
+      },
+      onState: (a) => {
+        if (gen !== this.generation) return;
+        const card = agentCards.get(a.callId);
+        if (card) card.badge.textContent = agentStateLabel(a.state);
+      },
+      onTool: (a) => {
+        if (gen !== this.generation) return;
+        const card = agentCards.get(a.callId);
+        if (!card) return;
+        const li = document.createElement('li');
+        li.textContent = `↳ ${a.toolName}`;
+        card.tools.appendChild(li);
+        scrollChatToBottomIfPinned(document.getElementById('chat')!);
+      },
+      onDone: (a) => {
+        if (gen !== this.generation) return;
+        const card = agentCards.get(a.callId);
+        if (!card) return;
+        finishAgentCard(card, a.success ? 'done' : 'failed', a.success ? '✓ 完成' : '✗ 失败', a.output ? truncate(a.output, 240) : undefined);
+      },
+      onError: (a) => {
+        if (gen !== this.generation) return;
+        const card = agentCards.get(a.callId);
+        if (!card) return;
+        finishAgentCard(card, 'failed', '✗ 出错', a.error ? `错误：${truncate(a.error, 240)}` : '未知错误');
+      },
+    };
     // The plan-card snapshot belongs to this turn only; a follow-up simple
     // task must not re-attach a stale card from a previous complex plan.
     if (!this.activeComplexPlan) {
@@ -1976,6 +2116,8 @@ export class ChatController {
         // a hard failure there triggers an in-engine rewrite. No LLM re-check of
         // the final output surfaces internal verifier feedback to the user.
         verifier: createDefaultVerifier(),
+        // Surface each spawned subagent as a live "which agent is working" card.
+        subagentProgress,
       });
       // Text-to-image support: computed once per send from the connected
       // provider/model (see imageGenContextFor). When enabled, register the
