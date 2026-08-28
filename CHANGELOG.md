@@ -3,7 +3,7 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v2.1.0-beta
+## v2.0.0
 
 **多 Agent 委派接通 + 并行/深度/预算/持久化 + GUI 可视化 + 死代码清理（CLI + GUI 两侧）**
 
