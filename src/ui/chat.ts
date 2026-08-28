@@ -49,7 +49,7 @@ import { linkifyPaths, setPathLinkWorkspace } from './pathLink';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
-import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, runDeliveryVerification, workspaceProfileSummary, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
+import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -961,6 +961,14 @@ export class ChatController {
    * revision a card reflects when a file is updated several times. Keyed by a
    * normalized path; reset on a new chat (clear()). */
   private fileWriteVersions = new Map<string, number>();
+  // Cumulative list of every file written across all turns of the current
+  // project (session-scoped, reset on a new chat). Used to present the
+  // "project directory" card exactly once, on genuine completion — including
+  // when the project was interrupted and resumed, where the final completion
+  // turn itself may write no new files.
+  private sessionArtifacts: ArtifactItem[] = [];
+  private sessionArtifactSeen = new Set<string>();
+  private projectDirectoryShown = false;
   // Background pre-compaction cache: the ContextEngine's LLM summarization —
   // the dominant pre-send cost once a long session crosses maxMessages — runs
   // after each completed turn (idle) instead of blocking the next send. The
@@ -1587,7 +1595,12 @@ export class ChatController {
       if (artifactSeen.has(key)) return;
       artifactSeen.add(key);
       const norm = path.trim().toLowerCase().replaceAll('\\', '/').replace(/^\.\//, '');
-      turnArtifacts.push({ path, version: this.fileWriteVersions.get(norm) ?? 1 });
+      const version = this.fileWriteVersions.get(norm) ?? 1;
+      turnArtifacts.push({ path, version });
+      if (!this.sessionArtifactSeen.has(norm)) {
+        this.sessionArtifactSeen.add(norm);
+        this.sessionArtifacts.push({ path, version });
+      }
     };
     let toolRowSinceSegment = false;
     const createSegment = (): AssistantSegment => {
@@ -3178,7 +3191,17 @@ export class ChatController {
             if (needsDeliveryGate && hasToolWork && !event.payload.interrupted && gen === this.generation) {
               this.addStatusBubble('🧪 交付验证：正在重跑机械检查（typecheck / 测试 / 构建）…', true);
               scrollChatToBottomIfPinned(chatEl);
-              deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal);
+              // Surface each mechanical check as it finishes so the user can see
+              // the verification actually running (instead of a static bubble
+              // that appears to do nothing before "passed").
+              const onDeliveryStep = (step: DeliveryStepResult): void => {
+                if (gen !== this.generation) return;
+                const icon = step.status === 'passed' ? '✅' : step.status === 'skipped' ? '⏭️' : '❌';
+                const dur = step.durationMs ? ` · ${(step.durationMs / 1000).toFixed(1)}s` : '';
+                this.addStatusBubble(`${icon} 交付验证 · ${step.label}（${step.command}）${dur}`);
+                scrollChatToBottomIfPinned(chatEl);
+              };
+              deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep);
               while (
                 !deliveryResult.passed &&
                 !turnSignal.aborted &&
@@ -3202,7 +3225,7 @@ export class ChatController {
                 }
                 // Every round closes with a real re-check, never the previous
                 // round's evidence.
-                deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal);
+                deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep);
               }
               if (gen !== this.generation || this.abortController?.signal.aborted) return;
               if (!deliveryResult.passed && qualityRepairRounds >= MAX_QUALITY_REPAIR_ROUNDS) {
@@ -3398,20 +3421,31 @@ export class ChatController {
               }
             }
 
-            // Smart artifact display: files the agent generated this turn become
-            // clickable cards after the final answer — one card per artifact when
-            // few (open with default app / reveal in file manager), collapsing to
-            // a single project-directory card when many. Skipped on stale
-            // generations (user switched sessions while the turn was streaming).
-            // The Interrupted handler already rendered the artifact cards for
-            // an aborted turn (the engine always yields Completed right after
-            // Interrupted) — rendering them again here would duplicate the
-            // project-directory card. Normal completions still render here.
-            if (gen === this.generation && !event.payload.interrupted && (!needsDeliveryGate || deliveryResult?.passed === true) && turnArtifacts.length > 0) {
+            // Project directory card: the single entry point to everything the
+            // agent generated for this project. It must appear EXACTLY ONCE and
+            // ONLY when the project is genuinely delivered — never on an
+            // interruption (showing it mid-run made users think the task was
+            // done), and it must still appear when a project was interrupted and
+            // resumed: the final completion turn may write no new files, so the
+            // cumulative session artifact list is used rather than this turn's.
+            const deliveredPlanIndex = completionSnapshot?.plan.steps.length ?? 0;
+            const deliveredOnFinalStage = completionSnapshot !== undefined
+              && completionSnapshot.currentPlan >= deliveredPlanIndex;
+            const isPlanBuild = planCard !== undefined;
+            const projectDelivered =
+              gen === this.generation
+              && !event.payload.interrupted
+              && this.sessionArtifacts.length > 0
+              && !this.projectDirectoryShown
+              && (isPlanBuild
+                ? (planMarkedCompleted || (needsDeliveryGate && qualityPassed && deliveredOnFinalStage))
+                : (!needsDeliveryGate || qualityPassed) && hasToolWork);
+            if (projectDelivered) {
               const artifactRow = document.createElement('div');
               artifactRow.className = 'bubble-row artifact-row';
               chatEl.appendChild(artifactRow);
-              renderArtifactCards(artifactRow, turnArtifacts, effectiveWorkspace, { userRequest: userText });
+              renderArtifactCards(artifactRow, this.sessionArtifacts, effectiveWorkspace, { userRequest: userText });
+              this.projectDirectoryShown = true;
               scrollChatToBottomIfPinned(chatEl);
             }
             if (assessmentFlow && designPreviewShown) {
@@ -3517,14 +3551,10 @@ export class ChatController {
                 seg.el.textContent = cancelled;
               }
             }
-            // Files written before the interruption are still real artifacts —
-            // surface them the same way a completed turn would.
-            if (turnArtifacts.length > 0) {
-              const artifactRow = document.createElement('div');
-              artifactRow.className = 'bubble-row artifact-row';
-              chatEl.appendChild(artifactRow);
-              renderArtifactCards(artifactRow, turnArtifacts, effectiveWorkspace, { userRequest: userText });
-            }
+            // Do NOT surface the project-directory card here: an interruption
+            // (e.g. max-steps reached) means the project is NOT done. The card
+            // must only appear once on genuine completion (handled in the
+            // Completed branch), so a mid-run abort never implies success.
             scrollChatToBottomIfPinned(chatEl);
             break;
           }
@@ -3721,6 +3751,9 @@ export class ChatController {
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
     this.fileWriteVersions.clear();
+    this.sessionArtifacts = [];
+    this.sessionArtifactSeen.clear();
+    this.projectDirectoryShown = false;
     this.pausePlanCard = null;
     this.pauseAssessmentFlow = null;
     // Invalidate any background pre-compaction from the previous session.
