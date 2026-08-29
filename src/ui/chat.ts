@@ -2037,6 +2037,17 @@ export class ChatController {
       if (gen !== this.generation) return;
       const entry = pendingRows.get(toolCallId);
       if (!entry) return;
+      // A failed download must not leave a visible progress bar — tear it down
+      // and forget it (only successful downloads keep a bar). No-op if a bar
+      // was never created.
+      if (p.state === 'hidden') {
+        const existing = downloadBars.get(toolCallId);
+        if (existing) {
+          downloadBars.delete(toolCallId);
+          existing.wrap.remove();
+        }
+        return;
+      }
       const row = entry.row;
       let bar = downloadBars.get(toolCallId);
       if (!bar) {
@@ -3578,9 +3589,25 @@ export class ChatController {
             let qualityRepairRounds = 0;
             const qualityRepairIssues: string[] = [];
             const MAX_QUALITY_REPAIR_ROUNDS = 3;
+            // 交付验证步骤气泡先收集到离屏容器，回合末再整体前置到“完成
+            // 总结”之前（而非追加到末尾），避免“先声称完成、后验证”的顺序。
+            const deliveryHolder = document.createElement('div');
+            const addDeliveryBubble = (text: string, pending = false, isError = false): HTMLElement => {
+              const bubble = document.createElement('div');
+              bubble.className = 'bubble status';
+              if (pending) bubble.classList.add('pending');
+              if (isError) bubble.classList.add('error');
+              bubble.textContent = text;
+              linkifyPaths(bubble);
+              const wrapper = document.createElement('div');
+              wrapper.className = `bubble-row status${pending ? ' pending' : ''}${isError ? ' error' : ''}`;
+              wrapper.appendChild(bubble);
+              deliveryHolder.appendChild(wrapper);
+              return bubble;
+            };
             let deliveryResult: DeliveryVerificationResult | null = null;
             if (needsDeliveryGate && hasToolWork && !event.payload.interrupted && gen === this.generation) {
-              this.addStatusBubble('🧪 交付验证：正在重跑机械检查（typecheck / 测试 / 构建）…', true);
+              addDeliveryBubble('🧪 交付验证：正在重跑机械检查（typecheck / 测试 / 构建）…', true);
               scrollChatToBottomIfPinned(chatEl);
               // Surface each mechanical check as it finishes so the user can see
               // the verification actually running (instead of a static bubble

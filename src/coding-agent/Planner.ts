@@ -23,7 +23,7 @@ const SEMANTIC_ROUTE_PROMPT = `You are the routing layer for a coding assistant.
 Return ONLY one JSON object with this shape:
 {"intent":"question|research|add|modify|debug|refactor|migrate|delete|build","complexity":"simple|complex","mode":"yolo|plan|build","requiresPlan":false,"needsDeliveryGate":false,"assessment":{"riskLevel":"low|medium|high","reversibility":"reversible|partially-reversible|hard-to-reverse|irreversible","impact":"...","recommendation":"...","requiresProbe":false,"requiresConfirmation":false}}
 
-Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation only for an explicit destructive/irreversible action or a concrete safety boundary. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files.`;
+Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation only for an explicit destructive/irreversible action or a concrete safety boundary. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files. When the user message is about an image and the goal is to READ, EXTRACT, TRANSCRIBE, or DESCRIBE the text/content shown in that image (e.g. "把图片里的文字读出来", "extract the text from this screenshot", "读出图里的字"), classify it as intent "question", mode "yolo", needsDeliveryGate false — it is a read-only request, NOT a build/delivery task. Never invent a plan or workspace change for reading an image.`;
 
 /** 只有非常短、明显是客套/承接语（不含任何实质任务内容）时才跳过语义路由。
  * 其余一律交给语义路由去理解“完整语句 + 对话上下文”，而不是用一张“动作词关键词
@@ -64,7 +64,8 @@ export async function inferSemanticRoute(
         }, timeoutMs);
       }),
     ]);
-    return parseSemanticRoute(String(response.content ?? ''));
+    const decision = parseSemanticRoute(String(response.content ?? ''));
+    return decision ? applyImageReadOverride(decision, prompt) : null;
   } catch {
     return null;
   } finally {
@@ -118,6 +119,16 @@ export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
       requiresConfirmation: a.requiresConfirmation === true,
     },
   };
+}
+
+const IMAGE_READ_PATTERN = /(图|截图|照片|图像)[^。；\n]{0,25}?(文字|内容|读|提取|识别|转写)|读图|extract.{0,20}text.{0,20}(image|图)|read.{0,20}text.{0,20}(image|图)/i;
+function applyImageReadOverride(
+  decision: SemanticRouteDecision,
+  prompt: string,
+): SemanticRouteDecision {
+  if (!IMAGE_READ_PATTERN.test(prompt)) return decision;
+  // 读图 / 提取图片文字是只读请求，不应被当成构建任务或进入交付验证门禁。
+  return { ...decision, intent: 'question', complexity: 'simple', mode: 'yolo', requiresPlan: false, needsDeliveryGate: false };
 }
 
 export class Planner {

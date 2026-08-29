@@ -240,6 +240,7 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
         filename: { type: 'string', description: '可选文件名，默认从 URL 推断' },
         connections: { type: 'number', description: '并行下载线程数（默认 4，仅当服务器支持 Range 时启用分块加速；设为 1 则单线程）' },
         resume: { type: 'boolean', description: '是否支持断点续传（默认 true）' },
+        proxy: { type: 'string', description: '可选代理地址（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080），仅外部地址经此代理；内网/私有地址自动直连。留空则沿用 HTTPS_PROXY/HTTP_PROXY 等环境变量' },
       },
       required: ['url'],
     },
