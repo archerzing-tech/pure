@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process';
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
+import { stripAnsi } from '../../shared/ansi';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript } from '../../shared/backgroundCommand';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
 import { isPublicToolName } from '../../shared/toolDefs';
@@ -655,8 +656,10 @@ export class NodeToolAdapter implements ToolAdapter {
         env: spawnEnv,
       });
 
-      const stdout = (await new Response(proc.stdout).text()).trim();
-      const stderr = stripPowerShellStartupProgress((await new Response(proc.stderr).text()).trim());
+      // Strip ANSI color codes from captured output so logs / colored command
+      // output render as plain text instead of mojibake.
+      const stdout = stripAnsi((await new Response(proc.stdout).text()).trim());
+      const stderr = stripAnsi(stripPowerShellStartupProgress((await new Response(proc.stderr).text()).trim()));
       await proc.exited;
       const exitCode = proc.exitCode ?? -1;
 

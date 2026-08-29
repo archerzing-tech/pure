@@ -6,6 +6,7 @@
 // Returns (text, note) — note is ONLY set when nothing usable was extracted.
 
 import { inflateRawSync, inflateSync } from 'node:zlib';
+import { stripAnsi } from '../../shared/ansi';
 
 export interface ExtractedText {
   text: string;
@@ -31,31 +32,36 @@ function hexDigit(b: number): number {
  * step effectively catches every legacy-CJK file.
  */
 export function decodeTextBytes(bytes: Uint8Array): string {
+  let decoded: string;
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-    return new TextDecoder('utf-8').decode(bytes.subarray(3));
+    decoded = new TextDecoder('utf-8').decode(bytes.subarray(3));
+  } else if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    decoded = new TextDecoder('utf-16le').decode(bytes.subarray(2));
+  } else if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    decoded = new TextDecoder('utf-16be').decode(bytes.subarray(2));
+  } else {
+    // Strict UTF-8 first: replacement chars mean the file is NOT valid UTF-8.
+    const utf8 = new TextDecoder('utf-8', { fatal: true });
+    try {
+      decoded = utf8.decode(bytes);
+    } catch {
+      // fall through to legacy CJK decoders
+      const gbk = new TextDecoder('gb18030').decode(bytes);
+      // GB18030 decodes almost anything; Big5 only wins for its own char sets.
+      // There's no cheap round-trip check here, so prefer GB18030 (covers the
+      // common Chinese-Windows case) and fall back to Big5 only when the GBK
+      // decode produced replacement chars.
+      if (!gbk.includes('\uFFFD')) {
+        decoded = gbk;
+      } else {
+        const big5 = new TextDecoder('big5').decode(bytes);
+        decoded = big5.includes('\uFFFD') ? gbk : big5;
+      }
+    }
   }
-  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
-    return new TextDecoder('utf-16le').decode(bytes.subarray(2));
-  }
-  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
-    return new TextDecoder('utf-16be').decode(bytes.subarray(2));
-  }
-  // Strict UTF-8 first: replacement chars mean the file is NOT valid UTF-8.
-  const utf8 = new TextDecoder('utf-8', { fatal: true });
-  try {
-    return utf8.decode(bytes);
-  } catch {
-    // fall through to legacy CJK decoders
-  }
-  const gbk = new TextDecoder('gb18030').decode(bytes);
-  // GB18030 decodes almost anything; Big5 only wins for its own char sets.
-  // There's no cheap round-trip check here, so prefer GB18030 (covers the
-  // common Chinese-Windows case) and fall back to Big5 only when the GBK
-  // decode produced replacement chars.
-  if (!gbk.includes('\uFFFD')) return gbk;
-  const big5 = new TextDecoder('big5').decode(bytes);
-  if (!big5.includes('\uFFFD')) return big5;
-  return gbk;
+  // Logs / command dumps often carry ANSI color codes \u2014 strip them so text
+  // reads clean in the GUI and in the model context (see stripAnsi).
+  return stripAnsi(decoded);
 }
 
 function unescapeXmlEntities(s: string): string {

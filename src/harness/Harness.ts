@@ -161,6 +161,13 @@ export class Harness {
     return this.config.contextEngine;
   }
 
+  /** The runtime strategy selected for the current/latest turn (includes
+   * recommendedRoles / parallelRoles / complexity) — surfaced so the GUI can
+   * tell the user which subagents are planned for what. */
+  getAdaptiveStrategy(): AdaptiveStrategy | undefined {
+    return this.currentAdaptiveStrategy;
+  }
+
   async saveTranscriptCheckpoint(messages: Message[], turnCount = 1): Promise<void> {
     if (!this.stateMgr) return;
     await this.stateMgr.saveCheckpoint('transcript', messages, turnCount);
