@@ -17,7 +17,7 @@ import { ContextEngine, type ContextCompactionResult } from '../harness/ContextE
 import { isGitMutationCommand, Tags } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
-import { formatIntentPrompt, inferSemanticRoute, shouldBypassSemanticRoute } from '../coding-agent/Planner';
+import { formatIntentPrompt, inferSemanticRoute, shouldBypassSemanticRoute, classifyInsertion } from '../coding-agent/Planner';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
@@ -48,7 +48,7 @@ import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore, tauriInvoke 
 import { invoke } from '@tauri-apps/api/core';
 import { resourceDir, join, homeDir } from '@tauri-apps/api/path';
 import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
-import { renderArtifactCards, type ArtifactItem } from './artifactCards';
+import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
@@ -1368,6 +1368,19 @@ export class ChatController {
   private sessionArtifacts: ArtifactItem[] = [];
   private sessionArtifactSeen = new Set<string>();
   private projectDirectoryShown = false;
+  /** Messages the user typed while a turn was running, judged UNRELATED to the
+   * current task. They are queued and started as fresh tasks once the current
+   * task/plan reaches a terminal state (no auto-continue pending). */
+  private pendingTasks: Array<{ text: string; images: MessageImage[]; displayText: string; ts: number }> = [];
+  /** A message the user typed mid-run that IS related to the current task. Held
+   * until the interrupted round finalizes, then re-entered as a continuation of
+   * the SAME task so the model re-plans/rewrites around the new variable. */
+  private relatedInsert: { text: string; images: MessageImage[]; displayText: string } | null = null;
+  /** Guards interject() against concurrent classification (only one in flight). */
+  private insertInFlight = false;
+  /** The LLM adapter for the current turn — interject() reuses it to classify a
+   * mid-run insert as related/unrelated (set by send(); null before first run). */
+  private turnLlm?: import('../shared/types').LLMAdapter;
   // Background pre-compaction cache: the ContextEngine's LLM summarization —
   // the dominant pre-send cost once a long session crosses maxMessages — runs
   // after each completed turn (idle) instead of blocking the next send. The
@@ -1812,6 +1825,96 @@ export class ChatController {
     return this.sessionToolAdapter;
   }
 
+  /** Compact snapshot of the current task, fed to classifyInsertion so it can
+   * judge whether a mid-run insert is related. */
+  private buildInsertionContext(images?: MessageImage[]): string {
+    const parts: string[] = [];
+    const lastUser = [...this.messages].reverse().find((m) => m.role === 'user');
+    if (lastUser?.content) parts.push(`用户当前诉求：${lastUser.content.slice(0, 400)}`);
+    if (images?.length) parts.push(`（本回合含 ${images.length} 张图片）`);
+    const plan = this.activeComplexPlan;
+    if (plan && plan.steps.length > 0) {
+      parts.push(`当前计划（第 ${Math.max(1, this.activePlanNumber)} 阶段 / 共 ${plan.steps.length} 步）`);
+      for (const s of plan.steps.slice(0, 8)) {
+        parts.push(`- ${(s.action ?? s.id).slice(0, 120)}`);
+      }
+    }
+    if (this.sessionArtifacts.length > 0) {
+      parts.push(`本会话已写入文件：${this.sessionArtifacts.slice(0, 12).map((a) => a.path).join(', ')}`);
+    }
+    return parts.join('\n') || '（当前任务）';
+  }
+
+  /**
+   * Handle a message the user typed while a turn is running (interrupt-and-
+   * insert). Judges RELATED vs UNRELATED against the current task:
+   *   - RELATED   → abort the running round and re-enter the SAME task with the
+   *                 new directive, so the model re-plans/rewrites around it.
+   *   - UNRELATED → queue it (pendingTasks); it starts as a fresh task once the
+   *                 current task/plan reaches a terminal state.
+   * Falls back to "unrelated → queue" when classification is unavailable so the
+   * input is never dropped.
+   */
+  async interject(text: string, images: MessageImage[] = [], displayText = text): Promise<void> {
+    if (!text.trim()) return;
+    // Not mid-run → a normal send.
+    if (!this.isStreaming()) {
+      void this.send(text, images, displayText);
+      return;
+    }
+    if (this.insertInFlight) return;
+    this.insertInFlight = true;
+    try {
+      const llm = this.turnLlm;
+      if (!llm) {
+        this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
+        this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
+        return;
+      }
+      const cls = await classifyInsertion(llm, this.buildInsertionContext(images), text, this.abortController?.signal, images);
+      if (this.abortController?.signal?.aborted) {
+        // The turn was hard-stopped while we were classifying — don't drop the
+        // insert; queue it so it still runs as a task.
+        this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
+        this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
+        return;
+      }
+      if (cls.related) {
+        this.relatedInsert = { text, images, displayText };
+        this.addStatusBubble(`已并入这条新要求，正在重新规划…`, true, false);
+        this.abortController?.abort();
+      } else {
+        this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
+        this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
+      }
+    } finally {
+      this.insertInFlight = false;
+    }
+  }
+
+  /** Schedule the deferred dispatch just after a turn fully finalizes. */
+  private scheduleDeferred(): void {
+    window.setTimeout(() => this.dispatchDeferred(), 40);
+  }
+
+  /** After the current turn is over:
+   *  - a RELATED insert → immediately re-enter the same task with it (fold in).
+   *  - else, if an UNRELATED task is queued AND the task is terminal (no
+   *    auto-continue pending) → start it as a fresh task. */
+  private dispatchDeferred(): void {
+    if (this.relatedInsert) {
+      const ri = this.relatedInsert;
+      this.relatedInsert = null;
+      this.autoContinue.cancel(); // folding in supersedes the '继续' chain
+      void this.send(ri.text, ri.images, ri.displayText);
+      return;
+    }
+    if (this.pendingTasks.length > 0 && !this.autoContinue.pending) {
+      const t = this.pendingTasks.shift()!;
+      void this.send(t.text, t.images, t.displayText);
+    }
+  }
+
   async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false, userAttachments: import('../shared/types').MessageAttachment[] = [], attachmentViewer?: (attachment: import('../shared/types').MessageAttachment) => void) {
     const chatEl = document.getElementById('chat')!;
     wireScrollPin(chatEl);
@@ -1842,6 +1945,9 @@ export class ChatController {
       userBubble.textContent = displayUserText;
       renderUserImageAttachments(userBubble, userImages);
       for (const attachment of userAttachments) {
+        // Images already render as thumbnails above (renderUserImageAttachments
+        // from userImages) — don't double them as a full attachment card.
+        if (attachment.kind === 'image') continue;
         userBubble.appendChild(renderAttachmentCard(attachment, () => openUserAttachment?.(attachment)));
       }
     }
@@ -2033,6 +2139,11 @@ export class ChatController {
     // project scaffolding never become result cards. Collected from SUCCESSFUL
     // write/edit/replace tool results only.
     const turnArtifacts: ArtifactItem[] = [];
+    // 是否本轮真实交付了项目（projectDelivered 命中：非中断、且验证/计划/任务满足
+    // 交付条件）。仅在此时把 artifact 块持久化进 transcript——否则一个"写到一半被中断
+    // /未验证"的回合会把目录卡片写进历史，切回会话时错误重现。声明在最前以覆盖所有
+    // persistSession 调用点（含计划暂停的早期分支）。
+    let deliveredThisTurn = false;
     const artifactSeen = new Set<string>();
     const addArtifact = (path: string): void => {
       const key = path;
@@ -2388,6 +2499,7 @@ export class ChatController {
       let taskContract: TaskContract | undefined;
 
       const llm = createLLMAdapter(config);
+      this.turnLlm = llm;
       const toolAdapter = this.getOrCreateSessionToolAdapter(effectiveWorkspace, config, sendSessionId);
       this.snapshotPort = toolAdapter.getSnapshotPort?.();
       this.onSnapshotChanged?.(!!this.snapshotPort?.getLatestWriteBatch());
@@ -3227,6 +3339,7 @@ export class ChatController {
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
           displayUserText,
+          deliveredThisTurn,
         );
         return;
       }
@@ -3990,8 +4103,9 @@ export class ChatController {
               const artifactRow = document.createElement('div');
               artifactRow.className = 'bubble-row artifact-row';
               chatEl.appendChild(artifactRow);
-              renderArtifactCards(artifactRow, this.sessionArtifacts, effectiveWorkspace, { userRequest: userText });
+              renderArtifactCards(artifactRow, this.sessionArtifacts, computeProjectDir(this.sessionArtifacts) ?? effectiveWorkspace, { userRequest: userText });
               this.projectDirectoryShown = true;
+              deliveredThisTurn = true;
               scrollChatToBottomIfPinned(chatEl);
             }
             if (assessmentFlow && designPreviewShown) {
@@ -4045,6 +4159,20 @@ export class ChatController {
             endThinking();
             if (event.payload.messages) {
               interruptedMessages = mergeTranscriptWithTurn(this.messages, event.payload.messages, userText);
+              // Safeguard against a lost in-flight partial reply: the DOM's
+              // accumulated text is the ground truth for what the user actually
+              // SAW this turn. If the engine's final messages (which depends on
+              // the adapter throwing/rejecting on abort) did not carry that
+              // partial, append it now — otherwise the interrupted answer is
+              // silently dropped from history. Only touches the interrupted
+              // path, and only when the partial is genuinely missing.
+              const visiblePartial = assistantSegments.map((s) => s.text).filter(Boolean).join('\n\n').trim();
+              const partialTail = visiblePartial.slice(-48);
+              const alreadyCarried = partialTail.length > 0
+                && interruptedMessages.some((m) => m.role === 'assistant' && (m.content ?? '').includes(partialTail));
+              if (visiblePartial.length > 0 && !alreadyCarried) {
+                interruptedMessages.push({ role: 'assistant', content: visiblePartial });
+              }
               finalMessages = interruptedMessages;
               this.messages = limitMessageHistory(interruptedMessages);
               this.hasHistory = true;
@@ -4130,6 +4258,7 @@ export class ChatController {
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
           displayUserText,
+          deliveredThisTurn,
         );
       }
     } catch (err: any) {
@@ -4170,6 +4299,7 @@ export class ChatController {
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
           displayUserText,
+          deliveredThisTurn,
         );
       } else if (thinkingPhases.length > 0 && gen === this.generation) {
         const partialOutput = assistantSegments.map(segment => segment.text).filter(Boolean).join('\n\n');
@@ -4194,6 +4324,7 @@ export class ChatController {
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
           displayUserText,
+          deliveredThisTurn,
         );
       }
       const lastSeg = assistantSegments.length ? assistantSegments[assistantSegments.length - 1] : null;
@@ -4273,6 +4404,12 @@ export class ChatController {
         // No eligible signals / superseded turn: the chain is over.
         this.activePlanCardHandle?.clearAutoContinue();
       }
+      // After a turn fully finalizes (this turn still owns the controller),
+      // fold in any RELATED insert or start the next queued UNRELATED task once
+      // the current task/plan is terminal (no auto-continue pending). Defers via
+      // a timer so it never re-enters send() synchronously from inside the
+      // finally stack.
+      if (ownsTurn) this.scheduleDeferred();
     }
   }
 
@@ -4289,6 +4426,8 @@ export class ChatController {
     this.contextEngine = undefined;
     this.hasHistory = false;
     this.activeComplexPlan = null;
+    this.pendingTasks = [];
+    this.relatedInsert = null;
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;
@@ -4363,6 +4502,11 @@ export class ChatController {
     renderedAssistantTexts: string[] = [],
     artifacts: Array<{ path: string }> = [],
     visibleUserText = '',
+    /** Only persist the artifact block when this turn genuinely delivered the
+     * project (projectDelivered). Without this, an interrupted / unverified
+     * turn writes its artifacts into the transcript and the directory/file
+     * card wrongly reappears when the history session is replayed. */
+    artifactsDelivered = false,
   ) {
     if (messages.length <= 0) return;
     await this.activePlanProgressPersistence?.flush();
@@ -4447,7 +4591,7 @@ export class ChatController {
         images: m.images,
         attachments: m.attachments,
         analysis,
-        artifacts: m.role === 'assistant' && index === lastAssistantIndex && artifacts.length > 0 ? artifacts : undefined,
+        artifacts: m.role === 'assistant' && index === lastAssistantIndex && artifactsDelivered && artifacts.length > 0 ? artifacts : undefined,
         thinkingPhases: phases.length > 0 ? phases : undefined,
         toolExec: recordedToolExec,
         isPlanPause: isPauseMessage || undefined,

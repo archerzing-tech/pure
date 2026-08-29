@@ -36,6 +36,7 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Clickable paths ──
     'path.open': '打开路径',
     'path.copied': '路径已复制',
+    'path.copyFailed': '无法复制路径',
     'path.openFailed': '无法打开路径',
     'paste.openWithDefault': '用系统默认应用打开',
     'paste.uploadRejected': '已拒绝 {name}：仅支持文本、图片和文档文件',
@@ -43,6 +44,7 @@ const translations: Record<Language, Record<string, string>> = {
     'artifacts.group': '生成的文件',
     'artifacts.openFile': '用系统默认应用打开文件',
     'artifacts.openDir': '在文件管理器中打开目录',
+    'artifacts.copyDir': '复制路径',
     'artifacts.project': '项目目录',
     'artifacts.projectContents': '生成内容已收纳到此目录',
     'artifacts.dblclickHint': '点击打开文件',
@@ -822,6 +824,7 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Clickable paths ──
     'path.open': 'Open path',
     'path.copied': 'Path copied',
+    'path.copyFailed': 'Could not copy path',
     'path.openFailed': 'Could not open path',
     'paste.openWithDefault': 'Open with default app',
     'paste.uploadRejected': 'Rejected {name}: only text, images, and documents are allowed',
@@ -829,6 +832,7 @@ const translations: Record<Language, Record<string, string>> = {
     'artifacts.group': 'Generated files',
     'artifacts.openFile': 'Open file with default app',
     'artifacts.openDir': 'Reveal in file manager',
+    'artifacts.copyDir': 'Copy path',
     'artifacts.project': 'Project folder',
     'artifacts.projectContents': 'Generated content is in this folder',
     'artifacts.dblclickHint': 'Click to open',

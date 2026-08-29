@@ -1046,10 +1046,13 @@ promptEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     if (chat.isStreaming()) {
-      // Enter while generating: queue the typed message instead of cancelling.
+      // Enter while generating: interrupt-and-insert. chat.interject() judges
+      // whether the new message is RELATED to the current task (fold in +
+      // re-plan) or UNRELATED (queue it, run after the task completes), instead
+      // of the old behaviour of dumping it as a follow-up after the run.
       const text = promptEl.value.trim();
       if (text) {
-        queuedWhileStreaming = text;
+        void chat.interject(text, [], text);
         promptEl.value = '';
         promptEl.style.height = 'auto';
         promptEl.placeholder = t('input.queued');
