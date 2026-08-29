@@ -91,10 +91,13 @@ export function compileRequestWorkflow(
   // forcedMode 是外部显式覆盖，无论走语义路径还是关键词兜底都要生效。
   if (options.forcedMode) analysis.mode = options.forcedMode;
   const assessment = analysis.intent;
-  const needsDeliveryGate = options.forcedMode === 'build'
+  const isPureQuestion = semantic?.intent === 'question' && !options.forcedMode;
+  const needsDeliveryGate = !isPureQuestion && (
+    options.forcedMode === 'build'
     || analysis.mode === 'build'
     || semantic?.needsDeliveryGate === true
-    || options.continuingProjectBuild === true;
+    || options.continuingProjectBuild === true
+  );
   // Design-first applies to project builds that look like UI work. A
   // continuing build keeps its original routing decision (the marker only
   // matters for the FIRST implementation turn).

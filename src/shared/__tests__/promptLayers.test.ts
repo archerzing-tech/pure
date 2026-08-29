@@ -43,12 +43,12 @@ describe('L1 behavior contracts', () => {
   it('re-exports the always-on workflow + completion contracts', () => {
     expect(WORKFLOW_PROMPT).toContain('Proactive problem-solving workflow');
     expect(COMPLETION_PROMPT).toContain('Completion report');
-    expect(COMPLETION_PROMPT).toContain('本次完成了什么');
-    expect(COMPLETION_PROMPT).toContain('修复了什么');
-    expect(COMPLETION_PROMPT).toContain('验证结果');
+    expect(COMPLETION_PROMPT).toContain('交付依据（可信）');
+    expect(COMPLETION_PROMPT).toContain('产出与改动（可回溯）');
+    expect(COMPLETION_PROMPT).toContain('验证结论');
     expect(COMPLETION_PROMPT).toContain('通过');
     expect(COMPLETION_PROMPT).toContain('不通过');
-    expect(COMPLETION_PROMPT).toContain('真实执行过的命令');
+    expect(COMPLETION_PROMPT).toContain('实际运行的命令');
   });
 
   it('shares typo tolerance and logical-traps defense', () => {

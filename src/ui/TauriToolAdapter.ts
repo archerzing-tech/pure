@@ -84,7 +84,7 @@ export interface DownloadProgressEvent {
   total: number;
   percent: number;
   speed: number;
-  state: 'downloading' | 'paused' | 'done' | 'error';
+  state: 'downloading' | 'paused' | 'done' | 'error' | 'hidden';
   filename?: string;
   path?: string;
   via?: string;
@@ -584,13 +584,14 @@ export class TauriToolAdapter implements ToolAdapter {
                 onOutput: channel,
               })) as number;
               if (cancelled) {
+                emit({ downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: doneHolder.value?.filename });
                 return { id: toolCall.id, toolName: 'download_file', result: '下载已取消。', error: '下载已取消。', success: false, duration: Date.now() - start };
               }
               const done = doneHolder.value;
               const path = done?.path;
               const size = Number(done?.size ?? 0);
-              emit({ downloaded: size, total: size, percent: 100, speed: 0, state: 'done', path, filename: done?.filename, via: done?.via });
               if (code === 0 && path) {
+                emit({ downloaded: size, total: size, percent: 100, speed: 0, state: 'done', path, filename: done?.filename, via: done?.via });
                 return {
                   id: toolCall.id,
                   toolName: 'download_file',
@@ -599,6 +600,7 @@ export class TauriToolAdapter implements ToolAdapter {
                   duration: Date.now() - start,
                 };
               }
+              emit({ downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: done?.filename });
               return { id: toolCall.id, toolName: 'download_file', result: `下载失败（退出码 ${code}）`, success: false, duration: Date.now() - start };
             } finally {
               signal?.removeEventListener('abort', onAbort);
@@ -620,6 +622,7 @@ export class TauriToolAdapter implements ToolAdapter {
               duration: Date.now() - start,
             };
           }
+          downloadProgressListener?.(toolCall.id, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: doneFb?.filename });
           return { id: toolCall.id, toolName: 'download_file', result: `下载失败（退出码 ${exec.exitCode}）`, success: false, duration: Date.now() - start };
         }
         case 'git_diff': {
