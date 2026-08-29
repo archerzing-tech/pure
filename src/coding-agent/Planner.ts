@@ -121,6 +121,88 @@ export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
   };
 }
 
+/** Result of judging whether a mid-run insert is related to the current task. */
+export interface InsertionClassification {
+  /** True → fold into the current task & re-plan; False → queue as a separate task. */
+  related: boolean;
+  reason: string;
+}
+
+const INSERTION_CLASSIFY_PROMPT = `You decide whether a NEW user message, sent while an agent is ALREADY working on a task, is RELATED to that task or NOT.
+
+The current task the agent is working on:
+<current_task>
+{{CONTEXT}}
+</current_task>
+
+The new message the user just inserted mid-run:
+<new_message>
+{{PROMPT}}
+</new_message>
+
+Judgment:
+- RELATED: the new message changes, refines, constrains, fixes, or directly extends the current task — e.g. a tweak to the deliverable being built ("把首页改成深色"), a correction, an added requirement, a comment about the exact file/feature in progress.
+- UNRELATED: the new message is a separate, independent request that does not touch the current task — e.g. a brand-new question, a lookup, a different file/feature not being worked on, a whole different task.
+
+Return ONLY one JSON object:
+{"related":true|false,"reason":"<one short line>"}`;
+
+/**
+ * Lightweight single-call judgment of whether a message the user inserts while
+ * the agent is mid-run is related to the current task. Mirrors
+ * inferSemanticRoute's (signal + timeout + JSON-parse) shape. On any failure,
+ * timeout, or parse miss it defaults to RELATED so the new input is never
+ * silently dropped — folding it in lets the model reconcile it during re-plan.
+ */
+export async function classifyInsertion(
+  llm: LLMAdapter,
+  context: string,
+  prompt: string,
+  signal?: AbortSignal,
+  images?: MessageImage[],
+  timeoutMs = 8_000,
+): Promise<InsertionClassification> {
+  const fallback: InsertionClassification = { related: true, reason: 'classification unavailable; treated as related' };
+  if (!prompt.trim() || signal?.aborted) return fallback;
+  const controller = new AbortController();
+  const forwardAbort = (): void => controller.abort();
+  signal?.addEventListener('abort', forwardAbort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const system = INSERTION_CLASSIFY_PROMPT
+      .replace('{{CONTEXT}}', context.slice(0, 3_200))
+      .replace('{{PROMPT}}', prompt.slice(0, 2_000));
+    const request: Message[] = [
+      { role: 'system', content: system },
+      { role: 'user', content: prompt, images },
+    ];
+    const response = await Promise.race([
+      llm.complete(request, [], controller.signal),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('insertion classify timeout'));
+        }, timeoutMs);
+      }),
+    ]);
+    const raw = String(response.content ?? '');
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]) as { related?: unknown; reason?: unknown };
+      if (parsed && typeof parsed.related === 'boolean') {
+        return { related: parsed.related, reason: typeof parsed.reason === 'string' ? parsed.reason : '' };
+      }
+    }
+    return fallback;
+  } catch {
+    return fallback;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    signal?.removeEventListener('abort', forwardAbort);
+    controller.abort();
+  }
+}
+
 const IMAGE_READ_PATTERN = /(图|截图|照片|图像)[^。；\n]{0,25}?(文字|内容|读|提取|识别|转写)|读图|extract.{0,20}text.{0,20}(image|图)|read.{0,20}text.{0,20}(image|图)/i;
 function applyImageReadOverride(
   decision: SemanticRouteDecision,

@@ -3,8 +3,8 @@
 // and the logical-trap detection that primes premise verification.
 
 import { describe, it, expect } from 'bun:test';
-import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
-import type { LLMAdapter } from '../../shared/types';
+import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, classifyInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
+import type { LLMAdapter, Message } from '../../shared/types';
 
 describe('Planner', () => {
   it('classifies straightforward tasks as simple (no plan, yolo mode)', () => {
@@ -473,5 +473,41 @@ describe('detectFictionIntent', () => {
   it('assessIntent propagates the detection', () => {
     expect(assessIntent('不用管事实，写一个架空的故事').skipPlausibilityReview).toBe(true);
     expect(assessIntent('规划一条从西安到上海的骑行路线').skipPlausibilityReview).toBe(false);
+  });
+});
+
+describe('classifyInsertion', () => {
+  /** Build an LLMAdapter whose complete() returns the given content. */
+  function mockLlm(content: string): LLMAdapter {
+    const fn = async (_messages: Message[], _tools: unknown[], _signal?: AbortSignal) =>
+      ({ content, messages: _messages } as never);
+    return { complete: fn } as unknown as LLMAdapter;
+  }
+
+  it('returns related true for a related insert', async () => {
+    const cls = await classifyInsertion(mockLlm('{"related":true,"reason":"tweak to the page being built"}'), '正在构建一个网页', '把首页改成深色');
+    expect(cls.related).toBe(true);
+    expect(cls.reason).toContain('tweak');
+  });
+
+  it('returns related false for an unrelated insert', async () => {
+    const cls = await classifyInsertion(mockLlm('{"related":false,"reason":"separate lookup"}'), '正在构建一个网页', '查一下北京的天气');
+    expect(cls.related).toBe(false);
+  });
+
+  it('defaults to related when the model output cannot be parsed', async () => {
+    const cls = await classifyInsertion(mockLlm('not json at all'), 'context', 'anything');
+    expect(cls.related).toBe(true); // never drop the user's input
+  });
+
+  it('defaults to related when the LLM throws', async () => {
+    const bad = { complete: async () => { throw new Error('boom'); } } as unknown as LLMAdapter;
+    const cls = await classifyInsertion(bad, 'context', 'anything');
+    expect(cls.related).toBe(true);
+  });
+
+  it('returns related true for an empty prompt (no-op fallback)', async () => {
+    const cls = await classifyInsertion(mockLlm('{"related":false}'), 'context', '');
+    expect(cls.related).toBe(true);
   });
 });
