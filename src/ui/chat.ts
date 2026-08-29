@@ -9,6 +9,7 @@ import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
+import { mergeConventions } from '../shared/conventions';
 import { compileRequestWorkflow } from '../shared/requestWorkflow';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { CodingAgent } from '../coding-agent/CodingAgent';
@@ -44,6 +45,8 @@ import { attachPlanPauseActions } from './planPauseActions';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
 import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
+import { invoke } from '@tauri-apps/api/core';
+import { resourceDir, join, homeDir } from '@tauri-apps/api/path';
 import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
 import { renderArtifactCards, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
@@ -540,7 +543,49 @@ function buildModelIdentity(config: PureConfig | null): { provider: string; mode
   return model ? { provider, model } : undefined;
 }
 
-function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null, toolDefinitions: ToolDefinition[] = [], imageGeneration = false): string {
+/** Load + merge the two AGENTS.md layers for the Tauri GUI. App-level defaults to
+ * the app resource dir; user-level comes from the active workspace (optional).
+ * Returns '' outside the Tauri runtime or on any read failure (best-effort). */
+async function loadGuiConventions(userWorkspace?: string): Promise<string> {
+  if (!isTauriRuntime()) return '';
+  try {
+    const appRoot = await resourceDir();
+    const globalRoot = await join(await homeDir(), '.pure');
+    const read = async (root: string): Promise<string | null> => {
+      try {
+        return (await invoke<string>('read_file', { workspace: root, path: 'AGENTS.md' })) || null;
+      } catch {
+        return null;
+      }
+    };
+    const [appMd, globalMd, userMd] = await Promise.all([
+      read(appRoot),
+      read(globalRoot),
+      userWorkspace ? read(userWorkspace) : Promise.resolve(null),
+    ]);
+    // Seed ~/.pure/AGENTS.md from the app default on first run (best-effort),
+    // so a user-editable global conventions file exists after install.
+    let effectiveGlobal = globalMd;
+    if (!effectiveGlobal && appMd) {
+      try {
+        await invoke<string>('write_file', {
+          workspace: globalRoot,
+          path: 'AGENTS.md',
+          content: appMd,
+        });
+        effectiveGlobal = appMd;
+      } catch {
+        /* ignore seeding failure */
+      }
+    }
+    const appPlusGlobal = mergeConventions(appMd, effectiveGlobal);
+    return mergeConventions(appPlusGlobal || null, userMd);
+  } catch {
+    return '';
+  }
+}
+
+function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null, toolDefinitions: ToolDefinition[] = [], imageGeneration = false, conventions?: string): string {
   return promptAssembler.buildSystemPrompt({
     surface: 'gui',
     capabilities: buildGuiCapabilities(hasWorkspace, temporaryWorkspace, { imageGeneration }),
@@ -553,6 +598,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
     shell: buildShellContextLine(),
     skills: config?.hubSkills,
     budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model),
+    conventions,
   });
 }
 
@@ -2418,7 +2464,8 @@ export class ChatController {
             ...DYNAMIC_CAPABILITY_TOOL_DEFS,
             ...(imageGen ? [IMAGE_GEN_TOOL_DEF] : []),
           ];
-      systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen);
+      const conventions = await loadGuiConventions(effectiveWorkspace || undefined);
+      systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen, conventions);
       this.contextEngine = codingAgent.getHarness().getContextEngine();
 
       // ── Logical-trap pre-scan (runs in plain-chat AND workspace mode):

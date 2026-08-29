@@ -264,6 +264,17 @@ export class AgentLoopEngine {
       let content = '';
       let reasoningText = '';
       let toolCalls: ToolCall[] = [];
+      // Mid-stream interruptions (Ctrl+C / budget-stop) leave the in-flight
+      // answer only in `content` — the push below (after a completed stream)
+      // never runs, so the partial text was never persisted and interrupted
+      // turns vanished from history. Flush it (text only, never while a tool
+      // call is in flight, since toolCalls stays empty until the `done` chunk)
+      // so resume/restore keeps what the user already saw.
+      const flushPartialAssistant = (): void => {
+        if (content.length > 0 && toolCalls.length === 0) {
+          messages.push({ role: 'assistant' as const, content });
+        }
+      };
       // Set as soon as the stream starts emitting a tool call. A timeout mid
       // tool-call-argument can't be safely resumed (the partial call would be
       // corrupt), so the auto-resume branch below only fires for plain text.
@@ -344,6 +355,7 @@ export class AgentLoopEngine {
         }
       } catch (err: any) {
         if (ctx.signal?.aborted) {
+          flushPartialAssistant();
           yield { type: 'Interrupted', payload: { reason: 'aborted', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
           interrupted = true;
           break;
@@ -371,6 +383,7 @@ export class AgentLoopEngine {
           // memories (stop → error_pattern now, retry → on eventual success).
           yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
           if (action.kind === 'stop') {
+            flushPartialAssistant();
             yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }

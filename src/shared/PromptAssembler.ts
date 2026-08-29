@@ -66,6 +66,15 @@ export interface PromptAssemblyContext {
   traceId?: string;
   sessionId?: string;
   turnId?: string;
+  /**
+   * Pre-merged application + user layer AGENTS.md conventions, already read and
+   * merged by the caller (the caller owns file I/O, which differs per surface:
+   * node CLI reads from disk, the Tauri GUI reads via the host). When present it
+   * is injected as a pinned system fragment so project conventions are always
+   * visible. Two-layer semantics (user overrides app, else inherit) are applied
+   * by the caller via mergeConventions().
+   */
+  conventions?: string;
 }
 
 export interface PromptFragment {
@@ -283,6 +292,9 @@ export class PromptAssembler {
     const capabilities = context.capabilities.trim();
     return [
       fragment('system_core', SYSTEM_CORE_PROMPT, 120, true),
+      ...(context.conventions
+        ? [fragment('project_conventions', `<project_conventions>\n${context.conventions}\n</project_conventions>`, 250, true)]
+        : []),
       fragment('model_identity', buildModelIdentity(context.modelIdentity), 118, true),
       fragment('capabilities', `<capabilities>${capabilities ? `\n${capabilities}` : ''}\n</capabilities>`, 75),
       fragment('work_invariant', 'Work step by step. Read before you write. Verify after you change. Be concise.', 110, true),
