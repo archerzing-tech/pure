@@ -1785,6 +1785,51 @@ fn hex_digit(b: u8) -> u8 {
     }
 }
 
+/// Strip ANSI escape sequences and C0 control characters (keep \n \r \t) from
+/// text that came out of a terminal or a log — color codes, clear-line, and OSC
+/// sequences otherwise render as mojibake in the GUI and pollute the context.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // ESC → consume an ANSI sequence (CSI `[5*…final`, OSC/DCS/APC/SOS/PM
+            // `]…BEL/ST` string sequences, or a single following char).
+            '\u{1b}' => {
+                match chars.peek().copied() {
+                    Some('[') => {
+                        chars.next();
+                        // CSI: params `[0-?]*`, intermediates `[ -/]*`, then a single final `[@-~]`.
+                        while let Some(&n) = chars.peek() {
+                            if n >= '\u{30}' && n <= '\u{3f}' { chars.next(); } else { break; }
+                        }
+                        while let Some(&n) = chars.peek() {
+                            if n >= '\u{20}' && n <= '\u{2f}' { chars.next(); } else { break; }
+                        }
+                        chars.next(); // final byte
+                    }
+                    Some(']') | Some('P') | Some('_') | Some('^') | Some('X') => {
+                        chars.next();
+                        // OSC (`]`), DCS (`P`), APC (`_`), SOS (`^`), PM (`X`) —
+                        // string sequences terminated by BEL (\u{07}) or ST (ESC \).
+                        while let Some(&n) = chars.peek() {
+                            if n == '\u{07}' || n == '\u{1b}' { break; }
+                            chars.next();
+                        }
+                        if chars.peek() == Some(&'\u{07}') { chars.next(); }
+                        else if chars.peek() == Some(&'\u{1b}') { chars.next(); chars.next(); }
+                    }
+                    _ => { chars.next(); }
+                }
+            }
+            '\n' | '\r' | '\t' => out.push(c),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => { /* other C0 control → drop */ }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Decode plain-text bytes with BOM detection and a CJK-friendly fallback
 /// chain: UTF-8 strict → GB18030 (covers GBK, the ANSI default on Chinese
 /// Windows) → Big5 → lossy Latin-1. encoding_rs decode never fails, so the
@@ -2422,7 +2467,9 @@ fn extract_file_text(bytes: &[u8], path: &std::path::Path) -> (String, String) {
     if looks_binary(bytes) {
         return (String::new(), format!("二进制文件（{}），不是文本文件，无法读取内容。", describe_binary(bytes)));
     }
-    (decode_text_bytes(bytes), String::new())
+    // Strip ANSI escape sequences so logs / colored output read as plain text
+    // in the GUI (see strip_ansi).
+    (strip_ansi(&decode_text_bytes(bytes)), String::new())
 }
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2690,13 +2737,13 @@ async fn execute_command(workspace: String, command: String, proxy_url: Option<S
     };
 
     #[cfg(windows)]
-    let stderr = strip_powershell_startup_progress(String::from_utf8_lossy(&output.stderr).to_string());
+    let stderr = strip_ansi(&strip_powershell_startup_progress(String::from_utf8_lossy(&output.stderr).to_string()));
     #[cfg(not(windows))]
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr).to_string());
 
     Ok(serde_json::json!({
         "exitCode": output.status.code().unwrap_or(-1),
-        "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+        "stdout": strip_ansi(&String::from_utf8_lossy(&output.stdout).to_string()),
         "stderr": stderr,
     }))
 }

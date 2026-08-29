@@ -662,6 +662,9 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
   const restoreToken = ++sessionRestoreToken;
   const isCurrentRestore = (): boolean => restoreToken === sessionRestoreToken;
   enterChatMode();
+  // Multi-agent floating cards are ephemeral and session-scoped: clear them on
+  // every session load so the previous session's cards never bleed into this one.
+  document.getElementById('agent-float')?.replaceChildren();
   chat.loadFromStorage(snapshot);
 
   const chatEl = document.getElementById('chat')!;
