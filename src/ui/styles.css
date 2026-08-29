@@ -925,11 +925,11 @@ body {
      inside this box anyway; fixed overlays (mermaid viewer, paste viewer)
      are mounted on document.body, not inside #chat. */
   box-sizing: border-box;
-  /* Constant right gutter (320px) reserved for the ephemeral multi-agent cards
-     AND the context-panel overlay. Constant → the chat column width is stable
-     and never reflows when those UI elements appear/disappear, and they slide
-     over the gutter instead of covering the conversation. */
-  padding: 48px 328px 20px 48px;
+  /* Right padding is minimal: both the floating multi-agent cards (position:
+     fixed) and the context-panel overlay (position: absolute) slide over the
+     chat area without needing it to reserve space. The old 328px gutter
+     compressed the transcript unnecessarily. */
+  padding: 48px 48px 20px 48px;
   display: none;
   flex-direction: column;
   gap: 16px;
@@ -5635,7 +5635,7 @@ select:focus-visible,
 
 #right-settings-btn {
   top: 12px;
-  right: 328px;
+  right: 12px;
   transition: right 0.35s var(--ease-out), opacity 0.2s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
 }
 
@@ -5803,7 +5803,7 @@ select:focus-visible,
   box-sizing: border-box;
   /* Same constant right gutter as the base rule — keeps the chat width stable
      and leaves room for the multi-agent cards / context panel overlay. */
-  padding: 38px 328px 26px 32px;
+  padding: 38px 32px 26px 32px;
   gap: 20px;
 }
 
@@ -6031,8 +6031,8 @@ select:focus-visible,
   }
 
   #chat {
-    padding-left: 18px;
-    padding-right: 18px;
+    padding-left: 14px;
+    padding-right: 14px;
   }
 
   #input-bar {
