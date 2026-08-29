@@ -9,6 +9,7 @@ import { open, stat, writeFile, readFile, rename, unlink, mkdir, rm } from 'node
 import { tmpdir, homedir } from 'node:os';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import * as tls from 'node:tls';
 import { spawn } from 'node:child_process';
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
@@ -1652,9 +1653,87 @@ export class NodeToolAdapter implements ToolAdapter {
     return { ...headers, ...(extra ?? {}) };
   }
 
+  // ── 代理 / 内网识别 ──
+  // 下载应区分「内网直连」与「外网走代理」：命中私有地址或 NO_PROXY 的 URL 直接
+  // 连接，其余外部地址才经过代理（命令行显式 proxy 参数 → 标准环境变量）。
+
+  /** 判断主机是否为私有/内网地址（直连，不经代理）。 */
+  private isPrivateHost(host: string): boolean {
+    const h = host.toLowerCase();
+    if (h === 'localhost' || h === '::1' || h.endsWith('.localhost') || h.endsWith('.internal') || h.endsWith('.local')) return true;
+    const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (m) {
+      const a = Number(m[1]);
+      const b = Number(m[2]);
+      if (a === 10) return true;
+      if (a === 127) return true;
+      if (a === 169 && b === 254) return true;
+      if (a === 172 && b >= 16 && b <= 31) return true;
+      if (a === 192 && b === 168) return true;
+      if (a === 100 && b >= 64 && b <= 127) return true;
+      if (a === 0) return true;
+    }
+    return false;
+  }
+
+  /** 主机是否匹配 NO_PROXY（支持域名后缀与 `*`）。 */
+  private hostMatchesNoProxy(host: string, noProxy: string): boolean {
+    const h = host.toLowerCase();
+    return noProxy
+      .split(/[,\s]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .some((entry) => {
+        const e = entry.toLowerCase();
+        if (e === '*') return true;
+        if (e.startsWith('.')) return h === e.slice(1) || h.endsWith(e);
+        return h === e;
+      });
+  }
+
+  /** 解析下载应使用的代理：显式 proxy 参数优先，其次环境变量；内网/匹配
+   * NO_PROXY 时返回空串（直连）。返回 undefined 表示无法用标准代理（如 SOCKS）。 */
+  private resolveDownloadProxy(targetUrl: string, proxyArg?: string): { proxy: string; bypass: boolean } {
+    let proxy = (proxyArg && proxyArg.trim()) || '';
+    if (!proxy) {
+      for (const key of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) {
+        const v = process.env[key]?.trim();
+        if (v) {
+          proxy = v;
+          break;
+        }
+      }
+    }
+    const noProxy = process.env['NO_PROXY'] || process.env['no_proxy'] || '';
+    let host = '';
+    try {
+      host = new URL(targetUrl).hostname;
+    } catch {
+      /* ignore malformed url */
+    }
+    const bypass = !proxy || this.isPrivateHost(host) || this.hostMatchesNoProxy(host, noProxy);
+    return { proxy: bypass ? '' : proxy, bypass };
+  }
+
+  /** 将代理字符串规范为 URL；SOCKS 代理返回 'socks'（原生请求无法处理，需交给
+   * curl/aria2c），非法值返回 null。 */
+  private parseProxy(proxy: string): { url: URL; scheme: string } | 'socks' | null {
+    try {
+      const u = new URL(proxy);
+      if (u.protocol === 'socks5:' || u.protocol === 'socks5h:' || u.protocol === 'socks4:' || u.protocol === 'socks4a:') {
+        return 'socks';
+      }
+      if (['http:', 'https:'].includes(u.protocol)) return { url: u, scheme: u.protocol };
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   private requestOnce(
     urlStr: string,
     opts: { method?: string; headers?: Record<string, string>; signal?: AbortSignal },
+    proxy?: string,
   ): Promise<http.IncomingMessage> {
     return new Promise((resolve, reject) => {
       let u: URL;
@@ -1664,40 +1743,106 @@ export class NodeToolAdapter implements ToolAdapter {
         reject(new Error(`无效 URL: ${urlStr}`));
         return;
       }
+      const headers = this.downloadHeaders(urlStr, opts.headers);
+      const onResponse = (res: http.IncomingMessage): void => {
+        const status = res.statusCode ?? 0;
+        if (status >= 300 && status < 400 && res.headers.location) {
+          res.resume();
+          const next = new URL(res.headers.location, u).toString();
+          this.requestOnce(next, opts, proxy).then(resolve, reject);
+          return;
+        }
+        resolve(res);
+      };
+      const pu = proxy ? this.parseProxy(proxy) : null;
+      // SOCKS 代理原生请求无法处理 —— 返回明确错误，让下载链回退到 curl/aria2c。
+      if (pu === 'socks') {
+        reject(new Error('SOCKS 代理需由 curl/aria2c 处理'));
+        return;
+      }
+      if (pu && u.protocol === 'http:') {
+        // HTTP-over-HTTP 正向代理：请求行带绝对 URL，Host 指向目标主机。
+        const req = http.request(
+          {
+            protocol: pu.url.protocol,
+            host: pu.url.hostname,
+            port: pu.url.port || (pu.url.protocol === 'https:' ? 443 : 80),
+            method: opts.method ?? 'GET',
+            path: urlStr,
+            headers: { ...headers, Host: u.host },
+            signal: opts.signal,
+          },
+          onResponse,
+        );
+        req.setTimeout(60_000, () => req.destroy(new Error('下载超时（长时间无数据）')));
+        req.on('error', reject);
+        req.end();
+        return;
+      }
+      if (pu && u.protocol === 'https:') {
+        // HTTPS 经 HTTP 代理：先 CONNECT 隧道，再在隧道上做 TLS 握手。
+        const connectReq = http.request({
+          host: pu.url.hostname,
+          port: pu.url.port || (pu.url.protocol === 'https:' ? 443 : 80),
+          method: 'CONNECT',
+          path: `${u.hostname}:${u.port || 443}`,
+          headers: { Host: `${u.hostname}:${u.port || 443}` },
+          signal: opts.signal,
+        });
+        connectReq.on('connect', (res, socket) => {
+          if ((res.statusCode ?? 0) !== 200) {
+            socket.destroy();
+            reject(new Error(`代理 CONNECT 失败（${res.statusCode}）`));
+            return;
+          }
+          const agent = new https.Agent({});
+          // 在 CONNECT 隧道上复用 socket 做 TLS 握手（原生 AgentOptions 类型未暴露
+          // createConnection，运行时 http.Agent 支持）。
+          (agent as unknown as { createConnection: () => tls.TLSSocket }).createConnection = () =>
+            tls.connect({ socket, servername: u.hostname, rejectUnauthorized: true });
+          const req = https.request(
+            {
+              host: u.hostname,
+              port: u.port || 443,
+              path: u.pathname + u.search,
+              method: opts.method ?? 'GET',
+              headers,
+              agent,
+              signal: opts.signal,
+            },
+            onResponse,
+          );
+          req.setTimeout(60_000, () => req.destroy(new Error('下载超时（长时间无数据）')));
+          req.on('error', reject);
+          req.end();
+        });
+        connectReq.on('error', reject);
+        connectReq.end();
+        return;
+      }
+      // 直连（内网或无需代理）。
       const lib = u.protocol === 'https:' ? https : http;
       const req = lib.request(
         u,
         {
           method: opts.method ?? 'GET',
-          headers: this.downloadHeaders(urlStr, opts.headers),
+          headers,
           signal: opts.signal,
         },
-        (res) => {
-          const status = res.statusCode ?? 0;
-          if (status >= 300 && status < 400 && res.headers.location) {
-            res.resume();
-            const next = new URL(res.headers.location, u).toString();
-            this.requestOnce(next, opts).then(resolve, reject);
-            return;
-          }
-          resolve(res);
-        },
+        onResponse,
       );
-      // Stall guard: a server that stops sending data (no bytes for 60s) is
-      // treated as a failure so the caller can fall through to the next
-      // download method instead of hanging forever.
       req.setTimeout(60_000, () => req.destroy(new Error('下载超时（长时间无数据）')));
       req.on('error', reject);
       req.end();
     });
   }
 
-  private async getHead(url: string, signal?: AbortSignal): Promise<{ length: number; acceptRanges: boolean; disposition?: string }> {
+  private async getHead(url: string, signal?: AbortSignal, proxy?: string): Promise<{ length: number; acceptRanges: boolean; disposition?: string }> {
     try {
-      const res = await this.requestOnce(url, { method: 'HEAD', signal });
+      const res = await this.requestOnce(url, { method: 'HEAD', signal }, proxy);
       if ((res.statusCode ?? 0) >= 400) {
         res.resume();
-        const r2 = await this.requestOnce(url, { method: 'GET', headers: { Range: 'bytes=0-0' }, signal });
+        const r2 = await this.requestOnce(url, { method: 'GET', headers: { Range: 'bytes=0-0' }, signal }, proxy);
         const len = Number((r2.headers['content-range']?.split('/')[1] ?? r2.headers['content-length'] ?? 0) || 0);
         const ar = r2.headers['accept-ranges'] === 'bytes' || !!r2.headers['content-range'];
         const disposition = parseContentDispositionFilename(r2.headers['content-disposition']);
@@ -1714,8 +1859,8 @@ export class NodeToolAdapter implements ToolAdapter {
     }
   }
 
-  private async getRangeBuffer(url: string, start: number, end: number, signal?: AbortSignal): Promise<Buffer> {
-    const res = await this.requestOnce(url, { method: 'GET', headers: { Range: `bytes=${start}-${end}` }, signal });
+  private async getRangeBuffer(url: string, start: number, end: number, signal?: AbortSignal, proxy?: string): Promise<Buffer> {
+    const res = await this.requestOnce(url, { method: 'GET', headers: { Range: `bytes=${start}-${end}` }, signal }, proxy);
     if ((res.statusCode ?? 200) >= 400) {
       res.resume();
       throw new Error(`HTTP ${res.statusCode}`);
@@ -1734,6 +1879,7 @@ export class NodeToolAdapter implements ToolAdapter {
     emit: (p: Partial<DownloadProgress>) => void,
     total: number,
     filename: string,
+    proxy?: string,
   ): Promise<number> {
     const fd = await open(outPath, startOffset > 0 ? 'r+' : 'w');
     let written = startOffset;
@@ -1749,7 +1895,7 @@ export class NodeToolAdapter implements ToolAdapter {
         if (written > 0) headers.Range = `bytes=${written}-`;
         let res: http.IncomingMessage;
         try {
-          res = await this.requestOnce(url, { method: 'GET', headers, signal: controller.signal });
+          res = await this.requestOnce(url, { method: 'GET', headers, signal: controller.signal }, proxy);
         } catch (err) {
           if (controller.paused && !controller.aborted) {
             await controller.waitWhilePaused();
@@ -1806,6 +1952,7 @@ export class NodeToolAdapter implements ToolAdapter {
     controller: DownloadController,
     emit: (p: Partial<DownloadProgress>) => void,
     filename: string,
+    proxy?: string,
   ): Promise<number> {
     const chunkSize = Math.ceil(total / connections);
     const fd = await open(outPath, 'w');
@@ -1815,10 +1962,10 @@ export class NodeToolAdapter implements ToolAdapter {
       if (done[i]) return;
       const s = i * chunkSize;
       const e = Math.min(total - 1, s + chunkSize - 1);
-      let buf: Buffer;
-      try {
-        buf = await this.getRangeBuffer(url, s, e, controller.signal);
-      } catch (err) {
+       let buf: Buffer;
+       try {
+         buf = await this.getRangeBuffer(url, s, e, controller.signal, proxy);
+       } catch (err) {
         if (controller.paused && !controller.aborted) return;
         throw err;
       }
@@ -1843,10 +1990,10 @@ export class NodeToolAdapter implements ToolAdapter {
   private async downloadNative(
     url: string,
     outPath: string,
-    opts: { connections: number; resume: boolean; controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string },
+    opts: { connections: number; resume: boolean; controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string; proxy?: string },
   ): Promise<{ ok: boolean; size?: number; via?: string; error?: string; expected?: number }> {
     try {
-      const head = await this.getHead(url, opts.controller.signal);
+      const head = await this.getHead(url, opts.controller.signal, opts.proxy);
       const total = head.length ?? -1;
       const expected = total > 0 ? total : undefined;
       let startOffset = 0;
@@ -1863,17 +2010,17 @@ export class NodeToolAdapter implements ToolAdapter {
       const chunked = canRange && total > 1024 * 1024 && opts.connections > 1 && startOffset === 0;
       if (chunked) {
         try {
-          const size = await this.downloadChunked(url, outPath, total, opts.connections, opts.controller, opts.emit, opts.filename);
+          const size = await this.downloadChunked(url, outPath, total, opts.connections, opts.controller, opts.emit, opts.filename, opts.proxy);
           return { ok: true, size, via: 'native-chunked', expected };
         } catch (e: unknown) {
           if (opts.controller.paused || opts.controller.aborted) {
-            const size = await this.streamRange(url, outPath, (await stat(outPath)).size, opts.controller, opts.emit, total, opts.filename);
-            return { ok: true, size, via: 'native-resume', expected };
+          const size = await this.streamRange(url, outPath, (await stat(outPath)).size, opts.controller, opts.emit, total, opts.filename, opts.proxy);
+          return { ok: true, size, via: 'native-resume', expected };
           }
           return { ok: false, error: (e as Error)?.message };
         }
       }
-      const size = await this.streamRange(url, outPath, startOffset, opts.controller, opts.emit, total, opts.filename);
+      const size = await this.streamRange(url, outPath, startOffset, opts.controller, opts.emit, total, opts.filename, opts.proxy);
       return { ok: true, size, via: startOffset > 0 ? 'native-resume' : 'native', expected };
     } catch (e: unknown) {
       return { ok: false, error: (e as Error)?.message };
@@ -1882,7 +2029,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
   /** Infer a download file name: URL basename first, refined by the server's
    * Content-Disposition header when present (best-effort, 8s budget). */
-  private async inferDownloadFilename(url: string): Promise<string> {
+  private async inferDownloadFilename(url: string, proxy?: string): Promise<string> {
     let filename = '';
     try {
       filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || '');
@@ -1890,7 +2037,7 @@ export class NodeToolAdapter implements ToolAdapter {
       /* ignore */
     }
     try {
-      const head = await this.getHead(url, AbortSignal.timeout(8000));
+      const head = await this.getHead(url, AbortSignal.timeout(8000), proxy);
       if (head.disposition) filename = head.disposition;
     } catch {
       /* best-effort */
@@ -1907,18 +2054,62 @@ export class NodeToolAdapter implements ToolAdapter {
     });
   }
 
+  /** 为 curl/aria2c/wget 构造带代理的环境变量（直连时返回 undefined，沿用原环境）。 */
+  private proxyEnv(proxy?: string): NodeJS.ProcessEnv | undefined {
+    if (!proxy) return undefined;
+    return {
+      ...process.env,
+      HTTPS_PROXY: proxy,
+      HTTP_PROXY: proxy,
+      ALL_PROXY: proxy,
+      https_proxy: proxy,
+      http_proxy: proxy,
+      all_proxy: proxy,
+    };
+  }
+
+  /** 轮询部分文件大小，向 UI 推送实时进度（curl/aria2c/wget 不原生上报进度，
+   * 故通过 stat 落盘文件估算）。返回停止函数。 */
+  private startDownloadProgressPoller(
+    outPath: string,
+    controller: DownloadController,
+    emit: (p: Partial<DownloadProgress>) => void,
+    filename: string,
+  ): () => void {
+    const timer = setInterval(() => {
+      if (controller.aborted) {
+        clearInterval(timer);
+        return;
+      }
+      try {
+        const size = statSync(outPath).size;
+        emit({ downloaded: size, total: -1, percent: -1, speed: 0, state: 'downloading', filename });
+      } catch {
+        /* 部分文件尚未创建 */
+      }
+    }, 300);
+    return () => clearInterval(timer);
+  }
+
   private async downloadViaCurl(
     url: string,
     outPath: string,
-    opts: { resume: boolean; controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string },
+    opts: { resume: boolean; controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string; proxy?: string },
   ): Promise<{ ok: boolean; size?: number; error?: string }> {
     const hasCurl = await this.commandExists('curl');
     if (!hasCurl) return { ok: false, error: 'curl 不可用' };
     return new Promise((resolve) => {
-      const args = ['-L', '--retry', '3', '--retry-delay', '1', '-C', '-', '-o', outPath, url];
-      const child = spawn('curl', args, { signal: opts.controller.signal } as { signal: AbortSignal });
-      child.on('error', (e) => resolve({ ok: false, error: e.message }));
+      const args = ['-L', '--retry', '3', '--retry-delay', '1', '-C', '-'];
+      if (opts.proxy) args.push('--proxy', opts.proxy);
+      args.push('-o', outPath, url);
+      const child = spawn('curl', args, { signal: opts.controller.signal, env: this.proxyEnv(opts.proxy) } as { signal: AbortSignal; env: NodeJS.ProcessEnv });
+      const stop = this.startDownloadProgressPoller(outPath, opts.controller, opts.emit, opts.filename);
+      child.on('error', (e) => {
+        stop();
+        resolve({ ok: false, error: e.message });
+      });
       child.on('close', async (code) => {
+        stop();
         if (code === 0) {
           try {
             const st = await stat(outPath);
@@ -1936,7 +2127,7 @@ export class NodeToolAdapter implements ToolAdapter {
   private async downloadViaAria2(
     url: string,
     outPath: string,
-    opts: { controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string },
+    opts: { controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string; proxy?: string },
   ): Promise<{ ok: boolean; size?: number; error?: string }> {
     const hasAria2 = await this.commandExists('aria2c');
     if (!hasAria2) return { ok: false, error: 'aria2c 不可用' };
@@ -1945,11 +2136,17 @@ export class NodeToolAdapter implements ToolAdapter {
         '-x', '8', '-s', '8', '-k', '1M', '-c',
         '--max-tries=5', '--timeout=30', '--retry-wait=3',
         '--file-allocation=none', '--console-log-level=warn',
-        '-d', dirname(outPath), '-o', basename(outPath), url,
       ];
-      const child = spawn('aria2c', args, { signal: opts.controller.signal } as { signal: AbortSignal });
-      child.on('error', (e) => resolve({ ok: false, error: e.message }));
+      if (opts.proxy) args.push('--all-proxy', opts.proxy);
+      args.push('-d', dirname(outPath), '-o', basename(outPath), url);
+      const child = spawn('aria2c', args, { signal: opts.controller.signal, env: this.proxyEnv(opts.proxy) } as { signal: AbortSignal; env: NodeJS.ProcessEnv });
+      const stop = this.startDownloadProgressPoller(outPath, opts.controller, opts.emit, opts.filename);
+      child.on('error', (e) => {
+        stop();
+        resolve({ ok: false, error: e.message });
+      });
       child.on('close', async (code) => {
+        stop();
         if (code === 0) {
           try {
             const st = await stat(outPath);
@@ -1967,15 +2164,20 @@ export class NodeToolAdapter implements ToolAdapter {
   private async downloadViaWget(
     url: string,
     outPath: string,
-    opts: { controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string },
+    opts: { controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string; proxy?: string },
   ): Promise<{ ok: boolean; size?: number; error?: string }> {
     const hasWget = await this.commandExists('wget');
     if (!hasWget) return { ok: false, error: 'wget 不可用' };
     return new Promise((resolve) => {
       const args = ['-c', '-q', '--tries=5', '--timeout=30', '-O', outPath, url];
-      const child = spawn('wget', args, { signal: opts.controller.signal } as { signal: AbortSignal });
-      child.on('error', (e) => resolve({ ok: false, error: e.message }));
+      const child = spawn('wget', args, { signal: opts.controller.signal, env: this.proxyEnv(opts.proxy) } as { signal: AbortSignal; env: NodeJS.ProcessEnv });
+      const stop = this.startDownloadProgressPoller(outPath, opts.controller, opts.emit, opts.filename);
+      child.on('error', (e) => {
+        stop();
+        resolve({ ok: false, error: e.message });
+      });
       child.on('close', async (code) => {
+        stop();
         if (code === 0) {
           try {
             const st = await stat(outPath);
@@ -1995,6 +2197,7 @@ export class NodeToolAdapter implements ToolAdapter {
     outPath: string,
     controller: DownloadController,
     emit: (p: Partial<DownloadProgress>) => void,
+    proxy?: string,
   ): Promise<{ ok: boolean; size?: number; error?: string }> {
     try {
       const res = await fetch(url, { signal: controller.signal, headers: this.downloadHeaders(url) });
@@ -2028,6 +2231,9 @@ export class NodeToolAdapter implements ToolAdapter {
     const url = String(args.url ?? '').trim();
     if (!/^https?:\/\//i.test(url)) return this.fail(null, start, '请提供以 http(s):// 开头的下载链接');
 
+    const proxyArg = typeof args.proxy === 'string' ? args.proxy.trim() : '';
+    const { proxy } = this.resolveDownloadProxy(url, proxyArg);
+
     const destination = typeof args.destination === 'string' ? args.destination.trim() : '';
     const filenameArg = typeof args.filename === 'string' ? args.filename.trim() : '';
     const connections = Math.max(1, Math.min(16, Number(args.connections) || 4));
@@ -2044,7 +2250,7 @@ export class NodeToolAdapter implements ToolAdapter {
     // Content-Disposition header (best-effort) \u2192 'download'.
     let filename = filenameArg;
     if (!filename) {
-      filename = await this.inferDownloadFilename(url);
+      filename = await this.inferDownloadFilename(url, proxy);
     }
     if (!filename) filename = 'download';
     const outPath = join(outDir, filename);
@@ -2058,27 +2264,31 @@ export class NodeToolAdapter implements ToolAdapter {
     try {
       const errors: string[] = [];
       // 1) Native multi-threaded downloader (Range + resume + pause).
-      const native = await this.downloadNative(url, outPath, { connections, resume, controller, emit, filename });
+      const native = await this.downloadNative(url, outPath, { connections, resume, controller, emit, filename, proxy });
       if (native.ok) return this.downloadOk(outPath, native.size ?? 0, Date.now() - start, native.via ?? 'native', toolCallId, native.expected);
       errors.push(native.error ?? '');
       // 2) curl (resume via -C -).
-      const curl = await this.downloadViaCurl(url, outPath, { resume, controller, emit, filename });
+      const curl = await this.downloadViaCurl(url, outPath, { resume, controller, emit, filename, proxy });
       if (curl.ok) return this.downloadOk(outPath, curl.size ?? 0, Date.now() - start, 'curl', toolCallId);
       errors.push(curl.error ?? '');
       // 3) aria2c (parallel + resume), when installed.
-      const aria2 = await this.downloadViaAria2(url, outPath, { controller, emit, filename });
+      const aria2 = await this.downloadViaAria2(url, outPath, { controller, emit, filename, proxy });
       if (aria2.ok) return this.downloadOk(outPath, aria2.size ?? 0, Date.now() - start, 'aria2c', toolCallId);
       errors.push(aria2.error ?? '');
       // 4) wget (resume via -c), when installed.
-      const wget = await this.downloadViaWget(url, outPath, { controller, emit, filename });
+      const wget = await this.downloadViaWget(url, outPath, { controller, emit, filename, proxy });
       if (wget.ok) return this.downloadOk(outPath, wget.size ?? 0, Date.now() - start, 'wget', toolCallId);
       errors.push(wget.error ?? '');
       // 5) Plain fetch (small files only).
-      const fetched = await this.downloadViaFetch(url, outPath, controller, emit);
+      const fetched = await this.downloadViaFetch(url, outPath, controller, emit, proxy);
       if (fetched.ok) return this.downloadOk(outPath, fetched.size ?? 0, Date.now() - start, 'fetch', toolCallId);
       errors.push(fetched.error ?? '');
+      // 全部方式都失败：移除进度条（失败的下载不应残留进度条，仅成功下载保留）。
+      downloadHub.clearProgress(toolCallId);
       return this.fail(null, start, `下载失败：${errors.filter(Boolean).join('；') || '未知错误'}`);
     } catch (err: unknown) {
+      // 异常同样清理进度条。
+      downloadHub.clearProgress(toolCallId);
       return this.fail(null, start, `下载异常：${err instanceof Error ? err.message : String(err)}`);
     } finally {
       downloadHub.dispose(toolCallId);
