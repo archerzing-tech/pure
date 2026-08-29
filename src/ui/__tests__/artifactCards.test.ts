@@ -1,6 +1,6 @@
 // src/ui/__tests__/artifactCards.test.ts
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { planArtifactDisplay, isIntermediateArtifact, isDataDumpPair, artifactKindLabel, fileIconMeta, MAX_FILE_CARDS, isCardFriendlyArtifact, type ArtifactItem } from '../artifactCards';
+import { planArtifactDisplay, isIntermediateArtifact, isDataDumpPair, artifactKindLabel, fileIconMeta, MAX_FILE_CARDS, isCardFriendlyArtifact, computeProjectDir, type ArtifactItem } from '../artifactCards';
 import { setPathLinkWorkspace } from '../pathLink';
 
 describe('planArtifactDisplay', () => {
@@ -175,5 +175,37 @@ describe('fileIconMeta', () => {
     expect(fileIconMeta('docs/readme.md').cls).toBe('artifact-icon-doc');
     expect(fileIconMeta('assets/photo.png').cls).toBe('artifact-icon-img');
     expect(artifactKindLabel('archive.zip')).toBe('ZIP');
+  });
+});
+
+describe('computeProjectDir', () => {
+  beforeEach(() => setPathLinkWorkspace(''));
+
+  const file = (path: string): ArtifactItem => ({ path });
+
+  it('returns the shared top-level subdirectory when every artifact lives under it', () => {
+    expect(computeProjectDir([file('my-app/index.html'), file('my-app/app.js'), file('my-app/src/style.css')])).toBe('my-app');
+  });
+
+  it('returns the top-level directory even when files nest deeper inside it', () => {
+    expect(computeProjectDir([file('my-app/src/App.tsx'), file('my-app/src/main.tsx')])).toBe('my-app');
+  });
+
+  it('returns null when files are spread across the workspace root', () => {
+    expect(computeProjectDir([file('index.html'), file('styles.css')])).toBeNull();
+  });
+
+  it('returns null when artifacts span multiple top-level folders', () => {
+    expect(computeProjectDir([file('one/a.js'), file('two/b.js')])).toBeNull();
+  });
+
+  it('returns null for an empty or fully-intermediate artifact set', () => {
+    expect(computeProjectDir([])).toBeNull();
+    // Raw-data dumps / scratch files are not the project; nothing meaningful remains.
+    expect(computeProjectDir([file('weather_raw.js'), file('data.raw')])).toBeNull();
+  });
+
+  it('ignores intermediate artifacts when locating the project directory', () => {
+    expect(computeProjectDir([file('my-app/README.md'), file('my-app/notes_raw.txt')])).toBe('my-app');
   });
 });

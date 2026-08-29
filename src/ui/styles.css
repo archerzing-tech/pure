@@ -1918,6 +1918,33 @@ body {
   background: var(--accent-soft);
   border-color: color-mix(in srgb, var(--accent) 22%, transparent);
 }
+/* Project-directory card actions: open-hint icon + a copy-path button. */
+.artifact-project-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.artifact-project-copy {
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light));
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition), border-color var(--transition);
+}
+.artifact-project-copy:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: var(--accent-soft);
+}
+.artifact-project-copy:active {
+  transform: translateY(0) scale(0.97);
+}
 .artifact-icon {
   position: relative;
   display: grid;

@@ -21,6 +21,8 @@
 
 import { resolvePathForOpen, openPathLink } from './pathLink';
 import { isTauriRuntime, tauriInvoke } from '../shared/tauri';
+import { copyTextToClipboard } from '../shared/clipboard';
+import { showToast as toast } from '../shared/toast';
 import { t } from '../shared/i18n';
 
 export interface ArtifactItem {
@@ -160,11 +162,13 @@ function compactArtifactFiles(items: ArtifactItem[]): ArtifactDisplay {
   return { mode: 'project', items };
 }
 
-/** Choose a compact end-of-turn presentation without exposing implementation files. */
-export function planArtifactDisplay(items: ArtifactItem[], options: ArtifactDisplayOptions = {}): ArtifactDisplay {
+/** Dedupe + strip intermediate artifacts (raw dumps, scratch files) and data
+ * dump pairs. Shared by planArtifactDisplay and computeProjectDir so both see
+ * only the user-facing artifacts. */
+function keptArtifacts(items: ArtifactItem[]): ArtifactItem[] {
   const all = items.map((item) => item.path);
   const seen = new Set<string>();
-  const kept = items.filter((item) => {
+  return items.filter((item) => {
     const path = item.path.trim();
     if (!path) return false;
     const key = path.trim().toLowerCase().replaceAll('\\', '/').replace(/^\.\//, '');
@@ -174,6 +178,35 @@ export function planArtifactDisplay(items: ArtifactItem[], options: ArtifactDisp
     if (isDataDumpPair(path, all)) return false;
     return true;
   });
+}
+
+/**
+ * Locate the real project directory the agent generated, given the files it
+ * wrote this session. When every kept artifact lives under the SAME top-level
+ * subfolder (e.g. all under `my-app/`), that folder is the project directory
+ * and the directory card should point there, NOT at the workspace root. Returns
+ * the relative subfolder (e.g. `my-app`) or `null` when files are spread across
+ * the workspace root (caller falls back to the workspace path).
+ */
+export function computeProjectDir(items: ArtifactItem[]): string | null {
+  const kept = keptArtifacts(items);
+  if (kept.length === 0) return null;
+  const firstSegments = kept.map((item) => {
+    const p = item.path.trim().replaceAll('\\', '/').replace(/^\.\//, '');
+    const idx = p.indexOf('/');
+    return idx >= 0 ? p.slice(0, idx) : ''; // '' means the file is at the workspace root
+  });
+  // Any file at the root, or multiple different top-level folders → not one
+  // project subdir; the caller uses the workspace root.
+  if (firstSegments.some((seg) => seg === '')) return null;
+  const first = firstSegments[0];
+  if (!firstSegments.every((seg) => seg === first)) return null;
+  return first;
+}
+
+/** Choose a compact end-of-turn presentation without exposing implementation files. */
+export function planArtifactDisplay(items: ArtifactItem[], options: ArtifactDisplayOptions = {}): ArtifactDisplay {
+  const kept = keptArtifacts(items);
   if (kept.length === 0) return { mode: 'none' };
 
   const request = options.userRequest?.trim() ?? '';
@@ -399,24 +432,55 @@ function createArtifactCard(item: ArtifactItem): HTMLButtonElement | null {
   return card;
 }
 
-/** Render one project-directory link instead of expanding a project into file cards. */
-function createProjectDirectoryLink(projectPath: string): HTMLButtonElement {
+/** Render one project-directory card instead of expanding a project into file cards.
+ * The card points at the generated project subdirectory (computeProjectDir) — not
+ * always the workspace root — and offers both "reveal in file manager" and a
+ * copy-path action. */
+function createProjectDirectoryLink(projectPath: string): HTMLElement {
   const target = projectPath.trim() || '.';
   const resolved = resolvePathForOpen(target).replace(/[\\/]\.$/, '') || target;
-  const link = document.createElement('button');
-  link.type = 'button';
-  link.className = 'artifact-project-link';
-  link.title = `${t('artifacts.openDir')}: ${resolved}`;
-  link.setAttribute('aria-label', `${t('artifacts.openDir')}: ${resolved}`);
-  link.innerHTML =
-    `<span class="artifact-project-icon">${PROJECT_ICON}</span>` +
-    `<span class="artifact-project-text"><span class="artifact-project-label"></span><span class="artifact-project-path"></span><span class="artifact-project-count"></span></span>` +
-    `<span class="artifact-open-hint" aria-hidden="true">${OPEN_HINT_ICON}</span>`;
-  link.querySelector<HTMLElement>('.artifact-project-label')!.textContent = t('artifacts.project');
-  link.querySelector<HTMLElement>('.artifact-project-path')!.textContent = resolved;
-  link.querySelector<HTMLElement>('.artifact-project-count')!.textContent = t('artifacts.projectContents');
-  link.addEventListener('click', () => openPathLink(target));
-  return link;
+
+  const card = document.createElement('div');
+  card.className = 'artifact-project-link';
+  card.title = `${t('artifacts.openDir')}: ${resolved}`;
+  card.setAttribute('aria-label', `${t('artifacts.openDir')}: ${resolved}`);
+  card.addEventListener('click', () => openPathLink(target));
+
+  const icon = document.createElement('span');
+  icon.className = 'artifact-project-icon';
+  icon.innerHTML = PROJECT_ICON;
+
+  const text = document.createElement('span');
+  text.className = 'artifact-project-text';
+  const label = document.createElement('span');
+  label.className = 'artifact-project-label';
+  label.textContent = t('artifacts.project');
+  const path = document.createElement('span');
+  path.className = 'artifact-project-path';
+  path.textContent = resolved;
+  const count = document.createElement('span');
+  count.className = 'artifact-project-count';
+  count.textContent = t('artifacts.projectContents');
+  text.append(label, path, count);
+
+  const actions = document.createElement('span');
+  actions.className = 'artifact-project-actions';
+  const hint = document.createElement('span');
+  hint.className = 'artifact-open-hint';
+  hint.setAttribute('aria-hidden', 'true');
+  hint.innerHTML = OPEN_HINT_ICON;
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'artifact-project-copy';
+  copy.textContent = t('artifacts.copyDir');
+  copy.addEventListener('click', (e) => {
+    e.stopPropagation();
+    void copyTextToClipboard(resolved).then((ok) => toast(ok ? t('path.copied') : t('path.copyFailed')));
+  });
+  actions.append(hint, copy);
+
+  card.append(icon, text, actions);
+  return card;
 }
 
 /**
