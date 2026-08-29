@@ -1087,8 +1087,7 @@ function deriveFallbackPlan(prompt: string): Plan {
   };
 }
 
-function createAgentCard(a: SubagentActivity): AgentCardHandle {
-  const rail = getAgentRail();
+function createAgentCard(a: SubagentActivity, container: HTMLElement): AgentCardHandle {
   const root = document.createElement('div');
   root.className = 'agent-activity working';
   root.dataset.callId = a.callId;
@@ -1134,9 +1133,75 @@ function createAgentCard(a: SubagentActivity): AgentCardHandle {
   tools.className = 'agent-activity-tools';
 
   root.append(head, body, tools);
-  rail.appendChild(root);
-  rail.scrollTop = rail.scrollHeight;
+  container.appendChild(root);
+  getAgentRail().scrollTop = getAgentRail().scrollHeight;
   return { root, badge, tools, meta };
+}
+
+/** Orchestration stage (pipeline phase) for a subagent role, so the right-hand
+ * rail reads as 规划 → 实现 → 评审 instead of a flat list of cards. Parallel
+ * roles sharing a stage (e.g. several code_editor) render side by side. */
+const AGENT_STAGE: Record<string, string> = {
+  task_planner: 'plan', planner: 'plan', deep_thinker: 'plan',
+  researcher: 'research', web_researcher: 'research',
+  code_editor: 'implement', ui_designer: 'implement', writer: 'implement',
+  bash_executor: 'verify',
+  code_reviewer: 'review',
+  project_auditor: 'audit',
+};
+const STAGE_LABEL: Record<string, string> = {
+  plan: '规划与设计', research: '调研', implement: '并行实现',
+  verify: '构建 / 验证', review: '评审', audit: '验签 / 交付', other: '其他',
+};
+function agentStageKey(name: string, role?: string): string {
+  if (AGENT_STAGE[name]) return AGENT_STAGE[name];
+  const r = (role ?? '').toLowerCase();
+  if (/plan|规划|planner/.test(name + r)) return 'plan';
+  if (/review|评审/.test(name + r)) return 'review';
+  if (/audit|审计|验签/.test(name + r)) return 'audit';
+  if (/edit|editor|write|实现|ui|design|设计/.test(name + r)) return 'implement';
+  if (/research|调研|研究/.test(name + r)) return 'research';
+  if (/exec|bash|command|验证|build|test/.test(name + r)) return 'verify';
+  return 'other';
+}
+/** Get (or lazily create) the pipeline stage block for `key` inside the rail, in
+ * first-appearance order, with a ↓ connector before every stage after the first
+ * so the rail reads as a vertical flow of phases. Returns the stage's agents row
+ * (the element cards are appended to). */
+function ensureAgentStage(rail: HTMLElement, key: string): HTMLElement {
+  const existing = rail.querySelector(`.agent-stage[data-stage="${key}"]`) as HTMLElement | null;
+  if (existing) return existing.querySelector('.agent-stage-agents') as HTMLElement;
+  const hasPrior = rail.querySelector('.agent-stage') !== null;
+  const block = document.createElement('section');
+  block.className = 'agent-stage';
+  block.dataset.stage = key;
+  if (hasPrior) {
+    const arrow = document.createElement('div');
+    arrow.className = 'agent-stage-connector';
+    arrow.textContent = '↓';
+    block.appendChild(arrow);
+  }
+  const head = document.createElement('header');
+  head.className = 'agent-stage-head';
+  head.textContent = STAGE_LABEL[key] ?? key;
+  const count = document.createElement('span');
+  count.className = 'agent-stage-count';
+  head.appendChild(count);
+  const agents = document.createElement('div');
+  agents.className = 'agent-stage-agents';
+  block.appendChild(head);
+  block.appendChild(agents);
+  rail.appendChild(block);
+  return agents;
+}
+/** Update the "×N" count badge on this stage's header (N parallel agents). */
+function refreshStageCount(agents: HTMLElement): void {
+  const block = agents.closest('.agent-stage') as HTMLElement | null;
+  const count = block?.querySelector('.agent-stage-count') as HTMLElement | null;
+  if (count) {
+    const n = agents.querySelectorAll('.agent-activity').length;
+    count.textContent = n > 1 ? `×${n}` : '';
+  }
 }
 
 function finishAgentCard(
@@ -1805,7 +1870,11 @@ export class ChatController {
     const subagentProgress: SubagentProgress = {
       onStart: (a) => {
         if (gen !== this.generation || agentCards.has(a.callId)) return;
-        agentCards.set(a.callId, createAgentCard(a));
+        const rail = getAgentRail();
+        const stageAgents = ensureAgentStage(rail, agentStageKey(a.agentName, a.agentRole));
+        const card = createAgentCard(a, stageAgents);
+        agentCards.set(a.callId, card);
+        refreshStageCount(stageAgents);
       },
       onState: (a) => {
         if (gen !== this.generation) return;
@@ -3188,6 +3257,18 @@ export class ChatController {
         skills: [...(config.hubSkills ?? []), ...appSkills],
         mode: analysis.mode,
         budget: promptBudgetForProvider(config.customProviders, config.provider, config.model),
+        // Subagent tools join the model-visible list only in workspace mode
+        // (finalPromptTools above), so the multi_agent protocol should only
+        // fire when delegation is actually possible. Without a workspace there
+        // are no subagent tools — don't tell the model to delegate.
+        hasSubagents: !!effectiveWorkspace,
+        // Thread the merged AGENTS.md conventions into the EXECUTION prompt too
+        // (not just the pre-analysis buildSystemPrompt). Without this the GUI
+        // runs with no project_conventions — the model never sees the
+        // multi-agent delegation + display-discipline rules it needs to
+        // actually delegate and to keep output concise. `conventions` is in
+        // scope from line 2467.
+        conventions,
       }, userText, {
         traps: userTraps,
         buildProtocol: userBuildProtocol,

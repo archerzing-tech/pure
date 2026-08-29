@@ -66,7 +66,7 @@ describe('CLI proactive intent assessment', () => {
 
   it('keeps both CLI execution paths wired to the shared assembler', () => {
     const source = readFileSync(new URL('../cli.ts', import.meta.url), 'utf8');
-    expect((source.match(/const assembly = assembleCliPrompt\(/g) ?? []).length).toBe(2);
+    expect((source.match(/const assembly = await? assembleCliPrompt\(/g) ?? []).length).toBe(2);
     expect(source).toContain('toolDefinitions: toolsDefs');
     expect(source).toContain("resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, DEFAULT_CLI_AUTO_APPROVE)");
   });
