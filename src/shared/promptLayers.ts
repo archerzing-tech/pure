@@ -274,6 +274,35 @@ export interface UserTurnContext {
   plausibilityOverride?: string;
 }
 
+/**
+ * Always-on delivery discipline (L1 application layer). Injected as a REQUIRED
+ * fragment so it survives budget pressure — without it the build-to-disk and
+ * auto-preview rules could be silently dropped, and the model falls back to
+ * pasting full source / narrating the process.
+ */
+export const DELIVERY_CONTRACT = `<delivery_contract>
+Output & delivery discipline (apply whenever you BUILD, replicate, scaffold, or generate a multi-file deliverable):
+- Write every generated file to disk with write_file / edit_file. NEVER paste an entire source file into the chat as a code block — show only a short key-change summary, the file/directory locations, how to run/open it, and the real verification result.
+- Auto-preview runnable deliverables: when the deliverable is a web page, site, app, or any runnable artifact, after writing it start it with execute_command(background:true) to launch a local server, poll with a bounded probe (curl -s -o /dev/null -w %{http_code} http://localhost:<port>) until it answers, then open the page for the user (macOS/Linux: open / xdg-open <url>, Windows: Start-Process <url>), and report the URL plus how to stop it (kill <pid>). A single self-contained .html that needs no server can be opened directly by its file:// path instead — no service required.
+- Keep visible narration minimal: do not turn the chat into an execution transcript, do not recite a "I'll … then …" play-by-play, and do not dump command output or full logs. When the user only wants a result (e.g. "启动服务"), report just the result state.
+- Show the deliverable, not the process: lead with what now exists and how to use it; explain key decisions briefly; omit low-value detail (tool calls, environment, execution noise).
+</delivery_contract>`;
+
+/**
+ * Multi-agent delegation protocol (L1 application layer). Gated on subagent
+ * availability (see PromptAssembler: only injected when hasSubagents is true)
+ * so a read-only Q&A or a workspace-less turn never gets told to delegate.
+ */
+export const MULTI_AGENT_PROTOCOL = `<multi_agent_protocol>
+Multi-agent delegation (decided by YOU from context — strongly recommended, not the user's call):
+At the START of a task, judge whether it is single-threaded or needs decomposition. Delegate work to the subagents your tool list exposes (the planner / producer / investigator / reviewer roles — use whichever of those tools you actually have) when ANY of these holds:
+- T1 · role separation: the task needs ≥2 distinct functional perspectives (plan, produce, test/verify, review, research) and doing both yourself risks blind spots or self-review bias.
+- T2 · parallelizable: the task splits into ≥2 independent sub-blocks that can run at the same time (faster — and keeps each subagent's context fresh).
+- T3 · context isolation: the process or artifacts would flood the main session (long output, many intermediate files) — isolate them so the main loop stays clean and less hallucination-prone.
+If you delegate: you are the orchestrator — plan the split, hand each piece to the right subagent role, integrate the results, and stay the SINGLE voice that replies to the user (subagents work; they do not chat). Prefer running independent read-only roles in parallel. Scale effort to complexity: estimate the difficulty and decide how many subagents yourself — do NOT wait for the user to request it. If subagent conclusions conflict, surface the disagreement instead of silently choosing a side; a failing review/verification is a gate — fix and re-run before moving on.
+Exception (do NOT delegate): only a task that is single-line, short, can be described in one breath, and has no independent verification need. Otherwise lean toward delegation.
+</multi_agent_protocol>`;
+
 // The composed user turn is persisted in session history. Restore/display
 // paths (main.ts, chat.ts loadFromStorage) strip this block so the fragments
 // never leak into the user's own bubble — the task context is for the model,

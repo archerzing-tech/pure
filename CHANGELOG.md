@@ -3,6 +3,19 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.0.1-beta
+
+**智能化：多 Agent 委派 + 输出呈现纪律升格为常驻核心行为（GUI + CLI 两侧）**
+
+- **修 GUI 执行期丢约定（根因）**：`ui/chat.ts` 的预分析把 AGENTS.md 约定传进了 prompt，但**真正执行**的 `assemble()` 遗漏 `conventions`——模型在 GUI 执行期看不到 AGENTS.md 的「多 Agent 判定方案 + 界面呈现」规则。一处补齐，GUI 执行期恢复注入 `project_conventions`
+- **常驻 `multi_agent` 协议（required）**：核心 Prompt 层新增 `MULTI_AGENT_PROTOCOL`——命中 T1（职能分离）/T2（可并行）/T3（上下文隔离）即**强烈建议**拆解委派给对应子 agent 角色，仅单线短小且无独立检验时才自干；按 `hasSubagents` 门控（无子 agent 工具的纯问答不注入）。此前委派引导只存在于可被覆盖/裁剪的 AGENTS.md 层
+- **常驻 `delivery_contract` 协议（required）**：构建/复刻项目**直接写文件、严禁贴全源码**，只报关键改动 + 如何运行 + 验证；完成后**自动起服务 + 有界探测 + 打开预览 + 回报 URL/关闭方式**（单文件自包含 .html 直接按其路径打开）
+- **子 agent 描述补触发语言**：`SubagentOrchestrator` 各角色 `description` 补「何时用/触发条件」（T1/T2/T3），让模型在工具 schema 层面就知道何时委派
+- **自适应委派对齐**：`adaptiveControl` 新增 build/scaffold/replicate 意图信号，complex+build 落 `parallel`；弱化 `do not delegate by default` 反向表述，避免与常驻协议矛盾
+- **CLI 补齐委派面**：CLI 现注册 `CODING_AGENT_ROLES`（task_planner/code_editor/researcher/ui_designer/deep_thinker/bash_executor），与 GUI 一致，`multi_agent` 协议在 CLI 有真实抓手
+- **一致性**：AGENTS.md「界面呈现」补自动预览；新增 `DEFAULT_AGENTS_MD` ↔ 项目根 AGENTS.md 的 parity 测试（防 base64 漂移）；`defaultAgentsMd.ts` base64 同步重生成
+- **多 agent 编排流水线可视化**：右侧活动面板从扁平卡片列表升级为**阶段流水线**——按角色归入「规划与设计 → 调研 → 并行实现 → 构建/验证 → 评审 → 验签」，阶段间以 ↓ 串起（纵向＝先后顺序），同一阶段的并行子 agent 横向并排（横向＝并行），头部显示 ×N 并计数；父→子、并行、先后关系一眼可见
+
 ## v2.0.0
 
 **多 Agent 委派接通 + 并行/深度/预算/持久化 + GUI 可视化 + 死代码清理（CLI + GUI 两侧）**

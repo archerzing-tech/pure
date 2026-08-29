@@ -375,7 +375,7 @@ export class SubagentOrchestrator implements ToolAdapter {
 export const BUILT_IN_SUBAGENTS: SubagentDefinition[] = [
   {
     name: 'code_reviewer',
-    description: 'Review code changes for correctness, style, and security. Returns a structured review with issues and suggestions.',
+    description: 'Review code changes for correctness, style, and security — the independent quality gate (T1 role separation): use whenever a deliverable needs a verdict that should NOT come from its own author (never grade your own work). Returns a structured review with issues and suggestions.',
     input_schema: {
       type: 'object',
       properties: {
@@ -401,7 +401,7 @@ Be concise. Structure your review with clear sections.${filesHint}`;
   },
   {
     name: 'project_auditor',
-    description: 'Audit a project for dependency vulnerabilities, unsafe configuration, exposed secrets, and reproducible verification evidence. Uses read-only checks and returns a structured AUDIT: PASS or AUDIT: FAIL verdict.',
+    description: 'Audit a project for dependency vulnerabilities, unsafe configuration, exposed secrets, and reproducible verification evidence. Uses read-only checks and returns a structured AUDIT: PASS or AUDIT: FAIL verdict. Read-only and parallel-safe: run it as the verification/audit role (T2/T3) when delivery needs independent evidence.',
     input_schema: {
       type: 'object',
       properties: {
@@ -437,7 +437,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
   // Breaks down complex tasks into ordered, actionable steps
   {
     name: 'task_planner',
-    description: '制定详细的修改计划，决定修改哪些文件及执行顺序。用于复杂的多文件修改或重构任务。',
+    description: '制定详细的修改计划，决定修改哪些文件及执行顺序。用于复杂多文件/重构任务：先出计划（T1 规划），再让 code_editor 执行。',
     input_schema: {
       type: 'object',
       properties: {
@@ -474,7 +474,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
   // Executes precise code modifications based on plans
   {
     name: 'code_editor',
-    description: '根据计划执行精确的代码修改。先读取文件，然后按指令修改。',
+    description: '根据计划执行精确的代码修改。先读取文件，然后按指令修改。用于独立可并行的子块实现（T2）：把每个子块交给一个 code_editor 同时跑，最后整合。',
     input_schema: {
       type: 'object',
       properties: {
@@ -511,7 +511,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
   // Handles complex reasoning and multi-step analysis
   {
     name: 'deep_thinker',
-    description: '专门处理复杂、需要深度推理的问题。用于算法分析、架构设计决策等。',
+    description: '专门处理复杂、需要深度推理的问题（算法分析、架构设计、权衡决策）。用于想把深度推理隔离出主循环的场景（T3 上下文隔离），避免长篇推理刷屏主会话。',
     input_schema: {
       type: 'object',
       properties: {
@@ -549,7 +549,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
   // Handles interface design, layout planning, and interaction design
   {
     name: 'ui_designer',
-    description: '负责界面设计、布局规划和交互设计。处理UI/UX相关的需求。',
+    description: '负责界面设计、布局规划和交互设计。处理UI/UX相关的需求：当任务含设计视角（T1）、且是独立并可并行的界面/交互子块时委派（T2）。',
     input_schema: {
       type: 'object',
       properties: {
@@ -596,7 +596,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
   // Executes terminal commands with safety checks
   {
     name: 'bash_executor',
-    description: '执行终端命令，返回执行结果。用于运行测试、构建脚本等。',
+    description: '执行终端命令，返回执行结果。用于运行测试、构建、检查等：把命令输出隔离出主会话（T3 上下文隔离），只回传结论。',
     input_schema: {
       type: 'object',
       properties: {
@@ -629,7 +629,7 @@ ${description ? `命令用途：${description}` : ''}
   // Researches topics and summarizes findings
   {
     name: 'researcher',
-    description: '研究主题并总结发现，包括查阅网络资源和文档。用于技术调研、API研究等。',
+    description: '研究主题并总结发现，包括查阅网络资源和文档。用于技术调研、API研究等：调研前置（先出事实 baseline 再给生产环节），只读且可并行（T2/T3），把检索源与引用隔离出主会话。',
     input_schema: {
       type: 'object',
       properties: {

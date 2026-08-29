@@ -12,10 +12,12 @@ import {
   CHART_DSL_PROMPT,
   MAP_DSL_PROMPT,
   COMPLETION_PROMPT,
+  DELIVERY_CONTRACT,
   FILE_TOOLS_CORE,
   HUMAN_TONE_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
   LOGICAL_TRAPS_PROMPT,
+  MULTI_AGENT_PROTOCOL,
   PLAUSIBILITY_REVIEW_PROMPT,
   PUBLIC_API_DIRECTORIES_PROMPT,
   SVG_OUTPUT_PROMPT,
@@ -42,6 +44,12 @@ export interface PromptAssemblyContext {
   /** Definitions sent in the provider's separate tools payload. They are
    * counted by the compiler but are not duplicated into the system text. */
   toolDefinitions?: ToolDefinition[];
+  /** True when the model can actually spawn subagents this turn (subagent
+   * tools are in the model-visible tool list). Gates the multi_agent protocol
+   * fragment so a plain Q&A or a workspace-less turn is never told to
+   * delegate — set by each surface (GUI: has a workspace; CLI: subagents
+   * registered). */
+  hasSubagents?: boolean;
   /** The actual provider/model requested for this turn, distinct from the app identity. */
   modelIdentity?: { provider: string; model: string };
   /**
@@ -300,6 +308,15 @@ export class PromptAssembler {
       fragment('work_invariant', 'Work step by step. Read before you write. Verify after you change. Be concise.', 110, true),
       fragment('workflow', WORKFLOW_PROMPT, 90),
       fragment('completion', COMPLETION_PROMPT, 80),
+      // Multi-agent delegation + delivery discipline are REQUIRED so they are
+      // never dropped under budget pressure (selectFragments always keeps
+      // required). multi_agent is gated on subagent availability: a plain Q&A
+      // or a workspace-less turn has no subagent tools and must not be told to
+      // delegate; delivery_contract is safe to always include.
+      ...(context.hasSubagents
+        ? [fragment('multi_agent', MULTI_AGENT_PROTOCOL, 115, true)]
+        : []),
+      fragment('delivery_contract', DELIVERY_CONTRACT, 112, true),
       fragment('output_style', buildOutputStyle(context.surface, context.imageGeneration === true), 65),
       // Image requests follow ONE contract: the generate_image tool when the
       // provider supports it, otherwise the multi-SVG grid contract. Never both.
