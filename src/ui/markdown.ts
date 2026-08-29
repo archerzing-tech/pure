@@ -11,6 +11,7 @@
 import { Marked, Renderer } from 'marked';
 import DOMPurify from 'dompurify';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { stripAnsi } from '../shared/ansi';
 import { showToast } from '../shared/toast';
 import { t } from '../shared/i18n';
 import { linkifyPaths } from './pathLink';
@@ -1958,7 +1959,9 @@ export async function renderMarkdown(
   // 1) Parse to HTML synchronously (renders fenced-code overrides inline).
   // marked always appends a trailing \n; trim it — with white-space:pre-wrap on
   // the bubble, that trailing newline would render as a visible blank line.
-  const html = (md.parse(normalizeMapFence(text), { async: false }) as string).replace(/\n+$/, '');
+  // Strip ANSI escape codes (logs / colored command output echo) so they render
+  // as plain text rather than mojibake.
+  const html = (md.parse(normalizeMapFence(stripAnsi(text)), { async: false }) as string).replace(/\n+$/, '');
   // Defense-in-depth: the custom renderer already escapes raw HTML and
   // restricts link/image schemes, but sanitize the final HTML anyway so any
   // future renderer gap (or a marked default renderer, e.g. <img>) can never
