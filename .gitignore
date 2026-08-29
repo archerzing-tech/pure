@@ -8,6 +8,8 @@ src-tauri/AGENTS.md
 .env.*.local
 .DS_Store
 pure
+pure.exe
+NUL
 .playwright-mcp/
 public/
 
