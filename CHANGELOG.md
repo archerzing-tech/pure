@@ -15,6 +15,10 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - **CLI 补齐委派面**：CLI 现注册 `CODING_AGENT_ROLES`（task_planner/code_editor/researcher/ui_designer/deep_thinker/bash_executor），与 GUI 一致，`multi_agent` 协议在 CLI 有真实抓手
 - **一致性**：AGENTS.md「界面呈现」补自动预览；新增 `DEFAULT_AGENTS_MD` ↔ 项目根 AGENTS.md 的 parity 测试（防 base64 漂移）；`defaultAgentsMd.ts` base64 同步重生成
 - **多 agent 编排流水线可视化**：右侧活动面板从扁平卡片列表升级为**阶段流水线**——按角色归入「规划与设计 → 调研 → 并行实现 → 构建/验证 → 评审 → 验签」，阶段间以 ↓ 串起（纵向＝先后顺序），同一阶段的并行子 agent 横向并排（横向＝并行），头部显示 ×N 并计数；父→子、并行、先后关系一眼可见
+- **项目目录卡片只在真交付时显示 + 指向真实子目录**：修复"中断/未完成的会话切回时错误重现目录卡片"——`persistSession` 只在 `projectDelivered` 命中（非中断 + 验证/计划/任务满足交付）时才持久化 artifact 块；新增 `computeProjectDir()` 从会话产物求最深的共享子目录（建在 `my-app/` 就指向 `…/my-app`），目录卡片补「复制路径」按钮，显示真实项目目录
+- **上传图片只显示缩略图**：图片附件不再重复渲染全卡（已有 `user-image-thumb` 缩略图，双击放大），只保留缩略图
+- **中断回合的部分回复不再丢失**：中断重建时以 DOM 已渲染文本为兜底——若引擎最终消息没带上"用户已看到的部分回复"，则将其补进历史快照（只在中断路径、只在确实缺失时补），修复"中断后切回历史会话部分回复消失"
+- **运行中插入新输入（中断并插话）**：生成期间 Composer 保持可用，Enter 即中断并插入——新增 `classifyInsertion` 单次语义判定插入内容与当前任务是否相关：**相关** → 中断本回合并带新消息重进同一任务，模型看到当前进度 + 新变量后**重新规划/改写**（计划卡延续）；**不相关** → 排入 `pendingTasks` 队列（显示「已排队」气泡），当前任务/计划达到终态（无 auto-continue 继续）时作为**全新任务**自动启动。语义判定失败/超时默认按"相关"处理，绝不丢失你的输入
 
 ## v2.0.0
 
