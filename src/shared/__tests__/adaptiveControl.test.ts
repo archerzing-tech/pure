@@ -61,4 +61,24 @@ describe('AdaptiveControlPlane', () => {
     expect(morning.timePhase).not.toBe(night.timePhase);
     expect(morning.directive).not.toBe(night.directive);
   });
+
+  it('biases delegation to parallel for a complex build / replicate request', () => {
+    const strategy = plane.select({
+      prompt: '帮我把这个项目复刻成一个新的多文件网页应用，包含首页、详情页和管理后台',
+      environment: environment({ toolCount: 6 }),
+    });
+
+    expect(strategy.complexity).toBe('complex');
+    expect(strategy.delegation).toBe('parallel');
+    expect(strategy.recommendedRoles).toEqual(expect.arrayContaining(['task_planner', 'code_editor', 'code_reviewer']));
+    // The directive must not steer the model AWAY from delegation on a build.
+    expect(strategy.directive).not.toContain('do not delegate by default');
+  });
+
+  it('does not delegate a trivial one-liner, and keeps its directive honest', () => {
+    const strategy = plane.select({ prompt: '2 + 2 = ?', environment: environment() });
+
+    expect(strategy.delegation).toBe('none');
+    expect(strategy.directive).toContain('trivial/simple task — keep the loop local');
+  });
 });

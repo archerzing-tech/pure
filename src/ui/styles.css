@@ -11695,6 +11695,67 @@ button svg,
   opacity: 0.95;
 }
 
+/* ── Orchestration-pipeline stages in the rail ──
+   Subagent cards are grouped into phase blocks (规划/调研/实现/验证/评审/验签)
+   connected top→bottom by ↓ arrows, so the multi-agent flow reads as a pipeline:
+   phases are ordered (vertical), and parallel roles within a phase sit side by
+   side (horizontal). */
+.agent-stage + .agent-stage .agent-stage-connector {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-tertiary, #9B968F);
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 0 4px;
+}
+.agent-stage + .agent-stage .agent-stage-connector::before,
+.agent-stage + .agent-stage .agent-stage-connector::after {
+  content: "";
+  height: 1px;
+  flex: 1 1 0;
+  background: var(--border-light, #EDEBE7);
+}
+.agent-stage-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-light, #EDEBE7);
+}
+.agent-stage-head::before {
+  content: "";
+  width: 12px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+  flex: 0 0 auto;
+}
+.agent-stage-count {
+  margin-left: auto;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  color: var(--text-tertiary, #9B968F);
+}
+.agent-stage-agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+/* Cards shrink to a sub-card so parallel agents in one phase read side by side. */
+.agent-stage-agents .agent-activity {
+  margin: 0;
+  flex: 1 1 132px;
+  min-width: 132px;
+  box-sizing: border-box;
+}
+
 /* Word-comment style highlight when tracing a card back to its tool row. */
 .agent-trace-flash {
   animation: agent-trace-flash 1.6s ease-out;

@@ -190,6 +190,32 @@ describe('PromptAssembler', () => {
     expect(prompt).toContain('night strategy');
   });
 
+  it('injects the multi_agent + delivery_contract protocols when subagents are available', () => {
+    const assembly = assembler.assemble({
+      surface: 'gui',
+      capabilities: 'capabilities',
+      hasSubagents: true,
+    }, '造一个多文件的网页应用');
+
+    expect(assembly.budget.includedFragmentIds).toContain('multi_agent');
+    expect(assembly.budget.includedFragmentIds).toContain('delivery_contract');
+    expect(assembly.systemPrompt).toContain('<multi_agent_protocol>');
+    expect(assembly.systemPrompt).toContain('<delivery_contract>');
+  });
+
+  it('omits the multi_agent protocol when no subagents are available, but keeps delivery_contract', () => {
+    const assembly = assembler.assemble({
+      surface: 'gui',
+      capabilities: 'capabilities',
+      // hasSubagents unset = plain chat / no workspace → no subagent tools.
+    }, '2 + 2 = ?');
+
+    expect(assembly.budget.includedFragmentIds).not.toContain('multi_agent');
+    expect(assembly.budget.includedFragmentIds).toContain('delivery_contract');
+    expect(assembly.systemPrompt).not.toContain('<multi_agent_protocol>');
+    expect(assembly.systemPrompt).toContain('<delivery_contract>');
+  });
+
   it('omits low-priority fragments before required fragments when the model budget is tight', () => {
     const assembly = assembler.assemble({
       surface: 'cli',

@@ -65,6 +65,9 @@ export interface RequestIntent {
   design: boolean;
   audit: boolean;
   review: boolean;
+  /** Build / scaffold / replicate a deliverable (a project, site, app, game,
+   * scaffolding — multi-role, multi-file by nature). Drives delegation up. */
+  build: boolean;
   parallelRequested: boolean;
   serialRequested: boolean;
 }
@@ -81,6 +84,7 @@ function parseIntent(prompt: string): RequestIntent {
     design: has('设计', '界面', '前端', '视觉', '交互', 'ui', 'ux', 'design', 'layout'),
     audit: has('审计', '安全', '漏洞', '扫描', 'audit', 'security', 'vulnerab'),
     review: has('审查', '评审', '复查', 'review', 'check the code'),
+    build: has('复刻', '复现', '复制', '搭建', '新建', '脚手架', '构建', '生成', '做一', '开发一', 'scaffold', 'create project', 'build a', 'make a', 'clone', 'replicate', '复刻这个'),
     parallelRequested: has('并行', '分头', '同时', '一起做', 'parallel', 'concurrently'),
     serialRequested: has('逐步', '串行', '顺序', '先', 'step by step', 'sequentially'),
   };
@@ -106,6 +110,7 @@ function intentFromTags(tags: string[]): RequestIntent {
     design: has('design', 'ui', 'ux'),
     audit: has('audit', 'security'),
     review: has('review'),
+    build: has('build', 'scaffold', 'create', 'replicate', 'clone', 'generate'),
     parallelRequested: has('parallel', 'concurrent'),
     serialRequested: has('serial', 'step-by-step', 'sequential'),
   };
@@ -115,6 +120,9 @@ function estimateComplexity(prompt: string, intent: RequestIntent): AdaptiveStra
   let score = 0;
   if (intent.quick) score -= 2;
   if (intent.refactor || intent.multiFile || intent.planning) score += 2;
+  // Build / scaffold / replicate is a multi-role, multi-file deliverable by
+  // nature — bias it toward complex so delegation actually kicks in.
+  if (intent.build) score += 2;
   if (intent.research) score += 1;
   if (intent.design) score += 1;
   if (intent.audit) score += 1;
@@ -137,7 +145,7 @@ const PARALLEL_SAFE_ROLES = new Set([
 
 function recommendRoles(intent: RequestIntent, complexity: AdaptiveStrategy['complexity']): string[] {
   const roles: string[] = [];
-  if (intent.planning || intent.refactor || intent.multiFile) {
+  if (intent.planning || intent.refactor || intent.multiFile || intent.build) {
     roles.push('task_planner', 'code_editor', 'code_reviewer');
   }
   if (intent.research) roles.push('researcher', 'deep_thinker');
@@ -202,10 +210,10 @@ function buildDirective(strategy: Omit<AdaptiveStrategy, 'directive'>): string {
     ? 'Explore the relevant workspace and dependencies broadly enough to test competing hypotheses before editing.'
     : 'Start with a targeted read of the smallest relevant surface, expanding only when evidence requires it.';
   const delegation = strategy.delegation === 'parallel'
-    ? 'Use independent read-only or verification subagents in parallel when that reduces uncertainty.'
+    ? 'Delegate this task to the matching subagent roles (planner / producer / researcher / reviewer / auditor) and run independent read-only roles in parallel; integrate their results with your own verification.'
     : strategy.delegation === 'targeted'
-      ? 'Delegate only an independent, well-scoped investigation when it reduces context or execution risk.'
-      : 'Do not delegate by default; keep the loop local unless new evidence makes delegation useful.';
+      ? 'Delegate the well-scoped pieces of this task to the matching subagent roles when it reduces context or execution risk, and parallelize independent read-only roles where possible — do not do a multi-role job alone by default.'
+      : 'This is a trivial/simple task — keep the loop local and avoid the overhead of delegation; delegate only if new evidence shows it is needed.';
   const roles = strategy.recommendedRoles.length > 0
     ? `\n- Preferred subagents for this request: ${strategy.recommendedRoles.join(', ')}.${strategy.parallelRoles.length > 0 ? ` Run these in parallel when independent: ${strategy.parallelRoles.join(', ')}.` : ''}`
     : '';
@@ -259,7 +267,8 @@ export class AdaptiveControlPlane {
           : complexity === 'simple'
             ? 'targeted'
             : complexity === 'complex'
-              ? (intent.parallelRequested || ((intent.research || intent.audit || intent.design) && environment.toolCount >= 2)
+              ? (intent.parallelRequested || intent.build
+                || ((intent.research || intent.audit || intent.design) && environment.toolCount >= 2)
                 ? 'parallel'
                 : 'targeted')
               : 'targeted';

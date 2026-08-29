@@ -27,7 +27,7 @@ import { DefaultFailurePolicy } from './engine/FailurePolicy';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
-import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
+import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler } from './cli_permission';
 import { dim, bold, red, green, yellow, cyan, purple, frameGray } from './termcolors';
@@ -446,6 +446,11 @@ async function assembleCliPrompt(
     globalUserRoot: PURE_DIR,
     userSpaceRoot: userWorkspace,
   });
+  // Only enable the multi_agent protocol when subagent tools are actually in
+  // the model-visible list (workspace mode). Plain-chat mode returns an empty
+  // toolsDefs and must not be told to delegate.
+  const subagentNames = new Set([...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name));
+  const hasSubagents = toolsDefs.some((t) => subagentNames.has(t.name));
   return promptAssembler.assemble({
     surface: 'cli',
     capabilities: buildCliCapabilities(),
@@ -459,6 +464,10 @@ async function assembleCliPrompt(
     mode,
     budget: promptBudgetForProvider(args.customProviders, args.provider, args.model),
     conventions,
+    // The CLI merges subagent tools into toolsDefs when it has a workspace, so
+    // delegation is possible — enable the multi_agent protocol fragment. Gated
+    // on actual subagent tool presence (see hasSubagents above).
+    hasSubagents,
   }, userText, context);
 }
 
@@ -1100,7 +1109,11 @@ async function createHarness(args: CliArgs) {
       stateStore: store,
       progress: cliSubagentProgress,
     });
-    for (const def of BUILT_IN_SUBAGENTS) {
+    // Full delegation surface, mirroring the GUI: both the built-in reviewers
+    // and the coding roles (task_planner / code_editor / researcher /
+    // ui_designer / deep_thinker / bash_executor), so the CLI can satisfy the
+    // multi_agent protocol instead of only being able to review/audit.
+    for (const def of [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES]) {
       orchestrator.register(def);
       tools.register(def);
     }

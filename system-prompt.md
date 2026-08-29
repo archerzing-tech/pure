@@ -16,7 +16,7 @@ Prompt 不是单层文本，而是三个明确层级的组合（见 `src/shared/
 | 层级 | 内容 | 生命周期 | 代码位置 |
 |------|------|----------|----------|
 | **L0 · System** | 身份、全局操作原则、权限模式、运行时契约、响应格式（本文件） | 不可变，产品契约 | `SYSTEM_CORE_PROMPT`（promptLayers.ts）—— 运行时唯一来源，本文件为其人读镜像，两者须保持同步 |
-| **L1 · Application** | 工具列表、工作流+完成报告契约、输出风格、工具调用规则、typo 容错、逻辑陷阱防御、环境上下文、已装技能、任务模式 | 每会话/每轮，随应用状态变 | `PromptAssembler` 统一组装 `WORKFLOW_PROMPT` / `COMPLETION_PROMPT` / `TYPO_TOLERANCE_PROMPT` / `LOGICAL_TRAPS_PROMPT`；按 provider/model context window 与 fragment priority 选择可注入片段，并把实际工具/MCP schema 的 token 开销计入预算；GUI/CLI 只提供 surface-specific capabilities、工具定义与运行时上下文。自定义 provider 可通过 provider/model metadata 覆盖 context window、输出预留和安全余量，超预算会输出诊断。 |
+| **L1 · Application** | 工具列表、工作流+完成报告契约、**多 Agent 委派协议**、**交付呈现纪律（写文件+预览）**、输出风格、工具调用规则、typo 容错、逻辑陷阱防御、环境上下文、已装技能、任务模式 | 每会话/每轮，随应用状态变 | `PromptAssembler` 统一组装 `WORKFLOW_PROMPT` / `COMPLETION_PROMPT` / `MULTI_AGENT_PROTOCOL` / `DELIVERY_CONTRACT` / `TYPO_TOLERANCE_PROMPT` / `LOGICAL_TRAPS_PROMPT`；`multi_agent` 仅在模型暴露子 agent 工具（`hasSubagents`）时注入，`delivery_contract` 恒定注入，两者均为 required（预算紧也不裁）；按 provider/model context window 与 fragment priority 选择可注入片段，并把实际工具/MCP schema 的 token 开销计入预算；GUI/CLI 只提供 surface-specific capabilities、工具定义与运行时上下文。自定义 provider 可通过 provider/model metadata 覆盖 context window、输出预留和安全余量，超预算会输出诊断。 |
 | **L2 · User** | 本次请求的逻辑陷阱警告、主动意图/风险评估、artifact 构建协议、澄清回答、交付契约、已批准执行计划 | 每请求，随请求变 | `composeUserTurn()`（promptLayers.ts），拼进 user 消息 |
 
 **归属判定规则**：不可变产品契约 → L0；依赖应用状态而非请求 → L1；依赖**本次请求** → L2。

@@ -1,8 +1,20 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadMergedConventions, mergeConventions, splitSections } from '../conventions';
+import { DEFAULT_AGENTS_MD } from '../defaultAgentsMd';
+
+describe('DEFAULT_AGENTS_MD parity', () => {
+  it('stays in sync with the project-root AGENTS.md (trimmed)', () => {
+    // Regenerate src/shared/defaultAgentsMd.ts after editing AGENTS.md. The base64
+    // is the trimmed AGENTS.md content (no trailing newline). Both sides are
+    // trimmed so a header/line-ending difference never masquerades as a change.
+    const root = join(import.meta.dir, '..', '..', '..');
+    const agents = readFileSync(join(root, 'AGENTS.md'), 'utf8').trim();
+    expect(DEFAULT_AGENTS_MD.trim()).toBe(agents);
+  });
+});
 
 describe('conventions merge (two-layer AGENTS.md)', () => {
   it('returns empty when both layers are empty', () => {
