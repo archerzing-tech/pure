@@ -869,7 +869,7 @@ describe('generate_image text-to-image wiring', () => {
     // …and the plain toolsDef list otherwise.
     expect(src).toContain('...(imageGen ? [IMAGE_GEN_TOOL_DEF] : [])');
     // Both prompt surfaces (early base + final assembly) get the flag.
-    expect(src).toContain('buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen)');
+    expect(src).toContain('buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen, conventions)');
     expect(src).toContain('capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen })');
     expect(src).toContain('imageGeneration: imageGen,');
     // generate_image is workspace-independent (available in plain-chat mode).

@@ -39,6 +39,8 @@ import { WASMEmbeddingStore } from './adapter/memory/WASMEmbeddingStore';
 import type { EvolutionConfig } from './adapter/memory/evolution';
 import { harvestUserPreferences } from './shared/memory';
 import { buildCliCapabilities, formatPromptBudgetDiagnostic, promptAssembler, resolvePromptBudget, type PromptSkill } from './shared/PromptAssembler';
+import { loadMergedConventions, getAppSpaceRoot, readAgentsMdAt, ensureAgentsMdAt } from './shared/conventions';
+import { DEFAULT_AGENTS_MD } from './shared/defaultAgentsMd';
 import { buildShellContext } from './shared/shellEnv';
 import { parseSkillMarkdown } from './shared/skillFiles';
 import { mergeTranscriptWithTurn } from './shared/conversation';
@@ -426,13 +428,24 @@ function loadAppSkills(): PromptSkill[] {
   return out;
 }
 
-function assembleCliPrompt(
+async function assembleCliPrompt(
   mode: TaskMode,
   args: CliArgs,
   toolsDefs: ToolDefinition[],
   userText: string,
   context: UserTurnContext,
 ) {
+  const userWorkspace = args.workspace && args.workspace !== 'true'
+    ? args.workspace
+    : (loadConfig()?.workspace || process.cwd());
+  const appAgentsRoot = getAppSpaceRoot();
+  const appAgents = (await readAgentsMdAt(appAgentsRoot)) || DEFAULT_AGENTS_MD;
+  await ensureAgentsMdAt(PURE_DIR, appAgents);
+  const conventions = await loadMergedConventions({
+    appSpaceRoot: appAgentsRoot,
+    globalUserRoot: PURE_DIR,
+    userSpaceRoot: userWorkspace,
+  });
   return promptAssembler.assemble({
     surface: 'cli',
     capabilities: buildCliCapabilities(),
@@ -445,6 +458,7 @@ function assembleCliPrompt(
     skills: [...(loadConfig()?.hubSkills ?? []), ...loadAppSkills()],
     mode,
     budget: promptBudgetForProvider(args.customProviders, args.provider, args.model),
+    conventions,
   }, userText, context);
 }
 
@@ -1412,7 +1426,7 @@ async function runOneShot(args: CliArgs) {
   }
   // Assemble system + user context together so tool schemas, priorities, and
   // the final budget report are computed against the same provider window.
-  const assembly = assembleCliPrompt(analysis.mode, args, toolsDefs, args.prompt, {
+  const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, args.prompt, {
     ...workflow.userContext,
     contract: taskContract ? formatTaskContract(taskContract) : undefined,
   });
@@ -1611,7 +1625,7 @@ async function runRepl(args: CliArgs) {
       process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(workspaceProfile))}\\n`);
       if (needsDeliveryGate) process.stdout.write(`  ${dim('📋 Contract:')} ${dim(`${taskContract.acceptanceCriteria.length} 项验收标准，验证证据将决定是否交付`)}\\n`);
     }
-    const assembly = assembleCliPrompt(analysis.mode, args, toolsDefs, input, {
+    const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, input, {
       ...workflow.userContext,
       contract: taskContract ? formatTaskContract(taskContract) : undefined,
     });

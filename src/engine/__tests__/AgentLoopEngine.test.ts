@@ -369,6 +369,45 @@ describe('AgentLoopEngine', () => {
     expect(interrupted!.payload.reason).toBe('Budget exceeded');
   });
 
+  it('preserves in-flight partial answer on aborted (Ctrl+C) interrupt', async () => {
+    const ac = new AbortController();
+    // A transport that streams a partial answer, then waits for the consumer to
+    // abort and surfaces the interruption — mirroring a real stream cut mid-text.
+    // Regression: the partial text must be persisted in the interrupted
+    // checkpoint, otherwise interrupted turns vanish from history.
+    const partialLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        yield { type: 'content', content: 'partial answer that was still streaming' };
+        while (!ac.signal.aborted) {
+          await new Promise((r) => setTimeout(r, 1));
+        }
+        throw new Error('aborted');
+      },
+      complete: async () => ({ content: 'x', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm: partialLLM, signal: ac.signal });
+    const gen = engine.run(
+      { sessionId: 's-partial', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    );
+    const collected = collect(gen);
+    // Abort only AFTER the stream has emitted its partial answer, mirroring a
+    // real Ctrl+C mid-response — so the engine's aborted-branch must persist the
+    // in-flight text rather than aborting before the stream even starts.
+    const abortTimer = setTimeout(() => ac.abort(), 0);
+    const events = await collected;
+    clearTimeout(abortTimer);
+
+    const interrupted = events.find((e) => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reason).toBe('aborted');
+    const msgs = interrupted!.payload.messages ?? [];
+    const last = msgs[msgs.length - 1];
+    expect(last?.role).toBe('assistant');
+    expect(String((last as any).content)).toContain('partial answer that was still streaming');
+  });
+
   it('emits Interrupted when turn budget is exceeded', async () => {
     const engine = new AgentLoopEngine();
     const ctx = baseCtx({
