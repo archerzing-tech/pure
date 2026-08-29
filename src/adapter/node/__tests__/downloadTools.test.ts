@@ -95,4 +95,20 @@ describe('download_file (real local HTTP server)', () => {
     expect(result.success).toBe(true);
     expect(lastHeaders['referer']).toBe(baseUrl);
   });
+
+  it('bypasses the proxy for private/loopback hosts (never routes internal traffic through a proxy)', async () => {
+    // A deliberately unreachable proxy: if internal hosts were wrongly routed
+    // through it, the download would fail — this proves the internal bypass.
+    const prev = process.env['HTTPS_PROXY'];
+    process.env['HTTPS_PROXY'] = 'http://127.0.0.1:9';
+    try {
+      const result = await dl(`${baseUrl}/file`, { destination: workspace, filename: 'internal-bypass.txt' });
+      expect(result.success).toBe(true);
+      const summary = JSON.parse(String(result.result)) as { path: string };
+      expect(readFileSync(summary.path, 'utf8')).toBe(FILE_BODY);
+    } finally {
+      if (prev === undefined) delete process.env['HTTPS_PROXY'];
+      else process.env['HTTPS_PROXY'] = prev;
+    }
+  });
 });

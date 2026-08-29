@@ -11,7 +11,8 @@ export type DownloadState =
   | 'paused'
   | 'merging'
   | 'done'
-  | 'error';
+  | 'error'
+  | 'hidden';
 
 export interface DownloadProgress {
   downloaded: number;
@@ -79,6 +80,13 @@ class DownloadHub {
 
   emitProgress(id: string, p: DownloadProgress): void {
     for (const cb of this.progressCbs) cb(id, p);
+  }
+
+  /** Tell the UI to tear down any progress bar for this download — used when a
+   * download ultimately fails so a stuck/partial bar never lingers (only
+   * successful downloads should leave a visible bar). */
+  clearProgress(id: string): void {
+    this.emitProgress(id, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: '' });
   }
 
   registerController(id: string): DownloadController {
