@@ -1032,37 +1032,37 @@ function truncate(text: string, max: number): string {
   return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
+/** Short Chinese duty label per subagent role, for the "plan" announcement. */
+const AGENT_ROLE_DUTY: Record<string, string> = {
+  task_planner: '规划', deep_thinker: '深度推理', researcher: '调研',
+  ui_designer: '设计', code_editor: '实现', bash_executor: '验证 / 构建',
+  code_reviewer: '评审', project_auditor: '验签',
+};
+/** Render a concise "本任务计划用这些子 agent" line from recommendedRoles. */
+function subagentPlanText(roles: string[]): string {
+  const parts = roles.map((r) => `${AGENT_ROLE_DUTY[r] ?? r}(${r})`);
+  return `🔀 本任务计划用这些子 agent：${parts.join(' → ')}`;
+}
+
 interface AgentCardHandle {
   root: HTMLElement;
   badge: HTMLElement;
-  tools: HTMLElement;
-  meta: HTMLElement;
 }
 
-/** Lazy right-side rail that hosts the live multi-agent activity cards. */
-function getAgentRail(): HTMLElement {
-  let rail = document.getElementById('agent-rail');
-  if (!rail) {
-    rail = document.createElement('div');
-    rail.id = 'agent-rail';
-    rail.className = 'agent-rail';
-    rail.setAttribute('aria-label', '多 agent 活动面板');
-    const chatView = document.getElementById('chat-view');
-    (chatView ?? document.body).appendChild(rail);
-    chatView?.classList.add('agent-rail-open');
+/** Lazy floating container (top-right) hosting the live multi-agent cards. It is
+ * `pointer-events:none` so it never blocks the transcript; the cards fade out and
+ * are removed when each subagent finishes (ephemeral — never persisted, so replay
+ * never shows them). */
+function getAgentFloat(): HTMLElement {
+  let host = document.getElementById('agent-float');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'agent-float';
+    host.className = 'agent-float';
+    host.setAttribute('aria-label', '多 agent 活动');
+    (document.body).appendChild(host);
   }
-  rail.classList.add('open');
-  return rail;
-}
-
-/** Word-comment style trace-back: clicking a card scrolls the transcript to the
- * exact tool row where that subagent was invoked and flashes it. */
-function traceToAgentCall(callId: string): void {
-  const el = document.querySelector(`[data-agent-callid="${CSS.escape(callId)}"]`) as HTMLElement | null;
-  if (!el) return;
-  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  el.classList.add('agent-trace-flash');
-  window.setTimeout(() => el.classList.remove('agent-trace-flash'), 1600);
+  return host;
 }
 
 /**
@@ -1087,148 +1087,51 @@ function deriveFallbackPlan(prompt: string): Plan {
   };
 }
 
-function createAgentCard(a: SubagentActivity, container: HTMLElement): AgentCardHandle {
+function createAgentCard(a: SubagentActivity): AgentCardHandle {
+  const host = getAgentFloat();
   const root = document.createElement('div');
-  root.className = 'agent-activity working';
+  root.className = 'agent-float-card working';
   root.dataset.callId = a.callId;
-  root.style.cursor = 'pointer';
-  root.title = '点击在对话中定位该子 agent 的处理位置';
-  root.addEventListener('click', () => traceToAgentCall(a.callId));
-
-  const head = document.createElement('div');
-  head.className = 'agent-activity-head';
-
-  const dot = document.createElement('span');
-  dot.className = 'agent-activity-dot';
+  // Ephemeral: no click-to-trace, no transcript binding — the card just shows
+  // which subagent is doing what, then fades away.
 
   const name = document.createElement('span');
-  name.className = 'agent-activity-name';
+  name.className = 'agent-float-name';
   name.textContent = a.agentName;
 
   const role = document.createElement('span');
-  role.className = 'agent-activity-role';
-  if (a.agentRole) role.textContent = `· ${a.agentRole}`;
+  role.className = 'agent-float-role';
+  if (a.agentRole) role.textContent = a.agentRole;
 
   const badge = document.createElement('span');
-  badge.className = 'agent-activity-badge';
+  badge.className = 'agent-float-badge';
   badge.textContent = '工作中';
 
-  head.append(dot, name, role, badge);
-
-  // Meta line (duration / tokens) populated on done — capped here to a visible slot.
-  const meta = document.createElement('span');
-  meta.className = 'agent-activity-meta';
-
-  const body = document.createElement('div');
-  body.className = 'agent-activity-body';
-  if (a.inputSnippet) {
-    const task = document.createElement('div');
-    task.className = 'agent-activity-task';
-    task.textContent = `委托: ${a.inputSnippet}`;
-    body.appendChild(task);
-  }
-  body.appendChild(meta);
-
-  const tools = document.createElement('ul');
-  tools.className = 'agent-activity-tools';
-
-  root.append(head, body, tools);
-  container.appendChild(root);
-  getAgentRail().scrollTop = getAgentRail().scrollHeight;
-  return { root, badge, tools, meta };
-}
-
-/** Orchestration stage (pipeline phase) for a subagent role, so the right-hand
- * rail reads as 规划 → 实现 → 评审 instead of a flat list of cards. Parallel
- * roles sharing a stage (e.g. several code_editor) render side by side. */
-const AGENT_STAGE: Record<string, string> = {
-  task_planner: 'plan', planner: 'plan', deep_thinker: 'plan',
-  researcher: 'research', web_researcher: 'research',
-  code_editor: 'implement', ui_designer: 'implement', writer: 'implement',
-  bash_executor: 'verify',
-  code_reviewer: 'review',
-  project_auditor: 'audit',
-};
-const STAGE_LABEL: Record<string, string> = {
-  plan: '规划与设计', research: '调研', implement: '并行实现',
-  verify: '构建 / 验证', review: '评审', audit: '验签 / 交付', other: '其他',
-};
-function agentStageKey(name: string, role?: string): string {
-  if (AGENT_STAGE[name]) return AGENT_STAGE[name];
-  const r = (role ?? '').toLowerCase();
-  if (/plan|规划|planner/.test(name + r)) return 'plan';
-  if (/review|评审/.test(name + r)) return 'review';
-  if (/audit|审计|验签/.test(name + r)) return 'audit';
-  if (/edit|editor|write|实现|ui|design|设计/.test(name + r)) return 'implement';
-  if (/research|调研|研究/.test(name + r)) return 'research';
-  if (/exec|bash|command|验证|build|test/.test(name + r)) return 'verify';
-  return 'other';
-}
-/** Get (or lazily create) the pipeline stage block for `key` inside the rail, in
- * first-appearance order, with a ↓ connector before every stage after the first
- * so the rail reads as a vertical flow of phases. Returns the stage's agents row
- * (the element cards are appended to). */
-function ensureAgentStage(rail: HTMLElement, key: string): HTMLElement {
-  const existing = rail.querySelector(`.agent-stage[data-stage="${key}"]`) as HTMLElement | null;
-  if (existing) return existing.querySelector('.agent-stage-agents') as HTMLElement;
-  const hasPrior = rail.querySelector('.agent-stage') !== null;
-  const block = document.createElement('section');
-  block.className = 'agent-stage';
-  block.dataset.stage = key;
-  if (hasPrior) {
-    const arrow = document.createElement('div');
-    arrow.className = 'agent-stage-connector';
-    arrow.textContent = '↓';
-    block.appendChild(arrow);
-  }
-  const head = document.createElement('header');
-  head.className = 'agent-stage-head';
-  head.textContent = STAGE_LABEL[key] ?? key;
-  const count = document.createElement('span');
-  count.className = 'agent-stage-count';
-  head.appendChild(count);
-  const agents = document.createElement('div');
-  agents.className = 'agent-stage-agents';
-  block.appendChild(head);
-  block.appendChild(agents);
-  rail.appendChild(block);
-  return agents;
-}
-/** Update the "×N" count badge on this stage's header (N parallel agents). */
-function refreshStageCount(agents: HTMLElement): void {
-  const block = agents.closest('.agent-stage') as HTMLElement | null;
-  const count = block?.querySelector('.agent-stage-count') as HTMLElement | null;
-  if (count) {
-    const n = agents.querySelectorAll('.agent-activity').length;
-    count.textContent = n > 1 ? `×${n}` : '';
-  }
+  root.append(name, role, badge);
+  host.appendChild(root);
+  return { root, badge };
 }
 
 function finishAgentCard(
   card: AgentCardHandle,
   outcome: 'done' | 'failed',
   badgeText: string,
-  note?: string,
+  _note?: string,
   a?: SubagentActivity,
 ): void {
   card.root.classList.remove('working');
   card.root.classList.add(outcome);
   if (a?.status === 'timed_out') card.root.classList.add('timed-out');
   card.badge.textContent = badgeText;
-  if (a && (typeof a.durationMs === 'number' || typeof a.tokensUsed === 'number')) {
-    const parts: string[] = [];
-    if (typeof a.durationMs === 'number') parts.push(`耗时 ${(a.durationMs / 1000).toFixed(1)}s`);
-    if (typeof a.tokensUsed === 'number') parts.push(`${a.tokensUsed} tok`);
-    card.meta.textContent = parts.join(' · ');
-  }
-  if (note) {
-    const li = document.createElement('li');
-    li.className = 'agent-activity-note';
-    li.textContent = note;
-    card.tools.appendChild(li);
-  }
-  const rail = document.getElementById('agent-rail');
-  if (rail) rail.scrollTop = rail.scrollHeight;
+  // Ephemeral card: ~1s after the task ends, fade out slowly and remove it.
+  window.setTimeout(() => {
+    card.root.classList.add('agent-float-exit');
+    window.setTimeout(() => {
+      // Guard against the float container already being gone (new chat / session
+      // switch cleared the DOM) — remove() on a detached node throws.
+      if (card.root.isConnected) card.root.remove();
+    }, 900);
+  }, 1000);
 }
 
 // ── ChatController ──
@@ -1711,6 +1614,10 @@ export class ChatController {
 
   /** Load stored messages into the agent's internal state so subsequent turns use history. */
   loadFromStorage(snapshot: SessionSnapshotV2) {
+    // Switching to another session invalidates any in-flight send of the
+    // previous one, so its subagent-progress callbacks can never recreate
+    // multi-agent cards here (they check gen === this.generation).
+    this.generation++;
     const boundedMessages = limitConversationMessages(snapshot.modelContext.messages);
     this.messages = boundedMessages.map(m => ({ ...m }));
     this.detachActivePlanProgress();
@@ -1976,11 +1883,7 @@ export class ChatController {
     const subagentProgress: SubagentProgress = {
       onStart: (a) => {
         if (gen !== this.generation || agentCards.has(a.callId)) return;
-        const rail = getAgentRail();
-        const stageAgents = ensureAgentStage(rail, agentStageKey(a.agentName, a.agentRole));
-        const card = createAgentCard(a, stageAgents);
-        agentCards.set(a.callId, card);
-        refreshStageCount(stageAgents);
+        agentCards.set(a.callId, createAgentCard(a));
       },
       onState: (a) => {
         if (gen !== this.generation) return;
@@ -1990,11 +1893,7 @@ export class ChatController {
       onTool: (a) => {
         if (gen !== this.generation) return;
         const card = agentCards.get(a.callId);
-        if (!card) return;
-        const li = document.createElement('li');
-        li.textContent = `↳ ${a.toolName}`;
-        card.tools.appendChild(li);
-        scrollChatToBottomIfPinned(document.getElementById('chat')!);
+        if (card) card.badge.textContent = agentStateLabel(a.state);
       },
       onDone: (a) => {
         if (gen !== this.generation) return;
@@ -3420,6 +3319,11 @@ export class ChatController {
       // 本轮是否至少有一个工具真实成功：全失败的工具轮既不能推进阶段，也不能
       // 作为“阶段完成”的证据（hasToolWork 只表示模型调用了工具，含失败）。
       let hasToolSuccess = false;
+      // One-shot announcement of the planned subagent roles ("用了哪几个子
+      // agent 做什么"), surfaced once the adaptive strategy is selected by the
+      // harness (available on the first engine event). Silent for single-agent /
+      // plain-Q&A tasks (recommendedRoles is empty).
+      let planRolesAnnounced = false;
       for await (const event of events) {
 
         // Session switched mid-stream (sidebar click / new chat): stop writing
@@ -3427,6 +3331,11 @@ export class ChatController {
         // cancel() (main.ts loadAndDisplaySession), so no events remain — this
         // guard also covers slow-abort cases where a straggler still yields.
         if (gen !== this.generation) break;
+        if (!planRolesAnnounced) {
+          planRolesAnnounced = true;
+          const roles = codingAgent.getHarness().getAdaptiveStrategy()?.recommendedRoles ?? [];
+          if (roles.length > 0) this.addStatusBubble(subagentPlanText(roles), true, false);
+        }
         switch (event.type) {
           case 'YieldControl': {
             this.updateTurnCount(event.payload.turnNumber, true);
@@ -4428,6 +4337,10 @@ export class ChatController {
     this.activeComplexPlan = null;
     this.pendingTasks = [];
     this.relatedInsert = null;
+    // Multi-agent floating cards are session-scoped: clear them so a new chat
+    // never shows the previous session's cards (and the singleton float
+    // container isn't reused across sessions).
+    document.getElementById('agent-float')?.replaceChildren();
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;

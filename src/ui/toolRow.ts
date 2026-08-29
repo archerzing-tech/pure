@@ -8,6 +8,7 @@
 
 import { linkifyPaths } from './pathLink';
 import { formatBytes } from '../shared/format';
+import { stripAnsi } from '../shared/ansi';
 import { isTauriRuntime } from '../shared/tauri';
 import type { GeneratedImage } from '../shared/types';
 // Structured (JSON/YAML) highlighting reuses the same tree-shaken hljs core
@@ -243,10 +244,12 @@ export function formatStructuredText(text: string): StructuredText | null {
 // Render pretty text with hljs token spans. hljs escapes the source before
 // wrapping tokens, so innerHTML is safe; the fallback degrades to textContent.
 function renderStructured(container: HTMLElement, language: StructuredLanguage, text: string): void {
+  // Guard against ANSI escape codes from logs / colored command output.
+  const clean = stripAnsi(text);
   try {
-    container.innerHTML = hljs.highlight(text, { language }).value;
+    container.innerHTML = hljs.highlight(clean, { language }).value;
   } catch {
-    container.textContent = text;
+    container.textContent = clean;
   }
 }
 
@@ -872,15 +875,19 @@ export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stder
   // collects every line for the full final result.
   const n = Number(row.resultEl.dataset.streamLines ?? 0);
   if (n >= MAX_LIVE_STREAM_LINES) return;
+  // Strip ANSI escape codes / control chars on the live path too: stream lines
+  // arrive from the adapter BEFORE its final stripAnsi, so a colored command
+  // would otherwise garble the in-flight preview (the small-probability case).
+  const clean = stripAnsi(line);
   row.resultEl.querySelector('.tool-row-waiting')?.remove();
-  updateLiveOutputStatus(row, kind, line);
+  updateLiveOutputStatus(row, kind, clean);
   row.resultEl.dataset.streamLines = String(n + 1);
   const div = document.createElement('div');
   div.className = kind === 'stderr' ? 'tool-row-stream-line stderr' : 'tool-row-stream-line';
   // Step tint only on stdout — a stderr line that starts with `> ` or a build
   // verb must keep its red error identity, not get overridden to the step color.
-  if (kind === 'stdout' && isStepHeaderLine(line)) div.classList.add('stream-step');
-  appendHighlightSegments(div, line);
+  if (kind === 'stdout' && isStepHeaderLine(clean)) div.classList.add('stream-step');
+  appendHighlightSegments(div, clean);
   row.resultEl.appendChild(div);
 }
 
