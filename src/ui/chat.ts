@@ -83,6 +83,7 @@ import type {
   Checkpoint,
 } from '../shared/types';
 import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, TaskMode, IntentAssessment } from '../coding-agent/types';
+import { createOptimizeCard } from './optimizeCard';
 
 // Insert a `-v{n}` segment before the extension (or append it for extension-less
 // files) so a written file `a/b/index.html` snapshots to `a/b/index-v1.html`.
@@ -1567,6 +1568,13 @@ export class ChatController {
   /** Current session's aggregated stats (token totals, cost, tool activity). */
   getSessionStats(): SessionStats {
     return this.sessionStats;
+  }
+
+  /** Live transcript messages (current context). Used by the context-panel
+   * charts to estimate the context window actually consumed right now —
+   * sessionStats.usage.promptTokens is cumulative across turns, not current. */
+  getMessages(): Message[] {
+    return this.messages;
   }
 
   private updateTurnCount(turnCount: number, persist = false): void {
@@ -4015,6 +4023,27 @@ export class ChatController {
               renderArtifactCards(artifactRow, this.sessionArtifacts, computeProjectDir(this.sessionArtifacts) ?? effectiveWorkspace, { userRequest: userText });
               this.projectDirectoryShown = true;
               deliveredThisTurn = true;
+              scrollChatToBottomIfPinned(chatEl);
+            }
+            // 课后优化建议卡（非阻断）：交付通过且本回合写过文件时，给用户
+            // 一个手动触发的「生成优化建议」入口。绝不自动跑——不烧 token、
+            // 不拖慢回合收尾。
+            if (projectDelivered && this.sessionArtifacts.length > 0 && gen === this.generation) {
+              createOptimizeCard(chatEl, {
+                files: this.sessionArtifacts.map((a) => a.path),
+                workspace: effectiveWorkspace,
+                userRequest: userText,
+                runReview: async (prompt, files): Promise<string> => {
+                  const toolCall: ToolCall = {
+                    id: `optimize-${gen}-${Date.now()}`,
+                    index: 0,
+                    function: { name: 'code_reviewer', arguments: JSON.stringify({ prompt, files: files.join(', ') }) },
+                  };
+                  const result = await codingAgent.subagentOrchestrator.execute(toolCall, this.abortController?.signal);
+                  if (!result.success || result.error) throw new Error(result.error || 'code_reviewer failed');
+                  return String(result.result ?? '');
+                },
+              });
               scrollChatToBottomIfPinned(chatEl);
             }
             if (assessmentFlow && designPreviewShown) {

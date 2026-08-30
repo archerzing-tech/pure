@@ -594,6 +594,22 @@ function ensureDetachedChartObserver(): void {
  * ResizeObserver — sidebar toggles and window resizes stay correct.
  */
 export function renderEchartInto(target: HTMLElement, spec: ChartSpec): void {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  mountEchart(target, buildChartOption(spec, dark));
+}
+
+/**
+ * Render a caller-built echarts option into `target` with the same lifecycle
+ * as renderEchartInto (dispose on re-render, ResizeObserver refit, detached-
+ * target cleanup). Used by the context-panel stats charts (token-distribution
+ * donut + window-budget ring) so they share one mount/dispose path with
+ * ```chart blocks. The caller bakes theme colors into the option.
+ */
+export function renderEchartOption(target: HTMLElement, option: EChartsOption): void {
+  mountEchart(target, option);
+}
+
+function mountEchart(target: HTMLElement, option: EChartsOption): void {
   // An async chart render can finish after its transcript row was replaced.
   // Never create an ECharts instance for an already-detached target; there is
   // no future mutation in document.body that could reclaim it.
@@ -611,8 +627,6 @@ export function renderEchartInto(target: HTMLElement, spec: ChartSpec): void {
   if (target.clientWidth < 100 || target.clientHeight < 60) {
     target.style.minHeight = '320px';
   }
-  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
-  const option = buildChartOption(spec, dark);
   const font = typeof getComputedStyle === 'function'
     ? getComputedStyle(document.body).fontFamily || undefined
     : undefined;

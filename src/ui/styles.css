@@ -6515,6 +6515,287 @@ select:focus-visible,
   font-weight: 600;
 }
 
+/* ── Context-panel charts (上下文窗口仪表盘 + Token 分布环形图) ── */
+
+.stats-chart-block {
+  margin-bottom: 14px;
+  padding: 10px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-header) 55%, transparent);
+}
+
+.stats-chart-block .context-section-heading {
+  padding-bottom: 6px;
+  border-bottom: none;
+}
+
+.stats-chart-block .context-section-heading b {
+  color: var(--accent);
+  font: 600 11px var(--font-mono);
+}
+
+.stats-chart {
+  height: 120px;
+  width: 100%;
+}
+
+.stats-chart.stats-chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+/* ── Usage dashboard (设置 → 用量统计页) ── */
+
+.usage-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.usage-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.usage-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-header) 55%, transparent);
+}
+
+.usage-stat span {
+  color: var(--text-tertiary);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.usage-stat b {
+  color: var(--text);
+  font: 600 14px var(--font-mono);
+}
+
+.usage-token-line {
+  display: flex;
+  gap: 12px;
+  color: var(--text-secondary);
+  font: 10px var(--font-mono);
+}
+
+.usage-section-title {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.usage-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.usage-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.usage-row-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-cmd {
+  font-family: var(--font-mono);
+}
+
+.usage-row-sub {
+  color: var(--text-tertiary);
+  font: 9px var(--font-mono);
+}
+
+.usage-row-bar {
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--border-light);
+}
+
+.usage-row-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #3E63DD, #7ED9FF);
+}
+
+.usage-activity {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 80px;
+  padding-top: 6px;
+}
+
+.usage-day {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  height: 100%;
+}
+
+.usage-day i {
+  width: 100%;
+  max-width: 18px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.8;
+}
+
+.usage-day span {
+  font: 8px var(--font-mono);
+  color: var(--text-tertiary);
+}
+
+.usage-empty {
+  padding: 6px 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+/* ── Composer inline autocomplete popup ── */
+
+.ac-popup {
+  position: fixed;
+  z-index: 1000;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.ac-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.ac-item.active {
+  background: var(--accent-soft);
+}
+
+.ac-item-kind {
+  flex: none;
+  width: 14px;
+  font-size: 10px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.ac-item-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 课后优化建议卡 ── */
+
+.bubble-row.optimize-row {
+  align-self: stretch;
+  width: 100%;
+  margin: 2px 0 6px;
+}
+
+.optimize-card {
+  padding: 0 12px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-header) 55%, transparent);
+}
+
+.optimize-toggle {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  user-select: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.optimize-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.optimize-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--accent-soft);
+  border-radius: 999px;
+  color: var(--accent);
+  font: 9px var(--font-mono);
+  letter-spacing: 0.05em;
+}
+
+.optimize-body {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.optimize-hint {
+  margin: 0 0 8px;
+  color: var(--text-tertiary);
+}
+
+.optimize-run-btn {
+  margin-top: 4px;
+}
+
+.optimize-loading {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.optimize-result {
+  margin: 0;
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  font: 11px/1.6 var(--font-mono);
+}
+
+.optimize-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .stats-list-section {
   margin-bottom: 14px;
 }
@@ -11606,3 +11887,204 @@ button svg,
 .agent-float-card.timed-out { border-color: var(--warning, #E8A33D); }
 .agent-float-card.timed-out .agent-float-badge { background: color-mix(in srgb, var(--warning, #E8A33D) 14%, transparent); color: var(--warning, #E8A33D); }
 .agent-float-card.agent-float-exit { opacity: 0; transform: translateY(-6px) scale(0.96); }
+
+/* ═══ Batch task queue: composer button badge + popover panel ═══ */
+
+.queue-btn { position: relative; }
+
+.queue-btn-badge {
+  position: absolute;
+  top: -5px;
+  right: -6px;
+  display: none;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+  pointer-events: none;
+}
+.queue-btn-badge-on { display: inline-block; }
+
+/* order:-1 places the panel above the composer inside #input-bar's column.
+   `hidden` must win over .queue-panel's own display:flex (UA [hidden] would
+   otherwise be beaten by the higher-specificity author rule). */
+.queue-panel {
+  order: -1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-height: 340px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-light);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-card) 96%, var(--bg));
+  box-shadow: 0 14px 44px rgba(8, 14, 26, 0.18);
+}
+.queue-panel[hidden] { display: none; }
+
+.queue-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.queue-panel-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.queue-panel-close {
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.queue-panel-close:hover { color: var(--text); background: var(--accent-soft); }
+
+.queue-input-row { display: flex; align-items: stretch; gap: 8px; }
+.queue-input {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-input) 92%, var(--bg));
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.queue-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+}
+.queue-add-btn { align-self: flex-end; white-space: nowrap; }
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 210px;
+  overflow-y: auto;
+}
+.queue-empty { margin: 0; padding: 6px 2px; color: var(--text-tertiary); font-size: 12px; }
+
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.queue-item:hover { background: var(--accent-soft); }
+.queue-dot { flex-shrink: 0; width: 16px; text-align: center; color: var(--text-tertiary); }
+.queue-item-running .queue-dot { color: var(--accent); animation: queueSpin 1.1s linear infinite; }
+.queue-item-done .queue-dot { color: var(--success); }
+.queue-item-failed .queue-dot { color: var(--danger); }
+.queue-item-cancelled .queue-dot { color: var(--text-tertiary); }
+.queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.queue-error {
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--danger);
+  font-size: 12px;
+}
+.queue-cancel-btn {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  padding: 2px 5px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.queue-cancel-btn:hover { color: var(--danger); background: var(--danger-soft); }
+
+.queue-panel-foot { display: flex; gap: 8px; justify-content: flex-end; }
+.queue-foot-btn { white-space: nowrap; }
+
+@keyframes queueSpin { to { transform: rotate(360deg); } }
+
+/* ═══ Scheduled tasks settings page ═══ */
+
+.schedule-hint { margin-bottom: 14px; }
+.schedule-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.schedule-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-input) 92%, var(--bg));
+}
+.schedule-kind {
+  flex-shrink: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+}
+.schedule-trigger { flex-shrink: 0; }
+.schedule-time,
+.schedule-minutes {
+  width: 96px;
+  padding: 4px 6px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-input) 92%, var(--bg));
+  color: var(--text);
+  font-size: 13px;
+}
+.schedule-text {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-input) 92%, var(--bg));
+  color: var(--text);
+  font-size: 13px;
+}
+.schedule-kind:focus,
+.schedule-time:focus,
+.schedule-minutes:focus,
+.schedule-text:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+}
+.schedule-enabled {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.schedule-delete {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.schedule-delete:hover { color: var(--danger); background: var(--danger-soft); }
+.schedule-add { margin-top: 4px; }

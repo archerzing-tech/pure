@@ -670,6 +670,30 @@ function resolveWithin(promise: Promise<unknown>, timeoutMs: number): Promise<vo
 
 // ── Tauri backend (filesystem via Rust commands) ──
 
+// Raw shapes returned by the Rust commands. These mirror the serde structs in
+// src-tauri and are validated/normalized by the normalize* helpers below;
+// typing them here catches schema drift at compile time instead of leaking
+// `any` through every load path. `snapshot` is `unknown` because the raw
+// session payload predates SESSION_SNAPSHOT_VERSION and normalizeSessionSnapshot
+// accepts both the bare snapshot and the legacy whole-object form.
+interface RawLoadLastPayload {
+  sessionId?: string;
+  snapshot?: unknown;
+  workspace?: string;
+}
+interface RawLoadSessionPayload {
+  snapshot?: unknown;
+  workspace?: string;
+}
+interface RawSessionMeta {
+  id?: string;
+  title?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  messageCount?: number;
+  workspace?: string;
+}
+
 async function tauriSave(sessionId: string, snapshot: SessionSnapshotV2, workspace: string): Promise<void> {
   await withTauriTimeout(tauriInvoke('save_session', { sessionId, snapshot, workspace }), 'save_session');
 }
@@ -679,25 +703,25 @@ async function tauriSaveWorkspace(sessionId: string, workspace: string): Promise
 }
 
 async function tauriLoadLast(): Promise<{ sessionId: string; snapshot: SessionSnapshotV2; workspace: string } | null> {
-  const data: any = await withTauriTimeout(tauriInvoke('load_last_session'), 'load_last_session');
+  const data = await withTauriTimeout<RawLoadLastPayload | null>(tauriInvoke<RawLoadLastPayload | null>('load_last_session'), 'load_last_session');
   if (!data) return null;
-  return { sessionId: data.sessionId, snapshot: normalizeSessionSnapshot(data.snapshot ?? data), workspace: data.workspace ?? '' };
+  return { sessionId: data.sessionId ?? '', snapshot: normalizeSessionSnapshot(data.snapshot ?? data), workspace: data.workspace ?? '' };
 }
 
 async function tauriLoad(sessionId: string): Promise<LoadedSession | null> {
-  const data: any = await withTauriTimeout(tauriInvoke('load_session', { sessionId }), 'load_session');
+  const data = await withTauriTimeout<RawLoadSessionPayload | null>(tauriInvoke<RawLoadSessionPayload | null>('load_session', { sessionId }), 'load_session');
   if (!data) return null;
   return { snapshot: normalizeSessionSnapshot(data.snapshot ?? data), workspace: data.workspace ?? '' };
 }
 
 async function tauriLoadList(): Promise<SessionMeta[]> {
-  const list: any[] = await withTauriTimeout(tauriInvoke('load_session_list'), 'load_session_list');
-  return list.map((s: any) => ({
-    id: s.id,
-    title: s.title,
-    createdAt: s.createdAt,
-    updatedAt: s.updatedAt,
-    messageCount: s.messageCount,
+  const list = await withTauriTimeout<RawSessionMeta[]>(tauriInvoke<RawSessionMeta[]>('load_session_list'), 'load_session_list');
+  return list.map((s) => ({
+    id: s.id ?? '',
+    title: s.title ?? '',
+    createdAt: s.createdAt ?? 0,
+    updatedAt: s.updatedAt ?? 0,
+    messageCount: s.messageCount ?? 0,
     workspace: s.workspace ?? '',
   }));
 }
@@ -1042,7 +1066,7 @@ export function loadSessionStats(sessionId: string): SessionStats {
 async function refreshStatsFromDisk(sessionId: string): Promise<void> {
   if (!tauriAvailable) return;
   try {
-    const data: any = await tauriInvoke('load_session_stats', { sessionId });
+    const data = await tauriInvoke<Partial<SessionStats> | null>('load_session_stats', { sessionId });
     if (!data) return;
     const stats = normalizeLoadedStats(data);
     cacheStats(sessionId, stats);
@@ -1086,7 +1110,7 @@ export async function loadSessionStatsForList(sessionIds: string[]): Promise<Map
     try {
       // Pass only the uncached ids so the Rust side reads just those
       // stats.json files instead of sweeping every session on disk.
-      const data: Record<string, any> = await tauriInvoke('load_all_session_stats', { sessionIds: uncached });
+      const data = await tauriInvoke<Record<string, Partial<SessionStats>> | null>('load_all_session_stats', { sessionIds: uncached });
       for (const id of uncached) {
         const raw = data?.[id];
         if (!raw) continue;

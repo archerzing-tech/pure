@@ -152,6 +152,25 @@ export interface PureConfig {
    * partial) entries fall back to the engine defaults (EVOLUTION_DEFAULTS).
    */
   evolution?: Partial<EvolutionConfig>;
+  /**
+   * Scheduled tasks (Settings → 定时任务). Frontend-scheduled: the app fires a
+   * task at its daily HH:MM or every N minutes and enqueues the text into the
+   * task queue. Only meaningful while the app is running — no Rust/OS layer.
+   */
+  schedules?: ScheduleDef[];
+}
+
+/** A scheduled auto-submission. `kind` selects which trigger field is used. */
+export interface ScheduleDef {
+  id: string;
+  /** Task text submitted through the queue when the schedule fires. */
+  text: string;
+  kind: 'daily' | 'interval';
+  /** daily: local time "HH:MM" (24h) to fire each day. */
+  time?: string;
+  /** interval: fire every N minutes (≥ 1). */
+  minutes?: number;
+  enabled: boolean;
 }
 
 export const STORAGE_KEY = 'pure_config';
@@ -238,6 +257,7 @@ export function defaults(): PureConfig {
     autoContinueMaxRounds: 8,
     mapTileCacheMB: DEFAULT_MAP_TILE_CACHE_MB,
     mapTileKey: '',
+    schedules: [],
     configVersion: 13,
   };
 }
@@ -408,7 +428,11 @@ async function saveConfigToRust(cfg: PureConfig): Promise<void> {
 export function persistConfig(cfg: PureConfig): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
-  } catch { /* ignore */ }
+  } catch (err) {
+    // A quota/private-mode failure here silently drops the user's settings —
+    // surface it instead of pretending the write succeeded.
+    console.warn('[pure] failed to persist config to localStorage:', err);
+  }
   invalidateConfigCache();
   if (isTauriRuntime()) void saveConfigToRust(cfg);
 }
@@ -434,7 +458,9 @@ export async function initConfigFile(): Promise<void> {
       if (raw) {
         try {
           await core.invoke('save_config', { config: JSON.parse(raw) });
-        } catch { /* ignore */ }
+        } catch (err) {
+          console.warn('[pure] failed to seed config file from localStorage:', err);
+        }
       }
     }
   } catch (err) {
@@ -657,7 +683,12 @@ export function loadConfig(): PureConfig | null {
       configCache = cfg;
       return cfg;
     }
-  } catch { /* ignore */ }
+  } catch (err) {
+    // Corrupted/unreadable stored config falls back to defaults, but the user
+    // must know the saved settings were NOT loaded — silent defaults look like
+    // "settings lost for no reason".
+    console.warn('[pure] stored config could not be read; using defaults:', err);
+  }
   configCache = null;
   return null;
 }
