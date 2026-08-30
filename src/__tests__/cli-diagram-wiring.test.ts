@@ -9,7 +9,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 function readCliSource(): string {
-  return readFileSync(fileURLToPath(new URL('../cli.ts', import.meta.url)), 'utf-8');
+  // consumeTurn moved to cliRepl.ts in the cli.ts split (audit ①).
+  return readFileSync(fileURLToPath(new URL('../cliRepl.ts', import.meta.url)), 'utf-8');
 }
 
 describe('CLI diagram wireframe wiring', () => {
