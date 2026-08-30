@@ -8,6 +8,7 @@
 import type { AnalysisResult, IntentAssessment, RequestIntent, SemanticRouteDecision, TaskComplexity, TaskMode, Plan, PlanStep, TrapWarning } from './types';
 import type { LLMAdapter, Message, MessageImage } from '../shared/types';
 import { repairJsonSource } from '../shared/parseRepair';
+import { KNOWN_SUBAGENT_ROLES } from '../shared/adaptiveControl';
 
 /** Upper bound on LLM-plan steps kept in the review card / system prompt. */
 const MAX_PLAN_STEPS = 10;
@@ -21,7 +22,18 @@ export interface PlannerConfig {
 const SEMANTIC_ROUTE_PROMPT = `You are the routing layer for a coding assistant. Understand the user's complete message semantically; do not classify from isolated words or a fixed keyword list. Decide what outcome the user is asking for: answer/explanation, research, advice, debugging, a small change, a broad refactor/migration, or creation of a runnable artifact. Distinguish feedback about an existing result from a request to create a new result. A clear creative request is not a reasonableness review merely because it is large, has several variants, or contains style constraints.
 
 Return ONLY one JSON object with this shape:
-{"intent":"question|research|add|modify|debug|refactor|migrate|delete|build","complexity":"simple|complex","mode":"yolo|plan|build","requiresPlan":false,"needsDeliveryGate":false,"assessment":{"riskLevel":"low|medium|high","reversibility":"reversible|partially-reversible|hard-to-reverse|irreversible","impact":"...","recommendation":"...","requiresProbe":false,"requiresConfirmation":false}}
+{"intent":"question|research|add|modify|debug|refactor|migrate|delete|build","complexity":"simple|complex","mode":"yolo|plan|build","requiresPlan":false,"needsDeliveryGate":false,"subagents":["researcher","deep_thinker"],"assessment":{"riskLevel":"low|medium|high","reversibility":"reversible|partially-reversible|hard-to-reverse|irreversible","impact":"...","recommendation":"...","requiresProbe":false,"requiresConfirmation":false}}
+
+"subagents" — pick the SMALLEST useful subset of the real subagent roster below (exact names) that this request genuinely needs to delegate real work to. Use [] (empty) for anything you can answer or do directly yourself; never name a helper you would not actually invoke. Cap at 3-4 roles:
+- researcher — 查资料/网络/文档调研，只读可并行（查景点、天气、汇率、预算参考等）
+- deep_thinker — 复杂推理、架构权衡、多方案评估，把长推理隔离出主会话
+- task_planner — 拆解复杂代码任务（仅真正改代码时）
+- code_editor — 按计划修改代码（仅真正改代码时）
+- code_reviewer — 代码审查把关（仅改代码且需要独立评审时）
+- project_auditor — 项目安全/依赖审计
+- ui_designer — 界面/视觉/交互设计
+- bash_executor — 跑命令、构建/验证（有真实命令要执行时）
+A travel plan / itinerary / event arrangement is NOT a coding task: never pick task_planner / code_editor / code_reviewer just because the word "计划/规划" appears. Prefer researcher and/or deep_thinker (or [] if you already know enough).
 
 Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation only for an explicit destructive/irreversible action or a concrete safety boundary. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files. When the user message is about an image and the goal is to READ, EXTRACT, TRANSCRIBE, or DESCRIBE the text/content shown in that image (e.g. "把图片里的文字读出来", "extract the text from this screenshot", "读出图里的字"), classify it as intent "question", mode "yolo", needsDeliveryGate false — it is a read-only request, NOT a build/delivery task. Never invent a plan or workspace change for reading an image.`;
 
@@ -29,7 +41,7 @@ Use plan/build only when the user's actual outcome benefits from ordered executi
  * 其余一律交给语义路由去理解“完整语句 + 对话上下文”，而不是用一张“动作词关键词
  * 表”去猜用户想做什么。这样“项目跑不起来”这类没有动作词的短消息也会走语义理解，
  * 不再被关键词启发式误判。 */
-const PLEASANTRY_BYPASS = /^(?:好的|好|谢谢|感谢|多谢|谢谢您|感谢您|ok|okay|yes|yeah|对的|对|对呀|继续|接着|收到|明白|明白了|嗯|棒|赞|辛苦了|thanks|thank you|sure|continue|got it|noted|righteous|好的[。.，,！!?？]?|谢谢[。.，,！!?？]?)$/i;
+const PLEASANTRY_BYPASS = /^(?:好的|好|谢谢|感谢|多谢|谢谢您|感谢您|ok|okay|yes|yeah|对的|对|对呀|继续|接着|收到|明白|明白了|嗯|棒|赞|辛苦了|thanks|thank you|sure|continue|got it|noted|righteous|hello|hi|hey|hiya|yo|你好|您好|嗨|哈喽|哈啰|哈罗|早上好|上午好|中午好|下午好|晚上好|晚安|在吗|在么|在不在|好的[。.，,！!?？]?|谢谢[。.，,！!?？]?)$/i;
 
 export function shouldBypassSemanticRoute(prompt: string, images?: MessageImage[] | null): boolean {
   if (images?.length) return false;
@@ -103,12 +115,21 @@ export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
   const reversibility = a.reversibility as IntentAssessment['reversibility'];
   if (!['low', 'medium', 'high'].includes(riskLevel)
     || !['reversible', 'partially-reversible', 'hard-to-reverse', 'irreversible'].includes(reversibility)) return null;
+  // subagents 宽松解析：畸形（非数组/元素非字符串）不整体拒绝决策，按缺失处理；
+  // 未知角色过滤到已知名录、去重、上限 4。显式空数组保留（= 路由判断无需委派）。
+  let subagents: string[] | undefined;
+  if (Array.isArray(value.subagents)) {
+    subagents = Array.from(new Set(
+      value.subagents.filter((s): s is string => typeof s === 'string' && KNOWN_SUBAGENT_ROLES.has(s)),
+    )).slice(0, 4);
+  }
   return {
     intent,
     complexity,
     mode,
     requiresPlan: value.requiresPlan === true,
     needsDeliveryGate: value.needsDeliveryGate === true,
+    subagents,
     assessment: {
       intent,
       riskLevel,

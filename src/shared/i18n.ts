@@ -712,6 +712,16 @@ const translations: Record<Language, Record<string, string>> = {
     'plan.modeForced': '已按你的选择进入 {mode} 模式，正在整理方案…',
     'plan.modeNoWorkspace': '当前没有可写工作区，先选择工作区后才能把这个项目落地。',
     'plan.modeDisabled': '🧭 计划/构建模式已被禁用（设置 → Skills → Planning），本次按普通对话继续',
+    'plan.seq': '规划 {n}',
+    'plan.seqNew': '新一轮规划 {n}',
+    'plan.card.newTitle': '收到，这是一份新的规划：',
+    'plan.card.reason': '因为你提到：“{reason}”',
+    'plan.pin.state.active': '执行中',
+    'plan.pin.state.waiting': '等待你的回复',
+    'plan.pin.state.complete': '已完成',
+    'plan.pin.step': '第 {n}/{total} 步',
+    'plan.pin.done': '全部 {total} 步已完成',
+    'plan.pin.jump': '回到完整计划',
 
     // ── Composer quick selectors ──
     'composer.mode.title': '任务模式 — 自动:智能判断 · YOLO:直接执行 · 计划:先看计划再执行 · 构建:分阶段构建并汇报',
@@ -1547,6 +1557,16 @@ const translations: Record<Language, Record<string, string>> = {
     'plan.modeForced': '🧭 Entering {mode} mode as you selected — generating execution plan…',
     'plan.modeNoWorkspace': '🧭 Project builds need a workspace first — the plan is confirmed, so execution is paused',
     'plan.modeDisabled': '🧭 Plan/Build mode is disabled (Settings → Skills → Planning) — continuing as a normal chat',
+    'plan.seq': 'Plan {n}',
+    'plan.seqNew': 'New plan {n}',
+    'plan.card.newTitle': 'Got it — this is a fresh plan:',
+    'plan.card.reason': 'Because you said: “{reason}”',
+    'plan.pin.state.active': 'Executing',
+    'plan.pin.state.waiting': 'Waiting for your reply',
+    'plan.pin.state.complete': 'Completed',
+    'plan.pin.step': 'Step {n}/{total}',
+    'plan.pin.done': 'All {total} steps done',
+    'plan.pin.jump': 'Back to full plan',
 
     // ── Composer quick selectors ──
     'composer.mode.title': 'Task mode — Auto: decide per task · YOLO: run directly · Plan: review a plan first · Build: build in phases',

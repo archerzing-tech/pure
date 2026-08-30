@@ -135,6 +135,12 @@ const refiningTimers = new WeakMap<HTMLElement, number>();
 const planCardSubscriptions = new WeakMap<PlanCardHandle, () => void>();
 
 export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgressModel): PlanCardHandle {
+  // 会话内规划身份：同一对话可能有多份独立规划（原计划 + 反馈后重规划），
+  // planSeq 区分它们，reason 说明新一轮规划的触发来源（仅新规划携带）。
+  const planSnapshot = source.getSnapshot();
+  const planSeq = planSnapshot.planSeq ?? 1;
+  const reason = planSnapshot.reason;
+
   const el = document.createElement('div');
   el.className = 'bubble-row plan-progress-row plan-text-progress-row';
 
@@ -143,12 +149,20 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
 
   const head = document.createElement('div');
   head.className = 'plan-progress-head';
+  const seqChip = document.createElement('span');
+  seqChip.className = 'plan-progress-seq';
+  if (planSeq > 1) seqChip.classList.add('is-new');
+  seqChip.textContent = planSeq > 1
+    ? t('plan.seqNew', '新一轮规划 {n}').replace('{n}', String(planSeq))
+    : t('plan.seq', '规划 {n}').replace('{n}', String(planSeq));
   const title = document.createElement('span');
   title.className = 'plan-progress-title';
   const firstAction = plan.steps[0]?.action?.trim();
-  title.textContent = plan.steps.length === 1 && firstAction
-    ? `先从「${firstAction}」开始：`
-    : '根据刚才的判断，接下来按这个顺序推进：';
+  title.textContent = planSeq > 1
+    ? t('plan.card.newTitle', '收到，这是一份新的规划：')
+    : (plan.steps.length === 1 && firstAction
+      ? `先从「${firstAction}」开始：`
+      : '根据刚才的判断，接下来按这个顺序推进：');
   const count = document.createElement('span');
   count.className = 'plan-progress-count';
   count.textContent = `大概分成 ${plan.steps.length} 件事`;
@@ -160,7 +174,7 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
   autoBadge.setAttribute('role', 'status');
   autoBadge.setAttribute('aria-live', 'polite');
   autoBadge.hidden = true;
-  const headParts: HTMLElement[] = [title];
+  const headParts: HTMLElement[] = [seqChip, title];
   if (refining) {
     // Scaffold period: the LLM is still working out the real steps. Animated
     // dots + label tell the user the card is live and being refined, instead
@@ -290,7 +304,17 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
     substepNumEls.push(nestedNums);
   });
 
-  card.append(head, activity, steps);
+  // 新一轮规划：在活动行上方展示触发来源，一眼看出与上面的规划不是同一件事。
+  let reasonEl: HTMLElement | null = null;
+  if (planSeq > 1 && reason) {
+    reasonEl = document.createElement('div');
+    reasonEl.className = 'plan-progress-reason';
+    const truncated = reason.length > 28 ? `${reason.slice(0, 28)}…` : reason;
+    reasonEl.textContent = t('plan.card.reason', '因为你提到：“{reason}”').replace('{reason}', truncated);
+  }
+  card.append(head);
+  if (reasonEl) card.append(reasonEl);
+  card.append(activity, steps);
   el.appendChild(card);
   for (const todoList of todoLists) el.appendChild(todoList);
 

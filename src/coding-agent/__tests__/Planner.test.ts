@@ -78,12 +78,87 @@ describe('Planner', () => {
     expect(parseSemanticRoute('{"intent":"build","complexity":"complex"}')).toBeNull();
   });
 
+  it('parses subagents into the semantic decision, filtering unknown roles', () => {
+    const route = parseSemanticRoute(JSON.stringify({
+      intent: 'research',
+      complexity: 'complex',
+      mode: 'plan',
+      requiresPlan: true,
+      needsDeliveryGate: false,
+      subagents: ['researcher', 'deep_thinker', 'not_a_real_role', 'code_editor'],
+      assessment: { riskLevel: 'low', reversibility: 'reversible', impact: '沿线路程', recommendation: '分头调研', requiresProbe: false, requiresConfirmation: false },
+    }));
+    expect(route?.subagents).toEqual(['researcher', 'deep_thinker', 'code_editor']);
+  });
+
+  it('preserves an explicit empty subagents array (≠ missing)', () => {
+    const route = parseSemanticRoute(JSON.stringify({
+      intent: 'question',
+      complexity: 'simple',
+      mode: 'yolo',
+      requiresPlan: false,
+      needsDeliveryGate: false,
+      subagents: [],
+      assessment: { riskLevel: 'low', reversibility: 'reversible', impact: '', recommendation: '', requiresProbe: false, requiresConfirmation: false },
+    }));
+    expect(route?.subagents).toBeDefined();
+    expect(route?.subagents).toEqual([]);
+  });
+
+  it('leaves subagents undefined when the field is absent', () => {
+    const route = parseSemanticRoute(JSON.stringify({
+      intent: 'question',
+      complexity: 'simple',
+      mode: 'yolo',
+      requiresPlan: false,
+      needsDeliveryGate: false,
+      assessment: { riskLevel: 'low', reversibility: 'reversible', impact: '', recommendation: '', requiresProbe: false, requiresConfirmation: false },
+    }));
+    expect(route?.subagents).toBeUndefined();
+  });
+
+  it('caps subagents at 4 and dedupes', () => {
+    const route = parseSemanticRoute(JSON.stringify({
+      intent: 'build',
+      complexity: 'complex',
+      mode: 'build',
+      requiresPlan: true,
+      needsDeliveryGate: true,
+      subagents: ['researcher', 'deep_thinker', 'researcher', 'ui_designer', 'project_auditor', 'bash_executor'],
+      assessment: { riskLevel: 'low', reversibility: 'reversible', impact: '新建', recommendation: '分步实现', requiresProbe: true, requiresConfirmation: false },
+    }));
+    expect(route?.subagents).toEqual(['researcher', 'deep_thinker', 'ui_designer', 'project_auditor']);
+  });
+
+  it('does not reject the whole decision when subagents is malformed', () => {
+    const route = parseSemanticRoute(JSON.stringify({
+      intent: 'research',
+      complexity: 'complex',
+      mode: 'plan',
+      requiresPlan: true,
+      needsDeliveryGate: false,
+      subagents: 'researcher',
+      assessment: { riskLevel: 'low', reversibility: 'reversible', impact: '调研', recommendation: '查资料', requiresProbe: false, requiresConfirmation: false },
+    }));
+    expect(route).not.toBeNull();
+    expect(route?.subagents).toBeUndefined();
+  });
+
   it('bypasses the semantic router only for short acknowledgements without action words', () => {
     // Pleasantries / acknowledgements — no LLM round-trip needed.
     expect(shouldBypassSemanticRoute('好的')).toBe(true);
     expect(shouldBypassSemanticRoute('谢谢')).toBe(true);
     expect(shouldBypassSemanticRoute('ok')).toBe(true);
     expect(shouldBypassSemanticRoute('继续')).toBe(true);
+    // Greetings / openers skip the semantic router too — an extra LLM round
+    // trip for "hello" is the dominant part of the first-reply latency.
+    expect(shouldBypassSemanticRoute('hello')).toBe(true);
+    expect(shouldBypassSemanticRoute('hi')).toBe(true);
+    expect(shouldBypassSemanticRoute('hey')).toBe(true);
+    expect(shouldBypassSemanticRoute('你好')).toBe(true);
+    expect(shouldBypassSemanticRoute('您好')).toBe(true);
+    expect(shouldBypassSemanticRoute('早上好')).toBe(true);
+    expect(shouldBypassSemanticRoute('在吗')).toBe(true);
     // Concrete short requests still route through the model.
     expect(shouldBypassSemanticRoute('帮我写个游戏')).toBe(false);
     expect(shouldBypassSemanticRoute('改一下')).toBe(false);
