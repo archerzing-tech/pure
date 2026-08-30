@@ -66,12 +66,38 @@ initTauriInvoke();
 // engine uses for the id-bearing TokenDelta and the ToolResult event.
 
 export type ToolOutputKind = 'stdout' | 'stderr';
-export type ToolOutputListener = (toolCallId: string, kind: ToolOutputKind, line: string) => void;
+// `progress` marks a lone-`\r` in-place redraw (pip/npm/bun progress bars): the
+// GUI redraws its last progress line instead of appending another row.
+export type ToolOutputListener = (toolCallId: string, kind: ToolOutputKind, line: string, progress?: boolean) => void;
 
 let toolOutputListener: ToolOutputListener | null = null;
 
 export function setToolOutputListener(fn: ToolOutputListener | null): void {
   toolOutputListener = fn;
+}
+
+/** One message from the Rust execute_command_stream Channel. */
+export type CommandStreamChunk =
+  | { type: 'stdout' | 'stderr'; line: string; progress: boolean }
+  | { type: 'exit'; code: number }
+  | null;
+
+/** Parse one Channel message; malformed JSON or unknown shapes return null. */
+export function parseCommandStreamChunk(raw: string): CommandStreamChunk {
+  let parsed: { type?: string; content?: unknown; code?: unknown; progress?: unknown } | null = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed) return null;
+  if (parsed.type === 'stdout' || parsed.type === 'stderr') {
+    return { type: parsed.type, line: String(parsed.content ?? ''), progress: parsed.progress === true };
+  }
+  if (parsed.type === 'exit') {
+    return { type: 'exit', code: typeof parsed.code === 'number' ? parsed.code : -1 };
+  }
+  return null;
 }
 
 // ── Download progress side channel ──
@@ -469,13 +495,11 @@ export class TauriToolAdapter implements ToolAdapter {
             // tell a warning from an error even when a command fails.
             const collected: Array<{ kind: 'stdout' | 'stderr'; line: string }> = [];
             channel.onmessage = (raw: string) => {
-              let parsed: { type?: string; content?: unknown } | null = null;
-              try { parsed = JSON.parse(raw); } catch { parsed = null; }
-              if (!parsed) return;
-              if (parsed.type === 'stdout' || parsed.type === 'stderr') {
-                const line = String(parsed.content ?? '');
-                collected.push({ kind: parsed.type, line });
-                toolOutputListener?.(toolCall.id, parsed.type, line);
+              const chunk = parseCommandStreamChunk(raw);
+              if (!chunk) return;
+              if (chunk.type === 'stdout' || chunk.type === 'stderr') {
+                collected.push({ kind: chunk.type, line: chunk.line });
+                toolOutputListener?.(toolCall.id, chunk.type, chunk.line, chunk.progress);
               }
             };
             // Cancel wiring: when the engine aborts this tool call (user

@@ -120,6 +120,9 @@ export interface ToolRowHandle {
   resultEl: HTMLElement;
   expandButton: HTMLButtonElement;
   toolName: string;
+  // Browser interval id for the "已运行 Ns" pending heartbeat (see
+  // startElapsedTicker); undefined when no window (DOM tests) or after stop.
+  elapsedTimer?: number;
 }
 
 // Every tool row is a live execution trace. Open it initially so the user can
@@ -149,6 +152,14 @@ export function shouldUseTerminalPanel(toolName: string): boolean {
     case 'git_diff':
     case 'git_log':
     case 'git_status':
+    // Coding subagents that read files / run commands and report verdicts are
+    // console tools too — their body must match the other dark terminal panels
+    // (code_reviewer's transparent white body was the visible mismatch).
+    case 'code_reviewer':
+    case 'project_auditor':
+    case 'task_planner':
+    case 'code_editor':
+    case 'bash_executor':
       return true;
     default:
       return false;
@@ -506,7 +517,53 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   if (shouldExpandToolRowInitially(toolName)) details.open = true;
 
   const handle: ToolRowHandle = { el: wrapper, details, statusEl, argsEl, inputSection, resultEl, expandButton, toolName };
+  startElapsedTicker(handle);
   return handle;
+}
+
+// ── Pending heartbeat (已运行 Ns) ──
+// A ticking elapsed-time indicator next to the pending spinner. A silent,
+// long-running command (npm/bun/pip install) otherwise reads as frozen — the
+// spinner and blinking cursor never change, and the waiting placeholder is
+// removed the moment the first line streams. The "已运行 Ns" counter advances
+// every second regardless of output, so the row is visibly alive. It's plain
+// text (not a CSS animation), so it still works under prefers-reduced-motion,
+// where the project suppresses every animation. Guarded on window so the bun
+// DOM tests (no window) never start a leaked interval.
+
+function formatElapsedSince(startedAt: number): string {
+  const total = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  if (total < 60) return `已运行 ${total}s`;
+  const m = Math.floor(total / 60);
+  if (m < 60) return `已运行 ${m}m ${total % 60}s`;
+  const h = Math.floor(m / 60);
+  return `已运行 ${h}h ${m % 60}m`;
+}
+
+function stopElapsedTicker(row: ToolRowHandle): void {
+  if (row.elapsedTimer !== undefined && typeof window !== 'undefined' && typeof window.clearInterval === 'function') {
+    window.clearInterval(row.elapsedTimer);
+    row.elapsedTimer = undefined;
+  }
+}
+
+function startElapsedTicker(handle: ToolRowHandle): void {
+  if (typeof window === 'undefined' || typeof window.setInterval !== 'function') return;
+  const startedAt = Date.now();
+  const elapsed = document.createElement('span');
+  elapsed.className = 'tool-row-elapsed';
+  handle.statusEl.appendChild(elapsed);
+  const tick = (): void => {
+    // Self-terminating: if the row ever leaves the pending state without an
+    // explicit cleanup, stop instead of mutating a dead row forever.
+    if (!handle.details.classList.contains('pending')) {
+      stopElapsedTicker(handle);
+      return;
+    }
+    elapsed.textContent = formatElapsedSince(startedAt);
+  };
+  tick();
+  handle.elapsedTimer = window.setInterval(tick, 1000);
 }
 
 function setToolRowExpandedLabel(button: HTMLButtonElement, expanded: boolean): void {
@@ -641,6 +698,7 @@ export function updateToolRowArgs(
 }
 
 export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): void {
+  stopElapsedTicker(row);
   row.details.classList.remove('pending');
   row.details.classList.add(meta.success ? 'success' : 'failure');
   row.statusEl.textContent = `${meta.success ? '✓' : '✗'} ${formatDuration(meta.duration)}`;
@@ -767,6 +825,7 @@ function appendHighlightedResult(pre: HTMLElement, text: string): void {
 }
 
 export function markToolRowStopped(row: ToolRowHandle): void {
+  stopElapsedTicker(row);
   row.details.classList.remove('pending');
   row.details.classList.add('stopped');
   row.statusEl.textContent = '⏹';
@@ -869,7 +928,7 @@ function appendHighlightSegments(parent: HTMLElement, line: string): void {
   }
 }
 
-export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stderr', line: string): void {
+export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stderr', line: string, progress = false): void {
   // Counter-based cap (not a per-line DOM scan): once the live preview stops
   // growing, later lines short-circuit immediately. The adapter still
   // collects every line for the full final result.
@@ -880,6 +939,22 @@ export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stder
   // would otherwise garble the in-flight preview (the small-probability case).
   const clean = stripAnsi(line);
   row.resultEl.querySelector('.tool-row-waiting')?.remove();
+  // A lone-`\r` progress chunk (pip/npm/bun in-place progress bars, split into
+  // live updates by the Rust backend) redraws the LAST stream line instead of
+  // appending — one download's ~50 redraws would otherwise flood the panel. It
+  // also skips the byte counter: a redraw isn't distinct output.
+  if (progress) {
+    const last = row.resultEl.querySelector('.tool-row-stream-line:last-child') as HTMLElement | null;
+    if (last) {
+      // Reset identity classes: a redraw can flip stdout↔stderr or a step tint.
+      last.className = kind === 'stderr' ? 'tool-row-stream-line stderr' : 'tool-row-stream-line';
+      if (kind === 'stdout' && isStepHeaderLine(clean)) last.classList.add('stream-step');
+      last.textContent = '';
+      appendHighlightSegments(last, clean);
+      return;
+    }
+    // No previous line to redraw yet — fall through and append the first one.
+  }
   updateLiveOutputStatus(row, kind, clean);
   row.resultEl.dataset.streamLines = String(n + 1);
   const div = document.createElement('div');
