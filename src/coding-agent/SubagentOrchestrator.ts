@@ -68,6 +68,22 @@ export interface SubagentProgress {
   onError?: (a: SubagentActivity) => void;
 }
 
+/** Pure cap: derive a subagent's budget from the parent's so a single subagent
+ * cannot burn the whole allocation. Exported so the code_reviewer fix — the
+ * caps were once 6 turns / 20k tokens / 90s, far below what a multi-step
+ * review (read several files, write a structured verdict) needs, so the
+ * reviewer always aborted mid-review — is locked by a unit test. Most roles
+ * stay tighter via their own `defaultTimeoutMs` AbortSignal. */
+export function deriveSubagentBudget(parent: BudgetConfig): BudgetConfig {
+  return {
+    maxTurns: Math.min(parent.maxTurns, 20),
+    maxTotalTokens: Math.min(parent.maxTotalTokens, 100_000),
+    maxExecutionTime: Math.min(parent.maxExecutionTime, 600_000),
+    warningThreshold: parent.warningThreshold ?? 0.8,
+    graceTurns: parent.graceTurns ?? 1,
+  };
+}
+
 export interface SubagentOrchestratorConfig {
   llm: LLMAdapter;
   parentTools?: ToolAdapter;
@@ -137,14 +153,7 @@ export class SubagentOrchestrator implements ToolAdapter {
    * — the parent's wall-clock deadline still brackets the subagent via the
    * engine's runWithDeadline. */
   private subagentBudget(): BudgetConfig {
-    const b = this.config.subagentBudget ?? this.config.defaultBudget;
-    return {
-      maxTurns: Math.min(b.maxTurns, 6),
-      maxTotalTokens: Math.min(b.maxTotalTokens, 20000),
-      maxExecutionTime: Math.min(b.maxExecutionTime, 90_000),
-      warningThreshold: b.warningThreshold ?? 0.8,
-      graceTurns: b.graceTurns ?? 1,
-    };
+    return deriveSubagentBudget(this.config.subagentBudget ?? this.config.defaultBudget);
   }
 
   /** FNV-1a 64-bit over the UTF-8 bytes of a string (stable, no Date/random —
@@ -397,7 +406,10 @@ export const BUILT_IN_SUBAGENTS: SubagentDefinition[] = [
 
 Be concise. Structure your review with clear sections.${filesHint}`;
     },
-    defaultTimeoutMs: 120_000,
+    // A real review reads several files then writes a structured verdict; keep
+    // this above the subagent budget cap so the budget (not a stray timeout)
+    // governs. 90s/120s was consistently too short.
+    defaultTimeoutMs: 600_000,
   },
   {
     name: 'project_auditor',
@@ -424,7 +436,9 @@ Check:
 
 Distinguish a vulnerability/finding from an unavailable audit tool, missing lockfile, network failure, or inconclusive result. Do not call an unavailable check a pass. Report evidence under concise headings, then end with exactly one line: AUDIT: PASS when no blocking finding remains and all required checks have evidence, otherwise AUDIT: FAIL.${filesHint}`;
     },
-    defaultTimeoutMs: 120_000,
+    // Same reasoning as code_reviewer: a read-only audit walks manifests and
+    // runs checks, so 120s was too tight. Bounded by the subagent budget cap.
+    defaultTimeoutMs: 600_000,
   },
 ];
 

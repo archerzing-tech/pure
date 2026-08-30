@@ -1,7 +1,7 @@
 // src/ui/__tests__/toolRow.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded } from '../toolRow';
+import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine } from '../toolRow';
 import type { GeneratedImage } from '../../shared/types';
 
 // Minimal fake DOM sufficient for createToolRow + finalizeToolRow's image
@@ -12,6 +12,8 @@ function installFakeDocument(): () => void {
   const createElement = (tag: string): any => {
     const classes = new Set<string>();
     const children: any[] = [];
+    let className = '';
+    let textContent = '';
     const el: any = {
       tagName: tag.toUpperCase(),
       children,
@@ -19,8 +21,23 @@ function installFakeDocument(): () => void {
       dataset: {},
       style: {},
       _listeners: {} as Record<string, (ev?: any) => void>,
-      className: '',
-      textContent: '',
+      // Keep direct `el.className = ...` assignments and classList mutations in
+      // sync (a real DOM does): a class added via classList must not wipe a
+      // className set directly, e.g. toolRow's
+      // `div.className = 'tool-row-stream-line'; div.classList.add('stream-step')`.
+      get className(): string { return className; },
+      set className(value: string) {
+        className = value;
+        classes.clear();
+        String(value).split(/\s+/).filter(Boolean).forEach((c) => classes.add(c));
+      },
+      // Setting textContent replaces all children (a real DOM does); toolRow's
+      // progress redraw relies on `last.textContent = ''` then re-appending.
+      get textContent(): string { return textContent; },
+      set textContent(value: string) {
+        textContent = value;
+        children.length = 0;
+      },
       _innerHTML: '',
       hidden: false,
       open: false,
@@ -39,7 +56,7 @@ function installFakeDocument(): () => void {
         }
       },
       get innerHTML(): string { return this._innerHTML; },
-      _sync: () => { el.className = [...classes].join(' '); },
+      _sync: () => { className = [...classes].join(' '); },
       classList: {
         add: (...names: string[]) => { names.forEach((n) => classes.add(n)); el._sync(); },
         remove: (...names: string[]) => { names.forEach((n) => classes.delete(n)); el._sync(); },
@@ -53,6 +70,7 @@ function installFakeDocument(): () => void {
       },
       append: (...items: any[]) => items.forEach((item) => { children.push(item); item.parentNode = el; }),
       appendChild: (item: any) => { children.push(item); item.parentNode = el; return item; },
+      prepend: (...items: any[]) => items.forEach((item) => { children.unshift(item); item.parentNode = el; }),
       remove: () => {
         const parent = el.parentNode;
         if (parent?.children) {
@@ -213,6 +231,18 @@ describe('tool row terminal panel policy', () => {
     expect(shouldUseTerminalPanel('web_researcher')).toBe(false);
     expect(shouldUseTerminalPanel('unknown_tool')).toBe(false);
   });
+
+  it('renders coding subagents (code_reviewer and siblings) on the dark console surface', () => {
+    // Regression: code_reviewer's body was transparent/white — visibly out of
+    // step with the other dark terminal panels (execute_command / read_file).
+    for (const tool of ['code_reviewer', 'project_auditor', 'task_planner', 'code_editor', 'bash_executor']) {
+      expect(shouldUseTerminalPanel(tool)).toBe(true);
+    }
+    // Prose roles keep the light surface.
+    for (const tool of ['researcher', 'deep_thinker', 'ui_designer', 'planner']) {
+      expect(shouldUseTerminalPanel(tool)).toBe(false);
+    }
+  });
 });
 
 describe('live stream line highlighting', () => {
@@ -239,6 +269,92 @@ describe('live stream line highlighting', () => {
   it('joins segments back into the exact original line', () => {
     const line = 'fetch https://x 50% done ok ████░';
     expect(highlightStreamLine(line).map((s) => s.text).join('')).toBe(line);
+  });
+});
+
+describe('appendToolStreamLine progress redraw (lone-\\r chunks)', () => {
+  // installFakeDocument's querySelector returns null everywhere, so we wire the
+  // row's resultEl to resolve '.tool-row-stream-line:last-child' from its own
+  // children — the minimal surface appendToolStreamLine touches.
+  function wireStreamLines(row: ReturnType<typeof createToolRow>): void {
+    row.resultEl.querySelector = (sel: string) => {
+      if (sel === '.tool-row-stream-line:last-child') {
+        const lines = Array.from(row.resultEl.children).filter((c: any) =>
+          String(c.className).includes('tool-row-stream-line'));
+        return lines.length ? lines[lines.length - 1] : null;
+      }
+      return null;
+    };
+  }
+
+  // join textContent across an element's children (highlight segments are
+  // inserted as text nodes + .stream-hl-* spans, not as the parent's textContent).
+  function textOf(el: any): string {
+    return Array.from(el.childNodes).map((c: any) => c.textContent ?? '').join('');
+  }
+
+  // resultEl also holds a .tool-row-live-status + waiting placeholder; only the
+  // stream lines matter here.
+  function streamLineCount(row: ReturnType<typeof createToolRow>): number {
+    return Array.from(row.resultEl.children).filter((c: any) =>
+      String(c.className).includes('tool-row-stream-line')).length;
+  }
+
+  it('redraws the last stream line in place instead of appending', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('execute_command', { command: 'pip install requests' });
+      wireStreamLines(row);
+      appendToolStreamLine(row, 'stdout', 'Collecting requests');
+      appendToolStreamLine(row, 'stdout', 'Downloading requests 0%');
+      const before = streamLineCount(row);
+      const streamLines = Number(row.resultEl.dataset.streamLines);
+
+      // ~50 pip progress redraws → still one line appended per round.
+      for (let pct = 10; pct <= 100; pct += 10) {
+        appendToolStreamLine(row, 'stdout', `Downloading requests ${pct}%`, true);
+      }
+
+      expect(streamLineCount(row)).toBe(before); // never appended
+      expect(Number(row.resultEl.dataset.streamLines)).toBe(streamLines); // counter untouched
+      const last = Array.from(row.resultEl.children)
+        .filter((c: any) => String(c.className).includes('tool-row-stream-line')).pop();
+      expect(textOf(last)).toBe('Downloading requests 100%');
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps the redraw line on the stdout surface (no stray step tint)', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('execute_command', { command: 'bun install' });
+      wireStreamLines(row);
+      appendToolStreamLine(row, 'stdout', 'downloading 12%');
+      appendToolStreamLine(row, 'stdout', 'downloading 45%', true);
+      expect(streamLineCount(row)).toBe(1); // redrew, did not append
+      // A lone percent is not a build-step header → plain stream line.
+      const last = Array.from(row.resultEl.children)
+        .filter((c: any) => String(c.className).includes('tool-row-stream-line')).pop()!;
+      expect(String(last.className)).toBe('tool-row-stream-line');
+    } finally {
+      restore();
+    }
+  });
+
+  it('falls through to append when there is no prior line to redraw', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('execute_command', { command: 'pip install' });
+      wireStreamLines(row);
+      appendToolStreamLine(row, 'stdout', 'downloading 12%', true);
+      expect(streamLineCount(row)).toBe(1);
+      const last = Array.from(row.resultEl.children)
+        .filter((c: any) => String(c.className).includes('tool-row-stream-line')).pop();
+      expect(textOf(last)).toBe('downloading 12%');
+    } finally {
+      restore();
+    }
   });
 });
 
