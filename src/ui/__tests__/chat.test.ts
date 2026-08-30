@@ -720,6 +720,25 @@ describe('plan overview completion state', () => {
     expect(canAdvance).toBeGreaterThan(-1);
   });
 
+  it('delivers a build plan from delivery-gate evidence when the cursor is stuck mid-list', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 模型做文档类项目时常漏发 `## 计划 n` 起始/完成标记，游标卡在列表中间；
+    // 此时构建计划的交付验证通过（真实 typecheck/测试/构建全绿）就是项目已交付
+    // 的证据，必须把计划置为完成——否则顶部进度条永远停在「第 N/6 步」。
+    const candidate = src.indexOf('const deliveryCompletedPlan = planCard');
+    expect(candidate).toBeGreaterThan(-1);
+    // 守卫：只对构建计划、且交付验证真实通过、游标确实未到末步时触发。
+    expect(src.slice(candidate, candidate + 550)).toContain('needsDeliveryGate && qualityPassed === true');
+    expect(src.slice(candidate, candidate + 550)).toContain('hasToolSuccess');
+    expect(src.slice(candidate, candidate + 550)).toContain('completionSnapshot.currentPlan < completionSnapshot.plan.steps.length');
+    // 本轮已播报下一计划时不抢跑（标记机制正要推进游标）。
+    expect(src.slice(candidate, candidate + 550)).toContain('!planTrack.phaseStarted.has(completionSnapshot.currentPlan + 1)');
+    // 兜底并入回合末完成判定，且复用「交付门禁通过」分支 dispatch completed。
+    const gate = src.indexOf('|| (deliveryCompletedPlan && planCard)', candidate);
+    expect(gate).toBeGreaterThan(candidate);
+    expect(src.slice(gate, gate + 900)).toContain("planProgress?.dispatch({ type: 'completed' });");
+  });
+
   it('never force-advances a stage whose work is incomplete', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 回合收尾兜底（canAdvancePlan）只在实际证据齐备时推进：当前阶段 Todo 全部
@@ -938,5 +957,28 @@ describe('generate_image text-to-image wiring', () => {
     const endThinkingCall = src.indexOf('endThinking();', tokenDelta);
     expect(linger).toBeGreaterThan(-1);
     expect(linger).toBeLessThan(endThinkingCall);
+  });
+});
+
+describe('subagent tool body renders the delegated output', () => {
+  it('extracts SubagentResult.output instead of stringifying the object (bash_executor body fix)', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const candidate = src.indexOf("const resultText = rawResult && typeof rawResult === 'object'");
+    expect(candidate).toBeGreaterThan(-1);
+    // The object path must pull .output for subagents (bash conclusion, review
+    // verdict), not fall through to String(object) === "[object Object]".
+    expect(src.slice(candidate, candidate + 650)).toContain("'summary' in rawResult");
+    expect(src.slice(candidate, candidate + 650)).toContain("'output' in rawResult");
+    expect(src.slice(candidate, candidate + 650)).toContain('(rawResult as { output?: string }).output as string');
+  });
+
+  it('line-caps subagent bodies like live execute_command output', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const subagentBranch = src.indexOf('} else if (subagentNames.has(toolName)) {');
+    expect(subagentBranch).toBeGreaterThan(-1);
+    const slice = src.slice(subagentBranch, subagentBranch + 520);
+    expect(slice).toContain('resultPreview = truncateResultLines(resultText);');
+    // The generic 800-char slice stays for non-subagent tools only.
+    expect(slice).toContain('resultText.slice(0, 800);');
   });
 });

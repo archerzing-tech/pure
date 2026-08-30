@@ -633,3 +633,40 @@ describe('tool row renders generated images as <img> cards', () => {
     }
   });
 });
+
+describe('bash_executor body matches the unified console look', () => {
+  it('gets the dark terminal panel on both sections like execute_command', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('bash_executor', { command: 'bun test' });
+      expect(String(row.inputSection.className)).toContain('terminal-panel');
+      // The Output section wraps resultEl; it must carry the same dark panel.
+      const outputSection = (row.resultEl.parentNode as any);
+      expect(String(outputSection.className)).toContain('terminal-panel');
+    } finally {
+      restore();
+    }
+  });
+
+  it('terminal-highlights bash_executor output on finalize (not monochrome text)', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('bash_executor', { command: 'bun run build' });
+      finalizeToolRow(row, {
+        success: true,
+        duration: 1200,
+        resultText: '✓ 构建通过，产物位于 dist/',
+      });
+      const preview = Array.from(row.resultEl.children).find((c: any) => String(c.className).includes('tool-result-preview')) as any;
+      expect(preview).toBeDefined();
+      // Terminal-highlight path: line spans instead of a single text node, and
+      // the ✓ success token gets a colored span (stream-hl-success).
+      const lineEl = preview.children[0];
+      expect(String(lineEl.className)).toContain('tool-result-line');
+      const colored = Array.from(lineEl.children).filter((c: any) => String(c.className).startsWith('stream-hl-'));
+      expect(colored.length).toBeGreaterThan(0);
+    } finally {
+      restore();
+    }
+  });
+});
