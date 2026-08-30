@@ -107,12 +107,19 @@ export function renderSchedulesSettings(host: HTMLElement, onChange: () => void)
     del.className = 'schedule-delete';
     del.textContent = '✕';
     del.title = t('schedule.delete');
-    del.addEventListener('click', () => {
+    del.addEventListener('click', function() {
       const cfg = loadConfig() ?? defaults();
       cfg.schedules = (cfg.schedules ?? []).filter((x) => x.id !== s.id);
       persistConfig(cfg);
       invalidateConfigCache();
       onChange();
+      // Re-render the schedules dashboard to reflect the deletion
+      const host = document.getElementById('schedules-dashboard');
+      if (host) {
+        renderSchedulesSettings(host, function() {
+          this.onSave();
+        }.bind(this));
+      }
     });
 
     row.append(kind, trigger, text, enabled, del);
