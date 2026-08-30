@@ -21,18 +21,15 @@ function onnxWasmAssets(): Plugin {
       if (!id.includes('/node_modules/@huggingface/transformers/')
         && !id.includes('/node_modules/onnxruntime-web/')) return;
       if (!code.includes('ort-wasm-simd-threaded')) return;
+      // Collapse 10 replaceAll calls into 2 regex passes — the main perf
+      // win when this hook runs on every module from @huggingface/transformers.
       return {
         code: code
-          .replaceAll('ort-wasm-simd-threaded.asyncify.wasm', 'ort-wasm-simd-threaded.wasm')
-          .replaceAll('ort-wasm-simd-threaded.asyncify.mjs', 'ort-wasm-simd-threaded.mjs')
-          .replaceAll('new URL("ort-wasm-simd-threaded.wasm", import.meta.url).href', '"wasm/ort-wasm-simd-threaded.wasm"')
-          .replaceAll("new URL('ort-wasm-simd-threaded.wasm', import.meta.url).href", "'wasm/ort-wasm-simd-threaded.wasm'")
-          .replaceAll('new URL("ort-wasm-simd-threaded.wasm", void 0).href', '"wasm/ort-wasm-simd-threaded.wasm"')
-          .replaceAll("new URL('ort-wasm-simd-threaded.wasm', void 0).href", "'wasm/ort-wasm-simd-threaded.wasm'")
-          .replaceAll('new URL("ort-wasm-simd-threaded.mjs", import.meta.url).href', '"wasm/ort-wasm-simd-threaded.mjs"')
-          .replaceAll("new URL('ort-wasm-simd-threaded.mjs', import.meta.url).href", "'wasm/ort-wasm-simd-threaded.mjs'")
-          .replaceAll('new URL("ort-wasm-simd-threaded.mjs", void 0).href', '"wasm/ort-wasm-simd-threaded.mjs"')
-          .replaceAll("new URL('ort-wasm-simd-threaded.mjs', void 0).href", "'wasm/ort-wasm-simd-threaded.mjs'"),
+          // 1) asyncify fallback → canonical SIMD name
+          .replace(/ort-wasm-simd-threaded\.asyncify\.(wasm|mjs)/g, 'ort-wasm-simd-threaded.$1')
+          // 2) new URL("...", import.meta.url | void 0).href → stable path
+          .replace(/new URL\((["'])ort-wasm-simd-threaded\.(wasm|mjs)["'],\s*(?:import\.meta\.url|void 0)\)\.href/g,
+            (_, q: string, ext: string) => `${q}wasm/ort-wasm-simd-threaded.${ext}${q}`),
         map: null,
       };
     },
@@ -71,25 +68,44 @@ function onnxWasmAssets(): Plugin {
       // only that unreferenced fallback after all assets have been written.
       const outputDirs = [ORT_OUTPUT_DIR, join(ORT_OUTPUT_DIR, 'assets')]
         .filter((dir) => existsSync(dir));
+
+      // Cache directory listings and file contents to avoid redundant I/O
+      // (same script is read multiple times when several hashed WASM files
+      // reference it).
+      const dirEntries = new Map<string, string[]>();
+      const readDir = (dir: string) => {
+        let e = dirEntries.get(dir);
+        if (!e) { e = readdirSync(dir); dirEntries.set(dir, e); }
+        return e;
+      };
+      const fileCache = new Map<string, string>();
+      const readFile = (f: string) => {
+        let c = fileCache.get(f);
+        if (c === undefined) { c = readFileSync(f, 'utf8'); fileCache.set(f, c); }
+        return c;
+      };
+
       const outputScripts = outputDirs.flatMap((dir) =>
-        readdirSync(dir)
+        readDir(dir)
           .filter((fileName) => /\.(?:m?js)$/.test(fileName))
           .map((fileName) => join(dir, fileName)),
       );
       for (const dir of outputDirs) {
-        for (const fileName of readdirSync(dir)) {
+        for (const fileName of readDir(dir)) {
           const isUnusedFallback = /^ort-wasm-.*\.asyncify\./.test(fileName);
           const isHashedStandard = /^ort-wasm-simd-threaded-[A-Za-z0-9_-]+\.wasm$/.test(fileName);
           if (!isUnusedFallback && !isHashedStandard) continue;
           if (isHashedStandard) {
             for (const script of outputScripts) {
-              const source = readFileSync(script, 'utf8');
+              const source = readFile(script);
               if (!source.includes(fileName)) continue;
-              writeFileSync(script, source.replaceAll(fileName, 'wasm/ort-wasm-simd-threaded.wasm'));
+              const updated = source.replaceAll(fileName, 'wasm/ort-wasm-simd-threaded.wasm');
+              writeFileSync(script, updated);
+              fileCache.set(script, updated);
             }
           }
           const referenced = outputScripts.some((script) =>
-            readFileSync(script, 'utf8').includes(fileName));
+            readFile(script).includes(fileName));
           if (!referenced) unlinkSync(join(dir, fileName));
         }
       }
@@ -122,6 +138,14 @@ export default defineConfig({
     // boundary while the application entry and eager chunks stay much smaller.
     chunkSizeWarningLimit: 700,
     rollupOptions: {
+      // Suppress intentional node:* externalization warnings — conventions.ts
+      // and backgroundCommand.ts use dynamic import / guarded require inside
+      // try-catch so browser builds safely skip them.  See source-file comments
+      // for the full browser-safety rationale.
+      onwarn(warning, warn) {
+        if (warning.message?.includes('has been externalized for browser compatibility')) return;
+        warn(warning);
+      },
       output: {
         manualChunks(id) {
           const normalizedId = id.replaceAll('\\\\', '/');
