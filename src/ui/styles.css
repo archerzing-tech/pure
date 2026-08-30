@@ -1236,6 +1236,15 @@ body {
   animation: toolRowSpin 0.7s linear infinite;
   vertical-align: -2px;
 }
+/* Pending heartbeat: a ticking "已运行 Ns" next to the spinner so a silent,
+   long-running command (npm/bun/pip install) reads as alive instead of frozen.
+   Plain text, so it survives prefers-reduced-motion (which disables the spinner
+   and cursor animations). */
+.tool-row-elapsed {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.9;
+}
 .tool-row-expand-btn {
   display: inline-flex;
   align-items: center;
