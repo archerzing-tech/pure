@@ -10,6 +10,13 @@ export interface PlanProgressSnapshot {
   /** True when this plan was approved as a project build — the per-phase
    * delivery-gate (real verification evidence) applies to its continuations. */
   projectBuild?: boolean;
+  /** 本会话内第几个独立规划（1、2、…）。同一规划的细化（planReplaced）与
+   * 续跑沿用同一编号；只有对话里新生成的规划递增。用于区分「第 1 份规划」
+   * 与「第 2 份规划（因反馈而来）」——它们不是同一件事。 */
+  planSeq?: number;
+  /** 触发本次规划的用户输入（仅新规划携带）。卡头据此展示「因为你提到：…」，
+   * 让新一轮规划一眼看出与上面的规划不同。 */
+  reason?: string;
 }
 
 export type PlanProgressEvent =
@@ -40,6 +47,8 @@ export class PlanProgressModel {
     currentPlan = 1,
     currentTodo = 1,
     projectBuild = false,
+    planSeq = 1,
+    reason?: string,
   ) {
     const complete = status === 'complete' || currentPlan > plan.steps.length;
     this.state = {
@@ -50,6 +59,8 @@ export class PlanProgressModel {
         : Math.max(1, currentTodo),
       status: complete ? 'complete' : status,
       projectBuild,
+      planSeq,
+      reason,
     };
   }
 
@@ -60,6 +71,8 @@ export class PlanProgressModel {
       snapshot.currentPlan,
       snapshot.currentTodo,
       snapshot.projectBuild === true,
+      snapshot.planSeq ?? 1,
+      snapshot.reason,
     );
   }
 

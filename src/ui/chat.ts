@@ -38,6 +38,7 @@ import {
 } from './plan';
 import { renderAttachmentCard } from './pasteChip';
 import { PlanProgressModel, shouldAdvancePlanAtTurnEnd, type PlanProgressSnapshot } from './planProgress';
+import { createPlanProgressPin, type PlanProgressPinHandle } from './planProgressBar';
 import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, setDownloadProgressListener, cancelDownload, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
@@ -1033,18 +1034,6 @@ function truncate(text: string, max: number): string {
   return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
-/** Short Chinese duty label per subagent role, for the "plan" announcement. */
-const AGENT_ROLE_DUTY: Record<string, string> = {
-  task_planner: '规划', deep_thinker: '深度推理', researcher: '调研',
-  ui_designer: '设计', code_editor: '实现', bash_executor: '验证 / 构建',
-  code_reviewer: '评审', project_auditor: '验签',
-};
-/** Render a concise "本任务计划用这些子 agent" line from recommendedRoles. */
-function subagentPlanText(roles: string[]): string {
-  const parts = roles.map((r) => `${AGENT_ROLE_DUTY[r] ?? r}(${r})`);
-  return `🔀 本任务计划用这些子 agent：${parts.join(' → ')}`;
-}
-
 interface AgentCardHandle {
   root: HTMLElement;
   badge: HTMLElement;
@@ -1258,6 +1247,13 @@ export class ChatController {
   /** Whether the active plan was approved as a project build — carried across
    * continuation turns so the delivery gate follows the plan, not the prompt. */
   private activePlanProjectBuild = false;
+  /** 本会话内已生成的第几个独立规划（1、2、…）。同一规划的细化/续跑不递增，
+   * 只有新请求在对话里再开一份计划才 +1；会话切换/新对话清零。 */
+  private planSeqCounter = 0;
+  /** 当前活动规划的会话内编号（applyPlanProgressSnapshot 从快照恢复）。 */
+  private activePlanSeq = 1;
+  /** 固定进度条：对话滚动时始终可见的当前步骤摘要，随活动计划卡挂载/卸载。 */
+  private planProgressPin: PlanProgressPinHandle | null = null;
   /** Per-session count of how many times each generated/modified file has been
    * written (write_file / edit_file / replace_files) this session. Drives the
    * "v1 / v2 / …" version badge on artifact cards so the user can see which
@@ -1363,6 +1359,9 @@ export class ChatController {
   }
 
   private applyPlanProgressSnapshot(snapshot: PlanProgressSnapshot): void {
+    // 快照带会话内规划编号：恢复旧会话时编号接续，后续新规划不会重复编号。
+    this.activePlanSeq = snapshot.planSeq ?? 1;
+    this.planSeqCounter = Math.max(this.planSeqCounter, this.activePlanSeq);
     const complete = snapshot.status === 'complete';
     this.activePlanCardSnapshot = {
       plan: snapshot.plan,
@@ -1412,6 +1411,35 @@ export class ChatController {
     }, { emitCurrent: false });
   }
 
+  /** 固定进度条：挂载到聊天区顶部并绑定到当前进度模型（幂等复用同一个元素）。 */
+  private ensurePlanProgressPin(model: PlanProgressModel): void {
+    if (!this.planProgressPin) {
+      this.planProgressPin = createPlanProgressPin({
+        jumpTo: () => {
+          const cardEl = this.activePlanCardHandle?.el;
+          if (cardEl?.isConnected) cardEl.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        },
+      });
+      const chatView = document.getElementById('chat-view');
+      chatView?.insertBefore(this.planProgressPin.el, chatView.firstChild);
+    }
+    this.planProgressPin.bind(model);
+  }
+
+  /** 固定进度条：解除订阅并从 DOM 移除（计划卡被移除/会话切换/新对话）。 */
+  private removePlanProgressPin(): void {
+    if (!this.planProgressPin) return;
+    this.planProgressPin.unbind();
+    this.planProgressPin.el.remove();
+    this.planProgressPin = null;
+  }
+
+  /** 幂等同步（session restore 后调用）：有活动计划模型则挂载固定条，否则移除。 */
+  syncPlanProgressPin(): void {
+    if (this.activePlanProgress) this.ensurePlanProgressPin(this.activePlanProgress);
+    else this.removePlanProgressPin();
+  }
+
   setSessionId(id: string) {
     this.cancelBackgroundPreCompaction();
     // Session switch = human takeover: stop any pending auto-continue chain.
@@ -1426,6 +1454,11 @@ export class ChatController {
     this.activePlanStarted = false;
     this.activePlanCardSnapshot = null;
     this.activePlanProgress = null;
+    // 会话切换 = 新的一次对话：规划编号重新起算，固定进度条随之移除
+    //（chatView 里它不会随 #chat 清空，必须显式卸载）。
+    this.planSeqCounter = 0;
+    this.activePlanSeq = 1;
+    this.removePlanProgressPin();
     this.sessionId = id;
     this.contextEngine = undefined;
     this.preCompactedMessages = null;
@@ -1544,6 +1577,7 @@ export class ChatController {
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;
     this.activePlanCardSnapshot = null;
+    this.removePlanProgressPin();
     // The in-transcript plan/assessment cards must not stay stuck on
     // "等待你回复" next to a cancellation notice.
     this.pauseAssessmentFlow?.cancel('已取消本次执行计划。');
@@ -1636,6 +1670,9 @@ export class ChatController {
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;
     this.activePlanCardSnapshot = null;
+    this.planSeqCounter = 0;
+    this.activePlanSeq = 1;
+    this.removePlanProgressPin();
 
     const savedPlanState = snapshot.uiState.planState;
     const savedPlanCard = [...snapshot.transcript].reverse().find((entry) => entry.planCard)?.planCard;
@@ -1920,10 +1957,13 @@ export class ChatController {
     };
     // The plan-card snapshot belongs to this turn only; a follow-up simple
     // task must not re-attach a stale card from a previous complex plan.
+    // The fixed progress pin is stale too — if this same turn spawns a new
+    // plan, showPlanCard remounts it with the fresh plan.
     if (!this.activeComplexPlan) {
       this.detachActivePlanProgress();
       this.activePlanProgress = null;
       this.activePlanCardSnapshot = null;
+      this.removePlanProgressPin();
     }
     // Create the turn controller before any preflight await. Previously the
     // controller and streaming state were installed only after workspace
@@ -2728,6 +2768,7 @@ export class ChatController {
         this.detachActivePlanProgress();
         this.activePlanCardSnapshot = null;
         this.activePlanProgress = null;
+        this.removePlanProgressPin();
       };
       // A plan is useful for a real build even when no approval is needed.
       // Approval is a separate safety decision, not a consequence of the word
@@ -2752,8 +2793,16 @@ export class ChatController {
           // 也绝不套用与上下文无关的“探明工作区现状”之类固定话术。
           let planForReview: Plan = analysis.plan ?? deriveFallbackPlan(userText);
           const showPlanCard = (plan: Plan, refining = false): void => {
-            if (!planProgress) planProgress = new PlanProgressModel(plan, 'active', 1, 1, needsDeliveryGate);
-            else if (planProgress.getSnapshot().plan !== plan) planProgress.dispatch({ type: 'planReplaced', plan });
+            if (!planProgress) {
+              // 新规划：本会话内规划编号 +1，并把触发它的用户输入带给卡头，
+              // 让「第 1 份规划」与「第 2 份规划（因反馈而来）」一眼可分。
+              const planSeq = ++this.planSeqCounter;
+              this.activePlanSeq = planSeq;
+              planProgress = new PlanProgressModel(plan, 'active', 1, 1, needsDeliveryGate, planSeq, userText);
+            } else if (planProgress.getSnapshot().plan !== plan) {
+              // 同一规划在细化中换了步骤（planReplaced）：编号沿用，不递增。
+              planProgress.dispatch({ type: 'planReplaced', plan });
+            }
             if (planCard) {
               // Keep one stable, flat progress list in the transcript. Updating
               // its contents in place preserves the user's visual anchor and
@@ -2766,6 +2815,8 @@ export class ChatController {
             }
             this.activePlanCardHandle = planCard;
             this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
+            // 固定进度条跟随当前计划卡：对话滚动时仍能看到走到第几步。
+            this.ensurePlanProgressPin(planProgress);
             scrollChatToBottomIfPinned(chatEl);
           };
           // 探查（工作区扫描）已完成：预检期的思考卡只是过渡反馈且没有内容，
@@ -2874,7 +2925,7 @@ export class ChatController {
         userPlan = isExplicitContinuation(userText)
           ? formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate)
           : undefined;
-        planProgress = new PlanProgressModel(this.activeComplexPlan, 'active', this.activePlanNumber, this.activeTodoNumber, this.activePlanProjectBuild);
+        planProgress = new PlanProgressModel(this.activeComplexPlan, 'active', this.activePlanNumber, this.activeTodoNumber, this.activePlanProjectBuild, this.activePlanSeq);
         const existingCard = this.activePlanCardHandle?.el.isConnected ? this.activePlanCardHandle : null;
         if (existingCard) {
           // One stable progress list per transcript: rebind the SAME card to
@@ -2887,6 +2938,8 @@ export class ChatController {
         }
         this.activePlanCardHandle = planCard;
         this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
+        // 续跑复用同一规划编号；固定进度条跟随当前计划卡。
+        this.ensurePlanProgressPin(planProgress);
         // 仅当是明确续跑指令时才输出“继续处理第 x 阶段第 y 个 Todo”的生硬框架；
         // 中途的新诉求沿用计划上下文，但不套用该文案，直接自然处理。
         if (isExplicitContinuation(userText)) {
@@ -3322,16 +3375,11 @@ export class ChatController {
       // the plan, or a follow-up after the previous plan finished), do not
       // attach any stale plan presentation to the new turn.
       const events = this.hasHistory
-        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages)
-        : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages);
+        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, semanticRoute)
+        : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages, semanticRoute);
       // 本轮是否至少有一个工具真实成功：全失败的工具轮既不能推进阶段，也不能
       // 作为“阶段完成”的证据（hasToolWork 只表示模型调用了工具，含失败）。
       let hasToolSuccess = false;
-      // One-shot announcement of the planned subagent roles ("用了哪几个子
-      // agent 做什么"), surfaced once the adaptive strategy is selected by the
-      // harness (available on the first engine event). Silent for single-agent /
-      // plain-Q&A tasks (recommendedRoles is empty).
-      let planRolesAnnounced = false;
       for await (const event of events) {
 
         // Session switched mid-stream (sidebar click / new chat): stop writing
@@ -3339,11 +3387,6 @@ export class ChatController {
         // cancel() (main.ts loadAndDisplaySession), so no events remain — this
         // guard also covers slow-abort cases where a straggler still yields.
         if (gen !== this.generation) break;
-        if (!planRolesAnnounced) {
-          planRolesAnnounced = true;
-          const roles = codingAgent.getHarness().getAdaptiveStrategy()?.recommendedRoles ?? [];
-          if (roles.length > 0) this.addStatusBubble(subagentPlanText(roles), true, false);
-        }
         switch (event.type) {
           case 'YieldControl': {
             this.updateTurnCount(event.payload.turnNumber, true);
@@ -4378,6 +4421,10 @@ export class ChatController {
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
+    // 新对话 = 新的一次会话：规划编号重新起算，固定进度条移除。
+    this.planSeqCounter = 0;
+    this.activePlanSeq = 1;
+    this.removePlanProgressPin();
     this.fileWriteVersions.clear();
     this.sessionArtifacts = [];
     this.sessionArtifactSeen.clear();

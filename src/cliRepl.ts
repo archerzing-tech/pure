@@ -593,7 +593,7 @@ async function runOneShot(args: CliArgs) {
   streamMgr.start();
 
   const startTime = Date.now();
-  const result = await consumeTurn(harness.run(systemPrompt, userTurn), streamMgr);
+  const result = await consumeTurn(harness.run(systemPrompt, userTurn, undefined, undefined, semanticRoute), streamMgr);
   let ok = result.ok;
   if (needsDeliveryGate && tools) {
     const profile = workspaceProfile ?? await discoverWorkspace(tools);
@@ -790,8 +790,8 @@ async function runRepl(args: CliArgs) {
       ? compactedHistory
       : messages;
     const events = firstTurn
-      ? harness.run(systemPrompt, userTurn, currentAbort.signal)
-      : harness.continueTurn(systemPrompt, historyMessages, userTurn, currentAbort.signal);
+      ? harness.run(systemPrompt, userTurn, currentAbort.signal, undefined, semanticRoute)
+      : harness.continueTurn(systemPrompt, historyMessages, userTurn, currentAbort.signal, undefined, semanticRoute);
 
     const result = await consumeTurn(events, streamMgr);
     let turnOk = result.ok;
