@@ -132,7 +132,7 @@ export class DefaultFailurePolicy implements FailurePolicy {
 
     return {
       kind: 'degrade',
-      reason: `${count} consecutive failures. Switched to degraded / simplified mode.`,
+      reason: `${count} consecutive failures (last: ${last.message}). Switched to degraded / simplified mode: stop retrying the failing approach, minimize further tool use, and deliver the simplest complete answer — or hand control back to the user with a clear summary of what was attempted and what failed.`,
     };
   }
 }
