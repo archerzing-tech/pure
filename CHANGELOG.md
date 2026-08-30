@@ -3,7 +3,7 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v2.0.2-alpha
+## v2.0.2-beta
 
 **ANSI 剥离 + 上下文面板 overlay 重构 + 多 Agent 浮动卡片 + 规划预告**
 
