@@ -22,7 +22,9 @@ import { loadSessionList, loadSessionStatsForList, type SessionMeta, type Sessio
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
-import { providerDef, PROVIDERS, defaultModelFor, customProviderLabel, type ProviderId } from '../shared/providers';
+import { providerDef, PROVIDERS, defaultModelFor, customProviderLabel, promptBudgetForProvider, type ProviderId } from '../shared/providers';
+import { resolvePromptBudget } from '../shared/PromptAssembler';
+import type { Message } from '../shared/types';
 import { ComposerSelect, type ComposerSelectOption } from './composerSelect';
 import { renderMarkdown, stripToolCallXml } from './markdownLoader';
 import { createToolRow, finalizeToolRow, markToolRowStopped } from './toolRow';
@@ -37,6 +39,11 @@ import { PasteChipManager, PASTE_FILE_THRESHOLD, attachmentToMessageImage, compo
 import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { memoryStore } from './memoryStore';
 import { showConfirmModal } from './modal';
+import { checkPreflight, type PreflightGate } from './preflight';
+import { InlineAutocomplete } from './inlineAutocomplete';
+import { TaskQueue } from './taskQueue';
+import { mountTaskQueuePanel } from './taskQueuePanel';
+import { Scheduler } from './scheduler';
 import { WorkspaceController } from './workspace';
 import { SessionSidebar } from './sessionSidebar';
 import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
@@ -219,6 +226,9 @@ function onConfigSaved() {
   // The composer's mode/model dropdowns mirror the persisted config — a
   // settings save (provider/model change, language switch) must re-sync them.
   populateComposerSelects();
+  // Schedule edits (Settings → 定时任务) persist via the config — re-arm the
+  // frontend scheduler so changes apply immediately without an app restart.
+  scheduler?.reschedule();
 }
 
 // ── DOM refs ──
@@ -229,6 +239,27 @@ const landingPrompt = document.getElementById('landing-prompt') as HTMLTextAreaE
 const landingSend = document.getElementById('landing-send-btn') as HTMLButtonElement;
 const sidebarNewChat = document.getElementById('sidebar-new-chat') as HTMLButtonElement;
 const sidebarSettingsBtn = document.getElementById('sidebar-settings-btn') as HTMLButtonElement;
+
+// ── Composer inline autocomplete (context-based suggestions) ──
+// Suggests recent session titles / past commands / written paths while typing.
+new InlineAutocomplete(promptEl);
+if (landingPrompt) new InlineAutocomplete(landingPrompt);
+
+// ── Batch task queue (chat is single-flight, so tasks run one after another) ──
+// Model + popover panel. Tasks persist to localStorage, so a reload resumes any
+// that were still pending.
+const taskQueue = new TaskQueue({ chat });
+mountTaskQueuePanel(taskQueue);
+
+// ── Scheduled tasks (frontend scheduler) ──
+// Schedules live in the config (Settings → 定时任务). A due task enqueues into
+// the queue; it is skipped for that cycle while a chat turn is active so it
+// never hijacks an in-progress conversation.
+const scheduler = new Scheduler({
+  queue: taskQueue,
+  isBusy: () => chat.isStreaming(),
+});
+scheduler.start();
 
 // ── Composer quick selectors (mode + model) ──
 // Both the chat composer and the landing hero have the same pair of frameless
@@ -536,7 +567,11 @@ function deferToIdle(fn: () => void): void {
       console.error('[pure] deferred init failed:', err);
     }
   });
-  setTimeout(() => checkForUpdatesSilently(), 3000);
+  // Silent update probe: defer long enough for the boot splash + landing to
+  // reveal before the version check hits the network. Named constant so the
+  // delay is discoverable/tunable instead of a bare magic number.
+  const UPDATE_CHECK_DELAY_MS = 3_000;
+  setTimeout(() => checkForUpdatesSilently(), UPDATE_CHECK_DELAY_MS);
 })().catch(err => {
   console.error('[pure] init failed:', err);
   dismissBootSplash();
@@ -1154,6 +1189,12 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
     return;
   }
 
+  // Error prediction & prevention: a destructive intent (delete / clear /
+  // reset / drop…) must be explicitly confirmed before the draft leaves the
+  // composer. Cancelling returns here with the draft untouched.
+  const gate = checkPreflight(text);
+  if (gate && !(await confirmHighRiskDraft(gate))) return;
+
   sourceEl.value = '';
   sourceEl.style.height = 'auto';
   if (sourceEl === landingPrompt) {
@@ -1336,7 +1377,12 @@ function setContextPanelCollapsed(collapsed: boolean) {
   if (poly) poly.setAttribute('points', collapsed ? '15 18 9 12 15 6' : '9 18 15 12 9 6');
 }
 
-contextPanelReopen?.addEventListener('click', () => withChatWidthSnap(() => setContextPanelCollapsed(!contextCollapsed)));
+contextPanelReopen?.addEventListener('click', () => {
+  withChatWidthSnap(() => setContextPanelCollapsed(!contextCollapsed));
+  // Charts live inside the collapsed-by-default panel; init them only once it
+  // is actually expanded so echarts measures real container dimensions.
+  if (!contextCollapsed) void renderContextCharts();
+});
 
 // Both sidebars start collapsed: the right context panel begins hidden and its
 // edge toggle flips to the left-pointing "expand" arrow (the left sidebar's
@@ -1392,6 +1438,126 @@ function renderSessionStats() {
   // Command rows are copyable: a hover-revealed copy button copies the raw
   // command (without the ✗ failure prefix shown in the label).
   renderStatsList('stat-cmd-list', stats.commands, (c) => (c.success ? '' : '✗ ') + c.command, undefined, (c) => c.command);
+
+  // Context-panel charts (窗口预算仪表盘 + Token 分布) refresh alongside the numbers.
+  void renderContextCharts();
+}
+
+// ── Context-panel charts (上下文窗口仪表盘 + Token 分布环形图) ──
+// The window gauge measures the CURRENT live transcript, not the cumulative
+// usage counter: sessionStats.usage.promptTokens is summed across turns.
+// Estimator mirrors engine/BudgetManager.countTokens (CJK ≈ 1 token/char,
+// Latin ≈ 1/4) so the gauge reads in the same units the engine budgets in.
+const CJK_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]/u;
+
+function estimateTextTokens(text: string): number {
+  if (!text) return 0;
+  let cjk = 0;
+  for (const ch of text) if (CJK_CHAR_RE.test(ch)) cjk++;
+  return Math.ceil(cjk + (text.length - cjk) / 4);
+}
+
+function estimateMessageTokens(messages: Message[]): number {
+  let total = 0;
+  for (const m of messages) {
+    total += estimateTextTokens(m.content ?? '');
+    for (const tc of m.toolCalls ?? []) total += estimateTextTokens(tc.function?.arguments ?? '');
+  }
+  return total;
+}
+
+// echarts stays out of the main bundle: only ```chart blocks (echartsChart.ts)
+// and these panel charts lazy-import it. One cached dynamic import shared here.
+let echartsModulePromise: Promise<typeof import('./echartsChart')> | null = null;
+function loadEchartsChart(): Promise<typeof import('./echartsChart')> {
+  if (!echartsModulePromise) echartsModulePromise = import('./echartsChart');
+  return echartsModulePromise;
+}
+
+// Chart palettes kept local to main.ts (NOT chartTheme — importing it
+// statically would pull echarts into the main bundle).
+const CHART_THEMES = {
+  light: { text: '#4b5563', sub: '#9ca3af', border: '#e5e7eb', accent: '#3E63DD', cyan: '#7ED9FF', green: '#2e9e6b', red: '#e5484d' },
+  dark: { text: '#c7cdd6', sub: '#6b7280', border: '#2a2f3a', accent: '#6f8fff', cyan: '#57c7ff', green: '#3ecf8e', red: '#ff6b70' },
+};
+
+async function renderContextCharts(): Promise<void> {
+  // The right panel starts collapsed; inited charts on hidden containers would
+  // be invisible/blank. Skip and let the reopen trigger render them.
+  if (contextCollapsed) return;
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const theme = CHART_THEMES[dark ? 'dark' : 'light'];
+  const { renderEchartOption } = await loadEchartsChart();
+  const usage = chat.getSessionStats().usage;
+  const hit = usage?.cacheHitTokens ?? 0;
+  const miss = usage?.cacheMissTokens ?? Math.max(0, (usage?.promptTokens ?? 0) - hit);
+  const out = usage?.completionTokens ?? 0;
+
+  // Token-distribution donut: cache hit / cache miss / output.
+  const distEl = document.getElementById('token-dist-chart');
+  if (distEl) {
+    const pieces = [
+      { name: t('stats.cacheHit'), value: hit, color: theme.accent },
+      { name: t('stats.cacheMiss'), value: miss, color: theme.cyan },
+      { name: t('stats.output'), value: out, color: theme.green },
+    ].filter((p) => p.value > 0);
+    if (pieces.length === 0) {
+      distEl.className = 'stats-chart stats-chart-empty';
+      distEl.textContent = t('stats.noUsage');
+    } else {
+      distEl.className = 'stats-chart';
+      distEl.textContent = '';
+      renderEchartOption(distEl, {
+        tooltip: { trigger: 'item' },
+        legend: { bottom: 0, textStyle: { fontSize: 9, color: theme.sub } },
+        series: [{
+          type: 'pie', radius: ['55%', '75%'], center: ['50%', '42%'],
+          avoidLabelOverlap: false,
+          itemStyle: { borderColor: 'transparent', borderRadius: 3 },
+          label: { show: false },
+          emphasis: { label: { show: false } },
+          data: pieces.map((p) => ({ value: p.value, name: p.name, itemStyle: { color: p.color } })),
+        }],
+      });
+    }
+  }
+
+  // Context-window budget ring: live transcript estimate vs available budget.
+  const winEl = document.getElementById('context-window-chart');
+  const winPctEl = document.getElementById('stat-window-pct');
+  if (winEl && winPctEl) {
+    const config = loadConfig();
+    const budget = resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model));
+    const max = budget.availableInputTokens ?? 0;
+    const used = estimateMessageTokens(chat.getMessages());
+    if (max <= 0 || used <= 0) {
+      winEl.className = 'stats-chart stats-chart-empty';
+      winEl.textContent = t('stats.noUsage');
+      winPctEl.textContent = '—';
+    } else {
+      winEl.className = 'stats-chart';
+      winEl.textContent = '';
+      const pct = Math.min(100, (used / max) * 100);
+      winPctEl.textContent = `${Math.round(pct)}%`;
+      const overflow = used > max;
+      const usedColor = overflow || pct > 80 ? theme.red : theme.accent;
+      renderEchartOption(winEl, {
+        tooltip: { formatter: (): string => `${t('stats.windowUsed')}: ${formatTokens(used)} / ${formatTokens(max)}` },
+        series: [{
+          type: 'pie', radius: ['72%', '88%'], center: ['50%', '45%'],
+          silent: true, clockwise: true,
+          label: {
+            show: true, position: 'center', formatter: `${Math.round(pct)}%`,
+            fontSize: 15, fontWeight: 600, color: theme.text,
+          },
+          data: [
+            { value: used, itemStyle: { color: usedColor } },
+            { value: Math.max(0, max - used), itemStyle: { color: theme.border } },
+          ],
+        }],
+      });
+    }
+  }
 }
 
 function renderFileWriteGroups(
@@ -1944,6 +2110,20 @@ function confirmDialog(message: string): Promise<boolean> {
     title: t('confirm.title'),
     message,
     okLabel: t('confirm.ok'),
+    cancelLabel: t('confirm.cancel'),
+    danger: true,
+  });
+}
+
+/** Preflight confirmation for a high-risk draft. The assessment's impact /
+ * recommendation strings are already localized by assessIntent. Focus stays on
+ * Cancel: Esc / Enter-on-cancel can never confirm a destructive send. */
+function confirmHighRiskDraft(gate: PreflightGate): Promise<boolean> {
+  const a = gate.assessment;
+  return showConfirmModal({
+    title: t('preflight.title'),
+    message: `${a.impact}\n\n${a.recommendation}`,
+    okLabel: t('preflight.ok'),
     cancelLabel: t('confirm.cancel'),
     danger: true,
   });

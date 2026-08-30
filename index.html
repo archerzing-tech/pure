@@ -180,12 +180,19 @@
                 </button>
                 <div id="composer-model-select" class="composer-select-host composer-select-model" data-i18n-title="composer.model.title" title="模型" aria-label="模型"></div>
                 <button id="undo-write-btn" class="input-copy-btn undo-write-btn" type="button" title="撤销最近一次写入" aria-label="撤销最近一次写入" hidden>↶</button>
+                <button id="queue-btn" class="input-copy-btn queue-btn" type="button" data-i18n-title="queue.title" data-i18n-aria-label="queue.title" title="任务队列" aria-label="任务队列" disabled>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                </button>
                 <span class="composer-spacer"></span>
                 <button id="send-btn" data-i18n-title="input.send.title" data-i18n-aria-label="input.send.title" aria-label="发送" disabled>
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
                 </button>
               </div>
             </div>
+
+            <!-- Task queue panel: a popover above the composer. DOM is filled by
+                 taskQueuePanel.ts; only the shell lives here. -->
+            <div id="task-queue-panel" hidden></div>
           </footer>
 
           <!-- ═══ Persistent status footer: workspace · model · live state · version ═══
@@ -247,6 +254,14 @@
               <div class="stats-cache-top"><span data-i18n="stats.cacheRate">缓存命中率</span><b id="stat-cache-rate">—</b></div>
               <div class="stats-cache-track"><i id="stat-cache-bar"></i></div>
               <div class="stats-cache-sub"><span data-i18n="stats.cacheHit">缓存命中</span><b id="stat-cache-hit">0</b><span data-i18n="stats.cacheMiss">未命中</span><b id="stat-cache-miss">0</b></div>
+            </div>
+            <div class="stats-chart-block" id="context-window-chart-wrap">
+              <div class="context-section-heading"><span data-i18n="stats.contextWindow">上下文窗口</span><b id="stat-window-pct">—</b></div>
+              <div id="context-window-chart" class="stats-chart" role="img" data-i18n-aria-label="stats.contextWindow" aria-label="上下文窗口预算"></div>
+            </div>
+            <div class="stats-chart-block" id="token-dist-chart-wrap">
+              <div class="context-section-heading"><span data-i18n="stats.tokenDist">Token 分布</span></div>
+              <div id="token-dist-chart" class="stats-chart" role="img" data-i18n-aria-label="stats.tokenDist" aria-label="Token 使用分布"></div>
             </div>
             <div class="stats-list-section">
               <div class="context-section-heading"><span data-i18n="stats.searches">搜索历史</span><b id="stat-search-count">0</b></div>
@@ -313,6 +328,14 @@
               <button class="settings-nav-item" data-category="memory">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="3" width="14" height="18" rx="2"/><line x1="9" y1="7" x2="15" y2="7"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="15" x2="13" y2="15"/></svg>
                 <span data-i18n="nav.memory">Memory</span>
+              </button>
+              <button class="settings-nav-item" data-category="usage">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                <span data-i18n="nav.usage">Usage</span>
+              </button>
+              <button class="settings-nav-item" data-category="schedules">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                <span data-i18n="nav.schedules">Schedules</span>
               </button>
               <button class="settings-nav-item" data-category="mcp">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
@@ -688,6 +711,22 @@
                   <div id="memory-summary" class="memory-summary"></div>
                   <div id="memory-list" class="memory-list"></div>
                   <div id="memory-capped" class="memory-capped" hidden></div>
+                </div>
+              </div>
+              <!-- Usage (跨会话用量统计) -->
+              <div class="settings-page" data-page="usage">
+                <h2 class="settings-page-title" data-i18n="usage.title">Usage</h2>
+                <p class="settings-page-desc" data-i18n="usage.desc">Cross-session usage & behavior profile</p>
+                <div class="settings-section">
+                  <div id="usage-dashboard"></div>
+                </div>
+              </div>
+              <!-- Schedules (定时任务) -->
+              <div class="settings-page" data-page="schedules">
+                <h2 class="settings-page-title" data-i18n="schedule.title">Scheduled tasks</h2>
+                <p class="settings-page-desc" data-i18n="schedule.desc">Frontend-scheduled tasks — fire while the app is open and enqueue into the task queue</p>
+                <div class="settings-section">
+                  <div id="schedules-dashboard"></div>
                 </div>
               </div>
               <!-- MCP -->
