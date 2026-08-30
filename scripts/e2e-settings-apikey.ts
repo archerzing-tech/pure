@@ -207,7 +207,14 @@ try {
   await send('Page.navigate', { url: appUrl });
   await waitFor('({ ok: document.readyState === "complete" })', 25000, 'app load');
   await evaluate(`(() => { localStorage.clear(); return "cleared"; })()`);
-  await send('Page.reload', { ignoreCache: true });
+  // Avoid Page.reload({ ignoreCache: true }) — in headless=new Chrome on CI,
+  // a hard reload can detach the CDP target (renderer restart), causing
+  // "Inspected target navigated or closed".  Navigating to a cache-busted URL
+  // achieves the same fresh-load effect without disrupting the CDP session.
+  await send('Page.navigate', { url: `${appUrl}?_nocache=${Date.now()}` });
+  // Re-enable domains after cross-document navigation (same as above).
+  await send('Page.enable');
+  await send('Runtime.enable');
   await waitFor('({ ok: document.readyState === "complete" && !!document.getElementById("sidebar-settings-btn") })', 25000, 'app boot');
   // App modules finish binding listeners shortly after DOM-ready; give the
   // init a settle beat so the first click lands on wired handlers.
