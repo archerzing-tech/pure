@@ -387,9 +387,11 @@ export class AgentLoopEngine {
             yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
-          if (action.kind !== 'degrade') {
-            messages.push({ role: 'user' as const, content: action.hint, internal: true });
-          }
+          // retry/reflect carry a hint; degrade carries a reason. Inject
+          // whichever applies — the model must SEE the directive, including
+          // the degraded-mode instruction, or the escalate levels are silent.
+          const guidance = action.kind === 'degrade' ? action.reason : action.hint;
+          messages.push({ role: 'user' as const, content: guidance, internal: true });
           turnCount++; budget.incrementTurn();
           yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
           continue;
@@ -460,9 +462,11 @@ export class AgentLoopEngine {
             messages.push({ role: 'user' as const, content: note, internal: true });
             budget.addTokens(note);
           }
-          if (action.kind !== 'degrade') {
-            messages.push({ role: 'user' as const, content: action.hint, internal: true });
-          }
+          // retry/reflect carry a hint; degrade carries a reason — inject
+          // whichever applies so the model sees the directive (degrade must
+          // not silently retry without guidance).
+          const toolGuidance = action.kind === 'degrade' ? action.reason : action.hint;
+          messages.push({ role: 'user' as const, content: toolGuidance, internal: true });
           turnCount++; budget.incrementTurn();
           yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
           continue;
@@ -597,9 +601,9 @@ export class AgentLoopEngine {
                 payload: { code: 'VERIFY_FAILED', message: hint, stateType: 'VERIFY', recoverable: true, recoveryAction },
                 timestamp: Date.now(),
               };
-              if (action.kind !== 'degrade') {
-                messages.push({ role: 'user' as const, content: hint });
-              }
+              // hint already resolves degrade → action.reason, so the degraded
+              // directive reaches the model instead of vanishing.
+              messages.push({ role: 'user' as const, content: hint });
             } else {
               yield {
                 type: 'Error',

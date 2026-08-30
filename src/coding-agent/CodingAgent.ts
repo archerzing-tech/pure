@@ -3,17 +3,15 @@
 // Includes SubagentOrchestrator + MCPClient integration.
 
 import { Harness, type HarnessConfig } from '../harness/Harness';
-import { DefaultHookRouter } from '../engine/HookRouter';
-import { DefaultFailurePolicy } from '../engine/FailurePolicy';
-import { ContextEngine } from '../harness/ContextEngine';
 import { DefaultSubagentRegistry } from '../harness/SubagentRegistry';
 import { Planner } from './Planner';
 import { PermissionManager } from './PermissionManager';
-import { Verifier, createDefaultVerifier } from './Verifier';
+import { Verifier } from './Verifier';
+import { createDefaultHarnessConfig } from './defaultHarnessConfig';
 import { ToolRegistry } from './ToolRegistry';
 import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentOrchestratorConfig, type SubagentProgress } from './SubagentOrchestrator';
 import { MCPClient, type MCPClientConfig } from '../harness/mcp/MCPClient';
-import { PromptAssembler, resolvePromptBudget, type PromptBudgetConfig } from '../shared/PromptAssembler';
+import { PromptAssembler, type PromptBudgetConfig } from '../shared/PromptAssembler';
 import type { PromptObservability } from '../shared/promptObservability';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import type {
@@ -99,9 +97,17 @@ export class CodingAgent {
       config.permissionMode ?? 'NORMAL',
       config.permissionHandler,
     );
-    this.verifier = config.verifier ?? createDefaultVerifier();
-    this.hooks = config.hooks ?? new DefaultHookRouter();
-    this.failurePolicy = config.failurePolicy ?? new DefaultFailurePolicy();
+    // Default Harness plumbing (ContextEngine + rule-based verifier + empty hook
+    // router + escalating failure policy) is shared with the CLI — one factory,
+    // no drift between the two entrypoints.
+    const plumbing = createDefaultHarnessConfig({
+      llm: config.llm,
+      promptBudget: config.promptBudget,
+      toolsProvider: () => this.toolRegistry.getTools(),
+    });
+    this.verifier = config.verifier ?? plumbing.verifier;
+    this.hooks = config.hooks ?? plumbing.hooks;
+    this.failurePolicy = config.failurePolicy ?? plumbing.failurePolicy;
 
     // Wire the permission manager into the tool execution path
     this.toolRegistry.setPermissionManager(this.permissionManager);
@@ -156,15 +162,11 @@ export class CodingAgent {
       // Deferred connect: call mcpClient.connectAll() from the UI after construction
     }
 
-    // G-3 fix: pass the LLM so the summary fallback actually runs when a lot
-    // of history gets evicted (previously `llm` was omitted → summarizeEvicted
-    // was dead code and the summary path never triggered).
-    const contextEngine = new ContextEngine({
-      maxMessages: 20,
-      maxTokens: resolvePromptBudget(config.promptBudget).availableInputTokens,
-      toolsProvider: () => this.toolRegistry.getTools(),
-      llm: config.llm,
-    });
+    // G-3 fix: the ContextEngine carries the LLM so the summary fallback
+    // actually runs when a lot of history gets evicted (previously `llm` was
+    // omitted → summarizeEvicted was dead code and the summary path never
+    // triggered). Built by the shared default harness factory.
+    const contextEngine = plumbing.contextEngine;
 
     const promptCompiler = config.promptAssembler ?? new PromptAssembler(config.observability);
 

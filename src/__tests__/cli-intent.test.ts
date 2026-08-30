@@ -59,20 +59,24 @@ describe('CLI proactive intent assessment', () => {
   });
 
   it('keeps both CLI execution paths applying the request-scoped permission policy', () => {
-    const source = readFileSync(new URL('../cli.ts', import.meta.url), 'utf8');
+    // Both run loops live in cliRepl.ts since the cli.ts split (audit ①).
+    const source = readFileSync(new URL('../cliRepl.ts', import.meta.url), 'utf8');
     expect((source.match(/applyCliIntentPermission\(tools, args, analysis\.intent\)/g) ?? []).length).toBe(2);
     expect(source).toContain('assessment);');
   });
 
   it('keeps both CLI execution paths wired to the shared assembler', () => {
-    const source = readFileSync(new URL('../cli.ts', import.meta.url), 'utf8');
-    expect((source.match(/const assembly = await? assembleCliPrompt\(/g) ?? []).length).toBe(2);
-    expect(source).toContain('toolDefinitions: toolsDefs');
-    expect(source).toContain("resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, DEFAULT_CLI_AUTO_APPROVE)");
+    // Run loops (one-shot + REPL) call assembleCliPrompt in cliRepl.ts; the
+    // parseArgs permission defaulting stays in cli.ts.
+    const repl = readFileSync(new URL('../cliRepl.ts', import.meta.url), 'utf8');
+    expect((repl.match(/const assembly = await? assembleCliPrompt\(/g) ?? []).length).toBe(2);
+    expect(repl).toContain('toolDefinitions: toolsDefs');
+    const entry = readFileSync(new URL('../cli.ts', import.meta.url), 'utf8');
+    expect(entry).toContain("resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, DEFAULT_CLI_AUTO_APPROVE)");
   });
 
   it('uses the shared workflow compiler and exposes unavailable-probe degradation', () => {
-    const source = readFileSync(new URL('../cli.ts', import.meta.url), 'utf8');
+    const source = readFileSync(new URL('../cliRepl.ts', import.meta.url), 'utf8');
     expect((source.match(/compileRequestWorkflow\(/g) ?? []).length).toBe(2);
     expect(source).toContain('printWorkflowStage(workflow.stage)');
     expect(source).toContain('workflow.probeRequired && !workflow.probeAvailable');
