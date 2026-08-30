@@ -63,6 +63,17 @@ describe('BudgetManager', () => {
     expect(bm.countTokens('')).toBe(0);
   });
 
+  it('token counting weights CJK at ~1 token/char (not length/4)', () => {
+    const bm = new BudgetManager(BASE);
+    // 4 CJK chars ≈ 4 tokens — the old flat length/4 estimator said 1,
+    // undercounting real usage ~4× and delaying budget warnings.
+    expect(bm.countTokens('中文测试')).toBe(4);
+    // Mixed: 4 CJK + 4 latin → 4 + ceil(4/4) = 5.
+    expect(bm.countTokens('中文测试abcd')).toBe(5);
+    // Hangul + kana also counted as dense CJK.
+    expect(bm.countTokens('안녕하세요')).toBe(5);
+  });
+
   it('no duplicate warnings once warning has been issued', () => {
     const bm = new BudgetManager({ ...BASE, maxTurns: 10 });
     for (let i = 0; i < 8; i++) bm.incrementTurn();

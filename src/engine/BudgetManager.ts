@@ -6,6 +6,11 @@ import type { BudgetConfig, BudgetSnapshot } from '../shared/types';
 
 export type BudgetStatus = 'ok' | 'warning' | 'exceeded';
 
+// CJK token estimator range: Hiragana/Katakana, CJK Ext A + unified
+// ideographs, Hangul syllables, and CJK compatibility. All BMP, so each
+// matched code point is exactly one UTF-16 unit in `text.length`.
+const CJK_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]/u;
+
 export class BudgetManager {
   private config: BudgetConfig;
   private tokensUsed = 0;
@@ -24,7 +29,18 @@ export class BudgetManager {
   }
 
   countTokens(text: string): number {
-    return Math.ceil(text.length / 4);
+    if (!text) return 0;
+    // CJK characters are dense: most tokenizers spend ~1 token per CJK char
+    // while Latin text averages ~4 chars/token. A flat length/4 estimate
+    // UNDERCOUNTS CJK by ~4×, so long Chinese or symbol-heavy code silently
+    // blows past the token budget before the soft/hard limits fire. Weight
+    // CJK-range code points at 1 token/char, everything else (Latin, digits,
+    // ASCII symbols) at the historical ~1/4 token/char.
+    let cjk = 0;
+    for (const ch of text) {
+      if (CJK_CHAR_RE.test(ch)) cjk++;
+    }
+    return Math.ceil(cjk + (text.length - cjk) / 4);
   }
 
   addTokens(text: string) {
@@ -96,7 +112,11 @@ export class BudgetManager {
     return {
       turns: { used: this.turnCount, max: this.config.maxTurns },
       tokens: { used: this.tokensUsed, max: this.config.maxTotalTokens },
-      iterations: { used: this.turnCount, max: this.config.maxTurns * 3 },
+      // The engine has a single loop counter (turnCount) — "iterations" is the
+      // same counter, so its max is the turn budget, not a fabricated ×3.
+      iterations: { used: this.turnCount, max: this.config.maxTurns },
+      // No tool-call budget is configured; max is an order-of-magnitude display
+      // estimate derived from the turn cap (not a real limit).
       toolCalls: { used: this.toolCallCount, max: this.config.maxTurns * 10 },
       elapsed: Date.now() - this.startTime,
     };

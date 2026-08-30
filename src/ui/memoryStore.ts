@@ -13,10 +13,10 @@
 // for its memory dashboard without dragging the whole chat pipeline (adapters,
 // CodingAgent, WASM, …) into the lazily-loaded settings chunk.
 import { LocalStorageMemoryStore } from '../adapter/memory/LocalStorageMemoryStore';
-import { WASMEmbeddingStore } from '../adapter/memory/WASMEmbeddingStore';
+import { createEmbeddingMemoryStore } from '../shared/memoryFactory';
 import { loadConfig } from './config';
 
-export const memoryStore = new WASMEmbeddingStore({
+export const memoryStore = createEmbeddingMemoryStore({
   store: new LocalStorageMemoryStore(() => loadConfig()?.evolution),
   // 同一份配置同时驱动 WASM 路径的 dormant 过滤（健康分阈值由用户可调）。
   getEvolution: () => loadConfig()?.evolution,
