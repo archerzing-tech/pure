@@ -6,7 +6,7 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape } from './chat';
+import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
@@ -475,6 +475,9 @@ function deferToIdle(fn: () => void): void {
   tagPlatform();
   await initConfigFile();
   applySavedAppearance();
+  // 冷启动就把运行时/网络探测放到后台：用户阅读 landing 页期间 sys_info 已完成，
+  // 首条消息不再在关键路径上等环境探针（与 memoryStore.warmUp() 同一预热模式）。
+  void ensureRuntimesProbed();
   chat.setWorkspace('');
   wireComposerSelects();
   checkLandingState();
@@ -827,6 +830,9 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
     }
     if (!isCurrentRestore()) return;
     flushReplayTools();
+    // 恢复可能重建了计划卡：重新挂载固定进度条，让当前步骤在滚动后仍可见；
+    // 无活动计划时是幂等移除（no-op）。
+    chat.syncPlanProgressPin();
   } catch (err) {
     // Always remove this restore's local loading row, but only the current
     // restore may dismiss the shared overlay. An older restore can fail after

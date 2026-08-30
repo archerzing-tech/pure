@@ -74,6 +74,29 @@ describe('PlanProgressModel', () => {
     expect(model.getSnapshot().plan).toEqual(refined);
   });
 
+  it('carries the conversation-local plan sequence number and trigger reason', () => {
+    const source = new PlanProgressModel(plan(), 'active', 1, 1, false, 2, '我觉得这里不好看');
+    expect(source.getSnapshot()).toMatchObject({ planSeq: 2, reason: '我觉得这里不好看' });
+    const restored = PlanProgressModel.fromSnapshot(source.getSnapshot());
+    expect(restored.getSnapshot()).toMatchObject({ planSeq: 2, reason: '我觉得这里不好看' });
+  });
+
+  it('keeps the plan sequence when the same plan is refined in place', () => {
+    const model = new PlanProgressModel(plan(), 'active', 1, 1, false, 2, '触发原因');
+    const refined: Plan = {
+      steps: [{ id: 'r1', action: '细化步骤', description: '', expectedOutcome: '' }],
+      reasoning: 'refined',
+    };
+    model.dispatch({ type: 'planReplaced', plan: refined });
+    expect(model.getSnapshot()).toMatchObject({ planSeq: 2, reason: '触发原因' });
+    expect(model.getSnapshot().plan).toEqual(refined);
+  });
+
+  it('defaults a legacy snapshot to plan sequence 1 without a reason', () => {
+    const legacy = PlanProgressModel.fromSnapshot({ plan: plan(), currentPlan: 1, currentTodo: 1, status: 'active' });
+    expect(legacy.getSnapshot()).toMatchObject({ planSeq: 1, reason: undefined });
+  });
+
   it('round-trips the project-build flag through persistence', () => {
     const source = new PlanProgressModel(plan(), 'active', 1, 1, true);
     expect(source.getSnapshot().projectBuild).toBe(true);

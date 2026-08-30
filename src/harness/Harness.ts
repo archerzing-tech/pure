@@ -26,6 +26,7 @@ import type {
   VerificationSummary,
 } from '../shared/types';
 import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
+import type { SemanticRouteDecision } from '../coding-agent/types';
 
 // Bounded wait for the memory retrieval that feeds the system prompt. The
 // embedder's one-time load (WASM + ~80MB model) happens lazily inside the
@@ -162,8 +163,7 @@ export class Harness {
   }
 
   /** The runtime strategy selected for the current/latest turn (includes
-   * recommendedRoles / parallelRoles / complexity) — surfaced so the GUI can
-   * tell the user which subagents are planned for what. */
+   * recommendedRoles / parallelRoles / complexity). */
   getAdaptiveStrategy(): AdaptiveStrategy | undefined {
     return this.currentAdaptiveStrategy;
   }
@@ -186,6 +186,7 @@ export class Harness {
     userPrompt: string,
     signal?: AbortSignal,
     images?: MessageImage[],
+    semantic?: SemanticRouteDecision | null,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.verificationPassed = false;
@@ -204,7 +205,7 @@ export class Harness {
     // start, search the IMemoryStore with the user prompt and inject the
     // relevant preferences / error patterns into the system prompt's
     // <session_memory> section (composeMemoryPrompt → promptAssembler).
-    const effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, userPrompt);
+    const effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, userPrompt, semantic);
 
     // ── Resume (P1-7): feed the checkpoint as initial context ──
     // Previously the loaded messages were only used for checkpoint saving —
@@ -413,13 +414,14 @@ export class Harness {
     newUserPrompt: string,
     signal?: AbortSignal,
     images?: MessageImage[],
+    semantic?: SemanticRouteDecision | null,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.verificationPassed = false;
     this.scheduleMemoryDecay();
     // Memory refresh on continuation: compose the current prompt with memories
     // relevant to the new follow-up (same layer as run()).
-    const effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, newUserPrompt);
+    const effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, newUserPrompt, semantic);
 
     let msgs = messages[0]?.role === 'system'
       ? [{ role: 'system' as const, content: effectiveSystemPrompt }, ...messages.slice(1)]
@@ -631,7 +633,7 @@ export class Harness {
    * preferences / error patterns into the system prompt. Never throws — a
    * memory failure degrades to the plain system prompt.
    */
-  private async composeMemoryPrompt(systemPrompt: string, userPrompt: string): Promise<string> {
+  private async composeMemoryPrompt(systemPrompt: string, userPrompt: string, semantic?: SemanticRouteDecision | null): Promise<string> {
     let memories = [] as Awaited<ReturnType<IMemoryStore['search']>>;
     try {
       if (this.config.memory) {
@@ -713,6 +715,12 @@ export class Harness {
       },
       learnedProcedures: procedures,
       recentFailures: errorPatterns,
+      // 理解驱动的角色分配：把 LLM 语义路由的意图/复杂度/角色选择喂给策略层，
+      // 让委托建议来自对任务的理解而不是关键词。undefined（路由超时/失败/续跑
+      // 置 null）时策略层照旧走关键词兜底。
+      semantic: semantic
+        ? { tags: [semantic.intent], complexity: semantic.complexity, roles: semantic.subagents }
+        : undefined,
     });
     this.currentAdaptiveStrategy = strategy;
     return this.promptAssembler.composeMemoryPrompt({

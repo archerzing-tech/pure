@@ -76,6 +76,9 @@ export interface SemanticRouteDecision {
   mode: TaskMode;
   requiresPlan: boolean;
   needsDeliveryGate: boolean;
+  /** 任务真正需要的子 agent 角色（精确名，来自已知名录）。缺字段=路由没给，
+   * 策略层回退关键词推荐；显式空数组=模型判断无需委派，不回退关键词。 */
+  subagents?: string[];
   assessment: IntentAssessment;
 }
 export type Reversibility = 'reversible' | 'partially-reversible' | 'hard-to-reverse' | 'irreversible';

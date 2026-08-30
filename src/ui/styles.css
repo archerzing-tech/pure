@@ -12017,6 +12017,132 @@ button svg,
 .queue-panel-foot { display: flex; gap: 8px; justify-content: flex-end; }
 .queue-foot-btn { white-space: nowrap; }
 
+/* ════════════════════════════════════════════════════════════════
+   固定进度条（planProgressBar.ts）
+   对话滚动时完整计划卡会滚出视口，这条钉在聊天区顶部的细条始终
+   显示当前规划（第几个）+ 当前第几步 + 整体进度，并一键跳回计划卡。
+   ════════════════════════════════════════════════════════════════ */
+.plan-progress-pin {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 8px 48px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--plan-bg) 55%, var(--bg-chat));
+  font-size: 12px;
+  color: var(--text);
+  user-select: none;
+}
+.plan-progress-pin[hidden] { display: none; }
+
+.plan-progress-pin-seq {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  background: var(--accent-soft);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+.plan-progress-pin-seq.is-new {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.plan-progress-pin-state {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.plan-progress-pin-state--active { color: var(--accent); background: var(--accent-soft); }
+.plan-progress-pin-state--waiting { color: var(--text-secondary); background: color-mix(in srgb, var(--text-tertiary) 12%, transparent); }
+.plan-progress-pin-state--complete { color: var(--success); background: color-mix(in srgb, var(--success) 14%, transparent); }
+
+.plan-progress-pin-step {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.plan-progress-pin-track {
+  flex-shrink: 0;
+  width: 110px;
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-tertiary) 18%, transparent);
+  overflow: hidden;
+}
+.plan-progress-pin-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.4s var(--ease-out);
+}
+
+.plan-progress-pin-jump {
+  flex-shrink: 0;
+  border: 1px solid var(--border-light);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 12px;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.plan-progress-pin-jump:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--accent-soft);
+}
+
+/* ── 计划卡头：规划序号 chip（区分同一对话里的多份规划）── */
+.plan-progress-seq {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  background: var(--accent-soft);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  padding: 2px 9px;
+  white-space: nowrap;
+  user-select: none;
+}
+.plan-progress-seq.is-new {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+/* 新一轮规划：展示触发来源，明确与上面的规划不是同一件事 */
+.plan-progress-reason {
+  margin: -2px 0 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @keyframes queueSpin { to { transform: rotate(360deg); } }
 
 /* ═══ Scheduled tasks settings page ═══ */

@@ -26,7 +26,13 @@ export interface AdaptiveControlInput {
    * its tags/complexity here so delegation (看人下菜) is driven by semantic
    * understanding rather than re-scanning keywords. Keyword inference in
    * parseIntent remains only as a fallback when this is absent. */
-  semantic?: { tags?: string[]; complexity?: AdaptiveStrategy['complexity'] };
+  semantic?: {
+    tags?: string[];
+    complexity?: AdaptiveStrategy['complexity'];
+    /** 语义路由按任务属性挑选的子 agent（真实名录精确名）。undefined=路由没给
+     * → 关键词兜底；显式 [] = 路由判断无需委派，不回退关键词。 */
+    roles?: string[];
+  };
 }
 
 export interface AdaptiveStrategy {
@@ -102,7 +108,7 @@ function intentFromTags(tags: string[]): RequestIntent {
   const t = new Set(tags.map((x) => x.toLowerCase()));
   const has = (...keys: string[]) => keys.some((k) => t.has(k));
   return {
-    quick: has('quick'),
+    quick: has('quick', 'question'),
     planning: has('planning', 'plan'),
     refactor: has('refactor'),
     multiFile: has('multi-file', 'multifile', 'whole-project', 'whole', 'repository'),
@@ -116,10 +122,22 @@ function intentFromTags(tags: string[]): RequestIntent {
   };
 }
 
+/** The task actually targets software — only then do the code-modification
+ * roles (task_planner → code_editor → code_reviewer) make sense. A "规划/计划"
+ * request may be a travel itinerary or event schedule; it must never be routed
+ * to code roles just because it used the word "计划". */
+function involvesCode(intent: RequestIntent, prompt: string): boolean {
+  if (intent.refactor || intent.multiFile || intent.build) return true;
+  if (fileMentions(prompt) > 0) return true;
+  return /代码|源码|编程|开发|重构|修复|接口|前端|后端|页面|网页|网站|组件|模块|数据库|函数|脚本|补丁|部署|bug|报错|日志|api|功能|游戏|应用/i.test(prompt);
+}
+
 function estimateComplexity(prompt: string, intent: RequestIntent): AdaptiveStrategy['complexity'] {
   let score = 0;
   if (intent.quick) score -= 2;
-  if (intent.refactor || intent.multiFile || intent.planning) score += 2;
+  // 「规划」是否算复杂度看它是否真的涉及代码：非代码计划（行程/活动安排）
+  // 不该被当作代码复杂度去推动委托。
+  if (intent.refactor || intent.multiFile || (intent.planning && involvesCode(intent, prompt))) score += 2;
   // Build / scaffold / replicate is a multi-role, multi-file deliverable by
   // nature — bias it toward complex so delegation actually kicks in.
   if (intent.build) score += 2;
@@ -143,16 +161,32 @@ const PARALLEL_SAFE_ROLES = new Set([
   'researcher', 'deep_thinker', 'project_auditor', 'code_reviewer', 'ui_designer',
 ]);
 
-function recommendRoles(intent: RequestIntent, complexity: AdaptiveStrategy['complexity']): string[] {
+/** 语义路由可从中挑选的完整真实子 agent 名录。必须与 SubagentOrchestrator.ts 的
+ * BUILT_IN_SUBAGENTS + CODING_AGENT_ROLES 保持一致（当前 8 个，已定不新增）。 */
+export const KNOWN_SUBAGENT_ROLES = new Set([
+  'task_planner', 'code_editor', 'deep_thinker', 'ui_designer',
+  'bash_executor', 'researcher', 'code_reviewer', 'project_auditor',
+]);
+/** 代码修改/执行类角色：非代码任务（旅游、问答、调研）永远不该拿到——语义路径
+ * 上镜像关键词路径的 involvesCode 门，保证即便路由误判也防住误配。 */
+const CODE_OR_EXEC_ROLES = new Set(['task_planner', 'code_editor', 'code_reviewer', 'bash_executor']);
+/** 语义推荐的角色数量上限。 */
+const MAX_SUBAGENT_ROLES = 4;
+
+function recommendRoles(intent: RequestIntent, complexity: AdaptiveStrategy['complexity'], prompt: string): string[] {
   const roles: string[] = [];
-  if (intent.planning || intent.refactor || intent.multiFile || intent.build) {
+  const codeTask = involvesCode(intent, prompt);
+  // 代码管线（规划→实现→评审）只派给真正改动代码的任务；planning 本身可能是
+  // 旅游/日程这类非代码计划，绝不给它们派 code_editor/code_reviewer。
+  if (codeTask && (intent.planning || intent.refactor || intent.multiFile || intent.build)) {
     roles.push('task_planner', 'code_editor', 'code_reviewer');
   }
   if (intent.research) roles.push('researcher', 'deep_thinker');
   if (intent.design) roles.push('ui_designer');
   if (intent.audit) roles.push('project_auditor', 'code_reviewer');
   if (intent.review) roles.push('code_reviewer');
-  if (roles.length === 0) {
+  // 兜底同样只在代码任务上补 code 角色，避免把非代码复杂任务误派。
+  if (roles.length === 0 && codeTask) {
     if (complexity === 'complex') roles.push('task_planner', 'researcher');
     else if (complexity === 'moderate') roles.push('code_reviewer');
   }
@@ -210,12 +244,12 @@ function buildDirective(strategy: Omit<AdaptiveStrategy, 'directive'>): string {
     ? 'Explore the relevant workspace and dependencies broadly enough to test competing hypotheses before editing.'
     : 'Start with a targeted read of the smallest relevant surface, expanding only when evidence requires it.';
   const delegation = strategy.delegation === 'parallel'
-    ? 'Delegate this task to the matching subagent roles (planner / producer / researcher / reviewer / auditor) and run independent read-only roles in parallel; integrate their results with your own verification.'
+    ? 'This task needs parallel decomposition. Delegate to the matching subagent tools and run independent read-only roles in parallel, then integrate their results. Narrate the orchestration to the user like a colleague setting up a shared effort: one natural sentence about your overall approach first (e.g. "这趟安排有点复杂，我先分头安排：一边让研究员查沿途景点和交通，一边让深度思考的同事把预算和路线取舍算清楚"), then hand each piece to its subagent and weave the results into ONE reply in the user\'s language. Never recite a role list or an arrow-chain of subagents.'
     : strategy.delegation === 'targeted'
-      ? 'Delegate the well-scoped pieces of this task to the matching subagent roles when it reduces context or execution risk, and parallelize independent read-only roles where possible — do not do a multi-role job alone by default.'
+      ? 'Delegate the well-scoped pieces of this task to the matching subagent roles when it reduces context or execution risk, and parallelize independent read-only roles where possible — do not do a multi-role job alone by default. Tell the user about each hand-off in one natural sentence at the moment you make it (e.g. "我先让 researcher 把沿途的旅游点和大致预算摸一遍，deep_thinker 再把路线取舍算一算"), and keep the single-voice final answer in the user\'s language.'
       : 'This is a trivial/simple task — keep the loop local and avoid the overhead of delegation; delegate only if new evidence shows it is needed.';
   const roles = strategy.recommendedRoles.length > 0
-    ? `\n- Preferred subagents for this request: ${strategy.recommendedRoles.join(', ')}.${strategy.parallelRoles.length > 0 ? ` Run these in parallel when independent: ${strategy.parallelRoles.join(', ')}.` : ''}`
+    ? `\n- 推荐的本任务子 agent：${strategy.recommendedRoles.join(', ')}。${strategy.parallelRoles.length > 0 ? ` 其中可并行：${strategy.parallelRoles.join(', ')}。` : ''}（建议人选；具体怎么跟用户说由你自然表达，不要列成机械清单。）`
     : '';
   const complexityLine = `\n- Task complexity: ${strategy.complexity}.${strategy.intentTags.length > 0 ? ` Intent: ${strategy.intentTags.join(', ')}.` : ''}`;
   const recovery = strategy.recovery === 'switch-approach'
@@ -245,7 +279,24 @@ export class AdaptiveControlPlane {
       ? intentFromTags(input.semantic.tags)
       : parseIntent(input.prompt);
     const complexity = input.semantic?.complexity ?? estimateComplexity(input.prompt, intent);
-    const recommendedRoles = recommendRoles(intent, complexity);
+    // 理解驱动的角色分配优先：语义路由已按任务属性挑好人选。undefined=路由没给
+    // （超时/失败/模型忽略新字段）→ 关键词兜底，保持原有行为；显式 [] = 路由判断
+    // 无需委派，不回退关键词。
+    const semanticRoles = input.semantic?.roles;
+    let recommendedRoles: string[];
+    if (semanticRoles !== undefined) {
+      let roles = Array.from(new Set(
+        semanticRoles.filter((r) => KNOWN_SUBAGENT_ROLES.has(r)),
+      )).slice(0, MAX_SUBAGENT_ROLES);
+      // 语义路径的防误配镜像门：非代码任务（旅游/问答/调研）永远剔除代码/执行角色，
+      // 即使路由误选了也兜住——与关键词路径的 involvesCode 门对称。
+      if (!involvesCode(intent, input.prompt)) {
+        roles = roles.filter((r) => !CODE_OR_EXEC_ROLES.has(r));
+      }
+      recommendedRoles = roles;
+    } else {
+      recommendedRoles = recommendRoles(intent, complexity, input.prompt);
+    }
     const parallelRoles = recommendedRoles.filter((r) => PARALLEL_SAFE_ROLES.has(r));
     const broadExploration = hasEvidenceOfFailure || (procedures.length === 0 && input.prompt.length > 240);
     const exploration: AdaptiveExploration = broadExploration ? 'broad' : 'targeted';
@@ -260,7 +311,11 @@ export class AdaptiveControlPlane {
     // user actually asked, not just from how many tools are loaded.
     const delegation: AdaptiveDelegation = !hasCapability
       ? 'none'
-      : hasEvidenceOfFailure
+      // 语义路由显式给出空角色清单 = 模型判断本任务无需委派：不再因为 build/complex
+      // 就把委托级别抬到 parallel，避免“硬往不相关子 agent 上靠”的旧问题复现。
+      : semanticRoles !== undefined && semanticRoles.length === 0
+        ? 'none'
+        : hasEvidenceOfFailure
         ? (environment.toolCount >= 3 ? 'parallel' : 'targeted')
         : intent.quick || complexity === 'trivial'
           ? 'none'
