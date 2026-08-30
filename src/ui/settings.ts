@@ -17,7 +17,6 @@ import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
 import { buildMemoryExportJson, buildMemoryExportMarkdown, parseMemoryImport } from './memoryTransfer';
 import { showToastHtml } from '../shared/toast';
 import { showConfirmModal } from './modal';
-import { renderUsageDashboard } from './usageStats';
 import { renderSchedulesSettings } from './scheduleSettings';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { buildExportSavedToast } from './statsExportToast';
@@ -190,11 +189,6 @@ export class SettingsPanel {
     // 记忆库是只读仪表盘：切换到该页时重新渲染，反映最新的进化状态
     // （比如刚结束的会话刚写入新记忆 / 某条被取代降级）。
     if (category === 'memory') this.renderMemoryDashboard();
-    // 用量统计页是跨会话聚合：每次进入重算，反映最新会话。
-    if (category === 'usage') {
-      const el = document.getElementById('usage-dashboard');
-      if (el) void renderUsageDashboard(el);
-    }
     // 定时任务页：每次进入重建列表；改动后通知主线程 reschedule 调度器。
     if (category === 'schedules') {
       const el = document.getElementById('schedules-dashboard');

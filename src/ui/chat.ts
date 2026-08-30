@@ -1113,14 +1113,16 @@ function finishAgentCard(
   card.root.classList.add(outcome);
   if (a?.status === 'timed_out') card.root.classList.add('timed-out');
   card.badge.textContent = badgeText;
-  // Ephemeral card: ~1s after the task ends, fade out slowly and remove it.
+  // Ephemeral card: ~1s after the task ends, slide out to the right and
+  // remove once the exit animation completes.
   window.setTimeout(() => {
+    card.root.style.pointerEvents = 'none';
     card.root.classList.add('agent-float-exit');
     window.setTimeout(() => {
       // Guard against the float container already being gone (new chat / session
       // switch cleared the DOM) — remove() on a detached node throws.
       if (card.root.isConnected) card.root.remove();
-    }, 900);
+    }, 500);
   }, 1000);
 }
 
