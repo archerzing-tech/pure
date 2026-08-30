@@ -764,7 +764,11 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
       const structured = formatStructuredText(meta.resultText);
       if (structured) {
         renderStructured(pre, structured.language, structured.formatted);
-      } else if (row.toolName === 'execute_command') {
+      } else if (row.toolName === 'execute_command' || row.toolName === 'bash_executor') {
+        // bash_executor reports a terminal command's conclusion — highlight it
+        // like live execute_command output so its body matches the unified
+        // console look (build-step tints, % / ✓ / error tokens) instead of
+        // falling back to monochrome plain text.
         appendHighlightedResult(pre, meta.resultText);
       } else {
         pre.textContent = meta.resultText;

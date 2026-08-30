@@ -3587,8 +3587,17 @@ export class ChatController {
             const rawResult = event.payload.result.result;
             // generate_image returns a structured summary (the LLM must never
             // see megabytes of base64): pull the human text out of the object.
-            const resultText = rawResult && typeof rawResult === 'object' && 'summary' in rawResult
-              ? String((rawResult as { summary?: unknown }).summary ?? '')
+            // Subagent tools (code_reviewer / bash_executor / …) return a
+            // SubagentResult carrying the delegated output — String() of that
+            // object is "[object Object]", so the real body text is extracted
+            // here too, otherwise the bash_executor console panel renders
+            // garbage instead of the command's conclusion.
+            const resultText = rawResult && typeof rawResult === 'object'
+              ? 'summary' in rawResult
+                ? String((rawResult as { summary?: unknown }).summary ?? '')
+                : 'output' in rawResult && typeof (rawResult as { output?: unknown }).output === 'string'
+                  ? ((rawResult as { output?: string }).output as string)
+                  : String(rawResult ?? '')
               : String(rawResult ?? '');
             // Special-parse web_search / web_fetch results for rich body
             // rendering; generated images render as <img> cards. Other tools
@@ -3636,6 +3645,12 @@ export class ChatController {
                 // at MAX_LIVE_STREAM_LINES: a 5000-line build log must not
                 // balloon the DOM (nor the persisted session preview). The
                 // LLM still received the FULL output in the tool result.
+                resultPreview = truncateResultLines(resultText);
+              } else if (subagentNames.has(toolName)) {
+                // Subagent bodies show the delegated output (bash conclusion,
+                // review verdict, file list). Cap by line count like live
+                // execute_command output — a fixed 800-char slice would cut a
+                // build/conclusion summary off mid-sentence.
                 resultPreview = truncateResultLines(resultText);
               } else {
                 resultPreview = resultText.slice(0, 800);
@@ -3917,6 +3932,20 @@ export class ChatController {
               && completionSnapshot !== undefined
               && completionSnapshot.currentPlan === completionSnapshot.plan.steps.length && turnText.length > 0;
             const planCompletionCandidate = (planFinished || planSummarized) && planCard;
+            // 交付门禁证据完成的兜底（修复游标卡在中段的场景）：构建计划的交付
+            // 验证通过（真实 typecheck / 测试 / 构建全绿）即视为整个项目已交付，
+            // 即使标记扫描的游标还停在列表中间——模型做文档类项目时后期常以自然
+            // 语言叙述、漏发 `## 计划 n` 起始标记（或步骤 Todo 未逐项播报被
+            // canCompleteCurrentTodos 卡住），项目完成后进度条仍停在「第 N 步」。
+            // 守卫：本轮已播报下一计划（游标正要由标记机制推进）时不抢跑。
+            const deliveryCompletedPlan = planCard
+              && needsDeliveryGate && qualityPassed === true
+              && !event.payload.interrupted && gen === this.generation
+              && !turnAsksForInput && !this.pausePlanCard
+              && hasToolSuccess
+              && completionSnapshot !== undefined
+              && completionSnapshot.currentPlan < completionSnapshot.plan.steps.length
+              && !planTrack.phaseStarted.has(completionSnapshot.currentPlan + 1);
             // 完成标记驱动的一次推进（finishPlan）已把游标推到 completedPlan+1，
             // 回合收尾的兜底不能再推进一次——否则"一轮一阶段"时会把下一阶段整段跳过。
             const canAdvancePlan = completionSnapshot !== undefined
@@ -3944,7 +3973,7 @@ export class ChatController {
                   ? `计划 ${finishedPlan} 的工作已完成，等待验证结果后继续…`
                   : `计划 ${finishedPlan} 的工作尚未全部完成，继续处理当前计划…`);
               }
-            } else if (planCompletionCandidate && (protocolPlanFinished || legacyPlanFinished || planSummarized || toolFinishedLastPlan) && planCard) {
+            } else if (planCompletionCandidate && (protocolPlanFinished || legacyPlanFinished || planSummarized || toolFinishedLastPlan) && planCard || (deliveryCompletedPlan && planCard)) {
               // 收尾判定加独立证据（审计第 3 项）：不能只信模型一句“已完成”——
               // 最后阶段的 Todo 要真实完成、或构建计划的回合末交付验证通过。
               // 证据不足时只更新文案，不 dispatch completed。
