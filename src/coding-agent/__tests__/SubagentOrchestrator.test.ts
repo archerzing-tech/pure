@@ -8,7 +8,7 @@
 // clean Completed event — no network, no real provider.
 
 import { describe, expect, it } from 'bun:test';
-import { SubagentOrchestrator, type SubagentActivity, type SubagentProgress } from '../SubagentOrchestrator';
+import { SubagentOrchestrator, deriveSubagentBudget, BUILT_IN_SUBAGENTS, type SubagentActivity, type SubagentProgress } from '../SubagentOrchestrator';
 import { Tags, ToolRegistry } from '../ToolRegistry';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
 import type { BudgetConfig, Checkpoint, IStateStore, LLMAdapter, Message, ToolAdapter, ToolCall, ToolResult } from '../../shared/types';
@@ -254,5 +254,41 @@ describe('SubagentOrchestrator P1', () => {
     const subSessionId = Array.from(sessions.keys()).find((id) => id.startsWith(`sub_${parentSession}_test_researcher_`));
     expect(subSessionId).toBeDefined();
     expect(sessions.get(subSessionId!)!.checkpoints.length).toBeGreaterThan(0);
+  });
+});
+
+describe('deriveSubagentBudget (code_reviewer timeout regression)', () => {
+  const PARENT: BudgetConfig = {
+    maxTurns: 1000,
+    maxTotalTokens: 4_000_000,
+    maxExecutionTime: 7_200_000,
+    warningThreshold: 0.9,
+    graceTurns: 3,
+  };
+
+  it('caps a subagent below the elastic parent budget but with review headroom', () => {
+    const sub = deriveSubagentBudget(PARENT);
+    // A real review reads several files then writes a structured verdict; the
+    // old 6 turns / 20k tokens / 90s always aborted it mid-review.
+    expect(sub.maxTurns).toBeGreaterThanOrEqual(20);
+    expect(sub.maxTotalTokens).toBeGreaterThanOrEqual(100_000);
+    expect(sub.maxExecutionTime).toBeGreaterThanOrEqual(600_000);
+    // Still bounded — a subagent can't burn the parent's whole allocation.
+    expect(sub.maxTotalTokens).toBeLessThanOrEqual(200_000);
+  });
+
+  it('keeps a smaller parent budget tight', () => {
+    const sub = deriveSubagentBudget({ maxTurns: 3, maxTotalTokens: 8000, maxExecutionTime: 30000, warningThreshold: 0.8, graceTurns: 1 });
+    expect(sub.maxTurns).toBe(3);
+    expect(sub.maxTotalTokens).toBe(8000);
+    expect(sub.maxExecutionTime).toBe(30000);
+  });
+
+  it("code_reviewer's defaultTimeoutMs outlives the budget cap (signal must not fire first)", () => {
+    const reviewer = BUILT_IN_SUBAGENTS.find((d) => d.name === 'code_reviewer');
+    const auditor = BUILT_IN_SUBAGENTS.find((d) => d.name === 'project_auditor');
+    const sub = deriveSubagentBudget(PARENT);
+    expect(reviewer?.defaultTimeoutMs ?? 0).toBeGreaterThanOrEqual(sub.maxExecutionTime);
+    expect(auditor?.defaultTimeoutMs ?? 0).toBeGreaterThanOrEqual(sub.maxExecutionTime);
   });
 });

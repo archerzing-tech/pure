@@ -2150,7 +2150,7 @@ export class ChatController {
     // re-rendering the Input panel on every token freezes the UI mid-stream
     // ("stuck with only the blinking cursor"). See the TokenDelta handler.
     const toolCallRefresh = new Map<string, number>();
-    type LiveToolOutputLine = { kind: 'stdout' | 'stderr'; line: string };
+    type LiveToolOutputLine = { kind: 'stdout' | 'stderr'; line: string; progress?: boolean };
     const liveToolOutputQueue = new Map<string, LiveToolOutputLine[]>();
     let liveToolOutputFrame: number | undefined;
     const LIVE_OUTPUT_BATCH_SIZE = 24;
@@ -2166,7 +2166,7 @@ export class ChatController {
         }
         for (let i = 0; i < LIVE_OUTPUT_BATCH_SIZE && lines.length > 0; i++) {
           const next = lines.shift()!;
-          appendToolStreamLine(entry.row, next.kind, next.line);
+          appendToolStreamLine(entry.row, next.kind, next.line, next.progress);
           rendered = true;
         }
         if (lines.length > 0) hasMore = true;
@@ -2188,7 +2188,7 @@ export class ChatController {
     // engine uses for the id-bearing TokenDelta and the ToolResult event; rows
     // staged by name migrate onto the id key before execution, so the row
     // always exists by the time the first line streams.
-    setToolOutputListener((toolCallId, kind, line) => {
+    setToolOutputListener((toolCallId, kind, line, progress) => {
       if (gen !== this.generation) return;
       const entry = pendingRows.get(toolCallId);
       if (!entry || !entry.row.details.classList.contains('pending')) return;
@@ -2198,7 +2198,7 @@ export class ChatController {
       // only needs a bounded preview, so never let a chatty command build an
       // unbounded queue that can starve keyboard and click events.
       if (queued.length >= MAX_LIVE_STREAM_LINES) return;
-      queued.push({ kind, line });
+      queued.push({ kind, line, progress });
       liveToolOutputQueue.set(toolCallId, queued);
       scheduleLiveToolOutputFlush();
     });
@@ -3852,7 +3852,11 @@ export class ChatController {
                 this.addStatusBubble(`⚠️ 已自动完成 ${MAX_QUALITY_REPAIR_ROUNDS} 轮修复与复查，仍有明确问题未解决，建议人工介入。\n${qualityRepairIssues.join('\n')}`, false, true);
               }
               this.addStatusBubble(deliveryResult.passed
-                ? `✅ 交付验证通过：${deliveryVerificationSummary(deliveryResult)}`
+                ? (deliveryResult.steps.length === 0
+                    // No mechanical verification entry in this workspace — skip
+                    // the "没有标准机械验证入口" explanation, just confirm pass.
+                    ? '✅ 交付验证通过'
+                    : `✅ 交付验证通过：${deliveryVerificationSummary(deliveryResult)}`)
                 : `⛔ 项目暂不交付：${deliveryVerificationSummary(deliveryResult)}`,
               !deliveryResult.passed, !deliveryResult.passed);
               scrollChatToBottomIfPinned(chatEl);

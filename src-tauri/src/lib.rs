@@ -338,7 +338,7 @@ mod llm_probe_tests {
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command as TokioCommand};
 
 use base64::Engine as _;
@@ -2859,6 +2859,282 @@ fn kill_process_group(pid: i32) -> std::io::Result<()> {
     }
 }
 
+/// Splits a byte stream into live-streamable chunks for execute_command_stream.
+///
+/// BufReader::read_line segments ONLY on `\n`, so pip/npm/bun in-place progress
+/// bars — which redraw in place with a bare carriage return and no newline —
+/// accumulate inside one growing "line" and emit nothing until the command
+/// exits. The GUI then sits on a static spinner for the whole install and reads
+/// as frozen (假死).
+///
+/// This splitter treats `\r` as a boundary too: `\r\n` and `\n` yield a normal
+/// line, a LONE `\r` yields a `progress` chunk that the GUI renders by redrawing
+/// the previous progress line (terminal-style), and whatever trails at EOF is
+/// flushed as a final normal line. Only ASCII `\r`/`\n` bytes are ever used as
+/// boundaries, so a chunk split across a UTF-8 codepoint still slices cleanly.
+struct StreamLineSplitter {
+    pending: Vec<u8>,
+}
+
+/// One streamed chunk: `progress` marks a lone-`\r` redraw (the GUI replaces its
+/// last progress line) vs a normal `\n`-terminated line (the GUI appends).
+struct StreamLine {
+    line: String,
+    progress: bool,
+}
+
+fn trim_trailing_ws(slice: &[u8]) -> &[u8] {
+    let mut end = slice.len();
+    while end > 0 {
+        match slice[end - 1] {
+            b' ' | b'\t' | b'\r' | b'\n' => end -= 1,
+            _ => break,
+        }
+    }
+    &slice[..end]
+}
+
+impl StreamLineSplitter {
+    fn new() -> Self {
+        Self { pending: Vec::new() }
+    }
+
+    /// Feed freshly-read bytes; returns the complete chunks they produced.
+    fn push(&mut self, bytes: &[u8]) -> Vec<StreamLine> {
+        self.pending.extend_from_slice(bytes);
+        let mut out = Vec::new();
+        let len = self.pending.len();
+        let mut scan = 0;
+        loop {
+            // Find the earliest boundary. The scan stops at the first `\n`, so
+            // `cr` (first `\r`) is always strictly before that newline — exactly
+            // the ambiguity that decides lone-`\r` (progress) vs `\r\n` (normal).
+            let mut newline: Option<usize> = None;
+            let mut cr: Option<usize> = None;
+            for (i, &b) in self.pending[scan..len].iter().enumerate() {
+                if b == b'\n' {
+                    newline = Some(scan + i);
+                    break;
+                }
+                if b == b'\r' && cr.is_none() {
+                    cr = Some(scan + i);
+                }
+            }
+            match (cr, newline) {
+                (Some(r), Some(n)) if r + 1 == n => {
+                    // \r\n terminator — a normal line, consumed through the \n.
+                    let trimmed = trim_trailing_ws(&self.pending[scan..r]);
+                    if !trimmed.is_empty() {
+                        out.push(StreamLine {
+                            line: String::from_utf8_lossy(trimmed).into_owned(),
+                            progress: false,
+                        });
+                    }
+                    scan = n + 1;
+                }
+                (Some(r), _) => {
+                    // Lone \r — an in-place progress redraw, streamed live.
+                    let trimmed = trim_trailing_ws(&self.pending[scan..r]);
+                    if !trimmed.is_empty() {
+                        out.push(StreamLine {
+                            line: String::from_utf8_lossy(trimmed).into_owned(),
+                            progress: true,
+                        });
+                    }
+                    scan = r + 1;
+                }
+                (None, Some(n)) => {
+                    let trimmed = trim_trailing_ws(&self.pending[scan..n]);
+                    if !trimmed.is_empty() {
+                        out.push(StreamLine {
+                            line: String::from_utf8_lossy(trimmed).into_owned(),
+                            progress: false,
+                        });
+                    }
+                    scan = n + 1;
+                }
+                (None, None) => break,
+            }
+            if scan >= len {
+                break;
+            }
+        }
+        if scan > 0 {
+            self.pending.drain(..scan);
+        }
+        out
+    }
+
+    /// Flush whatever is still buffered when the stream ends — a final line
+    /// with no trailing newline — or nothing.
+    fn finish(&mut self) -> Vec<StreamLine> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        let trimmed = trim_trailing_ws(&self.pending).to_vec();
+        self.pending.clear();
+        if trimmed.is_empty() {
+            Vec::new()
+        } else {
+            vec![StreamLine {
+                line: String::from_utf8_lossy(&trimmed).into_owned(),
+                progress: false,
+            }]
+        }
+    }
+}
+
+/// Drain one command pipe through StreamLineSplitter, pushing each chunk to the
+/// Channel as `{ "type": <kind>, "content": ..., "progress": bool }` JSON.
+async fn stream_pipe_lines<R>(raw: R, ch: Channel<String>, kind: &'static str)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut reader = BufReader::new(raw);
+    let mut splitter = StreamLineSplitter::new();
+    let mut buf = vec![0u8; 4096];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                for chunk in splitter.push(&buf[..n]) {
+                    let msg = serde_json::json!({
+                        "type": kind,
+                        "content": chunk.line,
+                        "progress": chunk.progress,
+                    });
+                    if ch.send(msg.to_string()).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    for chunk in splitter.finish() {
+        let msg = serde_json::json!({
+            "type": kind,
+            "content": chunk.line,
+            "progress": chunk.progress,
+        });
+        if ch.send(msg.to_string()).is_err() {
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod stream_line_splitter_tests {
+    use super::*;
+
+    fn lines(chunks: &[&str]) -> Vec<(String, bool)> {
+        let mut splitter = StreamLineSplitter::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            for chunk in splitter.push(c.as_bytes()) {
+                out.push((chunk.line, chunk.progress));
+            }
+        }
+        for chunk in splitter.finish() {
+            out.push((chunk.line, chunk.progress));
+        }
+        out
+    }
+
+    #[test]
+    fn newline_terminated_lines_are_normal() {
+        let out = lines(&["foo\nbar\n"]);
+        assert_eq!(out, vec![("foo".to_string(), false), ("bar".to_string(), false)]);
+    }
+
+    #[test]
+    fn crlf_is_a_normal_line_terminator() {
+        let out = lines(&["foo\r\nbar\r\n"]);
+        assert_eq!(out, vec![("foo".to_string(), false), ("bar".to_string(), false)]);
+    }
+
+    #[test]
+    fn lone_cr_streams_progress_rewrites_live() {
+        // pip-style in-place progress bar: no newlines until the very end. Each
+        // lone \r closes the previous rewrite; the final 100% is \n-terminated
+        // (a normal line). Leading spaces are preserved (bars often indent).
+        let out = lines(&["Collecting requests\r  10%\r  45%\r100%\nDone\n"]);
+        assert_eq!(
+            out,
+            vec![
+                ("Collecting requests".to_string(), true),
+                ("  10%".to_string(), true),
+                ("  45%".to_string(), true),
+                ("100%".to_string(), false),
+                ("Done".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn progress_before_a_later_newline_is_split_first() {
+        // "a\rb\nc": the lone \r is a progress boundary even though a \n follows.
+        let out = lines(&["a\rb\nc"]);
+        assert_eq!(
+            out,
+            vec![("a".to_string(), true), ("b".to_string(), false), ("c".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn chunks_split_across_calls_preserve_the_tail() {
+        let mut splitter = StreamLineSplitter::new();
+        let first = splitter.push(b"Downloading 10%\r");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].line, "Downloading 10%");
+        assert!(first[0].progress);
+        let second = splitter.push(b"Downloading 20%\r");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].line, "Downloading 20%");
+        assert!(second[0].progress);
+        let done = splitter.push(b"Downloading 100%\n");
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].line, "Downloading 100%");
+        assert!(!done[0].progress);
+        assert!(splitter.finish().is_empty());
+    }
+
+    #[test]
+    fn trailing_tail_flushes_on_finish() {
+        let mut splitter = StreamLineSplitter::new();
+        let done_line = splitter.push(b"Successfully installed requests\n");
+        assert_eq!(done_line.len(), 1);
+        assert_eq!(done_line[0].line, "Successfully installed requests");
+        assert!(!done_line[0].progress);
+        // A tail with no trailing newline sits in the buffer until finish().
+        assert!(splitter.push(b"done ").is_empty());
+        let tail = splitter.finish();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].line, "done");
+        assert!(!tail[0].progress);
+    }
+
+    #[test]
+    fn multibyte_utf8_split_across_chunks_survives() {
+        let mut splitter = StreamLineSplitter::new();
+        let s = "安装依赖中…\n";
+        let bytes = s.as_bytes();
+        // Feed the first two bytes only — mid-codepoint.
+        assert!(splitter.push(&bytes[..2]).is_empty());
+        let out = splitter.push(&bytes[2..]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, "安装依赖中…");
+        assert!(!out[0].progress);
+    }
+
+    #[test]
+    fn empty_and_whitespace_only_rewrites_emit_nothing() {
+        let mut splitter = StreamLineSplitter::new();
+        assert!(splitter.push(b"\r\r\n  \r").is_empty());
+        assert!(splitter.finish().is_empty());
+    }
+}
+
 /// Core of execute_command_stream, split out for unit testing (a Tauri
 /// CommandRegistry State can't be constructed inside a plain test).
 async fn execute_command_stream_inner(
@@ -2889,40 +3165,15 @@ async fn execute_command_stream_inner(
     let ch_stdout = on_output.clone();
     let ch_stderr = on_output.clone();
 
+    // Drain both pipes through the \r-aware splitter (see StreamLineSplitter) so
+    // npm/bun/pip in-place progress bars stream live instead of holding the GUI
+    // on a static spinner until the command exits.
     let mut stdout_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    let chunk = serde_json::json!({ "type": "stdout", "content": line.trim_end() });
-                    if ch_stdout.send(chunk.to_string()).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+        stream_pipe_lines(stdout, ch_stdout, "stdout").await;
     });
 
     let mut stderr_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    let chunk = serde_json::json!({ "type": "stderr", "content": line.trim_end() });
-                    if ch_stderr.send(chunk.to_string()).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+        stream_pipe_lines(stderr, ch_stderr, "stderr").await;
     });
 
     // Wait for the shell first. A background server may keep inherited pipes
@@ -5841,6 +6092,7 @@ mod execute_command_tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn reports_failure_with_nonzero_exit_and_stderr() {
         let out = execute_command(".".to_string(), "echo boom >&2; exit 3".to_string(), None)
             .await
@@ -13366,6 +13618,7 @@ mod mcp_subprocess_tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn spawn_mcp_augments_path_and_forwards_env() {
         // Can't invoke the Tauri command (needs State), so exercise the shared
         // path helper + env forwarding against a real child process.
@@ -13692,6 +13945,7 @@ mod tmp_cleanup_tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn cleanup_deletes_only_aged_pastes() {
         let dir = temp_cleanup_dir("age");
         let session = dir.join("sess1");
@@ -13713,6 +13967,7 @@ mod tmp_cleanup_tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn cleanup_removes_session_dirs_left_empty() {
         let dir = temp_cleanup_dir("empty");
         let session = dir.join("hexses");

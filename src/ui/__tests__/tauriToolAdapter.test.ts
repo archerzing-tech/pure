@@ -1,7 +1,7 @@
 // src/ui/__tests__/tauriToolAdapter.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs, buildCodeSearchArgs, filterResearchSources, researchLimits, TauriToolAdapter } from '../TauriToolAdapter';
+import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs, buildCodeSearchArgs, filterResearchSources, researchLimits, TauriToolAdapter, parseCommandStreamChunk } from '../TauriToolAdapter';
 import type { ToolCall } from '../../shared/types';
 import { formatCommandError, formatBytes } from '../../shared/format';
 
@@ -340,5 +340,37 @@ describe('formatWriteProgress (Rust write_file_stream protocol lock)', () => {
   it('shows the full write at the final chunk', () => {
     expect(formatWriteProgress('big.bin', 1024 * 1024, 1024 * 1024))
       .toBe('正在写入 big.bin — 100% (1.0 MB/1.0 MB)');
+  });
+});
+
+describe('parseCommandStreamChunk (execute_command_stream protocol lock)', () => {
+  it('parses a stdout progress chunk (lone-\\r redraw from the Rust splitter)', () => {
+    expect(parseCommandStreamChunk('{"type":"stdout","content":"Downloading 45%","progress":true}'))
+      .toEqual({ type: 'stdout', line: 'Downloading 45%', progress: true });
+  });
+
+  it('marks non-progress chunks progress:false even when progress is omitted', () => {
+    expect(parseCommandStreamChunk('{"type":"stdout","content":"line"}'))
+      .toEqual({ type: 'stdout', line: 'line', progress: false });
+    expect(parseCommandStreamChunk('{"type":"stderr","content":"warn","progress":false}'))
+      .toEqual({ type: 'stderr', line: 'warn', progress: false });
+  });
+
+  it('parses the exit event and falls back to -1 for a bad code', () => {
+    expect(parseCommandStreamChunk('{"type":"exit","code":3}'))
+      .toEqual({ type: 'exit', code: 3 });
+    expect(parseCommandStreamChunk('{"type":"exit"}'))
+      .toEqual({ type: 'exit', code: -1 });
+  });
+
+  it('coerces a non-string content into a string line', () => {
+    expect(parseCommandStreamChunk('{"type":"stdout","content":42}'))
+      .toEqual({ type: 'stdout', line: '42', progress: false });
+  });
+
+  it('returns null for malformed JSON and unknown shapes', () => {
+    expect(parseCommandStreamChunk('not json')).toBeNull();
+    expect(parseCommandStreamChunk('{"type":"progress"}')).toBeNull();
+    expect(parseCommandStreamChunk('null')).toBeNull();
   });
 });
