@@ -794,6 +794,7 @@ const translations: Record<Language, Record<string, string>> = {
     'queue.cancel': '取消该任务',
     'queue.cancelAll': '全部取消',
     'queue.clearDone': '清除已完成',
+    'queue.adoptLegacy': '恢复旧任务',
     'queue.count': '{n} 个待执行',
 
     // ── Paste chips ──
@@ -1639,6 +1640,7 @@ const translations: Record<Language, Record<string, string>> = {
     'queue.cancel': 'Cancel this task',
     'queue.cancelAll': 'Cancel all',
     'queue.clearDone': 'Clear done',
+    'queue.adoptLegacy': 'Restore old tasks',
     'queue.count': '{n} queued',
 
     // ── Paste chips ──
