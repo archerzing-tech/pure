@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import { projectTranscript } from '../transcriptProjection';
+import { projectSessionEvents, projectTranscript } from '../transcriptProjection';
+import type { SessionEvent } from '../store';
 import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
 import type { Message } from '../../shared/types';
 import type { Plan } from '../../coding-agent/types';
@@ -300,6 +301,31 @@ describe('session snapshot separation', () => {
     expect(snapshot.uiState.planProgress).toEqual(progress);
     expect(snapshot.uiState.planState?.planNumber).toBe(2);
     expect(snapshot.modelContext.messages[0]).not.toHaveProperty('planProgress');
+  });
+});
+
+describe('session event projection', () => {
+  it('keeps event order and preserves tool result pairing metadata', () => {
+    const events: SessionEvent[] = [
+      { id: 'u1', type: 'user', content: '读取文件' },
+      { id: 'a1', type: 'assistant', content: '开始处理' },
+      { id: 'c1', type: 'tool_call', toolCallId: 'call-1', toolName: 'read_file', toolCalls: [{ id: 'call-1', toolName: 'read_file', args: { path: 'src/app.ts' } }] },
+      { id: 'r1', type: 'tool_result', toolCallId: 'call-1', toolName: 'read_file', content: '内容', toolExec: { toolName: 'read_file', success: true, duration: 3, args: { path: 'src/app.ts' }, resultText: '内容' } },
+      { id: 'a2', type: 'assistant', content: '完成' },
+    ];
+    expect(projectSessionEvents(events).map((block) => block.type)).toEqual(['user', 'assistant', 'tool', 'assistant']);
+    const tool = projectSessionEvents(events).find((block) => block.type === 'tool');
+    expect(tool?.type === 'tool' && tool.exec.toolName).toBe('read_file');
+    expect(tool?.type === 'tool' && tool.exec.args).toEqual({ path: 'src/app.ts' });
+  });
+
+  it('does not render internal tool_call events as visible duplicate rows', () => {
+    const blocks = projectSessionEvents([
+      { id: 'call', type: 'tool_call', toolCallId: 'x', toolName: 'read_file' },
+      { id: 'result', type: 'tool_result', toolCallId: 'x', toolName: 'read_file', content: 'ok' },
+    ]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.type).toBe('tool');
   });
 });
 
