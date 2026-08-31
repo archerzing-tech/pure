@@ -10,7 +10,7 @@ import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, rende
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
-import { projectSessionEvents, projectTranscript } from './transcriptProjection';
+import { projectCanonicalSession } from './sessionEvents';
 import { estimateCostUsd, formatCostUsd, formatTokens } from '../shared/usage';
 import { escapeHtml } from '../shared/html';
 import { buildExportSavedToast } from './statsExportToast';
@@ -705,9 +705,7 @@ function hideSessionLoading(): void {
 }
 
 async function renderSessionMessages(snapshot: SessionSnapshotV2) {
-  const blocks = snapshot.events.length > 0
-    ? projectSessionEvents(snapshot.events)
-    : projectTranscript(snapshot.transcript);
+  const blocks = projectCanonicalSession(snapshot.events, snapshot.transcript);
   const restoreToken = ++sessionRestoreToken;
   const isCurrentRestore = (): boolean => restoreToken === sessionRestoreToken;
   enterChatMode();

@@ -163,9 +163,47 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
 
 export function projectSessionEvents(events: import('./store').SessionEvent[]): TranscriptReplayBlock[] {
   const blocks: TranscriptReplayBlock[] = [];
+  const pending = new Map<string, StoredToolCallInfo>();
+  const completedTools: ToolExecMeta[] = [];
+  let lastUserRequest = '';
+  const turnArtifactPaths = new Map<string, { path: string }>();
+  let turnHasExplicitArtifacts = false;
+
+  const flushTurnArtifacts = (): void => {
+    if (turnArtifactPaths.size === 0) return;
+    blocks.push(lastUserRequest
+      ? { type: 'artifact', items: [...turnArtifactPaths.values()], userRequest: lastUserRequest }
+      : { type: 'artifact', items: [...turnArtifactPaths.values()] });
+    turnArtifactPaths.clear();
+  };
+  const addArtifactsFromTools = (): void => {
+    if (turnHasExplicitArtifacts) return;
+    for (const artifact of artifactsFromToolExecs(completedTools)) {
+      if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
+    }
+  };
+  const registerCalls = (event: import('./store').SessionEvent): void => {
+    for (const call of event.toolCalls ?? []) {
+      if (call.id) pending.set(call.id, call);
+    }
+    if (event.toolCallId && event.toolName && !event.toolCalls?.some((call) => call.id === event.toolCallId)) {
+      pending.set(event.toolCallId, { id: event.toolCallId, toolName: event.toolName, args: {} });
+    }
+  };
+  const flushPending = (): void => {
+    for (const call of pending.values()) blocks.push(stoppedTool(call));
+    pending.clear();
+  };
+
   for (const event of events) {
     switch (event.type) {
       case 'user':
+        flushPending();
+        addArtifactsFromTools();
+        completedTools.length = 0;
+        flushTurnArtifacts();
+        turnHasExplicitArtifacts = false;
+        lastUserRequest = event.content ?? '';
         blocks.push({ type: 'user', content: visibleUserContent(event.content ?? ''), images: event.images ?? [], attachments: event.attachments ?? [] });
         break;
       case 'analysis':
@@ -181,18 +219,59 @@ export function projectSessionEvents(events: import('./store').SessionEvent[]): 
         blocks.push({ type: 'plan' });
         break;
       case 'assistant':
+        flushPending();
         if (event.content) blocks.push({ type: 'assistant', content: event.content, isPlanPause: !!event.isPlanPause });
+        if (event.artifacts?.length) {
+          turnHasExplicitArtifacts = true;
+          for (const artifact of event.artifacts) {
+            if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
+          }
+        } else {
+          addArtifactsFromTools();
+        }
+        completedTools.length = 0;
+        registerCalls(event);
         break;
-      case 'tool_result':
-        blocks.push({ type: 'tool', stopped: false, exec: event.toolExec ?? { toolName: event.toolName ?? 'tool', success: true, duration: 0, resultText: event.content } });
+      case 'tool_result': {
+        const call = event.toolCallId ? pending.get(event.toolCallId) : undefined;
+        const stored = event.toolExec;
+        const resultText = event.content ?? '';
+        const exec: ToolExecMeta = stored
+          ? {
+              ...stored,
+              toolName: stored.toolName || event.toolName || call?.toolName || 'tool',
+              args: stored.args ?? call?.args,
+              resultText: stored.resultText ?? (resultText || undefined),
+            }
+          : {
+              toolName: event.toolName || call?.toolName || 'tool',
+              success: !/^Error:\s/i.test(resultText),
+              duration: 0,
+              args: call?.args,
+              resultText: resultText || undefined,
+            };
+        blocks.push({ type: 'tool', stopped: false, exec });
+        completedTools.push(exec);
+        if (event.toolCallId) pending.delete(event.toolCallId);
         break;
+      }
       case 'artifact':
-        if (event.artifacts?.length) blocks.push({ type: 'artifact', items: event.artifacts });
+        if (event.artifacts?.length) {
+          turnHasExplicitArtifacts = true;
+          for (const artifact of event.artifacts) {
+            if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
+          }
+        }
         break;
       case 'tool_call':
+        registerCalls(event);
+        break;
       case 'status':
         break;
     }
   }
+  addArtifactsFromTools();
+  flushPending();
+  flushTurnArtifacts();
   return blocks;
 }

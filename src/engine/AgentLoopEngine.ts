@@ -3,11 +3,12 @@
 // Fixes: BudgetWarning events, completedSteps/lastState tracking, note injection for recoverable errors,
 //        VERIFY_FAILED → loop back to THINK with reflection note instead of completing.
 
-import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, ToolDefinition } from '../shared/types';
+import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
-import { safeParseArgs } from '../shared/format';
+import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT } from './LlmTurnRunner';
+import { runWithDeadline } from './streamDeadline';
 import { BudgetManager } from './BudgetManager';
-import { FileLockManager } from './FileLockManager';
+import { ToolExecutionCoordinator } from './ToolExecutionCoordinator';
 
 // v1.9.15 — research-loop guard: successful web searches never trip the
 // failure policy (empty/relevance-gated-out result sets return success so the
@@ -31,13 +32,7 @@ function isWebResearchTool(name: string): boolean {
 }
 
 const RESEARCH_ROUND_LIMIT = 4;
-const LLM_STREAM_IDLE_TIMEOUT_MS = 120_000;
-// First-token budget is far more lenient than inter-chunk idle: a huge prompt
-// (large input file / giant attachment) makes the provider's time-to-first-token
-// (TTFT) long, and a big generation can also stall before the first byte. Killing
-// the stream on a 120s TTFT wrongly aborts legitimate large tasks — only treat a
-// *gap between delivered chunks* as a real stall.
-const LLM_STREAM_FIRST_TOKEN_TIMEOUT_MS = 300_000;
+const VERIFIER_TIMEOUT_MS = 60_000;
 // Tool results (read_file of a big file, a giant build/test dump, …) are folded
 // into the LLM context verbatim. A huge result both inflates the prompt (slow
 // first-token / TTFT → stream timeout) and can blow the context window. Cap the
@@ -52,113 +47,9 @@ function capToolResult(text: string, toolName: string): string {
     : `\n\n« Tool result too large — ${omitted.toLocaleString()} chars omitted. Fetch it in pages/ranges if you need the rest. »`;
   return text.slice(0, TOOL_RESULT_MAX_CHARS) + notice;
 }
-// On a stream idle-timeout while the model is still producing plain text (no
-// half-formed tool call), keep what we have and let it continue seamlessly
-// instead of hard-aborting. Cap so a pathological stall can't loop forever.
-const MAX_STREAM_RESUMES = 2;
-const STREAM_RESUME_HINT = '[system] The previous response generation was cut off by a stream timeout. Continue EXACTLY from where the last assistant message ended — do NOT repeat any already-generated content, just complete the remainder (and close any open code block).';
-// Heuristic truncation check for a SILENT cut: a generation that ends with an
-// unterminated fenced code block (``` opened but never closed) was almost
-// certainly cut off mid-stream — e.g. token-limit truncation of an HTML page
-// wrapped in a ```html fence. The provider still emits a clean `done`, so the
-// engine would otherwise treat the partial content as complete (the silent
-// truncation the user hit). A balanced fence count means a real completion.
-function contentLooksTruncated(text: string): boolean {
-  const fenceCount = (text.match(/```/g) ?? []).length;
-  return fenceCount % 2 === 1;
-}
-const TOOL_EXECUTION_TIMEOUT_MS = 180_000;
-const VERIFIER_TIMEOUT_MS = 60_000;
-
-function makeLifecycleError(name: 'AbortError' | 'TimeoutError', message: string): Error {
-  const error = new Error(message);
-  error.name = name;
-  return error;
-}
-
-export function runWithDeadline<T>(
-  operation: () => Promise<T> | T,
-  signal: AbortSignal | undefined,
-  timeoutMs: number,
-  label: string,
-  onTimeout?: () => void,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const cleanup = (): void => {
-      if (timer !== undefined) clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-    };
-    const finish = (callback: () => void): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      callback();
-    };
-    const onAbort = (): void => finish(() => reject(makeLifecycleError('AbortError', `${label} aborted`)));
-    if (signal?.aborted) {
-      onAbort();
-      return;
-    }
-    signal?.addEventListener('abort', onAbort, { once: true });
-    timer = setTimeout(() => {
-      onTimeout?.();
-      finish(() => reject(makeLifecycleError('TimeoutError', `${label} timed out after ${timeoutMs}ms`)));
-    }, Math.max(1, timeoutMs));
-    Promise.resolve().then(operation).then(
-      (value) => finish(() => resolve(value)),
-      (error) => finish(() => reject(error)),
-    );
-  });
-}
-
-export async function* streamWithDeadline(
-  llm: LLMAdapter,
-  messages: Message[],
-  tools: ToolDefinition[],
-  signal: AbortSignal | undefined,
-  timeoutMs: number,
-): AsyncGenerator<Extract<import('../shared/types').LLMChunk, { type: string }>, void, void> {
-  const linkedController = new AbortController();
-  const forwardAbort = (): void => linkedController.abort();
-  signal?.addEventListener('abort', forwardAbort, { once: true });
-  const iterator = llm.stream(messages, tools, linkedController.signal)[Symbol.asyncIterator]();
-  const deadline = Date.now() + Math.max(1, timeoutMs);
-  let firstChunk = true;
-  try {
-    while (true) {
-      const idleCap = firstChunk ? LLM_STREAM_FIRST_TOKEN_TIMEOUT_MS : LLM_STREAM_IDLE_TIMEOUT_MS;
-      const remaining = Math.min(
-        deadline - Date.now(),
-        idleCap,
-      );
-      if (remaining <= 0) {
-        linkedController.abort();
-        throw makeLifecycleError('TimeoutError', firstChunk
-          ? 'LLM stream exceeded its first-token deadline'
-          : 'LLM stream exceeded its deadline');
-      }
-      const next = await runWithDeadline(
-        () => iterator.next(),
-        signal,
-        remaining,
-        'LLM stream read',
-        () => linkedController.abort(),
-      );
-      if (next.done) return;
-      firstChunk = false;
-      yield next.value;
-    }
-  } finally {
-    signal?.removeEventListener('abort', forwardAbort);
-    linkedController.abort();
-    void iterator.return?.();
-  }
-}
 
 export class AgentLoopEngine {
-  private fileLock = new FileLockManager();
+  private toolCoordinator = new ToolExecutionCoordinator();
 
   async *run(
     input: RunInput,
@@ -286,19 +177,21 @@ export class AgentLoopEngine {
 
       try {
         const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
-        const hasTools = !!ctx.tools && currentToolsDefs.length > 0;
-        const toolsDefs = hasTools ? currentToolsDefs : [];
+        const toolsDefs = ctx.tools && currentToolsDefs.length > 0 ? currentToolsDefs : [];
         const streamTimeoutMs = Math.max(1, budget.remaining().time);
-        for await (const chunk of streamWithDeadline(ctx.llm, messages, toolsDefs, ctx.signal, streamTimeoutMs)) {
+        for await (const chunk of streamLlmTurn({
+          llm: ctx.llm,
+          messages,
+          tools: toolsDefs,
+          signal: ctx.signal,
+          timeoutMs: streamTimeoutMs,
+        })) {
           switch (chunk.type) {
             case 'content':
               content += chunk.content;
               yield { type: 'TokenDelta', payload: { content: chunk.content, stateId: sid(), isToolCall: false }, timestamp: Date.now() };
               break;
             case 'reasoning':
-              // Reasoning (chain-of-thought) is surfaced to the GUI as its own
-              // event — never folded into TokenDelta content, so it stays out of
-              // the visible answer and the persisted assistant message.
               reasoningText += chunk.content;
               yield { type: 'ReasoningDelta', payload: { content: chunk.content, stateId: sid() }, timestamp: Date.now() };
               break;
@@ -308,10 +201,6 @@ export class AgentLoopEngine {
               break;
             case 'tool_call':
               sawToolCall = true;
-              // BUG-6: surface the completed tool-call id for streaming
-              // adapters that emit it mid-stream (Anthropic-style). The UI
-              // keys its toasts by toolCallId, not toolName — parallel
-              // same-name calls would otherwise collide on one toast.
               yield { type: 'TokenDelta', payload: { content: '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name, toolCallId: chunk.id }, timestamp: Date.now() };
               break;
             case 'usage':
@@ -321,35 +210,23 @@ export class AgentLoopEngine {
               content = chunk.content || content;
               toolCalls = chunk.toolCalls;
               sawDone = true;
-              if (chunk.toolCalls.length > 0) sawToolCall = true;
-              // BUG-6: the `done` chunk is the single guaranteed source of the
-              // final tool calls (every adapter emits it per the LLMAdapter
-              // contract, even ones that never stream `tool_call` chunks).
-              // Emit one id-bearing TokenDelta per call so the UI can key its
-              // pending toasts by toolCallId before any ToolResult arrives.
-              for (const tc of chunk.toolCalls) {
+              if (toolCalls.length > 0) sawToolCall = true;
+              for (const tc of toolCalls) {
                 yield { type: 'TokenDelta', payload: { content: '', stateId: sid(), isToolCall: true, toolCallBuffer: tc.function.arguments, toolCallName: tc.function.name, toolCallId: tc.id }, timestamp: Date.now() };
               }
               break;
           }
         }
 
-        // Silent-truncation guard: the stream ended but the answer is NOT
-        // complete. Two cases:
-        //  - no terminal `done` arrived (connection closed without error), or
-        //  - a `done` arrived but the text ends inside an unterminated code
-        //    fence (token-limit truncation of an HTML page / long doc).
-        // Either way the partial content must not be treated as the final answer.
-        // Resume it exactly like a stream timeout — keep what we have and let the
-        // model finish the remainder (capped by MAX_STREAM_RESUMES).
         const silentlyTruncated =
-          (sawDone && !sawToolCall && content.length > 0 && contentLooksTruncated(content)) ||
+          (sawDone && !sawToolCall && content.length > 0 && (content.match(/```/g) ?? []).length % 2 === 1) ||
           (!sawDone && !sawToolCall && content.length > 0);
         if (silentlyTruncated && streamResumes < MAX_STREAM_RESUMES) {
           streamResumes++;
           messages.push({ role: 'assistant' as const, content });
           messages.push({ role: 'user' as const, content: STREAM_RESUME_HINT, internal: true });
-          turnCount++; budget.incrementTurn();
+          turnCount++;
+          budget.incrementTurn();
           yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
           continue;
         }
@@ -426,7 +303,7 @@ export class AgentLoopEngine {
         yield { type: 'StateChange', payload: { from: 'THINK', to: 'ACT', stateId: sid() }, timestamp: Date.now() };
         completedSteps.push('ACT');
 
-        const toolResults = await this.executeTools(toolCalls, ctx, budget);
+        const toolResults = await this.toolCoordinator.execute(toolCalls, ctx, budget);
         for (const result of toolResults) {
           yield { type: 'ToolResult', payload: result, timestamp: Date.now() };
         }
@@ -687,94 +564,6 @@ export class AgentLoopEngine {
     return `Tool call ${te.toolName} failed: ${te.result.error ?? 'unknown error'}. Degrade this approach — do NOT repeat the exact same call: either adapt it (different arguments) or use a different tool or strategy. Prefer approaches that have already proven successful this session.`;
   }
 
-  private async executeTools(
-    toolCalls: ToolCall[],
-    ctx: EngineContext,
-    budget: BudgetManager,
-  ): Promise<Array<{ toolName: string; result: import('../shared/types').ToolResult; duration: number; toolCallId: string }>> {
-    const results: Array<{ toolName: string; result: import('../shared/types').ToolResult; duration: number; toolCallId: string }> = [];
-    const reads: ToolCall[] = [];
-    const writes: ToolCall[] = [];
 
-    for (const tc of toolCalls) {
-      budget.incrementToolCall();
-      const meta = ctx.tools!.getMetadata(tc.function.name);
-      // Tools marked side-effectful (MCP and subagents included) must not be
-      // run concurrently merely because they are not file writes. Parallel
-      // execution is reserved for explicitly read-only tools.
-      if (meta?.isWrite || meta?.sideEffects) {
-        writes.push(tc);
-      } else {
-        reads.push(tc);
-      }
-    }
-
-    // Execute reads in parallel
-    const readResults = await Promise.all(reads.map(async tc => {
-      try {
-        const args = safeParseArgs(tc.function.arguments);
-        const path = typeof args.path === 'string' ? args.path : '';
-        const lm = ctx.lockManager ?? this.fileLock;
-        if (path) await lm.acquireRead(path, ctx.signal);
-        try {
-          const toolController = new AbortController();
-          const forwardAbort = (): void => toolController.abort();
-          ctx.signal?.addEventListener('abort', forwardAbort, { once: true });
-          try {
-            const result = await runWithDeadline(
-              () => ctx.tools!.execute(tc, toolController.signal),
-              ctx.signal,
-              Math.min(TOOL_EXECUTION_TIMEOUT_MS, Math.max(1, budget.remaining().time)),
-              `tool ${tc.function.name}`,
-              () => toolController.abort(),
-            );
-            return { toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id };
-          } finally {
-            ctx.signal?.removeEventListener('abort', forwardAbort);
-          }
-        } finally {
-          // Release even when the tool itself throws — a leaked lock would
-          // deadlock every later write to the same path.
-          if (path) lm.release(path);
-        }
-      } catch (err: any) {
-        return { toolName: tc.function.name, result: { id: tc.id, toolName: tc.function.name, error: err?.message ?? 'unknown', success: false, duration: 0 }, duration: 0, toolCallId: tc.id };
-      }
-    }));
-    results.push(...readResults);
-
-    // Execute writes sequentially
-    for (const tc of writes) {
-      try {
-        const args = safeParseArgs(tc.function.arguments);
-        const path = typeof args.path === 'string' ? args.path : '';
-        const lm = ctx.lockManager ?? this.fileLock;
-        if (path) await lm.acquireWrite(path, ctx.signal);
-        try {
-          const toolController = new AbortController();
-          const forwardAbort = (): void => toolController.abort();
-          ctx.signal?.addEventListener('abort', forwardAbort, { once: true });
-          try {
-            const result = await runWithDeadline(
-              () => ctx.tools!.execute(tc, toolController.signal),
-              ctx.signal,
-              Math.min(TOOL_EXECUTION_TIMEOUT_MS, Math.max(1, budget.remaining().time)),
-              `tool ${tc.function.name}`,
-              () => toolController.abort(),
-            );
-            results.push({ toolName: tc.function.name, result, duration: result.duration, toolCallId: tc.id });
-          } finally {
-            ctx.signal?.removeEventListener('abort', forwardAbort);
-          }
-        } finally {
-          if (path) lm.release(path);
-        }
-      } catch (err: any) {
-        results.push({ toolName: tc.function.name, result: { id: tc.id, toolName: tc.function.name, error: err?.message ?? 'unknown', success: false, duration: 0 }, duration: 0, toolCallId: tc.id });
-      }
-    }
-
-    return results;
-  }
 }
 

@@ -13,6 +13,7 @@
     "toolchain:setup": "bash scripts/setup-mac-toolchain.sh",
     "test": "bun test",
     "verify:plan-restore": "bun run scripts/verify-plan-restore.ts --scenario=restore",
+    "verify:plan-events": "bun run scripts/verify-plan-restore.ts --scenario=events",
     "verify:plan-session": "bun run scripts/verify-plan-restore.ts --scenario=session",
     "verify:plan-progress": "bun run scripts/verify-plan-restore.ts --scenario=progress",
     "verify:gates": "bun run scripts/verify-plan-restore.ts --scenario=gates",
