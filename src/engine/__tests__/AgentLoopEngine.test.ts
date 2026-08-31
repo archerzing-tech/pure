@@ -247,6 +247,7 @@ describe('AgentLoopEngine', () => {
 
     const stateChanges = events.filter(e => e.type === 'StateChange');
     const toolResults = events.filter(e => e.type === 'ToolResult');
+    const toolStarts = events.filter(e => e.type === 'ToolStarted');
     const completed = events.find(e => e.type === 'Completed');
 
     const transitions = stateChanges.map(e => `${e.payload.from}→${e.payload.to}`);
@@ -256,6 +257,9 @@ describe('AgentLoopEngine', () => {
     expect(transitions).toContain('THINK→VERIFY');
     expect(transitions).toContain('VERIFY→TERMINATE');
 
+    expect(toolStarts).toHaveLength(1);
+    expect(toolStarts[0]).toMatchObject({ type: 'ToolStarted', payload: { toolName: 'read_file', toolCallId: 'call_1' } });
+    expect(events.indexOf(toolStarts[0])).toBeLessThan(events.indexOf(toolResults[0]));
     expect(toolResults).toHaveLength(1);
     expect(toolResults[0].payload.toolName).toBe('read_file');
     expect(toolResults[0].payload.result.success).toBe(true);

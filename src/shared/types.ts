@@ -398,6 +398,7 @@ export interface IMemoryStore {
 // EngineEvent union
 export type EngineEvent =
   | { type: 'TokenDelta'; payload: { content: string; stateId: string; isToolCall: boolean; toolCallBuffer?: string; toolCallName?: string; toolCallId?: string }; timestamp: number }
+  | { type: 'ToolStarted'; payload: { toolName: string; toolCallId: string }; timestamp: number }
   // Reasoning/chain-of-thought deltas, surfaced so the GUI can render a live
   // "thinking" card (animation while collapsed, streaming text when expanded).
   | { type: 'ReasoningDelta'; payload: { content: string; stateId: string }; timestamp: number }
