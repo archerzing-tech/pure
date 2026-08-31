@@ -42,6 +42,7 @@ function snapshotFor(progress: PlanProgressSnapshot): SessionSnapshotV2 {
         { role: 'assistant', content: '执行中' },
       ],
     },
+    events: [],
     transcript: [{
       id: 'plan-assistant',
       modelMessageIndex: 1,

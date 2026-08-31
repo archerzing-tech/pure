@@ -4,7 +4,7 @@
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, promptBudgetForProvider, imageGenEnabled, imageGenModelFor } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
+import { saveSession, loadLastSession, loadSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
@@ -4639,17 +4639,23 @@ export class ChatController {
             status: turnPlanState.complete ? 'complete' as const : turnPlanState.started ? 'active' as const : 'waiting' as const,
           }
         : null);
-    const nextSnapshot = createSessionSnapshot(canonicalMessages, transcriptDrafts, {
+    const nextSnapshotV2 = createSessionSnapshot(canonicalMessages, transcriptDrafts, {
       planProgress: progressSnapshot,
       planState: turnPlanState,
     });
-    let previousSnapshot: SessionSnapshotV2 | null = null;
-    try {
-      previousSnapshot = (await loadSession(sessionId))?.snapshot ?? null;
-    } catch {
-      // No previous session (or storage failure) — nothing to merge.
-    }
-    await saveSession(sessionId, mergeSessionSnapshotMetadata(previousSnapshot, nextSnapshot), workspace);
+    const events: SessionEvent[] = transcriptDrafts.flatMap((draft, index) => {
+      const eventId = `event-${index}`;
+      if (draft.message.role === 'user') return [{ id: eventId, type: 'user' as const, content: draft.content ?? draft.message.content ?? '', images: draft.images, attachments: draft.attachments }];
+      if (draft.message.role === 'tool') return [{ id: eventId, type: 'tool_result' as const, content: draft.message.content ?? '', toolCallId: draft.message.toolCallId, toolName: draft.message.toolName, toolExec: draft.toolExec }];
+      const result: SessionEvent[] = [];
+      if (draft.analysis) result.push({ id: `${eventId}-analysis`, type: 'analysis', content: draft.analysis });
+      for (const phase of draft.thinkingPhases ?? []) result.push({ id: `${eventId}-thinking-${result.length}`, type: 'thinking', content: phase.text });
+      if (draft.message.content || draft.content) result.push({ id: `${eventId}-assistant`, type: 'assistant', content: draft.content ?? draft.message.content ?? '', isPlanPause: draft.isPlanPause });
+      if (draft.artifacts?.length) result.push({ id: `${eventId}-artifacts`, type: 'artifact', artifacts: draft.artifacts });
+      return result;
+    });
+    const nextSnapshot: SessionSnapshot = { version: 3, modelContext: nextSnapshotV2.modelContext, events, transcript: nextSnapshotV2.transcript, uiState: nextSnapshotV2.uiState };
+    await saveSession(sessionId, nextSnapshot, workspace);
   }
 
   /** Cancel a queued idle pre-compaction pass before a new user turn. */

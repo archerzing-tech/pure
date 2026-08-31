@@ -64,6 +64,7 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
   // turn's written files (deduped by path) and emit a single artifact block
   // at the turn boundary — never one card per assistant message.
   const turnArtifactPaths = new Map<string, { path: string }>();
+  let turnHasExplicitArtifacts = false;
 
   const flushTurnArtifacts = (): void => {
     if (turnArtifactPaths.size === 0) return;
@@ -105,6 +106,7 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
       // the next request starts — exactly where live streaming put it.
       flushPending();
       flushTurnArtifacts();
+      turnHasExplicitArtifacts = false;
       lastUserRequest = entry.content ?? '';
       if (entry.content || entry.images?.length || entry.attachments?.length) {
         blocks.push({ type: 'user', content: visibleUserContent(entry.content ?? ''), images: entry.images ?? [], attachments: entry.attachments ?? [] });
@@ -112,7 +114,9 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
       continue;
     }
 
-    flushPending();
+    if (entry.role === 'assistant') {
+      flushPending();
+    }
     if (entry.analysis) blocks.push({ type: 'analysis', text: entry.analysis });
     // The plan card sits between the preflight analysis and the engine's
     // reasoning trace in the live transcript, so replay it at the same spot.
@@ -127,8 +131,15 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
     if (content) {
       blocks.push({ type: 'assistant', content, isPlanPause: !!entry.isPlanPause });
     }
-    for (const artifact of (entry.artifacts?.length ? entry.artifacts : artifactsFromToolExecs(completedTools))) {
-      if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
+    if (entry.artifacts?.length) {
+      turnHasExplicitArtifacts = true;
+      for (const artifact of entry.artifacts) {
+        if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
+      }
+    } else if (!turnHasExplicitArtifacts) {
+      for (const artifact of artifactsFromToolExecs(completedTools)) {
+        if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
+      }
     }
     completedTools.length = 0;
     for (const call of entry.toolCalls ?? []) {
@@ -139,7 +150,7 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
   // Drain any completed tool results that arrived after the last assistant
   // entry (e.g. an interrupted session ending on a tool result) so their
   // artifact cards are not silently dropped.
-  if (completedTools.length > 0) {
+  if (completedTools.length > 0 && !turnHasExplicitArtifacts) {
     for (const artifact of artifactsFromToolExecs(completedTools)) {
       if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
     }
@@ -147,5 +158,41 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
   }
   flushPending();
   flushTurnArtifacts();
+  return blocks;
+}
+
+export function projectSessionEvents(events: import('./store').SessionEvent[]): TranscriptReplayBlock[] {
+  const blocks: TranscriptReplayBlock[] = [];
+  for (const event of events) {
+    switch (event.type) {
+      case 'user':
+        blocks.push({ type: 'user', content: event.content ?? '', images: event.images ?? [], attachments: event.attachments ?? [] });
+        break;
+      case 'analysis':
+        if (event.content) blocks.push({ type: 'analysis', text: event.content });
+        break;
+      case 'thinking':
+        if (event.content) blocks.push({ type: 'thinking', text: event.content });
+        break;
+      case 'assessment':
+        if (event.assessment) blocks.push({ type: 'assessment', assessment: event.assessment });
+        break;
+      case 'plan':
+        blocks.push({ type: 'plan' });
+        break;
+      case 'assistant':
+        if (event.content) blocks.push({ type: 'assistant', content: event.content, isPlanPause: !!event.isPlanPause });
+        break;
+      case 'tool_result':
+        blocks.push({ type: 'tool', stopped: false, exec: event.toolExec ?? { toolName: event.toolName ?? 'tool', success: true, duration: 0, resultText: event.content } });
+        break;
+      case 'artifact':
+        if (event.artifacts?.length) blocks.push({ type: 'artifact', items: event.artifacts });
+        break;
+      case 'tool_call':
+      case 'status':
+        break;
+    }
+  }
   return blocks;
 }
