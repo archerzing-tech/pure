@@ -11237,6 +11237,36 @@ mod generate_image_tests {
     }
 
     #[test]
+    fn save_session_rejects_stale_revision() {
+        let home = std::env::temp_dir().join(format!("pure-session-revision-{}-{}", std::process::id(), "test"));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let snapshot = |revision: u64, content: &str| {
+            serde_json::json!({
+                "version": 3,
+                "revision": revision,
+                "modelContext": { "messages": [{ "role": "user", "content": content }] },
+                "events": [],
+                "transcript": [],
+                "uiState": {}
+            })
+        };
+        assert!(save_session("revision-test".to_string(), snapshot(2, "new"), Some(String::new())).is_ok());
+        let error = save_session("revision-test".to_string(), snapshot(1, "old"), Some(String::new())).unwrap_err();
+        assert_eq!(error, "stale session revision");
+        let stored = load_session("revision-test".to_string()).unwrap().unwrap();
+        assert_eq!(stored["snapshot"]["revision"], 2);
+        assert_eq!(stored["snapshot"]["modelContext"]["messages"][0]["content"], "new");
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn sniff_detects_png_jpeg_gif_webp() {
         assert_eq!(sniff_image_mime(b"\x89PNG\r\n\x1a\n...."), "image/png");
         assert_eq!(sniff_image_mime(b"\xff\xd8\xff\xe0...."), "image/jpeg");
