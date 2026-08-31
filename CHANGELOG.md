@@ -3,6 +3,15 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.1.0-alpha
+
+**长对话与多 Agent 执行可视化增强**
+
+- 多 Agent 执行期间显示当前活跃 agent、阶段、工具和完成状态，并支持历史恢复。
+- 长对话按用户轮次分组；历史轮次按需加载，控制 live DOM 数量。
+- 实时对话保留当前轮和最近轮次，较早轮次可展开恢复，避免超长会话无限增长。
+- 增加 200 轮会话恢复、SessionEvent 顺序、计划进度、会话切换和自动续跑中断验收。
+
 ## v2.0.2
 
 **Vite 构建优化 + 构建警告抑制 + ANSI 剥离 + 上下文面板 overlay 重构 + 多 Agent 浮动卡片 + 规划预告**

@@ -961,6 +961,46 @@ body {
 .agent-console-history[open] .agent-console-history-summary::before { transform: rotate(90deg); }
 .agent-console-history-list { padding-top: 6px; }
 
+/* ── Conversation history segments ── */
+.conversation-segment {
+  width: 100%;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-card, #fff) 98%, var(--accent-soft));
+  overflow: hidden;
+}
+.conversation-segment-summary {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 7px 12px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+  list-style: none;
+  user-select: none;
+}
+.conversation-segment-summary::-webkit-details-marker { display: none; }
+.conversation-segment-summary::before {
+  content: '›';
+  width: 16px;
+  color: var(--text-tertiary);
+  font-size: 17px;
+  transition: transform var(--transition);
+}
+.conversation-segment[open] > .conversation-segment-summary {
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text);
+}
+.conversation-segment[open] > .conversation-segment-summary::before { transform: rotate(90deg); }
+.conversation-segment-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 12px 12px;
+}
+.conversation-segment-body > .bubble-row:first-child { margin-top: 12px; }
+
 /* ── Chat area ── */
 
 #chat-view:not(.landing) #chat {
@@ -997,6 +1037,53 @@ body {
 }
 
 /* ── Bubbles ── */
+.bubble-turn {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 16px;
+}
+.bubble-turn.archived {
+  gap: 0;
+}
+.live-turn-archive {
+  width: 100%;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-card, #fff) 98%, var(--accent-soft));
+  overflow: hidden;
+}
+.live-turn-archive-summary {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 7px 12px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+  list-style: none;
+  user-select: none;
+}
+.live-turn-archive-summary::-webkit-details-marker { display: none; }
+.live-turn-archive-summary::before {
+  content: '›';
+  width: 16px;
+  color: var(--text-tertiary);
+  font-size: 17px;
+  transition: transform var(--transition);
+}
+.live-turn-archive[open] > .live-turn-archive-summary {
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text);
+}
+.live-turn-archive[open] > .live-turn-archive-summary::before { transform: rotate(90deg); }
+.live-turn-archive-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 12px 12px;
+}
+.live-turn-archive-body > .bubble-row:first-child { margin-top: 12px; }
 .bubble-row {
   display: flex;
   flex-direction: column;

@@ -11,6 +11,7 @@ import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConf
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
 import { projectCanonicalSession } from './sessionEvents';
+import type { TranscriptReplayBlock } from './transcriptProjection';
 import { estimateCostUsd, formatCostUsd, formatTokens } from '../shared/usage';
 import { escapeHtml } from '../shared/html';
 import { buildExportSavedToast } from './statsExportToast';
@@ -47,6 +48,7 @@ import { Scheduler } from './scheduler';
 import { WorkspaceController } from './workspace';
 import { SessionSidebar } from './sessionSidebar';
 import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
+import { groupConversationTurns, segmentConversationTurns } from './conversationTurns';
 import { loadDeferredStyles } from './deferredStyles';
 
 const chat = new ChatController();
@@ -706,6 +708,17 @@ function hideSessionLoading(): void {
 
 async function renderSessionMessages(snapshot: SessionSnapshotV2) {
   const blocks = projectCanonicalSession(snapshot.events, snapshot.transcript);
+  const grouped = groupConversationTurns(blocks);
+  const segments = segmentConversationTurns(grouped.turns);
+  const restoreGroups = [
+    ...(grouped.preamble.length > 0 ? [{ blocks: grouped.preamble, collapsed: false, startTurn: 0, endTurn: 0 }] : []),
+    ...segments.map(segment => ({
+      blocks: segment.turns.flatMap(turn => turn.blocks),
+      collapsed: segment.collapsed,
+      startTurn: segment.startTurn,
+      endTurn: segment.endTurn,
+    })),
+  ];
   const restoreToken = ++sessionRestoreToken;
   const isCurrentRestore = (): boolean => restoreToken === sessionRestoreToken;
   enterChatMode();
@@ -727,26 +740,19 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
   loadingBubble.className = 'bubble status';
   loadingBubble.textContent = t('session.restoring');
   loadingRow.appendChild(loadingBubble);
-  chatEl.appendChild(loadingRow);
-  const replayTools: Array<{ exec: ToolExecMeta; stopped: boolean }> = [];
-  const flushReplayTools = (): void => {
-    if (replayTools.length === 0) return;
-    const grid = document.createElement('div');
-    grid.className = 'bubble-row tool-grid';
-    for (const item of replayTools) {
-      const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
-      if (item.stopped) markToolRowStopped(row);
-      else finalizeToolRow(row, item.exec);
-      grid.appendChild(row.el);
-    }
-    chatEl.appendChild(grid);
-    replayTools.length = 0;
-  };
-  // Restoring a long session must not block the GUI. Render a small batch in
-  // one turn, then yield for a paint and input processing. Waiting after every
-  // block made a 400-message session spend several seconds in artificial rAF
-  // gaps; a batch keeps the UI responsive without serializing every bubble.
-  const yieldToUI = (): Promise<void> => new Promise(resolve => requestAnimationFrame(() => resolve()));
+  chatEl.appendChild(loadingRow);  // Restoring a long session must not block the GUI. Render only the visible
+  // groups initially; collapsed history is materialized on first expansion.
+  const yieldToUI = (): Promise<void> => new Promise(resolve => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = window.setTimeout(finish, 32);
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(finish);
+  });
   let blocksSinceYield = 0;
   const yieldIfNeeded = async (): Promise<void> => {
     blocksSinceYield++;
@@ -755,21 +761,30 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
     await yieldToUI();
   };
 
-  try {
+  const renderReplayBlocks = async (blocks: TranscriptReplayBlock[], target: HTMLElement): Promise<void> => {
+    const replayTools: Array<{ exec: ToolExecMeta; stopped: boolean }> = [];
+    const flushReplayTools = (): void => {
+      if (replayTools.length === 0) return;
+      const grid = document.createElement('div');
+      grid.className = 'bubble-row tool-grid';
+      for (const item of replayTools) {
+        const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
+        if (item.stopped) markToolRowStopped(row);
+        else finalizeToolRow(row, item.exec);
+        grid.appendChild(row.el);
+      }
+      target.appendChild(grid);
+      replayTools.length = 0;
+    };
+
     for (const block of blocks) {
       if (!isCurrentRestore()) return;
       if (block.type === 'tool') {
         replayTools.push(block);
         await yieldIfNeeded();
-        if (!isCurrentRestore()) return;
         continue;
       }
       flushReplayTools();
-
-      // Per-block isolation: one broken block (e.g. markdown that trips the
-      // renderer, a malformed card payload) must not abort the whole restore —
-      // it used to truncate everything AFTER it, so reviewing a long project
-      // history silently lost all later messages. Log and keep going.
       try {
         if (block.type === 'user') {
           const wrapper = document.createElement('div');
@@ -788,20 +803,20 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
           bindUserBubbleSelectAll(bubble);
           linkifyPaths(bubble);
           wrapper.appendChild(bubble);
-          chatEl.appendChild(wrapper);
+          target.appendChild(wrapper);
         } else if (block.type === 'analysis' || block.type === 'thinking') {
-          appendStoredThinking(block.text, chatEl);
+          appendStoredThinking(block.text, target);
         } else if (block.type === 'assessment') {
           const flow = createAssessmentFlowCard(block.assessment);
           flow.completePhase('gate');
           flow.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
-          chatEl.appendChild(flow.el);
+          target.appendChild(flow.el);
           chat.registerPausedAssessment(flow);
         } else if (block.type === 'plan') {
           const progress = chat.getPlanProgressModel();
           if (!progress) continue;
           const restoredPlanCard = createRestoredPlanCard(progress);
-          chatEl.appendChild(restoredPlanCard.el);
+          target.appendChild(restoredPlanCard.el);
           chat.registerRestoredPlanCard(restoredPlanCard);
         } else if (block.type === 'assistant') {
           const wrapper = document.createElement('div');
@@ -814,7 +829,7 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
           bubble.className = block.isPlanPause ? 'bubble plan-pause-message' : 'bubble';
           bindAssistantBubbleCopy(bubble);
           wrapper.appendChild(bubble);
-          chatEl.appendChild(wrapper);
+          target.appendChild(wrapper);
           await renderMarkdown(stripToolCallXml(block.content), bubble, { yieldBeforeParse: false });
           if (block.isPlanPause) {
             attachPlanPauseActions(
@@ -826,18 +841,63 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
         } else if (block.type === 'artifact') {
           const artifactRow = document.createElement('div');
           artifactRow.className = 'bubble-row artifact-row';
-          chatEl.appendChild(artifactRow);
+          target.appendChild(artifactRow);
           renderArtifactCards(artifactRow, block.items, chat.getEffectiveWorkspace() || '.', { userRequest: block.userRequest });
         }
       } catch (blockErr) {
         console.warn('[pure] restore: skipping unrenderable transcript block', block.type, blockErr);
       }
-
       await yieldIfNeeded();
+    }
+    flushReplayTools();
+  };
+
+  try {
+    for (const group of restoreGroups) {
       if (!isCurrentRestore()) return;
+      if (!group.collapsed) {
+        await renderReplayBlocks(group.blocks, chatEl);
+        continue;
+      }
+
+      const segmentDetails = document.createElement('details');
+      segmentDetails.className = 'conversation-segment';
+      const summary = document.createElement('summary');
+      summary.className = 'conversation-segment-summary';
+      const first = group.blocks.find(block => block.type === 'user')?.content?.trim().replace(/\s+/g, ' ') || '历史内容';
+      const preview = first.length > 56 ? `${first.slice(0, 56)}…` : first;
+      summary.textContent = `第 ${group.startTurn}–${group.endTurn} 轮 · ${preview}`;
+      const body = document.createElement('div');
+      body.className = 'conversation-segment-body';
+      segmentDetails.append(summary, body);
+      chatEl.appendChild(segmentDetails);
+
+      const parkedSegmentContent: Node[] = [];
+      let renderPromise: Promise<void> | null = null;
+      const park = (): void => {
+        while (body.firstChild) parkedSegmentContent.push(body.removeChild(body.firstChild));
+      };
+      const mount = (): void => {
+        while (parkedSegmentContent.length > 0) body.appendChild(parkedSegmentContent.shift()!);
+      };
+      const renderOnDemand = async (): Promise<void> => {
+        mount();
+        if (body.childElementCount > 0) return;
+        if (!renderPromise) {
+          renderPromise = renderReplayBlocks(group.blocks, body).finally(() => {
+            renderPromise = null;
+            if (!segmentDetails.open) park();
+          });
+        }
+        await renderPromise;
+      };
+      segmentDetails.addEventListener('toggle', () => {
+        if (segmentDetails.open) void renderOnDemand();
+        else if (!renderPromise) park();
+      });
+      await yieldIfNeeded();
     }
     if (!isCurrentRestore()) return;
-    flushReplayTools();
     // 恢复可能重建了计划卡：重新挂载固定进度条，让当前步骤在滚动后仍可见；
     // 无活动计划时是幂等移除（no-op）。
     chat.syncPlanProgressPin();

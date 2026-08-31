@@ -16,6 +16,12 @@ export interface InlineCardAction {
   kind?: 'primary' | 'danger' | 'secondary';
 }
 
+let transcriptHost: HTMLElement | null = null;
+
+export function setInlineCardHost(host: HTMLElement | null): void {
+  transcriptHost = host;
+}
+
 export interface InlineCardOptions {
   /** Extra row class (e.g. 'permission', 'plan', 'confirm'). */
   cardClass: string;
@@ -30,11 +36,13 @@ export interface InlineCardOptions {
   escValue?: string;
   /** When aborted (e.g. user pressed stop), resolves with the esc value and closes. */
   signal?: AbortSignal;
+  /** Optional transcript host for a live turn; defaults to #chat. */
+  host?: HTMLElement;
 }
 
 export function showInlineCard(opts: InlineCardOptions): Promise<string> {
   return new Promise((resolve) => {
-    const chatEl = document.getElementById('chat')!;
+    const chatEl = opts.host ?? transcriptHost ?? document.getElementById('chat')!;
     // Already-aborted signal: never render the card, resolve as cancelled so
     // the awaiting caller (e.g. plan review) exits cleanly on a user stop.
     if (opts.signal?.aborted) {
