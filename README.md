@@ -3,7 +3,7 @@
 **Pure** is an immersive AI agent: everything you need to get, see, and use lives inside one continuous conversation — files, commands, search results, charts, and decisions surface right where you are, so you never have to jump to a terminal, a browser, or another app to move your work forward. It is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. Its Agent Loop is inspired by the Event Loop in JavaScript engines: it borrows the idea of event-driven phases that keep progressing until the work reaches a verified outcome, then applies it to tool-driven coding tasks. Pure reads, writes, and edits files, executes shell commands, searches the web, renders structured results, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app. Its conversation window is a projection of session state, not a direct dump of long-term memory: stored transcript data is mapped into UI blocks, while retrieved memory stays in the model context unless the UI explicitly represents it.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.2-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-2.1.0--alpha-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -15,7 +15,7 @@
 <p align="center">
   <img src="docs/screenshots/pure-ui-default.png" alt="Pure GUI default surface (landing view)" width="720" />
   <br />
-  <em>Pure GUI — the calm default surface: session rail, hero prompt, and status bar (real screenshot, dark theme, v2.0.2)</em>
+  <em>Pure GUI — the calm default surface: session rail, hero prompt, and status bar (real screenshot, dark theme, v2.1.0-alpha)</em>
   <br /><br />
   <img src="docs/screenshots/event-loop-agentloop-comparison.svg" alt="Classic JavaScript Event Loop compared with Pure AgentLoop" width="720" />
   <br />

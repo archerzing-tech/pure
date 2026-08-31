@@ -12,7 +12,7 @@
 // desktop Chrome binary (defaults to the standard macOS path).
 //
 // Usage:
-//   bun run scripts/verify-plan-restore.ts [--scenario=restore|events|session|progress|gates|all] [--state=complete|active|waiting|all] [--gate=review|delivery|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]
+//   bun run scripts/verify-plan-restore.ts [--scenario=restore|events|session|progress|gates|long|all] [--state=complete|active|waiting|all] [--gate=review|delivery|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]
 
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -144,8 +144,8 @@ function killByPort(port: number): void {
 }
 
 async function main(): Promise<number> {
-  if (STATES.length === 0 || !['restore', 'events', 'session', 'progress', 'gates', 'all'].includes(scenario)) {
-    console.error('Usage: bun run scripts/verify-plan-restore.ts [--scenario=restore|events|session|progress|gates|all] [--gate=review|delivery|all] [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]');
+  if (STATES.length === 0 || !['restore', 'events', 'session', 'progress', 'gates', 'long', 'all'].includes(scenario)) {
+    console.error('Usage: bun run scripts/verify-plan-restore.ts [--scenario=restore|events|session|progress|gates|long|all] [--gate=review|delivery|all] [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]');
     return 2;
   }
   try { appendFileSync(LOG_FILE, `\n=== run ${new Date().toISOString()} ===\n`); } catch {}
@@ -409,6 +409,98 @@ async function main(): Promise<number> {
     }
     if (!eventOk) failures++;
     log(`[verify] canonical SessionEvent restore (events → projection → DOM): ${eventOk ? 'OK' : 'MISMATCH'}`);
+  }
+
+  // ── Browser-level 200-turn restore / collapse regression ──
+  if (scenario === 'long' || scenario === 'all') {
+    const sid = 'verify-session-long-200';
+    const messages = Array.from({ length: 200 }, (_, index) => [
+      { role: 'user', content: `第 ${index + 1} 轮用户请求` },
+      { role: 'assistant', content: `第 ${index + 1} 轮助手回答` },
+    ]).flat();
+    const events = messages.map((message, index) => ({
+      id: `long-event-${index}`,
+      type: message.role,
+      content: message.content,
+    }));
+    const snapshot = { version: 3, modelContext: { messages }, events, transcript: [], uiState: {} };
+    const meta = { id: sid, title: '200 轮长对话恢复', createdAt: Date.now(), updatedAt: Date.now(), messageCount: messages.length, workspace: '' };
+    await evaluate(`(() => {
+      const meta = ${JSON.stringify(meta)};
+      const snapshot = ${JSON.stringify(snapshot)};
+      localStorage.setItem('pure_sessions', JSON.stringify([meta]));
+      localStorage.setItem('pure_session:${sid}', JSON.stringify({ snapshot, updatedAt: meta.updatedAt, messageCount: meta.messageCount, workspace: '' }));
+      localStorage.setItem('pure_last_session', '${sid}');
+      return true;
+    })()`);
+    await send('Page.reload');
+    await waitFor(async () => (await evaluate('document.readyState')) === 'complete', 25000, 'long conversation reload');
+    await waitFor(async () => Number(await evaluate(`document.querySelectorAll('.sidebar-session-item[data-sid="${sid}"]').length`)) === 1, 25000, 'long conversation session item');
+    await evaluate(`document.querySelector('.sidebar-session-item[data-sid="${sid}"]').click()`);
+    try {
+      await waitFor(async () => {
+        const segments = Number(await evaluate(`document.querySelectorAll('#chat .conversation-segment').length`));
+        const restoring = Number(await evaluate(`document.querySelectorAll('#chat .status.loading').length`));
+        const userRows = Number(await evaluate(`document.querySelectorAll('#chat > .bubble-row.user').length`));
+        const last = String(await evaluate(`Array.from(document.querySelectorAll('#chat .bubble-row.user')).at(-1)?.textContent ?? ''`));
+        return segments === 20 && restoring === 0 && userRows === 8 && last.includes('第 200 轮用户请求');
+      }, 120000, '200-turn conversation render');
+    } catch (error) {
+      const diagnostic = await evaluate(`(() => JSON.stringify({
+        segments: document.querySelectorAll('#chat .conversation-segment').length,
+        collapsed: Array.from(document.querySelectorAll('#chat .conversation-segment')).filter((segment) => !segment.open).length,
+        userRows: document.querySelectorAll('#chat .bubble-row.user').length,
+        loadingRows: document.querySelectorAll('#chat .status.loading').length,
+        chatChildren: Array.from(document.querySelector('#chat')?.children ?? []).map((child) => ({ tag: child.tagName, className: child.className, text: child.textContent?.trim().slice(0, 80) ?? '' })),
+        agentConsole: document.querySelector('#agent-console-host')?.textContent ?? '',
+      }))()`);
+      log(`[verify] 200-turn diagnostic: ${String(diagnostic)}`);
+      throw error;
+    }
+    const longView = JSON.parse(String(await evaluate(`(() => JSON.stringify({
+      segments: document.querySelectorAll('#chat .conversation-segment').length,
+      collapsed: Array.from(document.querySelectorAll('#chat .conversation-segment')).filter((segment) => !segment.open).length,
+      expanded: Array.from(document.querySelectorAll('#chat .conversation-segment')).filter((segment) => segment.open).length,
+      recentRows: document.querySelectorAll('#chat > .bubble-row.user').length,
+      mountedRows: document.querySelectorAll('#chat .bubble-row').length,
+      emptyCollapsedBodies: Array.from(document.querySelectorAll('#chat .conversation-segment-body')).filter((body) => body.childElementCount === 0).length,
+      lastText: Array.from(document.querySelectorAll('#chat > .bubble-row.user')).at(-1)?.querySelector('.bubble')?.textContent ?? '',
+    }))()`)));
+    const firstSegment = '#chat .conversation-segment:first-of-type';
+    await evaluate(`document.querySelector('${firstSegment} > summary')?.click()`);
+    try {
+      await waitFor(async () => Number(await evaluate(`document.querySelector('${firstSegment} .conversation-segment-body')?.querySelectorAll('.bubble-row.user').length ?? 0`)) === 10, 25000, 'first history segment expansion');
+    } catch (error) {
+      const diagnostic = await evaluate(`(() => JSON.stringify({
+        selector: '${firstSegment}',
+        exists: !!document.querySelector('${firstSegment}'),
+        open: document.querySelector('${firstSegment}')?.open ?? null,
+        bodyChildren: document.querySelector('${firstSegment} .conversation-segment-body')?.childElementCount ?? null,
+        bodyText: document.querySelector('${firstSegment} .conversation-segment-body')?.textContent?.slice(0, 120) ?? '',
+      }))()`);
+      log(`[verify] first history segment expansion diagnostic: ${String(diagnostic)}`);
+      throw error;
+    }
+    const expandedSegmentRows = Number(await evaluate(`document.querySelector('${firstSegment} .conversation-segment-body')?.querySelectorAll('.bubble-row').length ?? 0`));
+    await evaluate(`document.querySelector('${firstSegment} > summary')?.click()`);
+    await waitFor(async () => Number(await evaluate(`document.querySelector('${firstSegment} .conversation-segment-body')?.childElementCount ?? 0`)) === 0, 25000, 'first history segment unload');
+    const checks: Array<[string, unknown, unknown]> = [
+      ['200 轮恢复 → 旧段折叠数量', longView.collapsed, 20],
+      ['200 轮恢复 → 最近段展开数量', longView.expanded, 0],
+      ['200 轮恢复 → 最近 8 轮保留在主滚动层', longView.recentRows, 8],
+      ['200 轮恢复 → live DOM 只挂载最近 8 轮', longView.mountedRows, 16],
+      ['200 轮恢复 → 折叠段内容已卸载', longView.emptyCollapsedBodies, 20],
+      ['200 轮恢复 → 展开历史段按需挂载 10 轮', expandedSegmentRows, 20],
+      ['200 轮恢复 → 最后一轮内容保留', longView.lastText, '第 200 轮用户请求'],
+    ];
+    let longOk = longView.segments === 20;
+    for (const [name, actual, want] of checks) {
+      const pass = actual === want;
+      if (!pass) longOk = false;
+      log(`  [${pass ? 'PASS' : 'FAIL'}] ${name}: ${JSON.stringify(actual)}${pass ? '' : ` (expected ${JSON.stringify(want)})`}`);
+    }
+    if (!longOk) failures++;
+    log(`[verify] 200-turn conversation segmentation: ${longOk ? 'OK' : 'MISMATCH'}`);
   }
 
   // ── Browser-level refresh + session-switch regression ──

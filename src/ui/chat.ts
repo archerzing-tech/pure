@@ -87,6 +87,8 @@ import type {
 import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, TaskMode, IntentAssessment } from '../coding-agent/types';
 import type { SessionAgentActivity } from './store';
 import { createOptimizeCard } from './optimizeCard';
+import { LiveTranscriptWindow, type LiveTurnHandle } from './liveTranscriptWindow';
+import { setInlineCardHost } from './inlineCard';
 
 // Insert a `-v{n}` segment before the extension (or append it for extension-less
 // files) so a written file `a/b/index.html` snapshots to `a/b/index-v1.html`.
@@ -1247,11 +1249,38 @@ export class ChatController {
   // In-memory subagent checkpoint store for this conversation — lets a sub-task
   // resume after a user stop + continue within the same session.
   private subagentStore = new MemoryStateStore();
+  private liveTranscript = new LiveTranscriptWindow();
+  private liveTurn: LiveTurnHandle | null = null;
 
   constructor() {
     this.sessionId = `session_${Date.now()}`;
     this.permissionManager = new PermissionManager();
     this.sessionStats = loadSessionStats(this.sessionId);
+  }
+
+  private transcriptTarget(): HTMLElement {
+    return this.liveTurn?.host.isConnected ? this.liveTurn.host : document.getElementById('chat')!;
+  }
+
+  private appendToTranscript(node: Node): void {
+    this.transcriptTarget().appendChild(node);
+  }
+
+  private beginLiveTurn(userText: string): LiveTurnHandle {
+    const turn = this.liveTranscript.startTurn(userText);
+    if (this.activeComplexPlan && this.activePlanCardHandle) {
+      this.liveTranscript.moveNodeToTurn(this.activePlanCardHandle.el, turn);
+    }
+    this.liveTurn = turn;
+    setInlineCardHost(turn.host);
+    return turn;
+  }
+
+  private finishLiveTurn(turn: LiveTurnHandle | null): void {
+    if (!turn || this.liveTurn !== turn) return;
+    this.liveTranscript.finishTurn(turn);
+    this.liveTurn = null;
+    setInlineCardHost(null);
   }
 
   onStreamingStateChange(fn: (streaming: boolean) => void) {
@@ -1358,6 +1387,9 @@ export class ChatController {
 
   setSessionId(id: string) {
     this.cancelBackgroundPreCompaction();
+    this.liveTranscript.reset();
+    this.liveTurn = null;
+    setInlineCardHost(null);
     // Session switch = human takeover: stop any pending auto-continue chain.
     this.autoContinue.cancel();
     this.pendingAutoContinue = null;
@@ -1647,6 +1679,9 @@ export class ChatController {
 
   /** Load stored messages into the agent's internal state so subsequent turns use history. */
   loadFromStorage(snapshot: SessionSnapshotV2) {
+    this.liveTranscript.reset();
+    this.liveTurn = null;
+    setInlineCardHost(null);
     // Switching to another session invalidates any in-flight send of the
     // previous one, so its subagent-progress callbacks can never recreate
     // multi-agent cards here (they check gen === this.generation).
@@ -1883,6 +1918,7 @@ export class ChatController {
     // stayed frozen while the pre-flight silently ran. If the plan review is
     // then cancelled, the bubble is removed (see the cancel branch) so no
     // ghost message remains.
+    const liveTurn = this.beginLiveTurn(displayUserText || userText);
     const userBubble = this.addBubble('user', userText);
     const userMessageAttachments = userAttachments.length > 0 ? userAttachments : undefined;
     const openUserAttachment = attachmentViewer;
@@ -1996,6 +2032,7 @@ export class ChatController {
     await yieldToNextPaint(turnController.signal);
     if (gen !== this.generation) {
       userBubble.remove();
+      this.finishLiveTurn(liveTurn);
       releaseSupersededTurn();
       return;
     }
@@ -2023,6 +2060,7 @@ export class ChatController {
     if (turnController.signal.aborted) {
       this.addStatusBubble('⏸ 已暂停：你的请求已保留在对话中。', true, false);
       commitPausedUserTurn(new Map(), []);
+      this.finishLiveTurn(liveTurn);
       releaseSupersededTurn();
       return;
     }
@@ -2259,7 +2297,7 @@ export class ChatController {
       if (!toolGrid) {
         toolGrid = document.createElement('div');
         toolGrid.className = 'bubble-row tool-grid';
-        chatEl.appendChild(toolGrid);
+        this.appendToTranscript(toolGrid);
       }
       return this.addToolRow(toolName, args, toolGrid);
     };
@@ -2384,7 +2422,7 @@ export class ChatController {
     // only dots reads as a hung session, ticking seconds prove it is alive.
     const openThinkingCard = (): ThinkingCardHandle => {
       const card = createThinkingCard();
-      chatEl.appendChild(card.el);
+      this.appendToTranscript(card.el);
       startThinkingTimer(card);
       return card;
     };
@@ -2678,7 +2716,7 @@ export class ChatController {
           && effectiveIntent.intent !== 'question';
         if (!showAssessmentFlow) return;
         assessmentFlow = createAssessmentFlowCard(effectiveIntent);
-        chatEl.appendChild(assessmentFlow.el);
+        this.appendToTranscript(assessmentFlow.el);
         assessmentFlow.completePhase('intent', '已完成需求分析，明确了任务目标与边界。');
         assessmentFlow.completePhase('risk', `风险等级已确认：${riskLabelOf(effectiveIntent.riskLevel)}`);
         // 前置检查已完成的（探针跑完、或本就不需要探针）且不是高风险：闸门落定；
@@ -2802,7 +2840,7 @@ export class ChatController {
               updatePlanCard(planCard, plan, refining, planProgress);
             } else {
               planCard = createPlanCard(plan, refining, planProgress);
-              chatEl.appendChild(planCard.el);
+              this.appendToTranscript(planCard.el);
             }
             this.activePlanCardHandle = planCard;
             this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
@@ -2917,7 +2955,13 @@ export class ChatController {
           ? formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate)
           : undefined;
         planProgress = new PlanProgressModel(this.activeComplexPlan, 'active', this.activePlanNumber, this.activeTodoNumber, this.activePlanProjectBuild, this.activePlanSeq);
-        const existingCard = this.activePlanCardHandle?.el.isConnected ? this.activePlanCardHandle : null;
+        const existingCard = this.activePlanCardHandle?.el.isConnected
+          ? this.activePlanCardHandle
+          : null;
+        if (existingCard && this.liveTurn && !this.liveTurn.host.contains(existingCard.el)) {
+          existingCard.el.parentNode?.removeChild(existingCard.el);
+          this.liveTurn.host.appendChild(existingCard.el);
+        }
         if (existingCard) {
           // One stable progress list per transcript: rebind the SAME card to
           // the fresh model instead of stacking a duplicate every round.
@@ -2925,7 +2969,7 @@ export class ChatController {
           planCard = existingCard;
         } else {
           planCard = createPlanCard(this.activeComplexPlan, false, planProgress);
-          chatEl.appendChild(planCard.el);
+          this.appendToTranscript(planCard.el);
         }
         this.activePlanCardHandle = planCard;
         this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
@@ -4052,7 +4096,7 @@ export class ChatController {
                 }, turnSignal);
                 const html = typeof res.result === 'string' ? res.result : '';
                 if (html.trim() && gen === this.generation) {
-                  chatEl.appendChild(createDesignPreviewCard(html, designMockupFile, () => {
+                  this.appendToTranscript(createDesignPreviewCard(html, designMockupFile, () => {
                     void this.send('用户已确认当前设计稿：请严格按照该设计稿开始实现，实现完成后继续执行交付验证管线。');
                   }).el);
                   this.addStatusBubble('⏸ 已按约定停在实现前：请在上方预览卡确认设计效果；确认前不会写实现代码，想调整直接回复意见。', true, false);
@@ -4086,7 +4130,7 @@ export class ChatController {
             if (projectDelivered) {
               const artifactRow = document.createElement('div');
               artifactRow.className = 'bubble-row artifact-row';
-              chatEl.appendChild(artifactRow);
+              this.appendToTranscript(artifactRow);
               renderArtifactCards(artifactRow, this.sessionArtifacts, computeProjectDir(this.sessionArtifacts) ?? effectiveWorkspace, { userRequest: userText });
               this.projectDirectoryShown = true;
               deliveredThisTurn = true;
@@ -4096,7 +4140,7 @@ export class ChatController {
             // 一个手动触发的「生成优化建议」入口。绝不自动跑——不烧 token、
             // 不拖慢回合收尾。
             if (projectDelivered && this.sessionArtifacts.length > 0 && gen === this.generation) {
-              createOptimizeCard(chatEl, {
+              createOptimizeCard(this.transcriptTarget(), {
                 files: this.sessionArtifacts.map((a) => a.path),
                 workspace: effectiveWorkspace,
                 userRequest: userText,
@@ -4378,6 +4422,7 @@ export class ChatController {
       // back to "not generating". releaseSupersededTurn() is idempotent for
       // the already-released early-return paths.
       const ownsTurn = this.abortController === turnController;
+      this.finishLiveTurn(liveTurn);
       releaseSupersededTurn();
       // Long-task auto-continue: schedule the next round only when THIS turn
       // still owns the controller (a newer send superseding us cancels the
@@ -4420,6 +4465,9 @@ export class ChatController {
 
   clear() {
     this.cancel();
+    this.liveTranscript.reset();
+    this.liveTurn = null;
+    setInlineCardHost(null);
     this.snapshotPort = undefined;
     this.sessionToolAdapter = undefined;
     this.sessionToolAdapterKey = '';
@@ -4745,7 +4793,7 @@ export class ChatController {
       bindAssistantBubbleCopy(bubble);
     }
     wrapper.appendChild(bubble);
-    chatEl.appendChild(wrapper);
+    this.appendToTranscript(wrapper);
     return bubble;
   }
 
@@ -4761,7 +4809,7 @@ export class ChatController {
     bubble.textContent = text;
     linkifyPaths(bubble);
     wrapper.appendChild(bubble);
-    chatEl.appendChild(wrapper);
+    this.appendToTranscript(wrapper);
     return bubble;
   }
 
@@ -4783,7 +4831,7 @@ export class ChatController {
     // but path-shaped text must stay clickable for parity).
     linkifyPaths(bubble);
     wrapper.appendChild(bubble);
-    chatEl.appendChild(wrapper);
+    this.appendToTranscript(wrapper);
   }
 
   private addToolRow(toolName: string, args: Record<string, unknown>, parent: HTMLElement): ToolRowHandle {
