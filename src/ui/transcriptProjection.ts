@@ -166,7 +166,7 @@ export function projectSessionEvents(events: import('./store').SessionEvent[]): 
   for (const event of events) {
     switch (event.type) {
       case 'user':
-        blocks.push({ type: 'user', content: event.content ?? '', images: event.images ?? [], attachments: event.attachments ?? [] });
+        blocks.push({ type: 'user', content: visibleUserContent(event.content ?? ''), images: event.images ?? [], attachments: event.attachments ?? [] });
         break;
       case 'analysis':
         if (event.content) blocks.push({ type: 'analysis', text: event.content });
