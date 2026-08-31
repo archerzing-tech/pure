@@ -13,7 +13,7 @@ import type { Message, MessageAttachment, MessageImage, TokenUsage, GeneratedIma
 import type { IntentAssessment, Plan } from '../coding-agent/types';
 import type { PlanProgressSnapshot } from './planProgress';
 
-export const SESSION_SNAPSHOT_VERSION = 2;
+export const SESSION_SNAPSHOT_VERSION = 3;
 
 export interface TranscriptEntry {
   id: string;
@@ -85,7 +85,23 @@ export interface TranscriptDraft {
   planCard?: PlanCardSnapshot;
 }
 
-export interface SessionSnapshotV2 {
+export interface SessionEvent {
+  id: string;
+  type: 'user' | 'assistant' | 'thinking' | 'tool_call' | 'tool_result' | 'analysis' | 'assessment' | 'plan' | 'artifact' | 'status';
+  content?: string;
+  images?: MessageImage[];
+  attachments?: MessageAttachment[];
+  toolCallId?: string;
+  toolName?: string;
+  toolCalls?: StoredToolCallInfo[];
+  toolExec?: ToolExecMeta;
+  artifacts?: Array<{ path: string }>;
+  assessment?: IntentAssessment;
+  planCard?: PlanCardSnapshot;
+  isPlanPause?: boolean;
+}
+
+export interface SessionSnapshotV2Legacy {
   version: 2;
   modelContext: {
     messages: Message[];
@@ -94,8 +110,23 @@ export interface SessionSnapshotV2 {
   uiState: SessionUiState;
 }
 
+export interface SessionSnapshotV3 {
+  version: 3;
+  modelContext: {
+    messages: Message[];
+  };
+  events: SessionEvent[];
+  uiState: SessionUiState;
+  transcript: TranscriptEntry[];
+}
+
+export type SessionSnapshot = SessionSnapshotV3;
+
+/** Compatibility name used by existing callers; snapshots are now v3 event snapshots. */
+export type SessionSnapshotV2 = SessionSnapshotV3;
+
 export interface LoadedSession {
-  snapshot: SessionSnapshotV2;
+  snapshot: SessionSnapshot;
   workspace: string;
 }
 
@@ -263,7 +294,7 @@ export function createSessionSnapshot(
   modelMessages: Message[],
   source: TranscriptDraft[] | StoredMessage[],
   uiState: Partial<SessionUiState> = {},
-): SessionSnapshotV2 {
+): SessionSnapshotV3 {
   const drafts = source.length > 0 && 'message' in source[0]
     ? source as TranscriptDraft[]
     : legacyToTranscriptDrafts(source as StoredMessage[]);
@@ -296,15 +327,16 @@ export function createSessionSnapshot(
     };
   });
   const latestPlanState = [...drafts].reverse().find(draft => draft.planState !== undefined)?.planState;
-  return {
-    version: SESSION_SNAPSHOT_VERSION,
+  const legacy = {
+    version: 2 as const,
     modelContext: { messages: modelMessages },
     transcript,
     uiState: { planState: latestPlanState ?? null, ...uiState },
   };
+  return { ...snapshotV2ToV3(legacy), transcript };
 }
 
-export function createSessionSnapshotFromLegacy(messages: StoredMessage[]): SessionSnapshotV2 {
+export function createSessionSnapshotFromLegacy(messages: StoredMessage[]): SessionSnapshotV3 {
   return createSessionSnapshot(messages.map(modelMessageFromStored), messages);
 }
 
@@ -313,12 +345,14 @@ export function mergeSessionSnapshotMetadata(
   next: SessionSnapshotV2,
 ): SessionSnapshotV2 {
   if (!previous) return next;
-  const previousById = new Map(previous.transcript.map(entry => [entry.id, entry]));
+
+  /* Legacy v2 metadata merge retained below for migration documentation. */
+  const previousById = new Map<string, TranscriptEntry>();
   const previousByIndex = new Map<number, TranscriptEntry>();
   for (const entry of previous.transcript) {
     if (!previousByIndex.has(entry.modelMessageIndex)) previousByIndex.set(entry.modelMessageIndex, entry);
   }
-  const transcript = next.transcript.map(entry => {
+  const transcript = (next.transcript ?? []).map(entry => {
     const priorById = previousById.get(entry.id);
     const prior = priorById && priorById.role === entry.role
       ? priorById
@@ -326,7 +360,7 @@ export function mergeSessionSnapshotMetadata(
     if (!prior || prior.role !== entry.role) return entry;
     return {
       ...entry,
-      content: entry.displayOverride ? entry.content : (prior.content || entry.content),
+      content: entry.displayOverride ? entry.content : prior.content || entry.content,
       images: entry.images ?? prior.images,
       attachments: entry.attachments ?? prior.attachments,
       displayOverride: entry.displayOverride || prior.displayOverride,
@@ -344,22 +378,46 @@ export function mergeSessionSnapshotMetadata(
   return { ...next, transcript, uiState: next.uiState };
 }
 
-function normalizeSessionSnapshot(raw: unknown): SessionSnapshotV2 {
-  if (raw && typeof raw === 'object') {
-    const candidate = raw as Partial<SessionSnapshotV2> & { messages?: unknown };
-    if (candidate.version === SESSION_SNAPSHOT_VERSION && candidate.modelContext && Array.isArray(candidate.transcript)) {
-      return {
-        version: SESSION_SNAPSHOT_VERSION,
-        modelContext: { messages: (candidate.modelContext.messages ?? []) as Message[] },
-        transcript: candidate.transcript as TranscriptEntry[],
-        uiState: candidate.uiState ?? {},
-      };
+function eventId(index: number, type: SessionEvent['type']): string {
+  return `event-${index}-${type}`;
+}
+
+function snapshotV2ToV3(snapshot: SessionSnapshotV2Legacy): SessionSnapshotV3 {
+  const events: SessionEvent[] = [];
+  for (const entry of snapshot.transcript) {
+    if (entry.role === 'user') {
+      events.push({ id: entry.id, type: 'user', content: entry.content ?? '', images: entry.images, attachments: entry.attachments });
+      continue;
     }
-    if (Array.isArray(candidate.messages)) {
-      return createSessionSnapshotFromLegacy(candidate.messages as StoredMessage[]);
+    if (entry.analysis) events.push({ id: `${entry.id}-analysis`, type: 'analysis', content: entry.analysis });
+    if (entry.planCard) events.push({ id: `${entry.id}-plan`, type: 'plan', planCard: entry.planCard });
+    for (const phase of entry.thinkingPhases ?? (entry.thinking ? [{ text: entry.thinking, assistantIndex: 0 }] : [])) {
+      events.push({ id: `${entry.id}-thinking-${events.length}`, type: 'thinking', content: phase.text });
+    }
+    if (entry.role === 'assistant') {
+      if (entry.assessment) events.push({ id: `${entry.id}-assessment`, type: 'assessment', assessment: entry.assessment });
+      if (entry.content) events.push({ id: `${entry.id}-assistant`, type: 'assistant', content: entry.content, isPlanPause: entry.isPlanPause });
+      for (const call of entry.toolCalls ?? []) events.push({ id: `${entry.id}-call-${call.id}`, type: 'tool_call', toolCallId: call.id, toolName: call.toolName, toolCalls: [call] });
+      if (entry.artifacts?.length) events.push({ id: `${entry.id}-artifacts`, type: 'artifact', artifacts: entry.artifacts });
+    } else if (entry.role === 'tool') {
+      events.push({ id: `${entry.id}-result`, type: 'tool_result', content: entry.content ?? '', toolCallId: entry.toolCallId, toolName: entry.toolName, toolExec: entry.toolExec });
     }
   }
-  return createSessionSnapshotFromLegacy([]);
+  return { version: 3, modelContext: snapshot.modelContext, events, uiState: snapshot.uiState, transcript: snapshot.transcript };
+}
+
+function normalizeSessionSnapshot(raw: unknown): SessionSnapshot {
+  if (raw && typeof raw === 'object') {
+    const candidate = raw as { version?: unknown; modelContext?: { messages?: unknown }; events?: unknown; transcript?: unknown; messages?: unknown; uiState?: SessionUiState };
+    if (candidate.version === 3 && candidate.modelContext && Array.isArray(candidate.events)) {
+      return { version: 3, modelContext: { messages: (candidate.modelContext.messages ?? []) as Message[] }, events: candidate.events as SessionEvent[], uiState: candidate.uiState ?? {}, transcript: Array.isArray(candidate.transcript) ? candidate.transcript as TranscriptEntry[] : [] };
+    }
+    if (candidate.version === 2 && candidate.modelContext && Array.isArray(candidate.transcript)) {
+      return snapshotV2ToV3(candidate as SessionSnapshotV2Legacy);
+    }
+    if (Array.isArray(candidate.messages)) return createSessionSnapshotFromLegacy(candidate.messages as StoredMessage[]);
+  }
+  return { version: 3, modelContext: { messages: [] }, events: [], transcript: [], uiState: {} };
 }
 
 /**
@@ -739,23 +797,25 @@ async function tauriDeleteAll(): Promise<void> {
 const SESSIONS_KEY = 'pure_sessions';
 const LAST_SESSION_KEY = 'pure_last_session';
 
-function limitSessionSnapshot(snapshot: SessionSnapshotV2): SessionSnapshotV2 {
+function limitSessionSnapshot(snapshot: SessionSnapshotV3): SessionSnapshotV3 {
   const messages = limitConversationMessages(snapshot.modelContext.messages);
-  const maxModelIndex = snapshot.modelContext.messages.length - messages.length;
-  const transcript = snapshot.transcript.filter(entry => entry.modelMessageIndex >= maxModelIndex);
-  return {
-    ...snapshot,
-    modelContext: { messages },
-    transcript,
-  };
+  const dropped = snapshot.modelContext.messages.length - messages.length;
+  const events = dropped > 0
+    ? snapshot.events.slice(Math.max(0, snapshot.events.length - Math.max(1, messages.length * 8)))
+    : snapshot.events;
+  return { ...snapshot, modelContext: { messages }, events, transcript: snapshot.transcript.filter(entry => entry.modelMessageIndex >= dropped) };
 }
 
 function lsSave(sessionId: string, snapshot: SessionSnapshotV2, workspace: string) {
   // Store the workspace exactly as passed ('' clears a previous override), so
   // the localStorage fallback behaves identically to the Tauri path.
   const boundedSnapshot = limitSessionSnapshot(snapshot);
-  const data = { snapshot: boundedSnapshot, updatedAt: Date.now(), messageCount: boundedSnapshot.modelContext.messages.length, workspace };
-  localStorage.setItem(`pure_session:${sessionId}`, JSON.stringify(data));
+  const payload = JSON.stringify({ snapshot: boundedSnapshot, updatedAt: Date.now(), messageCount: boundedSnapshot.modelContext.messages.length, workspace });
+  const key = `pure_session:${sessionId}`;
+  const tempKey = `${key}:pending`;
+  localStorage.setItem(tempKey, payload);
+  localStorage.setItem(key, payload);
+  localStorage.removeItem(tempKey);
 
   const list = lsLoadList();
   const existing = list.findIndex(s => s.id === sessionId);
@@ -842,6 +902,29 @@ function lsDeleteAll() {
 // Throttle the disk-save failure toast: a persistently failing disk must not
 // spam the user on every message — at most one warning per 30s window.
 let lastDiskSaveWarning = 0;
+const sessionSaveChains = new Map<string, Promise<void>>();
+const sessionSaveRevisions = new Map<string, number>();
+const sessionSaveRetries = 2;
+
+async function saveWithRetry(sessionId: string, snapshot: SessionSnapshotV2, workspace: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= sessionSaveRetries; attempt++) {
+    try {
+      if (tauriAvailable) {
+        await tauriSave(sessionId, snapshot, workspace);
+      } else {
+        lsSave(sessionId, snapshot, workspace);
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < sessionSaveRetries) {
+        await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('session save failed');
+}
 
 export interface SessionPlanProgressPersistence {
   persist(snapshot: PlanProgressSnapshot): void;
@@ -924,20 +1007,33 @@ export function createSessionPlanProgressPersistence(
  */
 export async function saveSession(sessionId: string, snapshot: SessionSnapshotV2, workspace = ''): Promise<void> {
   const boundedSnapshot = limitSessionSnapshot(snapshot);
-  if (tauriAvailable) {
-    try {
-      await tauriSave(sessionId, boundedSnapshot, workspace);
-      return;
-    } catch (err) {
-      console.error('[pure] save_session failed, fell back to localStorage:', err);
-      const now = Date.now();
-      if (now - lastDiskSaveWarning > 30_000) {
-        lastDiskSaveWarning = now;
-        showToast(t('toast.saveDiskFailed'), 6000);
+  const revision = (sessionSaveRevisions.get(sessionId) ?? 0) + 1;
+  sessionSaveRevisions.set(sessionId, revision);
+  const previous = sessionSaveChains.get(sessionId) ?? Promise.resolve();
+  const current = previous
+    .catch(() => {})
+    .then(async () => {
+      try {
+        await saveWithRetry(sessionId, boundedSnapshot, workspace);
+      } catch (err) {
+        console.error('[pure] save_session failed:', err);
+        const now = Date.now();
+        if (now - lastDiskSaveWarning > 30_000) {
+          lastDiskSaveWarning = now;
+          showToast(t('toast.saveDiskFailed'), 6000);
+        }
+        throw err;
       }
+    });
+  sessionSaveChains.set(sessionId, current);
+  try {
+    await current;
+  } finally {
+    if (sessionSaveChains.get(sessionId) === current) sessionSaveChains.delete(sessionId);
+    if (!sessionSaveChains.has(sessionId) && sessionSaveRevisions.get(sessionId) === revision) {
+      sessionSaveRevisions.delete(sessionId);
     }
   }
-  lsSave(sessionId, boundedSnapshot, workspace);
 }
 
 /**
@@ -945,6 +1041,10 @@ export async function saveSession(sessionId: string, snapshot: SessionSnapshotV2
  * the user edits the workspace chip without sending a new message, so the
  * change survives an app restart).
  */
+export async function flushSessionSaves(): Promise<void> {
+  await Promise.all([...sessionSaveChains.values()].map(chain => chain.catch(() => {})));
+}
+
 export async function saveSessionWorkspace(sessionId: string, workspace: string): Promise<void> {
   if (tauriAvailable) {
     await tauriSaveWorkspace(sessionId, workspace);

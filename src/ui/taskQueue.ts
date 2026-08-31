@@ -20,6 +20,8 @@ export interface QueueTask {
   displayText: string;
   status: QueueTaskStatus;
   ts: number;
+  workspace: string;
+  sessionId: string;
   error?: string;
 }
 
@@ -52,14 +54,21 @@ function loadStored(key: string): QueueTask[] {
   }
 }
 
+export interface TaskQueueContext {
+  workspace: string;
+  sessionId: string;
+}
+
 export interface TaskQueueOptions {
   chat: QueueChat;
   storageKey?: string;
+  getContext?: () => TaskQueueContext;
 }
 
 export class TaskQueue {
   private readonly chat: QueueChat;
   private readonly storageKey: string;
+  private readonly getContext: () => TaskQueueContext;
   private tasks: QueueTask[] = [];
   private running = false;
   private listeners = new Set<() => void>();
@@ -67,8 +76,13 @@ export class TaskQueue {
   constructor(opts: TaskQueueOptions) {
     this.chat = opts.chat;
     this.storageKey = opts.storageKey ?? STORAGE_KEY;
-    this.tasks = loadStored(this.storageKey);
-    if (this.tasks.some((t) => t.status === 'pending')) {
+    this.getContext = opts.getContext ?? (() => ({ workspace: '', sessionId: '' }));
+    this.tasks = loadStored(this.storageKey).map((task) => ({
+      ...task,
+      workspace: task.workspace ?? '',
+      sessionId: task.sessionId ?? '',
+    }));
+    if (this.tasks.some((t) => t.status === 'pending' && this.isRunnable(t))) {
       // Kick off any pending work restored from storage once the caller has
       // fully wired the chat (defer so the UI can subscribe first).
       queueMicrotask(() => void this.runNext());
@@ -84,6 +98,33 @@ export class TaskQueue {
     return !this.running;
   }
 
+  /** Tasks without an owner are legacy records and require explicit handling. */
+  private isRunnable(task: QueueTask): boolean {
+    const context = this.getContext();
+    return task.workspace === context.workspace && task.sessionId === context.sessionId;
+  }
+
+  hasLegacyTasks(): boolean {
+    return this.tasks.some((task) => !task.workspace && !task.sessionId && task.status === 'pending');
+  }
+
+  /** Explicitly assign legacy tasks to the current context before running them. */
+  adoptLegacyTasks(): void {
+    const context = this.getContext();
+    let changed = false;
+    for (const task of this.tasks) {
+      if (task.status === 'pending' && !task.workspace && !task.sessionId) {
+        task.workspace = context.workspace;
+        task.sessionId = context.sessionId;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    this.persist();
+    this.emit();
+    void this.runNext();
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -93,10 +134,19 @@ export class TaskQueue {
   enqueue(texts: string | string[]): void {
     const list = (Array.isArray(texts) ? texts : [texts]).flatMap((t) => t.split(/\r?\n/));
     const now = Date.now();
+    const context = this.getContext();
     for (const text of list) {
       const trimmed = text.trim();
       if (!trimmed) continue;
-      this.tasks.push({ id: genId(), text: trimmed, displayText: trimmed, status: 'pending', ts: now });
+      this.tasks.push({
+        id: genId(),
+        text: trimmed,
+        displayText: trimmed,
+        status: 'pending',
+        ts: now,
+        workspace: context.workspace,
+        sessionId: context.sessionId,
+      });
     }
     this.persist();
     this.emit();
@@ -143,7 +193,7 @@ export class TaskQueue {
 
   private async runNext(): Promise<void> {
     if (this.running) return;
-    const next = this.tasks.find((t) => t.status === 'pending');
+    const next = this.tasks.find((t) => t.status === 'pending' && this.isRunnable(t));
     if (!next) return;
     this.running = true;
     this.cancelRunning = false;

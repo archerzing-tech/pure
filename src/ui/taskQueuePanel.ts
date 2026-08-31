@@ -64,11 +64,16 @@ export function mountTaskQueuePanel(queue: TaskQueue): void {
   cancelAll.type = 'button';
   cancelAll.className = 'setting-btn secondary queue-foot-btn';
   cancelAll.textContent = t('queue.cancelAll');
+  const adoptLegacy = document.createElement('button');
+  adoptLegacy.type = 'button';
+  adoptLegacy.className = 'setting-btn secondary queue-foot-btn';
+  adoptLegacy.textContent = t('queue.adoptLegacy');
+  adoptLegacy.hidden = !queue.hasLegacyTasks();
   const clearDone = document.createElement('button');
   clearDone.type = 'button';
   clearDone.className = 'setting-btn secondary queue-foot-btn';
   clearDone.textContent = t('queue.clearDone');
-  foot.append(cancelAll, clearDone);
+  foot.append(cancelAll, adoptLegacy, clearDone);
 
   panel.append(head, inputRow, list, foot);
 
@@ -80,6 +85,7 @@ export function mountTaskQueuePanel(queue: TaskQueue): void {
     badge.classList.toggle('queue-btn-badge-on', active > 0);
     toggleBtn.title = active > 0 ? t('queue.count').replace('{n}', String(active)) : t('queue.title');
     toggleBtn.setAttribute('aria-label', toggleBtn.title);
+    adoptLegacy.hidden = !queue.hasLegacyTasks();
 
     list.replaceChildren();
     if (tasks.length === 0) {
@@ -145,6 +151,7 @@ export function mountTaskQueuePanel(queue: TaskQueue): void {
   closeBtn.addEventListener('click', () => toggle(false));
   toggleBtn.addEventListener('click', () => toggle());
   cancelAll.addEventListener('click', () => queue.cancelAll());
+  adoptLegacy.addEventListener('click', () => queue.adoptLegacyTasks());
   clearDone.addEventListener('click', () => queue.clearDone());
 
   const onDocDown = (e: MouseEvent): void => {

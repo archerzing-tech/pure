@@ -10,7 +10,7 @@ import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, rende
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
-import { projectTranscript } from './transcriptProjection';
+import { projectSessionEvents, projectTranscript } from './transcriptProjection';
 import { estimateCostUsd, formatCostUsd, formatTokens } from '../shared/usage';
 import { escapeHtml } from '../shared/html';
 import { buildExportSavedToast } from './statsExportToast';
@@ -18,7 +18,7 @@ import { stripUserTurnContext } from '../shared/promptLayers';
 import { checkForUpdatesSilently, fetchAppVersion } from './updater';
 import { t, updateLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
-import { loadSessionList, loadSessionStatsForList, type SessionMeta, type SessionStats } from './store';
+import { loadSessionList, loadSessionStatsForList, flushSessionSaves, type SessionMeta, type SessionStats } from './store';
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -248,7 +248,10 @@ if (landingPrompt) new InlineAutocomplete(landingPrompt);
 // ── Batch task queue (chat is single-flight, so tasks run one after another) ──
 // Model + popover panel. Tasks persist to localStorage, so a reload resumes any
 // that were still pending.
-const taskQueue = new TaskQueue({ chat });
+const taskQueue = new TaskQueue({
+  chat,
+  getContext: () => ({ workspace: chat.getWorkspace(), sessionId: chat.getSessionId() }),
+});
 mountTaskQueuePanel(taskQueue);
 
 // ── Scheduled tasks (frontend scheduler) ──
@@ -516,6 +519,12 @@ function deferToIdle(fn: () => void): void {
   // preloaded by workspace.ts, so a first click can open the macOS picker
   // immediately instead of waiting for the idle bootstrap callback.
   workspace.init();
+  window.addEventListener('pagehide', () => {
+    void flushSessionSaves();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') void flushSessionSaves();
+  });
   dismissBootSplash();
   // Preload the memory embedder (WASM + model) so the first message of a new
   // chat never blocks on the one-time load. Deferred to an idle slot (NOT run
@@ -696,7 +705,9 @@ function hideSessionLoading(): void {
 }
 
 async function renderSessionMessages(snapshot: SessionSnapshotV2) {
-  const blocks = projectTranscript(snapshot.transcript);
+  const blocks = snapshot.events.length > 0
+    ? projectSessionEvents(snapshot.events)
+    : projectTranscript(snapshot.transcript);
   const restoreToken = ++sessionRestoreToken;
   const isCurrentRestore = (): boolean => restoreToken === sessionRestoreToken;
   enterChatMode();

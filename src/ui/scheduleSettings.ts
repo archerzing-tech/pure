@@ -113,13 +113,6 @@ export function renderSchedulesSettings(host: HTMLElement, onChange: () => void)
       persistConfig(cfg);
       invalidateConfigCache();
       onChange();
-      // Re-render the schedules dashboard to reflect the deletion
-      const host = document.getElementById('schedules-dashboard');
-      if (host) {
-        renderSchedulesSettings(host, function() {
-          this.onSave();
-        }.bind(this));
-      }
     });
 
     row.append(kind, trigger, text, enabled, del);

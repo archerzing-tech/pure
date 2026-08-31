@@ -11339,11 +11339,13 @@ fn save_session(
     };
 
     let data_path = dir.join("session.json");
-    fs::write(
-        &data_path,
-        serde_json::to_string_pretty(&data).unwrap_or_default(),
-    )
-    .map_err(|e| format!("write: {}", e))?;
+    let temp_path = dir.join("session.json.tmp");
+    let serialized = serde_json::to_string_pretty(&data).map_err(|e| format!("serialize: {}", e))?;
+    fs::write(&temp_path, serialized).map_err(|e| format!("write temp: {}", e))?;
+    let file = fs::OpenOptions::new().read(true).write(true).open(&temp_path)
+        .map_err(|e| format!("open temp: {}", e))?;
+    file.sync_all().map_err(|e| format!("sync temp: {}", e))?;
+    fs::rename(&temp_path, &data_path).map_err(|e| format!("replace session: {}", e))?;
     // Keep the mutable workspace override in a tiny sidecar as well. Changing
     // folders should not require the picker path to rewrite this potentially
     // very large session.json, while older sessions remain readable through
@@ -11411,11 +11413,13 @@ fn save_session_stats(session_id: String, stats: serde_json::Value) -> Result<()
     let dir = sessions_dir().join(&session_id);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
     let path = dir.join("stats.json");
-    fs::write(
-        &path,
-        serde_json::to_string_pretty(&stats).unwrap_or_default(),
-    )
-    .map_err(|e| format!("write: {}", e))
+    let temp = dir.join("stats.json.tmp");
+    let serialized = serde_json::to_string_pretty(&stats).map_err(|e| format!("serialize: {}", e))?;
+    fs::write(&temp, serialized).map_err(|e| format!("write temp: {}", e))?;
+    let file = fs::OpenOptions::new().read(true).write(true).open(&temp)
+        .map_err(|e| format!("open temp: {}", e))?;
+    file.sync_all().map_err(|e| format!("sync temp: {}", e))?;
+    fs::rename(&temp, &path).map_err(|e| format!("replace stats: {}", e))
 }
 
 #[tauri::command]
