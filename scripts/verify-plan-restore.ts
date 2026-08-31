@@ -12,7 +12,7 @@
 // desktop Chrome binary (defaults to the standard macOS path).
 //
 // Usage:
-//   bun run scripts/verify-plan-restore.ts [--scenario=restore|session|progress|gates|all] [--state=complete|active|waiting|all] [--gate=review|delivery|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]
+//   bun run scripts/verify-plan-restore.ts [--scenario=restore|events|session|progress|gates|all] [--state=complete|active|waiting|all] [--gate=review|delivery|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]
 
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -144,8 +144,8 @@ function killByPort(port: number): void {
 }
 
 async function main(): Promise<number> {
-  if (STATES.length === 0 || !['restore', 'session', 'progress', 'gates', 'all'].includes(scenario)) {
-    console.error('Usage: bun run scripts/verify-plan-restore.ts [--scenario=restore|session|progress|gates|all] [--gate=review|delivery|all] [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]');
+  if (STATES.length === 0 || !['restore', 'events', 'session', 'progress', 'gates', 'all'].includes(scenario)) {
+    console.error('Usage: bun run scripts/verify-plan-restore.ts [--scenario=restore|events|session|progress|gates|all] [--gate=review|delivery|all] [--state=complete|active|waiting|all] [--out=DIR] [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--keep]');
     return 2;
   }
   try { appendFileSync(LOG_FILE, `\n=== run ${new Date().toISOString()} ===\n`); } catch {}
@@ -304,6 +304,96 @@ async function main(): Promise<number> {
     const shotPath = join(outDir, `${state}.png`);
     writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
     log(`[verify] screenshot: ${shotPath}`);
+  }
+
+  // ── Browser-level canonical SessionEvent restore regression ──
+  // The transcript deliberately contains conflicting legacy text. A passing
+  // result therefore proves the live restore path chose non-empty v3 events,
+  // paired tool results with their preceding calls, and preserved an
+  // unreturned call as stopped instead of merely rendering any old transcript.
+  if (scenario === 'events' || scenario === 'all') {
+    const sid = 'verify-session-events';
+    const snapshot = {
+      version: 3,
+      modelContext: {
+        messages: [
+          { role: 'user', content: '事件中的用户请求' },
+          { role: 'assistant', content: '' },
+        ],
+      },
+      events: [
+        { id: 'event-user', type: 'user', content: '事件中的用户请求' },
+        {
+          id: 'event-assistant',
+          type: 'assistant',
+          content: '事件中的助手回复',
+          toolCalls: [
+            { id: 'event-call-ok', toolName: 'read_file', args: { path: 'event.ts' } },
+            { id: 'event-call-stopped', toolName: 'list_files', args: { path: 'event-dir' } },
+          ],
+        },
+        // Deliberately omit toolName, args, and toolExec: the projection must
+        // recover them from the call keyed by toolCallId.
+        { id: 'event-result', type: 'tool_result', toolCallId: 'event-call-ok', content: '事件中的工具结果' },
+        // A new assistant event is the same boundary used by the real stream;
+        // it flushes the second call as stopped before this final answer.
+        { id: 'event-final', type: 'assistant', content: '事件中的最终回答' },
+      ],
+      // Conflicting legacy content detects accidental transcript fallback.
+      transcript: [{ id: 'legacy', modelMessageIndex: 0, role: 'assistant', content: '错误的 legacy 内容' }],
+      uiState: {},
+    };
+    const meta = { id: sid, title: 'SessionEvent canonical restore', createdAt: Date.now(), updatedAt: Date.now(), messageCount: 2, workspace: '' };
+    await evaluate(`(() => {
+      const meta = ${JSON.stringify(meta)};
+      const snapshot = ${JSON.stringify(snapshot)};
+      localStorage.setItem('pure_sessions', JSON.stringify([meta]));
+      localStorage.setItem('pure_session:${sid}', JSON.stringify({ snapshot, updatedAt: meta.updatedAt, messageCount: meta.messageCount, workspace: '' }));
+      localStorage.setItem('pure_last_session', '${sid}');
+      return true;
+    })()`);
+    await send('Page.reload');
+    await waitFor(async () => {
+      const href = await evaluate('location.href');
+      return typeof href === 'string' && href.startsWith(appUrl) && (await evaluate('document.readyState')) === 'complete';
+    }, 25000, 'SessionEvent scenario reload');
+    await waitFor(async () => Number(await evaluate(`document.querySelectorAll('.sidebar-session-item[data-sid="${sid}"]').length`)) === 1, 25000, 'SessionEvent session item');
+    await evaluate(`document.querySelector('.sidebar-session-item[data-sid="${sid}"]').click()`);
+    await waitFor(async () => Number(await evaluate("document.querySelectorAll('.tool-row-row').length")) === 2, 25000, 'SessionEvent tool rows');
+
+    const eventView = JSON.parse(String(await evaluate(`(() => {
+      const chat = document.querySelector('#chat');
+      const rows = Array.from(chat?.querySelectorAll('.tool-row-row') ?? []);
+      return JSON.stringify({
+        text: chat?.textContent ?? '',
+        toolNames: rows.map((row) => row.querySelector('.tool-row-name')?.textContent ?? ''),
+        args: rows.map((row) => row.querySelector('.tool-row-field-value')?.textContent ?? ''),
+        results: rows.map((row) => row.querySelector('.tool-result-preview')?.textContent ?? ''),
+        stopped: rows.map((row) => row.querySelector('.tool-row.stopped') !== null),
+        order: Array.from(chat?.children ?? []).map((child) => child.textContent?.trim().slice(0, 40) ?? ''),
+      });
+    })()`)));
+    const checks: Array<[string, unknown, unknown]> = [
+      ['事件内容优先于 legacy transcript', eventView.text.includes('事件中的最终回答') && !eventView.text.includes('错误的 legacy 内容'), true],
+      ['工具调用/结果保持事件顺序', eventView.order.some((text) => text.includes('事件中的助手回复')) && eventView.order.some((text) => text.includes('事件中的最终回答')), true],
+      ['已返回调用补齐工具名', eventView.toolNames, ['Read', 'List']],
+      ['已返回调用补齐参数', eventView.args[0], 'pathevent.ts'],
+      ['已返回调用显示结果', eventView.results[0], '事件中的工具结果'],
+      ['未返回调用恢复为 stopped', eventView.stopped, [false, true]],
+    ];
+    let eventOk = true;
+    for (const [name, actual, want] of checks) {
+      // The browser's textContent includes the field label/value separator, so
+      // use a containment assertion for the path while keeping exact checks
+      // for ordered/status arrays.
+      const pass = name === '已返回调用补齐参数'
+        ? String(actual).includes('event.ts')
+        : JSON.stringify(actual) === JSON.stringify(want);
+      if (!pass) eventOk = false;
+      log(`  [${pass ? 'PASS' : 'FAIL'}] SessionEvent restore → ${name}: ${JSON.stringify(actual)}${pass ? '' : ` (expected ${JSON.stringify(want)})`}`);
+    }
+    if (!eventOk) failures++;
+    log(`[verify] canonical SessionEvent restore (events → projection → DOM): ${eventOk ? 'OK' : 'MISMATCH'}`);
   }
 
   // ── Browser-level refresh + session-switch regression ──
@@ -547,80 +637,38 @@ async function main(): Promise<number> {
       // 1) Review gate decisions + real card DOM.
       if (gate === 'all' || gate === 'review') {
         const review = await evaluate(`(async () => {
-          const { shouldShowRequestReview, shouldPauseForRequestReview, createRequestReviewCard } = await import('/src/ui/requestReview.ts');
-          const buildAssessment = { intent: 'build', riskLevel: 'low', reversibility: 'reversible', impact: '', recommendation: '', requiresProbe: false, requiresConfirmation: false };
-          const destructiveAssessment = { ...buildAssessment, intent: 'delete', riskLevel: 'high', reversibility: 'irreversible', requiresConfirmation: true };
-          const subjective = [{ part: '需求范围较大', verdict: 'questionable', reason: '需要更长时间', suggestion: '先做核心部分' }];
-          const unreasonable = [{ part: '直接删除被引用的目录', verdict: 'unreasonable', reason: '迁移脚本还在引用它', suggestion: '先归档再删除' }];
-          const trap = [{ part: '同时保持旧版接口', verdict: 'questionable', reason: '与删除旧模块互相矛盾' }];
-
-          // Render the real card for the subjective concern (show-only: no pause).
+          const { shouldEnterPlanReview } = await import('/src/ui/chat.ts');
+          const { createAssessmentFlowCard } = await import('/src/ui/assessmentFlow.ts');
+          const assessment = {
+            intent: 'delete', riskLevel: 'high', reversibility: 'irreversible',
+            impact: '会删除现有数据', recommendation: '先确认影响范围',
+            requiresProbe: false, requiresConfirmation: true,
+          };
           const host = document.createElement('div');
-          host.id = 'gate-review-show';
-          const card = createRequestReviewCard(subjective);
+          host.id = 'gate-assessment';
+          const card = createAssessmentFlowCard(assessment);
           host.appendChild(card.el);
           document.body.appendChild(host);
-
-          // Render the real card for the unreasonable concern (pause: buttons).
-          const host2 = document.createElement('div');
-          host2.id = 'gate-review-pause';
-          const card2 = createRequestReviewCard(unreasonable);
-          host2.appendChild(card2.el);
-          document.body.appendChild(host2);
-
           return {
-            showSubjective: shouldShowRequestReview(subjective),
-            pauseSubjective: shouldPauseForRequestReview(subjective, buildAssessment, false),
-            pauseTrap: shouldPauseForRequestReview(trap, buildAssessment, true),
-            pauseDestructive: shouldPauseForRequestReview(subjective, destructiveAssessment, false),
-            pauseUnreasonable: shouldPauseForRequestReview(unreasonable, buildAssessment, false),
-            pauseAllReasonable: shouldPauseForRequestReview([{ part: '保留新接口', verdict: 'reasonable', reason: '一致' }], destructiveAssessment, true),
+            ordinaryContinuation: shouldEnterPlanReview(true, false, true, false, false),
+            plannedTurn: shouldEnterPlanReview(false, false, true, false, false),
+            activeHighRisk: shouldEnterPlanReview(true, false, true, false, true),
+            pausedHighRisk: shouldEnterPlanReview(false, true, true, false, true),
+            forcedYoloHighRisk: shouldEnterPlanReview(true, false, false, false, true, false),
+            assessmentCard: !!host.querySelector('.assessment-flow-card'),
+            riskNode: !!host.querySelector('.assessment-flow-node'),
+            gateNode: !!host.querySelector('.assessment-flow-node[data-status]') && Array.from(host.querySelectorAll('.assessment-flow-node')).some((node) => (node.textContent || '').includes('执行前需要你的确认')),
           };
         })()`);
-
-        // Subjective concern renders the card, but WITHOUT decision buttons
-        // (the turn does not pause for an opinion).
-        const showDom = await evaluate(`(() => {
-          const host = document.getElementById('gate-review-show');
-          const item = host?.querySelector('.request-review-item');
-          return {
-            card: !!host?.querySelector('.request-review-card'),
-            itemClass: item?.className ?? '',
-            actions: !!host?.querySelector('.request-review-actions'),
-          };
-        })()`);
-
-        // Unreasonable concern pauses: the same card gains the decision bar
-        // only when chat.ts calls enableDecisions (the pause path). Assert the
-        // real wiring: no bar on the show-only card, bar + buttons on the
-        // paused card after enableDecisions runs.
-        const pauseDom = await evaluate(`(async () => {
-          const { createRequestReviewCard } = await import('/src/ui/requestReview.ts');
-          const host = document.getElementById('gate-review-pause');
-          const card = createRequestReviewCard([{ part: '直接删除被引用的目录', verdict: 'unreasonable', reason: '迁移脚本还在引用它', suggestion: '先归档再删除' }]);
-          host.appendChild(card.el);
-          const before = !!host.querySelector('.request-review-actions');
-          card.enableDecisions(() => true, () => true);
-          const after = !!host.querySelector('.request-review-actions');
-          const buttons = Array.from(host.querySelectorAll('.request-review-actions button')).map((b) => b.textContent);
-          card.setDecided('已决策');
-          const afterDecide = !!host.querySelector('.request-review-actions');
-          return { before, after, buttons, afterDecide };
-        })()`);
-
         const checks: Array<[string, boolean]> = [
-          ['主观担忧 → 展示', review.showSubjective, true],
-          ['主观担忧 → 不暂停', !review.pauseSubjective, true],
-          ['逻辑陷阱 → 暂停', review.pauseTrap, true],
-          ['破坏性/高风险 → 暂停', review.pauseDestructive, true],
-          ['不合理判定 → 暂停', review.pauseUnreasonable, true],
-          ['全合理 → 不暂停（即使高风险）', !review.pauseAllReasonable, true],
-          ['主观卡渲染（含存疑样式）', showDom.card && showDom.itemClass.includes('request-review-questionable'), true],
-          ['主观卡不渲染决策按钮', !showDom.actions, true],
-          ['暂停卡初始无决策按钮', !pauseDom.before, true],
-          ['暂停卡 enableDecisions 后出现决策按钮', pauseDom.after, true],
-          ['决策按钮文案正确', pauseDom.buttons.length === 2 && pauseDom.buttons[0]?.includes('采纳建议') && pauseDom.buttons[1]?.includes('仍按原诉求'), true],
-          ['决策后按钮移除', !pauseDom.afterDecide, true],
+          ['普通计划续跑 → 不重复确认', !review.ordinaryContinuation, true],
+          ['新计划请求 → 进入确认路径', review.plannedTurn, true],
+          ['活动计划中的高风险请求 → 重新确认', review.activeHighRisk, true],
+          ['暂停计划中的高风险请求 → 重新确认', review.pausedHighRisk, true],
+          ['显式关闭工作流时仍拦截高风险', review.forcedYoloHighRisk, true],
+          ['真实评估卡已渲染', review.assessmentCard, true],
+          ['评估卡包含风险节点', review.riskNode, true],
+          ['评估卡包含执行确认节点', review.gateNode, true],
         ];
         let ok = true;
         for (const [name, actual, want] of checks) {
@@ -628,7 +676,8 @@ async function main(): Promise<number> {
           if (!pass) ok = false;
           log(`  [${pass ? 'PASS' : 'FAIL'}] review gate → ${name}: ${JSON.stringify(actual)}`);
         }
-        log(`[verify] review gate (shouldPauseForRequestReview + card DOM): ${ok ? 'OK' : 'MISMATCH'}`);
+        log(`[verify] safety review gate (chat workflow + assessment card): ${ok ? 'OK' : 'MISMATCH'}`);
+        await evaluate("document.getElementById('gate-assessment')?.remove(); true");
         if (!ok) return false;
       }
 

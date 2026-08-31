@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { projectSessionEvents, projectTranscript } from '../transcriptProjection';
+import { projectCanonicalSession } from '../sessionEvents';
 import type { SessionEvent } from '../store';
 import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
 import type { Message } from '../../shared/types';
@@ -327,6 +328,74 @@ describe('session event projection', () => {
     ]);
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.type).toBe('tool');
+  });
+
+  it('pairs event-only tool results with the preceding call and marks missing results stopped', () => {
+    const blocks = projectSessionEvents([
+      { id: 'u', type: 'user', content: '读取两个文件' },
+      {
+        id: 'a',
+        type: 'assistant',
+        content: '开始读取',
+        toolCalls: [
+          { id: 'one', toolName: 'read_file', args: { path: 'one.ts' } },
+          { id: 'two', toolName: 'read_file', args: { path: 'two.ts' } },
+        ],
+      },
+      { id: 'r', type: 'tool_result', toolCallId: 'one', content: 'one contents' },
+      { id: 'a2', type: 'assistant', content: '已停止。' },
+    ]);
+
+    expect(blocks.map((block) => block.type)).toEqual(['user', 'assistant', 'tool', 'tool', 'assistant']);
+    expect(blocks[2]).toMatchObject({ type: 'tool', stopped: false, exec: { toolName: 'read_file', args: { path: 'one.ts' }, resultText: 'one contents' } });
+    expect(blocks[3]).toMatchObject({ type: 'tool', stopped: true, exec: { toolName: 'read_file', args: { path: 'two.ts' } } });
+  });
+
+  it('keeps event order when tool calls and results are interleaved across assistant events', () => {
+    const blocks = projectSessionEvents([
+      { id: 'u', type: 'user', content: '检查' },
+      { id: 'a1', type: 'assistant', content: '先读文件' },
+      { id: 'c1', type: 'tool_call', toolCallId: 'call-1', toolName: 'read_file', toolCalls: [{ id: 'call-1', toolName: 'read_file', args: { path: 'a.ts' } }] },
+      { id: 'r1', type: 'tool_result', toolCallId: 'call-1', content: 'a' },
+      { id: 'a2', type: 'assistant', content: '继续处理' },
+      { id: 'c2', type: 'tool_call', toolCallId: 'call-2', toolName: 'list_files', toolCalls: [{ id: 'call-2', toolName: 'list_files', args: { path: '.' } }] },
+      { id: 'r2', type: 'tool_result', toolCallId: 'call-2', content: 'b' },
+    ]);
+
+    expect(blocks.map((block) => block.type)).toEqual(['user', 'assistant', 'tool', 'assistant', 'tool']);
+    expect(blocks[2]).toMatchObject({ type: 'tool', exec: { args: { path: 'a.ts' } } });
+    expect(blocks[4]).toMatchObject({ type: 'tool', exec: { toolName: 'list_files', args: { path: '.' } } });
+  });
+
+  it('uses event-first projection when events exist and transcript fallback when they do not', () => {
+    const eventSession: SessionEvent[] = [
+      { id: 'u', type: 'user', content: 'event source' },
+      { id: 'a', type: 'assistant', content: 'event answer' },
+    ];
+    expect(projectCanonicalSession(eventSession, [{ id: 'legacy', modelMessageIndex: 0, role: 'assistant', content: 'legacy answer' }]).map((block) => block.type)).toEqual(['user', 'assistant']);
+    expect(projectCanonicalSession([], [{ id: 'legacy', modelMessageIndex: 0, role: 'assistant', content: 'legacy answer' }])).toEqual([{ type: 'assistant', content: 'legacy answer', isPlanPause: false }]);
+  });
+
+  it('encodes assistant tool calls into the v3 event stream in transcript order', () => {
+    const user: Message = { role: 'user', content: '读取文件' };
+    const assistant: Message = {
+      role: 'assistant',
+      content: '',
+      toolCalls: [{ id: 'call-1', index: 0, function: { name: 'read_file', arguments: '{"path":"src/app.ts"}' } }],
+    };
+    const tool: Message = { role: 'tool', content: '内容', toolCallId: 'call-1', toolName: 'read_file' };
+    const snapshot = createSessionSnapshot(
+      [user, assistant, tool],
+      [
+        { message: user, modelMessageIndex: 0 },
+        { message: assistant, modelMessageIndex: 1 },
+        { message: tool, modelMessageIndex: 2 },
+      ],
+    );
+
+    expect(snapshot.events.map((event) => event.type)).toEqual(['user', 'tool_call', 'tool_result']);
+    expect(snapshot.events[1]).toMatchObject({ type: 'tool_call', toolCallId: 'call-1', toolName: 'read_file', toolCalls: [{ id: 'call-1', args: { path: 'src/app.ts' } }] });
+    expect(snapshot.events[2]).toMatchObject({ type: 'tool_result', toolCallId: 'call-1', toolName: 'read_file', content: '内容' });
   });
 });
 

@@ -4643,17 +4643,7 @@ export class ChatController {
       planProgress: progressSnapshot,
       planState: turnPlanState,
     });
-    const events: SessionEvent[] = transcriptDrafts.flatMap((draft, index) => {
-      const eventId = `event-${index}`;
-      if (draft.message.role === 'user') return [{ id: eventId, type: 'user' as const, content: draft.content ?? draft.message.content ?? '', images: draft.images, attachments: draft.attachments }];
-      if (draft.message.role === 'tool') return [{ id: eventId, type: 'tool_result' as const, content: draft.message.content ?? '', toolCallId: draft.message.toolCallId, toolName: draft.message.toolName, toolExec: draft.toolExec }];
-      const result: SessionEvent[] = [];
-      if (draft.analysis) result.push({ id: `${eventId}-analysis`, type: 'analysis', content: draft.analysis });
-      for (const phase of draft.thinkingPhases ?? []) result.push({ id: `${eventId}-thinking-${result.length}`, type: 'thinking', content: phase.text });
-      if (draft.message.content || draft.content) result.push({ id: `${eventId}-assistant`, type: 'assistant', content: draft.content ?? draft.message.content ?? '', isPlanPause: draft.isPlanPause });
-      if (draft.artifacts?.length) result.push({ id: `${eventId}-artifacts`, type: 'artifact', artifacts: draft.artifacts });
-      return result;
-    });
+    const events = nextSnapshotV2.events;
     const nextSnapshot: SessionSnapshot = { version: 3, modelContext: nextSnapshotV2.modelContext, events, transcript: nextSnapshotV2.transcript, uiState: nextSnapshotV2.uiState };
     await saveSession(sessionId, nextSnapshot, workspace);
   }
