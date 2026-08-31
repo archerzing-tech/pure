@@ -341,7 +341,18 @@ async function main(): Promise<number> {
       ],
       // Conflicting legacy content detects accidental transcript fallback.
       transcript: [{ id: 'legacy', modelMessageIndex: 0, role: 'assistant', content: '错误的 legacy 内容' }],
-      uiState: {},
+      uiState: {
+        agentActivities: [{
+          callId: 'event-agent-1',
+          agentName: 'researcher',
+          agentRole: '资料调研',
+          state: 'VERIFY',
+          status: 'done',
+          inputSnippet: '核对事件恢复链路',
+          output: '已完成事件恢复验证',
+          durationMs: 3200,
+        }],
+      },
     };
     const meta = { id: sid, title: 'SessionEvent canonical restore', createdAt: Date.now(), updatedAt: Date.now(), messageCount: 2, workspace: '' };
     await evaluate(`(() => {
@@ -370,6 +381,8 @@ async function main(): Promise<number> {
         args: rows.map((row) => row.querySelector('.tool-row-field-value')?.textContent ?? ''),
         results: rows.map((row) => row.querySelector('.tool-result-preview')?.textContent ?? ''),
         stopped: rows.map((row) => row.querySelector('.tool-row.stopped') !== null),
+        agentPanel: !!document.querySelector('#agent-console-host [data-agent-activity-panel="true"]'),
+        agentText: document.querySelector('#agent-console-host [data-agent-activity-panel="true"]')?.textContent ?? '',
         order: Array.from(chat?.children ?? []).map((child) => child.textContent?.trim().slice(0, 40) ?? ''),
       });
     })()`)));
@@ -380,6 +393,8 @@ async function main(): Promise<number> {
       ['已返回调用补齐参数', eventView.args[0], 'pathevent.ts'],
       ['已返回调用显示结果', eventView.results[0], '事件中的工具结果'],
       ['未返回调用恢复为 stopped', eventView.stopped, [false, true]],
+      ['历史恢复显示协作轨迹', eventView.agentPanel, true],
+      ['协作轨迹保留 agent 状态和摘要', eventView.agentText.includes('researcher') && eventView.agentText.includes('已完成事件恢复验证'), true],
     ];
     let eventOk = true;
     for (const [name, actual, want] of checks) {

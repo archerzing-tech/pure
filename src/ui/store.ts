@@ -37,11 +37,38 @@ export interface TranscriptEntry {
   planCard?: PlanCardSnapshot;
 }
 
+export interface SessionAgentActivity {
+  callId: string;
+  agentName: string;
+  agentRole?: string;
+  state?: string;
+  /** Explicit lifecycle used to answer which agents are active right now. */
+  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled';
+  /** Monotonic progress sequence for rejecting late concurrent updates. */
+  sequence?: number;
+  /** Epoch ms when this activity snapshot was emitted. */
+  lastUpdatedAt?: number;
+  toolName?: string;
+  toolState?: 'running' | 'completed';
+  success?: boolean;
+  error?: string;
+  output?: string;
+  status?: 'running' | 'done' | 'failed' | 'timed_out' | 'cancelled';
+  durationMs?: number;
+  tokensUsed?: number;
+  inputSnippet?: string;
+  startedAt?: number;
+  timeoutMs?: number;
+  parentCallId?: string;
+}
+
 export interface SessionUiState {
   /** Canonical session-level plan cursor used by the transcript plan card. */
   planProgress?: PlanProgressSnapshot | null;
   /** Legacy cursor retained for migration and older exports. */
   planState?: PlanState | null;
+  /** Latest multi-agent activity for the current task, retained on restore. */
+  agentActivities?: SessionAgentActivity[];
 }
 
 export interface PlanState {

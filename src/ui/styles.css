@@ -909,6 +909,58 @@ body {
   pointer-events: none;
 }
 
+/* ── Task-level agent console ── */
+#agent-console-host[hidden] { display: none !important; }
+#agent-console-host {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  width: 100%;
+  padding: 10px 48px 0;
+  pointer-events: none;
+  z-index: 15;
+}
+#agent-console-host > .agent-console {
+  width: 100%;
+  max-width: 1120px;
+  pointer-events: auto;
+}
+.agent-console {
+  box-sizing: border-box;
+  max-height: min(40vh, 310px);
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-card, #fff) 96%, var(--accent-soft));
+  box-shadow: var(--shadow-sm);
+}
+.agent-console-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-height: 24px;
+  padding: 0 2px 7px;
+}
+.agent-console-title { font-size: 13px; color: var(--text); }
+.agent-console-count { margin-left: auto; color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
+.agent-console-active-list,
+.agent-console-history-list { display: grid; gap: 5px; }
+.agent-console-history { margin-top: 6px; border-top: 1px solid var(--border-light); padding-top: 6px; }
+.agent-console-history-summary {
+  display: flex;
+  justify-content: space-between;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 11px;
+  list-style: none;
+  user-select: none;
+}
+.agent-console-history-summary::-webkit-details-marker { display: none; }
+.agent-console-history-summary::before { content: '›'; margin-right: 6px; transition: transform var(--transition); }
+.agent-console-history[open] .agent-console-history-summary::before { transform: rotate(90deg); }
+.agent-console-history-list { padding-top: 6px; }
+
 /* ── Chat area ── */
 
 #chat-view:not(.landing) #chat {
@@ -11867,88 +11919,49 @@ button svg,
 .design-preview-row.confirmed .design-preview-card { border-color: var(--success); }
 @media (prefers-reduced-motion: reduce) {
   .design-preview-confirm { transition: none; }
-  .agent-float-card,
-  .agent-float-card.working,
-  .agent-float-card.agent-float-exit {
-    animation: none !important;
-  }
 }
 
-/* ── Multi-agent floating cards ──
-   Ephemeral cards that float over the top-right of the GUI while a subagent is
-   working: slide in from the right edge, pulse while active, then slide back
-   out to the right when the task ends. Never persisted, so history replay
-   never shows them and they are not reconstructable. Multiple cards stack
-   vertically with a gap. */
-.agent-float {
-  position: fixed;
-  top: 84px;
-  right: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  z-index: 60;
-  pointer-events: none; /* never blocks the transcript */
-}
-.agent-float-card {
-  width: 210px;
-  height: 64px;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 3px;
-  padding: 6px 10px;
-  border: 1px solid var(--accent);
+.agent-activity-agent {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto;
+  gap: 2px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--bg-card, #FBFAF9) 92%, transparent);
-  backdrop-filter: blur(2px);
-  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0,0,0,0.06));
-  pointer-events: auto;
-  /* Slide-in from right when the card first appears */
-  animation: agent-float-slide-in 0.4s var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)) both;
+  background: var(--bg);
 }
-.agent-float-card.working {
-  /* Pulse overlay on top of the entrance animation */
-  animation: agent-float-slide-in 0.4s var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)) both,
-             agent-float-pulse 1.1s ease-in-out 0.4s infinite;
+.agent-activity-identity { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.agent-activity-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
 }
-@keyframes agent-float-slide-in {
-  from {
-    opacity: 0;
-    transform: translateX(240px) scale(0.9);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0) scale(1);
-  }
+.agent-activity-agent--running .agent-activity-dot { animation: agent-console-pulse 1.4s ease-in-out infinite; }
+@keyframes agent-console-pulse {
+  50% { opacity: .45; box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 8%, transparent); }
 }
-@keyframes agent-float-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
-  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 0%, transparent); border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
-}
-.agent-float-name { font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-float-role { font-size: 11px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-float-badge { align-self: flex-start; font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--accent-soft, #F1EFFC); color: var(--accent); white-space: nowrap; }
-.agent-float-card.done { border-color: var(--success); }
-.agent-float-card.done .agent-float-badge { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
-.agent-float-card.failed { border-color: var(--danger); }
-.agent-float-card.failed .agent-float-badge { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
-.agent-float-card.timed-out { border-color: var(--warning, #E8A33D); }
-.agent-float-card.timed-out .agent-float-badge { background: color-mix(in srgb, var(--warning, #E8A33D) 14%, transparent); color: var(--warning, #E8A33D); }
-/* Slide-out to the right when the task finishes — mirrors the entrance */
-.agent-float-card.agent-float-exit {
-  animation: agent-float-slide-out 0.45s var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) both !important;
-}
-@keyframes agent-float-slide-out {
-  from {
-    opacity: 1;
-    transform: translateX(0) scale(1);
-  }
-  to {
-    opacity: 0;
-    transform: translateX(240px) scale(0.9);
-  }
+.agent-activity-agent--done .agent-activity-dot { background: var(--success); box-shadow: none; }
+.agent-activity-agent--failed .agent-activity-dot,
+.agent-activity-agent--timed-out .agent-activity-dot { background: var(--danger); box-shadow: none; }
+.agent-activity-agent--cancelled .agent-activity-dot,
+.agent-activity-agent--historical .agent-activity-dot { background: var(--text-tertiary); box-shadow: none; }
+.agent-activity-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.agent-activity-role { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 11px; }
+.agent-activity-status { color: var(--accent); font-size: 11px; white-space: nowrap; }
+.agent-activity-agent--done .agent-activity-status { color: var(--success); }
+.agent-activity-agent--failed .agent-activity-status,
+.agent-activity-agent--timed-out .agent-activity-status { color: var(--danger); }
+.agent-activity-agent--cancelled .agent-activity-status,
+.agent-activity-agent--historical .agent-activity-status { color: var(--text-tertiary); }
+.agent-activity-action { grid-column: 1 / -1; overflow: hidden; color: var(--text); font-size: 12px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.agent-activity-note { grid-column: 1 / -1; overflow: hidden; color: var(--text-tertiary); font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 680px) {
+  #agent-console-host { padding: 6px 16px 0; }
+  .agent-activity-agent { grid-template-columns: minmax(0, 1fr) auto; padding: 7px 8px; }
+  .agent-activity-role { display: none; }
 }
 
 /* ═══ Batch task queue: composer button badge + popover panel ═══ */

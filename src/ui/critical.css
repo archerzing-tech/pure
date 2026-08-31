@@ -231,6 +231,14 @@ body {
 
 #chat-view.landing #chat, #chat-view.landing #input-bar { display: none; }
 #chat-view:not(.landing) #chat { display: flex; }
+#agent-console-host[hidden] { display: none !important; }
+#agent-console-host {
+  display: flex;
+  width: 100%;
+  flex: 0 0 auto;
+  justify-content: center;
+  padding: 10px 48px 0;
+}
 #chat {
   display: none;
   width: 100%;
@@ -284,6 +292,7 @@ body {
 .boot-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
 @media (max-width: 720px) {
+  #agent-console-host { padding: 6px 16px 0; }
   #chat { padding: 40px 16px 16px; }
   #input-bar { padding: 0 16px 16px; }
   #landing-content { gap: 28px; }

@@ -709,13 +709,11 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
   const restoreToken = ++sessionRestoreToken;
   const isCurrentRestore = (): boolean => restoreToken === sessionRestoreToken;
   enterChatMode();
-  // Multi-agent floating cards are ephemeral and session-scoped: clear them on
-  // every session load so the previous session's cards never bleed into this one.
-  document.getElementById('agent-float')?.replaceChildren();
   chat.loadFromStorage(snapshot);
 
   const chatEl = document.getElementById('chat')!;
   chatEl.innerHTML = '';
+  chat.mountAgentActivityPanel();
   // Same coalesced scroll machinery as live streaming (chat.ts), so the
   // one-shot restore scroll joins the shared rAF budget instead of forcing a
   // synchronous full-transcript layout at the end of the restore.
@@ -804,6 +802,7 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
           if (!progress) continue;
           const restoredPlanCard = createRestoredPlanCard(progress);
           chatEl.appendChild(restoredPlanCard.el);
+          chat.registerRestoredPlanCard(restoredPlanCard);
         } else if (block.type === 'assistant') {
           const wrapper = document.createElement('div');
           wrapper.className = 'bubble-row assistant';
