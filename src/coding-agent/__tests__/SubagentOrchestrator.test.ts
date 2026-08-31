@@ -102,6 +102,9 @@ describe('SubagentOrchestrator', () => {
     expect(seen.every((a) => a.agentName === 'test_researcher')).toBe(true);
     // At least one start and one successful done.
     expect(seen.some((a) => a.success === true)).toBe(true);
+    expect(seen.every((a, index) => index === 0 || (a.sequence ?? 0) > (seen[index - 1]?.sequence ?? 0))).toBe(true);
+    expect(seen.some((a) => a.lifecycle === 'started')).toBe(true);
+    expect(seen.some((a) => a.lifecycle === 'done')).toBe(true);
   });
 
   it('returns a failure when the subagent engine errors', async () => {
