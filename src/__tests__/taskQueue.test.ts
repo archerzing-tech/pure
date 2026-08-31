@@ -180,6 +180,34 @@ describe('TaskQueue', () => {
     expect(queue.getTasks()[0].error).toBeUndefined();
   });
 
+  it('stores task ownership and does not resume a task from another context', async () => {
+    const chat = new FakeChat();
+    const context = { workspace: '/project-a', sessionId: 'session-a' };
+    const queue = new TaskQueue({ chat, storageKey: 'k', getContext: () => context });
+    queue.enqueue('owned task');
+    expect(queue.getTasks()[0].workspace).toBe('/project-a');
+    expect(queue.getTasks()[0].sessionId).toBe('session-a');
+    chat.resolveNext();
+    await until(() => queue.getTasks()[0].status === 'done');
+
+    const otherContext = { workspace: '/project-b', sessionId: 'session-b' };
+    const otherChat = new FakeChat();
+    const otherQueue = new TaskQueue({ chat: otherChat, storageKey: 'k', getContext: () => otherContext });
+    expect(otherQueue.getTasks()[0].status).toBe('done');
+    expect(otherChat.calls).toEqual([]);
+  });
+
+  it('does not auto-run legacy unowned pending tasks', async () => {
+    mem.set('k', JSON.stringify([{
+      id: 'legacy', text: 'legacy task', displayText: 'legacy task', status: 'pending', ts: Date.now(),
+    }]));
+    const chat = new FakeChat();
+    const queue = new TaskQueue({ chat, storageKey: 'k', getContext: () => ({ workspace: '/project', sessionId: 'session' }) });
+    await Promise.resolve();
+    expect(chat.calls).toEqual([]);
+    expect(queue.getTasks()[0].status).toBe('pending');
+  });
+
   it('persists pending/running tasks and resumes after reload', async () => {
     const chat1 = new FakeChat();
     const q1 = new TaskQueue({ chat: chat1, storageKey: 'k' });

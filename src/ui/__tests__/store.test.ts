@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { projectTranscript } from '../transcriptProjection';
 import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
 import type { Message } from '../../shared/types';
 import type { Plan } from '../../coding-agent/types';
@@ -25,6 +26,29 @@ describe('session stats persistence', () => {
       const sessionId = `stats-turns-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       saveSessionStats(sessionId, { turns: 4, searches: [], fileWrites: [], fileReads: [], commands: [] });
       expect(loadSessionStats(sessionId).turns).toBe(4);
+    } finally {
+      (globalThis as any).localStorage = previousStorage;
+    }
+  });
+});
+
+describe('session save ordering', () => {
+  it('serializes consecutive snapshots and keeps the newest snapshot', async () => {
+    const previousStorage = (globalThis as any).localStorage;
+    const values = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    };
+    try {
+      const sessionId = `save-order-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await Promise.all([
+        saveSession(sessionId, createSessionSnapshot([{ role: 'user', content: 'first' }], [{ message: { role: 'user', content: 'first' }, modelMessageIndex: 0 }])),
+        saveSession(sessionId, createSessionSnapshot([{ role: 'user', content: 'second' }], [{ message: { role: 'user', content: 'second' }, modelMessageIndex: 0 }])),
+      ]);
+      const loaded = await loadSession(sessionId);
+      expect(loaded?.snapshot.modelContext.messages[0]?.content).toBe('second');
     } finally {
       (globalThis as any).localStorage = previousStorage;
     }
@@ -254,6 +278,19 @@ describe('session snapshot separation', () => {
     expect(snapshot.uiState.planProgress).toEqual(progress);
     expect(snapshot.uiState.planState?.planNumber).toBe(2);
     expect(snapshot.modelContext.messages[0]).not.toHaveProperty('planProgress');
+  });
+});
+
+describe('transcript projection', () => {
+  it('keeps an explicitly persisted artifact card exactly once', () => {
+    const blocks = projectTranscript([{
+      id: 'assistant-1',
+      modelMessageIndex: 0,
+      role: 'assistant',
+      content: '已完成',
+      artifacts: [{ path: 'index.html' }],
+    }]);
+    expect(blocks.filter((block) => block.type === 'artifact')).toHaveLength(1);
   });
 });
 
