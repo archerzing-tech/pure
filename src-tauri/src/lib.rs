@@ -9,6 +9,16 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 
+mod path_policy;
+
+#[cfg(test)]
+static TEST_HOME_LOCK: std::sync::OnceLock<StdMutex<()>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn test_home_lock() -> &'static StdMutex<()> {
+    TEST_HOME_LOCK.get_or_init(|| StdMutex::new(()))
+}
+
 fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .timeout(timeout)
@@ -498,75 +508,25 @@ async fn mcp_call_inner(handle: &McpHandle, request: &str) -> Result<String, Str
 /// appended; this keeps new-file writes safe even when an intermediate
 /// directory is a symlink.
 fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
-    let base = PathBuf::from(workspace.trim());
-    if base.as_os_str().is_empty() {
+    let workspace_path = PathBuf::from(workspace.trim());
+    if workspace_path.as_os_str().is_empty() {
         return Err("workspace is required".to_string());
     }
-    let base_canonical =
-        fs::canonicalize(&base).map_err(|e| format!("invalid workspace '{}': {}", workspace, e))?;
-    if !base_canonical.is_dir() {
-        return Err(format!("workspace is not a directory: {}", workspace));
-    }
-
-    let raw = path.trim();
-    if raw.is_empty() {
+    let requested_path = PathBuf::from(path.trim());
+    if requested_path.as_os_str().is_empty() {
         return Err("path is required".to_string());
     }
-    let requested = PathBuf::from(raw);
-    let candidate = if requested.is_absolute() {
-        requested
-    } else {
-        base_canonical.join(requested)
-    };
-    // Lexically collapse `.` / `..` (a `..` that climbs above the filesystem
-    // root is an error). No workspace containment is enforced: absolute paths
-    // outside the workspace are allowed.
-    let normalized =
-        normalize_lexical(&candidate).map_err(|_| format!("path cannot be resolved: {}", path))?;
-
-    // Canonicalize the deepest existing ancestor, then append the missing
-    // components in reverse order. This resolves existing symlinks while still
-    // allowing write_file to target a file that does not exist yet.
-    let mut existing = normalized.clone();
-    let mut missing: Vec<PathBuf> = Vec::new();
-    while !existing.exists() {
-        // `Path::exists()` follows symlinks and returns false for a dangling
-        // link. Inspect metadata before climbing so a broken link cannot be
-        // treated as an ordinary missing directory and later followed by a
-        // write into an arbitrary target.
-        if let Ok(meta) = fs::symlink_metadata(&existing) {
-            if meta.file_type().is_symlink() {
-                return Err(format!("path uses an unresolved symlink: {}", path));
-            }
-        }
-        let Some(name) = existing.file_name().map(PathBuf::from) else {
-            return Err(format!("path cannot be resolved: {}", path));
-        };
-        missing.push(name);
-        if !existing.pop() {
-            return Err(format!("path cannot be resolved: {}", path));
-        }
-    }
-
-    let canonical_existing =
-        fs::canonicalize(&existing).map_err(|e| format!("resolve '{}': {}", path, e))?;
-
-    let mut resolved = canonical_existing;
-    for component in missing.iter().rev() {
-        resolved.push(component);
-    }
-    Ok(resolved)
+    path_policy::resolve_workspace_path(&workspace_path, &requested_path)
 }
 
 fn has_symlink_component(workspace: &str, path: &str) -> bool {
     let base = PathBuf::from(workspace.trim());
     let requested = PathBuf::from(path.trim());
     let candidate = if requested.is_absolute() { requested } else { base.join(requested) };
-    let Ok(normalized) = normalize_lexical(&candidate) else { return false };
-    // Workspace confinement is removed: outside paths are allowed, so this only
-    // guards against an ACTUAL symlink component in the path itself. Paths
-    // inside the workspace are checked relative to the workspace root (original
-    // behavior — catches a middle-component symlink like workspace/link -> elsewhere).
+    let Ok(normalized) = path_policy::normalize_lexical(&candidate) else { return false };
+    // Guard against an ACTUAL symlink component in the path itself. Paths
+    // inside the workspace are checked relative to the workspace root (catches
+    // a middle-component symlink like workspace/link -> elsewhere).
     if let Ok(relative) = normalized.strip_prefix(&base) {
         let mut current = base;
         for component in relative.components() {
@@ -582,53 +542,10 @@ fn has_symlink_component(workspace: &str, path: &str) -> bool {
         }
         false
     } else {
-        // Outside the workspace: only the deepest existing ancestor can still
-        // be a symlink the caller could traverse through (everything above it
-        // is a system directory — flagging /var on macOS would break every
-        // temp path). Missing tail components cannot be symlinks yet.
-        let mut existing = normalized.clone();
-        while !existing.exists() {
-            if !existing.pop() {
-                break;
-            }
-        }
-        fs::symlink_metadata(&existing)
-            .map(|metadata| metadata.file_type().is_symlink())
-            .unwrap_or(false)
+        false
     }
 }
 
-/// Lexically normalize `.` and `..` without touching the filesystem. The
-/// filesystem-aware containment check in `resolve` runs after this step.
-fn normalize_lexical(path: &std::path::Path) -> Result<PathBuf, ()> {
-    let mut normalized = PathBuf::new();
-    let mut root_seen = false;
-    let mut normal_depth = 0usize;
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if normal_depth > 0 {
-                    normalized.pop();
-                    normal_depth -= 1;
-                } else if root_seen {
-                    return Err(());
-                } else {
-                    normalized.push(component.as_os_str());
-                }
-            }
-            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
-                normalized.push(component.as_os_str());
-                root_seen = true;
-            }
-            std::path::Component::Normal(value) => {
-                normalized.push(value);
-                normal_depth += 1;
-            }
-        }
-    }
-    Ok(normalized)
-}
 
 #[tauri::command]
 fn read_file(workspace: String, path: String) -> Result<String, String> {
@@ -5772,16 +5689,14 @@ mod resolve_tests {
 
     #[cfg(unix)]
     #[test]
-    fn allows_files_through_a_symlink_outside_workspace() {
-        // Workspace confinement is removed — a symlink pointing outside the
-        // workspace resolves to its real target instead of being refused.
+    fn rejects_files_through_a_symlink_outside_workspace() {
         let ws = temp_workspace("symlink");
         let outside =
             std::env::temp_dir().join(format!("pure-resolve-outside-{}", std::process::id()));
         let _ = fs::remove_dir_all(&outside);
         fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, PathBuf::from(&ws).join("linked")).unwrap();
-        assert!(resolve(&ws, "linked/evil.txt").is_ok());
+        assert!(resolve(&ws, "linked/evil.txt").is_err());
         fs::remove_dir_all(&outside).unwrap();
         fs::remove_dir_all(&ws).unwrap();
     }
@@ -5799,9 +5714,7 @@ mod resolve_tests {
     }
 
     #[test]
-    fn allows_absolute_paths_outside_the_workspace() {
-        // Workspace confinement is removed: absolute paths anywhere on disk
-        // are accepted (not just paths under the workspace root).
+    fn rejects_absolute_paths_outside_the_workspace() {
         let ws = temp_workspace("absolute-outside");
         let outside =
             std::env::temp_dir().join(format!("pure-resolve-absout-{}", std::process::id()));
@@ -5809,8 +5722,7 @@ mod resolve_tests {
         fs::create_dir_all(&outside).unwrap();
         let target = outside.join("note.txt");
         fs::write(&target, "outside").unwrap();
-        let r = resolve(&ws, target.to_str().unwrap()).unwrap();
-        assert_eq!(r, fs::canonicalize(&target).unwrap());
+        assert!(resolve(&ws, target.to_str().unwrap()).is_err());
         fs::remove_dir_all(&outside).unwrap();
         fs::remove_dir_all(&ws).unwrap();
     }
@@ -11238,6 +11150,7 @@ mod generate_image_tests {
 
     #[test]
     fn save_session_rejects_stale_revision() {
+        let _home_guard = super::test_home_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!("pure-session-revision-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
@@ -11278,6 +11191,7 @@ mod generate_image_tests {
 
     #[test]
     fn workspace_override_wins_over_session_snapshot_workspace() {
+        let _home_guard = super::test_home_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!("pure-session-workspace-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
@@ -11380,6 +11294,12 @@ struct SessionMeta {
     workspace: String,
 }
 
+static SESSION_PERSISTENCE_LOCK: std::sync::OnceLock<StdMutex<()>> = std::sync::OnceLock::new();
+
+fn session_persistence_lock() -> &'static StdMutex<()> {
+    SESSION_PERSISTENCE_LOCK.get_or_init(|| StdMutex::new(()))
+}
+
 fn sessions_dir() -> PathBuf {
     PathBuf::from(pure_home_dir()).join(".pure").join("sessions")
 }
@@ -11426,6 +11346,7 @@ fn save_session(
     workspace: Option<String>,
 ) -> Result<(), String> {
     validate_session_id(&session_id)?;
+    let _guard = session_persistence_lock().lock().map_err(|_| "session persistence lock poisoned".to_string())?;
     let dir = sessions_dir().join(&session_id);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
 
@@ -11539,6 +11460,7 @@ fn load_session_workspace(session_id: &str) -> Result<String, String> {
 #[tauri::command]
 fn save_session_stats(session_id: String, stats: serde_json::Value) -> Result<(), String> {
     validate_session_id(&session_id)?;
+    let _guard = session_persistence_lock().lock().map_err(|_| "session persistence lock poisoned".to_string())?;
     let dir = sessions_dir().join(&session_id);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
     let path = dir.join("stats.json");
@@ -11671,6 +11593,7 @@ async fn save_session_workspace(session_id: String, workspace: String) -> Result
 
 fn save_session_workspace_sync(session_id: &str, workspace: &str) -> Result<(), String> {
     validate_session_id(session_id)?;
+    let _guard = session_persistence_lock().lock().map_err(|_| "session persistence lock poisoned".to_string())?;
     let dir = sessions_dir().join(session_id);
     let data_path = dir.join("session.json");
     if data_path.exists() {
@@ -14148,6 +14071,7 @@ mod session_stats_tests {
     /// Point HOME at a temp dir for the duration of the closure so
     /// `sessions_dir()` resolves inside it.
     fn with_temp_home<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let _guard = super::test_home_lock().lock().unwrap();
         let old = std::env::var_os("HOME");
         std::env::set_var("HOME", dir);
         let result = f();
