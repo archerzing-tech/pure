@@ -11227,6 +11227,16 @@ mod generate_image_tests {
     use super::*;
 
     #[test]
+    fn session_ids_are_path_safe() {
+        assert!(validate_session_id("session_123-ok").is_ok());
+        assert!(validate_session_id("").is_err());
+        assert!(validate_session_id("../escape").is_err());
+        assert!(validate_session_id("session/name").is_err());
+        assert!(validate_session_id("session name").is_err());
+        assert!(validate_session_id(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
     fn sniff_detects_png_jpeg_gif_webp() {
         assert_eq!(sniff_image_mime(b"\x89PNG\r\n\x1a\n...."), "image/png");
         assert_eq!(sniff_image_mime(b"\xff\xd8\xff\xe0...."), "image/jpeg");
@@ -11294,11 +11304,24 @@ fn sessions_dir() -> PathBuf {
     PathBuf::from(pure_home_dir()).join(".pure").join("sessions")
 }
 
+fn validate_session_id(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err("invalid session id".to_string());
+    }
+    Ok(())
+}
+
 fn workspace_override_path(session_id: &str) -> PathBuf {
     sessions_dir().join(session_id).join("workspace.txt")
 }
 
 fn write_workspace_override(session_id: &str, workspace: &str) -> Result<(), String> {
+    validate_session_id(session_id)?;
     fs::write(workspace_override_path(session_id), workspace)
         .map_err(|e| format!("write workspace: {}", e))
 }
@@ -11309,6 +11332,7 @@ fn save_session(
     snapshot: serde_json::Value,
     workspace: Option<String>,
 ) -> Result<(), String> {
+    validate_session_id(&session_id)?;
     let dir = sessions_dir().join(&session_id);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
 
@@ -11366,6 +11390,7 @@ fn save_session(
 
 #[tauri::command]
 fn load_session(session_id: String) -> Result<Option<serde_json::Value>, String> {
+    validate_session_id(&session_id)?;
     let path = sessions_dir().join(&session_id).join("session.json");
     if !path.exists() {
         return Ok(None);
@@ -11388,6 +11413,7 @@ fn load_session(session_id: String) -> Result<Option<serde_json::Value>, String>
 
 /// Read the stored workspace override for a session ("" when absent).
 fn load_session_workspace(session_id: &str) -> Result<String, String> {
+    validate_session_id(session_id)?;
     let override_path = workspace_override_path(session_id);
     if override_path.exists() {
         return fs::read_to_string(override_path).map_err(|e| format!("read workspace: {}", e));
@@ -11410,6 +11436,7 @@ fn load_session_workspace(session_id: &str) -> Result<String, String> {
 
 #[tauri::command]
 fn save_session_stats(session_id: String, stats: serde_json::Value) -> Result<(), String> {
+    validate_session_id(&session_id)?;
     let dir = sessions_dir().join(&session_id);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
     let path = dir.join("stats.json");
@@ -11424,6 +11451,7 @@ fn save_session_stats(session_id: String, stats: serde_json::Value) -> Result<()
 
 #[tauri::command]
 fn load_session_stats(session_id: String) -> Result<Option<serde_json::Value>, String> {
+    validate_session_id(&session_id)?;
     let path = sessions_dir().join(&session_id).join("stats.json");
     if !path.exists() {
         return Ok(None);
@@ -11446,6 +11474,11 @@ fn load_session_stats(session_id: String) -> Result<Option<serde_json::Value>, S
 /// "export all as ZIP" path needs every session).
 #[tauri::command]
 fn load_all_session_stats(session_ids: Option<Vec<String>>) -> Result<serde_json::Value, String> {
+    if let Some(ids) = &session_ids {
+        for id in ids {
+            validate_session_id(id)?;
+        }
+    }
     let dir = sessions_dir();
     let mut out = serde_json::Map::new();
     if !dir.exists() {
@@ -11527,6 +11560,7 @@ fn load_session_list() -> Result<Vec<serde_json::Value>, String> {
 /// has never been persisted; its workspace is captured on first save_session.
 #[tauri::command]
 async fn save_session_workspace(session_id: String, workspace: String) -> Result<(), String> {
+    validate_session_id(&session_id)?;
     tokio::task::spawn_blocking(move || save_session_workspace_sync(&session_id, &workspace))
         .await
         .map_err(|e| format!("workspace save task failed: {}", e))??;
@@ -11534,6 +11568,7 @@ async fn save_session_workspace(session_id: String, workspace: String) -> Result
 }
 
 fn save_session_workspace_sync(session_id: &str, workspace: &str) -> Result<(), String> {
+    validate_session_id(session_id)?;
     let dir = sessions_dir().join(session_id);
     let data_path = dir.join("session.json");
     if data_path.exists() {
@@ -11561,6 +11596,7 @@ fn save_session_workspace_sync(session_id: &str, workspace: &str) -> Result<(), 
 
 #[tauri::command]
 fn delete_session(session_id: String) -> Result<(), String> {
+    validate_session_id(&session_id)?;
     // Drop the session from the index synchronously so the sidebar refreshes
     // immediately; the heavier filesystem cleanup (session dir + tmp workspace)
     // runs on a background thread and must not block the UI.
