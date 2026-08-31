@@ -11238,11 +11238,20 @@ mod generate_image_tests {
 
     #[test]
     fn save_session_rejects_stale_revision() {
-        let home = std::env::temp_dir().join(format!("pure-session-revision-{}-{}", std::process::id(), "test"));
+        let home = std::env::temp_dir().join(format!("pure-session-revision-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let old_home = std::env::var_os("HOME");
         std::env::set_var("HOME", &home);
+        fs::create_dir_all(home.join(".pure").join("sessions")).unwrap();
+        let revision_session_dir = home.join(".pure").join("sessions").join("revisiontest");
+        let _ = fs::remove_dir_all(&revision_session_dir);
+        let index_path = sessions_dir().join("index.json");
+        let _ = fs::remove_file(&index_path);
+        let revision_session_id = format!("revisiontest{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let session_dir = sessions_dir().join(&revision_session_id);
+        let _ = fs::remove_dir_all(&session_dir);
+        fs::create_dir_all(&session_dir).unwrap();
         let snapshot = |revision: u64, content: &str| {
             serde_json::json!({
                 "version": 3,
@@ -11253,12 +11262,53 @@ mod generate_image_tests {
                 "uiState": {}
             })
         };
-        assert!(save_session("revision-test".to_string(), snapshot(2, "new"), Some(String::new())).is_ok());
-        let error = save_session("revision-test".to_string(), snapshot(1, "old"), Some(String::new())).unwrap_err();
+        let first_save = save_session(revision_session_id.clone(), snapshot(2, "new"), Some(String::new()));
+        assert!(first_save.is_ok(), "first save failed: {first_save:?}");
+        let error = save_session(revision_session_id.clone(), snapshot(1, "old"), Some(String::new())).unwrap_err();
         assert_eq!(error, "stale session revision");
-        let stored = load_session("revision-test".to_string()).unwrap().unwrap();
+        let stored = load_session(revision_session_id).unwrap().unwrap();
         assert_eq!(stored["snapshot"]["revision"], 2);
         assert_eq!(stored["snapshot"]["modelContext"]["messages"][0]["content"], "new");
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn workspace_override_wins_over_session_snapshot_workspace() {
+        let home = std::env::temp_dir().join(format!("pure-session-workspace-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        fs::create_dir_all(home.join(".pure").join("sessions")).unwrap();
+        let workspace_session_id = format!("workspacetest{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let session_dir = sessions_dir().join(&workspace_session_id);
+        let _ = fs::remove_dir_all(&session_dir);
+        fs::create_dir_all(&session_dir).unwrap();
+        let existing_session = session_dir.join("session.json");
+        let _ = fs::remove_file(existing_session);
+        let index_path = sessions_dir().join("index.json");
+        let _ = fs::remove_file(&index_path);
+        let snapshot = serde_json::json!({
+            "version": 3,
+            "revision": 1,
+            "modelContext": { "messages": [{ "role": "user", "content": "workspace" }] },
+            "events": [],
+            "transcript": [],
+            "uiState": {}
+        });
+        let first_save = save_session(workspace_session_id.clone(), snapshot, Some("/old/workspace".to_string()));
+        assert!(first_save.is_ok(), "first save failed: {first_save:?}");
+        let workspace_save = save_session_workspace_sync(&workspace_session_id, "/new/workspace");
+        assert!(workspace_save.is_ok(), "workspace save failed: {workspace_save:?}");
+        let loaded = load_session(workspace_session_id.clone()).unwrap().unwrap();
+        assert_eq!(loaded["workspace"], "/new/workspace");
+        let workspace_path = workspace_override_path(&workspace_session_id);
+        assert!(workspace_path.exists());
+        assert_eq!(load_session_workspace(&workspace_session_id).unwrap(), "/new/workspace");
         match old_home {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
@@ -11426,6 +11476,9 @@ fn save_session(
     // workspace selection can be persisted concurrently with a turn that was
     // already in flight, and the newer user choice must win.
     let override_path = workspace_override_path(&session_id);
+    if let Some(parent) = override_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir workspace: {}", e))?;
+    }
     if !override_path.exists() {
         write_workspace_override(&session_id, &workspace)?;
     }
