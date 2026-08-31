@@ -90,7 +90,10 @@ export class TaskQueue {
   }
 
   getTasks(): QueueTask[] {
-    return this.tasks;
+    const context = this.getContext();
+    return this.tasks.filter((task) =>
+      task.workspace === context.workspace && task.sessionId === context.sessionId,
+    );
   }
 
   /** True when no queue task is currently driving the chat. */
@@ -154,7 +157,7 @@ export class TaskQueue {
   }
 
   cancel(id: string): void {
-    const task = this.tasks.find((t) => t.id === id);
+    const task = this.tasks.find((t) => t.id === id && this.isRunnable(t));
     if (!task) return;
     if (task.status === 'running') {
       // Abort the in-flight turn; it settles and runNext advances past it.
@@ -174,6 +177,7 @@ export class TaskQueue {
   cancelAll(): void {
     let anyRunning = false;
     for (const t of this.tasks) {
+      if (!this.isRunnable(t)) continue;
       if (t.status === 'pending') t.status = 'cancelled';
       else if (t.status === 'running') anyRunning = true;
     }
@@ -186,7 +190,13 @@ export class TaskQueue {
   }
 
   clearDone(): void {
-    this.tasks = this.tasks.filter((t) => t.status === 'pending' || t.status === 'running');
+    const context = this.getContext();
+    this.tasks = this.tasks.filter((t) =>
+      t.status === 'pending'
+      || t.status === 'running'
+      || t.workspace !== context.workspace
+      || t.sessionId !== context.sessionId,
+    );
     this.persist();
     this.emit();
   }
