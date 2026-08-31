@@ -193,8 +193,28 @@ describe('TaskQueue', () => {
     const otherContext = { workspace: '/project-b', sessionId: 'session-b' };
     const otherChat = new FakeChat();
     const otherQueue = new TaskQueue({ chat: otherChat, storageKey: 'k', getContext: () => otherContext });
-    expect(otherQueue.getTasks()[0].status).toBe('done');
+    expect(otherQueue.getTasks()).toEqual([]);
     expect(otherChat.calls).toEqual([]);
+  });
+
+  it('only exposes and mutates tasks owned by the current context', async () => {
+    const chat = new FakeChat();
+    const context = { workspace: '/project-a', sessionId: 'session-a' };
+    const queue = new TaskQueue({ chat, storageKey: 'k', getContext: () => context });
+    queue.enqueue('owned');
+    chat.resolveNext();
+    await until(() => queue.getTasks()[0].status === 'done');
+
+    mem.set('k', JSON.stringify([
+      ...JSON.parse(mem.get('k')!),
+      { id: 'foreign', text: 'foreign', displayText: 'foreign', status: 'done', ts: Date.now(), workspace: '/project-b', sessionId: 'session-b' },
+    ]));
+    const isolated = new TaskQueue({ chat: new FakeChat(), storageKey: 'k', getContext: () => context });
+    expect(isolated.getTasks().map((task) => task.text)).toEqual(['owned']);
+    isolated.clearDone();
+    const stored = JSON.parse(mem.get('k')!);
+    expect(stored.some((task: { id: string }) => task.id === 'foreign')).toBe(true);
+    expect(stored.some((task: { id: string }) => task.id === isolated.getTasks()[0]?.id)).toBe(false);
   });
 
   it('does not auto-run legacy unowned pending tasks', async () => {
@@ -205,7 +225,7 @@ describe('TaskQueue', () => {
     const queue = new TaskQueue({ chat, storageKey: 'k', getContext: () => ({ workspace: '/project', sessionId: 'session' }) });
     await Promise.resolve();
     expect(chat.calls).toEqual([]);
-    expect(queue.getTasks()[0].status).toBe('pending');
+    expect(queue.getTasks()).toEqual([]);
   });
 
   it('persists pending/running tasks and resumes after reload', async () => {
