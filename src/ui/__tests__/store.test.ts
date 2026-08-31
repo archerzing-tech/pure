@@ -49,6 +49,28 @@ describe('session save ordering', () => {
       ]);
       const loaded = await loadSession(sessionId);
       expect(loaded?.snapshot.modelContext.messages[0]?.content).toBe('second');
+      expect(loaded?.snapshot.revision).toBe(2);
+    } finally {
+      (globalThis as any).localStorage = previousStorage;
+    }
+  });
+});
+
+describe('session snapshot revision', () => {
+  it('assigns an increasing revision to consecutive saves', async () => {
+    const previousStorage = (globalThis as any).localStorage;
+    const values = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    };
+    try {
+      const sessionId = `revision-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const message = { role: 'user' as const, content: 'revision' };
+      await saveSession(sessionId, createSessionSnapshot([message], [{ message, modelMessageIndex: 0 }]));
+      await saveSession(sessionId, createSessionSnapshot([message], [{ message, modelMessageIndex: 0 }]));
+      expect((await loadSession(sessionId))?.snapshot.revision).toBe(2);
     } finally {
       (globalThis as any).localStorage = previousStorage;
     }

@@ -112,6 +112,8 @@ export interface SessionSnapshotV2Legacy {
 
 export interface SessionSnapshotV3 {
   version: 3;
+  /** Monotonically increasing client save revision, optional for legacy sessions. */
+  revision?: number;
   modelContext: {
     messages: Message[];
   };
@@ -333,7 +335,7 @@ export function createSessionSnapshot(
     transcript,
     uiState: { planState: latestPlanState ?? null, ...uiState },
   };
-  return { ...snapshotV2ToV3(legacy), transcript };
+  return { ...snapshotV2ToV3(legacy), transcript, revision: 0 };
 }
 
 export function createSessionSnapshotFromLegacy(messages: StoredMessage[]): SessionSnapshotV3 {
@@ -410,7 +412,7 @@ function normalizeSessionSnapshot(raw: unknown): SessionSnapshot {
   if (raw && typeof raw === 'object') {
     const candidate = raw as { version?: unknown; modelContext?: { messages?: unknown }; events?: unknown; transcript?: unknown; messages?: unknown; uiState?: SessionUiState };
     if (candidate.version === 3 && candidate.modelContext && Array.isArray(candidate.events)) {
-      return { version: 3, modelContext: { messages: (candidate.modelContext.messages ?? []) as Message[] }, events: candidate.events as SessionEvent[], uiState: candidate.uiState ?? {}, transcript: Array.isArray(candidate.transcript) ? candidate.transcript as TranscriptEntry[] : [] };
+      return { version: 3, revision: typeof (candidate as { revision?: unknown }).revision === 'number' ? (candidate as { revision: number }).revision : 0, modelContext: { messages: (candidate.modelContext.messages ?? []) as Message[] }, events: candidate.events as SessionEvent[], uiState: candidate.uiState ?? {}, transcript: Array.isArray(candidate.transcript) ? candidate.transcript as TranscriptEntry[] : [] };
     }
     if (candidate.version === 2 && candidate.modelContext && Array.isArray(candidate.transcript)) {
       return snapshotV2ToV3(candidate as SessionSnapshotV2Legacy);
@@ -904,6 +906,7 @@ function lsDeleteAll() {
 let lastDiskSaveWarning = 0;
 const sessionSaveChains = new Map<string, Promise<void>>();
 const sessionSaveRevisions = new Map<string, number>();
+const sessionLoadedRevisions = new Map<string, number>();
 const sessionSaveRetries = 2;
 
 async function saveWithRetry(sessionId: string, snapshot: SessionSnapshotV2, workspace: string): Promise<void> {
@@ -1007,14 +1010,20 @@ export function createSessionPlanProgressPersistence(
  */
 export async function saveSession(sessionId: string, snapshot: SessionSnapshotV2, workspace = ''): Promise<void> {
   const boundedSnapshot = limitSessionSnapshot(snapshot);
-  const revision = (sessionSaveRevisions.get(sessionId) ?? 0) + 1;
+  const revision = Math.max(
+    sessionSaveRevisions.get(sessionId) ?? 0,
+    sessionLoadedRevisions.get(sessionId) ?? 0,
+    boundedSnapshot.revision ?? 0,
+  ) + 1;
   sessionSaveRevisions.set(sessionId, revision);
+  sessionLoadedRevisions.set(sessionId, revision);
+  const revisionedSnapshot = { ...boundedSnapshot, revision };
   const previous = sessionSaveChains.get(sessionId) ?? Promise.resolve();
   const current = previous
     .catch(() => {})
     .then(async () => {
       try {
-        await saveWithRetry(sessionId, boundedSnapshot, workspace);
+        await saveWithRetry(sessionId, revisionedSnapshot, workspace);
       } catch (err) {
         console.error('[pure] save_session failed:', err);
         const now = Date.now();
@@ -1061,10 +1070,14 @@ export async function loadLastSession(): Promise<{ sessionId: string; snapshot: 
 }
 
 export async function loadSession(sessionId: string): Promise<LoadedSession | null> {
+  let loaded: LoadedSession | null;
   if (tauriAvailable) {
-    try { return await tauriLoad(sessionId); } catch {}
+    try { loaded = await tauriLoad(sessionId); } catch { loaded = null; }
+  } else {
+    loaded = lsLoad(sessionId);
   }
-  return lsLoad(sessionId);
+  if (loaded) sessionLoadedRevisions.set(sessionId, loaded.snapshot.revision ?? 0);
+  return loaded;
 }
 
 export async function loadSessionList(): Promise<SessionMeta[]> {

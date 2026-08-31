@@ -11316,6 +11316,19 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn load_stored_session_revision(session_id: &str) -> Result<u64, String> {
+    validate_session_id(session_id)?;
+    let path = sessions_dir().join(session_id).join("session.json");
+    if !path.exists() {
+        return Ok(0);
+    }
+    let raw = fs::read_to_string(path).map_err(|e| format!("read: {}", e))?;
+    let data: SessionData = serde_json::from_str(&raw).map_err(|e| format!("parse: {}", e))?;
+    Ok(data.snapshot
+        .and_then(|snapshot| snapshot.get("revision").and_then(|value| value.as_u64()))
+        .unwrap_or(0))
+}
+
 fn workspace_override_path(session_id: &str) -> PathBuf {
     sessions_dir().join(session_id).join("workspace.txt")
 }
@@ -11347,6 +11360,12 @@ fn save_session(
         Some(w) => w,
         None => load_session_workspace(&session_id).unwrap_or_default(),
     };
+
+    let revision = snapshot.get("revision").and_then(|value| value.as_u64()).unwrap_or(0);
+    let existing_revision = load_stored_session_revision(&session_id).unwrap_or(0);
+    if revision < existing_revision {
+        return Err("stale session revision".to_string());
+    }
 
     let messages = snapshot
         .get("modelContext")
