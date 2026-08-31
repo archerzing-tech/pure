@@ -314,6 +314,7 @@ describe('session event projection', () => {
       { id: 'a2', type: 'assistant', content: '完成' },
     ];
     expect(projectSessionEvents(events).map((block) => block.type)).toEqual(['user', 'assistant', 'tool', 'assistant']);
+    expect(projectSessionEvents([{ id: 'u', type: 'user', content: '请求\n[粘贴图片/截图: /tmp/image.png]\n/tmp/image.png' }])[0]).toMatchObject({ type: 'user', content: '请求' });
     const tool = projectSessionEvents(events).find((block) => block.type === 'tool');
     expect(tool?.type === 'tool' && tool.exec.toolName).toBe('read_file');
     expect(tool?.type === 'tool' && tool.exec.args).toEqual({ path: 'src/app.ts' });
