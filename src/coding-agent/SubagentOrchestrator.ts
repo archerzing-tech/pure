@@ -22,7 +22,7 @@ import { createDefaultVerifier, type Verifier } from './Verifier';
 
 /** Terminal outcome of a subagent, used by the UI to color the badge and by
  * the orchestrator to distinguish a timeout/cancel from an ordinary failure. */
-export type SubagentStatus = 'running' | 'done' | 'failed' | 'timed_out';
+export type SubagentStatus = 'running' | 'done' | 'failed' | 'timed_out' | 'cancelled';
 
 /**
  * A single progress snapshot emitted by the orchestrator while a subagent runs.
@@ -43,8 +43,16 @@ export interface SubagentActivity {
   success?: boolean;
   error?: string;
   output?: string;
-  /** High-level lifecycle status (filled by onStart/onDone/onError). */
+  /** Explicit lifecycle status used to derive the current active-agent set. */
+  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled';
+  /** High-level outcome (filled by onStart/onDone/onError). */
   status?: SubagentStatus;
+  /** Monotonic per-call progress sequence; stale UI updates must be ignored. */
+  sequence?: number;
+  /** Epoch ms of the latest progress update. */
+  lastUpdatedAt?: number;
+  /** Whether the named tool is currently running or has returned. */
+  toolState?: 'running' | 'completed';
   /** Wall-clock duration of the subagent run (ms), filled on done/error. */
   durationMs?: number;
   /** LLM tokens consumed (chunk count), filled on done/error. */
@@ -218,12 +226,18 @@ export class SubagentOrchestrator implements ToolAdapter {
     // touched by these callbacks, so message pass-through stays intact.
     const progress = this.config.progress;
     const timeoutMs = def.defaultTimeoutMs;
+    let progressSequence = 0;
+    const nextProgressMeta = (): Pick<SubagentActivity, 'sequence' | 'lastUpdatedAt'> => ({
+      sequence: ++progressSequence,
+      lastUpdatedAt: Date.now(),
+    });
     const activity = (): SubagentActivity => ({
       callId: toolCall.id,
       agentName: def.name,
       agentRole: def.description,
       timeoutMs,
       parentCallId: toolCall.id,
+      ...nextProgressMeta(),
     });
     const emit = (
       cb: ((a: SubagentActivity) => void) | undefined,
@@ -240,7 +254,7 @@ export class SubagentOrchestrator implements ToolAdapter {
     // Parse args — slightly-broken LLM JSON is repaired first, so a single
     // trailing comma or unquoted key no longer drops the whole prompt payload.
     const args = parseToolArguments(toolCall.function.arguments);
-    emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, status: 'running' });
+    emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, status: 'running', lifecycle: 'started' });
 
     // Build combined signal: parent abort OR timeout
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
@@ -317,9 +331,16 @@ export class SubagentOrchestrator implements ToolAdapter {
         if (event.type === 'TokenDelta') {
           tokensUsed++;
         } else if (event.type === 'StateChange') {
-          emit(progress?.onState, { state: event.payload.to });
+          const lifecycle = event.payload.to === 'ACT' ? 'started'
+            : event.payload.to === 'OBSERVE' ? 'observing'
+              : event.payload.to === 'VERIFY' ? 'verifying'
+                : event.payload.to === 'TERMINATE' ? 'done'
+                  : 'started';
+          emit(progress?.onState, { state: event.payload.to, lifecycle, toolState: event.payload.to === 'ACT' ? undefined : 'completed' });
+        } else if (event.type === 'ToolStarted') {
+          emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'running', lifecycle: 'tool_running' });
         } else if (event.type === 'ToolResult') {
-          emit(progress?.onTool, { toolName: event.payload.toolName });
+          emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'completed', lifecycle: 'observing' });
         } else if (event.type === 'Completed') {
           finalOutput = event.payload.finalOutput;
           await persist('subagent_completed', event.payload.messages, event.payload.turnCount ?? 0);
@@ -327,7 +348,8 @@ export class SubagentOrchestrator implements ToolAdapter {
         } else if (event.type === 'Interrupted') {
           await persist('subagent_interrupted', event.payload.messages, event.payload.turnCount ?? 0);
           if (combinedSignal.aborted) {
-            emit(progress?.onDone, { success: false, error: 'timed out or cancelled', status: 'timed_out', durationMs: done(0), tokensUsed });
+            const cancelled = parentSignal?.aborted === true && !timeoutSignal.aborted;
+            emit(progress?.onDone, { success: false, error: cancelled ? 'cancelled' : 'timed out', status: cancelled ? 'cancelled' : 'timed_out', lifecycle: cancelled ? 'cancelled' : 'timed_out', durationMs: done(0), tokensUsed });
             return {
               id: toolCall.id,
               toolName: def.name,
@@ -336,10 +358,10 @@ export class SubagentOrchestrator implements ToolAdapter {
               duration: done(0),
             };
           }
-          emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput, status: 'failed', durationMs: done(0), tokensUsed });
+          emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed });
           break;
         } else if (event.type === 'Error') {
-          emit(progress?.onError, { error: event.payload.message, status: 'failed', durationMs: done(0), tokensUsed });
+          emit(progress?.onError, { error: event.payload.message, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed });
           return {
             id: toolCall.id,
             toolName: def.name,
@@ -367,7 +389,7 @@ export class SubagentOrchestrator implements ToolAdapter {
         duration: done(0),
       };
     } catch (err: any) {
-      emit(progress?.onError, { error: err?.message ?? String(err), status: 'failed', durationMs: done(0), tokensUsed: 0 });
+      emit(progress?.onError, { error: err?.message ?? String(err), status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed: 0 });
       return {
         id: toolCall.id,
         toolName: def.name,

@@ -143,6 +143,7 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
 
   const el = document.createElement('div');
   el.className = 'bubble-row plan-progress-row plan-text-progress-row';
+  el.setAttribute('data-plan-seq', String(planSeq));
 
   const card = document.createElement('div');
   card.className = 'plan-progress-text-plan';

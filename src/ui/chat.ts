@@ -4,7 +4,7 @@
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, promptBudgetForProvider, imageGenEnabled, imageGenModelFor } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
+import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
@@ -42,6 +42,7 @@ import { createPlanProgressPin, type PlanProgressPinHandle } from './planProgres
 import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, setDownloadProgressListener, cancelDownload, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
+import { createAgentActivityPanel, mergeAgentActivity, type AgentActivityPanelHandle } from './agentActivityPanel';
 import { attachPlanPauseActions } from './planPauseActions';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
@@ -84,6 +85,7 @@ import type {
   Checkpoint,
 } from '../shared/types';
 import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, TaskMode, IntentAssessment } from '../coding-agent/types';
+import type { SessionAgentActivity } from './store';
 import { createOptimizeCard } from './optimizeCard';
 
 // Insert a `-v{n}` segment before the extension (or append it for extension-less
@@ -1003,57 +1005,9 @@ function yieldToNextPaint(signal?: AbortSignal): Promise<void> {
 }
 
 // ── Multi-agent activity visualization ──
-// When the CodingAgent delegates a sub-task to a subagent, the orchestrator
-// emits SubagentActivity snapshots. These helpers turn them into a live
-// "which agent is working" card in the transcript so the user can see the
-// multi-agent system in action instead of a black box.
-
-function agentStateLabel(state?: string): string {
-  switch (state) {
-    case 'THINK': return '思考中';
-    case 'ACT': return '执行中';
-    case 'OBSERVE': return '观察中';
-    case 'VERIFY': return '验证中';
-    case 'TERMINATE': return '收尾中';
-    default: return state ? state : '工作中';
-  }
-}
-
-/** A compact status label for the card badge, driven by SubagentStatus. */
-function agentStatusLabel(a: SubagentActivity): string {
-  switch (a.status) {
-    case 'done': return '✓ 完成';
-    case 'failed': return '✗ 失败';
-    case 'timed_out': return '⏱ 超时';
-    default: return agentStateLabel(a.state) || '工作中';
-  }
-}
-
-function truncate(text: string, max: number): string {
-  const t = (text ?? '').trim();
-  return t.length > max ? `${t.slice(0, max)}…` : t;
-}
-
-interface AgentCardHandle {
-  root: HTMLElement;
-  badge: HTMLElement;
-}
-
-/** Lazy floating container (top-right) hosting the live multi-agent cards. It is
- * `pointer-events:none` so it never blocks the transcript; the cards fade out and
- * are removed when each subagent finishes (ephemeral — never persisted, so replay
- * never shows them). */
-function getAgentFloat(): HTMLElement {
-  let host = document.getElementById('agent-float');
-  if (!host) {
-    host = document.createElement('div');
-    host.id = 'agent-float';
-    host.className = 'agent-float';
-    host.setAttribute('aria-label', '多 agent 活动');
-    (document.body).appendChild(host);
-  }
-  return host;
-}
+// Agent activity is task-scoped and stays in the transcript. The panel is
+// updated from the orchestrator callbacks and restored from SessionUiState so
+// a long-running multi-step task has one continuous visual status surface.
 
 /**
  * 规则分析没能给出具体计划时的起步步骤兜底。关键：按用户真实诉求生成，而不是
@@ -1075,55 +1029,6 @@ function deriveFallbackPlan(prompt: string): Plan {
     }],
     reasoning: '没有可用的计划分析时，先按这次请求的真实语义理解目标，而不是把请求归类为某种固定任务类型。',
   };
-}
-
-function createAgentCard(a: SubagentActivity): AgentCardHandle {
-  const host = getAgentFloat();
-  const root = document.createElement('div');
-  root.className = 'agent-float-card working';
-  root.dataset.callId = a.callId;
-  // Ephemeral: no click-to-trace, no transcript binding — the card just shows
-  // which subagent is doing what, then fades away.
-
-  const name = document.createElement('span');
-  name.className = 'agent-float-name';
-  name.textContent = a.agentName;
-
-  const role = document.createElement('span');
-  role.className = 'agent-float-role';
-  if (a.agentRole) role.textContent = a.agentRole;
-
-  const badge = document.createElement('span');
-  badge.className = 'agent-float-badge';
-  badge.textContent = '工作中';
-
-  root.append(name, role, badge);
-  host.appendChild(root);
-  return { root, badge };
-}
-
-function finishAgentCard(
-  card: AgentCardHandle,
-  outcome: 'done' | 'failed',
-  badgeText: string,
-  _note?: string,
-  a?: SubagentActivity,
-): void {
-  card.root.classList.remove('working');
-  card.root.classList.add(outcome);
-  if (a?.status === 'timed_out') card.root.classList.add('timed-out');
-  card.badge.textContent = badgeText;
-  // Ephemeral card: ~1s after the task ends, slide out to the right and
-  // remove once the exit animation completes.
-  window.setTimeout(() => {
-    card.root.style.pointerEvents = 'none';
-    card.root.classList.add('agent-float-exit');
-    window.setTimeout(() => {
-      // Guard against the float container already being gone (new chat / session
-      // switch cleared the DOM) — remove() on a detached node throws.
-      if (card.root.isConnected) card.root.remove();
-    }, 500);
-  }, 1000);
 }
 
 // ── ChatController ──
@@ -1256,6 +1161,11 @@ export class ChatController {
   private activePlanSeq = 1;
   /** 固定进度条：对话滚动时始终可见的当前步骤摘要，随活动计划卡挂载/卸载。 */
   private planProgressPin: PlanProgressPinHandle | null = null;
+  /** Task-scoped collaboration trace shared by live execution and restore. */
+  private agentActivities: SessionAgentActivity[] = [];
+  private agentActivityPanel: AgentActivityPanelHandle | null = null;
+  private agentActivityHistorical = false;
+  private agentActivityPersistTimer: ReturnType<typeof setTimeout> | null = null;
   /** Per-session count of how many times each generated/modified file has been
    * written (write_file / edit_file / replace_files) this session. Drives the
    * "v1 / v2 / …" version badge on artifact cards so the user can see which
@@ -1418,7 +1328,11 @@ export class ChatController {
     if (!this.planProgressPin) {
       this.planProgressPin = createPlanProgressPin({
         jumpTo: () => {
-          const cardEl = this.activePlanCardHandle?.el;
+          const liveCard = this.activePlanCardHandle?.el;
+          const restoredCard = document.querySelector<HTMLElement>(
+            `.plan-progress-row[data-plan-seq="${this.activePlanSeq}"]`,
+          );
+          const cardEl = liveCard?.isConnected ? liveCard : restoredCard;
           if (cardEl?.isConnected) cardEl.scrollIntoView({ block: 'start', behavior: 'smooth' });
         },
       });
@@ -1456,6 +1370,10 @@ export class ChatController {
     this.activePlanStarted = false;
     this.activePlanCardSnapshot = null;
     this.activePlanProgress = null;
+    this.agentActivities = [];
+    this.agentActivityHistorical = false;
+    this.clearAgentActivityPersistence();
+    this.removeAgentActivityPanel();
     // 会话切换 = 新的一次对话：规划编号重新起算，固定进度条随之移除
     //（chatView 里它不会随 #chat 清空，必须显式卸载）。
     this.planSeqCounter = 0;
@@ -1601,6 +1519,77 @@ export class ChatController {
     this.pauseAssessmentFlow = flow;
   }
 
+  /** Mount the task-scoped collaboration trace outside the transcript scroll box. */
+  mountAgentActivityPanel(): void {
+    const host = document.getElementById('agent-console-host');
+    if (!host) return;
+    if (this.agentActivities.length === 0) {
+      host.hidden = true;
+      return;
+    }
+    if (!this.agentActivityPanel || !this.agentActivityPanel.el.isConnected) {
+      this.agentActivityPanel = createAgentActivityPanel();
+      host.replaceChildren(this.agentActivityPanel.el);
+    }
+    host.hidden = false;
+    this.agentActivityPanel.update(this.agentActivities, { historical: this.agentActivityHistorical });
+  }
+
+  private removeAgentActivityPanel(): void {
+    this.agentActivityPanel?.el.remove();
+    this.agentActivityPanel = null;
+    const host = document.getElementById('agent-console-host');
+    if (host) {
+      host.hidden = true;
+      host.replaceChildren();
+    }
+  }
+
+  private updateAgentActivity(activity: SubagentActivity): void {
+    const index = this.agentActivities.findIndex((item) => item.callId === activity.callId);
+    const previous = index >= 0 ? this.agentActivities[index] : undefined;
+    // Progress callbacks from parallel work can arrive after a terminal update.
+    // A per-call sequence makes the latest observed lifecycle authoritative and
+    // prevents a delayed state/tool callback from bringing a finished agent back.
+    if (previous?.sequence !== undefined && activity.sequence !== undefined && activity.sequence <= previous.sequence) return;
+    const next = mergeAgentActivity(previous, activity);
+    if (index >= 0) this.agentActivities[index] = next;
+    else this.agentActivities.push(next);
+    this.mountAgentActivityPanel();
+    this.agentActivityPanel?.update(this.agentActivities);
+    this.scheduleAgentActivityPersistence();
+  }
+
+  private scheduleAgentActivityPersistence(): void {
+    if (this.agentActivityPersistTimer !== null) clearTimeout(this.agentActivityPersistTimer);
+    const sessionId = this.sessionId;
+    const generation = this.generation;
+    this.agentActivityPersistTimer = setTimeout(() => {
+      this.agentActivityPersistTimer = null;
+      void flushSessionSaves().then(() => loadSession(sessionId)).then((loaded) => {
+        if (!loaded || this.sessionId !== sessionId || this.generation !== generation) return;
+        const snapshot: SessionSnapshot = {
+          ...loaded.snapshot,
+          uiState: {
+            ...loaded.snapshot.uiState,
+            agentActivities: this.agentActivities.map((item) => ({ ...item })),
+          },
+        };
+        return saveSession(sessionId, snapshot, loaded.workspace);
+      }).catch(() => {});
+    }, 250);
+  }
+
+  private clearAgentActivityPersistence(): void {
+    if (this.agentActivityPersistTimer !== null) clearTimeout(this.agentActivityPersistTimer);
+    this.agentActivityPersistTimer = null;
+  }
+
+  /** Register the restored plan card as the scroll target for the fixed progress bar. */
+  registerRestoredPlanCard(card: PlanCardHandle): void {
+    this.activePlanCardHandle = card;
+  }
+
   /** Current session's aggregated stats (token totals, cost, tool activity). */
   getSessionStats(): SessionStats {
     return this.sessionStats;
@@ -1672,6 +1661,9 @@ export class ChatController {
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;
     this.activePlanCardSnapshot = null;
+    this.agentActivities = (snapshot.uiState.agentActivities ?? []).map((activity) => ({ ...activity }));
+    this.agentActivityHistorical = true;
+    this.removeAgentActivityPanel();
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
     this.removePlanProgressPin();
@@ -1924,37 +1916,34 @@ export class ChatController {
     }
     const gen = ++this.generation;
 
-    // Live multi-agent activity cards: each subagent spawned by the orchestrator
-    // gets a visible "which agent is working" card in the transcript.
-    const agentCards = new Map<string, AgentCardHandle>();
+    // The activity panel is task-scoped: a continuation keeps the existing
+    // rows, while a new top-level task starts a fresh collaboration trace.
+    const preserveAgentActivities = this.activeComplexPlan !== null && this.hasHistory;
+    this.agentActivityHistorical = false;
+    if (!preserveAgentActivities) {
+      this.agentActivities = [];
+      this.removeAgentActivityPanel();
+    }
     const subagentProgress: SubagentProgress = {
       onStart: (a) => {
-        if (gen !== this.generation || agentCards.has(a.callId)) return;
-        agentCards.set(a.callId, createAgentCard(a));
+        if (gen !== this.generation) return;
+        this.updateAgentActivity(a);
       },
       onState: (a) => {
         if (gen !== this.generation) return;
-        const card = agentCards.get(a.callId);
-        if (card) card.badge.textContent = agentStateLabel(a.state);
+        this.updateAgentActivity(a);
       },
       onTool: (a) => {
         if (gen !== this.generation) return;
-        const card = agentCards.get(a.callId);
-        if (card) card.badge.textContent = agentStateLabel(a.state);
+        this.updateAgentActivity(a);
       },
       onDone: (a) => {
         if (gen !== this.generation) return;
-        const card = agentCards.get(a.callId);
-        if (!card) return;
-        const outcome = a.success ? 'done' : 'failed';
-        const note = a.output ? truncate(a.output, 240) : (a.error ? `错误：${truncate(a.error, 240)}` : undefined);
-        finishAgentCard(card, outcome, agentStatusLabel(a), note, a);
+        this.updateAgentActivity(a);
       },
       onError: (a) => {
         if (gen !== this.generation) return;
-        const card = agentCards.get(a.callId);
-        if (!card) return;
-        finishAgentCard(card, 'failed', agentStatusLabel(a) || '✗ 出错', a.error ? `错误：${truncate(a.error, 240)}` : '未知错误', a);
+        this.updateAgentActivity(a);
       },
     };
     // The plan-card snapshot belongs to this turn only; a follow-up simple
@@ -4444,15 +4433,15 @@ export class ChatController {
     this.activeComplexPlan = null;
     this.pendingTasks = [];
     this.relatedInsert = null;
-    // Multi-agent floating cards are session-scoped: clear them so a new chat
-    // never shows the previous session's cards (and the singleton float
-    // container isn't reused across sessions).
-    document.getElementById('agent-float')?.replaceChildren();
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;
     this.activePlanCardSnapshot = null;
     this.activePlanCardHandle = null;
+    this.agentActivities = [];
+    this.agentActivityHistorical = false;
+    this.clearAgentActivityPersistence();
+    this.removeAgentActivityPanel();
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
@@ -4644,7 +4633,16 @@ export class ChatController {
       planState: turnPlanState,
     });
     const events = nextSnapshotV2.events;
-    const nextSnapshot: SessionSnapshot = { version: 3, modelContext: nextSnapshotV2.modelContext, events, transcript: nextSnapshotV2.transcript, uiState: nextSnapshotV2.uiState };
+    const nextSnapshot: SessionSnapshot = {
+      version: 3,
+      modelContext: nextSnapshotV2.modelContext,
+      events,
+      transcript: nextSnapshotV2.transcript,
+      uiState: {
+        ...nextSnapshotV2.uiState,
+        agentActivities: this.agentActivities.length > 0 ? this.agentActivities.map((activity) => ({ ...activity })) : undefined,
+      },
+    };
     await saveSession(sessionId, nextSnapshot, workspace);
   }
 
