@@ -79,6 +79,11 @@ const THINKING_TIMER_DEFAULTS = { intervalMs: 1000, hintAfterMs: 15000 };
 
 const timerIntervals = new WeakMap<ThinkingCardHandle, number>();
 
+// Fade timers for scheduled dismissThinkingHint(delayMs > 0) calls, tracked
+// per-handle so stopThinkingTimer can cancel a pending fade when the card is
+// finalized or destroyed mid-linger instead of the timer firing later.
+const hintFadeTimeouts = new WeakMap<ThinkingCardHandle, number>();
+
 /** Tick an elapsed-seconds chip beside the label until the card finalizes,
  *  detaches (interval self-cancels), or stopThinkingTimer runs. */
 export function startThinkingTimer(
@@ -116,12 +121,23 @@ export function startThinkingTimer(
   timerIntervals.set(handle, iv);
 }
 
-/** Remove the timer chip and cancel its interval (idempotent). */
+/** Remove the timer chip and cancel its interval (idempotent). Also cancels
+ *  any pending hint fade scheduled by dismissThinkingHint — unless the hint is
+ *  already mid-dismissal (dismissing === '1'), in which case its own fade
+ *  timer owns removal and must be left alone. */
 export function stopThinkingTimer(handle: ThinkingCardHandle): void {
   const iv = timerIntervals.get(handle);
   if (iv !== undefined) {
     clearInterval(iv);
     timerIntervals.delete(handle);
+  }
+  const hint = handle.card.querySelector<HTMLElement>('.thinking-hint');
+  if (!hint || hint.dataset.dismissing !== '1') {
+    const fade = hintFadeTimeouts.get(handle);
+    if (fade !== undefined) {
+      clearTimeout(fade);
+      hintFadeTimeouts.delete(handle);
+    }
   }
   handle.card.querySelector('.thinking-timer')?.remove();
 }
@@ -147,10 +163,11 @@ export function dismissThinkingHint(handle: ThinkingCardHandle, delayMs = 0): vo
     // Card (and hint) may have left the DOM mid-dwell (abort / session switch).
     if (!hint.isConnected) return;
     hint.classList.add('fading');
-    window.setTimeout(() => hint.remove(), 400);
+    hintFadeTimeouts.set(handle, window.setTimeout(() => hint.remove(), 400));
   };
-  if (delayMs > 0) window.setTimeout(startFade, delayMs);
-  else startFade();
+  if (delayMs > 0) {
+    hintFadeTimeouts.set(handle, window.setTimeout(startFade, delayMs));
+  } else startFade();
 }
 
 export function createThinkingCard(): ThinkingCardHandle {

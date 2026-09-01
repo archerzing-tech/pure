@@ -534,6 +534,51 @@ body {
   box-shadow: var(--shadow-sm);
 }
 
+/* ── In-sidebar collapse handle ──
+   While the sidebar is open, the floating top-left hamburger (#sidebar-toggle)
+   hides and this right-pointing chevron takes its place inside the sidebar's
+   top-right corner — the chat area stays fully unobstructed. Hidden whenever
+   the sidebar is collapsed; the hamburger reappears in #main. */
+#sidebar-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 12;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  /* The sidebar is -webkit-app-region: drag; clicks must reach the button. */
+  -webkit-app-region: no-drag;
+  transition: opacity 0.4s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
+}
+
+#sidebar:not(.collapsed) #sidebar-close {
+  display: flex;
+}
+
+#sidebar-close:hover {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Sidebar open → the floating top-left hamburger would float over the chat
+   content (the sidebar's right edge sits where #main used to start); swap it
+   for the in-sidebar handle above. Inline display toggles from the settings
+   overlay (settings.ts) restore to '' and fall back to this rule cleanly. */
+#sidebar:not(.collapsed) ~ #main #sidebar-toggle {
+  display: none;
+}
+
 /* ── Right-side floating settings button (glassmorphism) ── */
 
 #right-settings-btn {
@@ -3576,6 +3621,48 @@ body {
   padding: 1px 8px;
 }
 
+/* Footer context-window budget: slim progress bar + % chip, measuring the
+   live transcript against the provider's available input budget. On narrow
+   windows the text label drops first (same policy as #status-model). */
+.status-window {
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.status-window-label {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+
+.status-window-track {
+  width: 68px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-light);
+  overflow: hidden;
+}
+
+.status-window-track i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.3s var(--ease-out), background 0.3s var(--ease-out);
+}
+
+.status-window.over .status-window-track i {
+  background: var(--danger);
+}
+
+.status-window-pct {
+  min-width: 2.6em;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
 /* ── Settings Header ── */
 #settings-header {
   position: relative;
@@ -5104,6 +5191,41 @@ body {
   background: transparent;
 }
 
+/* ── Settings sub-panels: show scrollbars when a card scrolls ──
+ * The global hides above keep scrollbar chrome off the chat surface; inside
+ * the settings panel (each nav item's sub-panel) every scrollable surface —
+ * the page body and any card-internal lists (provider model picker, …) —
+ * restores a thin visible scrollbar whenever content overflows. Non-scrolling
+ * elements never paint one, so the panel stays clean unless a card actually
+ * scrolls. Styling matches the #memory-list precedent (accent thumb on a
+ * transparent track). */
+#settings-content,
+#settings-content * {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: var(--accent) var(--bg-card);
+}
+#settings-content::-webkit-scrollbar,
+#settings-content *::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+  display: block;
+}
+#settings-content::-webkit-scrollbar-track,
+#settings-content *::-webkit-scrollbar-track {
+  display: block;
+  background: transparent;
+}
+#settings-content::-webkit-scrollbar-thumb,
+#settings-content *::-webkit-scrollbar-thumb {
+  display: block;
+  background-color: var(--accent);
+  border-radius: 20px;
+}
+#settings-content::-webkit-scrollbar-thumb:hover,
+#settings-content *::-webkit-scrollbar-thumb:hover {
+  background-color: var(--accent-hover, var(--accent));
+}
+
 /* ════════════════════════════════════════
    MARKDOWN + CODE + DIAGRAMS (v0.7)
    ════════════════════════════════════════ */
@@ -6216,8 +6338,13 @@ select:focus-visible,
   }
 
   /* Narrow windows: the model badge is the least critical piece of the
-     footer — drop it before the workspace path or the live state. */
+     footer — drop it before the workspace path or the live state. The
+     context-window label goes next, keeping bar + % chip visible. */
   #status-model {
+    display: none;
+  }
+
+  .status-window-label {
     display: none;
   }
 
@@ -12277,7 +12404,7 @@ button svg,
   background: var(--accent-soft);
 }
 
-/* ── 计划卡头：规划序号 chip（区分同一对话里的多份规划）── */
+/* ── 计划卡头：计划序号 chip（区分同一对话里的多份计划）── */
 .plan-progress-seq {
   flex-shrink: 0;
   font-size: 10px;
@@ -12296,7 +12423,7 @@ button svg,
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
 }
 
-/* 新一轮规划：展示触发来源，明确与上面的规划不是同一件事 */
+/* 新一轮计划：展示触发来源，明确与上面的计划不是同一件事 */
 .plan-progress-reason {
   margin: -2px 0 8px;
   font-size: 12px;
