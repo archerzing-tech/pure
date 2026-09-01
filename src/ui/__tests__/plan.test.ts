@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { createPlanCard, createRestoredPlanCard, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers } from '../plan';
+import { createPlanCard, createRestoredPlanCard, dedupePlanAnnouncements, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers } from '../plan';
 import { t } from '../../shared/i18n';
 import type { Plan } from '../../coding-agent/types';
 import { PlanProgressModel } from '../planProgress';
@@ -66,6 +66,35 @@ describe('formatPlanForPrompt', () => {
     expect(pending).toContain('this first planning response is a pause point');
     expect(pending).toContain('Only after the user sends the next message may you begin execution');
   });
+
+describe('dedupePlanAnnouncements', () => {
+  it('collapses consecutive repeats of the same announcement line', () => {
+    const input = '## 计划 5：交付验证与质量修复\n## 计划 5：交付验证与质量修复\n## 计划 5：交付验证与质量修复\n接下来重跑机械检查。';
+    const out = dedupePlanAnnouncements(input);
+    expect(out).toBe('## 计划 5：交付验证与质量修复\n接下来重跑机械检查。');
+  });
+
+  it('keeps different announcement lines and non-consecutive repeats', () => {
+    const input = '## 计划 1：搭建骨架\n## 计划 2：实现核心\n## 计划 1：搭建骨架';
+    expect(dedupePlanAnnouncements(input)).toBe(input);
+  });
+
+  it('never folds plain repeated body copy or code lines', () => {
+    const code = '```shell\nps aux\nps aux\n```';
+    expect(dedupePlanAnnouncements(code)).toBe(code);
+    const prose = '计划 计划 计划——正文里的重复不是协议行';
+    expect(dedupePlanAnnouncements(prose)).toBe(prose);
+  });
+
+  it('collapses repeated substep control lines too', () => {
+    const input = '### 子步骤 2：接入数据层\n### 子步骤 2：接入数据层\n开始工作';
+    expect(dedupePlanAnnouncements(input)).toBe('### 子步骤 2：接入数据层\n开始工作');
+  });
+
+  it('handles empty input', () => {
+    expect(dedupePlanAnnouncements('')).toBe('');
+  });
+});
 
   it('keeps first-turn planning separate from later continuation context', () => {
     const plan: Plan = {
