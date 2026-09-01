@@ -562,7 +562,7 @@ export class SettingsPanel {
       if (target.closest('#cfg-add-model-btn')) { this.addModelRow(); return; }
       if (target.closest('#cfg-clear-models-btn')) { this.clearModels(); return; }
       if (target.closest('#cfg-fetch-models-btn')) { void this.fetchProviderModels(); return; }
-      if (target.closest('#provider-delete-btn')) { this.removeCustomProvider(this.editingProvider || ''); return; }
+      if (target.closest('#provider-delete-btn')) { this.removeProvider(this.editingProvider || ''); return; }
       if (target.closest('[data-close-panel]')) { this.collapseProviderPanel(); return; }
       if (target.closest('[data-save-panel]')) { this.saveAndCollapsePanel(); return; }
       const toggleKey = target.closest('#cfg-toggle-key');
@@ -1071,7 +1071,7 @@ export class SettingsPanel {
         </div>` : ''}
       </div>
       <div class="llm-provider-panel-foot">
-        ${custom ? `<button id="provider-delete-btn" class="setting-btn danger" data-i18n="llm.custom.deleteBtn">删除</button>` : ''}
+        <button id="provider-delete-btn" class="setting-btn danger" data-i18n="llm.custom.deleteBtn">删除</button>
         <span class="llm-provider-panel-spacer"></span>
         <button type="button" class="setting-btn primary" data-save-panel data-i18n="llm.panel.save">保存</button>
       </div>
@@ -2505,26 +2505,35 @@ export class SettingsPanel {
   /** 按 id 删除自定义供应商卡片（卡片 × 与配置卡删除按钮共用）。若删除的是
    *  当前选中的供应商，回退到 DeepSeek 默认配置；否则保持当前选择。删除后
    *  表单回填新活动供应商的配置，避免残留被删卡片的字段值被后续保存误写。 */
-  private removeCustomProvider(id: string): void {
+  private removeProvider(id: string): void {
     const prev = loadConfig() ?? defaults();
     const removed = customProviderFor(prev.customProviders ?? [], id);
-    if (!removed) return;
-    if (isTauriRuntime() && removed.hasApiKey) {
+    const isBuiltin = PROVIDERS.some((provider) => provider.id === id);
+    if (!removed && !isBuiltin) return;
+    if (removed && isTauriRuntime() && removed.hasApiKey) {
       void revokeCustomSecretFromRust(removed.id);
     }
     const wasSelected = prev.provider === id;
+    const remainingCustoms = removed
+      ? (prev.customProviders ?? []).filter(p => p.id !== id)
+      : (prev.customProviders ?? []);
+    const providerOverrides = { ...(prev.providerOverrides ?? {}) };
+    delete providerOverrides[id];
+    const providerModels = { ...(prev.providerModels ?? {}) };
+    delete providerModels[id];
     const cfg: PureConfig = {
       ...prev,
-      customProviders: (prev.customProviders ?? []).filter(p => p.id !== id),
+      customProviders: remainingCustoms,
+      providerOverrides,
+      providerModels,
       provider: wasSelected ? 'deepseek-openai' : prev.provider,
       model: wasSelected ? '' : prev.model,
       baseURL: wasSelected ? '' : prev.baseURL,
       apiKey: wasSelected ? '' : prev.apiKey,
+      hasApiKey: wasSelected ? false : prev.hasApiKey,
     };
     persistConfig(cfg);
     invalidateConfigCache();
-    // Deleting the provider whose panel is open also collapses the panel;
-    // the default model falls back to the first registry default.
     if (this.editingProvider === id) this.editingProvider = null;
     this.renderProviderGrid();
     this.renderDefaultBar();
