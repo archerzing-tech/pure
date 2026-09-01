@@ -15,7 +15,7 @@ function nextScheduleId(): string {
 }
 
 /** Re-read config, mutate cfg.schedules by id, persist, notify. */
-function applyById(id: string, patch: Partial<ScheduleDef>, onChange: () => void): void {
+function applyById(id: string, patch: Partial<ScheduleDef>, onChange: () => void, refresh: () => void): void {
   const cfg = loadConfig() ?? defaults();
   cfg.schedules = cfg.schedules ?? [];
   const target = cfg.schedules.find((x) => x.id === id);
@@ -23,6 +23,7 @@ function applyById(id: string, patch: Partial<ScheduleDef>, onChange: () => void
   persistConfig(cfg);
   invalidateConfigCache();
   onChange();
+  refresh();
 }
 
 export function renderSchedulesSettings(host: HTMLElement, onChange: () => void): void {
@@ -48,6 +49,7 @@ export function renderSchedulesSettings(host: HTMLElement, onChange: () => void)
     persistConfig(cfg);
     invalidateConfigCache();
     onChange();
+    renderSchedulesSettings(host, onChange);
   });
   host.appendChild(addBtn);
 
@@ -66,14 +68,14 @@ export function renderSchedulesSettings(host: HTMLElement, onChange: () => void)
     kind.append(optDaily, optInterval);
     kind.value = s.kind;
     kind.addEventListener('change', () =>
-      applyById(s.id, { kind: kind.value === 'interval' ? 'interval' : 'daily' }, onChange));
+      applyById(s.id, { kind: kind.value === 'interval' ? 'interval' : 'daily' }, onChange, () => renderSchedulesSettings(host, onChange)));
 
     const timeInput = document.createElement('input');
     timeInput.type = 'time';
     timeInput.className = 'schedule-time';
     timeInput.value = parseHhMm(s.time ?? '') ? s.time! : '09:00';
     timeInput.title = t('schedule.timeTitle');
-    timeInput.addEventListener('change', () => applyById(s.id, { time: timeInput.value || undefined }, onChange));
+    timeInput.addEventListener('change', () => applyById(s.id, { time: timeInput.value || undefined }, onChange, () => renderSchedulesSettings(host, onChange)));
 
     const minutesInput = document.createElement('input');
     minutesInput.type = 'number';
@@ -82,7 +84,7 @@ export function renderSchedulesSettings(host: HTMLElement, onChange: () => void)
     minutesInput.value = String(s.minutes ?? 30);
     minutesInput.title = t('schedule.minutesTitle');
     minutesInput.addEventListener('change', () =>
-      applyById(s.id, { minutes: Math.max(1, Math.floor(Number(minutesInput.value) || 1)) }, onChange));
+      applyById(s.id, { minutes: Math.max(1, Math.floor(Number(minutesInput.value) || 1)) }, onChange, () => renderSchedulesSettings(host, onChange)));
 
     const trigger = document.createElement('span');
     trigger.className = 'schedule-trigger';
@@ -93,14 +95,14 @@ export function renderSchedulesSettings(host: HTMLElement, onChange: () => void)
     text.className = 'schedule-text';
     text.placeholder = t('schedule.textPlaceholder');
     text.value = s.text;
-    text.addEventListener('change', () => applyById(s.id, { text: text.value }, onChange));
+    text.addEventListener('change', () => applyById(s.id, { text: text.value }, onChange, () => renderSchedulesSettings(host, onChange)));
 
     const enabled = document.createElement('input');
     enabled.type = 'checkbox';
     enabled.className = 'schedule-enabled';
     enabled.checked = s.enabled !== false;
     enabled.title = t('schedule.enabled');
-    enabled.addEventListener('change', () => applyById(s.id, { enabled: enabled.checked }, onChange));
+    enabled.addEventListener('change', () => applyById(s.id, { enabled: enabled.checked }, onChange, () => renderSchedulesSettings(host, onChange)));
 
     const del = document.createElement('button');
     del.type = 'button';
@@ -113,6 +115,7 @@ export function renderSchedulesSettings(host: HTMLElement, onChange: () => void)
       persistConfig(cfg);
       invalidateConfigCache();
       onChange();
+      renderSchedulesSettings(host, onChange);
     });
 
     row.append(kind, trigger, text, enabled, del);
