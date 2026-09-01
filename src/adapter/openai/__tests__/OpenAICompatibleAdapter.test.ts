@@ -26,9 +26,9 @@ describe('provider adapter factories — endpoint overrides', () => {
   });
 
   it('createGLMAdapter defaults to the z.ai endpoint and honors an override', () => {
-    expect(clientBaseURL(createGLMAdapter('sk-1', 'glm-5.2') as never))
-      .toBe('https://api.z.ai/api/paas/v4');
-    expect(clientBaseURL(createGLMAdapter('sk-1', 'glm-5.2', 'https://open.bigmodel.cn/api/paas/v4') as never))
+    expect(clientBaseURL(createGLMAdapter('sk-1') as never))
+      .toBe('https://api.z.ai/api/coding/paas/v4');
+    expect(clientBaseURL(createGLMAdapter('sk-1', 'glm-5.3-flash', 'https://open.bigmodel.cn/api/paas/v4') as never))
       .toBe('https://open.bigmodel.cn/api/paas/v4');
   });
 });

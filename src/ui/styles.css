@@ -750,7 +750,7 @@ body {
   align-items: flex-end;
   gap: 0;
   border-bottom: 1.5px solid var(--border);
-  padding: 12px 4px;
+  padding: 12px 4px 4px;
   position: relative;
   transition: border-color 0.3s ease;
 }
@@ -7368,7 +7368,8 @@ button svg,
 }
 
 #landing-input-wrap {
-  min-height: 78px;
+  min-height: 0;
+  flex-wrap: nowrap;
 }
 
 #landing-input-wrap .input-ws-btn,
@@ -9178,6 +9179,7 @@ button svg,
 #input-bar {
   flex-direction: column;
   align-items: stretch;
+  min-height: 0;
 }
 
 #composer-box {
@@ -9236,6 +9238,7 @@ button svg,
   flex-wrap: wrap;
   gap: 4px;
   padding: 4px 8px 8px;
+  min-height: 0;
 }
 
 /* Attach + workspace + copy: ghost icon buttons, no frame — hover chip. */
@@ -9427,9 +9430,10 @@ button svg,
   align-items: stretch;
   gap: 0;
   min-height: 0;
-  padding: 8px 8px 6px 8px;
+  padding: 8px 8px 6px;
   border: 1px solid var(--border-light);
   background: color-mix(in srgb, var(--bg-input) 78%, transparent);
+  flex-wrap: nowrap;
 }
 
 #landing-input-wrap:focus-within {
@@ -9446,6 +9450,8 @@ button svg,
 #landing-input-row {
   display: flex;
   align-items: flex-end;
+  flex: 0 0 auto;
+  min-height: 0;
   padding: 6px 6px 2px 8px;
   position: relative;
 }
@@ -9463,8 +9469,10 @@ button svg,
 #landing-tool-row {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   gap: 4px;
+  min-height: 0;
   padding: 4px 2px 2px;
 }
 

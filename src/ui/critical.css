@@ -282,9 +282,9 @@ body {
 .bubble-row.user .bubble { background: var(--bg-user); }
 .bubble-row.assistant .bubble { background: transparent; }
 
-#input-bar { display: flex; justify-content: center; padding: 0 48px 24px; }
+#input-bar { display: flex; justify-content: center; min-height: 0; padding: 0 48px 24px; }
 #composer-box { width: 100%; max-width: 1120px; }
-#composer-input-row { min-height: 36px; }
+#composer-input-row { min-height: 0; }
 #composer-tool-row, #landing-tool-row { display: flex; align-items: center; gap: 8px; }
 .composer-spacer { flex: 1; }
 .input-ws-btn, .attach-btn, .input-copy-btn {

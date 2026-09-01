@@ -3,6 +3,16 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.1.0
+
+**Provider 协议支持与输入框布局优化**
+
+- 新增 LLM wire protocol 支持（`openai` / `anthropic` / `auto`），Provider 可配置协议，并按 URL 自动检测。
+- 新增 Anthropic 协议适配器（浏览器端 `DeepSeekAnthropicAdapter` + Rust `chat_stream` Anthropic 分支），MiniMax 切换到 Anthropic 协议端点。
+- GLM 默认模型升级为 glm-5.3-flash，端点切换到 z.ai coding 网关，GLM 输出 token 预算提升至 32768。
+- 输入框/composer 布局修复：移除固定 min-height、防止 flex 溢出，多行输入不再撑破输入栏。
+- 动态信息插入协调器：新增无关请求排队、补充信息、约束变化、目标变化和停止请求的分类与调度。
+
 ## v2.1.0-beta
 
 **定时任务、动态插入与侧栏交互修复**

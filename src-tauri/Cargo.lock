@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "pure"
-version = "2.1.0-beta"
+version = "2.1.0"
 dependencies = [
  "base64 0.21.7",
  "block2",
