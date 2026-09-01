@@ -154,6 +154,32 @@ body {
 #right-settings-btn { right: 4px; }
 #sidebar-toggle:hover, #right-settings-btn:hover { color: var(--text); background: var(--bg); }
 
+/* In-sidebar collapse handle (right-pointing chevron): visible only while the
+   sidebar is open; the floating top-left hamburger hides at the same time so
+   it never covers the chat content. Must opt out of the sidebar's drag region
+   for clicks to register. */
+#sidebar-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 12;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+#sidebar:not(.collapsed) #sidebar-close { display: flex; }
+#sidebar-close:hover { color: var(--text); background: var(--bg); }
+#sidebar:not(.collapsed) ~ #main #sidebar-toggle { display: none; }
+
 #main {
   position: relative;
   display: flex;

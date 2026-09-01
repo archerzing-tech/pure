@@ -10,12 +10,12 @@ export interface PlanProgressSnapshot {
   /** True when this plan was approved as a project build — the per-phase
    * delivery-gate (real verification evidence) applies to its continuations. */
   projectBuild?: boolean;
-  /** 本会话内第几个独立规划（1、2、…）。同一规划的细化（planReplaced）与
-   * 续跑沿用同一编号；只有对话里新生成的规划递增。用于区分「第 1 份规划」
-   * 与「第 2 份规划（因反馈而来）」——它们不是同一件事。 */
+  /** 本会话内第几个独立计划（1、2、…）。同一计划的细化（planReplaced）与
+   * 续跑沿用同一编号；只有对话里新生成的计划递增。首份计划不显示序号，
+   * 只有出现「新一轮计划」时才用编号与首份区分开。 */
   planSeq?: number;
-  /** 触发本次规划的用户输入（仅新规划携带）。卡头据此展示「因为你提到：…」，
-   * 让新一轮规划一眼看出与上面的规划不同。 */
+  /** 触发本次计划的用户输入（仅新计划携带）。卡头据此展示「因为你提到：…」，
+   * 让新一轮计划一眼看出与上面的计划不同。 */
   reason?: string;
 }
 

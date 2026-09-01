@@ -1,11 +1,11 @@
 // src/ui/planProgressBar.ts
 // 会话内计划进度固定条：对话继续时，transcript 里的完整计划卡会滚出视口，
 // 用户就看不到「走到第几步了」。这条固定在聊天区顶部的细条始终展示
-// 当前规划身份（第几个规划）+ 当前第几步 + 整体进度，并一键跳回完整计划卡。
+// 当前计划身份（第几个计划）+ 当前第几步 + 整体进度，并一键跳回完整计划卡。
 //
 // 只针对当前这个对话：它随活动计划卡挂载/卸载（会话切换/新对话/计划取消即消失），
-// 不跨会话残留。规划编号（planSeq）与计划卡头共用，planSeq>1 时强调显示
-// 「新一轮规划」，明确与上面的规划不是同一件事。
+// 不跨会话残留。planSeq 与计划卡头共用，planSeq>1 时强调显示
+// 「新一轮计划」，明确与上面的计划不是同一件事；首份计划不显示序号。
 
 import type { PlanProgressModel, PlanProgressSnapshot } from './planProgress';
 import { t } from '../shared/i18n';
@@ -13,7 +13,7 @@ import { t } from '../shared/i18n';
 export type PlanPinState = 'active' | 'waiting' | 'complete';
 
 export interface PlanPinInfo {
-  /** 本会话内第几个独立规划（1、2、…）。 */
+  /** 本会话内第几个独立计划（1、2、…；首份不显示序号）。 */
   seq: number;
   state: PlanPinState;
   /** 已完成（勾选）的顶层步骤数；complete 时等于 total。 */
@@ -40,8 +40,8 @@ export function formatPlanPin(snapshot: PlanProgressSnapshot): PlanPinInfo {
 
 function seqLabel(seq: number): string {
   return seq > 1
-    ? t('plan.seqNew', '新一轮规划 {n}').replace('{n}', String(seq))
-    : t('plan.seq', '规划 {n}').replace('{n}', String(seq));
+    ? t('plan.seqNew', '新一轮计划 {n}').replace('{n}', String(seq))
+    : t('plan.seq', '计划');
 }
 
 function stateLabel(state: PlanPinState): string {

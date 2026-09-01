@@ -1,5 +1,5 @@
 // src/ui/__tests__/planProgressBar.test.ts
-// 固定进度条（planProgressBar.ts）与计划卡头规划序号（plan.ts）：
+// 固定进度条（planProgressBar.ts）与计划卡头计划序号（plan.ts）：
 // formatPlanPin 纯函数 + createPlanProgressPin 的 DOM 挂载/绑定行为，
 // 以及 createPlanCard 对「第 2 份规划」身份（序号 chip + 触发原因）的渲染。
 
@@ -120,11 +120,14 @@ describe('createPlanProgressPin', () => {
 });
 
 describe('plan card head — conversation-local plan identity', () => {
-  it('renders a plain "plan 1" chip without a reason line for the first plan', () => {
+  it('renders a plain plan chip — no session number — for the first plan', () => {
     const card = createPlanCard(samplePlan(), false, new PlanProgressModel(samplePlan()));
     const seq = card.el.querySelector<HTMLElement>('.plan-progress-seq');
     expect(seq).not.toBeNull();
-    expect(seq?.textContent).toContain('1');
+    // 首份计划不显示“1”：没有“计划 2”时序号只会让用户困惑（所谓“规划 1”而
+    // 找不到“规划 2”）。只有出现新一轮计划时编号才有意义。
+    expect(seq?.textContent).toBe('计划');
+    expect(seq?.textContent).not.toContain('1');
     expect(seq?.classList.contains('is-new')).toBe(false);
     expect(card.el.querySelector('.plan-progress-reason')).toBeNull();
   });
