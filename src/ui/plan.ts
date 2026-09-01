@@ -135,8 +135,8 @@ const refiningTimers = new WeakMap<HTMLElement, number>();
 const planCardSubscriptions = new WeakMap<PlanCardHandle, () => void>();
 
 export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgressModel): PlanCardHandle {
-  // 会话内规划身份：同一对话可能有多份独立规划（原计划 + 反馈后重规划），
-  // planSeq 区分它们，reason 说明新一轮规划的触发来源（仅新规划携带）。
+  // 会话内计划身份：同一对话可能有多份独立计划（原计划 + 反馈后重计划），
+  // planSeq 区分它们，reason 说明新一轮计划的触发来源（仅新计划携带）。
   const planSnapshot = source.getSnapshot();
   const planSeq = planSnapshot.planSeq ?? 1;
   const reason = planSnapshot.reason;
@@ -154,13 +154,13 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
   seqChip.className = 'plan-progress-seq';
   if (planSeq > 1) seqChip.classList.add('is-new');
   seqChip.textContent = planSeq > 1
-    ? t('plan.seqNew', '新一轮规划 {n}').replace('{n}', String(planSeq))
-    : t('plan.seq', '规划 {n}').replace('{n}', String(planSeq));
+    ? t('plan.seqNew', '新一轮计划 {n}').replace('{n}', String(planSeq))
+    : t('plan.seq', '计划');
   const title = document.createElement('span');
   title.className = 'plan-progress-title';
   const firstAction = plan.steps[0]?.action?.trim();
   title.textContent = planSeq > 1
-    ? t('plan.card.newTitle', '收到，这是一份新的规划：')
+    ? t('plan.card.newTitle', '收到，这是一份新的计划：')
     : (plan.steps.length === 1 && firstAction
       ? `先从「${firstAction}」开始：`
       : '根据刚才的判断，接下来按这个顺序推进：');
@@ -305,7 +305,7 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
     substepNumEls.push(nestedNums);
   });
 
-  // 新一轮规划：在活动行上方展示触发来源，一眼看出与上面的规划不是同一件事。
+  // 新一轮计划：在活动行上方展示触发来源，一眼看出与上面的计划不是同一件事。
   let reasonEl: HTMLElement | null = null;
   if (planSeq > 1 && reason) {
     reasonEl = document.createElement('div');

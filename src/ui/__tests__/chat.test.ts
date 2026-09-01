@@ -605,6 +605,33 @@ describe('user bubble double-click select-all', () => {
   });
 });
 
+describe('footer context-window estimate', () => {
+  it('caches the real system+tool overhead measured at prompt assembly', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 底部进度条必须复用 send() 里真实装配的系统提示词 + 工具定义开销，而不是
+    // 拿一个静态近似值当真理——否则启动/恢复时的占用百分比会和真实上下文脱节。
+    const cache = src.indexOf('this.contextOverhead = {');
+    expect(cache).toBeGreaterThan(-1);
+    expect(src.slice(cache, cache + 220)).toContain('estimatePromptTokens(systemPrompt)');
+    expect(src.slice(cache, cache + 220)).toContain('estimateToolDefinitionTokens(promptTools)');
+    expect(src).toContain('getContextOverheadTokens(): { system: number; tools: number }');
+  });
+
+  it('denominates the bar against the full context window, not the input-only budget', () => {
+    const src = readSource(new URL('../main.ts', import.meta.url));
+    const render = src.indexOf('function renderContextWindowBar(): void {');
+    expect(render).toBeGreaterThan(-1);
+    const seg = src.slice(render, render + 1400);
+    expect(seg).toContain('const windowTokens = budget.contextWindowTokens ?? 0;');
+    expect(seg).toContain('const messageTokens = estimateMessageTokens(chat.getMessages());');
+    expect(seg).toContain('const used = messageTokens + overhead.system + overhead.tools;');
+    // 空会话（还没对话）不显示占用，避免“一句话都没说就用了 X%”的错觉。
+    expect(seg).toContain('messageTokens <= 0');
+    expect(seg).toContain('value > 90');
+    expect(src).toContain('function contextOverheadTokens(): { system: number; tools: number } {');
+  });
+});
+
 describe('plan overview completion state', () => {
   it('finalizes the chat plan card on completion without depending on phase markers', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
@@ -689,7 +716,7 @@ describe('plan overview completion state', () => {
     expect(branch).toBeGreaterThan(-1);
     const seg = src.slice(branch, branch + 1600);
     expect(seg).toContain('const lastTodosDone =');
-    expect(seg).toContain('lastTodosDone || (needsDeliveryGate && qualityPassed === true)');
+    expect(seg).toContain('lastTodosDone || (needsDeliveryGate && (qualityPassed === true || this.deliveryGatePassed === true))');
   });
 
   it('keeps the plan context when the delivery gate fails', () => {
@@ -699,7 +726,7 @@ describe('plan overview completion state', () => {
     const branch = src.indexOf('} else if (planCompletionCandidate');
     expect(branch).toBeGreaterThan(-1);
     const seg = src.slice(branch, branch + 1600);
-    const blocked = seg.indexOf('const deliveryBlocked = needsDeliveryGate && !qualityPassed;');
+    const blocked = seg.indexOf('const deliveryBlocked = needsDeliveryGate && !qualityPassed && !this.deliveryGatePassed;');
     expect(blocked).toBeGreaterThan(-1);
     const completed = seg.indexOf("planProgress?.dispatch({ type: 'completed' });");
     expect(completed).toBeGreaterThan(blocked);
@@ -736,7 +763,28 @@ describe('plan overview completion state', () => {
     // 兜底并入回合末完成判定，且复用「交付门禁通过」分支 dispatch completed。
     const gate = src.indexOf('|| (deliveryCompletedPlan && planCard)', candidate);
     expect(gate).toBeGreaterThan(candidate);
-    expect(src.slice(gate, gate + 900)).toContain("planProgress?.dispatch({ type: 'completed' });");
+    expect(src.slice(gate, gate + 1200)).toContain("planProgress?.dispatch({ type: 'completed' });");
+  });
+
+  it('finalizes a build plan on a pure closing summary round using session delivery evidence', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 构建计划的收尾回合常不带工具调用（纯总结轮），deliveryResult 不会重算；
+    // 只要本会话曾真实通过过交付验证，就应把计划置为完成，否则顶部进度条永远
+    // 停在「执行中 第 N 步」。
+    const cand = src.indexOf('const deliverySummarizedPlan = planCard');
+    expect(cand).toBeGreaterThan(-1);
+    const seg = src.slice(cand, cand + 700);
+    expect(seg).toContain('needsDeliveryGate && this.deliveryGatePassed === true');
+    expect(seg).toContain('!hasToolWork');
+    expect(seg).toContain('completionSnapshot.status !== \'complete\'');
+    // 与「纯工具轮」的 deliveryCompletedPlan 兜底互补，并入同一回合末完成判定。
+    const branch = src.indexOf('|| (deliverySummarizedPlan && planCard)', cand);
+    expect(branch).toBeGreaterThan(cand);
+    const blocked = src.indexOf('const deliveryBlocked = needsDeliveryGate && !qualityPassed');
+    const dispatch = src.indexOf("planProgress?.dispatch({ type: 'completed' });", blocked);
+    expect(blocked).toBeGreaterThan(-1);
+    expect(dispatch).toBeGreaterThan(blocked);
+    expect(src.slice(blocked, dispatch)).toContain('this.deliveryGatePassed === true');
   });
 
   it('never force-advances a stage whose work is incomplete', () => {

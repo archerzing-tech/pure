@@ -6,7 +6,7 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed } from './chat';
+import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, BASE_SYSTEM_PROMPT } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
@@ -23,7 +23,7 @@ import { loadSessionList, loadSessionStatsForList, flushSessionSaves, type Sessi
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
-import { providerDef, PROVIDERS, defaultModelFor, customProviderLabel, promptBudgetForProvider, type ProviderId } from '../shared/providers';
+import { providerDef, PROVIDERS, defaultModelFor, customProviderLabel, promptBudgetForProvider, estimatePromptTokens, estimateToolDefinitionTokens, imageGenEnabled, type ProviderId } from '../shared/providers';
 import { resolvePromptBudget } from '../shared/PromptAssembler';
 import type { Message } from '../shared/types';
 import { ComposerSelect, type ComposerSelectOption } from './composerSelect';
@@ -36,6 +36,9 @@ import { renderArtifactCards } from './artifactCards';
 import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
+import { getWebToolDefs, getSysInfoToolDefs } from './TauriToolAdapter';
+import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../shared/dynamicCapabilityTools';
+import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { PasteChipManager, PASTE_FILE_THRESHOLD, attachmentToMessageImage, composeMessageWithAttachments, renderAttachmentCard } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { memoryStore } from './memoryStore';
@@ -429,6 +432,10 @@ function updateStatusBar() {
 
 function updateContextPanelStage(streaming = chat.isStreaming()) {
   updateStatusBar();
+  // The footer progress bar tracks the live transcript; refresh it on every
+  // streaming state change so it reflects the newest estimate at turn start
+  // and end (cheap: one pass over the messages per transition).
+  renderContextWindowBar();
 }
 
 // ── Boot splash ──
@@ -1405,6 +1412,16 @@ sidebarToggle.addEventListener('click', () => {
   }
 });
 
+// The in-sidebar collapse handle (right-pointing chevron) is visible only
+// while the sidebar is open — its only job is to close it again, handing
+// focus back to the floating hamburger for keyboard users.
+const sidebarClose = document.getElementById('sidebar-close') as HTMLButtonElement | null;
+sidebarClose?.addEventListener('click', () => {
+  withChatWidthSnap(() => sidebar.classList.add('collapsed'));
+  workspace.closePopover();
+  sidebarToggle.focus();
+});
+
 sidebarNewChat.addEventListener('click', () => {
   chat.clear();
   goToLanding();
@@ -1453,9 +1470,6 @@ function setContextPanelCollapsed(collapsed: boolean) {
 
 contextPanelReopen?.addEventListener('click', () => {
   withChatWidthSnap(() => setContextPanelCollapsed(!contextCollapsed));
-  // Charts live inside the collapsed-by-default panel; init them only once it
-  // is actually expanded so echarts measures real container dimensions.
-  if (!contextCollapsed) void renderContextCharts();
 });
 
 // Both sidebars start collapsed: the right context panel begins hidden and its
@@ -1513,15 +1527,16 @@ function renderSessionStats() {
   // command (without the ✗ failure prefix shown in the label).
   renderStatsList('stat-cmd-list', stats.commands, (c) => (c.success ? '' : '✗ ') + c.command, undefined, (c) => c.command);
 
-  // Context-panel charts (窗口预算仪表盘 + Token 分布) refresh alongside the numbers.
-  void renderContextCharts();
+  // Footer context-window progress bar refreshes alongside the numbers.
+  renderContextWindowBar();
 }
 
-// ── Context-panel charts (上下文窗口仪表盘 + Token 分布环形图) ──
-// The window gauge measures the CURRENT live transcript, not the cumulative
-// usage counter: sessionStats.usage.promptTokens is summed across turns.
-// Estimator mirrors engine/BudgetManager.countTokens (CJK ≈ 1 token/char,
-// Latin ≈ 1/4) so the gauge reads in the same units the engine budgets in.
+// ── 上下文窗口估算 ──
+// The footer gauge estimates the CURRENT context occupancy (fixed system +
+// tool-schema overhead plus the live transcript), not the cumulative usage
+// counter (sessionStats.usage.promptTokens is summed across turns). Message
+// estimation mirrors engine/BudgetManager.countTokens (CJK ≈ 1 token/char,
+// Latin ≈ 1/4) so the bar reads in the same units the engine budgets in.
 const CJK_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]/u;
 
 function estimateTextTokens(text: string): number {
@@ -1540,98 +1555,64 @@ function estimateMessageTokens(messages: Message[]): number {
   return total;
 }
 
-// echarts stays out of the main bundle: only ```chart blocks (echartsChart.ts)
-// and these panel charts lazy-import it. One cached dynamic import shared here.
-let echartsModulePromise: Promise<typeof import('./echartsChart')> | null = null;
-function loadEchartsChart(): Promise<typeof import('./echartsChart')> {
-  if (!echartsModulePromise) echartsModulePromise = import('./echartsChart');
-  return echartsModulePromise;
+// ── Footer context-window progress bar ──
+// The persistent status footer shows the estimated context occupancy as a slim
+// progress bar (the old ring chart lived in the right panel): the fixed
+// system + tool-schema overhead plus the live transcript, against the model's
+// FULL context window — not the input-only budget (availableInputTokens
+// subtracts the output reservation and safety margin, which inflated the
+// percentage and made a fresh sentence look nearly full). Refreshed on turn
+// end, restore, and streaming changes.
+
+/** Fixed system + tool-schema overhead. Prefers the exact numbers chat.ts
+ * measured when it last assembled a real prompt; before the first send
+ * (fresh session / restore) a static approximation covers the same pieces. */
+function contextOverheadTokens(): { system: number; tools: number } {
+  const measured = chat.getContextOverheadTokens();
+  if (measured.system > 0 || measured.tools > 0) return measured;
+  const cfg = loadConfig();
+  const hasWorkspace = !!chat.getWorkspace();
+  const tools = [
+    ...(cfg?.toolBrowser ? getWebToolDefs() : []),
+    ...getSysInfoToolDefs(),
+    ...DYNAMIC_CAPABILITY_TOOL_DEFS,
+    ...(imageGenEnabled(cfg?.customProviders, cfg?.provider, cfg?.model) ? [IMAGE_GEN_TOOL_DEF] : []),
+  ];
+  return {
+    system: estimatePromptTokens(BASE_SYSTEM_PROMPT(hasWorkspace, false)),
+    tools: estimateToolDefinitionTokens(tools),
+  };
 }
 
-// Chart palettes kept local to main.ts (NOT chartTheme — importing it
-// statically would pull echarts into the main bundle).
-const CHART_THEMES = {
-  light: { text: '#4b5563', sub: '#9ca3af', border: '#e5e7eb', accent: '#3E63DD', cyan: '#7ED9FF', green: '#2e9e6b', red: '#e5484d' },
-  dark: { text: '#c7cdd6', sub: '#6b7280', border: '#2a2f3a', accent: '#6f8fff', cyan: '#57c7ff', green: '#3ecf8e', red: '#ff6b70' },
-};
-
-async function renderContextCharts(): Promise<void> {
-  // The right panel starts collapsed; inited charts on hidden containers would
-  // be invisible/blank. Skip and let the reopen trigger render them.
-  if (contextCollapsed) return;
-  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
-  const theme = CHART_THEMES[dark ? 'dark' : 'light'];
-  const { renderEchartOption } = await loadEchartsChart();
-  const usage = chat.getSessionStats().usage;
-  const hit = usage?.cacheHitTokens ?? 0;
-  const miss = usage?.cacheMissTokens ?? Math.max(0, (usage?.promptTokens ?? 0) - hit);
-  const out = usage?.completionTokens ?? 0;
-
-  // Token-distribution donut: cache hit / cache miss / output.
-  const distEl = document.getElementById('token-dist-chart');
-  if (distEl) {
-    const pieces = [
-      { name: t('stats.cacheHit'), value: hit, color: theme.accent },
-      { name: t('stats.cacheMiss'), value: miss, color: theme.cyan },
-      { name: t('stats.output'), value: out, color: theme.green },
-    ].filter((p) => p.value > 0);
-    if (pieces.length === 0) {
-      distEl.className = 'stats-chart stats-chart-empty';
-      distEl.textContent = t('stats.noUsage');
-    } else {
-      distEl.className = 'stats-chart';
-      distEl.textContent = '';
-      renderEchartOption(distEl, {
-        tooltip: { trigger: 'item' },
-        legend: { bottom: 0, textStyle: { fontSize: 9, color: theme.sub } },
-        series: [{
-          type: 'pie', radius: ['55%', '75%'], center: ['50%', '42%'],
-          avoidLabelOverlap: false,
-          itemStyle: { borderColor: 'transparent', borderRadius: 3 },
-          label: { show: false },
-          emphasis: { label: { show: false } },
-          data: pieces.map((p) => ({ value: p.value, name: p.name, itemStyle: { color: p.color } })),
-        }],
-      });
-    }
+function renderContextWindowBar(): void {
+  const wrap = document.getElementById('status-window');
+  const bar = document.getElementById('status-window-bar');
+  const pct = document.getElementById('status-window-pct');
+  if (!wrap || !bar || !pct) return;
+  const config = loadConfig();
+  const budget = resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model));
+  const windowTokens = budget.contextWindowTokens ?? 0;
+  const inputBudget = budget.availableInputTokens ?? 0;
+  const overhead = contextOverheadTokens();
+  const messageTokens = estimateMessageTokens(chat.getMessages());
+  // 还没有任何对话（空会话/刚启动）时不显示占用——单显示系统+工具的固定开销会
+  // 让用户以为“还没说话就用了 X%”。有了消息后固定开销才与对话一起计入。
+  if (windowTokens <= 0 || messageTokens <= 0) {
+    bar.style.width = '0%';
+    pct.textContent = '—';
+    wrap.classList.remove('over');
+    wrap.title = t('stats.contextWindow');
+    return;
   }
-
-  // Context-window budget ring: live transcript estimate vs available budget.
-  const winEl = document.getElementById('context-window-chart');
-  const winPctEl = document.getElementById('stat-window-pct');
-  if (winEl && winPctEl) {
-    const config = loadConfig();
-    const budget = resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model));
-    const max = budget.availableInputTokens ?? 0;
-    const used = estimateMessageTokens(chat.getMessages());
-    if (max <= 0 || used <= 0) {
-      winEl.className = 'stats-chart stats-chart-empty';
-      winEl.textContent = t('stats.noUsage');
-      winPctEl.textContent = '—';
-    } else {
-      winEl.className = 'stats-chart';
-      winEl.textContent = '';
-      const pct = Math.min(100, (used / max) * 100);
-      winPctEl.textContent = `${Math.round(pct)}%`;
-      const overflow = used > max;
-      const usedColor = overflow || pct > 80 ? theme.red : theme.accent;
-      renderEchartOption(winEl, {
-        tooltip: { formatter: (): string => `${t('stats.windowUsed')}: ${formatTokens(used)} / ${formatTokens(max)}` },
-        series: [{
-          type: 'pie', radius: ['72%', '88%'], center: ['50%', '45%'],
-          silent: true, clockwise: true,
-          label: {
-            show: true, position: 'center', formatter: `${Math.round(pct)}%`,
-            fontSize: 15, fontWeight: 600, color: theme.text,
-          },
-          data: [
-            { value: used, itemStyle: { color: usedColor } },
-            { value: Math.max(0, max - used), itemStyle: { color: theme.border } },
-          ],
-        }],
-      });
-    }
-  }
+  const used = messageTokens + overhead.system + overhead.tools;
+  const value = Math.min(100, (used / windowTokens) * 100);
+  bar.style.width = `${Math.max(1, value)}%`;
+  pct.textContent = `${Math.round(value)}%`;
+  // 警示线：窗口占用超过 90%，或已突破模型的可用输入预算（此时 prompt 装配
+  // 会开始丢弃片段）——而不是按剩余输出空间提前变红制造“快满了”的错觉。
+  const over = value > 90 || (inputBudget > 0 && used > inputBudget);
+  wrap.classList.toggle('over', over);
+  wrap.title = `${t('stats.contextWindow')}：${t('stats.windowUsed')} ${formatTokens(used)} / ${formatTokens(windowTokens)}`;
 }
 
 function renderFileWriteGroups(
