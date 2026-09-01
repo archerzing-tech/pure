@@ -121,7 +121,7 @@ describe('custom label / model / baseURL resolution', () => {
     expect(customBaseURL([OLLAMA], 'ollama')).toBe('http://localhost:11434/v1');
     // Built-ins keep their registry defaults.
     expect(customDefaultModel([], 'qwen')).toBe(defaultModelFor('qwen'));
-    expect(customBaseURL([], 'glm')).toBe('https://open.bigmodel.cn/api/paas/v4');
+    expect(customBaseURL([], 'glm')).toBe('https://api.z.ai/api/coding/paas/v4');
   });
 });
 
@@ -148,7 +148,7 @@ describe('provider overrides (built-in name / endpoint / key edits)', () => {
     // Custom providers still win over the override map (they never appear in it).
     expect(customBaseURL([OLLAMA], 'ollama', OVERRIDES)).toBe('http://localhost:11434/v1');
     // Legacy call shape (no overrides) keeps working.
-    expect(customBaseURL([], 'glm')).toBe('https://open.bigmodel.cn/api/paas/v4');
+    expect(customBaseURL([], 'glm')).toBe('https://api.z.ai/api/coding/paas/v4');
   });
 
   it('customProviderLabel honors a built-in name override before the registry label', () => {
@@ -275,11 +275,13 @@ describe('text-to-image capability detection', () => {
   it('ships the 8 built-in providers with the official endpoints and model libraries', () => {
     expect(PROVIDERS).toHaveLength(8);
     expect(baseURLFor('moonshot')).toBe('https://api.moonshot.cn/v1');
-    expect(baseURLFor('minimax')).toBe('https://api.minimaxi.com/v1');
+    expect(baseURLFor('minimax')).toBe('https://api.minimaxi.com/anthropic');
     expect(baseURLFor('openai')).toBe('https://api.openai.com/v1');
     expect(baseURLFor('openrouter')).toBe('https://openrouter.ai/api/v1');
     expect(baseURLFor('nvidia')).toBe('https://integrate.api.nvidia.com/v1');
     expect(isProviderId('deepseek-anthropic')).toBe(false);
+    expect(PROVIDERS.find((p) => p.id === 'minimax')?.protocol).toBe('anthropic');
+    expect(PROVIDERS.find((p) => p.id === 'nvidia')?.protocol).toBe('openai');
     for (const def of PROVIDERS) {
       expect(def.models.length).toBeGreaterThan(0);
       expect(def.models[0]).toBe(def.defaultModel);

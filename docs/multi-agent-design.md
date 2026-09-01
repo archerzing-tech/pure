@@ -455,6 +455,7 @@ export interface AgentResult {
 | `src/coding-agent/ToolRegistry.ts` | 扁平标签工具注册 + AGENT 工具路由 + 权限门 | ✅ 已接线 |
 | `src/coding-agent/CodingAgent.ts` | 组装引擎/Harness/权限/子 Agent | ✅ 已接线 |
 | `src/harness/SubagentRegistry.ts` | 子 Agent 定义注册 | ✅ 已接线 |
+| `src/coding-agent/DynamicInsertionCoordinator.ts` | 对运行中用户插入信息进行相关性、补充、约束变化、目标变化和停止分类 | ✅ GUI 已接线 |
 
 ### 7.2 委派模型（running）
 
@@ -464,7 +465,7 @@ export interface AgentResult {
 - **子 Agent 预算**：独立受限预算（不继承父全部配额），完成回传 token。
 - **持久化**：子 Agent 以「父会话 + 角色 + 任务哈希」稳定 sessionId，接 stateStore 可在中断/重新委派时续跑（CLI 生效；GUI 注入后可用）。
 
-> Phase 5 规划（结果缓存/性能监控/学习优化）仍为**未实现**的未来项，见 §9。
+> 动态插入当前已完成第一版调度闭环，但结构化新旧计划 diff、自动候选计划比较，以及基于插入信息的单 Agent / 多 Agent 自动切换仍未实现，详见 `docs/dynamic-insertion-design.md`。Phase 5 规划（结果缓存/性能监控/学习优化）仍为**未实现**的未来项，见 §9。
 
 ---
 

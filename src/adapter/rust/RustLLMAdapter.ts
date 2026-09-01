@@ -25,6 +25,7 @@ import { isTauriRuntime } from '../../shared/tauri';
 export interface RustLLMConfig {
   provider: string;
   model: string;
+  protocol?: 'openai' | 'anthropic';
   baseURL?: string;
   extraBody?: Record<string, unknown>;
   maxTokens?: number;
@@ -129,6 +130,7 @@ export class RustLLMAdapter implements LLMAdapter {
           tools: (params.tools as unknown[] | undefined) ?? [],
           provider: this.config.provider,
           model: params.model,
+          protocol: this.config.protocol ?? 'openai',
           apiKey: '',
           baseUrl: this.config.baseURL ?? '',
           secretKey: this.config.secretKey ?? '',
