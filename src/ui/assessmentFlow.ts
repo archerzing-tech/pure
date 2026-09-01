@@ -22,13 +22,13 @@ export interface AssessmentFlowHandle {
   fail(activity?: string): void;
 }
 
-const RISK_LABELS: Record<IntentAssessment['riskLevel'], string> = {
+export const RISK_LABELS: Record<IntentAssessment['riskLevel'], string> = {
   low: '低风险',
   medium: '中风险',
   high: '高风险',
 };
 
-const INTENT_LABELS: Record<IntentAssessment['intent'], string> = {
+export const INTENT_LABELS: Record<IntentAssessment['intent'], string> = {
   question: '咨询',
   research: '调研',
   add: '新增功能',
