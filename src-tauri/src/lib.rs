@@ -10231,6 +10231,8 @@ struct ChatStreamArgs {
     #[serde(default)]
     provider: String,
     #[serde(default)]
+    protocol: String,
+    #[serde(default)]
     tools: Vec<serde_json::Value>,
     model: String,
     #[serde(default, rename = "apiKey")]
@@ -10801,21 +10803,93 @@ async fn chat_stream(
     } else {
         args.base_url.trim_end_matches('/').to_string()
     };
-    let url = format!("{}/chat/completions", base_url);
+    let anthropic = args.protocol.eq_ignore_ascii_case("anthropic");
+    let url = if anthropic {
+        format!("{}/v1/messages", base_url.trim_end_matches("/v1"))
+    } else {
+        format!("{}/chat/completions", base_url)
+    };
     let client = build_http_client(
         std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
         llm_proxy_url(&args),
     )?;
-    let mut body = serde_json::json!({
-        "model": args.model,
-        "messages": args.messages,
-        "max_tokens": args.max_tokens_override.unwrap_or(4096),
-        "stream": true,
-    });
+    let mut body = if anthropic {
+        let mut system_parts = Vec::new();
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+        for message in &args.messages {
+            let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+            if role == "system" {
+                if let Some(content) = message.get("content") {
+                    if let Some(text) = content.as_str() { system_parts.push(text.to_string()); }
+                }
+                continue;
+            }
+            if role == "assistant" {
+                let mut blocks = Vec::new();
+                if let Some(text) = message.get("content").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    blocks.push(serde_json::json!({"type":"text","text":text}));
+                }
+                if let Some(calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                    for call in calls {
+                        let function = &call["function"];
+                        let input = function.get("arguments").and_then(|v| v.as_str())
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        blocks.push(serde_json::json!({
+                            "type":"tool_use",
+                            "id":call.get("id").and_then(|v| v.as_str()).unwrap_or("call_0"),
+                            "name":function.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                            "input":input,
+                        }));
+                    }
+                }
+                messages.push(serde_json::json!({"role":"assistant","content":blocks}));
+                continue;
+            }
+            if role == "tool" {
+                let result = serde_json::json!({
+                    "type":"tool_result",
+                    "tool_use_id":message.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "content":message.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+                });
+                if let Some(last) = messages.last_mut() {
+                    if last.get("role").and_then(|v| v.as_str()) == Some("user") {
+                        let content = last.get_mut("content").and_then(|v| v.as_array_mut());
+                        if let Some(content) = content { content.push(result); continue; }
+                    }
+                }
+                messages.push(serde_json::json!({"role":"user","content":[result]}));
+                continue;
+            }
+            messages.push(message.clone());
+        }
+        let mut value = serde_json::json!({
+            "model": args.model,
+            "messages": messages,
+            "max_tokens": args.max_tokens_override.unwrap_or(32768),
+            "stream": true,
+        });
+        if !system_parts.is_empty() { value["system"] = serde_json::json!(system_parts.join("\\n\\n")); }
+        if !args.tools.is_empty() {
+            value["tools"] = serde_json::Value::Array(args.tools.iter().map(|tool| serde_json::json!({
+                "name": tool["function"]["name"],
+                "description": tool["function"]["description"],
+                "input_schema": tool["function"]["parameters"],
+            })).collect());
+        }
+        value
+    } else {
+        serde_json::json!({
+            "model": args.model,
+            "messages": args.messages,
+            "max_tokens": args.max_tokens_override.unwrap_or(4096),
+            "stream": true,
+        })
+    };
     if let Some(temp) = args.temperature {
-        body["temperature"] = serde_json::json!(temp);
+        if !anthropic { body["temperature"] = serde_json::json!(temp); }
     }
-    if !args.tools.is_empty() {
+    if !args.tools.is_empty() && !anthropic {
         body["tools"] = serde_json::Value::Array(args.tools);
         body["tool_choice"] = serde_json::json!("auto");
     }
@@ -10848,7 +10922,11 @@ async fn chat_stream(
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&body);
-        if !api_key.is_empty() {
+        if anthropic {
+            request = request
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01");
+        } else if !api_key.is_empty() {
             request = request.header("Authorization", format!("Bearer {}", api_key));
         }
         let send_result = tokio::time::timeout(
@@ -10995,6 +11073,44 @@ async fn chat_stream(
                         return Err("cancelled".into());
                     }
                 }
+            }
+
+            if anthropic {
+                let event_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match event_type {
+                    "content_block_delta" => {
+                        let delta = &json["delta"];
+                        match delta.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                            "text_delta" => {
+                                if let Some(content) = delta.get("text").and_then(|v| v.as_str()) {
+                                    text.push_str(content);
+                                    if on_chunk.send(serde_json::json!({ "type": "delta", "content": content }).to_string()).is_err() { return Err("cancelled".into()); }
+                                }
+                            }
+                            "thinking_delta" => {
+                                if let Some(content) = delta.get("thinking").and_then(|v| v.as_str()) {
+                                    if on_chunk.send(serde_json::json!({ "type": "reasoning", "content": content }).to_string()).is_err() { return Err("cancelled".into()); }
+                                }
+                            }
+                            "input_json_delta" => {
+                                let index = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                let partial = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
+                                let cur = tc_map.entry(index).or_insert_with(|| serde_json::json!({"id":"","name":"","arguments":""}));
+                                cur["arguments"] = serde_json::Value::String(format!("{}{}", cur["arguments"].as_str().unwrap_or(""), partial));
+                            }
+                            _ => {}
+                        }
+                    }
+                    "content_block_start" => {
+                        let index = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        let block = &json["content_block"];
+                        if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                            tc_map.insert(index, serde_json::json!({"id": block["id"], "name": block["name"], "arguments":""}));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
             }
 
             let delta = match json["choices"][0]["delta"].as_object() {

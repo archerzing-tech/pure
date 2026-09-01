@@ -203,11 +203,11 @@ export function createQwenAdapter(apiKey: string, workspaceId: string, model = '
   });
 }
 
-export function createGLMAdapter(apiKey: string, model = 'glm-5.2', baseURL?: string) {
+export function createGLMAdapter(apiKey: string, model = 'glm-5.3-flash', baseURL?: string) {
   return new OpenAICompatibleAdapter({
-    baseURL: baseURL || 'https://api.z.ai/api/paas/v4',
+    baseURL: baseURL || 'https://api.z.ai/api/coding/paas/v4',
     apiKey,
     model,
-    extraBody: { tool_stream: true },
+    maxTokens: 32768,
   });
 }

@@ -50,7 +50,7 @@ function promptBudgetDefaults(provider: string, model: string): { contextWindowT
   const name = model.toLowerCase();
   if (id.includes('deepseek') || name.includes('deepseek')) return { contextWindowTokens: 64_000, outputReserveTokens: 32_768 };
   if (id === 'qwen' || name.includes('qwen')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
-  if (id === 'glm' || name.includes('glm')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
+  if (id === 'glm' || name.includes('glm')) return { contextWindowTokens: 128_000, outputReserveTokens: 32_768 };
   if (id === 'moonshot' || name.includes('kimi')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
   if (id === 'minimax' || name.includes('minimax')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
   if (name.includes('claude') || id.includes('anthropic')) return { contextWindowTokens: 200_000, outputReserveTokens: 8_192 };
@@ -169,7 +169,11 @@ export interface CustomProvider {
  * API key. Desktop keys live in Rust secrets under `llm.apiKey.<id>` (same
  * slot scheme as custom providers) and never round-trip through storage.
  */
+export type LLMProtocol = 'openai' | 'anthropic' | 'auto';
+
 export interface ProviderOverride {
+  /** Wire protocol used by this provider endpoint; auto detects from the URL. */
+  protocol?: LLMProtocol;
   /** Custom display name shown on the card / summary instead of the i18n label. */
   name?: string;
   /** Custom OpenAI-compatible base URL overriding the registry default. */
@@ -258,8 +262,10 @@ export interface ProviderDef {
   models: string[];
   /** i18n key for the full display name in settings dropdowns. */
   i18nKey: string;
-  /** Default base URL for the OpenAI-compatible HTTP fallback (browser mode). */
+  /** Default API base URL. */
   baseURL: string;
+  /** Default wire protocol for this provider. */
+  protocol: Exclude<LLMProtocol, 'auto'>;
   /**
    * DeepSeek-family providers share the same API base / budget tuning; other
    * providers get their own (larger) token budget (see ui/chat.ts).
@@ -274,14 +280,14 @@ export interface ProviderDef {
 }
 
 export const PROVIDERS: readonly ProviderDef[] = [
-  { id: 'deepseek-openai', label: 'DeepSeek', defaultModel: 'deepseek-v4-flash', models: ['deepseek-v4-flash', 'deepseek-reasoner'], i18nKey: 'provider.deepseek-openai', baseURL: 'https://api.deepseek.com', deepSeekFamily: true },
-  { id: 'qwen', label: 'Qwen', defaultModel: 'qwen3-coder-next', models: ['qwen3-coder-next', 'qwen3-max'], i18nKey: 'provider.qwen', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', deepSeekFamily: false },
-  { id: 'glm', label: 'GLM', defaultModel: 'glm-5.2', models: ['glm-5.2', 'glm-5.2-flash'], i18nKey: 'provider.glm', baseURL: 'https://open.bigmodel.cn/api/paas/v4', deepSeekFamily: false },
-  { id: 'moonshot', label: 'Moonshot', defaultModel: 'kimi-k3', models: ['kimi-k3', 'kimi-k2.6'], i18nKey: 'provider.moonshot', baseURL: 'https://api.moonshot.cn/v1', deepSeekFamily: false },
-  { id: 'minimax', label: 'MiniMax', defaultModel: 'MiniMax-M2.7', models: ['MiniMax-M2.7', 'MiniMax-M2'], i18nKey: 'provider.minimax', baseURL: 'https://api.minimaxi.com/v1', deepSeekFamily: false },
-  { id: 'openai', label: 'OpenAI', defaultModel: 'gpt-5.2', models: ['gpt-5.2', 'gpt-4o-mini', 'o3-mini'], i18nKey: 'provider.openai', baseURL: 'https://api.openai.com/v1', deepSeekFamily: false, imageGenModel: 'gpt-image-1' },
-  { id: 'openrouter', label: 'OpenRouter', defaultModel: 'openai/gpt-4o-mini', models: ['openai/gpt-4o-mini', 'anthropic/claude-sonnet-4', 'deepseek/deepseek-r1'], i18nKey: 'provider.openrouter', baseURL: 'https://openrouter.ai/api/v1', deepSeekFamily: false },
-  { id: 'nvidia', label: 'NVIDIA', defaultModel: 'meta/llama-3.1-8b-instruct', models: ['meta/llama-3.1-8b-instruct', 'deepseek-ai/deepseek-r1', 'mistralai/mixtral-8x7b-instruct'], i18nKey: 'provider.nvidia', baseURL: 'https://integrate.api.nvidia.com/v1', deepSeekFamily: false },
+  { id: 'deepseek-openai', label: 'DeepSeek', defaultModel: 'deepseek-v4-flash', models: ['deepseek-v4-flash', 'deepseek-reasoner'], i18nKey: 'provider.deepseek-openai', baseURL: 'https://api.deepseek.com', protocol: 'openai', deepSeekFamily: true },
+  { id: 'qwen', label: 'Qwen', defaultModel: 'qwen3-coder-next', models: ['qwen3-coder-next', 'qwen3-max'], i18nKey: 'provider.qwen', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', protocol: 'openai', deepSeekFamily: false },
+  { id: 'glm', label: 'GLM', defaultModel: 'glm-5.3-flash', models: ['glm-5.3-flash', 'glm-5.3', 'glm-5.2', 'glm-5.2-flash'], i18nKey: 'provider.glm', baseURL: 'https://api.z.ai/api/coding/paas/v4', protocol: 'openai', deepSeekFamily: false },
+  { id: 'moonshot', label: 'Moonshot', defaultModel: 'kimi-k3', models: ['kimi-k3', 'kimi-k2.6'], i18nKey: 'provider.moonshot', baseURL: 'https://api.moonshot.cn/v1', protocol: 'openai', deepSeekFamily: false },
+  { id: 'minimax', label: 'MiniMax', defaultModel: 'MiniMax-M2.7', models: ['MiniMax-M2.7', 'MiniMax-M2'], i18nKey: 'provider.minimax', baseURL: 'https://api.minimaxi.com/anthropic', protocol: 'anthropic', deepSeekFamily: false },
+  { id: 'openai', label: 'OpenAI', defaultModel: 'gpt-5.2', models: ['gpt-5.2', 'gpt-4o-mini', 'o3-mini'], i18nKey: 'provider.openai', baseURL: 'https://api.openai.com/v1', protocol: 'openai', deepSeekFamily: false, imageGenModel: 'gpt-image-1' },
+  { id: 'openrouter', label: 'OpenRouter', defaultModel: 'openai/gpt-4o-mini', models: ['openai/gpt-4o-mini', 'anthropic/claude-sonnet-4', 'deepseek/deepseek-r1'], i18nKey: 'provider.openrouter', baseURL: 'https://openrouter.ai/api/v1', protocol: 'openai', deepSeekFamily: false },
+  { id: 'nvidia', label: 'NVIDIA', defaultModel: 'meta/llama-3.1-8b-instruct', models: ['meta/llama-3.1-8b-instruct', 'deepseek-ai/deepseek-r1', 'mistralai/mixtral-8x7b-instruct'], i18nKey: 'provider.nvidia', baseURL: 'https://integrate.api.nvidia.com/v1', protocol: 'openai', deepSeekFamily: false },
 ];
 
 const PROVIDER_BY_ID = new Map<string, ProviderDef>(PROVIDERS.map((p) => [p.id, p]));
@@ -323,7 +329,7 @@ export function providerOverrideFor(
   const override = overrides[id];
   if (!override) return undefined;
   // An all-empty override is a stale tombstone — treat it as absent.
-  if (!override.name && !override.baseURL && !override.apiKey && !override.hasApiKey) {
+  if (!override.protocol && !override.name && !override.baseURL && !override.apiKey && !override.hasApiKey) {
     return undefined;
   }
   return override;
@@ -468,6 +474,13 @@ export function defaultModelFor(id: string): string {
 /** Default base URL for a provider; falls back to the DeepSeek endpoint. */
 export function baseURLFor(id: string): string {
   return providerDef(id)?.baseURL ?? 'https://api.deepseek.com';
+}
+
+/** Infer the wire protocol from a configured endpoint. */
+export function protocolForURL(baseURL: string | undefined | null): Exclude<LLMProtocol, 'auto'> {
+  return /(?:\/api\/anthropic|\/anthropic(?:\/|$))/i.test(baseURL?.trim() ?? '')
+    ? 'anthropic'
+    : 'openai';
 }
 
 /** True for the deepseek-* providers (shared API base / budget tuning). */
