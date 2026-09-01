@@ -263,6 +263,50 @@ async fn test_llm_connection(
 }
 
 #[cfg(test)]
+mod llm_retry_tests {
+    use super::*;
+
+    #[test]
+    fn retryable_status_classifies_transient_codes() {
+        for code in [408u16, 409, 425, 429, 500, 502, 503, 504, 599] {
+            assert!(retryable_status(code), "{code} should be retryable");
+        }
+        for code in [200u16, 301, 400, 401, 403, 404, 405, 422, 499] {
+            assert!(!retryable_status(code), "{code} must NOT be retried");
+        }
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_and_caps() {
+        let d1 = sleep_backoff(1, None).as_millis();
+        let d2 = sleep_backoff(2, None).as_millis();
+        let d3 = sleep_backoff(3, None).as_millis();
+        // ~800 / ~1600 / ~3200 with jitter ±250ms.
+        assert!((d1 as u64) >= 800 && (d1 as u64) <= 1_050, "d1: {d1}");
+        assert!((d2 as u64) >= 1_600 && (d2 as u64) <= 1_900, "d2: {d2}");
+        assert!((d3 as u64) >= 3_200 && (d3 as u64) <= 3_450, "d3: {d3}");
+        // Far-out attempts cap at LLM_RETRY_MAX_MS + jitter.
+        let far = sleep_backoff(20, None).as_millis() as u64;
+        assert!(far <= LLM_RETRY_MAX_MS + 250, "far: {far}");
+    }
+
+    #[test]
+    fn retry_after_header_wins_and_is_bounded() {
+        assert_eq!(parse_retry_after_secs("3"), Some(std::time::Duration::from_secs(3)));
+        // Bounded: a 60s retry-after stalls only ~15s at most.
+        assert_eq!(parse_retry_after_secs("60"), Some(std::time::Duration::from_secs(15)));
+        assert_eq!(parse_retry_after_secs("abc"), None);
+        assert_eq!(parse_retry_after_secs(""), None);
+    }
+
+    #[test]
+    fn backoff_honors_retry_after() {
+        let via_header = sleep_backoff(2, Some(std::time::Duration::from_secs(4))).as_millis() as u64;
+        assert!(via_header >= 4_000 && via_header <= 4_250, "via_header: {via_header}");
+    }
+}
+
+#[cfg(test)]
 mod llm_probe_tests {
     use super::*;
     use std::io::{Read as _, Write as _};
@@ -10497,6 +10541,64 @@ mod chat_cancel_tests {
 const LLM_REQUEST_TIMEOUT_SECS: u64 = 180;
 const LLM_STREAM_IDLE_TIMEOUT_SECS: u64 = 180;
 
+// ── Transient-failure retry (2026 provider convention) ──
+// One dropped TCP connection, a brief 429, or a 5xx blip must NOT kill an
+// entire agent turn. All mainstream SDKs (OpenAI / Anthropic / Gemini)
+// retry transient LLM failures with bounded exponential backoff; here the
+// same policy applies at the transport level for chat_stream: 2 retries on
+// top of the original attempt, honoring Retry-After when the provider sends
+// it. Retries happen ONLY before the response body streams — re-sending the
+// POST after a failed send/status is always safe (no duplicate output).
+const LLM_RETRY_MAX_ATTEMPTS: u32 = 3; // original + 2 retries
+const LLM_RETRY_BASE_MS: u64 = 800;
+const LLM_RETRY_MAX_MS: u64 = 12_000;
+
+/// Statuses worth retrying at the transport level. Deterministic client
+/// errors (400/401/403/404/422) are never retried — the request itself is
+/// wrong. 408/409/425 = the server asked us to slow down; 429/5xx = classic
+/// transient.
+fn retryable_status(code: u16) -> bool {
+    code == 408 || code == 409 || code == 425 || code == 429
+        || (500..=599).contains(&code)
+}
+
+/// Parse a raw `retry-after` header value (seconds; HTTP-date is rare from LLM
+/// APIs). Bounded so a huge value cannot stall the turn forever.
+fn parse_retry_after_secs(raw: &str) -> Option<std::time::Duration> {
+    let secs: u64 = raw.trim().parse().ok()?;
+    Some(std::time::Duration::from_secs(secs.min(15)))
+}
+
+/// Read `retry-after` from a response and bound it.
+fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
+    let raw = resp.headers().get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after_secs(raw)
+}
+
+/// Full-jitter-ish backoff: min(base * 2^(attempt-1), max) plus a small
+/// deterministic jitter so N concurrent clients don't all wake at once.
+/// Without jitter, every client that hit the rate limit retries in sync and
+/// keeps hammering the provider (the classic 429 thundering herd).
+/// Compute the delay before retry attempt `attempt` (1-based). Full-jitter-ish:
+/// min(base * 2^(attempt-1), max) plus a small deterministic jitter so N
+/// concurrent clients don't all wake at once (the 429 thundering herd).
+fn sleep_backoff(attempt: u32, retry_after: Option<std::time::Duration>) -> std::time::Duration {
+    let jitter = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0);
+        nanos % 250
+    };
+    let base = if let Some(ra) = retry_after {
+        ra.as_millis() as u64
+    } else {
+        let shift = (attempt - 1).min(8) as u32;
+        (LLM_RETRY_BASE_MS << shift).min(LLM_RETRY_MAX_MS)
+    };
+    std::time::Duration::from_millis(base.saturating_add(jitter).min(15_000))
+}
+
 /// One line of the SSE stream, classified. Split out so the `[DONE]`
 /// termination contract is unit-testable: `[DONE]` must terminate the READ
 /// loop (not just the current line batch) — a connection the server keeps
@@ -10734,36 +10836,83 @@ async fn chat_stream(
     // even long reasoning-model time-to-first-byte. Keyless providers
     // (Ollama / LM Studio) get NO Authorization header — some local servers
     // reject `Bearer ` with an empty token.
-    let mut request = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&body);
-    if !api_key.is_empty() {
-        request = request.header("Authorization", format!("Bearer {}", api_key));
-    }
-    let resp = tokio::time::timeout(
-        std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
-        request.send(),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "request timeout: the LLM API did not respond within {}s (network or server issue) — try the turn again.",
-            LLM_REQUEST_TIMEOUT_SECS
+    //
+    // Transient-failure retry loop (below): a single dropped connection, 429,
+    // or 5xx is retried with bounded exponential backoff + jitter (honoring
+    // Retry-After) BEFORE the response body streams. Only deterministic errors
+    // (bad request, auth, 404) surface immediately.
+    let mut llm_attempts: u32 = 0;
+    let resp = loop {
+        llm_attempts += 1;
+        let mut request = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body);
+        if !api_key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let send_result = tokio::time::timeout(
+            std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
+            request.send(),
         )
-    })?
-    .map_err(|e| format!("request: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "{} {}: {}",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or(""),
-            text
-        ));
-    }
+        .await;
+        match send_result {
+            // The whole request timed out (connect phase or headers never
+            // arrived) — a network/proxy hiccup, retry it.
+            Err(_) => {
+                if llm_attempts < LLM_RETRY_MAX_ATTEMPTS {
+                    let delay = sleep_backoff(llm_attempts, None);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(format!(
+                    "request timeout: the LLM API did not respond within {}s after {} attempts (network or server issue) — try the turn again.",
+                    LLM_REQUEST_TIMEOUT_SECS,
+                    llm_attempts
+                ));
+            }
+            Ok(Err(e)) => {
+                // Connection-level error (ECONNRESET / proxy drop / DNS): the
+                // most common transient in a flaky network — retry.
+                if llm_attempts < LLM_RETRY_MAX_ATTEMPTS {
+                    let delay = sleep_backoff(llm_attempts, None);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(format!(
+                    "request: {} (after {} attempts)",
+                    e,
+                    llm_attempts
+                ));
+            }
+            Ok(Ok(resp)) => {
+                let status = resp.status();
+                if status.is_success() {
+                    break resp;
+                }
+                let code = status.as_u16();
+                if retryable_status(code) && llm_attempts < LLM_RETRY_MAX_ATTEMPTS {
+                    let retry_after = parse_retry_after(&resp);
+                    let delay = sleep_backoff(llm_attempts, retry_after);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                let text = resp.text().await.unwrap_or_default();
+                let retried = llm_attempts > 1;
+                return Err(format!(
+                    "{} {}: {}{}",
+                    status.as_u16(),
+                    status.canonical_reason().unwrap_or(""),
+                    text,
+                    if retried {
+                        format!(" (已自动重试 {})", llm_attempts - 1)
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+        }
+    };
 
     // Register the cancel channel for this call (Stop → cancel_chat_stream →
     // this receiver fires → the select! below aborts the read loop). The

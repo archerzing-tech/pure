@@ -304,7 +304,7 @@ export class AgentLoopEngine {
         completedSteps.push('ACT');
 
         for (const call of toolCalls) {
-          yield { type: 'ToolStarted', payload: { toolName: call.function.name, toolCallId: call.id }, timestamp: Date.now() };
+          yield { type: 'ToolStarted', payload: { toolName: call.function.name, toolCallId: call.id, toolCallArgs: call.function.arguments }, timestamp: Date.now() };
         }
         const toolResults = await this.toolCoordinator.execute(toolCalls, ctx, budget);
         for (const result of toolResults) {

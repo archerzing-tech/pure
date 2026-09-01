@@ -500,3 +500,242 @@
     opacity: .8;
   }
 }
+
+/* ═══ Execution-plan summary card (语义路由决策的呈现入口) ═══ */
+/* 与评估卡同一套玻璃卡片语言：默认展开、可折叠、accent 细滚动条的兄弟组件。
+   展示“为什么这样拆、打算动用哪些角色”——决策依据对用户可见。 */
+.plan-summary-row {
+  width: 100%;
+  margin: 2px 0 8px;
+}
+.plan-summary-card {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-card) 92%, var(--accent-soft));
+  box-shadow: var(--shadow-sm);
+}
+.plan-summary-card.risk-high {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
+}
+.plan-summary-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 11px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.plan-summary-head::-webkit-details-marker {
+  display: none;
+}
+.plan-summary-head:hover {
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+}
+.plan-summary-marker {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+}
+.plan-summary-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+.plan-summary-mode {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.plan-summary-status {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plan-summary-chevron {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: 16px;
+  line-height: 1;
+  transition: transform var(--transition);
+}
+.plan-summary-card[open] .plan-summary-chevron {
+  transform: rotate(180deg);
+}
+.plan-summary-body {
+  padding: 0 11px 11px;
+}
+.plan-summary-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 0 2px 2px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.plan-summary-intent {
+  color: var(--text);
+  font-weight: 600;
+}
+.plan-summary-complexity {
+  color: var(--text-secondary);
+}
+.plan-summary-risk {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.plan-summary-risk.risk-low {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.plan-summary-risk.risk-medium {
+  color: #a36f16;
+  background: color-mix(in srgb, #d97706 14%, var(--bg));
+}
+.plan-summary-risk.risk-high {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.plan-summary-note {
+  margin: 6px 2px 0;
+  padding: 7px 9px;
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
+  border-radius: 0 8px 8px 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.plan-summary-collab {
+  margin: 8px 2px 0;
+}
+.plan-summary-collab-title {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+.plan-summary-roles {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 5px;
+}
+.plan-summary-role {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+/* ═══ Agent activity: parallel batch + expandable tool trace ═══ */
+.agent-activity-agent--parallel {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-light));
+}
+.agent-activity-agent--parallel .agent-activity-action::before {
+  content: '';
+  display: block;
+  height: 2px;
+  margin-bottom: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 55%, transparent), transparent);
+}
+.agent-activity-parallel {
+  display: inline-flex;
+  align-items: center;
+  min-height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, #d97706 15%, var(--bg));
+  color: #a36f16;
+  font-size: 9.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.agent-activity-trace {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+  border-top: 1px dashed var(--border-light);
+  padding-top: 5px;
+}
+.agent-activity-trace-summary {
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.agent-activity-trace-summary::-webkit-details-marker {
+  display: none;
+}
+.agent-activity-trace-summary:hover {
+  color: var(--accent);
+}
+.agent-activity-trace-list {
+  display: grid;
+  gap: 3px;
+  margin-top: 5px;
+}
+.agent-trace-item {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+.agent-trace-icon {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.agent-trace-name {
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.agent-trace-args {
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-trace-item.running .agent-trace-icon {
+  animation: agent-console-pulse 1.4s ease-in-out infinite;
+}
+.agent-trace-item.completed .agent-trace-icon {
+  color: var(--success);
+}
+.agent-trace-item.failed .agent-trace-icon {
+  color: var(--danger);
+}

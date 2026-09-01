@@ -60,6 +60,8 @@ export interface SessionAgentActivity {
   startedAt?: number;
   timeoutMs?: number;
   parentCallId?: string;
+  /** Ordered trace of the tools this subagent ran (name + arg hint + state). */
+  toolTrace?: Array<{ name: string; args?: string; status: 'running' | 'completed' | 'failed' }>;
 }
 
 export interface SessionUiState {
