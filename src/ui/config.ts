@@ -608,7 +608,11 @@ export function loadConfig(): PureConfig | null {
       if ((parsed.configVersion ?? 1) < 11) {
         const overrides = { ...(cfg.providerOverrides ?? {}) };
         const normalize = (url: string) => url.trim().replace(/([^:])\/+$/, '$1').toLowerCase();
-        const registryURLs = new Set(PROVIDERS.map((p) => normalize(p.baseURL)));
+        const registryURLs = new Set([
+          ...PROVIDERS.map((p) => normalize(p.baseURL)),
+          normalize('https://api.z.ai/api/paas/v4'),
+          normalize('https://open.bigmodel.cn/api/paas/v4'),
+        ]);
         for (const [pid, ovr] of Object.entries(overrides)) {
           if (!ovr?.baseURL) continue;
           if (!registryURLs.has(normalize(ovr.baseURL))) continue;

@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens } from '../shared/providers';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, protocolForURL } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
@@ -48,6 +48,7 @@ import { createPlanSummaryCard, shouldShowPlanSummary } from './planSummary';
 import { createAgentActivityPanel, mergeAgentActivity, type AgentActivityPanelHandle } from './agentActivityPanel';
 import { attachPlanPauseActions } from './planPauseActions';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
+import { DeepSeekAnthropicAdapter } from '../adapter/deepseek/DeepSeekAnthropicAdapter';
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
 import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
 import { invoke } from '@tauri-apps/api/core';
@@ -824,20 +825,29 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
   // generating a full HTML animation) exhaust the budget on thinking and the
   // visible answer comes back EMPTY → verify failure → retry loop. Give
   // DeepSeek a larger budget; Qwen/GLM/custom keep the shared default.
-  const maxTokens = !custom && isDeepSeekFamily(config.provider)
+  const maxTokens = !custom && (isDeepSeekFamily(config.provider) || config.provider === 'glm')
     ? 32768
     : undefined;
-  // GLM's tool_stream extra applies to the built-in GLM provider only.
-  const extraBody = !custom && config.provider === 'glm' ? { tool_stream: true } : undefined;
+  const builtinOverride = providerOverrideFor(config.providerOverrides, config.provider);
+  const providerProtocol = providerDef(config.provider)?.protocol;
+  const protocol = builtinOverride?.protocol && builtinOverride.protocol !== 'auto'
+    ? builtinOverride.protocol
+    : providerProtocol ?? protocolForURL(baseURL);
+  const extraBody = undefined;
+  const apiKey = custom?.apiKey ?? builtinOverride?.apiKey ?? config.apiKey;
+  if (protocol === 'anthropic' && !isTauriRuntime()) {
+    if (!apiKey && !isCustomKeyless(customs, config.provider)) throw new Error('No API key configured');
+    return new DeepSeekAnthropicAdapter({ apiKey: apiKey ?? '', model, baseURL, maxTokens });
+  }
   if (isTauriRuntime()) {
     // Desktop: the key lives in Rust secrets (~/.pure/secrets.json, 0600) and
     // is resolved inside `chat_stream` — it never passes through the WebView.
     // Custom providers resolve their own named secret ('llm.apiKey.<id>');
     // keyless ones resolve to nothing and Rust omits the Authorization header.
-    const builtinOverride = providerOverrideFor(config.providerOverrides, config.provider);
     return new RustLLMAdapter({
       provider: config.provider,
       model,
+      protocol,
       baseURL,
       // Built-in providers with their own saved key resolve it from the same
       // per-provider Rust secret slot ('llm.apiKey.<id>') as custom providers;
@@ -852,8 +862,6 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
       maxTokens,
     });
   }
-  const builtinOverride = providerOverrideFor(config.providerOverrides, config.provider);
-  const apiKey = custom?.apiKey ?? builtinOverride?.apiKey ?? config.apiKey;
   if (!apiKey && !isCustomKeyless(customs, config.provider)) {
     throw new Error('No API key configured');
   }
