@@ -552,5 +552,5 @@ export function deliveryVerificationSummary(result: DeliveryVerificationResult):
 export function formatDeliveryFixPrompt(result: DeliveryVerificationResult): string {
   const failures = result.steps.filter((s) => s.status === 'failed');
   const lines = failures.map((s) => `### ${s.label} 失败（${s.command}）\n\`\`\`\n${s.output || '(无输出)'}\n\`\`\``).join('\n\n');
-  return `交付验证未通过，以下是真实失败输出：\n\n${lines}\n\n请修复根因（不要掩盖或跳过失败），然后重新运行失败的检查以及它之后的所有检查，直到交付验证管线全部通过。`;
+  return `交付验证未通过，以下是真实失败输出：\n\n${lines}\n\n请修复根因（不要掩盖或跳过失败），然后重新运行失败的检查以及它之后的所有检查，直到交付验证管线全部通过。注意：这还是当前同一个计划内的修复轮，不要重复输出「## 计划 n：…」等阶段宣布行——只在真正进入一个全新计划时才需要宣布。`;
 }
