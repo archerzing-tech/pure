@@ -17,7 +17,8 @@ import { ContextEngine, type ContextCompactionResult } from '../harness/ContextE
 import { isGitMutationCommand, Tags } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
-import { formatIntentPrompt, inferSemanticRoute, shouldBypassSemanticRoute, classifyInsertion } from '../coding-agent/Planner';
+import { formatIntentPrompt, inferSemanticRoute, shouldBypassSemanticRoute } from '../coding-agent/Planner';
+import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
@@ -1221,6 +1222,7 @@ export class ChatController {
   private relatedInsert: { text: string; images: MessageImage[]; displayText: string } | null = null;
   /** Guards interject() against concurrent classification (only one in flight). */
   private insertInFlight = false;
+  private dynamicInsertionCoordinator = new DynamicInsertionCoordinator();
   /** The LLM adapter for the current turn — interject() reuses it to classify a
    * mid-run insert as related/unrelated (set by send(); null before first run). */
   private turnLlm?: import('../shared/types').LLMAdapter;
@@ -1888,7 +1890,7 @@ export class ChatController {
         this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
         return;
       }
-      const cls = await classifyInsertion(llm, this.buildInsertionContext(images), text, this.abortController?.signal, images);
+      const decision = await this.dynamicInsertionCoordinator.decide(llm, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
       if (this.abortController?.signal?.aborted) {
         // The turn was hard-stopped while we were classifying — don't drop the
         // insert; queue it so it still runs as a task.
@@ -1896,9 +1898,12 @@ export class ChatController {
         this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
         return;
       }
-      if (cls.related) {
+      if (decision.kind === 'stop') {
+        this.addStatusBubble('已收到停止请求，正在结束当前任务。', true, false, 'info');
+        this.abortController?.abort();
+      } else if (decision.related) {
         this.relatedInsert = { text, images, displayText };
-        this.addStatusBubble(`已并入这条新要求，正在重新规划…`, true, false, 'info');
+        this.addStatusBubble(decision.requiresReplan ? '检测到目标或约束变化，正在重新评估并规划…' : '已并入这条补充要求，正在重新评估…', true, false, 'info');
         this.abortController?.abort();
       } else {
         this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
