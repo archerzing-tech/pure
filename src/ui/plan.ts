@@ -32,7 +32,7 @@ export function requestPlanReview(
   return run;
 }
 
-const PLAN_STAGE_PROTOCOL = `Use this strict stage protocol for every top-level plan item. Before any tool call or file change for plan n, first write two short user-facing lines in the conversation: one standalone control line exactly \"## 计划 n：<阶段名称>\" and then a natural sentence explaining what this stage is about and what you are going to do. The UI consumes that line as the single stage-start event and synchronizes the in-chat plan card before execution begins. Do not call tools before the stage-start announcement. After the work and its meaningful verification are actually complete, write a standalone control line exactly \"## 计划 n 已完成\" and then briefly say what this stage completed. The UI consumes that line as the single stage-complete event for the in-chat plan card. These supported progress markers are state events, not a generic progress estimate; they do not dictate execution granularity. Do not announce the next stage, call its tools, or claim the whole plan is complete before the current stage-complete line. If a stage needs user input, explain what is missing and pause without emitting its completion line. Never use a stage marker merely as a preview or example. For a plan item that carries a visible Todo list (substeps), drive that list with the same discipline: before starting substep k, write a standalone control line exactly 「### 子步骤 k：<子步骤名称>」, and once that substep's work is actually done and verified, write a standalone control line exactly 「### 子步骤 k 已完成」 (an optional 「/总数」 after the number is accepted). The UI consumes these as the per-Todo start/complete events and advances the Todo cursor only in numeric order, so emit them in order and never mark a substep done before its work is finished. Skip substep markers entirely for an atomic plan item that has no Todo list.`;
+const PLAN_STAGE_PROTOCOL = `Use this strict stage protocol for every top-level plan item. Before any tool call or file change for plan n, first write two short user-facing lines in the conversation: one standalone control line exactly \"## 计划 n：<阶段名称>\" and then a natural sentence explaining what this stage is about and what you are going to do. The UI consumes that line as the single stage-start event and synchronizes the in-chat plan card before execution begins. Do not call tools before the stage-start announcement. After the work and its meaningful verification are actually complete, write a standalone control line exactly \"## 计划 n 已完成\" and then briefly say what this stage completed. The UI consumes that line as the single stage-complete event for the in-chat plan card. These supported progress markers are state events, not a generic progress estimate; they do not dictate execution granularity. Do not announce the next stage, call its tools, or claim the whole plan is complete before the current stage-complete line. If a stage needs user input, explain what is missing and pause without emitting its completion line. Never use a stage marker merely as a preview or example. A plan may be announced exactly ONCE per conversation: when you resume, repair, or continue work inside an already-announced plan, do NOT write its announcement line again (no repeated 「## 计划 n：…」 lines, and no repeated completion lines either) — the UI shows the plan card and cursor, so one announcement at the start and one completion at the end is all that is needed. For a plan item that carries a visible Todo list (substeps), drive that list with the same discipline: before starting substep k, write a standalone control line exactly 「### 子步骤 k：<子步骤名称>」 (only for substeps that have not been announced before), and once that substep's work is actually done and verified, write a standalone control line exactly 「### 子步骤 k 已完成」 (an optional 「/总数」 after the number is accepted). The UI consumes these as the per-Todo start/complete events and advances the Todo cursor only in numeric order, so emit them in order and never mark a substep done before its work is finished. Skip substep markers entirely for an atomic plan item that has no Todo list.`;
 
 /** Render an approved plan into a system-prompt fragment the LLM must follow.
  * Also instructs the model to write a `## 阶段 n/m` heading at the start of
@@ -83,7 +83,7 @@ export function formatPlanContinuation(plan: Plan, currentPlan: number, currentT
     const done = index + 1 < currentTodo;
     return `${done ? '✓ ~~' : '□ '}${index + 1}. ${todo.action}${done ? '~~ [已完成]' : index + 1 === currentTodo ? ' 👈 建议从这里继续' : ''}`;
   }).join('\n');
-  return `\n\n<plan_continuation>\n这是一个已经开始的复杂任务，不要重新生成计划，也不要从头开始。\n\n当前总计划：\n${planLines}\n\n当前阶段 Todos（阶段 ${currentPlan}）：\n${todos || '当前阶段没有拆分 Todo，请直接处理这一阶段。'}\n\n继续规则：把这里的计划和 Todo 当作当前上下文，根据实际依赖选择下一步工作；可以合并紧密相关的小项，也可以在需要信息时先提问并暂停。严格执行阶段协议：每个计划开始前先单独输出一行「## 计划 n：<正在做什么>」宣布阶段，之后才能调用工具；阶段真实完成并验证后，再单独输出「## 计划 n 已完成」并简要说明完成结果；编号与上面的列表保持一致，界面靠这两个阶段事件把执行大纲一步步往下推。没有开始播报就不要执行，没有完成播报就不要进入下一计划。如果当前阶段带 Todo 列表，也要按序播报子步骤：开始第 k 项前先单独输出一行「### 子步骤 k：<名称>」，该项真实完成后再单独输出「### 子步骤 k 已完成」（数字后可选「/总数」）；界面靠这些子步骤事件推进 Todo 游标，未完成就不要播报完成。用自然语言说明真实进展，并在有帮助时使用 Todo 标记。${projectBuild ? '项目级交付仍需提供真实验证证据。' : ''}\n</plan_continuation>`;
+  return `\n\n<plan_continuation>\n这是一个已经开始的复杂任务，不要重新生成计划，也不要从头开始。\n\n当前总计划：\n${planLines}\n\n当前阶段 Todos（阶段 ${currentPlan}）：\n${todos || '当前阶段没有拆分 Todo，请直接处理这一阶段。'}\n\n继续规则：把这里的计划和 Todo 当作当前上下文，根据实际依赖选择下一步工作。开始任何工具调用之前，先用一两句自然语言向用户汇报：上次做到哪一步（已结束的步骤/阶段）、当前停在哪个阶段、接下来准备做什么——让用户一进来就知道任务进行到哪里，然后再继续。可以合并紧密相关的小项，也可以在需要信息时先提问并暂停。阶段协议：只有尚未宣布过的计划才需要输出「## 计划 n：<正在做什么>」宣布行；当前计划如果已经在之前的对话里宣布过（计划卡与进度条可见），不要再次输出宣布行，直接继续该计划的工作；真正进入一个新计划（编号变化）时才宣布。阶段真实完成并验证后，再单独输出「## 计划 n 已完成」并简要说明完成结果；同一计划只宣布一次、只完成一次，修复/续跑轮绝不重复输出这两个事件。编号与上面的列表保持一致，界面靠这两个阶段事件把执行大纲一步步往下推。没有开始播报就不要执行，没有完成播报就不要进入下一计划。如果当前阶段带 Todo 列表，也要按序播报子步骤：仅在子步骤尚未宣布过时输出「### 子步骤 k：<名称>」，该项真实完成后再单独输出「### 子步骤 k 已完成」（数字后可选「/总数」）；界面靠这些子步骤事件推进 Todo 游标，未完成就不要播报完成。用自然语言说明真实进展，并在有帮助时使用 Todo 标记。${projectBuild ? '项目级交付仍需提供真实验证证据。' : ''}\n</plan_continuation>`;
 }
 
 // ── Live plan-progress card (transcript) ──
@@ -603,6 +603,35 @@ export function matchPlanPhaseMarker(text: string): number | null {
     if (Number.isFinite(n) && (best === null || n > best)) best = n;
   }
   return best;
+}
+
+// Protocol control-line pattern: heading + 「计划/阶段/子步骤 n …」shapes. Only
+// lines shaped like state-event control lines are eligible for repeat-folding
+// (never plain body copy, never code lines).
+const PLAN_CONTROL_LINE_RE = /^(#{1,4}\s*)?(?:计划|阶段|子步骤|小步骤|子任务)\s*\d+/;
+
+/**
+ * Collapse consecutive repeats of the SAME protocol control line into one
+ * (a model echoing 「## 计划 5：交付验证与质量修复」 three times streams into the
+ * bubble as three identical headings). Control lines are single-use state
+ * events — the echo is display noise, not content. Dedup only applies to
+ * identical protocol-shaped lines running consecutively; real body copy that
+ * happens to repeat is untouched, and code blocks keep their repeated lines.
+ */
+export function dedupePlanAnnouncements(text: string): string {
+  if (!text) return text;
+  const lines = text.split('\n');
+  const out: string[] = [];
+  let previous: string | null = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed !== '' && previous !== null && trimmed === previous && PLAN_CONTROL_LINE_RE.test(trimmed)) {
+      continue;
+    }
+    out.push(line);
+    previous = trimmed;
+  }
+  return out.join('\n');
 }
 
 function showPlanDialog(analysis: AnalysisResult, options: PlanReviewOptions): Promise<PlanReviewDecision> {

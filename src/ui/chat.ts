@@ -33,6 +33,7 @@ import {
   updatePlanCard,
   clearPlanCardRefining,
   matchPlanProgressMarkers,
+  dedupePlanAnnouncements,
   type PlanProgressMarker,
   type PlanCardHandle,
 } from './plan';
@@ -1897,7 +1898,7 @@ export class ChatController {
       }
       if (cls.related) {
         this.relatedInsert = { text, images, displayText };
-        this.addStatusBubble(`已并入这条新要求，正在重新规划…`, true, false);
+        this.addStatusBubble(`已并入这条新要求，正在重新规划…`, true, false, 'info');
         this.abortController?.abort();
       } else {
         this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
@@ -2729,7 +2730,7 @@ export class ChatController {
         if (probeFindingsReported) return;
         if (workflow.probeRequired && !workflow.probeAvailable) {
           probeFindingsReported = true;
-          this.addStatusBubble('⚠ 这项请求需要先做只读探针，但当前没有可用工作区工具，已降级为有限上下文执行。', false, false);
+          this.addStatusBubble('⚠ 这项请求需要先做只读探针，但当前没有可用工作区工具，已降级为有限上下文执行。', false, false, 'warn');
           return;
         }
         if (!workspaceProfile || !taskContract) return;
@@ -2737,12 +2738,12 @@ export class ChatController {
         if (isBareWorkspace(workspaceProfile)) {
           // “从零搭建”只在项目级构建语境下说；非构建请求没有可报告的探索结论。
           if (needsDeliveryGate) {
-            this.addStatusBubble('当前工作区为空或尚未建立项目结构，将从零搭建。', false, false);
+            this.addStatusBubble('当前工作区为空或尚未建立项目结构，将从零搭建。', false, false, 'info');
           }
           return;
         }
-        this.addStatusBubble(`🔎 已完成项目探索：${workspaceProfileSummary(workspaceProfile)}`, true, false);
-        this.addStatusBubble(`📋 已建立任务契约：${taskContract.acceptanceCriteria.length} 项验收标准，验证结果将决定是否交付。`, true, false);
+        this.addStatusBubble(`🔎 已完成项目探索：${workspaceProfileSummary(workspaceProfile)}`, true, false, 'info');
+        this.addStatusBubble(`📋 已建立任务契约：${taskContract.acceptanceCriteria.length} 项验收标准，验证结果将决定是否交付。`, true, false, 'info');
       };
       const maybeShowAssessment = (): void => {
         if (assessmentFlow) return;
@@ -3269,7 +3270,7 @@ export class ChatController {
               resultText: typeof fixEvent.payload.result.result === 'string' ? fixEvent.payload.result.result.slice(0, 800) : fixEvent.payload.result.error,
             });
             this.recordToolActivity(fixEvent.payload.toolName, undefined, ok);
-            this.addStatusBubble(`${ok ? '🔧✅' : '🔧⛔'} 修复工具 ${fixEvent.payload.toolName}：${ok ? '已完成' : fixEvent.payload.result.error ?? '失败'}`, !ok, !ok);
+            this.addStatusBubble(`${ok ? '🔧✅' : '🔧⛔'} 修复工具 ${fixEvent.payload.toolName}：${ok ? '已完成' : fixEvent.payload.result.error ?? '失败'}`, !ok, !ok, ok ? 'success' : undefined);
             scrollChatToBottomIfPinned(chatEl);
           } else if (fixEvent.type === 'Completed') {
             latestMessages = fixEvent.payload.messages ?? latestMessages;
@@ -3291,7 +3292,7 @@ export class ChatController {
       // agent will verify the premise before executing.
       if (analysis.traps.length > 0) {
         const labels = [...new Set(analysis.traps.map(t => TRAP_TYPE_LABELS[t.type] ?? t.type))].join('、');
-        this.addStatusBubble(`⚠️ 检测到请求中可能包含逻辑陷阱（${labels}）— 将先验证前提，若前提有误会换思路处理`);
+        this.addStatusBubble(`⚠️ 检测到请求中可能包含逻辑陷阱（${labels}）— 将先验证前提，若前提有误会换思路处理`, false, false, 'warn');
       }
       // Eager thinking indicator: the user sees the animation while waiting
       // for the first token; reasoning deltas upgrade it with live text. A
@@ -3922,7 +3923,7 @@ export class ChatController {
                 if (gen !== this.generation) return;
                 const icon = step.status === 'passed' ? '✅' : step.status === 'skipped' ? '⏭️' : '❌';
                 const dur = step.durationMs ? ` · ${(step.durationMs / 1000).toFixed(1)}s` : '';
-                this.addStatusBubble(`${icon} 交付验证 · ${step.label}（${step.command}）${dur}`);
+                this.addStatusBubble(`${icon} 交付验证 · ${step.label}（${step.command}）${dur}`, false, step.status === 'failed', step.status === 'passed' ? 'success' : undefined);
                 scrollChatToBottomIfPinned(chatEl);
               };
               deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep);
@@ -3945,7 +3946,7 @@ export class ChatController {
                   qualityRepairIssues.push(`第 ${round} 轮修复未完成：修复 agent 未返回可继续验证的完成结果。`);
                   this.addStatusBubble(`⚠️ 第 ${round} 轮修复没有完成，仍先重新验证当前工作区；未达到三轮前不会让人工介入。`, true, true);
                 } else {
-                  this.addStatusBubble(`🔁 第 ${round} 轮修复完成，重新执行全部交付验证…`, true);
+                  this.addStatusBubble(`🔁 第 ${round} 轮修复完成，重新执行全部交付验证…`, true, false, 'info');
                 }
                 // Every round closes with a real re-check, never the previous
                 // round's evidence.
@@ -3963,7 +3964,8 @@ export class ChatController {
                     ? '✅ 交付验证通过'
                     : `✅ 交付验证通过：${deliveryVerificationSummary(deliveryResult)}`)
                 : `⛔ 项目暂不交付：${deliveryVerificationSummary(deliveryResult)}`,
-              !deliveryResult.passed, !deliveryResult.passed);
+              !deliveryResult.passed, !deliveryResult.passed,
+              deliveryResult.passed ? 'success' : undefined);
               scrollChatToBottomIfPinned(chatEl);
             }
             if (deliveryResult && completionMessages && gen === this.generation) {
@@ -4125,8 +4127,10 @@ export class ChatController {
               // the for-await loop doesn't block on the async mermaid render; the bubble is
               // visibly replaced as soon as innerHTML is set synchronously inside renderMarkdown.
               // Same XML filter as streaming, then re-scroll once the async diagram pass
-              // has changed the bubble height.
-              void renderMarkdown(stripToolCallXml(finalText), seg.el).then(() => {
+              // has changed the bubble height. Protocol control lines (「## 计划
+              // n：…」) are folded so a model echo of an already-announced stage
+              // cannot render as duplicated headings.
+              void renderMarkdown(stripToolCallXml(dedupePlanAnnouncements(finalText)), seg.el).then(() => {
                 // The async diagram pass can resolve AFTER a session switch: the
                 // bubble may already be detached and the transcript re-rendered
                 // with another session's messages. Guard on the generation so a
@@ -4314,7 +4318,7 @@ export class ChatController {
             // and path linkification — same treatment as Completed.
             for (const seg of assistantSegments) {
               if (!seg.text) continue;
-              void renderMarkdown(stripToolCallXml(seg.text), seg.el).then(() => {
+              void renderMarkdown(stripToolCallXml(dedupePlanAnnouncements(seg.text)), seg.el).then(() => {
                 if (gen !== this.generation) return;
                 scrollChatToBottomIfPinned(chatEl);
               });
@@ -4870,7 +4874,22 @@ export class ChatController {
     return bubble;
   }
 
-  private addStatusBubble(text: string, pending = false, isError = false): HTMLElement {
+  /**
+   * Append a system status bubble to the transcript. `pending` pulses in
+   * accent (in-progress); `isError` renders the full-width danger row. `kind`
+   * adds a tonal highlight for result-bearing messages so key moments (root
+   * cause found, a bug discovered, verification all-green) are noticed at a
+   * glance instead of blending into neutral notices:
+   *  - 'success' → green: verification passed, a step completed cleanly
+   *  - 'warn'    → amber: a defect/bug found, degraded mode, needs attention
+   *  - 'info'    → accent: root-cause / probe findings, contract established
+   */
+  private addStatusBubble(
+    text: string,
+    pending = false,
+    isError = false,
+    kind: 'success' | 'warn' | 'info' | undefined = undefined,
+  ): HTMLElement {
     const chatEl = document.getElementById('chat')!;
     const wrapper = document.createElement('div');
     wrapper.className = 'bubble-row status';
@@ -4879,6 +4898,7 @@ export class ChatController {
     const bubble = document.createElement('div');
     bubble.className = 'bubble status';
     if (isError) bubble.classList.add('error');
+    if (kind) bubble.classList.add(`hl-${kind}`);
     bubble.textContent = text;
     linkifyPaths(bubble);
     wrapper.appendChild(bubble);
