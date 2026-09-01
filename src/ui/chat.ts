@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, promptBudgetForProvider, imageGenEnabled, imageGenModelFor } from '../shared/providers';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
@@ -1156,6 +1156,10 @@ export class ChatController {
   /** Whether the active plan was approved as a project build — carried across
    * continuation turns so the delivery gate follows the plan, not the prompt. */
   private activePlanProjectBuild = false;
+  /** 会话级交付证据：构建计划曾在某一回合真实通过机械验证（typecheck/测试/构建）。
+   * 后续纯总结轮没有工具调用、不会重跑验证，收尾时仍可据此把计划置为完成，
+   * 避免顶部进度条在项目交付后停在「执行中 第 N 步」。新对话/会话切换清零。 */
+  private deliveryGatePassed = false;
   /** 本会话内已生成的第几个独立规划（1、2、…）。同一规划的细化/续跑不递增，
    * 只有新请求在对话里再开一份计划才 +1；会话切换/新对话清零。 */
   private planSeqCounter = 0;
@@ -1182,6 +1186,10 @@ export class ChatController {
   private sessionArtifacts: ArtifactItem[] = [];
   private sessionArtifactSeen = new Set<string>();
   private projectDirectoryShown = false;
+  /** 最近一次上下文装配（send 构建 systemPrompt + promptTools）的真实固定开销
+   * （系统提示词 + 工具定义 token 估算），与底部上下文窗口进度条共用口径；
+   * 尚未发过消息时为 0，由 main.ts 的静态近似兜底（启动/恢复场景）。 */
+  private contextOverhead = { system: 0, tools: 0 };
   /** Messages the user typed while a turn was running, judged UNRELATED to the
    * current task. They are queued and started as fresh tasks once the current
    * task/plan reaches a terminal state (no auto-continue pending). */
@@ -1300,7 +1308,7 @@ export class ChatController {
   }
 
   private applyPlanProgressSnapshot(snapshot: PlanProgressSnapshot): void {
-    // 快照带会话内规划编号：恢复旧会话时编号接续，后续新规划不会重复编号。
+    // 快照带会话内计划编号：恢复旧会话时编号接续，后续新计划不会重复编号。
     this.activePlanSeq = snapshot.planSeq ?? 1;
     this.planSeqCounter = Math.max(this.planSeqCounter, this.activePlanSeq);
     const complete = snapshot.status === 'complete';
@@ -1410,6 +1418,7 @@ export class ChatController {
     //（chatView 里它不会随 #chat 清空，必须显式卸载）。
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
+    this.deliveryGatePassed = false;
     this.removePlanProgressPin();
     this.sessionId = id;
     this.contextEngine = undefined;
@@ -1632,6 +1641,12 @@ export class ChatController {
    * sessionStats.usage.promptTokens is cumulative across turns, not current. */
   getMessages(): Message[] {
     return this.messages;
+  }
+
+  /** 最近一次 send 装配的上下文固定开销（系统提示词 + 工具定义 token 估算），
+   * 与底部上下文窗口进度条共用口径。 */
+  getContextOverheadTokens(): { system: number; tools: number } {
+    return this.contextOverhead;
   }
 
   private updateTurnCount(turnCount: number, persist = false): void {
@@ -2623,6 +2638,11 @@ export class ChatController {
           ];
       const conventions = await loadGuiConventions(effectiveWorkspace || undefined);
       systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen, conventions);
+      // 缓存本次真实装配的固定开销，供底部上下文窗口进度条读取（与引擎估算同口径）。
+      this.contextOverhead = {
+        system: estimatePromptTokens(systemPrompt),
+        tools: estimateToolDefinitionTokens(promptTools),
+      };
       this.contextEngine = codingAgent.getHarness().getContextEngine();
 
       // ── Logical-trap pre-scan (runs in plain-chat AND workspace mode):
@@ -2823,8 +2843,8 @@ export class ChatController {
           let planForReview: Plan = analysis.plan ?? deriveFallbackPlan(userText);
           const showPlanCard = (plan: Plan, refining = false): void => {
             if (!planProgress) {
-              // 新规划：本会话内规划编号 +1，并把触发它的用户输入带给卡头，
-              // 让「第 1 份规划」与「第 2 份规划（因反馈而来）」一眼可分。
+              // 新计划：本会话内计划编号 +1，并把触发它的用户输入带给卡头，
+              // 让第 1 份计划与「新一轮计划」（因反馈而来）一眼可分。
               const planSeq = ++this.planSeqCounter;
               this.activePlanSeq = planSeq;
               planProgress = new PlanProgressModel(plan, 'active', 1, 1, needsDeliveryGate, planSeq, userText);
@@ -2973,7 +2993,7 @@ export class ChatController {
         }
         this.activePlanCardHandle = planCard;
         this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
-        // 续跑复用同一规划编号；固定进度条跟随当前计划卡。
+        // 续跑复用同一计划编号；固定进度条跟随当前计划卡。
         this.ensurePlanProgressPin(planProgress);
         // 仅当是明确续跑指令时才输出“继续处理第 x 阶段第 y 个 Todo”的生硬框架；
         // 中途的新诉求沿用计划上下文，但不套用该文案，直接自然处理。
@@ -3918,6 +3938,11 @@ export class ChatController {
               completionMessages = [...completionMessages, { role: 'assistant', content: `交付验证结果（回合末机械检查重跑）：\n${evidence}` }];
             }
             const qualityPassed = !needsDeliveryGate || (deliveryResult?.passed === true && gen === this.generation);
+            // 交付验证结果是会话级证据：记下“本会话真实通过过一次机械验证”，供后续
+            // 纯总结轮（无工具调用、不重跑验证）收尾时使用。
+            if (needsDeliveryGate && !event.payload.interrupted && gen === this.generation && deliveryResult?.passed === true) {
+              this.deliveryGatePassed = true;
+            }
             // 计划完成的收尾不能只依赖模型的 `## 计划 n 已完成` 标记：模型漏发时
             // 卡片会永远停在第一步。只要回合正常结束、本轮真实执行过工具（与上方
             // hasToolWork 同一约定：提问/确认轮没有 tool 消息）、末句不是提问、且
@@ -3981,6 +4006,18 @@ export class ChatController {
               && completionSnapshot !== undefined
               && completionSnapshot.currentPlan < completionSnapshot.plan.steps.length
               && !planTrack.phaseStarted.has(completionSnapshot.currentPlan + 1);
+            // 纯总结轮的交付兜底：构建计划的收尾回合常常不带工具调用（模型以自然语言
+            // 总结并展示结果），deliveryResult 因此不会重算。只要本会话已真实通过过
+            // 交付验证，且这轮是干净的总结/确认收尾，就视为项目已交付并把计划置为
+            // 完成——否则顶部进度条就停留在「执行中 第 N 步」，与对话窗口里已经结束
+            // 的项目不一致。该轮未通过验证（或从未通过）时不触发，继续保持续跑上下文。
+            const deliverySummarizedPlan = planCard
+              && needsDeliveryGate && this.deliveryGatePassed === true
+              && !hasToolWork && !event.payload.interrupted && gen === this.generation
+              && !turnAsksForInput && !this.pausePlanCard
+              && completionSnapshot !== undefined
+              && completionSnapshot.currentPlan < completionSnapshot.plan.steps.length
+              && completionSnapshot.status !== 'complete';
             // 完成标记驱动的一次推进（finishPlan）已把游标推到 completedPlan+1，
             // 回合收尾的兜底不能再推进一次——否则"一轮一阶段"时会把下一阶段整段跳过。
             const canAdvancePlan = completionSnapshot !== undefined
@@ -4008,19 +4045,19 @@ export class ChatController {
                   ? `计划 ${finishedPlan} 的工作已完成，等待验证结果后继续…`
                   : `计划 ${finishedPlan} 的工作尚未全部完成，继续处理当前计划…`);
               }
-            } else if (planCompletionCandidate && (protocolPlanFinished || legacyPlanFinished || planSummarized || toolFinishedLastPlan) && planCard || (deliveryCompletedPlan && planCard)) {
+            } else if (planCompletionCandidate && (protocolPlanFinished || legacyPlanFinished || planSummarized || toolFinishedLastPlan) && planCard || (deliveryCompletedPlan && planCard) || (deliverySummarizedPlan && planCard)) {
               // 收尾判定加独立证据（审计第 3 项）：不能只信模型一句“已完成”——
               // 最后阶段的 Todo 要真实完成、或构建计划的回合末交付验证通过。
               // 证据不足时只更新文案，不 dispatch completed。
               const lastPlanNumber = completionSnapshot?.plan.steps.length ?? 0;
               const lastTodosDone = (planProgress?.canCompleteCurrentTodos() ?? false);
-              const deliveryBlocked = needsDeliveryGate && !qualityPassed;
+              const deliveryBlocked = needsDeliveryGate && !qualityPassed && !this.deliveryGatePassed;
               if (deliveryBlocked) {
                 // 交付门禁未通过（审计第 4 项）：不把计划标记为完成，保留续跑
                 // 上下文（activeComplexPlan 不被清空），下一轮“修复/继续”仍走
                 // 原计划续跑，而不是丢失计划卡后重新分析。
                 planCard.setActivity('所有阶段已完成，但交付检查未通过；回复后可继续修复并重新验证。');
-              } else if (lastTodosDone || (needsDeliveryGate && qualityPassed === true)) {
+              } else if (lastTodosDone || (needsDeliveryGate && (qualityPassed === true || this.deliveryGatePassed === true))) {
                 planProgress?.dispatch({ type: 'completed' });
                 planMarkedCompleted = true;
                 if (this.activeComplexPlan)
@@ -4496,6 +4533,7 @@ export class ChatController {
     // 新对话 = 新的一次会话：规划编号重新起算，固定进度条移除。
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
+    this.deliveryGatePassed = false;
     this.removePlanProgressPin();
     this.fileWriteVersions.clear();
     this.sessionArtifacts = [];
