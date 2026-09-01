@@ -443,6 +443,53 @@ function deliveryCall(toolName: string, args: Record<string, unknown>): ToolCall
  * bare/static workspace counts as not_applicable → passed (nothing mechanical
  * to verify), matching the honest "no standard entry" reporting upstream.
  */
+/** Run one verification spec exactly once, resolving null on timeout/abort. */
+async function runDeliveryStepOnce(
+  tools: ToolAdapter,
+  spec: VerificationSpec,
+  signal?: AbortSignal,
+): Promise<ToolResult | null> {
+  try {
+    return await new Promise<ToolResult | null>((resolve) => {
+      let settled = false;
+      const local = new AbortController();
+      const onAbort = (): void => finish(null);
+      const timer = setTimeout(() => finish(null), spec.timeoutMs ?? DELIVERY_STEP_TIMEOUT_MS);
+      const finish = (value: ToolResult | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        local.abort();
+        signal?.removeEventListener('abort', onAbort);
+        resolve(value);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      tools.execute(deliveryCall('execute_command', { command: spec.command }), local.signal).then(finish, () => finish(null));
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Retry a transiently-failed verification step once so a command that died on
+ * a network/registry/tool-channel blip is re-run instead of killing the whole
+ * delivery pipeline. Deterministic failures (real compile/test errors) are
+ * never retried — the exit code and output are the evidence. */
+async function runDeliveryStep(
+  tools: ToolAdapter,
+  spec: VerificationSpec,
+  signal?: AbortSignal,
+): Promise<{ result: ToolResult | null; retried: boolean }> {
+  const first = await runDeliveryStepOnce(tools, spec, signal);
+  if (signal?.aborted || first === null || first.success === true) return { result: first, retried: false };
+  const output = String(first.error ?? first.result ?? '');
+  const kind = classifyDeliveryFailure(output, 1);
+  const transient = kind === 'timeout' || kind === 'network_failure' || kind === 'tool_unavailable';
+  if (!transient) return { result: first, retried: false };
+  const again = await runDeliveryStepOnce(tools, spec, signal);
+  return { result: again, retried: true };
+}
+
 export async function runDeliveryVerification(
   tools: ToolAdapter,
   profile: WorkspaceProfile | undefined,
@@ -456,27 +503,7 @@ export async function runDeliveryVerification(
   for (const spec of profile.verification) {
     if (signal?.aborted) break;
     const start = Date.now();
-    let result: ToolResult | null = null;
-    try {
-      result = await new Promise<ToolResult | null>((resolve) => {
-        let settled = false;
-        const local = new AbortController();
-        const onAbort = (): void => finish(null);
-        const timer = setTimeout(() => finish(null), spec.timeoutMs ?? DELIVERY_STEP_TIMEOUT_MS);
-        const finish = (value: ToolResult | null): void => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          local.abort();
-          signal?.removeEventListener('abort', onAbort);
-          resolve(value);
-        };
-        signal?.addEventListener('abort', onAbort, { once: true });
-        tools.execute(deliveryCall('execute_command', { command: spec.command }), local.signal).then(finish, () => finish(null));
-      });
-    } catch {
-      result = null;
-    }
+    const { result, retried } = await runDeliveryStep(tools, spec, signal);
     const durationMs = Date.now() - start;
     const output = (typeof result?.result === 'string' ? result.result : result?.error ?? '').slice(0, DELIVERY_OUTPUT_MAX_CHARS);
     const timedOut = result === null && !signal?.aborted;
@@ -490,7 +517,9 @@ export async function runDeliveryVerification(
         status: (signal?.aborted || (environmentBlocked && !spec.required)) ? 'skipped' : 'failed',
         exitCode: result ? -1 : undefined,
         durationMs,
-        output: timedOut ? `命令超时（>${Math.round((spec.timeoutMs ?? DELIVERY_STEP_TIMEOUT_MS) / 1000)}s）` : output,
+        output: timedOut
+          ? `命令超时（>${Math.round((spec.timeoutMs ?? DELIVERY_STEP_TIMEOUT_MS) / 1000)}s）${retried ? '，已自动重试一次' : ''}`
+          : output,
         failureKind: timedOut ? 'timeout' : result ? classifyDeliveryFailure(output, 1) : 'tool_unavailable',
       }
       : {

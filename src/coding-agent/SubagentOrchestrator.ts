@@ -28,6 +28,18 @@ export type SubagentStatus = 'running' | 'done' | 'failed' | 'timed_out' | 'canc
  * A single progress snapshot emitted by the orchestrator while a subagent runs.
  * The host UI turns these into a live "which agent is working" view.
  */
+/** One entry in a subagent's internal tool trace. The parent loop only hears
+ * toolName via the old onTool path; this richer list (name + arg hint + state)
+ * lets the activity panel show what a subagent actually did, not just that it
+ * did something. */
+export interface SubagentToolTrace {
+  /** Tool the subagent invoked. */
+  name: string;
+  /** Short human-readable hint of the call's arguments (never full payloads). */
+  args?: string;
+  status: 'running' | 'completed' | 'failed';
+}
+
 export interface SubagentActivity {
   /** Parent tool-call id that spawned this subagent (stable UI key). */
   callId: string;
@@ -65,6 +77,8 @@ export interface SubagentActivity {
   timeoutMs?: number;
   /** Parent tool-call id that spawned this subagent (chain-of-delegation). */
   parentCallId?: string;
+  /** Ordered, deduped-by-toolCallId trace of the tools the subagent ran so far. */
+  toolTrace?: SubagentToolTrace[];
 }
 
 /** Optional UI progress sink — lets the host surface multi-agent activity. */
@@ -218,6 +232,36 @@ export class SubagentOrchestrator implements ToolAdapter {
       };
     }
 
+    // Per-call tool trace: keyed by the subagent's internal toolCallId so
+    // parallel tool calls inside one round cannot clobber each other. Derived
+    // from the subagent engine's ToolStarted/ToolResult events; emitted with
+    // onTool/onDone/onError so the UI can expand what the subagent actually
+    // did rather than showing a single "agentName" row.
+    const toolTrace = new Map<string, SubagentToolTrace>();
+    // Compact arg hint: pull the fields users actually care about (path, files,
+    // query, command …) out of the tool-call JSON. Never a full payload.
+    const summarizeToolArgs = (raw: string | undefined): string | undefined => {
+      if (!raw) return undefined;
+      try {
+        const parsed = JSON.parse(raw) as Record<string, unknown> | null;
+        if (!parsed || typeof parsed !== 'object') return undefined;
+        const parts: string[] = [];
+        for (const key of ['path', 'files', 'query', 'topic', 'command', 'prompt', 'package', 'name', 'url']) {
+          const value = parsed[key];
+          if (typeof value === 'string' && value.trim()) {
+            const v = value.replace(/\s+/g, ' ').trim();
+            parts.push(v.length > 40 ? `${v.slice(0, 40)}…` : v);
+          } else if (value !== null && typeof value === 'object') {
+            const s = JSON.stringify(value);
+            parts.push(s.length > 40 ? `${s.slice(0, 40)}…` : s);
+          }
+        }
+        return parts.length > 0 ? parts.join(' · ') : undefined;
+      } catch {
+        const flat = raw.replace(/\s+/g, ' ').trim();
+        return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat;
+      }
+    };
     // UI progress sink: emit a live "which agent is working" trace so the host
     // UI can show the multi-agent nature of the run instead of a black box.
     // CRITICAL: a display/UI error MUST NOT break the agent's actual work
@@ -338,18 +382,25 @@ export class SubagentOrchestrator implements ToolAdapter {
                   : 'started';
           emit(progress?.onState, { state: event.payload.to, lifecycle, toolState: event.payload.to === 'ACT' ? undefined : 'completed' });
         } else if (event.type === 'ToolStarted') {
-          emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'running', lifecycle: 'tool_running' });
+          toolTrace.set(event.payload.toolCallId, {
+            name: event.payload.toolName,
+            args: summarizeToolArgs(event.payload.toolCallArgs),
+            status: 'running',
+          });
+          emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'running', lifecycle: 'tool_running', toolTrace: [...toolTrace.values()] });
         } else if (event.type === 'ToolResult') {
-          emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'completed', lifecycle: 'observing' });
+          const entry = toolTrace.get(event.payload.toolCallId);
+          if (entry) entry.status = event.payload.result?.success ? 'completed' : 'failed';
+          emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'completed', lifecycle: 'observing', toolTrace: [...toolTrace.values()] });
         } else if (event.type === 'Completed') {
           finalOutput = event.payload.finalOutput;
           await persist('subagent_completed', event.payload.messages, event.payload.turnCount ?? 0);
-          emit(progress?.onDone, { success: true, output: finalOutput, status: 'done', durationMs: done(0), tokensUsed });
+          emit(progress?.onDone, { success: true, output: finalOutput, status: 'done', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
         } else if (event.type === 'Interrupted') {
           await persist('subagent_interrupted', event.payload.messages, event.payload.turnCount ?? 0);
           if (combinedSignal.aborted) {
             const cancelled = parentSignal?.aborted === true && !timeoutSignal.aborted;
-            emit(progress?.onDone, { success: false, error: cancelled ? 'cancelled' : 'timed out', status: cancelled ? 'cancelled' : 'timed_out', lifecycle: cancelled ? 'cancelled' : 'timed_out', durationMs: done(0), tokensUsed });
+            emit(progress?.onDone, { success: false, error: cancelled ? 'cancelled' : 'timed out', status: cancelled ? 'cancelled' : 'timed_out', lifecycle: cancelled ? 'cancelled' : 'timed_out', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
             return {
               id: toolCall.id,
               toolName: def.name,
@@ -358,10 +409,10 @@ export class SubagentOrchestrator implements ToolAdapter {
               duration: done(0),
             };
           }
-          emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed });
+          emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
           break;
         } else if (event.type === 'Error') {
-          emit(progress?.onError, { error: event.payload.message, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed });
+          emit(progress?.onError, { error: event.payload.message, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
           return {
             id: toolCall.id,
             toolName: def.name,
@@ -389,7 +440,7 @@ export class SubagentOrchestrator implements ToolAdapter {
         duration: done(0),
       };
     } catch (err: any) {
-      emit(progress?.onError, { error: err?.message ?? String(err), status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed: 0 });
+      emit(progress?.onError, { error: err?.message ?? String(err), status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed: 0, toolTrace: [...toolTrace.values()] });
       return {
         id: toolCall.id,
         toolName: def.name,
