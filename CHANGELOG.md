@@ -3,6 +3,14 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.1.0-beta
+
+**定时任务面板与侧栏交互修复**
+
+- 修复添加定时任务后必须切换菜单才能看到新任务的问题。
+- 修复删除定时任务后面板不会立即更新的问题。
+- 左侧菜单返回按钮箭头改为向右。
+
 ## v2.1.0-alpha
 
 **长对话与多 Agent 执行可视化增强**

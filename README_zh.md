@@ -15,7 +15,7 @@
 <p align="center">
   <img src="docs/screenshots/pure-ui-default.png" alt="Pure GUI 默认界面（落地页）" width="720" />
   <br />
-  <em>Pure GUI — 默认态：会话侧栏、主输入区和状态栏（真实截图，暗色主题，v2.1.0-alpha）</em>
+  <em>Pure GUI — 默认态：会话侧栏、主输入区和状态栏（真实截图，暗色主题，v2.1.0-beta）</em>
   <br /><br />
   <img src="docs/screenshots/event-loop-agentloop-comparison.svg" alt="经典 JavaScript Event Loop 与 Pure AgentLoop 对比" width="720" />
   <br />
