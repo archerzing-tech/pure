@@ -96,6 +96,70 @@ describe('agent activity panel', () => {
     expect(panel?.querySelector('.agent-console-history')).not.toBeNull();
   });
 
+  it('renders the expandable tool trace with per-step state', () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([activity({
+      lifecycle: 'tool_running',
+      toolName: 'read_file',
+      toolTrace: [
+        { name: 'read_file', args: 'src/ui/chat.ts', status: 'completed' },
+        { name: 'web_search', args: 'rust retry best practices', status: 'running' },
+      ],
+    })]);
+
+    const trace = panel.el.querySelector('.agent-activity-trace');
+    expect(trace).not.toBeNull();
+    expect(panel.el.textContent).toContain('查看工具轨迹');
+    expect(panel.el.textContent).toContain('read_file');
+    expect(panel.el.textContent).toContain('rust retry best practices');
+    const items = panel.el.querySelectorAll('.agent-trace-item');
+    expect(items).toHaveLength(2);
+    expect(items[0].className).toContain('completed');
+    expect(items[1].className).toContain('running');
+  });
+
+  it('hides the trace area when no tool trace exists', () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([activity({ lifecycle: 'verifying', toolName: undefined })]);
+    const trace = panel.el.querySelector<HTMLElement>('.agent-activity-trace');
+    expect(trace).not.toBeNull();
+    expect(trace?.hidden).toBe(true);
+    expect(panel.el.querySelectorAll('.agent-trace-item')).toHaveLength(0);
+  });
+
+  it('flags a same-batch parallel launch and counts it in the header', () => {
+    const now = Date.now();
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([
+      activity({ callId: 'a', agentName: 'researcher', startedAt: now }),
+      activity({ callId: 'b', agentName: 'deep_thinker', startedAt: now + 300 }),
+    ]);
+
+    expect(panel.el.textContent).toContain('2 个 agent 并行工作中');
+    const badge = panel.el.querySelector('.agent-activity-parallel') as HTMLElement | null;
+    expect(badge).not.toBeNull();
+    expect(badge?.hidden).toBe(false);
+    expect(panel.el.querySelector('[data-call-id="a"]')?.className).toContain('agent-activity-agent--parallel');
+  });
+
+  it('does not flag agents started far apart as parallel', () => {
+    const now = Date.now();
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([
+      activity({ callId: 'a', agentName: 'researcher', startedAt: now }),
+      activity({ callId: 'b', agentName: 'deep_thinker', startedAt: now + 60_000 }),
+    ]);
+
+    const badge = panel.el.querySelector<HTMLElement>('.agent-activity-parallel');
+    expect(badge).not.toBeNull();
+    expect(badge?.hidden).toBe(true);
+    expect(panel.el.textContent).not.toContain('并行工作中');
+  });
+
   it('keeps active agents in the fixed console and marks restored active rows as historical', () => {
     const panel = createAgentActivityPanel();
     document.body.appendChild(panel.el);

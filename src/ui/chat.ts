@@ -42,6 +42,7 @@ import { createPlanProgressPin, type PlanProgressPinHandle } from './planProgres
 import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, setDownloadProgressListener, cancelDownload, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
+import { createPlanSummaryCard, shouldShowPlanSummary } from './planSummary';
 import { createAgentActivityPanel, mergeAgentActivity, type AgentActivityPanelHandle } from './agentActivityPanel';
 import { attachPlanPauseActions } from './planPauseActions';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
@@ -670,11 +671,23 @@ let cachedRuntimes = '';
 let cachedNetwork = '';
 let cachedOs = '';
 let runtimesProbe: Promise<string> | null = null;
+/** Epoch ms of the last FAILED probe. A failure no longer degrades the whole
+ * session: after a short cooldown the next send re-triggers the probe, so a
+ * transient network blip that hid the runtimes oracle at startup is
+ * re-established once the network returns. */
+let runtimesProbeFailedAt = 0;
+const PROBE_RETRY_COOLDOWN_MS = 30_000;
 
 /** Kick off the one-shot environment probe (idempotent). Callers await the
- * same promise so the first send doesn't race the probe. */
+ * same promise so the first send doesn't race the probe. A failed probe is
+ * cleared after a cooldown so a later send re-probes instead of silently
+ * running the whole session with no runtimes/network context. */
 export function ensureRuntimesProbed(signal?: AbortSignal): Promise<string> {
   if (!runtimesProbe) {
+    if (runtimesProbeFailedAt > 0 && Date.now() - runtimesProbeFailedAt < PROBE_RETRY_COOLDOWN_MS) {
+      // Still inside the cooldown: serve the last-known (possibly empty) state.
+      return Promise.resolve(cachedRuntimes);
+    }
     runtimesProbe = (async () => {
       try {
         const core = await loadTauriCore();
@@ -685,18 +698,25 @@ export function ensureRuntimesProbed(signal?: AbortSignal): Promise<string> {
           8_000,
           'environment probe',
         ) ?? '';
-      // sys_info output: "runtimes:  node: v22.x.x  bun: 1.3.x  python3: 3.x.x  rustc: …"
-      // and "network:   proxy: …; env: …; vpn: …; reach: …"
+        // sys_info output: "runtimes:  node: v22.x.x  bun: 1.3.x  python3: 3.x.x  rustc: …"
+        // and "network:   proxy: …; env: …; vpn: …; reach: …"
         const m = raw.match(/^runtimes:\s*(.+)$/m);
         cachedRuntimes = m?.[1]?.trim() ?? '';
         const n = raw.match(/^network:\s*(.+)$/m);
         cachedNetwork = n?.[1]?.trim() ?? '';
         const o = raw.match(/^os:\s*(.+)$/m);
         cachedOs = o?.[1]?.trim() ?? '';
+        runtimesProbeFailedAt = 0;
       } catch {
+        // Network or runtime blip: remember the failure so a subsequent send
+        // re-probes after the cooldown instead of running without environment
+        // context forever. The probe promise itself stays settled (the caller
+        // that started it still sees its resolved value).
         cachedRuntimes = '';
         cachedNetwork = '';
         cachedOs = '';
+        runtimesProbeFailedAt = Date.now();
+        runtimesProbe = null;
       }
       return cachedRuntimes;
     })();
@@ -2747,6 +2767,19 @@ export class ChatController {
         // 探索/契约结论跟随评估卡一起呈现：先看到真实分析，再看到基于它的发现。
         reportProbeFindings();
       };
+      // 执行方案卡：把语义路由的决策（意图/复杂度/策略/风险/计划协作的子 agent
+      // 名单）在 LLM 分析完成后、执行开始前呈现给用户——让"为什么这样拆、打算
+      // 动用哪些角色"与计划/评估卡并列可见，而不是只在引擎内部消费。每轮只展示
+      // 一次；继续轮与纯咨询不重复弹卡。
+      let planSummaryShown = false;
+      const maybeShowPlanSummary = (): void => {
+        if (planSummaryShown) return;
+        if (continuingPlan || !semanticRoute) return;
+        if (!shouldShowPlanSummary(semanticRoute, { hasSubagents: !!effectiveWorkspace })) return;
+        planSummaryShown = true;
+        const planSummaryCard = createPlanSummaryCard(semanticRoute, { hasSubagents: !!effectiveWorkspace });
+        this.appendToTranscript(planSummaryCard.el);
+      };
       // "写一个小游戏 / 做一个网页 / 开发一个工具" → build the artifact on disk
       // instead of printing the full source inline (see the compiled build protocol).
       // Multi-file builds also get the incremental-build protocol (outline
@@ -2873,6 +2906,7 @@ export class ChatController {
           // 评估卡此刻一并落定（规则层判断），随后渲染计划卡进入确认/执行流程。
           removeThinkingCard();
           maybeShowAssessment();
+          maybeShowPlanSummary();
           showPlanCard(planForReview);
           const approvePlan = (explicitlyApproved = false) => {
             if (assessmentFlow) {
@@ -3362,6 +3396,7 @@ export class ChatController {
       // 未走计划访谈的路径（如中风险但简单的请求）在这里补出评估卡：此时所有前置
       // 检查都已真实完成，闸门随检查结果落定，卡片再随执行/验证进度推进。
       maybeShowAssessment();
+      maybeShowPlanSummary();
       if (assessmentFlow && !pauseAfterPlanning) {
         assessmentFlow.setPhase('execute', '已通过评估闸门，开始按确认范围小步执行…');
       }
