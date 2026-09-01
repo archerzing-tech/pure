@@ -80,6 +80,8 @@ describe('LLM page layout (default-model bar + provider grid)', () => {
     expect(settings).toContain("data-remove-row");
     expect(settings).toContain("data-save-panel");
     expect(settings).toContain("data-add-provider");
+    expect(settings).toContain("id=\"provider-delete-btn\"");
+    expect(settings).toContain("private removeProvider(id: string): void");
   });
 
   it('renders the expanded panel as a vertical form: name → base URL → API key + verify → model list', () => {
