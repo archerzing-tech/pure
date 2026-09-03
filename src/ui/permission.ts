@@ -8,13 +8,26 @@ import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { showInlineCard } from './inlineCard';
 
-// Serialize concurrent permission requests — each card must be decided before
-// the next one renders, otherwise listeners/DOM state would overlap.
-let requestQueue: Promise<unknown> = Promise.resolve();
+export interface PermissionRequestOptions {
+  /** Transcript column this card belongs to (per-session mode). Defaults to
+   * the active #chat when omitted. */
+  host?: HTMLElement;
+  /** Owner token (session id) so concurrent runs of DIFFERENT sessions never
+   * serialize behind one another's hidden permission cards. */
+  scope?: string;
+}
 
-export function requestPermission(info: PermissionRequestInfo): Promise<PermissionDecision> {
-  const run = requestQueue.then(() => showDialog(info));
-  requestQueue = run.catch(() => {});
+// Serialize concurrent permission requests PER OWNER — each card must be
+// decided before the next one renders, otherwise listeners/DOM state would
+// overlap. The queue is keyed by scope so a background session's pending card
+// can never block the active conversation's permission prompts.
+const requestQueues = new Map<string, Promise<unknown>>();
+
+export function requestPermission(info: PermissionRequestInfo, options: PermissionRequestOptions = {}): Promise<PermissionDecision> {
+  const scope = options.scope ?? 'default';
+  const previous = requestQueues.get(scope) ?? Promise.resolve();
+  const run = previous.then(() => showDialog(info, options.host));
+  requestQueues.set(scope, run.catch(() => {}));
   return run;
 }
 
@@ -24,7 +37,7 @@ export function requestPermission(info: PermissionRequestInfo): Promise<Permissi
  * - Always allow → { allowed: true, remember: true }  (cached for this session, incl. high risk)
  * - Deny / Esc   → { allowed: false }
  */
-function showDialog(info: PermissionRequestInfo): Promise<PermissionDecision> {
+function showDialog(info: PermissionRequestInfo, host?: HTMLElement): Promise<PermissionDecision> {
   const isHighRisk = info.riskLevel === 'high';
   const riskKey = `permission.risk.${info.riskLevel}`;
   const riskBadge = `<span class="permission-risk-badge risk-${info.riskLevel}">${t(riskKey, info.riskLevel)}</span>`;
@@ -42,6 +55,7 @@ function showDialog(info: PermissionRequestInfo): Promise<PermissionDecision> {
     : '';
 
   return showInlineCard({
+    host,
     cardClass: 'permission',
     title: isHighRisk ? t('permission.titleHigh') : t('permission.title'),
     bodyHTML:

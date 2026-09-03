@@ -134,6 +134,13 @@ export interface CustomProvider {
   name: string;
   /** OpenAI-compatible base URL (e.g. http://localhost:11434/v1). */
   baseURL: string;
+  /**
+   * Wire protocol for this endpoint ('openai' / 'anthropic'); unset or 'auto'
+   * detects from the URL (see protocolForURL). Lets an Anthropic-compatible
+   * endpoint live on an arbitrary URL (proxy / mirror) without a /anthropic
+   * path segment.
+   */
+  protocol?: LLMProtocol;
   /** Suggested models, comma-separated in the settings form. */
   models: string[];
   /** Optional display names per model id (model id → human label). */
@@ -481,6 +488,22 @@ export function protocolForURL(baseURL: string | undefined | null): Exclude<LLMP
   return /(?:\/api\/anthropic|\/anthropic(?:\/|$))/i.test(baseURL?.trim() ?? '')
     ? 'anthropic'
     : 'openai';
+}
+
+/**
+ * Resolve the wire protocol for a provider request. A non-auto user override
+ * always wins. Otherwise a user-supplied endpoint is authoritative because a
+ * built-in provider's registry protocol only describes its default endpoint.
+ */
+export function resolveProviderProtocol(
+  providerProtocol: Exclude<LLMProtocol, 'auto'> | undefined,
+  baseURL: string | undefined | null,
+  endpointOverridden: boolean,
+  protocolOverride?: LLMProtocol,
+): Exclude<LLMProtocol, 'auto'> {
+  if (protocolOverride && protocolOverride !== 'auto') return protocolOverride;
+  if (endpointOverridden || !providerProtocol) return protocolForURL(baseURL);
+  return providerProtocol;
 }
 
 /** True for the deepseek-* providers (shared API base / budget tuning). */

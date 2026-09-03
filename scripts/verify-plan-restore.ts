@@ -267,12 +267,12 @@ async function main(): Promise<number> {
 
     await evaluate(`document.querySelector('.sidebar-session-item[data-sid="${sid}"]').click()`);
     await waitFor(async () => {
-      const n = await evaluate("(() => { const card = document.querySelector('.plan-progress-text-plan'); return card ? card.querySelectorAll('.plan-progress-step').length : 0; })()");
+      const n = await evaluate("(() => { const card = document.querySelector('.session-transcript:not([hidden]) .plan-progress-text-plan') ?? document.querySelector('.plan-progress-text-plan'); return card ? card.querySelectorAll('.plan-progress-step').length : 0; })()");
       return Number(n) === 3;
     }, 25000, `${label} restored plan card`);
 
     const stateResult = JSON.parse(await evaluate(`(() => {
-      const card = document.querySelector('.plan-progress-text-plan');
+      const card = document.querySelector('.session-transcript:not([hidden]) .plan-progress-text-plan') ?? document.querySelector('.plan-progress-text-plan');
       const steps = card ? Array.from(card.querySelectorAll('.plan-progress-step')) : [];
       const doneSteps = steps.filter((s) => s.classList.contains('done')).length;
       const activeSteps = steps.filter((s) => s.classList.contains('active')).length;
@@ -374,16 +374,20 @@ async function main(): Promise<number> {
 
     const eventView = JSON.parse(String(await evaluate(`(() => {
       const chat = document.querySelector('#chat');
-      const rows = Array.from(chat?.querySelectorAll('.tool-row-row') ?? []);
+      // Transcript rows live inside the session's own .session-transcript host
+      // (multi-session mode); read the VISIBLE host so the ordered children are
+      // the actual bubbles, not hidden session hosts.
+      const host = document.querySelector('#chat > .session-transcript:not([hidden])') ?? chat;
+      const rows = Array.from(host?.querySelectorAll('.tool-row-row') ?? []);
       return JSON.stringify({
         text: chat?.textContent ?? '',
         toolNames: rows.map((row) => row.querySelector('.tool-row-name')?.textContent ?? ''),
         args: rows.map((row) => row.querySelector('.tool-row-field-value')?.textContent ?? ''),
         results: rows.map((row) => row.querySelector('.tool-result-preview')?.textContent ?? ''),
         stopped: rows.map((row) => row.querySelector('.tool-row.stopped') !== null),
-        agentPanel: !!document.querySelector('#agent-console-host [data-agent-activity-panel="true"]'),
-        agentText: document.querySelector('#agent-console-host [data-agent-activity-panel="true"]')?.textContent ?? '',
-        order: Array.from(chat?.children ?? []).map((child) => child.textContent?.trim().slice(0, 40) ?? ''),
+        agentPanel: !!document.querySelector('#agent-activity-host [data-agent-activity-rail="true"]'),
+        agentText: document.querySelector('#agent-activity-host [data-agent-activity-rail="true"]')?.textContent ?? '',
+        order: Array.from(host?.children ?? []).map((child) => child.textContent?.trim().slice(0, 40) ?? ''),
       });
     })()`)));
     const checks: Array<[string, unknown, unknown]> = [
@@ -394,7 +398,7 @@ async function main(): Promise<number> {
       ['已返回调用显示结果', eventView.results[0], '事件中的工具结果'],
       ['未返回调用恢复为 stopped', eventView.stopped, [false, true]],
       ['历史恢复显示协作轨迹', eventView.agentPanel, true],
-      ['协作轨迹保留 agent 状态和摘要', eventView.agentText.includes('researcher') && eventView.agentText.includes('已完成事件恢复验证'), true],
+      ['协作轨迹保留 agent 状态和摘要', eventView.agentText.includes('researcher') && eventView.agentText.includes('已返回结果'), true],
     ];
     let eventOk = true;
     for (const [name, actual, want] of checks) {
@@ -441,8 +445,8 @@ async function main(): Promise<number> {
       await waitFor(async () => {
         const segments = Number(await evaluate(`document.querySelectorAll('#chat .conversation-segment').length`));
         const restoring = Number(await evaluate(`document.querySelectorAll('#chat .status.loading').length`));
-        const userRows = Number(await evaluate(`document.querySelectorAll('#chat > .bubble-row.user').length`));
-        const last = String(await evaluate(`Array.from(document.querySelectorAll('#chat .bubble-row.user')).at(-1)?.textContent ?? ''`));
+        const userRows = Number(await evaluate(`document.querySelectorAll('#chat .session-transcript:not([hidden]) .bubble-row.user, #chat .bubble-row.user').length`));
+        const last = String(await evaluate(`Array.from(document.querySelectorAll('#chat .session-transcript:not([hidden]) .bubble-row.user, #chat .bubble-row.user')).at(-1)?.textContent ?? ''`));
         return segments === 20 && restoring === 0 && userRows === 8 && last.includes('第 200 轮用户请求');
       }, 120000, '200-turn conversation render');
     } catch (error) {
@@ -452,7 +456,7 @@ async function main(): Promise<number> {
         userRows: document.querySelectorAll('#chat .bubble-row.user').length,
         loadingRows: document.querySelectorAll('#chat .status.loading').length,
         chatChildren: Array.from(document.querySelector('#chat')?.children ?? []).map((child) => ({ tag: child.tagName, className: child.className, text: child.textContent?.trim().slice(0, 80) ?? '' })),
-        agentConsole: document.querySelector('#agent-console-host')?.textContent ?? '',
+        agentConsole: document.querySelector('#agent-activity-host')?.textContent ?? '',
       }))()`);
       log(`[verify] 200-turn diagnostic: ${String(diagnostic)}`);
       throw error;
@@ -461,10 +465,10 @@ async function main(): Promise<number> {
       segments: document.querySelectorAll('#chat .conversation-segment').length,
       collapsed: Array.from(document.querySelectorAll('#chat .conversation-segment')).filter((segment) => !segment.open).length,
       expanded: Array.from(document.querySelectorAll('#chat .conversation-segment')).filter((segment) => segment.open).length,
-      recentRows: document.querySelectorAll('#chat > .bubble-row.user').length,
-      mountedRows: document.querySelectorAll('#chat .bubble-row').length,
+      recentRows: document.querySelectorAll('#chat .session-transcript:not([hidden]) .bubble-row.user, #chat .bubble-row.user').length,
+      mountedRows: document.querySelectorAll('#chat .session-transcript:not([hidden]) .bubble-row, #chat .bubble-row').length,
       emptyCollapsedBodies: Array.from(document.querySelectorAll('#chat .conversation-segment-body')).filter((body) => body.childElementCount === 0).length,
-      lastText: Array.from(document.querySelectorAll('#chat > .bubble-row.user')).at(-1)?.querySelector('.bubble')?.textContent ?? '',
+      lastText: Array.from(document.querySelectorAll('#chat .session-transcript:not([hidden]) .bubble-row.user, #chat .bubble-row.user')).at(-1)?.querySelector('.bubble')?.textContent ?? '',
     }))()`)));
     const firstSegment = '#chat .conversation-segment:first-of-type';
     await evaluate(`document.querySelector('${firstSegment} > summary')?.click()`);
@@ -565,7 +569,11 @@ async function main(): Promise<number> {
       }, 25000, `${label} session list`);
     };
     const readSessionView = async (): Promise<{ chat: string; chatDone: number; chatActive: number; noOutline: boolean }> => JSON.parse(String(await evaluate(`(() => {
-      const card = document.querySelector('.plan-progress-text-plan');
+      // Scope to the VISIBLE session host: in multi-session mode the hidden
+      // session's host stays in the DOM with its own plan card, and a bare
+      // querySelector would read the first (hidden) session instead of the one
+      // actually shown. Fall back to the unscoped query for single-session mode.
+      const card = document.querySelector('.session-transcript:not([hidden]) .plan-progress-text-plan') ?? document.querySelector('.plan-progress-text-plan');
       const steps = card ? Array.from(card.querySelectorAll('.plan-progress-step')) : [];
       return JSON.stringify({
         chat: card?.textContent?.trim() ?? '',
@@ -681,7 +689,7 @@ async function main(): Promise<number> {
       allTodos: string[];
       noOutline: boolean;
     }> => JSON.parse(String(await evaluate(`(() => {
-      const card = document.querySelector('.plan-progress-text-plan');
+      const card = document.querySelector('.session-transcript:not([hidden]) .plan-progress-text-plan') ?? document.querySelector('.plan-progress-text-plan');
       const row = card?.parentElement;
       const classes = (selector, root = card) => Array.from(root?.querySelectorAll(selector) ?? []).map((el) => el.className);
       return JSON.stringify({
