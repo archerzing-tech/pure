@@ -105,6 +105,16 @@ describe('LLM page layout (default-model bar + provider grid)', () => {
     expect(settings).toContain('llm-model-row-radio');
     expect(settings).toContain('llm.model.idPlaceholder');
     expect(settings).toContain('llm.model.namePlaceholder');
+    // Wire protocol select sits between Base URL and API Key with the auto option.
+    const protocolRow = body.indexOf('id="cfg-protocol"');
+    expect(protocolRow).toBeGreaterThan(baseUrlRow);
+    expect(protocolRow).toBeLessThan(apiKeyRow);
+    expect(body).toContain('data-i18n="llm.protocol"');
+    expect(body).toContain('data-i18n="llm.protocol.hint"');
+    expect(settings).toContain("['auto', 'openai', 'anthropic']");
+    expect(settings).toContain("savedProtocol: LLMProtocol");
+    expect(settings).toContain("entry.protocol = protocol");
+    expect(settings).toContain("next.protocol = protocol");
     // Padding to a minimum of 2 rows (real models + empty add-slots).
     expect(settings).toContain('models.length >= 2 ? models :');
     expect(settings).toContain('[...models, \'\', \'\'].slice(0, 2)');

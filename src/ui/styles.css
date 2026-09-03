@@ -954,57 +954,268 @@ body {
   pointer-events: none;
 }
 
-/* ── Task-level agent console ── */
-#agent-console-host[hidden] { display: none !important; }
-#agent-console-host {
+/* ── Live multi-agent workbench ──
+ * This host is a sibling track of #chat-view. It owns its own scroll area so
+ * agent updates never enter the transcript flow or cover conversation text. */
+#agent-activity-host[hidden] { display: none !important; }
+#agent-activity-host {
   display: flex;
-  flex: 0 0 auto;
-  justify-content: center;
-  width: 100%;
-  padding: 10px 48px 0;
-  pointer-events: none;
-  z-index: 15;
+  flex: 0 0 200px;
+  width: 200px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  isolation: isolate;
+  position: relative;
+  z-index: 0;
+  border-left: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--bg-sidebar) 72%, var(--bg-chat));
 }
-#agent-console-host > .agent-console {
-  width: 100%;
-  max-width: 1120px;
-  pointer-events: auto;
-}
-.agent-console {
-  box-sizing: border-box;
-  max-height: min(40vh, 310px);
-  overflow: auto;
-  padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--bg-card, #fff) 96%, var(--accent-soft));
-  box-shadow: var(--shadow-sm);
-}
-.agent-console-head {
+.agent-activity-rail {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-height: 24px;
-  padding: 0 2px 7px;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 14px 24px;
 }
-.agent-console-title { font-size: 13px; color: var(--text); }
-.agent-console-count { margin-left: auto; color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
-.agent-console-active-list,
-.agent-console-history-list { display: grid; gap: 5px; }
-.agent-console-history { margin-top: 6px; border-top: 1px solid var(--border-light); padding-top: 6px; }
-.agent-console-history-summary {
+.agent-activity-rail-header {
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
-  cursor: pointer;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-light);
+}
+.agent-activity-rail-heading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.agent-activity-rail-eyebrow {
+  color: var(--accent);
+  font: 700 9px var(--font-mono);
+  letter-spacing: .12em;
+}
+.agent-activity-rail-title {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 700;
+}
+.agent-activity-rail-count {
+  flex: 0 0 auto;
+  padding-top: 2px;
   color: var(--text-secondary);
+  font: 600 11px var(--font-mono);
+  white-space: nowrap;
+}
+.agent-activity-live {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agent-activity-section-label {
+  color: var(--text-tertiary);
+  font: 700 10px var(--font-mono);
+  letter-spacing: .08em;
+}
+.agent-activity-live-list,
+.agent-activity-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agent-activity-history {
+  border-top: 1px solid var(--border-light);
+  padding-top: 12px;
+}
+.agent-activity-history-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-secondary);
+  cursor: pointer;
   font-size: 11px;
   list-style: none;
   user-select: none;
 }
-.agent-console-history-summary::-webkit-details-marker { display: none; }
-.agent-console-history-summary::before { content: '›'; margin-right: 6px; transition: transform var(--transition); }
-.agent-console-history[open] .agent-console-history-summary::before { transform: rotate(90deg); }
-.agent-console-history-list { padding-top: 6px; }
+.agent-activity-history-summary::-webkit-details-marker { display: none; }
+.agent-activity-history-summary::before {
+  content: '›';
+  margin-right: 5px;
+  color: var(--text-tertiary);
+  transition: transform var(--transition);
+}
+.agent-activity-history[open] .agent-activity-history-summary::before { transform: rotate(90deg); }
+.agent-activity-history-count { color: var(--text-tertiary); font-family: var(--font-mono); }
+.agent-activity-history-list { padding-top: 8px; }
+.agent-worker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 10px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-card) 72%, transparent);
+  box-shadow: var(--shadow-sm);
+}
+.agent-worker--active {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-light));
+  background: color-mix(in srgb, var(--accent-soft) 50%, var(--bg-card));
+}
+.agent-worker--paused,
+.agent-worker--cancelled { opacity: .72; }
+.agent-worker--done { border-color: color-mix(in srgb, var(--success) 30%, var(--border-light)); }
+.agent-worker--failed,
+.agent-worker--timed-out { border-color: color-mix(in srgb, var(--danger) 36%, var(--border-light)); }
+.agent-worker-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  grid-column: 1 / -1;
+  gap: 8px;
+  min-width: 0;
+}
+.agent-worker-identity {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.agent-worker-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.agent-worker--active .agent-worker-dot { animation: agent-worker-pulse 1.4s ease-in-out infinite; }
+@keyframes agent-worker-pulse {
+  50% { opacity: .4; box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 6%, transparent); }
+}
+.agent-worker--done .agent-worker-dot { background: var(--success); box-shadow: none; }
+.agent-worker--failed .agent-worker-dot,
+.agent-worker--timed-out .agent-worker-dot { background: var(--danger); box-shadow: none; }
+.agent-worker--paused .agent-worker-dot,
+.agent-worker--cancelled .agent-worker-dot { background: var(--text-tertiary); box-shadow: none; }
+.agent-worker-name,
+.agent-worker-role {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-worker-name { color: var(--text); font-size: 12.5px; }
+.agent-worker-role { color: var(--text-secondary); font-size: 10.5px; }
+.agent-worker-status {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.agent-worker--done .agent-worker-status { color: var(--success); }
+.agent-worker--failed .agent-worker-status,
+.agent-worker--timed-out .agent-worker-status { color: var(--danger); }
+.agent-worker--paused .agent-worker-status,
+.agent-worker--cancelled .agent-worker-status { color: var(--text-tertiary); }
+.agent-worker-action {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-worker-task {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-worker-trace {
+  grid-column: 1 / -1;
+  min-width: 0;
+  border-top: 1px dashed var(--border-light);
+  padding-top: 7px;
+}
+.agent-worker-trace[hidden] { display: none; }
+.agent-worker-trace-summary {
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-size: 10.5px;
+  list-style: none;
+}
+.agent-worker-trace-summary::-webkit-details-marker { display: none; }
+.agent-worker-trace-summary:hover { color: var(--accent); }
+.agent-worker-trace-list { display: grid; gap: 4px; margin-top: 6px; }
+.agent-activity-trace-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.agent-activity-trace-marker { flex: 0 0 12px; color: var(--text-tertiary); text-align: center; }
+.agent-activity-trace-item--running .agent-activity-trace-marker { color: var(--accent); }
+.agent-activity-trace-item--completed .agent-activity-trace-marker { color: var(--success); }
+.agent-activity-trace-item--failed .agent-activity-trace-marker { color: var(--danger); }
+.agent-activity-trace-name { color: var(--text); white-space: nowrap; }
+.agent-activity-trace-args { overflow: hidden; color: var(--text-tertiary); text-overflow: ellipsis; white-space: nowrap; }
+.agent-worker-duration {
+  grid-column: 2;
+  justify-self: end;
+  color: var(--text-tertiary);
+  font: 10px var(--font-mono);
+}
+/* Mail-arrival entry: a subagent that just began working in the CURRENT
+ * session slides in from the rail edge like a new inbox message. The class is
+ * added only to newly-activated rows on live (non-restored) updates and is
+ * replayed once per agent, so a long-running task never re-animates. */
+.agent-worker--entering {
+  animation: agent-worker-mail-in .45s var(--ease-spring) both;
+}
+@keyframes agent-worker-mail-in {
+  from {
+    opacity: 0;
+    transform: translateX(26px);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-worker--active .agent-worker-dot { animation: none; }
+  .agent-worker--entering { animation: none; }
+}
+
+/* ── Per-session transcript hosts ──
+ * Each live session owns a .session-transcript column inside the shared #chat
+ * scroll box. Only the ACTIVE session's host is shown; hidden hosts keep
+ * streaming in the background so switching back resumes exactly where the run
+ * left off (nothing is interrupted, rebuilt, or re-persisted on switch). */
+#chat > .session-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  min-height: 0;
+}
+#chat > .session-transcript[hidden] {
+  display: none;
+}
 
 /* ── Conversation history segments ── */
 .conversation-segment {
@@ -1181,6 +1392,12 @@ body {
 .bubble-row.assistant .bubble {
   background: transparent;
   color: var(--text);
+}
+
+.bubble mark {
+  background: transparent;
+  color: var(--accent);
+  font-weight: 650;
 }
 
 .bubble.streaming::after {
@@ -6470,6 +6687,18 @@ select:focus-visible,
   align-items: stretch;
 }
 
+/* The activity rail is an independent sibling track. The conversation keeps
+   its own full-height scroll box and never receives agent updates as children. */
+#agent-activity-host {
+  order: 2;
+  align-self: stretch;
+}
+#chat-view {
+  order: 1;
+  position: relative;
+  z-index: 1;
+}
+
 #chat-view {
   width: auto;
   flex: 1 1 auto;
@@ -7279,6 +7508,11 @@ select:focus-visible,
 }
 
 @media (max-width: 900px) {
+  #agent-activity-host {
+    flex-basis: 180px;
+    width: 180px;
+  }
+
   #context-panel {
     width: 276px;
     flex-basis: 276px;
@@ -7294,6 +7528,25 @@ select:focus-visible,
 }
 
 @media (max-width: 720px) {
+  #view-container {
+    flex-direction: column;
+  }
+
+  #agent-activity-host {
+    order: 3;
+    width: 100%;
+    flex: 0 0 auto;
+    max-height: 220px;
+    border-top: 1px solid var(--border-light);
+    border-left: 0;
+  }
+
+  #chat-view {
+    order: 1;
+    width: 100%;
+    min-height: 0;
+  }
+
   #context-panel {
     position: absolute;
     inset: 0 0 0 auto;
@@ -11793,6 +12046,17 @@ button svg,
   white-space: nowrap;
 }
 
+.llm-provider-card-protocol {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font: 500 10px var(--font-mono);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
 /* Provider id chip on the collapsed card — click copies the id for proxy
    bypass rules without opening the card. */
 .llm-provider-card-id {
@@ -12179,48 +12443,6 @@ button svg,
   .design-preview-confirm { transition: none; }
 }
 
-.agent-activity-agent {
-  display: grid;
-  grid-template-columns: minmax(160px, 1fr) auto;
-  gap: 2px 12px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-light);
-  border-radius: 10px;
-  background: var(--bg);
-}
-.agent-activity-identity { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.agent-activity-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
-}
-.agent-activity-agent--running .agent-activity-dot { animation: agent-console-pulse 1.4s ease-in-out infinite; }
-@keyframes agent-console-pulse {
-  50% { opacity: .45; box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 8%, transparent); }
-}
-.agent-activity-agent--done .agent-activity-dot { background: var(--success); box-shadow: none; }
-.agent-activity-agent--failed .agent-activity-dot,
-.agent-activity-agent--timed-out .agent-activity-dot { background: var(--danger); box-shadow: none; }
-.agent-activity-agent--cancelled .agent-activity-dot,
-.agent-activity-agent--historical .agent-activity-dot { background: var(--text-tertiary); box-shadow: none; }
-.agent-activity-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
-.agent-activity-role { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 11px; }
-.agent-activity-status { color: var(--accent); font-size: 11px; white-space: nowrap; }
-.agent-activity-agent--done .agent-activity-status { color: var(--success); }
-.agent-activity-agent--failed .agent-activity-status,
-.agent-activity-agent--timed-out .agent-activity-status { color: var(--danger); }
-.agent-activity-agent--cancelled .agent-activity-status,
-.agent-activity-agent--historical .agent-activity-status { color: var(--text-tertiary); }
-.agent-activity-action { grid-column: 1 / -1; overflow: hidden; color: var(--text); font-size: 12px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
-.agent-activity-note { grid-column: 1 / -1; overflow: hidden; color: var(--text-tertiary); font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
-@media (max-width: 680px) {
-  #agent-console-host { padding: 6px 16px 0; }
-  .agent-activity-agent { grid-template-columns: minmax(0, 1fr) auto; padding: 7px 8px; }
-  .agent-activity-role { display: none; }
-}
 
 /* ═══ Batch task queue: composer button badge + popover panel ═══ */
 

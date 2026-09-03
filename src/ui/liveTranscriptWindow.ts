@@ -8,6 +8,9 @@ export interface LiveTurnHandle {
 
 export interface LiveTranscriptWindowOptions {
   maxMountedTurns?: number;
+  /** Session-owned transcript column this live window appends into. Defaults
+   * to the shared #chat element (single-session mode). */
+  root?: HTMLElement | null;
 }
 
 const DEFAULT_MAX_MOUNTED_TURNS = 8;
@@ -20,11 +23,18 @@ export function summarizeLiveTurn(userText: string, turnNumber: number): string 
 
 export class LiveTranscriptWindow {
   private readonly maxMountedTurns: number;
+  private readonly rootEl: HTMLElement | null;
   private readonly turns: LiveTurnHandle[] = [];
   private nextTurnId = 1;
 
   constructor(options: LiveTranscriptWindowOptions = {}) {
     this.maxMountedTurns = Math.max(1, Math.floor(options.maxMountedTurns ?? DEFAULT_MAX_MOUNTED_TURNS));
+    this.rootEl = options.root ?? null;
+  }
+
+  /** Root transcript container this live window writes into. */
+  private root(): HTMLElement {
+    return this.rootEl ?? document.getElementById('chat')!;
   }
 
   startTurn(userText: string): LiveTurnHandle {
@@ -37,7 +47,7 @@ export class LiveTranscriptWindow {
     host.className = 'bubble-turn';
     host.dataset.turnId = String(this.nextTurnId);
     host.dataset.turnState = 'active';
-    document.getElementById('chat')?.appendChild(host);
+    this.root().appendChild(host);
     const turn: LiveTurnHandle = {
       id: this.nextTurnId++,
       host,
@@ -86,7 +96,7 @@ export class LiveTranscriptWindow {
         return true;
       }
     }
-    const chat = document.getElementById('chat');
+    const chat = this.root();
     if (chat && node.parentNode === chat) {
       chat.removeChild(node);
       target.host.appendChild(node);

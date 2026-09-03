@@ -21,6 +21,7 @@ import { renderSchedulesSettings } from './scheduleSettings';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { buildExportSavedToast } from './statsExportToast';
 import {
+  customBaseURL,
   customProviderFor,
   customProviderLabel,
   defaultModelFor,
@@ -31,9 +32,11 @@ import {
   NVIDIA_PRESET,
   nextCustomProviderId,
   PROVIDERS,
+  protocolForURL,
   providerDef,
   providerOverrideFor,
   type CustomProvider,
+  type LLMProtocol,
 } from '../shared/providers';
 import { composeProxyUrl, effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList, parseProxyUrl, proxyUrlWithAuth } from '../shared/proxy';
 import { probeLlmEndpoint } from '../shared/llmProbe';
@@ -942,6 +945,14 @@ export class SettingsPanel {
         return this.expandedPanelTemplate(id, label, defaultModel, hasKey, custom, mark, markClass);
       }
       const status = hasKey ? t('llm.card.configured') : t('llm.card.notConfigured');
+      const entry = customProviderFor(customs, id);
+      const override = providerOverrideFor(overrides, id);
+      const resolvedProtocol = entry
+        ? (entry.protocol ?? protocolForURL(entry.baseURL))
+        : (override?.protocol && override.protocol !== 'auto'
+          ? override.protocol
+          : providerDef(id)?.protocol ?? protocolForURL(customBaseURL(customs, id, overrides)));
+      const protocolBadge = `<span class="llm-provider-card-protocol">${escapeHtml(t(`llm.protocol.${resolvedProtocol}`))}</span>`;
       return `<button type="button" class="llm-provider-card" data-provider="${escapeHtml(id)}" title="${t('llm.card.open')}">
         <span class="llm-provider-card-top">
           <span class="provider-card-mark ${markClass}">${escapeHtml(mark)}</span>
@@ -950,6 +961,7 @@ export class SettingsPanel {
         <span class="llm-provider-card-name">${escapeHtml(label)}</span>
         <span class="llm-provider-card-id" data-copy-provider-id="${escapeHtml(id)}" title="${t('llm.card.id.copy')}"><code>${escapeHtml(id)}</code><i aria-hidden="true">⧉</i></span>
         <span class="llm-provider-card-meta">${escapeHtml(defaultModel || '—')}</span>
+        <span class="llm-provider-card-meta">${protocolBadge}</span>
       </button>`;
     };
 
@@ -1016,6 +1028,8 @@ export class SettingsPanel {
       ? t('llm.baseURL.placeholder')
       : t('llm.baseURL.builtinPlaceholder').replace('{url}', def?.baseURL ?? '');
     const namePlaceholder = custom ? t('llm.custom.name.ph') : t('llm.panel.name.placeholder');
+    const savedProtocol: LLMProtocol = customEntry?.protocol ?? override?.protocol ?? 'auto';
+    const protocolOptions: LLMProtocol[] = ['auto', 'openai', 'anthropic'];
     return `<div class="llm-provider-panel" data-provider="${escapeHtml(id)}">
       <div class="llm-provider-panel-head">
         <span class="provider-card-mark ${markClass}">${escapeHtml(mark)}</span>
@@ -1039,6 +1053,19 @@ export class SettingsPanel {
         <div class="llm-form-row">
           <label class="llm-form-label" for="cfg-baseurl" data-i18n="llm.baseURL">Base URL</label>
           <input id="cfg-baseurl" class="setting-input llm-form-input" type="text" value="${escapeHtml(baseURL)}" placeholder="${escapeHtml(urlPlaceholder)}" autocomplete="off" />
+        </div>
+        <div class="llm-form-row">
+          <label class="llm-form-label" for="cfg-protocol" data-i18n="llm.protocol">接口协议</label>
+          <div class="llm-form-input-group">
+            <select id="cfg-protocol" class="setting-select llm-form-input" aria-label="${t('llm.protocol')}">
+              ${protocolOptions.map((value) => {
+                const urlDetected = value === 'auto' && baseURL ? protocolForURL(baseURL) : undefined;
+                const label = t(`llm.protocol.${value}`) + (urlDetected ? ` (${t(`llm.protocol.${urlDetected}`)})` : '');
+                return `<option value="${value}" ${savedProtocol === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+              }).join('')}
+            </select>
+            <span class="setting-hint" data-i18n="llm.protocol.hint">自动 = 按端点地址识别；Anthropic 兼容端点可写在任意 URL</span>
+          </div>
         </div>
         <div class="llm-form-row">
           <label class="llm-form-label" for="cfg-apikey" data-i18n="llm.apiKey">API Key</label>
@@ -2166,6 +2193,10 @@ export class SettingsPanel {
     entry.imageGen = imageGenToggle?.checked === true;
     if (imageGenModel) entry.imageGenModel = imageGenModel;
     else delete entry.imageGenModel;
+    // Wire protocol: 'auto' removes the field so URL detection stays in effect.
+    const protocol = (document.getElementById('cfg-protocol') as HTMLSelectElement | null)?.value as LLMProtocol | undefined;
+    if (protocol && protocol !== 'auto') entry.protocol = protocol;
+    else delete entry.protocol;
     // Raw key from the field; autoSave() scrubs/redirects it per platform.
     entry.apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() ?? '';
     list[idx] = entry;
@@ -2188,9 +2219,12 @@ export class SettingsPanel {
     }
     const name = (document.getElementById('cfg-custom-name-edit') as HTMLInputElement | null)?.value.trim() || '';
     const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement | null)?.value.trim().replace(/([^:])\/+$/, '$1') ?? '';
+    const protocol = (document.getElementById('cfg-protocol') as HTMLSelectElement | null)?.value as LLMProtocol | undefined;
     const next = { ...(prev[editing] ?? {}) };
     if (name) next.name = name; else delete next.name;
     if (baseURL) next.baseURL = baseURL; else delete next.baseURL;
+    // Wire protocol: 'auto' clears the override so URL detection takes over.
+    if (protocol && protocol !== 'auto') next.protocol = protocol; else delete next.protocol;
     out[editing] = next;
     return out;
   }

@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, sanitizeInterruptedReason } from '../chat';
 import { limitStoredMessages, MAX_PERSISTED_MESSAGES } from '../store';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 
@@ -43,6 +43,18 @@ describe('BASE_SYSTEM_PROMPT structure', () => {
     const prompt = BASE_SYSTEM_PROMPT(true);
     expect(prompt.indexOf('<capabilities>')).toBeGreaterThan(prompt.indexOf('</agent_identity>'));
     expect(prompt.indexOf('Output style:')).toBeGreaterThan(prompt.indexOf('<capabilities>'));
+  });
+});
+
+describe('interruption reason classification', () => {
+  it('does not call a provider token-budget error the engine budget limit', () => {
+    const message = sanitizeInterruptedReason('429: token budget exceeded by provider');
+    expect(message).not.toContain('本轮预算上限');
+    expect(message).toContain('稍后');
+  });
+
+  it('keeps the engine budget wording for the exact engine reason', () => {
+    expect(sanitizeInterruptedReason('Budget exceeded')).toContain('本轮预算上限');
   });
 });
 
@@ -445,7 +457,21 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
   it('wires the abort signal into the plan-review dialog', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 停止按钮在计划确认显示期间必须生效，否则 send() 会永久挂起。
-    expect(src).toContain('riskReview, signal: this.abortController?.signal }');
+    expect(src).toContain('riskReview,');
+    expect(src).toContain('signal: this.abortController?.signal,');
+    // 计划卡随当前会话渲染（多会话模式下后台会话不把卡插进正在看的对话）。
+    expect(src).toContain('host: this.transcriptTarget(),');
+    expect(src).toContain('scope: this.sessionId || sendSessionId,');
+  });
+
+  it('honors an explicit custom-provider wire protocol instead of URL-only detection', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 自定义供应商在 Settings → LLM 里把接口协议存进 customProviders 条目
+    // （不是 providerOverrides —— 那张表只装内置供应商）。适配器工厂必须把
+    // custom.protocol 作为用户显式选择交给解析器，否则 /anthropic 之外的
+    // 任意 URL（代理/镜像）会被误判成 openai 协议。
+    expect(src).toContain("Boolean(custom?.baseURL) || Boolean(builtinOverride?.baseURL)");
+    expect(src).toContain('custom?.protocol ?? builtinOverride?.protocol');
   });
 
   it('runs the delivery gate only when the turn did real tool work, never on a question-only turn', () => {

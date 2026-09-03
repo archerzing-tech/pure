@@ -43,14 +43,14 @@ describe('shouldShowPlanSummary', () => {
     expect(shouldShowPlanSummary(decision(), { hasSubagents: true })).toBe(true);
   });
 
-  it('hides a plain low-risk question with no collaborators', () => {
+  it('hides every simple low-risk question even when a role was selected', () => {
     expect(shouldShowPlanSummary(decision({
       intent: 'question',
       complexity: 'simple',
       mode: 'yolo',
       requiresPlan: false,
       needsDeliveryGate: false,
-      subagents: [],
+      subagents: ['researcher'],
       assessment: { intent: 'question', riskLevel: 'low', reversibility: 'reversible', impact: '', recommendation: '', requiresProbe: false, requiresConfirmation: false },
     }), { hasSubagents: true })).toBe(false);
   });
@@ -74,28 +74,30 @@ describe('shouldShowPlanSummary', () => {
 });
 
 describe('createPlanSummaryCard', () => {
-  it('renders intent, complexity, risk and the collaborator roster', () => {
+  it('renders one humanized sentence with the selected roles', () => {
     const { el } = createPlanSummaryCard(decision(), { hasSubagents: true });
     const text = el.textContent ?? '';
-    expect(text).toContain('本次执行方案');
-    expect(text).toContain('我判断这是一次项目构建请求');
-    expect(text).toContain('复杂度：复杂');
-    expect(text).toContain('低风险');
-    expect(text).toContain('按构建流程推进');
-    expect(text).toContain(SUBAGENT_ROLE_LABELS.researcher);
-    expect(text).toContain(SUBAGENT_ROLE_LABELS.code_editor);
-    expect(text).toContain('2 个角色');
+    expect(text).toContain(`你说的这个问题相对复杂，我将安排${SUBAGENT_ROLE_LABELS.researcher}和${SUBAGENT_ROLE_LABELS.code_editor}来处理你的问题。`);
+    expect(text).not.toContain('本次执行方案');
+    expect(text).not.toContain('计划协作');
+    expect(text).not.toContain('复杂度：');
   });
 
-  it('omits the collaborator section when hasSubagents is false', () => {
+  it('uses a concise fallback sentence when no roles are available', () => {
     const { el } = createPlanSummaryCard(decision(), { hasSubagents: false });
     const text = el.textContent ?? '';
+    expect(text).toContain('你说的这个问题相对复杂，我会按步骤推进并逐步验证。');
     expect(text).not.toContain('角色协作');
-    expect(text).not.toContain(SUBAGENT_ROLE_LABELS.researcher);
+    expect(text).not.toContain('本次执行方案');
   });
 
-  it('renders the recommendation note when present', () => {
-    const { el } = createPlanSummaryCard(decision(), { hasSubagents: false });
-    expect((el.querySelector('.plan-summary-note')?.textContent ?? '')).toContain('按构建流程推进');
+  it('uses cautious humanized wording for medium-risk work', () => {
+    const { el } = createPlanSummaryCard(decision({
+      complexity: 'simple',
+      mode: 'yolo',
+      subagents: ['code_reviewer'],
+      assessment: { ...decision().assessment, riskLevel: 'medium' },
+    }), { hasSubagents: true });
+    expect(el.textContent).toContain(`你说的这个问题需要谨慎处理，我将安排${SUBAGENT_ROLE_LABELS.code_reviewer}来一起确认影响并处理。`);
   });
 });
