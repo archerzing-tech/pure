@@ -23,11 +23,21 @@ import {
 import type { ChatController } from './chat';
 
 export interface SessionSidebarDeps {
-  chat: Pick<ChatController, 'cancel' | 'clear' | 'setSessionId' | 'setWorkspace' | 'syncEffectiveWorkspace'>;
+  chat: Pick<ChatController, 'clear' | 'setWorkspace' | 'syncEffectiveWorkspace'> & {
+    /** Make a session the visible conversation, reusing its live controller
+     * when already open. Returns whether it was already running (warm). */
+    openSession(sessionId: string): { controller: ChatController; host: HTMLElement; warm: boolean };
+    /** Stop + drop a live controller (session deleted). */
+    forgetSession(sessionId: string): void;
+    /** Stop + drop every live controller (delete-all). */
+    clearAll(): void;
+  };
   pasteChips: { clear(): void };
   confirm(message: string): Promise<boolean>;
-  /** Render a loaded session's transcript (main.ts owns the chat DOM). */
-  renderMessages(snapshot: SessionSnapshotV2): Promise<void>;
+  /** Render a loaded session's transcript into its session host (main.ts owns
+   * the chat DOM). Called only for COLD sessions — warm sessions already have
+   * their live transcript mounted. */
+  renderMessages(snapshot: SessionSnapshotV2, host: HTMLElement): Promise<void>;
   /** Move keyboard focus into the composer (main.ts owns the input). */
   focusPrompt(): void;
   /** Show the chat-area loading overlay while a session restores (main.ts). */
@@ -130,25 +140,45 @@ export class SessionSidebar {
     }, 700);
   }
 
-  /** Load a session's transcript and switch the active state to it. */
+  /** Load a session's transcript and switch the active state to it.
+   *
+   * Switching NEVER cancels the previously visible session: if it was still
+   * running it keeps executing in the background and re-attaches exactly where
+   * it was (mid-task, streaming, or already finished) when the user returns. A
+   * session that is ALREADY OPEN in this app instance (warm) is simply
+   * re-shown with its live state; only a never-opened (cold) session is
+   * rebuilt from its stored snapshot. */
   async load(id: string): Promise<void> {
     const seq = ++this.loadSequence;
     const loaded = await loadSession(id);
     // A newer load request superseded this one (rapid session clicking): the
     // latest click owns the transcript — drop this stale result entirely,
-    // including its tail effects (cancel / setSessionId / render / focus).
+    // including its tail effects (render / focus).
     if (this.isLoadStale(seq) || !loaded || loaded.snapshot.modelContext.messages.length === 0) return;
-    // Abort any in-flight generation first: the old send() loop must not keep
-    // appending to (or persisting into) the session we're about to switch to.
-    // chat.setSessionId also bumps the generation guard, which is the second
-    // line of defense (see ChatController.send).
-    this.deps.chat.cancel();
+    const opened = this.deps.chat.openSession(id);
+    if (this.isLoadStale(seq)) return;
     this.deps.pasteChips.clear();
-    this.deps.chat.setSessionId(id);
-    // Restore this session's own workspace ('' = none) — sessions are
-    // independent, so there is no global-default fallback. Set it BEFORE
-    // rendering so clickable relative paths in the transcript resolve against
-    // the restored workspace.
+    if (opened.warm) {
+      // The session's own live controller is still running exactly as the user
+      // left it — no disk rebuild, no interruption. Its workspace/state are
+      // the authoritative in-memory ones. The ONE exception: a cold restore
+      // that was superseded mid-render left the host 'pending' (partial
+      // content, no completion) — rebuild it from disk like a cold session so
+      // returning shows the full transcript, not a half-rendered column.
+      if (opened.host.dataset.restored === 'pending') {
+        // fall through to the cold rebuild path below
+      } else {
+        if (this.isLoadStale(seq)) return;
+        this.setActive(id);
+        this.deps.onSessionActivated();
+        this.deps.focusPrompt();
+        return;
+      }
+    }
+    // Cold session: restore this session's own workspace ('' = none) —
+    // sessions are independent, so there is no global-default fallback. Set it
+    // BEFORE rendering so clickable relative paths in the transcript resolve
+    // against the restored workspace.
     // The loading overlay shows the moment the session card is clicked —
     // feedback before the disk read and bubble-by-bubble render complete.
     this.deps.showSessionLoading();
@@ -157,7 +187,7 @@ export class SessionSidebar {
     // A newer click may have landed while we resolved the workspace — its
     // load owns the transcript from here on.
     if (this.isLoadStale(seq)) return;
-    await this.deps.renderMessages(loaded.snapshot);
+    await this.deps.renderMessages(loaded.snapshot, opened.host);
     if (this.isLoadStale(seq)) return;
     this.setActive(id);
     this.deps.onSessionActivated();
@@ -277,7 +307,14 @@ export class SessionSidebar {
             return;
           }
           if (this.currentActiveId === sid) {
+            // Deleting the visible session: clear() cancels its run (explicit
+            // user intent) and bounces back to landing.
             this.resetToLanding();
+          } else {
+            // A deleted session may still have a LIVE controller running in
+            // the background — stop and drop it so its run cannot keep
+            // re-persisting a session the user just deleted.
+            this.deps.chat.forgetSession(sid);
           }
           this.refresh();
         });
@@ -315,6 +352,9 @@ export class SessionSidebar {
       showToast(t('toast.deleteFailed'));
       return;
     }
+    // Stop every live background controller so no deleted session keeps
+    // running or re-persisting after the disk wipe.
+    this.deps.chat.clearAll();
     this.resetToLanding();
     this.refresh();
     showToast(t('toast.sessionsCleared'));

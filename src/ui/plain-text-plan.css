@@ -283,6 +283,7 @@
   font-weight: 650;
   white-space: nowrap;
 }
+
 .assessment-flow-risk.risk-low {
   color: var(--accent);
   background: var(--accent-soft);
@@ -610,6 +611,7 @@
   font-weight: 650;
   white-space: nowrap;
 }
+
 .plan-summary-risk.risk-low {
   color: var(--accent);
   background: var(--accent-soft);
@@ -652,90 +654,7 @@
   padding: 2px 8px;
   border-radius: 999px;
   background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 10.5px;
+  color: var(--accent);  font-size: 10.5px;
   font-weight: 650;
   white-space: nowrap;
-}
-
-/* ═══ Agent activity: parallel batch + expandable tool trace ═══ */
-.agent-activity-agent--parallel {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-light));
-}
-.agent-activity-agent--parallel .agent-activity-action::before {
-  content: '';
-  display: block;
-  height: 2px;
-  margin-bottom: 4px;
-  border-radius: 2px;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 55%, transparent), transparent);
-}
-.agent-activity-parallel {
-  display: inline-flex;
-  align-items: center;
-  min-height: 16px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, #d97706 15%, var(--bg));
-  color: #a36f16;
-  font-size: 9.5px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-.agent-activity-trace {
-  grid-column: 1 / -1;
-  margin-top: 6px;
-  border-top: 1px dashed var(--border-light);
-  padding-top: 5px;
-}
-.agent-activity-trace-summary {
-  color: var(--text-tertiary);
-  font-size: 10.5px;
-  cursor: pointer;
-  user-select: none;
-  list-style: none;
-}
-.agent-activity-trace-summary::-webkit-details-marker {
-  display: none;
-}
-.agent-activity-trace-summary:hover {
-  color: var(--accent);
-}
-.agent-activity-trace-list {
-  display: grid;
-  gap: 3px;
-  margin-top: 5px;
-}
-.agent-trace-item {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  min-width: 0;
-  font-size: 10.5px;
-  line-height: 1.4;
-}
-.agent-trace-icon {
-  flex: 0 0 auto;
-  color: var(--text-tertiary);
-  font-size: 10px;
-}
-.agent-trace-name {
-  color: var(--text);
-  font-weight: 600;
-  white-space: nowrap;
-}
-.agent-trace-args {
-  color: var(--text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.agent-trace-item.running .agent-trace-icon {
-  animation: agent-console-pulse 1.4s ease-in-out infinite;
-}
-.agent-trace-item.completed .agent-trace-icon {
-  color: var(--success);
-}
-.agent-trace-item.failed .agent-trace-icon {
-  color: var(--danger);
 }

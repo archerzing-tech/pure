@@ -18,6 +18,8 @@ import {
   isImageModelName,
   isProviderId,
   promptBudgetForProvider,
+  protocolForURL,
+  resolveProviderProtocol,
   providerOverrideFor,
   resolvePromptBudget,
   isCustomKeyless,
@@ -270,6 +272,33 @@ describe('text-to-image capability detection', () => {
     // A user-supplied custom entry with the same id wins over the built-in.
     const custom: CustomProvider = { ...OPENAI_PRESET, imageGenModel: 'dall-e-3' };
     expect(imageGenModelFor([custom], 'openai', 'gpt-5.2')).toBe('dall-e-3');
+  });
+
+  it('infers the wire protocol from the endpoint URL', () => {
+    expect(protocolForURL('https://api.minimaxi.com/anthropic')).toBe('anthropic');
+    expect(protocolForURL('https://api.minimaxi.com/anthropic/')).toBe('anthropic');
+    expect(protocolForURL('https://api.deepseek.com/anthropic')).toBe('anthropic');
+    expect(protocolForURL('https://api.openai.com/v1')).toBe('openai');
+    expect(protocolForURL('https://openrouter.ai/api/v1')).toBe('openai');
+    expect(protocolForURL('')).toBe('openai');
+    expect(protocolForURL(undefined)).toBe('openai');
+  });
+
+  it('lets an overridden GLM Anthropic endpoint select the Anthropic wire protocol', () => {
+    expect(resolveProviderProtocol(
+      'openai',
+      'https://open.bigmodel.cn/api/anthropic',
+      true,
+    )).toBe('anthropic');
+    // An explicit protocol choice remains authoritative over URL detection.
+    expect(resolveProviderProtocol(
+      'openai',
+      'https://open.bigmodel.cn/api/anthropic',
+      true,
+      'openai',
+    )).toBe('openai');
+    // The registry protocol remains the default when the endpoint is untouched.
+    expect(resolveProviderProtocol('openai', 'https://api.z.ai/api/coding/paas/v4', false)).toBe('openai');
   });
 
   it('ships the 8 built-in providers with the official endpoints and model libraries', () => {

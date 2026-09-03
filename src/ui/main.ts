@@ -6,7 +6,7 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { ChatController, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, BASE_SYSTEM_PROMPT } from './chat';
+import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, BASE_SYSTEM_PROMPT } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
@@ -54,7 +54,7 @@ import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
 import { groupConversationTurns, segmentConversationTurns } from './conversationTurns';
 import { loadDeferredStyles } from './deferredStyles';
 
-const chat = new ChatController();
+const chat = new SessionChatManager();
 
 // Long text submissions are converted into the same temporary text-file chip
 // used by oversized pastes, so the model receives a read_file reference rather
@@ -101,6 +101,10 @@ sessionSidebar = new SessionSidebar({
     queuedWhileStreaming = null;
     workspace.refresh();
     updateContextPanelStage();
+    // Warm re-attach does not re-run the disk render that normally refreshes
+    // the stats panel — pull the visible session's live numbers here so the
+    // right panel always matches the conversation that is actually shown.
+    renderSessionStats();
   },
   onChatCleared: () => {
     goToLanding();
@@ -713,7 +717,7 @@ function hideSessionLoading(): void {
   setTimeout(remove, 220);
 }
 
-async function renderSessionMessages(snapshot: SessionSnapshotV2) {
+async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLElement) {
   const blocks = projectCanonicalSession(snapshot.events, snapshot.transcript);
   const grouped = groupConversationTurns(blocks);
   const segments = segmentConversationTurns(grouped.turns);
@@ -731,13 +735,21 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
   enterChatMode();
   chat.loadFromStorage(snapshot);
 
-  const chatEl = document.getElementById('chat')!;
+  // The transcript content belongs to the session's own host element (a cold
+  // session is rendered into the host its controller owns), while scroll
+  // pinning/auto-scroll stays on the shared #chat scroll box.
+  const scrollContainer = document.getElementById('chat')!;
+  const chatEl = hostEl ?? scrollContainer;
   chatEl.innerHTML = '';
   chat.mountAgentActivityPanel();
+  // A disk restore is 'pending' until it finishes while still current. A
+  // superseded restore stays 'pending' so a later warm re-open rebuilds the
+  // transcript from disk instead of re-showing the half-restored host.
+  chatEl.dataset.restored = 'pending';
   // Same coalesced scroll machinery as live streaming (chat.ts), so the
   // one-shot restore scroll joins the shared rAF budget instead of forcing a
   // synchronous full-transcript layout at the end of the restore.
-  wireScrollPin(chatEl);
+  wireScrollPin(scrollContainer);
   // Loading notice while the transcript replays: a long session restores
   // bubble-by-bubble with rAF yields (seconds), so without feedback the app
   // looks frozen. Removed in the finally below on success or failure.
@@ -908,30 +920,36 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2) {
     // 恢复可能重建了计划卡：重新挂载固定进度条，让当前步骤在滚动后仍可见；
     // 无活动计划时是幂等移除（no-op）。
     chat.syncPlanProgressPin();
+    // Only a restore that finished while still current marks the host complete:
+    // a superseded (or failed) restore stays 'pending' so the sidebar rebuilds
+    // it from disk on the next open instead of showing a half-rendered host.
+    chatEl.dataset.restored = 'complete';
   } catch (err) {
-    // Always remove this restore's local loading row, but only the current
-    // restore may dismiss the shared overlay. An older restore can fail after
-    // the user has already selected another session and must not hide the new
-    // session's loading feedback.
-    loadingRow.remove();
+    // Only the current restore may dismiss the shared overlay. An older
+    // restore can fail after the user has already selected another session and
+    // must not hide the new session's loading feedback.
     if (isCurrentRestore()) hideSessionLoading();
     throw err;
+  } finally {
+    // The local loading row belongs to THIS restore's host — remove it even
+    // when the restore was superseded, so a hidden session never keeps a stuck
+    // "正在加载会话…" spinner in its transcript column.
+    loadingRow.remove();
   }
   // Only the CURRENT restore may dismiss the overlay: a stale restore (user
   // already clicked a newer session) must not hide the newer session's
   // loading feedback.
   if (!isCurrentRestore()) return;
   hideSessionLoading();
-  loadingRow.remove();
   if (!isCurrentRestore()) return;
   // A session restore rebuilds the transcript from scratch, so it always
   // lands at the newest content — force the pin state the same way a fresh
   // stream would, then scroll through the shared coalesced helper.
-  forceScrollToBottom(chatEl);
+  forceScrollToBottom(scrollContainer);
   // Fade the restored transcript in so the swap from loading overlay to
   // content reads as one smooth transition instead of an abrupt cut.
-  chatEl.classList.add('session-transition-fade');
-  chatEl.addEventListener('animationend', () => chatEl.classList.remove('session-transition-fade'), { once: true });
+  scrollContainer.classList.add('session-transition-fade');
+  scrollContainer.addEventListener('animationend', () => scrollContainer.classList.remove('session-transition-fade'), { once: true });
   // The restored session's stats belong to the same conversation id —
   // re-render the 统计 tab so the panel matches the transcript.
   renderSessionStats();

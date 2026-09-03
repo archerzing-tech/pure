@@ -18,17 +18,27 @@ export interface PlanReviewOptions {
   riskReview?: boolean;
   /** When aborted (user pressed stop), the dialog resolves as 'cancel' and closes. */
   signal?: AbortSignal;
+  /** Transcript column this card belongs to (per-session mode). Defaults to
+   * the active #chat when omitted. */
+  host?: HTMLElement;
+  /** Owner token (session id) so concurrent runs of DIFFERENT sessions never
+   * serialize behind one another's hidden plan cards. */
+  scope?: string;
 }
 
-// Serialize concurrent plan reviews (mirrors the permission dialog queue).
-let planQueue: Promise<unknown> = Promise.resolve();
+// Serialize concurrent plan reviews per owner (mirrors the permission dialog
+// queue): a background session's pending review must not block the active
+// conversation's own plan gate.
+const planQueues = new Map<string, Promise<unknown>>();
 
 export function requestPlanReview(
   analysis: AnalysisResult,
   options: PlanReviewOptions = {},
 ): Promise<PlanReviewDecision> {
-  const run = planQueue.then(() => showPlanDialog(analysis, options));
-  planQueue = run.catch(() => {});
+  const scope = options.scope ?? 'default';
+  const previous = planQueues.get(scope) ?? Promise.resolve();
+  const run = previous.then(() => showPlanDialog(analysis, options));
+  planQueues.set(scope, run.catch(() => {}));
   return run;
 }
 
@@ -656,6 +666,7 @@ function showPlanDialog(analysis: AnalysisResult, options: PlanReviewOptions): P
     ? `<div class="plan-risk-summary"><strong>${intent.requiresConfirmation ? '⚠️ 高风险操作' : '🧭 主动评估'}</strong><br><span>影响：${escapeHtml(intent.impact)}</span><br><span>可逆性：${escapeHtml(intent.reversibility)}</span><br><span>建议：${escapeHtml(intent.recommendation)}</span></div>`
     : '';
   return showInlineCard({
+    host: options.host,
     cardClass: options.riskReview ? 'plan risk-review' : 'plan',
     title: options.riskReview ? '执行前确认：先看影响再决定' : t('plan.title'),
     bodyHTML:

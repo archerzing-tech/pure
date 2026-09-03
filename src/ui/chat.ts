@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, protocolForURL } from '../shared/providers';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
@@ -42,7 +42,7 @@ import { renderAttachmentCard } from './pasteChip';
 import { PlanProgressModel, shouldAdvancePlanAtTurnEnd, type PlanProgressSnapshot } from './planProgress';
 import { createPlanProgressPin, type PlanProgressPinHandle } from './planProgressBar';
 import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
-import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, setToolOutputListener, setDownloadProgressListener, cancelDownload, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
+import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, registerToolOutputListener, registerDownloadProgressListener, cancelDownload, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
 import { createPlanSummaryCard, shouldShowPlanSummary } from './planSummary';
 import { createAgentActivityPanel, mergeAgentActivity, type AgentActivityPanelHandle } from './agentActivityPanel';
@@ -143,7 +143,7 @@ function extractFailureCause(raw: string): string {
   return '';
 }
 
-function sanitizeInterruptedReason(raw: string): string {
+export function sanitizeInterruptedReason(raw: string): string {
   const lower = raw.toLowerCase();
   // ── User stop / frontend-or-network disconnect (signal aborted) ──
   if (raw === 'aborted') {
@@ -153,7 +153,10 @@ function sanitizeInterruptedReason(raw: string): string {
   if (raw === 'max_turns' || /^max.?turns?$/i.test(raw)) {
     return t('chat.interrupted.maxTurns', 'Stopped: this turn reached the maximum number of steps — split the task or start a new session');
   }
-  if (/budget/i.test(raw)) {
+  // Only the engine's exact budget stop has this meaning. A provider failure
+  // may mention a request/token budget in its diagnostic text; classifying any
+  // such substring as the engine budget hid the actual GLM/API failure.
+  if (raw === 'Budget exceeded' || raw === 'Budget exhausted') {
     return t('chat.interrupted.budget', 'Stopped: this turn hit its step/token/time budget — compact the context or start a new session');
   }
   if (/hook aborted/i.test(raw)) {
@@ -792,7 +795,7 @@ function toolCategory(tool: string): 'read' | 'write' | 'cmd' | 'git' | 'other' 
   return 'other';
 }
 
-function createPermissionHandler(config: PureConfig): PermissionRequestHandler {
+function createPermissionHandler(config: PureConfig, hostFor?: () => HTMLElement, scope = 'default'): PermissionRequestHandler {
   return async (info: PermissionRequestInfo): Promise<PermissionDecision> => {
     const cat = toolCategory(info.tool);
     const auto = cat === 'read' ? config.autoPermRead
@@ -801,7 +804,7 @@ function createPermissionHandler(config: PureConfig): PermissionRequestHandler {
       : cat === 'cmd' ? config.autoPermCmd
       : false;
     if (auto) return { allowed: true, autoApproved: true };
-    return requestPermission(info);
+    return requestPermission(info, { host: hostFor?.(), scope });
   };
 }
 
@@ -830,9 +833,16 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
     : undefined;
   const builtinOverride = providerOverrideFor(config.providerOverrides, config.provider);
   const providerProtocol = providerDef(config.provider)?.protocol;
-  const protocol = builtinOverride?.protocol && builtinOverride.protocol !== 'auto'
-    ? builtinOverride.protocol
-    : providerProtocol ?? protocolForURL(baseURL);
+  // A CUSTOM provider stores its explicit wire-protocol choice on its own
+  // entry (Settings → LLM), never in providerOverrides (which only holds
+  // built-ins) — so pass it through as the user override, and treat the
+  // custom baseURL as an overridden endpoint for URL-based detection.
+  const protocol = resolveProviderProtocol(
+    providerProtocol,
+    baseURL,
+    Boolean(custom?.baseURL) || Boolean(builtinOverride?.baseURL),
+    custom?.protocol ?? builtinOverride?.protocol,
+  );
   const extraBody = undefined;
   const apiKey = custom?.apiKey ?? builtinOverride?.apiKey ?? config.apiKey;
   if (protocol === 'anthropic' && !isTauriRuntime()) {
@@ -1154,6 +1164,16 @@ function createDownloadCard(path: string, size: number, via?: string): HTMLEleme
   return card;
 }
 
+export interface ChatControllerOptions {
+  /** Session-owned transcript column (multi-session mode). When omitted the
+   * controller renders into the shared #chat element (single-session mode). */
+  host?: HTMLElement | null;
+  /** False while this session is hidden behind another active conversation. A
+   * hidden session keeps running — only its shared shell surfaces (activity
+   * rail, plan pin) are unmounted until the session becomes visible again. */
+  viewActive?: boolean;
+}
+
 export class ChatController {
   private streaming = false;
   private abortController: AbortController | null = null;
@@ -1161,6 +1181,10 @@ export class ChatController {
   private workspace: string = '';
   private effectiveWorkspace: string = '';
   private sessionId: string = '';
+  /** Session-owned transcript column; null in single-session mode. */
+  private readonly transcriptHost: HTMLElement | null;
+  /** Whether this session is currently the visible conversation. */
+  private viewActive: boolean;
   private messages: Message[] = [];
   private hasHistory = false;
   // Cross-turn complex-task workflow state. The plan and cursor survive the
@@ -1288,17 +1312,61 @@ export class ChatController {
   // In-memory subagent checkpoint store for this conversation — lets a sub-task
   // resume after a user stop + continue within the same session.
   private subagentStore = new MemoryStateStore();
-  private liveTranscript = new LiveTranscriptWindow();
+  private liveTranscript: LiveTranscriptWindow;
   private liveTurn: LiveTurnHandle | null = null;
 
-  constructor() {
+  constructor(options: ChatControllerOptions = {}) {
     this.sessionId = `session_${Date.now()}`;
     this.permissionManager = new PermissionManager();
     this.sessionStats = loadSessionStats(this.sessionId);
+    this.transcriptHost = options.host ?? null;
+    this.viewActive = options.viewActive ?? true;
+    this.liveTranscript = new LiveTranscriptWindow({ root: this.transcriptHost });
+  }
+
+  /** The transcript column this session streams into: its own host when in
+   * multi-session mode, otherwise the shared #chat element. */
+  transcriptElement(): HTMLElement {
+    return this.transcriptHost ?? document.getElementById('chat')!;
+  }
+
+  /** The session-owned host element (multi-session mode) or null. */
+  getViewHost(): HTMLElement | null {
+    return this.transcriptHost;
+  }
+
+  /** Whether this session is currently the visible conversation. */
+  isViewActive(): boolean {
+    return this.viewActive;
+  }
+
+  /** Mark this session as the visible conversation (or as a hidden background
+   * session). Switching NEVER cancels the session: a hidden session keeps its
+   * run alive in its own transcript host and re-mounts its shared surfaces
+   * (activity rail / plan pin) when shown again. */
+  setViewActive(on: boolean): void {
+    if (this.viewActive === on) return;
+    this.viewActive = on;
+    if (this.transcriptHost) this.transcriptHost.hidden = !on;
+    if (on) {
+      this.mountAgentActivityPanel();
+      this.syncPlanProgressPin();
+    } else {
+      this.hideAgentActivitySurface();
+      this.removePlanProgressPin();
+    }
+  }
+
+  /** Actual scrolling container: the shared #chat box that owns the scrollbar
+   * (per-session hosts live inside it). */
+  private scrollRoot(): HTMLElement {
+    const host = this.transcriptHost;
+    if (host?.isConnected) return host.parentElement ?? this.transcriptElement();
+    return this.transcriptElement();
   }
 
   private transcriptTarget(): HTMLElement {
-    return this.liveTurn?.host.isConnected ? this.liveTurn.host : document.getElementById('chat')!;
+    return this.liveTurn?.host.isConnected ? this.liveTurn.host : this.transcriptElement();
   }
 
   private appendToTranscript(node: Node): void {
@@ -1391,8 +1459,11 @@ export class ChatController {
     }, { emitCurrent: false });
   }
 
-  /** 固定进度条：挂载到聊天区顶部并绑定到当前进度模型（幂等复用同一个元素）。 */
+  /** 固定进度条：挂载到聊天区顶部并绑定到当前进度模型（幂等复用同一个元素）。
+   * The pin lives at the top of the shared chat view, so only the VISIBLE
+   * session may create it; hidden sessions mount their own pin on activation. */
   private ensurePlanProgressPin(model: PlanProgressModel): void {
+    if (!this.viewActive) return;
     if (!this.planProgressPin) {
       this.planProgressPin = createPlanProgressPin({
         jumpTo: () => {
@@ -1509,7 +1580,12 @@ export class ChatController {
 
   onWorkspaceSnapshotChanged(fn: (available: boolean) => void): void {
     this.onSnapshotChanged = fn;
-    fn(!!this.snapshotPort?.getLatestWriteBatch());
+    fn(this.hasUndoableWrites());
+  }
+
+  /** Whether this session has file writes that undo could restore. */
+  hasUndoableWrites(): boolean {
+    return !!this.snapshotPort?.getLatestWriteBatch();
   }
 
   async undoLastWriteBatch(): Promise<WorkspaceRestoreResult> {
@@ -1576,7 +1652,7 @@ export class ChatController {
     this.pausePlanCard?.setActivity('已取消本次执行计划。');
     this.pausePlanCard = null;
     this.pauseAssessmentFlow = null;
-    const chatEl = document.getElementById('chat')!;
+    const chatEl = this.scrollRoot();
     this.addStatusBubble('已取消本次执行计划，未执行任何改动。如需继续，请重新描述需求。', true, false);
     scrollChatToBottomIfPinned(chatEl);
     // Re-persist without planState so a reload no longer restores the plan
@@ -1591,27 +1667,55 @@ export class ChatController {
     this.pauseAssessmentFlow = flow;
   }
 
-  /** Mount the task-scoped collaboration trace outside the transcript scroll box. */
+  /** Mount the task-scoped collaboration trace outside the transcript scroll box.
+   * Only the VISIBLE session may own the shared activity rail; a hidden session
+   * keeps tracking its own activities in memory/persistence and re-mounts the
+   * rail when the user switches back. The panel object survives being replaced
+   * on the shared host (it simply detaches), so an agent that is still running
+   * does not replay its entry animation when its session regains focus. */
   mountAgentActivityPanel(): void {
-    const host = document.getElementById('agent-console-host');
+    if (!this.viewActive) return;
+    const host = document.getElementById('agent-activity-host');
     if (!host) return;
     if (this.agentActivities.length === 0) {
       host.hidden = true;
       return;
     }
-    if (!this.agentActivityPanel || !this.agentActivityPanel.el.isConnected) {
-      this.agentActivityPanel = createAgentActivityPanel();
+    if (this.agentActivityPanel && !this.agentActivityPanel.el.isConnected) {
+      // Another session mounted over ours while we were hidden — reattach the
+      // SAME panel (its per-agent animation state is still current).
+      host.replaceChildren(this.agentActivityPanel.el);
+    } else if (!this.agentActivityPanel) {
+      this.agentActivityPanel = createAgentActivityPanel(this.sessionId);
       host.replaceChildren(this.agentActivityPanel.el);
     }
     host.hidden = false;
-    this.agentActivityPanel.update(this.agentActivities, { historical: this.agentActivityHistorical });
+    this.agentActivityPanel.update(this.agentActivities, { historical: this.agentActivityHistorical, sessionId: this.sessionId });
   }
 
+  /** Hide the shared rail only when THIS session's panel is mounted on it (a
+   * visible session must not lose its rail). The panel stays alive detached so
+   * reactivation can reattach it without replaying entry animations. */
+  private hideAgentActivitySurface(): void {
+    const host = document.getElementById('agent-activity-host');
+    if (host && this.agentActivityPanel && host.contains(this.agentActivityPanel.el)) {
+      host.hidden = true;
+    }
+  }
+
+  /** Destroy this session's activity panel state (session cleared/deleted or a
+   * fresh restore is about to mount a historical panel). The shared host is
+   * only wiped when THIS session's panel is actually mounted on it — a hidden
+   * session must never clear the visible session's rail. */
   private removeAgentActivityPanel(): void {
-    this.agentActivityPanel?.el.remove();
-    this.agentActivityPanel = null;
-    const host = document.getElementById('agent-console-host');
-    if (host) {
+    const host = document.getElementById('agent-activity-host');
+    if (this.agentActivityPanel) {
+      if (host?.contains(this.agentActivityPanel.el)) {
+        host.hidden = true;
+        host.replaceChildren();
+      }
+      this.agentActivityPanel = null;
+    } else if (host && this.viewActive) {
       host.hidden = true;
       host.replaceChildren();
     }
@@ -1627,8 +1731,10 @@ export class ChatController {
     const next = mergeAgentActivity(previous, activity);
     if (index >= 0) this.agentActivities[index] = next;
     else this.agentActivities.push(next);
-    this.mountAgentActivityPanel();
-    this.agentActivityPanel?.update(this.agentActivities);
+    if (this.viewActive) {
+      this.mountAgentActivityPanel();
+      this.agentActivityPanel?.update(this.agentActivities);
+    }
     this.scheduleAgentActivityPersistence();
   }
 
@@ -1946,7 +2052,7 @@ export class ChatController {
   }
 
   async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false, userAttachments: import('../shared/types').MessageAttachment[] = [], attachmentViewer?: (attachment: import('../shared/types').MessageAttachment) => void) {
-    const chatEl = document.getElementById('chat')!;
+    const chatEl = this.scrollRoot();
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
     const config = loadConfig();
@@ -2089,7 +2195,8 @@ export class ChatController {
     forceScrollToBottom(chatEl);
     hideNewContentHint(); // a fresh user turn resumes following the newest content
 
-    const effectiveWorkspace = sendWorkspace || await withAbortTimeout(
+    const fastConversationalTurn = !sendWorkspace && shouldBypassSemanticRoute(userText, userImages);
+    const effectiveWorkspace = sendWorkspace || (fastConversationalTurn ? '' : await withAbortTimeout(
       getApplicationTmpWorkspace(sendSessionId),
       turnController.signal,
       5_000,
@@ -2098,7 +2205,7 @@ export class ChatController {
       if (error.name === 'AbortError') return '';
       console.warn('[pure] workspace resolution timed out; continuing without a workspace:', error.message);
       return '';
-    });
+    }));
     if (gen !== this.generation) {
       // The immediately-rendered user bubble belongs to the superseded
       // transcript — drop it so no ghost message appears in the new session.
@@ -2266,7 +2373,7 @@ export class ChatController {
     // engine uses for the id-bearing TokenDelta and the ToolResult event; rows
     // staged by name migrate onto the id key before execution, so the row
     // always exists by the time the first line streams.
-    setToolOutputListener((toolCallId, kind, line, progress) => {
+    const unregisterToolOutput = registerToolOutputListener((toolCallId, kind, line, progress) => {
       if (gen !== this.generation) return;
       const entry = pendingRows.get(toolCallId);
       if (!entry || !entry.row.details.classList.contains('pending')) return;
@@ -2281,10 +2388,10 @@ export class ChatController {
       scheduleLiveToolOutputFlush();
     });
     // Live download progress: download_file streams machine-readable progress
-    // (via downloadHub on the Node build, or setDownloadProgressListener on the
-    // Tauri build). Render it as a progress bar inside the tool row.
+    // (via downloadHub on the Node build, or registerDownloadProgressListener on
+    // the Tauri build). Render it as a progress bar inside the tool row.
     const downloadBars = new Map<string, DownloadBarState>();
-    setDownloadProgressListener((toolCallId, p) => {
+    const unregisterDownloadProgress = registerDownloadProgressListener((toolCallId, p) => {
       if (gen !== this.generation) return;
       const entry = pendingRows.get(toolCallId);
       if (!entry) return;
@@ -2558,7 +2665,11 @@ export class ChatController {
       // toggling "自动放行命令") takes effect immediately on the next send
       // while keeping the session's approval cache alive.
       this.permissionManager.setMode(mapPermissionMode(config.permissionMode));
-      this.permissionManager.setRequestHandler(createPermissionHandler(config));
+      this.permissionManager.setRequestHandler(createPermissionHandler(
+        config,
+        () => this.transcriptTarget(),
+        this.sessionId || sendSessionId,
+      ));
 
       // Rebuild MCP when the session identity or MCP config changed since the
       // last init. MCP transports are session-bound (the Rust subprocess
@@ -2971,7 +3082,13 @@ export class ChatController {
             // 动作前保留明确的确认点——先展示影响与计划，用户批准后才开始构建。
             const decision = await requestPlanReview(
               { ...analysis, plan: planForReview, reasoning: planForReview.reasoning },
-              { allowSkip: !needsDeliveryGate && !riskReview, riskReview, signal: this.abortController?.signal },
+              {
+                allowSkip: !needsDeliveryGate && !riskReview,
+                riskReview,
+                signal: this.abortController?.signal,
+                host: this.transcriptTarget(),
+                scope: this.sessionId || sendSessionId,
+              },
             );
             if (decision === 'cancel') {
               // 用户点了「停止」与点了「取消」文案区分：停止=暂停保留，取消=拒绝执行。
@@ -3330,12 +3447,12 @@ export class ChatController {
 
       // ── Deferred init: boot MCP on first use ──
       if (!this.deferredInitDone) {
-        this.deferredInitDone = true;
         this.mcpSessionId = sendSessionId;
         this.mcpConfigSnapshot = JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy, 'tools')]);
         this.mcpClient = codingAgent.mcpClient;
 
-        if (this.mcpClient) {
+        if (this.mcpClient && !fastConversationalTurn) {
+          this.deferredInitDone = true;
           // Await MCP connect so tools are registered before the first run builds
           // its toolsDefs (toolsDefsProvider reads them live) — but never block
           // the first send: race against a short timeout, then proceed without
@@ -4501,8 +4618,8 @@ export class ChatController {
       // assistantSegments DOM nodes …) held by the module-level tool output
       // listener; otherwise it keeps the whole last turn alive until the next
       // send (and, after a chat.clear(), detached bubbles stay in memory).
-      setToolOutputListener(null);
-      setDownloadProgressListener(null);
+      unregisterToolOutput();
+      unregisterDownloadProgress();
       // Release the streaming state ONLY if this turn still owns the
       // controller. An unconditional setStreaming(false) here could run AFTER
       // a newer send has already installed its own turn controller + set
@@ -4608,8 +4725,9 @@ export class ChatController {
     // session-bound, so actively close every stdio subprocess now instead of
     // leaving it running until the next send().
     this.disconnectMcpClient();
-    const chatEl = document.getElementById('chat')!;
-    chatEl.innerHTML = '';
+    // Clear only this session's own transcript column (host mode) or the
+    // shared #chat element in single-session mode.
+    this.transcriptElement().innerHTML = '';
   }
 
   cancel() {
@@ -4863,7 +4981,6 @@ export class ChatController {
     }
 
   private addBubble(role: 'user' | 'assistant', content: string, images: MessageImage[] = []): HTMLDivElement {
-    const chatEl = document.getElementById('chat')!;
     const wrapper = document.createElement('div');
     wrapper.className = `bubble-row ${role}`;
     const label = document.createElement('span');
@@ -4903,7 +5020,6 @@ export class ChatController {
     isError = false,
     kind: 'success' | 'warn' | 'info' | undefined = undefined,
   ): HTMLElement {
-    const chatEl = document.getElementById('chat')!;
     const wrapper = document.createElement('div');
     wrapper.className = 'bubble-row status';
     if (pending) wrapper.classList.add('pending');
@@ -4922,7 +5038,6 @@ export class ChatController {
   // Fallback tool-result status bubble (no live tool row existed for this
   // call): render the tool name highlighted, matching .tool-row-name.
   private addToolStatusBubble(toolName: string, status: string, duration: number) {
-    const chatEl = document.getElementById('chat')!;
     const wrapper = document.createElement('div');
     wrapper.className = 'bubble-row status';
     const bubble = document.createElement('div');
@@ -4941,15 +5056,274 @@ export class ChatController {
   }
 
   private addToolRow(toolName: string, args: Record<string, unknown>, parent: HTMLElement): ToolRowHandle {
-    const chatEl = document.getElementById('chat')!;
     const row = createToolRow(toolName, args);
     parent.appendChild(row.el);
-    scrollChatToBottomIfPinned(chatEl);
+    scrollChatToBottomIfPinned(this.scrollRoot());
     return row;
   }
 
   private setStreaming(v: boolean) {
     this.streaming = v;
     this.onStreamingChange?.(v);
+  }
+}
+
+// ── Multi-session chat manager ──
+// Pure supports several concurrent conversations. Each session owns a
+// ChatController + its own .session-transcript host inside the shared #chat
+// scroll box, so switching to another session NEVER cancels the previous one:
+// its engine loop keeps running and streaming into its (hidden) host, its
+// state keeps persisting under its own session id, and switching back
+// re-attaches exactly the live state it was left in — mid-search, mid-plan,
+// or already finished with results — instead of rebuilding from disk.
+//
+// The facade below forwards the app-shell calls to the CURRENT (visible)
+// controller, so main.ts / sessionSidebar.ts keep their existing call shapes.
+
+export interface OpenSessionResult {
+  /** Controller owning the requested session (existing live or freshly made). */
+  controller: ChatController;
+  /** Its .session-transcript host inside #chat (the DOM restore target). */
+  host: HTMLElement;
+  /** True when the session was already open and running in this app instance. */
+  warm: boolean;
+}
+
+export class SessionChatManager {
+  private controllers = new Map<string, ChatController>();
+  private hosts = new Map<string, HTMLElement>();
+  private currentSessionId = '';
+  private current: ChatController | null = null;
+  private currentHost: HTMLElement | null = null;
+  private nextSessionSeq = 1;
+
+  private streamingCb?: (streaming: boolean) => void;
+  private statsCb?: (stats: SessionStats) => void;
+  private snapshotCb?: (available: boolean) => void;
+
+  private container(): HTMLElement {
+    return document.getElementById('chat')!;
+  }
+
+  private createSessionHost(sessionId: string): HTMLElement {
+    const host = document.createElement('div');
+    host.className = 'session-transcript';
+    host.dataset.sessionId = sessionId;
+    host.hidden = true;
+    this.container().appendChild(host);
+    return host;
+  }
+
+  private wireController(controller: ChatController): void {
+    controller.onStreamingStateChange((streaming) => {
+      // Only the visible conversation drives the shared streaming UI.
+      if (controller === this.current) this.streamingCb?.(streaming);
+    });
+    controller.onSessionStatsChanged((stats) => {
+      if (controller === this.current) this.statsCb?.(stats);
+    });
+    controller.onWorkspaceSnapshotChanged((available) => {
+      if (controller === this.current) this.snapshotCb?.(available);
+    });
+  }
+
+  /** The visible controller; creates the first session lazily when needed. */
+  private activeNow(): ChatController {
+    if (this.current) return this.current;
+    this.openSession(`session_${Date.now()}_${this.nextSessionSeq++}`);
+    return this.current!;
+  }
+
+  private makeActive(controller: ChatController, host: HTMLElement, sessionId: string): void {
+    const changed = this.current !== controller;
+    if (this.current && changed) this.current.setViewActive(false);
+    this.current = controller;
+    this.currentHost = host;
+    this.currentSessionId = sessionId;
+    if (changed) {
+      controller.setViewActive(true);
+      this.streamingCb?.(controller.isStreaming());
+      // Re-publish the newly visible session's undo availability + stats so the
+      // shell chrome (undo button, context panel) reflects the session that is
+      // actually shown, not the previous one. The per-controller wiring above
+      // only forwards events while the session stays current, so a switch needs
+      // an explicit refresh here.
+      this.snapshotCb?.(controller.hasUndoableWrites());
+      this.statsCb?.(controller.getSessionStats());
+      const scroll = document.getElementById('chat');
+      if (scroll && typeof requestAnimationFrame === 'function') forceScrollToBottom(scroll);
+    }
+  }
+
+  /** Make `sessionId` the visible conversation, reusing its live controller
+   * when this app instance already has it open. Returns the session's host so
+   * a cold session can be rendered from disk into it. Never cancels work. */
+  openSession(sessionId: string): OpenSessionResult {
+    let controller = this.controllers.get(sessionId) ?? null;
+    let host = this.hosts.get(sessionId) ?? null;
+    const warm = controller !== null;
+    if (!controller) {
+      host = this.createSessionHost(sessionId);
+      controller = new ChatController({ host, viewActive: false });
+      // Bind the fresh controller to the REAL session id (the constructor only
+      // mints a placeholder) before it goes live, so persistence, stats and
+      // MCP ownership all key on the actual session.
+      controller.setSessionId(sessionId);
+      this.wireController(controller);
+      this.controllers.set(sessionId, controller);
+      this.hosts.set(sessionId, host);
+    }
+    this.makeActive(controller, host!, sessionId);
+    return { controller, host: host!, warm };
+  }
+
+  /** Switch to an already-open session (sidebar click on a live one). */
+  setSessionId(sessionId: string): void {
+    this.openSession(sessionId);
+  }
+
+  /** Cancel and drop every live session controller + host (delete-all). */
+  clearAll(): void {
+    for (const sessionId of [...this.controllers.keys()]) this.forgetSession(sessionId);
+  }
+
+  /** Current visible session id. */
+  getSessionId(): string {
+    return this.activeNow().getSessionId();
+  }
+
+  /** Whether the session identified by `sessionId` is still open (live). */
+  hasOpenSession(sessionId: string): boolean {
+    return this.controllers.has(sessionId);
+  }
+
+  /** Dispose a session's controller: cancels its run and removes its host.
+   * Used when a session is deleted from the sidebar. If it was the visible
+   * session the caller is expected to follow with clear()/landing. */
+  forgetSession(sessionId: string): void {
+    const controller = this.controllers.get(sessionId);
+    if (!controller) return;
+    controller.cancel();
+    controller.setViewActive(false);
+    this.hosts.get(sessionId)?.remove();
+    this.hosts.delete(sessionId);
+    this.controllers.delete(sessionId);
+    if (this.current === controller) {
+      this.current = null;
+      this.currentHost = null;
+      this.currentSessionId = '';
+    }
+  }
+
+  /** New chat: cancel the visible session and start a fresh conversation. This
+   * is explicit user intent (new-chat button / ⌘N), so the visible session's
+   * run IS stopped — hidden sessions are never touched. */
+  clear(): void {
+    const id = this.currentSessionId || this.getSessionId();
+    this.forgetSession(id);
+    // A fresh, empty conversation becomes the new active session.
+    this.openSession(`session_${Date.now()}_${this.nextSessionSeq++}`);
+  }
+
+  cancel(): void {
+    this.activeNow().cancel();
+  }
+
+  cancelAutoContinue(): void {
+    this.activeNow().cancelAutoContinue();
+  }
+
+  async send(...args: Parameters<ChatController['send']>): Promise<void> {
+    await this.activeNow().send(...args);
+  }
+
+  async interject(...args: Parameters<ChatController['interject']>): Promise<void> {
+    await this.activeNow().interject(...args);
+  }
+
+  isStreaming(): boolean {
+    return this.activeNow().isStreaming();
+  }
+
+  onStreamingStateChange(fn: (streaming: boolean) => void): void {
+    this.streamingCb = fn;
+  }
+
+  setWorkspace(path: string): void {
+    this.activeNow().setWorkspace(path);
+  }
+
+  getWorkspace(): string {
+    return this.activeNow().getWorkspace();
+  }
+
+  getEffectiveWorkspace(): string {
+    return this.activeNow().getEffectiveWorkspace();
+  }
+
+  async syncEffectiveWorkspace(): Promise<void> {
+    await this.activeNow().syncEffectiveWorkspace();
+  }
+
+  loadFromStorage(snapshot: SessionSnapshotV2): void {
+    this.activeNow().loadFromStorage(snapshot);
+  }
+
+  mountAgentActivityPanel(): void {
+    this.activeNow().mountAgentActivityPanel();
+  }
+
+  registerPausedAssessment(flow: AssessmentFlowHandle | null): void {
+    this.activeNow().registerPausedAssessment(flow);
+  }
+
+  registerRestoredPlanCard(card: PlanCardHandle): void {
+    this.activeNow().registerRestoredPlanCard(card);
+  }
+
+  getPlanProgressModel(): PlanProgressModel | null {
+    return this.activeNow().getPlanProgressModel();
+  }
+
+  continuePausedPlan(): boolean {
+    return this.activeNow().continuePausedPlan();
+  }
+
+  cancelPausedPlan(): boolean {
+    return this.activeNow().cancelPausedPlan();
+  }
+
+  syncPlanProgressPin(): void {
+    this.activeNow().syncPlanProgressPin();
+  }
+
+  onSessionStatsChanged(fn: (stats: SessionStats) => void): void {
+    this.statsCb = fn;
+  }
+
+  getSessionStats(): SessionStats {
+    return this.activeNow().getSessionStats();
+  }
+
+  onWorkspaceSnapshotChanged(fn: (available: boolean) => void): void {
+    this.snapshotCb = fn;
+    const current = this.current;
+    if (current) fn(current.hasUndoableWrites());
+  }
+
+  getMessages(): Message[] {
+    return this.activeNow().getMessages();
+  }
+
+  getContextOverheadTokens(): { system: number; tools: number } {
+    return this.activeNow().getContextOverheadTokens();
+  }
+
+  async undoLastWriteBatch(): Promise<WorkspaceRestoreResult> {
+    return this.activeNow().undoLastWriteBatch();
+  }
+
+  async compactContext(): Promise<ContextCompactionResult> {
+    return this.activeNow().compactContext();
   }
 }

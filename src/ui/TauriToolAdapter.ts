@@ -70,10 +70,20 @@ export type ToolOutputKind = 'stdout' | 'stderr';
 // GUI redraws its last progress line instead of appending another row.
 export type ToolOutputListener = (toolCallId: string, kind: ToolOutputKind, line: string, progress?: boolean) => void;
 
-let toolOutputListener: ToolOutputListener | null = null;
+// Fan-out registry: several SESSIONS can run commands concurrently (a hidden
+// session streams in the background while the visible one runs its own tool),
+// so a single listener slot would let one session's cleanup mute another's.
+// Each send() registers its own listener and unregisters it on completion.
+const toolOutputListeners = new Set<ToolOutputListener>();
 
-export function setToolOutputListener(fn: ToolOutputListener | null): void {
-  toolOutputListener = fn;
+export function registerToolOutputListener(fn: ToolOutputListener): () => void {
+  toolOutputListeners.add(fn);
+  return () => toolOutputListeners.delete(fn);
+}
+
+/** Dispatch one streamed command line to every registered session listener. */
+export function dispatchToolOutput(toolCallId: string, kind: ToolOutputKind, line: string, progress?: boolean): void {
+  for (const fn of toolOutputListeners) fn(toolCallId, kind, line, progress);
 }
 
 /** One message from the Rust execute_command_stream Channel. */
@@ -118,10 +128,16 @@ export interface DownloadProgressEvent {
 
 export type DownloadProgressListener = (toolCallId: string, p: DownloadProgressEvent) => void;
 
-let downloadProgressListener: DownloadProgressListener | null = null;
+const downloadProgressListeners = new Set<DownloadProgressListener>();
 
-export function setDownloadProgressListener(fn: DownloadProgressListener | null): void {
-  downloadProgressListener = fn;
+export function registerDownloadProgressListener(fn: DownloadProgressListener): () => void {
+  downloadProgressListeners.add(fn);
+  return () => downloadProgressListeners.delete(fn);
+}
+
+/** Dispatch one download progress event to every registered session listener. */
+export function dispatchDownloadProgress(toolCallId: string, p: DownloadProgressEvent): void {
+  for (const fn of downloadProgressListeners) fn(toolCallId, p);
 }
 
 /** Pause/cancel a running download: the Rust backend SIGKILLs the command's
@@ -406,7 +422,7 @@ export class TauriToolAdapter implements ToolAdapter {
               let parsed: { type?: string; written?: number; total?: number } | null = null;
               try { parsed = JSON.parse(raw); } catch { parsed = null; }
               if (!parsed || parsed.type !== 'progress') return;
-              toolOutputListener?.(toolCall.id, 'stdout', formatWriteProgress(path, parsed.written ?? 0, parsed.total ?? 0));
+              dispatchToolOutput(toolCall.id, 'stdout', formatWriteProgress(path, parsed.written ?? 0, parsed.total ?? 0));
             };
             const msg = await this.call('write_file_stream', {
               workspace: ws,
@@ -499,7 +515,7 @@ export class TauriToolAdapter implements ToolAdapter {
               if (!chunk) return;
               if (chunk.type === 'stdout' || chunk.type === 'stderr') {
                 collected.push({ kind: chunk.type, line: chunk.line });
-                toolOutputListener?.(toolCall.id, chunk.type, chunk.line, chunk.progress);
+                dispatchToolOutput(toolCall.id, chunk.type, chunk.line, chunk.progress);
               }
             };
             // Cancel wiring: when the engine aborts this tool call (user
@@ -562,7 +578,7 @@ export class TauriToolAdapter implements ToolAdapter {
           const resume = args.resume !== false;
           const outSpec = resolveDownloadOutSpec(destination);
           const cmd = buildDownloadCommand(url, outSpec, connections, filenameArg, resume);
-          const emit = (p: DownloadProgressEvent): void => downloadProgressListener?.(toolCall.id, p);
+          const emit = (p: DownloadProgressEvent): void => dispatchDownloadProgress(toolCall.id, p);
 
           if (tauriChannel && !this.invokeFn) {
             const channel = new tauriChannel<string>();
@@ -646,7 +662,7 @@ export class TauriToolAdapter implements ToolAdapter {
               duration: Date.now() - start,
             };
           }
-          downloadProgressListener?.(toolCall.id, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: doneFb?.filename });
+          dispatchDownloadProgress(toolCall.id, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: doneFb?.filename });
           return { id: toolCall.id, toolName: 'download_file', result: `下载失败（退出码 ${exec.exitCode}）`, success: false, duration: Date.now() - start };
         }
         case 'git_diff': {
