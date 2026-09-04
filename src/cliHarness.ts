@@ -170,6 +170,18 @@ async function createHarness(args: CliArgs) {
   const tools = createdTools.tools;
   let toolsDefs = createdTools.toolsDefs;
   const store = args.resume ? createStore(args) : undefined;
+
+  // Default Harness plumbing (ContextEngine + rule-based verifier + default
+  // hooks + default failure policy) shared with the GUI's CodingAgent — one
+  // factory, no drift between the two entrypoints. Declared BEFORE the
+  // subagent orchestrator so both the harness AND the subagents reuse the same
+  // escalating failure policy.
+  const plumbing = createDefaultHarnessConfig({
+    llm: adapter,
+    promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
+    toolsProvider: () => tools?.getTools() ?? toolsDefs,
+  });
+
   if (tools && tools instanceof ToolRegistry) {
     const orchestrator = new SubagentOrchestrator({
       llm: adapter,
@@ -181,6 +193,8 @@ async function createHarness(args: CliArgs) {
       parentSessionId: sessionId,
       stateStore: store,
       progress: cliSubagentProgress,
+      // Same escalating retry policy as the CLI parent harness.
+      failurePolicy: plumbing.failurePolicy,
     });
     // Full delegation surface, mirroring the GUI: both the built-in reviewers
     // and the coding roles (task_planner / code_editor / researcher /
@@ -200,15 +214,6 @@ async function createHarness(args: CliArgs) {
     ? (args.workspace.startsWith('/') ? args.workspace : `${process.cwd()}/${args.workspace}`)
     : process.cwd();
 
-  // Default Harness plumbing (ContextEngine + rule-based verifier + default
-  // hooks + default failure policy) shared with the GUI's CodingAgent — one
-  // factory, no drift between the two entrypoints.
-  const plumbing = createDefaultHarnessConfig({
-    llm: adapter,
-    promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model),
-    toolsProvider: () => tools?.getTools() ?? toolsDefs,
-  });
-
   const harness = new Harness({
     sessionId,
     llm: adapter,
@@ -219,7 +224,7 @@ async function createHarness(args: CliArgs) {
     memory: memoryStore,
     projectPath,
     workspaceAvailable: true,
-    promptAssembler,      promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model),
+    promptAssembler,      promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
     // G-3 fix: the ContextEngine (with LLM summarization fallback) is wired in
     // so long REPL sessions don't grow without bound — the CLI's Harness never
     // had a contextEngine configured.

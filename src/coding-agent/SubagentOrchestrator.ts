@@ -8,6 +8,7 @@ import { parseToolArguments } from '../shared/parseRepair';
 import type {
   BudgetConfig,
   EngineContext,
+  FailurePolicy,
   IStateStore,
   LLMAdapter,
   Message,
@@ -16,6 +17,7 @@ import type {
   ToolDefinition,
   ToolResult,
 } from '../shared/types';
+import { DefaultFailurePolicy } from '../engine/FailurePolicy';
 import type { SubagentDefinition, SubagentResult } from './types';
 import { Tags } from './ToolRegistry';
 import { createDefaultVerifier, type Verifier } from './Verifier';
@@ -131,6 +133,11 @@ export interface SubagentOrchestratorConfig {
   /** Optional verifier for subagents (defaults to the built-in rule checks so a
    * subagent also verifies its output instead of ending unverified). */
   verifier?: Verifier;
+  /** Optional failure-recovery policy for subagents. When omitted, subagents
+   * get the same escalating DefaultFailurePolicy as the parent (retry →
+   * reflect → degrade → stop), so a single transient LLM/API error no longer
+   * kills the subagent outright. */
+  failurePolicy?: FailurePolicy;
 }
 
 export class SubagentOrchestrator implements ToolAdapter {
@@ -319,6 +326,12 @@ export class SubagentOrchestrator implements ToolAdapter {
       budget,
       signal: combinedSignal,
       verifier: this.config.verifier ?? createDefaultVerifier(),
+      // Subagents must recover from transient failures like the parent does.
+      // Without a failurePolicy the engine aborts the subagent on the FIRST
+      // LLM error (network blip, rate limit, stream timeout) — the "子 agent
+      // 经常失败" the GUI surfaced. Escalating retry → reflect → degrade →
+      // stop mirrors the parent harness.
+      failurePolicy: this.config.failurePolicy ?? new DefaultFailurePolicy(),
       depth,
       maxDepth: this.config.maxDepth ?? 1,
     };
@@ -410,7 +423,18 @@ export class SubagentOrchestrator implements ToolAdapter {
             };
           }
           emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
-          break;
+          // A non-abort Interrupted (failure-policy stop, budget exceeded) is a
+          // REAL failure — report it as such to the parent instead of falling
+          // through to the success result below (which used to mask the
+          // subagent's death as `success: true` with empty output).
+          return {
+            id: toolCall.id,
+            toolName: def.name,
+            error: event.payload.reason,
+            result: { aborted: false, reason: event.payload.reason, finalOutput },
+            success: false,
+            duration: done(0),
+          };
         } else if (event.type === 'Error') {
           emit(progress?.onError, { error: event.payload.message, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
           return {
@@ -676,7 +700,10 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
 
 使用清晰的格式输出，便于开发者实现。对于代码相关的内容，提供具体的代码示例。`;
     },
-    defaultTimeoutMs: 120_000,
+    // 5 minutes: a full design scheme (colors/typography/layout/interaction +
+    // concrete examples) with a reasoning model often exceeds 2 minutes; the
+    // old 120s wall-clock AbortSignal made ui_designer the most-failed subagent.
+    defaultTimeoutMs: 300_000,
   },
 
   // === 执行器 (Bash Executor) ===

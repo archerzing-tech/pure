@@ -127,6 +127,9 @@ export class CodingAgent {
       parentSessionId: config.sessionId,
       stateStore: config.stateStore,
       verifier: config.verifier,
+      // Subagents inherit the parent's escalating failure policy so a transient
+      // LLM/API error retries inside the subagent instead of killing it.
+      failurePolicy: this.failurePolicy,
     };
     this.subagentOrchestrator = new SubagentOrchestrator(orchConfig);
 

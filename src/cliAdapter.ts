@@ -6,7 +6,7 @@
 // harness or run-loop modules (acyclic graph).
 import { MockLLMAdapter } from './adapter/mock/MockLLMAdapter';
 import { createDeepSeekAdapter, createQwenAdapter, createGLMAdapter, OpenAICompatibleAdapter } from './adapter/openai/OpenAICompatibleAdapter';
-import { baseURLFor, customProviderFor, customProviderLabel, providerOverrideFor } from './shared/providers';
+import { baseURLFor, customProviderFor, customProviderLabel, providerOverrideFor, promptBudgetForProvider, resolvePromptBudget } from './shared/providers';
 import { bold, cyan, dim, red } from './termcolors';
 import type { LLMAdapter } from './shared/types';
 import type { CliArgs } from './cliConfig';
@@ -26,9 +26,12 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
       process.exit(1);
     }
     const model = args.model || custom.defaultModel;
+    const maxTokens = resolvePromptBudget(
+      promptBudgetForProvider(args.customProviders, args.provider, model, args.providerOverrides),
+    ).outputReserveTokens;
     const apiKey = custom.apiKey || args.apiKey;
     return {
-      adapter: new OpenAICompatibleAdapter({ baseURL: custom.baseURL, apiKey, model }),
+      adapter: new OpenAICompatibleAdapter({ baseURL: custom.baseURL, apiKey, model, maxTokens }),
       label: `${custom.name} (${model})`,
     };
   }
@@ -40,6 +43,10 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
     console.error(`    ${dim('Or set an env var:')}  DEEPSEEK_API_KEY / DASHSCOPE_API_KEY / ZHIPU_API_KEY / MOONSHOT_API_KEY / MINIMAX_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / NVIDIA_API_KEY`);
     process.exit(1);
   }
+
+  const maxTokens = resolvePromptBudget(
+    promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
+  ).outputReserveTokens;
 
   // Built-in providers honor a per-provider endpoint override (proxy / mirror)
   // from ~/.pure/config.json providerOverrides, mirroring the GUI settings.
@@ -55,26 +62,26 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
       if (!endpoint) {
         const wsId = process.env.DASHSCOPE_WORKSPACE_ID ?? '';
         if (!wsId) { console.error('❌ Qwen requires DASHSCOPE_WORKSPACE_ID env var'); process.exit(1); }
-        return { adapter: createQwenAdapter(args.apiKey, wsId, args.model), label: `${displayName} (${args.model})` };
+        return { adapter: createQwenAdapter(args.apiKey, wsId, args.model, undefined, maxTokens), label: `${displayName} (${args.model})` };
       }
-      return { adapter: createQwenAdapter(args.apiKey, '', args.model, endpoint), label: `${displayName} (${args.model})` };
+      return { adapter: createQwenAdapter(args.apiKey, '', args.model, endpoint, maxTokens), label: `${displayName} (${args.model})` };
     }
     case 'glm':
-      return { adapter: createGLMAdapter(args.apiKey, args.model, endpoint), label: `${displayName} (${args.model})` };
+      return { adapter: createGLMAdapter(args.apiKey, args.model, endpoint, maxTokens), label: `${displayName} (${args.model})` };
     case 'deepseek-openai':
-      return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint), label: `${displayName} (${args.model})` };
-    // The remaining built-ins are plain OpenAI-compatible endpoints.
+      return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint, maxTokens), label: `${displayName} (${args.model})` };
+    // The remaining built-ins are plain OpenAI-compatible endpoints;
     case 'moonshot':
     case 'minimax':
     case 'openai':
     case 'openrouter':
     case 'nvidia':
       return {
-        adapter: new OpenAICompatibleAdapter({ baseURL: endpoint || baseURLFor(args.provider), apiKey: args.apiKey, model: args.model }),
+        adapter: new OpenAICompatibleAdapter({ baseURL: endpoint || baseURLFor(args.provider), apiKey: args.apiKey, model: args.model, maxTokens }),
         label: `${displayName} (${args.model})`,
       };
     default:
-      return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint), label: `${displayName} (${args.model})` };
+      return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint, maxTokens), label: `${displayName} (${args.model})` };
   }
 }
 

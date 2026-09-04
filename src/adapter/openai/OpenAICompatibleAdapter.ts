@@ -176,7 +176,7 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
 
 // ── Pre-configured factory functions ──
 
-export function createDeepSeekAdapter(apiKey: string, model = 'deepseek-v4-flash', baseURL?: string) {
+export function createDeepSeekAdapter(apiKey: string, model = 'deepseek-v4-flash', baseURL?: string, maxTokens?: number) {
   return new OpenAICompatibleAdapter({
     // A per-provider override (Settings → LLM → 连接设置, synced via
     // providerOverrides) wins over the official endpoint.
@@ -188,11 +188,11 @@ export function createDeepSeekAdapter(apiKey: string, model = 'deepseek-v4-flash
     // thinking on complex tasks (e.g. generating a full HTML animation), so
     // the visible answer comes back EMPTY → non-empty-output verify failure →
     // retry loop. 32768 leaves room for reasoning AND the actual answer.
-    maxTokens: 32768,
+    maxTokens: maxTokens ?? 32768,
   });
 }
 
-export function createQwenAdapter(apiKey: string, workspaceId: string, model = 'qwen3-coder-next', baseURL?: string) {
+export function createQwenAdapter(apiKey: string, workspaceId: string, model = 'qwen3-coder-next', baseURL?: string, maxTokens?: number) {
   return new OpenAICompatibleAdapter({
     // Default = the dedicated workspace deployment; an explicit override
     // (e.g. a DashScope compatible-mode endpoint or a gateway) replaces it
@@ -200,14 +200,15 @@ export function createQwenAdapter(apiKey: string, workspaceId: string, model = '
     baseURL: baseURL || `https://${workspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`,
     apiKey,
     model,
+    maxTokens,
   });
 }
 
-export function createGLMAdapter(apiKey: string, model = 'glm-5.3-flash', baseURL?: string) {
+export function createGLMAdapter(apiKey: string, model = 'glm-5.3-flash', baseURL?: string, maxTokens?: number) {
   return new OpenAICompatibleAdapter({
     baseURL: baseURL || 'https://api.z.ai/api/coding/paas/v4',
     apiKey,
     model,
-    maxTokens: 32768,
+    maxTokens: maxTokens ?? 32768,
   });
 }

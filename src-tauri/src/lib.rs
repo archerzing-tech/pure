@@ -304,6 +304,14 @@ mod llm_retry_tests {
         let via_header = sleep_backoff(2, Some(std::time::Duration::from_secs(4))).as_millis() as u64;
         assert!(via_header >= 4_000 && via_header <= 4_250, "via_header: {via_header}");
     }
+
+    #[test]
+    fn stream_failure_retries_only_before_any_output() {
+        assert!(should_retry_stream_failure(false, 1));
+        assert!(should_retry_stream_failure(false, 2));
+        assert!(!should_retry_stream_failure(false, 3));
+        assert!(!should_retry_stream_failure(true, 1));
+    }
 }
 
 #[cfg(test)]
@@ -5733,14 +5741,20 @@ mod resolve_tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_files_through_a_symlink_outside_workspace() {
+    fn allows_reads_through_a_symlink_outside_workspace() {
         let ws = temp_workspace("symlink");
         let outside =
             std::env::temp_dir().join(format!("pure-resolve-outside-{}", std::process::id()));
         let _ = fs::remove_dir_all(&outside);
         fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("evil.txt"), "x").unwrap();
         std::os::unix::fs::symlink(&outside, PathBuf::from(&ws).join("linked")).unwrap();
-        assert!(resolve(&ws, "linked/evil.txt").is_err());
+        // Absolute-path confinement is removed; the symlink resolves to its
+        // real target and the read passes through (mirrors the Node adapter).
+        // Compare against the CANONICAL target — resolve() canonicalizes
+        // existing ancestors (macOS /var → /private/var).
+        let r = resolve(&ws, "linked/evil.txt").unwrap();
+        assert_eq!(r, fs::canonicalize(outside.join("evil.txt")).unwrap());
         fs::remove_dir_all(&outside).unwrap();
         fs::remove_dir_all(&ws).unwrap();
     }
@@ -5758,7 +5772,7 @@ mod resolve_tests {
     }
 
     #[test]
-    fn rejects_absolute_paths_outside_the_workspace() {
+    fn accepts_absolute_paths_outside_the_workspace() {
         let ws = temp_workspace("absolute-outside");
         let outside =
             std::env::temp_dir().join(format!("pure-resolve-absout-{}", std::process::id()));
@@ -5766,7 +5780,9 @@ mod resolve_tests {
         fs::create_dir_all(&outside).unwrap();
         let target = outside.join("note.txt");
         fs::write(&target, "outside").unwrap();
-        assert!(resolve(&ws, target.to_str().unwrap()).is_err());
+        // Global file reads: absolute paths target any location on disk.
+        let r = resolve(&ws, target.to_str().unwrap()).unwrap();
+        assert_eq!(r, fs::canonicalize(&target).unwrap());
         fs::remove_dir_all(&outside).unwrap();
         fs::remove_dir_all(&ws).unwrap();
     }
@@ -10394,6 +10410,7 @@ mod proxy_tests {
         let mut args = ChatStreamArgs {
             messages: Vec::new(),
             provider: "ollama".to_string(),
+            protocol: String::new(),
             tools: Vec::new(),
             model: "qwen2.5-coder:7b".to_string(),
             api_key: String::new(),
@@ -10552,6 +10569,11 @@ const LLM_STREAM_IDLE_TIMEOUT_SECS: u64 = 180;
 // it. Retries happen ONLY before the response body streams — re-sending the
 // POST after a failed send/status is always safe (no duplicate output).
 const LLM_RETRY_MAX_ATTEMPTS: u32 = 3; // original + 2 retries
+// A successful HTTP response can still fail while its SSE body is being read
+// (for example, a proxy closes a chunked response after sending the headers).
+// Retry only when no SSE event has reached the WebView; once output has been
+// emitted, restarting would duplicate visible text or tool-call deltas.
+const LLM_STREAM_RETRY_MAX_ATTEMPTS: u32 = 3; // original + 2 retries
 const LLM_RETRY_BASE_MS: u64 = 800;
 const LLM_RETRY_MAX_MS: u64 = 12_000;
 
@@ -10584,6 +10606,10 @@ fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
 /// Compute the delay before retry attempt `attempt` (1-based). Full-jitter-ish:
 /// min(base * 2^(attempt-1), max) plus a small deterministic jitter so N
 /// concurrent clients don't all wake at once (the 429 thundering herd).
+fn should_retry_stream_failure(emitted_output: bool, attempt: u32) -> bool {
+    !emitted_output && attempt < LLM_STREAM_RETRY_MAX_ATTEMPTS
+}
+
 fn sleep_backoff(attempt: u32, retry_after: Option<std::time::Duration>) -> std::time::Duration {
     let jitter = {
         let nanos = std::time::SystemTime::now()
@@ -10785,6 +10811,86 @@ fn resolve_api_key(secrets: &serde_json::Value, arg_key: &str, secret_key: &str)
         .unwrap_or_default()
 }
 
+async fn send_chat_request(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    anthropic: bool,
+    api_key: &str,
+) -> Result<reqwest::Response, String> {
+    let mut attempts: u32 = 0;
+    loop {
+        attempts += 1;
+        let mut request = client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            // SSE is already a streaming transport. Asking intermediaries for
+            // an identity-encoded body avoids a common failure mode where a
+            // proxy truncates gzip/brotli output and reqwest reports only the
+            // generic `error decoding response body` from its decompressor.
+            .header("Accept-Encoding", "identity")
+            .json(body);
+        if anthropic {
+            request = request
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01");
+        } else if !api_key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let send_result = tokio::time::timeout(
+            std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
+            request.send(),
+        )
+        .await;
+        match send_result {
+            Err(_) => {
+                if attempts < LLM_RETRY_MAX_ATTEMPTS {
+                    tokio::time::sleep(sleep_backoff(attempts, None)).await;
+                    continue;
+                }
+                return Err(format!(
+                    "request timeout: the LLM API did not respond within {}s after {} attempts (network or server issue) — try the turn again.",
+                    LLM_REQUEST_TIMEOUT_SECS,
+                    attempts
+                ));
+            }
+            Ok(Err(e)) => {
+                if attempts < LLM_RETRY_MAX_ATTEMPTS {
+                    tokio::time::sleep(sleep_backoff(attempts, None)).await;
+                    continue;
+                }
+                return Err(format!("request: {} (after {} attempts)", e, attempts));
+            }
+            Ok(Ok(resp)) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return Ok(resp);
+                }
+                let code = status.as_u16();
+                if retryable_status(code) && attempts < LLM_RETRY_MAX_ATTEMPTS {
+                    let retry_after = parse_retry_after(&resp);
+                    tokio::time::sleep(sleep_backoff(attempts, retry_after)).await;
+                    continue;
+                }
+                let text = resp.text().await.unwrap_or_default();
+                let retried = attempts > 1;
+                return Err(format!(
+                    "{} {}: {}{}",
+                    status.as_u16(),
+                    status.canonical_reason().unwrap_or(""),
+                    text,
+                    if retried {
+                        format!(" (已自动重试 {})", attempts - 1)
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn chat_stream(
     state: tauri::State<'_, ChatStreamRegistry>,
@@ -10905,92 +11011,9 @@ async fn chat_stream(
         }
     }
 
-    // Timeout the whole send: with `Client::new()` a server that accepts the
-    // connection but never sends headers would block here forever. 180s covers
-    // even long reasoning-model time-to-first-byte. Keyless providers
-    // (Ollama / LM Studio) get NO Authorization header — some local servers
-    // reject `Bearer ` with an empty token.
-    //
-    // Transient-failure retry loop (below): a single dropped connection, 429,
-    // or 5xx is retried with bounded exponential backoff + jitter (honoring
-    // Retry-After) BEFORE the response body streams. Only deterministic errors
-    // (bad request, auth, 404) surface immediately.
-    let mut llm_attempts: u32 = 0;
-    let resp = loop {
-        llm_attempts += 1;
-        let mut request = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body);
-        if anthropic {
-            request = request
-                .header("x-api-key", &api_key)
-                .header("anthropic-version", "2023-06-01");
-        } else if !api_key.is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
-        }
-        let send_result = tokio::time::timeout(
-            std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
-            request.send(),
-        )
-        .await;
-        match send_result {
-            // The whole request timed out (connect phase or headers never
-            // arrived) — a network/proxy hiccup, retry it.
-            Err(_) => {
-                if llm_attempts < LLM_RETRY_MAX_ATTEMPTS {
-                    let delay = sleep_backoff(llm_attempts, None);
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-                return Err(format!(
-                    "request timeout: the LLM API did not respond within {}s after {} attempts (network or server issue) — try the turn again.",
-                    LLM_REQUEST_TIMEOUT_SECS,
-                    llm_attempts
-                ));
-            }
-            Ok(Err(e)) => {
-                // Connection-level error (ECONNRESET / proxy drop / DNS): the
-                // most common transient in a flaky network — retry.
-                if llm_attempts < LLM_RETRY_MAX_ATTEMPTS {
-                    let delay = sleep_backoff(llm_attempts, None);
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-                return Err(format!(
-                    "request: {} (after {} attempts)",
-                    e,
-                    llm_attempts
-                ));
-            }
-            Ok(Ok(resp)) => {
-                let status = resp.status();
-                if status.is_success() {
-                    break resp;
-                }
-                let code = status.as_u16();
-                if retryable_status(code) && llm_attempts < LLM_RETRY_MAX_ATTEMPTS {
-                    let retry_after = parse_retry_after(&resp);
-                    let delay = sleep_backoff(llm_attempts, retry_after);
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-                let text = resp.text().await.unwrap_or_default();
-                let retried = llm_attempts > 1;
-                return Err(format!(
-                    "{} {}: {}{}",
-                    status.as_u16(),
-                    status.canonical_reason().unwrap_or(""),
-                    text,
-                    if retried {
-                        format!(" (已自动重试 {})", llm_attempts - 1)
-                    } else {
-                        String::new()
-                    }
-                ));
-            }
-        }
-    };
+    // Retry request/status failures before the response body starts. A second
+    // bounded retry layer below handles a response body that dies after headers.
+    let mut resp = send_chat_request(&client, &url, &body, anthropic, &api_key).await?;
 
     // Register the cancel channel for this call (Stop → cancel_chat_stream →
     // this receiver fires → the select! below aborts the read loop). The
@@ -11004,27 +11027,32 @@ async fn chat_stream(
         key: request_id,
     };
 
-    let mut stream = resp.bytes_stream();
-    // Keep the SSE buffer as bytes until a full line is available. Decoding
-    // each reqwest chunk separately corrupts UTF-8 when a Chinese character
-    // is split across two network chunks.
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut text = String::new();
-    let mut usage: Option<serde_json::Value> = None;
-    let mut tc_map: BTreeMap<u32, serde_json::Value> = BTreeMap::new();
+    let mut stream_attempt: u32 = 0;
+    let (text, usage, tc_map) = 'stream_attempts: loop {
+        stream_attempt += 1;
+        let mut stream = resp.bytes_stream();
+        // Keep the SSE buffer as bytes until a full line is available. Decoding
+        // each chunk separately corrupts UTF-8 when a Chinese character is
+        // split across two network chunks.
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut text = String::new();
+        let mut usage: Option<serde_json::Value> = None;
+        let mut tc_map: BTreeMap<u32, serde_json::Value> = BTreeMap::new();
+        let mut stream_emitted = false;
+        let mut stream_error: Option<String> = None;
     // Last time a tool-call delta was forwarded to the WebView (throttle
     // below). Streaming a giant argument (e.g. write_file `content`, a whole
     // HTML file) grows the accumulated buffer to tens of KB; forwarding it on
     // every token is O(n²) over the channel.
     let mut last_tool_emit = Instant::now();
 
-    // SSE read loop with a labeled break: the idle timeout (every chunk
-    // resets the clock) fails only on genuinely dead connections, and the
-    // `[DONE]` terminal frame exits the OUTER loop — not just the inner line
-    // loop. Falling back into `stream.next()` after [DONE] would hang forever
-    // on endpoints that keep the connection open (previous bug: frozen GUI
-    // thinking card, no visible answer).
-    'stream: loop {
+        // SSE read loop with a labeled break: the idle timeout (every chunk
+        // resets the clock) fails only on genuinely dead connections, and the
+        // `[DONE]` terminal frame exits the OUTER loop — not just the inner line
+        // loop. Falling back into `stream.next()` after [DONE] would hang forever
+        // on endpoints that keep the connection open (previous bug: frozen GUI,
+        // no visible answer).
+        'stream: loop {
         // Select between the upstream stream (idle-timeout bounded) and the
         // cancel channel: a Stop click aborts the read immediately instead of
         // letting the abandoned task keep generating (and billing tokens)
@@ -11038,16 +11066,26 @@ async fn chat_stream(
                 std::time::Duration::from_secs(LLM_STREAM_IDLE_TIMEOUT_SECS),
                 stream.next(),
             ) => {
-                next_chunk.map_err(|_| {
-                    format!(
-                        "stream stalled: no data from the LLM API for {}s — the connection likely died. Try the turn again.",
-                        LLM_STREAM_IDLE_TIMEOUT_SECS
-                    )
-                })?
+                match next_chunk {
+                    Ok(item) => item,
+                    Err(_) => {
+                        stream_error = Some(format!(
+                            "stream stalled: no data from the LLM API for {}s — the connection likely died. Try the turn again.",
+                            LLM_STREAM_IDLE_TIMEOUT_SECS
+                        ));
+                        break 'stream;
+                    }
+                }
             }
         };
         let Some(chunk_result) = item else { break };
-        let chunk = chunk_result.map_err(|e| format!("stream: {}", e))?;
+        let chunk = match chunk_result {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                stream_error = Some(format!("stream: {}", e));
+                break 'stream;
+            }
+        };
         buffer.extend_from_slice(&chunk);
 
         while let Some(line) = take_sse_line(&mut buffer) {
@@ -11084,17 +11122,20 @@ async fn chat_stream(
                             "text_delta" => {
                                 if let Some(content) = delta.get("text").and_then(|v| v.as_str()) {
                                     text.push_str(content);
+                                    stream_emitted = true;
                                     if on_chunk.send(serde_json::json!({ "type": "delta", "content": content }).to_string()).is_err() { return Err("cancelled".into()); }
                                 }
                             }
                             "thinking_delta" => {
                                 if let Some(content) = delta.get("thinking").and_then(|v| v.as_str()) {
+                                    stream_emitted = true;
                                     if on_chunk.send(serde_json::json!({ "type": "reasoning", "content": content }).to_string()).is_err() { return Err("cancelled".into()); }
                                 }
                             }
                             "input_json_delta" => {
                                 let index = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                                 let partial = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
+                                stream_emitted = true;
                                 let cur = tc_map.entry(index).or_insert_with(|| serde_json::json!({"id":"","name":"","arguments":""}));
                                 cur["arguments"] = serde_json::Value::String(format!("{}{}", cur["arguments"].as_str().unwrap_or(""), partial));
                             }
@@ -11105,6 +11146,7 @@ async fn chat_stream(
                         let index = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                         let block = &json["content_block"];
                         if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                            stream_emitted = true;
                             tc_map.insert(index, serde_json::json!({"id": block["id"], "name": block["name"], "arguments":""}));
                         }
                     }
@@ -11122,6 +11164,7 @@ async fn chat_stream(
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                 text.push_str(content);
                 let chunk = serde_json::json!({ "type": "delta", "content": content });
+                stream_emitted = true;
                 if on_chunk.send(chunk.to_string()).is_err() {
                     return Err("cancelled".into());
                 }
@@ -11161,6 +11204,7 @@ async fn chat_stream(
                 });
             if let Some(rc) = reasoning {
                 let chunk = serde_json::json!({ "type": "reasoning", "content": rc });
+                stream_emitted = true;
                 if on_chunk.send(chunk.to_string()).is_err() {
                     return Err("cancelled".into());
                 }
@@ -11182,6 +11226,7 @@ async fn chat_stream(
                     // (name, or appended arguments) — a delta that merely
                     // carries the id must not re-send an identical buffer.
                     let mut updated = false;
+                    stream_emitted = true;
                     if let Some(id) = tc["id"].as_str() {
                         cur["id"] = serde_json::Value::String(id.to_string());
                     }
@@ -11208,6 +11253,7 @@ async fn chat_stream(
                             "name": cur["name"].as_str().unwrap_or(""),
                             "arguments": cur["arguments"].as_str().unwrap_or(""),
                         });
+                        stream_emitted = true;
                         if on_chunk.send(chunk.to_string()).is_err() {
                             return Err("cancelled".into());
                         }
@@ -11216,6 +11262,26 @@ async fn chat_stream(
             }
         }
     }
+
+        if let Some(error) = stream_error {
+            if should_retry_stream_failure(stream_emitted, stream_attempt) {
+                tokio::time::sleep(sleep_backoff(stream_attempt, None)).await;
+                resp = send_chat_request(&client, &url, &body, anthropic, &api_key).await?;
+                continue 'stream_attempts;
+            }
+            return Err(format!(                "{} (stream attempt {} of {}; response body failed before output: {})",
+                error,
+                stream_attempt,
+                LLM_STREAM_RETRY_MAX_ATTEMPTS,
+                if stream_emitted {
+                    "output had already been emitted"
+                } else {
+                    "no output was emitted"
+                },
+            ));
+        }
+        break (text, usage, tc_map);
+    };
 
     // Build tool_calls list
     let mut tool_calls: Vec<serde_json::Value> = Vec::new();
