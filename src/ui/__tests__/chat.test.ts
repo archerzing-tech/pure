@@ -690,7 +690,7 @@ describe('plan overview completion state', () => {
     expect(src).toContain('protocolStarted: false');
     expect(src).toContain('planTrack.phaseStarted.add(marker.number)');
     expect(src).toContain('planTrack.phaseCompleted.add(marker.number)');
-    expect(src).toContain('已完成”播报…');
+    expect(src).toContain('就差「计划');
     expect(src).toContain('!planTrack.phaseCompleted.has(finishedPlan)');
     expect(src).toContain('const legacyPlanFinished = planCard && !planTrack.protocolStarted');
     expect(src).toContain('completionSnapshot.currentPlan >= completionSnapshot.plan.steps.length;');

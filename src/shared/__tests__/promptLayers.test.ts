@@ -43,12 +43,18 @@ describe('L1 behavior contracts', () => {
   it('re-exports the always-on workflow + completion contracts', () => {
     expect(WORKFLOW_PROMPT).toContain('Proactive problem-solving workflow');
     expect(COMPLETION_PROMPT).toContain('Completion report');
-    expect(COMPLETION_PROMPT).toContain('交付依据（可信）');
-    expect(COMPLETION_PROMPT).toContain('产出与改动（可回溯）');
-    expect(COMPLETION_PROMPT).toContain('验证结论');
+    expect(COMPLETION_PROMPT).toContain('依据');
+    expect(COMPLETION_PROMPT).toContain('改动');
+    expect(COMPLETION_PROMPT).toContain('验证');
     expect(COMPLETION_PROMPT).toContain('通过');
     expect(COMPLETION_PROMPT).toContain('不通过');
     expect(COMPLETION_PROMPT).toContain('实际运行的命令');
+    // No fixed completion template: the report must read like a colleague,
+    // not a labeled checklist. (The prompt may MENTION the banned heading in
+    // its prohibition clause, but must not mandate the old heading+bullets
+    // structure.)
+    expect(COMPLETION_PROMPT).not.toContain('## 完成总结\n- ');
+    expect(COMPLETION_PROMPT).not.toContain('**交付依据');
   });
 
   it('shares typo tolerance and logical-traps defense', () => {
@@ -132,13 +138,13 @@ describe('L1 behavior contracts', () => {
 
   it('asks for a human, conversational tone without canned boilerplate', () => {
     expect(HUMAN_TONE_PROMPT).toContain('Communication tone');
-    expect(HUMAN_TONE_PROMPT).toContain('human colleague');
+    expect(HUMAN_TONE_PROMPT).toContain('senior engineer');
     expect(HUMAN_TONE_PROMPT).toContain('canned');
-    expect(HUMAN_TONE_PROMPT).toContain('conversationally');
+    expect(HUMAN_TONE_PROMPT).toContain('control lines');
   });
 
   it('reports finished work like a colleague, not a changelog', () => {
-    expect(HUMAN_TONE_PROMPT).toContain('report back the way a colleague would');
+    expect(HUMAN_TONE_PROMPT).toContain('flowing sentences');
     expect(HUMAN_TONE_PROMPT).toContain('changelog-style list');
   });
 

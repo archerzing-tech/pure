@@ -48,12 +48,12 @@ export function createPlanSummaryCard(
   const hasCaution = decision.assessment.riskLevel !== 'low';
   const message = isComplex
     ? roles.length > 0
-      ? `你说的这个问题相对复杂，我将安排${roleSentence(roles)}来处理你的问题。`
-      : '你说的这个问题相对复杂，我会按步骤推进并逐步验证。'
+      ? `这个问题不简单，我让${roleSentence(roles)}分头处理，最后我来汇总结果给你。`
+      : '这个问题不简单，我会分步推进，每一步验证后再往下走。'
     : hasCaution
       ? roles.length > 0
-        ? `你说的这个问题需要谨慎处理，我将安排${roleSentence(roles)}来一起确认影响并处理。`
-        : '你说的这个问题需要谨慎处理，我会先确认影响范围，再给你结果。'
+        ? `这事得谨慎点，我会先让${roleSentence(roles)}确认影响面，再动手处理。`
+        : '这事得谨慎点，我先确认影响范围，再决定怎么动。'
       : '';
 
   const el = document.createElement('div');
