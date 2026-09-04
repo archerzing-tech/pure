@@ -38,6 +38,12 @@ pub fn resolve_workspace_path(workspace: &Path, path: &Path) -> Result<PathBuf, 
     if !base.is_dir() {
         return Err(format!("workspace is not a directory: {}", workspace.display()));
     }
+    // The workspace is only the base for RELATIVE paths. Absolute paths point
+    // anywhere on disk — the workspace boundary has been removed (the adapter
+    // contract: absolute paths can target any location, the user explicitly
+    // opted out of workspace confinement). Remaining guards are path VALIDITY:
+    // lexical normalization (rejecting `..` above the filesystem root) and
+    // refusing to write through a dangling symlink.
     let candidate = if path.is_absolute() { path.to_path_buf() } else { base.join(path) };
     let normalized = normalize_lexical(&candidate)
         .map_err(|_| format!("path cannot be resolved: {}", path.display()))?;
@@ -62,9 +68,6 @@ pub fn resolve_workspace_path(workspace: &Path, path: &Path) -> Result<PathBuf, 
     for component in missing.iter().rev() {
         resolved.push(component);
     }
-    if !resolved.starts_with(&base) {
-        return Err(format!("path escapes workspace: {}", path.display()));
-    }
     Ok(resolved)
 }
 
@@ -81,10 +84,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_parent_traversal() {
+    fn rejects_parent_traversal_above_filesystem_root() {
         let (root, workspace) = test_workspace("parent");
-        let error = resolve_workspace_path(&workspace, Path::new("../outside.txt")).unwrap_err();
-        assert!(error.contains("escapes workspace"));
+        // `..` can no longer climb above the filesystem root; anything short of
+        // that resolves (workspace confinement is removed, see resolve_workspace_path).
+        let resolved = resolve_workspace_path(&workspace, Path::new("../outside.txt")).unwrap();
+        assert!(resolved.ends_with("outside.txt"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn accepts_absolute_path_outside_workspace() {
+        let (root, workspace) = test_workspace("absolute-outside");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let target = outside.join("note.txt");
+        std::fs::write(&target, "outside").unwrap();
+        // Absolute paths target ANY location on disk — no workspace boundary.
+        let resolved = resolve_workspace_path(&workspace, &target).unwrap();
+        assert!(resolved.ends_with("outside/note.txt"));
         let _ = std::fs::remove_dir_all(root);
     }
 

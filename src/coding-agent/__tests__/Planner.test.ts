@@ -3,7 +3,7 @@
 // and the logical-trap detection that primes premise verification.
 
 import { describe, it, expect } from 'bun:test';
-import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, classifyInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
+import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, isPlainConversational, classifyInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
 import type { LLMAdapter, Message } from '../../shared/types';
 
 describe('Planner', () => {
@@ -172,20 +172,50 @@ describe('Planner', () => {
 
   it('asks the connected model for semantic routing instead of local keyword matching', async () => {
     let request: any[] = [];
+    const consumed: string[] = [];
+    const json = JSON.stringify({
+      intent: 'question', complexity: 'simple', mode: 'yolo', requiresPlan: false, needsDeliveryGate: false,
+      assessment: { riskLevel: 'low', reversibility: 'reversible', impact: 'design feedback', recommendation: 'explain options', requiresProbe: false, requiresConfirmation: false },
+    });
     const llm = {
-      complete: async (messages: any[]) => {
+      // Unused now (routing consumes the stream incrementally) but required by
+      // the LLMAdapter interface.
+      complete: async () => ({ content: '' }),
+      async *stream(messages: any[]) {
         request = messages;
-        return { content: JSON.stringify({
-          intent: 'question', complexity: 'simple', mode: 'yolo', requiresPlan: false, needsDeliveryGate: false,
-          assessment: { riskLevel: 'low', reversibility: 'reversible', impact: 'design feedback', recommendation: 'explain options', requiresProbe: false, requiresConfirmation: false },
-        }) };
+        // The decision arrives across several streamed chunks, followed by
+        // trailing prose the router must NOT wait for.
+        consumed.push('a');
+        yield { type: 'content', content: json.slice(0, 24) };
+        consumed.push('b');
+        yield { type: 'content', content: json.slice(24) };
+        consumed.push('tail');
+        yield { type: 'content', content: ' this tail is never read — the stream aborts as soon as the JSON parses' };
       },
-      async *stream() { yield { type: 'content', content: '' }; },
     } as LLMAdapter;
     const route = await inferSemanticRoute(llm, '现有页面很难看，我应该从哪些设计方向改善？');
     expect(route?.intent).toBe('question');
     expect(request[1]?.content).toContain('现有页面很难看');
     expect(request[0]?.content).toContain('do not classify from isolated words');
+    // Early-exit: the router stopped the stream the moment the decision object
+    // was complete instead of draining the provider's trailing tokens.
+    expect(consumed).toEqual(['a', 'b']);
+  });
+
+  it('skips the LLM router only for plainly conversational low-stakes questions', () => {
+    expect(isPlainConversational('今天几号，星期几，天气如何')).toBe(true);
+    expect(isPlainConversational('What is the weather like today?')).toBe(true);
+    expect(isPlainConversational('为什么？')).toBe(true);
+    expect(isPlainConversational('现有页面很难看，我应该从哪些设计方向改善？')).toBe(true);
+    // Anything that could need the router still routes:
+    // - no question shape → the deterministic verdict alone is not enough
+    expect(isPlainConversational('帮我设计四个不同风格的自行车售卖网站的首页')).toBe(false);
+    // - a build request hiding inside a question frame
+    expect(isPlainConversational('能不能帮我设计一个自行车售卖网站的首页？')).toBe(false);
+    // - destructive / risky framing
+    expect(isPlainConversational('删除整个项目的文件，可以吗？')).toBe(false);
+    // - image attachments
+    expect(isPlainConversational('这张图讲了什么？', [{ dataUrl: 'data:image/png;base64,x', mimeType: 'image/png' }])).toBe(false);
   });
 
   it('classifies explicit planning requests as complex and generates a plan', () => {
@@ -552,11 +582,15 @@ describe('detectFictionIntent', () => {
 });
 
 describe('classifyInsertion', () => {
-  /** Build an LLMAdapter whose complete() returns the given content. */
+  /** Build an LLMAdapter whose stream() delivers the given content (the
+   * classification now consumes the stream incrementally). */
   function mockLlm(content: string): LLMAdapter {
-    const fn = async (_messages: Message[], _tools: unknown[], _signal?: AbortSignal) =>
-      ({ content, messages: _messages } as never);
-    return { complete: fn } as unknown as LLMAdapter;
+    const stream = async function* (_messages: Message[], _tools: unknown[], _signal?: AbortSignal) {
+      const mid = Math.max(1, Math.floor(content.length / 2));
+      if (mid < content.length) yield { type: 'content', content: content.slice(0, mid) };
+      yield { type: 'content', content: content.slice(mid) };
+    };
+    return { stream } as unknown as LLMAdapter;
   }
 
   it('returns related true for a related insert', async () => {
@@ -576,7 +610,7 @@ describe('classifyInsertion', () => {
   });
 
   it('defaults to related when the LLM throws', async () => {
-    const bad = { complete: async () => { throw new Error('boom'); } } as unknown as LLMAdapter;
+    const bad = { stream: async function* () { throw new Error('boom'); } } as unknown as LLMAdapter;
     const cls = await classifyInsertion(bad, 'context', 'anything');
     expect(cls.related).toBe(true);
   });

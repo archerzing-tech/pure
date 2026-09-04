@@ -46,7 +46,6 @@ import { showConfirmModal } from './modal';
 import { checkPreflight, type PreflightGate } from './preflight';
 import { InlineAutocomplete } from './inlineAutocomplete';
 import { TaskQueue } from './taskQueue';
-import { mountTaskQueuePanel } from './taskQueuePanel';
 import { Scheduler } from './scheduler';
 import { WorkspaceController } from './workspace';
 import { SessionSidebar } from './sessionSidebar';
@@ -261,7 +260,6 @@ const taskQueue = new TaskQueue({
   chat,
   getContext: () => ({ workspace: chat.getWorkspace(), sessionId: chat.getSessionId() }),
 });
-mountTaskQueuePanel(taskQueue);
 
 // ── Scheduled tasks (frontend scheduler) ──
 // Schedules live in the config (Settings → 定时任务). A due task enqueues into
@@ -1608,7 +1606,7 @@ function renderContextWindowBar(): void {
   const pct = document.getElementById('status-window-pct');
   if (!wrap || !bar || !pct) return;
   const config = loadConfig();
-  const budget = resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model));
+  const budget = resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides));
   const windowTokens = budget.contextWindowTokens ?? 0;
   const inputBudget = budget.availableInputTokens ?? 0;
   const overhead = contextOverheadTokens();

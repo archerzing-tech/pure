@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard, dismissThinkingHint } from '../thinkingCard';
+import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard, dismissThinkingHint, setThinkingLabel, resetThinkingLabelForOutput } from '../thinkingCard';
 
 beforeAll(() => {
   if (typeof document === 'undefined') GlobalRegistrator.register();
@@ -85,6 +85,46 @@ describe('live thinking card timer (long-silence feedback)', () => {
     // The hint sits ABOVE the reasoning scroll window inside the body.
     expect(handle.body.firstElementChild?.className).toBe('thinking-hint');
     stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('keeps recovery hints neutral instead of claiming a network outage', async () => {
+    const handle = attachedCard();
+    setThinkingLabel(handle, '模型请求未成功，正在重试（连续第 2 次）…');
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60 });
+    await sleep(150);
+    const hint = handle.card.querySelector('.thinking-hint')?.textContent ?? '';
+    expect(hint).toContain('上一阶段未成功');
+    expect(hint).toContain('不表示你的网络已断开');
+    expect(hint).not.toContain('网络或 API 异常');
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('default hint names the cause: plain waiting label → model latency, no network claim', async () => {
+    const handle = attachedCard();
+    // No retry has happened: waiting on the model's first token. The hint must
+    // say the likely cause is model-side latency and that NO network anomaly
+    // was detected — not lump the two causes together.
+    setThinkingLabel(handle, '等待模型首字返回…');
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60 });
+    await sleep(150);
+    const hint = handle.card.querySelector('.thinking-hint')?.textContent ?? '';
+    expect(hint).toContain('仍在等待模型返回首个内容');
+    expect(hint).toContain('深度思考或服务端排队');
+    expect(hint).toContain('暂未发现请求失败');
+    expect(hint).not.toContain('重试');
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('resets a recovery label as soon as real output resumes', () => {
+    const handle = attachedCard();
+    handle.card.classList.add('waiting');
+    setThinkingLabel(handle, '模型请求未成功，正在重试（连续第 1 次）…');
+    resetThinkingLabelForOutput(handle);
+    expect(handle.card.classList.contains('waiting')).toBe(false);
+    expect(handle.card.querySelector('.thinking-label')?.textContent).toBe('思考');
     handle.el.remove();
   });
 

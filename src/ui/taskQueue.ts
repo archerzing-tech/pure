@@ -7,8 +7,8 @@
 // promise settles. A user interjecting mid-run supersedes the queue's turn; the
 // queue sees the superseded send settle and simply advances.
 //
-// Model-only (no DOM): the panel lives in taskQueuePanel.ts, the runner drives
-// the injected ChatController. Unit-tested with a fake chat + fake storage.
+// Model-only (no DOM): the runner drives the injected ChatController.
+// Unit-tested with a fake chat + fake storage.
 
 import type { ChatController } from './chat';
 

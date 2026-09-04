@@ -50,6 +50,116 @@ export function shouldBypassSemanticRoute(prompt: string, images?: MessageImage[
   return PLEASANTRY_BYPASS.test(text);
 }
 
+// ── Deterministic conversational-route skip ───────────────────────────────
+// The GUI/CLI call the LLM once to route a request BEFORE the real turn
+// starts. On providers that trickle tokens slowly that hidden call alone
+// costs 6-12s (measured on GLM) even though the model's first byte arrives
+// in ~1s — the whole call is dead latency in front of the first visible
+// answer. Most such calls only confirm the obvious (this is a plain
+// question), so the synchronous fallback below reproduces the router's
+// verdict for exactly that case and the hidden round trip is skipped
+// entirely. It fires ONLY when the deterministic fallback already concludes
+// "low-stakes conversational question" — every flag that could route to a
+// plan / delivery gate / probe / confirmation must already be off, otherwise
+// the LLM router still runs.
+
+/** Question markers (CN + EN): the prompt must read as a request for an
+ * answer, not an instruction to act. */
+const QUESTION_SHAPED = /[?？]|几号|几月|几点|星期|周几|多久|多(?:大|少|远|久|高|长)|为什么|怎么|如何|怎样|能否|能不能|是否|该不该|应不应该|可不可以|会不会|要不要|吗|呢|什么|哪个|哪些|谁|哪里|哪儿|什么时候|what|when|where|which|who|why|how|can|could|should|would/i;
+
+/** Peel a leading question frame (能不能帮我… / how do i …) so the artifact
+ * guard below can still see an embedded build request. */
+function stripQuestionPrefix(text: string): string {
+  return text.replace(/^(?:请问|能不能|可不可以|可以|能否|是否|我想问|想问|麻烦问|帮我看看|how(?:(?:\s+can|\s+could|\s+do|\s+should|\s+would)?\s+i)?|can\s+you|could\s+you|please)\s*/i, '');
+}
+
+/** True when a request is SO plainly a low-stakes conversational question
+ * that the LLM router could not change the outcome. Conservative by
+ * construction: it requires an interrogative shape, no project/artifact
+ * build framing (even hidden behind a question prefix), and the synchronous
+ * fallback verdict must already be question / simple / yolo / low-risk with
+ * no traps. Anything else keeps the full semantic-route call. */
+export function isPlainConversational(prompt: string, images?: MessageImage[] | null): boolean {
+  if (images?.length) return false;
+  const text = prompt.trim();
+  if (!text || text.length > 200) return false;
+  if (!QUESTION_SHAPED.test(text)) return false;
+  // An imperative build request hiding inside the question frame (e.g.
+  // "能不能帮我设计一个自行车网站？") must still reach the LLM router — the
+  // artifact/delivery pipeline depends on it. detectArtifactRequest already
+  // rejects question-leading forms, so re-test with the frame peeled.
+  if (detectProjectRequest(text) || detectArtifactRequest(text)) return false;
+  if (detectArtifactRequest(stripQuestionPrefix(text))) return false;
+  const analysis = new Planner().analyzeTask(text);
+  return analysis.intent.intent === 'question'
+    && analysis.intent.riskLevel === 'low'
+    && !analysis.intent.requiresProbe
+    && !analysis.intent.requiresConfirmation
+    && analysis.complexity === 'simple'
+    && analysis.mode === 'yolo'
+    && analysis.traps.length === 0;
+}
+
+/**
+ * Stream a classification prompt while accumulating text and stop the moment
+ * `parse` yields a result. Classification outputs are tiny JSON objects, but
+ * providers keep trickling tokens long after the object is complete
+ * (measured 6-12s for a <100-token JSON on GLM) — waiting for the terminal
+ * frame turns a 1s first-byte call into many seconds of dead latency in
+ * front of the real turn. On a successful parse (or on timeout / caller
+ * abort) the upstream stream is cancelled so no further tokens are generated
+ * or billed. Any failure returns null, mirroring the previous Promise.race
+ * semantics.
+ */
+async function streamUntilParsed<T>(
+  llm: LLMAdapter,
+  request: Message[],
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  parse: (text: string) => T | null,
+): Promise<T | null> {
+  const controller = new AbortController();
+  const forwardAbort = (): void => controller.abort();
+  signal?.addEventListener('abort', forwardAbort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let result: T | null = null;
+  try {
+    await Promise.race([
+      (async () => {
+        let text = '';
+        for await (const chunk of llm.stream(request, [], controller.signal)) {
+          if (chunk.type === 'content' && chunk.content) {
+            text += chunk.content;
+          } else if (chunk.type === 'done' && chunk.content && chunk.content.length > text.length) {
+            // Adapters that only deliver the full text on the terminal chunk.
+            text = chunk.content;
+          }
+          if (text) {
+            result = parse(text);
+            if (result) break;
+          }
+        }
+        if (!result && text) result = parse(text);
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('classification timed out'));
+        }, timeoutMs);
+      }),
+    ]);
+  } catch {
+    /* aborted (timeout / caller) — a parse that already landed still counts */
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    signal?.removeEventListener('abort', forwardAbort);
+    // Stop upstream generation once the decision is in hand (or on any exit)
+    // so the provider does not keep billing a response we will discard.
+    controller.abort();
+  }
+  return result;
+}
+
 export async function inferSemanticRoute(
   llm: LLMAdapter,
   prompt: string,
@@ -58,33 +168,12 @@ export async function inferSemanticRoute(
   timeoutMs = 12_000,
 ): Promise<SemanticRouteDecision | null> {
   if (!prompt.trim() || signal?.aborted) return null;
-  const controller = new AbortController();
-  const forwardAbort = (): void => controller.abort();
-  signal?.addEventListener('abort', forwardAbort, { once: true });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const request: Message[] = [
-      { role: 'system', content: SEMANTIC_ROUTE_PROMPT },
-      { role: 'user', content: prompt, images },
-    ];
-    const response = await Promise.race([
-      llm.complete(request, [], controller.signal),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          controller.abort();
-          reject(new Error('semantic route timeout'));
-        }, timeoutMs);
-      }),
-    ]);
-    const decision = parseSemanticRoute(String(response.content ?? ''));
-    return decision ? applyImageReadOverride(decision, prompt) : null;
-  } catch {
-    return null;
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    signal?.removeEventListener('abort', forwardAbort);
-    controller.abort();
-  }
+  const request: Message[] = [
+    { role: 'system', content: SEMANTIC_ROUTE_PROMPT },
+    { role: 'user', content: prompt, images },
+  ];
+  const decision = await streamUntilParsed(llm, request, signal, timeoutMs, parseSemanticRoute);
+  return decision ? applyImageReadOverride(decision, prompt) : null;
 }
 
 export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
@@ -185,43 +274,33 @@ export async function classifyInsertion(
 ): Promise<InsertionClassification> {
   const fallback: InsertionClassification = { related: true, reason: 'classification unavailable; treated as related' };
   if (!prompt.trim() || signal?.aborted) return fallback;
-  const controller = new AbortController();
-  const forwardAbort = (): void => controller.abort();
-  signal?.addEventListener('abort', forwardAbort, { once: true });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const system = INSERTION_CLASSIFY_PROMPT
-      .replace('{{CONTEXT}}', context.slice(0, 3_200))
-      .replace('{{PROMPT}}', prompt.slice(0, 2_000));
-    const request: Message[] = [
-      { role: 'system', content: system },
-      { role: 'user', content: prompt, images },
-    ];
-    const response = await Promise.race([
-      llm.complete(request, [], controller.signal),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          controller.abort();
-          reject(new Error('insertion classify timeout'));
-        }, timeoutMs);
-      }),
-    ]);
-    const raw = String(response.content ?? '');
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]) as { related?: unknown; reason?: unknown };
-      if (parsed && typeof parsed.related === 'boolean') {
-        return { related: parsed.related, reason: typeof parsed.reason === 'string' ? parsed.reason : '' };
+  const system = INSERTION_CLASSIFY_PROMPT
+    .replace('{{CONTEXT}}', context.slice(0, 3_200))
+    .replace('{{PROMPT}}', prompt.slice(0, 2_000));
+  const request: Message[] = [
+    { role: 'system', content: system },
+    { role: 'user', content: prompt, images },
+  ];
+  const parsed = await streamUntilParsed<{ related?: unknown; reason?: unknown }>(
+    llm,
+    request,
+    signal,
+    timeoutMs,
+    (raw) => {
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      try {
+        const value = JSON.parse(match[0]) as { related?: unknown; reason?: unknown };
+        return value && typeof value.related === 'boolean' ? value : null;
+      } catch {
+        return null;
       }
-    }
-    return fallback;
-  } catch {
-    return fallback;
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    signal?.removeEventListener('abort', forwardAbort);
-    controller.abort();
+    },
+  );
+  if (parsed && typeof parsed.related === 'boolean') {
+    return { related: parsed.related, reason: typeof parsed.reason === 'string' ? parsed.reason : '' };
   }
+  return fallback;
 }
 
 const IMAGE_READ_PATTERN = /(图|截图|照片|图像)[^。；\n]{0,25}?(文字|内容|读|提取|识别|转写)|读图|extract.{0,20}text.{0,20}(image|图)|read.{0,20}text.{0,20}(image|图)/i;

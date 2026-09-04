@@ -185,6 +185,18 @@ export interface ProviderOverride {
   name?: string;
   /** Custom OpenAI-compatible base URL overriding the registry default. */
   baseURL?: string;
+  /** Provider-wide context window fallback. */
+  contextWindowTokens?: number;
+  /** Provider-wide maximum output-token fallback. */
+  outputReserveTokens?: number;
+  /** Provider-wide safety margin kept outside the input and output budgets. */
+  safetyMarginTokens?: number;
+  /** Model-specific budget overrides keyed by model id. */
+  modelBudgets?: Record<string, {
+    contextWindowTokens?: number;
+    outputReserveTokens?: number;
+    safetyMarginTokens?: number;
+  }>;
   /** Browser-mode per-provider API key (desktop keeps it in Rust secrets). */
   apiKey?: string;
   /** True when the key lives in Rust secrets under `llm.apiKey.<id>`. */
@@ -336,7 +348,12 @@ export function providerOverrideFor(
   const override = overrides[id];
   if (!override) return undefined;
   // An all-empty override is a stale tombstone — treat it as absent.
-  if (!override.protocol && !override.name && !override.baseURL && !override.apiKey && !override.hasApiKey) {
+  if (!override.protocol && !override.name && !override.baseURL
+    && override.contextWindowTokens === undefined
+    && override.outputReserveTokens === undefined
+    && override.safetyMarginTokens === undefined
+    && !override.modelBudgets
+    && !override.apiKey && !override.hasApiKey) {
     return undefined;
   }
   return override;
@@ -347,16 +364,28 @@ export function promptBudgetForProvider(
   customs: readonly CustomProvider[] | undefined | null,
   provider: string | undefined,
   model: string | undefined,
+  overrides?: Record<string, ProviderOverride> | null,
 ): PromptBudgetConfig {
   const custom = customProviderFor(customs, provider);
   const normalizedModel = model?.trim() || undefined;
   const modelOverride = normalizedModel ? custom?.modelBudgets?.[normalizedModel] : undefined;
+  const providerOverride = providerOverrideFor(overrides, provider);
+  const builtinModelOverride = normalizedModel ? providerOverride?.modelBudgets?.[normalizedModel] : undefined;
   return {
     provider,
     model: normalizedModel,
-    contextWindowTokens: modelOverride?.contextWindowTokens ?? custom?.contextWindowTokens,
-    outputReserveTokens: modelOverride?.outputReserveTokens ?? custom?.outputReserveTokens,
-    safetyMarginTokens: modelOverride?.safetyMarginTokens ?? custom?.safetyMarginTokens,
+    contextWindowTokens: modelOverride?.contextWindowTokens
+      ?? custom?.contextWindowTokens
+      ?? builtinModelOverride?.contextWindowTokens
+      ?? providerOverride?.contextWindowTokens,
+    outputReserveTokens: modelOverride?.outputReserveTokens
+      ?? custom?.outputReserveTokens
+      ?? builtinModelOverride?.outputReserveTokens
+      ?? providerOverride?.outputReserveTokens,
+    safetyMarginTokens: modelOverride?.safetyMarginTokens
+      ?? custom?.safetyMarginTokens
+      ?? builtinModelOverride?.safetyMarginTokens
+      ?? providerOverride?.safetyMarginTokens,
   };
 }
 
@@ -504,6 +533,24 @@ export function resolveProviderProtocol(
   if (protocolOverride && protocolOverride !== 'auto') return protocolOverride;
   if (endpointOverridden || !providerProtocol) return protocolForURL(baseURL);
   return providerProtocol;
+}
+
+/**
+ * Time-to-first-token budget before the slow-response hint appears on the
+ * thinking card. DeepSeek reasoning / o1 / o3 style models and local endpoints
+ * (Ollama / LM Studio) routinely take 20s+ before the first token arrives, so
+ * the hint must not cry wolf at the fast-chat default; fast chat models keep
+ * the shorter default. The provider id alone is not enough — the same provider
+ * serves both fast chat models and slow reasoning models.
+ */
+export function firstTokenHintTimeoutMs(provider: string | undefined | null, model: string | undefined | null): number {
+  const id = `${provider ?? ''} ${model ?? ''}`.toLowerCase();
+  const slowFirstToken = id.includes('reasoner')
+    || id.includes('deepseek')
+    || /\bo[13]\b/.test(id)
+    || id.includes('ollama')
+    || id.includes('lmstudio');
+  return slowFirstToken ? 30_000 : 15_000;
 }
 
 /** True for the deepseek-* providers (shared API base / budget tuning). */

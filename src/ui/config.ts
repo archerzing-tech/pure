@@ -258,7 +258,7 @@ export function defaults(): PureConfig {
     mapTileCacheMB: DEFAULT_MAP_TILE_CACHE_MB,
     mapTileKey: '',
     schedules: [],
-    configVersion: 13,
+    configVersion: 14,
   };
 }
 
