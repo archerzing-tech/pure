@@ -202,13 +202,17 @@ describe('Planner', () => {
     expect(consumed).toEqual(['a', 'b']);
   });
 
-  it('skips the LLM router only for plainly conversational low-stakes questions', () => {
+  it('skips the LLM router only for plainly conversational low-stakes turns', () => {
     expect(isPlainConversational('今天几号，星期几，天气如何')).toBe(true);
     expect(isPlainConversational('What is the weather like today?')).toBe(true);
     expect(isPlainConversational('为什么？')).toBe(true);
     expect(isPlainConversational('现有页面很难看，我应该从哪些设计方向改善？')).toBe(true);
+    // Creative imperatives classify identically under the remaining guards —
+    // they must not pay the hidden router round trip either.
+    expect(isPlainConversational('给我做一首诗')).toBe(true);
+    expect(isPlainConversational('写个关于秋天的故事')).toBe(true);
     // Anything that could need the router still routes:
-    // - no question shape → the deterministic verdict alone is not enough
+    // - an explicit multi-part build request
     expect(isPlainConversational('帮我设计四个不同风格的自行车售卖网站的首页')).toBe(false);
     // - a build request hiding inside a question frame
     expect(isPlainConversational('能不能帮我设计一个自行车售卖网站的首页？')).toBe(false);

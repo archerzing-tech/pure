@@ -617,8 +617,7 @@ export class SettingsPanel {
         this.debouncedAutoSave();
         return;
       }
-      if (el.id === 'cfg-custom-name-edit' || el.id === 'cfg-baseurl' || el.id === 'cfg-imagegen-model'
-        || el.id === 'cfg-context-window' || el.id === 'cfg-output-tokens') {
+      if (el.id === 'cfg-custom-name-edit' || el.id === 'cfg-baseurl' || el.id === 'cfg-imagegen-model') {
         this.debouncedAutoSave();
       }
       // Typing in a model row: debounce, then re-render UNLESS the caret is
@@ -1041,8 +1040,6 @@ export class SettingsPanel {
       : t('llm.baseURL.builtinPlaceholder').replace('{url}', def?.baseURL ?? '');
     const namePlaceholder = custom ? t('llm.custom.name.ph') : t('llm.panel.name.placeholder');
     const savedProtocol: LLMProtocol = customEntry?.protocol ?? override?.protocol ?? 'auto';
-    const contextWindowTokens = customEntry?.contextWindowTokens ?? override?.contextWindowTokens;
-    const outputReserveTokens = customEntry?.outputReserveTokens ?? override?.outputReserveTokens;
     const protocolOptions: LLMProtocol[] = ['auto', 'openai', 'anthropic'];
     return `<div class="llm-provider-panel" data-provider="${escapeHtml(id)}">
       <div class="llm-provider-panel-head">
@@ -1079,20 +1076,6 @@ export class SettingsPanel {
               }).join('')}
             </select>
             <span class="setting-hint" data-i18n="llm.protocol.hint">自动 = 按端点地址识别；Anthropic 兼容端点可写在任意 URL</span>
-          </div>
-        </div>
-        <div class="llm-form-row llm-budget-defaults-row">
-          <span class="llm-form-label" data-i18n="llm.budget.defaults">Token limits</span>
-          <div class="llm-budget-fields">
-            <label class="llm-budget-field" for="cfg-context-window">
-              <span data-i18n="llm.budget.context">Max context</span>
-              <input id="cfg-context-window" class="setting-input llm-budget-input" type="number" min="1" step="1" value="${contextWindowTokens === undefined ? '' : contextWindowTokens}" placeholder="${t('llm.budget.auto')}" inputmode="numeric" />
-            </label>
-            <label class="llm-budget-field" for="cfg-output-tokens">
-              <span data-i18n="llm.budget.output">Max output</span>
-              <input id="cfg-output-tokens" class="setting-input llm-budget-input" type="number" min="1" step="1" value="${outputReserveTokens === undefined ? '' : outputReserveTokens}" placeholder="${t('llm.budget.auto')}" inputmode="numeric" />
-            </label>
-            <span class="setting-hint llm-budget-hint" data-i18n="llm.budget.hint">Leave blank to use the provider/model default</span>
           </div>
         </div>
         <div class="llm-form-row">
@@ -2222,12 +2205,6 @@ export class SettingsPanel {
     entry.imageGen = imageGenToggle?.checked === true;
     if (imageGenModel) entry.imageGenModel = imageGenModel;
     else delete entry.imageGenModel;
-    const contextWindowTokens = optionalTokenLimit((document.getElementById('cfg-context-window') as HTMLInputElement | null)?.value);
-    const outputReserveTokens = optionalTokenLimit((document.getElementById('cfg-output-tokens') as HTMLInputElement | null)?.value);
-    if (contextWindowTokens === undefined) delete entry.contextWindowTokens;
-    else entry.contextWindowTokens = contextWindowTokens;
-    if (outputReserveTokens === undefined) delete entry.outputReserveTokens;
-    else entry.outputReserveTokens = outputReserveTokens;
     // Wire protocol: 'auto' removes the field so URL detection stays in effect.
     const protocol = (document.getElementById('cfg-protocol') as HTMLSelectElement | null)?.value as LLMProtocol | undefined;
     if (protocol && protocol !== 'auto') entry.protocol = protocol;
@@ -2256,12 +2233,6 @@ export class SettingsPanel {
     const baseURL = (document.getElementById('cfg-baseurl') as HTMLInputElement | null)?.value.trim().replace(/([^:])\/+$/, '$1') ?? '';
     const protocol = (document.getElementById('cfg-protocol') as HTMLSelectElement | null)?.value as LLMProtocol | undefined;
     const next = { ...(prev[editing] ?? {}) };
-    const contextWindowTokens = optionalTokenLimit((document.getElementById('cfg-context-window') as HTMLInputElement | null)?.value);
-    const outputReserveTokens = optionalTokenLimit((document.getElementById('cfg-output-tokens') as HTMLInputElement | null)?.value);
-    if (contextWindowTokens === undefined) delete next.contextWindowTokens;
-    else next.contextWindowTokens = contextWindowTokens;
-    if (outputReserveTokens === undefined) delete next.outputReserveTokens;
-    else next.outputReserveTokens = outputReserveTokens;
     const rows = this.readModelRowsFromDom();
     if (rows.models.length > 0) next.modelBudgets = rows.budgets;
     else delete next.modelBudgets;
@@ -2460,8 +2431,8 @@ export class SettingsPanel {
       <input type="radio" name="cfg-model-default" class="llm-model-row-radio" data-radio-row="${i}" ${isDefault ? 'checked' : ''} title="${t('llm.model.setDefault')}" aria-label="${t('llm.model.setDefault')}" />
       <input class="setting-input llm-model-row-id" data-row-id="${i}" type="text" value="${escapeHtml(model)}" placeholder="${t('llm.model.idPlaceholder')}" autocomplete="off" />
       <input class="setting-input llm-model-row-name" data-row-name="${i}" type="text" value="${escapeHtml(model ? (names[model] ?? '') : '')}" placeholder="${t('llm.model.namePlaceholder')}" autocomplete="off" />
-      <input class="setting-input llm-model-row-budget llm-model-row-context" data-row-context="${i}" type="number" min="1" step="1" value="${budget.contextWindowTokens ?? ''}" placeholder="${t('llm.budget.contextShort')}" inputmode="numeric" aria-label="${t('llm.budget.context')}" />
-      <input class="setting-input llm-model-row-budget llm-model-row-output" data-row-output="${i}" type="number" min="1" step="1" value="${budget.outputReserveTokens ?? ''}" placeholder="${t('llm.budget.outputShort')}" inputmode="numeric" aria-label="${t('llm.budget.output')}" />
+      <input class="setting-input llm-model-row-budget llm-model-row-context" data-row-context="${i}" type="number" min="1" step="1" value="${budget.contextWindowTokens ?? ''}" placeholder="${t('llm.budget.context')}" inputmode="numeric" aria-label="${t('llm.budget.context')}" />
+      <input class="setting-input llm-model-row-budget llm-model-row-output" data-row-output="${i}" type="number" min="1" step="1" value="${budget.outputReserveTokens ?? ''}" placeholder="${t('llm.budget.output')}" inputmode="numeric" aria-label="${t('llm.budget.output')}" />
       ${canRemove ? `<button type="button" class="llm-model-row-remove" data-remove-row="${i}" title="${t('llm.custom.removeModel')}" aria-label="${t('llm.custom.removeModel')}">×</button>` : ''}
     </div>`;
   }

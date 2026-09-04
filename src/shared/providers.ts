@@ -45,16 +45,57 @@ const PROMPT_BUDGET_FALLBACK = {
   safetyMarginTokens: 1_024,
 };
 
+/**
+ * Per-family budget defaults = each model generation's published maximums
+ * (blank settings input inherits these). Verified against 2026-08 vendor docs
+ * and release notes; where a ceiling claim came from a single source, the
+ * request cap is set one safe tier below it because max_tokens is validated
+ * server-side — an over-ceiling cap would fail EVERY request.
+ */
 function promptBudgetDefaults(provider: string, model: string): { contextWindowTokens: number; outputReserveTokens: number } | undefined {
   const id = provider.toLowerCase();
   const name = model.toLowerCase();
-  if (id.includes('deepseek') || name.includes('deepseek')) return { contextWindowTokens: 64_000, outputReserveTokens: 32_768 };
-  if (id === 'qwen' || name.includes('qwen')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
-  if (id === 'glm' || name.includes('glm')) return { contextWindowTokens: 128_000, outputReserveTokens: 32_768 };
-  if (id === 'moonshot' || name.includes('kimi')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
-  if (id === 'minimax' || name.includes('minimax')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
-  if (name.includes('claude') || id.includes('anthropic')) return { contextWindowTokens: 200_000, outputReserveTokens: 8_192 };
-  if (name.includes('o1') || name.includes('o3') || name.includes('gpt-4o')) return { contextWindowTokens: 128_000, outputReserveTokens: 8_192 };
+  // DeepSeek V4 (app default deepseek-v4-flash): 1M context, output ceiling
+  // reported at 384k — cap requests at a 128k tier. Legacy V3 endpoints
+  // (deepseek-chat / deepseek-reasoner) stay on the 128k/32k generation.
+  if (id.includes('deepseek') || name.includes('deepseek')) {
+    return name.includes('v4')
+      ? { contextWindowTokens: 1_000_000, outputReserveTokens: 131_072 }
+      : { contextWindowTokens: 128_000, outputReserveTokens: 32_768 };
+  }
+  // GLM-5.x (z.ai): lossless 1,048,576-token context; 128k output tier.
+  if (id === 'glm' || name.includes('glm')) return { contextWindowTokens: 1_000_000, outputReserveTokens: 128_000 };
+  // Qwen: qwen3-coder family (incl. qwen3-coder-next) 262,144 ctx / 65,536
+  // out; the 3.7/3.8-Max tier advertises 1M.
+  if (id === 'qwen' || name.includes('qwen')) {
+    return name.includes('max')
+      ? { contextWindowTokens: 1_000_000, outputReserveTokens: 65_536 }
+      : { contextWindowTokens: 262_144, outputReserveTokens: 65_536 };
+  }
+  // Kimi: K2.x ships 262,144 ctx via YaRN; K3 extends to 1M. Max output is a
+  // separate smaller limit (K2.7-Code default 32k) — cap at 64k.
+  if (id === 'moonshot' || name.includes('kimi')) {
+    return name.includes('k3')
+      ? { contextWindowTokens: 1_000_000, outputReserveTokens: 65_536 }
+      : { contextWindowTokens: 262_144, outputReserveTokens: 65_536 };
+  }
+  // MiniMax M2.x: 204,800 ctx / 131,072 out. (M3's 1M claim is inconsistent
+  // across providers — stay on the verified 200k tier.)
+  if (id === 'minimax' || name.includes('minimax')) return { contextWindowTokens: 204_800, outputReserveTokens: 131_072 };
+  // Claude: Opus 5 / Sonnet 4.6+ / Sonnet 5 ship 1M-context tiers with 128k
+  // output; 4.5-and-earlier stay at 200k / 64k (the 1M beta was retired).
+  if (name.includes('claude') || id.includes('anthropic')) {
+    return /opus-5|sonnet-[456]-?6|sonnet-5|haiku-5/.test(name)
+      ? { contextWindowTokens: 1_000_000, outputReserveTokens: 128_000 }
+      : { contextWindowTokens: 200_000, outputReserveTokens: 64_000 };
+  }
+  // OpenAI: GPT-5.x = 400k total (272k in + 128k out); o1/o3 reasoning tiers
+  // 200k/100k; gpt-4o 128k/16k.
+  if (name.includes('gpt-5')) return { contextWindowTokens: 400_000, outputReserveTokens: 128_000 };
+  if (name.includes('gpt-4o')) return { contextWindowTokens: 128_000, outputReserveTokens: 16_384 };
+  if (name.includes('o1') || name.includes('o3')) return { contextWindowTokens: 200_000, outputReserveTokens: 100_000 };
+  // Local runtimes: bounded by host RAM, not vendor ceilings — stay
+  // conservative so an unknown 8k model never gets a 128k input budget.
   if (id === 'ollama' || id === 'lmstudio' || name.includes('llama')) return { contextWindowTokens: 32_768, outputReserveTokens: 4_096 };
   return undefined;
 }
