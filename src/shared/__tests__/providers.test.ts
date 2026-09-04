@@ -19,6 +19,7 @@ import {
   isProviderId,
   promptBudgetForProvider,
   protocolForURL,
+  firstTokenHintTimeoutMs,
   resolveProviderProtocol,
   providerOverrideFor,
   resolvePromptBudget,
@@ -74,6 +75,30 @@ describe('resolvePromptBudget', () => {
     expect(budget.contextWindowTokens).toBe(16_000);
     expect(budget.outputReserveTokens).toBe(2_000);
     expect(budget.source).toBe('override');
+  });
+  it('falls back to builtin providerOverrides budgets for built-in providers', () => {
+    const overrides: Record<string, ProviderOverride> = {
+      'deepseek-openai': {
+        contextWindowTokens: 96_000,
+        outputReserveTokens: 12_000,
+        modelBudgets: { 'deepseek-v4-flash': { contextWindowTokens: 32_000, outputReserveTokens: 4_000 } },
+      },
+    };
+    // Model-specific override wins over the provider-wide fallback.
+    const perModel = promptBudgetForProvider([], 'deepseek-openai', 'deepseek-v4-flash', overrides);
+    expect(perModel.contextWindowTokens).toBe(32_000);
+    expect(perModel.outputReserveTokens).toBe(4_000);
+    // Another model on the same provider inherits the provider-wide budget.
+    const providerWide = promptBudgetForProvider([], 'deepseek-openai', 'deepseek-chat', overrides);
+    expect(providerWide.contextWindowTokens).toBe(96_000);
+    expect(providerWide.outputReserveTokens).toBe(12_000);
+    // No overrides → no budget (family defaults take over downstream).
+    expect(promptBudgetForProvider([], 'deepseek-openai', 'deepseek-chat').contextWindowTokens).toBeUndefined();
+  });
+  it('prefers persisted custom-provider budgets over builtin providerOverrides', () => {
+    const custom: CustomProvider = { ...OLLAMA, contextWindowTokens: 48_000 };
+    const overrides: Record<string, ProviderOverride> = { ollama: { contextWindowTokens: 16_000 } };
+    expect(promptBudgetForProvider([custom], 'ollama', 'tiny-coder', overrides).contextWindowTokens).toBe(48_000);
   });
 });
 
@@ -141,6 +166,15 @@ describe('provider overrides (built-in name / endpoint / key edits)', () => {
     expect(providerOverrideFor(OVERRIDES, 'deepseek-openai')).toBeUndefined();
     expect(providerOverrideFor(OVERRIDES, 'unknown')).toBeUndefined();
     expect(providerOverrideFor(undefined, 'qwen')).toBeUndefined();
+  });
+
+  it('keeps budget-only overrides instead of dropping them as tombstones', () => {
+    const budgetOverrides: Record<string, ProviderOverride> = {
+      'deepseek-openai': { contextWindowTokens: 96_000 },
+      glm: { modelBudgets: { 'glm-5.3-flash': { outputReserveTokens: 8_000 } } },
+    };
+    expect(providerOverrideFor(budgetOverrides, 'deepseek-openai')).toEqual({ contextWindowTokens: 96_000 });
+    expect(providerOverrideFor(budgetOverrides, 'glm')?.modelBudgets).toEqual({ 'glm-5.3-flash': { outputReserveTokens: 8_000 } });
   });
 
   it('customBaseURL honors a built-in override before the registry default', () => {
@@ -315,5 +349,33 @@ describe('text-to-image capability detection', () => {
       expect(def.models.length).toBeGreaterThan(0);
       expect(def.models[0]).toBe(def.defaultModel);
     }
+  });
+
+  describe('firstTokenHintTimeoutMs', () => {
+    it('keeps the fast-chat default for quick providers and models', () => {
+      expect(firstTokenHintTimeoutMs('qwen', 'qwen3-coder-next')).toBe(15_000);
+      expect(firstTokenHintTimeoutMs('openai', 'gpt-4o')).toBe(15_000);
+      expect(firstTokenHintTimeoutMs('anthropic', 'claude-sonnet')).toBe(15_000);
+      expect(firstTokenHintTimeoutMs('glm', 'glm-4-plus')).toBe(15_000);
+    });
+
+    it('raises the budget for slow-reasoning models (deepseek-reasoner, o1/o3)', () => {
+      expect(firstTokenHintTimeoutMs('deepseek-openai', 'deepseek-reasoner')).toBe(30_000);
+      expect(firstTokenHintTimeoutMs('openai', 'o1')).toBe(30_000);
+      expect(firstTokenHintTimeoutMs('openai', 'o3-mini')).toBe(30_000);
+      // The deepseek family is slow to first token even on its fast chat model.
+      expect(firstTokenHintTimeoutMs('deepseek-openai', 'deepseek-v4-flash')).toBe(30_000);
+    });
+
+    it('raises the budget for local endpoints (ollama / LM Studio)', () => {
+      expect(firstTokenHintTimeoutMs('ollama', 'llama3.1')).toBe(30_000);
+      expect(firstTokenHintTimeoutMs('lmstudio', 'qwen2.5-coder')).toBe(30_000);
+    });
+
+    it('is resilient to missing inputs', () => {
+      expect(firstTokenHintTimeoutMs(undefined, undefined)).toBe(15_000);
+      expect(firstTokenHintTimeoutMs('', '')).toBe(15_000);
+      expect(firstTokenHintTimeoutMs(null, null)).toBe(15_000);
+    });
   });
 });

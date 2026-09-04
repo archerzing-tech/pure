@@ -71,11 +71,32 @@ export function setThinkingLabel(handle: ThinkingCardHandle, text: string): void
 // A silent wait reads as a hung session ("正在思考下一步" could sit static for
 // minutes with only animated dots). The timer chip ticks every second next to
 // the label so the user can SEE time advancing, and after hintAfterMs with no
-// reasoning text yet, one honest hint explains what long silences usually are
-// (deep reasoning / network retries). No fake progress theater beyond that —
-// matching the no-rotation policy documented above.
+// reasoning text yet, one honest hint explains what long silences usually are.
+// No fake progress theater beyond that — matching the no-rotation policy
+// documented above.
 
 const THINKING_TIMER_DEFAULTS = { intervalMs: 1000, hintAfterMs: 15000 };
+
+// The slow-response hint must distinguish a recovery from an ordinary
+// first-token wait without guessing that the user's network is broken. A
+// retry can come from an empty response, provider-side rejection, rate limit,
+// tool failure, or verification failure; the precise failure remains in the
+// event stream, while this UI copy stays honest and cause-neutral.
+function defaultHintFor(handle: ThinkingCardHandle): string {
+  const label = handle.card.querySelector<HTMLElement>('.thinking-label')?.textContent ?? '';
+  if (label.includes('重试') || label.includes('未成功') || label.includes('失败') || label.includes('未通过')) {
+    return '上一阶段未成功，正在自动调整处理方式；这不表示你的网络已断开。若持续失败，请查看具体错误信息或停止本轮。';
+  }
+  return '仍在等待模型返回首个内容：通常是模型深度思考或服务端排队，暂未发现请求失败。可随时停止本轮。';
+}
+
+export function resetThinkingLabelForOutput(handle: ThinkingCardHandle): void {
+  const label = handle.card.querySelector<HTMLElement>('.thinking-label')?.textContent ?? '';
+  if (handle.card.classList.contains('waiting') || /重试|失败|未成功|未通过|调整输出/.test(label)) {
+    handle.card.classList.remove('waiting');
+    setThinkingLabel(handle, t('thinking.thinking'));
+  }
+}
 
 const timerIntervals = new WeakMap<ThinkingCardHandle, number>();
 
@@ -92,8 +113,7 @@ export function startThinkingTimer(
 ): void {
   stopThinkingTimer(handle);
   const { intervalMs, hintAfterMs } = { ...THINKING_TIMER_DEFAULTS, ...opts };
-  const hintText = opts.hintText
-    ?? '模型响应较慢：可能在深度推理或网络重试中，会话并未卡死；可随时停止本轮。';
+  const hintText = opts.hintText ?? null; // null → state-aware default at fire time
   const label = handle.card.querySelector<HTMLElement>('.thinking-label');
   if (!label || !handle.card.isConnected) return;
   const chip = document.createElement('span');
@@ -114,7 +134,9 @@ export function startThinkingTimer(
       hinted = true;
       const hint = document.createElement('div');
       hint.className = 'thinking-hint';
-      hint.textContent = hintText;
+      // Resolve the default AT fire time: the label may have flipped to a
+      // retry notice between start and hint, so the copy names the actual cause.
+      hint.textContent = hintText ?? defaultHintFor(handle);
       handle.body.insertBefore(hint, handle.scrollEl);
     }
   }, intervalMs);
