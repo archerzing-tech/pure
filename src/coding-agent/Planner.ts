@@ -73,23 +73,28 @@ function stripQuestionPrefix(text: string): string {
   return text.replace(/^(?:请问|能不能|可不可以|可以|能否|是否|我想问|想问|麻烦问|帮我看看|how(?:(?:\s+can|\s+could|\s+do|\s+should|\s+would)?\s+i)?|can\s+you|could\s+you|please)\s*/i, '');
 }
 
-/** True when a request is SO plainly a low-stakes conversational question
- * that the LLM router could not change the outcome. Conservative by
- * construction: it requires an interrogative shape, no project/artifact
- * build framing (even hidden behind a question prefix), and the synchronous
- * fallback verdict must already be question / simple / yolo / low-risk with
- * no traps. Anything else keeps the full semantic-route call. */
+/** True when a request is SO plainly a low-stakes conversational turn — a
+ * question OR a short creative/answer imperative (做一首诗 / 写个故事 / 讲讲
+ * X) — that the LLM router could not change the outcome. Conservative by
+ * construction: no images, short, no project/artifact build framing (even
+ * hidden behind a question prefix), and the synchronous fallback verdict
+ * must already be question / simple / yolo / low-risk with no traps.
+ * Anything else keeps the full semantic-route call. The interrogative-shape
+ * check was dropped: creative imperatives classify identically under the
+ * remaining guards, and requiring ？」/吗 made every 生成类 request pay the
+ * hidden router round trip (6-12s dead latency) for a verdict the fallback
+ * had already reproduced. */
 export function isPlainConversational(prompt: string, images?: MessageImage[] | null): boolean {
   if (images?.length) return false;
   const text = prompt.trim();
   if (!text || text.length > 200) return false;
-  if (!QUESTION_SHAPED.test(text)) return false;
-  // An imperative build request hiding inside the question frame (e.g.
+  // An imperative build request hiding inside a question frame (e.g.
   // "能不能帮我设计一个自行车网站？") must still reach the LLM router — the
   // artifact/delivery pipeline depends on it. detectArtifactRequest already
   // rejects question-leading forms, so re-test with the frame peeled.
   if (detectProjectRequest(text) || detectArtifactRequest(text)) return false;
-  if (detectArtifactRequest(stripQuestionPrefix(text))) return false;
+  const peeled = stripQuestionPrefix(text);
+  if (detectProjectRequest(peeled) || detectArtifactRequest(peeled)) return false;
   const analysis = new Planner().analyzeTask(text);
   return analysis.intent.intent === 'question'
     && analysis.intent.riskLevel === 'low'
