@@ -3448,6 +3448,12 @@ export class ChatController {
       // the generic "思考", so a retry notice later reads as a DIFFERENT
       // cause (network) rather than more of the same wait.
       setThinkingLabel(thinkingCard, '等待模型首字返回…');
+      // Mark this card as a silence-waiter (same as the tool-gap card below):
+      // 'waiting' is what lets resetThinkingLabelForOutput flip the label to
+      // "思考" on the first ReasoningDelta. Without it the first-token label
+      // matched neither reset path and stayed stuck over visibly streaming
+      // reasoning text — reading as "still waiting" while tokens arrive.
+      thinkingCard.card.classList.add('waiting');
       // A new user turn is explicit intent to continue at the bottom: re-pin
       // even if the user had scrolled up to re-read history (the pin normally
       // survives until a manual scroll-away, but a fresh send must resume
