@@ -150,8 +150,7 @@ function diagramControls(): string {
 function diagramLoading(): string {
   return `<div class="diagram-loading" role="status" aria-live="polite" aria-label="${attr(t('diagram.loading'))}">` +
     `<span class="diagram-loading-visual" aria-hidden="true">` +
-    `<span class="diagram-loading-ring"></span>` +
-    `<span class="diagram-loading-orbit"><i></i><i></i><i></i></span>` +
+    `<span class="loading-sun">${'<i></i>'.repeat(12)}</span>` +
     `</span>` +
     `<span class="diagram-loading-label">${esc(t('diagram.loading'))}</span>` +
     `</div>`;
@@ -1737,7 +1736,7 @@ function mapSlot(source: string): string {
       `</div>` +
     `</div>` +
     `<div class="map-loading" role="status" aria-live="polite">` +
-      `<span class="diagram-loading-visual" aria-hidden="true"><span class="diagram-loading-ring"></span><span class="diagram-loading-orbit"><i></i><i></i><i></i></span></span>` +
+      `<span class="diagram-loading-visual" aria-hidden="true"><span class="loading-sun">${'<i></i>'.repeat(12)}</span></span>` +
       `<span class="diagram-loading-label">${esc(t('map.loading'))}</span>` +
     `</div>` +
     `<div class="map-canvas-wrap">` +
@@ -2081,6 +2080,10 @@ streamRenderer.code = (token: { text: string; lang?: string }): string => {
     return svgSourcesHtml(splitTopLevelSvgSources(token.text));
   }
   if (lang === 'chart' || lang === 'charts') return diagramSlot('chart', token.text, '');
+  // Same slot as the completed render: a closed ```map fence mounts as a map
+  // slot mid-stream (not a plain code block), so the streaming gate can start
+  // hydrating it and hold later blocks until the tiles have painted.
+  if (lang === 'map' || lang === 'leaflet') return mapSlot(token.text);
   return `<pre><code class="hljs language-${attr(lang)}">${esc(token.text)}</code></pre>`;
 };
 const mdStream = new Marked({ gfm: true, breaks: true, renderer: streamRenderer });
@@ -2127,6 +2130,27 @@ function ungroupStreamingSvgGalleries(container: HTMLElement): void {
   }
 }
 
+/**
+ * Streaming gate for ```map slots. The completed render hydrates maps only at
+ * the end of the message, so mid-stream a closed ```map fence used to sit in
+ * its loading state while every later paragraph streamed in underneath — the
+ * map never got the chance to paint first. Two fixes in one gate:
+ *  1. Kicks the slot's hydration NOW (normally only the completed render calls
+ *     renderMapNodes), so tiles start loading while the message still streams.
+ *  2. Returns true while the slot has not painted yet; the caller stops
+ *     consuming tokens there, so later blocks stay invisible until the map is
+ *     done and appear on the next throttled tick.
+ * The hold is bounded: the leaflet import runs under withTimeout and the tile
+ * layer flips to preview/error via its own 12s timer, so the gate always opens;
+ * the completed render re-renders the full bubble regardless.
+ */
+function streamingMapGate(el: HTMLElement): boolean {
+  if (!el.classList.contains('map-slot')) return false;
+  if (el.getAttribute('data-map-state') !== 'loading') return false;
+  if (!el.hasAttribute('data-processed')) void renderMapNodes(el.parentElement ?? el);
+  return true;
+}
+
 function diffStreaming(container: HTMLElement, text: string): void {
   ungroupStreamingSvgGalleries(container);
   // During streaming, chat.ts sets `bubble.textContent = …` for instant raw
@@ -2171,8 +2195,13 @@ function diffStreaming(container: HTMLElement, text: string): void {
     const oldEl = container.children[childIdx] as HTMLElement | undefined;
 
     // Same source slice ⇒ child is already the canonical rendering for this
-    // token. Skip entirely.
-    if (oldEl && oldEl.getAttribute('data-md-raw') === tk.raw) { childIdx++; continue; }
+    // token. Skip entirely — unless it is a still-loading ```map slot whose
+    // gate holds every later block (see streamingMapGate).
+    if (oldEl && oldEl.getAttribute('data-md-raw') === tk.raw) {
+      childIdx++;
+      if (streamingMapGate(oldEl)) break;
+      continue;
+    }
 
     // Render EVERY token — including the still-growing last one — through the
     // same block pipeline the completed render uses. marked's lexer already
@@ -2211,6 +2240,9 @@ function diffStreaming(container: HTMLElement, text: string): void {
     if (oldEl) container.replaceChild(newEl, oldEl);
     else container.appendChild(newEl);
     childIdx++;
+    // A freshly mounted ```map slot closes the gate: hold every later token
+    // until the map has actually painted (data-map-state → preview/error).
+    if (streamingMapGate(newEl)) break;
   }
 
   // Trim trailing old children beyond the elements we just reconciled (rare

@@ -293,14 +293,15 @@ describe('multi-SVG placeholder layout', () => {
 });
 
 describe('diagramSlot', () => {
-  it('starts with a ring loading placeholder and keeps the raw source for recovery', () => {
+  it('starts with a sun-ray spinner placeholder and keeps the raw source for recovery', () => {
     const html = diagramSlot('svg', '<svg><text>secret</text></svg>', '');
     expect(html).toContain('data-state="loading"');
     expect(html).toContain('aria-busy="true"');
     expect(html).toContain('data-view="preview"');
     expect(html).toContain('diagram-loading-visual');
-    expect(html).toContain('diagram-loading-ring');
-    expect(html).toContain('diagram-loading-orbit');
+    expect(html).toContain('loading-sun');
+    expect(html).not.toContain('diagram-loading-ring');
+    expect(html).not.toContain('diagram-loading-orbit');
     expect(html).toContain('diagram-loading-label');
     expect(html).toContain('secret');
   });

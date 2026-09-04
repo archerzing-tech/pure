@@ -45,10 +45,27 @@ describe('resolvePromptBudget', () => {
   it('adapts the input budget to provider/model families', () => {
     const deepseek = resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-v4-flash' });
     const qwen = resolvePromptBudget({ provider: 'qwen', model: 'qwen3-coder-next' });
-    expect(deepseek.contextWindowTokens).toBe(64_000);
-    expect(deepseek.outputReserveTokens).toBe(32_768);
-    expect(qwen.contextWindowTokens).toBe(128_000);
-    expect(qwen.availableInputTokens).toBeGreaterThan(deepseek.availableInputTokens);
+    expect(deepseek.contextWindowTokens).toBe(1_000_000);
+    expect(deepseek.outputReserveTokens).toBe(131_072);
+    expect(qwen.contextWindowTokens).toBe(262_144);
+    expect(qwen.outputReserveTokens).toBe(65_536);
+    // V4's million-token window dwarfs the 256k coder tier.
+    expect(deepseek.availableInputTokens).toBeGreaterThan(qwen.availableInputTokens);
+  });
+
+  it('splits model tiers within a family (legacy vs long-context generations)', () => {
+    const glm = resolvePromptBudget({ provider: 'glm', model: 'glm-5.3-flash' });
+    expect(glm.contextWindowTokens).toBe(1_000_000);
+    // Legacy V3-era DeepSeek endpoints keep the previous generation's window.
+    const legacy = resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-chat' });
+    expect(legacy.contextWindowTokens).toBe(128_000);
+    // Claude 1M tiers (Sonnet 5 / Opus 5) vs the 4.5-and-earlier 200k window.
+    expect(resolvePromptBudget({ provider: 'anthropic', model: 'claude-sonnet-5' }).contextWindowTokens).toBe(1_000_000);
+    expect(resolvePromptBudget({ provider: 'anthropic', model: 'claude-sonnet-4-5' }).contextWindowTokens).toBe(200_000);
+    // GPT-5.x: 400k total (272k in + 128k out).
+    const gpt5 = resolvePromptBudget({ provider: 'openai', model: 'gpt-5.2' });
+    expect(gpt5.contextWindowTokens).toBe(400_000);
+    expect(gpt5.outputReserveTokens).toBe(128_000);
   });
 
   it('uses explicit limits for unknown/custom models and accounts for consumed input', () => {
