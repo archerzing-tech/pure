@@ -77,7 +77,7 @@ describe('createPlanSummaryCard', () => {
   it('renders one humanized sentence with the selected roles', () => {
     const { el } = createPlanSummaryCard(decision(), { hasSubagents: true });
     const text = el.textContent ?? '';
-    expect(text).toContain(`你说的这个问题相对复杂，我将安排${SUBAGENT_ROLE_LABELS.researcher}和${SUBAGENT_ROLE_LABELS.code_editor}来处理你的问题。`);
+    expect(text).toContain(`这个问题不简单，我让${SUBAGENT_ROLE_LABELS.researcher}和${SUBAGENT_ROLE_LABELS.code_editor}分头处理，最后我来汇总结果给你。`);
     expect(text).not.toContain('本次执行方案');
     expect(text).not.toContain('计划协作');
     expect(text).not.toContain('复杂度：');
@@ -86,7 +86,7 @@ describe('createPlanSummaryCard', () => {
   it('uses a concise fallback sentence when no roles are available', () => {
     const { el } = createPlanSummaryCard(decision(), { hasSubagents: false });
     const text = el.textContent ?? '';
-    expect(text).toContain('你说的这个问题相对复杂，我会按步骤推进并逐步验证。');
+    expect(text).toContain('这个问题不简单，我会分步推进，每一步验证后再往下走。');
     expect(text).not.toContain('角色协作');
     expect(text).not.toContain('本次执行方案');
   });
@@ -98,6 +98,6 @@ describe('createPlanSummaryCard', () => {
       subagents: ['code_reviewer'],
       assessment: { ...decision().assessment, riskLevel: 'medium' },
     }), { hasSubagents: true });
-    expect(el.textContent).toContain(`你说的这个问题需要谨慎处理，我将安排${SUBAGENT_ROLE_LABELS.code_reviewer}来一起确认影响并处理。`);
+    expect(el.textContent).toContain(`这事得谨慎点，我会先让${SUBAGENT_ROLE_LABELS.code_reviewer}确认影响面，再动手处理。`);
   });
 });
