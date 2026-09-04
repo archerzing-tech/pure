@@ -26,6 +26,21 @@ import { createDefaultVerifier, type Verifier } from './Verifier';
  * the orchestrator to distinguish a timeout/cancel from an ordinary failure. */
 export type SubagentStatus = 'running' | 'done' | 'failed' | 'timed_out' | 'cancelled';
 
+/** Shared tail appended to EVERY built-in subagent system prompt: the reply is
+ * consumed by the orchestrator agent, never shown raw to the user, so the
+ * orchestrator's single-voice answer does not inherit a formal-report register.
+ * English personas (code_reviewer / project_auditor) get the EN note, the
+ * Chinese personas get the ZH note. */
+const SUBAGENT_REPORT_NOTE_EN = `\n\nYour reply is read by the orchestrator agent, not shown to the user. Return compact findings only: conclusions, evidence (file:line, real command results), and open risks, as short bullets. No formal-report register, no pleasantries, no restating the task — the orchestrator will relay this conversationally. If your role protocol specifies a machine-readable final line (e.g. AUDIT: PASS/FAIL), still emit it exactly as instructed.`;
+const SUBAGENT_REPORT_NOTE_ZH = `\n\n你的回复是给主 agent 汇总用的，不会直接展示给用户。只回要点：结论、证据（文件:行号、真实命令结果）、遗留风险，用简短列表。不要写成正式报告——不要标题、不要寒暄、不要复述任务，主 agent 会用口语向用户转述。`;
+
+/** English-persona roles; everyone else gets the ZH note. */
+const SUBAGENT_EN_PERSONA_ROLES = new Set(['code_reviewer', 'project_auditor']);
+
+function subagentReportNote(name: string): string {
+  return SUBAGENT_EN_PERSONA_ROLES.has(name) ? SUBAGENT_REPORT_NOTE_EN : SUBAGENT_REPORT_NOTE_ZH;
+}
+
 /**
  * A single progress snapshot emitted by the orchestrator while a subagent runs.
  * The host UI turns these into a live "which agent is working" view.
@@ -347,7 +362,7 @@ export class SubagentOrchestrator implements ToolAdapter {
       : `subagent_${def.name}_${startTime}`;
 
     try {
-      const systemPrompt = def.createSystemPrompt(args);
+      const systemPrompt = def.createSystemPrompt(args) + subagentReportNote(def.name);
       const userPrompt = typeof args.prompt === 'string'
         ? args.prompt
         : JSON.stringify(args);

@@ -32,14 +32,14 @@ describe('formatPlanForPrompt', () => {
     expect(out).toContain('show a Todo list only when it helps clarify the work');
     expect(projectOut).toContain('top-level plan list');
     expect(projectOut).toContain('todosRequired');
-    expect(projectOut).toContain('supported progress markers');
+    expect(projectOut).toContain('machine-readable progress marks');
     expect(projectOut).toContain('do not dictate execution granularity');
     expect(projectOut).toContain('## 计划 n 已完成');
     expect(projectOut).toContain('plain language');
     expect(projectOut).toContain('separate Todo list below the plan list');
     expect(projectOut).toContain('strict stage protocol');
-    expect(projectOut).toContain('Do not call tools before the stage-start announcement');
-    expect(projectOut).toContain('The UI consumes that line as the single stage-complete event');
+    expect(projectOut).toContain('Do not call tools before that line');
+    expect(projectOut).toContain('The interface advances the Todo list only in numeric order');
     expect(projectOut).toContain('## 计划 n：<阶段名称>');
     expect(projectOut).toContain('### 子步骤 k 已完成');
     expect(projectOut).toContain('子步骤 k：<子步骤名称>');
@@ -103,7 +103,7 @@ describe('dedupePlanAnnouncements', () => {
     };
     const pause = formatPlanPauseMessage(plan);
     const continuation = formatPlanContinuation(plan, 1, 1);
-    expect(pause).toContain('计划先列到这里');
+    expect(pause).toContain('安排先放这儿');
     expect(pause).toContain('□ 1. 确认用户画像');
     expect(continuation).toContain('<plan_continuation>');
     expect(continuation).toContain('当前阶段 Todos');
@@ -112,7 +112,7 @@ describe('dedupePlanAnnouncements', () => {
     // 否则执行期聊天计划卡会停在第一步（只有首轮 formatPlanForPrompt 有该指令）。
     expect(continuation).toContain('## 计划 n：');
     expect(continuation).toContain('## 计划 n 已完成');
-    expect(continuation).toContain('没有开始播报就不要执行，没有完成播报就不要进入下一计划');
+    expect(continuation).toContain('开始行没写就不要执行，完成行没写就不要进入下一计划');
     expect(continuation).toContain('### 子步骤 k 已完成');
   });
 });
