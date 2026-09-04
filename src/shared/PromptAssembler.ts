@@ -306,6 +306,12 @@ export class PromptAssembler {
       fragment('model_identity', buildModelIdentity(context.modelIdentity), 118, true),
       fragment('capabilities', `<capabilities>${capabilities ? `\n${capabilities}` : ''}\n</capabilities>`, 75),
       fragment('work_invariant', 'Work step by step. Read before you write. Verify after you change. Be concise.', 110, true),
+      // Tone is REQUIRED: it is the persona of the product, not decoration —
+      // it used to be priority 35, optional, and was silently dropped first
+      // under budget pressure on small-context models. Priority 108 sits
+      // below delivery_contract (112) on purpose: evidence discipline
+      // outranks tone when the two ever conflict.
+      fragment('human_tone', HUMAN_TONE_PROMPT, 108, true),
       fragment('workflow', WORKFLOW_PROMPT, 90),
       fragment('completion', COMPLETION_PROMPT, 80),
       // Multi-agent delegation + delivery discipline are REQUIRED so they are
@@ -321,7 +327,6 @@ export class PromptAssembler {
       // Image requests follow ONE contract: the generate_image tool when the
       // provider supports it, otherwise the multi-SVG grid contract. Never both.
       fragment(context.imageGeneration === true ? 'image_gen' : 'svg_output', context.imageGeneration === true ? IMAGE_GEN_OUTPUT_PROMPT : SVG_OUTPUT_PROMPT, 50),
-      fragment('human_tone', HUMAN_TONE_PROMPT, 35),
       fragment('tool_calling', buildToolCallingRules(context.surface), 115, true),
       fragment('typo_tolerance', TYPO_TOLERANCE_PROMPT, 55),
       fragment('logical_traps', LOGICAL_TRAPS_PROMPT, 70),

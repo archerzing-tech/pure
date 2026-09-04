@@ -3218,7 +3218,7 @@ export class ChatController {
           // 游标。最后计划不再 force 清空未完成 Todo——收尾证据由回合末判定把关，
           // 否则“只做了一半就播报完成”会被当成整计划完成。
           if (!(planProgress?.canCompleteCurrentTodos() ?? false)) {
-            card.setActivity(`计划 ${planNumber} 仍有 Todo 未完成，暂不进入下一计划…`);
+            card.setActivity(`计划 ${planNumber} 还有 Todo 没收尾，先不进下一计划…`);
             return;
           }
           planProgress?.dispatch({ type: 'todosCompleted' });
@@ -3249,7 +3249,7 @@ export class ChatController {
             card.setActivity(`正在执行计划 ${activePlan} 的 Todo ${marker.number}${todoLabel ? `：${todoLabel}` : ''}…`);
           }
           if ((planProgress?.canCompleteCurrentTodos() ?? false)) {
-            card.setActivity(`计划 ${activePlan} 的 Todos 已完成，等待“计划 ${activePlan} 已完成”播报…`);
+            card.setActivity(`计划 ${activePlan} 的 Todos 都完成了，就差「计划 ${activePlan} 已完成」这行标记收尾…`);
           }
           };
          // Strict-protocol safety net: the projection must follow the actual
@@ -3309,7 +3309,7 @@ export class ChatController {
               // completion event. This keeps both progress views driven by the
               // conversation protocol instead of tool timing.
               if (planTrack.protocolStarted && !planTrack.phaseCompleted.has(before)) {
-                card.setActivity(`计划 ${before} 尚未播报完成，暂不进入计划 ${marker.number}…`);
+                card.setActivity(`计划 ${before} 还没收尾，计划 ${marker.number} 先等一等…`);
                 planTrack.deferredPhase = marker.number;
                 planTrack.deferredReason = 'protocol';
               } else {
@@ -4225,7 +4225,7 @@ export class ChatController {
               if ((todosDone || nextAnnounced) && evidenced) {
                 if (todosDone) planProgress.dispatch({ type: 'todosCompleted' });
                 planProgress.dispatch({ type: nextAnnounced && !todosDone ? 'phaseJumped' : 'phaseStarted', planNumber: nextPlan });
-                planCard.setActivity(`计划 ${finishedPlan} 已完成，已准备计划 ${nextPlan}；回复“继续”开始下一阶段。`);
+                planCard.setActivity(`计划 ${finishedPlan} 完成，计划 ${nextPlan} 已就绪；说声“继续”我就接着干。`);
               } else {
                 planCard.setActivity(todosDone
                   ? `计划 ${finishedPlan} 的工作已完成，等待验证结果后继续…`
@@ -4242,14 +4242,14 @@ export class ChatController {
                 // 交付门禁未通过（审计第 4 项）：不把计划标记为完成，保留续跑
                 // 上下文（activeComplexPlan 不被清空），下一轮“修复/继续”仍走
                 // 原计划续跑，而不是丢失计划卡后重新分析。
-                planCard.setActivity('所有阶段已完成，但交付检查未通过；回复后可继续修复并重新验证。');
+                planCard.setActivity('活都干完了，但交付检查没过；回我一声，我接着修并重新验证。');
               } else if (lastTodosDone || (needsDeliveryGate && (qualityPassed === true || this.deliveryGatePassed === true))) {
                 planProgress?.dispatch({ type: 'completed' });
                 planMarkedCompleted = true;
                 if (this.activeComplexPlan)
                   planCard.setActivity('计划中的所有步骤已完成，交付检查也已结束。');
               } else {
-                planCard.setActivity('最后阶段的工作或验证尚未完成，继续处理当前计划。');
+                planCard.setActivity('最后阶段还没收口，我继续处理当前计划。');
               }
             }
             // Cancel any throttled streaming render on every segment so a
