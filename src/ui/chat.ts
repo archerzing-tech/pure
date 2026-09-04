@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol } from '../shared/providers';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { memoryStore } from './memoryStore';
@@ -17,7 +17,7 @@ import { ContextEngine, type ContextCompactionResult } from '../harness/ContextE
 import { isGitMutationCommand, Tags } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
-import { formatIntentPrompt, inferSemanticRoute, shouldBypassSemanticRoute } from '../coding-agent/Planner';
+import { formatIntentPrompt, inferSemanticRoute, isPlainConversational, shouldBypassSemanticRoute } from '../coding-agent/Planner';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
@@ -59,7 +59,7 @@ import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
-import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
+import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
 import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
@@ -610,7 +610,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
     network: buildNetworkContext(),
     shell: buildShellContextLine(),
     skills: config?.hubSkills,
-    budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model),
+    budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides),
     conventions,
   });
 }
@@ -828,9 +828,9 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
   // generating a full HTML animation) exhaust the budget on thinking and the
   // visible answer comes back EMPTY → verify failure → retry loop. Give
   // DeepSeek a larger budget; Qwen/GLM/custom keep the shared default.
-  const maxTokens = !custom && (isDeepSeekFamily(config.provider) || config.provider === 'glm')
-    ? 32768
-    : undefined;
+  const maxTokens = resolvePromptBudget(
+    promptBudgetForProvider(customs, config.provider, model, config.providerOverrides),
+  ).outputReserveTokens;
   const builtinOverride = providerOverrideFor(config.providerOverrides, config.provider);
   const providerProtocol = providerDef(config.provider)?.protocol;
   // A CUSTOM provider stores its explicit wire-protocol choice on its own
@@ -1605,7 +1605,7 @@ export class ChatController {
     const config = loadConfig();
     const contextEngine = this.contextEngine ?? new ContextEngine({
       maxMessages: 20,
-      maxTokens: resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model)).availableInputTokens,
+      maxTokens: resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides)).availableInputTokens,
     });
     this.contextEngine = contextEngine;
     const result = await contextEngine.compact(messages, { force: true });
@@ -2550,6 +2550,7 @@ export class ChatController {
         thinkingCard = null;
         return;
       }
+      resetThinkingLabelForOutput(thinkingCard);
       finalizeThinkingCard(thinkingCard);
       thinkingCard = null;
     };
@@ -2579,10 +2580,14 @@ export class ChatController {
     const openThinkingCard = (): ThinkingCardHandle => {
       const card = createThinkingCard();
       this.appendToTranscript(card.el);
-      startThinkingTimer(card);
+      // Slow-reasoning / local models have a longer time-to-first-token: the
+      // slow-response hint must wait for THIS provider's typical latency
+      // instead of a fixed 15s that would cry wolf on deepseek-reasoner.
+      startThinkingTimer(card, {
+        hintAfterMs: firstTokenHintTimeoutMs(config.provider, config.model || customDefaultModel(config.customProviders ?? [], config.provider)),
+      });
       return card;
     };
-
     // `null as … | null`: TS control-flow can't see the assignment inside
     // maybeShowAssessment() (a closure), so without the widening cast it keeps
     // narrowing assessmentFlow to null and the later `if (assessmentFlow)`
@@ -2719,7 +2724,7 @@ export class ChatController {
         projectPath: effectiveWorkspace || undefined,
         workspaceAvailable: Boolean(effectiveWorkspace),
         promptAssembler,
-        promptBudget: promptBudgetForProvider(config.customProviders, config.provider, config.model),
+        promptBudget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides),
         mcpClient: this.mcpClient,
         mcpServers: this.deferredInitDone ? undefined : (config.mcpServers ?? []),
         mcpExcludedPrefixes: config.mcpExcludedPrefixes,
@@ -2819,9 +2824,16 @@ export class ChatController {
       // that a design critique is a build, or that a creative constraint needs
       // a reasonableness card. Continuing plans skip this extra call and keep
       // their already-approved route.
+      // A request that is deterministically a low-stakes conversational
+      // question (date/weather Q&A, casual questions) skips the hidden LLM
+      // classification round trip entirely: the sync fallback already
+      // reproduces the router's verdict for it, and on slow providers that
+      // call alone costs 6-12s of dead time before the first visible token.
+      const conversationalTurn = shouldBypassSemanticRoute(userText, userImages)
+        || isPlainConversational(userText, userImages);
       const semanticRoute = continuingPlan
         ? null
-        : shouldBypassSemanticRoute(userText, userImages)
+        : conversationalTurn
           ? null
           : await inferSemanticRoute(llm, userText, this.abortController?.signal, userImages);
       const workflow = compileRequestWorkflow(userText, {
@@ -3431,8 +3443,11 @@ export class ChatController {
       if (!thinkingCard) thinkingCard = openThinkingCard();
       // Waiting for the engine's first token: a stable honest label keeps the
       // card alive (dots animate) without pretending to do specific work; the
-      // first streamed reasoning delta replaces it with real content.
-      setThinkingLabel(thinkingCard, '正在思考…');
+      // first streamed reasoning delta replaces it with real content. The
+      // label names the real state (request sent, no token yet) instead of
+      // the generic "思考", so a retry notice later reads as a DIFFERENT
+      // cause (network) rather than more of the same wait.
+      setThinkingLabel(thinkingCard, '等待模型首字返回…');
       // A new user turn is explicit intent to continue at the bottom: re-pin
       // even if the user had scrolled up to re-read history (the pin normally
       // survives until a manual scroll-away, but a fresh send must resume
@@ -3550,7 +3565,7 @@ export class ChatController {
         shell: buildShellContextLine(),
         skills: [...(config.hubSkills ?? []), ...appSkills],
         mode: analysis.mode,
-        budget: promptBudgetForProvider(config.customProviders, config.provider, config.model),
+        budget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides),
         // Subagent tools join the model-visible list only in workspace mode
         // (finalPromptTools above), so the multi_agent protocol should only
         // fire when delegation is actually possible. Without a workspace there
@@ -3644,7 +3659,14 @@ export class ChatController {
                 thinkingCard.card.classList.add('waiting');
                 scrollChatToBottomIfPinned(chatEl);
               }
-              setThinkingLabel(thinkingCard, `模型请求失败，正在重试（连续第 ${llmRetryNotices} 次）…`);
+              const failureType = event.payload.failure.type;
+              const failureLabel = failureType === 'llm_error'
+                ? '模型请求未成功'
+                : failureType === 'tool_error'
+                  ? '工具执行未成功'
+                  : '验证未通过';
+              const actionLabel = kind === 'retry' ? '正在重试' : '正在调整输出';
+              setThinkingLabel(thinkingCard, `${failureLabel}，${actionLabel}（连续第 ${llmRetryNotices} 次）…`);
             } else if (kind === 'degrade') {
               llmRetryNotices++;
               if (thinkingCard) setThinkingLabel(thinkingCard, `连续失败，已降级处理（第 ${llmRetryNotices} 次）…`);
@@ -3774,12 +3796,9 @@ export class ChatController {
             // Reasoning can resume after tool rows (each LLM iteration), so a
             // fresh card opens below whatever was appended since the last one.
             if (!thinkingCard) thinkingCard = openThinkingCard();
-            // First real reasoning after a silence-waiter/retry label resets
-            // the card back to its default thinking state.
-            if (thinkingCard.card.classList.contains('waiting')) {
-              thinkingCard.card.classList.remove('waiting');
-              setThinkingLabel(thinkingCard, t('thinking.thinking'));
-            }
+            // First real reasoning after a silence-waiter or recovery label
+            // resets the card back to its default thinking state.
+            resetThinkingLabelForOutput(thinkingCard);
             // The slow-response hint describes a silent wait: now that
             // reasoning is visibly streaming it lingers 1s, then fades. Called
             // OUTSIDE the waiting-branch so a plain first-token wait (no

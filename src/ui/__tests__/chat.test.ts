@@ -537,7 +537,7 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     expect(cardSrc).not.toContain('正在准备好执行计划');
     // 改为在真实阶段边界设置诚实标签：预检探查期与引擎循环等待首 token 时。
     expect(src).toContain("setThinkingLabel(earlyAnalysisCard, '正在读取工作区，并结合你的目标判断…')");
-    expect(src).toContain("setThinkingLabel(thinkingCard, '正在思考…')");
+    expect(src).toContain("setThinkingLabel(thinkingCard, '等待模型首字返回…')");
     expect(src.indexOf('正在分析你的请求…')).toBe(-1);
   });
 
@@ -1006,20 +1006,25 @@ describe('generate_image text-to-image wiring', () => {
 
   it('keeps long silences legible: elapsed timer, retry surfacing, label reset', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // Every live thinking card starts the elapsed-seconds timer on open.
-    const openCard = src.indexOf('const openThinkingCard = ');
-    expect(openCard).toBeGreaterThan(-1);
-    expect(src.slice(openCard, openCard + 260)).toContain('startThinkingTimer(card);');
+    const thinkingSrc = readSource(new URL('../thinkingCard.ts', import.meta.url));
+    // Every live thinking card starts the elapsed-seconds timer on open, with
+    // the slow-response hint budget adapted to the provider's first-token latency.
+    expect(src).toContain('const openThinkingCard = ');
+    expect(src).toContain('startThinkingTimer(card, {');
+    expect(src).toContain('firstTokenHintTimeoutMs(config.provider,');
     // Abort paths stop the timer explicitly.
     expect(src).toContain('stopThinkingTimer(thinkingCard);');
     // Engine LLM retries are surfaced on the card instead of staying silent —
     // a retry re-streams the whole context and used to look exactly like a hang.
     expect(src).toContain("case 'FailurePolicyDecision': {");
-    expect(src).toContain('模型请求失败，正在重试');
-    // The silence-waiter label resets once real reasoning arrives, and the
+    expect(src).toContain('模型请求未成功');
+    expect(src).toContain('工具执行未成功');
+    expect(src).toContain('验证未通过');
+    // The silence-waiter/recovery label resets once real reasoning or answer
+    // output arrives, and the
     // slow-response hint lingers 1s after visible output, then fades.
-    expect(src).toContain("classList.contains('waiting')");
-    expect(src).toContain("setThinkingLabel(thinkingCard, t('thinking.thinking'))");
+    expect(src).toContain('resetThinkingLabelForOutput(thinkingCard)');
+    expect(thinkingSrc).toContain('export function resetThinkingLabelForOutput');
     // ReasoningDelta dismisses OUTSIDE the waiting-branch (plain first-token
     // waits must dismiss too), anchored at the first visible delta.
     expect(src).toContain('dismissThinkingHint(thinkingCard, HINT_LINGER_MS);');

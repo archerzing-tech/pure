@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
 import { compileRequestWorkflow, type RequestWorkflowStage } from './shared/requestWorkflow';
-import { inferSemanticRoute, shouldBypassSemanticRoute } from './coding-agent/Planner';
+import { inferSemanticRoute, isPlainConversational, shouldBypassSemanticRoute } from './coding-agent/Planner';
 import type { IntentAssessment, TaskMode } from './coding-agent/types';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { PermissionManager } from './coding-agent/PermissionManager';
@@ -279,7 +279,7 @@ async function assembleCliPrompt(
     shell: buildShellContextLine(),
     skills: [...(loadConfig()?.hubSkills ?? []), ...loadAppSkills()],
     mode,
-    budget: promptBudgetForProvider(args.customProviders, args.provider, args.model),
+    budget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
     conventions,
     // The CLI merges subagent tools into toolsDefs when it has a workspace, so
     // delegation is possible — enable the multi_agent protocol fragment. Gated
@@ -552,7 +552,7 @@ async function runOneShot(args: CliArgs) {
   // Logical-trap pre-scan: if the request itself is contradictory/impossible,
   // warn the user and inject the trap notice into the system prompt so the
   // model verifies the premise instead of following it into a failure loop.
-  const semanticRoute = shouldBypassSemanticRoute(args.prompt)
+  const semanticRoute = (shouldBypassSemanticRoute(args.prompt) || isPlainConversational(args.prompt))
     ? null
     : await inferSemanticRoute(adapter, args.prompt);
   const workflow = compileRequestWorkflow(args.prompt, { hasTools, semanticRoute });
@@ -748,7 +748,7 @@ async function runRepl(args: CliArgs) {
 
     // Trap pre-scan per REPL turn (same as one-shot): surface the warning and
     // inject it into the system prompt so the model verifies the premise.
-    const semanticRoute = shouldBypassSemanticRoute(input)
+    const semanticRoute = (shouldBypassSemanticRoute(input) || isPlainConversational(input))
       ? null
       : await inferSemanticRoute(adapter, input, currentAbort.signal);
     const workflow = compileRequestWorkflow(input, { hasTools: toolsDefs.length > 0, semanticRoute });
