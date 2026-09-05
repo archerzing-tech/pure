@@ -5,9 +5,16 @@
 // actually painted (data-map-state → preview), so text never piles up under
 // a slot that is still showing its loading spinner.
 
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { flushStreamingRender, scheduleStreamingRender } from '../markdown';
+
+// DOMPurify needs a real browser DOM to initialize its default export; under
+// happy-dom in bun tests `.sanitize` is undefined. The completion-render test
+// below exercises renderMarkdown end to end, so stub sanitize as a pass-through —
+// the fixtures here are trusted test strings, not model output.
+mock.module('dompurify', () => ({ default: { sanitize: (html: string) => html } }));
+
+const { flushStreamingRender, renderMarkdown, scheduleStreamingRender } = await import('../markdown');
 
 beforeAll(() => GlobalRegistrator.register());
 afterAll(() => GlobalRegistrator.unregister());
@@ -62,6 +69,27 @@ describe('streaming map gate (diffStreaming)', () => {
       slot.setAttribute('data-map-state', 'error');
       renderOnce(container, BEFORE + MAP + AFTER);
       expect(container.textContent).toContain(AFTER);
+    } finally {
+      container.remove();
+    }
+  });
+
+  it('carries a finished map slot across the completion render without rebuilding it', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    try {
+      renderOnce(container, BEFORE + MAP + AFTER);
+      const streamedSlot = container.querySelector<HTMLElement>('.map-slot')!;
+      // Simulate a finished hydration (leaflet sets these when tiles paint).
+      streamedSlot.setAttribute('data-map-state', 'preview');
+      streamedSlot.setAttribute('data-processed', 'true');
+      // The Completed handler re-renders the same text through renderMarkdown.
+      // The painted map must be ADOPTED (same node), not torn down and
+      // rebuilt — that rebuild was the violent mid-turn flicker.
+      await renderMarkdown(BEFORE + MAP + AFTER, container, { yieldBeforeParse: false });
+      const finalSlot = container.querySelector<HTMLElement>('.map-slot');
+      expect(finalSlot).toBe(streamedSlot);
+      expect(finalSlot!.getAttribute('data-processed')).toBe('true');
     } finally {
       container.remove();
     }

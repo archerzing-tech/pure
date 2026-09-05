@@ -18,6 +18,7 @@ import {
   isImageModelName,
   isProviderId,
   promptBudgetForProvider,
+  promptBudgetDefaultFor,
   protocolForURL,
   firstTokenHintTimeoutMs,
   resolveProviderProtocol,
@@ -116,6 +117,15 @@ describe('resolvePromptBudget', () => {
     const custom: CustomProvider = { ...OLLAMA, contextWindowTokens: 48_000 };
     const overrides: Record<string, ProviderOverride> = { ollama: { contextWindowTokens: 16_000 } };
     expect(promptBudgetForProvider([custom], 'ollama', 'tiny-coder', overrides).contextWindowTokens).toBe(48_000);
+  });
+  it('exposes the effective budget defaults shown in the settings placeholders', () => {
+    // Known family → published maximum.
+    expect(promptBudgetDefaultFor('glm', 'glm-5.3-flash').contextWindowTokens).toBe(1_000_000);
+    expect(promptBudgetDefaultFor('glm', 'glm-5.3-flash').outputReserveTokens).toBe(128_000);
+    // Unknown model → the conservative fallback, never a fabricated ceiling.
+    const unknown = promptBudgetDefaultFor('some-unknown', 'mystery-model');
+    expect(unknown.contextWindowTokens).toBe(32_768);
+    expect(unknown.outputReserveTokens).toBe(4_096);
   });
 });
 
