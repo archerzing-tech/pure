@@ -52,17 +52,30 @@ describe('DefaultFailurePolicy repeated-error detection (v0.11)', () => {
     }
   });
 
-  it('stops on the 3rd identical repeat instead of waiting for 6 failures', () => {
+  it('degrades on the 3rd identical repeat: skip the call and continue, do not abort', () => {
     const policy = new DefaultFailurePolicy();
     const action = policy.decide([
-      toolError('web_fetch', 'Unsupported content type: application/json'),
-      toolError('web_fetch', 'Unsupported content type: application/json'),
-      toolError('web_fetch', 'Unsupported content type: application/json'),
+      toolError('download_file', 'download failed: connection reset'),
+      toolError('download_file', 'download failed: connection reset'),
+      toolError('download_file', 'download failed: connection reset'),
     ]);
+    // A hard stop here killed multi-step work (a website build) over ONE
+    // non-critical failing call — the model must be told to skip and continue.
+    expect(action.kind).toBe('degrade');
+    if (action.kind === 'degrade') {
+      expect(action.reason).toContain('consecutive failures of the identical call');
+      expect(action.reason).toContain('SKIP it now');
+      expect(action.reason).toContain('CONTINUE the task');
+    }
+  });
+
+  it('stops on the 5th identical repeat after the skip directive was ignored', () => {
+    const policy = new DefaultFailurePolicy();
+    const err = () => toolError('download_file', 'download failed: connection reset');
+    const action = policy.decide([err(), err(), err(), err(), err()]);
     expect(action.kind).toBe('stop');
     if (action.kind === 'stop') {
-      expect(action.reason).toContain('consecutive failures');
-      expect(action.reason).toContain('stop making it');
+      expect(action.reason).toContain('even after a skip-it directive');
     }
   });
 
@@ -91,6 +104,49 @@ describe('DefaultFailurePolicy repeated-error detection (v0.11)', () => {
     expect(action.kind).toBe('retry');
   });
 
+  it('escalates same-CLASS failures even when the messages differ (v0.13)', () => {
+    const policy = new DefaultFailurePolicy();
+    // Three different URLs, three different network-flavored errors against
+    // web_fetch — the identical-repeat detector must NOT be the only tripwire.
+    const action3 = policy.decide([
+      toolError('web_fetch', 'error sending request for url (https://a.example/x)'),
+      toolError('web_fetch', 'connection reset by peer (https://b.example/y)'),
+      toolError('web_fetch', 'dns resolution failed for cdn.example'),
+    ]);
+    expect(action3.kind).toBe('reflect');
+    if (action3.kind === 'reflect') {
+      expect(action3.hint).toContain('same class (network)');
+      expect(action3.hint).toContain('换镜像或离线替代');
+    }
+    // A 4th network-class failure → degrade with the skip-and-continue
+    // directive instead of grinding to the generic ceiling.
+    const action4 = policy.decide([
+      toolError('web_fetch', 'error sending request for url (https://a.example/x)'),
+      toolError('web_fetch', 'connection reset by peer (https://b.example/y)'),
+      toolError('web_fetch', 'dns resolution failed for cdn.example'),
+      toolError('web_fetch', 'fetch failed: network unreachable'),
+    ]);
+    expect(action4.kind).toBe('degrade');
+    if (action4.kind === 'degrade') {
+      expect(action4.reason).toContain('same class (network)');
+      expect(action4.reason).toContain('CONTINUE the task');
+    }
+  });
+
+  it('does not treat a single non-network error as part of a network-class loop', () => {
+    const policy = new DefaultFailurePolicy();
+    const action = policy.decide([
+      toolError('web_fetch', 'error sending request for url (https://a.example/x)'),
+      toolError('web_fetch', 'connection reset by peer (https://b.example/y)'),
+      toolError('web_fetch', 'HTTP 404 — not found'),
+    ]);
+    // 2 network + 1 not-found: below every class threshold → generic ladder.
+    expect(action.kind).toBe('reflect');
+    if (action.kind === 'reflect') {
+      expect(action.hint).not.toContain('same class (network)');
+    }
+  });
+
   it('applies repeat detection to llm_error failures too', () => {
     const policy = new DefaultFailurePolicy();
     const action = policy.decide([
@@ -98,7 +154,7 @@ describe('DefaultFailurePolicy repeated-error detection (v0.11)', () => {
       llmError('model overloaded'),
       llmError('model overloaded'),
     ]);
-    expect(action.kind).toBe('stop');
+    expect(action.kind).toBe('degrade');
   });
 
   describe('DefaultFailurePolicy web_search recovery guidance (v0.12)', () => {
@@ -144,16 +200,17 @@ describe('DefaultFailurePolicy repeated-error detection (v0.11)', () => {
       }
     });
 
-    it('adds rephrase guidance to the identical-repeat stop reason for web_search', () => {
+    it('adds rephrase guidance to the identical-repeat degrade reason for web_search', () => {
       const policy = new DefaultFailurePolicy();
       const action = policy.decide([
         toolError('web_search', 'no results for the exact same query'),
         toolError('web_search', 'no results for the exact same query'),
         toolError('web_search', 'no results for the exact same query'),
       ]);
-      expect(action.kind).toBe('stop');
-      if (action.kind === 'stop') {
+      expect(action.kind).toBe('degrade');
+      if (action.kind === 'degrade') {
         expect(action.reason).toContain('Do NOT repeat the same or a near-identical query');
+        expect(action.reason).toContain('SKIP it now');
       }
     });
 

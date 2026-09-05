@@ -13,6 +13,12 @@ import { filterResearchSources, isOfficialDocumentationSource, makeResearchPaylo
 export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
+import { blockedHostMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
+
+/** curl/wget exit codes that mean "network-level failure" (resolve/connect/
+ *  timeout/SSL/send/recv) — these trip the host breaker; disk-full (e.g. 13)
+ *  does not, because the host is not the problem. */
+const NET_DOWNLOAD_EXIT_CODES = new Set([4, 6, 7, 28, 35, 47, 55, 56]);
 import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotEntry, WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import { BROWSER_UA } from '../shared/platformUa';
 
@@ -572,6 +578,10 @@ export class TauriToolAdapter implements ToolAdapter {
           if (!/^https?:\/\//i.test(url)) {
             return { id: toolCall.id, toolName: 'download_file', result: '请提供以 http(s):// 开头的下载链接', success: false, duration: Date.now() - start };
           }
+          // Host circuit breaker: a known-dead download source fails instantly.
+          if (hostBlocked(url)) {
+            return { id: toolCall.id, toolName: name, result: blockedHostMessage(url), success: false, duration: Date.now() - start };
+          }
           const destination = typeof args.destination === 'string' ? args.destination.trim() : '';
           const filenameArg = typeof args.filename === 'string' ? args.filename.trim() : '';
           const connections = Math.max(1, Math.min(16, Number(args.connections) || 4));
@@ -631,6 +641,7 @@ export class TauriToolAdapter implements ToolAdapter {
               const path = done?.path;
               const size = Number(done?.size ?? 0);
               if (code === 0 && path) {
+                recordNetSuccess(url);
                 emit({ downloaded: size, total: size, percent: 100, speed: 0, state: 'done', path, filename: done?.filename, via: done?.via });
                 return {
                   id: toolCall.id,
@@ -641,6 +652,17 @@ export class TauriToolAdapter implements ToolAdapter {
                 };
               }
               emit({ downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: done?.filename });
+              // curl/wget network-class exit codes trip the host breaker.
+              if (NET_DOWNLOAD_EXIT_CODES.has(code)) {
+                const { tripped } = recordNetFailure(url);
+                return {
+                  id: toolCall.id,
+                  toolName: 'download_file',
+                  result: tripped ? blockedHostMessage(url, `下载失败（退出码 ${code}）`) : netFailureHint(url, `下载失败（退出码 ${code}）`),
+                  success: false,
+                  duration: Date.now() - start,
+                };
+              }
               return { id: toolCall.id, toolName: 'download_file', result: `下载失败（退出码 ${code}）`, success: false, duration: Date.now() - start };
             } finally {
               signal?.removeEventListener('abort', onAbort);
@@ -654,6 +676,7 @@ export class TauriToolAdapter implements ToolAdapter {
           };
           const doneFb = parseDownloadDone(exec.stdout ?? '');
           if (exec.exitCode === 0 && doneFb?.path) {
+            recordNetSuccess(url);
             return {
               id: toolCall.id,
               toolName: 'download_file',
@@ -663,6 +686,16 @@ export class TauriToolAdapter implements ToolAdapter {
             };
           }
           dispatchDownloadProgress(toolCall.id, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: doneFb?.filename });
+          if (NET_DOWNLOAD_EXIT_CODES.has(exec.exitCode) || isNetworkError(exec.stderr ?? '')) {
+            const { tripped } = recordNetFailure(url);
+            return {
+              id: toolCall.id,
+              toolName: 'download_file',
+              result: tripped ? blockedHostMessage(url, `下载失败（退出码 ${exec.exitCode}）`) : netFailureHint(url, `下载失败（退出码 ${exec.exitCode}）`),
+              success: false,
+              duration: Date.now() - start,
+            };
+          }
           return { id: toolCall.id, toolName: 'download_file', result: `下载失败（退出码 ${exec.exitCode}）`, success: false, duration: Date.now() - start };
         }
         case 'git_diff': {
@@ -782,13 +815,33 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: searchData, success: true, duration: Date.now() - start };
         }
         case 'web_fetch': {
-          const pageText = await this.call('web_fetch', {
-            workspace: ws,
-            url: String(args.url ?? ''),
-            maxChars: args.maxChars ?? 20000,
-            proxyUrl: this.proxyUrl,
-          }) as string;
-          return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
+          const fetchUrl = String(args.url ?? '');
+          // Host circuit breaker: a known-dead host fails instantly with a
+          // skip directive instead of burning another full timeout.
+          if (hostBlocked(fetchUrl)) {
+            return { id: toolCall.id, toolName: name, result: blockedHostMessage(fetchUrl), success: false, duration: Date.now() - start };
+          }
+          try {
+            const pageText = await this.call('web_fetch', {
+              workspace: ws,
+              url: fetchUrl,
+              maxChars: args.maxChars ?? 20000,
+              proxyUrl: this.proxyUrl,
+            }) as string;
+            recordNetSuccess(fetchUrl);
+            return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!isNetworkError(msg)) throw err;
+            const { tripped } = recordNetFailure(fetchUrl);
+            return {
+              id: toolCall.id,
+              toolName: name,
+              result: tripped ? blockedHostMessage(fetchUrl, msg) : netFailureHint(fetchUrl, msg),
+              success: false,
+              duration: Date.now() - start,
+            };
+          }
         }
         case 'web_public_api': {
           // Structured direct lookups (Tier-2) with the same search keys so

@@ -6,6 +6,7 @@ import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type Pure
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
+import { blockedHosts } from '../shared/netGuard';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
@@ -543,10 +544,17 @@ export const BASE_SYSTEM_PROMPT = (hasWorkspace: boolean, temporaryWorkspace = f
 function buildEnvironmentContext(config: PureConfig | null): string {
   const lang = config?.language === 'en' ? 'English' : 'Chinese (zh-CN)';
   const city = config?.city?.trim();
+  // Capability brief (planner + executor both read this): hosts that tripped
+  // the network circuit breaker this session must not appear in any plan
+  // step that depends on reaching them.
+  const blocked = blockedHosts();
+  const netNote = blocked.length
+    ? ` Known-unreachable hosts this session (circuit-broken): ${blocked.join(', ')} — do not plan or attempt downloads/fetches from them; use inline/local alternatives instead.`
+    : '';
   if (!city) {
-    return `Environment: reply in ${lang}. The user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.`;
+    return `Environment: reply in ${lang}. The user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.${netNote}`;
   }
-  return `Environment: reply in ${lang}; user location is ${city} (configured in Settings → General → Environment). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.`;
+  return `Environment: reply in ${lang}; user location is ${city} (configured in Settings → General → Environment). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.${netNote}`;
 }
 
 function buildModelIdentity(config: PureConfig | null): { provider: string; model: string } | undefined {
