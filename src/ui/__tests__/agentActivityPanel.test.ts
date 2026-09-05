@@ -39,14 +39,15 @@ describe('agent activity panel', () => {
 
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(2);
     expect(panel.el.textContent).toContain('2 个活动中');
-    expect(panel.el.textContent).toContain('分析任务');
+    // Cards are minimal: the Agent badge + machine id + start time only.
+    expect(panel.el.textContent).toContain('Agent');
 
     panel.update([activity({ status: 'done', state: 'TERMINATE', output: '找到 8 个来源', durationMs: 4200 }), activity({ callId: 'call-2', state: 'VERIFY' })]);
 
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(2);
     expect(panel.el.querySelector('[data-call-id="call-1"]')?.className).toContain('agent-worker--done');
-    expect(panel.el.querySelector('[data-call-id="call-1"]')?.textContent).toContain('已完成');
-    expect(panel.el.querySelector('[data-call-id="call-2"]')?.textContent).toContain('验证中');
+    // Terminal state is conveyed by the badge color (row state class), not text.
+    expect(panel.el.querySelector('[data-call-id="call-1"]')?.querySelector('.agent-worker-badge')?.textContent).toBe('Agent');
   });
 
   it('counts only explicit non-terminal lifecycle states as active', () => {
@@ -90,9 +91,9 @@ describe('agent activity panel', () => {
 
     const panel = document.querySelector('[data-agent-activity-rail="true"]');
     expect(panel).not.toBeNull();
-    // Cards show the localized role name, not the raw tool id.
-    expect(panel?.textContent).toContain('研究员');
-    expect(panel?.textContent).toContain('已完成');
+    // Cards show the machine id in full, no status text.
+    expect(panel?.textContent).toContain('researcher');
+    expect(panel?.textContent).toContain('Agent');
     expect(panel?.textContent).not.toContain('已完成第一部分');
     expect(panel?.querySelector('.agent-worker-trace')).toBeNull();
     expect(panel?.querySelector('.agent-activity-history')).toBeNull();
@@ -112,9 +113,10 @@ describe('agent activity panel', () => {
 
     expect(panel.el.querySelector('.agent-worker-trace')).toBeNull();
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
-    // Cards carry only WHO is working + when it joined + a status — no
+    // Cards carry only WHO is working + when it joined — no status or
     // tool-call detail.
-    expect(panel.el.textContent).toContain('执行工具');
+    expect(panel.el.textContent).toContain('Agent');
+    expect(panel.el.textContent).not.toContain('执行工具');
     expect(panel.el.textContent).not.toContain('正在执行 read_file');
     expect(panel.el.textContent).not.toContain('rust retry best practices');
   });
@@ -186,8 +188,7 @@ describe('agent activity panel', () => {
 
     panel.update([activity({ lifecycle: 'tool_running', toolName: 'search_files' })], { historical: true });
     expect(panel.el.textContent).toContain('协作记录');
-    expect(panel.el.textContent).toContain('上次中断');
-    // Historical cards are minimal too: who + status, no tool-call detail.
+    // Historical cards are minimal too: who + start time, no tool-call detail.
     expect(panel.el.textContent).not.toContain('上次停留在 search_files');
     expect(panel.el.textContent).not.toContain('search_files');
   });
@@ -236,20 +237,20 @@ describe('agent activity panel', () => {
     const panel = createAgentActivityPanel('s1');
     document.body.appendChild(panel.el);
     panel.update([activity({ callId: 'flight-agent', agentName: 'researcher', lifecycle: 'started', status: 'running' })], { sessionId: 's1' });
-    expect(panel.el.textContent).toContain('研究员');
+    expect(panel.el.textContent).toContain('researcher');
 
     // Switching the panel to a different session drops the previous session's
     // rows entirely — the flight agent card cannot animate or persist under
     // the weather conversation.
     panel.update([activity({ callId: 'weather-agent', agentName: 'deep_thinker', lifecycle: 'started', status: 'running' })], { sessionId: 's2' });
-    expect(panel.el.textContent).not.toContain('研究员');
-    expect(panel.el.textContent).toContain('深度思考专家');
+    expect(panel.el.textContent).not.toContain('researcher');
+    expect(panel.el.textContent).toContain('deep_thinker');
 
     // Returning to the flight session re-shows only its own agent — no trace
     // of the weather conversation survives in this panel.
     panel.update([activity({ callId: 'flight-agent', lifecycle: 'started', status: 'running', agentName: 'researcher' })], { sessionId: 's1' });
-    expect(panel.el.textContent).toContain('研究员');
-    expect(panel.el.textContent).not.toContain('深度思考专家');
+    expect(panel.el.textContent).toContain('researcher');
+    expect(panel.el.textContent).not.toContain('deep_thinker');
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
   });
 });
