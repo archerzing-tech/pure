@@ -4,7 +4,8 @@
 // blocked window fails instantly with a skip directive, any success clears
 // it, and classifyFailure maps real error strings to recovery classes.
 
-import { describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import {
   blockedHostMessage,
   blockedHosts,
@@ -16,6 +17,12 @@ import {
   recordNetFailure,
   recordNetSuccess,
 } from '../netGuard';
+
+beforeAll(() => {
+  GlobalRegistrator.register();
+  localStorage.removeItem('pure.netGuard.hosts.v1');
+});
+afterAll(() => GlobalRegistrator.unregister());
 
 describe('host circuit breaker', () => {
   it('extracts the host from a URL and rejects garbage', () => {
@@ -59,6 +66,26 @@ describe('host circuit breaker', () => {
     expect(msg).toContain('熔断');
     expect(msg).toContain('connection reset');
     expect(netFailureHint(url, 'timeout')).toContain('请勿原样重试');
+  });
+
+  it('persists trip history so a NEW session inherits the planning knowledge', () => {
+    const url = 'https://persist-dead.example.com/x';
+    recordNetFailure(url);
+    recordNetFailure(url); // trip → written to localStorage
+    const stored = JSON.parse(localStorage.getItem('pure.netGuard.hosts.v1') ?? '[]') as { host: string }[];
+    expect(stored.some(p => p.host === 'persist-dead.example.com')).toBe(true);
+
+    // Simulate a fresh session: the in-memory cooldowns are gone, but the
+    // planner brief (blockedHosts) still lists the historically dead host —
+    // while hostBlocked (instant-fail) correctly does NOT, because the
+    // cooldown may have expired and the host could have recovered.
+    localStorage.setItem('pure.netGuard.hosts.v1', JSON.stringify([{ host: 'history-dead.example.com', lastTripAt: Date.now() }]));
+    expect(blockedHosts()).toContain('history-dead.example.com');
+    expect(hostBlocked('https://history-dead.example.com/a')).toBe(false);
+
+    // Entries older than the 24h retention fall out of the brief.
+    localStorage.setItem('pure.netGuard.hosts.v1', JSON.stringify([{ host: 'ancient.example.com', lastTripAt: Date.now() - 25 * 60 * 60_000 }]));
+    expect(blockedHosts()).not.toContain('ancient.example.com');
   });
 });
 
