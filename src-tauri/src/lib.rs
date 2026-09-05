@@ -7387,47 +7387,94 @@ struct GeoResult {
 }
 
 /// Open-Meteo geocoding first, Nominatim fallback (1 req/s, needs a UA).
+/// Transport-level failures never abort the chain: an unreachable backend is
+/// put on a 300s cooldown and skipped (Nominatim is routinely unreachable
+/// from mainland China — connection errors there used to bubble up as tool
+/// failures, which the model then retried until the failure policy aborted
+/// the whole turn). Ok(None) = definitively no result; Err = every backend
+/// failed at the transport level (last error).
 async fn geocode(location: &str, proxy_url: Option<&str>) -> Result<Option<GeoResult>, String> {
     let zh = is_chinese_query(location);
-    let url = format!(
-        "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language={}&format=json",
-        urlencoding(location),
-        if zh { "zh" } else { "en" }
-    );
-    if let Some(data) = fetch_json(&url, 8000, &[], proxy_url).await? {
-        if let Some(first) = data.get("results").and_then(|v| v.as_array()).and_then(|a| a.first()) {
-            if let (Some(lat), Some(lon)) = (
-                first.get("latitude").and_then(|v| v.as_f64()),
-                first.get("longitude").and_then(|v| v.as_f64()),
-            ) {
-                return Ok(Some(GeoResult {
-                    name: first.get("name").and_then(|v| v.as_str()).unwrap_or(location).to_string(),
-                    latitude: lat,
-                    longitude: lon,
-                    country: first.get("country").and_then(|v| v.as_str()).map(String::from),
-                }));
+    let mut last_err: Option<String> = None;
+
+    if !backend_blocked("geocode.open-meteo") {
+        let url = format!(
+            "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language={}&format=json",
+            urlencoding(location),
+            if zh { "zh" } else { "en" }
+        );
+        match fetch_json(&url, 8000, &[], proxy_url).await {
+            Ok(Some(data)) => {
+                if let Some(first) = data.get("results").and_then(|v| v.as_array()).and_then(|a| a.first()) {
+                    if let (Some(lat), Some(lon)) = (
+                        first.get("latitude").and_then(|v| v.as_f64()),
+                        first.get("longitude").and_then(|v| v.as_f64()),
+                    ) {
+                        return Ok(Some(GeoResult {
+                            name: first.get("name").and_then(|v| v.as_str()).unwrap_or(location).to_string(),
+                            latitude: lat,
+                            longitude: lon,
+                            country: first.get("country").and_then(|v| v.as_str()).map(String::from),
+                        }));
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                backend_mark_blocked("geocode.open-meteo", 300);
+                last_err = Some(e);
             }
         }
     }
-    let nomi = format!(
-        "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q={}",
-        urlencoding(location)
-    );
-    if let Some(arr) = fetch_json(&nomi, 6000, &[], proxy_url).await? {
-        if let Some(n) = arr.as_array().and_then(|a| a.first()) {
-            let lat = n.get("lat").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
-            let lon = n.get("lon").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
-            if let (Some(lat), Some(lon)) = (lat, lon) {
-                return Ok(Some(GeoResult {
-                    name: n.get("display_name").and_then(|v| v.as_str()).unwrap_or(location).to_string(),
-                    latitude: lat,
-                    longitude: lon,
-                    country: None,
-                }));
+
+    if !backend_blocked("geocode.nominatim") {
+        let nomi = format!(
+            "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q={}",
+            urlencoding(location)
+        );
+        match fetch_json(&nomi, 6000, &[], proxy_url).await {
+            Ok(Some(arr)) => {
+                if let Some(n) = arr.as_array().and_then(|a| a.first()) {
+                    let lat = n.get("lat").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+                    let lon = n.get("lon").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+                    if let (Some(lat), Some(lon)) = (lat, lon) {
+                        return Ok(Some(GeoResult {
+                            name: n.get("display_name").and_then(|v| v.as_str()).unwrap_or(location).to_string(),
+                            latitude: lat,
+                            longitude: lon,
+                            country: None,
+                        }));
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                backend_mark_blocked("geocode.nominatim", 300);
+                last_err = Some(e);
             }
         }
     }
-    Ok(None)
+
+    match last_err {
+        Some(e) => Err(e),
+        None => Ok(None),
+    }
+}
+
+/// Geocoding is down at the transport level (every backend unreachable).
+/// Return an actionable notice instead of a raw reqwest error string — the
+/// raw error gave the model nothing to act on, so it retried the same
+/// unreachable host until the failure policy killed the turn. The notice
+/// points at the one-shot fallback that actually works: the model's own
+/// knowledge of major-place coordinates.
+fn geocode_unavailable_outcome(err: String) -> PublicApiOutcome {
+    PublicApiOutcome {
+        intent: IntentKind::Geocode,
+        source: "Open-Meteo/Nominatim".to_string(),
+        text: format!(
+            "地理编码服务当前不可达（{err}）。请勿再次调用本工具获取坐标：主要城市、山川与知名景区的坐标在你的知识范围内（例如西安约 34.26,108.94；三门峡约 34.77,111.19），直接使用已知坐标继续任务即可；确需实时检索再改用 web_search。"
+        ),
+    }
 }
 
 fn json_num(v: &serde_json::Value, key: &str) -> Option<f64> {
@@ -7454,9 +7501,11 @@ async fn resolve_weather(
             text: "需要知道城市才能查天气（例如“北京天气”或“weather in Tokyo”）；未检测到城市，也没有配置位置。".to_string(),
         }));
     }
-    let geo = match geocode(&location, proxy_url).await? {
-        Some(g) => g,
-        None => return Ok(None),
+    let geo = match geocode(&location, proxy_url).await {
+        Ok(Some(g)) => g,
+        // Geocoder unreachable → let the tool fall through to the search
+        // backends instead of failing outright.
+        _ => return Ok(None),
     };
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&timezone=auto&forecast_days=3",
@@ -7527,9 +7576,13 @@ async fn resolve_geocode(query: &str, proxy_url: Option<&str>) -> Result<Option<
     if location.is_empty() {
         return Ok(None);
     }
-    let geo = match geocode(&location, proxy_url).await? {
-        Some(g) => g,
-        None => return Ok(None),
+    let geo = match geocode(&location, proxy_url).await {
+        Ok(Some(g)) => g,
+        Ok(None) => return Ok(None),
+        // Transport failure is a degraded state, not a tool error: hand the
+        // model the use-what-you-know fallback instead of an error it will
+        // retry until the turn aborts.
+        Err(e) => return Ok(Some(geocode_unavailable_outcome(e))),
     };
     let country = geo.country.as_deref().map(|c| format!(" ({})", c)).unwrap_or_default();
     Ok(Some(PublicApiOutcome {
@@ -7558,9 +7611,10 @@ async fn resolve_air_quality(
             text: "需要知道城市才能查空气质量（例如“北京空气质量”或“北京PM2.5”）；未检测到城市，也没有配置位置。".to_string(),
         }));
     }
-    let geo = match geocode(&location, proxy_url).await? {
-        Some(g) => g,
-        None => return Ok(None),
+    let geo = match geocode(&location, proxy_url).await {
+        Ok(Some(g)) => g,
+        // Geocoder unreachable → fall through to the search backends.
+        _ => return Ok(None),
     };
     let url = format!(
         "https://air-quality-api.open-meteo.com/v1/air-quality?latitude={}&longitude={}&current=pm10,pm2_5,nitrogen_dioxide,us_aqi&timezone=auto",
