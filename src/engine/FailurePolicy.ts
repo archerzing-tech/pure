@@ -12,6 +12,7 @@
 //        so the policy reinforces it even when the raw error message does not.
 
 import type { FailureRecord, FailureAction, FailurePolicy } from '../shared/types';
+import { classifyFailure, FAILURE_CLASS_HINTS } from '../shared/netGuard';
 
 // Trap-escape guidance appended to retry/reflect hints once the first attempt
 // has already failed: the failure may not be in the model's execution but in
@@ -47,11 +48,15 @@ function isEditMismatch(failure: FailureRecord): boolean {
  *
  * v0.11 — repeated-error detection: when the SAME call (same tool + same error
  * message) fails over and over, count-based escalation alone is not enough —
- * the model keeps walking the same dead-end path. The policy now recognizes
+ * the model keeps walking the same dead-end path. The policy recognizes
  * identical repeats and escalates faster with an explicit "do not repeat this
  * call" instruction:
  * - same error repeated 2× → reflect + tell the model to stop making that call
- * - same error repeated 3× → stop (do not wait for 6 total failures)
+ * - same error repeated 3-4× → degrade: SKIP the failing call, take a workable
+ *   alternative, CONTINUE the task (a hard stop here aborted multi-step work
+ *   over one non-critical failing call — e.g. a website build dying on a
+ *   blocked resource download)
+ * - same error repeated 5× → stop (it kept failing even after the directive)
  */
 function repeatKey(f: FailureRecord): string {
   // toolName separates "web_fetch failed on URL A" from "read_file failed";
@@ -79,15 +84,27 @@ export class DefaultFailurePolicy implements FailurePolicy {
       : '';
     const editHint = isEditMismatch(last) ? EDIT_MISMATCH_RECOVERY_HINT : '';
 
-    // Same call failed 3+ times with the same error: the model is looping.
-    // Stop now instead of grinding through the generic 6-failure ceiling.
-    // webHint rides along here (unlike the count-based handoff branches below):
-    // an identical web_search repeat is exactly the same-query loop the
-    // guidance targets, and this reason is surfaced to the user as well.
-    if (repeats >= 3) {
+    // Same call failed 5+ times with the same error: it kept failing even
+    // after the skip-it directive below — a genuine stuck loop. Stop instead
+    // of grinding toward the generic 6-failure ceiling.
+    if (repeats >= 5) {
       return {
         kind: 'stop',
-        reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". This exact call keeps failing with the same error — stop making it. Switch to a fundamentally different approach or ask the user.${webHint}`,
+        reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". This exact call kept failing even after a skip-it directive was issued — stopping here rather than retrying again. Please review and provide guidance.`,
+      };
+    }
+
+    // Same call failed 3-4 times with the same error: the model is looping on
+    // one dead-end call, but the TASK may be perfectly salvageable. This used
+    // to be a hard stop — which aborted multi-step work (e.g. a website build
+    // where one resource download kept failing) and threw away its own
+    // advice, because the model never got the chance to act on it. Degrade
+    // instead: the engine injects the directive and the loop continues, so
+    // the model can skip the call and finish the remaining steps.
+    if (repeats >= 3) {
+      return {
+        kind: 'degrade',
+        reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". This exact call keeps failing with the same error — SKIP it now. Do not retry it with the same or trivially-different arguments. Take a workable alternative that still serves the user's goal (a different source or tool, inline or substitute the content, or omit this step) and CONTINUE the task. A further identical failure will hand the turn back to the user.${webHint}`,
       };
     }
 
@@ -97,6 +114,29 @@ export class DefaultFailurePolicy implements FailurePolicy {
       return {
         kind: 'reflect',
         hint: `The same call${toolLabel} has now failed twice with the identical error: "${last.message}". Do NOT make this exact call again — it will fail the same way. Change approach now (different tool, different URL, or ask the user).${webHint}${TRAP_ESCAPE_HINT}`,
+      };
+    }
+
+    // ── Class-level loop detection (v0.13) ──
+    // Diverse arguments, same failure CLASS. Three different URLs failing with
+    // three different network errors against the same dead host used to evade
+    // the identical-repeat detector and grind to the generic 6-failure
+    // ceiling. Same tool + same class is a loop even when the messages differ.
+    const lastClass = classifyFailure(last.message);
+    const classHint = FAILURE_CLASS_HINTS[lastClass];
+    const classRepeats = lastClass === 'generic'
+      ? 0
+      : failures.filter(f => f.toolName === last.toolName && classifyFailure(f.message) === lastClass).length;
+    if (classRepeats >= 4) {
+      return {
+        kind: 'degrade',
+        reason: `${classRepeats} failures of the same class (${lastClass}) from ${last.toolName ?? 'this tool'}, most recently: "${last.message}". Stop attacking this path from different angles. ${classHint} Then CONTINUE the task with what is achievable.`,
+      };
+    }
+    if (classRepeats === 3) {
+      return {
+        kind: 'reflect',
+        hint: `3 failures of the same class (${lastClass}) from ${last.toolName ?? 'this tool'}, most recently: "${last.message}". ${classHint}`,
       };
     }
 
