@@ -1086,14 +1086,15 @@ body {
 .agent-activity-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 5px;
 }
 .agent-worker {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
   min-width: 0;
-  padding: 12px;
+  padding: 8px;
   border: 1px solid var(--border-light);
   border-radius: 10px;
   /* Near-solid surface so the card stays readable while floating OVER chat
@@ -1101,80 +1102,48 @@ body {
   background: color-mix(in srgb, var(--bg-card) 92%, transparent);
   box-shadow: var(--shadow-md);
 }
+/* Three-row card contract: centered "Agent" badge (cyan = an active worker),
+   the machine id in FULL below it, then the start time. Nothing else. */
+.agent-worker-badge {
+  align-self: center;
+  padding: 2px 14px;
+  border-radius: 999px;
+  font: 700 10px var(--font-sans);
+  letter-spacing: 0.08em;
+  background: #22d3ee;
+  color: #083344;
+}
+.agent-worker--done .agent-worker-badge { background: var(--success); color: #052e16; }
+.agent-worker--failed .agent-worker-badge,
+.agent-worker--timed-out .agent-worker-badge { background: var(--danger); color: #450a0a; }
+.agent-worker--paused .agent-worker-badge,
+.agent-worker--cancelled .agent-worker-badge { background: var(--text-tertiary); color: var(--bg-card); }
+.agent-worker-name {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  /* Show the FULL machine id — wrap instead of ellipsizing. */
+  word-break: break-all;
+  text-align: center;
+}
+.agent-worker-time {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-align: center;
+  white-space: nowrap;
+}
 .agent-worker--active {
-  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-light));
-  background: color-mix(in srgb, var(--accent-soft) 55%, var(--bg-card));
+  border-color: color-mix(in srgb, #22d3ee 45%, var(--border-light));
+  background: color-mix(in srgb, #22d3ee 8%, var(--bg-card));
 }
 .agent-worker--paused,
 .agent-worker--cancelled { opacity: .72; }
 .agent-worker--done { border-color: color-mix(in srgb, var(--success) 30%, var(--border-light)); }
 .agent-worker--failed,
 .agent-worker--timed-out { border-color: color-mix(in srgb, var(--danger) 36%, var(--border-light)); }
-.agent-worker-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  grid-column: 1 / -1;
-  gap: 8px;
-  min-width: 0;
-}
-.agent-worker-identity {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
-.agent-worker-dot {
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent);
-}
-.agent-worker--active .agent-worker-dot { animation: agent-worker-pulse 1.4s ease-in-out infinite; }
-@keyframes agent-worker-pulse {
-  50% { opacity: .4; box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 6%, transparent); }
-}
-.agent-worker--done .agent-worker-dot { background: var(--success); box-shadow: none; }
-.agent-worker--failed .agent-worker-dot,
-.agent-worker--timed-out .agent-worker-dot { background: var(--danger); box-shadow: none; }
-.agent-worker--paused .agent-worker-dot,
-.agent-worker--cancelled .agent-worker-dot { background: var(--text-tertiary); box-shadow: none; }
-.agent-worker-name,
-.agent-worker-role {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.agent-worker-name {
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-}
-.agent-worker-role { color: var(--text-secondary); font-size: 11px; }
-.agent-worker-status {
-  flex: 0 0 auto;
-  color: var(--accent);
-  font-size: 10.5px;
-  white-space: nowrap;
-}
-.agent-worker--done .agent-worker-status { color: var(--success); }
-.agent-worker--failed .agent-worker-status,
-.agent-worker--timed-out .agent-worker-status { color: var(--danger); }
-.agent-worker--paused .agent-worker-status,
-.agent-worker--cancelled .agent-worker-status { color: var(--text-tertiary); }
-/* 介入时间 — wall-clock moment the agent joined, beside the status. */
-.agent-worker-time {
-  flex: 0 0 auto;
-  margin-right: 8px;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  white-space: nowrap;
-}
 /* Terminal cards dwell 2s, then fade out and leave the DOM. */
 .agent-worker--leaving {
   opacity: 0;
@@ -1246,7 +1215,6 @@ body {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .agent-worker--active .agent-worker-dot { animation: none; }
   .agent-worker--entering { animation: none; }
 }
 
