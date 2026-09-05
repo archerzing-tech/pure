@@ -402,9 +402,10 @@ describe('Harness cross-session memory (v0.10)', () => {
   it('writes an error_pattern mid-session when the SAME call fails repeatedly (v0.11)', async () => {
     const memStore = new FakeMemoryStore();
     // The tool keeps failing with the SAME message (e.g. web_fetch content
-    // type). The repeated-error policy stops after 3 identical repeats; the
-    // Harness must persist a "Repeated failure" error_pattern (flushed at
-    // session end) so the lesson survives even an interrupted session.
+    // type). The repeated-error policy DEGRADES after 3 identical repeats —
+    // the turn stays alive (skip + continue) and the mock LLM then answers —
+    // but the Harness must still persist the "Repeated failure" error_pattern
+    // immediately so the lesson survives the successful session.
     const failTool: ToolAdapter = {
       execute: async (): Promise<ToolResult> => ({
         id: 'call_1',
@@ -443,15 +444,18 @@ describe('Harness cross-session memory (v0.10)', () => {
     });
 
     const events = await collect(harness.run('SYS', 'get the data'));
-    // Policy stops after 3 identical repeats → session interrupted.
-    expect(events.find(e => e.type === 'Interrupted')).toBeDefined();
+    // Policy degrades after 3 identical repeats → the turn CONTINUES (the
+    // skip directive reaches the model) and completes normally.
+    expect(events.find(e => e.type === 'Interrupted')).toBeUndefined();
+    expect(events.find(e => e.type === 'Completed')).toBeDefined();
 
-    const repeated = memStore.entries.filter(e => e.type === 'error_pattern' && e.content.includes('Repeated failure'));
-    // pendingRepeats guarantees exactly one "Repeated failure" memory per failure key.
+    const repeated = memStore.entries.filter(e => e.type === 'error_pattern' && e.content.includes('Stopped by failure policy'));
+    // Exactly one dead-end lesson per failure key, written on the degrade
+    // decision itself (the session-end flush skips already-written keys).
     expect(repeated).toHaveLength(1);
     expect(repeated[0].content).toContain('Unsupported content type');
     expect(repeated[0].content).toContain('web_fetch');
-    expect(repeated[0].content).toContain('Do not make this exact call again');
+    expect(repeated[0].content).toContain('SKIP it now');
     expect(repeated[0].projectPath).toBe('/ws');
   });
 

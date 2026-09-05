@@ -330,10 +330,18 @@ export class Harness {
         } else {
           seenFailures.add(repeatKey);
         }
-        if (event.payload.action.kind === 'stop') {
-          stopWrittenKeys.add(repeatKey);
-          await this.writeErrorPattern(event.payload.action, failure, userPrompt).catch(() => {});
-        } else if (event.payload.action.kind === 'retry') {
+        // A stop OR a degrade on repeated identical failures is a proven
+        // dead-end worth persisting immediately — the degrade path keeps the
+        // turn alive (skip + continue), but the "don't repeat this call"
+        // lesson must survive even a successful session. Written once per
+        // failure key.
+        if (event.payload.action.kind === 'stop' || event.payload.action.kind === 'degrade') {
+          if (!stopWrittenKeys.has(repeatKey)) {
+            stopWrittenKeys.add(repeatKey);
+            await this.writeErrorPattern(event.payload.action, failure, userPrompt).catch(() => {});
+          }
+        }
+        if (event.payload.action.kind === 'retry') {
           retriedFailures.push(failure);
         }
       }
@@ -356,6 +364,9 @@ export class Harness {
           const writtenRepeatKeys = new Set<string>();
           for (const [key, failure] of pendingRepeats) {
             if (recoveredRepeats.has(key)) continue;
+            // Already persisted immediately by the stop/degrade decision —
+            // one lesson per dead-end, not two.
+            if (stopWrittenKeys.has(key)) continue;
             writtenRepeatKeys.add(key);
             await this.writeRepeatedFailureMemory(failure, userPrompt).catch(() => {});
           }
@@ -538,6 +549,8 @@ export class Harness {
         const writtenRepeatKeys = new Set<string>();
         for (const [key, failure] of pendingRepeats) {
           if (recoveredRepeats.has(key)) continue;
+          // Already persisted immediately by the stop/degrade decision.
+          if (stopWrittenKeys.has(key)) continue;
           writtenRepeatKeys.add(key);
           await this.writeRepeatedFailureMemory(failure, newUserPrompt).catch(() => {});
         }
