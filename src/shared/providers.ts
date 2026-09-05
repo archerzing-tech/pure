@@ -100,6 +100,17 @@ function promptBudgetDefaults(provider: string, model: string): { contextWindowT
   return undefined;
 }
 
+/** Effective budget defaults for the settings placeholders: the model
+ * family's published maximums, or the conservative fallback for unknown
+ * models. Blank settings inputs inherit exactly these numbers. */
+export function promptBudgetDefaultFor(provider: string, model: string): { contextWindowTokens: number; outputReserveTokens: number } {
+  const defaults = promptBudgetDefaults(provider, model);
+  return {
+    contextWindowTokens: defaults?.contextWindowTokens ?? PROMPT_BUDGET_FALLBACK.contextWindowTokens,
+    outputReserveTokens: defaults?.outputReserveTokens ?? PROMPT_BUDGET_FALLBACK.outputReserveTokens,
+  };
+}
+
 export function resolvePromptBudget(config: PromptBudgetConfig = {}): ResolvedPromptBudget {
   const provider = config.provider?.trim() || undefined;
   const model = config.model?.trim() || undefined;

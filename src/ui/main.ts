@@ -6,7 +6,7 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, BASE_SYSTEM_PROMPT } from './chat';
+import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, BASE_SYSTEM_PROMPT } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
@@ -175,6 +175,10 @@ let appVersion = '';
 let queuedWhileStreaming: string | null = null;
 
 // ── Streaming state → update both send buttons ──
+
+// Background sessions starting/stopping work: pulse the sidebar's running
+// dots without re-rendering the list.
+onRunningSessionsChanged(() => sessionSidebar?.refreshRunningDots());
 
 chat.onStreamingStateChange((streaming) => {
   document.querySelectorAll<HTMLButtonElement>('.undo-write-btn, .compact-context-btn').forEach((button) => {

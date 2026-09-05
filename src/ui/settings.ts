@@ -31,6 +31,7 @@ import {
   OPENROUTER_PRESET,
   NVIDIA_PRESET,
   nextCustomProviderId,
+  promptBudgetDefaultFor,
   PROVIDERS,
   protocolForURL,
   providerDef,
@@ -38,6 +39,7 @@ import {
   type CustomProvider,
   type LLMProtocol,
 } from '../shared/providers';
+import { formatTokensCompact } from '../shared/usage';
 import { composeProxyUrl, effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList, parseProxyUrl, proxyUrlWithAuth } from '../shared/proxy';
 import { probeLlmEndpoint } from '../shared/llmProbe';
 import {
@@ -2410,7 +2412,7 @@ export class SettingsPanel {
     const hidden = document.getElementById('cfg-model') as HTMLInputElement | null;
     if (hidden) hidden.value = defaultModel;
     list.hidden = false;
-    list.innerHTML = rows.map((model, i) => this.modelRowHtml(model, i, defaultModel, models.length, names, budgets)).join('');
+    list.innerHTML = rows.map((model, i) => this.modelRowHtml(model, i, defaultModel, models.length, names, budgets, provider)).join('');
     applyTranslations();
   }
 
@@ -2423,16 +2425,24 @@ export class SettingsPanel {
     modelCount: number,
     names: Record<string, string>,
     budgets: Record<string, { contextWindowTokens?: number; outputReserveTokens?: number }>,
+    provider: string,
   ): string {
     const isDefault = !!model && model === defaultModel;
     const canRemove = !!model && modelCount > 1;
     const budget = model ? budgets[model] ?? {} : {};
+    // Blank = the family maximum: the placeholder shows the ACTUAL default
+    // number (with unit) so "auto" is never a guess. Unknown models show the
+    // conservative fallback instead of a fabricated ceiling.
+    const budgetDefaults = promptBudgetDefaultFor(provider, model);
+    const ctxDefault = `${formatTokensCompact(budgetDefaults.contextWindowTokens)} tok`;
+    const outDefault = `${formatTokensCompact(budgetDefaults.outputReserveTokens)} tok`;
+    const budgetHint = t('llm.budget.defaultHint');
     return `<div class="llm-model-row${isDefault ? ' llm-model-row-default' : ''}" data-row="${i}">
       <input type="radio" name="cfg-model-default" class="llm-model-row-radio" data-radio-row="${i}" ${isDefault ? 'checked' : ''} title="${t('llm.model.setDefault')}" aria-label="${t('llm.model.setDefault')}" />
       <input class="setting-input llm-model-row-id" data-row-id="${i}" type="text" value="${escapeHtml(model)}" placeholder="${t('llm.model.idPlaceholder')}" autocomplete="off" />
       <input class="setting-input llm-model-row-name" data-row-name="${i}" type="text" value="${escapeHtml(model ? (names[model] ?? '') : '')}" placeholder="${t('llm.model.namePlaceholder')}" autocomplete="off" />
-      <input class="setting-input llm-model-row-budget llm-model-row-context" data-row-context="${i}" type="number" min="1" step="1" value="${budget.contextWindowTokens ?? ''}" placeholder="${t('llm.budget.context')}" inputmode="numeric" aria-label="${t('llm.budget.context')}" />
-      <input class="setting-input llm-model-row-budget llm-model-row-output" data-row-output="${i}" type="number" min="1" step="1" value="${budget.outputReserveTokens ?? ''}" placeholder="${t('llm.budget.output')}" inputmode="numeric" aria-label="${t('llm.budget.output')}" />
+      <input class="setting-input llm-model-row-budget llm-model-row-context" data-row-context="${i}" type="number" min="1" step="1" value="${budget.contextWindowTokens ?? ''}" placeholder="${ctxDefault}" title="${budgetHint}" inputmode="numeric" aria-label="${t('llm.budget.context')}" />
+      <input class="setting-input llm-model-row-budget llm-model-row-output" data-row-output="${i}" type="number" min="1" step="1" value="${budget.outputReserveTokens ?? ''}" placeholder="${outDefault}" title="${budgetHint}" inputmode="numeric" aria-label="${t('llm.budget.output')}" />
       ${canRemove ? `<button type="button" class="llm-model-row-remove" data-remove-row="${i}" title="${t('llm.custom.removeModel')}" aria-label="${t('llm.custom.removeModel')}">×</button>` : ''}
     </div>`;
   }
@@ -2509,7 +2519,7 @@ export class SettingsPanel {
     const row = document.createElement('div');
     row.className = 'llm-model-row';
     row.dataset.row = String(index);
-    row.innerHTML = this.modelRowHtml('', index, '', 0, {}, {});
+    row.innerHTML = this.modelRowHtml('', index, '', 0, {}, {}, provider);
     list.appendChild(row);
     applyTranslations();
     row.querySelector<HTMLInputElement>('.llm-model-row-id')?.focus();

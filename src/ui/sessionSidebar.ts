@@ -20,7 +20,7 @@ import {
   type SessionStats,
   type SessionSnapshotV2,
 } from './store';
-import type { ChatController } from './chat';
+import { isSessionRunning, type ChatController } from './chat';
 
 export interface SessionSidebarDeps {
   chat: Pick<ChatController, 'clear' | 'setWorkspace' | 'syncEffectiveWorkspace'> & {
@@ -201,6 +201,29 @@ export class SessionSidebar {
 
   // ── Session list rendering ──
 
+  /** Cheap in-place refresh of the running dots (streaming state changed):
+   * toggles the dot per visible card without re-rendering the list, so an
+   * active background session starting/stopping never disturbs scroll or
+   * focus in the sidebar. */
+  refreshRunningDots(): void {
+    const container = document.getElementById('sidebar-session-list');
+    if (!container) return;
+    for (const el of Array.from(container.querySelectorAll<HTMLElement>('.sidebar-session-item'))) {
+      const sid = el.getAttribute('data-sid') ?? '';
+      const running = isSessionRunning(sid);
+      el.classList.toggle('session-running', running);
+      const existing = el.querySelector('.sidebar-session-running-dot');
+      if (running && !existing) {
+        el.querySelector('.sidebar-session-item-main')?.insertAdjacentHTML(
+          'afterbegin',
+          `<span class="sidebar-session-running-dot" role="status" aria-label="${escapeHtml(t('sidebar.running'))}" title="${escapeHtml(t('sidebar.running'))}"></span>`,
+        );
+      } else if (!running && existing) {
+        existing.remove();
+      }
+    }
+  }
+
   private async renderList(): Promise<void> {
     const container = document.getElementById('sidebar-session-list')!;
     try {
@@ -251,9 +274,14 @@ export class SessionSidebar {
              </button>`;
         const items = sessions.map(s => {
           const title = escapeHtml(s.title.slice(0, 50));
-          return `<div class="sidebar-session-item" data-sid="${s.id}">
+          // A pulsing dot marks sessions whose controller is still streaming —
+          // including background sessions the user has navigated away from.
+          const dot = isSessionRunning(s.id)
+            ? `<span class="sidebar-session-running-dot" role="status" aria-label="${escapeHtml(t('sidebar.running'))}" title="${escapeHtml(t('sidebar.running'))}"></span>`
+            : '';
+          return `<div class="sidebar-session-item${dot ? ' session-running' : ''}" data-sid="${s.id}">
           <div class="sidebar-session-item-main">
-            <span class="sidebar-session-item-title" title="${title}">${title}</span>
+            ${dot}<span class="sidebar-session-item-title" title="${title}">${title}</span>
             ${usageLine(s)}
           </div>
           <button class="sidebar-session-delete" data-sid="${s.id}" title="${t('sidebar.delete.title')}">

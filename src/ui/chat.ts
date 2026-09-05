@@ -5114,6 +5114,27 @@ export interface OpenSessionResult {
   warm: boolean;
 }
 
+// ── Live-session registry (sidebar running dots) ──
+// Sessions whose controller is currently streaming, regardless of whether
+// they are the visible conversation. The sidebar reads this to pulse a dot
+// on cards whose session is still working in the background.
+const runningSessionIds = new Set<string>();
+const runningSessionsListeners = new Set<() => void>();
+
+/** True when `sessionId` has a live controller that is streaming right now. */
+export function isSessionRunning(sessionId: string): boolean {
+  return runningSessionIds.has(sessionId);
+}
+
+/** Subscribe to running-set changes (session started/finished streaming).
+ * Returns an unsubscribe function. */
+export function onRunningSessionsChanged(cb: () => void): () => void {
+  runningSessionsListeners.add(cb);
+  return () => {
+    runningSessionsListeners.delete(cb);
+  };
+}
+
 export class SessionChatManager {
   private controllers = new Map<string, ChatController>();
   private hosts = new Map<string, HTMLElement>();
@@ -5139,8 +5160,14 @@ export class SessionChatManager {
     return host;
   }
 
-  private wireController(controller: ChatController): void {
+  private wireController(controller: ChatController, sessionId: string): void {
     controller.onStreamingStateChange((streaming) => {
+      // Track EVERY session's streaming state for the sidebar's running dots —
+      // background sessions keep working while another one is visible.
+      const changed = streaming ? !runningSessionIds.has(sessionId) : runningSessionIds.has(sessionId);
+      if (streaming) runningSessionIds.add(sessionId);
+      else runningSessionIds.delete(sessionId);
+      if (changed) runningSessionsListeners.forEach((cb) => cb());
       // Only the visible conversation drives the shared streaming UI.
       if (controller === this.current) this.streamingCb?.(streaming);
     });
@@ -5194,7 +5221,7 @@ export class SessionChatManager {
       // mints a placeholder) before it goes live, so persistence, stats and
       // MCP ownership all key on the actual session.
       controller.setSessionId(sessionId);
-      this.wireController(controller);
+      this.wireController(controller, sessionId);
       this.controllers.set(sessionId, controller);
       this.hosts.set(sessionId, host);
     }
@@ -5233,6 +5260,7 @@ export class SessionChatManager {
     this.hosts.get(sessionId)?.remove();
     this.hosts.delete(sessionId);
     this.controllers.delete(sessionId);
+    if (runningSessionIds.delete(sessionId)) runningSessionsListeners.forEach((cb) => cb());
     if (this.current === controller) {
       this.current = null;
       this.currentHost = null;

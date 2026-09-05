@@ -432,6 +432,28 @@ body {
   white-space: nowrap;
   max-width: 150px;
 }
+/* Running-session indicator: a soft pulsing dot on cards whose session still
+   has a live streaming controller (visible or running in the background). */
+.sidebar-session-running-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+  animation: sessionRunningPulse 1.6s ease-in-out infinite;
+}
+@keyframes sessionRunningPulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-session-running-dot {
+    animation: none;
+    opacity: 0.85;
+  }
+}
 
 .sidebar-session-item.active .sidebar-session-item-usage {
   color: var(--accent);
@@ -12335,7 +12357,9 @@ button svg,
   height: 36px;
 }
 /* Per-model budget columns override the wide .setting-input default with a
-   narrow numeric field; blank = inherit the provider-level budget. */
+   narrow numeric field; blank = inherit the provider-level budget. The
+   placeholder carries the model's default (its published maximum, with unit)
+   and renders a size smaller so "262.1k tok" fits the narrow column. */
 .llm-model-row-budget {
   flex: 0 0 84px;
   width: 84px;
@@ -12343,6 +12367,11 @@ button svg,
   height: 36px;
   padding: 4px 10px;
   text-align: right;
+}
+.llm-model-row-budget::placeholder {
+  font-size: 10px;
+  letter-spacing: -0.01em;
+  opacity: 0.75;
 }
 .llm-model-row-remove {
   flex: 0 0 auto;
