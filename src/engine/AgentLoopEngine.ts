@@ -166,6 +166,33 @@ export class AgentLoopEngine {
           messages.push({ role: 'assistant' as const, content });
         }
       };
+      // Graceful handover: a policy stop is a hard landing. Give the model ONE
+      // tool-less round to summarize state — what was completed, what is
+      // blocked, the recommended next step — so the turn ends with a usable
+      // report instead of a bare reason string. If the LLM itself is dead
+      // (the common stop cause is TOOL failures, not the model), the plain
+      // stop reason still lands unchanged.
+      const emitHandover = async function* (reason: string): AsyncGenerator<EngineEvent, void, void> {
+        try {
+          const ask: Message = {
+            role: 'user',
+            content: `HANDOVER (system directive): this turn is ending now. Reason: ${reason}. Do NOT call any tools — reply with text only, in the user's language: (1) what was completed (files written / verified), (2) what remains blocked and why, (3) the single recommended next step. 2-5 sentences of plain flowing text, no headings.`,
+            internal: true,
+          };
+          let text = '';
+          for await (const chunk of streamLlmTurn({ llm: ctx.llm, messages: [...messages, ask], tools: [], signal: ctx.signal, timeoutMs: 60_000 })) {
+            if (chunk.type === 'content' && chunk.content) {
+              text += chunk.content;
+              budget.addTokens(chunk.content);
+              yield { type: 'TokenDelta', payload: { content: chunk.content, stateId: sid(), isToolCall: false }, timestamp: Date.now() };
+            }
+          }
+          text = text.trim();
+          if (text) messages.push({ role: 'assistant' as const, content: text });
+        } catch {
+          // LLM unavailable — fall through to the plain stop reason.
+        }
+      };
       // Set as soon as the stream starts emitting a tool call. A timeout mid
       // tool-call-argument can't be safely resumed (the partial call would be
       // corrupt), so the auto-resume branch below only fires for plain text.
@@ -261,6 +288,7 @@ export class AgentLoopEngine {
           yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
           if (action.kind === 'stop') {
             flushPartialAssistant();
+            yield* emitHandover(action.reason);
             yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
@@ -320,6 +348,7 @@ export class AgentLoopEngine {
           const action = ctx.failurePolicy.decide(failures);
           yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
           if (action.kind === 'stop') {
+            yield* emitHandover(action.reason);
             yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'ACT', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
@@ -471,6 +500,7 @@ export class AgentLoopEngine {
               const action = ctx.failurePolicy.decide(failures);
               yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
               if (action.kind === 'stop') {
+                yield* emitHandover(action.reason);
                 yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'VERIFY', completedSteps, messages, turnCount }, timestamp: Date.now() };
                 interrupted = true; break;
               }

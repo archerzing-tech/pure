@@ -162,14 +162,22 @@ export class DefaultFailurePolicy implements FailurePolicy {
       };
     }
 
-    // count >= 5 → degrade or stop
-    if (count >= 6) {
+    // count >= 5 → salvage ladder: degrade with escalating directives. The
+    // model gets salvage turns at 5 AND 6-7 (the second one forbids every
+    // failing path outright) — a hard stop fires only at 8, when even
+    // "deliver with what you have" kept failing.
+    if (count >= 8) {
       return {
         kind: 'stop',
-        reason: `${count} consecutive failures. Last: ${last.message}. Please review and provide guidance.`,
+        reason: `${count} consecutive failures. Last: ${last.message}. Salvage mode could not complete a delivery — stopping here. Please review and provide guidance.`,
       };
     }
-
+    if (count >= 6) {
+      return {
+        kind: 'degrade',
+        reason: `${count} consecutive failures (last: ${last.message}). SALVAGE, final pass: every path that failed this turn is now OFF-LIMITS — do not call any tool that has failed, and do not start new side quests. Wrap up NOW: finish the minimal verifiable deliverable from what already exists, then report what was completed, what stayed blocked, and the recommended next step.`,
+      };
+    }
     return {
       kind: 'degrade',
       reason: `${count} consecutive failures (last: ${last.message}). Switched to degraded / simplified mode: stop retrying the failing approach, minimize further tool use, and deliver the simplest complete answer — or hand control back to the user with a clear summary of what was attempted and what failed.`,

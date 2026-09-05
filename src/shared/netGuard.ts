@@ -13,12 +13,54 @@
 const HOST_COOLDOWN_MS = 5 * 60_000;
 const HOST_TRIP_THRESHOLD = 2;
 
+// Cross-session knowledge: trip events persist to localStorage for 24h so a
+// NEW session's planner still avoids hosts that previous sessions proved
+// dead. The live 5-minute cooldown (above) governs instant-fail behavior;
+// the persisted history only widens the planner brief.
+const STORE_KEY = 'pure.netGuard.hosts.v1';
+const HISTORY_RETENTION_MS = 24 * 60 * 60_000;
+const HISTORY_MAX_HOSTS = 50;
+
 interface HostState {
   fails: number;
   blockedUntil: number;
 }
 
 const hosts = new Map<string, HostState>();
+
+interface PersistedHost {
+  host: string;
+  lastTripAt: number;
+}
+
+function loadTripHistory(): PersistedHost[] {
+  try {
+    if (typeof localStorage === 'undefined') return [];
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as PersistedHost[];
+    return Array.isArray(parsed) ? parsed.filter(p => typeof p?.host === 'string' && typeof p?.lastTripAt === 'number') : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistTrip(host: string): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const now = Date.now();
+    const merged = new Map<string, number>(loadTripHistory().map(p => [p.host, p.lastTripAt]));
+    merged.set(host, now);
+    const entries = [...merged.entries()]
+      .filter(([, ts]) => now - ts < HISTORY_RETENTION_MS)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, HISTORY_MAX_HOSTS)
+      .map(([h, ts]) => ({ host: h, lastTripAt: ts }));
+    localStorage.setItem(STORE_KEY, JSON.stringify(entries));
+  } catch {
+    // Storage unavailable/full — the in-memory breaker still works.
+  }
+}
 
 export function hostOf(url: string): string | null {
   try {
@@ -50,6 +92,7 @@ export function recordNetFailure(url: string): { tripped: boolean; host: string 
   if (state.fails >= HOST_TRIP_THRESHOLD) {
     state.blockedUntil = Date.now() + HOST_COOLDOWN_MS;
     tripped = true;
+    persistTrip(host);
   }
   hosts.set(host, state);
   return { tripped, host };
@@ -60,14 +103,19 @@ export function recordNetSuccess(url: string): void {
   if (host) hosts.delete(host);
 }
 
-/** Hosts currently circuit-broken — surfaced in the environment brief so the
- *  planner does not schedule steps that depend on them. */
+/** Hosts the planner should avoid: the live 5-minute cooldown set UNION the
+ *  persisted 24h trip history. The wide list feeds the environment brief
+ *  (planning knowledge); it does NOT drive hostBlocked()'s instant-fail —
+ *  cooldown expiry means "maybe recovered", and only a fresh trip re-blocks. */
 export function blockedHosts(): string[] {
   const now = Date.now();
-  return [...hosts.entries()]
+  const live = [...hosts.entries()]
     .filter(([, state]) => state.blockedUntil > now)
-    .map(([host]) => host)
-    .sort();
+    .map(([host]) => host);
+  const history = loadTripHistory()
+    .filter(p => now - p.lastTripAt < HISTORY_RETENTION_MS)
+    .map(p => p.host);
+  return [...new Set([...live, ...history])].sort();
 }
 
 /** Synthetic failure for a blocked host: instant, with the skip-and-continue
