@@ -39,7 +39,16 @@ import {
   type CustomProvider,
   type LLMProtocol,
 } from '../shared/providers';
-import { formatTokensCompact } from '../shared/usage';
+/** Compact integer form for budget placeholders ("1M", "262k", "33k") —
+ * short enough that "262k tok" fits the narrow budget column. */
+function compactBudgetTokens(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return `${m >= 10 ? Math.round(m) : Math.round(m * 10) / 10}M`;
+  }
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
 import { composeProxyUrl, effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList, parseProxyUrl, proxyUrlWithAuth } from '../shared/proxy';
 import { probeLlmEndpoint } from '../shared/llmProbe';
 import {
@@ -578,7 +587,12 @@ export class SettingsPanel {
       if (target.closest('#cfg-add-model-btn')) { this.addModelRow(); return; }
       if (target.closest('#cfg-clear-models-btn')) { this.clearModels(); return; }
       if (target.closest('#cfg-fetch-models-btn')) { void this.fetchProviderModels(); return; }
-      if (target.closest('#provider-delete-btn')) { this.removeProvider(this.editingProvider || ''); return; }
+      // Card-corner × → delete the provider without expanding its panel.
+      if (target.closest('[data-del-provider]')) {
+        const id = target.closest<HTMLElement>('[data-del-provider]')!.dataset.delProvider || '';
+        this.removeProvider(id);
+        return;
+      }
       if (target.closest('[data-close-panel]')) { this.collapseProviderPanel(); return; }
       if (target.closest('[data-save-panel]')) { this.saveAndCollapsePanel(); return; }
       const toggleKey = target.closest('#cfg-toggle-key');
@@ -967,6 +981,7 @@ export class SettingsPanel {
           : providerDef(id)?.protocol ?? protocolForURL(customBaseURL(customs, id, overrides)));
       const protocolBadge = `<span class="llm-provider-card-protocol">${escapeHtml(t(`llm.protocol.${resolvedProtocol}`))}</span>`;
       return `<button type="button" class="llm-provider-card" data-provider="${escapeHtml(id)}" title="${t('llm.card.open')}">
+        <span class="llm-provider-card-del" data-del-provider="${escapeHtml(id)}" role="button" aria-label="${escapeHtml(t('llm.custom.delete'))}" title="${escapeHtml(t('llm.custom.delete'))}">×</span>
         <span class="llm-provider-card-top">
           <span class="provider-card-mark ${markClass}">${escapeHtml(mark)}</span>
           <span class="llm-provider-card-status${hasKey ? '' : ' llm-provider-card-status-empty'}">${escapeHtml(status)}</span>
@@ -1111,7 +1126,6 @@ export class SettingsPanel {
         </div>` : ''}
       </div>
       <div class="llm-provider-panel-foot">
-        <button id="provider-delete-btn" class="setting-btn danger" data-i18n="llm.custom.deleteBtn">删除</button>
         <span class="llm-provider-panel-spacer"></span>
         <button type="button" class="setting-btn primary" data-save-panel data-i18n="llm.panel.save">保存</button>
       </div>
@@ -2434,8 +2448,8 @@ export class SettingsPanel {
     // number (with unit) so "auto" is never a guess. Unknown models show the
     // conservative fallback instead of a fabricated ceiling.
     const budgetDefaults = promptBudgetDefaultFor(provider, model);
-    const ctxDefault = `${formatTokensCompact(budgetDefaults.contextWindowTokens)} tok`;
-    const outDefault = `${formatTokensCompact(budgetDefaults.outputReserveTokens)} tok`;
+    const ctxDefault = `${compactBudgetTokens(budgetDefaults.contextWindowTokens)} tok`;
+    const outDefault = `${compactBudgetTokens(budgetDefaults.outputReserveTokens)} tok`;
     const budgetHint = t('llm.budget.defaultHint');
     return `<div class="llm-model-row${isDefault ? ' llm-model-row-default' : ''}" data-row="${i}">
       <input type="radio" name="cfg-model-default" class="llm-model-row-radio" data-radio-row="${i}" ${isDefault ? 'checked' : ''} title="${t('llm.model.setDefault')}" aria-label="${t('llm.model.setDefault')}" />
