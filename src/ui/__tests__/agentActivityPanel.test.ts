@@ -90,7 +90,8 @@ describe('agent activity panel', () => {
 
     const panel = document.querySelector('[data-agent-activity-rail="true"]');
     expect(panel).not.toBeNull();
-    expect(panel?.textContent).toContain('researcher');
+    // Cards show the localized role name, not the raw tool id.
+    expect(panel?.textContent).toContain('研究员');
     expect(panel?.textContent).toContain('已完成');
     expect(panel?.textContent).not.toContain('已完成第一部分');
     expect(panel?.querySelector('.agent-worker-trace')).toBeNull();
@@ -111,9 +112,38 @@ describe('agent activity panel', () => {
 
     expect(panel.el.querySelector('.agent-worker-trace')).toBeNull();
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
+    // Cards carry only WHO is working + when it joined + a status — no
+    // tool-call detail.
     expect(panel.el.textContent).toContain('执行工具');
-    expect(panel.el.textContent).toContain('正在执行 read_file');
+    expect(panel.el.textContent).not.toContain('正在执行 read_file');
     expect(panel.el.textContent).not.toContain('rust retry best practices');
+  });
+
+  it('fades terminal cards out after a short dwell in live mode', async () => {
+    const panel = createAgentActivityPanel('s1', { dismissDwellMs: 30, dismissFadeMs: 30 });
+    document.body.appendChild(panel.el);
+    panel.update([activity({ callId: 'a', agentName: 'code_editor', lifecycle: 'started', status: 'running', startedAt: Date.now() })]);
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
+
+    // Work finishes: the card dwells (still visible), then fades and leaves
+    // the DOM — and stays gone even though the stream keeps reporting it.
+    panel.update([activity({ callId: 'a', agentName: 'code_editor', lifecycle: 'done', status: 'done', startedAt: Date.now() })]);
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
+    await Bun.sleep(140);
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(0);
+    panel.update([activity({ callId: 'a', agentName: 'code_editor', lifecycle: 'done', status: 'done', startedAt: Date.now() })]);
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(0);
+    panel.el.remove();
+  });
+
+  it('keeps every card in the historical trace (no auto-dismiss)', async () => {
+    const panel = createAgentActivityPanel('s1', { dismissDwellMs: 30, dismissFadeMs: 30 });
+    document.body.appendChild(panel.el);
+    panel.update([activity({ callId: 'a', agentName: 'code_editor', lifecycle: 'done', status: 'done', startedAt: Date.now() })], { historical: true });
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
+    await Bun.sleep(120);
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
+    panel.el.remove();
   });
 
   it('keeps one flat row per active agent without a parallel sub-view', () => {
@@ -157,7 +187,9 @@ describe('agent activity panel', () => {
     panel.update([activity({ lifecycle: 'tool_running', toolName: 'search_files' })], { historical: true });
     expect(panel.el.textContent).toContain('协作记录');
     expect(panel.el.textContent).toContain('上次中断');
-    expect(panel.el.textContent).toContain('上次停留在 search_files');
+    // Historical cards are minimal too: who + status, no tool-call detail.
+    expect(panel.el.textContent).not.toContain('上次停留在 search_files');
+    expect(panel.el.textContent).not.toContain('search_files');
   });
 
   it('keeps the activity rail outside the conversation stream', () => {
@@ -204,20 +236,20 @@ describe('agent activity panel', () => {
     const panel = createAgentActivityPanel('s1');
     document.body.appendChild(panel.el);
     panel.update([activity({ callId: 'flight-agent', agentName: 'researcher', lifecycle: 'started', status: 'running' })], { sessionId: 's1' });
-    expect(panel.el.textContent).toContain('researcher');
+    expect(panel.el.textContent).toContain('研究员');
 
     // Switching the panel to a different session drops the previous session's
     // rows entirely — the flight agent card cannot animate or persist under
     // the weather conversation.
     panel.update([activity({ callId: 'weather-agent', agentName: 'deep_thinker', lifecycle: 'started', status: 'running' })], { sessionId: 's2' });
-    expect(panel.el.textContent).not.toContain('researcher');
-    expect(panel.el.textContent).toContain('deep_thinker');
+    expect(panel.el.textContent).not.toContain('研究员');
+    expect(panel.el.textContent).toContain('深度思考专家');
 
     // Returning to the flight session re-shows only its own agent — no trace
     // of the weather conversation survives in this panel.
     panel.update([activity({ callId: 'flight-agent', lifecycle: 'started', status: 'running', agentName: 'researcher' })], { sessionId: 's1' });
-    expect(panel.el.textContent).toContain('researcher');
-    expect(panel.el.textContent).not.toContain('deep_thinker');
+    expect(panel.el.textContent).toContain('研究员');
+    expect(panel.el.textContent).not.toContain('深度思考专家');
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
   });
 });
