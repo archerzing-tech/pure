@@ -1,5 +1,4 @@
 import type { SessionAgentActivity } from './store';
-import { SUBAGENT_ROLE_LABELS } from './planSummary';
 
 export interface AgentActivityPanelHandle {
   el: HTMLElement;
@@ -27,25 +26,6 @@ export function isAgentActivityActive(activity: SessionAgentActivity): boolean {
     || activity.lifecycle === 'observing'
     || activity.lifecycle === 'verifying'
     || (!activity.lifecycle && (!activity.status || activity.status === 'running'));
-}
-
-function statusLabel(activity: SessionAgentActivity, historical: boolean): string {
-  if (historical && isAgentActivityActive(activity)) return '上次中断';
-  if (activity.lifecycle === 'tool_running') return '执行工具';
-  if (activity.lifecycle === 'observing') return '整理结果';
-  if (activity.lifecycle === 'verifying') return '验证结果';
-  if (activity.lifecycle === 'cancelled') return '已取消';
-  if (activity.lifecycle === 'done' || activity.status === 'done') return '已完成';
-  if (activity.lifecycle === 'failed' || activity.status === 'failed') return '失败';
-  if (activity.lifecycle === 'timed_out' || activity.status === 'timed_out') return '超时';
-  switch (activity.state) {
-    case 'THINK': return '分析任务';
-    case 'ACT': return '执行中';
-    case 'OBSERVE': return '读取结果';
-    case 'VERIFY': return '验证中';
-    case 'TERMINATE': return '收尾中';
-    default: return '准备工作';
-  }
 }
 
 function stateClass(activity: SessionAgentActivity, historical: boolean): string {
@@ -103,8 +83,8 @@ export function createAgentActivityPanel(
 
   const rows = new Map<string, {
     row: HTMLElement;
+    badge: HTMLElement;
     name: HTMLElement;
-    status: HTMLElement;
     time: HTMLElement;
   }>();
   const activeCallIds = new Set<string>();
@@ -138,7 +118,9 @@ export function createAgentActivityPanel(
     // different conversation.
     const animateNewRows = !historical;
     const visible = activities.filter((activity) => activity.callId && !(!historical && dismissedCallIds.has(activity.callId)));
-    const active = visible.filter(isAgentActivityActive).sort((a, b) => (a.startedAt ?? a.lastUpdatedAt ?? 0) - (b.startedAt ?? b.lastUpdatedAt ?? 0));
+    // Newest active agent on TOP — each new card lands at the top of the
+    // stack like an incoming message; older ones push down.
+    const active = visible.filter(isAgentActivityActive).sort((a, b) => (b.startedAt ?? b.lastUpdatedAt ?? 0) - (a.startedAt ?? a.lastUpdatedAt ?? 0));
     const completed = visible.filter((activity) => !isAgentActivityActive(activity)).sort((a, b) => (b.startedAt ?? b.lastUpdatedAt ?? 0) - (a.startedAt ?? a.lastUpdatedAt ?? 0));
     const ordered = [...active, ...completed];
 
@@ -160,35 +142,28 @@ export function createAgentActivityPanel(
         const row = document.createElement('article');
         row.className = 'agent-worker';
         row.dataset.callId = activity.callId;
-        const top = document.createElement('div');
-        top.className = 'agent-worker-top';
-        const identity = document.createElement('div');
-        identity.className = 'agent-worker-identity';
-        const dot = document.createElement('span');
-        dot.className = 'agent-worker-dot';
-        dot.setAttribute('aria-hidden', 'true');
-        const name = document.createElement('strong');
+        // Three rows only, per the card contract: the "Agent" badge (cyan =
+        // an active worker), the machine name in FULL, and the start time.
+        // No status text, no action lines — state is conveyed by the badge
+        // color and the card's terminal fade.
+        const badge = document.createElement('span');
+        badge.className = 'agent-worker-badge';
+        badge.textContent = 'Agent';
+        const name = document.createElement('div');
         name.className = 'agent-worker-name';
-        identity.append(dot, name);
-        const time = document.createElement('span');
+        const time = document.createElement('div');
         time.className = 'agent-worker-time';
-        const status = document.createElement('span');
-        status.className = 'agent-worker-status';
-        top.append(identity, time, status);
-        row.append(top);
-        entry = { row, name, status, time };
+        row.append(badge, name, time);
+        entry = { row, badge, name, time };
         rows.set(activity.callId, entry);
       }
       const leaving = leavingCallIds.has(activity.callId);
       entry.row.className = `agent-worker agent-worker--${state}${entering ? ' agent-worker--entering' : ''}${leaving ? ' agent-worker--leaving' : ''}`;
-      // Show the localized role name (研究员 / 代码审查员 / …) instead of the
-      // raw snake_case tool id — 12px English ids were illegible on the small
-      // cards. Unknown / custom roles fall back to the id; the machine name
-      // stays available as the row tooltip.
-      entry.name.textContent = SUBAGENT_ROLE_LABELS[activity.agentName] ?? activity.agentName;
-      entry.row.title = activity.agentName;
+      // Row 2: the machine id in FULL (web_searcher / code_reviewer / …) —
+      // wraps instead of ellipsizing so the exact agent is always readable.
+      entry.name.textContent = activity.agentName;
+      entry.row.title = activity.agentRole || activity.agentName;
       entry.time.textContent = startedClock(activity.startedAt);
-      entry.status.textContent = statusLabel(activity, historical);
       list.appendChild(entry.row);
 
       // Schedule the fade-out the moment a live card reaches a terminal
