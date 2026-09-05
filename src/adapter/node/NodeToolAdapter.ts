@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process';
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
+import { blockedHostMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 import { stripAnsi } from '../../shared/ansi';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript } from '../../shared/backgroundCommand';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
@@ -1602,6 +1603,12 @@ export class NodeToolAdapter implements ToolAdapter {
     const url = String(args.url);
     const maxChars = typeof args.maxChars === 'number' ? args.maxChars : 20000;
 
+    // Host circuit breaker: a known-dead host fails instantly with a skip
+    // directive instead of walking the full fallback chain again.
+    if (hostBlocked(url)) {
+      return this.fail(null, start, blockedHostMessage(url), 'web_fetch');
+    }
+
     // Page cache: the same URL (with the same selector/maxChars bucket) served
     // within the hour comes from disk — news pages change but an agent loop
     // re-reading the same article mid-task does not need a second fetch.
@@ -1623,8 +1630,19 @@ export class NodeToolAdapter implements ToolAdapter {
     try {
       const outcome = await this.fetchPageWithFallbacks(url, { signal: abort.signal });
       if (!outcome) {
-        return this.fail(null!, start, `Fetch failed on all tiers (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_fetch on this URL; use researcher_web to find a mirror or a different source.`);
+        // The chain failed everywhere: feed the breaker so a repeat visit to
+        // this host fails instantly next time.
+        const { tripped } = recordNetFailure(url);
+        return this.fail(
+          null,
+          start,
+          tripped
+            ? blockedHostMessage(url, 'Fetch failed on all tiers (direct / Jina Reader / Wayback / Firecrawl)')
+            : `Fetch failed on all tiers (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_fetch on this URL; use researcher_web to find a mirror or a different source.`,
+          'web_fetch',
+        );
       }
+      recordNetSuccess(url);
       const truncated = outcome.text.length > maxChars ? outcome.text.slice(0, maxChars) + '\n\n[truncated]' : outcome.text;
       webCache().set(pageKey, truncated || '(empty page)', PAGE_TTL_MS);
 
@@ -2233,6 +2251,8 @@ export class NodeToolAdapter implements ToolAdapter {
   ): Promise<ToolResult> {
     const url = String(args.url ?? '').trim();
     if (!/^https?:\/\//i.test(url)) return this.fail(null, start, '请提供以 http(s):// 开头的下载链接');
+    // Host circuit breaker: a known-dead download source fails instantly.
+    if (hostBlocked(url)) return this.fail(null, start, blockedHostMessage(url));
 
     const proxyArg = typeof args.proxy === 'string' ? args.proxy.trim() : '';
     const { proxy } = this.resolveDownloadProxy(url, proxyArg);
@@ -2288,7 +2308,12 @@ export class NodeToolAdapter implements ToolAdapter {
       errors.push(fetched.error ?? '');
       // 全部方式都失败：移除进度条（失败的下载不应残留进度条，仅成功下载保留）。
       downloadHub.clearProgress(toolCallId);
-      return this.fail(null, start, `下载失败：${errors.filter(Boolean).join('；') || '未知错误'}`);
+      const allErrors = errors.filter(Boolean).join('；') || '未知错误';
+      if (isNetworkError(allErrors)) {
+        const { tripped } = recordNetFailure(url);
+        return this.fail(null, start, tripped ? blockedHostMessage(url, allErrors) : netFailureHint(url, allErrors));
+      }
+      return this.fail(null, start, `下载失败：${allErrors}`);
     } catch (err: unknown) {
       // 异常同样清理进度条。
       downloadHub.clearProgress(toolCallId);

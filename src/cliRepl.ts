@@ -28,6 +28,7 @@ import { parseSkillMarkdown } from './shared/skillFiles';
 import { mergeTranscriptWithTurn } from './shared/conversation';
 import { formatCliIntentAssessment, resolveCliAutoApprove } from './cliIntent';
 import { promptBudgetForProvider } from './shared/providers';
+import { blockedHosts } from './shared/netGuard';
 import { detectNetworkSummary, detectRuntimeVersions } from './adapter/node/NodeToolAdapter';
 import { buildTaskContract, discoverWorkspace, formatTaskContract, workspaceProfileSummary, type TaskContract, type WorkspaceProfile } from './shared/delivery';
 import { buildRepairPrompt, hasRepairableQualityFindings, qualityGateSummary, runProjectQualityGate, type ProjectQualityGateResult } from './ui/projectQualityGate';
@@ -181,10 +182,16 @@ function renderLogo() {
 // NodeToolAdapter reports inside sys_info() output.
 function buildEnvironmentContext(): string {
   const city = (process.env.PURE_LOCATION ?? process.env.PURE_CITY ?? '').trim();
+  // Capability brief: hosts that tripped the network circuit breaker this
+  // session — the planner must not schedule steps that depend on them.
+  const blocked = blockedHosts();
+  const netNote = blocked.length
+    ? ` Known-unreachable hosts this session (circuit-broken): ${blocked.join(', ')} — do not plan or attempt downloads/fetches from them; use inline/local alternatives instead.`
+    : '';
   if (!city) {
-    return `Environment: the user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.`;
+    return `Environment: the user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.${netNote}`;
   }
-  return `Environment: user location is ${city} (PURE_LOCATION). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.`;
+  return `Environment: user location is ${city} (PURE_LOCATION). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.${netNote}`;
 }   // Probe installed runtime versions (node / bun / python3 / rustc / git) once per process
 // and inject them into the system prompt, reusing the NodeToolAdapter probe so
 // sys_info() and the prompt always report identical versions. CLI runs inside
