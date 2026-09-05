@@ -1760,6 +1760,45 @@ function mapRawOf(slot: HTMLElement): string {
     ?? '';
 }
 
+/** A hydrated (or errored) map slot that must survive an innerHTML swap. */
+interface PreservedMapSlot {
+  raw: string;
+  el: HTMLElement;
+}
+
+/** Harvest finished map slots from the outgoing DOM so the completion render
+ * can re-attach them instead of rebuilding (and re-fetching tiles for) maps
+ * the user is already looking at. Still-loading slots are skipped — a fresh
+ * hydration is cheaper than interrupting one in flight. */
+function preserveLiveMapSlots(container: HTMLElement): PreservedMapSlot[] {
+  const preserved: PreservedMapSlot[] = [];
+  for (const el of Array.from(container.querySelectorAll<HTMLElement>('.map-slot'))) {
+    if (el.getAttribute('data-map-state') === 'loading') continue;
+    preserved.push({ raw: mapRawOf(el), el });
+  }
+  return preserved;
+}
+
+/** Re-attach preserved map slots into the freshly parsed DOM, matching by
+ * identical map payload (first-come-first-served for duplicates). The adopted
+ * node keeps its hydration, tile cache, listeners and source-toggle state;
+ * renderMapNodes skips it via its data-processed marker. */
+function adoptPreservedMapSlots(container: HTMLElement, preserved: PreservedMapSlot[]): void {
+  if (preserved.length === 0) return;
+  const queue = new Map<string, HTMLElement[]>();
+  for (const p of preserved) {
+    const list = queue.get(p.raw);
+    if (list) list.push(p.el);
+    else queue.set(p.raw, [p.el]);
+  }
+  for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.map-slot'))) {
+    const candidates = queue.get(mapRawOf(slot));
+    const candidate = candidates?.shift();
+    if (!candidate) continue;
+    slot.replaceWith(candidate);
+  }
+}
+
 function setMapState(slot: HTMLElement, state: 'loading' | 'preview' | 'error', message = ''): void {
   slot.setAttribute('data-map-state', state);
   slot.setAttribute('aria-busy', String(state === 'loading'));
@@ -1966,11 +2005,19 @@ export async function renderMarkdown(
   // future renderer gap (or a marked default renderer, e.g. <img>) can never
   // inject executable markup from model output into the WebView. ADD_ATTR keeps
   // our target="_blank" links working; data-* attributes are allowed by default.
+  // Hydrated live widgets (Leaflet map slots) are carried across the swap: the
+  // completion render re-parses the same text the user watched stream, and a
+  // full teardown used to visibly rebuild every already-painted map
+  // (painted → loading spinner → painted) — the violent flicker on route
+  // answers. Finished slots with an identical payload are adopted back
+  // untouched; still-loading ones re-render through the normal hydration.
+  const preservedMaps = preserveLiveMapSlots(container);
   container.innerHTML = DOMPurify.sanitize(html, {
     // ADD_ATTR: target is ours on links; loading + referrerpolicy are ours on
     // the PlantUML <img> and are not in DOMPurify's default allowed set.
     ADD_ATTR: ['target', 'loading', 'referrerpolicy'],
   });
+  adoptPreservedMapSlots(container, preservedMaps);
   // Bind image viewers immediately after DOM replacement. Waiting until after
   // Mermaid/chart work below leaves an already-visible image with no dblclick
   // handler while another diagram is still loading.
