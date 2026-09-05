@@ -80,7 +80,9 @@ describe('LLM page layout (default-model bar + provider grid)', () => {
     expect(settings).toContain("data-remove-row");
     expect(settings).toContain("data-save-panel");
     expect(settings).toContain("data-add-provider");
-    expect(settings).toContain("id=\"provider-delete-btn\"");
+    // Deletion lives on the collapsed card's corner × — no panel button.
+    expect(settings).toContain('data-del-provider');
+    expect(settings).not.toContain('id="provider-delete-btn"');
     expect(settings).toContain("private removeProvider(id: string): void");
   });
 

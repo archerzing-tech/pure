@@ -27,6 +27,10 @@ describe('SYSTEM_CORE_PROMPT (L0)', () => {
     expect(SYSTEM_CORE_PROMPT).toContain('<agent_identity>');
     expect(SYSTEM_CORE_PROMPT).toContain('pure');
     expect(SYSTEM_CORE_PROMPT).toContain('<operating_principles>');
+    // The reasoning phase plans the work — it is not a scratch draft of the
+    // deliverable (drafting code in thinking doubled tokens and latency).
+    expect(SYSTEM_CORE_PROMPT).toContain('Reason to plan, not to draft');
+    expect(SYSTEM_CORE_PROMPT).toContain('never to write out the deliverable');
     expect(SYSTEM_CORE_PROMPT).toContain('<permission_modes>');
     expect(SYSTEM_CORE_PROMPT).toContain('<runtime>');
     expect(SYSTEM_CORE_PROMPT).toContain('<response_format>');
