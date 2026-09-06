@@ -3,6 +3,14 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.2.1
+
+**原生 Rust 下载器 + 界面流畅度修复**
+
+- 用原生 Rust 下载器替换 GUI 侧 `download_file` 的 shell 管道，下载流程更稳定可靠。
+- 修复 backdrop blur 导致的长列表滚动卡顿。
+- 优化 agent 活动卡片的视觉细节与呈现。
+
 ## v2.2.1-beta
 
 **原生 Rust 下载器 + 界面流畅度修复**
