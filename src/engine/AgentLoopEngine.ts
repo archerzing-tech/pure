@@ -5,7 +5,7 @@
 
 import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
-import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT } from './LlmTurnRunner';
+import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
 import { BudgetManager } from './BudgetManager';
 import { ToolExecutionCoordinator } from './ToolExecutionCoordinator';
@@ -33,6 +33,12 @@ function isWebResearchTool(name: string): boolean {
 
 const RESEARCH_ROUND_LIMIT = 4;
 const VERIFIER_TIMEOUT_MS = 60_000;
+// Cap on continueGuard re-entries per run: the guard injects a "keep going"
+// directive when the model ends its turn with plain text while work remains.
+// Without a cap, a weak model and a strict guard could deadlock in a
+// think-text → nudge → think-text loop; three chances is enough to recover a
+// premature stop, after which the turn genuinely ends.
+const MAX_GUARD_CONTINUES = 3;
 // Tool results (read_file of a big file, a giant build/test dump, …) are folded
 // into the LLM context verbatim. A huge result both inflates the prompt (slow
 // first-token / TTFT → stream timeout) and can blow the context window. Cap the
@@ -100,6 +106,10 @@ export class AgentLoopEngine {
     // idle-timeout may be auto-resumed (see the THINK catch) so a pathological
     // stall can't loop forever.
     let streamResumes = 0;
+    // continueGuard re-entries this run (plan-incomplete nudges), and
+    // disconnected-tool-call recoveries (stream cut off mid tool call).
+    let guardContinues = 0;
+    let toolCallResumes = 0;
 
     while (true) {
       if (ctx.signal?.aborted) {
@@ -257,6 +267,22 @@ export class AgentLoopEngine {
           yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
           continue;
         }
+        // A tool call that started streaming but never saw its terminal `done`
+        // chunk: `toolCalls` stays empty and the round would fall through to
+        // VERIFY with the call silently DROPPED — the model asked to act, the
+        // act never ran, the turn "completed". Recover instead: keep any
+        // partial text, tell the model its call was cut off, let it re-issue
+        // the complete call. Bounded; past the cap the legacy path applies.
+        if (sawToolCall && !sawDone && toolCallResumes < MAX_TOOL_CALL_RESUMES) {
+          toolCallResumes++;
+          if (content.length > 0) messages.push({ role: 'assistant' as const, content });
+          messages.push({ role: 'user' as const, content: TOOL_CALL_RESUME_HINT, internal: true });
+          budget.addTokens(TOOL_CALL_RESUME_HINT);
+          turnCount++;
+          budget.incrementTurn();
+          yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+          continue;
+        }
       } catch (err: any) {
         if (ctx.signal?.aborted) {
           flushPartialAssistant();
@@ -302,6 +328,11 @@ export class AgentLoopEngine {
           continue;
         }
         yield { type: 'Error', payload: { code: 'LLM_STREAM_ERROR', message: err?.message ?? String(err), stateType: 'THINK', recoverable: false, recoveryAction: 'terminate' }, timestamp: Date.now() };
+        // Terminal event guarantee: consumers key their cleanup on Completed
+        // OR Interrupted. A bare `return` here used to emit NEITHER, so the
+        // GUI's finalMessages stayed empty and this turn's user prompt +
+        // partial answer were silently dropped from history.
+        yield { type: 'Interrupted', payload: { reason: `llm_stream_error: ${err?.message ?? String(err)}`, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
         return;
       }
 
@@ -568,6 +599,30 @@ export class AgentLoopEngine {
 
       // Successful verification resets the failure streak.
       failures.length = 0;
+
+      // ── continueGuard: "is the task ACTUALLY done?" ──
+      // The model ended its round with plain text and no tool calls, and
+      // VERIFY passed. For a question that is the correct ending; for a
+      // multi-step plan it is frequently a PREMATURE stop (the model reports
+      // progress and goes quiet while stages remain). The GUI supplies a
+      // guard that knows the live plan state; a directive return injects an
+      // internal nudge and re-enters THINK instead of terminating.
+      if (ctx.continueGuard) {
+        const directive = ctx.continueGuard({ content, turnCount, guardContinues });
+        const emptyOutputNudge = 'Your previous response contained no output. Either continue executing the remaining task steps with tools, or give your final answer as text — an empty response is not acceptable.';
+        const nudge = typeof directive === 'string' && directive.trim()
+          ? directive
+          : (!content.trim() && guardContinues < MAX_GUARD_CONTINUES ? emptyOutputNudge : false);
+        if (nudge && guardContinues < MAX_GUARD_CONTINUES) {
+          guardContinues++;
+          messages.push({ role: 'user' as const, content: nudge, internal: true });
+          budget.addTokens(nudge);
+          turnCount++;
+          budget.incrementTurn();
+          yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+          continue;
+        }
+      }
 
       // G-5: the design yields YieldControl at the bottom of every loop
       // iteration — including the one where VERIFY passes and we terminate.

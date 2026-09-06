@@ -2672,6 +2672,7 @@ export class SettingsPanel {
 
     return {
       provider: prev.provider,
+      planContinueGuard: prev.planContinueGuard ?? true,
       customProviders: this.gatherCustomProviders(),
       providerModels: this.gatherProviderModels(),
       providerModelNames: this.gatherProviderModelNames(),
@@ -2727,7 +2728,7 @@ export class SettingsPanel {
       // Max auto rounds per user message (Settings → General, next to the
       // auto-continue toggle). Clamp to 1..20 so a typed value can't zero out
       // the chain or spin it forever.
-      autoContinueMaxRounds: Math.min(20, Math.max(1, parseInt((document.getElementById('cfg-auto-continue-rounds') as HTMLInputElement | null)?.value ?? '', 10) || DEFAULT_AUTO_CONTINUE_MAX_ROUNDS)),
+      autoContinueMaxRounds: Math.min(50, Math.max(1, parseInt((document.getElementById('cfg-auto-continue-rounds') as HTMLInputElement | null)?.value ?? '', 10) || DEFAULT_AUTO_CONTINUE_MAX_ROUNDS)),
       mapTileCacheMB: Math.min(2000, Math.max(10, parseInt((document.getElementById('cfg-map-tile-cache-mb') as HTMLInputElement | null)?.value ?? '', 10) || DEFAULT_MAP_TILE_CACHE_MB)),
       mapTileKey: (document.getElementById('cfg-map-tianditu-key') as HTMLInputElement | null)?.value.trim().slice(0, 128) ?? '',
       // The composer's mode selector lives outside this form — carry its value

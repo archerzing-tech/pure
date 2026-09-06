@@ -16,6 +16,7 @@ import type { PromptObservability } from '../shared/promptObservability';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import type {
   BudgetConfig,
+  EngineContext,
   EngineEvent,
   FailurePolicy,
   HookRouter,
@@ -68,6 +69,9 @@ export interface CodingAgentConfig {
   hooks?: HookRouter;
   /** Custom failure policy — defaults to the built-in escalating policy. */
   failurePolicy?: FailurePolicy;
+  /** Optional plan-completion guard (EngineContext.continueGuard) — recovers
+   * turns where the model stopped calling tools while plan work remained. */
+  continueGuard?: EngineContext['continueGuard'];
   subagents?: SubagentDefinition[];
   /** Optional UI sink to surface which subagent is currently working. */
   subagentProgress?: SubagentProgress;
@@ -86,6 +90,7 @@ export class CodingAgent {
   public readonly verifier: Verifier;
   public readonly hooks: HookRouter;
   public readonly failurePolicy: FailurePolicy;
+  public readonly continueGuard?: EngineContext['continueGuard'];
   public readonly subagentOrchestrator: SubagentOrchestrator;
   public readonly subagentRegistry: DefaultSubagentRegistry;
   public readonly mcpClient?: MCPClient;
@@ -109,6 +114,7 @@ export class CodingAgent {
     this.verifier = config.verifier ?? plumbing.verifier;
     this.hooks = config.hooks ?? plumbing.hooks;
     this.failurePolicy = config.failurePolicy ?? plumbing.failurePolicy;
+    this.continueGuard = config.continueGuard;
 
     // Wire the permission manager into the tool execution path
     this.toolRegistry.setPermissionManager(this.permissionManager);
@@ -213,6 +219,7 @@ export class CodingAgent {
       // in the engine (never injected), now live in every run.
       hooks: this.hooks,
       failurePolicy: this.failurePolicy,
+      continueGuard: this.continueGuard,
     });
   }
 

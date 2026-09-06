@@ -4,10 +4,48 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { createPlanCard, createRestoredPlanCard, dedupePlanAnnouncements, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers } from '../plan';
+import { createPlanCard, createRestoredPlanCard, dedupePlanAnnouncements, evaluatePlanContinuation, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers } from '../plan';
 import { t } from '../../shared/i18n';
 import type { Plan } from '../../coding-agent/types';
 import { PlanProgressModel } from '../planProgress';
+
+describe('evaluatePlanContinuation (engine continueGuard decision)', () => {
+  const plan: Plan = {
+    reasoning: 'complex',
+    steps: [
+      { id: '1', action: '搭建骨架', description: '建目录与入口', expectedOutcome: '骨架可用', substeps: [{ id: '1', action: '初始化', description: 'npm init', expectedOutcome: 'package.json' }] },
+      { id: '2', action: '实现功能', description: '核心逻辑', expectedOutcome: '功能可用' },
+    ],
+  };
+
+  it('nudges when plan stages remain and the model stopped with text', () => {
+    const verdict = evaluatePlanContinuation({
+      content: '第一阶段已经完成。',
+      plan,
+      snapshot: { currentPlan: 1, currentTodo: 1, status: 'active' },
+      paused: false,
+    });
+    expect(typeof verdict).toBe('string');
+    expect(verdict).toContain('NOT finished');
+    expect(verdict).toContain('stage 1/2');
+  });
+
+  it('does not nudge on legitimate endings', () => {
+    const base = { plan, paused: false };
+    // Plan complete.
+    expect(evaluatePlanContinuation({ ...base, content: 'done', snapshot: { currentPlan: 2, currentTodo: 1, status: 'complete' } })).toBe(false);
+    // Last stage reached with its todos done.
+    expect(evaluatePlanContinuation({ ...base, content: 'done', snapshot: { currentPlan: 2, currentTodo: 1, status: 'active' } })).toBe(false);
+    // Paused flow (plan card waiting / assessment pending).
+    expect(evaluatePlanContinuation({ ...base, content: 'done', snapshot: { currentPlan: 1, currentTodo: 1, status: 'active' }, paused: true })).toBe(false);
+    // The model asked the user a question.
+    expect(evaluatePlanContinuation({ ...base, content: '要不要加上音效？', snapshot: { currentPlan: 1, currentTodo: 1, status: 'active' } })).toBe(false);
+    // Design-first gate: the ready marker hands control to the user.
+    expect(evaluatePlanContinuation({ ...base, content: '## 设计稿已就绪：design.html', snapshot: { currentPlan: 1, currentTodo: 1, status: 'active' } })).toBe(false);
+    // No plan at all.
+    expect(evaluatePlanContinuation({ ...base, plan: null, snapshot: null, content: 'x' })).toBe(false);
+  });
+});
 
 function createProgressCard(plan: Plan): { handle: ReturnType<typeof createPlanCard>; progress: PlanProgressModel } {
   const progress = new PlanProgressModel(plan);

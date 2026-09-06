@@ -400,10 +400,14 @@ function seedConfig(): string {
     toolFS: true, toolCmd: true, toolGit: true, toolBrowser: false,
     autoContinue: true,
     autoContinueMaxRounds: 8,
+    planContinueGuard: false,
     skills: { 'code-review': false, 'web-research': false, memory: false, planning: true },
     taskMode: 'auto',
     language: 'zh-CN',
-    configVersion: 13,
+    // Pin the NEWEST schema so the v14 migration cannot re-enable
+    // planContinueGuard — this scenario tests the ROUND-BASED chain only
+    // (the engine guard is covered by AgentLoopEngine unit tests).
+    configVersion: 14,
   };
   return `(() => {
     localStorage.setItem('pure_config', ${JSON.stringify(JSON.stringify(cfg))});
@@ -563,6 +567,7 @@ try {
     check('plan card rendered with 3 steps', view.card && view.totalSteps === 3, true);
     check('all steps done', view.doneSteps, 3);
     check('auto-continue rounds fired (🔁 bubbles)', view.autoRounds, 2);
+    log(`[debug] user bubbles: ${JSON.stringify(view.userBubbleTexts)}`);
     check('no floating outline', view.noOutline, true);
     // Chain must STOP at the terminal state: no further engine turns or 🔁 bubbles.
     await sleep(3500);

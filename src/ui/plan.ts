@@ -6,10 +6,44 @@
 import type { AnalysisResult, Plan } from '../coding-agent/types';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
+import { parseDesignReadyMarker } from '../shared/delivery';
 import { showInlineCard } from './inlineCard';
 import { PlanProgressModel, type PlanProgressSnapshot } from './planProgress';
 
 export type PlanReviewDecision = 'approve' | 'skip' | 'cancel';
+
+/**
+ * Engine continueGuard decision (pure, exported for tests): given the model's
+ * turn-ending text and the LIVE plan state, decide whether the turn is a
+ * premature stop. Returns the internal nudge directive to re-enter THINK, or
+ * false when the ending is legitimate (plan complete, user question, design
+ * gate, paused flow). Consulted only while the plan/build auto-continue
+ * setting is on (the CodingAgent construction gates it).
+ */
+export function evaluatePlanContinuation(args: {
+  content: string;
+  plan: Plan | null;
+  snapshot: { currentPlan: number; currentTodo: number; status: 'active' | 'waiting' | 'complete' } | null;
+  paused: boolean;
+}): string | false {
+  const { content, plan, snapshot, paused } = args;
+  if (!plan || !snapshot) return false;
+  if (paused) return false;
+  if (snapshot.status === 'complete') return false;
+  // A trailing question means the model is asking the USER — a human answer
+  // decides what happens next, never an automatic nudge.
+  if (/[?？]\s*$/.test(content.trim())) return false;
+  // Design-first gate: the design-ready marker hands control to the user's
+  // preview confirmation; continuing implementation would bypass it.
+  if (parseDesignReadyMarker(content)) return false;
+  const stage = plan.steps[snapshot.currentPlan - 1];
+  const lastStage = snapshot.currentPlan >= plan.steps.length;
+  const stageTodoCount = stage?.todosRequired === false ? 0 : (stage?.substeps?.length ?? 0);
+  const todosDone = snapshot.currentTodo >= stageTodoCount;
+  if (lastStage && todosDone) return false;
+  const progress = `stage ${snapshot.currentPlan}/${plan.steps.length}` + (stageTodoCount > 0 ? `, todo ${snapshot.currentTodo}/${stageTodoCount}` : '');
+  return `Handover check: the approved plan is NOT finished (${progress} done). Continue executing the remaining plan stages with tools right now — re-read where you stopped, make the next tool call, and keep going until every stage is complete and verified. Do NOT end the turn with a progress report.`;
+}
 
 export interface PlanReviewOptions {
   /** Project builds must be approved; ordinary complex tasks may be skipped. */
