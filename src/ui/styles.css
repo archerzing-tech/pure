@@ -990,7 +990,10 @@ body {
   right: 0;
   bottom: 0;
   z-index: 18; /* below the floating settings button (20) & context panel (30) */
-  width: 230px;
+  /* Shrinks with the window: on narrow viewports the rail takes less of the
+     conversation and its cards turn MORE transparent (see the media queries
+     below) so the chat stays readable underneath. */
+  width: clamp(184px, 15vw, 230px);
   max-width: 100%;
   min-width: 0;
   min-height: 0;
@@ -1097,9 +1100,9 @@ body {
   padding: 8px;
   border: 1px solid var(--border-light);
   border-radius: 10px;
-  /* Near-solid surface so the card stays readable while floating OVER chat
-     content; the host around it is transparent. */
-  background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+  /* Semi-transparent on purpose: the user wants to see that conversation
+     content continues underneath the floating rail. */
+  background: color-mix(in srgb, var(--bg-card) 72%, transparent);
   box-shadow: var(--shadow-md);
 }
 /* Three-row card contract: centered "Agent" badge (cyan = an active worker),
@@ -1128,12 +1131,40 @@ body {
   word-break: break-all;
   text-align: center;
 }
+/* Divider between the name row and the start-time row. */
 .agent-worker-time {
   color: var(--text-tertiary);
   font-family: var(--font-mono);
   font-size: 10.5px;
   text-align: center;
   white-space: nowrap;
+  border-top: 1px solid color-mix(in srgb, var(--border-light) 85%, transparent);
+  margin-top: 2px;
+  padding-top: 4px;
+}
+/* Persistent motion for ACTIVE workers: the card's whole job is "something is
+   working right now", so it breathes — a soft cyan glow on the border plus a
+   badge opacity pulse. Opacity/border only: compositor-friendly, no layout. */
+.agent-worker--active {
+  border-color: color-mix(in srgb, #22d3ee 45%, var(--border-light));
+  animation: agentWorkerBreath 2s ease-in-out infinite;
+}
+@keyframes agentWorkerBreath {
+  0%, 100% {
+    border-color: color-mix(in srgb, #22d3ee 30%, var(--border-light));
+    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0), var(--shadow-md);
+  }
+  50% {
+    border-color: color-mix(in srgb, #22d3ee 70%, var(--border-light));
+    box-shadow: 0 0 14px 0 rgba(34, 211, 238, 0.28), var(--shadow-md);
+  }
+}
+.agent-worker--active .agent-worker-badge {
+  animation: agentBadgeBreath 2s ease-in-out infinite;
+}
+@keyframes agentBadgeBreath {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 .agent-worker--active {
   border-color: color-mix(in srgb, #22d3ee 45%, var(--border-light));
@@ -1216,6 +1247,32 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .agent-worker--entering { animation: none; }
+  .agent-worker--active { animation: none; }
+  .agent-worker--active .agent-worker-badge { animation: none; }
+}
+
+/* ── Narrow windows: the rail overlays the conversation, so it shrinks and
+   its cards turn MORE transparent — occlusion stays tolerable without a
+   dedicated layout mode. ── */
+@media (max-width: 1500px) {
+  .agent-worker {
+    padding: 6px;
+    background: color-mix(in srgb, var(--bg-card) 62%, transparent);
+  }
+  .agent-worker-name { font-size: 11px; }
+  .agent-worker-time { font-size: 9.5px; padding-top: 3px; }
+}
+@media (max-width: 1280px) {
+  #agent-activity-host { width: 176px; }
+  .agent-activity-rail { padding: 46px 8px 16px; gap: 10px; }
+  .agent-worker {
+    padding: 5px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-card) 52%, transparent);
+  }
+  .agent-worker-badge { padding: 1px 10px; font-size: 9px; }
+  .agent-worker-name { font-size: 10px; }
+  .agent-worker-time { font-size: 9px; padding-top: 2px; }
 }
 
 /* ── Per-session transcript hosts ──
@@ -6509,9 +6566,12 @@ select:focus-visible,
 
 #status-bar {
   padding: 5px 32px;
-  background: color-mix(in srgb, var(--bg-header) 82%, transparent);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  /* SOLID, no backdrop-filter: this bar is on screen during every scroll
+     frame, and WKWebView re-blurs the entire region behind a backdrop-filter
+     element per frame — continuous scrolling through a long transcript
+     saturated the main/compositor thread (scroll jank, unresponsive
+     settings). Same treatment as #composer-box / #sidebar-toggle. */
+  background: var(--bg-header);
 }
 
 #input-bar .input-ws-btn,
@@ -6832,9 +6892,10 @@ select:focus-visible,
   height: 46px;
   border-right: none;
   border-radius: 10px 0 0 10px;
-  background: color-mix(in srgb, var(--bg-chat) 88%, transparent);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  /* Solid, no backdrop-filter — this tab floats over the scrolling
+     transcript whenever the context panel is collapsed, and WKWebView
+     re-blurs the region behind it every scroll frame (see #status-bar). */
+  background: var(--bg-chat);
   box-shadow: -3px 0 10px rgba(0,0,0,0.07);
   transition: right 0.35s var(--ease-out), color var(--transition), background var(--transition), border-color var(--transition), transform var(--transition);
   animation: reopenSlideIn 0.3s var(--ease-out);
