@@ -398,7 +398,9 @@ async function main(): Promise<number> {
       ['已返回调用显示结果', eventView.results[0], '事件中的工具结果'],
       ['未返回调用恢复为 stopped', eventView.stopped, [false, true]],
       ['历史恢复显示协作轨迹', eventView.agentPanel, true],
-      ['协作轨迹保留 agent 状态和摘要', eventView.agentText.includes('researcher') && eventView.agentText.includes('已返回结果'), true],
+      // Cards are minimal (Agent badge + machine id + start time): the trace
+      // preserves the agent id and the badge, not the old status labels.
+      ['协作轨迹保留 agent 状态和摘要', eventView.agentText.includes('researcher') && eventView.agentText.includes('Agent'), true],
     ];
     let eventOk = true;
     for (const [name, actual, want] of checks) {

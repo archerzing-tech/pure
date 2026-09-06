@@ -93,6 +93,10 @@ export interface HarnessConfig {
    * tool/verify failures fall back to the engine's default messaging.
    */
   failurePolicy?: FailurePolicy;
+  /** Optional "is the task actually done?" guard consulted before TERMINATE
+   * (see EngineContext.continueGuard). The GUI supplies a plan-state-aware
+   * guard; omitted for CLI and subagents. */
+  continueGuard?: EngineContext['continueGuard'];
 }
 
 export class Harness {
@@ -149,6 +153,7 @@ export class Harness {
       verifier: this.config.verifier,
       hooks: this.config.hooks,
       failurePolicy: this.config.failurePolicy,
+      continueGuard: this.config.continueGuard,
       signal,
     };
   }

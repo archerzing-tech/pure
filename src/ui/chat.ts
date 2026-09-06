@@ -36,6 +36,7 @@ import {
   clearPlanCardRefining,
   matchPlanProgressMarkers,
   dedupePlanAnnouncements,
+  evaluatePlanContinuation,
   type PlanProgressMarker,
   type PlanCardHandle,
 } from './plan';
@@ -2742,6 +2743,13 @@ export class ChatController {
         // a hard failure there triggers an in-engine rewrite. No LLM re-check of
         // the final output surfaces internal verifier feedback to the user.
         verifier: createDefaultVerifier(),
+        // Anti-stall guard: when the model ends its round with plain text while
+        // plan stages remain, the engine re-enters THINK with a continue
+        // directive instead of completing the turn. Independent of the
+        // round-based auto-continue chain: the guard keeps the CURRENT turn
+        // alive (bounded, 3 chances); the chain decides whether ANOTHER user
+        // turn starts at all.
+        continueGuard: config.planContinueGuard === false ? undefined : (args) => this.planContinueGuard(args),
         // Surface each spawned subagent as a live "which agent is working" card.
         subagentProgress,
       });
@@ -4684,7 +4692,17 @@ export class ChatController {
           // keeps the badge (advanced to the pending round), the chain ending
           // (terminal / budget / stall) clears it.
           if (scheduled) this.activePlanCardHandle?.setAutoContinue(this.autoContinue.roundCount + 1, max);
-          else this.activePlanCardHandle?.clearAutoContinue();
+          else {
+            this.activePlanCardHandle?.clearAutoContinue();
+            // The chain ended WITHOUT a scheduled round — say WHY instead of
+            // letting the badge silently vanish (capped vs stalled).
+            const deny = this.autoContinue.denyReason;
+            if (deny === 'budget') {
+              this.addStatusBubble(t('chat.autoContinue.capped').replace('{n}', String(this.autoContinue.roundCount)).replace('{max}', String(max)), false, false);
+            } else if (deny === 'stall') {
+              this.addStatusBubble(t('chat.autoContinue.stalled'), false, false);
+            }
+          }
         } else {
           // Auto-continue turned off mid-chain — drop the badge.
           this.activePlanCardHandle?.clearAutoContinue();
@@ -4779,6 +4797,18 @@ export class ChatController {
   /** Fire the next auto round. Runs from the scheduler timer; re-checks that
    * the chain is still wanted (config on, plan still active) before re-entering
    * send(). No streaming check needed — any user send/Stop cleared the timer. */
+  /** Engine continueGuard closure: thin adapter over the pure decision,
+   *  feeding it THIS controller's live plan state. */
+  private planContinueGuard(args: { content: string; turnCount: number; guardContinues: number }): string | false {
+    const snapshot = this.activePlanProgress?.getSnapshot() ?? null;
+    return evaluatePlanContinuation({
+      content: args.content,
+      plan: this.activeComplexPlan,
+      snapshot: snapshot ? { currentPlan: snapshot.currentPlan, currentTodo: snapshot.currentTodo, status: snapshot.status } : null,
+      paused: !!(this.pausePlanCard || this.pauseAssessmentFlow),
+    });
+  }
+
   private fireAutoContinue(): void {
     const cfg = loadConfig();
     if (!cfg || cfg.autoContinue !== true) return;

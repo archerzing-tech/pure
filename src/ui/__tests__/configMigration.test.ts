@@ -48,7 +48,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(13);
+    expect(cfg.configVersion).toBe(14);
   });
 
   it('moves a non-default global Base URL to the active built-in override', () => {
@@ -61,7 +61,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides.glm?.baseURL).toBe('https://my-gateway.example.com/v1');
-    expect(cfg.configVersion).toBe(13);
+    expect(cfg.configVersion).toBe(14);
   });
 
   it('never overwrites an existing override during migration', () => {
@@ -85,7 +85,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(13);
+    expect(cfg.configVersion).toBe(14);
   });
 
   it('persists the migrated config back to storage (idempotent re-read)', () => {
@@ -95,18 +95,18 @@ describe('config v10 migration — legacy global Base URL', () => {
     });
     loadConfig();
     const persisted = JSON.parse(mem[STORAGE_KEY]!) as PureConfig;
-    expect(persisted.configVersion).toBe(13);
+    expect(persisted.configVersion).toBe(14);
     expect(persisted.baseURL).toBe('');
     expect(persisted.providerOverrides.qwen?.baseURL).toBe('https://gateway.example.com/v1');
     // A second read must not re-migrate or change anything.
     invalidateConfigCache();
     const again = loadConfig()!;
-    expect(again.configVersion).toBe(13);
+    expect(again.configVersion).toBe(14);
     expect(again.baseURL).toBe('');
     expect(again.providerOverrides.qwen?.baseURL).toBe('https://gateway.example.com/v1');
   });
 
-  it('leaves an already-migrated v13 config untouched (no rewrite)', () => {
+  it('flips autoContinue on once when migrating a pre-v14 config', () => {
     const v13 = {
       configVersion: 13,
       provider: 'qwen',
@@ -117,9 +117,19 @@ describe('config v10 migration — legacy global Base URL', () => {
     mem[STORAGE_KEY] = JSON.stringify(v13);
     const cfg = loadConfig()!;
     expect(cfg.providerOverrides.qwen?.baseURL).toBe('https://mirror.example.com/v1');
-    expect(cfg.configVersion).toBe(13);
-    // Already at the latest schema → no rewrite: storage stays byte-identical.
-    expect(mem[STORAGE_KEY]).toBe(JSON.stringify(v13));
+    expect(cfg.configVersion).toBe(14);
+    // v14: long-task auto-continue becomes default-on for existing configs.
+    expect(cfg.autoContinue).toBe(true);
+    // Migrated → persisted; a re-read is stable and does NOT re-flip an
+    // explicit user opt-out.
+    invalidateConfigCache();
+    const again = loadConfig()!;
+    expect(again.autoContinue).toBe(true);
+    mem[STORAGE_KEY] = JSON.stringify({ ...JSON.parse(mem[STORAGE_KEY]!), configVersion: 14, autoContinue: false });
+    invalidateConfigCache();
+    const explicitOff = loadConfig()!;
+    expect(explicitOff.autoContinue).toBe(false);
+    expect(explicitOff.configVersion).toBe(14);
   });
 
   it('chains older migrations (v1 → v11) without breaking the final state', () => {
@@ -131,7 +141,7 @@ describe('config v10 migration — legacy global Base URL', () => {
       toolBrowser: false, // pre-v2 decorative false must be restored
     });
     const cfg = loadConfig()!;
-    expect(cfg.configVersion).toBe(13);
+    expect(cfg.configVersion).toBe(14);
     expect(cfg.toolBrowser).toBe(true); // v2 restored the real gate
     expect(cfg.baseURL).toBe(''); // v10 scrubbed the global field
     expect(cfg.providerOverrides.glm?.baseURL).toBe('https://gateway.example.com/v1');
@@ -154,7 +164,7 @@ describe('config v11 migration — scrub registry-default override leftovers', (
     });
     const cfg = loadConfig()!;
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(13);
+    expect(cfg.configVersion).toBe(14);
   });
 
   it('removes a cross-provider default (DashScope URL sitting on DeepSeek)', () => {
@@ -241,11 +251,14 @@ describe('config v12 migration — DeepSeek is ONE provider', () => {
     });
   });
 
-  it('stays put when the config is already at v13', () => {
-    const raw = JSON.stringify({ configVersion: 13, provider: 'glm', model: 'glm-5.2', autoContinue: false });
+  it('stays put when the config is already at v14', () => {
+    const raw = JSON.stringify({ configVersion: 14, provider: 'glm', model: 'glm-5.2', autoContinue: false });
     mem[STORAGE_KEY] = raw;
     const cfg = loadConfig()!;
-    expect(cfg.configVersion).toBe(13);
-    expect(mem[STORAGE_KEY]).toBe(raw); // byte-identical: no rewrite
+    expect(cfg.configVersion).toBe(14);
+    // Already at the newest schema → no rewrite, and an explicit user opt-out
+    // (v14 flipped the default once) is preserved byte-identically.
+    expect(cfg.autoContinue).toBe(false);
+    expect(mem[STORAGE_KEY]).toBe(raw);
   });
 });

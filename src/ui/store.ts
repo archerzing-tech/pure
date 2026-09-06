@@ -20,6 +20,9 @@ export interface TranscriptEntry {
   modelMessageIndex: number;
   role: 'user' | 'assistant' | 'tool';
   content: string | null;
+  /** True for engine-injected user messages (failure-policy hints, continuation
+   *  nudges): kept in modelContext but NEVER rendered as a user bubble. */
+  internal?: boolean;
   /** User-uploaded images shown in the restored conversation bubble. */
   images?: MessageImage[];
   attachments?: MessageAttachment[];
@@ -118,6 +121,8 @@ export interface SessionEvent {
   id: string;
   type: 'user' | 'assistant' | 'thinking' | 'tool_call' | 'tool_result' | 'analysis' | 'assessment' | 'plan' | 'artifact' | 'status';
   content?: string;
+  /** Engine-injected internal user message — never rendered as a bubble. */
+  internal?: boolean;
   images?: MessageImage[];
   attachments?: MessageAttachment[];
   toolCallId?: string;
@@ -341,6 +346,7 @@ export function createSessionSnapshot(
       modelMessageIndex: draft.modelMessageIndex,
       role: message.role as TranscriptEntry['role'],
       content: draft.content ?? message.content,
+      internal: message.role === 'user' && message.internal ? true : undefined,
       images: draft.images ?? message.images,
       attachments: draft.attachments ?? message.attachments,
       displayOverride: draft.displayOverride,
@@ -417,7 +423,7 @@ function snapshotV2ToV3(snapshot: SessionSnapshotV2Legacy): SessionSnapshotV3 {
   const events: SessionEvent[] = [];
   for (const entry of snapshot.transcript) {
     if (entry.role === 'user') {
-      events.push({ id: entry.id, type: 'user', content: entry.content ?? '', images: entry.images, attachments: entry.attachments });
+      events.push({ id: entry.id, type: 'user', content: entry.content ?? '', images: entry.images, attachments: entry.attachments, internal: entry.internal });
       continue;
     }
     if (entry.analysis) events.push({ id: `${entry.id}-analysis`, type: 'analysis', content: entry.analysis });

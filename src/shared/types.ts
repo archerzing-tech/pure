@@ -198,6 +198,12 @@ export interface EngineContext {
   signal?: AbortSignal;
   hooks?: HookRouter;
   failurePolicy?: FailurePolicy;
+  /** GUI-supplied "is the task actually done?" check, consulted once the THINK
+   *  round produced no tool calls and VERIFY passed — just before TERMINATE.
+   *  Return a directive string to inject an internal user message and re-enter
+   *  THINK (the model prematurely stopped calling tools); return false to end
+   *  the turn normally. CLI omits it, keeping its behavior unchanged. */
+  continueGuard?: (args: { content: string; turnCount: number; guardContinues: number }) => string | false;
   lockManager?: LockManager;
   /** Nesting depth of the current run: 0 = top-level parent, 1 = a subagent
    * spawned by the parent, etc. Set by SubagentOrchestrator; used to enforce

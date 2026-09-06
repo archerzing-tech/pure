@@ -57,17 +57,53 @@ describe('AutoContinueScheduler.schedule — trigger gates', () => {
 });
 
 describe('AutoContinueScheduler — stall protection', () => {
-  it('stops when a round made no tool progress and did not move the plan', async () => {
+  it('continues through ONE stalled round, stops at two, and reports the reason', async () => {
     const s = new AutoContinueScheduler();
     let fired = 0;
     // Establish the chain baseline with a real round at plan 2 / todo 1.
     expect(s.schedule(signals({ currentPlan: 2, currentTodo: 1 }), 8, 5, () => fired++)).toBe(true);
     await wait(20);
     expect(fired).toBe(1);
-    // A following round with no tools and NO forward movement must not chain.
+    // ONE stalled round (no tools, no movement) still continues — a text-only
+    // report is often a premature stop the "继续" nudge recovers.
+    expect(s.schedule(signals({ hasToolSuccess: false, currentPlan: 2, currentTodo: 1 }), 8, 5, () => fired++)).toBe(true);
+    await wait(20);
+    expect(fired).toBe(2);
+    expect(s.denyReason).toBeNull();
+    // A SECOND consecutive stalled round ends the chain with an explicit
+    // 'stall' reason the UI surfaces.
     expect(s.schedule(signals({ hasToolSuccess: false, currentPlan: 2, currentTodo: 1 }), 8, 5, () => fired++)).toBe(false);
+    expect(s.denyReason).toBe('stall');
+    expect(fired).toBe(2);
+  });
+
+  it('clears the stall counter as soon as a round makes progress', async () => {
+    const s = new AutoContinueScheduler();
+    let fired = 0;
+    expect(s.schedule(signals({ currentPlan: 2, currentTodo: 1 }), 8, 5, () => fired++)).toBe(true);
     await wait(20);
     expect(fired).toBe(1);
+    // Stall once…
+    expect(s.schedule(signals({ hasToolSuccess: false, currentPlan: 2, currentTodo: 1 }), 8, 5, () => fired++)).toBe(true);
+    await wait(20);
+    expect(fired).toBe(2);
+    // …then real progress resets the counter: another stall round continues.
+    expect(s.schedule(signals({ currentPlan: 3, currentTodo: 1 }), 8, 5, () => fired++)).toBe(true);
+    await wait(20);
+    expect(fired).toBe(3);
+    expect(s.schedule(signals({ hasToolSuccess: false, currentPlan: 3, currentTodo: 1 }), 8, 5, () => fired++)).toBe(true);
+  });
+
+  it('reports the budget reason when the round cap is reached', async () => {
+    const s = new AutoContinueScheduler();
+    let fired = 0;
+    for (let i = 0; i < 8; i++) {
+      expect(s.schedule(signals({ currentPlan: 2, currentTodo: 1 }), 8, 1, () => fired++)).toBe(true);
+      await wait(5);
+    }
+    expect(fired).toBe(8);
+    expect(s.schedule(signals({ currentPlan: 2, currentTodo: 1 }), 8, 1, () => fired++)).toBe(false);
+    expect(s.denyReason).toBe('budget');
   });
 
   it('chains a no-tool round that still advanced the plan cursor (e.g. stage announcement)', async () => {
