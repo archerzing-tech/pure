@@ -352,6 +352,156 @@ describe('AgentLoopEngine', () => {
       expect(err.payload.recoverable).toBe(false);
     }
     expect(completed).toBeUndefined();
+    // Terminal-event guarantee: consumers (chat.ts) key cleanup on Completed
+    // OR Interrupted — a bare Error used to strand them with empty state.
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    if (interrupted && interrupted.type === 'Interrupted') {
+      expect(interrupted.payload.reason).toContain('llm_stream_error');
+    }
+  });
+
+  // ═══ continueGuard: premature text-only stops are recovered ═══
+
+  it('re-enters THINK when the guard says plan work remains', async () => {
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        yield { type: 'done', content: calls === 1 ? 'progress report' : 'all done', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'all done', toolCalls: [] }),
+    };
+    let consultations = 0;
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm,
+      continueGuard: ({ guardContinues }) => {
+        consultations++;
+        return guardContinues === 0 ? 'continue: stage 2 remains' : false;
+      },
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 'guard-1', systemPrompt: 'X', userPrompt: 'build it', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    expect(calls).toBe(2); // premature stop → nudge → real finish
+    // Consulted at the premature stop AND once more at the real ending —
+    // but only ONE nudge was injected.
+    expect(consultations).toBe(2);
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed).toBeDefined();
+    if (completed && completed.type === 'Completed') {
+      expect(completed.payload.finalOutput).toBe('all done');
+    }
+    // The nudge rode into the model context as an internal user message.
+    const completedMsgs = completed && completed.type === 'Completed' ? (completed.payload.messages ?? []) : [];
+    expect(completedMsgs.some(m => m.role === 'user' && m.internal && m.content?.includes('stage 2 remains'))).toBe(true);
+  });
+
+  it('caps guard re-entries at three even when the guard always wants more', async () => {
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        yield { type: 'done', content: `report ${calls}`, toolCalls: [] };
+      },
+      complete: async () => ({ content: 'report', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, continueGuard: () => 'keep going' });
+
+    const events = await collect(engine.run(
+      { sessionId: 'guard-2', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // 1 initial + 3 nudged rounds, then the guard budget is exhausted.
+    expect(calls).toBe(4);
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed).toBeDefined();
+  });
+
+  it('ends immediately when the guard returns false', async () => {
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        yield { type: 'done', content: 'final', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'final', toolCalls: [] }),
+    };
+    let consulted = 0;
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm,
+      continueGuard: () => { consulted++; return false; },
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 'guard-3', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    expect(calls).toBe(1);
+    expect(consulted).toBe(1);
+    expect(events.find(e => e.type === 'Completed')).toBeDefined();
+  });
+
+  it('nudges an empty final round through the guard budget', async () => {
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        yield { type: 'done', content: '', toolCalls: [] };
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, continueGuard: () => false }); // guard declines; empty-output nudge applies
+
+    const events = await collect(engine.run(
+      { sessionId: 'guard-4', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // 1 empty round + 3 empty-output nudges (shared guard budget), then the
+    // turn terminates instead of "completing" on silence.
+    expect(calls).toBe(4);
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed).toBeDefined();
+  });
+
+  it('recovers a tool call whose stream was cut off before done', async () => {
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        if (calls === 1) {
+          // Tool call starts streaming, then the stream dies with NO done
+          // chunk — the legacy path silently dropped this call.
+          yield { type: 'tool_call_delta', index: 0, name: 'write_file', arguments: '{"path"' };
+          return;
+        }
+        yield { type: 'done', content: 'recovered and finished', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'recovered and finished', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm });
+
+    const events = await collect(engine.run(
+      { sessionId: 'guard-5', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    expect(calls).toBe(2); // cut-off call re-issued instead of dropped
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed).toBeDefined();
+    const completedMsgs = completed && completed.type === 'Completed' ? (completed.payload.messages ?? []) : [];
+    expect(completedMsgs.some(m => m.role === 'user' && m.internal && m.content?.includes('cut off mid-stream'))).toBe(true);
   });
 
   // ═══ BudgetManager: check() override via tiny budget ═══
