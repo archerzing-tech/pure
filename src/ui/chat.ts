@@ -329,6 +329,15 @@ type ToolRowEntry = {
   toolCallId?: string;
 };
 
+/** Deterministic key for a tool call's arguments (sorted object keys), used to
+ *  collapse a repeated identical call onto the card that already shows it. */
+function stableArgsStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableArgsStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableArgsStringify(v)}`).join(',')}}`;
+}
+
 // Parse a tool-call buffer into { name?, args? }. Two formats occur in practice:
 // 1. The { name, arguments } wrapper some adapters emit (arguments either a
 //    pre-parsed object or a JSON string).
@@ -2337,6 +2346,11 @@ export class ChatController {
     // arrived yet; the engine's id-bearing TokenDelta (from the `tool_call` /
     // `done` chunks) migrates the staged row onto the id-keyed map.
     const pendingRows = new Map<string, ToolRowEntry>();
+    // Last COMPLETED row per stable call key (tool + sorted args). When the
+    // model repeats an identical call (continuation rounds love re-listing /
+    // re-reading), the engine reuses the result and the UI re-points at this
+    // card instead of appending a second identical one.
+    const completedToolRowKeys = new Map<string, ToolRowEntry>();
     const pendingByName = new Map<string, ToolRowEntry>();
     // Per-call throttle for tool-call JSON re-parses (keyed by toolCallId or
     // staged tool name). Streaming a giant argument (write_file `content`, a
@@ -2344,6 +2358,12 @@ export class ChatController {
     // re-rendering the Input panel on every token freezes the UI mid-stream
     // ("stuck with only the blinking cursor"). See the TokenDelta handler.
     const toolCallRefresh = new Map<string, number>();
+    /** Collapse target for a repeated identical call: the completed card with
+     *  the same tool + args (see completedToolRowKeys), or null. */
+    const tryCollapseDuplicateRow = (toolName: string, args: Record<string, unknown> | undefined): ToolRowEntry | null => {
+      if (!args) return null;
+      return completedToolRowKeys.get(`${toolName}::${stableArgsStringify(args)}`) ?? null;
+    };
     type LiveToolOutputLine = { kind: 'stdout' | 'stderr'; line: string; progress?: boolean };
     const liveToolOutputQueue = new Map<string, LiveToolOutputLine[]>();
     let liveToolOutputFrame: number | undefined;
@@ -3763,8 +3783,23 @@ export class ChatController {
                   const args = parseToolCallBuffer(event.payload.toolCallBuffer).args || {};
                   let entry = pendingRows.get(toolCallId);
                   if (!entry) {
+                    // A repeated identical call collapses onto the completed
+                    // card that already shows it — the engine reuses that
+                    // result instead of executing again, so a second card
+                    // would only ever duplicate the first.
+                    const collapse = tryCollapseDuplicateRow(toolName, args);
                     const staged = pendingByName.get(toolName);
-                    if (staged) {
+                    if (collapse && staged) {
+                      // The duplicate streamed its own placeholder row —
+                      // remove it and point at the completed original.
+                      staged.row.el.remove();
+                      pendingByName.delete(toolName);
+                      entry = { ...collapse, toolCallId };
+                      pendingRows.set(toolCallId, entry);
+                    } else if (collapse) {
+                      entry = { ...collapse, toolCallId };
+                      pendingRows.set(toolCallId, entry);
+                    } else if (staged) {
                       pendingByName.delete(toolName);
                       entry = { ...staged, toolCallId };
                       pendingRows.set(toolCallId, entry);
@@ -3797,10 +3832,17 @@ export class ChatController {
                     : undefined;
                   const existing = pendingByName.get(toolName);
                   if (!existing) {
-                    endThinking();
-                    const row = appendToolRow(toolName, args ?? {});
-                    toolRowSinceSegment = true;
-                    pendingByName.set(toolName, { row, toolName, args: args ?? {} });
+                    // Repeated identical call mid-stream: stage VIRTUALLY on
+                    // the completed card instead of appending a new row.
+                    const collapse = args ? tryCollapseDuplicateRow(toolName, args) : null;
+                    if (collapse) {
+                      pendingByName.set(toolName, { ...collapse, toolName });
+                    } else {
+                      endThinking();
+                      const row = appendToolRow(toolName, args ?? {});
+                      toolRowSinceSegment = true;
+                      pendingByName.set(toolName, { row, toolName, args: args ?? {} });
+                    }
                   } else if (args) {
                     existing.args = args;
                     updateToolRowArgs(existing.row, toolName, args, false);
@@ -3998,6 +4040,9 @@ export class ChatController {
             liveToolOutputQueue.delete(event.payload.toolCallId);
             const pending = pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName);
             if (pending) {
+              // Remember the completed card so a repeated identical call
+              // collapses onto it instead of rendering twice.
+              if (pending.args) completedToolRowKeys.set(`${toolName}::${stableArgsStringify(pending.args)}`, pending);
               if (pending.toolCallId && subagentNames.has(pending.toolName)) pending.row.el.dataset.agentCallId = pending.toolCallId;
               finalizeToolRow(pending.row, {
                 success: event.payload.result.success,
