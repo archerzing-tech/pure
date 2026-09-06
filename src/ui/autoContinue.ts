@@ -10,8 +10,10 @@
 // testable on its own; chat.ts owns the timing (schedule from send()'s
 // finally) and the actual send('继续') re-entry.
 
-/** Default cap on auto rounds per user message. */
-export const DEFAULT_AUTO_CONTINUE_MAX_ROUNDS = 8;
+/** Default cap on auto rounds per user message. Long plans routinely need
+ *  more than a handful of stage-boundary continuations; 8 used to run out
+ *  mid-build with no notice. */
+export const DEFAULT_AUTO_CONTINUE_MAX_ROUNDS = 20;
 
 /** Delay between an auto round ending and the next one starting (ms). Keeps a
  * perceptible stop window for the user and lets the UI flip back to Send. */
@@ -47,6 +49,14 @@ export class AutoContinueScheduler {
   private round = 0;
   private lastPlan = -1;
   private lastTodo = -1;
+  /** Consecutive rounds with no tool success and no plan movement. One stall
+   *  round still continues (the model may be mid-report); two in a row ends
+   *  the chain with denyReason 'stall'. */
+  private stallRounds = 0;
+  /** Why the chain last refused to continue ('budget' = round cap, 'stall' =
+   *  repeated no-progress rounds) — surfaced to the user instead of the badge
+   *  silently vanishing. */
+  private deny: 'budget' | 'stall' | null = null;
 
   /** True when a continuation is currently scheduled (pending gap). */
   get pending(): boolean {
@@ -59,6 +69,11 @@ export class AutoContinueScheduler {
     return this.round;
   }
 
+  /** Why the chain last refused to schedule (null while healthy). */
+  get denyReason(): 'budget' | 'stall' | null {
+    return this.deny;
+  }
+
   /** Clear any pending continuation and reset the round budget + stall cursor. */
   cancel(): void {
     this.token++;
@@ -69,6 +84,8 @@ export class AutoContinueScheduler {
     this.round = 0;
     this.lastPlan = -1;
     this.lastTodo = -1;
+    this.stallRounds = 0;
+    this.deny = null;
   }
 
   /**
@@ -91,15 +108,28 @@ export class AutoContinueScheduler {
     }
     // Gate 1: only clean plan turns with real work chain.
     if (!signals.planActive || !signals.cleanEnd || signals.asksForInput || signals.planTerminal) return false;
-    // Stall protection: a round with no successful tool and no forward plan
-    // movement must not chain — the model is spinning or waiting for input.
+    // Stall handling (relaxed): a round with no successful tool and no plan
+    // movement may be a premature stop (text-only report) — the "继续" nudge
+    // frequently recovers it. ONE stall round still continues; TWO in a row
+    // means the model is genuinely done or stuck, so the chain ends with a
+    // 'stall' deny the UI reports. Any progress resets the stall counter.
     const advanced = signals.currentPlan > this.lastPlan || signals.currentTodo > this.lastTodo;
     if (!signals.hasToolSuccess && !advanced) {
-      this.round = 0;
-      return false;
+      this.stallRounds++;
+      if (this.stallRounds >= 2) {
+        this.stallRounds = 0;
+        this.deny = 'stall';
+        return false;
+      }
+    } else {
+      this.stallRounds = 0;
     }
     // Gate 2: per-user-message round budget.
-    if (this.round >= maxRounds) return false;
+    if (this.round >= maxRounds) {
+      this.deny = 'budget';
+      return false;
+    }
+    this.deny = null;
     this.lastPlan = signals.currentPlan;
     this.lastTodo = signals.currentTodo;
     const myToken = this.token;

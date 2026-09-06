@@ -6,6 +6,7 @@
 
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
+import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { customProviderFor, defaultModelFor, isProviderId, providerDef, providerOverrideFor, PROVIDERS, type CustomProvider, type ProviderId, type ProviderOverride } from '../shared/providers';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
@@ -133,9 +134,16 @@ export interface PureConfig {
    */
   autoContinue: boolean;
   /**
+   * Engine-level anti-stall guard (EngineContext.continueGuard): recovers
+   * turns where the model stopped calling tools while plan stages remained.
+   * Independent of autoContinue — the guard keeps the CURRENT turn alive;
+   * the chain decides whether another turn starts at all.
+   */
+  planContinueGuard: boolean;
+  /**
    * Max auto rounds per user message (loop protection; also enforced by stall
    * detection). Edited in Settings → General next to the auto-continue toggle
-   * (1..20, default 8).
+   * (1..50, default 20).
    */
   autoContinueMaxRounds: number;
   /**
@@ -253,8 +261,13 @@ export function defaults(): PureConfig {
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', username: '', password: '', hasPassword: false, bypassProviders: [], bypassModels: [] }),
     streamingRender: true,
     taskMode: 'auto',
-    autoContinue: false,
-    autoContinueMaxRounds: 8,
+    autoContinue: true,
+    autoContinueMaxRounds: DEFAULT_AUTO_CONTINUE_MAX_ROUNDS,
+    /** Engine-level anti-stall guard: when the model ends a turn with plain
+     *  text while plan stages remain, re-enter THINK with a continue directive
+     *  (bounded at 3 per turn). Independent of autoContinue — the guard keeps
+     *  the CURRENT turn alive; the chain decides whether another turn starts. */
+    planContinueGuard: true,
     mapTileCacheMB: DEFAULT_MAP_TILE_CACHE_MB,
     mapTileKey: '',
     schedules: [],
@@ -663,6 +676,17 @@ export function loadConfig(): PureConfig | null {
       // schema so future migrations can assume the fields exist.
       if ((parsed.configVersion ?? 1) < 13) {
         cfg.configVersion = 13;
+        needsPersist = true;
+      }
+      // Config v14: auto-continue becomes the DEFAULT-ON behavior. Complex
+      // plans stalled at every stage boundary waiting for a manual "继续" —
+      // flipped once here so existing configs inherit the new default (the
+      // user can still turn it off; that choice then persists). Also enables
+      // the engine-level plan continuation guard.
+      if ((parsed.configVersion ?? 1) < 14) {
+        cfg.autoContinue = true;
+        cfg.planContinueGuard = true;
+        cfg.configVersion = 14;
         needsPersist = true;
       }
       if (isTauriRuntime() && cfg.apiKey) {

@@ -102,6 +102,10 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
     }
 
     if (entry.role === 'user') {
+      // Engine-injected internal nudges (failure-policy hints, continuation
+      // directives) live in modelContext but must never render as a user
+      // bubble or act as a turn boundary.
+      if (entry.internal) continue;
       // Turn boundary: the previous turn's artifact card lands here, before
       // the next request starts — exactly where live streaming put it.
       flushPending();
@@ -198,6 +202,8 @@ export function projectSessionEvents(events: import('./store').SessionEvent[]): 
   for (const event of events) {
     switch (event.type) {
       case 'user':
+        // Engine-injected internal nudge — never rendered (see entry path).
+        if (event.internal) break;
         flushPending();
         addArtifactsFromTools();
         completedTools.length = 0;
