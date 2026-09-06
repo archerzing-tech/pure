@@ -8,7 +8,7 @@ import { mergeTokenUsage } from '../shared/usage';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
 import { BudgetManager } from './BudgetManager';
-import { ToolExecutionCoordinator } from './ToolExecutionCoordinator';
+import { ToolExecutionCoordinator, type ExecutedToolResult } from './ToolExecutionCoordinator';
 
 // v1.9.15 — research-loop guard: successful web searches never trip the
 // failure policy (empty/relevance-gated-out result sets return success so the
@@ -39,6 +39,20 @@ const VERIFIER_TIMEOUT_MS = 60_000;
 // think-text → nudge → think-text loop; three chances is enough to recover a
 // premature stop, after which the turn genuinely ends.
 const MAX_GUARD_CONTINUES = 3;
+// Stable key for a tool call (name + arguments with sorted object keys), used
+// by the consecutive-identical-call dedupe below.
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
+}
+function callKey(name: string, argsJson: string): string {
+  let parsed: unknown;
+  try { parsed = JSON.parse(argsJson || '{}'); } catch { parsed = argsJson; }
+  return `${name}::${typeof parsed === 'string' ? parsed : stableStringify(parsed)}`;
+}
+const DEDUPE_NOTE = '[dedupe] This call is identical to the immediately preceding call (same tool, same arguments) — its result was REUSED instead of executing again. If you genuinely need fresh data, change the call or say why in your reply.';
 // Tool results (read_file of a big file, a giant build/test dump, …) are folded
 // into the LLM context verbatim. A huge result both inflates the prompt (slow
 // first-token / TTFT → stream timeout) and can blow the context window. Cap the
@@ -102,6 +116,13 @@ export class AgentLoopEngine {
     // Consecutive tool rounds made up entirely of web-research tools (see the
     // research-loop guard above). Reset by any non-research tool or answer.
     let researchStreak = 0;
+    // Consecutive-identical-call dedupe: the last executed call (tool + args),
+    // so an IMMEDIATE repeat — the model re-issuing the same list/read/write
+    // after a rewrite round, a continuation nudge, or a parallel duplicate in
+    // the same round — reuses the previous result instead of executing again.
+    // Only the IMMEDIATELY preceding call counts: anything executed in between
+    // may have changed the world, and a repeat is then legitimate.
+    let lastExecuted: { key: string; text: string; ok: boolean } | null = null;
     // Survives THINK re-entries within one turn: caps how many times a stream
     // idle-timeout may be auto-resumed (see the THINK catch) so a pathological
     // stall can't loop forever.
@@ -365,9 +386,64 @@ export class AgentLoopEngine {
         for (const call of toolCalls) {
           yield { type: 'ToolStarted', payload: { toolName: call.function.name, toolCallId: call.id, toolCallArgs: call.function.arguments }, timestamp: Date.now() };
         }
-        const toolResults = await this.toolCoordinator.execute(toolCalls, ctx, budget);
+        // Consecutive-identical dedupe: split the round's calls into real
+        // executions and repeats of the immediately preceding SUCCESSFUL call.
+        // A repeat reuses that result instead of touching the world again —
+        // write tools included, since re-writing identical content is a no-op.
+        // FAILED calls are never deduped: re-executing after a failure is the
+        // legitimate transient-fault retry path.
+        const dedupedCalls: Array<{ call: (typeof toolCalls)[number]; key: string }> = [];
+        const toExecute: typeof toolCalls = [];
+        for (const call of toolCalls) {
+          const key = callKey(call.function.name, call.function.arguments);
+          if (lastExecuted && lastExecuted.ok && lastExecuted.key === key) {
+            dedupedCalls.push({ call, key });
+            continue;
+          }
+          toExecute.push(call);
+        }
+        const executedResults = toExecute.length > 0
+          ? await this.toolCoordinator.execute(toExecute, ctx, budget)
+          : [];
+        const textOfResult = (tr: ExecutedToolResult): string => tr.result.success
+          ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
+          : `Error: ${tr.result.error}`;
+        const executedByCallId = new Map(executedResults.map((tr) => [tr.toolCallId, tr]));
+        // Assemble in the ORIGINAL call order so the UI maps results back to
+        // the right cards; deduped calls reuse the executed result.
+        const toolResults: ExecutedToolResult[] = [];
+        for (const call of toolCalls) {
+          const dup = dedupedCalls.find((d) => d.call.id === call.id);
+          if (!dup) {
+            const tr = executedByCallId.get(call.id);
+            if (tr) toolResults.push(tr);
+            continue;
+          }
+          // lastExecuted is immutable across the execution below — safe here.
+          const snap = lastExecuted && lastExecuted.key === dup.key ? lastExecuted : null;
+          if (!snap) {
+            toolResults.push({ toolCallId: call.id, toolName: call.function.name, result: { id: call.id, toolName: call.function.name, result: 'dedupe resolution failed', success: false, duration: 0 }, duration: 0 });
+            continue;
+          }
+          toolResults.push({
+            toolCallId: call.id,
+            toolName: call.function.name,
+            result: { id: call.id, toolName: call.function.name, result: `${snap.text}\n\n${DEDUPE_NOTE}`, success: true, duration: 0 },
+            duration: 0,
+          });
+        }
         for (const result of toolResults) {
           yield { type: 'ToolResult', payload: result, timestamp: Date.now() };
+        }
+        // Advance the consecutive-call cursor from the last REAL execution.
+        const lastExec = executedResults[executedResults.length - 1];
+        if (lastExec) {
+          const callFor = toExecute.find((c) => c.id === lastExec.toolCallId);
+          lastExecuted = {
+            key: callKey(lastExec.toolName, callFor?.function.arguments ?? ''),
+            text: textOfResult(lastExec).slice(0, 8_000),
+            ok: lastExec.result.success,
+          };
         }
 
         // Track tool failures and consult policy
