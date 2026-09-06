@@ -3217,6 +3217,180 @@ async fn execute_command_stream(
     execute_command_stream_inner(&state, &id, &workspace, &command, &on_output, proxy_url.as_deref()).await
 }
 
+/// Native downloader for the GUI's download_file tool. Replaces the fragile
+/// POSIX shell pipeline (curl HEAD probes + awk field parsing + stat polling —
+/// broken on Windows, blind to the app's proxy config, one shot with no
+/// resume) with reqwest: proxy-aware via build_http_client (including the
+/// corporate HTTP/1.1 CONNECT workaround), browser UA + same-origin Referer
+/// (hotlink protection), Range resume from the partial file, bounded retries
+/// with backoff, and the SAME JSON progress-line protocol
+/// (`{"type":"dl"|"done",…}`) the WebView already parses.
+///
+/// `$HOME` / `$PWD` in `path` are expanded from the environment / `workspace`
+/// — the WebView cannot know the real home dir. Returns 0 on success, 1 when
+/// every attempt failed (the last error rides the final done line). Cancel is
+/// not wired to kill_command (there is no child pid); a Stop during a download
+/// lets it finish in the background.
+#[tauri::command]
+async fn download_file_stream(
+    url: String,
+    path: String,
+    workspace: String,
+    on_output: Channel<String>,
+    proxy_url: Option<String>,
+    max_attempts: Option<u32>,
+) -> Result<i32, String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+
+    // ── Path expansion ($HOME / $PWD) + parent dirs ──
+    let expand = |spec: &str| -> String {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".into());
+        if let Some(rest) = spec.strip_prefix("$HOME") {
+            return format!("{home}{rest}");
+        }
+        if let Some(rest) = spec.strip_prefix("$PWD") {
+            return format!("{}{rest}", workspace.trim_end_matches('/'));
+        }
+        spec.to_string()
+    };
+    let file_path = expand(&path);
+    if let Some(parent) = std::path::Path::new(&file_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let filename = std::path::Path::new(&file_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".into());
+
+    let emit = |line: String| {
+        // The WebView's channel parser expects the execute_command_stream
+        // envelope: {type:"stdout", content:<progress json line>}.
+        let _ = on_output.send(serde_json::json!({"type":"stdout","content": line}).to_string());
+    };
+
+    let attempts = max_attempts.unwrap_or(3).clamp(1, 5);
+    let mut last_err = String::from("unknown error");
+    for attempt in 1..=attempts {
+        // Resume: keep the partial file from a previous attempt and ask the
+        // server for the remainder. A 200 answer (no Range support) restarts
+        // from zero; a 206 appends.
+        let existing = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+
+        let client = match build_http_client(std::time::Duration::from_secs(120), proxy_url.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = e;
+                break;
+            }
+        };
+        let mut req = client.get(&url).header("User-Agent", BROWSER_UA);
+        if let Ok(parsed) = reqwest::Url::parse(&url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin.starts_with("http") {
+                req = req.header("Referer", origin);
+            }
+        }
+        if existing > 0 {
+            req = req.header("Range", format!("bytes={existing}-"));
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("{e}");
+                if attempt < attempts {
+                    tokio::time::sleep(std::time::Duration::from_millis(600 * attempt as u64)).await;
+                }
+                continue;
+            }
+        };
+        let status = resp.status();
+        // 4xx (except 429) are terminal — the server answered, retrying the
+        // same URL cannot help.
+        if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            last_err = format!("HTTP {}", status.as_u16());
+            break;
+        }
+        if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+            last_err = format!("HTTP {}", status.as_u16());
+            if attempt < attempts {
+                tokio::time::sleep(std::time::Duration::from_millis(800 * attempt as u64)).await;
+            }
+            continue;
+        }
+        let resuming = status == reqwest::StatusCode::PARTIAL_CONTENT && existing > 0;
+        let base = if resuming { existing } else { 0 };
+        let total = resp.content_length().map(|l| l + base);
+
+        let file = if resuming {
+            std::fs::OpenOptions::new().append(true).open(&file_path)
+        } else {
+            std::fs::File::create(&file_path)
+        };
+        let mut file = match file {
+            Ok(f) => f,
+            Err(e) => {
+                last_err = format!("open {}: {e}", file_path);
+                break;
+            }
+        };
+
+        let mut downloaded = base;
+        let mut last_emit = std::time::Instant::now() - std::time::Duration::from_millis(400);
+        let mut stream_err: Option<String> = None;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    downloaded += bytes.len() as u64;
+                    if let Err(e) = file.write_all(&bytes) {
+                        stream_err = Some(format!("disk write: {e}"));
+                        break;
+                    }
+                    if last_emit.elapsed() >= std::time::Duration::from_millis(300) {
+                        last_emit = std::time::Instant::now();
+                        emit(
+                            serde_json::json!({"type":"dl","downloaded":downloaded,"total":total.unwrap_or(0),"filename":filename,"via":"native"})
+                                .to_string(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    stream_err = Some(format!("{e}"));
+                    break;
+                }
+            }
+        }
+        drop(file);
+
+        match stream_err {
+            None => {
+                emit(
+                    serde_json::json!({"type":"done","code":0,"path":file_path,"filename":filename,"size":downloaded,"via":"native"})
+                        .to_string(),
+                );
+                return Ok(0);
+            }
+            Some(e) => {
+                // Keep the partial file — the next attempt resumes from it.
+                last_err = e;
+                if attempt < attempts {
+                    tokio::time::sleep(std::time::Duration::from_millis(800 * attempt as u64)).await;
+                }
+            }
+        }
+    }
+
+    emit(
+        serde_json::json!({"type":"done","code":1,"error":last_err,"via":"native"})
+            .to_string(),
+    );
+    Ok(1)
+}
+
 /// Kill a running command started via execute_command_stream. The GUI calls
 /// this when the turn is cancelled (Stop button): the shell tree is SIGKILLed
 /// as a process group so grandchildren don't survive as background orphans.
@@ -13954,6 +14128,7 @@ pub fn run() {
             // Command execution
             execute_command,
             execute_command_stream,
+            download_file_stream,
             kill_command,
             // Git tools
             git_diff,
