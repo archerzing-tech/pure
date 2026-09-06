@@ -117,6 +117,15 @@ sessionSidebar = new SessionSidebar({
 
 let settingsPanelPromise: Promise<SettingsPanel> | null = null;
 
+// Warm the lazy settings chunk during idle: the dynamic import otherwise pays
+// its full fetch + parse on the FIRST click, which read as "the settings
+// button is broken". After this warm-up the click only constructs the panel.
+if (typeof requestIdleCallback === 'function') {
+  requestIdleCallback(() => { void import('./settings').catch(() => {}); });
+} else {
+  setTimeout(() => { void import('./settings').catch(() => {}); }, 3000);
+}
+
 function getSettingsPanel(): Promise<SettingsPanel> {
   if (!settingsPanelPromise) {
     settingsPanelPromise = import('./settings')
