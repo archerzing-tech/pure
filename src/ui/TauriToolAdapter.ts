@@ -590,6 +590,87 @@ export class TauriToolAdapter implements ToolAdapter {
           const cmd = buildDownloadCommand(url, outSpec, connections, filenameArg, resume);
           const emit = (p: DownloadProgressEvent): void => dispatchDownloadProgress(toolCall.id, p);
 
+          // ── Native Rust downloader first ──
+          // Proxy-aware (app proxy config), resume via Range, bounded retries,
+          // browser UA + Referer — none of which the shell chain guarantees.
+          // Falls back to the shell chain when the backend predates the
+          // download_file_stream command.
+          if (tauriChannel) {
+            const urlBasename = (() => {
+              try {
+                const p = new URL(url).pathname.split('/').pop() ?? '';
+                return decodeURIComponent(p) || 'download';
+              } catch {
+                return 'download';
+              }
+            })();
+            const safeName = (filenameArg || urlBasename || 'download').replace(/[\\/:*?"<>|]/g, '_');
+            const nativePath = `${outSpec}/${safeName}`;
+            try {
+              const channel = new tauriChannel<string>();
+              const doneHolder: { value: { code: number; path?: string; size?: number; filename?: string; via?: string; error?: string } | null } = { value: null };
+              channel.onmessage = (raw: string) => {
+                let parsed: { type?: string; content?: unknown } | null = null;
+                try { parsed = JSON.parse(raw); } catch { parsed = null; }
+                if (!parsed || parsed.type !== 'stdout') return;
+                const line = String(parsed.content ?? '');
+                let ev: { type?: string; downloaded?: number; total?: number; filename?: string; via?: string; error?: string } | null = null;
+                try { ev = JSON.parse(line); } catch { ev = null; }
+                if (!ev) return;
+                if (ev.type === 'dl') {
+                  const total = Number(ev.total ?? -1);
+                  emit({
+                    downloaded: Number(ev.downloaded ?? 0),
+                    total,
+                    percent: total > 0 ? Math.min(100, Math.floor((Number(ev.downloaded ?? 0) / total) * 100)) : -1,
+                    speed: 0,
+                    state: 'downloading',
+                    filename: ev.filename,
+                    via: ev.via,
+                  });
+                } else if (ev.type === 'done') {
+                  doneHolder.value = ev as { code: number; path?: string; size?: number; filename?: string; via?: string; error?: string };
+                }
+              };
+              const code = (await this.call('download_file_stream', {
+                id: toolCall.id,
+                url,
+                path: nativePath,
+                workspace: ws,
+                proxyUrl: this.proxyUrl,
+                maxAttempts: 3,
+                onOutput: channel,
+              })) as number;
+              const done = doneHolder.value;
+              if (code === 0 && done?.path) {
+                recordNetSuccess(url);
+                emit({ downloaded: Number(done.size ?? 0), total: Number(done.size ?? 0), percent: 100, speed: 0, state: 'done', path: done.path, filename: done.filename, via: done.via ?? 'native' });
+                return {
+                  id: toolCall.id,
+                  toolName: 'download_file',
+                  result: JSON.stringify({ kind: 'download', path: done.path, size: Number(done.size ?? 0), durationMs: Date.now() - start, via: done.via ?? 'native' }),
+                  success: true,
+                  duration: Date.now() - start,
+                };
+              }
+              const detail = done?.error ?? `退出码 ${code}`;
+              if (isNetworkError(detail)) {
+                const { tripped } = recordNetFailure(url);
+                return {
+                  id: toolCall.id,
+                  toolName: 'download_file',
+                  result: tripped ? blockedHostMessage(url, detail) : netFailureHint(url, detail),
+                  success: false,
+                  duration: Date.now() - start,
+                };
+              }
+              return { id: toolCall.id, toolName: 'download_file', result: `下载失败：${detail}`, success: false, duration: Date.now() - start };
+            } catch {
+              // Backend predates download_file_stream — fall through to the
+              // shell chain below.
+            }
+          }
+
           if (tauriChannel && !this.invokeFn) {
             const channel = new tauriChannel<string>();
             // Captured from the async channel closure via a holder object (a bare
