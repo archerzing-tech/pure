@@ -3,6 +3,15 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.2.2-alpha
+
+**生成性子 agent 超时调整 + Agent 轨道与主题变量修复**
+
+- 所有生成角色超时提升至 600s（task_planner / bash_executor 300s），与子 agent 预算上限对齐，ui_designer 等长任务不再因超时中断。
+- 超时错误以人类可读单位提示（"3m" 而非 "180000ms"），并说明子 agent 仍在工作、重派同一子任务可从检查点继续，以及是否存在部分输出。
+- Agent 轨道修复：bash_executor 作为工具不再渲染成 agent 卡片；移除「本轮协作/协作现场」标题块；轨道随窗口收缩（`clamp(160px, 12vw, 200px)`），窄屏下卡片更透明。
+- 修复 `--surface` / `--fg` 主题变量未定义导致 var() 回退 #fff 的暗色模式下载卡片不可读问题。
+
 ## v2.2.1
 
 **原生 Rust 下载器 + 界面流畅度修复**
