@@ -428,11 +428,18 @@ export class SubagentOrchestrator implements ToolAdapter {
           await persist('subagent_interrupted', event.payload.messages, event.payload.turnCount ?? 0);
           if (combinedSignal.aborted) {
             const cancelled = parentSignal?.aborted === true && !timeoutSignal.aborted;
-            emit(progress?.onDone, { success: false, error: cancelled ? 'cancelled' : 'timed out', status: cancelled ? 'cancelled' : 'timed_out', lifecycle: cancelled ? 'cancelled' : 'timed_out', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+            // A timeout here is the subagent's own budget (defaultTimeoutMs),
+            // not a malfunction — generative roles simply need longer. The
+            // error tells the parent how to recover (re-delegate to continue
+            // from the checkpoint) and that partial output may exist.
+            const timeoutNote = cancelled
+              ? 'cancelled'
+              : `timed out after ${Math.round(def.defaultTimeoutMs / 1000)}s — the subagent was still working (generative tasks take a while). Re-delegate the SAME subtask to continue from its checkpoint${finalOutput ? '; partial output was produced' : ''}.`;
+            emit(progress?.onDone, { success: false, error: timeoutNote, status: cancelled ? 'cancelled' : 'timed_out', lifecycle: cancelled ? 'cancelled' : 'timed_out', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
             return {
               id: toolCall.id,
               toolName: def.name,
-              result: { aborted: true, reason: 'timeout or cancelled', finalOutput },
+              result: { aborted: true, reason: timeoutNote, finalOutput },
               success: false,
               duration: done(0),
             };
@@ -451,11 +458,20 @@ export class SubagentOrchestrator implements ToolAdapter {
             duration: done(0),
           };
         } else if (event.type === 'Error') {
-          emit(progress?.onError, { error: event.payload.message, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+          // A timeout is not a malfunction: generative subagents (ui_designer
+          // writing a whole site design, deep_thinker reasoning for minutes)
+          // simply need longer than their budget. Tell the parent HOW to
+          // recover — the checkpoint store lets a re-delegation of the SAME
+          // subtask continue instead of starting over.
+          const isTimeout = event.payload.code === 'LLM_STREAM_ERROR' && /timed out/i.test(event.payload.message);
+          const errorText = isTimeout
+            ? `${event.payload.message} — the subagent was still working when its time budget ran out (generative tasks take a while). Re-delegate the SAME subtask to continue from its checkpoint, or do the work directly in the main session.`
+            : event.payload.message;
+          emit(progress?.onError, { error: errorText, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
           return {
             id: toolCall.id,
             toolName: def.name,
-            error: event.payload.message,
+            error: errorText,
             success: false,
             duration: done(0),
           };
@@ -593,7 +609,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
 
 保持步骤原子化，每个步骤一个清晰动作。`;
     },
-    defaultTimeoutMs: 60_000,
+    defaultTimeoutMs: 600_000,
   },
 
   // === 编辑器 (Code Editor) ===
@@ -630,7 +646,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
 
 只使用 write_file、edit_file 或 replace_files 工具修改文件。`;
     },
-    defaultTimeoutMs: 180_000,
+    defaultTimeoutMs: 600_000,
   },
 
   // === 思考器 (Deep Thinker) ===
@@ -668,7 +684,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
 
 请以结构化的方式输出你的思考过程和结论。`;
     },
-    defaultTimeoutMs: 180_000,
+    defaultTimeoutMs: 600_000,
   },
 
   // === UI设计器 (UI Designer) ===
@@ -718,7 +734,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
     // 5 minutes: a full design scheme (colors/typography/layout/interaction +
     // concrete examples) with a reasoning model often exceeds 2 minutes; the
     // old 120s wall-clock AbortSignal made ui_designer the most-failed subagent.
-    defaultTimeoutMs: 300_000,
+    defaultTimeoutMs: 600_000,
   },
 
   // === 执行器 (Bash Executor) ===
@@ -751,7 +767,7 @@ ${description ? `命令用途：${description}` : ''}
 
 避免执行破坏性命令（如 rm -rf 除非明确要求）。`;
     },
-    defaultTimeoutMs: 120_000,
+    defaultTimeoutMs: 300_000,
   },
 
   // === 研究者 (Researcher) ===
@@ -790,6 +806,6 @@ ${description ? `命令用途：${description}` : ''}
 
 保持研究全面但简洁，使用清晰的标题组织。最终输出结构化的研究报告。`;
     },
-    defaultTimeoutMs: 180_000,
+    defaultTimeoutMs: 600_000,
   },
 ];
