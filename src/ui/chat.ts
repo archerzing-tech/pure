@@ -1280,7 +1280,10 @@ export class ChatController {
   // the dominant pre-send cost once a long session crosses maxMessages — runs
   // after each completed turn (idle) instead of blocking the next send. The
   // reuse guard (sessionId + message count) makes a stale window inert.
-  private contextEngine?: { compact(messages: Message[], options?: { force?: boolean }): Promise<ContextCompactionResult> };
+  private contextEngine?: {
+    compact(messages: Message[], options?: { force?: boolean }): Promise<ContextCompactionResult>;
+    getLastCompactionResult?(): ContextCompactionResult | undefined;
+  };
   private preCompactedMessages: Message[] | null = null;
   private preCompactSourceMessages: Message[] | null = null;
   private preCompactSessionId = '';
@@ -1802,6 +1805,14 @@ export class ChatController {
    * 与底部上下文窗口进度条共用口径。 */
   getContextOverheadTokens(): { system: number; tools: number } {
     return this.contextOverhead;
+  }
+
+  /** The engine's latest POST-compaction estimate — the exact token load the
+   *  next request would carry (system + tools + trimmed transcript). Null
+   *  before the first send. The raw transcript is never sent as-is once it
+   *  overflows; this is the number that actually matters. */
+  getLastCompaction(): ContextCompactionResult | null {
+    return this.contextEngine?.getLastCompactionResult?.() ?? null;
   }
 
   private updateTurnCount(turnCount: number, persist = false): void {
@@ -4414,12 +4425,19 @@ export class ChatController {
             const projectDelivered =
               gen === this.generation
               && !event.payload.interrupted
-              && this.sessionArtifacts.length > 0
-              && !this.projectDirectoryShown
               && (isPlanBuild
                 ? (planMarkedCompleted || (needsDeliveryGate && qualityPassed && deliveredOnFinalStage))
                 : (!needsDeliveryGate || qualityPassed) && hasToolWork);
-            if (projectDelivered) {
+            // 目录/路径卡片是「项目在哪」的信息，不是「交付合格」的声明：
+            // 只要本轮正常结束且产生过文件就显示。此前它被交付门禁拦住——
+            // 而会话恢复路径按 write 记录无条件重建卡片，导致「实时不显示、
+            // 重载后反而出现」的分叉。门禁是否通过由状态气泡单独表达。
+            const projectHasArtifacts =
+              gen === this.generation
+              && !event.payload.interrupted
+              && this.sessionArtifacts.length > 0
+              && !this.projectDirectoryShown;
+            if (projectHasArtifacts) {
               const artifactRow = document.createElement('div');
               artifactRow.className = 'bubble-row artifact-row';
               this.appendToTranscript(artifactRow);
@@ -5453,6 +5471,10 @@ export class SessionChatManager {
 
   getContextOverheadTokens(): { system: number; tools: number } {
     return this.activeNow().getContextOverheadTokens();
+  }
+
+  getLastCompaction(): ContextCompactionResult | null {
+    return this.activeNow().getLastCompaction();
   }
 
   async undoLastWriteBatch(): Promise<WorkspaceRestoreResult> {

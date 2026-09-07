@@ -643,17 +643,24 @@ describe('footer context-window estimate', () => {
     expect(src).toContain('getContextOverheadTokens(): { system: number; tools: number }');
   });
 
-  it('denominates the bar against the full context window, not the input-only budget', () => {
+  it('denominates the bar against the full context window using the POST-compaction load', () => {
     const src = readSource(new URL('../main.ts', import.meta.url));
     const render = src.indexOf('function renderContextWindowBar(): void {');
     expect(render).toBeGreaterThan(-1);
-    const seg = src.slice(render, render + 1400);
+    const seg = src.slice(render, render + 1900);
     expect(seg).toContain('const windowTokens = budget.contextWindowTokens ?? 0;');
-    expect(seg).toContain('const messageTokens = estimateMessageTokens(chat.getMessages());');
-    expect(seg).toContain('const used = messageTokens + overhead.system + overhead.tools;');
+    // The bar shows what the next request will actually carry (the engine's
+    // post-compaction estimate), NOT the raw transcript — raw history is
+    // never sent as-is once it overflows, which is exactly why a "100%"
+    // raw reading kept working.
+    expect(seg).toContain('const rawMessageTokens = estimateMessageTokens(chat.getMessages());');
+    expect(seg).toContain('const last = chat.getLastCompaction();');
+    expect(seg).toContain('const used = last ? last.estimatedTokens : rawUsed;');
     // 空会话（还没对话）不显示占用，避免“一句话都没说就用了 X%”的错觉。
-    expect(seg).toContain('messageTokens <= 0');
+    expect(seg).toContain('rawMessageTokens <= 0');
     expect(seg).toContain('value > 90');
+    // Compaction is visible: suffix + tooltip say when trimming is active.
+    expect(seg).toContain('compacted');
     expect(src).toContain('function contextOverheadTokens(): { system: number; tools: number } {');
   });
 });

@@ -3958,6 +3958,12 @@ body {
 .status-window.over .status-window-track i {
   background: var(--danger);
 }
+/* Compaction active: raw history overflows the input budget and the engine
+   trims a copy per request — the pct suffix (·压) and accent color tell the
+   user this is being managed, not broken. */
+.status-window.compacted .status-window-pct {
+  color: var(--accent);
+}
 
 .status-window-pct {
   min-width: 2.6em;
