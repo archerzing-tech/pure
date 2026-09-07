@@ -1623,25 +1623,42 @@ function renderContextWindowBar(): void {
   const windowTokens = budget.contextWindowTokens ?? 0;
   const inputBudget = budget.availableInputTokens ?? 0;
   const overhead = contextOverheadTokens();
-  const messageTokens = estimateMessageTokens(chat.getMessages());
+  const rawMessageTokens = estimateMessageTokens(chat.getMessages());
+  const rawUsed = rawMessageTokens + overhead.system + overhead.tools;
   // 还没有任何对话（空会话/刚启动）时不显示占用——单显示系统+工具的固定开销会
   // 让用户以为“还没说话就用了 X%”。有了消息后固定开销才与对话一起计入。
-  if (windowTokens <= 0 || messageTokens <= 0) {
+  if (windowTokens <= 0 || rawMessageTokens <= 0) {
     bar.style.width = '0%';
     pct.textContent = '—';
     wrap.classList.remove('over');
+    wrap.classList.remove('compacted');
     wrap.title = t('stats.contextWindow');
     return;
   }
-  const used = messageTokens + overhead.system + overhead.tools;
+  // 口径修正：显示的不是原始历史（它一旦超窗就会被裁剪，从不原样发送），
+  // 而是引擎最近一次压缩后的真实装载量——下一次请求实际会携带的 token 数，
+  // 与请求同口径。这就是“显示 100% 却还能正常对话”的原因：100% 量的是
+  // 原始历史，实际发送的是裁剪后的副本。
+  const last = chat.getLastCompaction();
+  const used = last ? last.estimatedTokens : rawUsed;
+  // 压缩生效中：引擎丢弃/总结了较早消息（或原始历史已超出输入预算）。
+  const compacted = !!last && (last.compacted || last.evictedMessages > 0 || rawUsed > used + 64);
   const value = Math.min(100, (used / windowTokens) * 100);
   bar.style.width = `${Math.max(1, value)}%`;
-  pct.textContent = `${Math.round(value)}%`;
-  // 警示线：窗口占用超过 90%，或已突破模型的可用输入预算（此时 prompt 装配
-  // 会开始丢弃片段）——而不是按剩余输出空间提前变红制造“快满了”的错觉。
-  const over = value > 90 || (inputBudget > 0 && used > inputBudget);
+  pct.textContent = trimmedLabel(Math.round(value), compacted);
+  // 警示线：压缩后的真实装载超过 90%，或引擎报告压缩后仍超输入预算（此时
+  // 请求才会真的逼近模型上限）。
+  const over = value > 90 || (last?.overBudget === true) || (inputBudget > 0 && used > inputBudget);
   wrap.classList.toggle('over', over);
-  wrap.title = `${t('stats.contextWindow')}：${t('stats.windowUsed')} ${formatTokens(used)} / ${formatTokens(windowTokens)}`;
+  wrap.classList.toggle('compacted', compacted);
+  const compactNote = compacted
+    ? `（已自动压缩：原始约 ${formatTokens(rawUsed)}，裁剪 ${last?.evictedMessages ?? 0} 条较早消息；旧内容不影响继续对话）`
+    : '';
+  wrap.title = `${t('stats.contextWindow')}：${t('stats.windowUsed')} ${formatTokens(used)} / ${formatTokens(windowTokens)}${compactNote}`;
+}
+
+function trimmedLabel(value: number, compacted: boolean): string {
+  return compacted ? `${value}%·压` : `${value}%`;
 }
 
 function renderFileWriteGroups(
