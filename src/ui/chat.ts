@@ -2568,6 +2568,21 @@ export class ChatController {
         thinkingCard = null;
       }
     };
+    // Stall watchdog: some engine phases emit NO events for a long time —
+    // VERIFY rule checks (up to 60s), failure-policy backoff sleeps, context
+    // summarization — and during those windows the UI looks frozen ("卡了？").
+    // Every 3s while this turn streams: if NOTHING on screen shows a live
+    // indicator, open the animated waiting card. Cheap no-op whenever any
+    // other indicator (thinking card, tool rows) is already visible.
+    const stallWatchdog = window.setInterval(() => {
+      if (gen !== this.generation || this.abortController?.signal.aborted) {
+        clearInterval(stallWatchdog);
+        return;
+      }
+      if (!thinkingCard && pendingRows.size === 0 && pendingByName.size === 0) {
+        scheduleToolGapCard();
+      }
+    }, 3000);
     const endThinking = () => {
       cancelToolGapCard();
       if (thinkingFlushTimer !== undefined) {
@@ -3685,6 +3700,16 @@ export class ChatController {
           case 'StateChange': {
             if (event.payload.to === 'VERIFY') {
               assessmentFlow?.setPhase('verify', event.payload.reason ?? '执行阶段完成，正在验证结果…');
+              // Plain turns have no assessment flow — VERIFY (rule checks,
+              // up to 60s) would be minutes of dead silence with no indicator.
+              // Keep the live card visible through the phase.
+              if (!thinkingCard) {
+                thinkingCard = openThinkingCard();
+                thinkingCard.card.classList.add('waiting');
+                scrollChatToBottomIfPinned(chatEl);
+              }
+              setThinkingLabel(thinkingCard, '正在验证结果…');
+              dismissThinkingHint(thinkingCard, HINT_LINGER_MS);
             } else if (event.payload.to === 'ACT') {
               assessmentFlow?.setPhase('execute', event.payload.reason ?? '正在执行当前确认范围内的改动…');
             }
@@ -4724,6 +4749,7 @@ export class ChatController {
       // send (and, after a chat.clear(), detached bubbles stay in memory).
       unregisterToolOutput();
       unregisterDownloadProgress();
+      clearInterval(stallWatchdog);
       // Release the streaming state ONLY if this turn still owns the
       // controller. An unconditional setStreaming(false) here could run AFTER
       // a newer send has already installed its own turn controller + set

@@ -453,8 +453,17 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
 
   let observer: ResizeObserver | null = null;
   if (typeof ResizeObserver === 'function') {
+    // Debounced invalidate: during streaming, transcript growth toggles the
+    // scrollbar, which jitters the container width frame-by-frame — an
+    // undebounced observer re-laid-out the map (and repainted the whole page
+    // around it) on every jitter, flickering the entire chat.
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     observer = new ResizeObserver(() => {
-      map.invalidateSize();
+      if (resizeTimer !== null) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null;
+        map.invalidateSize();
+      }, 150);
     });
     observer.observe(target);
   }
