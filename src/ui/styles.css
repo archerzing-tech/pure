@@ -14,6 +14,11 @@
   --bg-assistant: #F6F5F3;
   --bg-hover:     #EFEEEC;
   --bg-card:      #FBFAF9;
+  /* Card/text aliases used by later sections (download card, image cards).
+     Defining them here — they were referenced but never declared, which made
+     every var() fallback (#fff) apply in DARK mode too. */
+  --surface:      #FFFFFF;
+  --fg:           #37352F;
   --text:         #37352F;
   --text-secondary: #6B6965;
   --text-tertiary:  #9B9995;
@@ -67,6 +72,8 @@
   --bg-assistant: #252525;
   --bg-hover:     #2A2A2A;
   --bg-card:      #222222;
+  --surface:      #222222;
+  --fg:           #E5E3DF;
   --text:         #E5E3DF;
   --text-secondary: #9B9995;
   --text-tertiary:  #6B6965;
@@ -993,7 +1000,7 @@ body {
   /* Shrinks with the window: on narrow viewports the rail takes less of the
      conversation and its cards turn MORE transparent (see the media queries
      below) so the chat stays readable underneath. */
-  width: clamp(184px, 15vw, 230px);
+  width: clamp(160px, 12vw, 200px);
   max-width: 100%;
   min-width: 0;
   min-height: 0;
@@ -1007,44 +1014,14 @@ body {
   flex: 1;
   min-width: 0;
   flex-direction: column;
-  gap: 14px;
+  gap: 8px;
   min-height: 0;
   overflow-y: auto;
   /* Top padding clears the floating settings button (top:4px, ~36px tall);
-     right padding leaves a gap to the window edge. */
-  padding: 52px 14px 24px;
+     right padding leaves a gap to the window edge. No rail header — the
+     cards ARE the UI. */
+  padding: 46px 10px 20px;
   pointer-events: auto; /* the rail (scroll) + cards stay interactive */
-}
-.agent-activity-rail-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--border-light);
-}
-.agent-activity-rail-heading {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 4px;
-}
-.agent-activity-rail-eyebrow {
-  color: var(--accent);
-  font: 700 9px var(--font-mono);
-  letter-spacing: .12em;
-}
-.agent-activity-rail-title {
-  color: var(--text);
-  font-size: 15px;
-  font-weight: 700;
-}
-.agent-activity-rail-count {
-  flex: 0 0 auto;
-  padding-top: 2px;
-  color: var(--text-secondary);
-  font: 600 11px var(--font-mono);
-  white-space: nowrap;
 }
 .agent-activity-live {
   display: flex;
@@ -1263,8 +1240,8 @@ body {
   .agent-worker-time { font-size: 9.5px; padding-top: 3px; }
 }
 @media (max-width: 1280px) {
-  #agent-activity-host { width: 176px; }
-  .agent-activity-rail { padding: 46px 8px 16px; gap: 10px; }
+  #agent-activity-host { width: 148px; }
+  .agent-activity-rail { padding: 46px 6px 14px; gap: 6px; }
   .agent-worker {
     padding: 5px;
     border-radius: 8px;
