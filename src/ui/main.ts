@@ -48,7 +48,7 @@ import { InlineAutocomplete } from './inlineAutocomplete';
 import { TaskQueue } from './taskQueue';
 import { Scheduler } from './scheduler';
 import { WorkspaceController } from './workspace';
-import { SessionSidebar } from './sessionSidebar';
+import { SessionSidebar, openPureWindow } from './sessionSidebar';
 import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
 import { groupConversationTurns, segmentConversationTurns } from './conversationTurns';
 import { loadDeferredStyles } from './deferredStyles';
@@ -576,6 +576,10 @@ function deferToIdle(fn: () => void): void {
       updateContextPanelStage();
       sessionSidebar.refresh();
       sessionSidebar.init();
+      // Multi-window: a secondary window boots scoped to the session named in
+      // its URL (?session=<id>) — the same app, one conversation per window.
+      const bootSession = new URLSearchParams(location.search).get('session');
+      if (bootSession) void sessionSidebar.load(bootSession);
       initPathLinks();
       // Background memory decay: Harness only decays at session start (1h
       // throttle), so idle apps never forget. A timer re-runs decay after the
@@ -1449,6 +1453,12 @@ sidebarClose?.addEventListener('click', () => {
   withChatWidthSnap(() => sidebar.classList.add('collapsed'));
   workspace.closePopover();
   sidebarToggle.focus();
+});
+
+// ── Multi-window: spawn another full pure app window ──
+const sidebarNewWindow = document.getElementById('sidebar-new-window') as HTMLButtonElement | null;
+sidebarNewWindow?.addEventListener('click', () => {
+  void openPureWindow();
 });
 
 sidebarNewChat.addEventListener('click', () => {

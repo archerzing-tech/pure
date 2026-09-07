@@ -301,7 +301,8 @@ body {
   display: none;
 }
 
-#sidebar-new-chat {
+#sidebar-new-chat,
+#sidebar-new-window {
   background: none;
   border: none;
   cursor: pointer;
@@ -315,7 +316,8 @@ body {
   -webkit-app-region: no-drag;
 }
 
-#sidebar-new-chat:hover {
+#sidebar-new-chat:hover,
+#sidebar-new-window:hover {
   background: var(--bg-hover);
   color: var(--text);
 }
@@ -487,6 +489,27 @@ body {
 .sidebar-session-delete:hover {
   color: var(--danger);
   background: var(--danger-soft);
+}
+
+/* Open-in-new-window button: same hover-reveal pattern as delete. */
+.sidebar-session-open-window {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  padding: 3px;
+  border-radius: 4px;
+  display: flex;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+.sidebar-session-item:hover .sidebar-session-open-window {
+  opacity: 1;
+}
+.sidebar-session-open-window:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 /* ── Sidebar bottom ── */
@@ -1143,6 +1166,27 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
 }
+.sidebar-session-open-window {
+  flex: 0 0 auto;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.sidebar-session-item:hover .sidebar-session-open-window,
+.sidebar-session-open-window:focus-visible {
+  display: inline-flex;
+}
+.sidebar-session-open-window:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
 .agent-worker--active {
   border-color: color-mix(in srgb, #22d3ee 45%, var(--border-light));
   background: color-mix(in srgb, #22d3ee 8%, var(--bg-card));
@@ -1317,6 +1361,10 @@ body {
 #chat {
   flex: 1;
   overflow-y: auto;
+  /* Reserve the scrollbar gutter: streaming content growth toggles the
+     scrollbar on/off, and the resulting width jitter re-fired map/layout
+     observers frame-by-frame (whole-page flicker on map turns). */
+  scrollbar-gutter: stable;
   /* No layout containment on the transcript scroll box. `contain: layout`
      on an overflow:auto container has caused already-painted rows to go blank
      after the user scrolls back up in WKWebView — the same symptom class as

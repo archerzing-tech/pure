@@ -8,6 +8,7 @@
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { showToast } from '../shared/toast';
+import { isTauriRuntime } from '../shared/tauri';
 import { workspaceBase } from '../shared/paths';
 import { estimateCostUsd, formatCostUsd, formatTokensCompact } from '../shared/usage';
 import {
@@ -62,6 +63,30 @@ function saveCollapsedGroups(groups: Set<string>): void {
   try {
     localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...groups]));
   } catch { /* ignore */ }
+}
+
+/** Open a NEW pure app window (Tauri WebviewWindow; browser fallback = new
+ *  tab). Each window is a full, independent pure app — its own JS context,
+ *  free to start new chats and open any session. `sessionId` merely preloads
+ *  that conversation in the new window. */
+export async function openPureWindow(sessionId?: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    window.open(`${location.pathname}${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`, '_blank');
+    return;
+  }
+  try {
+    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    const label = `pure_${sessionId ?? 'app'}_${Date.now().toString(36)}`.replace(/[^A-Za-z0-9_-]/g, '_');
+    new WebviewWindow(label, {
+      url: `index.html${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`,
+      title: 'pure',
+      width: 1280,
+      height: 860,
+    });
+  } catch (err) {
+    console.error('[pure] open window failed:', err);
+    showToast(t('toast.deleteFailed'));
+  }
 }
 
 export class SessionSidebar {
@@ -284,6 +309,9 @@ export class SessionSidebar {
             ${dot}<span class="sidebar-session-item-title" title="${title}">${title}</span>
             ${usageLine(s)}
           </div>
+          <button class="sidebar-session-open-window" data-open-window="${s.id}" title="${escapeHtml(t('sidebar.openWindow'))}" aria-label="${escapeHtml(t('sidebar.openWindow'))}">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </button>
           <button class="sidebar-session-delete" data-sid="${s.id}" title="${t('sidebar.delete.title')}">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
@@ -314,9 +342,18 @@ export class SessionSidebar {
       container.querySelectorAll('.sidebar-session-item').forEach(el => {
         el.addEventListener('click', (e) => {
           const sid = el.getAttribute('data-sid');
-          if (sid && !(e.target as HTMLElement).closest('.sidebar-session-delete')) {
+          if (sid && !(e.target as HTMLElement).closest('.sidebar-session-delete') && !(e.target as HTMLElement).closest('.sidebar-session-open-window')) {
             void this.load(sid);
           }
+        });
+      });
+
+      // Open session in a NEW APP WINDOW: each window is its own WebView with
+      // its own JS context bound to one conversation (?session=<id> boot).
+      container.querySelectorAll('[data-open-window]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          void openPureWindow(btn.getAttribute('data-open-window') ?? undefined);
         });
       });
 

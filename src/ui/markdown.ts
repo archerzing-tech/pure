@@ -2301,6 +2301,13 @@ function diffStreaming(container: HTMLElement, text: string): void {
   // pass ungroups only these generated galleries, while a gallery representing
   // one multi-root fence keeps its data-md-raw wrapper and remains stable.
   groupAdjacentSvgSlots(container);
+  // Bind slot controls (retry / download / expand / source-toggle) for slots
+  // mounted during streaming. The completed render pipeline binds these too,
+  // but a slot that errors MID-STREAM shows its 重试 button right now — with
+  // no listener it was dead weight. Both binders are idempotent (per-slot
+  // data attributes), so re-running per tick is safe.
+  bindMapControls(container);
+  bindDiagramControls(container);
 }
 
 /**
