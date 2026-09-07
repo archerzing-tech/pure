@@ -38,7 +38,7 @@ describe('agent activity panel', () => {
     ]);
 
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(2);
-    expect(panel.el.textContent).toContain('2 个活动中');
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(2);
     // Cards are minimal: the Agent badge + machine id + start time only.
     expect(panel.el.textContent).toContain('Agent');
 
@@ -121,6 +121,16 @@ describe('agent activity panel', () => {
     expect(panel.el.textContent).not.toContain('rust retry best practices');
   });
 
+  it('never shows tool-like roles (bash_executor) as agent cards', () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    // bash_executor is a TOOL the model delegates to — the agent roster is
+    // for agents/subagents only.
+    panel.update([activity({ callId: 't', agentName: 'bash_executor', lifecycle: 'started', status: 'running' })]);
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(0);
+    panel.el.remove();
+  });
+
   it('fades terminal cards out after a short dwell in live mode', async () => {
     const panel = createAgentActivityPanel('s1', { dismissDwellMs: 30, dismissFadeMs: 30 });
     document.body.appendChild(panel.el);
@@ -157,7 +167,7 @@ describe('agent activity panel', () => {
       activity({ callId: 'b', agentName: 'deep_thinker', startedAt: now + 300 }),
     ]);
 
-    expect(panel.el.textContent).toContain('2 个活动中');
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(2);
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(2);
     expect(panel.el.querySelectorAll('.agent-activity-parallel')).toHaveLength(0);
     expect(panel.el.querySelector('[data-call-id="a"]')?.className).toContain('agent-worker--active');
@@ -174,7 +184,7 @@ describe('agent activity panel', () => {
 
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(2);
     expect(panel.el.querySelectorAll('.agent-activity-parallel')).toHaveLength(0);
-    expect(panel.el.textContent).toContain('2 个活动中');
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(2);
   });
 
   it('keeps active and completed agents in the same flat list', () => {
@@ -184,11 +194,11 @@ describe('agent activity panel', () => {
 
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(2);
     expect(panel.el.querySelector('.agent-activity-history-list')).toBeNull();
-    expect(panel.el.textContent).toContain('1 个活动中');
 
     panel.update([activity({ lifecycle: 'tool_running', toolName: 'search_files' })], { historical: true });
-    expect(panel.el.textContent).toContain('协作记录');
-    // Historical cards are minimal too: who + start time, no tool-call detail.
+    // No rail header anymore — and historical cards are minimal too: who +
+    // start time, no tool-call detail.
+    expect(panel.el.textContent).not.toContain('协作记录');
     expect(panel.el.textContent).not.toContain('上次停留在 search_files');
     expect(panel.el.textContent).not.toContain('search_files');
   });
