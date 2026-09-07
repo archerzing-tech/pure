@@ -3,6 +3,13 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.2.2-beta
+
+**上下文窗口计量修复 + 产物卡片一致性修复**
+
+- 上下文条改为显示 ContextEngine 压缩后的最新估算（即下一个请求真实携带的负载）；压缩生效时显示 `·压` 后缀、强调色与 tooltip（含原始大小与被剔除消息数）。
+- 修复项目目录卡片的 live/restore 分歧：恢复时无条件按写入记录重建，导致完工项目刷新前不显示路径卡；现改为轮次正常结束且存在产物即渲染，交付判定保留在其独立状态气泡中，优化建议卡仍以真实交付为准。
+
 ## v2.2.2-alpha
 
 **生成性子 agent 超时调整 + Agent 轨道与主题变量修复**
