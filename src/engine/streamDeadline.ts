@@ -36,7 +36,13 @@ export function runWithDeadline<T>(
     signal?.addEventListener('abort', onAbort, { once: true });
     timer = setTimeout(() => {
       onTimeout?.();
-      finish(() => reject(makeLifecycleError('TimeoutError', `${label} timed out after ${timeoutMs}ms`)));
+      // Human units: "180000ms" read like a malfunction ("180000 SECONDS?!")
+      // when it means "3 minutes" — which for generative work is often just
+      // "was still working".
+      const human = timeoutMs >= 60_000
+        ? `${Math.round((timeoutMs / 60_000) * 10) / 10}m`
+        : `${Math.round(timeoutMs / 1000)}s`;
+      finish(() => reject(makeLifecycleError('TimeoutError', `${label} timed out after ${human}`)));
     }, Math.max(1, timeoutMs));
     Promise.resolve().then(operation).then(
       value => finish(() => resolve(value)),

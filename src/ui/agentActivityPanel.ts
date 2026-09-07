@@ -63,23 +63,12 @@ export function createAgentActivityPanel(
   el.setAttribute('aria-label', '多 agent 活动');
   el.dataset.agentActivityRail = 'true';
 
-  const header = document.createElement('header');
-  header.className = 'agent-activity-rail-header';
-  const headingGroup = document.createElement('div');
-  headingGroup.className = 'agent-activity-rail-heading';
-  const eyebrow = document.createElement('span');
-  eyebrow.className = 'agent-activity-rail-eyebrow';
-  eyebrow.textContent = 'LIVE / MULTI-AGENT';
-  const title = document.createElement('strong');
-  title.className = 'agent-activity-rail-title';
-  headingGroup.append(eyebrow, title);
-  const count = document.createElement('span');
-  count.className = 'agent-activity-rail-count';
-  header.append(headingGroup, count);
+  // No rail header (the "本轮协作 / 协作现场" block): the cards themselves are
+  // the entire UI — a header only added a second surface covering the chat.
 
   const list = document.createElement('div');
   list.className = 'agent-activity-list';
-  el.append(header, list);
+  el.append(list);
 
   const rows = new Map<string, {
     row: HTMLElement;
@@ -117,19 +106,19 @@ export function createAgentActivityPanel(
     // activities already reset above, so a card can never animate in from a
     // different conversation.
     const animateNewRows = !historical;
-    const visible = activities.filter((activity) => activity.callId && !(!historical && dismissedCallIds.has(activity.callId)));
+    // Tool-like roles never become agent cards: bash_executor IS a tool the
+    // model delegates to — showing it as an "agent" blurred the agent/tool
+    // boundary for users.
+    const visible = activities.filter((activity) =>
+      activity.callId
+      && activity.agentName !== 'bash_executor'
+      && !(!historical && dismissedCallIds.has(activity.callId)));
     // Newest active agent on TOP — each new card lands at the top of the
     // stack like an incoming message; older ones push down.
     const active = visible.filter(isAgentActivityActive).sort((a, b) => (b.startedAt ?? b.lastUpdatedAt ?? 0) - (a.startedAt ?? a.lastUpdatedAt ?? 0));
     const completed = visible.filter((activity) => !isAgentActivityActive(activity)).sort((a, b) => (b.startedAt ?? b.lastUpdatedAt ?? 0) - (a.startedAt ?? a.lastUpdatedAt ?? 0));
     const ordered = [...active, ...completed];
 
-    title.textContent = historical ? '协作记录' : active.length > 0 ? '协作现场' : '本轮协作';
-    count.textContent = historical
-      ? `${visible.length} 个 agent`
-      : active.length > 0
-        ? `${active.length} 个活动中`
-        : `${visible.length} 个已结束`;
     list.replaceChildren();
 
     for (const activity of ordered) {
