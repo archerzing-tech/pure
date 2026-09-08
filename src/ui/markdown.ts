@@ -1869,7 +1869,24 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
         onTileStatus: (status, message) => {
           if (!isCurrentDiagramRender(slot, version)) return;
           if (status === 'error') {
-            setMapState(slot, 'error', message || t('map.tileLoadFailed'));
+            // 底图失败 ≠ 地图失败：markers/route 已由 Leaflet 画出（无底图）。
+            // 保持 preview 并给出软提示——旧逻辑把整卡打成 error，而
+            // markers/route 明明已经可见，网络受限时只会陷入
+            // 出错→重试→闪动的循环。
+            setMapState(slot, 'preview');
+            const warn = slot.querySelector<HTMLElement>('.map-route-warning');
+            if (warn) {
+              warn.textContent = '';
+              const icon = document.createElement('span');
+              icon.className = 'map-route-warning-icon';
+              icon.textContent = '⚠️';
+              const msg = document.createElement('span');
+              msg.className = 'map-route-warning-text';
+              msg.textContent = message
+                ? `${t('map.tileLoadFailed')}（${message}）— ${t('map.tileFallback')}`
+                : `${t('map.tileLoadFailed')} — ${t('map.tileFallback')}`;
+              warn.append(icon, msg);
+            }
           } else if (status === 'ready') {
             setMapState(slot, 'preview');
           }

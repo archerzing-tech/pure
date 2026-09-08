@@ -223,8 +223,12 @@ export function proxyUrlWithAuth(url: string, username: string, password: string
 }
 
 export function effectiveProxyUrl(config: ProxyConfig, scope: ProxyScope = 'tools'): string {
-  const scopeEnabled = scope === 'llm' ? config.llmEnabled : config.toolsEnabled;
-  if (!config.enabled || !scopeEnabled) return '';
+  // scope is retained for call-site compatibility, but the per-surface
+  // toggles (llmEnabled/toolsEnabled) are RETIRED: routing is per-DESTINATION
+  // now (see netRoute.ts) — a surface-level boolean cannot express "github
+  // needs the proxy but amap tiles must go direct". Only the master switch
+  // gates the proxy source here.
+  if (!config.enabled) return '';
   // System mode: send the sentinel so the backend resolves the OS proxy at
   // request time (transparent forwarding) instead of using the form address.
   if (config.mode === 'system') return SYSTEM_PROXY_MARKER;

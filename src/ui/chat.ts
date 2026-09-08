@@ -7,6 +7,7 @@ import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, custo
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { blockedHosts } from '../shared/netGuard';
+import { hostOf, resolveNetRoute } from '../shared/netRoute';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
@@ -567,6 +568,20 @@ function buildEnvironmentContext(config: PureConfig | null): string {
   return `Environment: reply in ${lang}; user location is ${city} (configured in Settings → General → Environment). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.${netNote}`;
 }
 
+/** Smart LLM proxy routing (see netRoute.ts): bypass lists force direct;
+ *  otherwise the destination host is classified (known-foreign → proxy,
+ *  known-domestic → direct) and the learned per-host route decides when a
+ *  proxy source exists. Returns '' (direct) whenever no proxy is configured. */
+function llmProxyUrlFor(config: PureConfig | null, baseURL: string, providerId: string, model: string): string {
+  const proxy = config?.proxy;
+  if (!proxy) return '';
+  const base = effectiveProxyUrl(proxy, 'llm');
+  if (!base) return '';
+  if (proxy.bypassProviders?.includes(providerId) || proxy.bypassModels?.includes(model)) return '';
+  const route = resolveNetRoute(hostOf(baseURL) ?? '', true);
+  return route === 'proxy' ? base : '';
+}
+
 function buildModelIdentity(config: PureConfig | null): { provider: string; model: string } | undefined {
   const provider = config?.provider?.trim();
   if (!provider) return undefined;
@@ -884,7 +899,7 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
       secretKey: custom ? customSecretKey(custom.id)
         : builtinOverride?.hasApiKey ? customSecretKey(config.provider)
         : undefined,
-      proxyUrl: effectiveProxyUrl(config.proxy, 'llm'),
+      proxyUrl: llmProxyUrlFor(config, baseURL, config.provider, model),
       proxyBypassProviders: config.proxy?.bypassProviders ?? [],
       extraBody,
       maxTokens,
@@ -1006,7 +1021,7 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
       : undefined,
     // Image generation hits the provider's LLM-family API — route it through
     // the same proxy scope (and bypass rules) as chat traffic.
-    proxyUrl: effectiveProxyUrl(config.proxy, 'llm'),
+    proxyUrl: llmProxyUrlFor(config, customBaseURL(customs, config.provider, config.providerOverrides), config.provider, config.model),
     proxyBypassProviders: config.proxy?.bypassProviders ?? [],
   };
 }
