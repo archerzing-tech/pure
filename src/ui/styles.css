@@ -561,7 +561,8 @@ body {
   color: var(--text-tertiary);
 }
 
-#sidebar-settings-btn {
+#sidebar-settings-btn,
+#sidebar-new-window-btn {
   background: none;
   border: none;
   cursor: pointer;
@@ -574,7 +575,8 @@ body {
   -webkit-app-region: no-drag;
 }
 
-#sidebar-settings-btn:hover {
+#sidebar-settings-btn:hover,
+#sidebar-new-window-btn:hover {
   opacity: 1;
   color: var(--text);
 }

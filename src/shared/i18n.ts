@@ -9,7 +9,6 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Sidebar ──
     'sidebar.newChat': '+ 新对话',
     'sidebar.newChat.title': '新建对话 (⌘N)',
-    'sidebar.newWindow': '⧉ 新窗口',
     'sidebar.newWindow.title': '打开一个新的 pure 窗口',
     'sidebar.sessions': '会话记录',
     'sidebar.noSessions': '暂无会话',
@@ -840,7 +839,6 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Sidebar ──
     'sidebar.newChat': '+ New chat',
     'sidebar.newChat.title': 'New chat (⌘N)',
-    'sidebar.newWindow': '⧉ New window',
     'sidebar.newWindow.title': 'Open a new pure window',
     'sidebar.sessions': 'Sessions',
     'sidebar.noSessions': 'No sessions yet',
