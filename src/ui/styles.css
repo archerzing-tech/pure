@@ -8160,12 +8160,15 @@ button svg,
   align-items: stretch;
   background: color-mix(in srgb, var(--bg-card) 88%, var(--accent-soft));
 }
+/* STABLE GEOMETRY: the canvas box is reserved at full height in EVERY state —
+   the loading spinner overlays it, error dims it. The old absolute/hidden
+   loading canvas let the slot collapse ~240px ↔ 560px between states, which
+   thrashed the whole conversation layout on every map turn (the streaming
+   flicker). */
 .bubble .map-slot[data-map-state="loading"] .map-canvas-wrap {
-  position: absolute;
-  inset: 0;
-  display: block;
   height: 480px;
-  visibility: hidden;
+  opacity: 0.3;
+  filter: grayscale(1);
 }
 .bubble .map-slot[data-map-state="loading"] .map-route-warning,
 .bubble .map-slot[data-map-state="loading"] .map-error,
@@ -8174,15 +8177,17 @@ button svg,
 }
 .bubble .map-slot .map-loading {
   display: none;
-  min-height: 200px;
+}
+.bubble .map-slot[data-map-state="loading"] .map-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 500;
+  display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 14px;
   padding: 24px;
-}
-.bubble .map-slot[data-map-state="loading"] .map-loading {
-  display: flex;
   animation: mapLoadingFade 1.8s ease-in-out infinite;
 }
 @keyframes mapLoadingFade {
@@ -8235,7 +8240,10 @@ button svg,
   transform: scale(1);
 }
 .map-slot[data-map-state="error"] .map-canvas-wrap {
-  display: none;
+  display: block;
+  height: 480px;
+  opacity: 0.3;
+  filter: grayscale(1);
 }
 .map-canvas {
   height: 480px;

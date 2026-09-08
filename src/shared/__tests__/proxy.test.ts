@@ -75,19 +75,21 @@ describe('proxy configuration', () => {
     expect(effectiveProxyUrl(config, 'tools')).toBe('');
   });
 
-  it('supports independent LLM and tool proxy switches', () => {
+  it('ignores the retired per-surface switches — routing is per-destination now', () => {
     const config = normalizeProxyConfig({
       enabled: true,
       llmEnabled: false,
       toolsEnabled: true,
       url: 'socks5://127.0.0.1:1080',
     });
-    expect(effectiveProxyUrl(config, 'llm')).toBe('');
+    // The old llmEnabled/toolsEnabled toggles are retired: the proxy source is
+    // returned for every surface, and per-DESTINATION routing (netRoute.ts)
+    // decides direct vs proxy per host.
+    expect(effectiveProxyUrl(config, 'llm')).toBe('socks5://127.0.0.1:1080');
     expect(effectiveProxyUrl(config, 'tools')).toBe('socks5://127.0.0.1:1080');
 
-    config.llmEnabled = true;
-    config.toolsEnabled = false;
-    expect(effectiveProxyUrl(config, 'llm')).toBe('socks5://127.0.0.1:1080');
+    config.enabled = false;
+    expect(effectiveProxyUrl(config, 'llm')).toBe('');
     expect(effectiveProxyUrl(config, 'tools')).toBe('');
   });
 

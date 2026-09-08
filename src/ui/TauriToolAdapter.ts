@@ -14,6 +14,7 @@ export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
+import { netRouteProxyPair } from '../shared/netRoute';
 
 /** curl/wget exit codes that mean "network-level failure" (resolve/connect/
  *  timeout/SSL/send/recv) — these trip the host breaker; disk-full (e.g. 13)
@@ -902,26 +903,42 @@ export class TauriToolAdapter implements ToolAdapter {
           if (hostBlocked(fetchUrl)) {
             return { id: toolCall.id, toolName: name, result: blockedHostMessage(fetchUrl), success: false, duration: Date.now() - start };
           }
-          try {
-            const pageText = await this.call('web_fetch', {
+          // Smart route: netRoute picks direct/proxy per destination host and
+          // remembers which route worked; the opposite route is the one-shot
+          // fallback for network-class failures.
+          const route = netRouteProxyPair(fetchUrl, this.proxyUrl);
+          const runFetch = (proxyUrl: string): Promise<string> =>
+            this.call('web_fetch', {
               workspace: ws,
               url: fetchUrl,
               maxChars: args.maxChars ?? 20000,
-              proxyUrl: this.proxyUrl,
-            }) as string;
+              proxyUrl,
+            }) as Promise<string>;
+          try {
+            const pageText = await runFetch(route.proxyUrl);
             recordNetSuccess(fetchUrl);
             return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            if (!isNetworkError(msg)) throw err;
-            const { tripped } = recordNetFailure(fetchUrl);
-            return {
-              id: toolCall.id,
-              toolName: name,
-              result: tripped ? blockedHostMessage(fetchUrl, msg) : netFailureHint(fetchUrl, msg),
-              success: false,
-              duration: Date.now() - start,
-            };
+            if (!isNetworkError(msg) || route.fallbackProxyUrl === null) {
+              // Non-network failure — not the proxy's fault; surface as-is.
+              return { id: toolCall.id, toolName: name, result: netFailureHint(fetchUrl, msg), success: false, duration: Date.now() - start };
+            }
+            try {
+              const pageText = await runFetch(route.fallbackProxyUrl);
+              recordNetSuccess(fetchUrl);
+              return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
+            } catch (err2) {
+              const msg2 = err2 instanceof Error ? err2.message : String(err2);
+              const { tripped } = recordNetFailure(fetchUrl);
+              return {
+                id: toolCall.id,
+                toolName: name,
+                result: tripped ? blockedHostMessage(fetchUrl, msg2) : netFailureHint(fetchUrl, msg2),
+                success: false,
+                duration: Date.now() - start,
+              };
+            }
           }
         }
         case 'web_public_api': {
