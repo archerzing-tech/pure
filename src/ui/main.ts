@@ -1455,9 +1455,8 @@ sidebarClose?.addEventListener('click', () => {
   sidebarToggle.focus();
 });
 
-// ── Multi-window: spawn another full pure app window ──
-const sidebarNewWindow = document.getElementById('sidebar-new-window') as HTMLButtonElement | null;
-sidebarNewWindow?.addEventListener('click', () => {
+// ── Multi-window: spawn another full pure app window (sidebar bottom menu) ──
+document.getElementById('sidebar-new-window-btn')?.addEventListener('click', () => {
   void openPureWindow();
 });
 
