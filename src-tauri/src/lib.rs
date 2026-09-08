@@ -14085,11 +14085,16 @@ pub fn run() {
                 let _ = sys_info(String::new(), None).await;
             });
 
-            // ── Native macOS menu bar ──
+            // ── Native menu bar (macOS ONLY) ──
             // The system menu is the natural home for window/app-level
             // actions (新建窗口 ⌘⇧N, 新对话 ⌘N) plus the standard Edit roles
             // — without an Edit submenu macOS text fields lose ⌘C/⌘V.
-            use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+            // Windows/Linux skip it entirely: a window-top menu bar reads as
+            // jarring there (modern Windows apps hide it), and Ctrl+C/V work
+            // natively without an Edit menu.
+            #[cfg(target_os = "macos")]
+            {
+            use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
             let handle = _app.handle();
             let new_chat = MenuItemBuilder::with_id("menu-new-chat", "新建对话")
                 .accelerator("CmdOrCtrl+N")
@@ -14170,6 +14175,7 @@ pub fn run() {
                     _ => {}
                 }
             });
+            } // ── end cfg(target_os = "macos") menu block ──
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
