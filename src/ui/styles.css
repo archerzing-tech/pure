@@ -1788,6 +1788,22 @@ body {
 .tool-row.success .tool-row-status {
   color: var(--success);
 }
+/* Success state: the summary (header) takes a soft green tint and framed
+   surfaces (web-tool pale-blue) flip their border to green — one glance
+   tells the user this step succeeded. Kept as a low-alpha TINT, not a solid
+   fill, so a transcript full of successful tools doesn't turn into a green
+   wall. */
+.tool-row.success .tool-row-summary {
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+  border-radius: 6px;
+}
+.tool-row.success.web-tool {
+  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+}
+.tool-row.success.web-tool .tool-row-summary,
+.tool-row.success.web-tool .tool-row-summary:hover {
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
 .tool-row.failure .tool-row-status {
   color: var(--danger);
 }
