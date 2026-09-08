@@ -70,9 +70,6 @@
 
       <div id="sidebar-bottom">
         <span id="sidebar-model"></span>
-        <button id="sidebar-new-window-btn" data-i18n-title="sidebar.newWindow.title" title="打开新的 pure 窗口">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        </button>
         <button id="sidebar-settings-btn" data-i18n-title="sidebar.settings.title" title="Settings (⌘,)">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
         </button>
@@ -210,6 +207,9 @@
                the landing page): the workspace shortcut on the left, then model,
                a live state dot and the app version on the right. -->
           <div id="status-bar" role="status" aria-live="polite">
+            <button id="status-new-window" class="status-bar-new-window" type="button" data-i18n-title="sidebar.newWindow.title" title="打开新的 pure 窗口" aria-label="打开新的 pure 窗口">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
             <button id="status-workspace" class="status-bar-workspace" type="button" data-i18n-title="workspace.browseTitle" title="选择工作区文件夹" aria-label="选择工作区文件夹">
               <svg class="wp-folder-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
               <span id="status-workspace-text"></span>

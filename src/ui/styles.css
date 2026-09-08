@@ -561,8 +561,7 @@ body {
   color: var(--text-tertiary);
 }
 
-#sidebar-settings-btn,
-#sidebar-new-window-btn {
+#sidebar-settings-btn {
   background: none;
   border: none;
   cursor: pointer;
@@ -575,8 +574,7 @@ body {
   -webkit-app-region: no-drag;
 }
 
-#sidebar-settings-btn:hover,
-#sidebar-new-window-btn:hover {
+#sidebar-settings-btn:hover {
   opacity: 1;
   color: var(--text);
 }
@@ -3904,6 +3902,27 @@ body {
   align-items: center;
   gap: 5px;
   min-width: 0;
+}
+
+/* New-window "+" (bottom-left): spawns another full pure app window. */
+.status-bar-new-window {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: -4px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition);
+}
+.status-bar-new-window:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 /* Workspace shortcut: ghost button, tints accent while a workspace is set.
