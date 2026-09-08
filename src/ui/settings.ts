@@ -987,7 +987,7 @@ export class SettingsPanel {
           <span class="llm-provider-card-status${hasKey ? '' : ' llm-provider-card-status-empty'}">${escapeHtml(status)}</span>
         </span>
         <span class="llm-provider-card-name">${escapeHtml(label)}</span>
-        <span class="llm-provider-card-id" data-copy-provider-id="${escapeHtml(id)}" title="${t('llm.card.id.copy')}"><code>${escapeHtml(id)}</code><i aria-hidden="true">⧉</i></span>
+        <span class="llm-provider-card-id" data-copy-provider-id="${escapeHtml(id)}" title="${t('llm.card.id.copy')}"><code>${escapeHtml(id)}</code><svg class="llm-id-copy-glyph" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><use href="#icon-copy"/></svg></span>
         <span class="llm-provider-card-meta">${escapeHtml(defaultModel || '—')}</span>
         <span class="llm-provider-card-meta">${protocolBadge}</span>
       </button>`;
@@ -1071,7 +1071,7 @@ export class SettingsPanel {
           <label class="llm-form-label" for="cfg-provider-id" data-i18n="llm.panel.id" data-i18n-title="llm.panel.id.hint" title="直连例外等场景使用的机器标识，点击复制">供应商 ID</label>
           <div class="llm-form-input-group">
             <input id="cfg-provider-id" class="setting-input llm-form-input" type="text" value="${escapeHtml(id)}" readonly aria-label="${t('llm.panel.id')}" />
-            <button id="cfg-copy-provider-id" class="setting-icon-btn" type="button" data-copy-provider-id="${escapeHtml(id)}" data-i18n-title="llm.card.id.copy" title="复制供应商 ID（用于代理直连例外）" aria-label="${t('llm.card.id.copy')}">⧉</button>
+            <button id="cfg-copy-provider-id" class="setting-icon-btn" type="button" data-copy-provider-id="${escapeHtml(id)}" data-i18n-title="llm.card.id.copy" title="复制供应商 ID（用于代理直连例外）" aria-label="${t('llm.card.id.copy')}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><use href="#icon-copy"/></svg></button>
           </div>
         </div>
         <div class="llm-form-row">

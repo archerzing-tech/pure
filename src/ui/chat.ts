@@ -1146,7 +1146,7 @@ function createDownloadCard(path: string, size: number, via?: string): HTMLEleme
   card.className = 'download-card';
   const icon = document.createElement('span');
   icon.className = 'download-card-icon';
-  icon.textContent = '⬇';
+  icon.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"/></svg>';
   const meta = document.createElement('div');
   meta.className = 'download-card-meta';
   const name = document.createElement('div');
