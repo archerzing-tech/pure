@@ -12233,11 +12233,13 @@ button svg,
   white-space: nowrap;
   font: inherit;
 }
-.llm-provider-card-id i {
+.llm-provider-card-id i,
+.llm-provider-card-id .llm-id-copy-glyph {
   font-style: normal;
   font-size: 10px;
   opacity: 0.55;
   transition: opacity var(--transition);
+  flex: 0 0 auto;
 }
 .llm-provider-card-id:hover {
   background: color-mix(in srgb, var(--accent-soft) 60%, var(--bg-hover));
