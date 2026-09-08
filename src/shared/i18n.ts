@@ -13,7 +13,6 @@ const translations: Record<Language, Record<string, string>> = {
     'sidebar.sessions': '会话记录',
     'sidebar.noSessions': '暂无会话',
     'sidebar.running': '会话运行中',
-    'sidebar.openWindow': '在新窗口打开此会话',
     'sidebar.settings.title': '设置 (⌘,)',
     'sidebar.delete.title': '删除',
     'sidebar.clearAll.title': '清空全部会话',

@@ -309,9 +309,6 @@ export class SessionSidebar {
             ${dot}<span class="sidebar-session-item-title" title="${title}">${title}</span>
             ${usageLine(s)}
           </div>
-          <button class="sidebar-session-open-window" data-open-window="${s.id}" title="${escapeHtml(t('sidebar.openWindow'))}" aria-label="${escapeHtml(t('sidebar.openWindow'))}">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-          </button>
           <button class="sidebar-session-delete" data-sid="${s.id}" title="${t('sidebar.delete.title')}">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
@@ -345,15 +342,6 @@ export class SessionSidebar {
           if (sid && !(e.target as HTMLElement).closest('.sidebar-session-delete') && !(e.target as HTMLElement).closest('.sidebar-session-open-window')) {
             void this.load(sid);
           }
-        });
-      });
-
-      // Open session in a NEW APP WINDOW: each window is its own WebView with
-      // its own JS context bound to one conversation (?session=<id> boot).
-      container.querySelectorAll('[data-open-window]').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          void openPureWindow(btn.getAttribute('data-open-window') ?? undefined);
         });
       });
 
