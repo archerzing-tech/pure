@@ -1456,9 +1456,23 @@ sidebarClose?.addEventListener('click', () => {
 });
 
 // ── Multi-window: spawn another full pure app window (sidebar bottom menu) ──
-document.getElementById('sidebar-new-window-btn')?.addEventListener('click', () => {
+document.getElementById('status-new-window')?.addEventListener('click', () => {
   void openPureWindow();
 });
+
+// Native macOS menu bar actions (Rust emits these): 新建对话 / 设置…
+if (isTauriRuntime()) {
+  void (async () => {
+    try {
+      await loadTauriCore();
+      const { listen } = await import('@tauri-apps/api/event');
+      await listen('menu:new-chat', () => sidebarNewChat.click());
+      await listen('menu:open-settings', () => { void openSettings(); });
+    } catch (err) {
+      console.error('[pure] native menu event bind failed:', err);
+    }
+  })();
+}
 
 sidebarNewChat.addEventListener('click', () => {
   chat.clear();

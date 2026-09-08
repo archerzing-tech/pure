@@ -400,6 +400,7 @@ mod llm_probe_tests {
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
+use tauri::Manager;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command as TokioCommand};
 
@@ -14082,6 +14083,92 @@ pub fn run() {
             // use. Best-effort: a failure only means the caches fill lazily.
             tauri::async_runtime::spawn(async {
                 let _ = sys_info(String::new(), None).await;
+            });
+
+            // ── Native macOS menu bar ──
+            // The system menu is the natural home for window/app-level
+            // actions (新建窗口 ⌘⇧N, 新对话 ⌘N) plus the standard Edit roles
+            // — without an Edit submenu macOS text fields lose ⌘C/⌘V.
+            use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+            let handle = _app.handle();
+            let new_chat = MenuItemBuilder::with_id("menu-new-chat", "新建对话")
+                .accelerator("CmdOrCtrl+N")
+                .build(handle)?;
+            let new_window = MenuItemBuilder::with_id("menu-new-window", "新建窗口")
+                .accelerator("CmdOrCtrl+Shift+N")
+                .build(handle)?;
+            let settings_item = MenuItemBuilder::with_id("menu-settings", "设置…")
+                .accelerator("CmdOrCtrl+,")
+                .build(handle)?;
+            let app_submenu = SubmenuBuilder::new(handle, "pure")
+                .about(None)
+                .separator()
+                .item(&settings_item)
+                .separator()
+                .quit()
+                .build()?;
+            let file_submenu = SubmenuBuilder::new(handle, "文件")
+                .item(&new_chat)
+                .item(&new_window)
+                .separator()
+                .close_window()
+                .build()?;
+            let edit_submenu = SubmenuBuilder::new(handle, "编辑")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
+            let view_submenu = SubmenuBuilder::new(handle, "显示")
+                .fullscreen()
+                .build()?;
+            let window_submenu = SubmenuBuilder::new(handle, "窗口")
+                .minimize()
+                .separator()
+                .close_window()
+                .build()?;
+            let menu = MenuBuilder::new(handle)
+                .item(&app_submenu)
+                .item(&file_submenu)
+                .item(&edit_submenu)
+                .item(&view_submenu)
+                .item(&window_submenu)
+                .build()?;
+            handle.set_menu(menu)?;
+
+            handle.on_menu_event(move |app, event| {
+                match event.id().as_ref() {
+                    "menu-new-window" => {
+                        let label = format!("pure_app_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0) as i64);
+                        let window = tauri::WebviewWindowBuilder::new(
+                            app,
+                            label,
+                            tauri::WebviewUrl::App("index.html".into()),
+                        )
+                        .title("pure")
+                        .inner_size(1280.0, 860.0)
+                        .build();
+                        if let Err(e) = window {
+                            eprintln!("[pure] menu new-window failed: {e}");
+                        }
+                    }
+                    "menu-new-chat" => {
+                        use tauri::Emitter;
+                        let _ = app.get_webview_window("main").map(|w| {
+                            let _ = w.emit("menu:new-chat", ());
+                        });
+                    }
+                    "menu-settings" => {
+                        use tauri::Emitter;
+                        let _ = app.get_webview_window("main").map(|w| {
+                            let _ = w.emit("menu:open-settings", ());
+                        });
+                    }
+                    _ => {}
+                }
             });
             Ok(())
         })
