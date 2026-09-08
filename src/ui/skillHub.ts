@@ -18,6 +18,39 @@
 // prompt (shared PromptAssembler), so the
 // agent behaves per the skill's instructions.
 
+import { isTauriRuntime } from '../shared/tauri';
+
+/** Proxy-aware text fetch for hub resources. In Tauri runtime, routes through
+ *  the Rust `web_fetch` command (which has app proxy + netRoute classification)
+ *  so raw.githubusercontent.com works behind restricted networks. */
+async function hubFetchText(url: string, timeoutMs = 10000): Promise<string | null> {
+  if (isTauriRuntime()) {
+    try {
+      const core = await loadTauriCore();
+      if (!core) return null;
+      const text = await core.invoke<string>('web_fetch', {
+        workspace: '',
+        url,
+        maxChars: 500000,
+        proxyUrl: '',
+      });
+      return text || null;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!resp.ok) return null;
+    return await resp.text();
+  } catch {
+    return null;
+  }
+}
+
+// Re-import loadTauriCore for the Tauri path above.
+import { loadTauriCore } from '../shared/tauri';
+
 export interface HubSkill {
   /** Skill id — the directory name (e.g. "web-design-guidelines"). */
   name: string;
