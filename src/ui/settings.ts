@@ -1575,10 +1575,6 @@ export class SettingsPanel {
     const proxyModeEl = document.getElementById('cfg-proxy-mode') as HTMLSelectElement | null;
     if (proxyModeEl) proxyModeEl.value = proxy.mode;
     this.updateProxyModeVisibility();
-    const proxyLlmEl = document.getElementById('cfg-proxy-llm') as HTMLInputElement | null;
-    if (proxyLlmEl) proxyLlmEl.checked = proxy.llmEnabled;
-    const proxyToolsEl = document.getElementById('cfg-proxy-tools') as HTMLInputElement | null;
-    if (proxyToolsEl) proxyToolsEl.checked = proxy.toolsEnabled;
     const proxyUrlEl = document.getElementById('cfg-proxy-url') as HTMLInputElement | null;
     const proxySchemeEl = document.getElementById('cfg-proxy-scheme') as HTMLSelectElement | null;
     const proxyHostEl = document.getElementById('cfg-proxy-host') as HTMLInputElement | null;
@@ -2705,8 +2701,6 @@ export class SettingsPanel {
       proxy: normalizeProxyConfig({
         enabled: (document.getElementById('cfg-proxy-enabled') as HTMLInputElement | null)?.checked ?? false,
         mode: ((document.getElementById('cfg-proxy-mode') as HTMLSelectElement | null)?.value ?? 'manual') as 'manual' | 'system',
-        llmEnabled: (document.getElementById('cfg-proxy-llm') as HTMLInputElement | null)?.checked ?? false,
-        toolsEnabled: (document.getElementById('cfg-proxy-tools') as HTMLInputElement | null)?.checked ?? false,
         url: composeProxyUrl(
           (document.getElementById('cfg-proxy-scheme') as HTMLSelectElement | null)?.value ?? '',
           (document.getElementById('cfg-proxy-host') as HTMLInputElement | null)?.value ?? '',

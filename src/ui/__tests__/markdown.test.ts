@@ -26,11 +26,16 @@ describe('map code blocks', () => {
     expect(src).toContain("leafletMapMod?.clearMapTileMemoryCache()");
     expect(src).toContain("refresh?.addEventListener('click', () => retryMapSlot(slot))");
     expect(src).toContain("t('map.tileLoadFailed')");
-    expect(css).toContain('.bubble .map-slot[data-map-state="loading"] .map-canvas-wrap {\n  position: absolute;');
-    expect(css).toContain('visibility: hidden;');
+    // STABLE GEOMETRY: the canvas box is reserved at full height in every
+    // state — the spinner overlays it; the slot never collapses/expands.
+    expect(css).toContain('.bubble .map-slot[data-map-state="loading"] .map-canvas-wrap {\n  height: 480px;');
+    expect(css).toContain('opacity: 0.3;');
     expect(css).toContain('animation: mapLoadingFade 1.8s ease-in-out infinite;');
     expect(css).toContain('.map-slot[data-map-state="preview"] .map-canvas-wrap');
+    // Tile failures degrade to a no-basemap preview with a warning, not an
+    // error card + retry loop.
     expect(src).toContain("} else if (status === 'ready') {");
+    expect(src).toContain('map.tileFallback');
     expect(src).not.toContain("setMapState(slot, 'preview');\n    } catch (err)");
   });
 
