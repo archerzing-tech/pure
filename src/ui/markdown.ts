@@ -624,10 +624,11 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
   try {
     mermaid = await withTimeout(ensureMermaid());
   } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
       slot.setAttribute('data-processed', 'true');
-      setDiagramState(slot, 'error', t('diagram.loadFailed'));
+      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}：${detail}`);
     }
     return;
   }
@@ -1689,13 +1690,15 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
 
   let mod: typeof import('./echartsChart');
   try {
-    mod = await ensureEchartsChart();    } catch (err) {
-      for (const { slot, version } of attempts) {
-        if (!isCurrentDiagramRender(slot, version)) continue;
-        setDiagramState(slot, 'error', t('diagram.loadFailed'));
-      }
-      return;
+    mod = await ensureEchartsChart();
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    for (const { slot, version } of attempts) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}：${detail}`);
     }
+    return;
+  }
 
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
@@ -1849,9 +1852,13 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
   try {
     mod = await ensureLeafletMap();
   } catch (err) {
+    // The Leaflet module itself failed to load — retrying the SAME import
+    // will fail the same way. Give the user a real explanation instead of
+    // a dead retry button.
+    const detail = err instanceof Error ? err.message : String(err);
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
-      setMapState(slot, 'error', t('diagram.loadFailed'));
+      setMapState(slot, 'error', `${t('diagram.loadFailed')}：${detail}。请重启应用后重试；如持续出现请检查应用完整性。`);
     }
     return;
   }
