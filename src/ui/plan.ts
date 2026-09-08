@@ -207,7 +207,7 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
     ? t('plan.card.newTitle', '收到，这是一份新的计划：')
     : (plan.steps.length === 1 && firstAction
       ? `先从「${firstAction}」开始：`
-      : '根据刚才的判断，接下来按这个顺序推进：');
+      : '接下来的安排：');
   const count = document.createElement('span');
   count.className = 'plan-progress-count';
   count.textContent = `大概分成 ${plan.steps.length} 件事`;

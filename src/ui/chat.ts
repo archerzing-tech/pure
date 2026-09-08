@@ -47,7 +47,6 @@ import { createPlanProgressPin, type PlanProgressPinHandle } from './planProgres
 import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, registerToolOutputListener, registerDownloadProgressListener, cancelDownload, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
-import { createPlanSummaryCard, shouldShowPlanSummary } from './planSummary';
 import { createAgentActivityPanel, mergeAgentActivity, type AgentActivityPanelHandle } from './agentActivityPanel';
 import { attachPlanPauseActions } from './planPauseActions';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
@@ -2987,12 +2986,10 @@ export class ChatController {
       // 一次；继续轮与纯咨询不重复弹卡。
       let planSummaryShown = false;
       const maybeShowPlanSummary = (): void => {
-        if (planSummaryShown) return;
-        if (continuingPlan || !semanticRoute) return;
-        if (!shouldShowPlanSummary(semanticRoute, { hasSubagents: !!effectiveWorkspace })) return;
-        planSummaryShown = true;
-        const planSummaryCard = createPlanSummaryCard(semanticRoute, { hasSubagents: !!effectiveWorkspace });
-        this.appendToTranscript(planSummaryCard.el);
+        // Plan summary card REMOVED: it was redundant with the plan card (both
+        // announce multi-agent delegation), used generic "这个问题" phrasing
+        // that mismatched build intents, and its heavy bubble visual competed
+        // with the plan card. The plan card alone communicates the stages.
       };
       // "写一个小游戏 / 做一个网页 / 开发一个工具" → build the artifact on disk
       // instead of printing the full source inline (see the compiled build protocol).
