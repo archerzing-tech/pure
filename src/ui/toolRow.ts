@@ -405,7 +405,9 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   const details = document.createElement('details');
   details.className = 'tool-row pending';
   if (toolName === 'sys_info') details.classList.add('sys-info');
-  if (isWebSearchLike(toolName) || toolName === 'web_researcher') {
+  // The researcher SUBAGENT is web research too — same pale-blue surface as
+  // its sibling web tools (its old classless body was the visible mismatch).
+  if (isWebSearchLike(toolName) || toolName === 'web_researcher' || toolName === 'researcher') {
     details.classList.add('web-tool');
   }
   if (toolName === 'web_researcher') details.classList.add('web-researcher');
