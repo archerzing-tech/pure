@@ -301,59 +301,22 @@ body {
   display: none;
 }
 
-/* ── Sidebar action row: primary "新对话" pill + icon button for a new
-   app window. One balanced row instead of two stacked text buttons. ── */
-#sidebar-actions {
-  display: flex;
-  gap: 6px;
-  padding: 0 12px 10px;
-}
 #sidebar-new-chat {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 34px;
-  padding: 0 10px;
-  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
-  border-radius: var(--radius-sm);
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 12.5px;
-  font-weight: 600;
-  font-family: inherit;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  background: none;
+  border: none;
   cursor: pointer;
-  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text-secondary);
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
+  text-align: left;
+  transition: all var(--transition);
   -webkit-app-region: no-drag;
 }
 #sidebar-new-chat:hover {
-  background: color-mix(in srgb, var(--accent) 16%, var(--accent-soft));
-  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
-}
-#sidebar-new-window {
-  flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-sm);
-  background: var(--bg-card);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background var(--transition), border-color var(--transition), color var(--transition);
-  -webkit-app-region: no-drag;
-}
-#sidebar-new-window:hover {
   background: var(--bg-hover);
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
-  color: var(--accent);
+  color: var(--text);
 }
 
 /* ── Sidebar sessions ── */
@@ -523,27 +486,6 @@ body {
 .sidebar-session-delete:hover {
   color: var(--danger);
   background: var(--danger-soft);
-}
-
-/* Open-in-new-window button: same hover-reveal pattern as delete. */
-.sidebar-session-open-window {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--text-tertiary);
-  padding: 3px;
-  border-radius: 4px;
-  display: flex;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s;
-  flex-shrink: 0;
-}
-.sidebar-session-item:hover .sidebar-session-open-window {
-  opacity: 1;
-}
-.sidebar-session-open-window:hover {
-  color: var(--accent);
-  background: var(--accent-soft);
 }
 
 /* ── Sidebar bottom ── */
@@ -1199,27 +1141,6 @@ body {
 @keyframes agentBadgeBreath {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
-}
-.sidebar-session-open-window {
-  flex: 0 0 auto;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-}
-.sidebar-session-item:hover .sidebar-session-open-window,
-.sidebar-session-open-window:focus-visible {
-  display: inline-flex;
-}
-.sidebar-session-open-window:hover {
-  color: var(--accent);
-  background: var(--accent-soft);
 }
 .agent-worker--active {
   border-color: color-mix(in srgb, #22d3ee 45%, var(--border-light));
