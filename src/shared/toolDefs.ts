@@ -304,6 +304,22 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
     description: 'Get operating system information: timezone (IANA name), language/locale, character encoding, public IP (masked — last octet redacted) with city-level geolocation, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
     input_schema: { type: 'object', properties: {} },
   },
+  {
+    name: 'create_document',
+    description: 'Create a REAL office document file (.pptx / .docx / .xlsx) on disk from a structured specification. Use when the user asks to create/generate a presentation, document, spreadsheet, report, or slide deck. Provide a JSON `spec` describing the document content; the tool generates the actual binary file and returns its full path. The user can then open it in PowerPoint / Word / Excel.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        format: { type: 'string', enum: ['pptx', 'docx', 'xlsx'], description: 'Output file format' },
+        path: { type: 'string', description: 'Output file path (absolute or workspace-relative), e.g. "output.pptx" or "~/Documents/report.docx"' },
+        spec: {
+          type: 'object',
+          description: 'Document content specification. For pptx: { slides: [{ title, content: [bullet1, bullet2, …] }] }. For docx: { sections: [{ type: "heading"|"paragraph"|"bullet"|"pageBreak", text, level? }] }. For xlsx: { sheets: [{ name, rows: [[cell,…],…] }] }.',
+        },
+      },
+      required: ['format', 'path', 'spec'],
+    },
+  },
 ] as const satisfies readonly ToolDefinition[];
 
 /** Side-effect / write classification per tool (same table the CLI and GUI
@@ -312,7 +328,7 @@ export const PUBLIC_TOOL_NAMES = new Set([
   'read_file', 'write_file', 'edit_file', 'find_files', 'list_files', 'execute_command',
   'create_directory', 'diff_files', 'researcher_web', 'researcher_docs',
   'code_searcher', 'glob_files', 'replace_files', 'git_diff', 'git_log',
-  'git_status', 'sys_info', 'generate_image', 'web_public_api', 'web_scrape', 'download_file',
+  'git_status', 'sys_info', 'generate_image', 'web_public_api', 'web_scrape', 'download_file', 'create_document',
 ]);
 
 /**
