@@ -6848,6 +6848,172 @@ fn write_app_skill(name: String, description: String, body: String) -> Result<St
     Ok(dir.to_string_lossy().into_owned())
 }
 
+/// A SKILL.md fetched from a GitHub repo, plus the route that actually
+/// delivered it — the caller surfaces `via` so the user (and the model) can
+/// see how the bytes arrived instead of guessing.
+#[derive(serde::Serialize)]
+struct SkillMarkdownFetch {
+    path: String,
+    body: String,
+    via: String,
+}
+
+/// One lean proxy-aware GET: browser UA, forced HTTP/1.1 (see
+/// build_http_client), short timeout, no rendering tiers — skill fetching
+/// must fail fast so the next transport in the ladder gets its turn. Callers
+/// pass 20 for single files; the zip tier passes 60 (multi-MB archives).
+async fn fetch_skill_url(url: &str, accept: &str, proxy_url: Option<&str>, timeout_secs: u64) -> Result<(u16, Vec<u8>), String> {
+    let client = build_http_client(std::time::Duration::from_secs(timeout_secs), proxy_url)?;
+    let resp = client
+        .get(url)
+        .header("User-Agent", BROWSER_UA)
+        .header("Accept", accept)
+        .send()
+        .await
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    let status = resp.status().as_u16();
+    let bytes = resp.bytes().await.map_err(|e| format!("read {url}: {e}"))?.to_vec();
+    Ok((status, bytes))
+}
+
+/// Candidate repo-relative paths a skill's SKILL.md may sit at, HEAD probed
+/// before main (mirrors the TS-side fetchSkillBody candidates): the hub
+/// layout (`skills/<name>/`), a repo-that-is-the-skill (`<name>/`), and a
+/// single-skill repo (root).
+fn skill_md_paths(skill: &str) -> Vec<String> {
+    let files = [
+        format!("skills/{skill}/SKILL.md"),
+        format!("{skill}/SKILL.md"),
+        "SKILL.md".to_string(),
+    ];
+    files
+        .iter()
+        .flat_map(|file| [format!("HEAD/{file}"), format!("main/{file}")])
+        .collect()
+}
+
+/// Scan a repository zip for the skill's SKILL.md: prefer `…/{skill}/SKILL.md`
+/// (the standard layout), then a root SKILL.md, then any SKILL.md whose
+/// frontmatter `name:` matches. GitHub zips nest everything under
+/// `<repo>-<ref>/`, so matching works on path suffixes, never exact names.
+fn find_skill_md_in_zip(bytes: &[u8], skill: &str) -> Option<String> {
+    use std::io::Read as _;
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor).ok()?;
+    let suffix = format!("/{skill}/SKILL.md");
+    let mut frontmatter_match: Option<String> = None;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).ok()?;
+        let name = file.name().to_string();
+        if !(name == "SKILL.md" || name.ends_with("/SKILL.md")) {
+            continue;
+        }
+        let mut text = String::new();
+        if file.read_to_string(&mut text).is_err() || text.trim().is_empty() {
+            continue;
+        }
+        if name.ends_with(&suffix) {
+            return Some(text);
+        }
+        if name == "SKILL.md" {
+            return Some(text);
+        }
+        if frontmatter_match.is_none() {
+            if let Some((fm_name, _, _)) = parse_skill_markdown(&text) {
+                if fm_name == skill {
+                    frontmatter_match = Some(text);
+                }
+            }
+        }
+    }
+    frontmatter_match
+}
+
+/// Fetch a skill's SKILL.md from a GitHub repo through a transport ladder, so
+/// one blocked host never kills an install the user explicitly asked for:
+///   1. raw.githubusercontent.com (per-candidate paths, HEAD then main)
+///   2. api.github.com contents endpoint (raw Accept) — a different edge that
+///      often stays reachable when the raw CDN is not
+///   3. the repo zip from codeload.github.com, scanned for the skill
+///      directory — also the only route that finds SKILL.md at nonstandard
+///      depths (e.g. document-skills/pdf/SKILL.md)
+/// All hops share the app's proxy-aware HTTP client. Accepts `main`/`master`
+/// branch zips; GitHub's default branch is main for every current skills repo.
+#[tauri::command]
+async fn fetch_skill_markdown(
+    repo: String,
+    skill: String,
+    proxy_url: Option<String>,
+) -> Result<SkillMarkdownFetch, String> {
+    let repo = repo.trim().trim_matches('/').to_string();
+    let skill = skill.trim().to_string();
+    if !repo.contains('/') || repo.split('/').any(|part| part.is_empty()) || skill.is_empty() {
+        return Err("fetch_skill_markdown: repo must be owner/repo and skill must not be empty".to_string());
+    }
+    let proxy = proxy_url.as_deref();
+    let mut last_err = String::new();
+
+    for path in skill_md_paths(&skill) {
+        let raw_url = format!("https://raw.githubusercontent.com/{repo}/{path}");
+        match fetch_skill_url(&raw_url, "text/plain", proxy, 20).await {
+            Ok((200, bytes)) => {
+                if let Ok(text) = String::from_utf8(bytes) {
+                    if !text.trim().is_empty() {
+                        return Ok(SkillMarkdownFetch {
+                            path,
+                            body: text,
+                            via: "raw.githubusercontent.com".into(),
+                        });
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => last_err = e,
+        }
+        // api.github.com serves file contents raw with this Accept header and
+        // is a separate edge from the raw CDN. HEAD is not a valid `ref` here,
+        // so only the main-branch path is probed (default branch = main).
+        if let Some(file_path) = path.strip_prefix("main/") {
+            let api_url = format!("https://api.github.com/repos/{repo}/contents/{file_path}");
+            match fetch_skill_url(&api_url, "application/vnd.github.raw", proxy, 20).await {
+                Ok((200, bytes)) => {
+                    if let Ok(text) = String::from_utf8(bytes) {
+                        if !text.trim().is_empty() {
+                            return Ok(SkillMarkdownFetch {
+                                path: file_path.to_string(),
+                                body: text,
+                                via: "api.github.com".into(),
+                            });
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => last_err = e,
+            }
+        }
+    }
+
+    for branch in ["main", "master"] {
+        let zip_url = format!("https://codeload.github.com/{repo}/zip/refs/heads/{branch}");
+        match fetch_skill_url(&zip_url, "application/zip", proxy, 60).await {
+            Ok((200, bytes)) => {
+                if let Some(body) = find_skill_md_in_zip(&bytes, &skill) {
+                    return Ok(SkillMarkdownFetch {
+                        path: format!("{skill}/SKILL.md"),
+                        body,
+                        via: format!("codeload zip ({branch})"),
+                    });
+                }
+            }
+            Ok(_) => {}
+            Err(e) => last_err = e,
+        }
+    }
+
+    let last = if last_err.is_empty() { String::new() } else { format!(" Last error: {last_err}") };
+    Err(format!("fetch_skill_markdown: SKILL.md for {repo}/{skill} not reachable via any route (raw CDN / api.github.com / repo zip).{last}"))
+}
+
 #[cfg(test)]
 mod app_skills_tests {
     use super::*;
@@ -6960,6 +7126,58 @@ mod app_skills_tests {
         assert_eq!(list[0]["name"], "find-skills");
         assert_eq!(list[0]["description"], "Skill discovery");
         assert!(list[0]["body"].as_str().unwrap().contains("npx skills"));
+    }
+
+    #[test]
+    fn skill_md_paths_match_the_ts_candidate_list() {
+        let paths = skill_md_paths("pdf");
+        assert_eq!(paths, vec![
+            "HEAD/skills/pdf/SKILL.md".to_string(),
+            "main/skills/pdf/SKILL.md".to_string(),
+            "HEAD/pdf/SKILL.md".to_string(),
+            "main/pdf/SKILL.md".to_string(),
+            "HEAD/SKILL.md".to_string(),
+            "main/SKILL.md".to_string(),
+        ]);
+    }
+
+    /// Build an in-memory zip mimicking GitHub's codeload layout: everything
+    /// nested under `<repo>-<ref>/`.
+    fn repo_zip(entries: &[(&str, &str)]) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+        for (name, body) in entries {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut zip, body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn zip_scan_prefers_the_named_skill_directory() {
+        let bytes = repo_zip(&[
+            ("skills-main/template/SKILL.md", "---\nname: template\ndescription: t\n---\nbody"),
+            ("skills-main/skills/pdf/SKILL.md", "---\nname: pdf\ndescription: PDF\n---\nUse pypdf."),
+            ("skills-main/README.md", "readme"),
+        ]);
+        let found = find_skill_md_in_zip(&bytes, "pdf").expect("finds pdf skill");
+        assert!(found.contains("Use pypdf."));
+    }
+
+    #[test]
+    fn zip_scan_falls_back_to_frontmatter_name_match() {
+        // Nonstandard depth (document-skills/…) — no path suffix matches, so
+        // the frontmatter `name:` decides.
+        let bytes = repo_zip(&[
+            ("skills-main/document-skills/pdf/SKILL.md", "---\nname: pdf\ndescription: PDF\n---\nDeep path."),
+            ("skills-main/other/SKILL.md", "---\nname: other\ndescription: o\n---\nnope"),
+        ]);
+        let found = find_skill_md_in_zip(&bytes, "pdf").expect("finds by frontmatter name");
+        assert!(found.contains("Deep path."));
+        // A zip with no matching skill at all yields None.
+        assert!(find_skill_md_in_zip(&bytes, "xlsx").is_none());
+        // Garbage bytes never panic.
+        assert!(find_skill_md_in_zip(b"not a zip", "pdf").is_none());
     }
 }
 
@@ -14206,6 +14424,7 @@ pub fn run() {
             request_system_permission,
             list_app_skills,
             write_app_skill,
+            fetch_skill_markdown,
             test_llm_connection,
             test_proxy,
             detect_system_proxy,

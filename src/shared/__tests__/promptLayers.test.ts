@@ -159,6 +159,14 @@ describe('L1 behavior contracts', () => {
     expect(CAPABILITY_GAP_PROMPT).toContain('connect_mcp_server(candidateId)');
     expect(CAPABILITY_GAP_PROMPT).toContain('consider a specialist skill as one possible solution');
     expect(CAPABILITY_GAP_PROMPT).toContain('official Registry recipe');
+    // The transport-escalation ladder: a failed route is a diagnosis, and the
+    // archive route must name the concrete codeload URL + placement target.
+    expect(CAPABILITY_GAP_PROMPT).toContain('diagnosis, not a dead end');
+    expect(CAPABILITY_GAP_PROMPT).toContain('codeload.github.com');
+    expect(CAPABILITY_GAP_PROMPT).toContain('download_file');
+    expect(CAPABILITY_GAP_PROMPT).toContain('~/.pure/skills/');
+    // User-provided repos install without a search hit.
+    expect(CAPABILITY_GAP_PROMPT).toContain('a GitHub repo the USER gave you');
   });
 });
 
