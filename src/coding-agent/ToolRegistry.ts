@@ -54,6 +54,7 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   diff_files: { tags: [Tags.FS, Tags.READ], riskLevel: 'low' },
   researcher_web: { tags: [Tags.SEARCH, Tags.READ], riskLevel: 'low' },
   researcher_docs: { tags: [Tags.SEARCH, Tags.READ], riskLevel: 'low' },
+  create_document: { tags: [Tags.WRITE], riskLevel: 'medium' },
   code_searcher: { tags: [Tags.FS, Tags.READ, Tags.SEARCH], riskLevel: 'low' },
   web_search: { tags: [Tags.SEARCH, Tags.READ], riskLevel: 'low' },
   web_fetch: { tags: [Tags.READ], riskLevel: 'low' },
