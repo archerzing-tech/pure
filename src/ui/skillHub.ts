@@ -21,19 +21,21 @@
 import { isTauriRuntime } from '../shared/tauri';
 
 /** Proxy-aware text fetch for hub resources. In Tauri runtime, routes through
- *  the Rust `web_fetch` command (which has app proxy + netRoute classification)
- *  so raw.githubusercontent.com works behind restricted networks. `proxyUrl`
- *  comes from netRouteProxyPair at the call site when one is configured. */
+ *  the lean Rust `fetch_url_text` command (app proxy + netRoute classification,
+ *  NO rendering tiers) so raw.githubusercontent.com works behind restricted
+ *  networks while a missing candidate still costs exactly one fast 404 — same
+ *  request count and latency profile as the direct fetch on clear networks.
+ *  `proxyUrl` comes from netRouteProxyPair at the call site when configured. */
 async function hubFetchText(url: string, timeoutMs = 10000, proxyUrl = ''): Promise<string | null> {
   if (isTauriRuntime()) {
     try {
       const core = await loadTauriCore();
       if (!core) return null;
-      const text = await core.invoke<string>('web_fetch', {
-        workspace: '',
+      const text = await core.invoke<string>('fetch_url_text', {
         url,
-        maxChars: 500000,
-        proxyUrl: proxyUrl || '',
+        accept: null,
+        proxyUrl: proxyUrl || null,
+        timeoutSecs: Math.max(1, Math.ceil(timeoutMs / 1000)),
       });
       return text || null;
     } catch {
