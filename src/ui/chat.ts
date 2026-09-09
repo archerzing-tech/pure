@@ -4069,7 +4069,7 @@ export class ChatController {
                 }
                 return v;
               };
-              if (toolName === 'write_file' || toolName === 'edit_file') {
+              if (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'create_document') {
                 if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) {
                   bumpVersion(resultArgs.path);
                   addArtifact(resultArgs.path);
