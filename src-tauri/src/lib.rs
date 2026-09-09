@@ -6876,6 +6876,30 @@ async fn fetch_skill_url(url: &str, accept: &str, proxy_url: Option<&str>, timeo
     Ok((status, bytes))
 }
 
+/// Lean proxied GET for plain text/JSON resources (hub index probes, raw
+/// files). Deliberately does NOT reuse web_fetch: a 404 here must cost one
+/// fast round trip, never a Jina/Wayback/Firecrawl detour — hub discovery
+/// probes several deliberately-missing paths per repo and relies on skipping
+/// them quickly, which is exactly the normal-network behavior to preserve.
+#[tauri::command]
+async fn fetch_url_text(
+    url: String,
+    accept: Option<String>,
+    proxy_url: Option<String>,
+    timeout_secs: Option<u64>,
+) -> Result<String, String> {
+    let url = url.trim().to_string();
+    if !url.starts_with("https://") {
+        return Err("fetch_url_text: only https:// URLs are allowed".to_string());
+    }
+    let accept = accept.unwrap_or_else(|| "text/plain, application/json".to_string());
+    let (status, bytes) = fetch_skill_url(&url, &accept, proxy_url.as_deref(), timeout_secs.unwrap_or(10)).await?;
+    if status != 200 {
+        return Err(format!("HTTP {status}"));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Candidate repo-relative paths a skill's SKILL.md may sit at, HEAD probed
 /// before main (mirrors the TS-side fetchSkillBody candidates): the hub
 /// layout (`skills/<name>/`), a repo-that-is-the-skill (`<name>/`), and a
@@ -14425,6 +14449,7 @@ pub fn run() {
             list_app_skills,
             write_app_skill,
             fetch_skill_markdown,
+            fetch_url_text,
             test_llm_connection,
             test_proxy,
             detect_system_proxy,
