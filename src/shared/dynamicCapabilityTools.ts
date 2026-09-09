@@ -25,12 +25,12 @@ export const DYNAMIC_CAPABILITY_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'install_agent_skill',
-    description: 'Download and install a previously discovered Agent Skill into the application skill directory. The skill becomes available to the current turn after installation; do not invent source/name values that were not returned by search_agent_skills.',
+    description: 'Download and install an Agent Skill into the application skill directory (~/.pure/skills/). The skill becomes available to the current turn after installation. `source` accepts either a repo returned by search_agent_skills OR a GitHub repo the user provided ("owner/repo" or a full github.com URL) — a search hit is NOT required when the user names the repo. The fetch tries several routes automatically (raw CDN → GitHub API → repo zip), so one blocked host usually does not fail the install; if it still fails, switch transport (download the repo zip via download_file and extract to ~/.pure/skills/) instead of retrying.',
     input_schema: {
       type: 'object',
       properties: {
-        source: { type: 'string', description: 'Repository source returned by search_agent_skills, for example vercel-labs/agent-skills' },
-        name: { type: 'string', description: 'Skill name returned by search_agent_skills' },
+        source: { type: 'string', description: 'Repository as owner/repo (e.g. anthropics/skills) or a full GitHub URL; from search_agent_skills results or from the user' },
+        name: { type: 'string', description: 'Skill directory name, e.g. pdf. From search results, or derived from the user-provided repo/skill name' },
       },
       required: ['source', 'name'],
     },
