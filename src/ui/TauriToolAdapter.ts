@@ -959,13 +959,15 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
         }
         case 'web_scrape': {
-          // Tier-3 known-URL extraction with Jina/Firecrawl fallbacks.
+          // Smart route: netRoute picks direct/proxy per destination host.
+          const scrapeUrl = String(args.url ?? '');
+          const scrapeRoute = netRouteProxyPair(scrapeUrl, this.proxyUrl);
           const data = await this.call('web_scrape', {
             workspace: ws,
-            url: String(args.url ?? ''),
+            url: scrapeUrl,
             selector: typeof args.selector === 'string' ? args.selector : null,
             maxChars: args.maxChars ?? 20000,
-            proxyUrl: this.proxyUrl,
+            proxyUrl: scrapeRoute.proxyUrl || null,
           }) as string;
           return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
         }
