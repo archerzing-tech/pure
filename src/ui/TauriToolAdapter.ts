@@ -8,7 +8,7 @@ import type { Channel } from '@tauri-apps/api/core';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA, isPublicToolName } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, isDynamicCapabilityTool, type DynamicCapabilityHooks } from '../shared/dynamicCapabilityTools';
 import { mcpRegistrySearchUrl, parseMcpRegistryPayload, communityMcpCandidates, type McpCandidate } from '../shared/mcpRegistry';
-import { fetchSkillBody, searchHubSkills, splitSkillMarkdown, sanitizeSkillName } from './skillHub';
+import { fetchSkillBody, searchHubSkills, splitSkillMarkdown, sanitizeSkillName, normalizeHubRepo } from './skillHub';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../shared/research';
 export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
@@ -341,7 +341,10 @@ export class TauriToolAdapter implements ToolAdapter {
           const query = String(args.query ?? '').trim();
           if (!query) return { id: toolCall.id, toolName: name, error: 'search_agent_skills requires a query', success: false, duration: Date.now() - start };
           const maxResults = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults) ? Math.min(20, Math.max(1, Math.floor(args.maxResults))) : 8;
-          const candidates = await searchHubSkills(query, maxResults);
+          // Hub indexes live on raw.githubusercontent.com — classify that host
+          // so a configured proxy actually gets used (same as web_scrape).
+          const hubRoute = netRouteProxyPair('https://raw.githubusercontent.com/', this.proxyUrl);
+          const candidates = await searchHubSkills(query, maxResults, undefined, hubRoute.proxyUrl);
           return { id: toolCall.id, toolName: name, result: JSON.stringify({ query, candidates }, null, 2), success: true, duration: Date.now() - start };
         }
         case 'install_agent_skill': {
@@ -350,8 +353,20 @@ export class TauriToolAdapter implements ToolAdapter {
           if (!/^[A-Za-z0-9_.-]+$/.test(nameArg)) {
             return { id: toolCall.id, toolName: name, error: 'install_agent_skill rejected an unsafe skill name', success: false, duration: Date.now() - start };
           }
-          const raw = await fetchSkillBody(source, nameArg);
-          if (!raw) return { id: toolCall.id, toolName: name, error: `SKILL.md not found for ${source}/${nameArg}`, success: false, duration: Date.now() - start };
+          // source may be a search candidate's owner/repo OR a GitHub URL the
+          // user pasted — normalize both to owner/repo for the fetch ladder.
+          const repo = normalizeHubRepo(source) || source;
+          const hubRoute = netRouteProxyPair('https://raw.githubusercontent.com/', this.proxyUrl);
+          const raw = await fetchSkillBody(repo, nameArg, hubRoute.proxyUrl);
+          if (!raw) {
+            return {
+              id: toolCall.id,
+              toolName: name,
+              error: `无法从 ${repo} 获取 ${nameArg}/SKILL.md — raw CDN、GitHub API 和 repo zip 三条路都不可达。不要重复同一调用，换条路：用 download_file 下载 https://codeload.github.com/${repo}/zip/refs/heads/main（download_file 走应用代理），解压后把 ${nameArg}/SKILL.md 所在目录拷进 ~/.pure/skills/${nameArg}/。`,
+              success: false,
+              duration: Date.now() - start,
+            };
+          }
           const split = splitSkillMarkdown(raw);
           const body = split.body.trim();
           if (!body) return { id: toolCall.id, toolName: name, error: 'Downloaded SKILL.md has no instruction body', success: false, duration: Date.now() - start };
