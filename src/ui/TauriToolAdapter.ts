@@ -1014,7 +1014,7 @@ export class TauriToolAdapter implements ToolAdapter {
           if (!format || !docPath) {
             return { id: toolCall.id, toolName: name, result: 'format 与 path 为必填字段', success: false, duration: Date.now() - start };
           }
-          const bytes = await generateDocument(spec as never);
+          const bytes = await generateDocument(format, spec);
           const b64 = toBase64(bytes);
           await this.call('save_file_binary', { path: docPath, data_base64: b64 });
           return {

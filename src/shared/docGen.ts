@@ -99,12 +99,22 @@ export async function generateXlsx(spec: XlsxSpec): Promise<Uint8Array> {
   return new Uint8Array(buf);
 }
 
-/** Generate a binary document from a spec. Returns the bytes ready to save. */
-export async function generateDocument(spec: DocumentSpec): Promise<Uint8Array> {
-  switch (spec.format) {
-    case 'docx': return generateDocx(spec);
-    case 'pptx': return generatePptx(spec);
-    case 'xlsx': return generateXlsx(spec);
+/** Generate a binary document from a spec. Returns the bytes ready to save.
+ * `format` is the tool's top-level argument — the schema never asks the model
+ * to repeat it inside `spec`, so dispatching on spec.format alone would miss
+ * every well-formed call and return undefined (the bytes.length crash).
+ * spec.format is still honored as a fallback for models that include it. */
+export async function generateDocument(format: string | undefined, spec: unknown): Promise<Uint8Array> {
+  if (!spec || typeof spec !== 'object') {
+    throw new Error('create_document: spec 必须是描述文档内容的对象，例如 pptx 用 { slides: [...] }');
+  }
+  const fmt = format ?? (spec as { format?: string }).format;
+  switch (fmt) {
+    case 'docx': return generateDocx(spec as DocxSpec);
+    case 'pptx': return generatePptx(spec as PptxSpec);
+    case 'xlsx': return generateXlsx(spec as XlsxSpec);
+    default:
+      throw new Error(`create_document: 无法识别的 format "${fmt ?? ''}"，只支持 pptx / docx / xlsx`);
   }
 }
 
