@@ -5407,13 +5407,22 @@ export class SessionChatManager {
     }
   }
 
-  /** New chat: cancel the visible session and start a fresh conversation. This
-   * is explicit user intent (new-chat button / ⌘N), so the visible session's
-   * run IS stopped — hidden sessions are never touched. */
-  clear(): void {
+  /** New chat: start a fresh conversation. On the 新建对话 / ⌘N path
+   * (keepRunningSession) a still-streaming visible session is NOT cancelled —
+   * it keeps running in the background exactly like a hidden session does on a
+   * sidebar switch: own host, own persistence, sidebar running dot. The user
+   * can stop it explicitly or switch back mid-run. Without the flag (the
+   * delete-visible-session path via resetToLanding) the run IS stopped: a
+   * deleted session must not keep executing or re-persisting after its disk
+   * state is gone. Idle sessions are always dropped, so repeated new-chats
+   * never build up dead controllers. */
+  clear({ keepRunningSession = false }: { keepRunningSession?: boolean } = {}): void {
     const id = this.currentSessionId || this.getSessionId();
-    this.forgetSession(id);
-    // A fresh, empty conversation becomes the new active session.
+    const keepRunning = keepRunningSession && this.controllers.get(id)?.isStreaming() === true;
+    if (!keepRunning) this.forgetSession(id);
+    // A fresh, empty conversation becomes the new active session. makeActive()
+    // flips the kept controller to viewActive(false), so it parks in the
+    // background through the same path a sidebar switch uses.
     this.openSession(`session_${Date.now()}_${this.nextSessionSeq++}`);
   }
 

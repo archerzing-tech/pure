@@ -115,6 +115,39 @@ describe('session chat manager (multi-session background execution)', () => {
     expect(manager.hasOpenSession('session-weather')).toBe(false);
   });
 
+  it('new chat parks a still-streaming visible session in the background instead of cancelling it', () => {
+    const manager = new SessionChatManager();
+    const flight = manager.openSession('session-flight');
+    // Mid-run: the flight session is streaming when the user hits 新建对话.
+    (flight.controller as any).setStreaming(true);
+    const cancelled = stubCancel(flight.controller);
+
+    manager.clear({ keepRunningSession: true });
+
+    // The run is NOT interrupted; the fresh chat becomes active instead.
+    expect(cancelled.count()).toBe(0);
+    expect(manager.getSessionId()).not.toBe('session-flight');
+    expect(manager.hasOpenSession('session-flight')).toBe(true);
+    // Parked in the background: host still in the DOM, just hidden.
+    expect(flight.host.hidden).toBe(true);
+    // Switching back reattaches the SAME live controller, still mid-run.
+    const back = manager.openSession('session-flight');
+    expect(back.warm).toBe(true);
+    expect(back.controller).toBe(flight.controller);
+    expect(back.controller.isStreaming()).toBe(true);
+  });
+
+  it('new chat on an idle visible session still discards it (no controller buildup)', () => {
+    const manager = new SessionChatManager();
+    const idle = manager.openSession('session-idle');
+    const cancelled = stubCancel(idle.controller);
+
+    manager.clear({ keepRunningSession: true });
+
+    expect(cancelled.count()).toBe(1);
+    expect(manager.hasOpenSession('session-idle')).toBe(false);
+  });
+
   it('forgetting a session cancels its run and removes its host', () => {
     const manager = new SessionChatManager();
     const entry = manager.openSession('session-ghost');

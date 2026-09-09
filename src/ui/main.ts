@@ -1475,7 +1475,9 @@ if (isTauriRuntime()) {
 }
 
 sidebarNewChat.addEventListener('click', () => {
-  chat.clear();
+  // A still-running conversation keeps working in the background — new chat
+  // only switches away, it never interrupts (same as a sidebar switch).
+  chat.clear({ keepRunningSession: true });
   goToLanding();
   landingPrompt.focus();
   sessionSidebar.setActive(null);
@@ -2282,7 +2284,7 @@ document.addEventListener('keydown', (e) => {
     void (async () => {
       if (!(await settingsVisible())) {
         workspace.closePopover();
-        chat.clear();
+        chat.clear({ keepRunningSession: true });
         goToLanding();
         landingPrompt.focus();
         chat.setWorkspace('');
