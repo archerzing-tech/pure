@@ -15,6 +15,7 @@ import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { netRouteProxyPair } from '../shared/netRoute';
+import { generateDocument, toBase64 } from '../shared/docGen';
 
 /** curl/wget exit codes that mean "network-level failure" (resolve/connect/
  *  timeout/SSL/send/recv) — these trip the host breaker; disk-full (e.g. 13)
@@ -1005,6 +1006,22 @@ export class TauriToolAdapter implements ToolAdapter {
           // trip — the Rust command treats it as optional.
           const info = await this.call('sys_info', { workspace: ws, location: this.location }) as string;
           return { id: toolCall.id, toolName: name, result: info, success: true, duration: Date.now() - start };
+        }
+        case 'create_document': {
+          const { format, path: docPath, spec } = args as { format: string; path: string; spec: unknown };
+          if (!format || !docPath) {
+            return { id: toolCall.id, toolName: name, result: 'format 与 path 为必填字段', success: false, duration: Date.now() - start };
+          }
+          const bytes = await generateDocument(spec as never);
+          const b64 = toBase64(bytes);
+          await this.call('save_file_binary', { path: docPath, data_base64: b64 });
+          return {
+            id: toolCall.id,
+            toolName: name,
+            result: `文档已生成：${docPath}（${format.toUpperCase()}，${(bytes.length / 1024).toFixed(1)} KB）`,
+            success: true,
+            duration: Date.now() - start,
+          };
         }
         case 'generate_image': {
           if (!this.imageGen) {
