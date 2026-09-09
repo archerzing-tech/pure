@@ -22,8 +22,9 @@ import { isTauriRuntime } from '../shared/tauri';
 
 /** Proxy-aware text fetch for hub resources. In Tauri runtime, routes through
  *  the Rust `web_fetch` command (which has app proxy + netRoute classification)
- *  so raw.githubusercontent.com works behind restricted networks. */
-async function hubFetchText(url: string, timeoutMs = 10000): Promise<string | null> {
+ *  so raw.githubusercontent.com works behind restricted networks. `proxyUrl`
+ *  comes from netRouteProxyPair at the call site when one is configured. */
+async function hubFetchText(url: string, timeoutMs = 10000, proxyUrl = ''): Promise<string | null> {
   if (isTauriRuntime()) {
     try {
       const core = await loadTauriCore();
@@ -32,7 +33,7 @@ async function hubFetchText(url: string, timeoutMs = 10000): Promise<string | nu
         workspace: '',
         url,
         maxChars: 500000,
-        proxyUrl: '',
+        proxyUrl: proxyUrl || '',
       });
       return text || null;
     } catch {
@@ -125,27 +126,37 @@ export function hubIndexUrls(repo: string): string[] {
   ];
 }
 
-/** Fetch the first reachable hub index and normalize it into HubIndex. */
-export async function fetchHubIndex(repo: string): Promise<HubIndex> {
+/** Fetch the first reachable hub index and normalize it into HubIndex. In
+ * Tauri runtime the fetch rides the proxy-aware Rust web_fetch (see
+ * hubFetchText); browser/dev mode fetches directly. */
+export async function fetchHubIndex(repo: string, proxyUrl = ''): Promise<HubIndex> {
   const urls = hubIndexUrls(repo);
   const errors: string[] = [];
   let anyReached = false;
   for (const url of urls) {
-    let resp: Response;
-    try {
-      resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    } catch {
-      continue;
+    let text: string | null;
+    if (isTauriRuntime()) {
+      text = await hubFetchText(url, 10000, proxyUrl);
+      if (text == null) continue;
+      anyReached = true;
+    } else {
+      let resp: Response;
+      try {
+        resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      } catch {
+        continue;
+      }
+      if (resp.status === 404) continue;
+      if (!resp.ok) {
+        errors.push(`${url}: HTTP ${resp.status}`);
+        continue;
+      }
+      anyReached = true;
+      text = await resp.text();
     }
-    if (resp.status === 404) continue;
-    if (!resp.ok) {
-      errors.push(`${url}: HTTP ${resp.status}`);
-      continue;
-    }
-    anyReached = true;
     let json: unknown;
     try {
-      json = await resp.json();
+      json = JSON.parse(text);
     } catch {
       // 200 but not JSON — record it so the failure message says "format
       // problem" instead of a misleading "unreachable".
@@ -204,12 +215,31 @@ export function normalizeIndex(json: unknown): HubIndex | null {
   return null;
 }
 
-/** Resolve the raw SKILL.md URL for a hub skill (probe a few branch/layout
- * candidates). Returns the raw markdown (frontmatter intact) or null when the
- * skill does not exist at any candidate. Callers split frontmatter via
- * splitSkillMarkdown. */
-export async function fetchSkillBody(repo: string, skillName: string): Promise<string | null> {
+/** Fetch a skill's raw SKILL.md (frontmatter intact; callers split it via
+ * splitSkillMarkdown). Desktop runtime delegates to the Rust
+ * `fetch_skill_markdown` ladder — raw CDN → api.github.com contents → repo
+ * zip — which is proxy-aware and keeps working when raw.githubusercontent.com
+ * is blocked; on any error it falls back to the direct candidates so an older
+ * backend that predates the command still works. Browser/dev mode probes the
+ * same candidates directly. */
+export async function fetchSkillBody(repo: string, skillName: string, proxyUrl = ''): Promise<string | null> {
   const r = normalizeHubRepo(repo);
+  if (isTauriRuntime()) {
+    try {
+      const core = await loadTauriCore();
+      if (core) {
+        const res = await core.invoke<{ path: string; body: string; via: string }>('fetch_skill_markdown', {
+          repo: r,
+          skill: skillName,
+          proxyUrl: proxyUrl || null,
+        });
+        return res?.body || null;
+      }
+    } catch {
+      // Unknown command (old backend) or all ladder routes unreachable —
+      // retry via the direct candidates below.
+    }
+  }
   const candidates = [
     `https://raw.githubusercontent.com/${r}/HEAD/skills/${skillName}/SKILL.md`,
     `https://raw.githubusercontent.com/${r}/main/skills/${skillName}/SKILL.md`,
@@ -274,6 +304,7 @@ export async function searchHubSkills(
   query: string,
   maxResults = 8,
   repos: readonly string[] = SEARCH_HUB_REPOS,
+  proxyUrl = '',
 ): Promise<SkillSearchResult[]> {
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   if (terms.length === 0) return [];
@@ -285,7 +316,7 @@ export async function searchHubSkills(
   let indexes: Array<PromiseSettledResult<{ repo: string; index: HubIndex }>>;
   try {
     indexes = await Promise.race([
-      Promise.allSettled(repos.map(async (repo) => ({ repo, index: await fetchHubIndex(repo) }))),
+      Promise.allSettled(repos.map(async (repo) => ({ repo, index: await fetchHubIndex(repo, proxyUrl) }))),
       new Promise<never>((_, reject) => {
         deadlineTimer = setTimeout(() => reject(new Error('skill search timed out')), SEARCH_TOTAL_DEADLINE_MS);
       }),
