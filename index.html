@@ -462,6 +462,28 @@
                   </div>
 
                 </div>
+                <!-- Reasoning effort: global level + per-model support backstop -->
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info">
+                      <span class="setting-label" data-i18n="llm.reasoning.label">思考深度（reasoning effort）</span>
+                      <span class="setting-hint" data-i18n="llm.reasoning.hint">只对支持 reasoning 的模型生效，随请求发送 reasoning_effort 参数</span>
+                      <span class="setting-hint" id="llm-reasoning-hint"></span>
+                    </div>
+                    <div class="llm-reasoning-controls">
+                      <select id="cfg-reasoning-effort" class="setting-select" data-i18n-options="low:llm.reasoning.low,medium:llm.reasoning.medium,high:llm.reasoning.high">
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                      </select>
+                      <select id="cfg-reasoning-override" class="setting-select" title="模型支持判定" data-i18n-options="auto:llm.reasoning.override.auto,on:llm.reasoning.override.on,off:llm.reasoning.override.off">
+                        <option value="auto">Auto</option>
+                        <option value="on">Force on</option>
+                        <option value="off">Force off</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
               </div>
               <!-- Tools -->
               <div class="settings-page" data-page="tools">
@@ -500,6 +522,11 @@
                     <div class="setting-info"><span class="setting-label" data-i18n="tools.moreKeys">CLI 更多免费 Key</span><span class="setting-hint" data-i18n="tools.moreKeys.hint">CLI 环境变量：EXA_API_KEY · PURE_JINA_API_KEY · SEARXNG_URL</span></div>
                     <div class="key-links"><a class="key-link" href="https://exa.ai" target="_blank" rel="noopener">Exa ↗</a><a class="key-link" href="https://jina.ai" target="_blank" rel="noopener">Jina ↗</a></div>
                   </div>
+                </div>
+                <h3 class="settings-section-title" data-i18n="tools.inventory.title">当前可用工具</h3>
+                <div class="settings-section">
+                  <p class="setting-hint tool-inventory-hint" data-i18n="tools.inventory.hint">这是模型这一轮真正能调用的工具。关掉上面的开关，对应工具会立刻从这里消失。</p>
+                  <div id="tool-inventory"></div>
                 </div>
                 <h3 class="settings-section-title" data-i18n="tools.permissionSection">Permission &amp; approval</h3>
                 <div class="settings-section">
@@ -606,6 +633,18 @@
                   <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.web-research">Web Research</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="web-research" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.web-research.desc">Search the web for documentation</p></div>
                   <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.memory">Memory</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="memory" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.memory.desc">Remember preferences and context</p></div>
                   <div class="skill-card"><div class="skill-card-header"><span class="skill-name" data-i18n="skills.planning">Planning</span><label class="toggle"><input type="checkbox" class="cfg-skill-toggle" data-skill="planning" checked /><span class="toggle-slider"></span></label></div><p class="skill-desc" data-i18n="skills.planning.desc">Break down complex tasks</p></div>
+                </div>
+
+                <!-- ── Installed app skills: ~/.pure/skills + <workspace>/.agents/skills ── -->
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info">
+                      <span class="setting-label" data-i18n="skills.installed.title">已安装技能</span>
+                      <span class="setting-hint" data-i18n="skills.installed.hint">从本机技能目录读取，随对话自动注入。Skill Hub 之外的技能（比如助手在会话里装的）也会显示在这里。</span>
+                    </div>
+                  </div>
+                  <div id="skills-dir-rows"></div>
+                  <div id="app-skills-list" class="hub-installed"></div>
                 </div>
 
                 <!-- ── Skill Hub: install third-party skills from open-source
@@ -720,6 +759,7 @@
                 <p class="settings-page-desc" data-i18n="mcp.desc">Connect to Model Context Protocol servers for extended tools</p>
                 <div class="settings-section">
                   <div id="mcp-server-list"></div>
+                  <p class="setting-hint mcp-probe-hint" data-i18n="mcp.tools.probeHint">「查看工具」会临时启动一次服务器进程、取完列表就关掉；第一次跑 npx 之类的命令可能要多等一会儿。</p>
                   <div id="mcp-add-form" class="mcp-add-form hidden">
                     <div class="mcp-form-row">
                       <input id="mcp-form-name" class="setting-input" type="text" data-i18n-placeholder="mcp.serverName.placeholder" placeholder="Server name (e.g. filesystem)" />
