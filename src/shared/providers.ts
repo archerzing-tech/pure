@@ -180,6 +180,9 @@ export interface CustomProvider {
     contextWindowTokens?: number;
     outputReserveTokens?: number;
     safetyMarginTokens?: number;
+    /** Reasoning-effort setting for THIS model (same row as the budgets —
+     * deepseek-v4-flash vs deepseek-v4-pro differ). */
+    reasoningEffort?: ReasoningEffortSetting;
   }>;
   /** Stable slug used as the provider id (e.g. 'ollama', 'openrouter'). */
   id: string;
@@ -249,6 +252,9 @@ export interface ProviderOverride {
     contextWindowTokens?: number;
     outputReserveTokens?: number;
     safetyMarginTokens?: number;
+    /** Reasoning-effort setting for THIS model (same row as the budgets —
+     * deepseek-v4-flash vs deepseek-v4-pro differ). */
+    reasoningEffort?: ReasoningEffortSetting;
   }>;
   /** Browser-mode per-provider API key (desktop keeps it in Rust secrets). */
   apiKey?: string;
@@ -511,7 +517,10 @@ export function imageGenModelFor(
 // Adding a new family is a one-line diff here plus one test line.
 
 export type ReasoningEffortLevel = 'low' | 'medium' | 'high';
-export type ReasoningModelOverride = 'on' | 'off';
+/** Per-model reasoning setting, stored alongside the model's token budgets:
+ * 'off' never sends the parameter, a concrete level forces it, and absence
+ * (undefined) means auto — the 2026+ name pattern decides, then medium. */
+export type ReasoningEffortSetting = 'off' | ReasoningEffortLevel;
 
 const REASONING_EFFORT_MODEL_PATTERN =
   /(?:gpt-[5-9]|glm-[5-9]|deepseek-(?:v[4-9]|r[2-9])|qwen[4-9]|qwen[3-9]\.[5-9]|qwq|qmax|claude-[5-9]|claude-(?:opus|sonnet|haiku)-[5-9]|fable|gemini-[3-9]|kimi-k[3-9]|moonshot-v[2-9]|minimax-m[2-9])/i;
@@ -521,35 +530,14 @@ export function isReasoningModelName(model: string | undefined | null): boolean 
   return !!model && REASONING_EFFORT_MODEL_PATTERN.test(model.trim());
 }
 
-/** Key format for the per-model manual backstop (`provider::model`). Same
- *  encoding the default-model menu uses; only ever looked up as a whole key. */
-export function reasoningOverrideKey(provider: string | undefined | null, model: string | undefined | null): string {
-  return `${provider ?? ''}::${model ?? ''}`;
-}
-
 /**
- * Whether `reasoning_effort` may be sent to this provider+model. Precedence:
- * the manual per-model override ('on'/'off') wins, then the 2026+ name
- * pattern, defaulting to false for anything unrecognized. `providerOverrides`
- * is accepted for call-site symmetry with promptBudgetForProvider but is not
- * read yet — per-provider capability flags would live there if ever needed.
- */
-export function supportsReasoningEffort(
-  _customs: readonly CustomProvider[] | undefined | null,
-  provider: string | undefined | null,
-  _providerOverrides: Record<string, ProviderOverride> | undefined | null,
-  model: string | undefined | null,
-  reasoningModelOverrides?: Record<string, ReasoningModelOverride> | null,
-): boolean {
-  const manual = reasoningModelOverrides?.[reasoningOverrideKey(provider, model)];
-  if (manual === 'on') return true;
-  if (manual === 'off') return false;
-  return isReasoningModelName(model);
-}
-
-/**
- * Resolve the reasoning-effort wire value for a turn: the configured global
- * level (default 'medium') when the model supports it, otherwise nothing.
+ * Resolve the reasoning-effort wire value for a turn. The setting lives ON
+ * THE MODEL — `modelBudgets[model].reasoningEffort`, the same slot as the
+ * model's token budgets (deepseek-v4-flash vs deepseek-v4-pro differ) — with
+ * custom-provider entries taking precedence over built-in overrides:
+ *   'off'            → never send
+ *   'low'|'medium'|'high' → always send that level
+ *   unset (auto)     → the 2026+ name pattern decides, then medium
  * Anthropic-protocol endpoints are excluded for now — they reject unknown
  * top-level body fields, and the anthropic thinking API has a different shape.
  * Accepts PureConfig structurally (providers.ts must not import ui/config.ts).
@@ -559,23 +547,23 @@ export function resolveReasoningEffort(cfg: {
   model?: string | null;
   customProviders?: readonly CustomProvider[] | null;
   providerOverrides?: Record<string, ProviderOverride> | null;
-  reasoningEffort?: ReasoningEffortLevel | null;
-  reasoningModelOverrides?: Record<string, ReasoningModelOverride> | null;
   protocol?: 'openai' | 'anthropic' | string | null;
 }): { supported: boolean; effort?: ReasoningEffortLevel } {
-  const supported = cfg.protocol !== 'anthropic'
-    && supportsReasoningEffort(
-      cfg.customProviders,
-      cfg.provider,
-      cfg.providerOverrides,
-      cfg.model,
-      cfg.reasoningModelOverrides,
-    );
-  if (!supported) return { supported: false };
-  const effort: ReasoningEffortLevel = cfg.reasoningEffort === 'low' || cfg.reasoningEffort === 'high'
-    ? cfg.reasoningEffort
-    : 'medium';
-  return { supported: true, effort };
+  const model = cfg.model?.trim();
+  if (!model) return { supported: false };
+  const custom = customProviderFor(cfg.customProviders, cfg.provider);
+  const override = providerOverrideFor(cfg.providerOverrides, cfg.provider);
+  // Same precedence as promptBudgetForProvider: custom entry → built-in override.
+  const setting: ReasoningEffortSetting | undefined
+    = custom?.modelBudgets?.[model]?.reasoningEffort
+      ?? override?.modelBudgets?.[model]?.reasoningEffort;
+  if (cfg.protocol === 'anthropic') return { supported: false };
+  if (setting === 'off') return { supported: false };
+  if (setting === 'low' || setting === 'medium' || setting === 'high') {
+    return { supported: true, effort: setting };
+  }
+  // Auto: only models on the 2026+ list get the parameter (level medium).
+  return isReasoningModelName(model) ? { supported: true, effort: 'medium' } : { supported: false };
 }
 
 /** Display label for a provider id, resolving custom providers by name. */

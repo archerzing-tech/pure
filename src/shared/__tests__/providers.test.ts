@@ -26,8 +26,6 @@ import {
   resolvePromptBudget,
   isReasoningModelName,
   resolveReasoningEffort,
-  reasoningOverrideKey,
-  supportsReasoningEffort,
   isCustomKeyless,
   isCustomProviderId,
   type CustomProvider,
@@ -434,38 +432,63 @@ describe('reasoning-effort capability detection', () => {
     expect(isReasoningModelName('glm-5.2')).toBe(true);
   });
 
-  it('manual per-model override wins over the name pattern', () => {
-    const overrides = {
-      [reasoningOverrideKey('ollama', 'qwen2.5-coder:7b')]: 'on' as const,
-      [reasoningOverrideKey('glm', 'glm-5.3-flash')]: 'off' as const,
-    };
-    // Force-on rescues a model the pattern missed.
-    expect(supportsReasoningEffort([], 'ollama', undefined, 'qwen2.5-coder:7b', overrides)).toBe(true);
-    // Force-off silences a model the pattern matched.
-    expect(supportsReasoningEffort([], 'glm', undefined, 'glm-5.3-flash', overrides)).toBe(false);
-    // Without an override the pattern decides.
-    expect(supportsReasoningEffort([], 'glm', undefined, 'glm-5.3-flash', {})).toBe(true);
-    expect(supportsReasoningEffort([], 'deepseek-openai', undefined, 'deepseek-r1')).toBe(false);
-    expect(supportsReasoningEffort([], 'openai', undefined, '')).toBe(false);
-  });
-
-  it('resolveReasoningEffort: level default, gating, and override precedence', () => {
-    // Default level is medium when nothing is configured.
+  it('resolveReasoningEffort reads the per-model row setting (modelBudgets)', () => {
+    // Auto (no setting): the 2026+ pattern decides, level medium.
     expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2' }))
       .toEqual({ supported: true, effort: 'medium' });
-    expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2', reasoningEffort: 'low' }))
+    expect(resolveReasoningEffort({ provider: 'qwen', model: 'qwen3-coder-next' }))
+      .toEqual({ supported: false });
+    // The setting lives ON THE MODEL ROW (same slot as the token budgets):
+    // deepseek-v4-flash and deepseek-v4-pro carry DIFFERENT values.
+    const custom: CustomProvider = {
+      ...OLLAMA_PRESET, id: 'ds', name: 'DS', baseURL: 'https://api.deepseek.com/v1',
+      defaultModel: 'deepseek-v4-flash', models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+      modelBudgets: {
+        'deepseek-v4-flash': { reasoningEffort: 'low' },
+        'deepseek-v4-pro': { reasoningEffort: 'high' },
+      },
+    };
+    expect(resolveReasoningEffort({ provider: 'ds', model: 'deepseek-v4-flash', customProviders: [custom] }))
       .toEqual({ supported: true, effort: 'low' });
-    // Unmatched model → nothing is sent.
-    expect(resolveReasoningEffort({ provider: 'qwen', model: 'qwen3-coder-next', reasoningEffort: 'high' }))
+    expect(resolveReasoningEffort({ provider: 'ds', model: 'deepseek-v4-pro', customProviders: [custom] }))
+      .toEqual({ supported: true, effort: 'high' });
+    // A sibling model without its own row entry falls back to auto.
+    expect(resolveReasoningEffort({ provider: 'ds', model: 'deepseek-chat', customProviders: [custom] }))
+      .toEqual({ supported: false });
+    // 'off' silences even a 2026+ model.
+    const off: CustomProvider = {
+      ...custom,
+      modelBudgets: { 'deepseek-v4-flash': { reasoningEffort: 'off' } },
+    };
+    expect(resolveReasoningEffort({ provider: 'ds', model: 'deepseek-v4-flash', customProviders: [off] }))
+      .toEqual({ supported: false });
+  });
+
+  it('resolveReasoningEffort: built-in override via modelBudgets, custom wins, anthropic gated', () => {
+    const override = {
+      glm: {
+        modelBudgets: { 'glm-5.3-flash': { reasoningEffort: 'high' as const } },
+      },
+    };
+    // Built-in override row setting forces the level despite being a matched
+    // name anyway (the override is what makes an UNMATCHED name send).
+    expect(resolveReasoningEffort({ provider: 'glm', model: 'glm-5.3-flash', providerOverrides: override }))
+      .toEqual({ supported: true, effort: 'high' });
+    expect(resolveReasoningEffort({ provider: 'glm', model: 'glm-5.2', providerOverrides: override }))
+      .toEqual({ supported: true, effort: 'medium' });
+    // Custom-provider entry wins over the built-in override.
+    const custom: CustomProvider = {
+      ...OLLAMA_PRESET, id: 'glm', name: 'GLM proxy', baseURL: 'https://glm.example.com/v1',
+      defaultModel: 'glm-5.3-flash', models: ['glm-5.3-flash'],
+      modelBudgets: { 'glm-5.3-flash': { reasoningEffort: 'off' } },
+    };
+    expect(resolveReasoningEffort({ provider: 'glm', model: 'glm-5.3-flash', customProviders: [custom], providerOverrides: override }))
       .toEqual({ supported: false });
     // Anthropic-protocol endpoints never receive the parameter (they reject
-    // unknown top-level fields), even for a matched model.
-    expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2', protocol: 'anthropic' }))
+    // unknown top-level fields), even with an explicit level.
+    expect(resolveReasoningEffort({ provider: 'glm', model: 'glm-5.3-flash', providerOverrides: override, protocol: 'anthropic' }))
       .toEqual({ supported: false });
-    // A manual force-off beats a matched name.
-    expect(resolveReasoningEffort({
-      provider: 'glm', model: 'glm-5.3-flash', reasoningEffort: 'high',
-      reasoningModelOverrides: { [reasoningOverrideKey('glm', 'glm-5.3-flash')]: 'off' },
-    })).toEqual({ supported: false });
+    // No model → nothing.
+    expect(resolveReasoningEffort({ provider: 'openai', model: '  ' })).toEqual({ supported: false });
   });
 });
