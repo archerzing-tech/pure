@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs } from '../shared/providers';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { blockedHosts } from '../shared/netGuard';
@@ -61,6 +61,8 @@ import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
+import { isToolEnabled } from './toolInventory';
+import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
 import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
@@ -298,23 +300,6 @@ const DEFAULT_BUDGET: BudgetConfig = {
   graceTurns: 3,
 };
 
-function isWebTool(name: string): boolean {
-  // Includes MCP-discovered web tools (serverName__search / __fetch / ...) —
-  // see isWebSearchLike in toolRow.ts for the base-name matching.
-  return isWebSearchLike(name);
-}
-
-// File-system tool family — gated by the `toolFS` settings toggle so users can
-// disable read/write/edit/search as a group from Settings → Tools.
-const FS_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'read_file', 'write_file', 'edit_file', 'search_files', 'find_files', 'list_files',
-  'glob_files', 'create_directory', 'diff_files', 'replace_files',
-]);
-
-function isFsTool(name: string): boolean {
-  return FS_TOOL_NAMES.has(name);
-}
-
 // ── Tool row helpers ──────────────────────────────────────────────────────
 // Tool calls render as Claude-Code-style inline rows in the chat transcript
 // (`.tool-row`), NOT floating toasts. Each row shows a friendly name, args
@@ -470,19 +455,6 @@ export function parseToolCallBuffer(buf: string | undefined): { name?: string; a
     args = parsed as Record<string, unknown>;
   }
   return { name, args };
-}
-
-/**
- * Map a tool name to its settings-toggle gate. Unknown tools (subagents,
- * MCP-discovered, future additions) default to enabled so the gate never
- * silently hides a tool the user didn't explicitly disable.
- */
-function isToolEnabled(name: string, config: PureConfig): boolean {
-  if (isWebTool(name)) return config.toolBrowser;
-  if (name === 'execute_command') return config.toolCmd;
-  if (name.startsWith('git_')) return config.toolGit;
-  if (isFsTool(name)) return config.toolFS;
-  return true;
 }
 
 // ── Scroll & status-bubble helpers ──
@@ -823,7 +795,9 @@ function toolCategory(tool: string): 'read' | 'write' | 'cmd' | 'git' | 'other' 
   // NB: by short-circuiting here, this branch never reaches PermissionManager,
   // so the "Allow always for this session" option (remember:true) is moot for
   // web reads — auto-approve already covers them per session.
-  if (isWebTool(tool) || tool === 'sys_info' || tool === 'read_file' || tool === 'list_files' || tool === 'search_files' || tool === 'glob_files' || tool === 'diff_files') return 'read';
+  // Includes MCP-discovered web tools (serverName__search / __fetch / ...) —
+  // see isWebSearchLike in toolRow.ts for the base-name matching.
+  if (isWebSearchLike(tool) || tool === 'sys_info' || tool === 'read_file' || tool === 'list_files' || tool === 'search_files' || tool === 'glob_files' || tool === 'diff_files') return 'read';
   return 'other';
 }
 
@@ -875,7 +849,14 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
     Boolean(custom?.baseURL) || Boolean(builtinOverride?.baseURL),
     custom?.protocol ?? builtinOverride?.protocol,
   );
-  const extraBody = undefined;
+  // Reasoning effort (Settings → LLM → 思考深度): sent as `reasoning_effort`
+  // only when the active model supports it (2026+ family pattern + per-model
+  // manual override in shared/providers.ts — extend the pattern list there).
+  // DeepSeekAnthropicAdapter (browser-dev anthropic branch below) has no
+  // extraBody plumb and anthropic endpoints reject unknown top-level fields,
+  // so this stays an OpenAI-protocol-only parameter for now.
+  const reasoning = resolveReasoningEffort({ ...config, protocol });
+  const extraBody = reasoning.effort ? { reasoning_effort: reasoning.effort } : undefined;
   const apiKey = custom?.apiKey ?? builtinOverride?.apiKey ?? config.apiKey;
   if (protocol === 'anthropic' && !isTauriRuntime()) {
     if (!apiKey && !isCustomKeyless(customs, config.provider)) throw new Error('No API key configured');
@@ -929,7 +910,6 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
  * installed mid-session loads without a restart while a per-turn invoke is
  * avoided.
  */
-interface AppSkillEntry { name: string; description: string; body: string }
 let appSkillsCache: { at: number; workspace: string; items: PromptSkill[] } | null = null;
 async function loadAppSkills(workspace: string): Promise<PromptSkill[]> {
   const ws = workspace || '';
@@ -1026,14 +1006,14 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
 }
 
 function createToolAdapter(workspace: string, config: PureConfig, sessionId = '', capabilityHooks?: DynamicCapabilityHooks): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy, 'tools'), imageGenContextFor(config), config.searxngUrl, capabilityHooks);
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy, 'tools'), imageGenContextFor(config), config.searxngUrl, capabilityHooks, config.sandboxCommands !== false);
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.
   // generate_image is workspace-independent (it calls the provider's image
   // API), so it stays available in plain-chat mode like the web tools.
   const available = (name: string): boolean =>
-    isToolEnabled(name, config) && (!!workspace || isWebTool(name) || name === 'sys_info' || name === 'generate_image' || DYNAMIC_CAPABILITY_TOOL_DEFS.some((tool) => tool.name === name));
+    isToolEnabled(name, config) && (!!workspace || isWebSearchLike(name) || name === 'sys_info' || name === 'generate_image' || DYNAMIC_CAPABILITY_TOOL_DEFS.some((tool) => tool.name === name));
   return {
     getTools: () => inner.getTools().filter((t) => available(t.name)),
     getMetadata: (name) => (available(name) ? inner.getMetadata(name) : undefined),
@@ -1153,8 +1133,8 @@ function createDownloadBarEl(row: ToolRowHandle, toolCallId: string): DownloadBa
   return { wrap, fill, label, pauseBtn, lastDownloaded: 0, lastTs: 0 };
 }
 
-/** Completion card for a finished download: quick-access to open the file, open
- * its folder, or copy the path. */
+/** Completion card for a finished download: the one action that matters is
+ * revealing the file's folder (opening the file itself lives in the folder). */
 function createDownloadCard(path: string, size: number, via?: string): HTMLElement {
   const card = document.createElement('div');
   card.className = 'download-card';
@@ -1172,26 +1152,12 @@ function createDownloadCard(path: string, size: number, via?: string): HTMLEleme
   meta.append(name, sub);
   const actions = document.createElement('div');
   actions.className = 'download-card-actions';
-  const openFile = document.createElement('button');
-  openFile.type = 'button';
-  openFile.className = 'download-card-btn';
-  openFile.textContent = '打开文件';
-  openFile.addEventListener('click', () => openPathLink(path));
   const openFolder = document.createElement('button');
   openFolder.type = 'button';
   openFolder.className = 'download-card-btn';
   openFolder.textContent = '打开所在文件夹';
   openFolder.addEventListener('click', () => openPathLink(path.replace(/[\\/][^\\/]+$/, '')));
-  const copyPath = document.createElement('button');
-  copyPath.type = 'button';
-  copyPath.className = 'download-card-btn';
-  copyPath.textContent = '复制路径';
-  copyPath.addEventListener('click', () => {
-    copyTextToClipboard(path);
-    copyPath.textContent = '已复制';
-    window.setTimeout(() => (copyPath.textContent = '复制路径'), 1500);
-  });
-  actions.append(openFile, openFolder, copyPath);
+  actions.append(openFolder);
   card.append(icon, meta, actions);
   return card;
 }

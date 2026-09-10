@@ -46,6 +46,14 @@ describe('SYSTEM_CORE_PROMPT (L0)', () => {
 describe('L1 behavior contracts', () => {
   it('re-exports the always-on workflow + completion contracts', () => {
     expect(WORKFLOW_PROMPT).toContain('Proactive problem-solving workflow');
+    // Reuse-first: the model must check for an existing skill / MCP tool /
+    // standard CLI before hand-rolling code (user feedback: it used to always
+    // write bespoke code instead of reaching for a good skill or tool).
+    expect(WORKFLOW_PROMPT).toContain('reusing or installing the right tool beats reimplementing it by hand');
+    // Install-route ladder: a network failure is a route problem, not a dead
+    // end (user feedback: npm blocked → declared "cannot install" and gave up
+    // while the official docs offered several install methods).
+    expect(WORKFLOW_PROMPT).toContain('ROUTE problem, not a dead end');
     expect(COMPLETION_PROMPT).toContain('Completion report');
     expect(COMPLETION_PROMPT).toContain('依据');
     expect(COMPLETION_PROMPT).toContain('改动');
@@ -167,6 +175,12 @@ describe('L1 behavior contracts', () => {
     expect(CAPABILITY_GAP_PROMPT).toContain('~/.pure/skills/');
     // User-provided repos install without a search hit.
     expect(CAPABILITY_GAP_PROMPT).toContain('a GitHub repo the USER gave you');
+    // Third-party software installs ride the same protocol: official docs
+    // list several methods, and a blocked route falls down the mirror /
+    // alternative-docs / direct-download ladder instead of ending in "无法安装".
+    expect(CAPABILITY_GAP_PROMPT).toContain('INSTALL, set up, or upgrade a third-party tool');
+    expect(CAPABILITY_GAP_PROMPT).toContain('registry.npmmirror.com');
+    expect(CAPABILITY_GAP_PROMPT).toContain('GitHub releases');
   });
 });
 

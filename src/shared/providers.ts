@@ -1,5 +1,6 @@
 // src/shared/providers.ts
 import type { ToolDefinition } from './types';
+import { estimateTextTokens } from './tokenEstimate';
 
 // Declarative registry of supported LLM providers — the single source of
 // truth for provider ids, display labels and default models, shared by the
@@ -144,9 +145,9 @@ export function resolvePromptBudget(config: PromptBudgetConfig = {}): ResolvedPr
   };
 }
 
-/** Fast, conservative estimate shared by prompt and history budgets. */
+/** Fast, conservative CJK-aware estimate shared by prompt and history budgets. */
 export function estimatePromptTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return estimateTextTokens(text);
 }
 
 /**
@@ -501,6 +502,80 @@ export function imageGenModelFor(
   if (builtin) return builtin;
   if (isImageModelName(model)) return model!.trim();
   return 'gpt-image-1';
+}
+
+// ── Reasoning-effort capability (`reasoning_effort` request parameter) ──
+// DATA, deliberately conservative: only model families from 2026 onwards are
+// assumed to accept `reasoning_effort`; anything unmatched defaults to NOT
+// supported (Settings → LLM can force a specific provider::model on/off).
+// Adding a new family is a one-line diff here plus one test line.
+
+export type ReasoningEffortLevel = 'low' | 'medium' | 'high';
+export type ReasoningModelOverride = 'on' | 'off';
+
+const REASONING_EFFORT_MODEL_PATTERN =
+  /(?:gpt-[5-9]|glm-[5-9]|deepseek-(?:v[4-9]|r[2-9])|qwen[4-9]|qwen[3-9]\.[5-9]|qwq|qmax|claude-[5-9]|claude-(?:opus|sonnet|haiku)-[5-9]|fable|gemini-[3-9]|kimi-k[3-9]|moonshot-v[2-9]|minimax-m[2-9])/i;
+
+/** True when a model id matches a known 2026+ reasoning-capable family. */
+export function isReasoningModelName(model: string | undefined | null): boolean {
+  return !!model && REASONING_EFFORT_MODEL_PATTERN.test(model.trim());
+}
+
+/** Key format for the per-model manual backstop (`provider::model`). Same
+ *  encoding the default-model menu uses; only ever looked up as a whole key. */
+export function reasoningOverrideKey(provider: string | undefined | null, model: string | undefined | null): string {
+  return `${provider ?? ''}::${model ?? ''}`;
+}
+
+/**
+ * Whether `reasoning_effort` may be sent to this provider+model. Precedence:
+ * the manual per-model override ('on'/'off') wins, then the 2026+ name
+ * pattern, defaulting to false for anything unrecognized. `providerOverrides`
+ * is accepted for call-site symmetry with promptBudgetForProvider but is not
+ * read yet — per-provider capability flags would live there if ever needed.
+ */
+export function supportsReasoningEffort(
+  _customs: readonly CustomProvider[] | undefined | null,
+  provider: string | undefined | null,
+  _providerOverrides: Record<string, ProviderOverride> | undefined | null,
+  model: string | undefined | null,
+  reasoningModelOverrides?: Record<string, ReasoningModelOverride> | null,
+): boolean {
+  const manual = reasoningModelOverrides?.[reasoningOverrideKey(provider, model)];
+  if (manual === 'on') return true;
+  if (manual === 'off') return false;
+  return isReasoningModelName(model);
+}
+
+/**
+ * Resolve the reasoning-effort wire value for a turn: the configured global
+ * level (default 'medium') when the model supports it, otherwise nothing.
+ * Anthropic-protocol endpoints are excluded for now — they reject unknown
+ * top-level body fields, and the anthropic thinking API has a different shape.
+ * Accepts PureConfig structurally (providers.ts must not import ui/config.ts).
+ */
+export function resolveReasoningEffort(cfg: {
+  provider?: string | null;
+  model?: string | null;
+  customProviders?: readonly CustomProvider[] | null;
+  providerOverrides?: Record<string, ProviderOverride> | null;
+  reasoningEffort?: ReasoningEffortLevel | null;
+  reasoningModelOverrides?: Record<string, ReasoningModelOverride> | null;
+  protocol?: 'openai' | 'anthropic' | string | null;
+}): { supported: boolean; effort?: ReasoningEffortLevel } {
+  const supported = cfg.protocol !== 'anthropic'
+    && supportsReasoningEffort(
+      cfg.customProviders,
+      cfg.provider,
+      cfg.providerOverrides,
+      cfg.model,
+      cfg.reasoningModelOverrides,
+    );
+  if (!supported) return { supported: false };
+  const effort: ReasoningEffortLevel = cfg.reasoningEffort === 'low' || cfg.reasoningEffort === 'high'
+    ? cfg.reasoningEffort
+    : 'medium';
+  return { supported: true, effort };
 }
 
 /** Display label for a provider id, resolving custom providers by name. */

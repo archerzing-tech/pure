@@ -2,6 +2,7 @@
 // v0.6 — context compaction with tool-call atomicity and explicit results.
 
 import { estimateToolDefinitionTokens } from '../shared/providers';
+import { estimateTextTokens } from '../shared/tokenEstimate';
 import type { Message, LLMAdapter, ToolDefinition } from '../shared/types';
 
 export interface ContextEngineConfig {
@@ -40,7 +41,7 @@ const SUMMARY_TIMEOUT_MS = 60_000;
 
 function estimateTokens(messages: Message[]): number {
   let sum = 0;
-  for (const message of messages) sum += Math.ceil((message.content?.length ?? 0) / 4);
+  for (const message of messages) sum += estimateTextTokens(message.content ?? '');
   return sum;
 }
 

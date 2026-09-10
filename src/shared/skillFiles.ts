@@ -15,6 +15,16 @@ export interface AppSkillFile {
   body: string;
 }
 
+/** One entry of the desktop `list_app_skills` response. `source`/`path` are
+ *  only present on desktop and power the Settings → Skills inventory (which
+ *  directory a skill came from + where it lives on disk). */
+export interface AppSkillEntry extends AppSkillFile {
+  /** Which directory the skill came from. */
+  source?: 'user' | 'project';
+  /** Absolute path of the skill's directory. */
+  path?: string;
+}
+
 /** Parse a SKILL.md file: YAML-ish frontmatter (`---\nname: …\ndescription:
  * …\n---`) followed by the instructions body. Returns null when the file has
  * no frontmatter or no usable name/body — such files are simply not skills. */
