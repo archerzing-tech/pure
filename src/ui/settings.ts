@@ -118,6 +118,13 @@ function optionalTokenLimit(raw: string | undefined | null): number | undefined 
   return Math.floor(value);
 }
 
+// Shared throttle for system-proxy detection: app start fetches once (Rust
+// setup), opening the 网络代理 page fetches once, and ANY two detections —
+// automatic or manual — must sit more than 5s apart so rapid menu toggling
+// never hammers scutil / the registry.
+let lastProxyPageDetectAt = 0;
+const PROXY_DETECT_MIN_INTERVAL_MS = 5_000;
+
 export class SettingsPanel {
   private onSave: () => void;
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -175,6 +182,9 @@ export class SettingsPanel {
     chatView.classList.add('squeezed');
     toggleBtn.style.display = 'none';
     this.loadToForm();
+    // Reopening straight onto the 网络代理 page must also auto-probe —
+    // switchCategory never fires when the page is already active.
+    if (this.currentCategory === 'proxy') void this.autoDetectProxyForPage();
     this.onOpen?.();
     // Move keyboard focus into the settings view so opening it never leaves
     // the user tabbing through controls behind the squeezed chat view.
@@ -242,6 +252,8 @@ export class SettingsPanel {
     // workspace 刚切换、或助手刚在会话里装了新技能，切过来就能看到。
     if (category === 'tools') this.renderToolInventory();
     if (category === 'skills') void this.renderAppSkills();
+    // 打开网络代理页：自动探测一次系统代理（静默，≥5s 节流）。
+    if (category === 'proxy') void this.autoDetectProxyForPage();
   }
 
   // ── Config queries ──
@@ -765,7 +777,12 @@ export class SettingsPanel {
     // ── Proxy: test the configured URL before relying on it — a malformed
     // address must not silently break every subsequent LLM / tool request. ──
     document.getElementById('cfg-proxy-test-btn')?.addEventListener('click', () => void this.testProxyConnection());
-    document.getElementById('cfg-proxy-detect-btn')?.addEventListener('click', () => void this.detectSystemProxy());
+    document.getElementById('cfg-proxy-detect-btn')?.addEventListener('click', () => {
+      // Manual click counts toward the same 5s window as the automatic
+      // page-open probe — one detection bookkeeping, whichever triggers it.
+      lastProxyPageDetectAt = Date.now();
+      void this.detectSystemProxy();
+    });
 
     // The address is split into scheme + host + port fields; keep the hidden
     // cfg-proxy-url mirror in sync so save/test read one composed value.
@@ -1459,13 +1476,24 @@ export class SettingsPanel {
    * one click away instead of hand-typed. Desktop-only: browser JS cannot
    * read the OS proxy, so be honest instead of pretending a detection ran.
    */
-  private async detectSystemProxy(): Promise<void> {
+  /** 打开网络代理页时自动探测一次系统代理：静默（不弹提示、不闪按钮），
+   *  检测到的地址直接填进表单并随 autoSave 持久化。与手动"检测"按钮共用
+   *  5 秒节流窗口 — 连续开关菜单不会反复触发 OS 读取。 */
+  private async autoDetectProxyForPage(): Promise<void> {
+    if (!isTauriRuntime()) return;
+    const now = Date.now();
+    if (now - lastProxyPageDetectAt < PROXY_DETECT_MIN_INTERVAL_MS) return;
+    lastProxyPageDetectAt = now;
+    await this.detectSystemProxy(true);
+  }
+
+  private async detectSystemProxy(silent = false): Promise<void> {
     const btn = document.getElementById('cfg-proxy-detect-btn') as HTMLButtonElement | null;
     if (!isTauriRuntime()) {
-      this.toast(t('proxy.detect.browserOnly'));
+      if (!silent) this.toast(t('proxy.detect.browserOnly'));
       return;
     }
-    if (btn) {
+    if (btn && !silent) {
       btn.disabled = true;
       btn.textContent = t('proxy.detecting');
     }
@@ -1475,7 +1503,9 @@ export class SettingsPanel {
         { scheme: string; host: string; port: string; source: string; detail: string } | null
       >('detect_system_proxy');
       if (!found) {
-        this.toast(t('proxy.detect.none'));
+        // Silent auto-probe: no OS proxy found is a normal state, stay quiet
+        // and leave the fields untouched.
+        if (!silent) this.toast(t('proxy.detect.none'));
         return;
       }
       const schemeEl = document.getElementById('cfg-proxy-scheme') as HTMLSelectElement | null;
@@ -1485,15 +1515,16 @@ export class SettingsPanel {
       if (hostEl) hostEl.value = found.host;
       if (portEl) portEl.value = found.port;
       this.autoSave();
+      if (silent) return;
       const source = found.detail
         ? `${t(`proxy.detect.source.${found.source}`)} ${found.detail}`
         : t(`proxy.detect.source.${found.source}`);
       this.toast(`${t('proxy.detect.ok')}：${source}`);
     } catch (err) {
       console.warn('[pure] system proxy detection failed:', err);
-      this.toast(t('proxy.detect.fail') + '：' + ((err as Error)?.message || String(err)));
+      if (!silent) this.toast(t('proxy.detect.fail') + '：' + ((err as Error)?.message || String(err)));
     } finally {
-      if (btn) {
+      if (btn && !silent) {
         btn.disabled = false;
         btn.textContent = t('proxy.detect');
       }

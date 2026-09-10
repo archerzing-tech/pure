@@ -68,19 +68,72 @@ fn effective_proxy_url(spec: &str) -> Option<String> {
 /// as a `scheme://host:port` URL. Env-var proxies are intentionally NOT read
 /// here: reqwest already honors HTTP(S)_PROXY/NO_PROXY when no explicit proxy
 /// is configured, so returning None lets those apply naturally.
-fn resolve_system_proxy_url() -> Option<String> {
+fn system_proxy_url_from(os: &Option<(String, String, String, &'static str)>) -> Option<String> {
+    let (scheme, host, port, _) = os.as_ref()?;
+    Some(if port.is_empty() {
+        format!("{scheme}{host}")
+    } else {
+        format!("{scheme}{host}:{port}")
+    })
+}
+
+fn detect_system_proxy_url_uncached() -> Option<String> {
     #[cfg(target_os = "macos")]
     let os = detect_macos_proxy();
     #[cfg(target_os = "windows")]
     let os = detect_windows_proxy();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let os: Option<(String, String, String, &'static str)> = None;
-    let (scheme, host, port, _) = os?;
-    Some(if port.is_empty() {
-        format!("{scheme}{host}")
-    } else {
-        format!("{scheme}{host}:{port}")
-    })
+    system_proxy_url_from(&os)
+}
+
+/// Detection spawns a `scutil` subprocess (or reads the registry) — doing that
+/// on EVERY proxied request is both wasteful and exactly the "太频繁" pattern
+/// to avoid. The cache throttles detection to one read per TTL: refreshed
+/// eagerly once at app startup, re-read lazily past the TTL, and the Settings
+/// probe (detect_system_proxy) re-seeds it whenever the user opens the proxy
+/// page. So the OS proxy is picked up at launch, on menu open, and at most
+/// every 5s in between — never more often.
+static SYSTEM_PROXY_CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>> = std::sync::Mutex::new(None);
+const SYSTEM_PROXY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn resolve_system_proxy_url() -> Option<String> {
+    if let Ok(guard) = SYSTEM_PROXY_CACHE.lock() {
+        if let Some((at, url)) = guard.as_ref() {
+            if at.elapsed() < SYSTEM_PROXY_CACHE_TTL {
+                return url.clone();
+            }
+        }
+    }
+    let detected = detect_system_proxy_url_uncached();
+    if let Ok(mut guard) = SYSTEM_PROXY_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), detected.clone()));
+    }
+    detected
+}
+
+/// Force a fresh OS read into the cache (startup + Settings probe path).
+fn refresh_system_proxy_cache() {
+    let detected = detect_system_proxy_url_uncached();
+    if let Ok(mut guard) = SYSTEM_PROXY_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), detected));
+    }
+}
+
+#[cfg(test)]
+mod system_proxy_cache_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_seeds_a_fresh_cache_entry() {
+        refresh_system_proxy_cache();
+        // The contract is the ENTRY, not the URL: on any platform the value
+        // may legitimately be None (no OS proxy), but an explicit refresh
+        // must leave a fresh timestamped entry for the request path to serve.
+        let guard = SYSTEM_PROXY_CACHE.lock().unwrap();
+        let (at, _) = guard.as_ref().expect("cache seeded by refresh");
+        assert!(at.elapsed() < SYSTEM_PROXY_CACHE_TTL);
+    }
 }
 
 fn valid_proxy_url(url: &str) -> bool {
@@ -13052,6 +13105,13 @@ async fn detect_system_proxy() -> Result<Option<DetectedProxy>, String> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let os_proxy: Option<(String, String, String, &'static str)> = None;
 
+    // The Settings probe doubles as a cache refresh: opening the proxy page
+    // (which auto-probes) re-seeds the request-path cache with what the OS
+    // read just found — or its deliberate absence.
+    if let Ok(mut guard) = SYSTEM_PROXY_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), system_proxy_url_from(&os_proxy)));
+    }
+
     if let Some((scheme, host, port, source)) = os_proxy {
         return Ok(Some(DetectedProxy {
             scheme,
@@ -14452,6 +14512,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async {
                 let _ = sys_info(String::new(), None).await;
             });
+
+            // Fetch the OS system proxy once at startup so 系统代理 mode has a
+            // warm cache (and the request path never needs a detection of its
+            // own until the 5s TTL lapses).
+            refresh_system_proxy_cache();
 
             // ── Native menu bar (macOS ONLY) ──
             // The system menu is the natural home for window/app-level
