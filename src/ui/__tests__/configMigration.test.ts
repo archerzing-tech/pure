@@ -262,3 +262,21 @@ describe('config v12 migration — DeepSeek is ONE provider', () => {
     expect(mem[STORAGE_KEY]).toBe(raw);
   });
 });
+
+describe('reasoning effort normalization', () => {
+  it('backfills medium for old configs and snaps unknown values back', () => {
+    // A config persisted before reasoningEffort existed → defaults() fills it.
+    seedConfig({});
+    expect(loadConfig()?.reasoningEffort).toBe('medium');
+
+    // A hand-edited or stale value must not reach the wire.
+    seedConfig({ reasoningEffort: 'ultra' });
+    invalidateConfigCache();
+    expect(loadConfig()?.reasoningEffort).toBe('medium');
+
+    // Real values pass through untouched.
+    seedConfig({ reasoningEffort: 'high' });
+    invalidateConfigCache();
+    expect(loadConfig()?.reasoningEffort).toBe('high');
+  });
+});

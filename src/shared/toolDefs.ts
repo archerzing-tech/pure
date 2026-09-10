@@ -392,6 +392,8 @@ const TOOL_METADATA_TABLE = {
   glob_files: { sideEffects: false, isWrite: false },
   replace_files: { sideEffects: true, isWrite: true },
   sys_info: { sideEffects: false, isWrite: false },
+  // Writes real office files (docx/xlsx/pptx) into the workspace.
+  create_document: { sideEffects: true, isWrite: true },
   // Image generation hits a paid provider API but never touches the workspace.
   generate_image: { sideEffects: false, isWrite: false },
   download_file: { sideEffects: true, isWrite: true },

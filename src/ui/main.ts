@@ -19,7 +19,7 @@ import { stripUserTurnContext } from '../shared/promptLayers';
 import { checkForUpdatesSilently, fetchAppVersion } from './updater';
 import { t, updateLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
-import { loadSessionList, loadSessionStatsForList, flushSessionSaves, type SessionMeta, type SessionStats } from './store';
+import { loadSessionList, loadSessionStatsForList, flushSessionSaves, saveSessionWorkspace, type SessionMeta, type SessionStats } from './store';
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -147,6 +147,9 @@ function getSettingsPanel(): Promise<SettingsPanel> {
             updateContextPanelStage();
             enableInputIfReady();
           },
+          // Skills page reads the current workspace for the project-local
+          // skills inventory (.agents/skills) — same source of truth as chat.
+          () => chat.getWorkspace(),
         ),
       )
       // A failed import/construction must not brick the panel for the whole
@@ -1329,6 +1332,7 @@ async function doSend(text: string) {
     void openSettings();
     return;
   }
+  await guardWorkspaceAlive();
   // Snapshot attachments before sending. Images are awaited so the vision
   // payload is complete, then the composer is cleared before the request starts;
   // the submitted image lives in the transcript instead of remaining attached
@@ -1363,6 +1367,33 @@ async function doSend(text: string) {
     sessionSidebar.refresh();
     flushQueued();
   }
+}
+
+/**
+ * A selected workspace can vanish behind pure's back — the folder gets moved
+ * or deleted in Finder while no task ever touched it. Every tool would then
+ * fail with raw ENOENT noise that the model cannot judge, so probe once per
+ * send and self-heal: clear the dead pointer (in memory + session store),
+ * tell the user plainly, and let the conversation proceed without a
+ * workspace. A local stat is all this costs on the happy path.
+ */
+async function guardWorkspaceAlive(): Promise<void> {
+  const ws = chat.getWorkspace();
+  if (!ws || !isTauriRuntime()) return;
+  try {
+    const core = await loadTauriCore();
+    if (!core) return;
+    // path_info canonicalizes the workspace first: a deleted/moved folder
+    // makes the command itself reject — that rejection IS the signal.
+    const info = await core.invoke<{ exists?: boolean }>('path_info', { workspace: ws, path: '.' });
+    if (info?.exists) return;
+  } catch {
+    // fall through — the workspace is gone
+  }
+  chat.setWorkspace('');
+  workspace.refresh();
+  void saveSessionWorkspace(chat.getSessionId(), '').catch(() => {});
+  showToast(t('workspace.missingCleared').replace('{path}', ws));
 }
 
 /** Focus the bottom input with the caret at the end of its content. */
@@ -1589,16 +1620,9 @@ function renderSessionStats() {
 // The footer gauge estimates the CURRENT context occupancy (fixed system +
 // tool-schema overhead plus the live transcript), not the cumulative usage
 // counter (sessionStats.usage.promptTokens is summed across turns). Message
-// estimation mirrors engine/BudgetManager.countTokens (CJK ≈ 1 token/char,
-// Latin ≈ 1/4) so the bar reads in the same units the engine budgets in.
-const CJK_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]/u;
-
-function estimateTextTokens(text: string): number {
-  if (!text) return 0;
-  let cjk = 0;
-  for (const ch of text) if (CJK_CHAR_RE.test(ch)) cjk++;
-  return Math.ceil(cjk + (text.length - cjk) / 4);
-}
+// estimation uses shared/tokenEstimate so the bar reads in the same units
+// the engine budgets in.
+import { estimateTextTokens } from '../shared/tokenEstimate';
 
 function estimateMessageTokens(messages: Message[]): number {
   let total = 0;
