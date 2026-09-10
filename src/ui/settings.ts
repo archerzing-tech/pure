@@ -36,14 +36,9 @@ import {
   protocolForURL,
   providerDef,
   providerOverrideFor,
-  resolveProviderProtocol,
-  customDefaultModel,
-  resolveReasoningEffort,
-  reasoningOverrideKey,
-  supportsReasoningEffort,
   type CustomProvider,
   type LLMProtocol,
-  type ReasoningEffortLevel,
+  type ReasoningEffortSetting,
 } from '../shared/providers';
 /** Compact integer form for budget placeholders ("1M", "262k", "33k") —
  * short enough that "262k tok" fits the narrow budget column. */
@@ -682,6 +677,9 @@ export class SettingsPanel {
       if (el.id === 'cfg-imagegen') this.autoSave();
       // Default-model radio inside a row → commit the selection.
       if (el.classList.contains('llm-model-row-radio')) this.commitModelRows();
+      // Reasoning-effort select on a model row → immediate save (discrete
+      // choice, no debounce needed; rides the normal budgets gather path).
+      if (el.classList.contains('llm-model-row-reasoning')) this.autoSave();
     });
 
     // Default-model bar: open the grouped model menu, pick a model, close on
@@ -701,27 +699,6 @@ export class SettingsPanel {
       if (defaultMenu.contains(t) || defaultBtn?.contains(t)) return;
       this.closeDefaultModelMenu();
     });
-
-    // Reasoning-support backstop for the CURRENT provider+model: writes the
-    // per-model override map directly (Skill-Hub style — immediate persist,
-    // NOT autoSave, which would double-persist via gatherForm) and refreshes
-    // the status hint. 'auto' removes the key so the name pattern decides.
-    document.getElementById('cfg-reasoning-override')?.addEventListener('change', () => {
-      const el = document.getElementById('cfg-reasoning-override') as HTMLSelectElement | null;
-      const value = el?.value as 'auto' | 'on' | 'off' | undefined;
-      if (!value) return;
-      const cfg = loadConfig() ?? defaults();
-      const custom = customProviderFor(cfg.customProviders, cfg.provider);
-      const model = cfg.model || customDefaultModel(cfg.customProviders, cfg.provider);
-      const key = reasoningOverrideKey(cfg.provider, model);
-      const map = { ...(cfg.reasoningModelOverrides ?? {}) };
-      if (value === 'auto') delete map[key];
-      else map[key] = value;
-      persistConfig({ ...cfg, reasoningModelOverrides: map });
-      invalidateConfigCache();
-      this.renderReasoningRow();
-    });
-
 
     // Theme selector
     document.querySelectorAll('.theme-option').forEach(el => {
@@ -821,9 +798,6 @@ export class SettingsPanel {
       '#cfg-auto-continue',
       '#cfg-auto-continue-rounds',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
-      // Reasoning-effort level (the per-model override select below has its
-      // own listener — it writes a map keyed by the current default model).
-      '#cfg-reasoning-effort',
       '.cfg-skill-toggle',
       // Map-tile cache cap (number input saves on change/blur).
       '#cfg-map-tile-cache-mb', '#cfg-map-tianditu-key',
@@ -1358,51 +1332,9 @@ export class SettingsPanel {
     invalidateConfigCache();
     this.closeDefaultModelMenu();
     this.renderDefaultBar();
-    this.renderReasoningRow();
     this.renderProviderGrid();
     this.autoSave();
     this.toast(t('llm.custom.defaultChanged').replace('{m}', model));
-  }
-
-  /**
-   * Reasoning-effort row (Settings → LLM): shows whether the CURRENT default
-   * model will actually receive `reasoning_effort`, and reflects the manual
-   * per-model override. Re-rendered on open, on save, and whenever the
-   * default model changes — the panel re-render never touches these static
-   * DOM nodes, so they need this explicit refresh.
-   */
-  private renderReasoningRow(): void {
-    const hintEl = document.getElementById('llm-reasoning-hint');
-    const overrideEl = document.getElementById('cfg-reasoning-override') as HTMLSelectElement | null;
-    if (!hintEl || !overrideEl) return;
-    const cfg = loadConfig() ?? defaults();
-    const custom = customProviderFor(cfg.customProviders, cfg.provider);
-    const providerOv = providerOverrideFor(cfg.providerOverrides, cfg.provider);
-    const baseURL = customBaseURL(cfg.customProviders, cfg.provider, cfg.providerOverrides);
-    const model = cfg.model || customDefaultModel(cfg.customProviders, cfg.provider);
-    const protocol = resolveProviderProtocol(
-      providerDef(cfg.provider)?.protocol,
-      baseURL,
-      Boolean(custom?.baseURL) || Boolean(providerOv?.baseURL),
-      custom?.protocol ?? providerOv?.protocol,
-    );
-    const overrides = cfg.reasoningModelOverrides ?? {};
-    const manual = overrides[reasoningOverrideKey(cfg.provider, model)];
-    const resolved = resolveReasoningEffort({ ...cfg, protocol });
-    // Mirror resolveReasoningEffort exactly so the hint never promises more
-    // than the request path delivers: a forced-on model under the anthropic
-    // protocol still isn't sent anything (endpoints reject unknown fields).
-    let statusKey: string;
-    if (manual === 'off') statusKey = 'llm.reasoning.forcedOff';
-    else if (!resolved.supported) statusKey = 'llm.reasoning.unsupported';
-    else if (manual === 'on') statusKey = 'llm.reasoning.forcedOn';
-    else statusKey = 'llm.reasoning.supported';
-    if (protocol === 'anthropic' && manual !== 'off') {
-      hintEl.textContent = `${t(statusKey)} · ${t('llm.reasoning.anthropic')}`;
-    } else {
-      hintEl.textContent = t(statusKey);
-    }
-    overrideEl.value = manual ?? 'auto';
   }
 
   // ── Proxy connection test ──
@@ -1648,10 +1580,6 @@ export class SettingsPanel {
     this.editingProvider = null;
     this.renderProviderGrid();
     this.renderDefaultBar();
-    // Reasoning-effort row (思考深度): level select + per-model support hint.
-    const reasoningEffortEl = document.getElementById('cfg-reasoning-effort') as HTMLSelectElement | null;
-    if (reasoningEffortEl) reasoningEffortEl.value = cfg.reasoningEffort ?? 'medium';
-    this.renderReasoningRow();
     (document.getElementById('cfg-language') as HTMLSelectElement).value = cfg.language;
     const cityEl = document.getElementById('cfg-city') as HTMLInputElement | null;
     if (cityEl) cityEl.value = cfg.city ?? '';
@@ -2691,20 +2619,21 @@ export class SettingsPanel {
   private readModelRowsFromDom(): {
     models: string[];
     names: Record<string, string>;
-    budgets: Record<string, { contextWindowTokens?: number; outputReserveTokens?: number }>;
+    budgets: Record<string, { contextWindowTokens?: number; outputReserveTokens?: number; reasoningEffort?: ReasoningEffortSetting }>;
     defaultModel: string;
   } {
     const list = document.getElementById('cfg-model-list');
     const rows = list ? [...list.querySelectorAll<HTMLElement>('.llm-model-row')] : [];
     const models: string[] = [];
     const names: Record<string, string> = {};
-    const budgets: Record<string, { contextWindowTokens?: number; outputReserveTokens?: number }> = {};
+    const budgets: Record<string, { contextWindowTokens?: number; outputReserveTokens?: number; reasoningEffort?: ReasoningEffortSetting }> = {};
     let defaultModel = '';
     for (const row of rows) {
       const idInput = row.querySelector<HTMLInputElement>('.llm-model-row-id');
       const nameInput = row.querySelector<HTMLInputElement>('.llm-model-row-name');
       const contextInput = row.querySelector<HTMLInputElement>('.llm-model-row-context');
       const outputInput = row.querySelector<HTMLInputElement>('.llm-model-row-output');
+      const reasoningSelect = row.querySelector<HTMLSelectElement>('.llm-model-row-reasoning');
       const radio = row.querySelector<HTMLInputElement>('.llm-model-row-radio');
       const id = (idInput?.value ?? '').trim();
       if (!id) continue;
@@ -2713,8 +2642,14 @@ export class SettingsPanel {
       if (name) names[id] = name;
       const contextWindowTokens = optionalTokenLimit(contextInput?.value);
       const outputReserveTokens = optionalTokenLimit(outputInput?.value);
-      if (contextWindowTokens !== undefined || outputReserveTokens !== undefined) {
-        budgets[id] = { contextWindowTokens, outputReserveTokens };
+      // '' = 自动 (the 2026+ name pattern decides) — nothing to persist.
+      const reasoningEffort = (reasoningSelect?.value ?? '') as ReasoningEffortSetting | '';
+      if (contextWindowTokens !== undefined || outputReserveTokens !== undefined || reasoningEffort) {
+        budgets[id] = {
+          contextWindowTokens,
+          outputReserveTokens,
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+        };
       }
       if (radio?.checked) defaultModel = id;
     }
@@ -2752,7 +2687,7 @@ export class SettingsPanel {
     defaultModel: string,
     modelCount: number,
     names: Record<string, string>,
-    budgets: Record<string, { contextWindowTokens?: number; outputReserveTokens?: number }>,
+    budgets: Record<string, { contextWindowTokens?: number; outputReserveTokens?: number; reasoningEffort?: ReasoningEffortSetting }>,
     provider: string,
   ): string {
     const isDefault = !!model && model === defaultModel;
@@ -2765,12 +2700,26 @@ export class SettingsPanel {
     const ctxDefault = `${compactBudgetTokens(budgetDefaults.contextWindowTokens)} tok`;
     const outDefault = `${compactBudgetTokens(budgetDefaults.outputReserveTokens)} tok`;
     const budgetHint = t('llm.budget.defaultHint');
+    // Reasoning effort lives on the MODEL row, same as the budgets:
+    // '' (auto) → the 2026+ pattern decides then medium; a concrete level
+    // forces it; 'off' never sends the parameter.
+    const reasoning = (model ? budget.reasoningEffort ?? '' : '') as ReasoningEffortSetting | '';
+    const reasoningTitle = t('llm.model.reasoning.title');
+    const reasoningOption = (value: ReasoningEffortSetting | '', label: string): string =>
+      `<option value="${value}" ${reasoning === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     return `<div class="llm-model-row${isDefault ? ' llm-model-row-default' : ''}" data-row="${i}">
       <input type="radio" name="cfg-model-default" class="llm-model-row-radio" data-radio-row="${i}" ${isDefault ? 'checked' : ''} title="${t('llm.model.setDefault')}" aria-label="${t('llm.model.setDefault')}" />
       <input class="setting-input llm-model-row-id" data-row-id="${i}" type="text" value="${escapeHtml(model)}" placeholder="${t('llm.model.idPlaceholder')}" autocomplete="off" />
       <input class="setting-input llm-model-row-name" data-row-name="${i}" type="text" value="${escapeHtml(model ? (names[model] ?? '') : '')}" placeholder="${t('llm.model.namePlaceholder')}" autocomplete="off" />
       <input class="setting-input llm-model-row-budget llm-model-row-context" data-row-context="${i}" type="number" min="1" step="1" value="${budget.contextWindowTokens ?? ''}" placeholder="${ctxDefault}" title="${budgetHint}" inputmode="numeric" aria-label="${t('llm.budget.context')}" />
       <input class="setting-input llm-model-row-budget llm-model-row-output" data-row-output="${i}" type="number" min="1" step="1" value="${budget.outputReserveTokens ?? ''}" placeholder="${outDefault}" title="${budgetHint}" inputmode="numeric" aria-label="${t('llm.budget.output')}" />
+      <select class="setting-select llm-model-row-budget llm-model-row-reasoning" data-row-reasoning="${i}" title="${reasoningTitle}" aria-label="${reasoningTitle}">
+        ${reasoningOption('', t('llm.model.reasoning.auto'))}
+        ${reasoningOption('low', t('llm.model.reasoning.low'))}
+        ${reasoningOption('medium', t('llm.model.reasoning.medium'))}
+        ${reasoningOption('high', t('llm.model.reasoning.high'))}
+        ${reasoningOption('off', t('llm.model.reasoning.off'))}
+      </select>
       ${canRemove ? `<button type="button" class="llm-model-row-remove" data-remove-row="${i}" title="${t('llm.custom.removeModel')}" aria-label="${t('llm.custom.removeModel')}">×</button>` : ''}
     </div>`;
   }
@@ -3005,12 +2954,6 @@ export class SettingsPanel {
       density: (document.getElementById('cfg-density') as HTMLSelectElement).value as PureConfig['density'],
       hasApiKey: (loadConfig() ?? defaults()).hasApiKey,
       permissionMode: (document.getElementById('cfg-permission-mode') as HTMLSelectElement | null)?.value as PureConfig['permissionMode'] || 'confirm',
-      reasoningEffort: ((document.getElementById('cfg-reasoning-effort') as HTMLSelectElement | null)?.value ?? 'medium') as ReasoningEffortLevel,
-      // Carry-through: the per-model override map is owned by its own change
-      // listener (the key depends on the current default model, which
-      // gatherForm doesn't touch) — but it MUST ride along here or any other
-      // autoSave would wipe it.
-      reasoningModelOverrides: (loadConfig() ?? defaults()).reasoningModelOverrides ?? {},
       autoPermRead: (document.getElementById('cfg-perm-read') as HTMLInputElement | null)?.checked ?? true,
       autoPermWrite: (document.getElementById('cfg-perm-write') as HTMLInputElement | null)?.checked ?? false,
       autoPermCmd: (document.getElementById('cfg-perm-cmd') as HTMLInputElement | null)?.checked ?? false,

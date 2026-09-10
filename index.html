@@ -462,28 +462,6 @@
                   </div>
 
                 </div>
-                <!-- Reasoning effort: global level + per-model support backstop -->
-                <div class="settings-section">
-                  <div class="setting-row">
-                    <div class="setting-info">
-                      <span class="setting-label" data-i18n="llm.reasoning.label">思考深度（reasoning effort）</span>
-                      <span class="setting-hint" data-i18n="llm.reasoning.hint">只对支持 reasoning 的模型生效，随请求发送 reasoning_effort 参数</span>
-                      <span class="setting-hint" id="llm-reasoning-hint"></span>
-                    </div>
-                    <div class="llm-reasoning-controls">
-                      <select id="cfg-reasoning-effort" class="setting-select" data-i18n-options="low:llm.reasoning.low,medium:llm.reasoning.medium,high:llm.reasoning.high">
-                        <option value="low">Low</option>
-                        <option value="medium" selected>Medium</option>
-                        <option value="high">High</option>
-                      </select>
-                      <select id="cfg-reasoning-override" class="setting-select" title="模型支持判定" data-i18n-options="auto:llm.reasoning.override.auto,on:llm.reasoning.override.on,off:llm.reasoning.override.off">
-                        <option value="auto">Auto</option>
-                        <option value="on">Force on</option>
-                        <option value="off">Force off</option>
-                      </select>
-                    </div>
-                  </div>
-                </div>
               </div>
               <!-- Tools -->
               <div class="settings-page" data-page="tools">
