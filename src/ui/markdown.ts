@@ -1934,6 +1934,7 @@ function retryMapSlot(slot: HTMLElement): void {
   if (!canvas) return;
   leafletMapMod?.clearMapTileMemoryCache();
   cancelSilentMapRetry(slot);
+  mapRetryAttempts.delete(slot); // a manual refresh restarts the retry budget
   slot.removeAttribute('data-processed');
   setMapState(slot, 'loading');
   const host = slot.parentElement ?? slot;
@@ -1941,15 +1942,17 @@ function retryMapSlot(slot: HTMLElement): void {
 }
 
 // ── Silent map retry ──
-// Tile/render failures are never shown to the user: the slot stays in its
-// loading state (spinner) and the map re-renders in the background on a
-// backoff until tiles actually draw — only THEN does the loading overlay lift
-// and the map become visible. This is deliberate: flashing an error card (and
-// flipping back on retry) read as the whole conversation flickering whenever a
-// tile source was slow or geo-blocked.
+// Tile failures are never shown to the user and NEVER rebuild the map. The
+// slot stays in its loading state — where the canvas is fully invisible — and
+// the retry loop re-requests ONLY the tile layer of the existing map instance
+// (reloadMapTiles: no dispose, no overlay repaint, nothing to see). A 'ready'
+// from a genuinely drawn tile is the one event that lifts the spinner.
+// Attempts are capped: past the cap the spinner simply stays up and the
+// manual refresh button remains the user's explicit way to try again.
 
 const mapRetryTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>();
 const mapRetryAttempts = new WeakMap<HTMLElement, number>();
+const MAX_SILENT_MAP_RETRIES = 8;
 
 function cancelSilentMapRetry(slot: HTMLElement): void {
   const pending = mapRetryTimers.get(slot);
@@ -1961,52 +1964,24 @@ function scheduleSilentMapRetry(slot: HTMLElement, version: number): void {
   if (mapRetryTimers.has(slot)) return;
   const attempts = (mapRetryAttempts.get(slot) ?? 0) + 1;
   mapRetryAttempts.set(slot, attempts);
-  // 5s → 10s → 20s → capped 30s. Unbounded retries are fine here: each round
-  // rides the tile memory cache, so a recovered network shows the map on the
-  // next attempt, and a disconnected slot just never fires (isConnected guard).
+  if (attempts > MAX_SILENT_MAP_RETRIES) return;
+  // 5s → 10s → 20s → capped 30s. Each round reloads only the tile layer of
+  // the live map, so even a failed attempt cannot flash anything on screen.
   const delay = Math.min(5_000 * 2 ** (attempts - 1), 30_000);
   const timer = setTimeout(() => {
     mapRetryTimers.delete(slot);
     if (!slot.isConnected) return;
     if (!isCurrentDiagramRender(slot, version)) return;
-    void rerenderMapSlotSilently(slot, version);
+    const canvas = slot.querySelector<HTMLElement>('.map-canvas');
+    if (!canvas) return;
+    leafletMapMod?.reloadMapTiles(canvas);
+    // Chain to the next attempt unconditionally: a reload whose tiles fail
+    // again fires no status event (the one-shot 12s timer was consumed by the
+    // initial render), so the loop must drive itself. Only 'ready' — a tile
+    // that truly drew — cancels the chain and lifts the spinner.
+    scheduleSilentMapRetry(slot, version);
   }, delay);
   mapRetryTimers.set(slot, timer);
-}
-
-/** Re-run the Leaflet render for one slot without touching its loading state. */
-async function rerenderMapSlotSilently(slot: HTMLElement, version: number): Promise<void> {
-  const mod = leafletMapMod;
-  if (!mod) return;
-  const canvas = slot.querySelector<HTMLElement>('.map-canvas');
-  if (!canvas) return;
-  let parsed: ReturnType<typeof mod.parseMapSource>;
-  try {
-    parsed = mod.parseMapSource(mapRawOf(slot));
-  } catch {
-    // Payload became unparsable mid-session — not transient; leave the card
-    // as-is (its state was set by the render path that already reported it).
-    return;
-  }
-  try {
-    mod.renderMapInto(canvas, parsed.spec, {
-      onTileStatus: (status) => {
-        if (!isCurrentDiagramRender(slot, version)) return;
-        if (status === 'ready') {
-          // Tiles really drew — this is the ONLY moment the loading overlay
-          // lifts and the map becomes visible.
-          cancelSilentMapRetry(slot);
-          mapRetryAttempts.delete(slot);
-          setMapState(slot, 'preview');
-        } else if (status === 'error') {
-          scheduleSilentMapRetry(slot, version);
-        }
-      },
-    });
-    if (parsed.repaired && parsed.repairedSource) markDiagramRepaired(slot, parsed.repairedSource);
-  } catch {
-    scheduleSilentMapRetry(slot, version);
-  }
 }
 
 function bindMapControls(container: HTMLElement): void {
