@@ -8372,11 +8372,13 @@ button svg,
    the loading spinner overlays it, error dims it. The old absolute/hidden
    loading canvas let the slot collapse ~240px ↔ 560px between states, which
    thrashed the whole conversation layout on every map turn (the streaming
-   flicker). */
+   flicker). While loading the canvas is FULLY invisible (visibility, not
+   opacity — a translucent canvas made every silent tile retry read as the
+   map visibly tearing down and repainting). The user sees exactly two
+   states: spinner, or a finished map. */
 .bubble .map-slot[data-map-state="loading"] .map-canvas-wrap {
   height: 480px;
-  opacity: 0.3;
-  filter: grayscale(1);
+  visibility: hidden;
 }
 .bubble .map-slot[data-map-state="loading"] .map-route-warning,
 .bubble .map-slot[data-map-state="loading"] .map-error,
