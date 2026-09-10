@@ -22,8 +22,10 @@ export type { MapMarker, MapSpec };
 
 
 // Track live map instances per canvas so re-render disposes cleanly and the
-// ResizeObserver never leaks across bubbles.
-const mapInstances = new WeakMap<HTMLElement, { map: L.Map; observer: ResizeObserver | null; tileTimer: ReturnType<typeof setTimeout> | null }>();
+// ResizeObserver never leaks across bubbles. The tile layer reference powers
+// reloadMapTiles — the silent retry path re-requests tiles WITHOUT disposing
+// or rebuilding the map, so a failed load can never read as visible churn.
+const mapInstances = new WeakMap<HTMLElement, { map: L.Map; observer: ResizeObserver | null; tileTimer: ReturnType<typeof setTimeout> | null; tiles: ChainedTileLayer | null }>();
 
 const PIN_HTML = (label: string): string =>
   `<div class="map-pin">${label ? `<span class="map-pin-label">${escapeHtml(label)}</span>` : ''}` +
@@ -218,6 +220,13 @@ class ChainedTileLayer extends L.TileLayer {
 
   setTileReadyHandler(fn: () => void): void {
     this.onTileReady = fn;
+  }
+
+  /** Restart the source walk from the first source on the next (re)load —
+   *  a source that was reachable when the map rendered may be dead by the
+   *  time tiles are re-requested, and vice versa. */
+  resetSourceChain(): void {
+    this.active = 0;
   }
 
   protected createTile(coords: L.Coords, done: L.DoneCallback): HTMLElement {
@@ -467,7 +476,7 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
     });
     observer.observe(target);
   }
-  mapInstances.set(target, { map, observer, tileTimer });
+  mapInstances.set(target, { map, observer, tileTimer, tiles });
 }
 
 /** Dispose any live map on a canvas (used when a bubble is removed). */
@@ -478,6 +487,18 @@ export function disposeMap(target: HTMLElement): void {
   if (existing.tileTimer !== null) clearTimeout(existing.tileTimer);
   existing.map.remove();
   mapInstances.delete(target);
+}
+
+/** Re-request every tile on the EXISTING map instance: no dispose, no map
+ *  rebuild, no overlay repaint — markers, route and camera stay exactly as
+ *  they are. This is what the silent retry loop drives, so a transient
+ *  network outage recovers invisibly instead of reading as the map tearing
+ *  itself down and rendering again (the "不断重新渲染" churn). */
+export function reloadMapTiles(target: HTMLElement): void {
+  const existing = mapInstances.get(target);
+  if (!existing) return;
+  existing.tiles?.resetSourceChain();
+  existing.tiles?.redraw();
 }
 
 export function clearMapTileMemoryCache(): void {

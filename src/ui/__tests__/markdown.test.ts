@@ -26,18 +26,20 @@ describe('map code blocks', () => {
     // The manual refresh action survives (user-initiated, always available).
     expect(src).toContain("leafletMapMod?.clearMapTileMemoryCache()");
     expect(src).toContain("refresh?.addEventListener('click', () => retryMapSlot(slot))");
-    // STABLE GEOMETRY: the canvas box is reserved at full height in every
-    // state — the spinner overlays it; the slot never collapses/expands.
-    expect(css).toContain('.bubble .map-slot[data-map-state="loading"] .map-canvas-wrap {\n  height: 480px;');
-    expect(css).toContain('opacity: 0.3;');
+    // STABLE GEOMETRY + FULLY HIDDEN while loading: the canvas box keeps its
+    // height (no layout thrash) but is visibility:hidden — a translucent
+    // canvas made every retry read as the map visibly repainting.
+    expect(css).toContain('.bubble .map-slot[data-map-state="loading"] .map-canvas-wrap {\n  height: 480px;\n  visibility: hidden;');
     expect(css).toContain('animation: mapLoadingFade 1.8s ease-in-out infinite;');
     expect(css).toContain('.map-slot[data-map-state="preview"] .map-canvas-wrap');
-    // Tile/render failures are INVISIBLE: the slot stays in its loading state
-    // and re-renders in the background on a backoff — only a real 'ready'
-    // (tiles drawn) lifts the loading overlay. No error card, no ⚠️ banner,
-    // no state flapping.
+    // Tile failures are INVISIBLE and never rebuild the map: the retry loop
+    // reloads ONLY the tile layer of the live instance (reloadMapTiles — no
+    // dispose, no renderMapInto re-run), self-chains until a real 'ready'
+    // lifts the spinner, and is capped so a dead network can't churn forever.
     expect(src).toContain('scheduleSilentMapRetry(slot, version)');
     expect(src).toContain('cancelSilentMapRetry(slot)');
+    expect(src).toContain('reloadMapTiles');
+    expect(src).toContain('MAX_SILENT_MAP_RETRIES');
     expect(src).toContain('function preserveLiveMapSlots');
     // The retired strategies stay gone.
     expect(src).not.toContain('map.tileFallback');
