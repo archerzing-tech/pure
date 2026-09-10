@@ -10,7 +10,11 @@
 //   original argv (sandboxing unavailable) or a `/usr/bin/sandbox-exec -f
 //   <profile> sh -c <wrapped>` invocation whose profile allows reads
 //   everywhere, writes only inside the workspace + temp dirs, and denies
-//   network inbound + process injection.
+//   network inbound. Process-control syscalls (process-info*, process-fork)
+//   are NOT denied: on macOS 14.x sandbox-exec rejects `process-info-setinfo`
+//   as unbound, and denying process-info even for Apple's own git makes it
+//   die with SIGILL, so those filters break the toolchain instead of
+//   hardening it. Write confinement + network direction are the backstop.
 // - Graceful degradation: on non-macOS builds, or when `sandbox-exec` is
 //   missing (Apple removed it from newer SDKs), wrap is a no-op and the
 //   caller runs the command exactly as before. Sandboxing must never make
@@ -67,17 +71,15 @@ pub fn seatbelt_profile(workspace: &Path) -> String {
 (allow file-write*
     (subpath "{ws}")
     (subpath "{tmp}")
+    (subpath "/tmp")
+    (subpath "/private/tmp")
     (literal "/dev/null")
     (literal "/dev/stdout")
     (literal "/dev/stderr")
-    (regex #"^/private/var/folders/[^/]+/[^/]+/[Tt]/"#)
-    (regex #"^/(private/)?var/folders/.*\\.pure-lock"#))
+    (regex "^/private/var/folders/[^/]+/[^/]+/[Tt]/")
+    (regex "^/(private/)?var/folders/.*[.]pure-lock"))
 (allow network-outbound)
 (deny network-inbound)
-(deny process-info-pidinfo)
-(deny process-info-setinfo)
-(deny process-info-codesign-attribute)
-(deny process-fork)
 "##,
         ws = ws,
         tmp = tmp,
@@ -148,6 +150,12 @@ mod tests {
         assert!(profile.contains("(deny network-inbound)"));
         // Temp regex line present
         assert!(profile.contains("/private/var/folders/"));
+        // Regex literals must be plain quoted strings: the #"..."# sharp
+        // expression form fails to compile on current macOS sandbox-exec.
+        assert!(!profile.contains('#'));
+        // process-* filters break Apple toolchain binaries (git dies with
+        // SIGILL under process-info denials); they must stay out.
+        assert!(!profile.contains("process-"));
     }
 
     #[test]
