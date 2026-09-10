@@ -12642,6 +12642,15 @@ button svg,
   letter-spacing: -0.01em;
   opacity: 0.75;
 }
+/* Reasoning-effort select rides the budget column sizing but a touch narrower,
+   left-aligned text (it's a word, not a number). */
+.llm-model-row-reasoning {
+  flex: 0 0 72px;
+  width: 72px;
+  padding: 4px 4px;
+  font-size: 11px;
+  text-align: left;
+}
 /* Corner × on collapsed provider cards: delete without expanding. Kept
    visible at rest (touch has no hover) and emphasized on card hover. */
 .llm-provider-card-del {

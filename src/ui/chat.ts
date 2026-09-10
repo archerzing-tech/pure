@@ -849,9 +849,10 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
     Boolean(custom?.baseURL) || Boolean(builtinOverride?.baseURL),
     custom?.protocol ?? builtinOverride?.protocol,
   );
-  // Reasoning effort (Settings → LLM → 思考深度): sent as `reasoning_effort`
-  // only when the active model supports it (2026+ family pattern + per-model
-  // manual override in shared/providers.ts — extend the pattern list there).
+  // Reasoning effort — a PER-MODEL setting on the model row (modelBudgets
+  // entry, same slot as the token budgets; Settings → LLM → 供应商面板 → 模型库).
+  // resolveReasoningEffort applies the row's 低/中/高/关闭 choice, falling back
+  // to the 2026+ name pattern (extend that list in shared/providers.ts).
   // DeepSeekAnthropicAdapter (browser-dev anthropic branch below) has no
   // extraBody plumb and anthropic endpoints reject unknown top-level fields,
   // so this stays an OpenAI-protocol-only parameter for now.
