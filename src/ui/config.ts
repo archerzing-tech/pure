@@ -7,7 +7,7 @@
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
-import { customProviderFor, defaultModelFor, isProviderId, providerDef, providerOverrideFor, PROVIDERS, type CustomProvider, type ProviderId, type ProviderOverride, type ReasoningEffortLevel, type ReasoningModelOverride } from '../shared/providers';
+import { customProviderFor, defaultModelFor, isProviderId, providerDef, providerOverrideFor, PROVIDERS, type CustomProvider, type ProviderId, type ProviderOverride } from '../shared/providers';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
 import type { ProxyConfig } from '../shared/proxy';
@@ -133,18 +133,12 @@ export interface PureConfig {
    */
   taskMode: 'auto' | 'yolo' | 'plan' | 'build';
   /**
-   * Global reasoning-effort level, sent to the provider as `reasoning_effort`
-   * (low/medium/high, default medium) — but ONLY for models that support it.
-   * Support detection lives in shared/providers.ts (2026+ model-family name
-   * pattern); the per-model manual backstop below overrides it.
+   * Reasoning effort is a PER-MODEL setting and lives with the model's other
+   * config: `modelBudgets[model].reasoningEffort` on the custom-provider
+   * entry or the built-in provider override (same row as 最大上下文 /
+   * 最大输出). Support auto-detection (2026+ family pattern) and wire
+   * resolution live in shared/providers.ts (resolveReasoningEffort).
    */
-  reasoningEffort: ReasoningEffortLevel;
-  /**
-   * Manual reasoning-support backstop keyed `${provider}::${model}`
-   * (see reasoningOverrideKey): 'on' forces the parameter on for a model the
-   * name pattern missed, 'off' forces it off. Absent = auto (pattern decides).
-   */
-  reasoningModelOverrides?: Record<string, ReasoningModelOverride>;
   /**
    * Long-task auto-continue (see docs/auto-continue-design.md): when enabled,
    * a complex plan task automatically keeps executing after each stage
@@ -283,8 +277,6 @@ export function defaults(): PureConfig {
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', username: '', password: '', hasPassword: false, bypassProviders: [], bypassModels: [] }),
     streamingRender: true,
     taskMode: 'auto',
-    reasoningEffort: 'medium',
-    reasoningModelOverrides: {},
     autoContinue: true,
     autoContinueMaxRounds: DEFAULT_AUTO_CONTINUE_MAX_ROUNDS,
     /** Engine-level anti-stall guard: when the model ends a turn with plain
@@ -533,11 +525,6 @@ export function loadConfig(): PureConfig | null {
     if (raw) {
       const parsed = JSON.parse(raw);
       const cfg: PureConfig = { ...defaults(), ...parsed };
-      // Defensive normalize: a hand-edited or stale reasoningEffort must not
-      // reach the wire — snap unknown values back to the default level.
-      if (cfg.reasoningEffort !== 'low' && cfg.reasoningEffort !== 'medium' && cfg.reasoningEffort !== 'high') {
-        cfg.reasoningEffort = 'medium';
-      }
       // Both migrations below mutate `cfg` and mark it dirty; the single write
       // at the end persists the result ONCE. Doing the writes inline would be
       // wrong in the Tauri case: a pre-scrub localStorage.setItem(cfg) could
