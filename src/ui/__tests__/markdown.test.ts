@@ -20,23 +20,28 @@ describe('map code blocks', () => {
     expect(html).not.toContain('<pre><code');
   });
 
-  it('exposes a manual refresh action when the basemap cannot load', () => {
+  it('keeps basemap failures invisible: silent retry under the loading spinner', () => {
     const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
     const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+    // The manual refresh action survives (user-initiated, always available).
     expect(src).toContain("leafletMapMod?.clearMapTileMemoryCache()");
     expect(src).toContain("refresh?.addEventListener('click', () => retryMapSlot(slot))");
-    expect(src).toContain("t('map.tileLoadFailed')");
     // STABLE GEOMETRY: the canvas box is reserved at full height in every
     // state — the spinner overlays it; the slot never collapses/expands.
     expect(css).toContain('.bubble .map-slot[data-map-state="loading"] .map-canvas-wrap {\n  height: 480px;');
     expect(css).toContain('opacity: 0.3;');
     expect(css).toContain('animation: mapLoadingFade 1.8s ease-in-out infinite;');
     expect(css).toContain('.map-slot[data-map-state="preview"] .map-canvas-wrap');
-    // Tile failures degrade to a no-basemap preview with a warning, not an
-    // error card + retry loop.
-    expect(src).toContain("} else if (status === 'ready') {");
-    expect(src).toContain('map.tileFallback');
-    expect(src).not.toContain("setMapState(slot, 'preview');\n    } catch (err)");
+    // Tile/render failures are INVISIBLE: the slot stays in its loading state
+    // and re-renders in the background on a backoff — only a real 'ready'
+    // (tiles drawn) lifts the loading overlay. No error card, no ⚠️ banner,
+    // no state flapping.
+    expect(src).toContain('scheduleSilentMapRetry(slot, version)');
+    expect(src).toContain('cancelSilentMapRetry(slot)');
+    expect(src).toContain('function preserveLiveMapSlots');
+    // The retired strategies stay gone.
+    expect(src).not.toContain('map.tileFallback');
+    expect(src).not.toContain('map.tileLoadFailed');
   });
 
   it('treats an un-tagged JSON block as a plain code block', () => {
