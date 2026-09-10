@@ -36,8 +36,14 @@ import {
   protocolForURL,
   providerDef,
   providerOverrideFor,
+  resolveProviderProtocol,
+  customDefaultModel,
+  resolveReasoningEffort,
+  reasoningOverrideKey,
+  supportsReasoningEffort,
   type CustomProvider,
   type LLMProtocol,
+  type ReasoningEffortLevel,
 } from '../shared/providers';
 /** Compact integer form for budget placeholders ("1M", "262k", "33k") —
  * short enough that "262k tok" fits the narrow budget column. */
@@ -83,6 +89,9 @@ import {
   splitSkillMarkdown,
   type HubSkill,
 } from './skillHub';
+import { listToolInventory } from './toolInventory';
+import { probeMcpServerTools, type McpProbeResult } from './mcpProbe';
+import type { AppSkillEntry } from '../shared/skillFiles';
 
 /**
  * AbortSignal.timeout needs Safari 16+ (macOS 13). Older WKWebView versions
@@ -118,6 +127,11 @@ export class SettingsPanel {
   private visible = false;
   private focusBeforeOpen: HTMLElement | null = null;
   private mcpServers: PureConfig['mcpServers'] = [];
+  /** Per-server "查看工具" results, cached in-memory so re-rendering the list
+   *  (or closing/reopening settings) never re-spawns a server process. */
+  private mcpToolProbes = new Map<string, McpProbeResult>();
+  /** Server names with a probe in flight (guards double-clicks). */
+  private mcpProbing = new Set<string>();
   /** Bound in the constructor; refreshes the paste-file footprint on open. */
   private refreshTmpUsage: () => Promise<void> = async () => {};
   /** Bound in the constructor; refreshes the offline map-tile cache footprint. */
@@ -133,10 +147,15 @@ export class SettingsPanel {
   /** Reset timer for the connectivity-verify button's ✓ / ✗ flash. */
   private testConnResetTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(onSave: () => void, onOpen?: () => void, onClose?: () => void) {
+  /** Current workspace path, injected by main.ts (the panel must not import
+   *  chat.ts). Powers the project-local skills inventory on the Skills page. */
+  private getWorkspace: () => string;
+
+  constructor(onSave: () => void, onOpen?: () => void, onClose?: () => void, getWorkspace: () => string = () => '') {
     this.onSave = onSave;
     this.onOpen = onOpen;
     this.onClose = onClose;
+    this.getWorkspace = getWorkspace;
 
     this.bindNav();
     this.bindActions();
@@ -219,6 +238,10 @@ export class SettingsPanel {
       const el = document.getElementById('schedules-dashboard');
       if (el) renderSchedulesSettings(el, () => this.onSave());
     }
+    // 工具清单与已装技能都是"进页面读最新"的只读区块：开关刚拨过、
+    // workspace 刚切换、或助手刚在会话里装了新技能，切过来就能看到。
+    if (category === 'tools') this.renderToolInventory();
+    if (category === 'skills') void this.renderAppSkills();
   }
 
   // ── Config queries ──
@@ -667,6 +690,26 @@ export class SettingsPanel {
       this.closeDefaultModelMenu();
     });
 
+    // Reasoning-support backstop for the CURRENT provider+model: writes the
+    // per-model override map directly (Skill-Hub style — immediate persist,
+    // NOT autoSave, which would double-persist via gatherForm) and refreshes
+    // the status hint. 'auto' removes the key so the name pattern decides.
+    document.getElementById('cfg-reasoning-override')?.addEventListener('change', () => {
+      const el = document.getElementById('cfg-reasoning-override') as HTMLSelectElement | null;
+      const value = el?.value as 'auto' | 'on' | 'off' | undefined;
+      if (!value) return;
+      const cfg = loadConfig() ?? defaults();
+      const custom = customProviderFor(cfg.customProviders, cfg.provider);
+      const model = cfg.model || customDefaultModel(cfg.customProviders, cfg.provider);
+      const key = reasoningOverrideKey(cfg.provider, model);
+      const map = { ...(cfg.reasoningModelOverrides ?? {}) };
+      if (value === 'auto') delete map[key];
+      else map[key] = value;
+      persistConfig({ ...cfg, reasoningModelOverrides: map });
+      invalidateConfigCache();
+      this.renderReasoningRow();
+    });
+
 
     // Theme selector
     document.querySelectorAll('.theme-option').forEach(el => {
@@ -761,6 +804,9 @@ export class SettingsPanel {
       '#cfg-auto-continue',
       '#cfg-auto-continue-rounds',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
+      // Reasoning-effort level (the per-model override select below has its
+      // own listener — it writes a map keyed by the current default model).
+      '#cfg-reasoning-effort',
       '.cfg-skill-toggle',
       // Map-tile cache cap (number input saves on change/blur).
       '#cfg-map-tile-cache-mb', '#cfg-map-tianditu-key',
@@ -1295,9 +1341,51 @@ export class SettingsPanel {
     invalidateConfigCache();
     this.closeDefaultModelMenu();
     this.renderDefaultBar();
+    this.renderReasoningRow();
     this.renderProviderGrid();
     this.autoSave();
     this.toast(t('llm.custom.defaultChanged').replace('{m}', model));
+  }
+
+  /**
+   * Reasoning-effort row (Settings → LLM): shows whether the CURRENT default
+   * model will actually receive `reasoning_effort`, and reflects the manual
+   * per-model override. Re-rendered on open, on save, and whenever the
+   * default model changes — the panel re-render never touches these static
+   * DOM nodes, so they need this explicit refresh.
+   */
+  private renderReasoningRow(): void {
+    const hintEl = document.getElementById('llm-reasoning-hint');
+    const overrideEl = document.getElementById('cfg-reasoning-override') as HTMLSelectElement | null;
+    if (!hintEl || !overrideEl) return;
+    const cfg = loadConfig() ?? defaults();
+    const custom = customProviderFor(cfg.customProviders, cfg.provider);
+    const providerOv = providerOverrideFor(cfg.providerOverrides, cfg.provider);
+    const baseURL = customBaseURL(cfg.customProviders, cfg.provider, cfg.providerOverrides);
+    const model = cfg.model || customDefaultModel(cfg.customProviders, cfg.provider);
+    const protocol = resolveProviderProtocol(
+      providerDef(cfg.provider)?.protocol,
+      baseURL,
+      Boolean(custom?.baseURL) || Boolean(providerOv?.baseURL),
+      custom?.protocol ?? providerOv?.protocol,
+    );
+    const overrides = cfg.reasoningModelOverrides ?? {};
+    const manual = overrides[reasoningOverrideKey(cfg.provider, model)];
+    const resolved = resolveReasoningEffort({ ...cfg, protocol });
+    // Mirror resolveReasoningEffort exactly so the hint never promises more
+    // than the request path delivers: a forced-on model under the anthropic
+    // protocol still isn't sent anything (endpoints reject unknown fields).
+    let statusKey: string;
+    if (manual === 'off') statusKey = 'llm.reasoning.forcedOff';
+    else if (!resolved.supported) statusKey = 'llm.reasoning.unsupported';
+    else if (manual === 'on') statusKey = 'llm.reasoning.forcedOn';
+    else statusKey = 'llm.reasoning.supported';
+    if (protocol === 'anthropic' && manual !== 'off') {
+      hintEl.textContent = `${t(statusKey)} · ${t('llm.reasoning.anthropic')}`;
+    } else {
+      hintEl.textContent = t(statusKey);
+    }
+    overrideEl.value = manual ?? 'auto';
   }
 
   // ── Proxy connection test ──
@@ -1529,6 +1617,10 @@ export class SettingsPanel {
     this.editingProvider = null;
     this.renderProviderGrid();
     this.renderDefaultBar();
+    // Reasoning-effort row (思考深度): level select + per-model support hint.
+    const reasoningEffortEl = document.getElementById('cfg-reasoning-effort') as HTMLSelectElement | null;
+    if (reasoningEffortEl) reasoningEffortEl.value = cfg.reasoningEffort ?? 'medium';
+    this.renderReasoningRow();
     (document.getElementById('cfg-language') as HTMLSelectElement).value = cfg.language;
     const cityEl = document.getElementById('cfg-city') as HTMLInputElement | null;
     if (cityEl) cityEl.value = cfg.city ?? '';
@@ -1639,6 +1731,10 @@ export class SettingsPanel {
     if (excludeInput) excludeInput.value = (cfg.mcpExcludedPrefixes ?? []).join(', ');
     this.renderMcpServers();
 
+    // Read-only inventories: effective tool list + skills installed on disk.
+    this.renderToolInventory();
+    void this.renderAppSkills();
+
     // System permission statuses refresh on every panel open.
     void this.refreshSystemPermissions();
   }
@@ -1665,6 +1761,7 @@ export class SettingsPanel {
             <span class="mcp-server-name">${escapeHtml(s.name)}</span>
             <span class="mcp-server-badge">${escapeHtml(s.transport)}</span>${builtin}
             <div class="mcp-server-command">${escapeHtml(label)}</div>
+            <div class="mcp-server-tools">${this.mcpToolsRowHtml(s, i)}</div>
           </div>
         </div>
         <button class="mcp-server-delete" data-index="${i}" title="${t('mcp.remove.title')}">
@@ -1681,6 +1778,196 @@ export class SettingsPanel {
         if (!isNaN(idx)) this.removeMcpServer(idx);
       });
     });
+    // Bind "查看工具" / re-probe buttons
+    list.querySelectorAll('.mcp-probe-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.getAttribute('data-index') || '', 10);
+        if (!isNaN(idx)) void this.probeMcpTools(idx);
+      });
+    });
+  }
+
+  /** Second row of an MCP server card: probe button → probing state → tool
+   *  chips (excluded ones struck through) or the failure reason. */
+  private mcpToolsRowHtml(s: PureConfig['mcpServers'][number], index: number): string {
+    if (this.mcpProbing.has(s.name)) {
+      return `<span class="mcp-probe-status">${t('mcp.tools.probing')}</span>`;
+    }
+    const probe = this.mcpToolProbes.get(s.name);
+    if (!probe) {
+      return `<button class="mcp-probe-btn" data-index="${index}">${t('mcp.tools.probe')}</button>`;
+    }
+    const again = `<button class="mcp-probe-btn mcp-probe-again" data-index="${index}" title="${t('mcp.tools.probe')}">↻</button>`;
+    if (probe.error) {
+      return `<span class="mcp-probe-status mcp-probe-status-error">${t('mcp.tools.failed')}：${escapeHtml(probe.error)}</span>${again}`;
+    }
+    if (probe.tools.length === 0) {
+      return `<span class="mcp-probe-status">${t('mcp.tools.none')}</span>${again}`;
+    }
+    const hiddenCount = probe.tools.filter((tool) => tool.excluded).length;
+    const summary = `${t('mcp.tools.count').replace('{n}', String(probe.tools.length))}` +
+      (hiddenCount > 0 ? ` · ${hiddenCount} ${t('mcp.tools.hidden')}` : '');
+    const chips = probe.tools.map((tool) => {
+      const short = tool.name.slice(tool.name.indexOf('__') + 2);
+      const title = tool.excluded ? t('mcp.tools.hiddenHint') : tool.description;
+      return `<span class="mcp-tool-chip${tool.excluded ? ' mcp-tool-chip-excluded' : ''}" title="${escapeHtml(title)}">${escapeHtml(short)}${tool.excluded ? ` <i>· ${t('mcp.tools.hidden')}</i>` : ''}</span>`;
+    }).join('');
+    return `<div class="mcp-probe-summary">${escapeHtml(summary)}${again}</div><div class="mcp-tool-chips">${chips}</div>`;
+  }
+
+  /** On-demand MCP tool discovery: spawns a short-lived probe (never the chat
+   *  session's own MCP processes — see mcpProbe.ts for why) and renders the
+   *  result as chips on the server card. Excluded prefixes are read from the
+   *  input's CURRENT value so freshly typed prefixes are reflected. */
+  private async probeMcpTools(index: number) {
+    const server = this.mcpServers[index];
+    if (!server || this.mcpProbing.has(server.name)) return;
+    this.mcpProbing.add(server.name);
+    this.mcpToolProbes.delete(server.name);
+    this.renderMcpServers();
+
+    const excludeInput = document.getElementById('cfg-mcp-exclude-prefixes') as HTMLInputElement | null;
+    // Same split rule as gatherForm — the marking must match what will be saved.
+    const excludedPrefixes = (excludeInput?.value ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+    const proxy = normalizeProxyConfig(loadConfig()?.proxy);
+
+    const result = await probeMcpServerTools(server, {
+      excludedPrefixes,
+      proxyUrl: effectiveProxyUrl(proxy, 'tools'),
+      timeoutLabel: t('mcp.tools.timeout'),
+    });
+
+    this.mcpProbing.delete(server.name);
+    this.mcpToolProbes.set(server.name, result);
+    this.renderMcpServers();
+  }
+
+  // ── Tools page: effective tool inventory ("当前可用工具") ──
+
+  /** Grouped list of every tool the model can call right now, honoring the
+   *  Settings → Tools toggles and (without a workspace) the plain-chat gate.
+   *  Display-only: re-rendered from loadToForm, switchCategory and autoSave,
+   *  so flipping a toggle refreshes the rows through the normal save path. */
+  private renderToolInventory(): void {
+    const host = document.getElementById('tool-inventory');
+    if (!host) return;
+    const cfg = loadConfig() ?? defaults();
+    const toggleLabels: Record<string, string> = {
+      fs: t('tools.fs'), cmd: t('tools.cmd'), git: t('tools.git'), browser: t('tools.browser'),
+    };
+    const groups = listToolInventory(cfg, { hasWorkspace: !!this.getWorkspace() });
+    host.innerHTML = groups.map((group) => {
+      if (group.tools.length === 0) return '';
+      const rows = group.tools.map((tool) => {
+        let pill = t('tools.inventory.on');
+        let pillClass = 'tool-inv-state-on';
+        let title = tool.description;
+        if (!tool.enabled && tool.disabledReason?.startsWith('toggle:')) {
+          pill = t('tools.inventory.off');
+          pillClass = 'tool-inv-state-off';
+          const gate = tool.disabledReason.slice('toggle:'.length);
+          title = `${t('tools.inventory.offReason').replace('{toggle}', toggleLabels[gate] ?? gate)} — ${tool.description}`;
+        } else if (tool.disabledReason === 'needWorkspace') {
+          pill = t('tools.inventory.needWorkspace');
+          pillClass = 'tool-inv-state-off';
+        } else if (tool.disabledReason === 'imageGenUnsupported') {
+          pill = t('tools.inventory.imageGenUnsupported');
+          pillClass = 'tool-inv-state-off';
+        }
+        return `<div class="tool-inv-row${tool.enabled ? '' : ' tool-inv-row-off'}" title="${escapeHtml(title)}">
+          <code class="tool-inv-name">${escapeHtml(tool.name)}</code>
+          <span class="tool-inv-desc">${escapeHtml(tool.description)}</span>
+          <span class="tool-inv-state ${pillClass}">${escapeHtml(pill)}</span>
+        </div>`;
+      }).join('');
+      return `<div class="tool-inv-group">
+        <div class="tool-inv-group-head">
+          <span class="tool-inv-group-name" data-i18n="tools.inventory.group.${group.id}">${escapeHtml(t(`tools.inventory.group.${group.id}`))}</span>
+          <span class="tool-inv-group-count">${group.tools.length}</span>
+        </div>
+        ${rows}
+      </div>`;
+    }).join('');
+    applyTranslations();
+  }
+
+  // ── Skills page: installed app skills (disk inventory) ──
+
+  /** Skills on disk — ~/.pure/skills (user) plus <workspace>/.agents/skills
+   *  (project) — the ones the agent installs mid-session and the Skill Hub
+   *  knows nothing about. Read-only: disk skills are always injected into the
+   *  prompt, so there is no toggle here, just visibility and an open-folder
+   *  affordance for managing them by hand. */
+  private async renderAppSkills(): Promise<void> {
+    const listEl = document.getElementById('app-skills-list');
+    const dirsEl = document.getElementById('skills-dir-rows');
+    if (!listEl || !dirsEl) return;
+
+    if (!isTauriRuntime()) {
+      dirsEl.innerHTML = '';
+      listEl.innerHTML = `<div class="mcp-server-empty" data-i18n="skills.installed.browserEmpty">浏览器模式下读不到本机技能目录，用桌面版就能看到</div>`;
+      applyTranslations();
+      return;
+    }
+
+    const workspace = this.getWorkspace();
+    const core = await loadTauriCore();
+    if (!core) return;
+    let entries: AppSkillEntry[] = [];
+    let dirs: { user: string; project: string | null } = { user: '', project: null };
+    try {
+      const [skillEntries, skillDirs] = await Promise.all([
+        core.invoke<AppSkillEntry[]>('list_app_skills', { workspace }),
+        core.invoke<{ user: string; project: string | null }>('app_skills_dirs', { workspace }),
+      ]);
+      entries = skillEntries ?? [];
+      dirs = skillDirs ?? dirs;
+    } catch (err) {
+      console.warn('[pure] failed to list app skills:', err);
+    }
+    // The user may have switched workspaces while the read was in flight —
+    // drop the result instead of showing another project's skills.
+    if (this.getWorkspace() !== workspace) return;
+
+    const dirRow = (labelKey: string, path: string | null, kind: string): string => {
+      if (!path) return '';
+      return `<div class="skills-dir-row">
+        <span class="skills-dir-label" data-i18n="${labelKey}">${escapeHtml(t(labelKey))}</span>
+        <code class="skills-dir-path">${escapeHtml(path)}</code>
+        <button class="skills-dir-open" data-dir="${kind}" title="${t('skills.openDir')}">${escapeHtml(t('skills.openDir'))}</button>
+      </div>`;
+    };
+    dirsEl.innerHTML = dirRow('skills.userDir', dirs.user, 'user') + dirRow('skills.projectDir', dirs.project, 'project');
+    dirsEl.querySelectorAll('.skills-dir-open').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const path = btn.getAttribute('data-dir') === 'project' ? dirs.project : dirs.user;
+        if (!path) return;
+        try {
+          await core.invoke('open_path', { path });
+        } catch {
+          this.toast(t('skills.openDirFailed'));
+        }
+      });
+    });
+
+    if (entries.length === 0) {
+      listEl.innerHTML = `<div class="mcp-server-empty" data-i18n="skills.installed.empty">这里还没有技能。把含 SKILL.md 的文件夹放进下面的目录，或者在聊天里让助手用 install_agent_skill 装一个。</div>`;
+      applyTranslations();
+      return;
+    }
+    const sourceBadge = (source?: string) => source === 'project'
+      ? `<span class="skill-source-badge skill-source-project" data-i18n="skills.source.project">${escapeHtml(t('skills.source.project'))}</span>`
+      : `<span class="skill-source-badge" data-i18n="skills.source.user">${escapeHtml(t('skills.source.user'))}</span>`;
+    listEl.innerHTML = entries.map((entry) => `
+      <div class="skill-card app-skill-card" title="${escapeHtml(entry.path ?? '')}">
+        <div class="skill-card-header">
+          <span class="skill-name">${escapeHtml(entry.name)}</span>
+          ${sourceBadge(entry.source)}
+        </div>
+        <p class="skill-desc">${escapeHtml(entry.description || '')}</p>
+      </div>`).join('');
+    applyTranslations();
   }
 
   private showAddForm() {
@@ -2669,6 +2956,7 @@ export class SettingsPanel {
     return {
       provider: prev.provider,
       planContinueGuard: prev.planContinueGuard ?? true,
+      sandboxCommands: prev.sandboxCommands ?? true,
       customProviders: this.gatherCustomProviders(),
       providerModels: this.gatherProviderModels(),
       providerModelNames: this.gatherProviderModelNames(),
@@ -2686,6 +2974,12 @@ export class SettingsPanel {
       density: (document.getElementById('cfg-density') as HTMLSelectElement).value as PureConfig['density'],
       hasApiKey: (loadConfig() ?? defaults()).hasApiKey,
       permissionMode: (document.getElementById('cfg-permission-mode') as HTMLSelectElement | null)?.value as PureConfig['permissionMode'] || 'confirm',
+      reasoningEffort: ((document.getElementById('cfg-reasoning-effort') as HTMLSelectElement | null)?.value ?? 'medium') as ReasoningEffortLevel,
+      // Carry-through: the per-model override map is owned by its own change
+      // listener (the key depends on the current default model, which
+      // gatherForm doesn't touch) — but it MUST ride along here or any other
+      // autoSave would wipe it.
+      reasoningModelOverrides: (loadConfig() ?? defaults()).reasoningModelOverrides ?? {},
       autoPermRead: (document.getElementById('cfg-perm-read') as HTMLInputElement | null)?.checked ?? true,
       autoPermWrite: (document.getElementById('cfg-perm-write') as HTMLInputElement | null)?.checked ?? false,
       autoPermCmd: (document.getElementById('cfg-perm-cmd') as HTMLInputElement | null)?.checked ?? false,
@@ -2899,6 +3193,9 @@ export class SettingsPanel {
       }
     }
     this.renderDefaultBar();
+    // The toggles are part of autoSaveSelectors — keep the read-only
+    // inventory in sync with them on the same change event.
+    this.renderToolInventory();
 
     this.onSave();
   }

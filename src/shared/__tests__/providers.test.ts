@@ -24,6 +24,10 @@ import {
   resolveProviderProtocol,
   providerOverrideFor,
   resolvePromptBudget,
+  isReasoningModelName,
+  resolveReasoningEffort,
+  reasoningOverrideKey,
+  supportsReasoningEffort,
   isCustomKeyless,
   isCustomProviderId,
   type CustomProvider,
@@ -404,5 +408,64 @@ describe('text-to-image capability detection', () => {
       expect(firstTokenHintTimeoutMs('', '')).toBe(15_000);
       expect(firstTokenHintTimeoutMs(null, null)).toBe(15_000);
     });
+  });
+});
+
+describe('reasoning-effort capability detection', () => {
+  it('matches 2026+ reasoning-capable model families by name', () => {
+    // 2026+ families → supported.
+    for (const model of [
+      'gpt-5.2', 'openai/gpt-5.2', 'glm-5.3-flash', 'glm-5.2', 'deepseek-v4-flash', 'deepseek-r2',
+      'kimi-k3', 'MiniMax-M2.7', 'gemini-3-pro', 'claude-5-sonnet', 'qwen3.5-max', 'qwq-32b', 'qwen4',
+    ]) {
+      expect(isReasoningModelName(model)).toBe(true);
+    }
+    // Pre-2026 / non-reasoning names → NOT supported (the conservative rule).
+    for (const model of [
+      'gpt-4o-mini', 'o3-mini', 'qwen3-coder-next', 'qwen2.5-coder:7b', 'glm-4.5',
+      'deepseek-reasoner', 'deepseek-r1', 'anthropic/claude-sonnet-4', 'kimi-k2.6', 'MiniMax-M1',
+      'gemini-2.5-flash', '', undefined,
+    ]) {
+      expect(isReasoningModelName(model)).toBe(false);
+    }
+    // Same model id, different capability: glm-5.2 draws images via SVG only
+    // but DOES accept reasoning_effort.
+    expect(isImageModelName('glm-5.2')).toBe(false);
+    expect(isReasoningModelName('glm-5.2')).toBe(true);
+  });
+
+  it('manual per-model override wins over the name pattern', () => {
+    const overrides = {
+      [reasoningOverrideKey('ollama', 'qwen2.5-coder:7b')]: 'on' as const,
+      [reasoningOverrideKey('glm', 'glm-5.3-flash')]: 'off' as const,
+    };
+    // Force-on rescues a model the pattern missed.
+    expect(supportsReasoningEffort([], 'ollama', undefined, 'qwen2.5-coder:7b', overrides)).toBe(true);
+    // Force-off silences a model the pattern matched.
+    expect(supportsReasoningEffort([], 'glm', undefined, 'glm-5.3-flash', overrides)).toBe(false);
+    // Without an override the pattern decides.
+    expect(supportsReasoningEffort([], 'glm', undefined, 'glm-5.3-flash', {})).toBe(true);
+    expect(supportsReasoningEffort([], 'deepseek-openai', undefined, 'deepseek-r1')).toBe(false);
+    expect(supportsReasoningEffort([], 'openai', undefined, '')).toBe(false);
+  });
+
+  it('resolveReasoningEffort: level default, gating, and override precedence', () => {
+    // Default level is medium when nothing is configured.
+    expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2' }))
+      .toEqual({ supported: true, effort: 'medium' });
+    expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2', reasoningEffort: 'low' }))
+      .toEqual({ supported: true, effort: 'low' });
+    // Unmatched model → nothing is sent.
+    expect(resolveReasoningEffort({ provider: 'qwen', model: 'qwen3-coder-next', reasoningEffort: 'high' }))
+      .toEqual({ supported: false });
+    // Anthropic-protocol endpoints never receive the parameter (they reject
+    // unknown top-level fields), even for a matched model.
+    expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2', protocol: 'anthropic' }))
+      .toEqual({ supported: false });
+    // A manual force-off beats a matched name.
+    expect(resolveReasoningEffort({
+      provider: 'glm', model: 'glm-5.3-flash', reasoningEffort: 'high',
+      reasoningModelOverrides: { [reasoningOverrideKey('glm', 'glm-5.3-flash')]: 'off' },
+    })).toEqual({ supported: false });
   });
 });

@@ -3,13 +3,9 @@
 // Exposes remaining() and gracePeriodEnd for BudgetWarning events.
 
 import type { BudgetConfig, BudgetSnapshot } from '../shared/types';
+import { estimateTextTokens } from '../shared/tokenEstimate';
 
 export type BudgetStatus = 'ok' | 'warning' | 'exceeded';
-
-// CJK token estimator range: Hiragana/Katakana, CJK Ext A + unified
-// ideographs, Hangul syllables, and CJK compatibility. All BMP, so each
-// matched code point is exactly one UTF-16 unit in `text.length`.
-const CJK_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]/u;
 
 export class BudgetManager {
   private config: BudgetConfig;
@@ -29,18 +25,7 @@ export class BudgetManager {
   }
 
   countTokens(text: string): number {
-    if (!text) return 0;
-    // CJK characters are dense: most tokenizers spend ~1 token per CJK char
-    // while Latin text averages ~4 chars/token. A flat length/4 estimate
-    // UNDERCOUNTS CJK by ~4×, so long Chinese or symbol-heavy code silently
-    // blows past the token budget before the soft/hard limits fire. Weight
-    // CJK-range code points at 1 token/char, everything else (Latin, digits,
-    // ASCII symbols) at the historical ~1/4 token/char.
-    let cjk = 0;
-    for (const ch of text) {
-      if (CJK_CHAR_RE.test(ch)) cjk++;
-    }
-    return Math.ceil(cjk + (text.length - cjk) / 4);
+    return estimateTextTokens(text);
   }
 
   addTokens(text: string) {

@@ -10,6 +10,7 @@ use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 
 mod path_policy;
+mod sandbox;
 
 #[cfg(test)]
 static TEST_HOME_LOCK: std::sync::OnceLock<StdMutex<()>> = std::sync::OnceLock::new();
@@ -2662,30 +2663,50 @@ mod sys_info_manual_regression {
     }
 }
 
+/// Decide whether to wrap this command in the Seatbelt sandbox: requested via
+/// the `sandbox` argument AND actually available on this machine AND the
+/// workspace exists (sandbox-exec profiles reference it).
+fn sandbox_arg_enabled(workspace: &str, sandbox: Option<bool>) -> bool {
+    sandbox.unwrap_or(false)
+        && sandbox::seatbelt_available()
+        && std::path::Path::new(workspace).is_dir()
+}
+
 /// Execute a shell command and return all output at once.
 /// Uses tokio::process::Command so it does NOT block the async runtime.
 /// Returns structured `{ exitCode, stdout, stderr }` so the frontend can tell
 /// a failed command (non-zero exit) apart from a successful one instead of
 /// squashing everything into a `success: true` string.
 #[tauri::command]
-async fn execute_command(workspace: String, command: String, proxy_url: Option<String>) -> Result<serde_json::Value, String> {
+async fn execute_command(workspace: String, command: String, proxy_url: Option<String>, sandbox: Option<bool>) -> Result<serde_json::Value, String> {
     // Unix shells run `sh -c`, Windows runs PowerShell (whose directory/file
     // commands and quoting rules are the ones the model is instructed to use).
+    // When `sandbox` is requested and Seatbelt is available the whole argv is
+    // replaced by a sandbox-exec invocation; otherwise run exactly as before.
     let output = {
         #[cfg(unix)]
-        let mut cmd = silent_child_tokio(TokioCommand::new("sh"));
+        let mut cmd = if sandbox_arg_enabled(&workspace, sandbox) {
+            let (argv, _wrapped) = sandbox::wrap_command(std::path::Path::new(&workspace), &command);
+            let mut parts = argv.into_iter();
+            let program = parts.next().unwrap_or_else(|| "sh".into());
+            let mut c = silent_child_tokio(TokioCommand::new(program));
+            c.args(parts.collect::<Vec<_>>());
+            c
+        } else {
+            let mut c = silent_child_tokio(TokioCommand::new("sh"));
+            c.arg("-c");
+            c.arg(&command);
+            c
+        };
         #[cfg(windows)]
         let mut cmd = silent_child_tokio(TokioCommand::new("powershell"));
-        #[cfg(unix)]
-        cmd.arg("-c");
         #[cfg(windows)]
-        cmd.args(["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
-        // -EncodedCommand (base64 UTF-16LE) bypasses the Windows command-line
-        // quoting mangling; the encoding also carries the exit-code wrapper.
-        #[cfg(windows)]
-        cmd.arg(powershell_encoded_command(&command));
-        #[cfg(not(windows))]
-        cmd.arg(&command);
+        {
+            cmd.args(["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
+            // -EncodedCommand (base64 UTF-16LE) bypasses the Windows command-line
+            // quoting mangling; the encoding also carries the exit-code wrapper.
+            cmd.arg(powershell_encoded_command(&command));
+        }
         // A Finder-launched app inherits a minimal PATH; inject the extended
         // probe PATH so `node` / `bun` / `python3` / nvm / Homebrew commands
         // actually resolve (see probe_extra_path_dirs).
@@ -2739,11 +2760,21 @@ type ChatStreamRegistry = Arc<StdMutex<BTreeMap<String, tokio::sync::oneshot::Se
 /// Spawn `sh -c <command>` in its own process group (Unix) so a cancellation
 /// can kill the whole command tree. process_group(0) makes the child its own
 /// group leader (pgid == pid), which is what kill_process_group targets.
-fn spawn_shell_command(workspace: &str, command: &str, proxy_url: Option<&str>) -> std::io::Result<Child> {
+fn spawn_shell_command(workspace: &str, command: &str, proxy_url: Option<&str>, sandbox: Option<bool>) -> std::io::Result<Child> {
     // Unix shells run `sh -c`, Windows runs PowerShell (whose directory/file
     // commands and quoting rules are the ones the model is instructed to use).
+    // With `sandbox` requested + Seatbelt available the whole argv becomes a
+    // sandbox-exec invocation (write-confined to the workspace, outbound-only
+    // network); otherwise the command runs exactly as before.
     #[cfg(unix)]
-    let mut cmd = {
+    let mut cmd = if sandbox_arg_enabled(workspace, sandbox) {
+        let (argv, _wrapped) = sandbox::wrap_command(std::path::Path::new(workspace), command);
+        let mut parts = argv.into_iter();
+        let program = parts.next().unwrap_or_else(|| "sh".into());
+        let mut c = silent_child_tokio(TokioCommand::new(program));
+        c.args(parts.collect::<Vec<_>>());
+        c
+    } else {
         let mut c = silent_child_tokio(TokioCommand::new("sh"));
         c.arg("-c");
         c
@@ -3114,8 +3145,9 @@ async fn execute_command_stream_inner(
     command: &str,
     on_output: &Channel<String>,
     proxy_url: Option<&str>,
+    sandbox: Option<bool>,
 ) -> Result<i32, String> {
-    let mut child = spawn_shell_command(workspace, command, proxy_url).map_err(|e| format!("spawn: {}", e))?;
+    let mut child = spawn_shell_command(workspace, command, proxy_url, sandbox).map_err(|e| format!("spawn: {}", e))?;
 
     // Take the pipes BEFORE registering so an early return on a missing pipe
     // (practically impossible with Stdio::piped, but the API allows it) can't
@@ -3214,8 +3246,9 @@ async fn execute_command_stream(
     command: String,
     on_output: Channel<String>,
     proxy_url: Option<String>,
+    sandbox: Option<bool>,
 ) -> Result<i32, String> {
-    execute_command_stream_inner(&state, &id, &workspace, &command, &on_output, proxy_url.as_deref()).await
+    execute_command_stream_inner(&state, &id, &workspace, &command, &on_output, proxy_url.as_deref(), sandbox).await
 }
 
 /// Native downloader for the GUI's download_file tool. Replaces the fragile
@@ -5864,6 +5897,19 @@ mod resolve_tests {
     }
 
     #[test]
+    fn path_info_rejects_a_deleted_workspace_root() {
+        // The GUI's send-time workspace guard relies on this: once the folder
+        // is gone, path_info must REJECT (canonicalize fails) rather than
+        // report exists=false — rejection is the detection signal.
+        let ws = temp_workspace("gone");
+        let info = path_info(ws.clone(), ".".into()).unwrap();
+        assert_eq!(info["exists"], true);
+        assert_eq!(info["isDirectory"], true);
+        fs::remove_dir_all(&ws).unwrap();
+        assert!(path_info(ws, ".".into()).is_err());
+    }
+
+    #[test]
     fn joins_without_doubling_the_workspace_path() {
         // Regression: the old implementation re-joined the absolute path
         // components onto the base, doubling every path. The resolved path
@@ -6231,7 +6277,7 @@ mod execute_command_tests {
 
     #[tokio::test]
     async fn reports_success_with_zero_exit() {
-        let out = execute_command(".".to_string(), "echo hello".to_string(), None)
+        let out = execute_command(".".to_string(), "echo hello".to_string(), None, None)
             .await
             .unwrap();
         assert_eq!(out["exitCode"], 0);
@@ -6241,7 +6287,7 @@ mod execute_command_tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn reports_failure_with_nonzero_exit_and_stderr() {
-        let out = execute_command(".".to_string(), "echo boom >&2; exit 3".to_string(), None)
+        let out = execute_command(".".to_string(), "echo boom >&2; exit 3".to_string(), None, None)
             .await
             .unwrap();
         assert_eq!(out["exitCode"], 3);
@@ -6250,7 +6296,7 @@ mod execute_command_tests {
 
     #[tokio::test]
     async fn keeps_stdout_even_when_command_fails() {
-        let out = execute_command(".".to_string(), "echo partial; exit 2".to_string(), None)
+        let out = execute_command(".".to_string(), "echo partial; exit 2".to_string(), None, None)
             .await
             .unwrap();
         assert_eq!(out["exitCode"], 2);
@@ -6298,6 +6344,7 @@ mod command_cancel_tests {
             "echo hello",
             &ch,
             None,
+            None,
         )
         .await
             .unwrap();
@@ -6321,7 +6368,7 @@ mod command_cancel_tests {
         let started = std::time::Instant::now();
         let code = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            execute_command_stream_inner(&registry, "background-pipe", ".", &command, &ch, None),
+            execute_command_stream_inner(&registry, "background-pipe", ".", &command, &ch, None, None),
         )
         .await
         .expect("a shell that exits must not be held open by a background child")
@@ -6345,7 +6392,7 @@ mod command_cancel_tests {
         let ch_for_task = ch.clone();
         let id_for_task = id.clone();
         let task = tokio::spawn(async move {
-            execute_command_stream_inner(&reg_for_task, &id_for_task, ".", "sleep 30", &ch_for_task, None)
+            execute_command_stream_inner(&reg_for_task, &id_for_task, ".", "sleep 30", &ch_for_task, None, None)
                 .await
                 .unwrap_or(-1)
         });
@@ -6791,18 +6838,20 @@ fn parse_skill_markdown(text: &str) -> Option<(String, String, String)> {
 
 /// List skills from the app skills directory (~/.pure/skills) plus the
 /// workspace's project-local .agents/skills directory (name/description/body),
-/// used by the GUI to inject them into the system prompt. Mirrors the CLI's
-/// loadAppSkills directory order (user skills first, project skills second).
-/// Never fails: a missing or unreadable directory just yields an empty list.
+/// used by the GUI to inject them into the system prompt. Each entry also
+/// carries `source` ("user" | "project") and `path` (skill directory) so the
+/// Settings → Skills inventory can tell the two directories apart. Mirrors the
+/// CLI's loadAppSkills directory order (user skills first, project skills
+/// second). Never fails: a missing or unreadable directory yields nothing.
 #[tauri::command]
 fn list_app_skills(workspace: String) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
-    let mut dirs = vec![app_skills_dir()];
+    let mut dirs: Vec<(PathBuf, &str)> = vec![(app_skills_dir(), "user")];
     let project = workspace.trim();
     if !project.is_empty() {
-        dirs.push(PathBuf::from(project).join(".agents").join("skills"));
+        dirs.push((PathBuf::from(project).join(".agents").join("skills"), "project"));
     }
-    for dir in dirs {
+    for (dir, source) in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let Ok(ft) = entry.file_type() else { continue };
@@ -6816,11 +6865,29 @@ fn list_app_skills(workspace: String) -> Vec<serde_json::Value> {
                     "name": name,
                     "description": description,
                     "body": body,
+                    "source": source,
+                    "path": entry.path().to_string_lossy(),
                 }));
             }
         }
     }
     out
+}
+
+/// Directories the app reads skills from, for the Settings → Skills "open
+/// folder" affordance. `project` is null when no workspace is set, so the
+/// frontend never has to expand `~` or join workspace paths itself.
+#[tauri::command]
+fn app_skills_dirs(workspace: String) -> serde_json::Value {
+    let project = workspace.trim();
+    serde_json::json!({
+        "user": app_skills_dir().to_string_lossy(),
+        "project": if project.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(project).join(".agents").join("skills").to_string_lossy().into_owned())
+        },
+    })
 }
 
 /// Persist a downloaded skill into the application-owned skills directory.
@@ -7122,6 +7189,7 @@ mod app_skills_tests {
         assert_eq!(list[0]["name"], "ocr");
         assert_eq!(list[0]["description"], "OCR tool");
         assert!(list[0]["body"].as_str().unwrap().contains("tesseract"));
+        assert_eq!(list[0]["source"], "user");
     }
 
     #[test]
@@ -7150,6 +7218,35 @@ mod app_skills_tests {
         assert_eq!(list[0]["name"], "find-skills");
         assert_eq!(list[0]["description"], "Skill discovery");
         assert!(list[0]["body"].as_str().unwrap().contains("npx skills"));
+        assert_eq!(list[0]["source"], "project");
+    }
+
+    #[test]
+    fn app_skills_dirs_reports_user_and_optional_project() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("pure-skills-dirs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prev = std::env::var("PURE_SKILLS_DIR").ok();
+        std::env::set_var("PURE_SKILLS_DIR", &base);
+
+        // No workspace: only the user directory, project stays null.
+        let dirs = app_skills_dirs(String::new());
+        assert!(dirs["project"].is_null());
+        assert!(dirs["user"].as_str().unwrap().ends_with("skills"));
+
+        // With a workspace the project skill directory is joined on.
+        let ws = base.join("some-workspace");
+        let dirs = app_skills_dirs(ws.to_string_lossy().into_owned());
+
+        match prev {
+            Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
+            None => std::env::remove_var("PURE_SKILLS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(
+            dirs["project"].as_str().unwrap(),
+            ws.join(".agents").join("skills").to_string_lossy().as_ref()
+        );
     }
 
     #[test]
@@ -10051,13 +10148,24 @@ async fn mcp_http_request(
     method: String,
     body: Option<String>,
     proxy_url: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+    timeout_secs: Option<u64>,
+    return_headers: Option<bool>,
 ) -> Result<String, String> {
-    let client = build_http_client(std::time::Duration::from_secs(30), proxy_url.as_deref())?;
+    let client = build_http_client(
+        std::time::Duration::from_secs(timeout_secs.unwrap_or(30).max(1)),
+        proxy_url.as_deref(),
+    )?;
     let mut request = match method.to_ascii_uppercase().as_str() {
         "GET" => client.get(&url),
         "POST" => client.post(&url),
         other => return Err(format!("unsupported MCP HTTP method: {}", other)),
     };
+    if let Some(extra) = &headers {
+        for (name, value) in extra {
+            request = request.header(name, value);
+        }
+    }
     if let Some(body) = body {
         request = request
             .header("Content-Type", "application/json")
@@ -10065,11 +10173,29 @@ async fn mcp_http_request(
     }
     let response = request.send().await.map_err(|e| format!("request: {}", e))?;
     let status = response.status();
-    let text = response.text().await.map_err(|e| format!("read: {}", e))?;
     if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
         return Err(format!("MCP HTTP {}: {}", status.as_u16(), text));
     }
-    Ok(text)
+    let session_id = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let text = response.text().await.map_err(|e| format!("read: {}", e))?;
+    if return_headers.unwrap_or(false) {
+        let mut envelope = serde_json::Map::new();
+        envelope.insert("__status".into(), serde_json::json!(status.as_u16()));
+        let mut header_map = serde_json::Map::new();
+        if let Some(sid) = &session_id {
+            header_map.insert("mcp-session-id".into(), serde_json::json!(sid));
+        }
+        envelope.insert("__headers".into(), serde_json::Value::Object(header_map));
+        envelope.insert("body".into(), serde_json::json!(text));
+        Ok(serde_json::Value::Object(envelope).to_string())
+    } else {
+        Ok(text)
+    }
 }
 
 #[tauri::command]
@@ -14447,6 +14573,7 @@ pub fn run() {
             check_system_permission,
             request_system_permission,
             list_app_skills,
+            app_skills_dirs,
             write_app_skill,
             fetch_skill_markdown,
             fetch_url_text,

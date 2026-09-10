@@ -217,14 +217,12 @@ body {
   background: var(--accent-soft);
 }
 
+/* Folder icons read as folders: always amber (works on light + dark),
+   independent of the accent/text palette. */
 .wp-folder-icon {
   flex-shrink: 0;
-  color: var(--text-tertiary);
+  color: #eab308;
   transition: color var(--transition);
-}
-
-#workspace-picker-btn.has-workspace .wp-folder-icon {
-  color: var(--accent);
 }
 
 #workspace-picker-label {
@@ -260,7 +258,7 @@ body {
 }
 
 .sidebar-workspace-path .wp-folder-icon {
-  color: var(--accent);
+  flex-shrink: 0;
 }
 
 .sidebar-workspace-path-text {
@@ -890,20 +888,12 @@ body {
 }
 
 /* The inner SVG carries its own .wp-folder-icon color rule, which would beat
-   the button's inherited color — override it explicitly so the icon tints
-   accent with the border/background (same pattern as the sidebar picker). */
-.input-ws-btn.has-workspace .wp-folder-icon {
-  color: var(--accent);
-}
+   the button's inherited color — the folder stays amber in every state. */
 
 .input-ws-btn.has-workspace:hover {
   color: var(--accent-hover);
   border-color: var(--accent);
   background: var(--accent-soft);
-}
-
-.input-ws-btn.has-workspace:hover .wp-folder-icon {
-  color: var(--accent-hover);
 }
 
 /* ── Composer attach button (paperclip) ──
@@ -3445,12 +3435,7 @@ body {
 
 .wp-popover-current-row .wp-folder-icon {
   flex-shrink: 0;
-  color: var(--text-tertiary);
   transition: color var(--transition);
-}
-
-.wp-popover-current-row:hover .wp-folder-icon {
-  color: var(--accent);
 }
 
 .wp-popover-current {
@@ -3542,6 +3527,10 @@ body {
 .wp-recent-item svg {
   flex-shrink: 0;
   color: var(--text-tertiary);
+}
+
+.wp-recent-item svg.wp-folder-icon {
+  color: #eab308;
 }
 
 .wp-recent-item-path {
@@ -3894,19 +3883,8 @@ body {
   color: var(--accent);
 }
 
-/* The inner svg carries its own .wp-folder-icon color rule, which would beat
-   the button's inherited color — override it so the icon tints accent with
-   the text (same pattern as .input-ws-btn.has-workspace). */
-.status-bar-workspace.has-workspace .wp-folder-icon {
-  color: var(--accent);
-}
-
 .status-bar-workspace.has-workspace:hover {
   background: var(--accent-soft);
-  color: var(--accent-hover);
-}
-
-.status-bar-workspace.has-workspace:hover .wp-folder-icon {
   color: var(--accent-hover);
 }
 
@@ -4687,6 +4665,144 @@ body {
   display: none;
 }
 
+/* ── Tools Inventory (Settings → Tools → 当前可用工具) ── */
+
+.tool-inventory-hint {
+  margin: 0 0 10px;
+}
+
+.tool-inv-group {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.tool-inv-group:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+.tool-inv-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+/* Same look as .hub-section-label: tiny bold caps group header. */
+.tool-inv-group-name {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+.tool-inv-group-count {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+.tool-inv-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+  min-width: 0;
+}
+.tool-inv-row-off {
+  opacity: 0.55;
+}
+.tool-inv-name {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+.tool-inv-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+}
+.tool-inv-state {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 99px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-inv-state-on {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+.tool-inv-state-off {
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  border: 1px solid var(--border);
+}
+
+/* ── Installed App Skills (Settings → Skills) ── */
+
+.skills-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 11px;
+  min-width: 0;
+}
+.skills-dir-label {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+}
+.skills-dir-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+.skills-dir-open {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.skills-dir-open:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  color: var(--accent);
+}
+
+/* 用户级 / 项目级 badge — same visual family as .hub-badge. */
+.skill-source-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.skill-source-project {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+.app-skill-card .skill-card-header {
+  justify-content: flex-start;
+  gap: 8px;
+}
+
 /* ── MCP Server List ── */
 #mcp-server-list {
   min-height: 60px;
@@ -4783,6 +4899,98 @@ body {
 .mcp-server-delete:hover {
   color: var(--danger);
   background: var(--danger-soft);
+}
+
+/* ── MCP per-server tool probe (查看工具) ── */
+
+.mcp-server-tools {
+  margin-top: 6px;
+  min-width: 0;
+}
+
+.mcp-probe-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.mcp-probe-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  color: var(--accent);
+}
+.mcp-probe-again {
+  padding: 2px 7px;
+  margin-left: 6px;
+  font-size: 11px;
+}
+
+.mcp-probe-status {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.mcp-probe-status-error {
+  color: var(--danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+.mcp-probe-summary {
+  display: flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.mcp-tool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.mcp-tool-chip {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-tool-chip i {
+  font-style: normal;
+  color: var(--text-tertiary);
+}
+.mcp-tool-chip-excluded {
+  color: var(--text-tertiary);
+  text-decoration: line-through;
+}
+
+.mcp-probe-hint {
+  margin: 6px 0 0;
+}
+
+/* ── Reasoning effort (Settings → LLM → 思考深度) ── */
+
+.llm-reasoning-controls {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+  align-items: center;
+}
+.llm-reasoning-controls .setting-select {
+  width: auto;
+  min-width: 0;
 }
 
 /* ── MCP Add Form ── */
@@ -9623,10 +9831,6 @@ button svg,
   background: var(--accent-soft);
 }
 
-#composer-tool-row .input-ws-btn.has-workspace .wp-folder-icon {
-  color: var(--accent);
-}
-
 #composer-tool-row .attach-btn.has-attachments {
   color: var(--accent);
   background: var(--accent-soft);
@@ -9854,10 +10058,6 @@ button svg,
   color: var(--accent);
   background: var(--accent-soft);
   opacity: 1;
-}
-
-#landing-tool-row .input-ws-btn.has-workspace .wp-folder-icon {
-  color: var(--accent);
 }
 
 #landing-tool-row .attach-btn.has-attachments {

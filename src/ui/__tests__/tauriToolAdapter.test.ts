@@ -151,6 +151,28 @@ function toolCall(name: string, args: Record<string, unknown>): ToolCall {
   return { id: `test_${name}`, index: 0, function: { name, arguments: JSON.stringify(args) } };
 }
 
+describe('create_document save path', () => {
+  it('saves via save_file_binary with the camelCase dataBase64 key', async () => {
+    // Regression: the snake_case `data_base64` spelling is rejected by the
+    // Tauri v2 IPC layer ("required key dataBase64") — binary documents never
+    // reached disk even though generation succeeded.
+    let seen: Record<string, unknown> = {};
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      seen = args ?? {};
+      return '';
+    };
+    const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(
+      toolCall('create_document', { format: 'docx', path: '报告.docx', spec: { sections: [{ type: 'paragraph', text: 'hello' }] } }),
+    );
+    expect(result.success).toBe(true);
+    expect(seen.path).toBe('报告.docx');
+    expect(seen.dataBase64).toBeTypeOf('string');
+    expect(String(seen.dataBase64).length).toBeGreaterThan(0);
+    // The binary payload must decode — i.e. the base64 round-trips.
+    expect(atob(String(seen.dataBase64)).startsWith('PK')).toBe(true);
+  });
+});
+
 describe('dynamic capability tools', () => {
   it('aggregates official MCP candidates and community search results', async () => {
     const invoke = async (command: string) => {

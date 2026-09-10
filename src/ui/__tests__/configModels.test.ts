@@ -1,5 +1,34 @@
 import { describe, expect, it } from 'bun:test';
 import { defaults, hasConfiguredKey, modelListForProvider, normalizeProviderModels, providerHasKey, SCRAPLING_MCP_PRESET, withDefaultModel } from '../config';
+import { resolveReasoningEffort } from '../../shared/providers';
+
+describe('reasoning effort config', () => {
+  it('defaults to medium with an empty override map', () => {
+    expect(defaults().reasoningEffort).toBe('medium');
+    expect(defaults().reasoningModelOverrides).toEqual({});
+  });
+
+  it('backfills medium for configs persisted before the field existed', () => {
+    // The loadConfig merge is { ...defaults(), ...parsed }: an old config
+    // JSON without the field resolves like this.
+    const old = { provider: 'openai', model: 'gpt-5.2' } as Record<string, unknown>;
+    const merged = { ...defaults(), ...old };
+    expect(merged.reasoningEffort).toBe('medium');
+    expect(resolveReasoningEffort(merged)).toEqual({ supported: true, effort: 'medium' });
+  });
+
+  it('out-of-range persisted levels snap back to medium', () => {
+    // The snap-back itself is asserted against the real loadConfig() path in
+    // configMigration.test.ts (needs the localStorage stub); here we only
+    // pin the resolve side: any level value the merge leaves must be one of
+    // the three wire values (defaults() has no model set, so pin a supported
+    // one explicitly).
+    for (const level of ['low', 'medium', 'high'] as const) {
+      const cfg = { ...defaults(), provider: 'openai', model: 'gpt-5.2', reasoningEffort: level };
+      expect(resolveReasoningEffort(cfg).effort).toBe(level);
+    }
+  });
+});
 
 describe('provider model lists', () => {
   it('keeps a built-in provider usable with one default model', () => {

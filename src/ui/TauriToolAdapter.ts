@@ -280,9 +280,13 @@ export class TauriToolAdapter implements ToolAdapter {
   private readonly maxSnapshotBytes = 8 * 1024 * 1024;
   private readonly imageGen?: ImageGenContext;
   private readonly capabilityHooks?: DynamicCapabilityHooks;
+  /** Pass `sandbox: true` to shell-command invocations so the Rust backend
+   * wraps them in the macOS Seatbelt profile (workspace-confined writes,
+   * outbound-only network) when available. Default on; user toggleable. */
+  private readonly sandbox: boolean;
   private readonly mcpCandidates = new Map<string, McpCandidate>();
 
-  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks) {
+  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks, sandbox = true) {
     this.workspace = workspace;
     this.tavilyApiKey = tavilyApiKey;
     this.serperApiKey = serperApiKey;
@@ -293,6 +297,7 @@ export class TauriToolAdapter implements ToolAdapter {
     this.sessionId = sessionId;
     this.imageGen = imageGen;
     this.capabilityHooks = capabilityHooks;
+    this.sandbox = sandbox;
   }
 
   private call(command: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -513,7 +518,7 @@ export class TauriToolAdapter implements ToolAdapter {
           // holds the tool call's pipes open.
           if (args.background === true) {
             const plan = buildBackgroundLaunchPlan(String(args.command ?? ''));
-            const launch = await this.call('execute_command', { workspace: ws, command: plan.detachCommand, proxyUrl: this.proxyUrl }) as { exitCode: number; stdout: string; stderr: string };
+            const launch = await this.call('execute_command', { workspace: ws, command: plan.detachCommand, proxyUrl: this.proxyUrl, sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
             const pid = parseBackgroundPid(launch.stdout ?? '');
             return {
               id: toolCall.id,
@@ -563,6 +568,7 @@ export class TauriToolAdapter implements ToolAdapter {
                 workspace: ws,
                 command: String(args.command ?? ''),
                 proxyUrl: this.proxyUrl,
+                sandbox: this.sandbox,
                 onOutput: channel,
               }) as number;
               if (cancelled) {
@@ -583,7 +589,7 @@ export class TauriToolAdapter implements ToolAdapter {
               signal?.removeEventListener('abort', onAbort);
             }
           }
-          const exec = await this.call('execute_command', { workspace: ws, command: String(args.command ?? ''), proxyUrl: this.proxyUrl }) as { exitCode: number; stdout: string; stderr: string };
+          const exec = await this.call('execute_command', { workspace: ws, command: String(args.command ?? ''), proxyUrl: this.proxyUrl, sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
           const execLines: Array<{ kind: 'stdout' | 'stderr'; line: string }> = [
             ...(exec.stdout ? [{ kind: 'stdout' as const, line: exec.stdout }] : []),
             ...(exec.stderr ? [{ kind: 'stderr' as const, line: exec.stderr }] : []),
@@ -1031,7 +1037,10 @@ export class TauriToolAdapter implements ToolAdapter {
           }
           const bytes = await generateDocument(format, spec);
           const b64 = toBase64(bytes);
-          await this.call('save_file_binary', { path: docPath, data_base64: b64 });
+          // Tauri v2 matches JS keys as the camelCase form of the Rust param
+          // (data_base64) — the snake_case spelling is rejected as a missing
+          // required key. Same call shape as markdown.ts / toolRow.ts.
+          await this.call('save_file_binary', { path: docPath, dataBase64: b64 });
           return {
             id: toolCall.id,
             toolName: name,

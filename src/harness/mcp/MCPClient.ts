@@ -92,14 +92,16 @@ export class MCPClient implements ToolAdapter {
         ? (this.config.sessionId && isTauriRuntime()
             ? new TauriStdioTransport(this.config.sessionId, config.name, config.command ?? [], config.env, this.config.proxyUrl ?? '', config.requestTimeoutMs)
             : new StdioTransport(config.command ?? [], config.env, config.requestTimeoutMs))
-        : new HttpTransport(config.url ?? 'http://localhost:3000', this.config.proxyUrl ?? ''));
+        : new HttpTransport(config.url ?? 'http://localhost:3000', this.config.proxyUrl ?? '', config.requestTimeoutMs));
 
     const state: ServerState = { config, transport, tools: [], connected: false };
     this.servers.set(config.name, state);
 
-    // Initialize handshake
+    // Initialize handshake — offer the newest protocol version we speak
+    // (2026-07-28); the server replies with the newest it supports and the
+    // transport echoes that version on every later request.
     const initResult = await transport.send('initialize', {
-      protocolVersion: '2024-11-05',
+      protocolVersion: '2026-07-28',
       capabilities: { tools: {} },
       clientInfo: { name: 'pure', version: '1.1.0' },
     });
