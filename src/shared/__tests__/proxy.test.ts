@@ -63,7 +63,6 @@ describe('proxy configuration', () => {
       enabled: true,
       url: '  ',
       bypassProviders: ['ollama'],
-      bypassModels: ['qwen'],
     });
     expect(effectiveProxyUrl(config)).toBe('');
     expect(config.bypassProviders).toEqual(['ollama']);
@@ -151,7 +150,6 @@ describe('proxy configuration', () => {
       enabled: true,
       url: 'socks5://127.0.0.1:1080',
       bypassProviders: ['ollama'],
-      bypassModels: ['deepseek-r1:8b'],
     });
     expect(shouldBypassProxy('ollama', 'qwen2.5-coder:7b', config)).toBe(true);
     expect(shouldBypassProxy('ollama', 'llama3.1:8b', config)).toBe(true);
