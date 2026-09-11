@@ -437,6 +437,52 @@ unit: 万元
     expect(spec.data).toHaveLength(2);
   });
 
+  it('accepts the series multi-series JSON form (bar/line)', () => {
+    const spec = parseChartSource(JSON.stringify({
+      type: 'bar',
+      labels: ['周一', '周二'],
+      series: [
+        { name: '北京', data: [25, 26] },
+        { name: '上海', data: [27, 28] },
+      ],
+    }));
+    expect(spec.type).toBe('bar');
+    expect(spec.series).toHaveLength(2);
+    expect(spec.series![0].data.map((d) => d.value)).toEqual([25, 26]);
+    expect(spec.series![1].data.map((d) => d.label)).toEqual(['周一', '周二']);
+  });
+
+  it('accepts an echarts-native option (xAxis.data + typed series, no top-level type)', () => {
+    const spec = parseChartSource(JSON.stringify({
+      xAxis: { type: 'category', data: ['一月', '二月', '三月'] },
+      yAxis: {},
+      series: [
+        { type: 'bar', name: '销售额', data: [120, 180, 90] },
+      ],
+    }));
+    expect(spec.type).toBe('bar');
+    expect(spec.series).toHaveLength(1);
+    expect(spec.series![0].name).toBe('销售额');
+    expect(spec.series![0].data.map((d) => d.label)).toEqual(['一月', '二月', '三月']);
+  });
+
+  it('flattens a pie series-form payload into flat data', () => {
+    const spec = parseChartSource(JSON.stringify({
+      type: 'pie',
+      series: [{ data: [['A', 30], ['B', 70]] }],
+    }));
+    expect(spec.type).toBe('pie');
+    expect(spec.series).toBeUndefined();
+    expect(spec.data).toEqual([{ label: 'A', value: 30 }, { label: 'B', value: 70 }]);
+  });
+
+  it('rescues prose-wrapped JSON through the repair path (retry now works)', () => {
+    const spec = parseChartSourceWithMeta('这是你要的图表数据：\n{ "type": "pie", "data": [["A", 30], ["B", 70]] }');
+    expect(spec.spec.type).toBe('pie');
+    expect(spec.spec.data).toHaveLength(2);
+    expect(spec.repaired).toBe(true);
+  });
+
   it('repairs slightly-broken JSON payloads (unquoted keys + single quotes + trailing commas)', () => {
     const spec = parseChartSource(`{ type: 'pie', data: [['A', 30], ['B', 70],], }`);
     expect(spec.type).toBe('pie');
