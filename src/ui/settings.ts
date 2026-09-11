@@ -1441,6 +1441,10 @@ export class SettingsPanel {
         if (!silent) this.toast(t('proxy.detect.none'));
         return;
       }
+      // 静默自动探测只信 OS 级来源（macOS scutil / Windows 注册表）。env 变量和
+      // 本地端口探测出来的地址可能是死代理——静默写进配置就是"自动代理不好用"
+      // 的污染源。手动"检测"按钮不受此限，完整结果仍会展示给用户。
+      if (silent && found.source !== 'macos' && found.source !== 'windows') return;
       const schemeEl = document.getElementById('cfg-proxy-scheme') as HTMLSelectElement | null;
       const hostEl = document.getElementById('cfg-proxy-host') as HTMLInputElement | null;
       const portEl = document.getElementById('cfg-proxy-port') as HTMLInputElement | null;

@@ -7,7 +7,7 @@ import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, custo
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { blockedHosts } from '../shared/netGuard';
-import { hostOf, resolveNetRoute } from '../shared/netRoute';
+import { hostOf, resolveNetRoute, netRouteProxyPair } from '../shared/netRoute';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
@@ -553,6 +553,19 @@ function llmProxyUrlFor(config: PureConfig | null, baseURL: string, providerId: 
   return route === 'proxy' ? base : '';
 }
 
+/** Proxy route PAIR for the LLM turn: the classified route goes first, and —
+ *  when a proxy exists at all — the OPPOSITE route rides along as the
+ *  one-shot fallback (netRouteProxyPair). Rust re-sends once on the fallback
+ *  after the primary exhausts its attempts, so a wrong classification or a
+ *  system proxy that changed/died mid-session self-heals on the same turn
+ *  instead of erroring. */
+function llmProxyPairFor(config: PureConfig | null, baseURL: string, providerId: string, model: string): { proxyUrl: string; fallbackProxyUrl?: string } {
+  const proxyUrl = llmProxyUrlFor(config, baseURL, providerId, model);
+  if (!proxyUrl) return { proxyUrl: '' };
+  const pair = netRouteProxyPair(baseURL, proxyUrl);
+  return { proxyUrl: pair.proxyUrl, fallbackProxyUrl: pair.fallbackProxyUrl ?? undefined };
+}
+
 function buildModelIdentity(config: PureConfig | null): { provider: string; model: string } | undefined {
   const provider = config?.provider?.trim();
   if (!provider) return undefined;
@@ -868,6 +881,7 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
     // is resolved inside `chat_stream` — it never passes through the WebView.
     // Custom providers resolve their own named secret ('llm.apiKey.<id>');
     // keyless ones resolve to nothing and Rust omits the Authorization header.
+    const llmProxy = llmProxyPairFor(config, baseURL, config.provider, model);
     return new RustLLMAdapter({
       provider: config.provider,
       model,
@@ -880,7 +894,8 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
       secretKey: custom ? customSecretKey(custom.id)
         : builtinOverride?.hasApiKey ? customSecretKey(config.provider)
         : undefined,
-      proxyUrl: llmProxyUrlFor(config, baseURL, config.provider, model),
+      proxyUrl: llmProxy.proxyUrl,
+      fallbackProxyUrl: llmProxy.fallbackProxyUrl,
       proxyBypassProviders: config.proxy?.bypassProviders ?? [],
       extraBody,
       maxTokens,
