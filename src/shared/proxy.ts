@@ -45,7 +45,6 @@ export interface ProxyConfig {
    */
   hasPassword: boolean;
   bypassProviders: string[];
-  bypassModels: string[];
   /**
    * How the proxy URL is determined. `manual` uses the address fields;
    * `system` ignores them and lets the backend resolve the OS system proxy
@@ -80,7 +79,6 @@ export function normalizeProxyConfig(config: Partial<ProxyConfig> | null | undef
     password: String(config?.password ?? ''),
     hasPassword: config?.hasPassword === true,
     bypassProviders: normalizeProxyList(config?.bypassProviders),
-    bypassModels: normalizeProxyList(config?.bypassModels),
     mode: config?.mode === 'system' ? 'system' : 'manual',
     probeUrls: normalizeProxyProbes(config?.probeUrls),
   };

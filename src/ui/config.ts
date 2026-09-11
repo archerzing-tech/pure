@@ -274,7 +274,7 @@ export function defaults(): PureConfig {
     providerModels: {},
     providerModelNames: {},
     providerOverrides: {},
-    proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', username: '', password: '', hasPassword: false, bypassProviders: [], bypassModels: [] }),
+    proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', username: '', password: '', hasPassword: false, bypassProviders: [] }),
     streamingRender: true,
     taskMode: 'auto',
     autoContinue: true,
