@@ -1,17 +1,23 @@
 // src/shared/netRoute.ts
 // Smart per-destination network routing: decide per HOST whether requests go
 // direct or through the configured proxy — replacing the manual per-surface
-// toggles (LLM/tools), which could not express "github needs the proxy but
-// amap tiles must go direct" inside the same surface.
+// toggles (LLM/tools), which could not express "github works direct but
+// api.openai.com needs the proxy" inside the same surface.
+//
+// DIRECT-FIRST. Reachability cannot be known from a static list — it varies
+// by network, ISP and time — so the default order is direct first with the
+// configured proxy as the one-shot fallback (the 10s connect timeout bounds a
+// wrong guess). Only hosts where a direct connection is reliably BLOCKED
+// (silent-drop GFW behavior: every direct attempt just waits out the timeout)
+// start proxy-first:
 //
 // Decision order in resolveNetRoute():
 //   1. learned route for this host (persisted; evidence from real outcomes)
-//   2. built-in classification: known-foreign hosts → proxy (when a proxy
-//      exists), known-domestic hosts → direct
-//   3. unknown hosts → direct (with a one-shot proxy fallback at the adapter)
+//   2. hard-blocked list (openai/anthropic/claude/huggingface) → proxy
+//   3. everything else → direct
 // Learning (recordNetOutcome): whichever route LAST SUCCEEDED is remembered;
-// a failed attempt clears the memory so classification decides again. Failed
-// calls are never "learned" — retrying after a failure must stay possible.
+// a failed attempt clears the memory so the order re-probes. Failed calls are
+// never "learned" — retrying after a failure must stay possible.
 // Persistence follows the netGuard pattern (localStorage, best-effort).
 
 import { hostOf } from './netGuard';
@@ -22,34 +28,16 @@ export type NetRoute = 'direct' | 'proxy';
 
 const STORE_KEY = 'pure.netRoute.v1';
 
-const FOREIGN_SUFFIXES = [
+// Hosts where a direct connection is not merely slow but reliably dropped —
+// direct-first would burn the connect timeout EVERY turn. Deliberately short:
+// an uncertain host is better served by direct-first + fallback, because a
+// wrong guess costs one bounded attempt and then the learning pins the route
+// that actually worked.
+const BLOCKED_DIRECT_SUFFIXES = [
   'openai.com',
   'anthropic.com',
   'claude.ai',
-  'openrouter.ai',
-  // NVIDIA's built-in provider (integrate.api.nvidia.com) is foreign-hosted —
-  // leaving it unclassified routed it DIRECT and hung without a proxy.
-  'nvidia.com',
-  'github.com',
-  'githubusercontent.com',
-  'githubassets.com',
   'huggingface.co',
-  'basemaps.cartocdn.com',
-  'server.arcgisonline.com',
-];
-
-const DOMESTIC_SUFFIXES = [
-  'deepseek.com',
-  'bigmodel.cn',
-  'z.ai',
-  'dashscope.aliyuncs.com',
-  'aliyuncs.com',
-  'moonshot.cn',
-  'minimax.io',
-  'autonavi.com',
-  'amap.com',
-  'map.gtimg.com',
-  'tianditu.gov.cn',
 ];
 
 interface RouteEntry {
@@ -100,22 +88,20 @@ export function hostSuffixMatch(host: string, suffixes: string[]): string | null
   return null;
 }
 
-/** Built-in destination class for a host: 'foreign' (needs the proxy),
- *  'domestic' (must NOT use it), or 'unknown'. */
-export function classifyHost(host: string): 'foreign' | 'domestic' | 'unknown' {
-  if (hostSuffixMatch(host, DOMESTIC_SUFFIXES)) return 'domestic';
-  if (hostSuffixMatch(host, FOREIGN_SUFFIXES)) return 'foreign';
-  return 'unknown';
+/** True for the short hard-blocked list where direct-first is known-hopeless
+ *  (silent-drop blocking) — these start proxy-first when a proxy exists. */
+export function blockedDirectHost(host: string): boolean {
+  return hostSuffixMatch(host, BLOCKED_DIRECT_SUFFIXES) !== null;
 }
 
 /** Route decision for a host. Without a configured proxy everything is
- *  direct; classification only routes THROUGH the proxy when one exists. */
+ *  direct; only the hard-blocked list starts THROUGH the proxy. */
 export function resolveNetRoute(host: string, hasProxy: boolean): NetRoute {
   ensureLoaded();
   const entry = learned.get(host);
   if (entry) return hasProxy ? entry.route : 'direct';
   if (!hasProxy) return 'direct';
-  return classifyHost(host) === 'foreign' ? 'proxy' : 'direct';
+  return blockedDirectHost(host) ? 'proxy' : 'direct';
 }
 
 /** Learn from a real outcome: success pins the route that worked; failure

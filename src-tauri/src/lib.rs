@@ -10962,6 +10962,16 @@ fn llm_fallback_proxy_url(args: &ChatStreamArgs) -> Option<String> {
     Some(spec)
 }
 
+/// Which route a proxy spec represents: None/"" = direct, a URL = proxy.
+/// Reporting only — mirrors effective_proxy_url's empty-is-direct handling so
+/// the WebView's learning records the route that ACTUALLY served the turn.
+fn route_of(proxy_spec: Option<&str>) -> &'static str {
+    match proxy_spec {
+        Some(spec) if !spec.trim().is_empty() => "proxy",
+        _ => "direct",
+    }
+}
+
 // Tool-call argument delta emit throttle (ms): forwarding the FULL accumulated
 // buffer on every token would be O(n²) over the channel for a giant argument
 // (write_file `content`, a whole HTML file). ~10 emits/s keeps the GUI's tool
@@ -11134,6 +11144,15 @@ mod proxy_tests {
         args.fallback_proxy_url = Some("".to_string());
         args.proxy_bypass_providers = vec!["qwen".to_string()];
         assert_eq!(llm_fallback_proxy_url(&args), None);
+    }
+
+    #[test]
+    fn route_of_reports_direct_for_empty_or_absent_spec() {
+        assert_eq!(route_of(None), "direct");
+        assert_eq!(route_of(Some("")), "direct");
+        assert_eq!(route_of(Some("   ")), "direct");
+        assert_eq!(route_of(Some("system://")), "proxy");
+        assert_eq!(route_of(Some("http://127.0.0.1:7890")), "proxy");
     }
 
     #[test]
@@ -11626,9 +11645,10 @@ async fn chat_stream(
         std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
         llm_proxy_url(&args),
     )?;
-    // Capture the fallback route spec BEFORE body construction moves pieces
-    // of `args` (tools) — the borrow checker forbids reading it afterwards.
+    // Capture the route information BEFORE body construction moves pieces of
+    // `args` (tools) — the borrow checker forbids reading it afterwards.
     let fallback_spec = llm_fallback_proxy_url(&args);
+    let primary_route = route_of(llm_proxy_url(&args));
     let mut body = if anthropic {
         let mut system_parts = Vec::new();
         let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -11726,27 +11746,32 @@ async fn chat_stream(
     // When the primary route exhausts its attempts and a fallback route was
     // supplied, ONE attempt runs on the fallback client — this is what makes a
     // frequently-changing system proxy (or a wrong route classification)
-    // self-heal within the same turn instead of surfacing as an error.
-    let mut resp = {
-        let primary = send_chat_request(&client, &url, &body, anthropic, &api_key).await;
-        match primary {
-            Ok(resp) => resp,
-            Err(primary_err) => {
-                let fallback_client = fallback_spec
-                    .as_ref()
-                    .map(|spec| build_http_client(std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS), Some(spec.as_str())))
-                    .transpose();
-                match fallback_client {
-                    Ok(Some(fallback)) => {
-                        send_chat_request(&fallback, &url, &body, anthropic, &api_key)
-                            .await
-                            .map_err(|fallback_err| format!("{primary_err}\n兜底路由也失败：{fallback_err}"))?
-                    }
-                    _ => return Err(primary_err),
+    // self-heal within the same turn instead of surfacing as an error. The
+    // route that ACTUALLY served is reported back so the WebView's learning
+    // pins what worked.
+    let mut resp;
+    let served_route: &'static str;
+    match send_chat_request(&client, &url, &body, anthropic, &api_key).await {
+        Ok(r) => {
+            resp = r;
+            served_route = primary_route;
+        }
+        Err(primary_err) => {
+            let fallback_client = fallback_spec
+                .as_ref()
+                .map(|spec| build_http_client(std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS), Some(spec.as_str())))
+                .transpose();
+            match fallback_client {
+                Ok(Some(fallback)) => {
+                    resp = send_chat_request(&fallback, &url, &body, anthropic, &api_key)
+                        .await
+                        .map_err(|fallback_err| format!("{primary_err}\n兜底路由也失败：{fallback_err}"))?;
+                    served_route = route_of(Some(fallback_spec.as_deref().unwrap_or("")));
                 }
+                _ => return Err(primary_err),
             }
         }
-    };
+    }
 
     // Register the cancel channel for this call (Stop → cancel_chat_stream →
     // this receiver fires → the select! below aborts the read loop). The
@@ -12030,7 +12055,7 @@ async fn chat_stream(
         }
     }
 
-    Ok(serde_json::json!({ "text": text, "toolCalls": tool_calls, "usage": usage }))
+    Ok(serde_json::json!({ "text": text, "toolCalls": tool_calls, "usage": usage, "netRoute": served_route }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -41,6 +41,9 @@ export interface RustLLMConfig {
   /** One-shot opposite-route fallback for the Rust request layer: '' = direct,
    *  a URL = that proxy, undefined = no fallback (netRouteProxyPair shape). */
   fallbackProxyUrl?: string;
+  /** Real-outcome feedback for the netRoute learning: which route served the
+   *  turn (or which failed). Wired by chat.ts to recordNetOutcome. */
+  onNetOutcome?: (outcome: { route: 'direct' | 'proxy'; ok: boolean }) => void;
   proxyBypassProviders?: string[];
 }
 
@@ -153,9 +156,22 @@ export class RustLLMAdapter implements LLMAdapter {
       })
       .then((res) => {
         finalResult = res;
+        // Report the route that ACTUALLY served this turn (Rust echoes it in
+        // the result; an older backend without the field falls back to what
+        // was chosen here) so the WebView's netRoute learning pins what worked.
+        const route = (res as { netRoute?: 'direct' | 'proxy' } | null)?.netRoute
+          ?? (this.config.proxyUrl ? 'proxy' : 'direct');
+        this.config.onNetOutcome?.({ route, ok: true });
       })
       .catch((err: unknown) => {
         invokeError = err instanceof Error ? err : new Error(String(err));
+        // Cancelled turns say nothing about route health — never poison the
+        // learning with them.
+        if (signal?.aborted || invokeError.message === 'cancelled') return;
+        this.config.onNetOutcome?.({
+          route: this.config.proxyUrl ? 'proxy' : 'direct',
+          ok: false,
+        });
       })
       .finally(() => {
         invokeDone = true;
