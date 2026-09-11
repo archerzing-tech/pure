@@ -7,7 +7,7 @@ import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, custo
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { blockedHosts } from '../shared/netGuard';
-import { hostOf, resolveNetRoute, netRouteProxyPair } from '../shared/netRoute';
+import { hostOf, resolveNetRoute, netRouteProxyPair, recordNetOutcome } from '../shared/netRoute';
 import { memoryStore } from './memoryStore';
 import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
@@ -896,6 +896,13 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
         : undefined,
       proxyUrl: llmProxy.proxyUrl,
       fallbackProxyUrl: llmProxy.fallbackProxyUrl,
+      // 实测学习：这条路由真的通了（或真的失败）就按主机记住，下次直接走
+      // 可行的路。没配代理时不学——所有轮次都是直连，记了只是噪声。
+      onNetOutcome: (outcome) => {
+        if (!effectiveProxyUrl(config.proxy, 'llm')) return;
+        const host = hostOf(baseURL);
+        if (host) recordNetOutcome(host, outcome.route, outcome.ok);
+      },
       proxyBypassProviders: config.proxy?.bypassProviders ?? [],
       extraBody,
       maxTokens,
