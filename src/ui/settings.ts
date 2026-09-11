@@ -1409,8 +1409,9 @@ export class SettingsPanel {
    * read the OS proxy, so be honest instead of pretending a detection ran.
    */
   /** 打开网络代理页时自动探测一次系统代理：静默（不弹提示、不闪按钮），
-   *  检测到的地址直接填进表单并随 autoSave 持久化。与手动"检测"按钮共用
-   *  5 秒节流窗口 — 连续开关菜单不会反复触发 OS 读取。 */
+   *  检测到的地址仅在手动地址为空时填入并随 autoSave 持久化（首次便利），
+   *  用户手填的地址永不覆盖。与手动"检测"按钮共用 5 秒节流窗口 — 连续
+   *  开关菜单不会反复触发 OS 读取。 */
   private async autoDetectProxyForPage(): Promise<void> {
     if (!isTauriRuntime()) return;
     const now = Date.now();
@@ -1443,6 +1444,10 @@ export class SettingsPanel {
       const schemeEl = document.getElementById('cfg-proxy-scheme') as HTMLSelectElement | null;
       const hostEl = document.getElementById('cfg-proxy-host') as HTMLInputElement | null;
       const portEl = document.getElementById('cfg-proxy-port') as HTMLInputElement | null;
+      // 静默自动探测只在地址为空时填入（首次便利）：手填的地址是用户的
+      // 明确配置，翻一下设置页就被静默覆盖说不过去。手动"检测"按钮是显式
+      // 动作，不受此限。
+      if (silent && !!hostEl?.value.trim()) return;
       if (schemeEl) schemeEl.value = found.scheme;
       if (hostEl) hostEl.value = found.host;
       if (portEl) portEl.value = found.port;
