@@ -27,6 +27,9 @@ const FOREIGN_SUFFIXES = [
   'anthropic.com',
   'claude.ai',
   'openrouter.ai',
+  // NVIDIA's built-in provider (integrate.api.nvidia.com) is foreign-hosted —
+  // leaving it unclassified routed it DIRECT and hung without a proxy.
+  'nvidia.com',
   'github.com',
   'githubusercontent.com',
   'githubassets.com',

@@ -38,6 +38,9 @@ export interface RustLLMConfig {
    */
   secretKey?: string;
   proxyUrl?: string;
+  /** One-shot opposite-route fallback for the Rust request layer: '' = direct,
+   *  a URL = that proxy, undefined = no fallback (netRouteProxyPair shape). */
+  fallbackProxyUrl?: string;
   proxyBypassProviders?: string[];
 }
 
@@ -139,6 +142,11 @@ export class RustLLMAdapter implements LLMAdapter {
           temperature: params.temperature,
           requestId,
           proxyUrl: this.config.proxyUrl ?? '',
+          // Must be ABSENT (not empty) when there is no fallback: Rust reads
+          // Some("") as the DIRECT route.
+          ...(this.config.fallbackProxyUrl !== undefined
+            ? { fallbackProxyUrl: this.config.fallbackProxyUrl }
+            : {}),
           proxyBypassProviders: this.config.proxyBypassProviders ?? [],
         },
         onChunk: channel,

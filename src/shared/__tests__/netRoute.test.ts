@@ -21,6 +21,9 @@ describe('classifyHost', () => {
     expect(netRoute.classifyHost('api.openai.com')).toBe('foreign');
     expect(netRoute.classifyHost('raw.githubusercontent.com')).toBe('foreign');
     expect(netRoute.classifyHost('claude.ai')).toBe('foreign');
+    // NVIDIA is a built-in provider — an unclassified host would route direct
+    // and hang for users who need the proxy.
+    expect(netRoute.classifyHost('integrate.api.nvidia.com')).toBe('foreign');
   });
 
   it('classifies known-domestic hosts', () => {
