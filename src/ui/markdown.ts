@@ -2251,24 +2251,36 @@ function ungroupStreamingSvgGalleries(container: HTMLElement): void {
 }
 
 /**
- * Streaming gate for ```map slots. The completed render hydrates maps only at
- * the end of the message, so mid-stream a closed ```map fence used to sit in
- * its loading state while every later paragraph streamed in underneath — the
- * map never got the chance to paint first. Two fixes in one gate:
- *  1. Kicks the slot's hydration NOW (normally only the completed render calls
- *     renderMapNodes), so tiles start loading while the message still streams.
- *  2. Returns true while the slot has not painted yet; the caller stops
- *     consuming tokens there, so later blocks stay invisible until the map is
- *     done and appear on the next throttled tick.
- * The hold is bounded: the leaflet import runs under withTimeout and the tile
- * layer flips to preview/error via its own 12s timer, so the gate always opens;
- * the completed render re-renders the full bubble regardless.
+ * True when a ```map fence's raw has its closing line — i.e. the model has
+ * finished streaming this block and the payload will not grow any further.
+ */
+function mapFenceClosed(raw: string): boolean {
+  return /```\s*$/.test(raw.trimEnd());
+}
+
+/**
+ * Streaming gate for ```map slots. Hydration happens EXACTLY ONCE, when the
+ * streamed fence has actually closed: an open fence's raw grows on every
+ * throttled tick, and hydrating (or re-mounting) mid-growth tore the slot
+ * down per tick — the map flicker that would not die.
+ *  - Open fence → return false: no hydration, no hold; the placeholder sits
+ *    stable while the JSON streams in.
+ *  - Closed and not yet hydrated → kick renderMapNodes and return true: the
+ *    caller holds later blocks until the map has been given its chance.
+ *  - Anything else (already hydrated, painted, or in its invisible retry
+ *    phase) → false; later blocks always flow.
+ * Map render errors are invisible by design (hidden canvas + silent retry),
+ * so the gate can never wedge the stream on them.
  */
 function streamingMapGate(el: HTMLElement): boolean {
   if (!el.classList.contains('map-slot')) return false;
   if (el.getAttribute('data-map-state') !== 'loading') return false;
-  if (!el.hasAttribute('data-processed')) void renderMapNodes(el.parentElement ?? el);
-  return true;
+  if (!mapFenceClosed(el.getAttribute('data-md-raw') ?? '')) return false;
+  if (!el.hasAttribute('data-processed')) {
+    void renderMapNodes(el.parentElement ?? el);
+    return true;
+  }
+  return false;
 }
 
 function diffStreaming(container: HTMLElement, text: string): void {
@@ -2321,6 +2333,28 @@ function diffStreaming(container: HTMLElement, text: string): void {
       childIdx++;
       if (streamingMapGate(oldEl)) break;
       continue;
+    }
+
+    // ── Streaming ```map fences are append-only-stable ──
+    // While the model streams the map JSON the token's raw grows every tick;
+    // a naive replaceChild here tore down the previously mounted slot — live
+    // map, spinner, anything — and mounted a fresh one. That per-tick
+    // teardown was the map flicker that survived every other fix.
+    // Rules: keep a mounted placeholder untouched while the fence is still
+    // open (it renders as a plain loading card); once the fence CLOSES, a
+    // differing raw replaces it exactly once and the gate hydrates + holds.
+    const tokenLang = typeof (tk as { lang?: unknown }).lang === 'string'
+      ? ((tk as { lang?: unknown }).lang as string)
+      : '';
+    if (tk.type === 'code' && tokenLang.trim().split(/\s+/)[0] === 'map') {
+      const closed = mapFenceClosed(tk.raw);
+      if (oldEl && oldEl.classList.contains('map-slot') && (!closed || oldEl.getAttribute('data-md-raw') === tk.raw)) {
+        childIdx++;
+        if (streamingMapGate(oldEl)) break;
+        continue;
+      }
+      // No mounted slot yet + open fence → fall through and mount the plain
+      // placeholder; the gate will not hydrate it until the fence closes.
     }
 
     // Render EVERY token — including the still-growing last one — through the
