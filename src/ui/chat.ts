@@ -543,12 +543,14 @@ function buildEnvironmentContext(config: PureConfig | null): string {
  *  otherwise the destination host is classified (known-foreign → proxy,
  *  known-domestic → direct) and the learned per-host route decides when a
  *  proxy source exists. Returns '' (direct) whenever no proxy is configured. */
-function llmProxyUrlFor(config: PureConfig | null, baseURL: string, providerId: string, model: string): string {
+function llmProxyUrlFor(config: PureConfig | null, baseURL: string, providerId: string): string {
   const proxy = config?.proxy;
   if (!proxy) return '';
   const base = effectiveProxyUrl(proxy, 'llm');
   if (!base) return '';
-  if (proxy.bypassProviders?.includes(providerId) || proxy.bypassModels?.includes(model)) return '';
+  // Bypass is provider-level by design (shouldBypassProxy): a model-level
+  // list existed once but was two deciders disagreeing — removed.
+  if (proxy.bypassProviders?.includes(providerId)) return '';
   const route = resolveNetRoute(hostOf(baseURL) ?? '', true);
   return route === 'proxy' ? base : '';
 }
@@ -559,8 +561,8 @@ function llmProxyUrlFor(config: PureConfig | null, baseURL: string, providerId: 
  *  after the primary exhausts its attempts, so a wrong classification or a
  *  system proxy that changed/died mid-session self-heals on the same turn
  *  instead of erroring. */
-function llmProxyPairFor(config: PureConfig | null, baseURL: string, providerId: string, model: string): { proxyUrl: string; fallbackProxyUrl?: string } {
-  const proxyUrl = llmProxyUrlFor(config, baseURL, providerId, model);
+function llmProxyPairFor(config: PureConfig | null, baseURL: string, providerId: string): { proxyUrl: string; fallbackProxyUrl?: string } {
+  const proxyUrl = llmProxyUrlFor(config, baseURL, providerId);
   if (!proxyUrl) return { proxyUrl: '' };
   const pair = netRouteProxyPair(baseURL, proxyUrl);
   return { proxyUrl: pair.proxyUrl, fallbackProxyUrl: pair.fallbackProxyUrl ?? undefined };
@@ -881,7 +883,7 @@ function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
     // is resolved inside `chat_stream` — it never passes through the WebView.
     // Custom providers resolve their own named secret ('llm.apiKey.<id>');
     // keyless ones resolve to nothing and Rust omits the Authorization header.
-    const llmProxy = llmProxyPairFor(config, baseURL, config.provider, model);
+    const llmProxy = llmProxyPairFor(config, baseURL, config.provider);
     return new RustLLMAdapter({
       provider: config.provider,
       model,
@@ -1023,7 +1025,7 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
       : undefined,
     // Image generation hits the provider's LLM-family API — route it through
     // the same proxy scope (and bypass rules) as chat traffic.
-    proxyUrl: llmProxyUrlFor(config, customBaseURL(customs, config.provider, config.providerOverrides), config.provider, config.model),
+    proxyUrl: llmProxyUrlFor(config, customBaseURL(customs, config.provider, config.providerOverrides), config.provider),
     proxyBypassProviders: config.proxy?.bypassProviders ?? [],
   };
 }
