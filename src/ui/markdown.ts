@@ -1008,13 +1008,96 @@ export interface ChartSpec {
  * is also accepted. Throws on unparseable input.
  */
 /**
+ * Multi-series / echarts-native JSON forms for bar/line/hbar/pie:
+ *   { type?, series: [{ name?, type?, data: [v…] | [[label,v]…] | [{label,value}…] }],
+ *     labels? | categories? | xAxis?.data?, legend?, title?, unit? }
+ * Models emit echarts-shaped options constantly; the flat `data` array stays
+ * the primary shape, this just stops the natural shapes from erroring out.
+ * Returns null when there is no usable series payload (caller throws then).
+ */
+function chartSpecFromSeriesJson(obj: Record<string, unknown>, type: ChartSpec['type'], title: string, unit: string): ChartSpec | null {
+  const seriesRows = Array.isArray(obj.series) ? obj.series : null;
+  if (!seriesRows) return null;
+
+  const labels: string[] = (() => {
+    for (const candidate of [obj.labels, obj.categories, obj.xAxis]) {
+      const arr = Array.isArray(candidate)
+        ? candidate
+        : (candidate && typeof candidate === 'object' && Array.isArray((candidate as Record<string, unknown>).data))
+          ? ((candidate as Record<string, unknown>).data as unknown[])
+          : null;
+      if (!arr) continue;
+      const names = arr.map((v) => {
+        if (typeof v === 'string') return v;
+        if (Array.isArray(v)) return String(v[0] ?? '');
+        if (v && typeof v === 'object') {
+          const cell = v as Record<string, unknown>;
+          return String(cell.name ?? cell.label ?? '');
+        }
+        return String(v ?? '');
+      }).filter(Boolean);
+      if (names.length > 0) return names;
+    }
+    return [];
+  })();
+  const legend = Array.isArray(obj.legend) ? obj.legend.map((v) => String(v)) : [];
+
+  const multi: ChartMultiSeries[] = [];
+  const flat: ChartSeries[] = [];
+  seriesRows.forEach((s, si) => {
+    const row = (s && typeof s === 'object') ? s as Record<string, unknown> : {};
+    const dataArr = Array.isArray(row.data) ? row.data : null;
+    if (!dataArr) return;
+    const name = String(row.name ?? legend[si] ?? (seriesRows.length === 1 ? (title || '数据') : `系列${si + 1}`));
+    const data: ChartSeries[] = [];
+    dataArr.forEach((v, di) => {
+      if (Array.isArray(v)) {
+        const label = String(v[0] ?? labels[di] ?? `#${di + 1}`);
+        const value = chartNumber(v[1]);
+        if (Number.isFinite(value)) data.push({ label, value });
+        return;
+      }
+      if (v && typeof v === 'object') {
+        const cell = v as Record<string, unknown>;
+        const label = String(cell.name ?? cell.label ?? labels[di] ?? `#${di + 1}`);
+        const value = chartNumber(cell.value);
+        if (Number.isFinite(value)) data.push({ label, value });
+        return;
+      }
+      const value = chartNumber(v);
+      if (Number.isFinite(value)) data.push({ label: labels[di] ?? `#${di + 1}`, value });
+    });
+    if (data.length === 0) return;
+    multi.push({ name, data });
+    // pie renders one ring — flatten every series entry into the flat shape.
+    if (type === 'pie') flat.push(...data);
+  });
+
+  if (multi.length === 0) return null;
+  if (type === 'pie') return { type, title, unit, data: flat };
+  return {
+    type,
+    title,
+    unit,
+    data: multi.map((s) => ({ label: s.data[0]?.label ?? '', value: s.data[0]?.value ?? 0 })),
+    series: multi,
+  };
+}
+
+/**
  * Parse the JSON form of a chart payload into a ChartSpec. Throws 'chart …'
  * errors for schema violations (missing data array, no numeric rows, bad row)
  * so the caller can tell "not JSON" from "wrong chart schema".
  */
 function chartSpecFromJson(raw: unknown): ChartSpec {
   const obj = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw as Record<string, unknown> : {};
-  const rawType = String(obj.type ?? 'bar').toLowerCase();
+  // echarts-native payloads carry the chart type on series[0].type instead of
+  // the top level — accept it when `type` is absent.
+  const seriesRows = Array.isArray(obj.series) ? obj.series : null;
+  const seriesType = seriesRows && seriesRows[0] && typeof seriesRows[0] === 'object'
+    ? (seriesRows[0] as Record<string, unknown>).type
+    : undefined;
+  const rawType = String(obj.type ?? seriesType ?? 'bar').toLowerCase();
   const type = normalizeChartType(rawType);
   const title = String(obj.title ?? '');
   const unit = String(obj.unit ?? '');
@@ -1030,7 +1113,13 @@ function chartSpecFromJson(raw: unknown): ChartSpec {
   }
 
   const arr = dataValue;
-  if (!Array.isArray(arr)) throw new Error('chart JSON needs a data array');
+  if (!Array.isArray(arr)) {
+    // No flat `data` array: try the series / echarts-native shape before
+    // rejecting the payload outright. (Hierarchy charts returned above.)
+    const fromSeries = chartSpecFromSeriesJson(obj, type, title, unit);
+    if (fromSeries) return fromSeries;
+    throw new Error('chart JSON needs a data array');
+  }
 
   if (type === 'scatter') {
     // Optional multi-series form: { type, series: [{ name, data: [[x,y],…] }] }.
@@ -1252,7 +1341,27 @@ function parseChartSourceCore(source: string, meta: { repaired: boolean; repaire
     rawLines.push(rawLine);
   }
 
-  if (lines.length === 0) throw new Error('chart needs at least one data row');
+  // Last-resort rescue before the line parser gives up: prose-wrapped or
+  // fence-wrapped JSON whose first character slipped past the JSON gate above
+  // still gets the smart-repair shot (repair extracts the balanced payload).
+  const rescueViaRepair = (): ChartSpec | null => {
+    const rescued = repairJsonSource(trimmed);
+    if (!rescued.repaired) return null;
+    try {
+      const spec = chartSpecFromJson(JSON.parse(rescued.source));
+      meta.repaired = true;
+      meta.repairedSource = rescued.source;
+      return spec;
+    } catch {
+      return null;
+    }
+  };
+
+  if (lines.length === 0) {
+    const rescued = rescueViaRepair();
+    if (rescued) return rescued;
+    throw new Error('chart needs at least one data row');
+  }
 
   // New chart families have their own line shapes, routed before the generic
   // single/multi-series logic (which would misread e.g. kline's 4 OHLC columns
@@ -1309,7 +1418,11 @@ function parseChartSourceCore(source: string, meta: { repaired: boolean; repaire
     data.push({ label: label || `#${data.length + 1}`, value });
   }
 
-  if (data.length === 0) throw new Error('chart needs at least one data row');
+  if (data.length === 0) {
+    const rescued = rescueViaRepair();
+    if (rescued) return rescued;
+    throw new Error('chart needs at least one data row');
+  }
   return { type, title, unit, data };
 }
 
