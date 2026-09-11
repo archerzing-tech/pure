@@ -14,6 +14,7 @@ export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
+import { recordNetOutcome } from '../shared/netRoute';
 import { netRouteProxyPair } from '../shared/netRoute';
 import { generateDocument, toBase64 } from '../shared/docGen';
 
@@ -363,6 +364,10 @@ export class TauriToolAdapter implements ToolAdapter {
           const repo = normalizeHubRepo(source) || source;
           const hubRoute = netRouteProxyPair('https://raw.githubusercontent.com/', this.proxyUrl);
           const raw = await fetchSkillBody(repo, nameArg, hubRoute.proxyUrl);
+          // Route learning (approximate by design): the ladder tries several
+          // GitHub routes internally — record against the classified host so
+          // a totally dead first route gets re-probed next time.
+          recordNetOutcome('raw.githubusercontent.com', hubRoute.proxyUrl ? 'proxy' : 'direct', !!raw);
           if (!raw) {
             return {
               id: toolCall.id,
@@ -939,6 +944,8 @@ export class TauriToolAdapter implements ToolAdapter {
           try {
             const pageText = await runFetch(route.proxyUrl);
             recordNetSuccess(fetchUrl);
+            // Route learning: pin the route that actually served this fetch.
+            recordNetOutcome(fetchUrl, route.proxyUrl ? 'proxy' : 'direct', true);
             return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -946,13 +953,18 @@ export class TauriToolAdapter implements ToolAdapter {
               // Non-network failure — not the proxy's fault; surface as-is.
               return { id: toolCall.id, toolName: name, result: netFailureHint(fetchUrl, msg), success: false, duration: Date.now() - start };
             }
+            // Network-class failure on the primary route — unlearn it so the
+            // fallback's outcome decides what gets pinned.
+            recordNetOutcome(fetchUrl, route.proxyUrl ? 'proxy' : 'direct', false);
             try {
               const pageText = await runFetch(route.fallbackProxyUrl);
               recordNetSuccess(fetchUrl);
+              recordNetOutcome(fetchUrl, route.fallbackProxyUrl ? 'proxy' : 'direct', true);
               return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
             } catch (err2) {
               const msg2 = err2 instanceof Error ? err2.message : String(err2);
               const { tripped } = recordNetFailure(fetchUrl);
+              recordNetOutcome(fetchUrl, route.fallbackProxyUrl ? 'proxy' : 'direct', false);
               return {
                 id: toolCall.id,
                 toolName: name,
@@ -980,17 +992,33 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
         }
         case 'web_scrape': {
-          // Smart route: netRoute picks direct/proxy per destination host.
+          // Smart route: netRoute picks direct/proxy per destination host; the
+          // opposite route is the one-shot fallback for network-class failures
+          // (same pattern as web_fetch above).
           const scrapeUrl = String(args.url ?? '');
           const scrapeRoute = netRouteProxyPair(scrapeUrl, this.proxyUrl);
-          const data = await this.call('web_scrape', {
-            workspace: ws,
-            url: scrapeUrl,
-            selector: typeof args.selector === 'string' ? args.selector : null,
-            maxChars: args.maxChars ?? 20000,
-            proxyUrl: scrapeRoute.proxyUrl || null,
-          }) as string;
-          return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
+          const runScrape = (proxyUrl: string): Promise<string> =>
+            this.call('web_scrape', {
+              workspace: ws,
+              url: scrapeUrl,
+              selector: typeof args.selector === 'string' ? args.selector : null,
+              maxChars: args.maxChars ?? 20000,
+              proxyUrl: proxyUrl || null,
+            }) as Promise<string>;
+          try {
+            const data = await runScrape(scrapeRoute.proxyUrl);
+            recordNetOutcome(scrapeUrl, scrapeRoute.proxyUrl ? 'proxy' : 'direct', true);
+            return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!isNetworkError(msg) || scrapeRoute.fallbackProxyUrl === null) {
+              throw err;
+            }
+            recordNetOutcome(scrapeUrl, scrapeRoute.proxyUrl ? 'proxy' : 'direct', false);
+            const data = await runScrape(scrapeRoute.fallbackProxyUrl);
+            recordNetOutcome(scrapeUrl, scrapeRoute.fallbackProxyUrl ? 'proxy' : 'direct', true);
+            return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
+          }
         }
         case 'glob_files': {
           const globResult = await this.call('glob_files', {
