@@ -287,7 +287,7 @@ class ChainedTileLayer extends L.TileLayer {
  * so the user can pan, zoom, and tap markers/spots. */
 export interface RenderMapOptions {
   interactive?: boolean;
-  onTileStatus?: (status: 'loading' | 'ready' | 'error', message?: string) => void;
+  onTileStatus?: (status: 'loading' | 'ready' | 'error') => void;
 }
 
 /**
@@ -412,7 +412,7 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
   options.onTileStatus?.('loading');
   tileTimer = setTimeout(() => {
     tileTimer = null;
-    if (!tileReady) options.onTileStatus?.('error', t('map.tileLoadFailed'));
+    if (!tileReady) options.onTileStatus?.('error');
   }, 12000);
 
   renderOverlays();

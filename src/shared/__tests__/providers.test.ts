@@ -411,10 +411,13 @@ describe('text-to-image capability detection', () => {
 
 describe('reasoning-effort capability detection', () => {
   it('matches 2026+ reasoning-capable model families by name', () => {
-    // 2026+ families → supported.
+    // 2026+ families → supported. claude-sonnet-4-6 and the qwen N-max tier
+    // are on the list because promptBudgetDefaults treats them as the current
+    // generation — the two capability tables must not disagree.
     for (const model of [
       'gpt-5.2', 'openai/gpt-5.2', 'glm-5.3-flash', 'glm-5.2', 'deepseek-v4-flash', 'deepseek-r2',
-      'kimi-k3', 'MiniMax-M2.7', 'gemini-3-pro', 'claude-5-sonnet', 'qwen3.5-max', 'qwq-32b', 'qwen4',
+      'kimi-k3', 'MiniMax-M2.7', 'gemini-3-pro', 'claude-5-sonnet', 'claude-sonnet-4-6',
+      'claude-sonnet-4.6', 'qwen3.5-max', 'qwen3-max', 'qwq-32b', 'qwen4',
     ]) {
       expect(isReasoningModelName(model)).toBe(true);
     }
