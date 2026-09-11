@@ -103,24 +103,31 @@ pub fn wrap_command(workspace: &Path, command: &str) -> (Vec<String>, bool) {
     if !seatbelt_available() {
         return (base(), false);
     }
-    let exec = std::path::PathBuf::from("/usr/bin/sandbox-exec");
-    let exec = if exec.exists() { exec } else { which_sandbox_exec().unwrap_or(exec) };
-    let profile_path = match write_profile_file(workspace) {
-        Ok(p) => p,
-        Err(_) => return (base(), false),
-    };
-    let inner = format!("cd {} && {}", sh_quote(&workspace.display().to_string()), command);
-    (
-        vec![
-            exec.display().to_string(),
-            "-f".into(),
-            profile_path.display().to_string(),
-            "sh".into(),
-            "-c".into(),
-            inner,
-        ],
-        true,
-    )
+    #[cfg(target_os = "macos")]
+    {
+        let exec = std::path::PathBuf::from("/usr/bin/sandbox-exec");
+        let exec = if exec.exists() { exec } else { which_sandbox_exec().unwrap_or(exec) };
+        let profile_path = match write_profile_file(workspace) {
+            Ok(p) => p,
+            Err(_) => return (base(), false),
+        };
+        let inner = format!("cd {} && {}", sh_quote(&workspace.display().to_string()), command);
+        return (
+            vec![
+                exec.display().to_string(),
+                "-f".into(),
+                profile_path.display().to_string(),
+                "sh".into(),
+                "-c".into(),
+                inner,
+            ],
+            true,
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (base(), false)
+    }
 }
 
 /// Materialize the profile once per machine into the app config dir so the
