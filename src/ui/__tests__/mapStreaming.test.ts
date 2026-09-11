@@ -94,4 +94,37 @@ describe('streaming map gate (diffStreaming)', () => {
       container.remove();
     }
   });
+
+  it('a still-growing map fence mounts ONE stable placeholder and never hydrates mid-growth', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    try {
+      // Tick 1: the fence is OPEN — the JSON is still streaming. The slot
+      // mounts as a plain placeholder and must not hydrate.
+      const open1 = '```map\n{"center": [31.23';
+      renderOnce(container, BEFORE + open1);
+      const slot1 = container.querySelector<HTMLElement>('.map-slot');
+      expect(slot1).toBeTruthy();
+      expect(slot1!.getAttribute('data-processed')).toBeNull();
+
+      // Tick 2: the JSON grows (markers streaming in) — raw differs, the fence
+      // is still open, so the SAME placeholder element must survive untouched.
+      // Per-tick teardown/rebuild of this slot was the residual map flicker.
+      renderOnce(container, BEFORE + open1 + ', "markers": [{"position": [31.2, 121.4]}]');
+      const slot2 = container.querySelector<HTMLElement>('.map-slot');
+      expect(slot2).toBe(slot1);
+      expect(slot2!.getAttribute('data-processed')).toBeNull();
+
+      // Tick 3: the fence CLOSES with the final payload — hydration kicks
+      // exactly once (data-processed flips) and the gate holds later blocks
+      // while the map is still loading.
+      renderOnce(container, BEFORE + MAP + ' 之后的内容。');
+      const slot3 = container.querySelector<HTMLElement>('.map-slot');
+      expect(slot3).not.toBe(slot1);
+      expect(slot3!.getAttribute('data-processed')).toBe('true');
+      expect(container.textContent).not.toContain('之后的内容');
+    } finally {
+      container.remove();
+    }
+  });
 });

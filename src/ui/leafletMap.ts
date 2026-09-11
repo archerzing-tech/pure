@@ -206,8 +206,13 @@ async function loadTile(url: string): Promise<string> {
 class ChainedTileLayer extends L.TileLayer {
   private sources: TileSource[];
   private active = 0;
+  /** Current tile generation counters, reset by newGeneration() and read by
+   *  renderMapInto when the grid's 'load' event reports every visible tile
+   *  settled. The reveal criterion is a generation with EVERY tile served —
+   *  first-tile-ready used to reveal a half-gray map that read as broken. */
+  genSuccess = 0;
+  genFail = 0;
   private onChange: ((source: TileSource) => void) | null = null;
-  private onTileReady: (() => void) | null = null;
 
   constructor(sources: TileSource[], options: L.TileLayerOptions) {
     super(sources[0].template, options);
@@ -218,14 +223,12 @@ class ChainedTileLayer extends L.TileLayer {
     this.onChange = fn;
   }
 
-  setTileReadyHandler(fn: () => void): void {
-    this.onTileReady = fn;
-  }
-
-  /** Restart the source walk from the first source on the next (re)load —
-   *  a source that was reachable when the map rendered may be dead by the
-   *  time tiles are re-requested, and vice versa. */
-  resetSourceChain(): void {
+  /** Start a fresh evaluation generation AND restart the source walk from
+   *  the first source — a source that was reachable when the map rendered
+   *  may be dead by the time tiles are re-requested, and vice versa. */
+  newGeneration(): void {
+    this.genSuccess = 0;
+    this.genFail = 0;
     this.active = 0;
   }
 
@@ -235,6 +238,7 @@ class ChainedTileLayer extends L.TileLayer {
     img.draggable = false;
     const attempt = (index: number): void => {
       if (index >= this.sources.length) {
+        this.genFail++;
         done(new Error('all tile sources unavailable'), img);
         return;
       }
@@ -250,7 +254,7 @@ class ChainedTileLayer extends L.TileLayer {
           this.active = index;
           this.onChange?.(source);
           }
-          this.onTileReady?.();
+          this.genSuccess++;
           done(undefined, img);
         };
         const cached = tileMemoryCache.get(url);
@@ -391,28 +395,41 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
 
   // maxNativeZoom caps real tile requests at 18 so zooming in past a China
   // basemap's native ceiling over-zooms its last zoom level instead of blanking.
-  let tileReady = false;
+  // REVEAL CRITERION — the strict half of the map presentation contract: the
+  // map becomes visible only when a tile generation completes with EVERY
+  // visible tile served and at least one drawn. A generation containing a
+  // failure (all six sources dead for that tile) reports 'error' instead —
+  // the slot stays a spinner and the silent retry re-requests the grid. The
+  // 12s timer covers a grid that never settles at all.
+  let readyReported = false;
   let tileTimer: ReturnType<typeof setTimeout> | null = null;
-  const markTileReady = (): void => {
-    if (tileReady) return;
-    tileReady = true;
+  const finishReady = (): void => {
+    if (readyReported) return;
+    readyReported = true;
     if (tileTimer !== null) clearTimeout(tileTimer);
     tileTimer = null;
     options.onTileStatus?.('ready');
   };
   const tiles = new ChainedTileLayer(TILE_SOURCES, { maxZoom: 19, maxNativeZoom: 18 });
-  tiles.setTileReadyHandler(markTileReady);
   tiles.setSourceChangeHandler((source) => {
     if (source.gcj02 !== gcj02) {
       gcj02 = source.gcj02;
       renderOverlays();
     }
   });
+  tiles.on('load', () => {
+    if (readyReported) return;
+    if (tiles.genSuccess > 0 && tiles.genFail === 0) {
+      finishReady();
+    } else {
+      options.onTileStatus?.('error');
+    }
+  });
   tiles.addTo(map);
   options.onTileStatus?.('loading');
   tileTimer = setTimeout(() => {
     tileTimer = null;
-    if (!tileReady) options.onTileStatus?.('error');
+    if (!readyReported) options.onTileStatus?.('error');
   }, 12000);
 
   renderOverlays();
@@ -497,7 +514,7 @@ export function disposeMap(target: HTMLElement): void {
 export function reloadMapTiles(target: HTMLElement): void {
   const existing = mapInstances.get(target);
   if (!existing) return;
-  existing.tiles?.resetSourceChain();
+  existing.tiles?.newGeneration();
   existing.tiles?.redraw();
 }
 
