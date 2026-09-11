@@ -522,8 +522,11 @@ export type ReasoningEffortLevel = 'low' | 'medium' | 'high';
  * (undefined) means auto — the 2026+ name pattern decides, then medium. */
 export type ReasoningEffortSetting = 'off' | ReasoningEffortLevel;
 
+// Kept consistent with promptBudgetDefaults' generation map below: the
+// families it treats as current (sonnet-4.6+, the qwen N-max tier, K3,
+// MiniMax-M2, GLM-5, DeepSeek-V4, GPT-5) are exactly the reasoning list.
 const REASONING_EFFORT_MODEL_PATTERN =
-  /(?:gpt-[5-9]|glm-[5-9]|deepseek-(?:v[4-9]|r[2-9])|qwen[4-9]|qwen[3-9]\.[5-9]|qwq|qmax|claude-[5-9]|claude-(?:opus|sonnet|haiku)-[5-9]|fable|gemini-[3-9]|kimi-k[3-9]|moonshot-v[2-9]|minimax-m[2-9])/i;
+  /(?:gpt-[5-9]|glm-[5-9]|deepseek-(?:v[4-9]|r[2-9])|qwen[4-9]|qwen[3-9]\.[5-9]|qwen[3-9]-max|qwq|qmax|claude-[5-9]|claude-(?:opus|sonnet|haiku)-[5-9]|claude-(?:opus|sonnet|haiku)-4[-.]?[6-9]|fable|gemini-[3-9]|kimi-k[3-9]|moonshot-v[2-9]|minimax-m[2-9])/i;
 
 /** True when a model id matches a known 2026+ reasoning-capable family. */
 export function isReasoningModelName(model: string | undefined | null): boolean {
