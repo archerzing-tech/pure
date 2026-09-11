@@ -93,6 +93,10 @@ export const DEFAULT_HUB_REPO = 'vercel-labs/agent-skills';
 
 export const SEARCH_HUB_REPOS = [
   DEFAULT_HUB_REPO,
+  // Anthropic's official library (Claude skills: docx/pdf/pptx/xlsx,
+  // mcp-builder, skill-creator, …). Ships no skills.sh index — discovered
+  // through the skills/ directory scan fallback below.
+  'anthropics/skills',
   'nvidia/skills',
   'youdotcom-oss/agent-skills',
   'zapier/agent-skills',
@@ -126,6 +130,55 @@ export function hubIndexUrls(repo: string): string[] {
     `https://raw.githubusercontent.com/${r}/main/.well-known/skills/index.json`,
     `https://raw.githubusercontent.com/${r}/main/.well-known/agent-skills/index.json`,
   ];
+}
+
+/** Fallback discovery for repos that ship NO index at all (e.g.
+ * anthropics/skills — Claude's official library, which only has the standard
+ * `skills/<name>/SKILL.md` layout plus its own .claude-plugin metadata): list
+ * the `skills/` directory through the GitHub contents API and treat every
+ * subdirectory as a skill. Names only — descriptions arrive with the install,
+ * same as the skills.sh.json grouped format. */
+export function hubContentsApiUrl(repo: string): string {
+  return `https://api.github.com/repos/${normalizeHubRepo(repo)}/contents/skills`;
+}
+
+/** Parse a GitHub contents-API directory listing into skill summaries: only
+ * real subdirectories count, dot-dirs are skipped. Returns [] for anything
+ * that isn't a listing. */
+export function hubIndexFromContentsScan(json: unknown): HubSkillSummary[] {
+  if (!Array.isArray(json)) return [];
+  const out: HubSkillSummary[] = [];
+  for (const entry of json) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    if (e.type !== 'dir') continue;
+    const name = typeof e.name === 'string' ? e.name : '';
+    if (!name || name.startsWith('.')) continue;
+    out.push({ name, description: '', hasDescription: false });
+  }
+  return out;
+}
+
+async function fetchSkillsDirListing(repo: string, proxyUrl = ''): Promise<HubSkillSummary[]> {
+  const url = hubContentsApiUrl(repo);
+  let text: string | null;
+  if (isTauriRuntime()) {
+    text = await hubFetchText(url, 10000, proxyUrl);
+  } else {
+    try {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(10000), headers: { Accept: 'application/vnd.github+json' } });
+      if (!resp.ok) return [];
+      text = await resp.text();
+    } catch {
+      return [];
+    }
+  }
+  if (!text) return [];
+  try {
+    return hubIndexFromContentsScan(JSON.parse(text));
+  } catch {
+    return [];
+  }
 }
 
 /** Fetch the first reachable hub index and normalize it into HubIndex. In
@@ -169,6 +222,15 @@ export async function fetchHubIndex(repo: string, proxyUrl = ''): Promise<HubInd
     if (index) return index;
     errors.push(`${url}: no parseable skills index`);
   }
+  // No skills.sh-style index anywhere — that's not necessarily a dead end:
+  // Anthropic's official library (anthropics/skills) and similar collections
+  // ship only the standard `skills/<name>/SKILL.md` layout. Scan that
+  // directory through the GitHub contents API so the Hub can browse them.
+  const scanned = await fetchSkillsDirListing(repo, proxyUrl);
+  if (scanned.length > 0) {
+    return { groupings: [], skills: scanned };
+  }
+  errors.push('skills/ 目录扫描也没有结果');
   throw new Error(
     `无法从 ${normalizeHubRepo(repo)} 获取 skill 索引 — ${anyReached ? errors.join('; ') || '索引格式无法解析' : '仓库或分支不可达，请确认仓库名正确（owner/repo 或完整 GitHub URL）'}`,
   );

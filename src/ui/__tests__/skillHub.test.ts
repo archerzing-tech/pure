@@ -4,10 +4,13 @@ import { describe, expect, it } from 'bun:test';
 import {
   normalizeHubRepo,
   hubIndexUrls,
+  hubContentsApiUrl,
+  hubIndexFromContentsScan,
   normalizeIndex,
   splitSkillMarkdown,
   makeHubSkill,
   sanitizeSkillName,
+  SEARCH_HUB_REPOS,
   DEFAULT_HUB_REPO,
 } from '../skillHub';
 
@@ -34,6 +37,40 @@ describe('hubIndexUrls', () => {
     const urls = hubIndexUrls('vercel-labs/agent-skills');
     expect(urls[0]).toBe('https://raw.githubusercontent.com/vercel-labs/agent-skills/HEAD/skills.sh.json');
     expect(urls.some((u) => u.includes('.well-known/skills/index.json'))).toBe(true);
+  });
+});
+
+describe('skills/ directory scan fallback (index-less hubs like anthropics/skills)', () => {
+  it('targets the GitHub contents API for the standard skills/ directory', () => {
+    expect(hubContentsApiUrl('anthropics/skills')).toBe('https://api.github.com/repos/anthropics/skills/contents/skills');
+    // Full GitHub URLs normalize to owner/repo first.
+    expect(hubContentsApiUrl('https://github.com/anthropics/skills')).toBe('https://api.github.com/repos/anthropics/skills/contents/skills');
+  });
+
+  it('treats subdirectories as skills, skipping files and dot-dirs', () => {
+    const skills = hubIndexFromContentsScan([
+      { name: 'docx', path: 'skills/docx', type: 'dir' },
+      { name: 'pdf', path: 'skills/pdf', type: 'dir' },
+      { name: 'README.md', path: 'skills/README.md', type: 'file' },
+      { name: '.github', path: 'skills/.github', type: 'dir' },
+      { name: '', type: 'dir' },
+      'not-an-object',
+      null,
+    ]);
+    expect(skills.map((s) => s.name)).toEqual(['docx', 'pdf']);
+    // Names only, like the skills.sh.json grouped format — the real
+    // description arrives with the SKILL.md at install time.
+    expect(skills[0]).toEqual({ name: 'docx', description: '', hasDescription: false });
+  });
+
+  it('returns nothing for non-listing payloads', () => {
+    expect(hubIndexFromContentsScan({ message: 'Not Found' })).toEqual([]);
+    expect(hubIndexFromContentsScan(null)).toEqual([]);
+    expect(hubIndexFromContentsScan('oops')).toEqual([]);
+  });
+
+  it('lists anthropics/skills in the search hub set (agent-side installs)', () => {
+    expect(SEARCH_HUB_REPOS).toContain('anthropics/skills');
   });
 });
 
