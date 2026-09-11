@@ -23,6 +23,11 @@ fn test_home_lock() -> &'static StdMutex<()> {
 fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .timeout(timeout)
+        // Bound the CONNECT/TLS handshake separately: without this a hung
+        // proxy (killed app that left the OS setting behind, half-dead node)
+        // holds the full request timeout — 180s of "很慢" — before the retry
+        // layer ever gets a turn. 10s is ample for any real proxy handshake.
+        .connect_timeout(std::time::Duration::from_secs(10))
         // Force HTTP/1.1: corporate TLS-intercepting gateways (netentsec et al.)
         // frequently break ALPN-negotiated HTTP/2, while plain HTTP/1.1 CONNECT
         // + streaming works everywhere. curl speaks HTTP/1.1 by default, which
@@ -10917,6 +10922,11 @@ struct ChatStreamArgs {
     request_id: String,
     #[serde(default, rename = "proxyUrl")]
     proxy_url: String,
+    /// One-shot alternate route for the request-level fallback: "" = direct,
+    /// a URL = that proxy. Absent = no fallback. Only sent when a primary
+    /// proxy exists (netRouteProxyPair semantics on the TS side).
+    #[serde(default, rename = "fallbackProxyUrl")]
+    fallback_proxy_url: Option<String>,
     #[serde(default, rename = "proxyBypassProviders")]
     proxy_bypass_providers: Vec<String>,
 }
@@ -10937,6 +10947,19 @@ fn llm_proxy_url(args: &ChatStreamArgs) -> Option<&str> {
     } else {
         Some(args.proxy_url.trim())
     }
+}
+
+/// Resolve the one-shot fallback route for a chat request: None = no
+/// fallback; Some("") = direct; Some(url) = that proxy. The TS side only
+/// ever sends the OPPOSITE of the primary route (netRouteProxyPair), so a
+/// mis-classified host or a system proxy that died mid-session self-heals on
+/// the same turn instead of erroring until the user intervenes.
+fn llm_fallback_proxy_url(args: &ChatStreamArgs) -> Option<String> {
+    if proxy_matches(&args.provider, &args.proxy_bypass_providers) {
+        return None;
+    }
+    let spec = args.fallback_proxy_url.as_deref()?.trim().to_string();
+    Some(spec)
 }
 
 // Tool-call argument delta emit throttle (ms): forwarding the FULL accumulated
@@ -11071,12 +11094,46 @@ mod proxy_tests {
             temperature: None,
             request_id: String::new(),
             proxy_url: "socks5://127.0.0.1:1080".to_string(),
+            fallback_proxy_url: None,
             proxy_bypass_providers: vec!["ollama".to_string()],
         };
         assert!(llm_proxy_url(&args).is_none());
         args.provider = "qwen".to_string();
         args.proxy_bypass_providers.clear();
         assert_eq!(llm_proxy_url(&args), Some("socks5://127.0.0.1:1080"));
+    }
+
+    #[test]
+    fn llm_fallback_proxy_url_respects_bypass_and_direct_sentinel() {
+        let mut args = ChatStreamArgs {
+            messages: Vec::new(),
+            provider: "qwen".to_string(),
+            protocol: String::new(),
+            tools: Vec::new(),
+            model: "deepseek-v4-flash".to_string(),
+            api_key: String::new(),
+            base_url: String::new(),
+            secret_key: String::new(),
+            extra_body: None,
+            max_tokens_override: None,
+            temperature: None,
+            request_id: String::new(),
+            proxy_url: String::new(),
+            fallback_proxy_url: Some("".to_string()),
+            proxy_bypass_providers: Vec::new(),
+        };
+        // Empty string = the DIRECT route as fallback, preserved as Some("").
+        assert_eq!(llm_fallback_proxy_url(&args), Some(String::new()));
+        // A URL fallback passes through trimmed.
+        args.fallback_proxy_url = Some("  system://  ".to_string());
+        assert_eq!(llm_fallback_proxy_url(&args), Some("system://".to_string()));
+        // Absent = no fallback.
+        args.fallback_proxy_url = None;
+        assert_eq!(llm_fallback_proxy_url(&args), None);
+        // Bypassed providers never get a fallback either.
+        args.fallback_proxy_url = Some("".to_string());
+        args.proxy_bypass_providers = vec!["qwen".to_string()];
+        assert_eq!(llm_fallback_proxy_url(&args), None);
     }
 
     #[test]
@@ -11569,6 +11626,9 @@ async fn chat_stream(
         std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
         llm_proxy_url(&args),
     )?;
+    // Capture the fallback route spec BEFORE body construction moves pieces
+    // of `args` (tools) — the borrow checker forbids reading it afterwards.
+    let fallback_spec = llm_fallback_proxy_url(&args);
     let mut body = if anthropic {
         let mut system_parts = Vec::new();
         let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -11663,7 +11723,30 @@ async fn chat_stream(
 
     // Retry request/status failures before the response body starts. A second
     // bounded retry layer below handles a response body that dies after headers.
-    let mut resp = send_chat_request(&client, &url, &body, anthropic, &api_key).await?;
+    // When the primary route exhausts its attempts and a fallback route was
+    // supplied, ONE attempt runs on the fallback client — this is what makes a
+    // frequently-changing system proxy (or a wrong route classification)
+    // self-heal within the same turn instead of surfacing as an error.
+    let mut resp = {
+        let primary = send_chat_request(&client, &url, &body, anthropic, &api_key).await;
+        match primary {
+            Ok(resp) => resp,
+            Err(primary_err) => {
+                let fallback_client = fallback_spec
+                    .as_ref()
+                    .map(|spec| build_http_client(std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS), Some(spec.as_str())))
+                    .transpose();
+                match fallback_client {
+                    Ok(Some(fallback)) => {
+                        send_chat_request(&fallback, &url, &body, anthropic, &api_key)
+                            .await
+                            .map_err(|fallback_err| format!("{primary_err}\n兜底路由也失败：{fallback_err}"))?
+                    }
+                    _ => return Err(primary_err),
+                }
+            }
+        }
+    };
 
     // Register the cancel channel for this call (Stop → cancel_chat_stream →
     // this receiver fires → the select! below aborts the read loop). The
