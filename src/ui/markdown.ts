@@ -628,7 +628,7 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
       slot.setAttribute('data-processed', 'true');
-      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}：${detail}`);
+      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}（流程图模块）：${detail}`);
     }
     return;
   }
@@ -1773,7 +1773,15 @@ let echartsChartMod: typeof import('./echartsChart') | null = null;
 
 async function ensureEchartsChart(): Promise<typeof import('./echartsChart')> {
   if (!echartsChartMod) {
-    echartsChartMod = await withTimeout(import('./echartsChart'));
+    try {
+      echartsChartMod = await withTimeout(import('./echartsChart'));
+    } catch {
+      // A failed module evaluation is NOT cached: re-importing re-runs it.
+      // The one-shot retry heals transient first-evaluation failures (a TDZ
+      // race on a busy first frame); a genuinely broken chunk fails twice
+      // and the error card shows as before.
+      echartsChartMod = await withTimeout(import('./echartsChart'));
+    }
   }
   return echartsChartMod;
 }
@@ -1808,7 +1816,7 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
     const detail = err instanceof Error ? err.message : String(err);
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
-      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}：${detail}`);
+      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}（图表模块）：${detail}`);
     }
     return;
   }
@@ -1939,7 +1947,13 @@ let leafletMapMod: LeafletMapModule | null = null;
 
 async function ensureLeafletMap(): Promise<LeafletMapModule> {
   if (!leafletMapMod) {
-    leafletMapMod = await withTimeout(import('./leafletMap'));
+    try {
+      leafletMapMod = await withTimeout(import('./leafletMap'));
+    } catch {
+      // Same one-shot re-import rationale as ensureEchartsChart: a failed
+      // module evaluation is not cached, so the retry re-runs it.
+      leafletMapMod = await withTimeout(import('./leafletMap'));
+    }
   }
   return leafletMapMod;
 }
@@ -1974,7 +1988,7 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
     const detail = err instanceof Error ? err.message : String(err);
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
-      setMapState(slot, 'error', `${t('diagram.loadFailed')}：${detail}。请重启应用后重试；如持续出现请检查应用完整性。`);
+      setMapState(slot, 'error', `${t('diagram.loadFailed')}（地图模块）：${detail}。请重启应用后重试；如持续出现请检查应用完整性。`);
     }
     return;
   }
