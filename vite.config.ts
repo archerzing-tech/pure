@@ -4,6 +4,15 @@ import { dirname, join } from 'node:path';
 import type { Plugin, ResolvedConfig } from 'vite';
 import { defineConfig } from 'vite';
 
+// The three big lazy chunks are imported dynamically from markdown.ts —
+// WITHOUT an explicit include, the dev server discovers them on FIRST use
+// (minutes into a conversation, when the first map/chart/diagram renders).
+// If that lands on a re-optimization, the in-flight import dies with an
+// initialization-order error ("Cannot access uninitialized variable") that
+// reads as a broken map/chart. Pre-bundling them at server start removes
+// the whole failure class in dev; the production build is unaffected.
+const LAZY_DIAGRAM_DEPS = ['leaflet', 'echarts', 'mermaid'];
+
 const require = createRequire(import.meta.url);
 const APP_VERSION = JSON.parse(readFileSync(join(import.meta.dirname, 'package.json'), 'utf8')).version as string;
 let ORT_WASM_DIR = dirname(require.resolve('onnxruntime-web/ort-wasm-simd-threaded.wasm'));
@@ -121,6 +130,10 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(APP_VERSION),
   },
   clearScreen: false,
+  // See LAZY_DIAGRAM_DEPS above.
+  optimizeDeps: {
+    include: LAZY_DIAGRAM_DEPS,
+  },
   server: {
     port: 1420,
     strictPort: true,
