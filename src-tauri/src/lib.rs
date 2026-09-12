@@ -299,6 +299,7 @@ async fn test_llm_connection(
     api_key: Option<String>,
     secret_key: Option<String>,
     proxy_url: Option<String>,
+    fallback_proxy_url: Option<String>,
     proxy_bypass_providers: Option<Vec<String>>,
     provider: Option<String>,
 ) -> Result<LlmConnectionProbe, String> {
@@ -318,7 +319,26 @@ async fn test_llm_connection(
     };
     let client = build_http_client(std::time::Duration::from_secs(8), effective_proxy)?;
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    Ok(probe_llm_endpoint(client, &url, &resolved_key).await)
+    let probe = probe_llm_endpoint(client, &url, &resolved_key).await;
+    // One-shot opposite-route fallback, mirroring chat_stream: a probe that
+    // failed on the primary route gets exactly one attempt on the alternate
+    // route before the result is reported. Without this the button measures
+    // a dead route while real chats would have self-healed.
+    if probe.ok {
+        return Ok(probe);
+    }
+    let fallback_spec = fallback_proxy_url.as_deref().map(str::trim);
+    // "" = direct; skip when the alternate route IS the primary route.
+    let alternate = match fallback_spec {
+        Some("") => None,
+        Some(spec) => Some(spec),
+        None => return Ok(probe),
+    };
+    if alternate == effective_proxy {
+        return Ok(probe);
+    }
+    let fallback_client = build_http_client(std::time::Duration::from_secs(8), alternate)?;
+    Ok(probe_llm_endpoint(fallback_client, &url, &resolved_key).await)
 }
 
 #[cfg(test)]
