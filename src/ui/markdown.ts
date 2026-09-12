@@ -625,6 +625,9 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
     mermaid = await withTimeout(ensureMermaid());
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
+    // Full stack to the console: the card only shows the message, but the
+    // stack names the exact module and byte offset for diagnosis.
+    console.error('[pure] mermaid module load failed:', err);
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
       slot.setAttribute('data-processed', 'true');
@@ -1814,6 +1817,7 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
     mod = await ensureEchartsChart();
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
+    console.error('[pure] chart module load failed:', err);
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
       setDiagramState(slot, 'error', `${t('diagram.loadFailed')}（图表模块）：${detail}`);
@@ -1982,9 +1986,10 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
   try {
     mod = await ensureLeafletMap();
   } catch (err) {
-    // The Leaflet module itself failed to load — retrying the SAME import
-    // will fail the same way. Give the user a real explanation instead of
-    // a dead retry button.
+    // ensureLeafletMap already re-imported once (failed module evaluations
+    // are not cached); a second failure means the chunk is genuinely broken.
+    // Full stack to the console — the card only shows the message.
+    console.error('[pure] map module load failed:', err);
     const detail = err instanceof Error ? err.message : String(err);
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
