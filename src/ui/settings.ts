@@ -52,6 +52,7 @@ function compactBudgetTokens(n: number): string {
 }
 import { composeProxyUrl, effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList, parseProxyUrl, proxyUrlWithAuth } from '../shared/proxy';
 import { probeLlmEndpoint } from '../shared/llmProbe';
+import { netRouteProxyPair } from '../shared/netRoute';
 import {
   defaults,
   DEFAULT_MAP_TILE_CACHE_MB,
@@ -1200,8 +1201,20 @@ export class SettingsPanel {
     btn.textContent = t('llm.connection.testing');
     const started = performance.now();
     let probe: { ok: boolean; status?: number; latencyMs?: number; error?: string };
+    let routeLabel = '';
     if (isTauriRuntime()) {
       const proxy = normalizeProxyConfig(cfg.proxy);
+      // Route PARITY with real chats: the probe takes the same netRoute
+      // decision (direct-first, learned route, opposite-route fallback) as
+      // llmProxyPairFor — otherwise the number measures the raw proxy path
+      // and swings with every proxy node change while actual chats go
+      // direct. Only a manual provider bypass skips the route entirely.
+      const bypassed = proxy.bypassProviders.includes(provider);
+      const rawProxy = bypassed ? '' : (effectiveProxyUrl(proxy, 'llm') ?? '');
+      const pair = rawProxy
+        ? netRouteProxyPair(baseURL, rawProxy)
+        : { proxyUrl: '', fallbackProxyUrl: null as string | null };
+      const servedRoute = pair.proxyUrl ? t('llm.connection.routeProxy') : t('llm.connection.routeDirect');
       try {
         const core = await loadTauriCore();
         if (!core) throw new Error('Tauri runtime unavailable');
@@ -1212,10 +1225,13 @@ export class SettingsPanel {
           secretKey: custom ? customSecretKey(custom.id)
             : override?.hasApiKey ? customSecretKey(provider)
             : undefined,
-          proxyUrl: effectiveProxyUrl(proxy, 'llm') ?? '',
+          proxyUrl: pair.proxyUrl,
+          // Absent (not empty) when there is no fallback: '' means DIRECT.
+          ...(pair.fallbackProxyUrl !== null ? { fallbackProxyUrl: pair.fallbackProxyUrl } : {}),
           proxyBypassProviders: proxy?.bypassProviders ?? [],
           provider,
         });
+        routeLabel = servedRoute;
       } catch (err) {
         probe = { ok: false, error: (err as Error)?.message || String(err) };
       }
@@ -1228,7 +1244,7 @@ export class SettingsPanel {
     if (probe.ok) {
       btn.textContent = t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
       btn.classList.add('llm-model-test-ok');
-      btn.title = t('llm.model.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
+      btn.title = `${t('llm.model.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed))} · ${routeLabel}`;
     } else {
       btn.textContent = '✗ ' + t('llm.connection.testFailed');
       btn.classList.add('llm-model-test-fail');
