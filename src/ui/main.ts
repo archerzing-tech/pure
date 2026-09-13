@@ -189,8 +189,13 @@ let queuedWhileStreaming: string | null = null;
 // ── Streaming state → update both send buttons ──
 
 // Background sessions starting/stopping work: pulse the sidebar's running
-// dots without re-rendering the list.
-onRunningSessionsChanged(() => sessionSidebar?.refreshRunningDots());
+// dots without re-rendering the list. refreshIdle also merges in / drops the
+// live-only entries — a first-turn session that just started streaming has no
+// disk row yet, so only a list rebuild can make it visible.
+onRunningSessionsChanged(() => {
+  sessionSidebar?.refreshRunningDots();
+  sessionSidebar?.refreshIdle();
+});
 
 chat.onStreamingStateChange((streaming) => {
   document.querySelectorAll<HTMLButtonElement>('.undo-write-btn, .compact-context-btn').forEach((button) => {
@@ -879,7 +884,7 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
           const artifactRow = document.createElement('div');
           artifactRow.className = 'bubble-row artifact-row';
           target.appendChild(artifactRow);
-          renderArtifactCards(artifactRow, block.items, chat.getEffectiveWorkspace() || '.', { userRequest: block.userRequest });
+          renderArtifactCards(artifactRow, block.items, chat.getEffectiveWorkspace() || '.', { userRequest: block.userRequest, workspace: chat.getEffectiveWorkspace() });
         }
       } catch (blockErr) {
         console.warn('[pure] restore: skipping unrenderable transcript block', block.type, blockErr);

@@ -137,14 +137,19 @@ export function findPathMatches(text: string): PathMatch[] {
   return out;
 }
 
-/** Strip any :line/:line:col suffix and resolve relative paths against the workspace. */
-export function resolvePathForOpen(raw: string): string {
+/** Strip any :line/:line:col suffix and resolve relative paths against the
+ * workspace. `workspace` is for artifacts that carry the workspace of the
+ * session that PRODUCED them: the module-level activeWorkspace tracks the
+ * VISIBLE session, so a background session's card resolved through it would
+ * open the wrong directory. */
+export function resolvePathForOpen(raw: string, workspace?: string): string {
   let p = raw.trim();
   p = p.replace(/:\d+(?::\d+)?$/, '');
   if (!p) return p;
   const isAbsolute = p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('~');
-  if (!isAbsolute && activeWorkspace) {
-    p = activeWorkspace.replace(/[\\/]+$/, '') + '/' + p.replace(/^[\\/]+/, '');
+  const ws = workspace ?? activeWorkspace;
+  if (!isAbsolute && ws) {
+    p = ws.replace(/[\\/]+$/, '') + '/' + p.replace(/^[\\/]+/, '');
   }
   return p;
 }
@@ -154,9 +159,11 @@ export function isExternalUrl(raw: string): boolean {
   return /^(?:https?:|mailto:)/i.test(raw.trim());
 }
 
-/** Open a raw path match (or copy it in browser dev). */
-export function openPathLink(rawPath: string): void {
-  const resolved = resolvePathForOpen(rawPath);
+/** Open a raw path match (or copy it in browser dev). `workspace` overrides
+ * the module-level resolver for artifact cards that carry their producing
+ * session's workspace. */
+export function openPathLink(rawPath: string, workspace?: string): void {
+  const resolved = resolvePathForOpen(rawPath, workspace);
   if (isTauriRuntime()) {
     (async () => {
       try {
@@ -227,7 +234,14 @@ export function initPathLinks(): void {
       e.preventDefault();
       e.stopPropagation();
       const raw = pathLink.getAttribute('data-path') ?? '';
-      if (raw) openPathLink(raw);
+      if (raw) {
+        // Artifact cards pin the workspace of the session that produced them
+        // (data-workspace); plain inline links resolve against the visible
+        // session's workspace.
+        openPathLink(raw, pathLink.hasAttribute('data-workspace')
+          ? pathLink.getAttribute('data-workspace') ?? undefined
+          : undefined);
+      }
       return;
     }
 

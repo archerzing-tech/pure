@@ -1151,7 +1151,10 @@ export async function deleteAllSessions(): Promise<void> {
   } catch { /* ignore */ }
 }
 
-function extractTitle(messages: Message[]): string {
+/** Derive a session title from its transcript: first user message, else a
+ * placeholder. Exported so live-but-unpersisted sessions (running first turn)
+ * can render the SAME title in the sidebar that persistence will give them. */
+export function extractTitle(messages: Message[]): string {
   const firstUser = messages.find(m => m.role === 'user' && m.content);
   if (firstUser?.content) {
     return firstUser.content.slice(0, 60);
