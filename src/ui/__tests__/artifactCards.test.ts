@@ -106,6 +106,68 @@ describe('planArtifactDisplay', () => {
     const items = [file('crawler.py'), file('crawler/utils.py')];
     expect(planArtifactDisplay(items, { userRequest: '帮我开发一个爬虫' })).toEqual({ mode: 'project', items });
   });
+
+  // ── Human rule: when a turn edits the user's own file, the card MUST name
+  // where it ended up — whatever the extension, whatever the phrasing. ──
+
+  it('always shows a file the agent edited in place, even a source/data file', () => {
+    const items: ArtifactItem[] = [{ path: 'config.json', op: 'edit' }];
+    expect(planArtifactDisplay(items, { userRequest: '帮我把 config.json 改成支持多环境的格式' })).toEqual({ mode: 'files', items });
+  });
+
+  it('always shows edited files even when the request reads like a document task', () => {
+    const items: ArtifactItem[] = [{ path: 'tools/render.js', op: 'edit' }];
+    expect(planArtifactDisplay(items, { userRequest: '修改渲染脚本让海报更清晰' })).toEqual({ mode: 'files', items });
+  });
+
+  it('shows several edited files as cards up to the ceiling', () => {
+    const items: ArtifactItem[] = ['env1.yaml', 'env2.yaml', 'env3.yaml'].map((path) => ({ path, op: 'edit' as const }));
+    expect(planArtifactDisplay(items, { userRequest: '把这三个配置都改成生产环境的' })).toEqual({ mode: 'files', items });
+  });
+
+  it('falls back to the project link when edited files exceed the ceiling', () => {
+    const items: ArtifactItem[] = Array.from({ length: MAX_FILE_CARDS + 1 }, (_, i) => ({ path: `src/f${i}.ts`, op: 'edit' as const }));
+    expect(planArtifactDisplay(items, { userRequest: '批量重构这些模块' })).toEqual({ mode: 'project', items });
+  });
+
+  // ── Human rule: the lone file of a build/persist/modify request IS the
+  // deliverable — a source/data extension must not make it vanish. ──
+
+  it('shows the single file of an overwrite request phrased with a modify verb', () => {
+    // write_file overwrite (op 'create'/absent) of a file the user named.
+    expect(planArtifactDisplay([file('config.json')], { userRequest: '帮我把 config.json 改成支持多环境的格式' })).toEqual({
+      mode: 'files',
+      items: [file('config.json')],
+    });
+  });
+
+  it('shows the single file of a save-as request regardless of extension', () => {
+    expect(planArtifactDisplay([file('weather.json')], { userRequest: '帮我查一下今天天气，把结果保存成文件' })).toEqual({
+      mode: 'files',
+      items: [file('weather.json')],
+    });
+  });
+
+  it('shows the single file of a refactor/build request regardless of extension', () => {
+    expect(planArtifactDisplay([file('utils.py')], { userRequest: '重构 utils.py，拆清楚一点' })).toEqual({
+      mode: 'files',
+      items: [file('utils.py')],
+    });
+  });
+
+  it('still hides a lone helper script when a visual task produced no image', () => {
+    // "制作一张海报" asks for a POSTER; a leftover script was the means, not
+    // the point — surfacing it would read as "here is your poster".
+    expect(planArtifactDisplay([file('tools/render.js')], { userRequest: '制作一张海报' })).toEqual({ mode: 'none' });
+  });
+
+  it('hides a single stashed file when a lookup request never asked for one', () => {
+    // The inverse of the save-as rule: "帮我分析一下这份数据" asks for an
+    // ANSWER, not a file. Whatever the model parked on disk mid-analysis is
+    // implementation detail — no card, or every lookup turn would advertise
+    // its scratch files.
+    expect(planArtifactDisplay([file('analysis.py')], { userRequest: '帮我分析一下这份数据' })).toEqual({ mode: 'none' });
+  });
 });
 
 describe('isCardFriendlyArtifact', () => {
