@@ -1779,10 +1779,13 @@ async function ensureEchartsChart(): Promise<typeof import('./echartsChart')> {
     try {
       echartsChartMod = await withTimeout(import('./echartsChart'));
     } catch {
-      // A failed module evaluation is NOT cached: re-importing re-runs it.
-      // The one-shot retry heals transient first-evaluation failures (a TDZ
-      // race on a busy first frame); a genuinely broken chunk fails twice
-      // and the error card shows as before.
+      // A failed FETCH is not cached, so the one-shot retry heals transient
+      // network/protocol hiccups. A module whose evaluation THREW is
+      // different: ESM keeps it errored and every re-import rejects with the
+      // same error without re-running it — the old echarts cross-chunk TDZ
+      // ("Cannot access 'or' before initialization") failed both attempts,
+      // which is why this retry never healed it and the fix had to happen at
+      // the chunking level (single echarts vendor chunk in vite.config.ts).
       echartsChartMod = await withTimeout(import('./echartsChart'));
     }
   }
