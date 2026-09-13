@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { SessionChatManager } from '../chat';
+import { resolvePathForOpen } from '../pathLink';
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -176,5 +177,40 @@ describe('session chat manager (multi-session background execution)', () => {
     // reloaded from disk over them.
     expect((back.controller as any).messages).toBe(ctl.messages);
     expect((back.controller as any).messages).toHaveLength(2);
+  });
+
+  it('getRunningLiveSessions lists only streaming sessions with their live title', () => {
+    const manager = new SessionChatManager();
+    const flight = manager.openSession('session-flight');
+    (flight.controller as any).messages = [
+      { role: 'user', content: '用canvas画一只会飞的小鸟' },
+    ];
+    (flight.controller as any).setStreaming(true);
+    manager.openSession('session-weather'); // idle — must NOT be listed
+
+    const running = manager.getRunningLiveSessions();
+    expect(running).toHaveLength(1);
+    expect(running[0].id).toBe('session-flight');
+    // Same title rule persistence will apply, so the live sidebar entry the
+    // user sees now matches the disk row that replaces it later.
+    expect(running[0].title).toBe('用canvas画一只会飞的小鸟');
+
+    (flight.controller as any).setStreaming(false);
+    expect(manager.getRunningLiveSessions()).toHaveLength(0);
+  });
+
+  it('switching back to a warm session re-syncs relative-path resolution to ITS workspace', () => {
+    // Regression: warm switches bypass setWorkspace, so the module-level
+    // resolver kept the PREVIOUS session's workspace and artifact cards opened
+    // the wrong directory after returning to a background session.
+    const manager = new SessionChatManager();
+    const flight = manager.openSession('session-flight');
+    flight.controller.setWorkspace('/ws/flight');
+    const weather = manager.openSession('session-weather');
+    weather.controller.setWorkspace('/ws/weather');
+    expect(resolvePathForOpen('out.png')).toBe('/ws/weather/out.png');
+
+    manager.openSession('session-flight'); // warm switch back
+    expect(resolvePathForOpen('out.png')).toBe('/ws/flight/out.png');
   });
 });
