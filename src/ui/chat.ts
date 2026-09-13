@@ -2303,7 +2303,10 @@ export class ChatController {
     let currentSegment: AssistantSegment | null = null;
     // Files the agent actually wrote this turn (deduped). Folders created for
     // project scaffolding never become result cards. Collected from SUCCESSFUL
-    // write/edit/replace tool results only.
+    // write/edit/replace tool results only. `op` records HOW the file came to
+    // exist: 'edit' = an existing file modified in place — planArtifactDisplay
+    // treats that as a must-show signal, because it is the file the user
+    // handed over and they must be told where it ended up.
     const turnArtifacts: ArtifactItem[] = [];
     // 是否本轮真实交付了项目（projectDelivered 命中：非中断、且验证/计划/任务满足
     // 交付条件）。仅在此时把 artifact 块持久化进 transcript——否则一个"写到一半被中断
@@ -2311,16 +2314,18 @@ export class ChatController {
     // persistSession 调用点（含计划暂停的早期分支）。
     let deliveredThisTurn = false;
     const artifactSeen = new Set<string>();
-    const addArtifact = (path: string): void => {
+    const addArtifact = (path: string, op: 'edit' | 'create'): void => {
       const key = path;
       if (artifactSeen.has(key)) return;
       artifactSeen.add(key);
       const norm = path.trim().toLowerCase().replaceAll('\\', '/').replace(/^\.\//, '');
       const version = this.fileWriteVersions.get(norm) ?? 1;
-      turnArtifacts.push({ path, version });
+      // Only 'edit' is materialized (see transcriptProjection.artifactsFromToolExecs).
+      const item: ArtifactItem = op === 'edit' ? { path, version, op } : { path, version };
+      turnArtifacts.push(item);
       if (!this.sessionArtifactSeen.has(norm)) {
         this.sessionArtifactSeen.add(norm);
-        this.sessionArtifacts.push({ path, version });
+        this.sessionArtifacts.push(item);
       }
     };
     let toolRowSinceSegment = false;
@@ -4063,13 +4068,16 @@ export class ChatController {
               if (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'create_document') {
                 if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) {
                   bumpVersion(resultArgs.path);
-                  addArtifact(resultArgs.path);
+                  // edit_file modifies the user's existing file in place — the
+                  // card must surface it even when the extension reads like
+                  // source code. write_file / create_document are new files.
+                  addArtifact(resultArgs.path, toolName === 'edit_file' ? 'edit' : 'create');
                 }
               } else if (toolName === 'replace_files' && Array.isArray(resultArgs.files)) {
                 for (const f of resultArgs.files) {
                   if (typeof f === 'string' && f.trim()) {
                     bumpVersion(f);
-                    addArtifact(f);
+                    addArtifact(f, 'edit');
                   }
                 }
               }
@@ -4439,13 +4447,15 @@ export class ChatController {
               }
             }
 
-            // Project directory card: the single entry point to everything the
-            // agent generated for this project. It must appear EXACTLY ONCE and
-            // ONLY when the project is genuinely delivered — never on an
-            // interruption (showing it mid-run made users think the task was
-            // done), and it must still appear when a project was interrupted and
-            // resumed: the final completion turn may write no new files, so the
-            // cumulative session artifact list is used rather than this turn's.
+            // Artifact cards follow the human rule per TURN: a colleague who
+            // edited your file this turn ends with "改好了，文件是 xxx" —
+            // every turn that wrote files says so, not just the first one.
+            // The once-per-session cumulative directory card survives only as
+            // the wrap-up entry point for a plan-built project whose final
+            // completion turn may write no new files (the reason the session
+            // list, not the turn list, was used here historically). Rendering
+            // the turn list also matches the replay projection, which has
+            // always persisted per-turn artifacts.
             const deliveredPlanIndex = completionSnapshot?.plan.steps.length ?? 0;
             const deliveredOnFinalStage = completionSnapshot !== undefined
               && completionSnapshot.currentPlan >= deliveredPlanIndex;
@@ -4460,16 +4470,21 @@ export class ChatController {
             // 只要本轮正常结束且产生过文件就显示。此前它被交付门禁拦住——
             // 而会话恢复路径按 write 记录无条件重建卡片，导致「实时不显示、
             // 重载后反而出现」的分叉。门禁是否通过由状态气泡单独表达。
-            const projectHasArtifacts =
+            const turnHasNewArtifacts =
               gen === this.generation
               && !event.payload.interrupted
+              && turnArtifacts.length > 0;
+            const projectWrapUp =
+              !turnHasNewArtifacts
+              && projectDelivered
               && this.sessionArtifacts.length > 0
               && !this.projectDirectoryShown;
-            if (projectHasArtifacts) {
+            if (turnHasNewArtifacts || projectWrapUp) {
+              const cardItems = turnHasNewArtifacts ? turnArtifacts : this.sessionArtifacts;
               const artifactRow = document.createElement('div');
               artifactRow.className = 'bubble-row artifact-row';
               this.appendToTranscript(artifactRow);
-              renderArtifactCards(artifactRow, this.sessionArtifacts, computeProjectDir(this.sessionArtifacts) ?? effectiveWorkspace, { userRequest: userText });
+              renderArtifactCards(artifactRow, cardItems, computeProjectDir(cardItems) ?? effectiveWorkspace, { userRequest: userText });
               this.projectDirectoryShown = true;
               deliveredThisTurn = true;
               scrollChatToBottomIfPinned(chatEl);
@@ -4924,7 +4939,7 @@ export class ChatController {
     pauseAssessment?: IntentAssessment,
     taskAnalysisText = '',
     renderedAssistantTexts: string[] = [],
-    artifacts: Array<{ path: string }> = [],
+    artifacts: Array<{ path: string; op?: 'edit' | 'create' }> = [],
     visibleUserText = '',
     /** Only persist the artifact block when this turn genuinely delivered the
      * project (projectDelivered). Without this, an interrupted / unverified

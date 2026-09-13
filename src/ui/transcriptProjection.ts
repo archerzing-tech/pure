@@ -17,7 +17,7 @@ export type TranscriptReplayBlock =
   | { type: 'plan' }
   | { type: 'assistant'; content: string; isPlanPause: boolean }
   | { type: 'tool'; exec: ToolExecMeta; stopped: boolean }
-  | { type: 'artifact'; items: Array<{ path: string }>; userRequest?: string };
+  | { type: 'artifact'; items: Array<{ path: string; op?: 'edit' | 'create' }>; userRequest?: string };
 
 function stoppedTool(call: StoredToolCallInfo): TranscriptReplayBlock {
   return {
@@ -38,19 +38,29 @@ function visibleUserContent(content: string): string {
     .trim();
 }
 
-function artifactsFromToolExecs(execs: ToolExecMeta[]): Array<{ path: string }> {
-  const paths = new Set<string>();
+function artifactsFromToolExecs(execs: ToolExecMeta[]): Array<{ path: string; op?: 'edit' | 'create' }> {
+  const paths = new Map<string, 'edit' | 'create'>();
+  const add = (path: string, op: 'edit' | 'create'): void => {
+    if (path.trim()) paths.set(path, op);
+  };
   for (const exec of execs) {
     if (!exec.success) continue;
-    if ((exec.toolName === 'write_file' || exec.toolName === 'edit_file') && typeof exec.args?.path === 'string' && exec.args.path.trim()) {
-      paths.add(exec.args.path);
+    if (exec.toolName === 'write_file' && typeof exec.args?.path === 'string') {
+      add(exec.args.path, 'create');
+    } else if (exec.toolName === 'edit_file' && typeof exec.args?.path === 'string') {
+      add(exec.args.path, 'edit');
+    } else if (exec.toolName === 'create_document' && typeof exec.args?.path === 'string') {
+      add(exec.args.path, 'create');
     } else if (exec.toolName === 'replace_files' && Array.isArray(exec.args?.files)) {
       for (const file of exec.args.files) {
-        if (typeof file === 'string' && file.trim()) paths.add(file);
+        if (typeof file === 'string') add(file, 'edit');
       }
     }
   }
-  return [...paths].map(path => ({ path }));
+  // `op` is only materialized for 'edit': a missing op already means
+  // "created/unknown" everywhere it is consumed, so persisted JSON stays lean
+  // and legacy replays compare equal.
+  return [...paths].map(([path, op]) => (op === 'edit' ? { path, op } : { path }));
 }
 
 export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayBlock[] {
@@ -63,7 +73,7 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
   // the final answer. The restore projection must match: accumulate the
   // turn's written files (deduped by path) and emit a single artifact block
   // at the turn boundary — never one card per assistant message.
-  const turnArtifactPaths = new Map<string, { path: string }>();
+  const turnArtifactPaths = new Map<string, { path: string; op?: 'edit' | 'create' }>();
   let turnHasExplicitArtifacts = false;
 
   const flushTurnArtifacts = (): void => {
@@ -170,7 +180,7 @@ export function projectSessionEvents(events: import('./store').SessionEvent[]): 
   const pending = new Map<string, StoredToolCallInfo>();
   const completedTools: ToolExecMeta[] = [];
   let lastUserRequest = '';
-  const turnArtifactPaths = new Map<string, { path: string }>();
+  const turnArtifactPaths = new Map<string, { path: string; op?: 'edit' | 'create' }>();
   let turnHasExplicitArtifacts = false;
 
   const flushTurnArtifacts = (): void => {

@@ -215,4 +215,23 @@ describe('projectTranscript', () => {
     const blocks = projectTranscript(entries);
     expect(blocks.at(-1)).toMatchObject({ type: 'artifact', items: [{ path: 'output.txt' }] });
   });
+
+  it('preserves the edit op so replayed turns can show edited-file cards', () => {
+    // Live turns mark edit_file writes with op:'edit' so planArtifactDisplay
+    // can guarantee a card for the user's own modified file; the replay
+    // projection must carry the same signal, both from tool-exec derivation
+    // and from persisted artifact metadata.
+    const blocks = projectTranscript([
+      { id: 'u1', modelMessageIndex: 0, role: 'user', content: '把 config.json 改成多环境' },
+      { id: 'a1', modelMessageIndex: 1, role: 'assistant', content: '', toolCalls: [{ id: 'e1', toolName: 'edit_file', args: { path: 'config.json' } }] },
+      { id: 't1', modelMessageIndex: 2, role: 'tool', content: 'edited', toolCallId: 'e1', toolName: 'edit_file' },
+      { id: 'a2', modelMessageIndex: 3, role: 'assistant', content: '改完了。', artifacts: [{ path: 'config.json', op: 'edit' }] },
+    ]);
+
+    expect(blocks.at(-1)).toEqual({
+      type: 'artifact',
+      items: [{ path: 'config.json', op: 'edit' }],
+      userRequest: '把 config.json 改成多环境',
+    });
+  });
 });

@@ -33,7 +33,7 @@ export interface TranscriptEntry {
   analysis?: string;
   thinking?: string;
   thinkingPhases?: Array<{ text: string; assistantIndex: number }>;
-  artifacts?: Array<{ path: string }>;
+  artifacts?: Array<{ path: string; op?: 'edit' | 'create' }>;
   isPlanPause?: boolean;
   assessment?: IntentAssessment;
   toolExec?: ToolExecMeta;
@@ -109,7 +109,7 @@ export interface TranscriptDraft {
   analysis?: string;
   thinking?: string;
   thinkingPhases?: Array<{ text: string; assistantIndex: number }>;
-  artifacts?: Array<{ path: string }>;
+  artifacts?: Array<{ path: string; op?: 'edit' | 'create' }>;
   isPlanPause?: boolean;
   assessment?: IntentAssessment;
   toolExec?: ToolExecMeta;
@@ -129,7 +129,7 @@ export interface SessionEvent {
   toolName?: string;
   toolCalls?: StoredToolCallInfo[];
   toolExec?: ToolExecMeta;
-  artifacts?: Array<{ path: string }>;
+  artifacts?: Array<{ path: string; op?: 'edit' | 'create' }>;
   assessment?: IntentAssessment;
   planCard?: PlanCardSnapshot;
   isPlanPause?: boolean;
@@ -219,7 +219,7 @@ export interface StoredMessage {
   /** Preflight task analysis shown before the first assistant response. */
   analysis?: string;
   /** Files shown as generated-artifact cards after this assistant response. */
-  artifacts?: Array<{ path: string }>;
+  artifacts?: Array<{ path: string; op?: 'edit' | 'create' }>;
   /** Assistant message that is a plan pause point ("已暂停，等待你回复") —
    * re-applies the waiting bubble style on session restore. */
   isPlanPause?: boolean;
