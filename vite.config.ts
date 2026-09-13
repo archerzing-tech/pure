@@ -146,10 +146,12 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari14',
     minify: !process.env.TAURI_ENV_DEBUG,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
-    // Mermaid's parser is a lazy, upstream-generated module that is roughly
-    // 680KB by itself; keep the warning threshold just above that known lazy
-    // boundary while the application entry and eager chunks stay much smaller.
-    chunkSizeWarningLimit: 700,
+    // Two known lazy boundaries sit just under 700KB minified: mermaid's
+    // upstream parser (~688KB) and the single echarts+zrender vendor chunk
+    // (~690KB, merged deliberately — see manualChunks above for why it must
+    // not be split). Keep the threshold above both so the warning stays
+    // meaningful for eager chunks, which are much smaller.
+    chunkSizeWarningLimit: 800,
     rollupOptions: {
       // Suppress intentional node:* externalization warnings — conventions.ts
       // and backgroundCommand.ts use dynamic import / guarded require inside
@@ -169,12 +171,22 @@ export default defineConfig({
           // diagram/chart is requested, so stable vendor boundaries improve
           // cache reuse and prevent unrelated UI changes from invalidating
           // them.
-          if (normalizedId.includes('/zrender/')) return 'zrender-vendor';
-          const chartMatch = normalizedId.match(/\/echarts\/lib\/chart\/([^/]+)/);
-          if (chartMatch) return `echarts-chart-${chartMatch[1]}`;
-          if (normalizedId.includes('/echarts/lib/component/')) return 'echarts-components';
-          if (normalizedId.includes('/echarts/lib/core/')) return 'echarts-core';
-          if (normalizedId.includes('/echarts/')) return 'echarts-vendor';
+          //
+          // echarts + zrender must stay ONE chunk. echarts' own module graph
+          // has cycles (core ⇄ export/util ⇄ components ⇄ chart helpers), and
+          // slicing those groups into separate chunks turned them into
+          // cross-chunk evaluation cycles: a component install ran before the
+          // vendor binding it reads was initialized, so every chart died with
+          // "Cannot access 'X' before initialization" (Node importing the
+          // built echartsChart chunk reproduced it verbatim). In one chunk
+          // Rollup orders the whole graph itself — the same shape dev gets
+          // from optimizeDeps pre-bundling echarts as a single file, which is
+          // why dev never showed this. The chunk stays lazy: it is only
+          // reached via import('./echartsChart') from markdown.ts, and the
+          // per-chart split never paid off anyway — echarts.use() in
+          // echartsChart.ts pulls every registered chart into the graph at
+          // once, so all slices always loaded together.
+          if (normalizedId.includes('/zrender/') || normalizedId.includes('/echarts/')) return 'echarts-vendor';
           if (normalizedId.includes('/@anthropic-ai/sdk/') || normalizedId.includes('/openai/')) {
             return 'llm-vendor';
           }
