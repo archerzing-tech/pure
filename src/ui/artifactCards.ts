@@ -1,17 +1,22 @@
 // src/ui/artifactCards.ts
 // Smart result display for generated files. After a turn completes, the files
 // the agent actually wrote are surfaced at the END of the final assistant
-// bubble as clickable cards:
+// bubble as clickable cards. The governing rule is the one a human colleague
+// follows: whenever the user would need to ask "改好的文件在哪?", the answer
+// must already be on screen —
 //
-//   * A single final deliverable is shown as a clickable card.
+//   * A file the agent EDITED in place (the file the user handed over) is
+//     always shown, whatever its extension.
+//   * The single file a build/persist/modify request asked for ("写一个脚本",
+//     "把结果保存成文件", "把这个文件改成xxx") is always shown.
+//   * Other single final deliverables are shown as clickable cards.
 //   * Multiple office/text files are shown as cards only when there are at most
 //     MAX_FILE_CARDS of them; helper scripts are omitted unless explicitly
 //     requested as the deliverable.
 //   * A multi-file project is represented by one clickable workspace-directory
 //     link, so a generated project never floods the transcript with cards.
-//   * Folders are workspace scaffolding and are deliberately omitted from the
-//     result area; the project workspace remains available through the context
-//     panel and path links in the assistant reply.
+//   * Intermediate byproducts (raw data dumps, scratch files) and folders are
+//     deliberately omitted — nobody needs to be told where the temp files went.
 //
 // Artifacts are collected from successful write_file / edit_file /
 // replace_files tool results during one send() turn — see chat.ts's ToolResult
@@ -31,6 +36,12 @@ export interface ArtifactItem {
   /** 1-based version of this generated/modified file (v1, v2, …). Undefined for
    * replayed/legacy artifacts whose version is unknown. */
   version?: number;
+  /** How this file came to exist. 'edit' = an existing file the agent modified
+   * in place (edit_file / replace_files) — the strongest "the user must be
+   * told where this ended up" signal, because it is the very file the user
+   * put on the table. 'create' = newly written. Legacy persisted items have
+   * no op and are treated like 'create'. */
+  op?: 'edit' | 'create';
 }
 
 export const MAX_FILE_CARDS = 10;
@@ -145,6 +156,23 @@ function requestLooksLikeBuild(request: string): boolean {
   return /(?:请|帮我|麻烦你|给我)?(?:编写|编|写|开发|制作|创建|搭建|实现|构建|做一个|做个|写一个|写个|开发一个|实现一个|写段|搭一个|重构|重写|修复|部署|迁移)/i.test(request.slice(0, 80));
 }
 
+/**
+ * True when the request asks to produce, persist, or change a file — the
+ * situations where a human colleague would ALWAYS end with "文件在 xxx":
+ *  - build verbs ("写一个脚本", "开发一个工具")
+ *  - persist verbs, anywhere in the sentence ("把结果保存成文件",
+ *    "导出成 csv", "打包成 zip")
+ *  - modify verbs on an existing file ("把这个文件改成多环境",
+ *    "修复 config.yaml", "优化一下这个脚本")
+ * A lookup/planning request ("帮我制定旅游规划") matches none of these — its
+ * stray data files stay hidden.
+ */
+function requestAsksForFileChange(request: string): boolean {
+  if (!request) return false;
+  if (requestLooksLikeBuild(request)) return true;
+  return /(?:保存|存成|存为|存到|存入|存个|另存|写进|写入|写出|导出|输出|落盘|打包|压缩|归档|保存为|导出为|改成|改为|换成|替换成|更新|调整|修改|修复|修复掉|优化|完善|重构|fix|update|modify|refactor|improve|save|export|archive|zip)/i.test(request);
+}
+
 function requestLooksLikeFinalVisualOrDocument(request: string): boolean {
   return /(?:画|绘制|图片|图像|插画|海报|封面|文档|报告|word|ppt|excel|表格|pdf|markdown|文本)/i.test(request);
 }
@@ -214,6 +242,30 @@ export function planArtifactDisplay(items: ArtifactItem[], options: ArtifactDisp
   const projectRequest = request.length > 0 && requestLooksLikeProject(request);
   const finalDeliverables = kept.filter(item => isFinalDeliverableArtifact(item.path));
   const hasImplementationFiles = kept.some(item => isScriptOrSourceArtifact(item.path));
+
+  // ── Human rules, before any extension heuristics ──
+  // A colleague who edits a file you handed them, or writes the one file you
+  // asked for, ALWAYS ends with where the file is — regardless of whether its
+  // extension "looks like a deliverable". Source/data extensions only decide
+  // presentation for AMBIGUOUS writes (stashed lookups, helper scripts), never
+  // for these:
+  //   1. Edited-in-place files (edit_file / replace_files): the strongest
+  //      signal there is — this is the file the user put on the table.
+  //   2. The lone artifact of a build/persist/modify request ("写一个脚本",
+  //      "把结果保存成文件", "把这个文件改成多环境"): it IS the deliverable.
+  //      Exception: when the request's object is a visual/document product
+  //      ("制作一张海报") and the only file left is a script, the script was
+  //      the means, not the point — showing it would read as "this is your
+  //      poster". Nothing survives, as before.
+  // Both stay under the card ceiling; a bigger mixed turn falls through to the
+  // project-directory link below, which still names a location.
+  const edits = kept.filter((item) => item.op === 'edit');
+  const singleDeliverable = kept.length === 1
+    && requestAsksForFileChange(request)
+    && !(requestLooksLikeFinalVisualOrDocument(request) && isScriptOrSourceArtifact(kept[0].path));
+  if ((edits.length > 0 || singleDeliverable) && kept.length <= MAX_FILE_CARDS) {
+    return { mode: 'files', items: kept };
+  }
 
   // For visual/document tasks, implementation files are working material. Only
   // the requested final files remain visible; if none survived, show nothing.
