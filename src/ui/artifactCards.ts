@@ -49,6 +49,11 @@ export const MAX_FILE_CARDS = 10;
 export interface ArtifactDisplayOptions {
   /** The user's request for this turn, used to hide implementation byproducts. */
   userRequest?: string;
+  /** The producing session's workspace. Pinned onto every card so opening the
+   * artifact resolves against the session that WROTE the file — not against
+   * whichever conversation is visible when the card is clicked (the two differ
+   * whenever a background session finished while another chat was open). */
+  workspace?: string;
 }
 
 export type ArtifactDisplay =
@@ -435,7 +440,7 @@ async function previewSvgArtifact(path: string, card: HTMLElement): Promise<void
  * Build one generated-file card. The native button semantics provide
  * Enter/Space activation and the hover hint makes the action discoverable.
  */
-function createArtifactCard(item: ArtifactItem): HTMLButtonElement | null {
+function createArtifactCard(item: ArtifactItem, workspace?: string): HTMLButtonElement | null {
   const path = item.path;
   if (!path) return null;
   const meta = fileIconMeta(path);
@@ -444,6 +449,7 @@ function createArtifactCard(item: ArtifactItem): HTMLButtonElement | null {
   card.type = 'button';
   card.className = `artifact-card ${meta.cls}`;
   card.setAttribute('data-path', path);
+  if (workspace !== undefined) card.setAttribute('data-workspace', workspace);
   card.title = t('artifacts.clickHint');
   card.setAttribute('aria-label', `${t('artifacts.openFile')}: ${path}`);
   card.innerHTML =
@@ -474,7 +480,7 @@ function createArtifactCard(item: ArtifactItem): HTMLButtonElement | null {
   pathEl.textContent = rest;
   kindEl.textContent = artifactKindLabel(path);
   actionEl.textContent = t('artifacts.openAction');
-  card.addEventListener('click', () => openPathLink(path));
+  card.addEventListener('click', () => openPathLink(path, workspace));
   // Inline preview for model-written .svg pictures (the write_file fallback
   // path) so the image still renders in the chat even when the model chose to
   // save a file instead of emitting a ```svg block.
@@ -488,15 +494,15 @@ function createArtifactCard(item: ArtifactItem): HTMLButtonElement | null {
  * The card points at the generated project subdirectory (computeProjectDir) — not
  * always the workspace root — and offers both "reveal in file manager" and a
  * copy-path action. */
-function createProjectDirectoryLink(projectPath: string): HTMLElement {
+function createProjectDirectoryLink(projectPath: string, workspace?: string): HTMLElement {
   const target = projectPath.trim() || '.';
-  const resolved = resolvePathForOpen(target).replace(/[\\/]\.$/, '') || target;
+  const resolved = resolvePathForOpen(target, workspace).replace(/[\\/]\.$/, '') || target;
 
   const card = document.createElement('div');
   card.className = 'artifact-project-link';
   card.title = `${t('artifacts.openDir')}: ${resolved}`;
   card.setAttribute('aria-label', `${t('artifacts.openDir')}: ${resolved}`);
-  card.addEventListener('click', () => openPathLink(target));
+  card.addEventListener('click', () => openPathLink(target, workspace));
 
   const icon = document.createElement('span');
   icon.className = 'artifact-project-icon';
@@ -556,10 +562,10 @@ export function renderArtifactCards(
   wrap.setAttribute('aria-label', plan.mode === 'project' ? t('artifacts.project') : t('artifacts.group'));
 
   if (plan.mode === 'project') {
-    wrap.appendChild(createProjectDirectoryLink(projectPath));
+    wrap.appendChild(createProjectDirectoryLink(projectPath, options.workspace));
   } else {
     for (const item of plan.items) {
-      const card = createArtifactCard(item);
+      const card = createArtifactCard(item, options.workspace);
       if (card) wrap.appendChild(card);
     }
   }

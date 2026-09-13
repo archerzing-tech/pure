@@ -4,7 +4,7 @@
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
+import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, resolveNetRoute, netRouteProxyPair, recordNetOutcome } from '../shared/netRoute';
@@ -4484,7 +4484,7 @@ export class ChatController {
               const artifactRow = document.createElement('div');
               artifactRow.className = 'bubble-row artifact-row';
               this.appendToTranscript(artifactRow);
-              renderArtifactCards(artifactRow, cardItems, computeProjectDir(cardItems) ?? effectiveWorkspace, { userRequest: userText });
+              renderArtifactCards(artifactRow, cardItems, computeProjectDir(cardItems) ?? effectiveWorkspace, { userRequest: userText, workspace: effectiveWorkspace });
               this.projectDirectoryShown = true;
               deliveredThisTurn = true;
               scrollChatToBottomIfPinned(chatEl);
@@ -5339,6 +5339,12 @@ export class SessionChatManager {
     this.currentSessionId = sessionId;
     if (changed) {
       controller.setViewActive(true);
+      // Relative-path resolution must follow the now-VISIBLE session. Warm
+      // switches bypass ChatController.setWorkspace entirely, so without this
+      // a transcript clicked right after returning from another conversation
+      // resolved against the previous session's workspace and opened the
+      // wrong directory.
+      setPathLinkWorkspace(controller.getEffectiveWorkspace());
       this.streamingCb?.(controller.isStreaming());
       // Re-publish the newly visible session's undo availability + stats so the
       // shell chrome (undo button, context panel) reflects the session that is
@@ -5392,6 +5398,27 @@ export class SessionChatManager {
   /** Whether the session identified by `sessionId` is still open (live). */
   hasOpenSession(sessionId: string): boolean {
     return this.controllers.has(sessionId);
+  }
+
+  /** Live sessions streaming RIGHT NOW, including ones never persisted to disk
+   * (a first turn still running has no SessionMeta yet). The sidebar merges
+   * these into its list so background work stays visible with a running dot
+   * instead of vanishing until its first persist. Titles come from the live
+   * transcript via the same extractTitle rule persistence uses, so the entry
+   * the user sees now matches the one disk will show later. */
+  getRunningLiveSessions(): Array<{ id: string; title: string; workspace: string }> {
+    const out: Array<{ id: string; title: string; workspace: string }> = [];
+    for (const id of runningSessionIds) {
+      const controller = this.controllers.get(id);
+      if (controller) {
+        out.push({
+          id,
+          title: extractTitle(controller.getMessages()),
+          workspace: controller.getEffectiveWorkspace(),
+        });
+      }
+    }
+    return out;
   }
 
   /** Dispose a session's controller: cancels its run and removes its host.

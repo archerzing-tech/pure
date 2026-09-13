@@ -32,6 +32,12 @@ export interface SessionSidebarDeps {
     forgetSession(sessionId: string): void;
     /** Stop + drop every live controller (delete-all). */
     clearAll(): void;
+    /** Live controllers of sessions streaming right now, including ones with
+     * nothing on disk yet — merged into the list so background work shows up
+     * with its running dot instead of being invisible until first persist. */
+    getRunningLiveSessions(): Array<{ id: string; title: string; workspace: string }>;
+    /** Whether this app instance still holds a live controller for the id. */
+    hasOpenSession(sessionId: string): boolean;
   };
   pasteChips: { clear(): void };
   confirm(message: string): Promise<boolean>;
@@ -63,6 +69,14 @@ function saveCollapsedGroups(groups: Set<string>): void {
   try {
     localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...groups]));
   } catch { /* ignore */ }
+}
+
+/** Session ids embed their creation time (`session_<ms>_<seq>`); live-only
+ * sidebar entries have no SessionMeta on disk, so recover the timestamp from
+ * the id itself for createdAt display/sorting. */
+function sessionIdCreatedAt(id: string): number {
+  const m = id.match(/^session_(\d+)_/);
+  return m ? Number(m[1]) : Date.now();
 }
 
 /** Open a NEW pure app window (Tauri WebviewWindow; browser fallback = new
@@ -176,6 +190,19 @@ export class SessionSidebar {
   async load(id: string): Promise<void> {
     const seq = ++this.loadSequence;
     const loaded = await loadSession(id);
+    // Live-only fallback: the session streams but has no disk snapshot yet
+    // (first turn still running). The controller owns the whole transcript in
+    // memory — re-show it warm instead of silently dropping the click.
+    if (!loaded && this.deps.chat.hasOpenSession(id)) {
+      if (this.isLoadStale(seq)) return;
+      this.deps.chat.openSession(id);
+      if (this.isLoadStale(seq)) return;
+      this.deps.pasteChips.clear();
+      this.setActive(id);
+      this.deps.onSessionActivated();
+      this.deps.focusPrompt();
+      return;
+    }
     // A newer load request superseded this one (rapid session clicking): the
     // latest click owns the transcript — drop this stale result entirely,
     // including its tail effects (render / focus).
@@ -253,12 +280,28 @@ export class SessionSidebar {
     const container = document.getElementById('sidebar-session-list')!;
     try {
       const list = await loadSessionList();
-      if (!list || list.length === 0) {
+      // Sessions streaming in the background merge ON TOP of the disk list: a
+      // first turn that is still running has never been persisted, so without
+      // this the conversation the user just started vanishes from the sidebar
+      // the moment they switch away — no entry, no running dot.
+      const persisted = new Set((list ?? []).map(s => s.id));
+      const live = this.deps.chat
+        .getRunningLiveSessions()
+        .filter(s => !persisted.has(s.id))
+        .map(s => ({
+          id: s.id,
+          title: s.title,
+          createdAt: sessionIdCreatedAt(s.id),
+          updatedAt: Date.now(),
+          messageCount: 0,
+          workspace: s.workspace || undefined,
+        }));
+      if ((!list || list.length === 0) && live.length === 0) {
         container.innerHTML = `<div class="sidebar-session-empty">${t('sidebar.noSessions')}</div>`;
         return;
       }
 
-      const sorted = [...list].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 30);
+      const sorted = [...(list ?? []), ...live].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 30);
 
       // Per-session token/cost summary line: bulk-load stats for every visible
       // row (one IPC round-trip) and show a compact `1.2k · $0.01` line under
@@ -352,22 +395,23 @@ export class SessionSidebar {
           const sid = btn.getAttribute('data-sid');
           if (!sid) return;
           if (!(await this.deps.confirm(t('confirm.deleteSession')))) return;
+          // Tear the controller down BEFORE the disk delete: a background run
+          // between the two steps would re-persist the session the user just
+          // deleted, and a live-only entry (never persisted, sidebar-merged)
+          // deletes cleanly even though it has no file to remove.
+          if (this.currentActiveId === sid) {
+            // Deleting the visible session: clear() cancels its run (explicit
+            // user intent) and bounces back to landing.
+            this.resetToLanding();
+          } else {
+            this.deps.chat.forgetSession(sid);
+          }
           try {
             await deleteSession(sid);
           } catch (err) {
             console.error('[pure] deleteSession failed:', err);
             showToast(t('toast.deleteFailed'));
             return;
-          }
-          if (this.currentActiveId === sid) {
-            // Deleting the visible session: clear() cancels its run (explicit
-            // user intent) and bounces back to landing.
-            this.resetToLanding();
-          } else {
-            // A deleted session may still have a LIVE controller running in
-            // the background — stop and drop it so its run cannot keep
-            // re-persisting a session the user just deleted.
-            this.deps.chat.forgetSession(sid);
           }
           this.refresh();
         });
