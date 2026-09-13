@@ -12771,6 +12771,39 @@ fn cleanup_session_files(session_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A conversation the user never talked to is not a session. Older versions
+/// could persist an untouched chat, leaving a "New chat" index row with zero
+/// messages; the frontend no longer saves empty sessions, so this one
+/// best-effort sweep at startup clears out the legacy rows (and their files).
+/// Idempotent and cheap: after the first run there is nothing left to prune.
+fn prune_empty_sessions() {
+    let Ok(_guard) = session_persistence_lock().lock() else { return };
+    let index_path = sessions_dir().join("index.json");
+    let Ok(raw) = fs::read_to_string(&index_path) else { return };
+    let list: Vec<SessionMeta> = match serde_json::from_str(&raw) {
+        Ok(list) => list,
+        Err(_) => return,
+    };
+    let empty_ids: Vec<String> = list
+        .iter()
+        .filter(|s| s.message_count == 0)
+        .map(|s| s.id.clone())
+        .collect();
+    if empty_ids.is_empty() {
+        return;
+    }
+    let kept: Vec<SessionMeta> = list.into_iter().filter(|s| s.message_count > 0).collect();
+    if fs::write(&index_path, serde_json::to_string_pretty(&kept).unwrap_or_default()).is_err() {
+        return;
+    }
+    drop(_guard);
+    std::thread::spawn(move || {
+        for id in empty_ids {
+            let _ = cleanup_session_files(&id);
+        }
+    });
+}
+
 #[tauri::command]
 fn delete_all_sessions() -> Result<(), String> {
     let dir = sessions_dir();
@@ -14645,6 +14678,10 @@ pub fn run() {
             // warm cache (and the request path never needs a detection of its
             // own until the 5s TTL lapses).
             refresh_system_proxy_cache();
+
+            // Drop legacy zero-message sessions (see prune_empty_sessions):
+            // the sidebar must only ever list conversations that exist.
+            prune_empty_sessions();
 
             // ── Native menu bar (macOS ONLY) ──
             // The system menu is the natural home for window/app-level

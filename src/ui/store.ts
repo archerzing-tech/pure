@@ -1045,6 +1045,9 @@ export function createSessionPlanProgressPersistence(
  */
 export async function saveSession(sessionId: string, snapshot: SessionSnapshotV2, workspace = ''): Promise<void> {
   const boundedSnapshot = limitSessionSnapshot(snapshot);
+  // A conversation the user has not talked to is not a session: persisting it
+  // would put a "New chat" row in the sidebar that restores to nothing.
+  if (boundedSnapshot.modelContext.messages.length === 0) return;
   const revision = Math.max(
     sessionSaveRevisions.get(sessionId) ?? 0,
     sessionLoadedRevisions.get(sessionId) ?? 0,
