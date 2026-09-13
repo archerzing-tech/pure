@@ -21,7 +21,7 @@ fn test_home_lock() -> &'static StdMutex<()> {
 }
 
 fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .timeout(timeout)
         // Bound the CONNECT/TLS handshake separately: without this a hung
         // proxy (killed app that left the OS setting behind, half-dead node)
@@ -34,6 +34,26 @@ fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> R
         // is exactly why it succeeds through such proxies where the h2 client
         // fails.
         .http1_only();
+    finalize_http_client(builder, proxy_url)
+}
+
+/// Client for STREAMING LLM requests: deliberately NO total timeout. reqwest's
+/// client `timeout` spans the whole request INCLUDING reading the streamed
+/// body, so the previous 180s killed perfectly healthy long generations at
+/// exactly the 3-minute mark — every big-project analysis turn streams longer
+/// than that, and the cut lands mid-answer ("上一条回复输出中断了"). Dead
+/// connections are already bounded by the SSE idle timeout in chat_stream's
+/// read loop (LLM_STREAM_IDLE_TIMEOUT_SECS with no data ⇒ error), which is the
+/// only guard a live stream needs.
+fn build_llm_stream_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    let builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .http1_only();
+    finalize_http_client(builder, proxy_url)
+}
+
+/// Shared tail of every client builder: apply the optional proxy, then build.
+fn finalize_http_client(mut builder: reqwest::ClientBuilder, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
     if let Some(url) = effective_proxy_url(proxy_url.unwrap_or("")) {
         if !valid_proxy_url(&url) {
             return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
@@ -11661,10 +11681,9 @@ async fn chat_stream(
     } else {
         format!("{}/chat/completions", base_url)
     };
-    let client = build_http_client(
-        std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
-        llm_proxy_url(&args),
-    )?;
+    // Streaming client: no total deadline (see build_llm_stream_client) — the
+    // idle timeout in the read loop below is the only connection guard.
+    let client = build_llm_stream_client(llm_proxy_url(&args))?;
     // Capture the route information BEFORE body construction moves pieces of
     // `args` (tools) — the borrow checker forbids reading it afterwards.
     let fallback_spec = llm_fallback_proxy_url(&args);
@@ -11779,7 +11798,7 @@ async fn chat_stream(
         Err(primary_err) => {
             let fallback_client = fallback_spec
                 .as_ref()
-                .map(|spec| build_http_client(std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS), Some(spec.as_str())))
+                .map(|spec| build_llm_stream_client(Some(spec.as_str())))
                 .transpose();
             match fallback_client {
                 Ok(Some(fallback)) => {
