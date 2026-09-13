@@ -79,6 +79,27 @@ describe('session snapshot revision', () => {
   });
 });
 
+describe('empty sessions are not sessions', () => {
+  it('saveSession skips a conversation with zero messages entirely', async () => {
+    const previousStorage = (globalThis as any).localStorage;
+    const values = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    };
+    try {
+      const sessionId = `empty-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await saveSession(sessionId, createSessionSnapshot([], []));
+      // Nothing persisted: no session file, no index row, no "last session".
+      expect(await loadSession(sessionId)).toBeNull();
+      expect(values.get('pure_last_session')).toBeUndefined();
+    } finally {
+      (globalThis as any).localStorage = previousStorage;
+    }
+  });
+});
+
 describe('session plan progress persistence adapter', () => {
   it('coalesces model snapshots and persists the latest canonical progress', async () => {
     const previousStorage = (globalThis as any).localStorage;
