@@ -37,13 +37,6 @@ function stateClass(activity: SessionAgentActivity, historical: boolean): string
   return 'active';
 }
 
-/** Live-mode dismissal: a terminal card dwells so its end state is readable,
- * then fades away — the card's job is "who is working, since when", not a
- * permanent log. The historical trace always keeps every card. */
-const DISMISS_DWELL_MS = 2000;
-const DISMISS_FADE_MS = 400;
-const TERMINAL_WORKER_STATES = new Set(['done', 'failed', 'timed-out', 'cancelled']);
-
 /** 介入时间 — the wall-clock moment the agent joined, HH:MM:SS. */
 function startedClock(ts: number | undefined): string {
   if (!ts) return '';
@@ -54,10 +47,7 @@ function startedClock(ts: number | undefined): string {
 
 export function createAgentActivityPanel(
   initialSessionId = '',
-  options: { dismissDwellMs?: number; dismissFadeMs?: number } = {},
 ): AgentActivityPanelHandle {
-  const dwellMs = options.dismissDwellMs ?? DISMISS_DWELL_MS;
-  const fadeMs = options.dismissFadeMs ?? DISMISS_FADE_MS;
   const el = document.createElement('aside');
   el.className = 'agent-activity-rail';
   el.setAttribute('aria-label', '多 agent 活动');
@@ -77,27 +67,13 @@ export function createAgentActivityPanel(
     time: HTMLElement;
   }>();
   const activeCallIds = new Set<string>();
-  // Live-mode dismiss bookkeeping: a card whose work has ended dwells 2s,
-  // fades, then leaves the DOM AND the render set — its activity may keep
-  // arriving in the source stream, and it must not re-materialize.
-  const dismissedCallIds = new Set<string>();
-  const leavingCallIds = new Set<string>();
-  const dismissTimers = new Map<string, number>();
   let sessionId = initialSessionId;
-
-  const clearDismissals = (): void => {
-    for (const timer of dismissTimers.values()) clearTimeout(timer);
-    dismissTimers.clear();
-    dismissedCallIds.clear();
-    leavingCallIds.clear();
-  };
 
   const update = (activities: SessionAgentActivity[], options: { historical?: boolean; sessionId?: string } = {}): void => {
     if (options.sessionId !== undefined && options.sessionId !== sessionId) {
       sessionId = options.sessionId;
       rows.clear();
       activeCallIds.clear();
-      clearDismissals();
       list.replaceChildren();
     }
     const historical = options.historical === true;
@@ -111,13 +87,22 @@ export function createAgentActivityPanel(
     // boundary for users.
     const visible = activities.filter((activity) =>
       activity.callId
-      && activity.agentName !== 'bash_executor'
-      && !(!historical && dismissedCallIds.has(activity.callId)));
+      && activity.agentName !== 'bash_executor');
+    // Every dispatched agent keeps its card for the whole task — the roster is
+    // the answer to "这轮到底派了几个 agent"。The rail scrolls, and the task
+    // scoping (a new top-level task starts a fresh trace) bounds the growth.
     // Newest active agent on TOP — each new card lands at the top of the
     // stack like an incoming message; older ones push down.
     const active = visible.filter(isAgentActivityActive).sort((a, b) => (b.startedAt ?? b.lastUpdatedAt ?? 0) - (a.startedAt ?? a.lastUpdatedAt ?? 0));
     const completed = visible.filter((activity) => !isAgentActivityActive(activity)).sort((a, b) => (b.startedAt ?? b.lastUpdatedAt ?? 0) - (a.startedAt ?? a.lastUpdatedAt ?? 0));
     const ordered = [...active, ...completed];
+    // Same agent delegated N times reads as one ambiguous name — number the
+    // instances (ui_designer（1）（2）…) whenever a name appears more than
+    // once in the task. A lone agent keeps its bare name.
+    const nameCounts = new Map<string, number>();
+    for (const activity of visible) {
+      nameCounts.set(activity.agentName, (nameCounts.get(activity.agentName) ?? 0) + 1);
+    }
 
     list.replaceChildren();
 
@@ -132,9 +117,10 @@ export function createAgentActivityPanel(
         row.className = 'agent-worker';
         row.dataset.callId = activity.callId;
         // Three rows only, per the card contract: the "Agent" badge (cyan =
-        // an active worker), the machine name in FULL, and the start time.
+        // an active worker), the machine name (+ instance number when the
+        // same agent was delegated more than once), and the start time.
         // No status text, no action lines — state is conveyed by the badge
-        // color and the card's terminal fade.
+        // color and the card's state class.
         const badge = document.createElement('span');
         badge.className = 'agent-worker-badge';
         badge.textContent = 'Agent';
@@ -146,34 +132,16 @@ export function createAgentActivityPanel(
         entry = { row, badge, name, time };
         rows.set(activity.callId, entry);
       }
-      const leaving = leavingCallIds.has(activity.callId);
-      entry.row.className = `agent-worker agent-worker--${state}${entering ? ' agent-worker--entering' : ''}${leaving ? ' agent-worker--leaving' : ''}`;
+      entry.row.className = `agent-worker agent-worker--${state}${entering ? ' agent-worker--entering' : ''}`;
       // Row 2: the machine id in FULL (web_searcher / code_reviewer / …) —
       // wraps instead of ellipsizing so the exact agent is always readable.
-      entry.name.textContent = activity.agentName;
+      const numbered = (nameCounts.get(activity.agentName) ?? 0) > 1 && activity.instanceNo !== undefined;
+      entry.name.textContent = numbered
+        ? `${activity.agentName}（${activity.instanceNo}）`
+        : activity.agentName;
       entry.row.title = activity.agentRole || activity.agentName;
       entry.time.textContent = startedClock(activity.startedAt);
       list.appendChild(entry.row);
-
-      // Schedule the fade-out the moment a live card reaches a terminal
-      // state; the composed className above keeps the leaving class applied
-      // across intermediate render ticks.
-      if (!historical && !leaving && !dismissTimers.has(activity.callId) && TERMINAL_WORKER_STATES.has(state)) {
-        const timer = window.setTimeout(() => {
-          dismissTimers.delete(activity.callId);
-          const target = rows.get(activity.callId);
-          if (!target) return;
-          leavingCallIds.add(activity.callId);
-          target.row.classList.add('agent-worker--leaving');
-          window.setTimeout(() => {
-            leavingCallIds.delete(activity.callId);
-            dismissedCallIds.add(activity.callId);
-            rows.delete(activity.callId);
-            target.row.remove();
-          }, fadeMs);
-        }, dwellMs);
-        dismissTimers.set(activity.callId, timer);
-      }
     }
   };
 
