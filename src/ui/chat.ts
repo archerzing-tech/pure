@@ -1755,8 +1755,15 @@ export class ChatController {
     // prevents a delayed state/tool callback from bringing a finished agent back.
     if (previous?.sequence !== undefined && activity.sequence !== undefined && activity.sequence <= previous.sequence) return;
     const next = mergeAgentActivity(previous, activity);
-    if (index >= 0) this.agentActivities[index] = next;
-    else this.agentActivities.push(next);
+    if (index >= 0) {
+      this.agentActivities[index] = next;
+    } else {
+      // First sighting of this delegation: number it among this task's
+      // dispatches of the same agent, so four ui_designer cards read as
+      // ui_designer（1）…（4）instead of four identical names.
+      next.instanceNo = this.agentActivities.filter((item) => item.agentName === next.agentName).length + 1;
+      this.agentActivities.push(next);
+    }
     if (this.viewActive) {
       this.mountAgentActivityPanel();
       this.agentActivityPanel?.update(this.agentActivities);
@@ -1883,6 +1890,15 @@ export class ChatController {
     this.activePlanStarted = false;
     this.activePlanCardSnapshot = null;
     this.agentActivities = (snapshot.uiState.agentActivities ?? []).map((activity) => ({ ...activity }));
+    // Snapshots saved before per-instance numbering lacked instanceNo — derive
+    // it from dispatch order so a restored roster numbers consistently with a
+    // live one (and new delegations continue the sequence, not collide with it).
+    const seen = new Map<string, number>();
+    for (const activity of this.agentActivities) {
+      const next = (seen.get(activity.agentName) ?? 0) + 1;
+      seen.set(activity.agentName, next);
+      activity.instanceNo = activity.instanceNo ?? next;
+    }
     this.agentActivityHistorical = true;
     this.removeAgentActivityPanel();
     this.planSeqCounter = 0;

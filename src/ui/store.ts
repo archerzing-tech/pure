@@ -43,6 +43,10 @@ export interface TranscriptEntry {
 export interface SessionAgentActivity {
   callId: string;
   agentName: string;
+  /** 1-based instance number among THIS task's delegations of the same agent
+   * name (the 3rd ui_designer of a task is 3). Assigned by the host when the
+   * callId is first seen; persisted so a restored roster keeps its numbering. */
+  instanceNo?: number;
   agentRole?: string;
   state?: string;
   /** Explicit lifecycle used to answer which agents are active right now. */

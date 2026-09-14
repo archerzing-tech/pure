@@ -131,30 +131,55 @@ describe('agent activity panel', () => {
     panel.el.remove();
   });
 
-  it('fades terminal cards out after a short dwell in live mode', async () => {
-    const panel = createAgentActivityPanel('s1', { dismissDwellMs: 30, dismissFadeMs: 30 });
+  it('keeps a terminal card in live mode — the roster shows every dispatched agent', async () => {
+    const panel = createAgentActivityPanel('s1');
     document.body.appendChild(panel.el);
     panel.update([activity({ callId: 'a', agentName: 'code_editor', lifecycle: 'started', status: 'running', startedAt: Date.now() })]);
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
 
-    // Work finishes: the card dwells (still visible), then fades and leaves
-    // the DOM — and stays gone even though the stream keeps reporting it.
+    // Work finishes: the card STAYS (marked done). It used to fade after a
+    // 2s dwell, which hid a serial delegation queue — the user only ever saw
+    // the currently-running agent, never the ones already finished.
     panel.update([activity({ callId: 'a', agentName: 'code_editor', lifecycle: 'done', status: 'done', startedAt: Date.now() })]);
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
     await Bun.sleep(140);
-    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(0);
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
+    expect(panel.el.querySelector('[data-call-id="a"]')?.className).toContain('agent-worker--done');
+    // A repeated terminal report does not duplicate or resurrect anything.
     panel.update([activity({ callId: 'a', agentName: 'code_editor', lifecycle: 'done', status: 'done', startedAt: Date.now() })]);
-    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(0);
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
     panel.el.remove();
   });
 
-  it('keeps every card in the historical trace (no auto-dismiss)', async () => {
-    const panel = createAgentActivityPanel('s1', { dismissDwellMs: 30, dismissFadeMs: 30 });
+  it('keeps every card in the historical trace', async () => {
+    const panel = createAgentActivityPanel('s1');
     document.body.appendChild(panel.el);
     panel.update([activity({ callId: 'a', agentName: 'code_editor', lifecycle: 'done', status: 'done', startedAt: Date.now() })], { historical: true });
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
     await Bun.sleep(120);
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
+    panel.el.remove();
+  });
+
+  it('numbers repeated delegations of the same agent (ui_designer（1）（2）…)', () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([
+      activity({ callId: 'd1', agentName: 'ui_designer', instanceNo: 1, lifecycle: 'done', status: 'done' }),
+      activity({ callId: 'd2', agentName: 'ui_designer', instanceNo: 2, lifecycle: 'tool_running' }),
+      activity({ callId: 'd3', agentName: 'ui_designer', instanceNo: 3, lifecycle: 'started', status: 'running' }),
+      activity({ callId: 's1', agentName: 'code_editor', lifecycle: 'started', status: 'running' }),
+    ]);
+
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(4);
+    const nameOf = (id: string): string =>
+      panel.el.querySelector(`[data-call-id="${id}"] .agent-worker-name`)?.textContent ?? '';
+    // Every instance of the repeated name gets its number…
+    expect(nameOf('d1')).toBe('ui_designer（1）');
+    expect(nameOf('d2')).toBe('ui_designer（2）');
+    expect(nameOf('d3')).toBe('ui_designer（3）');
+    // …while a name that appears once stays bare.
+    expect(nameOf('s1')).toBe('code_editor');
     panel.el.remove();
   });
 
