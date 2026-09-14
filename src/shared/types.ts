@@ -114,7 +114,11 @@ import type { WorkspaceSnapshotPort } from './workspaceSnapshot';
 
 export interface ToolAdapter {
   execute(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResult>;
-  getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined;
+  /** `timeoutMs` lets a tool declare its own execution budget — the engine's
+   * generic tool cap yields to it. Subagent delegations bracket a whole
+   * nested agent loop, so they declare the budget their definition already
+   * carries instead of being strangled by the generic cap. */
+  getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean; timeoutMs?: number } | undefined;
   getTools(): ToolDefinition[];
   getSnapshotPort?(): WorkspaceSnapshotPort | undefined;
 }
