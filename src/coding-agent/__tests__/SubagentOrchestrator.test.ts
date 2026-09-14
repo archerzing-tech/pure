@@ -8,10 +8,10 @@
 // clean Completed event — no network, no real provider.
 
 import { describe, expect, it } from 'bun:test';
-import { SubagentOrchestrator, deriveSubagentBudget, BUILT_IN_SUBAGENTS, type SubagentActivity, type SubagentProgress } from '../SubagentOrchestrator';
+import { SubagentOrchestrator, deriveSubagentBudget, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentProgress } from '../SubagentOrchestrator';
 import { Tags, ToolRegistry } from '../ToolRegistry';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
-import type { BudgetConfig, Checkpoint, IStateStore, LLMAdapter, Message, ToolAdapter, ToolCall, ToolResult } from '../../shared/types';
+import type { BudgetConfig, Checkpoint, IStateStore, LLMAdapter, LLMChunk, Message, ToolAdapter, ToolCall, ToolResult } from '../../shared/types';
 import type { SubagentDefinition, SubagentResult } from '../types';
 
 const BUDGET: BudgetConfig = {
@@ -195,7 +195,7 @@ describe('SubagentOrchestrator P1', () => {
     expect(orch.getMetadata('destructive')).toEqual({ sideEffects: true, isWrite: false, timeoutMs: 5000 });
   });
 
-  it('publishes the definition budget through getMetadata so the parent tool cap can honor it', () => {
+  it('publishes the definition budget and parallel/serial class through getMetadata', () => {
     const registry = new ToolRegistry(stubAdapter);
     const orch = new SubagentOrchestrator({
       llm: new MockLLMAdapter('findings'),
@@ -204,15 +204,25 @@ describe('SubagentOrchestrator P1', () => {
       defaultBudget: BUDGET,
     });
     // Regression: a delegation used to be boxed by the engine's generic
-    // 3-minute tool cap even though the definition budgeted 10 minutes —
+    // 3-minute tool cap even though the definition budgeted far more —
     // code_reviewer "timed out after 3m" then failed retries identically.
-    const def = subagentDefWith('test_reviewer', [Tags.READ], 600_000);
-    orch.register(def);
-    registry.register(def);
+    const reviewer = subagentDefWith('test_reviewer', [Tags.READ], 600_000);
+    const editor = subagentDefWith('test_editor', [Tags.WRITE], 600_000);
+    orch.register(reviewer);
+    orch.register(editor);
+    registry.register(reviewer);
+    registry.register(editor);
     registry.setSubagentExecutor(orch);
 
+    // Read-only delegations run in the parent's PARALLEL reads pool…
     expect(registry.getMetadata('test_reviewer')).toEqual({
-      sideEffects: true, // registry keeps AGENT tools serialized regardless of the executor's classification
+      sideEffects: false,
+      isWrite: false,
+      timeoutMs: 600_000,
+    });
+    // …while file-mutating ones stay serialized so they never race.
+    expect(registry.getMetadata('test_editor')).toEqual({
+      sideEffects: true,
       isWrite: false,
       timeoutMs: 600_000,
     });
@@ -301,7 +311,13 @@ describe('deriveSubagentBudget (code_reviewer timeout regression)', () => {
     // old 6 turns / 20k tokens / 90s always aborted it mid-review.
     expect(sub.maxTurns).toBeGreaterThanOrEqual(20);
     expect(sub.maxTotalTokens).toBeGreaterThanOrEqual(100_000);
-    expect(sub.maxExecutionTime).toBeGreaterThanOrEqual(600_000);
+    // 30 minutes: at the old 10-minute ceiling every generative role died
+    // mid-work — four delegated agents produced four timeouts.
+    expect(sub.maxExecutionTime).toBeGreaterThanOrEqual(1_800_000);
+    // The hard slice is what ends ONE engine segment; the orchestrator then
+    // continues from the transcript in a fresh slice instead of failing.
+    expect(sub.hardMaxTime).toBe(600_000);
+    expect(sub.hardMaxTime).toBeLessThanOrEqual(sub.maxExecutionTime);
     // Still bounded — a subagent can't burn the parent's whole allocation.
     expect(sub.maxTotalTokens).toBeLessThanOrEqual(200_000);
   });
@@ -311,13 +327,86 @@ describe('deriveSubagentBudget (code_reviewer timeout regression)', () => {
     expect(sub.maxTurns).toBe(3);
     expect(sub.maxTotalTokens).toBe(8000);
     expect(sub.maxExecutionTime).toBe(30000);
+    expect(sub.hardMaxTime).toBe(30000);
   });
 
-  it("code_reviewer's defaultTimeoutMs outlives the budget cap (signal must not fire first)", () => {
-    const reviewer = BUILT_IN_SUBAGENTS.find((d) => d.name === 'code_reviewer');
-    const auditor = BUILT_IN_SUBAGENTS.find((d) => d.name === 'project_auditor');
+  it("every generative role's defaultTimeoutMs outlives the budget cap (signal must not fire first)", () => {
+    // ui_designer / code_editor are here because four of EACH timing out was
+    // the reported failure — a role whose signal fires before its budget
+    // produces that mass-timeout symptom. Coding roles live in
+    // CODING_AGENT_ROLES, reviewers in BUILT_IN_SUBAGENTS.
+    const names = ['code_reviewer', 'project_auditor', 'task_planner', 'code_editor', 'deep_thinker', 'ui_designer', 'researcher'];
     const sub = deriveSubagentBudget(PARENT);
-    expect(reviewer?.defaultTimeoutMs ?? 0).toBeGreaterThanOrEqual(sub.maxExecutionTime);
-    expect(auditor?.defaultTimeoutMs ?? 0).toBeGreaterThanOrEqual(sub.maxExecutionTime);
+    for (const name of names) {
+      const def = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].find((d) => d.name === name);
+      expect(def?.defaultTimeoutMs ?? 0).toBeGreaterThanOrEqual(sub.maxExecutionTime);
+    }
+    // bash_executor is a command runner, not generative — its tighter cap is
+    // deliberate.
+    expect(CODING_AGENT_ROLES.find((d) => d.name === 'bash_executor')?.defaultTimeoutMs).toBe(300_000);
   });
+});
+
+// ── P2: segment continuation + no-progress watchdog ──
+// "Four subagents, four timeouts": a slice ending used to FAIL the whole
+// delegation and rely on the parent model re-delegating. Now the orchestrator
+// continues from the transcript in a fresh slice, and a wedged run (no
+// progress events at all) dies fast via the liveness watchdog instead of
+// waiting out the total wall.
+
+describe('SubagentOrchestrator segment continuation + liveness watchdog', () => {
+  it('continues in a fresh slice when a segment exhausts its hard budget', async () => {
+    let deliver = false;
+    let starts = 0;
+    const llm: LLMAdapter = {
+      async *stream(): AsyncGenerator<LLMChunk, void, void> {
+        if (!deliver) {
+          yield { type: 'content', content: 'working…' };
+          // Stall past the slice: the segment's hard budget must end THIS
+          // engine run (clean "Budget exceeded" Interrupted with transcript),
+          // not fail the delegation.
+          await new Promise<void>(() => {});
+        }
+        yield { type: 'content', content: 'slice-2 final deliverable' };
+        yield { type: 'done', content: 'slice-2 final deliverable', toolCalls: [] };
+      },
+      async complete() { throw new Error('not used'); },
+    };
+    const orch = new SubagentOrchestrator({
+      llm,
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: { ...BUDGET, maxExecutionTime: 150, graceTurns: 0 },
+      progress: { onStart: () => { starts++; if (starts >= 2) deliver = true; } },
+    });
+    orch.register({ ...subagentDef('test_slicer'), defaultTimeoutMs: 5_000 });
+    const result = await orch.execute(toolCall('test_slicer', { prompt: 'long task' }));
+
+    expect(result.success).toBe(true);
+    expect(String((result.result as SubagentResult).output)).toContain('slice-2');
+    // A second slice actually began (the re-delegate-and-pray path never ran).
+    expect(starts).toBeGreaterThanOrEqual(2);
+  }, 15_000);
+
+  it('aborts a wedged subagent via the no-progress watchdog instead of waiting out the wall', async () => {
+    const llm: LLMAdapter = {
+      async *stream(): AsyncGenerator<LLMChunk, void, void> {
+        // Total stall: not even one chunk, forever.
+        await new Promise<void>(() => {});
+      },
+      async complete() { throw new Error('not used'); },
+    };
+    const orch = new SubagentOrchestrator({
+      llm,
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      noProgressTimeoutMs: 80,
+    });
+    orch.register(subagentDef('test_wedger'));
+    const result = await orch.execute(toolCall('test_wedger', { prompt: 'x' }));
+
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result)).toContain('no progress');
+  }, 10_000);
 });
