@@ -199,6 +199,40 @@ describe('session chat manager (multi-session background execution)', () => {
     expect(manager.getRunningLiveSessions()).toHaveLength(0);
   });
 
+  it('numbers same-name subagent delegations per task (ui_designer（1）（2）…)', () => {
+    const manager = new SessionChatManager();
+    const flight = manager.openSession('session-flight');
+    const ctl = flight.controller as any;
+    ctl.agentActivities = [];
+    ctl.scheduleAgentActivityPersistence = () => {};
+
+    // Four ui_designer delegations arrive as four distinct callIds.
+    for (let i = 1; i <= 4; i++) {
+      ctl.updateAgentActivity({
+        callId: `call-ui-${i}`,
+        agentName: 'ui_designer',
+        agentRole: '负责界面设计',
+        status: 'running',
+        state: 'THINK',
+        sequence: i,
+      });
+    }
+    expect(ctl.agentActivities).toHaveLength(4);
+    expect(ctl.agentActivities.map((a: any) => a.instanceNo)).toEqual([1, 2, 3, 4]);
+
+    // Progress on the SAME call keeps its number instead of growing it.
+    ctl.updateAgentActivity({
+      callId: 'call-ui-2',
+      agentName: 'ui_designer',
+      status: 'running',
+      state: 'ACT',
+      sequence: 5,
+    });
+    const second = ctl.agentActivities.find((a: any) => a.callId === 'call-ui-2');
+    expect(second.instanceNo).toBe(2);
+    expect(ctl.agentActivities).toHaveLength(4);
+  });
+
   it('switching back to a warm session re-syncs relative-path resolution to ITS workspace', () => {
     // Regression: warm switches bypass setWorkspace, so the module-level
     // resolver kept the PREVIOUS session's workspace and artifact cards opened
