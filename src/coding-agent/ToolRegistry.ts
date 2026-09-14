@@ -147,12 +147,14 @@ export class ToolRegistry implements ToolAdapter {
     };
     // A delegation is one tool call wrapping a whole nested agent loop, so the
     // executor's declared budget must reach the engine's tool-execution cap —
-    // otherwise the generic 3-minute tool timeout kills subagents that were
-    // given 10 minutes. Only the budget is borrowed here: serial/parallel
-    // classification stays the registry's (all AGENT tools run serialized).
+    // otherwise the generic tool timeout kills subagents that were given far
+    // more. The executor also classifies parallel/serial: read-only agents
+    // (review / research / think) run concurrently in the parent's reads pool;
+    // agents that write files or run commands stay serialized so they never
+    // race on shared filesystem state.
     if (tool.tags.includes(Tags.AGENT)) {
-      const timeoutMs = this.subagentExecutor?.getMetadata(toolName)?.timeoutMs;
-      if (timeoutMs) return { ...meta, timeoutMs };
+      const sub = this.subagentExecutor?.getMetadata(toolName);
+      if (sub) return { sideEffects: sub.sideEffects ?? true, isWrite: false, timeoutMs: sub.timeoutMs };
     }
     return meta;
   }
