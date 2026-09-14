@@ -183,13 +183,16 @@ export class SubagentOrchestrator implements ToolAdapter {
   /** Parallel/serial classification: read-only subagents (no WRITE/SHELL/
    * DESTRUCTIVE tag) may run concurrently in the parent's `reads` pool; agents
    * that edit files or run commands stay serial (`sideEffects: true`) so they
-   * never race on shared filesystem state. */
-  getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined {
+   * never race on shared filesystem state. `timeoutMs` publishes the
+   * definition's own budget so the parent's tool-execution wrapper brackets
+   * the delegation by IT instead of the generic tool cap — a review agent
+   * legitimately runs longer than three minutes. */
+  getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean; timeoutMs?: number } | undefined {
     const def = this.defs.get(toolName);
     if (!def) return { sideEffects: true, isWrite: false };
     const tags = def.tags ?? [];
     const mutates = tags.includes(Tags.WRITE) || tags.includes(Tags.SHELL) || tags.includes(Tags.DESTRUCTIVE);
-    return { sideEffects: mutates, isWrite: false };
+    return { sideEffects: mutates, isWrite: false, timeoutMs: def.defaultTimeoutMs };
   }
 
   /** Derive a constrained per-subagent budget from the parent's, so a single

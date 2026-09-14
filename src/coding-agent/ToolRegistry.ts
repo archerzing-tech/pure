@@ -135,16 +135,26 @@ export class ToolRegistry implements ToolAdapter {
     return this.delegate.getSnapshotPort?.();
   }
 
-  getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined {
+  getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean; timeoutMs?: number } | undefined {
     const tool = this.tools.find(t => t.name === toolName);
     if (!tool) return this.delegate.getMetadata(toolName);
-    return {
+    const meta = {
       sideEffects: tool.tags.includes(Tags.DESTRUCTIVE)
         || tool.tags.includes(Tags.SHELL)
         || tool.tags.includes(Tags.MCP)
         || tool.tags.includes(Tags.AGENT),
       isWrite: tool.tags.includes(Tags.WRITE) || tool.tags.includes(Tags.DESTRUCTIVE),
     };
+    // A delegation is one tool call wrapping a whole nested agent loop, so the
+    // executor's declared budget must reach the engine's tool-execution cap —
+    // otherwise the generic 3-minute tool timeout kills subagents that were
+    // given 10 minutes. Only the budget is borrowed here: serial/parallel
+    // classification stays the registry's (all AGENT tools run serialized).
+    if (tool.tags.includes(Tags.AGENT)) {
+      const timeoutMs = this.subagentExecutor?.getMetadata(toolName)?.timeoutMs;
+      if (timeoutMs) return { ...meta, timeoutMs };
+    }
+    return meta;
   }
 
   async execute(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
