@@ -117,7 +117,17 @@ export function deriveSubagentBudget(parent: BudgetConfig): BudgetConfig {
   return {
     maxTurns: Math.min(parent.maxTurns, 20),
     maxTotalTokens: Math.min(parent.maxTotalTokens, 100_000),
-    maxExecutionTime: Math.min(parent.maxExecutionTime, 600_000),
+    // Per-SEGMENT budget: one engine run inside a delegation. hardMaxTime is
+    // the slice length — when it fires, the engine ends the run with a clean
+    // "Budget exceeded" Interrupted carrying the full transcript, and the
+    // orchestrator CONTINUES from that transcript in a fresh slice instead of
+    // failing the delegation. Total wall clock is governed separately by the
+    // role's defaultTimeoutMs; the parent's own budget still brackets all of
+    // it. At the old 10-minute ceiling EVERY delegated generative agent died
+    // mid-work ("four subagents, four timeouts") with no recovery but a
+    // re-delegation hint the parent model could ignore.
+    maxExecutionTime: Math.min(parent.maxExecutionTime, 1_800_000),
+    hardMaxTime: Math.min(parent.maxExecutionTime, 600_000),
     warningThreshold: parent.warningThreshold ?? 0.8,
     graceTurns: parent.graceTurns ?? 1,
   };
@@ -153,6 +163,11 @@ export interface SubagentOrchestratorConfig {
    * reflect → degrade → stop), so a single transient LLM/API error no longer
    * kills the subagent outright. */
   failurePolicy?: FailurePolicy;
+  /** Liveness bound: abort a subagent only when NO progress event (token,
+   * state, tool) has arrived for this long — healthy-but-slow work is never
+   * killed by it, a wedged run is. Defaults to 5 minutes; injectable so
+   * tests can exercise the watchdog in milliseconds. */
+  noProgressTimeoutMs?: number;
 }
 
 export class SubagentOrchestrator implements ToolAdapter {
@@ -325,23 +340,41 @@ export class SubagentOrchestrator implements ToolAdapter {
     const args = parseToolArguments(toolCall.function.arguments);
     emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, status: 'running', lifecycle: 'started' });
 
-    // Build combined signal: parent abort OR timeout
+    // Liveness watchdog: abort only when NO progress event (token / state /
+    // tool) has arrived for a while — a wedged run dies in minutes while
+    // healthy-but-slow work is never killed by it. Paused while a tool
+    // executes: a long command produces no events by design.
+    const noProgressMs = this.config.noProgressTimeoutMs ?? 300_000;
+    const watchdog = new AbortController();
+    let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+    let toolInFlight = false;
+    const stopWatchdogTimer = (): void => {
+      if (watchdogTimer !== undefined) {
+        clearTimeout(watchdogTimer);
+        watchdogTimer = undefined;
+      }
+    };
+    const kickWatchdog = (): void => {
+      if (toolInFlight) return;
+      stopWatchdogTimer();
+      watchdogTimer = setTimeout(() => watchdog.abort(), noProgressMs);
+    };
+
+    // Build combined signal: parent abort OR total wall clock OR liveness.
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const combinedSignal = parentSignal
-      ? AbortSignal.any([parentSignal, timeoutSignal])
-      : timeoutSignal;
+      ? AbortSignal.any([parentSignal, timeoutSignal, watchdog.signal])
+      : AbortSignal.any([timeoutSignal, watchdog.signal]);
 
-    const budget = this.subagentBudget();
-
-    // Construct EngineContext for the subagent — enrich it so the subagent also
-    // verifies (default rule-based verifier) and re-computes its tool list
-    // each THINK instead of a spawn-time snapshot.
-    const ctx: EngineContext = {
+    // Engine context is per-segment (fresh budget per slice); the static
+    // parts are hoisted. The subagent also verifies (default rule-based
+    // verifier) and re-computes its tool list each THINK instead of a
+    // spawn-time snapshot.
+    const baseCtx = {
       llm: this.config.llm,
       tools: this.config.parentTools,
       toolsDefs: this.config.parentToolsDefsProvider?.() ?? this.config.parentToolsDefs ?? [],
       toolsDefsProvider: this.config.parentToolsDefsProvider,
-      budget,
       signal: combinedSignal,
       verifier: this.config.verifier ?? createDefaultVerifier(),
       // Subagents must recover from transient failures like the parent does.
@@ -392,20 +425,52 @@ export class SubagentOrchestrator implements ToolAdapter {
       // previous sub-run instead of starting fresh (mirrors parent Harness.run).
       const saved = this.config.stateStore?.loadSession(sessionId)?.state;
       const resumedMessages = saved && saved.messages.length > 0 ? saved.messages : undefined;
-      const stream = resumedMessages
-        ? this.engine.continue(
-            { sessionId, newUserPrompt: userPrompt, messages: resumedMessages, budget },
-            ctx,
-          )
-        : this.engine.run(
-            { sessionId, systemPrompt, userPrompt, budget },
-            ctx,
-          );
 
-      for await (const event of stream) {
+      // Segment slicing: each engine run gets a hard time slice; when it ends
+      // with the engine's clean "Budget exceeded" Interrupted (full transcript
+      // intact), continue in a fresh slice instead of failing the delegation.
+      // The role's defaultTimeoutMs stays the TOTAL wall the parent waits —
+      // this loop is what makes "ran out of time" mean "keep going" rather
+      // than "failed, hope the parent model re-delegates".
+      const segmentBudget = this.subagentBudget();
+      const segmentSliceMs = segmentBudget.hardMaxTime ?? segmentBudget.maxExecutionTime;
+      const maxSegments = Math.max(1, Math.min(5, Math.ceil(timeoutMs / segmentSliceMs)));
+      const SEGMENT_RESUME_HINT = '[system] Your previous work slice ended (its time budget ran out). Nothing is broken — continue EXACTLY where the transcript above leaves off: do not restart, do not redo completed steps; finish the remaining work and deliver the final result.';
+      let segment = 0;
+      let carryMessages: Message[] | undefined;
+      kickWatchdog();
+
+      segmentLoop: while (true) {
+        segment++;
+        kickWatchdog();
+        const budget = segment === 1 ? segmentBudget : this.subagentBudget();
+        const ctx: EngineContext = { ...baseCtx, budget };
+        if (segment > 1) {
+          // Re-mark the roster card active so a slice boundary never reads as
+          // the agent dying and respawning.
+          emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, status: 'running', lifecycle: 'started' });
+        }
+        const stream = segment === 1
+          ? (resumedMessages
+              ? this.engine.continue(
+                  { sessionId, newUserPrompt: userPrompt, messages: resumedMessages, budget },
+                  ctx,
+                )
+              : this.engine.run(
+                  { sessionId, systemPrompt, userPrompt, budget },
+                  ctx,
+                ))
+          : this.engine.continue(
+              { sessionId, newUserPrompt: SEGMENT_RESUME_HINT, messages: carryMessages!, budget },
+              ctx,
+            );
+
+        for await (const event of stream) {
         if (event.type === 'TokenDelta') {
           tokensUsed++;
+          kickWatchdog();
         } else if (event.type === 'StateChange') {
+          kickWatchdog();
           const lifecycle = event.payload.to === 'ACT' ? 'started'
             : event.payload.to === 'OBSERVE' ? 'observing'
               : event.payload.to === 'VERIFY' ? 'verifying'
@@ -413,6 +478,8 @@ export class SubagentOrchestrator implements ToolAdapter {
                   : 'started';
           emit(progress?.onState, { state: event.payload.to, lifecycle, toolState: event.payload.to === 'ACT' ? undefined : 'completed' });
         } else if (event.type === 'ToolStarted') {
+          toolInFlight = true;
+          stopWatchdogTimer();
           toolTrace.set(event.payload.toolCallId, {
             name: event.payload.toolName,
             args: summarizeToolArgs(event.payload.toolCallArgs),
@@ -420,6 +487,8 @@ export class SubagentOrchestrator implements ToolAdapter {
           });
           emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'running', lifecycle: 'tool_running', toolTrace: [...toolTrace.values()] });
         } else if (event.type === 'ToolResult') {
+          toolInFlight = false;
+          kickWatchdog();
           const entry = toolTrace.get(event.payload.toolCallId);
           if (entry) entry.status = event.payload.result?.success ? 'completed' : 'failed';
           emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'completed', lifecycle: 'observing', toolTrace: [...toolTrace.values()] });
@@ -427,17 +496,34 @@ export class SubagentOrchestrator implements ToolAdapter {
           finalOutput = event.payload.finalOutput;
           await persist('subagent_completed', event.payload.messages, event.payload.turnCount ?? 0);
           emit(progress?.onDone, { success: true, output: finalOutput, status: 'done', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+          return {
+            id: toolCall.id,
+            toolName: def.name,
+            result: {
+              id: toolCall.id,
+              agentName: def.name,
+              success: true,
+              output: finalOutput,
+              duration: done(0),
+              tokensUsed,
+            },
+            success: true,
+            duration: done(0),
+          };
         } else if (event.type === 'Interrupted') {
           await persist('subagent_interrupted', event.payload.messages, event.payload.turnCount ?? 0);
           if (combinedSignal.aborted) {
-            const cancelled = parentSignal?.aborted === true && !timeoutSignal.aborted;
-            // A timeout here is the subagent's own budget (defaultTimeoutMs),
-            // not a malfunction — generative roles simply need longer. The
-            // error tells the parent how to recover (re-delegate to continue
-            // from the checkpoint) and that partial output may exist.
+            const cancelled = parentSignal?.aborted === true && !timeoutSignal.aborted && !watchdog.signal.aborted;
+            const stalled = watchdog.signal.aborted && !timeoutSignal.aborted;
+            // A timeout here is the delegation's TOTAL wall (defaultTimeoutMs)
+            // or the liveness watchdog, not a malfunction of any single slice.
+            // The error tells the parent how to recover (re-delegate to
+            // continue from the checkpoint) and that partial output may exist.
             const timeoutNote = cancelled
               ? 'cancelled'
-              : `timed out after ${Math.round(def.defaultTimeoutMs / 1000)}s — the subagent was still working (generative tasks take a while). Re-delegate the SAME subtask to continue from its checkpoint${finalOutput ? '; partial output was produced' : ''}.`;
+              : stalled
+                ? `no progress for ${Math.max(1, Math.round(noProgressMs / 60_000))} minutes — the subagent appeared wedged (no tokens, no tool activity). Re-delegate the SAME subtask to retry from its checkpoint${finalOutput ? '; partial output was produced' : ''}.`
+                : `timed out after ${Math.round(def.defaultTimeoutMs / 1000)}s — the subagent used all ${maxSegments} work segment${maxSegments > 1 ? 's' : ''} and was still mid-task (generative tasks take a while). Re-delegate the SAME subtask to continue from its checkpoint${finalOutput ? '; partial output was produced' : ''}.`;
             emit(progress?.onDone, { success: false, error: timeoutNote, status: cancelled ? 'cancelled' : 'timed_out', lifecycle: cancelled ? 'cancelled' : 'timed_out', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
             return {
               id: toolCall.id,
@@ -447,11 +533,21 @@ export class SubagentOrchestrator implements ToolAdapter {
               duration: done(0),
             };
           }
+          // Clean slice end: the segment's hard budget fired with the
+          // transcript intact — carry it into a fresh slice and keep going.
+          // This converts "ran out of time" from a failure into a continuation.
+          const sliceTranscript = event.payload.messages;
+          if (event.payload.reason === 'Budget exceeded' && segment < maxSegments && sliceTranscript && sliceTranscript.length > 0) {
+            carryMessages = sliceTranscript;
+            await persist(`subagent_segment_${segment}`, carryMessages, event.payload.turnCount ?? 0);
+            continue segmentLoop;
+          }
           emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
-          // A non-abort Interrupted (failure-policy stop, budget exceeded) is a
-          // REAL failure — report it as such to the parent instead of falling
-          // through to the success result below (which used to mask the
-          // subagent's death as `success: true` with empty output).
+          // A non-abort Interrupted (failure-policy stop, or the LAST slice's
+          // budget exhaustion) is a REAL failure — report it as such to the
+          // parent instead of falling through to the success result below
+          // (which used to mask the subagent's death as `success: true` with
+          // empty output).
           return {
             id: toolCall.id,
             toolName: def.name,
@@ -479,6 +575,12 @@ export class SubagentOrchestrator implements ToolAdapter {
             duration: done(0),
           };
         }
+        }
+
+        // The stream ended without a terminal event (the engine guarantees
+        // one — this is defensive). Do NOT slice again; report via the
+        // fall-through below.
+        break;
       }
 
       const result: SubagentResult = {
@@ -506,6 +608,8 @@ export class SubagentOrchestrator implements ToolAdapter {
         success: false,
         duration: done(0),
       };
+    } finally {
+      stopWatchdogTimer();
     }
   }
 }
@@ -540,7 +644,7 @@ Be concise. Structure your review with clear sections.${filesHint}`;
     // A real review reads several files then writes a structured verdict; keep
     // this above the subagent budget cap so the budget (not a stray timeout)
     // governs. 90s/120s was consistently too short.
-    defaultTimeoutMs: 600_000,
+    defaultTimeoutMs: 1_800_000,
   },
   {
     name: 'project_auditor',
@@ -569,7 +673,7 @@ Distinguish a vulnerability/finding from an unavailable audit tool, missing lock
     },
     // Same reasoning as code_reviewer: a read-only audit walks manifests and
     // runs checks, so 120s was too tight. Bounded by the subagent budget cap.
-    defaultTimeoutMs: 600_000,
+    defaultTimeoutMs: 1_800_000,
   },
 ];
 
@@ -612,7 +716,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
 
 保持步骤原子化，每个步骤一个清晰动作。`;
     },
-    defaultTimeoutMs: 600_000,
+    defaultTimeoutMs: 1_800_000,
   },
 
   // === 编辑器 (Code Editor) ===
@@ -649,7 +753,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
 
 只使用 write_file、edit_file 或 replace_files 工具修改文件。`;
     },
-    defaultTimeoutMs: 600_000,
+    defaultTimeoutMs: 1_800_000,
   },
 
   // === 思考器 (Deep Thinker) ===
@@ -687,7 +791,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
 
 请以结构化的方式输出你的思考过程和结论。`;
     },
-    defaultTimeoutMs: 600_000,
+    defaultTimeoutMs: 1_800_000,
   },
 
   // === UI设计器 (UI Designer) ===
@@ -737,7 +841,7 @@ export const CODING_AGENT_ROLES: SubagentDefinition[] = [
     // 5 minutes: a full design scheme (colors/typography/layout/interaction +
     // concrete examples) with a reasoning model often exceeds 2 minutes; the
     // old 120s wall-clock AbortSignal made ui_designer the most-failed subagent.
-    defaultTimeoutMs: 600_000,
+    defaultTimeoutMs: 1_800_000,
   },
 
   // === 执行器 (Bash Executor) ===
@@ -809,6 +913,6 @@ ${description ? `命令用途：${description}` : ''}
 
 保持研究全面但简洁，使用清晰的标题组织。最终输出结构化的研究报告。`;
     },
-    defaultTimeoutMs: 600_000,
+    defaultTimeoutMs: 1_800_000,
   },
 ];
