@@ -1141,18 +1141,8 @@ body {
 .agent-worker--done { border-color: color-mix(in srgb, var(--success) 30%, var(--border-light)); }
 .agent-worker--failed,
 .agent-worker--timed-out { border-color: color-mix(in srgb, var(--danger) 36%, var(--border-light)); }
-/* Terminal cards dwell 2s, then fade out and leave the DOM. */
-.agent-worker--leaving {
-  opacity: 0;
-  transform: translateY(-4px);
-  transition: opacity 0.4s ease, transform 0.4s ease;
-  pointer-events: none;
-}
-@media (prefers-reduced-motion: reduce) {
-  .agent-worker--leaving {
-    transition: none;
-  }
-}
+/* Terminal cards STAY: the roster answers "这轮派了几个 agent" — cards only
+   leave when the next task starts a fresh trace. */
 .agent-worker-task {
   grid-column: 1 / -1;
   min-width: 0;
