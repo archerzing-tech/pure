@@ -71,10 +71,18 @@ export class ToolExecutionCoordinator {
         const forwardAbort = (): void => controller.abort();
         ctx.signal?.addEventListener('abort', forwardAbort, { once: true });
         try {
+          // A tool may declare its own budget (subagent delegations bracket a
+          // whole nested agent loop); the generic cap covers everything that
+          // doesn't. The engine's remaining wall clock still wins.
+          const metadata = ctx.tools!.getMetadata(call.function.name);
+          const cap = Math.min(
+            metadata?.timeoutMs ?? TOOL_EXECUTION_TIMEOUT_MS,
+            Math.max(1, budget.remaining().time),
+          );
           const result = await runWithDeadline(
             () => ctx.tools!.execute(call, controller.signal),
             ctx.signal,
-            Math.min(TOOL_EXECUTION_TIMEOUT_MS, Math.max(1, budget.remaining().time)),
+            cap,
             `tool ${call.function.name}`,
             () => controller.abort(),
           );

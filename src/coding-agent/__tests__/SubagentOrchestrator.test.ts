@@ -189,10 +189,36 @@ describe('SubagentOrchestrator P1', () => {
     orch.register(subagentDefWith('basher', [Tags.SHELL]));
     orch.register(subagentDefWith('destructive', [Tags.DESTRUCTIVE]));
 
-    expect(orch.getMetadata('reader')).toEqual({ sideEffects: false, isWrite: false });
-    expect(orch.getMetadata('writer')).toEqual({ sideEffects: true, isWrite: false });
-    expect(orch.getMetadata('basher')).toEqual({ sideEffects: true, isWrite: false });
-    expect(orch.getMetadata('destructive')).toEqual({ sideEffects: true, isWrite: false });
+    expect(orch.getMetadata('reader')).toEqual({ sideEffects: false, isWrite: false, timeoutMs: 5000 });
+    expect(orch.getMetadata('writer')).toEqual({ sideEffects: true, isWrite: false, timeoutMs: 5000 });
+    expect(orch.getMetadata('basher')).toEqual({ sideEffects: true, isWrite: false, timeoutMs: 5000 });
+    expect(orch.getMetadata('destructive')).toEqual({ sideEffects: true, isWrite: false, timeoutMs: 5000 });
+  });
+
+  it('publishes the definition budget through getMetadata so the parent tool cap can honor it', () => {
+    const registry = new ToolRegistry(stubAdapter);
+    const orch = new SubagentOrchestrator({
+      llm: new MockLLMAdapter('findings'),
+      parentTools: registry,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+    });
+    // Regression: a delegation used to be boxed by the engine's generic
+    // 3-minute tool cap even though the definition budgeted 10 minutes —
+    // code_reviewer "timed out after 3m" then failed retries identically.
+    const def = subagentDefWith('test_reviewer', [Tags.READ], 600_000);
+    orch.register(def);
+    registry.register(def);
+    registry.setSubagentExecutor(orch);
+
+    expect(registry.getMetadata('test_reviewer')).toEqual({
+      sideEffects: true, // registry keeps AGENT tools serialized regardless of the executor's classification
+      isWrite: false,
+      timeoutMs: 600_000,
+    });
+    // Plain tools carry no budget declaration — the generic cap applies.
+    registry.register({ ...subagentDef('plain_tool'), tags: [Tags.READ] });
+    expect(registry.getMetadata('plain_tool')?.timeoutMs).toBeUndefined();
   });
 
   it('refuses to nest a subagent beyond maxDepth', async () => {
