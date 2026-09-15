@@ -353,10 +353,20 @@ export class Harness {
 
       // Track messages for checkpoint saving
       if (event.type === 'Completed' && event.payload.messages) {
-        runningMessages = event.payload.messages;
+        // The engine ALWAYS emits a final Completed — including right after an
+        // Interrupted (interrupted=true). Persisting those messages raw would
+        // let the untrimmed 'turn_completed' checkpoint shadow the trimmed
+        // 'interrupted' one (resume reads the LATEST checkpoint), re-arming the
+        // unpaired tool_use the trim exists to prevent — so interrupted rounds
+        // get the same trim here, for both the checkpoint and the next turn's
+        // seed.
+        const nextMessages = event.payload.interrupted
+          ? trimUnresolvedToolCalls(event.payload.messages)
+          : event.payload.messages;
+        runningMessages = nextMessages;
         this.updateVerificationSummary(event.payload.messages, event.payload.verification);
         if (this.stateMgr) {
-          await this.stateMgr.saveCheckpoint('turn_completed', event.payload.messages, event.payload.turnCount);
+          await this.stateMgr.saveCheckpoint('turn_completed', nextMessages, event.payload.turnCount);
         }
         // Memory write at session end (Adapter Layer 设计文档 §12.3): a
         // successful completion becomes a successful_pattern memory; failures
@@ -1067,8 +1077,10 @@ function parseRememberMarkers(text: string): string[] {
  * Remove trailing assistant messages whose toolCalls never received tool
  * results (e.g. an after_think hook abort). Persisting them would leave an
  * unpaired tool_use in the checkpoint, which LLM APIs reject on resume.
+ * Exported for the subagent orchestrator's checkpoint persistence, which must
+ * uphold the same resume-safety contract.
  */
-function trimUnresolvedToolCalls(messages: Message[]): Message[] {
+export function trimUnresolvedToolCalls(messages: Message[]): Message[] {
   const result = [...messages];
   while (result.length > 0) {
     const last = result[result.length - 1];

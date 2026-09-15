@@ -1275,8 +1275,11 @@ export class ChatController {
    * until the interrupted round finalizes, then re-entered as a continuation of
    * the SAME task so the model re-plans/rewrites around the new variable. */
   private relatedInsert: { text: string; images: MessageImage[]; displayText: string } | null = null;
-  /** Guards interject() against concurrent classification (only one in flight). */
-  private insertInFlight = false;
+  /** Serializes mid-run insert classifications. A second insert typed while
+   * the first is still being judged must WAIT its turn — main.ts clears the
+   * input box the moment interject() is called, so dropping the call would
+   * lose the user's words for good. */
+  private insertClassificationChain: Promise<void> = Promise.resolve();
   private dynamicInsertionCoordinator = new DynamicInsertionCoordinator();
   /** The LLM adapter for the current turn — interject() reuses it to classify a
    * mid-run insert as related/unrelated (set by send(); null before first run). */
@@ -2045,37 +2048,62 @@ export class ChatController {
       void this.send(text, images, displayText);
       return;
     }
-    if (this.insertInFlight) return;
-    this.insertInFlight = true;
-    try {
-      const llm = this.turnLlm;
-      if (!llm) {
-        this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
-        this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
-        return;
-      }
-      const decision = await this.dynamicInsertionCoordinator.decide(llm, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
-      if (this.abortController?.signal?.aborted) {
-        // The turn was hard-stopped while we were classifying — don't drop the
-        // insert; queue it so it still runs as a task.
-        this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
-        this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
-        return;
-      }
-      if (decision.kind === 'stop') {
-        this.addStatusBubble('已收到停止请求，正在结束当前任务。', true, false, 'info');
-        this.abortController?.abort();
-      } else if (decision.related) {
-        this.relatedInsert = { text, images, displayText };
-        this.addStatusBubble(decision.requiresReplan ? '检测到目标或约束变化，正在重新评估并规划…' : '已并入这条补充要求，正在重新评估…', true, false, 'info');
-        this.abortController?.abort();
-      } else {
-        this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
-        this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
-      }
-    } finally {
-      this.insertInFlight = false;
+    // Serialize classifications instead of dropping concurrent inserts: the
+    // old insertInFlight early-return silently discarded any message typed
+    // while an earlier one was still being judged — and the caller has
+    // already cleared the input box, so those words were gone.
+    const run = this.insertClassificationChain.then(() => this.classifyAndApplyInterject(text, images, displayText));
+    // A rejected link must never poison the chain for later inserts.
+    this.insertClassificationChain = run.catch(() => {});
+    await run;
+  }
+
+  /** One link of the interject chain: runs only after every earlier insert has
+   * been judged. Re-checks isStreaming() because an earlier RELATED insert
+   * aborts the turn — by the time this link runs, the insert may belong to a
+   * fresh send instead. */
+  private async classifyAndApplyInterject(text: string, images: MessageImage[], displayText: string): Promise<void> {
+    if (!this.isStreaming()) {
+      void this.send(text, images, displayText);
+      return;
     }
+    const llm = this.turnLlm;
+    if (!llm) {
+      this.queueInterjectTask(text, images, displayText);
+      return;
+    }
+    const decision = await this.dynamicInsertionCoordinator.decide(llm, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
+    if (this.abortController?.signal?.aborted) {
+      // The turn was hard-stopped while we were classifying — don't drop the
+      // insert; queue it so it still runs as a task.
+      this.queueInterjectTask(text, images, displayText);
+      return;
+    }
+    if (decision.kind === 'stop') {
+      this.addStatusBubble('已收到停止请求，正在结束当前任务。', true, false, 'info');
+      this.abortController?.abort();
+    } else if (decision.related) {
+      this.relatedInsert = { text, images, displayText };
+      this.addStatusBubble(decision.requiresReplan ? '检测到目标或约束变化，正在重新评估并规划…' : '已并入这条补充要求，正在重新评估…', true, false, 'info');
+      this.abortController?.abort();
+      // Same late-classification hazard as queueInterjectTask: if the turn
+      // already finished while we were judging, no finalize will dispatch the
+      // held insert — re-arm the deferred dispatch here.
+      if (!this.isStreaming()) this.scheduleDeferred();
+    } else {
+      this.queueInterjectTask(text, images, displayText);
+    }
+  }
+
+  /** Queue an UNRELATED insert and make sure something will dispatch it. The
+   * send() finally schedules the deferred dispatch only for turns that end
+   * AFTER this point — a classification that lands after the turn already
+   * finished (LLM judges can take seconds) would otherwise leave the queued
+   * task or a RELATED insert frozen until the user's NEXT turn completed. */
+  private queueInterjectTask(text: string, images: MessageImage[], displayText: string): void {
+    this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
+    this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
+    if (!this.isStreaming()) this.scheduleDeferred();
   }
 
   /** Schedule the deferred dispatch just after a turn fully finalizes. */
@@ -2086,8 +2114,13 @@ export class ChatController {
   /** After the current turn is over:
    *  - a RELATED insert → immediately re-enter the same task with it (fold in).
    *  - else, if an UNRELATED task is queued AND the task is terminal (no
-   *    auto-continue pending) → start it as a fresh task. */
+   *    auto-continue pending) → start it as a fresh task.
+   * The isStreaming guard makes overlapping schedules (turn finalize + a late
+   * interject classification) safe: the first dispatch enters send(), which
+   * flips streaming on synchronously, and the second becomes a no-op instead
+   * of starting a second concurrent turn. */
   private dispatchDeferred(): void {
+    if (this.isStreaming()) return;
     if (this.relatedInsert) {
       const ri = this.relatedInsert;
       this.relatedInsert = null;
@@ -2242,8 +2275,14 @@ export class ChatController {
       return;
     }
     linkifyPaths(userBubble);
-    forceScrollToBottom(chatEl);
-    hideNewContentHint(); // a fresh user turn resumes following the newest content
+    // Background sessions run their auto-continue chains inside the same
+    // shared scroll container: yanking the viewport here used to drag the
+    // session the user is ACTUALLY reading every ~1.2s. Fresh-turn re-pinning
+    // is explicit intent only for the visible transcript.
+    if (this.viewActive) {
+      forceScrollToBottom(chatEl);
+      hideNewContentHint(); // a fresh user turn resumes following the newest content
+    }
 
     const fastConversationalTurn = !sendWorkspace && shouldBypassSemanticRoute(userText, userImages);
     const effectiveWorkspace = sendWorkspace || (fastConversationalTurn ? '' : await withAbortTimeout(
@@ -3548,9 +3587,13 @@ export class ChatController {
       // rAF-coalesced helper so this first content growth joins the same frame
       // budget as every streamed token (a direct scrollTop write here forced a
       // synchronous full-transcript layout). A fresh turn also dismisses any
-      // "new content below" pill left over from the previous turn.
-      forceScrollToBottom(chatEl);
-      hideNewContentHint();
+      // "new content below" pill left over from the previous turn. Background
+      // sessions must not touch the shared viewport at all (see the
+      // viewActive guard at the fresh-user-turn scroll).
+      if (this.viewActive) {
+        forceScrollToBottom(chatEl);
+        hideNewContentHint();
+      }
 
       // ── Deferred init: boot MCP on first use ──
       if (!this.deferredInitDone) {

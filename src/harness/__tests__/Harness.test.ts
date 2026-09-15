@@ -1017,6 +1017,47 @@ describe('Harness resume (P1-7)', () => {
     expect(last.role === 'assistant' && !!last.toolCalls?.length).toBe(false);
   });
 
+  it('trims the follow-up turn_completed checkpoint too — it shadows the interrupted one', async () => {
+    // The engine emits Interrupted AND then a final Completed(interrupted=true)
+    // for the same round. The Completed handler used to persist the raw
+    // messages as 'turn_completed', which becomes the LATEST checkpoint —
+    // resume reads the latest, so the unpaired tool_use the 'interrupted' trim
+    // removed came right back on the next request (provider 400).
+    const store = new MemoryStore();
+    const toolLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        yield { type: 'tool_call', index: 0, id: 'call_1', name: 'read_file', arguments: '{"path":"a.ts"}' };
+        yield { type: 'done', content: '', toolCalls: [{ id: 'call_1', index: 0, function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }] };
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    const tools = {
+      execute: async (): Promise<any> => ({ id: 'call_1', toolName: 'read_file', result: 'x', success: true, duration: 1 }),
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'read_file', description: 'r', input_schema: {} }],
+    };
+    const hooks = new DefaultHookRouter();
+    hooks.register('before_act', () => ({ action: 'abort' as const, reason: 'test abort' }));
+    const harness = new Harness({
+      sessionId: 'sess-int3',
+      llm: toolLLM,
+      tools,
+      toolsDefs: [{ name: 'read_file', description: 'r', input_schema: {} }],
+      budget: STD_BUDGET,
+      stateStore: store,
+      hooks,
+    });
+
+    await collect(harness.run('SYS', 'read a.ts'));
+
+    const session = store.loadSession('sess-int3');
+    expect(session).not.toBeNull();
+    const latest = session!.checkpoints[session!.checkpoints.length - 1];
+    expect(latest.label).toBe('turn_completed');
+    const latestLast = latest.state.messages[latest.state.messages.length - 1];
+    expect(latestLast.role === 'assistant' && !!latestLast.toolCalls?.length).toBe(false);
+  });
+
   it('can replace a compacted engine checkpoint with the full transcript', async () => {
     const store = new MemoryStore();
     const harness = new Harness({

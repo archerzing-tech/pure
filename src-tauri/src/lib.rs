@@ -615,7 +615,24 @@ fn augmented_mcp_path(existing: Option<&str>) -> String {
     dirs.join(":")
 }
 
+/// Hard deadline for one stdio MCP round trip. This is a wedge-guard, not a
+/// tool timeout: the JS side enforces the per-server `requestTimeoutMs`
+/// (default 30s, heavy servers configure minutes). When the JS timer fires it
+/// abandons the pending invoke, but the Rust future keeps holding the stdout
+/// mutex — without a deadline here, ONE wedged server deadlocks every later
+/// call on it. 10 minutes sits above any sane per-request timeout while still
+/// guaranteeing the mutex eventually frees.
+const MCP_RESPONSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
+
 async fn mcp_call_inner(handle: &McpHandle, request: &str) -> Result<String, String> {
+    mcp_call_inner_with_deadline(handle, request, MCP_RESPONSE_DEADLINE).await
+}
+
+async fn mcp_call_inner_with_deadline(
+    handle: &McpHandle,
+    request: &str,
+    deadline: std::time::Duration,
+) -> Result<String, String> {
     // Write request to stdin
     {
         let mut stdin = handle.stdin.lock().await;
@@ -633,17 +650,55 @@ async fn mcp_call_inner(handle: &McpHandle, request: &str) -> Result<String, Str
             .map_err(|e| format!("flush stdin: {}", e))?;
     }
 
-    // Read response from stdout (one line = one JSON-RPC response)
-    let mut line = String::new();
-    {
+    // A server's stdout is shared traffic: progress notifications and plain
+    // log lines interleave with responses on the same pipe. Blindly returning
+    // "the next line" desynced every later call the moment a server emitted a
+    // single notification — so read until the response whose id MATCHES the
+    // request arrives, skipping everything else (log noise, server→client
+    // notifications, late answers to already-abandoned calls).
+    let request_id: Option<serde_json::Value> = serde_json::from_str::<serde_json::Value>(request)
+        .ok()
+        .and_then(|v| v.get("id").cloned());
+    let read_matching = async {
         let mut stdout = handle.stdout.lock().await;
-        stdout
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("read stdout: {}", e))?;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = stdout
+                .read_line(&mut line)
+                .await
+                .map_err(|e| format!("read stdout: {}", e))?;
+            if n == 0 {
+                return Err("MCP server closed stdout (process exited)".to_string());
+            }
+            let trimmed = line.trim();
+            let Ok(frame) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue; // not JSON — server log noise on stdout
+            };
+            let Some(frame_id) = frame.get("id") else {
+                continue; // no id — a server→client notification
+            };
+            match &request_id {
+                Some(want) if frame_id == want => return Ok(trimmed.to_string()),
+                Some(_) => continue, // response to an abandoned call — skip
+                None => return Ok(trimmed.to_string()), // request carried no id
+            }
+        }
+    };
+    match tokio::time::timeout(deadline, read_matching).await {
+        Ok(result) => result,
+        Err(_) => {
+            // Kill the wedged server: its late response must never be served
+            // to the NEXT caller — a misrouted answer is worse than a clean
+            // death (later calls then fail fast on a closed pipe).
+            let mut child = handle.child.lock().await;
+            let _ = child.kill().await;
+            Err(format!(
+                "MCP server did not respond within {}s — killed the wedged process",
+                deadline.as_secs()
+            ))
+        }
     }
-
-    Ok(line.trim().to_string())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -14953,6 +15008,118 @@ mod mcp_subprocess_tests {
 
         let mut child = handle.child.lock().await;
         let _ = child.kill().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_call_skips_notifications_and_matches_ids() {
+        // A realistic stdio server: per request it emits a notification (no
+        // id), a bare log line, a LATE response to an abandoned call (id 99),
+        // and only then the real response (id 7). The old "return the next
+        // line" behaviour would have handed back the notification and
+        // desynced every later call; the id-matching reader must skip to the
+        // id-7 response.
+        let mut child = TokioCommand::new("sh")
+            .arg("-c")
+            .arg(
+                r#"while IFS= read -r line; do
+  printf '%s\n' '{"jsonrpc":"2.0","method":"progress","params":{"p":1}}'
+  printf '%s\n' 'server log noise: starting up'
+  printf '%s\n' '{"jsonrpc":"2.0","id":99,"result":{"late":true}}'
+  printf '%s\n' '{"jsonrpc":"2.0","id":7,"result":{"ok":true}}'
+done"#,
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let handle = McpHandle {
+            child: tokio::sync::Mutex::new(child),
+            stdin: tokio::sync::Mutex::new(stdin),
+            stdout: tokio::sync::Mutex::new(BufReader::new(stdout)),
+        };
+
+        let request = r#"{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}"#;
+        let resp = mcp_call_inner(&handle, request).await.unwrap();
+        assert_eq!(
+            resp, r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#,
+            "must return the response whose id matches, skipping notification/log/late lines"
+        );
+
+        let mut child = handle.child.lock().await;
+        let _ = child.kill().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_call_times_out_and_kills_a_wedged_server() {
+        // Server answers every request with only a notification — the real
+        // response never comes. The call must fail at the (short, injected)
+        // deadline instead of holding the stdout mutex forever, and the child
+        // must be killed so its late response can't be served to the next
+        // caller.
+        let mut child = TokioCommand::new("sh")
+            .arg("-c")
+            .arg("while IFS= read -r line; do printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"tick\"}'; done")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let handle = McpHandle {
+            child: tokio::sync::Mutex::new(child),
+            stdin: tokio::sync::Mutex::new(stdin),
+            stdout: tokio::sync::Mutex::new(BufReader::new(stdout)),
+        };
+
+        let started = std::time::Instant::now();
+        let err = mcp_call_inner_with_deadline(
+            &handle,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}"#,
+            std::time::Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(err.contains("did not respond"), "got: {}", err);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mut child = handle.child.lock().await;
+        let exited = child.try_wait().unwrap();
+        assert!(exited.is_some(), "wedged child must have been killed by the deadline path");
+    }
+
+    #[tokio::test]
+    async fn mcp_call_reports_server_death_instead_of_returning_garbage() {
+        // A server that dies before answering must surface as an error — the
+        // old code returned Ok("") for EOF and the JS side reported
+        // "MCP invalid response: " with no clue why.
+        let mut child = TokioCommand::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let handle = McpHandle {
+            child: tokio::sync::Mutex::new(child),
+            stdin: tokio::sync::Mutex::new(stdin),
+            stdout: tokio::sync::Mutex::new(BufReader::new(stdout)),
+        };
+
+        let err = mcp_call_inner_with_deadline(
+            &handle,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("closed stdout"), "got: {}", err);
     }
 
     #[tokio::test]
