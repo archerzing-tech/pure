@@ -22,6 +22,7 @@
     "eval:baseline": "bun run scripts/run-evals.ts",
     "e2e:apikey": "bun run scripts/e2e-settings-apikey.ts",
     "typecheck": "bun run --no-run tsc --noEmit",
+    "lint:conventions": "bun run scripts/check-conventions.ts",
     "build": "bun run typecheck && npx vite build && bun run cli:build",
     "build:cli": "bun run cli:build",
     "sign:mac": "bash scripts/sign-app.sh",
@@ -37,6 +38,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
     "@huggingface/transformers": "^4.2.0",
+    "@plantuml/core": "^1.2026.8",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/cli": "^2.11.4",
     "@tauri-apps/plugin-dialog": "^2.7.2",
@@ -51,7 +53,6 @@
     "marked": "^18.0.7",
     "mermaid": "^11.16.0",
     "openai": "^7.1.0",
-    "plantuml-encoder": "^1.4.0",
     "pptxgenjs": "^4.0.1",
     "vite": "^7.1.3",
     "xlsx": "file:vendor/xlsx-0.20.3.tgz"

@@ -5,6 +5,32 @@ export interface AgentActivityPanelHandle {
   update(activities: SessionAgentActivity[], options?: { historical?: boolean; sessionId?: string }): void;
 }
 
+/** The rail renders the badge / name / start time only — `output` and
+ *  `toolTrace` ride along for the session snapshot and are never displayed.
+ *  Bound them at the single funnel that writes into the host's activity list:
+ *  an unbounded `output` (a subagent's ENTIRE final answer) plus one trace entry
+ *  per tool call made the persisted payload grow with how much a delegation
+ *  produced instead of how many delegations ran, and the whole list is cloned
+ *  and re-serialized into storage on every save. */
+const MAX_ACTIVITY_OUTPUT_CHARS = 2_000;
+const MAX_ACTIVITY_TRACE_ENTRIES = 20;
+
+function boundActivityPayload(activity: SessionAgentActivity): SessionAgentActivity {
+  const { output, toolTrace } = activity;
+  const boundedOutput = output !== undefined && output.length > MAX_ACTIVITY_OUTPUT_CHARS
+    ? output.slice(0, MAX_ACTIVITY_OUTPUT_CHARS)
+    : output;
+  const boundedTrace = toolTrace !== undefined && toolTrace.length > MAX_ACTIVITY_TRACE_ENTRIES
+    ? toolTrace.slice(-MAX_ACTIVITY_TRACE_ENTRIES)
+    : toolTrace;
+  if (boundedOutput === output && boundedTrace === toolTrace) return activity;
+  return {
+    ...activity,
+    ...(boundedOutput === output ? {} : { output: boundedOutput }),
+    ...(boundedTrace === toolTrace ? {} : { toolTrace: boundedTrace }),
+  };
+}
+
 export function mergeAgentActivity(
   previous: SessionAgentActivity | undefined,
   update: Partial<SessionAgentActivity> & Pick<SessionAgentActivity, 'callId' | 'agentName'>,
@@ -12,12 +38,12 @@ export function mergeAgentActivity(
   if (previous?.sequence !== undefined && update.sequence !== undefined && update.sequence <= previous.sequence) {
     return previous;
   }
-  return {
+  return boundActivityPayload({
     ...(previous ?? {}),
     ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined)),
     callId: update.callId,
     agentName: update.agentName,
-  };
+  });
 }
 
 export function isAgentActivityActive(activity: SessionAgentActivity): boolean {
