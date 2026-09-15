@@ -107,6 +107,19 @@ describe('PromptAssembler', () => {
     expect(gui).not.toContain('wireframe');
   });
 
+  it('defaults GUI diagrams to mermaid (offline) and gates puml behind an explicit ask', () => {
+    // GUI 的图默认走 mermaid：mermaid 随应用打包、本地渲染，断网也能画；
+    // puml 块要经 plantuml.com 在线渲染，断网即失败——所以只有用户点名要
+    // PlantUML 语法时才允许输出 puml。
+    const gui = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: buildGuiCapabilities(true),
+    });
+    expect(gui).toContain('mermaid renders locally and works offline');
+    expect(gui).toContain('NEVER emit puml/plantuml blocks unless the user explicitly asks for PlantUML');
+    expect(gui).toContain('plantuml.com server and fail without network');
+  });
+
   it('injects runtime state, skills, and task mode at assembly time', () => {
     const prompt = assembler.buildSystemPrompt({
       surface: 'cli',
