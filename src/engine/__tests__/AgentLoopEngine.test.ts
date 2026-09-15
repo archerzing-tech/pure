@@ -160,6 +160,26 @@ function baseCtx(overrides: Partial<EngineContext> = {}): EngineContext {
   };
 }
 
+/** A conversation is sendable only if every assistant message carrying
+ * toolCalls is followed by tool results for EVERY call id before the next
+ * assistant message — providers reject an unpaired tail with 400. */
+function transcriptIsPaired(messages: Message[]): boolean {
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === 'assistant' && m.toolCalls?.length) {
+      const needed = new Set(m.toolCalls.map((t) => t.id));
+      for (let j = i + 1; j < messages.length && needed.size > 0; j++) {
+        if (messages[j].role === 'assistant') break;
+        if (messages[j].role === 'tool' && needed.has(messages[j].toolCallId!)) {
+          needed.delete(messages[j].toolCallId!);
+        }
+      }
+      if (needed.size > 0) return false;
+    }
+  }
+  return true;
+}
+
 // ── Tests ──
 
 describe('AgentLoopEngine', () => {
@@ -953,6 +973,58 @@ describe('AgentLoopEngine', () => {
     }
     const interrupted = events.find(e => e.type === 'Interrupted');
     expect(interrupted).toBeDefined();
+  });
+
+  it('pairs tool results into the transcript BEFORE a failure-policy stop lands', async () => {
+    // Tool fails on round 1 and the policy stops immediately. The old order —
+    // emitHandover/Interrupted FIRST, tool results pushed only on the retry
+    // path — sent the handover request and the interrupted checkpoint with an
+    // UNPAIRED assistant.toolCalls tail (providers answer 400), so the
+    // "graceful handover" silently never worked in the most common stop
+    // scenario and the persisted transcript stayed malformed.
+    const handoverRequests: Message[][] = [];
+    let round = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        round++;
+        if (round === 1) {
+          const tc: ToolCall = { id: 'call_1', index: 0, function: { name: 'read_file', arguments: '{"path":"a.ts"}' } };
+          yield { type: 'tool_call', index: 0, id: 'call_1', name: 'read_file', arguments: '{"path":"a.ts"}' };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+          return;
+        }
+        handoverRequests.push(messages.map(m => ({ ...m }) as Message));
+        yield { type: 'content', content: 'Blocked: the read failed.' };
+        yield { type: 'done', content: 'Blocked: the read failed.', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'Blocked: the read failed.', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+
+    const events = await collect(engine.run(
+      { sessionId: 's-stop-pairing', systemPrompt: 'SYS', userPrompt: 'read a.ts', budget: STD_BUDGET },
+      baseCtx({
+        llm,
+        tools: failToolAdapter([READ_FILE_TOOL], 'read_file'),
+        toolsDefs: [READ_FILE_TOOL],
+        failurePolicy: { decide: () => ({ kind: 'stop' as const, reason: 'tool keeps failing' }) },
+      }),
+    ));
+
+    const interrupted = events.find(e => e.type === 'Interrupted') as Extract<EngineEvent, { type: 'Interrupted' }>;
+    expect(interrupted).toBeDefined();
+    expect(interrupted.payload.messages).toBeDefined();
+    // The interrupted transcript is a sendable conversation: every assistant
+    // toolCalls has its tool results.
+    expect(transcriptIsPaired(interrupted.payload.messages!)).toBe(true);
+    // The handover LLM call actually happened AND received a paired transcript.
+    expect(handoverRequests).toHaveLength(1);
+    expect(transcriptIsPaired(handoverRequests[0])).toBe(true);
+    // The final Completed (interrupted=true) carries the same well-formed tail.
+    const completed = events.find(e => e.type === 'Completed') as Extract<EngineEvent, { type: 'Completed' }>;
+    expect(completed.payload.interrupted).toBe(true);
+    expect(completed.payload.messages).toBeDefined();
+    expect(transcriptIsPaired(completed.payload.messages!)).toBe(true);
   });
 
   // ═══ Lock release on tool throw (P0 fix) ═══

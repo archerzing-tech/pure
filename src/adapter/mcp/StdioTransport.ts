@@ -36,6 +36,10 @@ export class StdioTransport implements MCPTransport {
   private command: string[];
   private env?: Record<string, string>;
   private stderrTail: string[] = [];
+  /** Human-readable reason the last spawn failed (latched by the 'error'
+   * handler). The write-callback rejection defers one tick so a broken stdin
+   * surfaces this instead of a bare ERR_STREAM_DESTROYED. */
+  private startError: string | null = null;
   /** stdout line reader; closed on exit and on close() so the readline
    *  interface (and its buffered lines) does not outlive the process. */
   private rl: { close(): void } | null = null;
@@ -60,6 +64,7 @@ export class StdioTransport implements MCPTransport {
   }
 
   private async startProcess(): Promise<ChildProcess> {
+    this.startError = null;
     // Dynamically load Node.js APIs — only works in CLI/Node context, not browser
     const nodeCP = await (new Function('return import("node:child_process")')() as Promise<any>);
     const nodeRL = await (new Function('return import("node:readline")')() as Promise<any>);
@@ -110,20 +115,43 @@ export class StdioTransport implements MCPTransport {
     });
 
     proc.on('exit', (code: number) => {
-      const tail = this.stderrTail.join('\n');
-      const suffix = tail ? `\n[stderr]\n${tail}` : '';
-      for (const [, p] of this.pending) {
-        clearTimeout(p.timer);
-        p.reject(new Error(`MCP server exited with code ${code}${suffix}`));
-      }
-      this.pending.clear();
-      this.stderrTail = [];
-      this.rl?.close();
-      this.rl = null;
-      if (this.proc === proc) this.proc = null;
+      this.teardownProcess(proc, `MCP server exited with code ${code}`);
+    });
+
+    // 'error' covers spawn failures (ENOENT / EACCES) and stream faults.
+    // Without a handler Node turns a missing command into an UNCAUGHT
+    // exception that kills the whole CLI; worse, a failed spawn emits 'error'
+    // WITHOUT 'exit', so the exit-handler cleanup never ran and the dead
+    // process stayed cached in this.proc (killed=false) — every later send()
+    // wrote into its broken stdin forever. Funnel both events through the
+    // shared teardown so pending requests reject with the stderr tail and the
+    // next send() respawns from scratch.
+    proc.on('error', (err: Error) => {
+      const code = (err as { code?: string }).code;
+      const detail = code === 'ENOENT'
+        ? `command not found: ${this.command[0] ?? ''} — fix the MCP server's command`
+        : err.message;
+      this.startError = `MCP server failed to start: ${detail}`;
+      this.teardownProcess(proc, this.startError);
     });
 
     return proc;
+  }
+
+  /** Idempotent teardown shared by 'exit' and 'error' (a dying process can
+   * emit both; a failed spawn emits only 'error'). */
+  private teardownProcess(proc: ChildProcess, message: string): void {
+    const tail = this.stderrTail.join('\n');
+    const suffix = tail ? `\n[stderr]\n${tail}` : '';
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error(`${message}${suffix}`));
+    }
+    this.pending.clear();
+    this.stderrTail = [];
+    this.rl?.close();
+    this.rl = null;
+    if (this.proc === proc) this.proc = null;
   }
 
   async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
@@ -139,12 +167,16 @@ export class StdioTransport implements MCPTransport {
 
       const payload = JSON.stringify(request) + '\n';
       proc.stdin.write(payload, (err: Error | null) => {
-        if (err) {
-          const pending = this.pending.get(request.id);
-          if (pending) clearTimeout(pending.timer);
-          this.pending.delete(request.id);
-          reject(err);
-        }
+        if (!err) return;
+        const pending = this.pending.get(request.id);
+        if (pending) clearTimeout(pending.timer);
+        this.pending.delete(request.id);
+        // A broken stdin usually means the spawn itself failed; defer one tick
+        // so the 'error' handler can latch the real reason ("command not
+        // found: …") before this rejection settles the promise.
+        setImmediate(() => {
+          reject(new Error(this.startError ?? `write to MCP server failed: ${err.message}`));
+        });
       });
     });
   }

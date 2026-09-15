@@ -12,6 +12,7 @@ import type { EngineContext, ToolAdapter, ToolCall, ToolResult } from '../../sha
 const BUDGET = {
   incrementToolCall: () => {},
   remaining: () => ({ time: 60_000 }),
+  streamDeadlineMs: () => 60_000,
 };
 
 function makeContext(execute: (tc: ToolCall) => Promise<ToolResult>, timeoutMs?: number): EngineContext {
@@ -61,7 +62,7 @@ describe('ToolExecutionCoordinator tool budget', () => {
       await new Promise((resolve) => setTimeout(resolve, 200));
       return ok(tc);
     }, 600_000);
-    const tightBudget = { incrementToolCall: () => {}, remaining: () => ({ time: 10 }) };
+    const tightBudget = { incrementToolCall: () => {}, remaining: () => ({ time: 10 }), streamDeadlineMs: () => 10 };
 
     const results = await coordinator.execute([call('reviewer')], ctx, tightBudget);
     expect(results[0].result.success).toBe(false);
