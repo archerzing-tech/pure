@@ -149,6 +149,11 @@ export class HttpTransport implements MCPTransport {
       }, this.requestTimeoutMs);
       this.pending.set(request.id, { resolve, reject, timer });
     });
+    // The pending timer can fire while no handler is attached to `promise` yet
+    // (an SSE read loop is awaiting the stream, not this promise). Rejecting in
+    // that window would surface as an unhandled rejection, so mark it handled
+    // immediately; the real handler below still observes the outcome.
+    promise.catch(() => {});
 
     try {
       if (this.legacyMode) {
