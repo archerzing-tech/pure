@@ -6027,22 +6027,27 @@ body {
   white-space: pre-wrap;
 }
 
-/* PlantUML images */
-.bubble .puml-diagram {
-  max-width: 100%;
-  height: auto;
+/* PlantUML slot — the diagram is rendered LOCALLY (src/ui/plantumlDiagram.ts)
+   into `.puml-target`, so the slot is a card like the mermaid one instead of a
+   remote <img>; the preview/source/error states come from the shared
+   .diagram-slot styles below. */
+.bubble .puml-slot {
+  position: relative;
   margin: 12px 0;
-  padding: 16px;
   background: var(--bg-card);
   border: 1px solid var(--border-light);
   border-radius: var(--radius-sm);
-  display: block;
-  cursor: pointer;
-  transition: background var(--transition), border-color var(--transition), opacity 0.15s var(--ease-out);
+  overflow: hidden;
+  min-height: 240px;
+  transition: background var(--transition), border-color var(--transition);
 }
-
-.bubble .puml-diagram:hover {
-  opacity: 0.88;
+/* The engine emits an SVG at its natural size (viewBox + width/height). Keep
+   that size — stretching a small diagram across the whole bubble blurs its
+   labels — and only scale it DOWN when it is wider than the card. */
+.bubble .puml-slot .puml-target svg {
+  width: auto;
+  max-width: 100%;
+  margin: 0 auto;
 }
 
 /* Error / fallback blocks */
@@ -6234,7 +6239,7 @@ body {
 [data-theme="dark"] .bubble .hljs-section,
 [data-theme="dark"] .bubble .hljs-name { color: #7ee787; }
 [data-theme="dark"] .bubble .mermaid-slot,
-[data-theme="dark"] .bubble .puml-diagram {
+[data-theme="dark"] .bubble .puml-slot {
   background: #161b22;
   border-color: #30363d;
 }

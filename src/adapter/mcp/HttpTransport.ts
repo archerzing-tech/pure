@@ -47,6 +47,10 @@ export class HttpTransport implements MCPTransport {
   private legacyMode = false;
   /** Legacy push channel (fetch path only); created on demand in legacy mode. */
   private legacyEventSource: EventSource | null = null;
+  /** Streamable POST bodies still being read line-by-line (SSE). Held so
+   *  close() can release them instead of leaving the reader to the fetch
+   *  timeout. */
+  private sseReaders = new Set<ReadableStreamDefaultReader<Uint8Array>>();
   /** `Mcp-Session-Id` assigned by the server during initialize (streamable). */
   private sessionId: string | undefined;
   /** Protocol version agreed during initialize (echoed on later requests). */
@@ -100,6 +104,12 @@ export class HttpTransport implements MCPTransport {
       p.reject(new Error('Transport closed'));
     }
     this.pending.clear();
+    for (const reader of this.sseReaders) {
+      // Released on close(): an in-flight SSE body would otherwise stay held
+      // until the fetch's own timeout fires.
+      void reader.cancel().catch(() => { /* already closed */ });
+    }
+    this.sseReaders.clear();
     if (this.legacyEventSource) {
       this.legacyEventSource.close();
       this.legacyEventSource = null;
@@ -189,26 +199,38 @@ export class HttpTransport implements MCPTransport {
   /** Read the SSE stream attached to a streamable POST until the response for
    * `requestId` arrives, then cancel the stream. */
   private async readSseResponse(res: Response, requestId: number): Promise<void> {
-    const reader = res.body!.getReader();
+    if (!res.body) return;
+    const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    this.sseReaders.add(reader);
     const finish = async () => {
       try { await reader.cancel(); } catch { /* already closed */ }
+      this.sseReaders.delete(reader);
     };
-    while (true) {
-      const { done, value } = await reader.read().catch(() => ({ done: true, value: undefined }));
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let newlineAt = buffer.indexOf('\n');
-      while (newlineAt >= 0) {
-        const line = buffer.slice(0, newlineAt).replace(/\r$/, '');
-        buffer = buffer.slice(newlineAt + 1);
-        if (line.startsWith('data:')) {
-          const settled = this.handleSseData(line.slice(5).trim(), requestId);
-          if (settled) { await finish(); return; }
+    try {
+      while (true) {
+        // The pending timer settles this request on timeout while the server may
+        // keep the POST open. Nothing downstream consumes the rest of the
+        // stream, so stop here instead of holding the reader until the fetch's
+        // own timeout fires.
+        if (!this.pending.has(requestId)) { await finish(); return; }
+        const { done, value } = await reader.read().catch(() => ({ done: true, value: undefined }));
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let newlineAt = buffer.indexOf('\n');
+        while (newlineAt >= 0) {
+          const line = buffer.slice(0, newlineAt).replace(/\r$/, '');
+          buffer = buffer.slice(newlineAt + 1);
+          if (line.startsWith('data:')) {
+            const settled = this.handleSseData(line.slice(5).trim(), requestId);
+            if (settled) { await finish(); return; }
+          }
+          newlineAt = buffer.indexOf('\n');
         }
-        newlineAt = buffer.indexOf('\n');
       }
+    } finally {
+      this.sseReaders.delete(reader);
     }
   }
 

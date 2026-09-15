@@ -7,6 +7,7 @@
       "dependencies": {
         "@anthropic-ai/sdk": "^0.115.0",
         "@huggingface/transformers": "^4.2.0",
+        "@plantuml/core": "^1.2026.8",
         "@tauri-apps/api": "^2.11.1",
         "@tauri-apps/cli": "^2.11.4",
         "@tauri-apps/plugin-dialog": "^2.7.2",
@@ -21,7 +22,6 @@
         "marked": "^18.0.7",
         "mermaid": "^11.16.0",
         "openai": "^7.1.0",
-        "plantuml-encoder": "^1.4.0",
         "pptxgenjs": "^4.0.1",
         "vite": "^7.1.3",
         "xlsx": "file:vendor/xlsx-0.20.3.tgz",
@@ -164,6 +164,8 @@
     "@mermaid-js/parser": ["@mermaid-js/parser@1.2.0", "https://mirrors.cloud.tencent.com/npm/@mermaid-js/parser/-/parser-1.2.0.tgz", { "dependencies": { "@chevrotain/types": "~11.1.2" } }, "sha512-oYPyv8A4As1yH5Bx+04iQEQxXuIQDe0GKCNSRgao6z8AM9jixXIfP0vsppRLvGf+nKIOb9/LdpWA4YuJiVvESA=="],
 
     "@napi-rs/lzma-linux-x64-gnu": ["@napi-rs/lzma-linux-x64-gnu@1.5.1", "https://mirrors.cloud.tencent.com/npm/@napi-rs/lzma-linux-x64-gnu/-/lzma-linux-x64-gnu-1.5.1.tgz", { "os": "linux", "cpu": "x64" }, "sha512-oTXEIha4SsuXdTA4Iyskj0kpdx2yVXdhd75c2v3xGrHFfVMsbhTPZU/nMPL4sWKo4pBHm3aucLaqGlF696dTyQ=="],
+
+    "@plantuml/core": ["@plantuml/core@1.2026.8", "", {}, "sha512-md2wGuaIJnAq1yKkedSpQE68cLsvZvctwzWHkDAnC3DTVLe/MSd/2vr4ETwr6jtc1av8cdxCohFuW4VGejMHyw=="],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "https://mirrors.cloud.tencent.com/npm/@protobufjs/aspromise/-/aspromise-1.1.2.tgz", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 
@@ -556,8 +558,6 @@
     "picocolors": ["picocolors@1.1.1", "https://mirrors.cloud.tencent.com/npm/picocolors/-/picocolors-1.1.1.tgz", {}, "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA=="],
 
     "picomatch": ["picomatch@4.0.7", "", {}, "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA=="],
-
-    "plantuml-encoder": ["plantuml-encoder@1.4.0", "https://mirrors.cloud.tencent.com/npm/plantuml-encoder/-/plantuml-encoder-1.4.0.tgz", {}, "sha512-sxMwpDw/ySY1WB2CE3+IdMuEcWibJ72DDOsXLkSmEaSzwEUaYBT6DWgOfBiHGCux4q433X6+OEFWjlVqp7gL6g=="],
 
     "platform": ["platform@1.3.6", "https://mirrors.cloud.tencent.com/npm/platform/-/platform-1.3.6.tgz", {}, "sha512-fnWVljUchTro6RiCFvCXBbNhJc2NijN7oIQxbwsyL0buWJPG85v81ehlHI9fXrJsMNgTofEoWIQeClKpgxFLrg=="],
 

@@ -107,17 +107,28 @@ describe('PromptAssembler', () => {
     expect(gui).not.toContain('wireframe');
   });
 
-  it('defaults GUI diagrams to mermaid (offline) and gates puml behind an explicit ask', () => {
-    // GUI 的图默认走 mermaid：mermaid 随应用打包、本地渲染，断网也能画；
-    // puml 块要经 plantuml.com 在线渲染，断网即失败——所以只有用户点名要
-    // PlantUML 语法时才允许输出 puml。
+  it('offers mermaid and puml as offline GUI diagram formats', () => {
+    // GUI 的图全部本地渲染：mermaid 与 PlantUML 引擎都随应用打包，断网也能画，
+    // 所以 puml 不再被禁止，只声明各自擅长的图型（mermaid 默认，PlantUML 负责
+    // class / component / deployment / activity / use-case）。
     const gui = assembler.buildSystemPrompt({
       surface: 'gui',
       capabilities: buildGuiCapabilities(true),
     });
-    expect(gui).toContain('mermaid renders locally and works offline');
-    expect(gui).toContain('NEVER emit puml/plantuml blocks unless the user explicitly asks for PlantUML');
-    expect(gui).toContain('plantuml.com server and fail without network');
+    expect(gui).toContain('puml/plantuml blocks render locally too');
+    expect(gui).toContain('class / component / deployment / activity / use-case UML');
+    expect(gui).not.toContain('NEVER emit puml/plantuml');
+    expect(gui).not.toContain('fail without network');
+
+    // The text-to-image variant carries the same offline contract.
+    const withImageGen = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: buildGuiCapabilities(true, false, { imageGeneration: true }),
+      imageGeneration: true,
+    });
+    expect(withImageGen).toContain('ALL of them render locally in the app with no network');
+    expect(withImageGen).toContain('puml/plantuml when PlantUML\'s layout is better');
+    expect(withImageGen).not.toContain('plantuml.com');
   });
 
   it('injects runtime state, skills, and task mode at assembly time', () => {

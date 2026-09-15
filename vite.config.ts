@@ -4,14 +4,24 @@ import { dirname, join } from 'node:path';
 import type { Plugin, ResolvedConfig } from 'vite';
 import { defineConfig } from 'vite';
 
-// The three big lazy chunks are imported dynamically from markdown.ts —
-// WITHOUT an explicit include, the dev server discovers them on FIRST use
-// (minutes into a conversation, when the first map/chart/diagram renders).
-// If that lands on a re-optimization, the in-flight import dies with an
-// initialization-order error ("Cannot access uninitialized variable") that
-// reads as a broken map/chart. Pre-bundling them at server start removes
-// the whole failure class in dev; the production build is unaffected.
-const LAZY_DIAGRAM_DEPS = ['leaflet', 'echarts', 'mermaid'];
+// The big lazy chunks are imported dynamically from markdown.ts — WITHOUT an
+// explicit include, the dev server discovers them on FIRST use (minutes into a
+// conversation, when the first map/chart/diagram renders). If that lands on a
+// re-optimization, the in-flight import dies with an initialization-order
+// error ("Cannot access uninitialized variable") that reads as a broken
+// map/chart. Pre-bundling them at server start removes the whole failure class
+// in dev; the production build is unaffected. The PlantUML engine and the
+// bundles it loads on demand (themes / emoji / openiconic, all local) join the
+// list for the same reason.
+const LAZY_DIAGRAM_DEPS = [
+  'leaflet',
+  'echarts',
+  'mermaid',
+  '@plantuml/core',
+  '@plantuml/core/themes.js',
+  '@plantuml/core/emoji.js',
+  '@plantuml/core/openiconic.js',
+];
 
 const require = createRequire(import.meta.url);
 const APP_VERSION = JSON.parse(readFileSync(join(import.meta.dirname, 'package.json'), 'utf8')).version as string;
@@ -122,7 +132,43 @@ function onnxWasmAssets(): Plugin {
   };
 }
 
-const plugins = [onnxWasmAssets()];
+// PlantUML's Graphviz layout (viz-global.js) publishes the global `Viz` and
+// must be loaded as a CLASSIC script before the engine runs (see
+// src/ui/plantumlDiagram.ts). Serving it from the app — node_modules in dev,
+// an emitted asset in the build — is what keeps PlantUML rendering off the
+// network entirely; a CDN copy would re-create the blank-diagram failure this
+// app must never have.
+const PLANTUML_VIZ_SCRIPT = 'viz-global.js';
+const PLANTUML_ASSET_ROUTE = '/plantuml/';
+
+function plantumlAssets(): Plugin {
+  const readVizScript = (): string => readFileSync(require.resolve('@plantuml/core/viz-global.js'), 'utf8');
+  return {
+    name: 'pure-plantuml-assets',
+    enforce: 'pre',
+    configureServer(server) {
+      server.middlewares.use(PLANTUML_ASSET_ROUTE, (req, res, next) => {
+        const name = (req.url ?? '').split('?')[0].replace(/^\//, '');
+        if (name !== PLANTUML_VIZ_SCRIPT) {
+          next();
+          return;
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Content-Type', 'text/javascript');
+        res.end(readVizScript());
+      });
+    },
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: `plantuml/${PLANTUML_VIZ_SCRIPT}`,
+        source: readVizScript(),
+      });
+    },
+  };
+}
+
+const plugins = [onnxWasmAssets(), plantumlAssets()];
 
 export default defineConfig({
   plugins,
@@ -146,12 +192,14 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari14',
     minify: !process.env.TAURI_ENV_DEBUG,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
-    // Two known lazy boundaries sit just under 700KB minified: mermaid's
-    // upstream parser (~688KB) and the single echarts+zrender vendor chunk
-    // (~690KB, merged deliberately — see manualChunks above for why it must
-    // not be split). Keep the threshold above both so the warning stays
-    // meaningful for eager chunks, which are much smaller.
-    chunkSizeWarningLimit: 800,
+    // Known lazy boundaries sit just under 700KB minified: mermaid's upstream
+    // parser (~688KB) and the single echarts+zrender vendor chunk (~690KB,
+    // merged deliberately — see manualChunks above for why it must not be
+    // split) — and the PlantUML engine + Graphviz layout is a deliberately
+    // large ~5.8MB chunk that only a ```puml block ever pulls in. Keep the
+    // threshold above all of them so the warning stays meaningful for eager
+    // chunks, which are much smaller.
+    chunkSizeWarningLimit: 6000,
     rollupOptions: {
       // Suppress intentional node:* externalization warnings — conventions.ts
       // and backgroundCommand.ts use dynamic import / guarded require inside
@@ -160,6 +208,18 @@ export default defineConfig({
       onwarn(warning, warn) {
         if (warning.message?.includes('has been externalized for browser compatibility')) return;
         warn(warning);
+      },
+      // The PlantUML sibling bundles (themes / emoji / openiconic) are IIFEs
+      // whose entire job is registering their data on a window global — and
+      // @plantuml/core's package.json declares every file except
+      // viz-global.js as side-effect-free. Without this, a production build is
+      // free to tree-shake a lazily imported bundle down to nothing, and
+      // `!theme` / emoji diagrams would silently lose their data (dev never
+      // shows it: the dev server pre-bundles those files as-is).
+      treeshake: {
+        moduleSideEffects(id: string) {
+          return id.includes('@plantuml/core') ? true : null;
+        },
       },
       output: {
         manualChunks(id) {
@@ -191,12 +251,23 @@ export default defineConfig({
             return 'llm-vendor';
           }
           if (normalizedId.includes('/@tauri-apps/')) return 'tauri-vendor';
-          if (normalizedId.includes('/marked/')
-            || normalizedId.includes('/dompurify/')
-            || normalizedId.includes('/plantuml-encoder/')) {
+          if (normalizedId.includes('/marked/') || normalizedId.includes('/dompurify/')) {
             return 'markdown-vendor';
           }
           if (normalizedId.includes('/@huggingface/transformers/')) return 'transformers-runtime';
+          // The TeaVM PlantUML engine + Graphviz layout stay in one lazy
+          // chunk, reached only by import('./plantumlDiagram') from
+          // markdown.ts — same reasoning as echarts: one chunk keeps the
+          // engine's own module ordering intact, and nothing loads it until a
+          // ```puml block actually appears. The data bundles the engine pulls
+          // in on demand (themes / emoji / openiconic, ~2MB of sprite tables)
+          // are excluded so they keep their own chunks: a diagram that never
+          // uses emoji never parses them.
+          if (normalizedId.includes('/@plantuml/core/')) {
+            return /\/@plantuml\/core\/(?:themes|emoji|openiconic)\.js$/.test(normalizedId)
+              ? undefined
+              : 'plantuml-engine';
+          }
           if (normalizedId.includes('/@mermaid-js/parser/')) return 'mermaid-parser';
           if (normalizedId.includes('/onnxruntime-web/')) return 'onnxruntime-web';
           if (normalizedId.includes('/katex/')) return 'katex';

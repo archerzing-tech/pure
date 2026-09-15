@@ -333,7 +333,7 @@ function stableArgsStringify(value: unknown): string {
 //    of two queries (see the "两个 web Search 同时出现" report).
 export function assistantBubbleTextForCopy(bubble: HTMLElement): string {
   const clone = bubble.cloneNode(true) as HTMLElement;
-  clone.querySelectorAll('button, .svg-slot, .chart-slot, .mermaid-slot, .puml-diagram').forEach((el) => el.remove());
+  clone.querySelectorAll('button, .svg-slot, .chart-slot, .mermaid-slot, .puml-slot').forEach((el) => el.remove());
   return (clone.innerText || clone.textContent || '').trim();
 }
 
