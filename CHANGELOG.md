@@ -3,6 +3,16 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.2.5-beta
+
+**PlantUML 全离线渲染 + MCP 传输资源释放 + 会话存储配额兜底**
+
+- ```` ```puml ```` 代码块改为 WebView 内本地渲染（TeaVM 版 PlantUML 引擎 + 本地 Graphviz 布局），彻底取代断网/被墙时白屏的 plantuml.com 在线图片路线；引擎与 themes/emoji/openiconic 数据包保持懒加载，不用 PlantUML 的会话零开销。模型常见的不规范写法（缺 `@enduml`、嵌套代码围栏、裸语法体）自动归一化，不再渲染成空白卡片。
+- 流式 HTTP MCP 传输：请求超时不再打印虚假的 unhandled rejection；超时/关闭时立即释放仍在读取的 SSE reader，不再吊着连接等 fetch 自身超时；新增回归测试覆盖超时路径并断言 reader 释放。
+- stdio MCP 传输：进程退出与 close() 时关闭 readline 接口并清空 stderr 尾部缓冲，重连不再带上一个进程的报错尾巴。
+- localStorage 会话写入遇到 QuotaExceededError 时自动降级为更短历史重试（40 条上限），不再整轮丢失；同时移除从未被读取的 `:pending` 暂存副本，峰值配额占用减半。
+- 新增约定检查脚本（`lint:conventions`）并接入 CI；`node:*` 外部化警告按约定静默。
+
 ## v2.2.4
 
 **子代理超时根治 + 会话与图表体验修复**
