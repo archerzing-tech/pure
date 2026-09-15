@@ -1,0 +1,8 @@
+{
+  "untyped-catch-binding": 22,
+  "dom-non-null-assertion": 33,
+  "literal-non-null-assertion": 0,
+  "unfinished-marker": 0,
+  "typecheck-suppression": 0,
+  "stray-debugger": 0
+}

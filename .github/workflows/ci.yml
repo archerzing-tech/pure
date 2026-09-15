@@ -26,6 +26,11 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # No linter is configured; this ratchet keeps the convention patterns the
+      # code review flagged from growing (see scripts/check-conventions.ts).
+      - name: Conventions
+        run: bun run lint:conventions
+
       - name: Run tests
         run: bun test
 

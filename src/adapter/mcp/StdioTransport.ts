@@ -36,6 +36,9 @@ export class StdioTransport implements MCPTransport {
   private command: string[];
   private env?: Record<string, string>;
   private stderrTail: string[] = [];
+  /** stdout line reader; closed on exit and on close() so the readline
+   *  interface (and its buffered lines) does not outlive the process. */
+  private rl: { close(): void } | null = null;
 
   constructor(command: string[], env?: Record<string, string>, requestTimeoutMs = REQUEST_TIMEOUT_MS) {
     this.command = command;
@@ -75,6 +78,7 @@ export class StdioTransport implements MCPTransport {
     this.proc = proc;
 
     const rl = createInterface({ input: proc.stdout, crlfDelay: Infinity });
+    this.rl = rl;
 
     rl.on('line', (line: string) => {
       try {
@@ -113,6 +117,9 @@ export class StdioTransport implements MCPTransport {
         p.reject(new Error(`MCP server exited with code ${code}${suffix}`));
       }
       this.pending.clear();
+      this.stderrTail = [];
+      this.rl?.close();
+      this.rl = null;
       if (this.proc === proc) this.proc = null;
     });
 
@@ -168,6 +175,9 @@ export class StdioTransport implements MCPTransport {
       p.reject(new Error('Transport closed'));
     }
     this.pending.clear();
+    this.stderrTail = [];
+    this.rl?.close();
+    this.rl = null;
     if (this.proc) {
       this.proc.kill();
       this.proc = null;

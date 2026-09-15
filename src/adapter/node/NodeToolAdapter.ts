@@ -209,28 +209,28 @@ export class NodeToolAdapter implements ToolAdapter {
     const path = this.resolve(String(args.path));
 
     if (!existsSync(path)) {
-      return this.fail(null!, start, `File not found: ${String(args.path)}`);
+      return this.fail(null, start, `File not found: ${String(args.path)}`);
     }
 
     let meta: ReturnType<typeof statSync>;
     try {
       meta = statSync(path);
     } catch {
-      return this.fail(null!, start, `File not found: ${String(args.path)}`);
+      return this.fail(null, start, `File not found: ${String(args.path)}`);
     }
     if (meta.isDirectory()) {
-      return this.fail(null!, start, `read_file: '${String(args.path)}' 是目录，不是文件——请用 list_files 查看目录内容，或补全到具体文件名。`);
+      return this.fail(null, start, `read_file: '${String(args.path)}' 是目录，不是文件——请用 list_files 查看目录内容，或补全到具体文件名。`);
     }
 
     if (meta.size > this.maxFileSize) {
-      return this.fail(null!, start, `read_file: 文件 ${(meta.size / 1024 / 1024).toFixed(0)}MB 超过读取上限 ${Math.round(this.maxFileSize / 1024 / 1024)}MB；可以改用 search_files 搜索其中的内容，或用 execute_command 分段读取。`);
+      return this.fail(null, start, `read_file: 文件 ${(meta.size / 1024 / 1024).toFixed(0)}MB 超过读取上限 ${Math.round(this.maxFileSize / 1024 / 1024)}MB；可以改用 search_files 搜索其中的内容，或用 execute_command 分段读取。`);
     }
 
     const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
     const { text: extracted, note } = await extractFileText(bytes, path);
     let text = extracted.trim();
     if (!text && note) {
-      return this.fail(null!, start, `read_file: '${String(args.path)}' — ${note}`);
+      return this.fail(null, start, `read_file: '${String(args.path)}' — ${note}`);
     }
     if (!text) {
       text = '(empty file)';
@@ -287,18 +287,18 @@ export class NodeToolAdapter implements ToolAdapter {
 
     const file = Bun.file(path);
     if (!(await file.exists())) {
-      return this.fail(null!, start, `File not found: ${String(args.path)}`);
+      return this.fail(null, start, `File not found: ${String(args.path)}`);
     }
 
     const text = await file.text();
     const match = findEditMatch(text, oldStr);
     if (!match) {
-      return this.fail(null!, start, editStringNotFoundError(String(args.path), oldStr), 'edit_file');
+      return this.fail(null, start, editStringNotFoundError(String(args.path), oldStr), 'edit_file');
     }
 
     const occurrences = match.normalizedText.split(match.normalizedOld).length - 1;
     if (occurrences > 1 && !allowMultiple) {
-      return this.fail(null!, start, `Found ${occurrences} occurrences of the string. Set allowMultiple:true to replace all, or provide more context to narrow the match.`);
+      return this.fail(null, start, `Found ${occurrences} occurrences of the string. Set allowMultiple:true to replace all, or provide more context to narrow the match.`);
     }
 
     const replacement = match.lineEnding === 'crlf' ? newStr.replace(/\r?\n/g, '\r\n') : newStr.replace(/\r\n/g, '\n');
@@ -324,7 +324,7 @@ export class NodeToolAdapter implements ToolAdapter {
     const searchDir = pathArg.trim() ? this.resolve(pathArg) : this.resolve('.');
 
     if (!existsSync(searchDir)) {
-      return this.fail(null!, start, `search_files: '${pathArg || '.'}' 不存在。若这是 Windows 绝对路径，请确认路径拼写正确且磁盘上确实存在。`);
+      return this.fail(null, start, `search_files: '${pathArg || '.'}' 不存在。若这是 Windows 绝对路径，请确认路径拼写正确且磁盘上确实存在。`);
     }
 
     const max = Math.min(Math.max(1, typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : 50), 500);
@@ -403,20 +403,20 @@ export class NodeToolAdapter implements ToolAdapter {
   private async handleFindFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const query = String(args.query ?? '').trim();
     if (!query) {
-      return this.fail(null!, start, 'find_files: query 不能为空。请给出要查找的主题词，例如 "学历" 或 "education"。');
+      return this.fail(null, start, 'find_files: query 不能为空。请给出要查找的主题词，例如 "学历" 或 "education"。');
     }
     const pathArg = args.path ? String(args.path) : '';
     const searchDir = pathArg.trim() ? this.resolve(pathArg) : this.resolve('.');
 
     if (!existsSync(searchDir)) {
-      return this.fail(null!, start, `find_files: '${pathArg || '.'}' 不存在。若这是 Windows 绝对路径，请确认路径拼写正确且磁盘上确实存在。`);
+      return this.fail(null, start, `find_files: '${pathArg || '.'}' 不存在。若这是 Windows 绝对路径，请确认路径拼写正确且磁盘上确实存在。`);
     }
 
     const max = Math.min(Math.max(1, typeof args.maxResults === 'number' ? Math.floor(args.maxResults) : 10), 30);
     const ignoreCase = args.caseSensitive !== true;
     const needles = tokenizeFindQuery(query);
     if (needles.length === 0) {
-      return this.fail(null!, start, `find_files: 无法从查询 "${query}" 中提取有效关键词（只剩助词/停用词）。请换更具体的词，例如 "学历"、"毕业证" 或 "education"。`);
+      return this.fail(null, start, `find_files: 无法从查询 "${query}" 中提取有效关键词（只剩助词/停用词）。请换更具体的词，例如 "学历"、"毕业证" 或 "education"。`);
     }
 
     // ── Stage 0: filename scan (cheap — no content reads) ────────────────
@@ -590,7 +590,7 @@ export class NodeToolAdapter implements ToolAdapter {
     // missing. existsSync + statSync().isDirectory() accept both; statSync
     // follows symlinks, matching how the glob below resolves the cwd.
     if (!existsSync(dirPath) || !statSync(dirPath).isDirectory()) {
-      return this.fail(null!, start, `Directory not found: ${String(args.path || '.')}`);
+      return this.fail(null, start, `Directory not found: ${String(args.path || '.')}`);
     }
 
     const requestedMax = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults)
@@ -689,9 +689,9 @@ export class NodeToolAdapter implements ToolAdapter {
       };
     } catch (err: any) {
       if (err?.name === 'AbortError') {
-        return this.fail(null!, start, `Command timed out after ${this.commandTimeout}ms`);
+        return this.fail(null, start, `Command timed out after ${this.commandTimeout}ms`);
       }
-      return this.fail(null!, start, err?.message ?? 'Command execution failed');
+      return this.fail(null, start, err?.message ?? 'Command execution failed');
     } finally {
       abort.cleanup();
     }
@@ -742,7 +742,7 @@ export class NodeToolAdapter implements ToolAdapter {
         duration: Date.now() - start,
       };
     } catch (err: any) {
-      return this.fail(null!, start, `background launch failed: ${err?.message ?? err}`, 'execute_command');
+      return this.fail(null, start, `background launch failed: ${err?.message ?? err}`, 'execute_command');
     }
   }
 
@@ -801,7 +801,7 @@ export class NodeToolAdapter implements ToolAdapter {
         const message = signal?.aborted
           ? 'diff_files cancelled by the caller'
           : `diff_files timed out after ${this.commandTimeout}ms`;
-        return this.fail(null!, start, message);
+        return this.fail(null, start, message);
       }
 
       if (proc.exitCode === 0) {
@@ -824,15 +824,15 @@ export class NodeToolAdapter implements ToolAdapter {
         };
       }
 
-      return this.fail(null!, start, stderr.trim() || `diff failed with exit code ${proc.exitCode}`);
+      return this.fail(null, start, stderr.trim() || `diff failed with exit code ${proc.exitCode}`);
     } catch (err: any) {
       if (err?.name === 'AbortError') {
         const message = signal?.aborted
           ? 'diff_files cancelled by the caller'
           : `diff_files timed out after ${this.commandTimeout}ms`;
-        return this.fail(null!, start, message);
+        return this.fail(null, start, message);
       }
-      return this.fail(null!, start, err?.message ?? 'diff failed');
+      return this.fail(null, start, err?.message ?? 'diff failed');
     } finally {
       abort.cleanup();
     }
@@ -859,7 +859,7 @@ export class NodeToolAdapter implements ToolAdapter {
     start: number,
     context: { library?: string; topic?: string; version?: string } = {},
   ): Promise<ToolResult> {
-    if (!query) return this.fail(null!, start, 'Research prompt/query must not be empty', kind);
+    if (!query) return this.fail(null, start, 'Research prompt/query must not be empty', kind);
     const requestedSources = typeof args.maxSources === 'number' && Number.isFinite(args.maxSources)
       ? Math.min(8, Math.max(1, Math.floor(args.maxSources)))
       : 5;
@@ -901,7 +901,7 @@ export class NodeToolAdapter implements ToolAdapter {
       const detail = allowedDomains.length > 0
         ? `No usable research sources matched the allowed domains: ${allowedDomains.join(', ')}`
         : 'No usable research sources were returned by the available search backends';
-      return this.fail(null!, start, `${detail}. Rephrase the query or broaden the allowed domain list; do not repeat the unchanged query.`, kind);
+      return this.fail(null, start, `${detail}. Rephrase the query or broaden the allowed domain list; do not repeat the unchanged query.`, kind);
     }
 
     const result = makeResearchPayload(kind, query, sources, {
@@ -927,7 +927,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleCodeSearcher(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
     const query = String(args.query ?? args.pattern ?? '').trim();
-    if (!query) return this.fail(null!, start, 'code_searcher query must not be empty', 'code_searcher');
+    if (!query) return this.fail(null, start, 'code_searcher query must not be empty', 'code_searcher');
     const searchDir = this.resolve(String(args.path || '.'));
     const workspaceRoot = realpathSync(this.workspace);
     const scope = pathRelative(workspaceRoot, searchDir) || '.';
@@ -1015,7 +1015,7 @@ export class NodeToolAdapter implements ToolAdapter {
       await proc.exited;
       const exitCode = proc.exitCode ?? -1;
       if (!truncated && exitCode !== 0 && exitCode !== 1) {
-        return this.fail(null!, start, stderr.trim() || `rg failed with exit code ${exitCode}`, 'code_searcher');
+        return this.fail(null, start, stderr.trim() || `rg failed with exit code ${exitCode}`, 'code_searcher');
       }
 
       return {
@@ -1039,12 +1039,12 @@ export class NodeToolAdapter implements ToolAdapter {
         const message = signal?.aborted
           ? 'code_searcher cancelled by the caller'
           : `code_searcher timed out after ${timeoutSeconds}s`;
-        return this.fail(null!, start, message, 'code_searcher');
+        return this.fail(null, start, message, 'code_searcher');
       }
       if (isRipgrepUnavailable(error)) {
         return this.handleCodeSearcherFallback(query, searchDir, scope, args, start);
       }
-      return this.fail(null!, start, error?.message ?? 'code_searcher failed', 'code_searcher');
+      return this.fail(null, start, error?.message ?? 'code_searcher failed', 'code_searcher');
     } finally {
       abort.cleanup();
     }
@@ -1062,7 +1062,7 @@ export class NodeToolAdapter implements ToolAdapter {
     try {
       matcher = new RegExp(query, flags);
     } catch (error: any) {
-      return this.fail(null!, start, `Invalid regular expression: ${error?.message ?? String(error)}`, 'code_searcher');
+      return this.fail(null, start, `Invalid regular expression: ${error?.message ?? String(error)}`, 'code_searcher');
     }
     const perFile = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults)
       ? Math.min(100, Math.max(1, Math.floor(args.maxResults)))
@@ -1077,7 +1077,7 @@ export class NodeToolAdapter implements ToolAdapter {
     try {
       globMatchers = globs.map((pattern) => new Bun.Glob(pattern));
     } catch (error: any) {
-      return this.fail(null!, start, `Invalid code_searcher glob: ${error?.message ?? String(error)}`, 'code_searcher');
+      return this.fail(null, start, `Invalid code_searcher glob: ${error?.message ?? String(error)}`, 'code_searcher');
     }
     const matches: Array<{ path: string; line: number; column?: number; text: string }> = [];
     const workspaceRoot = realpathSync(this.workspace);
@@ -1140,7 +1140,7 @@ export class NodeToolAdapter implements ToolAdapter {
         }
       }
     } catch (error: any) {
-      return this.fail(null!, start, error?.message ?? 'code_searcher fallback failed', 'code_searcher');
+      return this.fail(null, start, error?.message ?? 'code_searcher fallback failed', 'code_searcher');
     }
 
     return {
@@ -1503,7 +1503,7 @@ export class NodeToolAdapter implements ToolAdapter {
       // blindly retry, and how to recover. This is the message the failure
       // policy feeds back on.
       const details = failed.length > 0 ? failed.join('; ') : 'all backends unreachable';
-      return this.fail(null!, start, `Web search failed on all backends (${details}). This looks like a network or rate-limit issue rather than a bad query — do NOT retry web_search immediately with the same or similar queries. Retry later, or use web_fetch / web_scrape on a URL you expect to contain the information.`);
+      return this.fail(null, start, `Web search failed on all backends (${details}). This looks like a network or rate-limit issue rather than a bad query — do NOT retry web_search immediately with the same or similar queries. Retry later, or use web_fetch / web_scrape on a URL you expect to contain the information.`);
     }
 
     const output = results
@@ -2325,7 +2325,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleWebPublicApi(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const query = String(args.query ?? '').trim();
-    if (!query) return this.fail(null!, start, 'web_public_api query must not be empty', 'web_public_api');
+    if (!query) return this.fail(null, start, 'web_public_api query must not be empty', 'web_public_api');
     const { outcome, cached } = await cachedDirectPublicApi(
       query,
       typeof args.category === 'string' ? args.category : undefined,
@@ -2348,7 +2348,7 @@ export class NodeToolAdapter implements ToolAdapter {
       if (search.success) return { ...search, toolName: 'web_public_api' };
     }
     return this.fail(
-      null!,
+      null,
       start,
       `No structured-data source matched "${query}" and web search also failed. web_public_api covers weather/geocode/news/wiki/IP/FX/stock/GitHub lookups — for anything else use researcher_web instead of retrying this tool with the same query (auto-fallback to search is off when searchOnMiss:false).`,
       'web_public_api',
@@ -2357,7 +2357,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleWebScrape(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
     const url = String(args.url ?? '').trim();
-    if (!url) return this.fail(null!, start, 'web_scrape url must not be empty', 'web_scrape');
+    if (!url) return this.fail(null, start, 'web_scrape url must not be empty', 'web_scrape');
     const selector = typeof args.selector === 'string' ? args.selector.trim() || undefined : undefined;
     const maxChars = Math.min(typeof args.maxChars === 'number' ? args.maxChars : 20000, 50000);
 
@@ -2374,7 +2374,7 @@ export class NodeToolAdapter implements ToolAdapter {
     try {
       const outcome = await this.fetchPageWithFallbacks(url, { selector, signal: abort.signal });
       if (!outcome) {
-        return this.fail(null!, start, `No readable content could be obtained from ${url} on any tier (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_scrape on this URL; use researcher_web to find a mirror or a different page.`, 'web_scrape');
+        return this.fail(null, start, `No readable content could be obtained from ${url} on any tier (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_scrape on this URL; use researcher_web to find a mirror or a different page.`, 'web_scrape');
       }
       const page = truncateText(outcome.text, maxChars);
       webCache().set(pageKey, page, PAGE_TTL_MS);
@@ -2425,7 +2425,7 @@ export class NodeToolAdapter implements ToolAdapter {
     const allowMultiple = Boolean(args.allowMultiple);
 
     if (files.length === 0) {
-      return this.fail(null!, start, 'No files specified');
+      return this.fail(null, start, 'No files specified');
     }
 
     const results: string[] = [];
@@ -2495,7 +2495,7 @@ export class NodeToolAdapter implements ToolAdapter {
       await proc.exited;
 
       if (proc.exitCode !== 0) {
-        return this.fail(null!, start, stderr.trim() || `git failed with exit code ${proc.exitCode}`);
+        return this.fail(null, start, stderr.trim() || `git failed with exit code ${proc.exitCode}`);
       }
 
       return {
@@ -2507,9 +2507,9 @@ export class NodeToolAdapter implements ToolAdapter {
       };
     } catch (err: any) {
       if (err?.name === 'AbortError') {
-        return this.fail(null!, start, `Git command timed out after ${this.commandTimeout}ms`);
+        return this.fail(null, start, `Git command timed out after ${this.commandTimeout}ms`);
       }
-      return this.fail(null!, start, err?.message ?? 'Git command failed');
+      return this.fail(null, start, err?.message ?? 'Git command failed');
     } finally {
       abort.cleanup();
     }

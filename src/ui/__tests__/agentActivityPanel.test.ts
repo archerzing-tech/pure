@@ -75,6 +75,25 @@ describe('agent activity panel', () => {
     expect(current.toolName).toBe('read_file');
   });
 
+  it('bounds the carried output and tool trace so one delegation cannot bloat every save', () => {
+    const trace = Array.from({ length: 50 }, (_, i) => ({ name: `tool-${i}`, status: 'completed' as const }));
+    const merged = mergeAgentActivity(undefined, {
+      callId: 'call-bounded',
+      agentName: 'researcher',
+      output: 'x'.repeat(5_000),
+      toolTrace: trace,
+    });
+    expect(merged.output).toHaveLength(2_000);
+    expect(merged.toolTrace).toHaveLength(20);
+    // The tail survives — the newest tool calls are the ones a reader needs.
+    expect(merged.toolTrace?.at(-1)?.name).toBe('tool-49');
+
+    // A payload already inside the bound is passed through untouched.
+    const small = mergeAgentActivity(undefined, { callId: 'call-small', agentName: 'researcher', output: '找到 4 个来源' });
+    expect(small.output).toBe('找到 4 个来源');
+    expect(mergeAgentActivity(small, { callId: 'call-small', agentName: 'researcher', state: 'VERIFY' }).output).toBe('找到 4 个来源');
+  });
+
   it('mounts the saved activity trace when a session is restored', () => {
     const snapshot: SessionSnapshotV2 = {
       version: 3,
