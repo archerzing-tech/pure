@@ -863,6 +863,19 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('|| designPreviewShown,')).toBeGreaterThan(-1);
   });
 
+  it('never records a clean end for an interrupted round, so Stop kills the auto-continue chain', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 用户在多步计划执行中途点停止：引擎仍会补发一个 Completed(interrupted=true)，
+    // 该回合绝不能带着 cleanEnd=true 进入 send() 的 finally——否则自动续跑会在
+    // 1.2s 后重新排下一轮，表现为“点了暂停，计划却继续跑”。cleanEnd 必须把
+    // interrupted 一票否决（调度器侧的契约见 autoContinue.test.ts）。
+    const record = src.indexOf('this.pendingAutoContinue = {');
+    expect(record).toBeGreaterThan(-1);
+    const seg = src.slice(record, record + 600);
+    expect(seg).toContain('planActive: planCard !== undefined,');
+    expect(seg).toContain('!event.payload.interrupted && gen === this.generation');
+  });
+
   it('no longer stalls the plan cursor on per-phase verification gates', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 逐阶段验证门禁（phaseVerifySeen / schedulePhaseBackstop）已被回合末的
