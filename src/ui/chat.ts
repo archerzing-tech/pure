@@ -4548,7 +4548,10 @@ export class ChatController {
               && completionSnapshot.currentPlan >= lastPlanIndex;
             this.pendingAutoContinue = {
               planActive: planCard !== undefined,
-              cleanEnd: planCard !== undefined && gen === this.generation && !this.pausePlanCard,
+              // 被中断的回合（用户点停止 / Escape / 插话接管）绝不是 cleanEnd：
+              // 链路必须随中止一起终止，否则 send() 的 finally 会在 1.2s 后重新
+              // 排下一轮「自动续跑」——表现为“点了暂停，计划却继续跑”。
+              cleanEnd: planCard !== undefined && !event.payload.interrupted && gen === this.generation && !this.pausePlanCard,
               asksForInput: turnAsksForInput,
               hasToolSuccess,
               currentPlan: completionSnapshot?.currentPlan ?? -1,

@@ -23,7 +23,9 @@ export const AUTO_CONTINUE_DELAY_MS = 1200;
 export interface AutoContinueSignals {
   /** A complex plan card is present (simple turns never chain). */
   planActive: boolean;
-  /** Round ended cleanly: Completed, current generation, not paused, no question. */
+  /** Round ended cleanly: Completed WITHOUT interruption, current generation,
+   *  not paused, no question. An interrupted round (user Stop / interject
+   *  supersede) must report false or the chain re-fires right after the stop. */
   cleanEnd: boolean;
   /** Assistant's final text ended with a question — never chain past a question. */
   asksForInput: boolean;
