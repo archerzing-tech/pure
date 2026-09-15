@@ -4,8 +4,9 @@ import { HttpTransport, MCP_HTTP_PROTOCOL_VERSION } from '../HttpTransport';
 
 /** Minimal streamable-HTTP MCP server: answers `initialize` with a session
  * header + inline JSON (negotiated version), other requests echo received
- * headers. Can be told to require the legacy /message endpoint. */
-function startStreamableServer(opts: { legacyOnly?: boolean; sseReply?: boolean } = {}) {
+ * headers. Can be told to require the legacy /message endpoint, or to hold an
+ * SSE reply open without ever sending the response. */
+function startStreamableServer(opts: { legacyOnly?: boolean; sseReply?: boolean; neverReplySse?: boolean } = {}) {
   const sessions = new Set<string>();
   const server = serve({
     port: 0,
@@ -40,6 +41,11 @@ function startStreamableServer(opts: { legacyOnly?: boolean; sseReply?: boolean 
       }
 
       if (msg.method === 'tools/list') {
+        if (opts.neverReplySse) {
+          // Hold the SSE body open forever: no data, no close, no error — the
+          // client's pending timer (not the stream) must settle the request.
+          return new Response(new ReadableStream({ start() {} }), { headers: { 'Content-Type': 'text/event-stream' } });
+        }
         if (opts.sseReply) {
           const stream = new ReadableStream({
             start(controller) {
@@ -92,6 +98,29 @@ describe('MCP Streamable HTTP transport', () => {
       await t.notify('notifications/initialized', {});
       const result = await t.send('tools/list', {}) as { tools: Array<{ name: string }> };
       expect(result.tools.map((tool) => tool.name)).toContain('echo');
+      t.close();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it('rejects on timeout while an SSE reply is held open and releases the reader', async () => {
+    const { url, server } = startStreamableServer({ neverReplySse: true });
+    try {
+      const t = new HttpTransport(url, '', 200);
+      // The stream never carries the response, so the pending timer settles
+      // the request while the server keeps the POST open.
+      await expect(t.send('tools/list', {})).rejects.toThrow(/timed out after 200ms/);
+      // The fetch abort lands a tick after the pending timer (same
+      // requestTimeoutMs, timer inserted first), so the read loop's cleanup
+      // (finish()/finally) may run just after the rejection is observed —
+      // poll briefly for the reader to leave sseReaders instead of asserting
+      // synchronously. A reader left behind keeps the SSE body held past the
+      // request's lifetime, the leak this cleanup exists to prevent.
+      const readers = t as unknown as { sseReaders: Set<unknown> };
+      const deadline = Date.now() + 1000;
+      while (readers.sseReaders.size > 0 && Date.now() < deadline) await Bun.sleep(10);
+      expect(readers.sseReaders.size).toBe(0);
       t.close();
     } finally {
       server.stop(true);
