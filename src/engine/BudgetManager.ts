@@ -93,6 +93,23 @@ export class BudgetManager {
     };
   }
 
+  /**
+   * Wall-clock deadline for ONE LLM stream round, derived from the cap that
+   * actually ends the run. remaining().time clamps at 0 once the SOFT cap
+   * passes — feeding it straight into the per-round stream timeout turned the
+   * elastic budget into a 1ms guillotine: every later round timed out
+   * instantly and the failure policy escalated to a stop, contradicting "the
+   * agent is never hard-stopped by the soft budget". After the soft cap
+   * expires the run is elastic by design, so the per-round ceiling falls back
+   * to the soft cap duration itself; a configured hardMaxTime always wins.
+   */
+  streamDeadlineMs(): number {
+    const hardTime = this.config.hardMaxTime ?? 0;
+    if (hardTime > 0) return Math.max(1, hardTime - (Date.now() - this.startTime));
+    const softLeft = this.remaining().time;
+    return softLeft > 0 ? softLeft : Math.max(1, this.config.maxExecutionTime);
+  }
+
   snapshot(): BudgetSnapshot {
     return {
       turns: { used: this.turnCount, max: this.config.maxTurns },

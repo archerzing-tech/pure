@@ -876,6 +876,53 @@ describe('plan overview completion state', () => {
     expect(seg).toContain('!event.payload.interrupted && gen === this.generation');
   });
 
+  it('serializes concurrent interjects instead of silently dropping them', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 流式插话第二条在第一条判定期间到达时，旧代码 `if (this.insertInFlight)
+    // return` 直接丢弃——而 main.ts 在调用 interject() 的同一瞬间就清空了输入框，
+    // 用户的话就此蒸发。现在后到的插话挂到 insertClassificationChain 上排队等
+    // 前一个判定完成，永不丢弃；单个判定失败也不许毒化链条（run.catch）。
+    expect(src.indexOf('if (this.insertInFlight) return')).toBe(-1);
+    expect(src.indexOf('this.insertClassificationChain.then(')).toBeGreaterThan(-1);
+    expect(src.indexOf('this.insertClassificationChain = run.catch(() => {})')).toBeGreaterThan(-1);
+    // 链上的每一环重新检查 isStreaming()：前一条 RELATED 插话可能已中止回合，
+    // 轮到本条时它应该走正常 send 而不是对已结束的回合做判定。
+    const link = src.indexOf('private async classifyAndApplyInterject(');
+    expect(link).toBeGreaterThan(-1);
+    const linkBody = src.slice(link, src.indexOf('private scheduleDeferred', link));
+    expect(linkBody.indexOf('if (!this.isStreaming())')).toBeGreaterThan(-1);
+    expect(linkBody.indexOf('void this.send(text, images, displayText)')).toBeGreaterThan(-1);
+  });
+
+  it('re-arms the deferred dispatch when a classification lands after the turn already ended', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 判定 LLM 可能跑好几秒：回合在这期间自然结束的话，send() 的 finally 已经
+    // 跑过 deferred dispatch——RELATED 插话 / 排队任务会冻结到用户下一条消息
+    // 结束后才突然执行。判定落定时若已不在流式中，必须补一次 scheduleDeferred；
+    // dispatchDeferred 的 isStreaming 守卫保证重复调度不会开出第二个并发回合。
+    expect(src.indexOf('if (!this.isStreaming()) this.scheduleDeferred()')).toBeGreaterThan(-1);
+    const dispatch = src.indexOf('private dispatchDeferred(): void');
+    expect(dispatch).toBeGreaterThan(-1);
+    const dispatchBody = src.slice(dispatch, dispatch + 400);
+    expect(dispatchBody.indexOf('if (this.isStreaming()) return;')).toBeGreaterThan(-1);
+  });
+
+  it('background sessions never yank the shared scroll container', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 后台会话的自动续跑也走 send()：无守卫的 forceScrollToBottom 会把用户
+    // 正在阅读的会话每 1.2 秒拽到底部。两处 fresh-turn 滚动都必须包在
+    // viewActive 守卫里。
+    const guarded = src.split('if (this.viewActive) {').length - 1;
+    expect(guarded).toBeGreaterThanOrEqual(2);
+    for (const anchor of ['linkifyPaths(userBubble);', 'synchronous full-transcript layout)']) {
+      const site = src.indexOf(anchor);
+      expect(site).toBeGreaterThan(-1);
+      const seg = src.slice(site, site + 600);
+      expect(seg.indexOf('if (this.viewActive) {')).toBeGreaterThan(-1);
+      expect(seg.indexOf('forceScrollToBottom(')).toBeGreaterThan(seg.indexOf('if (this.viewActive) {'));
+    }
+  });
+
   it('no longer stalls the plan cursor on per-phase verification gates', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 逐阶段验证门禁（phaseVerifySeen / schedulePhaseBackstop）已被回合末的

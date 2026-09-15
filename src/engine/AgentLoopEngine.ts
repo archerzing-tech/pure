@@ -236,7 +236,12 @@ export class AgentLoopEngine {
       try {
         const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
         const toolsDefs = ctx.tools && currentToolsDefs.length > 0 ? currentToolsDefs : [];
-        const streamTimeoutMs = Math.max(1, budget.remaining().time);
+        // Stream deadline follows the budget line that ACTUALLY ends the run
+        // (hardMaxTime, else the soft cap while it lasts, else the soft cap
+        // duration once the run is elastic). remaining().time clamps at 0
+        // after the soft cap — Math.max(1, 0) used to become a 1ms deadline
+        // that instantly timed out every remaining round.
+        const streamTimeoutMs = budget.streamDeadlineMs();
         for await (const chunk of streamLlmTurn({
           llm: ctx.llm,
           messages,
@@ -446,6 +451,23 @@ export class AgentLoopEngine {
           };
         }
 
+        // Append tool results to the conversation BEFORE anything else
+        // consumes `messages`: the failure-policy branches below AND the
+        // eventual Interrupted/Completed payloads (handover request, persisted
+        // checkpoint) all assume every assistant.toolCalls is paired with tool
+        // role messages — an unpaired tail gets the handover LLM call and any
+        // resume request rejected with 400. (The policy-stop branch used to
+        // emit handover/Interrupted BEFORE this push, so "graceful handover"
+        // never actually worked in the most common stop scenario.)
+        for (const tr of toolResults) {
+          const rawText = tr.result.success
+            ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
+            : `Error: ${tr.result.error}`;
+          const resultText = capToolResult(rawText, tr.toolName);
+          messages.push({ role: 'tool', content: resultText, toolCallId: tr.toolCallId, toolName: tr.toolName });
+          budget.addTokens(resultText);
+        }
+
         // Track tool failures and consult policy
         const toolErrors = toolResults.filter(tr => !tr.result.success);
         for (const te of toolErrors) {
@@ -458,15 +480,6 @@ export class AgentLoopEngine {
             yield* emitHandover(action.reason);
             yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'ACT', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
-          }
-          // Append tool results so the LLM sees them on retry
-          for (const tr of toolResults) {
-            const rawText = tr.result.success
-              ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
-              : `Error: ${tr.result.error}`;
-            const resultText = capToolResult(rawText, tr.toolName);
-            messages.push({ role: 'tool', content: resultText, toolCallId: tr.toolCallId, toolName: tr.toolName });
-            budget.addTokens(resultText);
           }
           // v1.9.7 — every failed execution explicitly degrades the subsequent
           // reasoning: the model is told the exact call is a dead-end and to
@@ -504,14 +517,10 @@ export class AgentLoopEngine {
         yield { type: 'StateChange', payload: { from: 'ACT', to: 'OBSERVE', stateId: sid() }, timestamp: Date.now() };
         completedSteps.push('OBSERVE');
 
-        for (const tr of toolResults) {
-          const rawText = tr.result.success
-            ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
-            : `Error: ${tr.result.error}`;
-          const resultText = capToolResult(rawText, tr.toolName);
-          messages.push({ role: 'tool', content: resultText, toolCallId: tr.toolCallId, toolName: tr.toolName });
-          budget.addTokens(resultText);
-        }
+        // Tool results were already appended to `messages` right after
+        // execution (shared with the failure-policy branches — a single push
+        // site keeps every consumer of `messages` well-formed).
+
         // v1.9.7 — same degradation without a failure policy: the model still
         // sees the raw error, but the explicit directive guarantees the next
         // THINK treats the failed call as a dead-end instead of re-issuing it.
@@ -579,7 +588,7 @@ export class AgentLoopEngine {
           const result = await runWithDeadline(
             () => ctx.verifier!.evaluate({ output: content, context: messages }),
             ctx.signal,
-            Math.min(VERIFIER_TIMEOUT_MS, Math.max(1, budget.remaining().time)),
+            Math.min(VERIFIER_TIMEOUT_MS, budget.streamDeadlineMs()),
             'verification',
           );
           const evidence = result.evidence ?? [{

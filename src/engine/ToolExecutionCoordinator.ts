@@ -15,6 +15,10 @@ export interface ExecutedToolResult {
 export interface ToolExecutionBudget {
   incrementToolCall(): void;
   remaining(): { time: number };
+  /** Wall-clock ceiling that follows the cap actually ending the run —
+   * remaining().time clamps at 0 after the soft cap, and Math.max(1, 0) used
+   * to become a 1ms tool deadline that killed every later call instantly. */
+  streamDeadlineMs(): number;
 }
 
 export class ToolExecutionCoordinator {
@@ -77,7 +81,7 @@ export class ToolExecutionCoordinator {
           const metadata = ctx.tools!.getMetadata(call.function.name);
           const cap = Math.min(
             metadata?.timeoutMs ?? TOOL_EXECUTION_TIMEOUT_MS,
-            Math.max(1, budget.remaining().time),
+            budget.streamDeadlineMs(),
           );
           const result = await runWithDeadline(
             () => ctx.tools!.execute(call, controller.signal),

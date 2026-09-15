@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { SubagentOrchestrator, deriveSubagentBudget, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentProgress } from '../SubagentOrchestrator';
+import { Verifier } from '../Verifier';
 import { Tags, ToolRegistry } from '../ToolRegistry';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
 import type { BudgetConfig, Checkpoint, IStateStore, LLMAdapter, LLMChunk, Message, ToolAdapter, ToolCall, ToolResult } from '../../shared/types';
@@ -126,6 +127,41 @@ describe('SubagentOrchestrator', () => {
     const result = await orch.execute(toolCall('test_researcher', { prompt: 'x' }));
     expect(result.success).toBe(false);
     expect(String(result.error)).toContain('provider boom');
+  });
+
+  it('lets the engine recover from a RECOVERABLE error instead of killing the subagent mid-recovery', async () => {
+    // The engine emits Error(VERIFY_FAILED, recoverable=true) when its verifier
+    // rejects the first answer, folds a recovery hint into the messages, and
+    // loops. The orchestrator used to treat ANY Error event as terminal —
+    // abandoning a healthy self-correction and reporting the delegation
+    // failed. The delegation must complete once the second answer verifies.
+    let verifyCalls = 0;
+    const orch = new SubagentOrchestrator({
+      llm: new MockLLMAdapter('research findings'),
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      // First evaluate fails (→ VERIFY_FAILED, recoverable) with the engine
+      // retrying; the retry passes and the run completes normally.
+      verifier: new Verifier([{
+        name: 'flip-flop',
+        run: async () => {
+          verifyCalls++;
+          return verifyCalls === 1
+            ? { passed: false, feedback: 'answer too shallow' }
+            : { passed: true };
+        },
+      }]),
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const result = await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
+
+    expect(verifyCalls).toBe(2);
+    expect(result.success).toBe(true);
+    const sub = result.result as SubagentResult;
+    expect(sub.success).toBe(true);
+    expect(sub.output).toContain('research findings');
   });
 
   it('rejects an unknown subagent name', async () => {
@@ -408,5 +444,49 @@ describe('SubagentOrchestrator segment continuation + liveness watchdog', () => 
 
     expect(result.success).toBe(false);
     expect(JSON.stringify(result)).toContain('no progress');
+  }, 10_000);
+
+  it('trims unresolved toolCalls from subagent checkpoints so re-delegation resumes safely', async () => {
+    // The delegation times out while a tool call is still executing: the
+    // transcript ends in an assistant message whose toolCalls never got
+    // results. Persisting that raw made every "re-delegate the SAME subtask
+    // to continue from its checkpoint" resume request die with a provider
+    // 400 — the recovery path this checkpoint store exists for.
+    const saved: Checkpoint[] = [];
+    const store = {
+      saveCheckpoint: async (_sid: string, cp: Checkpoint) => { saved.push(cp); },
+      loadSession: () => null,
+    } as unknown as IStateStore;
+    const llm: LLMAdapter = {
+      async *stream(): AsyncGenerator<LLMChunk, void, void> {
+        const tc = { id: 'call_hang', index: 0, function: { name: 'read_file', arguments: '{"path":"a.ts"}' } };
+        yield { type: 'tool_call', index: 0, id: 'call_hang', name: 'read_file', arguments: '{"path":"a.ts"}' };
+        yield { type: 'done', content: '', toolCalls: [tc] };
+        // Never returns: the tool hangs and the total wall kills the run.
+        await new Promise<void>(() => {});
+      },
+      async complete() { throw new Error('not used'); },
+    };
+    const hangingAdapter: ToolAdapter = {
+      getTools: () => [{ name: 'read_file', description: 'r', input_schema: {} }],
+      getMetadata: () => ({ isWrite: false }),
+      execute: async (tc: ToolCall): Promise<ToolResult> =>
+        new Promise<ToolResult>(() => {}), // hang until the timeout aborts
+    };
+    const orch = new SubagentOrchestrator({
+      llm,
+      parentTools: hangingAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      stateStore: store,
+    });
+    orch.register({ ...subagentDef('test_stalled_tool'), defaultTimeoutMs: 300 });
+    const result = await orch.execute(toolCall('test_stalled_tool', { prompt: 'x' }));
+    expect(result.success).toBe(false);
+
+    const interrupted = saved.find((c) => c.label === 'subagent_interrupted');
+    expect(interrupted).toBeDefined();
+    const last = interrupted!.state.messages[interrupted!.state.messages.length - 1];
+    expect(last.role === 'assistant' && !!last.toolCalls?.length).toBe(false);
   }, 10_000);
 });
