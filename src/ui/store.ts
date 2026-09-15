@@ -838,8 +838,8 @@ async function tauriDeleteAll(): Promise<void> {
 const SESSIONS_KEY = 'pure_sessions';
 const LAST_SESSION_KEY = 'pure_last_session';
 
-function limitSessionSnapshot(snapshot: SessionSnapshotV3): SessionSnapshotV3 {
-  const messages = limitConversationMessages(snapshot.modelContext.messages);
+function limitSessionSnapshot(snapshot: SessionSnapshotV3, maxMessages = MAX_PERSISTED_MESSAGES): SessionSnapshotV3 {
+  const messages = limitConversationMessages(snapshot.modelContext.messages, maxMessages);
   const dropped = snapshot.modelContext.messages.length - messages.length;
   const events = dropped > 0
     ? snapshot.events.slice(Math.max(0, snapshot.events.length - Math.max(1, messages.length * 8)))
@@ -847,16 +847,39 @@ function limitSessionSnapshot(snapshot: SessionSnapshotV3): SessionSnapshotV3 {
   return { ...snapshot, modelContext: { messages }, events, transcript: snapshot.transcript.filter(entry => entry.modelMessageIndex >= dropped) };
 }
 
+/** localStorage is ~5MB in WebKit and the session payload is by far the largest
+ * thing this app writes there, so a session that no longer fits must degrade
+ * instead of losing every turn it holds: retry once with a much shorter history
+ * (the durable Tauri copy is unaffected — this only bounds the fallback). */
+const LS_DEGRADED_MESSAGE_MAX = 40;
+
+function isQuotaError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const name = (error as { name?: unknown }).name;
+  // Safari/WebKit: 'QuotaExceededError' (also thrown for private-browsing
+  // storage). Firefox: 'NS_ERROR_DOM_QUOTA_REACHED'.
+  return name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED';
+}
+
 function lsSave(sessionId: string, snapshot: SessionSnapshotV2, workspace: string) {
+  try {
+    lsWriteSession(sessionId, snapshot, workspace);
+  } catch (error) {
+    if (!isQuotaError(error)) throw error;
+    lsWriteSession(sessionId, limitSessionSnapshot(snapshot, LS_DEGRADED_MESSAGE_MAX), workspace);
+  }
+}
+
+function lsWriteSession(sessionId: string, snapshot: SessionSnapshotV2, workspace: string) {
   // Store the workspace exactly as passed ('' clears a previous override), so
   // the localStorage fallback behaves identically to the Tauri path.
   const boundedSnapshot = limitSessionSnapshot(snapshot);
   const payload = JSON.stringify({ snapshot: boundedSnapshot, updatedAt: Date.now(), messageCount: boundedSnapshot.modelContext.messages.length, workspace });
   const key = `pure_session:${sessionId}`;
-  const tempKey = `${key}:pending`;
-  localStorage.setItem(tempKey, payload);
+  // One write, no staging key: the payload used to be written twice (a
+  // `<key>:pending` copy that nothing ever read), which doubled the peak quota
+  // usage of the one store most likely to exceed it.
   localStorage.setItem(key, payload);
-  localStorage.removeItem(tempKey);
 
   const list = lsLoadList();
   const existing = list.findIndex(s => s.id === sessionId);
@@ -880,8 +903,18 @@ function lsSave(sessionId: string, snapshot: SessionSnapshotV2, workspace: strin
 function lsSaveWorkspace(sessionId: string, workspace: string) {
   const prev = lsLoad(sessionId);
   if (!prev) return;
-  const data = { snapshot: prev.snapshot, updatedAt: Date.now(), messageCount: prev.snapshot.modelContext.messages.length, workspace };
-  localStorage.setItem(`pure_session:${sessionId}`, JSON.stringify(data));
+  const write = (snapshot: SessionSnapshotV3): void => {
+    const data = { snapshot, updatedAt: Date.now(), messageCount: snapshot.modelContext.messages.length, workspace };
+    localStorage.setItem(`pure_session:${sessionId}`, JSON.stringify(data));
+  };
+  // Same quota degrade as lsSave(): callers swallow this rejection, so an
+  // unguarded throw here loses the workspace override without a trace.
+  try {
+    write(prev.snapshot);
+  } catch (error) {
+    if (!isQuotaError(error)) throw error;
+    write(limitSessionSnapshot(prev.snapshot, LS_DEGRADED_MESSAGE_MAX));
+  }
 
   const list = lsLoadList();
   const existing = list.findIndex(s => s.id === sessionId);

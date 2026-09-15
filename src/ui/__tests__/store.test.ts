@@ -79,6 +79,56 @@ describe('session snapshot revision', () => {
   });
 });
 
+describe('localStorage quota', () => {
+  /** Storage that rejects any single value over `limit` — what WebKit throws
+   *  (QuotaExceededError) once the ~5MB origin budget is exhausted. */
+  function quotaBoundStorage(limit: number): { values: Map<string, string>; storage: Record<string, unknown> } {
+    const values = new Map<string, string>();
+    return {
+      values,
+      storage: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (value.length > limit) {
+            const error = new Error('QuotaExceededError');
+            error.name = 'QuotaExceededError';
+            throw error;
+          }
+          values.set(key, value);
+        },
+        removeItem: (key: string) => { values.delete(key); },
+      },
+    };
+  }
+
+  it('degrades to a bounded history instead of losing the session', async () => {
+    const previousStorage = (globalThis as any).localStorage;
+    // Budget sits between the two payload sizes this fixture produces: the full
+    // 200-message snapshot serializes to ~630KB (message + event + transcript
+    // entry per turn), the degraded 40-message one to ~295KB.
+    const { values, storage } = quotaBoundStorage(400_000);
+    (globalThis as any).localStorage = storage;
+    try {
+      const sessionId = `quota-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const messages = Array.from({ length: 200 }, (_, i) => ({
+        role: 'user' as const,
+        content: `msg-${i}-`.padEnd(1_000, 'x'),
+      }));
+      const drafts = messages.map((message, i) => ({ message, modelMessageIndex: i }));
+      // The full 200-message payload is well over the simulated budget.
+      await saveSession(sessionId, createSessionSnapshot(messages, drafts));
+
+      const loaded = await loadSession(sessionId);
+      expect(loaded?.snapshot.modelContext.messages).toHaveLength(40);
+      // Degrading drops the OLDEST turns: the newest one must survive.
+      expect(loaded?.snapshot.modelContext.messages.at(-1)?.content).toBe(messages.at(-1)?.content);
+      expect(values.get('pure_last_session')).toBe(sessionId);
+    } finally {
+      (globalThis as any).localStorage = previousStorage;
+    }
+  });
+});
+
 describe('empty sessions are not sessions', () => {
   it('saveSession skips a conversation with zero messages entirely', async () => {
     const previousStorage = (globalThis as any).localStorage;

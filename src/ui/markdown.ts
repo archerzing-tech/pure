@@ -1,8 +1,9 @@
 // src/ui/markdown.ts
 // Assistant message renderer: Markdown → HTML with syntax highlighting (hljs),
-// inline Mermaid diagrams, and inline PlantUML images (via the public
-// plantuml.com server). Called once per assistant bubble on stream completion
-// (see src/ui/chat.ts:Completed) and on session restore (src/ui/main.ts).
+// inline Mermaid diagrams, and inline PlantUML diagrams (rendered locally by
+// src/ui/plantumlDiagram.ts — no plantuml.com request, works offline). Called
+// once per assistant bubble on stream completion (see src/ui/chat.ts:Completed)
+// and on session restore (src/ui/main.ts).
 //
 // Streaming UX: keep raw textContent during token-by-token streaming; only
 // parse + render when the assistant message is fully complete. This avoids
@@ -18,8 +19,6 @@ import { linkifyPaths } from './pathLink';
 import { repairJsonSource, repairMermaidSource, repairSvgSource } from '../shared/parseRepair';
 import hljs from 'highlight.js/lib/core';
 import 'highlight.js/styles/atom-one-light.css';
-// plantuml-encoder types come from src/shared/plantuml-encoder.d.ts.
-import plantumlEncoder from 'plantuml-encoder';
 import { stripToolCallXml } from './markdownCore';
 export { stripToolCallXml } from './markdownCore';
 
@@ -73,8 +72,6 @@ hljs.registerAliases(['md'],         { languageName: 'markdown' });
 hljs.registerAliases(['htm'],        { languageName: 'html' });
 hljs.registerAliases(['yml'],        { languageName: 'yaml' });
 
-const PLANTUML_HOST = 'https://www.plantuml.com/plantuml/svg/';
-
 // ── Tiny HTML helpers (escape only what we cannot otherwise trust) ──
 
 function attr(s: string): string {
@@ -85,15 +82,11 @@ function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function plantumlUrl(code: string): string {
-  return PLANTUML_HOST + plantumlEncoder.encode(code);
-}
-
 // Attribute-safe encoding for raw source we must recover later (puml `data-raw`).
 // DOMPurify's SAFE_FOR_XML (default on) strips any attribute VALUE containing
 // `-->` / `<!--` / `]>` — but PlantUML sequence diagrams use `-->` as edge
 // syntax. encodeURIComponent emits no such sequences (nor spaces/quotes), so
-// the sanitizer keeps the attribute; bindPumlFallbacks decodes it back.
+// the sanitizer keeps the attribute; the render path decodes it back.
 function encodeRawAttr(s: string): string {
   try {
     return encodeURIComponent(s);
@@ -184,9 +177,9 @@ renderer.code = (token: { text: string; lang?: string }): string => {
   }
 
   if (lang === 'puml' || lang === 'plantuml') {
-    const url = plantumlUrl(code);
-    const image = `<img class="puml-diagram" src="${attr(url)}" alt="${attr(t('diagram.plantumlAlt'))}" loading="eager" referrerpolicy="no-referrer" />`;
-    return diagramSlot('puml', code, image);
+    // Rendered locally (src/ui/plantumlDiagram.ts) into `.puml-target` — no
+    // plantuml.com URL, no image, so the diagram still appears with no network.
+    return diagramSlot('puml', code, '');
   }
 
   if (lang === 'svg') {
@@ -679,39 +672,82 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
   }
 }
 
-// ── PlantUML: bind error fallbacks for offline / encoding errors ──
+// ── PlantUML (```puml / ```plantuml blocks) ──
+// The engine is the real PlantUML compiled to JavaScript (@plantuml/core) and
+// it is loaded lazily, so a session that never emits a puml block never pays
+// for it. Rendering is local, which is the point: the old implementation built
+// a plantuml.com URL and let the WebView fetch the picture, so no network (or a
+// proxy that cannot reach it) meant a blank card with a "needs the internet"
+// error. Nothing here touches the network.
 
-function bindPumlFallbacks(container: HTMLElement): void {
-  for (const img of Array.from(container.querySelectorAll<HTMLImageElement>('.puml-diagram'))) {
-    const slot = img.closest<HTMLElement>('.puml-slot');
-    if (!slot || img.hasAttribute('data-diagram-bound')) continue;
-    img.setAttribute('data-diagram-bound', 'true');
-    const version = nextDiagramRenderVersion(slot);
-    slot.setAttribute('data-state', 'loading');
-    const timeout = window.setTimeout(() => {
-      if (isCurrentDiagramRender(slot, version) && slot.getAttribute('data-state') === 'loading') {
-        setDiagramState(slot, 'error', t('diagram.timeout'));
+// Engine chunk + Graphviz layout are ~6MB and the first render also pays engine
+// start-up, so PlantUML gets a more generous window than mermaid/echarts before
+// the card reports a timeout (its 重试 button re-runs the whole path).
+const PUML_RENDER_TIMEOUT_MS = 30_000;
+
+let plantumlMod: typeof import('./plantumlDiagram') | null = null;
+
+async function ensurePlantuml(): Promise<typeof import('./plantumlDiagram')> {
+  if (!plantumlMod) {
+    try {
+      plantumlMod = await withTimeout(import('./plantumlDiagram'), PUML_RENDER_TIMEOUT_MS);
+    } catch {
+      // A failed FETCH is not cached, so one retry heals a transient chunk
+      // load failure; the module itself keeps its own retryable engine state.
+      plantumlMod = await withTimeout(import('./plantumlDiagram'), PUML_RENDER_TIMEOUT_MS);
+    }
+  }
+  return plantumlMod;
+}
+
+/** Fill every unprocessed `.puml-slot`'s target with a locally rendered SVG. */
+async function renderPumlNodes(container: HTMLElement): Promise<void> {
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.puml-slot:not([data-processed])'));
+  if (slots.length === 0) return;
+  const attempts = slots.map((slot) => ({ slot, version: nextDiagramRenderVersion(slot) }));
+  for (const { slot, version } of attempts) {
+    if (!isCurrentDiagramRender(slot, version)) continue;
+    slot.setAttribute('data-processed', 'true');
+    setDiagramState(slot, 'loading');
+  }
+
+  let mod: typeof import('./plantumlDiagram');
+  try {
+    mod = await ensurePlantuml();
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error('[pure] PlantUML module load failed:', err);
+    for (const { slot, version } of attempts) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}（PlantUML 模块）：${detail}`);
+    }
+    return;
+  }
+
+  const dark = isDark();
+  for (const { slot, version } of attempts) {
+    if (!isCurrentDiagramRender(slot, version)) continue;
+    const target = slot.querySelector<HTMLElement>('.puml-target');
+    if (!target) {
+      setDiagramState(slot, 'error', t('diagram.missingTarget'));
+      continue;
+    }
+    try {
+      // The engine renders ARBITRARY source into a picture — including its own
+      // syntax-error picture — so a bad diagram still shows what is wrong.
+      const svg = await withTimeout(mod.renderPlantumlToSvg(diagramRawOf(slot), { dark }), PUML_RENDER_TIMEOUT_MS);
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      const clean = sanitizeSvgSource(svg);
+      if (!clean) {
+        setDiagramState(slot, 'error', t('diagram.renderFailed'));
+        continue;
       }
-    }, DIAGRAM_RENDER_TIMEOUT_MS);
-    img.addEventListener('load', () => {
-      window.clearTimeout(timeout);
-      if (!isCurrentDiagramRender(slot, version) || slot.getAttribute('data-state') !== 'loading') return;
+      target.innerHTML = clean;
       setDiagramState(slot, 'preview');
-      bindPumlPopup(slot);
-    }, { once: true });
-    img.addEventListener('error', () => {
-      window.clearTimeout(timeout);
-      if (!isCurrentDiagramRender(slot, version) || slot.getAttribute('data-state') !== 'loading') return;
-      setDiagramState(slot, 'error', t('diagram.imageLoadFailed'));
-    }, { once: true });
-    if (img.complete) {
-      if (img.naturalWidth > 0) {
-        window.clearTimeout(timeout);
-        if (isCurrentDiagramRender(slot, version)) setDiagramState(slot, 'preview');
-      } else {
-        window.clearTimeout(timeout);
-        if (isCurrentDiagramRender(slot, version)) setDiagramState(slot, 'error', t('diagram.imageLoadFailed'));
-      }
+    } catch (err) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      const detail = err instanceof Error && err.message ? `：${err.message}` : '';
+      setDiagramState(slot, 'error', `${t('diagram.renderFailed')}${detail}`);
     }
   }
 }
@@ -830,7 +866,10 @@ function findSvgTags(source: string): SvgTag[] {
  * `<svg …>…</svg>` document or a bare fragment (wrapped in a root).
  */
 function sanitizeSvgSource(src: string): string {
-  const trimmed = src.trim();
+  // A leading XML prolog / doctype (PlantUML and some models emit one) is not
+  // part of the document element — keeping it while testing for `<svg` would
+  // miss the root and wrap a real document inside another one.
+  const trimmed = src.trim().replace(/^(?:<\?xml[^>]*\?>|<![^>]*>)\s*/i, '');
   if (!trimmed) return '';
   const wrapped = /^<svg[\s>]/i.test(trimmed)
     ? trimmed
@@ -2186,7 +2225,7 @@ function highlightAll(container: HTMLElement): void {
 
 /**
  * Parse `text` as Markdown and render into `container` with syntax highlighting
- * (hljs), inline mermaid diagrams, and inline `<img>` PlantUML diagrams.
+ * (hljs), inline mermaid diagrams, and locally rendered PlantUML diagrams.
  */
 export async function renderMarkdown(
   text: string,
@@ -2221,9 +2260,9 @@ export async function renderMarkdown(
   // untouched; still-loading ones re-render through the normal hydration.
   const preservedMaps = preserveLiveMapSlots(container);
   container.innerHTML = DOMPurify.sanitize(html, {
-    // ADD_ATTR: target is ours on links; loading + referrerpolicy are ours on
-    // the PlantUML <img> and are not in DOMPurify's default allowed set.
-    ADD_ATTR: ['target', 'loading', 'referrerpolicy'],
+    // ADD_ATTR: target is ours on links, loading is ours on inline images —
+    // neither is in DOMPurify's default allowed set.
+    ADD_ATTR: ['target', 'loading'],
   });
   adoptPreservedMapSlots(container, preservedMaps);
   // Bind image viewers immediately after DOM replacement. Waiting until after
@@ -2259,18 +2298,16 @@ export async function renderMarkdown(
   await renderChartNodes(container);
   await renderMapNodes(container);
 
-  // Start PlantUML listeners before awaiting Mermaid so a slow Mermaid render
-  // cannot extend the PlantUML spinner beyond its own bounded timeout.
-  bindPumlFallbacks(container);
-
-  // 4) Async: mermaid renders embed SVG into .mermaid-diagram nodes.
+  // 4) Async: PlantUML renders locally (its own lazy engine chunk) into
+  // .puml-target, then mermaid fills .mermaid-target. Both are awaited so the
+  // viewer/export bindings below only ever see rendered previews.
+  await renderPumlNodes(container);
   await renderMermaidNodes(container);
 
   // 5) Bind the post-render preview/source controls and diagram viewers.
   bindDiagramControls(container);
   bindMapControls(container);
   bindMermaidPopup(container);
-  bindPumlPopup(container);
   bindVectorPopup(container);
   bindMdImagePopup(container);
 
@@ -2285,11 +2322,11 @@ export async function renderMarkdown(
 // The streaming renderer is kept as close to the final one as possible so the
 // message the user watches grow is the message they end up with — no layout
 // "reset" at completion. Every block (including the still-growing last one) is
-// rendered through the normal marked pipeline; mermaid blocks emit a
-// `.mermaid-slot` holding the source while the stream runs, then the Completed
-// pass renders the SVG into the same slot (CSS cross-fades source→diagram).
-// PlantUML is the one deliberate exception: its server-side image only loads at
-// completion, so during streaming it appears as a plain code block.
+// rendered through the normal marked pipeline; mermaid and puml blocks emit a
+// slot holding the source while the stream runs, then the Completed pass renders
+// the SVG into the same slot (CSS cross-fades source→diagram). The PlantUML
+// engine is only pulled in at completion — during streaming the block stays a
+// plain code block, so a long answer never stalls on a 6MB engine load.
 
 const STREAM_THROTTLE_MS = 100;
 const STREAM_LONG_TEXT_MS = 160;
@@ -2693,6 +2730,21 @@ if (typeof document !== 'undefined') {
       await renderChartNodes(document.body);
       bindVectorPopup(document.body);
     }
+    // PlantUML SVGs bake their palette at render time too (the engine has its
+    // own dark mode), so every puml preview is re-rendered from source.
+    const pumlSlots = Array.from(document.querySelectorAll<HTMLElement>('.puml-slot'));
+    for (const slot of pumlSlots) {
+      nextDiagramRenderVersion(slot);
+      slot.removeAttribute('data-processed');
+      const target = slot.querySelector<HTMLElement>('.puml-target');
+      if (target) target.innerHTML = '';
+      slot.setAttribute('data-state', 'loading');
+    }
+    if (pumlSlots.length > 0) {
+      await renderPumlNodes(document.body);
+      bindVectorPopup(document.body);
+    }
+
     const all = Array.from(document.querySelectorAll<HTMLElement>('.mermaid-slot'));
     if (all.length === 0) return;
     for (const slot of all) {
@@ -2705,7 +2757,6 @@ if (typeof document !== 'undefined') {
     await renderMermaidNodes(document.body);
     bindDiagramControls(document.body);
     bindMermaidPopup(document.body);
-    bindPumlPopup(document.body);
     bindVectorPopup(document.body);
   });
 }
@@ -2752,15 +2803,11 @@ function bindDiagramControls(container: HTMLElement): void {
   for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.diagram-slot'))) {
     if (slot.hasAttribute('data-controls-bound')) continue;
     slot.setAttribute('data-controls-bound', 'true');
-    // Every slot has a single 下载图片 action: PlantUML images come from an
-    // external server URL, the rest are locally-rendered SVGs to rasterize.
+    // Every slot has a single 下载图片 action: all four diagram kinds are
+    // locally-rendered SVGs to rasterize.
     for (const button of Array.from(slot.querySelectorAll<HTMLButtonElement>('.diagram-download-btn'))) {
       button.addEventListener('click', () => {
-        if (slot.getAttribute('data-diagram-kind') === 'puml') {
-          void downloadPumlImage(slot);
-        } else {
-          void exportDiagramPng(slot);
-        }
+        void exportDiagramPng(slot);
       });
     }
     slot.addEventListener('click', (event) => {
@@ -2769,7 +2816,7 @@ function bindDiagramControls(container: HTMLElement): void {
       const target = slot.querySelector<HTMLElement>('.diagram-preview');
       if (!kind || !target) return;
       slot.removeAttribute('data-processed');
-      target.innerHTML = kind === 'puml' ? target.innerHTML : '';
+      target.innerHTML = '';
       setDiagramState(slot, 'loading');
       const host = slot.parentElement ?? slot;
       if (kind === 'mermaid') {
@@ -2781,14 +2828,7 @@ function bindDiagramControls(container: HTMLElement): void {
       } else if (kind === 'chart') {
         void renderChartNodes(host).then(() => bindVectorPopup(host));
       } else {
-        const oldImage = target.querySelector<HTMLImageElement>('.puml-diagram');
-        if (oldImage) {
-          const replacement = oldImage.cloneNode(true) as HTMLImageElement;
-          replacement.removeAttribute('data-diagram-bound');
-          target.replaceChildren(replacement);
-          bindPumlFallbacks(slot);
-          bindPumlPopup(slot);
-        }
+        void renderPumlNodes(host).then(() => bindVectorPopup(host));
       }
     });
   }
@@ -2808,21 +2848,13 @@ function bindMermaidPopup(container: HTMLElement): void {
   }
 }
 
-function bindPumlPopup(container: HTMLElement): void {
-  const imgs = container.matches('img.puml-diagram')
-    ? [container as HTMLImageElement]
-    : Array.from(container.querySelectorAll<HTMLImageElement>('.puml-slot[data-state="preview"] .puml-diagram'));
-  for (const img of imgs) {
-    bindDiagramActivation(img, () => img.cloneNode(true) as HTMLElement);
-  }
-}
-
 function bindVectorPopup(container: HTMLElement): void {
-  // Every svg-rendered preview (```svg blocks AND ```chart charts) opens the
-  // enlarged pan/zoom viewer on double-click; a single click stays a natural
-  // selection gesture. The floating 下载图片 button handles exports.
+  // Every svg-rendered preview (```svg blocks, ```chart charts and locally
+  // rendered ```puml diagrams) opens the enlarged pan/zoom viewer on
+  // double-click; a single click stays a natural selection gesture. The
+  // floating 下载图片 button handles exports.
   const targets = container.querySelectorAll<HTMLElement>(
-    '.svg-slot[data-state="preview"] .svg-target, .chart-slot[data-state="preview"] .chart-target',
+    '.svg-slot[data-state="preview"] .svg-target, .chart-slot[data-state="preview"] .chart-target, .puml-slot[data-state="preview"] .puml-target',
   );
   for (const target of Array.from(targets)) {
     bindDiagramActivation(target, () => {
@@ -3105,7 +3137,7 @@ function diagramSourceName(slot: HTMLElement): string {
  * no extra <style> injection is needed. Supports chart, mermaid, and SVG slots.
  */
 function serializeDiagramSvg(slot: HTMLElement): { svg: string; nameBase: string } | null {
-  const svg = slot.querySelector<SVGSVGElement>('.chart-target svg, .svg-target svg, .mermaid-target svg');
+  const svg = slot.querySelector<SVGSVGElement>('.chart-target svg, .svg-target svg, .mermaid-target svg, .puml-target svg');
   if (!svg) return null;
   const clone = svg.cloneNode(true) as SVGSVGElement;
   if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
@@ -3219,8 +3251,8 @@ async function saveImageFile(blob: Blob, filename: string, mime: string): Promis
 }
 
 /**
- * Rasterize the rendered diagram (svg / chart / mermaid) and export it as a
- * PNG image (2× scale for crisp output on HiDPI displays).
+ * Rasterize the rendered diagram (svg / chart / mermaid / puml) and export it
+ * as a PNG image (2× scale for crisp output on HiDPI displays).
  *
  * Known limitation: mermaid sequence/class diagrams render some labels inside
  * <foreignObject>, which browsers refuse to paint when an SVG is loaded as an
@@ -3242,39 +3274,6 @@ async function exportDiagramPng(slot: HTMLElement): Promise<void> {
     if (savedTo) showToast(`${t('codeBlock.savedTo')} ${savedTo}`);
   } catch {
     showToast(t('diagram.downloadError'));
-  }
-}
-
-/**
- * Export a PlantUML diagram (rendered from the external plantuml.com URL) as
- * a PNG image. The server sends CORS headers, so we fetch the SVG it rendered
- * and rasterize it like local diagrams; if the fetch ever fails (offline,
- * CORS change), fall back to downloading the raw SVG file directly.
- */
-async function downloadPumlImage(slot: HTMLElement): Promise<void> {
-  const img = slot.querySelector<HTMLImageElement>('.puml-diagram');
-  if (!img?.src) {
-    showToast(t('diagram.downloadError'));
-    return;
-  }
-  const stamp = Date.now();
-  try {
-    const resp = await fetch(img.src, { mode: 'cors' });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const svgText = await resp.text();
-    if (!/<svg[\s>]/i.test(svgText)) throw new Error('not an SVG response');
-    const blob = await svgToPngBlob(svgText, 2);
-    if (!blob) throw new Error('rasterization failed');
-    const savedTo = await saveImageFile(blob, `diagram-${stamp}.png`, 'image/png');
-    if (savedTo) showToast(`${t('codeBlock.savedTo')} ${savedTo}`);
-  } catch {
-    // CORS/offline: fall back to downloading the raw SVG the server rendered.
-    const a = document.createElement('a');
-    a.href = img.src;
-    a.download = `diagram-${stamp}.svg`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
   }
 }
 
