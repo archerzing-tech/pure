@@ -18,6 +18,7 @@ import type {
   ToolResult,
 } from '../shared/types';
 import { DefaultFailurePolicy } from '../engine/FailurePolicy';
+import { trimUnresolvedToolCalls } from '../harness/Harness';
 import type { SubagentDefinition, SubagentResult } from './types';
 import { Tags } from './ToolRegistry';
 import { createDefaultVerifier, type Verifier } from './Verifier';
@@ -409,11 +410,17 @@ export class SubagentOrchestrator implements ToolAdapter {
       const persist = async (label: string, messages: Message[] | undefined, turnCount: number): Promise<void> => {
         const store = this.config.stateStore;
         if (!store || !messages || messages.length === 0) return;
+        // Same resume-safety contract as the parent Harness: a checkpoint that
+        // ends in an unresolved assistant.toolCalls gets the resume request
+        // rejected with 400, which would silently break the "re-delegate to
+        // continue from its checkpoint" recovery this store exists for.
+        const trimmed = trimUnresolvedToolCalls(messages);
+        if (trimmed.length === 0) return;
         try {
           await store.saveCheckpoint(sessionId, {
             version: 1,
             label,
-            state: { messages, turnCount },
+            state: { messages: trimmed, turnCount },
             createdAt: Date.now(),
           });
         } catch {
@@ -557,6 +564,18 @@ export class SubagentOrchestrator implements ToolAdapter {
             duration: done(0),
           };
         } else if (event.type === 'Error') {
+          // RECOVERABLE engine errors (VERIFY_FAILED, VERIFIER_ERROR) are part
+          // of the engine's self-correction loop: it emits the event, folds a
+          // recovery hint into the messages, and loops again. Returning here
+          // used to kill a healthy subagent mid-recovery and report the
+          // delegation as failed. Surface the bump on the state channel only
+          // and keep consuming — the run's real outcome arrives via
+          // Completed/Interrupted.
+          if (event.payload.recoverable) {
+            kickWatchdog();
+            emit(progress?.onState, { state: event.payload.stateType, lifecycle: 'verifying' });
+            continue;
+          }
           // A timeout is not a malfunction: generative subagents (ui_designer
           // writing a whole site design, deep_thinker reasoning for minutes)
           // simply need longer than their budget. Tell the parent HOW to

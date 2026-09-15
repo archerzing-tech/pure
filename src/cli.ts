@@ -12,8 +12,8 @@ import { resolveCliAutoApprove } from './cliIntent';
 import { CUSTOM_PRESETS, customProviderFor, customProviderLabel, isCustomProviderId, nextCustomProviderId, providerOverrideFor } from './shared/providers';
 import { bold, cyan, dim, green, red } from './termcolors';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
-import { autoDetectProvider, DEFAULT_CLI_AUTO_APPROVE, envKeyForProvider, hasAnyApiKeyEnv, loadConfig, resolveDefaultModel, resolveOverrideSecretKey, saveConfig, CONFIG_PATH } from './cliConfig';
-import type { CliArgs, PureConfig } from './cliConfig';
+import { autoDetectProvider, DEFAULT_CLI_AUTO_APPROVE, envKeyForProvider, hasAnyApiKeyEnv, loadConfig, mergeWizardConfig, resolveDefaultModel, resolveOverrideSecretKey, saveConfig, CONFIG_PATH } from './cliConfig';
+import type { CliArgs } from './cliConfig';
 import { PROVIDER_ENV_HINT, PROVIDER_LABELS } from './cliAdapter';
 import { renderLogo, runOneShot, runRepl } from './cliRepl';
 
@@ -316,16 +316,17 @@ async function runConfig(): Promise<void> {
     const workspaceRaw = await ask(`  ${bold('Workspace')} ${dim('(Enter for current dir ".")')}: `);
     const workspace = workspaceRaw || existing?.workspace || '.';
 
-    const cfg: PureConfig = {
+    // Wizard answers only overwrite the fields it asks about; everything else
+    // in the shared file (mcpServers / mcpExcludedPrefixes / hubSkills /
+    // providerOverrides) survives the re-run. Rebuilding the object here used
+    // to erase every section the wizard does not know about.
+    const cfg = mergeWizardConfig(existing, {
       provider,
       apiKey: finalKey,
       model,
       workspace,
       customProviders: finalCustoms,
-      // Carry existing built-in overrides (name / Base URL / key) through a
-      // re-run so `pure config` never silently drops them.
-      providerOverrides: existing?.providerOverrides,
-    };
+    });
     saveConfig(cfg);
 
     const providerLabelOut = customProviderLabel(finalCustoms, provider, existing?.providerOverrides)

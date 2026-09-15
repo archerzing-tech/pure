@@ -81,6 +81,22 @@ export function saveConfig(cfg: PureConfig): void {
 }
 
 /**
+ * Merge the `pure config` wizard's answers over the config currently on disk.
+ * The wizard only asks about provider / key / model / workspace / custom
+ * providers; everything else in the shared file — GUI-owned state like
+ * `mcpServers`, `mcpExcludedPrefixes`, `hubSkills`, plus `providerOverrides`
+ * and any field added later — must survive the re-run untouched. Rebuilding
+ * the object field-by-field (the old approach) silently erased every section
+ * the wizard does not know about.
+ */
+export function mergeWizardConfig(
+  existing: PureConfig | null,
+  picked: Pick<PureConfig, 'provider' | 'apiKey' | 'model' | 'workspace' | 'customProviders'>,
+): PureConfig {
+  return { ...existing, ...picked };
+}
+
+/**
  * Resolve a built-in provider's per-provider API key from the Rust secrets
  * file (~/.pure/secrets.json, slot `llm.apiKey.<id>`) — the same slot the GUI
  * desktop app writes when the user saves a per-provider key, so terminal and

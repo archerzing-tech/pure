@@ -96,4 +96,35 @@ describe('BudgetManager', () => {
     expect(snap.tokens.max).toBe(BASE.maxTotalTokens);
     expect(snap.elapsed).toBeGreaterThanOrEqual(0);
   });
+
+  describe('streamDeadlineMs (the 1ms guillotine regression)', () => {
+    it('follows the HARD cap after the soft cap has expired', async () => {
+      // Soft time 10ms, hard time 10 minutes. Once the soft cap passes,
+      // remaining().time clamps at 0 — the per-round stream/tool/verifier
+      // deadlines used to become Math.max(1, 0) = 1ms and instantly killed
+      // every remaining round. The deadline must track the hard cap instead.
+      const bm = new BudgetManager({ ...BASE, maxExecutionTime: 10, hardMaxTime: 600_000 });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const deadline = bm.streamDeadlineMs();
+      expect(deadline).toBeGreaterThan(500_000); // ~10 minutes, not 1ms
+      expect(bm.remaining().time).toBe(0); // the soft clamp is unchanged
+    });
+
+    it('falls back to the soft cap duration for an elastic run (no hard cap)', () => {
+      const bm = new BudgetManager({ ...BASE, maxExecutionTime: 250_000 });
+      const deadline = bm.streamDeadlineMs();
+      // No hard cap → the run is elastic; a fresh budget reports the soft
+      // remaining time as the round ceiling.
+      expect(deadline).toBeGreaterThan(240_000);
+      expect(deadline).toBeLessThanOrEqual(250_000);
+    });
+
+    it('stays generous after soft exhaustion when the run has no hard cap', async () => {
+      const bm = new BudgetManager({ ...BASE, maxExecutionTime: 10 });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      // Elastic-by-design: the per-round ceiling falls back to the soft cap
+      // duration, never the 1ms clamp.
+      expect(bm.streamDeadlineMs()).toBe(10);
+    });
+  });
 });
