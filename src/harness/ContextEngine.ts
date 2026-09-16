@@ -3,6 +3,7 @@
 
 import { estimateToolDefinitionTokens } from '../shared/providers';
 import { estimateTextTokens } from '../shared/tokenEstimate';
+import { stripUserTurnContext } from '../shared/promptLayers';
 import type { Message, LLMAdapter, ToolDefinition } from '../shared/types';
 
 export interface ContextEngineConfig {
@@ -38,6 +39,26 @@ interface MessageGroup {
 }
 
 const SUMMARY_TIMEOUT_MS = 60_000;
+
+/** Per-message excerpt caps for the summarizer prompt. composeUserTurn
+ * prepends the <task_context> wrapper to user turns; without stripping it the
+ * wrapper eats the excerpt budget and whatever follows it — the attachment
+ * path lines — is exactly what the summarizer never sees (it is then asked to
+ * "include file paths mentioned" and has to invent one). The head+tail split
+ * keeps both the request (head) and trailing attachment-path blocks (tail)
+ * when a message must still be cut. */
+const USER_SUMMARY_EXCERPT_CHARS = 2_000;
+const TOOL_SUMMARY_EXCERPT_CHARS = 500;
+
+function summarizeExcerpt(message: Message): string {
+  const raw = message.content ?? '';
+  const text = message.role === 'user' ? stripUserTurnContext(raw) : raw;
+  const cap = message.role === 'user' ? USER_SUMMARY_EXCERPT_CHARS : TOOL_SUMMARY_EXCERPT_CHARS;
+  if (text.length <= cap) return text;
+  const headLen = Math.max(1, Math.ceil(cap * 0.7));
+  const tailLen = Math.max(1, cap - headLen);
+  return `${text.slice(0, headLen)}\n[...excerpt...]\n${text.slice(text.length - tailLen)}`;
+}
 
 function estimateTokens(messages: Message[]): number {
   let sum = 0;
@@ -100,6 +121,7 @@ export class ContextEngine {
     }
 
     const kept = new Set<MessageGroup>();
+    const isUserGroup = (group: MessageGroup): boolean => group.messages[0]?.role === 'user';
     let keptCount = 0;
     let remainingTokens = this.config.maxTokens === undefined
       ? undefined
@@ -108,6 +130,7 @@ export class ContextEngine {
     for (let index = groups.length - 1; index >= 0; index--) {
       const group = groups[index];
       if (!group.retainable) continue;
+      if (isUserGroup(group)) continue; // pinned below, outside the count budget
 
       const groupTokens = estimateTokens(group.messages);
       const exceedsCount = keptCount > 0 && keptCount + group.messages.length > this.config.maxMessages;
@@ -120,8 +143,36 @@ export class ContextEngine {
 
       // A complete newest tool pair stays intact even if that pair itself is
       // larger than the configured window; splitting it would make the next
-      // provider request invalid. The same rule applies to a newest user
-      // message, whose content is never silently truncated by the compactor.
+      // provider request invalid.
+    }
+
+    // User messages are pinned: they carry the request itself and the
+    // attachment paths the app tells the model to read by absolute path, so
+    // aging them out of the window is how a follow-up turn loses the task
+    // anchor and goes hunting for a file it can no longer name. They do not
+    // spend the assistant/tool window; only the token shed below may drop the
+    // oldest ones.
+    for (const group of groups) {
+      if (group.retainable && isUserGroup(group)) kept.add(group);
+    }
+
+    // Last resort: pinned users alone pushed the window past the token budget
+    // — shed the OLDEST pinned ones (they join `evicted`, so the summarizer
+    // can still carry their content forward). The newest kept group is never
+    // shed: the newest request must survive even when it alone exceeds the
+    // window (oversizedNewestGroup below reports that case).
+    if (remainingTokens !== undefined) {
+      for (const group of groups) {
+        if (kept.has(group) && isUserGroup(group)) remainingTokens -= estimateTokens(group.messages);
+      }
+      const newestKept = [...groups].reverse().find(group => kept.has(group));
+      for (const group of groups) {
+        if (remainingTokens >= 0) break;
+        if (group === newestKept) continue;
+        if (!kept.has(group) || !isUserGroup(group)) continue;
+        kept.delete(group);
+        remainingTokens += estimateTokens(group.messages);
+      }
     }
 
     const retained: Message[] = [];
@@ -144,7 +195,7 @@ export class ContextEngine {
     if (this.config.llm && this.config.summaryThreshold !== undefined && evicted.length > this.config.summaryThreshold) {
       try {
         const summaryInput = priorSummary ? [priorSummary, ...evicted] : evicted;
-        const summaryPrompt = `Summarize the key information from this conversation. Include decisions made, code patterns discussed, file paths mentioned, user preferences, and unresolved work. Do not invent facts.\n\n${summaryInput.map(message => `${message.role}: ${(message.content ?? '').slice(0, 500)}`).join('\n')}`;
+        const summaryPrompt = `Summarize the key information from this conversation. Include decisions made, code patterns discussed, file paths mentioned, user preferences, and unresolved work. Do not invent facts.\n\n${summaryInput.map(message => `${message.role}: ${summarizeExcerpt(message)}`).join('\n')}`;
         const controller = new AbortController();
         let timer: ReturnType<typeof setTimeout> | undefined;
         const summaryPromise = this.config.llm.complete([{ role: 'user', content: summaryPrompt }], [], controller.signal);
