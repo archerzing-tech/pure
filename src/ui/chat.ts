@@ -4830,6 +4830,26 @@ export class ChatController {
       unregisterToolOutput();
       unregisterDownloadProgress();
       clearInterval(stallWatchdog);
+      // Turn-scoped UI teardown for EVERY exit — not just Interrupted/catch.
+      // A superseded turn (send() bumped this.generation: a queued task,
+      // auto-continue round or session switch started a new send while this
+      // turn was mid-tool) leaves the event loop via the generation-guard
+      // `break`, so its Interrupted branch never runs. Without this block the
+      // background transcript kept a forever-animating thinking card, tool
+      // rows stuck on "calling…", a blinking streaming caret and an
+      // assessment card pinned on 执行中 — all visible the moment the user
+      // switches back to that session. Every call is idempotent (null /
+      // empty / finished guards), so paths that already cleaned up are
+      // no-ops here. The assessment card is only force-cancelled on the
+      // superseded path: a normal turn's flow has already reached a terminal
+      // state (or intentionally stays open), and cancel() must not rewrite it.
+      endThinking();
+      resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
+      for (const seg of assistantSegments) {
+        cancelStreamingRender(seg.el);
+        seg.el.classList.remove('streaming');
+      }
+      if (gen !== this.generation) assessmentFlow?.cancel('本轮被新的请求接管，未继续执行。');
       // Release the streaming state ONLY if this turn still owns the
       // controller. An unconditional setStreaming(false) here could run AFTER
       // a newer send has already installed its own turn controller + set
