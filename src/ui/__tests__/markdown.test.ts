@@ -1006,3 +1006,34 @@ describe('diffLines (original vs repaired source)', () => {
     expect(changed[0].right).toBe('  B --query--> C[(db)]');
   });
 });
+
+// The mermaid card must follow the SHARED .diagram-slot state machine —
+// loading → preview/error, driven by setDiagramState() in markdown.ts. A
+// retired v0.x contract instead keyed the SVG's visibility to
+// data-state="arrived" (a state nothing has written in many versions) while
+// .mermaid-target itself stayed opacity:0 + position:absolute — so every
+// successfully rendered flowchart was an invisible overlay on a blank card
+// (user report: “帮我快速绘制一个最简单的登录流程图” → 空白).
+describe('mermaid slot CSS contract', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+
+  it('keys mermaid visibility only to states the renderer actually sets', () => {
+    // The dead "arrived" state must stay gone — nothing writes it, and a
+    // visibility rule keyed to it hides the diagram forever.
+    expect(css).not.toContain('data-state="arrived"');
+    // The invisible overlay must stay gone: .mermaid-target is the slot's
+    // .diagram-preview element and visibility comes from the generic
+    // .diagram-slot[data-state] rules, so the base rule carries neither
+    // position:absolute nor opacity.
+    expect(css).not.toContain('.bubble .mermaid-target {');
+    // The renderer side of the contract: a successful render lands in
+    // preview state (which the generic CSS makes visible).
+    expect(src).toContain("setDiagramState(slot, 'preview')");
+  });
+
+  it('sizes the rendered SVG like puml — natural size, shrink to fit', () => {
+    expect(css).toContain('.bubble .mermaid-slot .mermaid-target svg {');
+    expect(css).toContain('width: auto');
+  });
+});
