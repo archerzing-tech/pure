@@ -11,7 +11,14 @@
 
 import type { ToolDefinition } from './types';
 
-export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
+// No widening annotation on purpose: the `as const` keeps every `name` a
+// literal, so the Record<BuiltinToolName, …> tables in ToolRegistry (TOOL_TAGS)
+// and below (TOOL_METADATA_TABLE) FAIL TO COMPILE when a def lacks its entry —
+// that is the compiler-enforced trio this module promises. Annotating the
+// const with `readonly ToolDefinition[]` silently erased the literals and
+// vacated both guards (found by 3.1's negative check: a missing tag entry
+// typechecked fine).
+export const BUILT_IN_TOOL_DEFS = [
   {
     name: 'read_file',
     description: 'Read a file from the workspace. Supports plain text/code (UTF-8, UTF-16, GBK/GB18030 Chinese Windows encoding), PDF (with ToUnicode CMap for Chinese fonts), DOCX/XLSX/PPTX/ODT, and RTF — binary/scanned files get an actionable error instead of mojibake. Optionally specify startLine and endLine to read a range.',
@@ -300,6 +307,30 @@ export const BUILT_IN_TOOL_DEFS: readonly ToolDefinition[] = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'git_commit',
+    description: 'Stage changes and create a git commit in the workspace repository (must already be a git repo). Pass paths to stage specific files, or omit paths to stage every change. Write the message as a concise summary line of WHY the change matters. Never force-push or amend published history.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', description: 'Commit message — a concise summary line of why this change matters' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'Optional file paths to stage (workspace-relative). Omit to stage all changes.' },
+      },
+      required: ['message'],
+    },
+  },
+  {
+    name: 'git_branch',
+    description: 'Create, switch to, or list git branches in the workspace repository.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['create', 'switch', 'list'], description: 'create = new branch and switch to it; switch = check out an existing branch; list = local branches' },
+        name: { type: 'string', description: 'Branch name (required for create and switch)' },
+      },
+      required: ['action'],
+    },
+  },
+  {
     name: 'sys_info',
     description: 'Get operating system information: timezone (IANA name), language/locale, character encoding, public IP (masked — last octet redacted) with city-level geolocation, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
     input_schema: { type: 'object', properties: {} },
@@ -328,7 +359,7 @@ export const PUBLIC_TOOL_NAMES = new Set([
   'read_file', 'write_file', 'edit_file', 'find_files', 'list_files', 'execute_command',
   'create_directory', 'diff_files', 'researcher_web', 'researcher_docs',
   'code_searcher', 'glob_files', 'replace_files', 'git_diff', 'git_log',
-  'git_status', 'sys_info', 'generate_image', 'web_public_api', 'web_scrape', 'download_file', 'create_document',
+  'git_status', 'git_commit', 'git_branch', 'sys_info', 'generate_image', 'web_public_api', 'web_scrape', 'download_file', 'create_document',
 ]);
 
 /**
@@ -380,6 +411,11 @@ const TOOL_METADATA_TABLE = {
   git_diff: { sideEffects: false, isWrite: false },
   git_log: { sideEffects: false, isWrite: false },
   git_status: { sideEffects: false, isWrite: false },
+  // Git writes: they mutate repository state, not workspace files, so the
+  // pre-write file snapshot has nothing to capture — but the write
+  // classification must hold so both runtimes gate them like writes.
+  git_commit: { sideEffects: true, isWrite: true },
+  git_branch: { sideEffects: true, isWrite: true },
   create_directory: { sideEffects: true, isWrite: true },
   diff_files: { sideEffects: false, isWrite: false },
   researcher_web: { sideEffects: false, isWrite: false },
@@ -397,6 +433,10 @@ const TOOL_METADATA_TABLE = {
   // Image generation hits a paid provider API but never touches the workspace.
   generate_image: { sideEffects: false, isWrite: false },
   download_file: { sideEffects: true, isWrite: true },
-} satisfies Readonly<Record<(typeof BUILT_IN_TOOL_DEFS)[number]['name'], ToolSideEffectMetadata>>;
+  // `generate_image` is not in the defs array (it is advertised conditionally
+  // from IMAGE_GEN_TOOL_DEF), but adapters still look up its metadata, so the
+  // key union extends the def names by exactly that one name — anything else
+  // missing or extra is a compile error.
+} satisfies Readonly<Record<(typeof BUILT_IN_TOOL_DEFS)[number]['name'] | 'generate_image', ToolSideEffectMetadata>>;
 
 export const TOOL_METADATA: Readonly<Record<string, ToolSideEffectMetadata>> = TOOL_METADATA_TABLE;
