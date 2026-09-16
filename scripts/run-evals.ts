@@ -97,7 +97,8 @@ if (reportPath) {
 }
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 
-// The default fixture run is a control baseline and intentionally scores 0/3.
+// The default fixture run is a control baseline and intentionally scores 0 on
+// every fixture (see the fixture-sanity test in codingTaskBaseline.test.ts).
 // Strict mode is for real agent runs/report consumers, where any failed task
 // should be a non-zero process result.
 if (strict && report.tasks.some((task) => task.status !== 'passed')) process.exitCode = 1;
