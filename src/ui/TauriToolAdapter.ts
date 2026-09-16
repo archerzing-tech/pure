@@ -634,6 +634,21 @@ export class TauriToolAdapter implements ToolAdapter {
             })();
             const safeName = (filenameArg || urlBasename || 'download').replace(/[\\/:*?"<>|]/g, '_');
             const nativePath = `${outSpec}/${safeName}`;
+            // Cancel wiring, same contract as the shell path below: Stop asks
+            // the Rust backend to abort the transfer. A download has no child
+            // pid — download_file_stream registers a cancel channel under this
+            // toolCall id and kill_command fires it — so without this the
+            // download kept running to completion in the background after the
+            // turn stopped (bandwidth + a file nobody is waiting for).
+            let cancelled = false;
+            const onAbort = () => {
+              cancelled = true;
+              if (tauriInvoke || this.invokeFn) {
+                this.call('kill_command', { id: toolCall.id }).catch(() => {});
+              }
+            };
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
             try {
               const channel = new tauriChannel<string>();
               const doneHolder: { value: { code: number; path?: string; size?: number; filename?: string; via?: string; error?: string } | null } = { value: null };
@@ -670,6 +685,19 @@ export class TauriToolAdapter implements ToolAdapter {
                 onOutput: channel,
               })) as number;
               const done = doneHolder.value;
+              // Cancelled beats every other outcome: the backend answers -1 /
+              // "cancelled" after the kill_command fired, and the shell-chain
+              // fallback must stay out of the way.
+              if (cancelled && code !== 0) {
+                return {
+                  id: toolCall.id,
+                  toolName: 'download_file',
+                  result: 'Download cancelled by user.',
+                  error: 'Download cancelled by user.',
+                  success: false,
+                  duration: Date.now() - start,
+                };
+              }
               if (code === 0 && done?.path) {
                 recordNetSuccess(url);
                 emit({ downloaded: Number(done.size ?? 0), total: Number(done.size ?? 0), percent: 100, speed: 0, state: 'done', path: done.path, filename: done.filename, via: done.via ?? 'native' });
@@ -696,6 +724,11 @@ export class TauriToolAdapter implements ToolAdapter {
             } catch {
               // Backend predates download_file_stream — fall through to the
               // shell chain below.
+            } finally {
+              // { once: true } already removed it if it fired; this covers the
+              // normal-completion case so a reused signal can't fire a stale
+              // kill for a download that already finished.
+              signal?.removeEventListener('abort', onAbort);
             }
           }
 
