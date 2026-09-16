@@ -9,7 +9,7 @@ bun run eval:baseline
 bun run eval:baseline -- --report evals/baseline.latest.json
 ```
 
-The control baseline starts each task from its seeded buggy/incomplete files and runs the real Bun verification command without an agent. It should score `0/3`; that is a fixture sanity check, not an agent-quality score. Use `--strict` when a real agent callback is wired and failed tasks should produce a non-zero exit code:
+The control baseline starts each task from its seeded buggy/incomplete files and runs the real Bun verification command without an agent. It should score `0` on every fixture; that is a fixture sanity check, not an agent-quality score. Use `--strict` when a real agent callback is wired and failed tasks should produce a non-zero exit code:
 
 ```bash
 PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent deepseek-openai --strict --report evals/model.latest.json
@@ -48,4 +48,4 @@ Prompt assembly records are local and opt-in at the integration boundary. They s
 
 ## Baseline interpretation
 
-This is a compact regression gate, not a replacement for SWE-bench/Terminal-Bench. It measures whether Pure can complete a few representative local bugfix, feature, and refactor tasks under the exact verification commands. Expand the fixture set only when each new task has a deterministic behavioral check and a clear reason to exist.
+This is a compact regression gate, not a replacement for SWE-bench/Terminal-Bench. It measures whether Pure can complete a few representative local tasks — bugfix, feature, refactor, multi-step, recovery, guardrail, and long-context — under the exact verification commands. Expand the fixture set only when each new task has a deterministic behavioral check and a clear reason to exist.
