@@ -2,8 +2,12 @@
 // P1-8 — CLI direct-path permission helpers: answer parsing, prompt rendering,
 // and the non-interactive fallback policy.
 
-import { describe, it, expect } from 'bun:test';
-import { formatPermissionRequest, parsePermissionAnswer, nonTtyDecision, createCliPermissionHandler } from '../cli_permission';
+import { afterAll, beforeAll, describe, it, expect } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { formatPermissionRequest, parsePermissionAnswer, nonTtyDecision, createCliPermissionHandler, parseHookApprovalAnswer, formatHookApprovalRequest, createCliHookGate } from '../cli_permission';
+import { loadHookApprovals } from '../shared/userHookApprovals';
 import type { PermissionRequestInfo } from '../coding-agent/types';
 
 const baseInfo: PermissionRequestInfo = {
@@ -116,5 +120,67 @@ describe('createCliPermissionHandler', () => {
     const d = await h({ ...baseInfo, signal: ac.signal, dangerLevel: 'safe' });
     expect(d.allowed).toBe(false);
     expect(d.reason).toContain('aborted');
+  });
+});
+
+// ── 2.3: user-hook approval gate ──
+
+describe('parseHookApprovalAnswer', () => {
+  it('maps y / yes / 是 / 允许 to a session-only approval', () => {
+    for (const raw of ['y', 'Y', 'yes', '是', '允许']) {
+      expect(parseHookApprovalAnswer(raw)).toBe('once');
+    }
+  });
+
+  it('maps a / always / 始终允许 to a persistent approval', () => {
+    for (const raw of ['a', 'A', 'always', '始终允许']) {
+      expect(parseHookApprovalAnswer(raw)).toBe('always');
+    }
+  });
+
+  it('maps n / no / 否 / 拒绝 to deny and unknown input to null', () => {
+    for (const raw of ['n', 'N', 'no', '否', '拒绝']) {
+      expect(parseHookApprovalAnswer(raw)).toBe('deny');
+    }
+    for (const raw of ['', '   ', 'maybe', 'sure']) {
+      expect(parseHookApprovalAnswer(raw)).toBeNull();
+    }
+  });
+});
+
+describe('formatHookApprovalRequest', () => {
+  it('renders the event and the command to approve', () => {
+    const out = formatHookApprovalRequest('bun run lint', 'on_pre_tool');
+    expect(out).toContain('hook:on_pre_tool');
+    expect(out).toContain('bun run lint');
+  });
+});
+
+describe('createCliHookGate', () => {
+  let dir: string;
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'pure-hook-gate-'));
+  });
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('allows hooks cached in the approval store without prompting', async () => {
+    const store = await loadHookApprovals(dir);
+    store.approve('bun run lint');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const gate = createCliHookGate(await loadHookApprovals(dir));
+    await expect(gate.check({ command: 'bun run lint' }, 'on_pre_tool')).resolves.toBe(true);
+  });
+
+  // First-enable prompts need a TTY; under `bun test` stdin is usually a pipe,
+  // where the gate must deny (never hang, never run). Skip rather than hang
+  // when someone runs the suite from a terminal with stdin attached.
+  const itUnlessInteractive = process.stdin.isTTY ? it.skip : it;
+  itUnlessInteractive('denies an unapproved hook on non-interactive stdin', async () => {
+    const gate = createCliHookGate(await loadHookApprovals(dir));
+    await expect(gate.check({ command: 'never-approved.sh' }, 'on_turn_complete')).resolves.toBe(false);
   });
 });
