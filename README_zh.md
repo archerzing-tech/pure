@@ -416,6 +416,47 @@ MCP 服务器可能一次性暴露大量工具；为避免第三方工具列表�
 
 ---
 
+## 用户钩子（Hooks）
+
+`~/.pure/hooks.json` 让你把自己的 shell 命令挂进 pure 的工具调用流程——在模型动手前把关、在它动手后做出反应、或在整轮结束时收到通知。钩子通过你的 shell 执行（macOS/Linux 为 `bash -c`，Windows 为 PowerShell），工作目录是当前项目。目前只加载全局层（`~/.pure/hooks.json`）；项目级钩子规划中，将走同一道权限门。
+
+### 事件
+
+| 事件 | 触发时机 | 效果 |
+|---|---|---|
+| `on_pre_tool` | 工具调用执行前 | 退出码 `2` 一票否决该调用，你的 stderr/stdout（前 500 字符）成为模型看到的否决理由；其余退出码仅作提示 |
+| `on_post_tool` | 工具调用之后（无论成败） | stdout（最多 4000 字符）追加到模型下一轮读到的工具结果里 |
+| `on_turn_complete` | 每轮结束后一次 | 只做副作用（通知、触发 CI），输出不回传给模型 |
+
+每个钩子从 stdin 收到一行 JSON：
+
+```json
+{"event":"on_post_tool","tool":"write_file","args":{"path":"src/x.ts"},"success":true}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `command` | 要执行的 shell 命令（必填） |
+| `matcher` | 按工具名过滤：省略 = 所有工具；结尾 `*` = 前缀通配；否则精确匹配（`on_turn_complete` 忽略此项） |
+| `timeoutMs` | 单钩子超时，默认 10 秒，收敛到 [1s, 60s]；超时的钩子会被杀掉 |
+
+### 权限门
+
+钩子第一次即将运行时，CLI 会先征求确认：`y` 本会话内放行，`a` 始终允许，`n` 拒绝。"始终允许"按命令原文逐字缓存在 `~/.pure/hooks-approved.json`——改动钩子命令即失效、重新弹确认，批准永远不会"过户"给另一段代码。非交互运行（管道、CI）无法完成首次确认：未批准的钩子在那里一律跳过，且每条跳过都会写 stderr 日志，既不静默放行、也不静默丢弃。
+
+### 官方示例
+
+[`examples/hooks/`](examples/hooks/) 里有三个可直接复制的钩子：编辑源码后自动跑测试、lint 不过就拦下 `git commit`、每轮结束弹桌面通知。
+
+```bash
+mkdir -p ~/.pure/hooks
+cp examples/hooks/*.sh ~/.pure/hooks/
+```
+
+再把 [`examples/hooks/hooks.json`](examples/hooks/hooks.json) 的内容合并进你的 `~/.pure/hooks.json`（没有就新建）。下个会话里每个钩子确认一次，你的选择会被记住。
+
+---
+
 ## CLI 用法
 
 ```bash
