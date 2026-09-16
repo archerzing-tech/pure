@@ -82,6 +82,27 @@ export class TaskQueue {
       workspace: task.workspace ?? '',
       sessionId: task.sessionId ?? '',
     }));
+    // Boot-time adoption: the constructor runs exactly once per app start,
+    // BEFORE any in-app session switch, so a pending task bound to the SAME
+    // workspace but a DIFFERENT session id is guaranteed to be stranded by
+    // the last reload (scheduled work enqueued but not run before the app
+    // closed — the boot session is fresh, the old binding can never run
+    // again). Rebind it to the boot session so the "reload resumes pending
+    // work" contract is real. Tasks from a DIFFERENT workspace stay put:
+    // auto-running them against the wrong project is exactly what the
+    // workspace binding exists to prevent.
+    const bootContext = this.getContext();
+    for (const task of this.tasks) {
+      if (
+        task.status === 'pending'
+        && task.workspace
+        && task.workspace === bootContext.workspace
+        && task.sessionId
+        && task.sessionId !== bootContext.sessionId
+      ) {
+        task.sessionId = bootContext.sessionId;
+      }
+    }
     if (this.tasks.some((t) => t.status === 'pending' && this.isRunnable(t))) {
       // Kick off any pending work restored from storage once the caller has
       // fully wired the chat (defer so the UI can subscribe first).
