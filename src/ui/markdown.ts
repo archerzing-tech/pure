@@ -2711,7 +2711,7 @@ export function cancelStreamingRender(container: HTMLElement): void {
 // settings.ts toggles `[data-theme]` on <html>. hljs colors are CSS-overridden
 // in styles.css via [data-theme="dark"] rules — no re-render needed there.
 // Mermaid SVG colors are baked in at render time, so we re-render every
-// .mermaid-diagram on the page when the theme flips.
+// .mermaid-slot on the page when the theme flips.
 
 if (typeof document !== 'undefined') {
   document.addEventListener('pure:theme-changed', async () => {
