@@ -121,7 +121,10 @@ export class AgentLoopEngine {
     // after a rewrite round, a continuation nudge, or a parallel duplicate in
     // the same round — reuses the previous result instead of executing again.
     // Only the IMMEDIATELY preceding call counts: anything executed in between
-    // may have changed the world, and a repeat is then legitimate.
+    // may have changed the world, and a repeat is then legitimate. The same
+    // rule holds within a round: only a call directly continuing a run of
+    // identical calls dedupes; an identical call AFTER a different call runs
+    // for real (e.g. re-reading a file the round itself just edited).
     let lastExecuted: { key: string; text: string; ok: boolean } | null = null;
     // Survives THINK re-entries within one turn: caps how many times a stream
     // idle-timeout may be auto-resumed (see the THINK catch) so a pathological
@@ -392,19 +395,39 @@ export class AgentLoopEngine {
           yield { type: 'ToolStarted', payload: { toolName: call.function.name, toolCallId: call.id, toolCallArgs: call.function.arguments }, timestamp: Date.now() };
         }
         // Consecutive-identical dedupe: split the round's calls into real
-        // executions and repeats of the immediately preceding SUCCESSFUL call.
-        // A repeat reuses that result instead of touching the world again —
-        // write tools included, since re-writing identical content is a no-op.
-        // FAILED calls are never deduped: re-executing after a failure is the
-        // legitimate transient-fault retry path.
+        // executions and repeats of the immediately preceding SUCCESSFUL call
+        // — across rounds (lastExecuted) and within the round itself, where a
+        // parallel batch sometimes contains the very same call twice. A repeat
+        // reuses that result instead of touching the world again — write tools
+        // included, since re-writing identical content is a no-op. Only runs
+        // of back-to-back identical calls dedupe: an identical call after a
+        // DIFFERENT call may legitimately want fresh data (the round itself
+        // may have changed the world in between). FAILED calls are never
+        // deduped: re-executing after a failure is the legitimate
+        // transient-fault retry path, so a failed anchor's repeats run for
+        // real in a second pass below.
         const dedupedCalls: Array<{ call: (typeof toolCalls)[number]; key: string }> = [];
+        const sameRoundDups: Array<{ call: (typeof toolCalls)[number]; anchorId: string }> = [];
         const toExecute: typeof toolCalls = [];
+        // The open back-to-back run: its key and the first real-execution
+        // candidate of the run (null when the run started from a cross-round
+        // reuse — its result comes from lastExecuted, rule 1 above).
+        let runKey: string | null = null;
+        let runAnchorId: string | null = null;
         for (const call of toolCalls) {
           const key = callKey(call.function.name, call.function.arguments);
           if (lastExecuted && lastExecuted.ok && lastExecuted.key === key) {
             dedupedCalls.push({ call, key });
+            runKey = key;
+            runAnchorId = null;
             continue;
           }
+          if (runKey === key && runAnchorId) {
+            sameRoundDups.push({ call, anchorId: runAnchorId });
+            continue;
+          }
+          runKey = key;
+          runAnchorId = call.id;
           toExecute.push(call);
         }
         const executedResults = toExecute.length > 0
@@ -413,37 +436,57 @@ export class AgentLoopEngine {
         const textOfResult = (tr: ExecutedToolResult): string => tr.result.success
           ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
           : `Error: ${tr.result.error}`;
+        // Second pass: repeats of a FAILED anchor execute for real. (A missing
+        // anchor result counts as failed — never fabricate a reuse.)
+        if (sameRoundDups.length > 0) {
+          const passOne = new Map(executedResults.map((tr) => [tr.toolCallId, tr]));
+          const retried = sameRoundDups
+            .filter((dup) => !passOne.get(dup.anchorId)?.result.success)
+            .map((dup) => dup.call);
+          if (retried.length > 0) {
+            executedResults.push(...await this.toolCoordinator.execute(retried, ctx, budget));
+          }
+        }
         const executedByCallId = new Map(executedResults.map((tr) => [tr.toolCallId, tr]));
         // Assemble in the ORIGINAL call order so the UI maps results back to
-        // the right cards; deduped calls reuse the executed result.
+        // the right cards; deduped calls reuse the executed result. Repeats of
+        // a failed anchor already re-executed in the second pass and keep
+        // their own result.
+        const reusedTextByCallId = new Map<string, string | null>();
+        for (const dup of dedupedCalls) {
+          // lastExecuted is immutable across the execution above — safe here.
+          const snap = lastExecuted && lastExecuted.key === dup.key ? lastExecuted : null;
+          reusedTextByCallId.set(dup.call.id, snap ? `${snap.text}\n\n${DEDUPE_NOTE}` : null);
+        }
+        for (const dup of sameRoundDups) {
+          const anchor = executedByCallId.get(dup.anchorId);
+          if (anchor?.result.success) {
+            reusedTextByCallId.set(dup.call.id, `${textOfResult(anchor)}\n\n${DEDUPE_NOTE}`);
+          }
+        }
         const toolResults: ExecutedToolResult[] = [];
         for (const call of toolCalls) {
-          const dup = dedupedCalls.find((d) => d.call.id === call.id);
-          if (!dup) {
-            const tr = executedByCallId.get(call.id);
-            if (tr) toolResults.push(tr);
+          if (reusedTextByCallId.has(call.id)) {
+            const reused = reusedTextByCallId.get(call.id)!;
+            toolResults.push({
+              toolCallId: call.id,
+              toolName: call.function.name,
+              result: { id: call.id, toolName: call.function.name, result: reused ?? 'dedupe resolution failed', success: reused !== null, duration: 0 },
+              duration: 0,
+            });
             continue;
           }
-          // lastExecuted is immutable across the execution below — safe here.
-          const snap = lastExecuted && lastExecuted.key === dup.key ? lastExecuted : null;
-          if (!snap) {
-            toolResults.push({ toolCallId: call.id, toolName: call.function.name, result: { id: call.id, toolName: call.function.name, result: 'dedupe resolution failed', success: false, duration: 0 }, duration: 0 });
-            continue;
-          }
-          toolResults.push({
-            toolCallId: call.id,
-            toolName: call.function.name,
-            result: { id: call.id, toolName: call.function.name, result: `${snap.text}\n\n${DEDUPE_NOTE}`, success: true, duration: 0 },
-            duration: 0,
-          });
+          const tr = executedByCallId.get(call.id);
+          if (tr) toolResults.push(tr);
         }
         for (const result of toolResults) {
           yield { type: 'ToolResult', payload: result, timestamp: Date.now() };
         }
-        // Advance the consecutive-call cursor from the last REAL execution.
+        // Advance the consecutive-call cursor from the last REAL execution
+        // (second-pass retries included).
         const lastExec = executedResults[executedResults.length - 1];
         if (lastExec) {
-          const callFor = toExecute.find((c) => c.id === lastExec.toolCallId);
+          const callFor = toolCalls.find((c) => c.id === lastExec.toolCallId);
           lastExecuted = {
             key: callKey(lastExec.toolName, callFor?.function.arguments ?? ''),
             text: textOfResult(lastExec).slice(0, 8_000),
