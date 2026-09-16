@@ -49,6 +49,12 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   git_diff: { tags: [Tags.SHELL, Tags.READ], riskLevel: 'low' },
   git_log: { tags: [Tags.SHELL, Tags.READ], riskLevel: 'low' },
   git_status: { tags: [Tags.SHELL, Tags.READ], riskLevel: 'low' },
+  // Git mutations change repository state the user cares about, so unlike the
+  // git read trio they confirm like writes (NORMAL mode) instead of running
+  // silently. History-rewriting / remote shell git still goes through
+  // execute_command's high-risk gate.
+  git_commit: { tags: [Tags.SHELL, Tags.WRITE], riskLevel: 'medium' },
+  git_branch: { tags: [Tags.SHELL, Tags.WRITE], riskLevel: 'medium' },
   sys_info: { tags: [Tags.READ], riskLevel: 'low' },
   create_directory: { tags: [Tags.FS, Tags.WRITE], riskLevel: 'low' },
   diff_files: { tags: [Tags.FS, Tags.READ], riskLevel: 'low' },
