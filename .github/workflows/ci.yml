@@ -6,9 +6,10 @@ on:
   pull_request:
 
 jobs:
-  # Quality gate: typecheck → unit tests → real-browser e2e (headless Chrome
-  # drives the unmodified app; see scripts/e2e-settings-apikey.ts). Chrome is
-  # preinstalled on GitHub ubuntu runners, so the e2e needs no browser setup.
+  # Quality gate: typecheck → unit tests → eval fixture sanity → real-browser
+  # e2e (headless Chrome drives the unmodified app; see
+  # scripts/e2e-settings-apikey.ts). Chrome is preinstalled on GitHub ubuntu
+  # runners, so the e2e needs no browser setup.
   test:
     runs-on: ubuntu-latest
 
@@ -33,6 +34,12 @@ jobs:
 
       - name: Run tests
         run: bun test
+
+      # Eval fixture sanity: control must fail every fixture from its seed and
+      # the golden solution must pass every one. No provider keys needed; a red
+      # step here means the baseline itself regressed.
+      - name: Eval fixture sanity
+        run: bun run eval:sanity
 
       - name: E2E — settings API key paste regression
         run: |

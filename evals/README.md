@@ -17,6 +17,8 @@ PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent deepseek-openai --strict 
 
 Provider/model/prompt/revision metadata can be supplied through `PURE_EVAL_MODEL`, `PURE_EVAL_PROMPT_VERSION`, `GIT_COMMIT`/`GITHUB_SHA`, and `PURE_EVAL_SEED`. Use `--agent deepseek-openai|deepseek-anthropic|qwen|glm|mock` (or `PURE_EVAL_AGENT`) to run the real CodingAgent executor; omit it for the control baseline. Set `PURE_EVAL_TRACE=evals/traces.jsonl` or pass `--trace evals/traces.jsonl` to persist local prompt traces. For custom OpenAI-compatible endpoints, pass `PURE_EVAL_BASE_URL` and optionally `PURE_EVAL_CONTEXT_WINDOW_TOKENS`, `PURE_EVAL_OUTPUT_RESERVE_TOKENS`, and `PURE_EVAL_SAFETY_MARGIN_TOKENS`.
 
+`bun run eval:sanity` is the no-LLM CI gate over the same contract: it asserts the control run fails every fixture from its seed and the recorded golden solutions (`src/evaluation/codingTaskGoldenSolutions.ts`) pass every fixture. A failure there means the fixture suite itself regressed, independent of any provider.
+
 ## Task protocol
 
 `src/evaluation/codingTaskBaseline.ts` contains the versioned fixtures. Each task has:
