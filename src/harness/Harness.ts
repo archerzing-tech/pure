@@ -26,6 +26,9 @@ import type {
   VerificationSummary,
 } from '../shared/types';
 import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
+import { runUserHooksForEvent } from '../shared/userHookRunner';
+import type { UserHookRunner } from '../shared/userHookRunner';
+import type { UserHooksConfig } from '../shared/userHooks';
 import type { SemanticRouteDecision } from '../coding-agent/types';
 
 // Bounded wait for the memory retrieval that feeds the system prompt. The
@@ -88,6 +91,11 @@ export interface HarnessConfig {
    * verify, on_budget_warning). When omitted the engine runs without hooks.
    */
   hooks?: HookRouter;
+  /** User hooks (hooks.json) run around tool calls and at turn completion.
+   * CLI loads the global layer (~/.pure); hooks run only when a runner is
+   * also wired (see userHookRunner.ts). */
+  userHooks?: UserHooksConfig;
+  userHookRunner?: UserHookRunner;
   /**
    * Failure recovery policy (retry → reflect → degrade → stop). When omitted
    * tool/verify failures fall back to the engine's default messaging.
@@ -152,6 +160,8 @@ export class Harness {
       budget: this.config.budget,
       verifier: this.config.verifier,
       hooks: this.config.hooks,
+      userHooks: this.config.userHooks,
+      userHookRunner: this.config.userHookRunner,
       failurePolicy: this.config.failurePolicy,
       continueGuard: this.config.continueGuard,
       signal,
@@ -412,6 +422,13 @@ export class Harness {
           }
         }
       }
+      // User on_turn_complete hooks (hooks.json) fire after the run settles,
+      // awaited so a notify-style hook finishes before the CLI exits. v1: the
+      // hook's real-world side effect is the value; output is not fed back
+      // into context.
+      if (this.config.userHooks?.on_turn_complete?.length && this.config.userHookRunner) {
+        await runUserHooksForEvent(this.config.userHooks, 'on_turn_complete', { event: 'on_turn_complete' }, this.config.userHookRunner);
+      }
       if (this.stateMgr && event.type === 'Interrupted') {
         try {
           // P1-9: the Interrupted event now carries the engine's live messages
@@ -591,6 +608,10 @@ export class Harness {
             await this.writeRetriedErrorPatterns(retriedFailures, newUserPrompt).catch(() => {});
           }
         }
+      }
+      // User on_turn_complete hooks — same contract as run().
+      if (this.config.userHooks?.on_turn_complete?.length && this.config.userHookRunner) {
+        await runUserHooksForEvent(this.config.userHooks, 'on_turn_complete', { event: 'on_turn_complete' }, this.config.userHookRunner);
       }
       if (this.stateMgr && event.type === 'Interrupted') {
         try {

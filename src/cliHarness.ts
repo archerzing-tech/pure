@@ -25,6 +25,8 @@ import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
 import type { IStateStore, ToolAdapter, ToolDefinition } from './shared/types';
 import { createAdapter } from './cliAdapter';
 import { DEFAULT_BUDGET, evolutionCfg, PURE_DIR } from './cliConfig';
+import { loadUserHooks } from './shared/userHooks';
+import { createNodeUserHookRunner } from './shared/userHookRunner';
 import type { CliArgs } from './cliConfig';
 
 // ── CLI cross-session memory (IMemoryStore) ──
@@ -214,6 +216,11 @@ async function createHarness(args: CliArgs) {
     ? (args.workspace.startsWith('/') ? args.workspace : `${process.cwd()}/${args.workspace}`)
     : process.cwd();
 
+  // User hooks (hooks.json): only the global layer (~/.pure) is loaded for
+  // now. The workspace layer is project-provided and waits for its permission
+  // gate (first-enable confirmation) before it may run anything.
+  const userHooks = await loadUserHooks({ globalUserRoot: PURE_DIR });
+
   const harness = new Harness({
     sessionId,
     llm: adapter,
@@ -237,6 +244,8 @@ async function createHarness(args: CliArgs) {
     verifier: plumbing.verifier,
     // Lifecycle hooks + escalating failure recovery policy.
     hooks: plumbing.hooks,
+    userHooks,
+    userHookRunner: createNodeUserHookRunner({ cwd: projectPath }),
     failurePolicy: plumbing.failurePolicy,
   });
 

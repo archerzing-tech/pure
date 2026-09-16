@@ -1,6 +1,9 @@
 // src/shared/types.ts
 // Canonical types per pure Spec §4 — single source of truth.
 
+import type { UserHooksConfig } from './userHooks';
+import type { UserHookRunner } from './userHookRunner';
+
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
 export interface MessageAttachment {
@@ -201,6 +204,11 @@ export interface EngineContext {
   budget: BudgetConfig;
   signal?: AbortSignal;
   hooks?: HookRouter;
+  /** User hooks (hooks.json) run around tool calls — see userHookRunner.ts.
+   * Hooks run only when BOTH fields are set: a renderer (no process spawn)
+   * omits the runner and the coordinator skips every hook. */
+  userHooks?: UserHooksConfig;
+  userHookRunner?: UserHookRunner;
   failurePolicy?: FailurePolicy;
   /** GUI-supplied "is the task actually done?" check, consulted once the THINK
    *  round produced no tool calls and VERIFY passed — just before TERMINATE.
