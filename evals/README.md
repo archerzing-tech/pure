@@ -19,6 +19,10 @@ Provider/model/prompt/revision metadata can be supplied through `PURE_EVAL_MODEL
 
 `bun run eval:sanity` is the no-LLM CI gate over the same contract: it asserts the control run fails every fixture from its seed and the recorded golden solutions (`src/evaluation/codingTaskGoldenSolutions.ts`) pass every fixture. A failure there means the fixture suite itself regressed, independent of any provider.
 
+## Release notes
+
+Every release entry in CHANGELOG.md carries an evaluation-baseline line. Run `bun run eval:notes` and paste its output under the new version heading: it re-measures the control and golden runs on the spot (so the numbers are never copied from an older release) and refuses to emit anything while the fixture sanity gate is red. The emitted `fixtureHash` ties the release to the exact suite state it was measured against. Once real-provider runs are recorded (see Baseline interpretation), add their scores to the same section.
+
 ## Task protocol
 
 `src/evaluation/codingTaskBaseline.ts` contains the versioned fixtures. Each task has:

@@ -11,6 +11,7 @@ const reportPath = reportFlag >= 0 ? argv[reportFlag + 1] : undefined;
 const keepWorkspaces = argv.includes('--keep-workspaces');
 const strict = argv.includes('--strict');
 const sanity = argv.includes('--sanity');
+const notes = argv.includes('--notes');
 const agentFlag = argv.indexOf('--agent');
 const traceFlag = argv.indexOf('--trace');
 const requestedAgent = agentFlag >= 0
@@ -24,7 +25,7 @@ const tracePath = traceFlag >= 0
 const traceStore = tracePath ? new FilePromptObservationStore(tracePath) : undefined;
 
 if ((reportFlag >= 0 && (!reportPath || reportPath.startsWith('--'))) || (traceFlag >= 0 && (!tracePath || tracePath.startsWith('--')))) {
-  console.error('Usage: bun run eval:baseline -- [--agent provider] [--report path] [--trace path] [--sanity] [--keep-workspaces] [--strict]');
+  console.error('Usage: bun run eval:baseline -- [--agent provider] [--report path] [--trace path] [--sanity] [--notes] [--keep-workspaces] [--strict]');
   process.exit(2);
 }
 
@@ -51,14 +52,18 @@ const observability = new PromptObservability(
 // every fixture from its seed, and the recorded golden solution must pass
 // every fixture. A violation means the fixture suite itself is broken — this
 // is what CI gates on; the agent modes below are for provider baselines.
-if (sanity) {
+// --notes runs the same pass and emits the paste-ready CHANGELOG baseline
+// section instead of per-fixture lines, refusing to emit anything when the
+// gate is red.
+if (sanity || notes) {
   let violations = 0;
   const control = await evaluateCodingTaskSuite();
   for (const task of control.tasks) {
     const failedAsSeeded = task.status === 'control' && task.verificationPassed === false;
     if (!failedAsSeeded) violations += 1;
-    process.stdout.write(`control ${task.taskId}: ${failedAsSeeded ? 'failed as seeded' : `UNEXPECTED ${task.status}`}\n`);
+    if (!notes) process.stdout.write(`control ${task.taskId}: ${failedAsSeeded ? 'failed as seeded' : `UNEXPECTED ${task.status}`}\n`);
   }
+  let goldenPassed = 0;
   for (const task of CODING_TASK_FIXTURES) {
     const solve = GOLDEN_SOLUTIONS[task.id];
     const result = solve
@@ -69,12 +74,22 @@ if (sanity) {
         })
       : undefined;
     const passed = result?.status === 'passed';
-    if (!passed) violations += 1;
-    process.stdout.write(`golden  ${task.id}: ${passed ? 'passed' : 'MISSING GOLDEN SOLUTION OR FAILED'}\n`);
+    if (passed) goldenPassed += 1;
+    else violations += 1;
+    if (!notes) process.stdout.write(`golden  ${task.id}: ${passed ? 'passed' : 'MISSING GOLDEN SOLUTION OR FAILED'}\n`);
   }
-  process.stdout.write(violations === 0
-    ? `eval sanity ok: ${control.taskCount} fixtures fail from seed and solve clean\n`
-    : `eval sanity FAILED: ${violations} violation(s)\n`);
+  if (notes) {
+    if (violations > 0) {
+      process.stdout.write(`eval sanity FAILED: ${violations} violation(s); refusing to emit release notes from a broken baseline\n`);
+      process.exit(1);
+    }
+    process.stdout.write(`**评测基线**（${control.suiteVersion}，fixtureHash ${control.fixtureHash}）\n\n`);
+    process.stdout.write(`- ${control.taskCount} 个 fixture：控制组全部按种子失败、金标准解全部通过（无 LLM 完整性自检，CI 门禁 \`eval:sanity\`）。\n`);
+  } else {
+    process.stdout.write(violations === 0
+      ? `eval sanity ok: ${control.taskCount} fixtures fail from seed and solve clean\n`
+      : `eval sanity FAILED: ${violations} violation(s)\n`);
+  }
   if (violations > 0) process.exit(1);
   process.exit(0);
 }
