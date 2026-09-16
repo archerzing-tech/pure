@@ -2910,6 +2910,18 @@ type CommandRegistry = StdMutex<BTreeMap<String, u32>>;
 // idle timeout. Mirror of the CommandRegistry pattern above.
 type ChatStreamRegistry = Arc<StdMutex<BTreeMap<String, tokio::sync::oneshot::Sender<()>>>>;
 
+// Track in-flight native downloads (download_file_stream, keyed by the LLM
+// tool-call id) so a Stop can abort the transfer: a download has no child pid
+// to SIGKILL, so the registry holds a oneshot cancel channel instead and the
+// download's request/chunk awaits select on it. kill_command checks this
+// registry after CommandRegistry, so the GUI keeps a single kill entry point.
+// A NEWTYPE over the same map shape as ChatStreamRegistry (the register/
+// cancel helpers are shared): tauri's manage() is keyed by concrete type, so
+// managing a second instance of the bare alias would panic at startup.
+type CancelMap = ChatStreamRegistry;
+#[derive(Clone, Default)]
+struct DownloadCancelRegistry(CancelMap);
+
 /// Spawn `sh -c <command>` in its own process group (Unix) so a cancellation
 /// can kill the whole command tree. process_group(0) makes the child its own
 /// group leader (pgid == pid), which is what kill_process_group targets.
@@ -3415,20 +3427,34 @@ async fn execute_command_stream(
 ///
 /// `$HOME` / `$PWD` in `path` are expanded from the environment / `workspace`
 /// — the WebView cannot know the real home dir. Returns 0 on success, 1 when
-/// every attempt failed (the last error rides the final done line). Cancel is
-/// not wired to kill_command (there is no child pid); a Stop during a download
-/// lets it finish in the background.
+/// every attempt failed (the last error rides the final done line), and -1
+/// when the GUI cancelled the transfer (kill_command fired the cancel
+/// channel): the partial file stays on disk for a later resume.
 #[tauri::command]
 async fn download_file_stream(
+    state: tauri::State<'_, DownloadCancelRegistry>,
     url: String,
     path: String,
     workspace: String,
     on_output: Channel<String>,
     proxy_url: Option<String>,
     max_attempts: Option<u32>,
+    id: Option<String>,
 ) -> Result<i32, String> {
     use futures_util::StreamExt;
     use std::io::Write;
+
+    // Stop wiring: the GUI calls kill_command(toolCall id) when the turn is
+    // aborted. There is no child pid here to SIGKILL — the cancel channel is
+    // the whole kill — and every long await below selects on it, so a stopped
+    // download exits in milliseconds instead of finishing in the background
+    // (burning bandwidth and writing a file nobody is waiting for). The guard
+    // drops the registry entry on every exit path so stale ids never
+    // accumulate; empty ids (legacy callers) skip registration entirely.
+    let cancel_id = id.as_deref().unwrap_or("").to_string();
+    let mut cancel_rx = register_chat_cancel(&state.inner().0, &cancel_id);
+    let _cancel_guard = ChatCancelGuard { registry: state.inner().0.clone(), key: cancel_id };
+    let mut cancelled = false;
 
     // ── Path expansion ($HOME / $PWD) + parent dirs ──
     let expand = |spec: &str| -> String {
@@ -3460,7 +3486,7 @@ async fn download_file_stream(
 
     let attempts = max_attempts.unwrap_or(3).clamp(1, 5);
     let mut last_err = String::from("unknown error");
-    for attempt in 1..=attempts {
+    'attempts: for attempt in 1..=attempts {
         // Resume: keep the partial file from a previous attempt and ask the
         // server for the remainder. A 200 answer (no Range support) restarts
         // from zero; a 206 appends.
@@ -3484,7 +3510,11 @@ async fn download_file_stream(
             req = req.header("Range", format!("bytes={existing}-"));
         }
 
-        let resp = match req.send().await {
+        let resp = match tokio::select! {
+            biased;
+            _ = &mut cancel_rx => { cancelled = true; break 'attempts; }
+            r = req.send() => r,
+        } {
             Ok(r) => r,
             Err(e) => {
                 last_err = format!("{e}");
@@ -3529,7 +3559,11 @@ async fn download_file_stream(
         let mut last_emit = std::time::Instant::now() - std::time::Duration::from_millis(400);
         let mut stream_err: Option<String> = None;
         let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
+        while let Some(chunk) = tokio::select! {
+            biased;
+            _ = &mut cancel_rx => { cancelled = true; break 'attempts; }
+            chunk = stream.next() => chunk,
+        } {
             match chunk {
                 Ok(bytes) => {
                     downloaded += bytes.len() as u64;
@@ -3571,6 +3605,17 @@ async fn download_file_stream(
         }
     }
 
+    if cancelled {
+        // The GUI stopped the turn: report a distinct exit code so the WebView
+        // surfaces "cancelled" instead of a download failure (and never falls
+        // back to the shell chain). The partial file stays for a later resume.
+        emit(
+            serde_json::json!({"type":"done","code":-1,"error":"cancelled","via":"native"})
+                .to_string(),
+        );
+        return Ok(-1);
+    }
+
     emit(
         serde_json::json!({"type":"done","code":1,"error":last_err,"via":"native"})
             .to_string(),
@@ -3578,12 +3623,19 @@ async fn download_file_stream(
     Ok(1)
 }
 
-/// Kill a running command started via execute_command_stream. The GUI calls
-/// this when the turn is cancelled (Stop button): the shell tree is SIGKILLed
-/// as a process group so grandchildren don't survive as background orphans.
-/// No-op when the id is unknown (already exited or never registered).
+/// Kill a running command started via execute_command_stream, or cancel an
+/// in-flight native download started via download_file_stream. The GUI calls
+/// this when the turn is cancelled (Stop button): shell trees are SIGKILLed
+/// as a process group so grandchildren don't survive as background orphans;
+/// downloads hold no child pid, so their registered cancel channel is fired
+/// instead and the transfer loop bails out of its next await. No-op when the
+/// id is unknown (already exited or never registered).
 #[tauri::command]
-async fn kill_command(state: tauri::State<'_, CommandRegistry>, id: String) -> Result<(), String> {
+async fn kill_command(
+    state: tauri::State<'_, CommandRegistry>,
+    downloads: tauri::State<'_, DownloadCancelRegistry>,
+    id: String,
+) -> Result<(), String> {
     let pid = {
         let mut reg = state.lock().map_err(|e| format!("lock: {}", e))?;
         reg.remove(&id)
@@ -3591,6 +3643,9 @@ async fn kill_command(state: tauri::State<'_, CommandRegistry>, id: String) -> R
     if let Some(pid) = pid {
         kill_process_group(pid as i32).map_err(|e| format!("kill: {}", e))?;
     }
+    // A live download never has a pid entry and a shell command never has a
+    // cancel entry, so checking both is race-free.
+    let _ = cancel_chat_stream_inner(&downloads.inner().0, &id);
     Ok(())
 }
 
@@ -6573,6 +6628,43 @@ mod command_cancel_tests {
         assert!(
             !reg.contains_key(&id),
             "registry must be cleaned up after the kill"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_cancel_fires_and_clean_up_its_registry_entry() {
+        let downloads = DownloadCancelRegistry::default();
+        let rx = register_chat_cancel(&downloads.0, "dl-call-1");
+        // kill_command's cancel path fires the registered channel…
+        assert!(
+            cancel_chat_stream_inner(&downloads.0, "dl-call-1"),
+            "a live download must be signalled"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), rx)
+                .await
+                .is_ok(),
+            "cancelled download's channel must resolve promptly"
+        );
+        // …is a no-op for unknown and legacy (empty) ids…
+        assert!(!cancel_chat_stream_inner(&downloads.0, "dl-call-1"));
+        assert!(!cancel_chat_stream_inner(&downloads.0, ""));
+        // …and the guard drops the entry on every exit path.
+        {
+            let rx2 = register_chat_cancel(&downloads.0, "dl-call-2");
+            let _guard = ChatCancelGuard {
+                registry: downloads.0.clone(),
+                key: "dl-call-2".to_string(),
+            };
+            drop(rx2);
+        }
+        assert!(
+            !downloads
+                .0
+                .lock()
+                .unwrap()
+                .contains_key("dl-call-2"),
+            "guard must remove the entry on drop"
         );
     }
 }
@@ -14739,6 +14831,7 @@ pub fn run() {
         .manage(McpRegistry::new(BTreeMap::new()))
         .manage(CommandRegistry::new(BTreeMap::new()))
         .manage(ChatStreamRegistry::new(StdMutex::new(BTreeMap::new())))
+        .manage(DownloadCancelRegistry::default())
         .setup(|_app| {
             // Warm the sys_info caches at startup so the first tool call /
             // prompt probe returns instantly instead of paying the full

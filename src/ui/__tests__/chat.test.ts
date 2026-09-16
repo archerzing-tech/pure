@@ -1128,3 +1128,32 @@ describe('subagent tool body renders the delegated output', () => {
     expect(slice).toContain('resultText.slice(0, 800);');
   });
 });
+
+// A superseded turn (queued task / auto-continue round / session switch
+// bumped this.generation while the old turn was mid-tool) exits the event
+// loop via the generation-guard `break`, so its Interrupted branch never
+// runs. The `finally` must therefore repeat the Interrupted branch's UI
+// teardown — or the background transcript kept a forever-animating thinking
+// card, tool rows stuck on "calling…", a blinking streaming caret and an
+// assessment card pinned on 执行中 (all idempotent calls; normal paths are
+// no-ops here).
+describe('superseded-turn finally teardown', () => {
+  const readSource = (url: URL): string => readFileSync(url, 'utf8');
+
+  it('cleans turn-scoped UI up in the finally for generation-guard exits', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // chat.ts has an inner finally (pause-path cleanup at ~3553); the turn
+    // teardown lives in doSend's LAST finally.
+    const finallyIdx = src.lastIndexOf('} finally {');
+    expect(finallyIdx).toBeGreaterThan(-1);
+    const finallyBlock = src.slice(finallyIdx, finallyIdx + 2600);
+    // Same teardown set the Interrupted branch runs, inside the finally:
+    expect(finallyBlock).toContain('endThinking();');
+    expect(finallyBlock).toContain('resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);');
+    expect(finallyBlock).toContain('cancelStreamingRender(seg.el);');
+    expect(finallyBlock).toContain("seg.el.classList.remove('streaming');");
+    // Assessment card force-cancel is scoped to the superseded path — a
+    // normal turn's flow must not be rewritten by the finally.
+    expect(finallyBlock).toContain('if (gen !== this.generation) assessmentFlow?.cancel(');
+  });
+});

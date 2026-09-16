@@ -1,6 +1,7 @@
 // src/ui/__tests__/tauriToolAdapter.test.ts
 
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs, buildCodeSearchArgs, filterResearchSources, researchLimits, TauriToolAdapter, parseCommandStreamChunk } from '../TauriToolAdapter';
 import type { ToolCall } from '../../shared/types';
 import { formatCommandError, formatBytes } from '../../shared/format';
@@ -394,5 +395,35 @@ describe('parseCommandStreamChunk (execute_command_stream protocol lock)', () =>
     expect(parseCommandStreamChunk('not json')).toBeNull();
     expect(parseCommandStreamChunk('{"type":"progress"}')).toBeNull();
     expect(parseCommandStreamChunk('null')).toBeNull();
+  });
+});
+
+// The native download_file_stream path must carry the same cancel wiring as
+// the shell path: a Stop (engine aborts the tool signal) asks the Rust backend
+// to kill the transfer — download_file_stream registers a cancel channel under
+// the toolCall id and kill_command fires it. Without this, a stopped download
+// kept running to completion in the background (bandwidth + a file nobody is
+// waiting for), and the cancelled outcome fell through to the shell chain.
+describe('native download cancel wiring', () => {
+  const readSource = (url: URL): string => readFileSync(url, 'utf8');
+
+  it('native download_file wires abort → kill_command and reports cancelled', () => {
+    const src = readSource(new URL('../TauriToolAdapter.ts', import.meta.url));
+    const nativeIdx = src.indexOf("await this.call('download_file_stream'");
+    expect(nativeIdx).toBeGreaterThan(-1);
+    // Look backwards from the call: the listener must be installed BEFORE the
+    // await so a pre-aborted signal still cancels instantly. (The onmessage
+    // handler between listener and call is long — give the window room.)
+    const before = src.slice(Math.max(0, nativeIdx - 2600), nativeIdx);
+    expect(before).toContain("const onAbort = () => {");
+    expect(before).toContain("this.call('kill_command', { id: toolCall.id }).catch(() => {});");
+    expect(before).toContain('if (signal?.aborted) onAbort();');
+    // Look forwards: the cancelled outcome wins over the failure path, and a
+    // normal completion removes the listener so a reused signal can't fire a
+    // stale kill.
+    const after = src.slice(nativeIdx, nativeIdx + 3400);
+    expect(after).toContain('if (cancelled && code !== 0) {');
+    expect(after).toContain("'Download cancelled by user.'");
+    expect(after).toContain("signal?.removeEventListener('abort', onAbort);");
   });
 });
