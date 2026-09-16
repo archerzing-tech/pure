@@ -14,7 +14,7 @@ import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
 import { PermissionManager } from './coding-agent/PermissionManager';
-import { createCliPermissionHandler } from './cli_permission';
+import { createCliPermissionHandler, createCliHookGate } from './cli_permission';
 import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
 import { createEmbeddingMemoryStore } from './shared/memoryFactory';
 import { harvestUserPreferences } from './shared/memory';
@@ -26,7 +26,8 @@ import type { IStateStore, ToolAdapter, ToolDefinition } from './shared/types';
 import { createAdapter } from './cliAdapter';
 import { DEFAULT_BUDGET, evolutionCfg, PURE_DIR } from './cliConfig';
 import { loadUserHooks } from './shared/userHooks';
-import { createNodeUserHookRunner } from './shared/userHookRunner';
+import { createGatedUserHookRunner, createNodeUserHookRunner } from './shared/userHookRunner';
+import { loadHookApprovals } from './shared/userHookApprovals';
 import type { CliArgs } from './cliConfig';
 
 // ── CLI cross-session memory (IMemoryStore) ──
@@ -220,6 +221,16 @@ async function createHarness(args: CliArgs) {
   // now. The workspace layer is project-provided and waits for its permission
   // gate (first-enable confirmation) before it may run anything.
   const userHooks = await loadUserHooks({ globalUserRoot: PURE_DIR });
+  // 2.3: every hook — even from the trusted global layer — passes the gate on
+  // first use. "Always allow" is cached per command text in
+  // ~/.pure/hooks-approved.json; a session answer lasts the session only.
+  // Skipped (unapproved) hooks are logged to stderr, never silent.
+  const hookGate = createCliHookGate(await loadHookApprovals(PURE_DIR));
+  const userHookRunner = createGatedUserHookRunner(
+    createNodeUserHookRunner({ cwd: projectPath }),
+    hookGate,
+    (hook, event) => process.stderr.write(`  ${dim('[hooks]')} ${dim(`unapproved ${event} hook skipped: ${hook.command}`)}\n`),
+  );
 
   const harness = new Harness({
     sessionId,
@@ -245,7 +256,7 @@ async function createHarness(args: CliArgs) {
     // Lifecycle hooks + escalating failure recovery policy.
     hooks: plumbing.hooks,
     userHooks,
-    userHookRunner: createNodeUserHookRunner({ cwd: projectPath }),
+    userHookRunner,
     failurePolicy: plumbing.failurePolicy,
   });
 

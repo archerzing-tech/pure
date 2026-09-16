@@ -11,6 +11,9 @@
 
 import * as readline from 'node:readline';
 import type { PermissionDecision, PermissionRequestHandler, PermissionRequestInfo } from './coding-agent/types';
+import { hookApprovalKey, type HookApprovalStore } from './shared/userHookApprovals';
+import type { UserHookGate } from './shared/userHookRunner';
+import type { UserHook, UserHookEvent } from './shared/userHooks';
 import { bold, cyan, dim, green, magenta, red, yellow } from './termcolors';
 
 /**
@@ -139,4 +142,79 @@ function riskColor(level: 'safe' | 'caution' | 'danger'): string {
     case 'caution': return yellow('caution');
     case 'danger': return red('danger');
   }
+}
+
+// ── User-hook approval gate (2.3) ──
+// The same y/a/n flow as tool permissions, one layer earlier: before a hook
+// from hooks.json runs for the first time, the user confirms it. `a` persists
+// per command text in the approval store (~/.pure/hooks-approved.json); `y`
+// lasts the session only. Editing a command changes its SHA-256 key and so
+// re-prompts — an approval never transfers to different code.
+
+export type HookApprovalAnswer = 'once' | 'always' | 'deny';
+
+/** Same answer vocabulary as parsePermissionAnswer, mapped to hook outcomes. */
+export function parseHookApprovalAnswer(raw: string): HookApprovalAnswer | null {
+  const a = raw.trim().toLowerCase();
+  if (a === 'y' || a === 'yes' || a === '是' || a === '允许') return 'once';
+  if (a === 'a' || a === 'always' || a === '始终允许') return 'always';
+  if (a === 'n' || a === 'no' || a === '否' || a === '拒绝') return 'deny';
+  return null;
+}
+
+/** Render the first-enable confirmation block for a hook. Pure (no I/O). */
+export function formatHookApprovalRequest(command: string, event: UserHookEvent): string {
+  const lines: string[] = [];
+  lines.push(`  ${magenta('🪝')} ${cyan(`hook:${event}`)} ${dim('—')} ${dim('first enable, approval required')}`);
+  lines.push(`    ${dim('Command:')} ${wrapLine(command, 120)}`);
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * CLI hook gate: approved ("always") or session-approved ("y") hooks run;
+ * everything else prompts once per command. Non-TTY stdin cannot confirm a
+ * first enable, so unapproved hooks are denied there (the run logs the skip).
+ *
+ * Checks are serialized behind one queue: parallel read-tool calls share a
+ * stdin, and two concurrent readline interfaces would interleave their prompts.
+ */
+export function createCliHookGate(store: HookApprovalStore): UserHookGate {
+  const sessionOnce = new Set<string>();
+  let queue: Promise<unknown> = Promise.resolve();
+
+  async function check(hook: UserHook, event: UserHookEvent): Promise<boolean> {
+    const key = hookApprovalKey(hook.command);
+    if (store.isApproved(hook.command) || sessionOnce.has(key)) return true;
+    if (!process.stdin.isTTY) return false;
+
+    process.stdout.write('\n' + formatHookApprovalRequest(hook.command, event));
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>(resolve => {
+      rl.question(`  Allow this hook? ${bold('y')}es (this session) / ${bold('a')}lways / ${bold('n')}o: `, resolve);
+    });
+    rl.close();
+    process.stdout.write('\n');
+
+    const parsed = parseHookApprovalAnswer(answer);
+    if (!parsed || parsed === 'deny') {
+      process.stdout.write(`  ${red('✗')} ${dim('Hook denied — it will be skipped.')}\n`);
+      return false;
+    }
+    if (parsed === 'always') {
+      store.approve(hook.command);
+      process.stdout.write(`  ${green('✓')} ${dim('Allowed always (cached per command).')}\n`);
+    } else {
+      sessionOnce.add(key);
+      process.stdout.write(`  ${green('✓')} ${dim('Allowed for this session.')}\n`);
+    }
+    return true;
+  }
+
+  return {
+    check(hook: UserHook, event: UserHookEvent): Promise<boolean> {
+      const run = queue.then(() => check(hook, event));
+      queue = run.then(() => undefined, () => undefined);
+      return run;
+    },
+  };
 }

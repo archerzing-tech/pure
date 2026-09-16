@@ -4,12 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   HOOK_STDOUT_CAP_CHARS,
+  createGatedUserHookRunner,
   createNodeUserHookRunner,
   hookMatchesTool,
   runUserHooksForEvent,
+  type UserHookGate,
   type UserHookPayload,
   type UserHookRunner,
 } from '../userHookRunner';
+import type { UserHook, UserHookEvent } from '../userHooks';
 
 describe('hookMatchesTool', () => {
   it('no matcher matches everything, including a missing tool name', () => {
@@ -122,5 +125,60 @@ describe('runUserHooksForEvent', () => {
     const results = await runUserHooksForEvent(undefined, 'on_pre_tool', { event: 'on_pre_tool', tool: 'x' }, runner);
     expect(results).toEqual([]);
     expect(seen).toEqual([]);
+  });
+});
+
+describe('createGatedUserHookRunner', () => {
+  const HOOK: UserHook = { command: 'lint.sh' };
+  const PAYLOAD: UserHookPayload = { event: 'on_pre_tool', tool: 'write_file' };
+
+  function makeGate(outcome: boolean | Error): { gate: UserHookGate; asked: Array<{ hook: UserHook; event: UserHookEvent }> } {
+    const asked: Array<{ hook: UserHook; event: UserHookEvent }> = [];
+    const gate: UserHookGate = {
+      async check(hook, event) {
+        asked.push({ hook, event });
+        if (outcome instanceof Error) throw outcome;
+        return outcome;
+      },
+    };
+    return { gate, asked };
+  }
+
+  it('an unapproved hook never reaches the inner runner and is reported to onSkip', async () => {
+    const inner: UserHookRunner = async () => {
+      throw new Error('inner must not run');
+    };
+    const skips: string[] = [];
+    const { gate } = makeGate(false);
+    const run = createGatedUserHookRunner(inner, gate, (hook, event) => skips.push(`${event}:${hook.command}`));
+    const result = await run(HOOK, PAYLOAD);
+    expect(result.skippedByGate).toBe(true);
+    expect(result.exitCode).toBeNull();
+    expect(result.stderr).toContain('not approved');
+    expect(result.durationMs).toBe(0);
+    expect(skips).toEqual(['on_pre_tool:lint.sh']);
+  });
+
+  it('an approved hook passes through to the inner runner untouched', async () => {
+    const inner: UserHookRunner = async (hook) => ({ command: hook.command, exitCode: 0, timedOut: false, stdout: 'ran', stderr: '', durationMs: 3 });
+    const skips: string[] = [];
+    const { gate, asked } = makeGate(true);
+    const run = createGatedUserHookRunner(inner, gate, () => skips.push('x'));
+    const result = await run(HOOK, PAYLOAD);
+    expect(result.stdout).toBe('ran');
+    expect(result.skippedByGate).toBeUndefined();
+    expect(skips).toEqual([]);
+    expect(asked).toEqual([{ hook: HOOK, event: 'on_pre_tool' }]);
+  });
+
+  it('a throwing gate denies (fail closed), it never bypasses', async () => {
+    const inner: UserHookRunner = async () => {
+      throw new Error('inner must not run');
+    };
+    const { gate } = makeGate(new Error('store exploded'));
+    const run = createGatedUserHookRunner(inner, gate);
+    const result = await run(HOOK, PAYLOAD);
+    expect(result.skippedByGate).toBe(true);
+    expect(result.stderr).toContain('not approved');
   });
 });

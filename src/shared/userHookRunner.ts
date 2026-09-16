@@ -36,6 +36,14 @@ export interface UserHookRunResult {
   stdout: string;
   stderr: string;
   durationMs: number;
+  /** Set when the permission gate refused to run the hook (it never executed). */
+  skippedByGate?: boolean;
+}
+
+/** Permission gate consulted before every hook run. Implementations consult
+ * the approval store and may ask the user (first enable); any throw denies. */
+export interface UserHookGate {
+  check(hook: UserHook, event: UserHookEvent): Promise<boolean>;
 }
 
 export type UserHookRunner = (hook: UserHook, payload: UserHookPayload) => Promise<UserHookRunResult>;
@@ -121,4 +129,27 @@ export async function runUserHooksForEvent(
     }
   }
   return results;
+}
+
+/** Wrap a runner with the permission gate: an unapproved hook never executes
+ * and reports `skippedByGate` with its stderr set to the skip reason, so the
+ * skip surfaces wherever the runner's results are consumed. */
+export function createGatedUserHookRunner(
+  inner: UserHookRunner,
+  gate: UserHookGate,
+  onSkip?: (hook: UserHook, event: UserHookEvent) => void,
+): UserHookRunner {
+  return async (hook, payload) => {
+    let approved = false;
+    try {
+      approved = await gate.check(hook, payload.event);
+    } catch {
+      approved = false; // a broken gate denies, never bypasses
+    }
+    if (!approved) {
+      onSkip?.(hook, payload.event);
+      return { command: hook.command, exitCode: null, timedOut: false, stdout: '', stderr: 'hook not approved — skipped', durationMs: 0, skippedByGate: true };
+    }
+    return inner(hook, payload);
+  };
 }
