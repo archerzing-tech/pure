@@ -3,6 +3,14 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.2.5
+
+**上下文压缩钉住用户消息：追问轮不再丢失附件路径**
+
+- 修复连续对话第二轮找不到之前上传文件的问题（Windows 上表现为 read_file 报“文件路径被截断了”，然后翻遍工作区也一无所获）。根因：后台上下文压缩按 20 条消息的窗口驱逐最老消息，把携带附件绝对路径的原始用户消息整体丢掉；小规模驱逐连摘要都不留，模型只能凭记忆拼路径。现在用户消息固定保留在压缩窗口内，assistant/工具消息对照旧受窗口约束；只有用户消息自身撑爆 token 预算时才按最老优先淘汰，且最新一条永不丢弃。
+- 压缩摘要的每条消息摘录改为先剥掉 `<task_context>` 包装块再按头+尾截取（用户消息 2000 字符），附件路径位于消息尾部，摘要中始终可见，不再被包装块挤出摘录窗口。
+- 其余变更同 v2.2.5-beta（见下节）。
+
 ## v2.2.5-beta
 
 **PlantUML 全离线渲染 + MCP 传输资源释放 + 会话存储配额兜底**
