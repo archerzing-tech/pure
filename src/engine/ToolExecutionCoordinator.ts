@@ -1,6 +1,7 @@
 import type { EngineContext, ToolCall, ToolResult } from '../shared/types';
 import { safeParseArgs } from '../shared/format';
 import { FileLockManager } from './FileLockManager';
+import { HOOK_BLOCK_EXIT_CODE, runUserHooksForEvent } from '../shared/userHookRunner';
 import { runWithDeadline } from './streamDeadline';
 
 export const TOOL_EXECUTION_TIMEOUT_MS = 180_000;
@@ -52,8 +53,9 @@ export class ToolExecutionCoordinator {
     write: boolean,
   ): Promise<ExecutedToolResult> {
     let path = '';
+    let args: Record<string, unknown> = {};
     try {
-      const args = safeParseArgs(call.function.arguments);
+      args = safeParseArgs(call.function.arguments);
       path = typeof args.path === 'string' ? args.path : '';
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -64,7 +66,24 @@ export class ToolExecutionCoordinator {
         toolCallId: call.id,
       };
     }
+    // User hooks (hooks.json), on_pre_tool: exit code 2 vetoes the call
+    // deterministically; every other exit is non-blocking. Skipped when no
+    // runner is wired (renderer before the Tauri bridge lands).
+    if (ctx.userHooks?.on_pre_tool?.length && ctx.userHookRunner) {
+      const pre = await runUserHooksForEvent(ctx.userHooks, 'on_pre_tool', { event: 'on_pre_tool', tool: call.function.name, args }, ctx.userHookRunner);
+      const veto = pre.find((r) => !r.timedOut && r.exitCode === HOOK_BLOCK_EXIT_CODE);
+      if (veto) {
+        const reason = (veto.stderr || veto.stdout).trim().slice(0, 500) || 'blocked by on_pre_tool hook';
+        return {
+          toolName: call.function.name,
+          result: { id: call.id, toolName: call.function.name, error: `[on_pre_tool hook] ${reason}`, success: false, duration: 0 },
+          duration: 0,
+          toolCallId: call.id,
+        };
+      }
+    }
     const lockManager = ctx.lockManager ?? this.fallbackLock;
+    let executed: ToolResult | undefined;
     try {
       if (path) {
         if (write) await lockManager.acquireWrite(path, ctx.signal);
@@ -83,14 +102,13 @@ export class ToolExecutionCoordinator {
             metadata?.timeoutMs ?? TOOL_EXECUTION_TIMEOUT_MS,
             budget.streamDeadlineMs(),
           );
-          const result = await runWithDeadline(
+          executed = await runWithDeadline(
             () => ctx.tools!.execute(call, controller.signal),
             ctx.signal,
             cap,
             `tool ${call.function.name}`,
             () => controller.abort(),
           );
-          return { toolName: call.function.name, result, duration: result.duration, toolCallId: call.id };
         } finally {
           ctx.signal?.removeEventListener('abort', forwardAbort);
         }
@@ -99,12 +117,18 @@ export class ToolExecutionCoordinator {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return {
-        toolName: call.function.name,
-        result: { id: call.id, toolName: call.function.name, error: message || 'unknown', success: false, duration: 0 },
-        duration: 0,
-        toolCallId: call.id,
-      };
+      executed = { id: call.id, toolName: call.function.name, error: message || 'unknown', success: false, duration: 0 };
     }
+    // on_post_tool runs after the lock is released, on both success and
+    // failure. stdout the model should see on its next THINK is appended to a
+    // string result, so the observation path needs no format awareness.
+    if (ctx.userHooks?.on_post_tool?.length && ctx.userHookRunner) {
+      const post = await runUserHooksForEvent(ctx.userHooks, 'on_post_tool', { event: 'on_post_tool', tool: call.function.name, args, success: executed.success }, ctx.userHookRunner);
+      const output = post.map((r) => r.stdout.trim()).filter(Boolean).join('\n').trim();
+      if (output && typeof executed.result === 'string') {
+        executed = { ...executed, result: `${executed.result}\n[hook] ${output}` };
+      }
+    }
+    return { toolName: call.function.name, result: executed, duration: executed.duration, toolCallId: call.id };
   }
 }
