@@ -430,6 +430,47 @@ MCP servers can expose many tools at once; to keep third-party lists from crowdi
 
 ---
 
+## User Hooks
+
+`~/.pure/hooks.json` lets you run your own shell commands around pure's tool calls — inspect what the model is about to do, react to what it just did, or get pinged when a turn finishes. Hooks run through your shell (`bash -c` on macOS/Linux, PowerShell on Windows) with the project workspace as cwd. Only the global layer (`~/.pure/hooks.json`) loads today; a project-level layer is planned behind the same permission gate.
+
+### Events
+
+| Event | Fires | Effect |
+|---|---|---|
+| `on_pre_tool` | before a tool call runs | exit code `2` vetoes the call — your stderr/stdout (first 500 chars) becomes the reason the model sees; any other exit is advisory |
+| `on_post_tool` | after a tool call, success or failure | stdout (up to 4,000 chars) is appended to the tool result the model reads next |
+| `on_turn_complete` | once per finished turn | side effects only (notification, CI ping); output is not fed back to the model |
+
+Each hook receives one JSON line on stdin:
+
+```json
+{"event":"on_post_tool","tool":"write_file","args":{"path":"src/x.ts"},"success":true}
+```
+
+| Field | Meaning |
+|---|---|
+| `command` | shell command to run (required) |
+| `matcher` | tool-name filter: omitted = every tool, trailing `*` = prefix wildcard, otherwise exact match (`on_turn_complete` ignores it) |
+| `timeoutMs` | per-hook timeout, default 10s, clamped to [1s, 60s]; a timed-out hook is killed |
+
+### Permission gate
+
+The first time a hook is about to run, the CLI asks: `y` allows it for this session, `a` always allows it, `n` denies. "Always" is cached per exact command text in `~/.pure/hooks-approved.json` — editing a hook's command invalidates its approval and re-prompts, so an approval never transfers to different code. Non-interactive runs (pipes, CI) can never confirm a first enable: unapproved hooks are skipped there, and every skip is logged to stderr rather than passing silently in either direction.
+
+### Official examples
+
+Three copyable hooks live in [`examples/hooks/`](examples/hooks/): auto-run the test suite after source edits, block `git commit` while lint fails, and a desktop notification per finished turn.
+
+```bash
+mkdir -p ~/.pure/hooks
+cp examples/hooks/*.sh ~/.pure/hooks/
+```
+
+Then merge [`examples/hooks/hooks.json`](examples/hooks/hooks.json) into your `~/.pure/hooks.json` (create the file if you don't have one). The next session asks once per hook, and your answers stick.
+
+---
+
 ## CLI Usage
 
 ```bash

@@ -1,0 +1,12 @@
+{
+  "on_pre_tool": [
+    { "command": "bash ~/.pure/hooks/lint-before-commit.sh", "matcher": "execute_command", "timeoutMs": 30000 }
+  ],
+  "on_post_tool": [
+    { "command": "bash ~/.pure/hooks/auto-test.sh", "matcher": "write_file", "timeoutMs": 60000 },
+    { "command": "bash ~/.pure/hooks/auto-test.sh", "matcher": "edit_file", "timeoutMs": 60000 }
+  ],
+  "on_turn_complete": [
+    { "command": "bash ~/.pure/hooks/notify-turn-complete.sh", "timeoutMs": 5000 }
+  ]
+}
