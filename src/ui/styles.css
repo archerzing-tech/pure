@@ -5926,12 +5926,17 @@ body {
   border-color: var(--success);
 }
 
-/* ── Mermaid slot — same container for streaming-source and final-svg phases ──
-   During the stream we render `<pre class="mermaid-source">` (the source code
-   the LLM is writing). On Completed (or theme change), mermaid.render() fills
-   `<div class="mermaid-target">` with the SVG. `data-state="arrived"` flips
-   source→target via CSS transitions — the user sees the source shrink into the
-   diagram smoothly, with the slot's outer height preserved.
+/* ── Mermaid slot — card + SVG sizing ──
+   markdown.ts emits the shared .diagram-slot skeleton and drives it through
+   the shared loading → preview / error state machine; VISIBILITY is owned by
+   the generic .diagram-slot[data-state] rules below (this block deliberately
+   carries no opacity/position of its own — a retired v0.x overlay kept
+   .mermaid-target at opacity:0 until a hand-rolled phase state that no code
+   has written in many versions, so every rendered flowchart was an invisible
+   layer on a blank card). After mermaid.render() resolves, the SVG lands in
+   `.mermaid-target` (the slot's .diagram-preview element). Like puml, the SVG
+   keeps its natural size and only scales DOWN to fit the card — stretching a
+   small flowchart across the whole bubble blurs its labels.
 */
 .bubble .mermaid-slot {
   position: relative;
@@ -5955,60 +5960,17 @@ body {
   white-space: pre;
   overflow-x: auto;
   border-radius: 0;
-  opacity: 1;
-  transition: opacity 220ms ease-out;
 }
 .bubble .mermaid-source code {
   background: none;
   padding: 0;
   color: var(--text);
 }
-.bubble .mermaid-target {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  pointer-events: none;
-  padding: 16px;
-  overflow: auto;
-  transition: opacity 320ms ease-in 80ms;
-}
-.bubble .mermaid-target svg {
+.bubble .mermaid-slot .mermaid-target svg {
+  width: auto;
   max-width: 100%;
   height: auto;
-  display: block;
-}
-.bubble .mermaid-slot[data-state="arrived"] .mermaid-source {
-  opacity: 0;
-  /* source is fully transparent while target is visible — no click events leak */
-  pointer-events: none;
-}
-.bubble .mermaid-slot[data-state="arrived"] .mermaid-target {
-  opacity: 1;
-  pointer-events: auto;
-  /* Second-stage fade: the target container + the SVG itself both have
-     opacity transitions, so even an instantly-cleared innerHTML achieves a
-     pleasant landing. */
-}
-.bubble .mermaid-slot[data-state="arrived"] .mermaid-target svg {
-  animation: mermaidFadeIn 0.22s ease-out 80ms backwards;
-}
-@keyframes mermaidFadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .bubble .mermaid-source,
-  .bubble .mermaid-target,
-  .bubble .mermaid-target svg {
-    transition: none;
-    animation: none;
-  }
-  /* When user opts out of motion, force target visible immediately. */
-  .bubble .mermaid-slot[data-state="arrived"] .mermaid-source { opacity: 0; }
-  .bubble .mermaid-slot[data-state="arrived"] .mermaid-target { opacity: 1; }
+  margin: 0 auto;
 }
 
 /* Raw HTML blocks in assistant output are escaped to text (see renderer.html
@@ -6194,15 +6156,6 @@ body {
   text-align: center;
   user-select: none;
   font-variant-numeric: tabular-nums;
-}
-
-/* Double-click hint cursor on mermaid diagrams */
-.bubble .mermaid-slot[data-state="arrived"] .mermaid-target {
-  cursor: pointer;
-}
-
-.bubble .mermaid-slot[data-state="arrived"] .mermaid-target:hover {
-  opacity: 0.88;
 }
 
 /* ════════════════════════════════════════
