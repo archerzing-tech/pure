@@ -131,6 +131,57 @@ function failToolAdapter(tools: ToolDefinition[], failOn: string): ToolAdapter {
   };
 }
 
+/** Emits each round's calls in ONE assistant turn (distinct ids), then the
+ * final text round — mirrors a model firing parallel (possibly duplicate)
+ * calls in a single batch. */
+function parallelRoundsLLM(rounds: Array<Array<{ toolName: string; toolArgs: string }>>, finalText: string): LLMAdapter {
+  let roundIdx = 0;
+  return {
+    stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+      if (roundIdx < rounds.length) {
+        const round = rounds[roundIdx++];
+        const tcs: ToolCall[] = round.map((r, i) => ({
+          id: `call_${roundIdx}_${i}`,
+          index: i,
+          function: { name: r.toolName, arguments: r.toolArgs },
+        }));
+        for (const tc of tcs) {
+          yield { type: 'tool_call_delta', index: tc.index, name: tc.function.name, arguments: tc.function.arguments };
+          yield { type: 'tool_call', index: tc.index, id: tc.id, name: tc.function.name, arguments: tc.function.arguments };
+        }
+        yield { type: 'done', content: '', toolCalls: tcs };
+      } else {
+        yield { type: 'content', content: finalText };
+        yield { type: 'done', content: finalText, toolCalls: [] };
+      }
+    },
+    complete: async () => ({ content: finalText, toolCalls: [] }),
+  };
+}
+
+/** Echo adapter that records every real execution so tests can count how many
+ * times the world was actually touched; optionally fails the first one. */
+function countingToolAdapter(tools: ToolDefinition[], failFirstExecution = false): ToolAdapter & { executions: string[] } {
+  const executions: string[] = [];
+  const adapter: ToolAdapter = {
+    execute: async (tc: ToolCall): Promise<ToolResult> => {
+      executions.push(`${tc.function.name} ${tc.function.arguments}`);
+      const fail = failFirstExecution && executions.length === 1;
+      return {
+        id: tc.id,
+        toolName: tc.function.name,
+        result: fail ? undefined : `executed ${tc.function.name} with ${tc.function.arguments}`,
+        error: fail ? 'transient failure' : undefined,
+        success: !fail,
+        duration: 5,
+      };
+    },
+    getMetadata: () => undefined,
+    getTools: () => tools,
+  };
+  return Object.assign(adapter, { executions });
+}
+
 const READ_FILE_TOOL: ToolDefinition = {
   name: 'read_file',
   description: 'Read a file',
@@ -1090,5 +1141,98 @@ describe('AgentLoopEngine', () => {
     const interrupted = events.find(e => e.type === 'Interrupted');
     expect(interrupted).toBeDefined();
     expect(interrupted!.payload.reason).toContain('consecutive failures');
+  });
+
+  // ═══ Consecutive-identical dedupe (same round) ═══
+  // A parallel batch containing the very same call twice used to execute both
+  // copies: the dedupe cursor only covered the PREVIOUS round's last call, so
+  // in-round duplicates slipped through and touched the world twice.
+
+  it('executes a back-to-back duplicate call once and reuses the result', async () => {
+    const engine = new AgentLoopEngine();
+    const adapter = countingToolAdapter([READ_FILE_TOOL]);
+    const ctx = baseCtx({
+      llm: parallelRoundsLLM([[
+        { toolName: 'read_file', toolArgs: '{"path":"src/a.ts"}' },
+        { toolName: 'read_file', toolArgs: '{"path":"src/a.ts"}' },
+      ]], 'done'),
+      tools: adapter,
+      toolsDefs: [READ_FILE_TOOL],
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-dedupe-ok', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // The world was touched once; the repeat carries the anchor's result plus
+    // the dedupe note instead of a second execution.
+    expect(adapter.executions).toHaveLength(1);
+    const results = events.filter(e => e.type === 'ToolResult');
+    expect(results).toHaveLength(2);
+    expect(results[0]!.payload.toolCallId).toBe('call_1_0');
+    expect(results[1]!.payload.toolCallId).toBe('call_1_1');
+    expect(results[0]!.payload.result.success).toBe(true);
+    expect(String(results[0]!.payload.result.result)).not.toContain('[dedupe]');
+    expect(results[1]!.payload.result.success).toBe(true);
+    expect(String(results[1]!.payload.result.result)).toContain('executed read_file with {"path":"src/a.ts"}');
+    expect(String(results[1]!.payload.result.result)).toContain('[dedupe]');
+  });
+
+  it('re-executes a duplicate when the anchor execution failed', async () => {
+    const engine = new AgentLoopEngine();
+    const adapter = countingToolAdapter([READ_FILE_TOOL], true);
+    const ctx = baseCtx({
+      llm: parallelRoundsLLM([[
+        { toolName: 'read_file', toolArgs: '{"path":"src/a.ts"}' },
+        { toolName: 'read_file', toolArgs: '{"path":"src/a.ts"}' },
+      ]], 'done'),
+      tools: adapter,
+      toolsDefs: [READ_FILE_TOOL],
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-dedupe-fail', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // A failed call is never deduped — the repeat ran for real (the retry
+    // succeeds here) and its own result is used verbatim, no dedupe note.
+    expect(adapter.executions).toHaveLength(2);
+    const results = events.filter(e => e.type === 'ToolResult');
+    expect(results).toHaveLength(2);
+    expect(results[0]!.payload.result.success).toBe(false);
+    expect(results[1]!.payload.result.success).toBe(true);
+    expect(String(results[1]!.payload.result.result)).not.toContain('[dedupe]');
+  });
+
+  it('still executes an identical call that follows a different call', async () => {
+    // [read(a), read(b), read(a)]: the second read(a) is NOT back-to-back —
+    // the round itself may have changed the world in between, so deduping it
+    // would feed the model stale data. Every call runs for real.
+    const engine = new AgentLoopEngine();
+    const adapter = countingToolAdapter([READ_FILE_TOOL]);
+    const ctx = baseCtx({
+      llm: parallelRoundsLLM([[
+        { toolName: 'read_file', toolArgs: '{"path":"a.ts"}' },
+        { toolName: 'read_file', toolArgs: '{"path":"b.ts"}' },
+        { toolName: 'read_file', toolArgs: '{"path":"a.ts"}' },
+      ]], 'done'),
+      tools: adapter,
+      toolsDefs: [READ_FILE_TOOL],
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-dedupe-gap', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    expect(adapter.executions).toHaveLength(3);
+    const results = events.filter(e => e.type === 'ToolResult');
+    expect(results).toHaveLength(3);
+    for (const r of results) {
+      expect(r.type === 'ToolResult' && r.payload.result.success).toBe(true);
+      expect(String(r.type === 'ToolResult' && r.payload.result.result)).not.toContain('[dedupe]');
+    }
   });
 });
