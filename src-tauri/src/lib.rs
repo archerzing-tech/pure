@@ -14822,6 +14822,21 @@ async fn open_path(path: String) -> Result<(), String> {
 //  Tauri App Entry
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Roadmap 5.1 — bring every window back on screen (tray "显示 pure", tray icon
+// left click, macOS dock reopen). The close button only ever HIDES windows
+// (see on_window_event below): every window is a full app instance whose
+// streaming sessions, queue lanes and worktree work live in its WebView, so
+// showing them again is all it takes — nothing needs restarting.
+fn show_all_windows(app: &tauri::AppHandle) {
+    for (_, window) in app.webview_windows() {
+        let _ = window.show();
+        let _ = window.unminimize();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.set_focus();
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -14941,7 +14956,61 @@ pub fn run() {
                 }
             });
             } // ── end cfg(target_os = "macos") menu block ──
+
+            // ── Tray icon (roadmap 5.1) ──
+            // The close button hides windows instead of exiting, so the tray
+            // is the always-visible way back in — and, from 5.3 on, the
+            // surface for the running-task list. Left click (and the menu's
+            // 显示 pure) re-shows every window; 退出 pure is the ONE explicit
+            // exit — closing windows never is. Labels stay Chinese here to
+            // match the native menu bar above; there is no i18n bridge into
+            // Rust (the frontend t() tables are unreachable at setup time).
+            let handle = _app.handle();
+            let show_item = tauri::menu::MenuItem::with_id(handle, "tray-show", "显示 pure", true, None::<&str>)?;
+            let quit_item = tauri::menu::MenuItem::with_id(handle, "tray-quit", "退出 pure", true, None::<&str>)?;
+            let tray_menu = tauri::menu::Menu::with_items(handle, &[&show_item, &quit_item])?;
+            let mut tray = tauri::tray::TrayIconBuilder::with_id("pure-tray")
+                .menu(&tray_menu)
+                .tooltip("pure")
+                // Left click = come back on screen; the menu lives on right
+                // click (the convention every tray app the user knows uses).
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "tray-show" => show_all_windows(app),
+                    "tray-quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_all_windows(tray.app_handle());
+                    }
+                });
+            // The bundled icon always exists (see bundle.icon in
+            // tauri.conf.json); a missing one still leaves the app usable —
+            // it would just be a blank tray slot — so no hard failure here.
+            if let Some(icon) = _app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            tray.build(handle)?;
+
             Ok(())
+        })
+        // Roadmap 5.1 — the minimal-async core: the red button hides instead
+        // of closing. Every window's WebView carries its own streaming
+        // sessions, queue lanes and worktree work; destroying a window would
+        // kill all of that mid-flight, while hiding just takes it off screen.
+        // Ways back in: the tray icon/menu, the macOS dock icon (RunEvent::
+        // Reopen below). App quit stays an explicit 托盘 → 退出 pure action.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             // File tools
@@ -15036,8 +15105,18 @@ pub fn run() {
             load_session_stats,
             load_all_session_stats,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running pure");
+        .build(tauri::generate_context!())
+        .expect("error while building pure")
+        .run(|_app, event| match event {
+            // macOS dock icon click while every window is hidden — behave
+            // exactly like the tray click: everything back on screen.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => show_all_windows(_app),
+            _ => {}
+        });
 }
 
 #[cfg(test)]
