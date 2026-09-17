@@ -4965,6 +4965,15 @@ body {
   color: var(--text-tertiary);
   text-decoration: line-through;
 }
+/* Resources are context, not callable tools — same chip geometry with a
+   quieter, dashed treatment so the two lists don't read as one. */
+.mcp-resource-row {
+  margin-top: 4px;
+}
+.mcp-resource-chip {
+  border-style: dashed;
+  color: var(--text-tertiary);
+}
 
 .mcp-probe-hint {
   margin: 6px 0 0;

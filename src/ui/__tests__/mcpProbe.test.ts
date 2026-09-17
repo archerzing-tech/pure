@@ -6,11 +6,14 @@
 
 import { describe, expect, it } from 'bun:test';
 import { probeMcpServerTools } from '../mcpProbe';
-import type { MCPTransport, MCPToolDescription, MCPServerConfig } from '../../adapter/mcp/MCPTransport';
+import type { MCPResourceDescription, MCPTransport, MCPToolDescription, MCPServerConfig } from '../../adapter/mcp/MCPTransport';
 
 class FakeTransport implements MCPTransport {
   tools: MCPToolDescription[] = [];
+  capabilities: Record<string, unknown> = { tools: {} };
+  resources: MCPResourceDescription[] = [];
   failOnInitialize = false;
+  failOnResourcesList = false;
   closed = false;
   calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
 
@@ -18,9 +21,14 @@ class FakeTransport implements MCPTransport {
     this.calls.push({ method, params });
     if (method === 'initialize') {
       if (this.failOnInitialize) throw new Error('spawn failed: command not found');
-      return { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fake', version: '1' } };
+      return { protocolVersion: '2024-11-05', capabilities: this.capabilities, serverInfo: { name: 'fake', version: '1' } };
     }
     if (method === 'tools/list') return { tools: this.tools };
+    if (method === 'resources/list') {
+      if (this.failOnResourcesList) throw new Error('resources/list exploded');
+      return { resources: this.resources };
+    }
+    if (method === 'resources/read') return { contents: [] };
     return {};
   }
 
@@ -77,6 +85,59 @@ describe('probeMcpServerTools', () => {
     });
     expect(result.error).toContain('spawn failed');
     expect(result.tools).toEqual([]);
+    expect(transport.closed).toBe(true);
+  });
+
+  it('reports the resource metadata a server publishes', async () => {
+    const transport = new FakeTransport();
+    transport.capabilities = { tools: {}, resources: {} };
+    transport.resources = [
+      { uri: 'file:///notes.md', name: 'notes', description: 'Project notes', mimeType: 'text/markdown' },
+      { uri: 'file:///shot.png', name: 'shot', mimeType: 'image/png' },
+    ];
+    const result = await probeMcpServerTools(SERVER, {
+      excludedPrefixes: [],
+      transportFactory: () => transport,
+    });
+
+    expect(result.resourcesSupported).toBe(true);
+    expect(result.resources).toEqual([
+      { uri: 'file:///notes.md', name: 'notes', description: 'Project notes', mimeType: 'text/markdown' },
+      { uri: 'file:///shot.png', name: 'shot', description: undefined, mimeType: 'image/png' },
+    ]);
+    // Metadata only — the card lists resources, it does not pull their bodies
+    // into the settings process.
+    expect(transport.calls.some((c) => c.method === 'resources/read')).toBe(false);
+  });
+
+  it('distinguishes "no resources offered" from "resources listed but empty"', async () => {
+    const offered = new FakeTransport();
+    offered.capabilities = { tools: {}, resources: {} };
+    const offeredResult = await probeMcpServerTools(SERVER, { excludedPrefixes: [], transportFactory: () => offered });
+    expect(offeredResult.resourcesSupported).toBe(true);
+    expect(offeredResult.resources).toEqual([]);
+
+    const unsupported = new FakeTransport();
+    const unsupportedResult = await probeMcpServerTools(SERVER, { excludedPrefixes: [], transportFactory: () => unsupported });
+    expect(unsupportedResult.resourcesSupported).toBe(false);
+    expect(unsupported.calls.some((c) => c.method === 'resources/list')).toBe(false);
+  });
+
+  it('keeps the tool list when resources/list fails', async () => {
+    const transport = new FakeTransport();
+    transport.capabilities = { tools: {}, resources: {} };
+    transport.failOnResourcesList = true;
+    transport.tools = [{ name: 'read_file', description: 'Read a file', inputSchema: { type: 'object' } }];
+    const result = await probeMcpServerTools(SERVER, {
+      excludedPrefixes: [],
+      resourceWaitMs: 200,
+      transportFactory: () => transport,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.tools.map((t) => t.name)).toEqual(['fs__read_file']);
+    expect(result.resources).toEqual([]);
+    expect(result.resourcesSupported).toBe(true);
     expect(transport.closed).toBe(true);
   });
 

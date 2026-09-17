@@ -14,6 +14,8 @@
 
 import { MCPClient } from '../harness/mcp/MCPClient';
 import type { MCPServerConfig, MCPTransport } from '../adapter/mcp/MCPTransport';
+import { escapeHtml } from '../shared/html';
+import { t } from '../shared/i18n';
 
 export interface McpProbeTool {
   /** Full registered name, e.g. `filesystem__read_file`. */
@@ -25,15 +27,59 @@ export interface McpProbeTool {
   excluded: boolean;
 }
 
+export interface McpProbeResource {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+}
+
 export interface McpProbeResult {
   serverName: string;
   tools: McpProbeTool[];
+  /** `resources/list` metadata. Empty when the server does not advertise the
+   *  capability — the card distinguishes "none published" from "not offered"
+   *  via `resourcesSupported`. */
+  resources: McpProbeResource[];
+  resourcesSupported: boolean;
   /** Set when connect / tools/list failed or timed out. */
   error?: string;
   durationMs: number;
 }
 
 let probeCounter = 0;
+
+/**
+ * Resource row of an MCP server card: the count plus one chip per resource
+ * (the tooltip carries uri / mime type / description). Text resources are the
+ * ones that reach the model as context (6.1), which the summary tooltip says.
+ *
+ * `source` distinguishes a fresh probe from the resources the running session
+ * already discovered — the second is merely "what this session can see right
+ * now", so it must not look like a verified inventory.
+ *
+ * Pure and exported for tests — the Settings panel only mounts the string.
+ */
+export function renderMcpResourcesRow(probe?: McpProbeResult, source: 'probe' | 'live' = 'probe'): string {
+  if (!probe || probe.error) return '';
+  if (!probe.resourcesSupported) {
+    return `<div class="mcp-server-tools mcp-resource-row"><span class="mcp-probe-status">${t('mcp.resources.unsupported')}</span></div>`;
+  }
+  if (probe.resources.length === 0) {
+    return `<div class="mcp-server-tools mcp-resource-row"><span class="mcp-probe-status">${t('mcp.resources.none')}</span></div>`;
+  }
+  const count = t('mcp.resources.count').replace('{n}', String(probe.resources.length));
+  const summary = source === 'live' ? `${count} · ${t('mcp.resources.live')}` : count;
+  const chips = probe.resources.map((resource) => {
+    const short = resource.name || resource.uri.replace(/^[a-z+]+:\/\//i, '');
+    const title = [resource.uri, resource.mimeType, resource.description].filter(Boolean).join(' — ');
+    return `<span class="mcp-tool-chip mcp-resource-chip" title="${escapeHtml(title)}">${escapeHtml(short)}</span>`;
+  }).join('');
+  return `<div class="mcp-server-tools mcp-resource-row">
+      <div class="mcp-probe-summary" title="${escapeHtml(t('mcp.resources.hint'))}">${escapeHtml(summary)}</div>
+      <div class="mcp-tool-chips">${chips}</div>
+    </div>`;
+}
 
 /** Same rule as MCPClient's connect-time filter (MCPClient.ts:128). */
 function isExcluded(fullName: string, prefixes: string[]): boolean {
@@ -57,6 +103,9 @@ export async function probeMcpServerTools(
     proxyUrl?: string;
     timeoutMs?: number;
     timeoutLabel?: string;
+    /** Bound on waiting for the resource-list prefetch that starts at connect
+     *  (metadata only — contents are never read here). */
+    resourceWaitMs?: number;
     /** Test seam: inject a transport factory (same as MCPClient's). */
     transportFactory?: (config: MCPServerConfig) => MCPTransport;
   },
@@ -70,6 +119,9 @@ export async function probeMcpServerTools(
     sessionId: `settings-probe-${Date.now()}-${++probeCounter}`,
     proxyUrl: opts.proxyUrl ?? '',
     excludedPrefixes: [],
+    // The card lists resources; pulling every text body into the settings
+    // process would be wasted work (and this client is thrown away anyway).
+    readResourceContents: false,
     transportFactory: opts.transportFactory,
   });
   try {
@@ -84,10 +136,19 @@ export async function probeMcpServerTools(
         description: t.description.replace(/^\[MCP:[^\]]+\]\s*/, ''),
         excluded: isExcluded(t.name, opts.excludedPrefixes),
       }));
-    return { serverName: server.name, tools, durationMs: Date.now() - started };
+    // Resource metadata only: the same client already listed them in the
+    // background at connect, so this is a bounded wait, not a second probe.
+    const resources = await client.listResources(opts.resourceWaitMs ?? 5_000);
+    return {
+      serverName: server.name,
+      tools,
+      resources: resources.map((r) => ({ uri: r.uri, name: r.name, description: r.description, mimeType: r.mimeType })),
+      resourcesSupported: client.supportsResources(server.name),
+      durationMs: Date.now() - started,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { serverName: server.name, tools: [], error: message, durationMs: Date.now() - started };
+    return { serverName: server.name, tools: [], resources: [], resourcesSupported: false, error: message, durationMs: Date.now() - started };
   } finally {
     client.disconnectAll();
   }

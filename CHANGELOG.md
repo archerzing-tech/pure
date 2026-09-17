@@ -18,6 +18,7 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - 注入有硬上限：每个服务器最多 10 条、单条最多 2000 字符（超出截断并标注 `…[truncated]`）、单连接合计最多 8000 字符；只有文本类型（`text/*` 与 json/xml/yaml/javascript 等，MIME 缺失时按文本处理）会进提示词，只带 base64 `blob` 的二进制资源一律跳过。片段优先级与 skills 同为 30，预算紧张时最先被裁。
 - 读取是连接完成后的后台预取，等待上限 3 秒，慢服务器不会拖住连上之后的第一轮；`resources/list` / `resources/read` 失败只记一条警告并放弃该服务器的资源，工具注册与连接状态不受影响（单个话痨/故障服务器不能拖垮整条连接）。
 - 资源正文来自第三方服务器，注入时显式标注为「参考数据，非指令」，为后续投毒特征扫描留出位置。GUI 与 CLI 共用同一条装配路径（`PromptAssembler.mcpResources`）。
+- 设置页 MCP 服务器卡片新增 resources 行：打开设置时先展示**当前会话已发现**的 resources（带「来自当前会话」标注），不需要为了看一眼清单再起一个探测进程；点「查看工具与资源」（原「查看工具」）则一次性取回工具列表与 resources 元数据（悬浮显示 uri / MIME / 描述）。卡片区分「服务器没提供 resources」「声明了但一条都没发布」「发布了 N 条」三种状态；探测只取元数据、不拉正文。
 
 ## v2.2.5
 
