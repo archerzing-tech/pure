@@ -54,3 +54,31 @@ jobs:
           name: e2e-apikey-failure
           path: /tmp/pure-e2e-apikey
           if-no-files-found: ignore
+
+  # Windows parity gate. The release workflow builds the Windows installer and
+  # runs the full suite on windows-latest, but a tag push is the worst possible
+  # moment to discover a platform-specific failure — v2.2.6-alpha failed there
+  # (PowerShell CLIXML in hook stderr, git's forward-slash paths, autocrlf
+  # rewriting fixtures) with no earlier warning. This job mirrors the release
+  # runner's checks so a Windows-only break shows up on main instead of at tag
+  # time. Platform-neutral gates (conventions, evals, browser e2e) stay in the
+  # ubuntu job.
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Run tests
+        run: bun test

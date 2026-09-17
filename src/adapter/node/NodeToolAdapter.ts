@@ -17,6 +17,7 @@ import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
 import { blockedHostMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 import { stripAnsi } from '../../shared/ansi';
+import { stripPowerShellStartupProgress } from '../../shared/powershellOutput';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript } from '../../shared/backgroundCommand';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
 import { isPublicToolName } from '../../shared/toolDefs';
@@ -82,11 +83,10 @@ export function tokenizeFindQuery(query: string): string[] {
   return [...out].sort();
 }
 
-export function stripPowerShellStartupProgress(stderr: string): string {
-  const text = stderr.trim();
-  if (!/^#< CLIXML/i.test(text) || /<S\s+S="Error">/i.test(text)) return stderr;
-  return /<AV>Preparing modules for first use\.<\/AV>/i.test(text) ? '' : stderr;
-}
+// Lives in shared/powershellOutput.ts since the user-hook runner captures
+// PowerShell output the same way; re-exported here because the adapter is
+// where callers (and the Windows quality-gate tests) expect to find it.
+export { stripPowerShellStartupProgress };
 
 /** Size of a file for ordering find_files scans, or Number.MAX_SAFE_INTEGER
  * if the stat fails (unreadable files sort last and get skipped). */

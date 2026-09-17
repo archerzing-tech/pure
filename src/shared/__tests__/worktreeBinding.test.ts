@@ -47,6 +47,11 @@ async function seedRepo(name: string): Promise<string> {
   await init.exited;
   await git(['config', 'user.email', 'test@pure.local'], repo);
   await git(['config', 'user.name', 'pure-test'], repo);
+  // Windows git defaults to core.autocrlf=true, which rewrites the LF fixture
+  // files to CRLF on every checkout (worktree add included) and makes the
+  // content assertions below platform-dependent. These fixtures are about
+  // worktree isolation, not line-ending policy — pin the setting.
+  await git(['config', 'core.autocrlf', 'false'], repo);
   await writeFile(join(repo, 'README.md'), 'seed\n', 'utf8');
   await git(['add', '-A'], repo);
   await git(['commit', '-q', '-m', 'seed'], repo);

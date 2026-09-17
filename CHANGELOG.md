@@ -5,6 +5,15 @@ release summary when publishing (see `.github/workflows/release.yml`).
 
 ## v2.2.6-alpha
 
+**发布修复：Windows 上 9 个测试把整个 Release 卡死**
+
+- v2.2.6-alpha 的 Release 工作流在 Windows 上先跑 `bun test`，9 例失败导致发布中断（macOS/Linux 的 CI 全绿）。三类根因都已修：
+  1. **PowerShell 的 CLIXML 噪声混进了 hook 的 stderr**：Windows 上 hook 走 `powershell.exe`，它会把自己的模块预热进度记录以 CLIXML 写到 stderr（`#< CLIXML … Preparing modules for first use.`）。`on_pre_tool` 否决理由取的是 stderr，于是模型看到的“理由”是一段 XML，而 hook 真正写的消息被整个盖掉。现在 hook 的 stdout/stderr 都过共享的 `stripPowerShellStartupProgress`（从 `NodeToolAdapter` 提到 `shared/powershellOutput.ts`，两条链路共用），只摘掉 blob、命令自己的输出无论先后都保留，真错误记录也不会被吞。
+  2. **git 在 Windows 输出正斜杠路径**：`rev-parse --show-toplevel` / `worktree list` 给出 `C:/Users/…`，而 `repoRoot` 要和用户选的本机路径比较、还会被存进“最近工作区”。`worktreeBinding` 现在统一转回本机分隔符（不引入 `node:path` —— 这个模块要进浏览器包，靠盘符/反斜杠特征判断），worktree 目录名的 basename 也改成按两种分隔符切。
+  3. **测试 fixture 被 core.autocrlf 改写**：Windows git 默认 `core.autocrlf=true`，checkout（`worktree add`、合并）时把 LF fixture 改成 CRLF，内容断言随之失败。两个 worktree 测试在自己的临时仓库里 pin `core.autocrlf=false`。
+- hook runner 的测试改为平台原生写法（`pwd` / `cat` / `yes|head` 在 PowerShell 里没有对应物），断言意图不变：cwd 绑定改用“相对路径找到标记文件”证明，不再比较路径字符串（Windows 同一临时目录会报 8.3 短名或长名两种形态）。
+- CI 新增 Windows 作业（typecheck + `bun test`），与 Release 的 Windows 前置检查一致：平台特有问题应在 main 上就暴露，而不是等到打 tag 那一刻。
+
 **MCP prompt 模板可在输入框直接调用**
 
 - 新增 `/mcp-prompt <服务器__模板名> [参数=值 …]` 命令：在输入框敲出即可把 MCP 服务器发布的 prompt 模板展开成本轮任务（GUI 与 CLI REPL 同一条语法）。参数支持引号（`path="a b.md"`）；必填参数缺失、模板名不存在（会列出可用项）、服务器报错，都直接在输入框旁提示，**草稿不会被吃掉**（展开成功才会清空）。
