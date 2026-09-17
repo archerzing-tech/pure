@@ -264,12 +264,29 @@ function clip(s: string, max: number): string {
  * - write_file → the full target path + the content that will be written
  *   (capped so a large generated file doesn't flood the dialog)
  * - edit_file  → the target path + a compact `-old / +new` diff snippet
+ * - git_commit → the commit scope + the message itself (the reviewable part)
  * Returns undefined for non-write tools (nothing to preview).
  */
 export function buildWritePreview(
   toolName: string,
   args: Record<string, unknown>,
 ): { path?: string; contentPreview?: string } | undefined {
+  if (toolName === 'git_commit') {
+    const message = typeof args.message === 'string' ? args.message : '';
+    const paths = Array.isArray(args.paths) ? args.paths.map(String) : [];
+    return {
+      // The card must answer "what exactly am I committing": the message is the
+      // reviewable intent, the scope line tells all-changes from a subset.
+      path: paths.length > 0 ? paths.join(', ') : '(all changes)',
+      contentPreview: clip(message, WRITE_FILE_PREVIEW_MAX),
+    };
+  }
+  if (toolName === 'git_branch') {
+    return {
+      path: typeof args.name === 'string' ? args.name : undefined,
+      contentPreview: typeof args.action === 'string' ? args.action : undefined,
+    };
+  }
   if (toolName !== 'write_file' && toolName !== 'edit_file' && toolName !== 'replace_files') return undefined;
   if (toolName === 'replace_files') {
     const files = Array.isArray(args.files) ? args.files.map(String) : [];
