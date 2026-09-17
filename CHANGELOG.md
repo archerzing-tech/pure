@@ -7,10 +7,12 @@ release summary when publishing (see `.github/workflows/release.yml`).
 
 **发布修复：Windows 上 9 个测试把整个 Release 卡死**
 
-- v2.2.6-alpha 的 Release 工作流在 Windows 上先跑 `bun test`，9 例失败导致发布中断（macOS/Linux 的 CI 全绿）。三类根因都已修：
+- v2.2.6-alpha 的 Release 工作流在 Windows 上先跑 `bun test`，9 例失败导致发布中断（macOS/Linux 的 CI 全绿）。根因分两轮修完（第二轮是新加的 Windows 作业在 main 上抓出来的）：
   1. **PowerShell 的 CLIXML 噪声混进了 hook 的 stderr**：Windows 上 hook 走 `powershell.exe`，它会把自己的模块预热进度记录以 CLIXML 写到 stderr（`#< CLIXML … Preparing modules for first use.`）。`on_pre_tool` 否决理由取的是 stderr，于是模型看到的“理由”是一段 XML，而 hook 真正写的消息被整个盖掉。现在 hook 的 stdout/stderr 都过共享的 `stripPowerShellStartupProgress`（从 `NodeToolAdapter` 提到 `shared/powershellOutput.ts`，两条链路共用），只摘掉 blob、命令自己的输出无论先后都保留，真错误记录也不会被吞。
   2. **git 在 Windows 输出正斜杠路径**：`rev-parse --show-toplevel` / `worktree list` 给出 `C:/Users/…`，而 `repoRoot` 要和用户选的本机路径比较、还会被存进“最近工作区”。`worktreeBinding` 现在统一转回本机分隔符（不引入 `node:path` —— 这个模块要进浏览器包，靠盘符/反斜杠特征判断），worktree 目录名的 basename 也改成按两种分隔符切。
   3. **测试 fixture 被 core.autocrlf 改写**：Windows git 默认 `core.autocrlf=true`，checkout（`worktree add`、合并）时把 LF fixture 改成 CRLF，内容断言随之失败。两个 worktree 测试在自己的临时仓库里 pin `core.autocrlf=false`。
+  4. **捕获到的 stderr 可能只剩一行 `#< CLIXML`**：PowerShell 的 wrapper 分两段写 —— 流被重定向时先写头行，记录序列化时再写 `<Objs>` 文档 —— 进程退出途中这两段会各自落单。原来的清理只认完整的预热文档，于是裸头行照旧当成“否决理由”送到模型面前。现在完整文档、被截断在大尾巴上的文档、没有文档跟随的裸头行三种形态都会被摘掉，而判不了归属的 CLIXML（既非预热记录、也无错误记录）整段保留。
+  5. **hook 不读 stdin 时 EPIPE 会把结果变成异常**：`proc.stdin.write/end` 在子进程已先退出时抛 `EPIPE: broken pipe` —— 任何“只看不动 stdin”的 hook（`command -v prettier` 这类探针）都会撞上，runner 的“永不抛异常”契约随之失效。Linux 每次必挂（bash 约 2ms 就退出，写入还在路上），macOS 很难复现，所以本地一直没看到。现在写入失败被吞掉，hook 的退出码与自己的输出仍是唯一事实来源。
 - hook runner 的测试改为平台原生写法（`pwd` / `cat` / `yes|head` 在 PowerShell 里没有对应物），断言意图不变：cwd 绑定改用“相对路径找到标记文件”证明，不再比较路径字符串（Windows 同一临时目录会报 8.3 短名或长名两种形态）。
 - CI 新增 Windows 作业（typecheck + `bun test`），与 Release 的 Windows 前置检查一致：平台特有问题应在 main 上就暴露，而不是等到打 tag 那一刻。
 

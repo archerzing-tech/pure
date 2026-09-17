@@ -52,10 +52,35 @@ describe('stripPowerShellStartupProgress', () => {
     expect(stripPowerShellStartupProgress(`${WARMUP.replace('#< CLIXML\n', '')}${WARMUP}`)).toBe('');
   });
 
-  it('leaves a truncated blob alone rather than cutting into real output', () => {
-    expect(stripPowerShellStartupProgress('#< CLIXML\n<Objs><AV>Preparing modules for first use.</AV>')).toBe(
-      '#< CLIXML\n<Objs><AV>Preparing modules for first use.</AV>',
-    );
+  it('removes a #< CLIXML header the document never followed', () => {
+    // The wrapper goes out in two pieces: powershell.exe writes the header when
+    // the stream is redirected, the document when the record is serialized. The
+    // v2.2.6-alpha release run captured the header alone — the warm-up document
+    // it belongs to never arrived — and it still reached the caller as a veto
+    // reason, so the header has to stand on its own as a cut.
+    expect(stripPowerShellStartupProgress('#< CLIXML')).toBe('');
+    expect(stripPowerShellStartupProgress('#< CLIXML\r\n')).toBe('');
+    expect(stripPowerShellStartupProgress('hook said: no\n#< CLIXML\n')).toBe('hook said: no');
+    // A header doubled in front of one document leaves the outer one stranded.
+    expect(stripPowerShellStartupProgress(`#< CLIXML\n${WARMUP}`)).toBe('');
+  });
+
+  it('cuts a warm-up document the stream truncated', () => {
+    // The release run delivered documents both ways: PowerShell was serializing
+    // the record while the process exited, so the closing tag never made it.
+    // An unclosed document is still the wrapper alone — whatever the command
+    // wrote sits in front of it and is asserted to survive.
+    const truncated = '#< CLIXML\n<Objs><AV>Preparing modules for first use.</AV>';
+    expect(stripPowerShellStartupProgress(truncated)).toBe('');
+    expect(stripPowerShellStartupProgress(`hook said: no\n${truncated}`)).toBe('hook said: no');
+  });
+
+  it('never swallows an unrelated CLIXML shape that precedes a warm-up blob', () => {
+    // An unknown document is left whole (see below); a later truncated warm-up
+    // document may not eat it on the way out, so the body is tempered.
+    const unknown = '#< CLIXML\n<Objs Version="1.1.0.1"><Obj S="information" RefId="0" /></Objs>';
+    const truncated = '#< CLIXML\n<Objs><AV>Preparing modules for first use.</AV>';
+    expect(stripPowerShellStartupProgress(`${unknown}\nhook said: no\n${truncated}`)).toBe(`${unknown}\nhook said: no`);
   });
 
   it('keeps a CLIXML blob that carries a real error record', () => {

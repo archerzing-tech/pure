@@ -62,6 +62,7 @@ describe('createNodeUserHookRunner', () => {
     // the long form depending on who asks, so a path equality check would be
     // testing path formatting, not the cwd binding.
     echoStdin: isWindows ? '[Console]::Out.Write([Console]::In.ReadToEnd())' : 'cat',
+    deafToStdin: isWindows ? "Write-Output 'deaf'" : 'echo deaf',
     markerOrNothing: isWindows ? `if (Test-Path ${MARKER_FILE}) { Write-Output bound }` : `test -f ${MARKER_FILE} && echo bound`,
     flood: isWindows ? "[Console]::Out.Write('x' * 10000)" : 'yes x | head -c 10000',
     failWithMessage: isWindows ? "[Console]::Error.Write('bad'); exit 2" : 'echo bad >&2; exit 2',
@@ -75,6 +76,20 @@ describe('createNodeUserHookRunner', () => {
     expect(result.exitCode).toBe(0);
     expect(result.timedOut).toBe(false);
     expect(result.stdout.trim()).toBe('bound');
+  }, SPAWN_TIMEOUT_MS);
+
+  // The payload is a courtesy, not a contract: a hook that only checks
+  // something (a linter's presence, a branch name) never reads stdin and can
+  // exit before the write lands, closing the pipe under it. The Linux CI runner
+  // reproduced this on every run — bash is gone in ~2ms while the test's first
+  // write was still in flight — and the runner rethrew EPIPE instead of
+  // reporting the hook's own result.
+  it('reports the result of a hook that never reads its stdin', async () => {
+    const run = createNodeUserHookRunner({ cwd: workspace });
+    const result = await run({ command: hookCommands.deafToStdin }, { event: 'on_turn_complete' });
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+    expect(result.stdout.trim()).toBe('deaf');
   }, SPAWN_TIMEOUT_MS);
 
   it('passes the payload as JSON on stdin', async () => {
