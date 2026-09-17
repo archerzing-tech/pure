@@ -3695,6 +3695,10 @@ export class ChatController {
         network: buildNetworkContext(),
         shell: buildShellContextLine(),
         skills: [...(config.hubSkills ?? []), ...appSkills],
+        // MCP resources join the same optional-context tier as skills. The
+        // client prefetches them on connect and caches the rendered body, so a
+        // slow server costs at most one bounded wait on the post-connect turn.
+        mcpResources: this.mcpClient ? await this.mcpClient.collectResourceContext() : undefined,
         mode: analysis.mode,
         budget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides),
         // Subagent tools join the model-visible list only in workspace mode

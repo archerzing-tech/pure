@@ -35,6 +35,26 @@ export interface MCPToolDescription {
   inputSchema: Record<string, unknown>;
 }
 
+// ── MCP resources (server-published read-only context) ──
+
+/** `resources/list` entry. `mimeType` and `description` are both optional in
+ *  the spec, so both are narrowed at read time before anything is injected. */
+export interface MCPResourceDescription {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+}
+
+/** `resources/read` returns one entry per returned part: text resources carry
+ *  `text`, binary ones carry base64 `blob` (never injected into the prompt). */
+export interface MCPResourceContents {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+}
+
 export interface MCPServerConfig {
   name: string;
   transport: 'stdio' | 'http';

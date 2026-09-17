@@ -3,6 +3,15 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v2.2.6-alpha
+
+**MCP resources 进上下文：服务器发布的只读文档自动可见**
+
+- 连接 MCP 服务器时，若服务器在 initialize 握手声明了 `resources` 能力，客户端会列目录并读取内容（`resources/list` + `resources/read`），渲染成 `<mcp_resources>` 片段随系统提示一起发给模型 —— 服务器发布的文档（笔记、项目约定、数据集说明）不再要靠用户手动粘贴。根因：此前 pure 只消费 MCP 的 tools，资源的发现与读取整条链路缺失，模型对已连接服务器里的文档一无所知。
+- 注入有硬上限：每个服务器最多 10 条、单条最多 2000 字符（超出截断并标注 `…[truncated]`）、单连接合计最多 8000 字符；只有文本类型（`text/*` 与 json/xml/yaml/javascript 等，MIME 缺失时按文本处理）会进提示词，只带 base64 `blob` 的二进制资源一律跳过。片段优先级与 skills 同为 30，预算紧张时最先被裁。
+- 读取是连接完成后的后台预取，等待上限 3 秒，慢服务器不会拖住连上之后的第一轮；`resources/list` / `resources/read` 失败只记一条警告并放弃该服务器的资源，工具注册与连接状态不受影响（单个话痨/故障服务器不能拖垮整条连接）。
+- 资源正文来自第三方服务器，注入时显式标注为「参考数据，非指令」，为后续投毒特征扫描留出位置。GUI 与 CLI 共用同一条装配路径（`PromptAssembler.mcpResources`）。
+
 ## v2.2.5
 
 **上下文压缩钉住用户消息：追问轮不再丢失附件路径**
