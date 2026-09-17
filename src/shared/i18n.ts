@@ -29,6 +29,13 @@ const translations: Record<Language, Record<string, string>> = {
     'workspace.saved': '工作区已更新',
     'workspace.cleared': '工作区已清除',
     'workspace.worktreeAuto': '检测到其他会话正在同一仓库工作，已为本会话创建独立 worktree，两边改动互不干扰',
+
+    // ── Parallel-task dock (roadmap 4.3) ──
+    'parallel.title': '并行任务',
+    'parallel.queued': '队列 {n}',
+    'parallel.queuedTitle': '排队等待的任务数',
+    'parallel.jump.title': '切换到此会话',
+    'parallel.stop.title': '停止：结束进行中的回答并清掉排队任务',
     'workspace.missingCleared': '工作区文件夹已不存在（可能被移动或删除），已自动清除该工作区：{path}',
     'workspace.browseTitle': '选择工作区文件夹',
     'workspace.dropHint': '拖拽文件或文件夹到窗口，松开即可导入或切换工作区',
@@ -896,6 +903,13 @@ const translations: Record<Language, Record<string, string>> = {
     'workspace.saved': 'Workspace updated',
     'workspace.cleared': 'Workspace cleared',
     'workspace.worktreeAuto': 'Another session is already working in this repo — created a dedicated worktree for this session so edits stay isolated',
+
+    // ── Parallel-task dock (roadmap 4.3) ──
+    'parallel.title': 'Parallel tasks',
+    'parallel.queued': 'Queue {n}',
+    'parallel.queuedTitle': 'Tasks waiting in the queue',
+    'parallel.jump.title': 'Switch to this session',
+    'parallel.stop.title': 'Stop: end the running answer and clear queued tasks',
     'workspace.missingCleared': 'The workspace folder no longer exists (moved or deleted) — cleared automatically: {path}',
     'workspace.browseTitle': 'Select workspace folder',
     'workspace.dropHint': 'Drop a file or folder to import it or switch workspace',

@@ -5353,6 +5353,13 @@ export function isSessionRunning(sessionId: string): boolean {
   return runningSessionIds.has(sessionId);
 }
 
+/** Snapshot of every currently-streaming session id (roadmap 4.3): the
+ * parallel-task cards enumerate the set to build one card per background
+ * session — a boolean probe alone cannot discover who is running. */
+export function runningSessionIdList(): string[] {
+  return [...runningSessionIds];
+}
+
 /** Subscribe to running-set changes (session started/finished streaming).
  * Returns an unsubscribe function. */
 export function onRunningSessionsChanged(cb: () => void): () => void {

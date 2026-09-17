@@ -12934,3 +12934,115 @@ button svg,
 }
 .schedule-delete:hover { color: var(--danger); background: var(--danger-soft); }
 .schedule-add { margin-top: 4px; }
+
+/* ═══ Parallel-task dock (roadmap 4.3): one independent card per background
+   session — spinner / title / workspace / live elapsed / queue chip. The
+   dock shows only sessions that are NOT the visible one; hidden when empty. ═══ */
+#parallel-tasks-dock[hidden] { display: none !important; }
+#parallel-tasks-dock {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 18; /* same band as the agent-activity rail, below panels */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 264px;
+  max-width: calc(100% - 24px);
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--shadow-lg);
+}
+.parallel-dock-label {
+  color: var(--text-tertiary);
+  font: 700 10px var(--font-mono);
+  letter-spacing: .08em;
+}
+.parallel-dock-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.parallel-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background .15s var(--ease-out);
+}
+.parallel-card:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.parallel-card-spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: parallelCardSpin .7s linear infinite;
+}
+@keyframes parallelCardSpin { to { transform: rotate(360deg); } }
+.parallel-card-body {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.parallel-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.parallel-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 10px var(--font-mono);
+  color: var(--text-tertiary);
+}
+.parallel-card-workspace {
+  max-width: 90px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.parallel-card-elapsed { font-variant-numeric: tabular-nums; }
+.parallel-card-queue {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+.parallel-card-stop {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all .15s var(--ease-out);
+}
+.parallel-card-stop:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+/* Reduced motion kills the spinner; the live elapsed text keeps the card
+   reading as active (same reasoning as the tool-row elapsed). */
+@media (prefers-reduced-motion: reduce) {
+  .parallel-card-spinner { animation: none; }
+}
