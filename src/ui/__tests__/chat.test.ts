@@ -219,7 +219,7 @@ describe('rules-layer risk calibration settles the safety card', () => {
     // 之后不再有任何“合并后重算”的路径。
     expect(src.indexOf('userAssessment = workflow.userContext.assessment;')).toBeGreaterThan(-1);
     expect(src.indexOf('userAssessment = formatIntentPrompt(effectiveIntent);')).toBe(-1);
-    const gate = src.indexOf("const needsInteractiveApproval = riskReview || forcedMode === 'plan' || forcedMode === 'build';");
+    const gate = src.indexOf("const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';");
     expect(gate).toBeGreaterThan(src.indexOf('const riskReview = effectiveIntent.requiresConfirmation;'));
   });
 });
@@ -411,13 +411,28 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
 
   it('does not force project builds through a generic approval dialog', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const gate = src.indexOf('const needsInteractiveApproval = riskReview || forcedMode === \'plan\' || forcedMode === \'build\';');
+    const gate = src.indexOf('const needsInteractiveApproval = forcedMode === \'plan\' || forcedMode === \'build\';');
     const review = src.indexOf('await requestPlanReview(', gate);
-    const autoStart = src.indexOf('approvePlan(true);', gate);
+    const autoStart = src.indexOf('approvePlan();', gate);
     expect(gate).toBeGreaterThan(-1);
     expect(review).toBeGreaterThan(gate);
     expect(autoStart).toBeGreaterThan(gate);
     expect(src).not.toContain('needsDeliveryGate && forcedMode !== \'yolo\'');
+  });
+
+  it('runs without waiting for authorization: high risk no longer gates, plans start at once', () => {
+    // 2026-09-17 产品决策：不必要的授权停等全部取消（默认自动允许）——
+    // 高风险不再触发确认卡，风险只影响评估卡的展示；计划就绪即开工，
+    // 不再保留“计划批准暂停”状态。只有用户主动选择的计划/构建模式
+    // 保留确认流程（那是模式本身的语义），以及不可逆 UI 确认。
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const gate = src.indexOf("const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';");
+    expect(gate).toBeGreaterThan(-1);
+    // The old `riskReview ||` prefix must be gone — risk only shapes display.
+    expect(src.indexOf('needsInteractiveApproval = riskReview')).toBe(-1);
+    // pauseAfterPlanning（计划就绪→等一句“开工”）fully retired — covered by
+    // the plan-prompt test below (approved=true on every path).
+    expect(src.indexOf('pauseAfterPlanning')).toBe(-1);
   });
 
   it('keeps explicit plan/build mode as the opt-in approval path', () => {
@@ -543,10 +558,10 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
 
   it('passes explicit approval into the plan prompt so execution starts immediately', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 本轮无需等待“开工”消息（确认卡已批准 / forced-yolo 直接放行）时，模型第一轮
-    // 必须立即执行——否则模型第一轮不调用工具，引擎空转完成，计划卡还停在第一步
-    // 就突然进入交付验证、评估卡跳到“验证结果”。
-    expect(src).toContain('formatPlanForPrompt(planForReview, needsDeliveryGate, !pauseAfterPlanning)');
+    // 计划就绪即开工（2026-09-17 起所有路径如此，不再有等待“开工”消息的分支）：
+    // 模型第一轮必须立即执行——否则模型第一轮不调用工具，引擎空转完成，计划卡
+    // 还停在第一步就突然进入交付验证、评估卡跳到“验证结果”。
+    expect(src).toContain('formatPlanForPrompt(planForReview, needsDeliveryGate, true)');
   });
 });
 
