@@ -17,6 +17,7 @@ import {
   HUMAN_TONE_PROMPT,
   FILE_TOOLS_CORE,
   CAPABILITY_GAP_PROMPT,
+  PRE_COMMIT_REVIEW_CONTRACT,
   composeUserTurn,
   stripUserTurnContext,
 } from '../promptLayers';
@@ -181,6 +182,30 @@ describe('L1 behavior contracts', () => {
     expect(CAPABILITY_GAP_PROMPT).toContain('INSTALL, set up, or upgrade a third-party tool');
     expect(CAPABILITY_GAP_PROMPT).toContain('registry.npmmirror.com');
     expect(CAPABILITY_GAP_PROMPT).toContain('GitHub releases');
+  });
+
+  // 3.4 pre-commit review: the quality gate that replaced the per-commit
+  // permission prompt — the contract must name the trigger (git_commit), the
+  // reviewer (code_reviewer), the verdict protocol, and the escape hatches.
+  it('gates the first commit on a code_reviewer verdict with strict PASS/FAIL', () => {
+    expect(PRE_COMMIT_REVIEW_CONTRACT.startsWith('<pre_commit_review>')).toBe(true);
+    expect(PRE_COMMIT_REVIEW_CONTRACT.endsWith('</pre_commit_review>')).toBe(true);
+    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('git_commit');
+    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('code_reviewer');
+    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('VERDICT: PASS');
+    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('VERDICT: FAIL');
+    // FAIL must actually gate; PASS/unavailable/trivial must not stall.
+    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('Never commit while a blocking finding stands');
+    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('trivial change');
+    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('reviewer unavailable');
+    // One review per task — follow-up commits are not re-reviewed.
+    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('once per task');
+  });
+
+  it('documents the git write tools in the Shell & Git tool core', () => {
+    expect(FILE_TOOLS_CORE).toContain('git_commit(message, paths?)');
+    expect(FILE_TOOLS_CORE).toContain("git_branch(action, name?)");
+    expect(FILE_TOOLS_CORE).toContain('<pre_commit_review>');
   });
 });
 
