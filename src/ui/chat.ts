@@ -4104,8 +4104,11 @@ export class ChatController {
             const resultText = rawResult && typeof rawResult === 'object'
               ? 'summary' in rawResult
                 ? String((rawResult as { summary?: unknown }).summary ?? '')
-                : 'output' in rawResult && typeof (rawResult as { output?: unknown }).output === 'string'
-                  ? ((rawResult as { output?: string }).output as string)
+                // SubagentResult always carries the `output` key; a missing
+                // value must become "" (the empty-result note), never
+                // "[object Object]" from the object-stringify fallback.
+                : 'output' in rawResult
+                  ? String((rawResult as { output?: unknown }).output ?? '')
                   : String(rawResult ?? '')
               : String(rawResult ?? '');
             // Special-parse web_search / web_fetch results for rich body
