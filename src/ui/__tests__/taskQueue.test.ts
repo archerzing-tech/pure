@@ -93,3 +93,167 @@ describe('TaskQueue resume after reload', () => {
     expect(chat.sends).toEqual(['直接可跑']);
   });
 });
+
+// ── Roadmap 4.2: single-flight is per worktree ──
+// Different worktrees drain in parallel through their own live chats; tasks
+// inside ONE worktree stay strictly serial; a context the host has no live
+// chat for stays pending.
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+const flush = async (): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+};
+
+interface StoredTask {
+  id: string;
+  text: string;
+  displayText: string;
+  status: string;
+  ts: number;
+  workspace: string;
+  sessionId: string;
+}
+
+function storedTask(partial: Partial<StoredTask>): StoredTask {
+  return {
+    id: partial.id ?? `q${Math.random().toString(36).slice(2)}`,
+    text: partial.text ?? '',
+    displayText: partial.text ?? '',
+    status: 'pending',
+    ts: 1,
+    workspace: partial.workspace ?? '',
+    sessionId: partial.sessionId ?? '',
+    ...partial,
+  } as StoredTask;
+}
+
+describe('TaskQueue per-worktree lanes (4.2)', () => {
+  it('drains different worktrees in parallel while keeping each worktree serial', async () => {
+    const gateA1 = deferred();
+    const sendsA: string[] = [];
+    const chatA: QueueChat = {
+      send: (text) => {
+        sendsA.push(text);
+        // Only the FIRST task blocks; a2 must not start until it settles.
+        return text === 'a1' ? gateA1.promise : Promise.resolve();
+      },
+    };
+    const sendsB: string[] = [];
+    const chatB: QueueChat = {
+      send: (text) => {
+        sendsB.push(text);
+        return Promise.resolve();
+      },
+    };
+    installStorage(fakeStorage([
+      storedTask({ id: 'a1', text: 'a1', workspace: '/proj-a', sessionId: 'sess-a' }),
+      storedTask({ id: 'a2', text: 'a2', workspace: '/proj-a', sessionId: 'sess-a' }),
+      storedTask({ id: 'b1', text: 'b1', workspace: '/proj-b', sessionId: 'sess-b' }),
+    ]));
+    const queue = new TaskQueue({
+      chat: chatA,
+      chatFor: (ctx) => (ctx.workspace === '/proj-b' ? chatB : chatA),
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj-a', sessionId: 'sess-a' }),
+    });
+    await flush();
+
+    // b1 is ALREADY running even though a1 (current context) still blocks —
+    // that is the parallelism the old global single-flight could never do.
+    expect(sendsA).toEqual(['a1']);
+    expect(sendsB).toEqual(['b1']);
+
+    gateA1.resolve();
+    await flush();
+    // a2 started only after a1 settled — same worktree stays serial.
+    expect(sendsA).toEqual(['a1', 'a2']);
+    queue.cancelAll();
+  });
+
+  it('leaves a context pending when the host has no live chat for it', async () => {
+    const sendsA: string[] = [];
+    const chatA: QueueChat = { send: (text) => { sendsA.push(text); return Promise.resolve(); } };
+    const sendsB: string[] = [];
+    const chatB: QueueChat = { send: (text) => { sendsB.push(text); return Promise.resolve(); } };
+    installStorage(fakeStorage([
+      storedTask({ id: 'b1', text: 'b1', workspace: '/proj-b', sessionId: 'sess-b' }),
+    ]));
+    const queue = new TaskQueue({
+      chat: chatA,
+      // /proj-b was never opened this run → controllerFor returns null.
+      chatFor: (ctx) => (ctx.workspace === '/proj-a' ? chatA : null),
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj-a', sessionId: 'sess-a' }),
+    });
+    await flush();
+    expect(sendsB).toEqual([]);
+    expect(queue.isIdle()).toBe(true);
+
+    // Enqueueing into the current context still runs — the pending foreign
+    // task does not block the queue.
+    queue.enqueue('a1');
+    await flush();
+    expect(sendsA).toEqual(['a1']);
+    queue.cancelAll();
+  });
+
+  it('cancels a background running task through its own lane chat', async () => {
+    const gateB1 = deferred();
+    let cancelledB = 0;
+    const chatA: QueueChat = { send: () => Promise.resolve() };
+    const chatB: QueueChat = {
+      send: () => gateB1.promise,
+      cancel: () => { cancelledB++; },
+    };
+    installStorage(fakeStorage([
+      storedTask({ id: 'b1', text: 'b1', workspace: '/proj-b', sessionId: 'sess-b' }),
+    ]));
+    const queue = new TaskQueue({
+      chat: chatA,
+      chatFor: (ctx) => (ctx.workspace === '/proj-b' ? chatB : chatA),
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj-a', sessionId: 'sess-a' }),
+    });
+    await flush();
+    expect(cancelledB).toBe(0);
+
+    // The visible session is /proj-a; cancelling b1 must reach chatB, not the
+    // facade — that is exactly what the old isRunnable guard made impossible.
+    queue.cancel('b1');
+    expect(cancelledB).toBe(1);
+
+    gateB1.resolve();
+    await flush();
+    const persisted = JSON.parse(globalThis.localStorage.getItem('pure_task_queue_test') ?? '[]') as StoredTask[];
+    expect(persisted.find((t) => t.id === 'b1')?.status).toBe('cancelled');
+    queue.cancelAll();
+  });
+
+  it('isIdle tracks only the current context while a background lane runs', async () => {
+    const gateB1 = deferred();
+    const chatA: QueueChat = { send: () => Promise.resolve() };
+    const chatB: QueueChat = { send: () => gateB1.promise };
+    installStorage(fakeStorage([
+      storedTask({ id: 'b1', text: 'b1', workspace: '/proj-b', sessionId: 'sess-b' }),
+    ]));
+    const queue = new TaskQueue({
+      chat: chatA,
+      chatFor: (ctx) => (ctx.workspace === '/proj-b' ? chatB : chatA),
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj-a', sessionId: 'sess-a' }),
+    });
+    await flush();
+    // b1 runs in the background; THIS context is idle, so the scheduler may
+    // still enqueue here.
+    expect(queue.isIdle()).toBe(true);
+    gateB1.resolve();
+    await flush();
+    queue.cancelAll();
+  });
+});

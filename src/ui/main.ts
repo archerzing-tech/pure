@@ -274,11 +274,14 @@ const sidebarSettingsBtn = document.getElementById('sidebar-settings-btn') as HT
 new InlineAutocomplete(promptEl);
 if (landingPrompt) new InlineAutocomplete(landingPrompt);
 
-// ── Batch task queue (chat is single-flight, so tasks run one after another) ──
+// ── Batch task queue (single-flight per worktree since 4.2: tasks in the
+// visible conversation run through the facade; tasks of OTHER worktrees run
+// in parallel lanes against their still-live background controllers) ──
 // Model + popover panel. Tasks persist to localStorage, so a reload resumes any
 // that were still pending.
 const taskQueue = new TaskQueue({
   chat,
+  chatFor: (ctx) => chat.controllerFor(ctx.sessionId),
   getContext: () => ({ workspace: chat.getWorkspace(), sessionId: chat.getSessionId() }),
 });
 
