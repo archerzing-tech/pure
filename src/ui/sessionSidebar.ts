@@ -41,6 +41,12 @@ export interface SessionSidebarDeps {
   };
   pasteChips: { clear(): void };
   confirm(message: string): Promise<boolean>;
+  /** Roadmap 4.4 retention notice: when the session's workspace is one of the
+   * auto-created worktrees (4.1) with unmerged work, return the delete
+   * confirmation text that says the worktree SURVIVES the delete (and where).
+   * Null/absent → the plain delete confirm. Deleting a session never deletes
+   * its worktree — retention is the default, this only makes it visible. */
+  retentionNotice?(sessionId: string): Promise<string | null>;
   /** Render a loaded session's transcript into its session host (main.ts owns
    * the chat DOM). Called only for COLD sessions — warm sessions already have
    * their live transcript mounted. */
@@ -394,7 +400,10 @@ export class SessionSidebar {
           e.stopPropagation();
           const sid = btn.getAttribute('data-sid');
           if (!sid) return;
-          if (!(await this.deps.confirm(t('confirm.deleteSession')))) return;
+          // 4.4: a worktree-bound session with unmerged work gets the
+          // retention wording — delete removes the session, not its worktree.
+          const retention = this.deps.retentionNotice ? await this.deps.retentionNotice(sid) : null;
+          if (!(await this.deps.confirm(retention ?? t('confirm.deleteSession')))) return;
           // Tear the controller down BEFORE the disk delete: a background run
           // between the two steps would re-persist the session the user just
           // deleted, and a live-only entry (never persisted, sidebar-merged)

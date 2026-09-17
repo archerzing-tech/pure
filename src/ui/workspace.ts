@@ -42,6 +42,18 @@ function getDialogModule(): Promise<DialogModule> {
 // so the first click does not wait for a lazy chunk or plugin initialization.
 if (isTauriRuntime()) void getDialogModule().catch(() => {});
 
+// Git through the same Rust execute_command the tool adapter uses — no new
+// native surface (same reasoning as the git write tools, 3.2). Non-zero exit
+// throws so callers can branch on failure; stderr carries the reason.
+export function tauriGitRunner(): GitRunner {
+  return async (args, cwd) => {
+    const command = ['git', ...args].map(quoteShellArg).join(' ');
+    const res = await tauriInvoke('execute_command', { workspace: cwd, command }) as { exitCode: number; stdout: string; stderr: string };
+    if (res.exitCode !== 0) throw new Error(res.stderr || `git exited with ${res.exitCode}`);
+    return res.stdout;
+  };
+}
+
 // Roadmap 4.1 — auto worktree: when the picked directory is a git repo that
 // ANOTHER session already works in, this session silently gets its own linked
 // worktree (see shared/worktreeBinding.ts) instead of sharing the directory,
@@ -55,20 +67,12 @@ async function resolveAutoWorktree(sessionId: string, requested: string): Promis
       import('@tauri-apps/api/path'),
       loadSessionList(),
     ]);
-    // Git runs through the same Rust execute_command the tool adapter uses —
-    // no new native surface (same reasoning as the git write tools, 3.2).
-    const runGit: GitRunner = async (args, cwd) => {
-      const command = ['git', ...args].map(quoteShellArg).join(' ');
-      const res = await tauriInvoke('execute_command', { workspace: cwd, command }) as { exitCode: number; stdout: string; stderr: string };
-      if (res.exitCode !== 0) throw new Error(res.stderr || `git exited with ${res.exitCode}`);
-      return res.stdout;
-    };
     const decision = await resolveSessionWorkspace({
       sessionId,
       requestedWorkspace: requested,
       otherWorkspaces: sessions.filter((s) => s.id !== sessionId && s.workspace).map((s) => s.workspace!),
       pureHome: await pathApi.join(await pathApi.homeDir(), '.pure'),
-    }, runGit);
+    }, tauriGitRunner());
     return decision.kind === 'linked-worktree' && decision.workspace !== requested ? decision.workspace : null;
   } catch (err) {
     console.error('[pure] auto worktree resolution failed:', err);

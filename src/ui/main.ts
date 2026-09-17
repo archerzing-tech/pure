@@ -48,7 +48,9 @@ import { InlineAutocomplete } from './inlineAutocomplete';
 import { TaskQueue } from './taskQueue';
 import { ParallelTaskCards, bindParallelTaskCards, type ParallelTaskCardsDeps } from './parallelTaskCards';
 import { Scheduler } from './scheduler';
-import { WorkspaceController } from './workspace';
+import { WorkspaceController, tauriGitRunner } from './workspace';
+import { inspectWorktreeFinish, mergeWorktreeBack, discardWorktree } from '../shared/worktreeFinish';
+import { WorktreeFinishCard, bindWorktreeFinishCard, retentionMessage, type WorktreeFinishCardDeps } from './worktreeFinishCard';
 import { SessionSidebar, openPureWindow } from './sessionSidebar';
 import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
 import { groupConversationTurns, segmentConversationTurns } from './conversationTurns';
@@ -90,6 +92,11 @@ const workspace = new WorkspaceController({
   },
 });
 
+// Set once the wrap-up card (4.4) is wired below; session activation and
+// clear happen through the sidebar deps declared here, which fire before —
+// and independently of — the card's own mount block.
+let worktreeFinishCardRef: WorktreeFinishCard | null = null;
+
 sessionSidebar = new SessionSidebar({
   chat,
   pasteChips,
@@ -105,11 +112,24 @@ sessionSidebar = new SessionSidebar({
     // the stats panel — pull the visible session's live numbers here so the
     // right panel always matches the conversation that is actually shown.
     renderSessionStats();
+    // Switching sessions swaps the reviewed worktree — re-inspect (4.4).
+    void worktreeFinishCardRef?.refresh();
   },
   onChatCleared: () => {
     goToLanding();
     workspace.refresh();
     updateContextPanelStage();
+    void worktreeFinishCardRef?.refresh();
+  },
+  retentionNotice: async (sessionId) => {
+    if (!isTauriRuntime()) return null;
+    const rows = await loadSessionList();
+    const ws = rows.find((s) => s.id === sessionId)?.workspace
+      ?? chat.controllerFor(sessionId)?.getWorkspace()
+      ?? '';
+    if (!ws) return null;
+    const status = await inspectWorktreeFinish(tauriGitRunner(), ws);
+    return status && (status.commits.length > 0 || status.uncommitted > 0) ? retentionMessage(status) : null;
   },
 });
 
@@ -309,6 +329,41 @@ if (parallelCardsHost) {
   // Snappy card set updates on session start/stop — the class's own 1s tick
   // is only the safety net and the elapsed refresher.
   onRunningSessionsChanged(() => void parallelCards.refresh());
+}
+
+// ── Worktree wrap-up card (4.4) ──
+// Diff preview + one-click merge-back/discard for the visible session when it
+// works in an auto-created worktree (4.1) with unmerged work. Event-driven:
+// refreshed on activation, running-state changes and after its own actions.
+const worktreeFinishHost = document.getElementById('worktree-finish-host');
+if (worktreeFinishHost) {
+  const worktreeFinishDeps: WorktreeFinishCardDeps = {
+    host: worktreeFinishHost,
+    chat: {
+      currentId: () => chat.getSessionId(),
+      isRunning: (sessionId) => runningSessionIdList().includes(sessionId),
+      workspaceOf: (sessionId) => chat.controllerFor(sessionId)?.getWorkspace() ?? '',
+    },
+    // Plain-web dev mode has no execute_command bridge — no card, no noise.
+    inspect: (worktreePath) => isTauriRuntime()
+      ? inspectWorktreeFinish(tauriGitRunner(), worktreePath)
+      : Promise.resolve(null),
+    merge: (status) => mergeWorktreeBack(tauriGitRunner(), status),
+    discard: (binding) => discardWorktree(tauriGitRunner(), binding),
+    confirm: confirmDialog,
+    notify: showToast,
+    // The worktree is gone; give the session a live workspace again. This is
+    // the normal commit path — if another session owns the repo root, the
+    // usual 4.1 auto-worktree rule kicks in (isolation stays intact).
+    onReleased: (repoRoot) => void workspace.commit(repoRoot).catch((err) => {
+      console.error('[pure] post-merge workspace commit failed:', err);
+    }),
+  };
+  const worktreeFinishCard = new WorktreeFinishCard(worktreeFinishDeps);
+  bindWorktreeFinishCard(worktreeFinishHost, worktreeFinishCard);
+  worktreeFinishCardRef = worktreeFinishCard;
+  onRunningSessionsChanged(() => void worktreeFinishCard.refresh());
+  void worktreeFinishCard.refresh();
 }
 
 // ── Scheduled tasks (frontend scheduler) ──

@@ -97,6 +97,8 @@ describe('resolveSessionWorkspace', () => {
     const binding = await describeWorktree(git, second.workspace);
     expect(binding?.repoRoot).toBe(repo);
     expect(binding?.branch).toBe('pure/session-b');
+    // The main worktree's branch is what the merge-back flow (4.4) targets.
+    expect(binding?.mainBranch).toBe((await git(['branch', '--show-current'], repo)).trim());
   });
 
   it('keeps two sessions editing the same file from interfering (acceptance)', async () => {
@@ -189,5 +191,7 @@ describe('describeWorktree', () => {
     expect(binding?.worktreePath).toBe(repo);
     // The seeded repo's initial branch — whatever git's default names it.
     expect(['main', 'master']).toContain(binding?.branch ?? '');
+    // For the main worktree itself, the merge target is its own branch.
+    expect(binding?.mainBranch).toBe(binding?.branch);
   });
 });
