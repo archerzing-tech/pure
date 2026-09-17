@@ -6,7 +6,7 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, BASE_SYSTEM_PROMPT } from './chat';
+import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, runningSessionIdList, BASE_SYSTEM_PROMPT } from './chat';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
@@ -46,6 +46,7 @@ import { showConfirmModal } from './modal';
 import { checkPreflight, type PreflightGate } from './preflight';
 import { InlineAutocomplete } from './inlineAutocomplete';
 import { TaskQueue } from './taskQueue';
+import { ParallelTaskCards, bindParallelTaskCards, type ParallelTaskCardsDeps } from './parallelTaskCards';
 import { Scheduler } from './scheduler';
 import { WorkspaceController } from './workspace';
 import { SessionSidebar, openPureWindow } from './sessionSidebar';
@@ -284,6 +285,31 @@ const taskQueue = new TaskQueue({
   chatFor: (ctx) => chat.controllerFor(ctx.sessionId),
   getContext: () => ({ workspace: chat.getWorkspace(), sessionId: chat.getSessionId() }),
 });
+
+// ── Parallel-task dock (4.3): one card per background streaming session ──
+// Same deps feed the renderer and the click wiring (card → jump, stop →
+// cancel that session's lane + queued tasks). Guarded lookup: a missing
+// mount point must not throw during boot.
+const parallelCardsHost = document.getElementById('parallel-tasks-dock');
+if (parallelCardsHost) {
+  const parallelCardsDeps: ParallelTaskCardsDeps = {
+    host: parallelCardsHost,
+    chat: {
+      currentId: () => chat.getSessionId(),
+      runningIds: () => runningSessionIdList(),
+      workspaceOf: (sessionId) => chat.controllerFor(sessionId)?.getWorkspace() ?? '',
+      jumpTo: (sessionId) => chat.setSessionId(sessionId),
+    },
+    queue: taskQueue,
+    listTitles: async () => (await loadSessionList()).map((s) => ({ id: s.id, title: s.title, workspace: s.workspace ?? '' })),
+  };
+  const parallelCards = new ParallelTaskCards(parallelCardsDeps);
+  bindParallelTaskCards(parallelCardsHost, parallelCardsDeps);
+  taskQueue.subscribe(() => void parallelCards.refresh());
+  // Snappy card set updates on session start/stop — the class's own 1s tick
+  // is only the safety net and the elapsed refresher.
+  onRunningSessionsChanged(() => void parallelCards.refresh());
+}
 
 // ── Scheduled tasks (frontend scheduler) ──
 // Schedules live in the config (Settings → 定时任务). A due task enqueues into
