@@ -45,10 +45,38 @@ const TOOL_META: Record<string, { name: string; icon: string }> = {
   web_public_api:   { name: 'Public API',    icon: '⚡' },
   web_researcher:   { name: 'Web Research',  icon: '🧭' },
   planner:          { name: 'Plan',          icon: '📋' },
-  project_auditor:  { name: 'Project Audit', icon: '🛡️' },
   sys_info:         { name: 'System Info',   icon: 'ℹ️' },
   generate_image:   { name: 'Generate Image', icon: '🎨' },
+  // Subagent delegations (roster from SubagentOrchestrator): the SAME 🤖 icon
+  // everywhere + a Chinese role label — tools keep their English verbs, so a
+  // "colleague doing work" never typesets like a tool call (2026-09-17
+  // user feedback: the two were indistinguishable in the transcript).
+  researcher:       { name: '资料调研', icon: '🤖' },
+  code_reviewer:    { name: '代码评审', icon: '🤖' },
+  project_auditor:  { name: '项目体检', icon: '🤖' },
+  task_planner:     { name: '任务规划', icon: '🤖' },
+  code_editor:      { name: '代码修改', icon: '🤖' },
+  deep_thinker:     { name: '深度思考', icon: '🤖' },
+  ui_designer:      { name: '界面设计', icon: '🤖' },
 };
+
+// Subagent delegations that render with an agent identity (badge + tinted
+// row). bash_executor is deliberately NOT in this set — same ruling as the
+// activity rail's: it is a shell command wearing an agent wrapper, and users
+// read it as a tool.
+const SUBAGENT_TOOLS: ReadonlySet<string> = new Set([
+  'researcher',
+  'code_reviewer',
+  'project_auditor',
+  'task_planner',
+  'code_editor',
+  'deep_thinker',
+  'ui_designer',
+]);
+
+export function isSubagentTool(toolName: string): boolean {
+  return SUBAGENT_TOOLS.has(toolName);
+}
 
 export function toolDisplayName(toolName: string): string {
   return TOOL_META[toolName]?.name ?? toolName;
@@ -405,6 +433,11 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   const details = document.createElement('details');
   details.className = 'tool-row pending';
   if (toolName === 'sys_info') details.classList.add('sys-info');
+  if (isSubagentTool(toolName)) {
+    details.classList.add('subagent-row');
+    // Hover reveals the exact machine id (code_reviewer / ui_designer / …).
+    details.title = toolName;
+  }
   // The researcher SUBAGENT is web research too — same pale-blue surface as
   // its sibling web tools (its old classless body was the visible mismatch).
   if (isWebSearchLike(toolName) || toolName === 'web_researcher' || toolName === 'researcher') {
@@ -423,6 +456,16 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   const name = document.createElement('span');
   name.className = 'tool-row-name';
   name.textContent = toolDisplayName(toolName);
+
+  // Identity chip for delegations — the same cyan "Agent" badge the floating
+  // rail uses, so the transcript and the rail speak one language.
+  const summaryItems: HTMLElement[] = [icon, name];
+  if (isSubagentTool(toolName)) {
+    const agentBadge = document.createElement('span');
+    agentBadge.className = 'tool-row-agent-badge';
+    agentBadge.textContent = '子 Agent';
+    summaryItems.push(agentBadge);
+  }
 
   const argsEl = document.createElement('span');
   argsEl.className = 'tool-row-args';
@@ -450,7 +493,7 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
     setToolRowExpanded(handle, !handle.el.classList.contains('tool-row-expanded'));
   });
 
-  summary.append(icon, name, argsEl, statusEl, expandButton);
+  summary.append(...summaryItems, argsEl, statusEl, expandButton);
 
   const body = document.createElement('div');
   body.className = 'tool-row-body';

@@ -1,7 +1,7 @@
 // src/ui/__tests__/toolRow.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine } from '../toolRow';
+import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine, isSubagentTool } from '../toolRow';
 import type { GeneratedImage } from '../../shared/types';
 
 // Minimal fake DOM sufficient for createToolRow + finalizeToolRow's image
@@ -485,8 +485,10 @@ describe('pendingActionLabel', () => {
   });
 
   it('shows a distinct project audit identity and pending state', () => {
-    expect(toolDisplayName('project_auditor')).toBe('Project Audit');
-    expect(toolIcon('project_auditor')).toBe('🛡️');
+    // project_auditor is a SUBAGENT (2026-09-17): 🤖 + Chinese role name,
+    // never a tool-style English label.
+    expect(toolDisplayName('project_auditor')).toBe('项目体检');
+    expect(toolIcon('project_auditor')).toBe('🤖');
     expect(pendingActionLabel('project_auditor', {})).toBe('正在审计项目安全与交付风险…');
   });
 
@@ -665,6 +667,50 @@ describe('bash_executor body matches the unified console look', () => {
       expect(String(lineEl.className)).toContain('tool-result-line');
       const colored = Array.from(lineEl.children).filter((c: any) => String(c.className).startsWith('stream-hl-'));
       expect(colored.length).toBeGreaterThan(0);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('subagent delegations read as agents, not tool calls (2026-09-17)', () => {
+  it('renders the roster with 🤖, a Chinese role name, the 子 Agent badge and a tinted row', () => {
+    expect(toolIcon('code_reviewer')).toBe('🤖');
+    expect(toolDisplayName('code_reviewer')).toBe('代码评审');
+    expect(toolDisplayName('ui_designer')).toBe('界面设计');
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('code_reviewer', { prompt: '审查这次改动' });
+      const details = row.details as any;
+      expect(details.classList.contains('subagent-row')).toBe(true);
+      expect(details.title).toBe('code_reviewer');
+      // The fake DOM has no tree-walking querySelectorAll — the summary is
+      // details.children[0], and the badge is one of its direct children.
+      const summary = details.children[0];
+      const badge = (summary.children as any[]).find(
+        (el) => el.className === 'tool-row-agent-badge',
+      );
+      expect(badge?.textContent).toBe('子 Agent');
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps tool rows badge-free — bash_executor included, same ruling as the rail', () => {
+    // bash_executor IS Tags.AGENT, but it is a shell command wearing an agent
+    // wrapper: the activity rail already refused to card it, and the
+    // transcript must not call it a colleague either.
+    expect(isSubagentTool('execute_command')).toBe(false);
+    expect(isSubagentTool('bash_executor')).toBe(false);
+    expect(isSubagentTool('code_reviewer')).toBe(true);
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('read_file', { path: 'src/a.ts' });
+      expect((row.details as any).classList.contains('subagent-row')).toBe(false);
+      const summary = (row.details as any).children[0];
+      expect((summary.children as any[]).some(
+        (el) => el.className === 'tool-row-agent-badge',
+      )).toBe(false);
     } finally {
       restore();
     }

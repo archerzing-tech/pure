@@ -987,8 +987,8 @@ body {
   bottom: 0;
   z-index: 18; /* below the floating settings button (20) & context panel (30) */
   /* Shrinks with the window: on narrow viewports the rail takes less of the
-     conversation and its cards turn MORE transparent (see the media queries
-     below) so the chat stays readable underneath. */
+     conversation. Cards stay opaque — the floating surface must not read as
+     a gray film over the chat (see the media queries below). */
   width: clamp(160px, 12vw, 200px);
   max-width: 100%;
   min-width: 0;
@@ -1066,9 +1066,10 @@ body {
   padding: 8px;
   border: 1px solid var(--border-light);
   border-radius: 10px;
-  /* Semi-transparent on purpose: the user wants to see that conversation
-     content continues underneath the floating rail. */
-  background: color-mix(in srgb, var(--bg-card) 72%, transparent);
+  /* Fully opaque (2026-09-17 user feedback): the old 72% blend put a gray
+     film over whatever chat text sat underneath — the cards float above the
+     conversation instead, one solid surface each. */
+  background: var(--bg-card);
   box-shadow: var(--shadow-md);
 }
 /* Three-row card contract: centered "Agent" badge (cyan = an active worker),
@@ -1207,13 +1208,12 @@ body {
   .agent-worker--active .agent-worker-badge { animation: none; }
 }
 
-/* ── Narrow windows: the rail overlays the conversation, so it shrinks and
-   its cards turn MORE transparent — occlusion stays tolerable without a
-   dedicated layout mode. ── */
+/* ── Narrow windows: the rail overlays the conversation, so it shrinks —
+   cards stay fully opaque (transparency put a gray film over the chat). ── */
 @media (max-width: 1500px) {
   .agent-worker {
     padding: 6px;
-    background: color-mix(in srgb, var(--bg-card) 62%, transparent);
+    background: var(--bg-card);
   }
   .agent-worker-name { font-size: 11px; }
   .agent-worker-time { font-size: 9.5px; padding-top: 3px; }
@@ -1224,7 +1224,7 @@ body {
   .agent-worker {
     padding: 5px;
     border-radius: 8px;
-    background: color-mix(in srgb, var(--bg-card) 52%, transparent);
+    background: var(--bg-card);
   }
   .agent-worker-badge { padding: 1px 10px; font-size: 9px; }
   .agent-worker-name { font-size: 10px; }
@@ -13191,3 +13191,24 @@ button svg,
    only live thing (same intent as the tool-row spinner dim). */
 .wf-busy .wf-diff,
 .wf-busy .wf-subtitle { opacity: .6; }
+
+/* ── Subagent delegation rows (2026-09-17) ──
+ * A "colleague doing work" must never read as a tool call: accent-tinted
+ * surface + the rail's cyan 子 Agent chip on the summary line. The exact
+ * machine id rides on the row's title attribute (hover). */
+.tool-row.subagent-row {
+  border-color: color-mix(in srgb, #22d3ee 35%, var(--border-light));
+}
+.tool-row.subagent-row > summary {
+  background: color-mix(in srgb, #22d3ee 8%, transparent);
+}
+.tool-row-agent-badge {
+  flex: none;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font: 700 10px var(--font-sans);
+  letter-spacing: .08em;
+  background: #22d3ee;
+  color: #083344;
+  white-space: nowrap;
+}
