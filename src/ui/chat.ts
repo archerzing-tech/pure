@@ -74,7 +74,8 @@ import { mergeTranscriptWithTurn } from '../shared/conversation';
 import { t } from '../shared/i18n';
 import { effectiveProxyUrl } from '../shared/proxy';
 import { buildShellContext } from '../shared/shellEnv';
-import { MCPClient } from '../harness/mcp/MCPClient';
+import { MCPClient, type MCPPromptSummary } from '../harness/mcp/MCPClient';
+import { parseMcpPromptCommand } from '../shared/mcpPrompt';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import type { DownloadProgressEvent } from './TauriToolAdapter';
@@ -1602,6 +1603,76 @@ export class ChatController {
     this.dynamicMcpConnector = null;
   }
 
+  /**
+   * Prompt templates published by the connected MCP servers, for the composer
+   * autocomplete (6.2). Deliberately side-effect free: it only reports what an
+   * already-connected client knows, so typing in the composer can never spawn
+   * third-party subprocesses. `waitMs` bounds a prefetch already in flight.
+   */
+  async listMcpPrompts(waitMs = 600): Promise<MCPPromptSummary[]> {
+    if (!this.mcpClient) return [];
+    return this.mcpClient.listPrompts(waitMs);
+  }
+
+  /**
+   * Expand a `/mcp-prompt <server__name> [key=value …]` composer command into
+   * the server's template text (6.2). Returns null when the text is not a
+   * prompt command, so callers can pass any draft through unchanged.
+   *
+   * A command IS an explicit request to use MCP, so this path may connect the
+   * configured servers on demand (the composer often sees the first command
+   * before any turn has run). The bookkeeping mirrors the deferred init below
+   * so the first send afterwards does not reconnect what we just wired up.
+   */
+  async expandMcpPromptCommand(text: string): Promise<{ ok: true; text: string; label: string } | { ok: false; error: string } | null> {
+    const invocation = parseMcpPromptCommand(text);
+    if (!invocation) return null;
+    try {
+      const client = await this.ensureMcpReadyForComposer();
+      if (!client) return { ok: false, error: '未配置 MCP 服务器，无法调用 prompt 模板。' };
+      const result = await client.getPrompt(invocation.key, invocation.args);
+      if (!result.ok) return { ok: false, error: result.error };
+      return { ok: true, text: result.text, label: result.description?.trim() || invocation.key };
+    } catch (err) {
+      return { ok: false, error: `MCP 连接失败：${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  /**
+   * Connect MCP on demand for composer-level work. Reuses the live client when
+   * one exists; otherwise builds it from the config the same way `send()` would
+   * (a `servers: []` client that connects each configured server by hand), then
+   * records the same session/config snapshot the deferred init records.
+   */
+  private async ensureMcpReadyForComposer(): Promise<MCPClient | null> {
+    const config = loadConfig();
+    if (!config) return null;
+    const servers = config.mcpServers ?? [];
+    if (servers.length === 0) return null;
+    const proxyUrl = effectiveProxyUrl(config.proxy, 'tools');
+    if (!this.mcpClient) {
+      this.mcpClient = new MCPClient({
+        servers: [],
+        sessionId: this.sessionId,
+        proxyUrl,
+        excludedPrefixes: config.mcpExcludedPrefixes,
+      });
+    }
+    const client = this.mcpClient;
+    if (!this.deferredInitDone) {
+      await withAbortTimeout(
+        Promise.allSettled(servers.map((server) => client.connectServer(server))),
+        undefined,
+        20_000,
+        'MCP initialization',
+      );
+      this.deferredInitDone = true;
+      this.mcpSessionId = this.sessionId;
+      this.mcpConfigSnapshot = JSON.stringify([servers, proxyUrl]);
+    }
+    return client;
+  }
+
   /** Subscribe to per-session stats updates (right-panel 统计 tab). */
   onSessionStatsChanged(fn: (stats: SessionStats) => void): void {
     this.onStatsChanged = fn;
@@ -2148,6 +2219,26 @@ export class ChatController {
     // before handling this input so an optimization can never compete with the
     // user's first frame or the new turn's setup.
     this.cancelBackgroundPreCompaction();
+
+    // MCP prompt command: `/mcp-prompt <server__name> [key=value …]` is
+    // expanded to the server's template BEFORE the turn is committed, so
+    // history, intent analysis, and the engine all see the template itself
+    // while the transcript keeps showing the command the user typed.
+    //
+    // Skipped when the caller already passed a distinct display text: the
+    // composer expands the draft itself (so a failed expansion keeps the text
+    // in the box) and hands the template over as userText.
+    if (!isAuto && displayUserText === userText) {
+      const expansion = await this.expandMcpPromptCommand(userText);
+      if (expansion?.ok === false) {
+        showToast(expansion.error);
+        return;
+      }
+      if (expansion?.ok) {
+        displayUserText = userText;
+        userText = expansion.text;
+      }
+    }
 
     // IMMEDIATE feedback: the user's own message renders synchronously here,
     // BEFORE any await below (workspace resolve, memory harvest, runtime
@@ -5575,6 +5666,17 @@ export class SessionChatManager {
 
   async send(...args: Parameters<ChatController['send']>): Promise<void> {
     await this.activeNow().send(...args);
+  }
+
+  /** MCP prompt templates of the visible session's client (composer
+   *  autocomplete, 6.2). Read-only: never connects on its own. */
+  async listMcpPrompts(waitMs?: number): Promise<MCPPromptSummary[]> {
+    return this.activeNow().listMcpPrompts(waitMs);
+  }
+
+  /** Expand a `/mcp-prompt …` composer draft (6.2). Null for non-commands. */
+  async expandMcpPromptCommand(text: string): Promise<{ ok: true; text: string; label: string } | { ok: false; error: string } | null> {
+    return this.activeNow().expandMcpPromptCommand(text);
   }
 
   async interject(...args: Parameters<ChatController['interject']>): Promise<void> {

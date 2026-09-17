@@ -55,6 +55,40 @@ export interface MCPResourceContents {
   blob?: string;
 }
 
+// ── MCP prompts (server-published templates the USER invokes) ──
+
+/** One declared argument of a prompt template. `required` args must be
+ *  supplied by the caller; the composer command reports what is missing. */
+export interface MCPPromptArgument {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+
+/** `prompts/list` entry. Unlike tools, prompts are not model-callable — they
+ *  are templates the user picks and fills in. */
+export interface MCPPromptDescription {
+  name: string;
+  description?: string;
+  arguments?: MCPPromptArgument[];
+}
+
+/** One content part of a prompt message. Only `text` parts carry printable
+ *  text; image/audio parts are binary and resource parts may embed text. */
+export interface MCPPromptContent {
+  type: string;
+  text?: string;
+  data?: string;
+  mimeType?: string;
+  resource?: { uri?: string; mimeType?: string; text?: string; blob?: string };
+}
+
+/** `prompts/get` message: content is a single part or a list of parts. */
+export interface MCPPromptMessage {
+  role?: string;
+  content?: MCPPromptContent | MCPPromptContent[] | string;
+}
+
 export interface MCPServerConfig {
   name: string;
   transport: 'stdio' | 'http';

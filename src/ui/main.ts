@@ -45,7 +45,8 @@ import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { memoryStore } from './memoryStore';
 import { showConfirmModal } from './modal';
 import { checkPreflight, type PreflightGate } from './preflight';
-import { InlineAutocomplete } from './inlineAutocomplete';
+import { InlineAutocomplete, type AutocompleteCandidate } from './inlineAutocomplete';
+import { MCP_PROMPT_COMMAND, describeMcpPrompt } from '../shared/mcpPrompt';
 import { TaskQueue } from './taskQueue';
 import { ParallelTaskCards, bindParallelTaskCards, type ParallelTaskCardsDeps } from './parallelTaskCards';
 import { Scheduler } from './scheduler';
@@ -294,9 +295,21 @@ const sidebarNewChat = document.getElementById('sidebar-new-chat') as HTMLButton
 const sidebarSettingsBtn = document.getElementById('sidebar-settings-btn') as HTMLButtonElement;
 
 // ── Composer inline autocomplete (context-based suggestions) ──
-// Suggests recent session titles / past commands / written paths while typing.
-new InlineAutocomplete(promptEl);
-if (landingPrompt) new InlineAutocomplete(landingPrompt);
+// Suggests recent session titles / past commands / written paths while typing,
+// plus the MCP prompt templates of the connected servers (6.2): picking one
+// inserts `/mcp-prompt <server__name>` for the user to fill in. The prompt
+// source is read-only — it reports prompts of an already-connected client and
+// never connects (typing must not spawn third-party subprocesses).
+const mcpPromptCandidates = async (): Promise<AutocompleteCandidate[]> => {
+  const prompts = await chat.listMcpPrompts();
+  return prompts.map((prompt) => ({
+    label: describeMcpPrompt(prompt),
+    insert: `${MCP_PROMPT_COMMAND} ${prompt.key} `,
+    kind: 'prompt' as const,
+  }));
+};
+new InlineAutocomplete(promptEl, { extraCandidates: mcpPromptCandidates });
+if (landingPrompt) new InlineAutocomplete(landingPrompt, { extraCandidates: mcpPromptCandidates });
 
 // ── Batch task queue (single-flight per worktree since 4.2: tasks in the
 // visible conversation run through the facade; tasks of OTHER worktrees run
@@ -1455,6 +1468,16 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
   const gate = checkPreflight(text);
   if (gate && !(await confirmHighRiskDraft(gate))) return;
 
+  // MCP prompt command (6.2): expanded HERE, before the composer is cleared,
+  // so a typo in the prompt name or a missing required argument shows a toast
+  // and leaves the draft in place instead of dropping it. The transcript still
+  // shows the command; the engine receives the template.
+  const expansion = await chat.expandMcpPromptCommand(text);
+  if (expansion?.ok === false) {
+    showToast(expansion.error);
+    return;
+  }
+
   sourceEl.value = '';
   sourceEl.style.height = 'auto';
   if (sourceEl === landingPrompt) {
@@ -1462,14 +1485,17 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
     syncLandingHasText();
   }
   sendBtn.disabled = true;
-  await doSend(text);
+  await doSend(expansion?.ok ? expansion.text : text, expansion?.ok ? text : undefined);
 }
 
 /**
  * Shared send core (also used by flushQueued so a queued message can be sent
  * even when the user has already started typing a new draft).
+ *
+ * `displayOverride` keeps an expanded `/mcp-prompt` command visible in the
+ * transcript instead of the (long) template that actually reaches the engine.
  */
-async function doSend(text: string) {
+async function doSend(text: string, displayOverride?: string) {
   if (!hasConfiguredKey(loadConfig())) {
     showToast(t('toast.setApiKey'));
     void openSettings();
@@ -1488,7 +1514,7 @@ async function doSend(text: string) {
   const outgoingAttachments = longTextAttachment ? await pasteChips.prepareForSend() : attachments;
   const fullText = composeMessageWithAttachments(longTextAttachment || hasSameTextAttachment ? '' : text, outgoingAttachments);
   const images = outgoingAttachments.map(attachmentToMessageImage).filter((image): image is NonNullable<typeof image> => image !== null);
-  const displayText = longTextAttachment || hasSameTextAttachment ? `已附加长文本文件：${outgoingAttachments.find((a) => a.kind === 'text' && a.content === text)?.name ?? '文本文件'}` : text;
+  const displayText = displayOverride ?? (longTextAttachment || hasSameTextAttachment ? `已附加长文本文件：${outgoingAttachments.find((a) => a.kind === 'text' && a.content === text)?.name ?? '文本文件'}` : text);
   const attachmentMetadata = outgoingAttachments.map((a) => ({ id: a.id, name: a.name, path: a.path, size: a.size, kind: a.kind, truncated: a.truncated }));
   const openAttachment = (attachment: import('../shared/types').MessageAttachment) => pasteChips.openStoredAttachment(attachment);
   pasteChips.clear();

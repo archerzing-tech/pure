@@ -34,6 +34,7 @@ import { buildTaskContract, discoverWorkspace, formatTaskContract, workspaceProf
 import { buildRepairPrompt, hasRepairableQualityFindings, qualityGateSummary, runProjectQualityGate, type ProjectQualityGateResult } from './ui/projectQualityGate';
 import type { Harness } from './harness/Harness';
 import type { MCPClient } from './harness/mcp/MCPClient';
+import { parseMcpPromptCommand, describeMcpPrompt, MCP_PROMPT_COMMAND } from './shared/mcpPrompt';
 import type { EngineEvent, Message, ToolAdapter, ToolDefinition } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
 import { loadConfig, DEFAULT_CLI_AUTO_APPROVE, PURE_DIR } from './cliConfig';
@@ -299,6 +300,27 @@ async function assembleCliPrompt(
     // on actual subagent tool presence (see hasSubagents above).
     hasSubagents,
   }, userText, context);
+}
+
+/** `/prompts` — list the prompt templates the connected MCP servers publish. */
+async function printMcpPrompts(mcpClient?: MCPClient): Promise<void> {
+  if (!mcpClient) {
+    process.stdout.write(`  ${yellow('!')} 未配置 MCP 服务器。\n`);
+    return;
+  }
+  const prompts = await mcpClient.listPrompts();
+  if (prompts.length === 0) {
+    process.stdout.write(`  ${dim('已连接的 MCP 服务器没有提供 prompt 模板。')}\n`);
+    return;
+  }
+  process.stdout.write(`  ${dim(`MCP prompt 模板（${prompts.length}）：用 ${MCP_PROMPT_COMMAND} <key> [key=value …] 调用`)} \n`);
+  for (const prompt of prompts) {
+    process.stdout.write(`  ${cyan('⚡')} ${prompt.key} ${dim(describeMcpPrompt(prompt))}\n`);
+    for (const arg of prompt.arguments ?? []) {
+      const flag = arg.required ? '*' : '';
+      process.stdout.write(`      ${dim(`${arg.name}${flag}${arg.description ? ` — ${arg.description}` : ''}`)}\n`);
+    }
+  }
 }
 
 // ── Task-mode integration (mirrors the GUI's yolo → plan/build switching) ──
@@ -638,7 +660,7 @@ async function runRepl(args: CliArgs) {
   process.stdout.write(`  ${bold('pure')}  ${dim(CLI_VERSION)} ${dim('—')} ${cyan(label)}\n`);
   if (hasTools) process.stdout.write(`  📁 ${dim(process.cwd())} ${dim(`| ${toolsDefs.length} tools`)}\n`);
   process.stdout.write(`  💾 ${dim(sessionId.slice(0, 12))}…\n`);
-  process.stdout.write(`  ${dim('/exit /quit — leave   /clear — reset context   /compact — compact context   /undo — restore last write   Ctrl+C — cancel')}\n`);
+  process.stdout.write(`  ${dim('/exit /quit — leave   /clear — reset context   /compact — compact context   /undo — restore last write   /prompts — list MCP prompts   Ctrl+C — cancel')}\n`);
   console.log('');
 
   let messages: Message[] = [];
@@ -750,6 +772,30 @@ async function runRepl(args: CliArgs) {
       continue;
     }
 
+    if (input === '/prompts') {
+      await printMcpPrompts(mcpClient);
+      continue;
+    }
+
+    // `/mcp-prompt <server__name> [key=value …]` (6.2): expand the server's
+    // template into this turn's request. The command IS the explicit ask, so
+    // this is the one REPL path allowed to wait on MCP.
+    let turnInput = input;
+    const promptInvocation = parseMcpPromptCommand(input);
+    if (promptInvocation) {
+      if (!mcpClient) {
+        process.stdout.write(`  ${yellow('!')} 未配置 MCP 服务器，无法调用 prompt 模板。\n`);
+        continue;
+      }
+      const resolved = await mcpClient.getPrompt(promptInvocation.key, promptInvocation.args);
+      if (!resolved.ok) {
+        process.stdout.write(`  ${red('!')} ${resolved.error}\n`);
+        continue;
+      }
+      process.stdout.write(`  ${cyan('⚡')} ${dim(`MCP prompt ${resolved.key}${resolved.description ? ` — ${resolved.description}` : ''}`)}\n`);
+      turnInput = resolved.text;
+    }
+
     currentAbort = new AbortController();
     generating = true;
 
@@ -761,10 +807,10 @@ async function runRepl(args: CliArgs) {
 
     // Trap pre-scan per REPL turn (same as one-shot): surface the warning and
     // inject it into the system prompt so the model verifies the premise.
-    const semanticRoute = (shouldBypassSemanticRoute(input) || isPlainConversational(input))
+    const semanticRoute = (shouldBypassSemanticRoute(turnInput) || isPlainConversational(turnInput))
       ? null
-      : await inferSemanticRoute(adapter, input, currentAbort.signal);
-    const workflow = compileRequestWorkflow(input, { hasTools: toolsDefs.length > 0, semanticRoute });
+      : await inferSemanticRoute(adapter, turnInput, currentAbort.signal);
+    const workflow = compileRequestWorkflow(turnInput, { hasTools: toolsDefs.length > 0, semanticRoute });
     const analysis = workflow.analysis;
     const traps = analysis.traps;
     if (traps.length > 0) {
@@ -788,11 +834,11 @@ async function runRepl(args: CliArgs) {
     let taskContract: TaskContract | undefined;
     if ((needsDeliveryGate || needsIntentProbe) && tools) {
       workspaceProfile = await discoverWorkspace(tools);
-      taskContract = buildTaskContract(input, workspaceProfile);
+      taskContract = buildTaskContract(turnInput, workspaceProfile);
       process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(workspaceProfile))}\\n`);
       if (needsDeliveryGate) process.stdout.write(`  ${dim('📋 Contract:')} ${dim(`${taskContract.acceptanceCriteria.length} 项验收标准，验证证据将决定是否交付`)}\\n`);
     }
-    const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, input, {
+    const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, turnInput, {
       ...workflow.userContext,
       contract: taskContract ? formatTaskContract(taskContract) : undefined,
     }, mcpClient);
