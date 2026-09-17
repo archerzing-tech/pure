@@ -154,8 +154,8 @@ if (typeof requestIdleCallback === 'function') {
 function getSettingsPanel(): Promise<SettingsPanel> {
   if (!settingsPanelPromise) {
     settingsPanelPromise = import('./settings')
-      .then(({ SettingsPanel }) =>
-        new SettingsPanel(
+      .then(({ SettingsPanel }) => {
+        const panel = new SettingsPanel(
           onConfigSaved,
           () => {
             contextCollapsedBeforeSettings = contextCollapsed;
@@ -175,8 +175,13 @@ function getSettingsPanel(): Promise<SettingsPanel> {
           // Skills page reads the current workspace for the project-local
           // skills inventory (.agents/skills) — same source of truth as chat.
           () => chat.getWorkspace(),
-        ),
-      )
+        );
+        // Settings → MCP cards show the resources the running session already
+        // discovered, so the user doesn't have to probe (spawn a second server
+        // process) just to see the list. Read-only by construction.
+        panel.setLiveMcpResourcesSource(() => chat.listMcpResources());
+        return panel;
+      })
       // A failed import/construction must not brick the panel for the whole
       // session: reset the cached promise so the next open retries.
       .catch((err) => {

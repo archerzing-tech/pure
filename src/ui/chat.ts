@@ -74,7 +74,7 @@ import { mergeTranscriptWithTurn } from '../shared/conversation';
 import { t } from '../shared/i18n';
 import { effectiveProxyUrl } from '../shared/proxy';
 import { buildShellContext } from '../shared/shellEnv';
-import { MCPClient, type MCPPromptSummary } from '../harness/mcp/MCPClient';
+import { MCPClient, type MCPPromptSummary, type MCPResourceSummary } from '../harness/mcp/MCPClient';
 import { parseMcpPromptCommand } from '../shared/mcpPrompt';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
@@ -1612,6 +1612,17 @@ export class ChatController {
   async listMcpPrompts(waitMs = 600): Promise<MCPPromptSummary[]> {
     if (!this.mcpClient) return [];
     return this.mcpClient.listPrompts(waitMs);
+  }
+
+  /**
+   * Resources the live MCP client has already discovered (Settings → MCP card
+   * prefill). Read-only like listMcpPrompts: it never connects, so opening
+   * Settings cannot spawn a server, and an empty list simply means this session
+   * has none loaded yet.
+   */
+  async listMcpResources(waitMs = 600): Promise<MCPResourceSummary[]> {
+    if (!this.mcpClient) return [];
+    return this.mcpClient.listResources(waitMs);
   }
 
   /**
@@ -5672,6 +5683,12 @@ export class SessionChatManager {
    *  autocomplete, 6.2). Read-only: never connects on its own. */
   async listMcpPrompts(waitMs?: number): Promise<MCPPromptSummary[]> {
     return this.activeNow().listMcpPrompts(waitMs);
+  }
+
+  /** Resources the visible session's MCP client already discovered (Settings
+   *  card prefill). Read-only: never connects on its own. */
+  async listMcpResources(waitMs?: number): Promise<MCPResourceSummary[]> {
+    return this.activeNow().listMcpResources(waitMs);
   }
 
   /** Expand a `/mcp-prompt …` composer draft (6.2). Null for non-commands. */

@@ -81,6 +81,13 @@ export interface MCPClientConfig {
    * (mcpExcludedPrefixes) and honored by CLI --mcp-exclude-prefix.
    */
   excludedPrefixes?: string[];
+  /**
+   * Whether the connect-time prefetch pulls resource BODIES (default true).
+   * Set false for a listing-only client (the Settings probe): the metadata is
+   * still discovered, but no content is read, so a throwaway client cannot
+   * spend a doc server's budget on bodies nobody will look at.
+   */
+  readResourceContents?: boolean;
   /** Test seam: inject a transport factory (defaults to stdio/http by config). */
   transportFactory?: (config: MCPServerConfig) => MCPTransport;
 }
@@ -109,6 +116,9 @@ export interface MCPResourceContextOptions {
   /** Max ms to wait for an in-flight prefetch (default RESOURCE_PREFETCH_WAIT_MS). */
   waitMs?: number;
 }
+
+/** Resource metadata of one connected server (no contents). */
+export type MCPResourceSummary = MCPResourceDescription & { serverName: string };
 
 /** A prompt template from a connected server, addressed as `server__name`. */
 export interface MCPPromptSummary extends MCPPromptDescription {
@@ -365,6 +375,7 @@ export class MCPClient implements ToolAdapter {
     state.resources = (listed?.resources ?? [])
       .filter((r) => r && typeof r.uri === 'string')
       .slice(0, MAX_RESOURCES_PER_SERVER);
+    if (this.config.readResourceContents === false) return;
 
     const blocks: string[] = [];
     let remaining = MAX_TOTAL_RESOURCE_CHARS;
@@ -414,13 +425,28 @@ export class MCPClient implements ToolAdapter {
     return bodies.join('\n\n');
   }
 
-  /** Resource metadata for every connected server (Settings / diagnostics). */
-  getResources(): Array<MCPResourceDescription & { serverName: string }> {
-    const out: Array<MCPResourceDescription & { serverName: string }> = [];
+  /** Resource metadata for every connected server (Settings / diagnostics).
+   *  Sync: whatever the prefetch has already loaded, no reading of contents. */
+  getResources(): MCPResourceSummary[] {
+    const out: MCPResourceSummary[] = [];
     for (const [, state] of this.servers) {
+      if (!state.connected) continue;
       for (const resource of state.resources) out.push({ ...resource, serverName: state.config.name });
     }
     return out;
+  }
+
+  /** Whether the server advertised `resources` during the handshake. Lets the
+   *  Settings card say "none published" instead of implying a failure. */
+  supportsResources(serverName: string): boolean {
+    return this.servers.get(serverName)?.hasResources ?? false;
+  }
+
+  /** Resource metadata with a bounded wait for the in-flight list — same shape
+   *  as listPrompts, used by the Settings probe. */
+  async listResources(waitMs = RESOURCE_PREFETCH_WAIT_MS): Promise<MCPResourceSummary[]> {
+    await this.awaitPrefetches(waitMs, this.resourcePrefetch);
+    return this.getResources();
   }
 
   private removeServerTools(serverName: string): void {

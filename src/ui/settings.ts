@@ -86,7 +86,8 @@ import {
   type HubSkill,
 } from './skillHub';
 import { listToolInventory } from './toolInventory';
-import { probeMcpServerTools, type McpProbeResult } from './mcpProbe';
+import { probeMcpServerTools, renderMcpResourcesRow, type McpProbeResult, type McpProbeResource } from './mcpProbe';
+import type { MCPResourceSummary } from '../harness/mcp/MCPClient';
 import type { AppSkillEntry } from '../shared/skillFiles';
 
 /**
@@ -133,6 +134,17 @@ export class SettingsPanel {
   /** Per-server "查看工具" results, cached in-memory so re-rendering the list
    *  (or closing/reopening settings) never re-spawns a server process. */
   private mcpToolProbes = new Map<string, McpProbeResult>();
+  /** Resource metadata per server, as discovered by the live chat session
+   *  (see refreshLiveMcpResources). Replaced by a probe result when one lands. */
+  private liveMcpResources = new Map<string, McpProbeResource[]>();
+  /** Live-session lookup, wired by main.ts. Absent in tests / CLI. */
+  private liveMcpResourcesSource: (() => Promise<MCPResourceSummary[]>) | null = null;
+
+  /** Registered once by main.ts: "what has the running session's MCP client
+   *  already discovered?". Never connects (see ChatController.listMcpResources). */
+  setLiveMcpResourcesSource(source: () => Promise<MCPResourceSummary[]>): void {
+    this.liveMcpResourcesSource = source;
+  }
   /** Server names with a probe in flight (guards double-clicks). */
   private mcpProbing = new Set<string>();
   /** Bound in the constructor; refreshes the paste-file footprint on open. */
@@ -1714,6 +1726,9 @@ export class SettingsPanel {
     const excludeInput = document.getElementById('cfg-mcp-exclude-prefixes') as HTMLInputElement | null;
     if (excludeInput) excludeInput.value = (cfg.mcpExcludedPrefixes ?? []).join(', ');
     this.renderMcpServers();
+    // Resources of the running session (if any) fill the card rows that no
+    // probe has answered yet; the render above is the immediate, sync pass.
+    void this.refreshLiveMcpResources();
 
     // Read-only inventories: effective tool list + skills installed on disk.
     this.renderToolInventory();
@@ -1746,6 +1761,7 @@ export class SettingsPanel {
             <span class="mcp-server-badge">${escapeHtml(s.transport)}</span>${builtin}
             <div class="mcp-server-command">${escapeHtml(label)}</div>
             <div class="mcp-server-tools">${this.mcpToolsRowHtml(s, i)}</div>
+            ${this.mcpResourcesRowHtml(s)}
           </div>
         </div>
         <button class="mcp-server-delete" data-index="${i}" title="${t('mcp.remove.title')}">
@@ -1798,6 +1814,36 @@ export class SettingsPanel {
       return `<span class="mcp-tool-chip${tool.excluded ? ' mcp-tool-chip-excluded' : ''}" title="${escapeHtml(title)}">${escapeHtml(short)}${tool.excluded ? ` <i>· ${t('mcp.tools.hidden')}</i>` : ''}</span>`;
     }).join('');
     return `<div class="mcp-probe-summary">${escapeHtml(summary)}${again}</div><div class="mcp-tool-chips">${chips}</div>`;
+  }
+
+  /** Resources row of an MCP server card. A probe result wins (fresh, and it
+   *  can say "offers none"); without one the row shows what the running chat
+   *  session already discovered, so resources are visible without spawning a
+   *  second probe process. Rendering lives in mcpProbe.ts (pure, tested). */
+  private mcpResourcesRowHtml(s: PureConfig['mcpServers'][number]): string {
+    const probe = this.mcpToolProbes.get(s.name);
+    if (probe) return renderMcpResourcesRow(probe);
+    const live = this.liveMcpResources.get(s.name);
+    return live ? renderMcpResourcesRow({ serverName: s.name, tools: [], resources: live, resourcesSupported: true, durationMs: 0 }, 'live') : '';
+  }
+
+  /** Prefill the resource rows from the running session's MCP client. */
+  private async refreshLiveMcpResources(): Promise<void> {
+    if (this.liveMcpResourcesSource) {
+      try {
+        const discovered = await this.liveMcpResourcesSource();
+        const grouped = new Map<string, McpProbeResource[]>();
+        for (const resource of discovered) {
+          const bucket = grouped.get(resource.serverName) ?? [];
+          bucket.push({ uri: resource.uri, name: resource.name, description: resource.description, mimeType: resource.mimeType });
+          grouped.set(resource.serverName, bucket);
+        }
+        if (grouped.size > 0) this.liveMcpResources = grouped;
+      } catch {
+        // A session without MCP just means no prefill — the probe still works.
+      }
+    }
+    this.renderMcpServers();
   }
 
   /** On-demand MCP tool discovery: spawns a short-lived probe (never the chat
