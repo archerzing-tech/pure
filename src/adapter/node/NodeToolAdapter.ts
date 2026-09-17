@@ -194,6 +194,8 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'git_diff': return await this.handleGitCmd(args, ['diff', ...(args.staged ? ['--staged'] : []), ...(typeof args.path === 'string' ? ['--', args.path as string] : [])], signal, start);
         case 'git_log': return await this.handleGitCmd(args, ['log', '-n', String(args.maxCount ?? 10), ...(args.oneline !== false ? ['--oneline'] : [])], signal, start);
         case 'git_status': return await this.handleGitCmd(args, ['status', '--short'], signal, start);
+        case 'git_commit': return await this.handleGitCommit(args, signal, start);
+        case 'git_branch': return await this.handleGitBranch(args, signal, start);
         case 'sys_info': return await this.handleSysInfo(start);
         default:
           return this.fail(toolCall, start, `Unknown tool: ${toolCall.function.name}`);
@@ -223,7 +225,10 @@ export class NodeToolAdapter implements ToolAdapter {
     }
 
     if (meta.size > this.maxFileSize) {
-      return this.fail(null, start, `read_file: 文件 ${(meta.size / 1024 / 1024).toFixed(0)}MB 超过读取上限 ${Math.round(this.maxFileSize / 1024 / 1024)}MB；可以改用 search_files 搜索其中的内容，或用 execute_command 分段读取。`);
+      // Points at code_searcher, not search_files: the model-facing tool list
+      // deliberately hides search_files (superseded), and a recommendation the
+      // model cannot follow ends in "Unknown tool".
+      return this.fail(null, start, `read_file: 文件 ${(meta.size / 1024 / 1024).toFixed(0)}MB 超过读取上限 ${Math.round(this.maxFileSize / 1024 / 1024)}MB；可以改用 code_searcher 搜索其中的内容，或用 execute_command 分段读取。`);
     }
 
     const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
@@ -612,7 +617,7 @@ export class NodeToolAdapter implements ToolAdapter {
     items.sort();
     const listing = items.length > 0 ? items.join('\n') : '(empty directory)';
     const result = truncated
-      ? `${listing}\n\n[截断] 仅显示前 ${maxResults} 项；目录还有更多内容，请缩小 path 或使用 search_files/glob_files。`
+      ? `${listing}\n\n[截断] 仅显示前 ${maxResults} 项；目录还有更多内容，请缩小 path 或使用 glob_files。`
       : listing;
     return {
       id: `tool_${Date.now()}`,
@@ -2495,7 +2500,10 @@ export class NodeToolAdapter implements ToolAdapter {
       await proc.exited;
 
       if (proc.exitCode !== 0) {
-        return this.fail(null, start, stderr.trim() || `git failed with exit code ${proc.exitCode}`);
+        // Some git failures explain themselves on stdout ("nothing to commit,
+        // working tree clean"), not stderr — fall back to stdout before the
+        // generic exit-code line so the model sees the actual reason.
+        return this.fail(null, start, stderr.trim() || stdout.trim() || `git failed with exit code ${proc.exitCode}`);
       }
 
       return {
@@ -2513,6 +2521,38 @@ export class NodeToolAdapter implements ToolAdapter {
     } finally {
       abort.cleanup();
     }
+  }
+
+  /** git_commit: stage (subset or all), then commit. Every argument travels in
+   * argv — the message and paths never pass through a shell, so quoting is
+   * not a concern on this side. */
+  private async handleGitCommit(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
+    const message = typeof args.message === 'string' ? args.message.trim() : '';
+    if (!message) return this.fail(null, start, 'git_commit requires a non-empty commit message');
+    const paths = Array.isArray(args.paths) ? args.paths.map(String).filter((p) => p.trim().length > 0) : [];
+    const staged = await this.handleGitCmd(args, paths.length > 0 ? ['add', '--', ...paths] : ['add', '-A'], signal, start);
+    if (!staged.success) return staged;
+    const committed = await this.handleGitCmd(args, ['commit', '-m', message], signal, start);
+    if (!committed.success) return committed;
+    return { ...committed, toolName: 'git_commit' };
+  }
+
+  /** git_branch: create/switch ride `git checkout`; the name is rejected when
+   * it starts with "-" so it can never re-enter git's flag parser. */
+  private async handleGitBranch(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
+    const action = typeof args.action === 'string' ? args.action : 'list';
+    const name = typeof args.name === 'string' ? args.name.trim() : '';
+    if (action === 'create' || action === 'switch') {
+      if (!name) return this.fail(null, start, `git_branch action "${action}" requires a branch name`);
+      if (name.startsWith('-')) return this.fail(null, start, `invalid branch name: ${name}`);
+    }
+    const gitArgs = action === 'create' ? ['checkout', '-b', name]
+      : action === 'switch' ? ['checkout', name]
+      : action === 'list' ? ['branch']
+      : null;
+    if (!gitArgs) return this.fail(null, start, `unknown git_branch action: ${action}`);
+    const result = await this.handleGitCmd(args, gitArgs, signal, start);
+    return { ...result, toolName: 'git_branch' };
   }
 
   private async handleSysInfo(start: number): Promise<ToolResult> {

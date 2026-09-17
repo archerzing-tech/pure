@@ -46,6 +46,20 @@ export function getSysInfoToolDefs(): ToolDefinition[] {
 
 export type InvokeFunction = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
+// Single-quote escaping for the two shells the Rust execute_command backend
+// uses (`sh -c` on Unix, PowerShell on Windows): inside single quotes every
+// byte is literal except the quote itself — written as '\'' for sh, '' for
+// PowerShell. Used by the git_commit/git_branch cases, whose commit messages
+// and branch names are arbitrary model-supplied text.
+function isWindowsHost(): boolean {
+  return typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
+}
+
+function quoteShellArg(value: string): string {
+  const escaped = isWindowsHost() ? value.replace(/'/g, "''") : value.replace(/'/g, `'\\''`);
+  return `'${escaped}'`;
+}
+
 // ── Static Tauri invoke loader ──
 // Loads once at module level so adapters don't need async init per-constructor.
 
@@ -852,6 +866,45 @@ export class TauriToolAdapter implements ToolAdapter {
           const status = await this.call('git_status', { workspace: ws }) as string;
           return { id: toolCall.id, toolName: name, result: status, success: true, duration: Date.now() - start };
         }
+        case 'git_commit': {
+          const message = typeof args.message === 'string' ? args.message.trim() : '';
+          if (!message) {
+            return { id: toolCall.id, toolName: name, error: 'git_commit requires a non-empty commit message', success: false, duration: Date.now() - start };
+          }
+          const commitPaths = Array.isArray(args.paths) ? args.paths.map(String).filter((p) => p.trim().length > 0) : [];
+          // Shell git via the existing execute_command Rust command — no new
+          // Rust surface for git. The single-quote escapers below are the
+          // complete escaping story for exactly the two shells the backend
+          // picks (`sh -c` on Unix, PowerShell on Windows).
+          const addCmd = commitPaths.length > 0 ? `git add -- ${commitPaths.map(quoteShellArg).join(' ')}` : 'git add -A';
+          const add = await this.call('execute_command', { workspace: ws, command: addCmd, proxyUrl: this.proxyUrl, sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
+          if (add.exitCode !== 0) {
+            return { id: toolCall.id, toolName: name, error: add.stderr || add.stdout || 'git add failed', success: false, duration: Date.now() - start };
+          }
+          const commit = await this.call('execute_command', { workspace: ws, command: `git commit -m ${quoteShellArg(message)}`, proxyUrl: this.proxyUrl, sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
+          if (commit.exitCode !== 0) {
+            return { id: toolCall.id, toolName: name, error: commit.stderr || commit.stdout || 'git commit failed', success: false, duration: Date.now() - start };
+          }
+          return { id: toolCall.id, toolName: name, result: (commit.stdout || commit.stderr || 'Committed.').trim(), success: true, duration: Date.now() - start };
+        }
+        case 'git_branch': {
+          const action = typeof args.action === 'string' ? args.action : 'list';
+          const branchName = typeof args.name === 'string' ? args.name.trim() : '';
+          if ((action === 'create' || action === 'switch') && !branchName) {
+            return { id: toolCall.id, toolName: name, error: `git_branch action "${action}" requires a branch name`, success: false, duration: Date.now() - start };
+          }
+          if ((action === 'create' || action === 'switch') && branchName.startsWith('-')) {
+            return { id: toolCall.id, toolName: name, error: `invalid branch name: ${branchName}`, success: false, duration: Date.now() - start };
+          }
+          const branchCmd = action === 'create' ? `git checkout -b ${quoteShellArg(branchName)}`
+            : action === 'switch' ? `git checkout ${quoteShellArg(branchName)}`
+            : 'git branch';
+          const branchOut = await this.call('execute_command', { workspace: ws, command: branchCmd, proxyUrl: this.proxyUrl, sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
+          if (branchOut.exitCode !== 0) {
+            return { id: toolCall.id, toolName: name, error: branchOut.stderr || branchOut.stdout || 'git branch failed', success: false, duration: Date.now() - start };
+          }
+          return { id: toolCall.id, toolName: name, result: (branchOut.stdout || branchOut.stderr || '').trim() || '(no output)', success: true, duration: Date.now() - start };
+        }
         case 'create_directory': {
           const path = String(args.path ?? '');
           const batch = await this.captureWriteBatch('create_directory', [path]);
@@ -1164,7 +1217,7 @@ export class TauriToolAdapter implements ToolAdapter {
           return {
             id: toolCall.id,
             toolName: name,
-            error: `Unknown tool: ${name}. Available: read_file, write_file, edit_file, search_files, list_files, execute_command, create_directory, diff_files, web_search, web_fetch, web_public_api, web_scrape, glob_files, replace_files, git_diff, git_log, git_status, sys_info`,
+            error: `Unknown tool: ${name}. Available: read_file, write_file, edit_file, search_files, list_files, execute_command, create_directory, diff_files, web_search, web_fetch, web_public_api, web_scrape, glob_files, replace_files, git_diff, git_log, git_status, git_commit, git_branch, sys_info`,
             success: false,
             duration: Date.now() - start,
           };
