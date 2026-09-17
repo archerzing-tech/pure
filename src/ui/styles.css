@@ -13046,3 +13046,148 @@ button svg,
 @media (prefers-reduced-motion: reduce) {
   .parallel-card-spinner { animation: none; }
 }
+
+/* ═══ Worktree wrap-up card (4.4) ═══
+   Sits between the transcript and the composer whenever the visible session
+   works in an auto-created worktree (4.1) with unmerged work: diff preview,
+   one-click merge back, or discard. Hidden until there is something to settle. */
+#worktree-finish-host[hidden] { display: none !important; }
+#worktree-finish-host {
+  flex-shrink: 0;
+  padding: 0 16px 8px;
+}
+.wf-card {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 12px 14px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm, none);
+}
+.wf-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wf-title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.wf-chips {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.wf-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.wf-chip-warn {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+.wf-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+.wf-branch {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--text-tertiary) 10%, transparent);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.wf-diff {
+  margin-top: 8px;
+  min-width: 0;
+}
+.wf-diff summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  user-select: none;
+}
+.wf-diff summary:hover { color: var(--text-secondary); }
+.wf-diff-stat {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--text-tertiary) 7%, transparent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  overflow-x: auto;
+  white-space: pre;
+}
+.wf-commits {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.wf-commit {
+  padding: 2px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-commit-hash {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  margin-right: 8px;
+}
+.wf-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.wf-merge,
+.wf-discard {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all .15s var(--ease-out);
+}
+.wf-merge {
+  background: var(--accent);
+  color: #fff;
+}
+.wf-merge:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, #000);
+}
+.wf-discard {
+  background: transparent;
+  border-color: var(--border-light);
+  color: var(--text-secondary);
+}
+.wf-discard:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+}
+.wf-merge:disabled,
+.wf-discard:disabled {
+  opacity: .55;
+  cursor: default;
+}
+/* While merging/discard runs, dim the card so the busy button reads as the
+   only live thing (same intent as the tool-row spinner dim). */
+.wf-busy .wf-diff,
+.wf-busy .wf-subtitle { opacity: .6; }

@@ -122,6 +122,10 @@ export interface WorktreeBinding {
   repoRoot: string;
   /** The worktree's checked-out branch (without refs/heads/). */
   branch: string;
+  /** The MAIN worktree's checked-out branch — the default target the
+   * merge-back flow (4.4) diffs and merges into. Empty when the main
+   * worktree is in detached HEAD (nothing to merge "into" by name). */
+  mainBranch: string;
 }
 
 /**
@@ -143,19 +147,26 @@ export async function describeWorktree(git: GitRunner, worktreePath: string): Pr
   }
   const hereNorm = normalizePath(here);
   let mainRoot = '';
+  let mainBranch = '';
   let branch = '';
   for (const block of list.split(/\n\s*\n/)) {
     const lines = block.split('\n').map((line) => line.trim()).filter(Boolean);
     const wtLine = lines.find((line) => line.startsWith('worktree '));
     if (!wtLine) continue;
     const path = wtLine.slice('worktree '.length).trim();
-    if (!mainRoot) mainRoot = path;
+    const blockBranch = (lines.find((line) => line.startsWith('branch ')) ?? '').slice('branch '.length).trim();
+    // The main worktree is always listed first — its branch is the merge
+    // target the finish flow (4.4) diffs against.
+    if (!mainRoot) {
+      mainRoot = path;
+      mainBranch = blockBranch.replace(/^refs\/heads\//, '');
+    }
     if (normalizePath(path) === hereNorm) {
-      branch = (lines.find((line) => line.startsWith('branch ')) ?? '').slice('branch '.length).trim();
+      branch = blockBranch;
     }
   }
   if (!mainRoot) return null;
-  return { worktreePath: here, repoRoot: mainRoot, branch: branch.replace(/^refs\/heads\//, '') };
+  return { worktreePath: here, repoRoot: mainRoot, branch: branch.replace(/^refs\/heads\//, ''), mainBranch };
 }
 
 function trimSlashes(path: string): string {
