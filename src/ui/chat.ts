@@ -5484,6 +5484,13 @@ export class SessionChatManager {
     return this.controllers.get(sessionId) ?? null;
   }
 
+  /** The transcript host of a live session (roadmap 5.2: settle-notification
+   * classification probes the settled transcript's tail). Null when the
+   * controller is not live. */
+  sessionHost(sessionId: string): HTMLElement | null {
+    return this.hosts.get(sessionId) ?? null;
+  }
+
   /** Cancel and drop every live session controller + host (delete-all). */
   clearAll(): void {
     for (const sessionId of [...this.controllers.keys()]) this.forgetSession(sessionId);

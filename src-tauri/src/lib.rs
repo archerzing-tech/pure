@@ -14819,6 +14819,60 @@ async fn open_path(path: String) -> Result<(), String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  System notifications (roadmap 5.2)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// A tiny in-house surface instead of the notification plugin: the plugin's
+// JS-side click events are unreliable inside macOS WKWebView, while
+// notify-rust gives us the body-click callback — which emits the session id
+// back to the frontend (`notification-clicked`) so one click jumps straight
+// to the conversation. macOS first notification triggers the standard system
+// permission prompt once; there is no pre-request flow (matching the
+// friction-averse default everywhere else).
+#[derive(serde::Deserialize)]
+struct TurnNotification {
+    title: String,
+    body: String,
+    session_id: String,
+}
+
+// On macOS the click callback dies with the NotificationHandle, so handles
+// must outlive the command call. Other platforms have no such rule and keep
+// no registry.
+#[cfg(target_os = "macos")]
+static NOTIFICATION_HANDLES: StdMutex<Vec<notify_rust::NotificationHandle>> = StdMutex::new(Vec::new());
+
+#[tauri::command]
+fn send_turn_notification(app: tauri::AppHandle, notification: TurnNotification) -> Result<(), String> {
+    use tauri::Emitter;
+    let session_id = notification.session_id.clone();
+    let handle = notify_rust::Notification::new()
+        .summary(&notification.title)
+        .body(&notification.body)
+        .on_action(move |_| {
+            // Any activation (body click, action button) means "take me
+            // there" — the frontend does the actual session switch.
+            let _ = app.emit("notification-clicked", session_id.clone());
+        })
+        .show()
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        // The handle above IS the callback's lease — keep the newest few
+        // alive (old notifications can no longer be clicked anyway).
+        if let Ok(mut slots) = NOTIFICATION_HANDLES.lock() {
+            slots.push(handle);
+            if slots.len() > 32 {
+                slots.drain(0..slots.len() - 32);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = handle;
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  Tauri App Entry
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -15104,6 +15158,7 @@ pub fn run() {
             save_session_stats,
             load_session_stats,
             load_all_session_stats,
+            send_turn_notification,
         ])
         .build(tauri::generate_context!())
         .expect("error while building pure")

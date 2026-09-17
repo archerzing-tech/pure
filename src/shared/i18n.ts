@@ -57,6 +57,11 @@ const translations: Record<Language, Record<string, string>> = {
     'worktreeFinish.detached': '主工作区处于 detached HEAD，没有可合并的分支。',
     'worktreeFinish.cleanupKept': '已合并；worktree 保留在 {path}（清理失败，不影响成果）',
     'worktreeFinish.retentionConfirm': '这个会话的 worktree 里还有未合并的工作（{detail}）。删除会话不会删掉它，worktree 会保留在 {path}，随时可以回来合并。仍要删除会话吗？',
+    // 5.2 — system notifications for settled background sessions.
+    'notify.done': '任务完成',
+    'notify.needsConfirm': '需要你确认',
+    'notify.failed': '任务失败',
+    'notify.bodyFallback': '切回去看看结果。',
     'workspace.missingCleared': '工作区文件夹已不存在（可能被移动或删除），已自动清除该工作区：{path}',
     'workspace.browseTitle': '选择工作区文件夹',
     'workspace.dropHint': '拖拽文件或文件夹到窗口，松开即可导入或切换工作区',
@@ -952,6 +957,11 @@ const translations: Record<Language, Record<string, string>> = {
     'worktreeFinish.detached': 'The main workspace is in detached HEAD — there is no branch to merge into.',
     'worktreeFinish.cleanupKept': 'Merged; the worktree is kept at {path} (cleanup failed — your work is safe)',
     'worktreeFinish.retentionConfirm': 'This session\'s worktree still holds unmerged work ({detail}). Deleting the session keeps it: the worktree stays at {path} and can be merged anytime. Delete the session anyway?',
+    // 5.2 — system notifications for settled background sessions.
+    'notify.done': 'Task finished',
+    'notify.needsConfirm': 'Needs your confirmation',
+    'notify.failed': 'Task failed',
+    'notify.bodyFallback': 'Switch back to see the result.',
     'workspace.missingCleared': 'The workspace folder no longer exists (moved or deleted) — cleared automatically: {path}',
     'workspace.browseTitle': 'Select workspace folder',
     'workspace.dropHint': 'Drop a file or folder to import it or switch workspace',
