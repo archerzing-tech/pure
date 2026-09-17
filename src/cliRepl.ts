@@ -33,6 +33,7 @@ import { detectNetworkSummary, detectRuntimeVersions } from './adapter/node/Node
 import { buildTaskContract, discoverWorkspace, formatTaskContract, workspaceProfileSummary, type TaskContract, type WorkspaceProfile } from './shared/delivery';
 import { buildRepairPrompt, hasRepairableQualityFindings, qualityGateSummary, runProjectQualityGate, type ProjectQualityGateResult } from './ui/projectQualityGate';
 import type { Harness } from './harness/Harness';
+import type { MCPClient } from './harness/mcp/MCPClient';
 import type { EngineEvent, Message, ToolAdapter, ToolDefinition } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
 import { loadConfig, DEFAULT_CLI_AUTO_APPROVE, PURE_DIR } from './cliConfig';
@@ -258,6 +259,7 @@ async function assembleCliPrompt(
   toolsDefs: ToolDefinition[],
   userText: string,
   context: UserTurnContext,
+  mcpClient?: MCPClient,
 ) {
   const userWorkspace = args.workspace && args.workspace !== 'true'
     ? args.workspace
@@ -285,6 +287,10 @@ async function assembleCliPrompt(
     network: buildNetworkContext(),
     shell: buildShellContextLine(),
     skills: [...(loadConfig()?.hubSkills ?? []), ...loadAppSkills()],
+    // MCP resources share the optional-context tier with skills; the client
+    // prefetches on connect and bounds the wait, so a slow server never
+    // delays the turn indefinitely.
+    mcpResources: mcpClient ? await mcpClient.collectResourceContext() : undefined,
     mode,
     budget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
     conventions,
@@ -590,7 +596,7 @@ async function runOneShot(args: CliArgs) {
   const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, args.prompt, {
     ...workflow.userContext,
     contract: taskContract ? formatTaskContract(taskContract) : undefined,
-  });
+  }, mcpClient);
   const systemPrompt = assembly.systemPrompt;
   const userTurn = assembly.userPrompt ?? args.prompt;
   const budgetDiagnostic = formatPromptBudgetDiagnostic(assembly.budget);
@@ -789,7 +795,7 @@ async function runRepl(args: CliArgs) {
     const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, input, {
       ...workflow.userContext,
       contract: taskContract ? formatTaskContract(taskContract) : undefined,
-    });
+    }, mcpClient);
     const systemPrompt = assembly.systemPrompt;
     const userTurn = assembly.userPrompt ?? input;
 
