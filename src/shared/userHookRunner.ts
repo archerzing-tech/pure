@@ -67,6 +67,10 @@ function cap(text: string): string {
   return text.length > HOOK_STDOUT_CAP_CHARS ? text.slice(0, HOOK_STDOUT_CAP_CHARS) : text;
 }
 
+/** The hook exited without reading the payload we piped it (see the stdin write
+ *  in the runner below): an unread payload is not a failure. */
+function ignoreBrokenPipe(): void {}
+
 /** Node-side runner: `bash -c` on POSIX; PowerShell -EncodedCommand on Windows
  * (the same transport the execute_command tool documents, so quoting behaves
  * identically for hooks and for tool commands). */
@@ -83,8 +87,20 @@ export function createNodeUserHookRunner(opts: { cwd?: string } = {}): UserHookR
       stdout: 'pipe',
       stderr: 'pipe',
     });
-    proc.stdin.write(JSON.stringify(payload) + '\n');
-    proc.stdin.end();
+    // The payload is a courtesy, not a contract: plenty of hooks never read
+    // stdin (`command -v prettier`, a lint probe, …) and exit before the write
+    // lands, closing the pipe under it. Without this guard bun raises `EPIPE:
+    // broken pipe, write` out of the runner — the hook's own result would turn
+    // into an exception, breaking the "never a throw" contract its callers rely
+    // on (this failed the Linux CI run even though macOS rarely loses the race).
+    // Both delivery shapes are covered: the sync throw, and the promise bun
+    // returns when the write has to be flushed.
+    try {
+      void Promise.resolve(proc.stdin.write(JSON.stringify(payload) + '\n')).catch(ignoreBrokenPipe);
+      void Promise.resolve(proc.stdin.end()).catch(ignoreBrokenPipe);
+    } catch {
+      // Unread payload: the hook's exit code and output stay the source of truth.
+    }
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
