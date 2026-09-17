@@ -32,8 +32,7 @@ describe('ToolRegistry command guard', () => {
   });
 });
 
-describe('buildWritePreview', () => {
-  it('builds a full-content preview for write_file', () => {
+describe('buildWritePreview', () => {  it('builds a full-content preview for write_file', () => {
     const preview = buildWritePreview('write_file', {
       path: 'src/foo.ts',
       content: 'export const a = 1;',
@@ -267,5 +266,48 @@ describe('PermissionManager write preview passthrough', () => {
     });
 
     expect(received!.signal).toBe(ac.signal);
+  });
+});
+
+// 3.3, simplified by product decision: the owner finds per-commit confirmation
+// cards more costly than the risk, so the dedicated git write tools run at
+// riskLevel 'low' — auto-approved in NORMAL, still blocked by PLAN/DONT_ASK
+// through the WRITE tag. No new command guard; remote/history-rewriting git
+// keeps living on execute_command's existing high-risk path.
+describe('git write tools permission flow', () => {
+  function ctxOf(tool: string): PermissionContext {
+    return { tool, isRead: false, riskLevel: 'low' };
+  }
+
+  it('NORMAL auto-approves git_commit / git_branch without prompting', async () => {
+    let asked = 0;
+    const pm = new PermissionManager('NORMAL', async () => {
+      asked++;
+      return { allowed: false };
+    });
+    for (const tool of ['git_commit', 'git_branch']) {
+      const decision = await pm.askUser(ctxOf(tool));
+      expect(decision.allowed).toBe(true);
+      expect(decision.autoApproved).toBe(true);
+    }
+    expect(asked).toBe(0);
+  });
+
+  it('PLAN still blocks them via the WRITE classification', async () => {
+    const pm = new PermissionManager('PLAN');
+    const decision = await pm.askUser(ctxOf('git_commit'));
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain('PLAN');
+  });
+
+  it('medium-risk writes still prompt in NORMAL (contrast)', async () => {
+    let asked = 0;
+    const pm = new PermissionManager('NORMAL', async () => {
+      asked++;
+      return { allowed: true };
+    });
+    const decision = await pm.askUser({ tool: 'write_file', isRead: false, riskLevel: 'medium' });
+    expect(decision.allowed).toBe(true);
+    expect(asked).toBe(1);
   });
 });
