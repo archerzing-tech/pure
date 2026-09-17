@@ -5467,6 +5467,16 @@ export class SessionChatManager {
     this.openSession(sessionId);
   }
 
+  /** The live controller for `sessionId`, WITHOUT activating or creating it
+   * (roadmap 4.2): the task queue's background lanes drive sessions that are
+   * already open this app-run — hidden controllers keep streaming by design,
+   * so a lane can run against one while another conversation is visible.
+   * Returns null for sessions never opened here; those stay pending until
+   * the user actually visits the workspace. */
+  controllerFor(sessionId: string): ChatController | null {
+    return this.controllers.get(sessionId) ?? null;
+  }
+
   /** Cancel and drop every live session controller + host (delete-all). */
   clearAll(): void {
     for (const sessionId of [...this.controllers.keys()]) this.forgetSession(sessionId);
