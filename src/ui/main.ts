@@ -18,7 +18,8 @@ import { buildExportSavedToast } from './statsExportToast';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { checkForUpdatesSilently, fetchAppVersion } from './updater';
 import { t, updateLanguage } from '../shared/i18n';
-import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
+import { workspaceBase } from '../shared/paths';
 import { loadSessionList, loadSessionStatsForList, flushSessionSaves, saveSessionWorkspace, type SessionMeta, type SessionStats } from './store';
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
@@ -51,6 +52,7 @@ import { Scheduler } from './scheduler';
 import { WorkspaceController, tauriGitRunner } from './workspace';
 import { inspectWorktreeFinish, mergeWorktreeBack, discardWorktree } from '../shared/worktreeFinish';
 import { WorktreeFinishCard, bindWorktreeFinishCard, retentionMessage, type WorktreeFinishCardDeps } from './worktreeFinishCard';
+import { SettleNotifier } from './notify';
 import { SessionSidebar, openPureWindow } from './sessionSidebar';
 import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
 import { groupConversationTurns, segmentConversationTurns } from './conversationTurns';
@@ -365,6 +367,38 @@ if (worktreeFinishHost) {
   onRunningSessionsChanged(() => void worktreeFinishCard.refresh());
   void worktreeFinishCard.refresh();
 }
+
+// ── System notifications (5.2) ──
+// A settled background session (done / waiting for your confirmation /
+// failed — classified from the transcript tail) raises a native notification;
+// clicking it jumps straight to that session (listener bound below). In the
+// plain-web dev runtime there is no bridge — the notifier wires anyway and
+// the notify step stays a silent no-op.
+const settleNotifier = new SettleNotifier({
+  runningIds: () => runningSessionIdList(),
+  currentId: () => chat.getSessionId(),
+  windowVisible: async () => {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      return await getCurrentWindow().isVisible();
+    } catch {
+      // No window API — DOM visibility is the best available signal.
+      return !document.hidden;
+    }
+  },
+  hostOf: (sessionId) => chat.sessionHost(sessionId),
+  messagesOf: (sessionId) => chat.controllerFor(sessionId)?.getMessages() ?? null,
+  titleOf: async (sessionId) => {
+    const live = chat.controllerFor(sessionId)?.getWorkspace() ?? '';
+    const row = (await loadSessionList()).find((s) => s.id === sessionId);
+    return row?.title || workspaceBase(live) || `…${sessionId.slice(-4)}`;
+  },
+  notify: async (payload) => {
+    if (!isTauriRuntime()) return;
+    await tauriInvoke('send_turn_notification', { notification: payload });
+  },
+});
+onRunningSessionsChanged(() => settleNotifier.refresh());
 
 // ── Scheduled tasks (frontend scheduler) ──
 // Schedules live in the config (Settings → 定时任务). A due task enqueues into
@@ -1588,6 +1622,23 @@ if (isTauriRuntime()) {
       const { listen } = await import('@tauri-apps/api/event');
       await listen('menu:new-chat', () => sidebarNewChat.click());
       await listen('menu:open-settings', () => { void openSettings(); });
+      // Notification click (5.2): Rust emits the settled session's id —
+      // bring the window out of the tray and switch to that conversation.
+      await listen('notification-clicked', (event) => {
+        const sessionId = String((event as unknown as { payload?: unknown }).payload ?? '');
+        if (!sessionId) return;
+        void (async () => {
+          try {
+            const { getCurrentWindow } = await import('@tauri-apps/api/window');
+            const win = getCurrentWindow();
+            await win.show();
+            await win.setFocus();
+          } catch {
+            // Window API unavailable — the session switch below still happens.
+          }
+        })();
+        chat.setSessionId(sessionId);
+      });
     } catch (err) {
       console.error('[pure] native menu event bind failed:', err);
     }
