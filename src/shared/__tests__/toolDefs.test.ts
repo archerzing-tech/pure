@@ -41,12 +41,14 @@ describe('tool table consistency', () => {
     }
   });
 
-  it('git write tools are classified as confirmed writes, not silent reads', () => {
+  it('git write tools keep write semantics but run friction-free in NORMAL mode', () => {
     for (const name of ['git_commit', 'git_branch']) {
       expect(TOOL_METADATA[name]?.isWrite).toBe(true);
       expect(TOOL_METADATA[name]?.sideEffects).toBe(true);
       const tagged = BUILT_IN_TOOLS.find((t) => t.name === name);
-      expect(tagged?.riskLevel).toBe('medium');
+      // low → PermissionManager auto-approves in NORMAL; the WRITE tag keeps
+      // the lock/snapshot classification and PLAN/DONT_ASK blocking.
+      expect(tagged?.riskLevel).toBe('low');
       expect(tagged?.tags).toContain('write');
     }
   });
