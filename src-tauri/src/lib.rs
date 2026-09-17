@@ -14824,9 +14824,9 @@ async fn open_path(path: String) -> Result<(), String> {
 
 // A tiny in-house surface instead of the notification plugin: the plugin's
 // JS-side click events are unreliable inside macOS WKWebView, while
-// notify-rust gives us the body-click callback — which emits the session id
-// back to the frontend (`notification-clicked`) so one click jumps straight
-// to the conversation. macOS first notification triggers the standard system
+// notify-rust lets us wait for the click and emit the session id back to the
+// frontend (`notification-clicked`) so one click jumps straight to the
+// conversation. macOS first notification triggers the standard system
 // permission prompt once; there is no pre-request flow (matching the
 // friction-averse default everywhere else).
 #[derive(serde::Deserialize)]
@@ -14836,12 +14836,6 @@ struct TurnNotification {
     session_id: String,
 }
 
-// On macOS the click callback dies with the NotificationHandle, so handles
-// must outlive the command call. Other platforms have no such rule and keep
-// no registry.
-#[cfg(target_os = "macos")]
-static NOTIFICATION_HANDLES: StdMutex<Vec<notify_rust::NotificationHandle>> = StdMutex::new(Vec::new());
-
 #[tauri::command]
 fn send_turn_notification(app: tauri::AppHandle, notification: TurnNotification) -> Result<(), String> {
     use tauri::Emitter;
@@ -14849,26 +14843,20 @@ fn send_turn_notification(app: tauri::AppHandle, notification: TurnNotification)
     let handle = notify_rust::Notification::new()
         .summary(&notification.title)
         .body(&notification.body)
-        .on_action(move |_| {
-            // Any activation (body click, action button) means "take me
-            // there" — the frontend does the actual session switch.
-            let _ = app.emit("notification-clicked", session_id.clone());
-        })
         .show()
         .map_err(|e| e.to_string())?;
-    #[cfg(target_os = "macos")]
-    {
-        // The handle above IS the callback's lease — keep the newest few
-        // alive (old notifications can no longer be clicked anyway).
-        if let Ok(mut slots) = NOTIFICATION_HANDLES.lock() {
-            slots.push(handle);
-            if slots.len() > 32 {
-                slots.drain(0..slots.len() - 32);
+    // wait_for_action consumes the handle and BLOCKS the calling thread until
+    // the user interacts with the notification — so it runs on a thread of
+    // its own, never inside this command. The thread is the click callback's
+    // lease: only a real body click ("default"; dismissal is "__closed")
+    // means "take me there", and the frontend does the session switch.
+    std::thread::spawn(move || {
+        handle.wait_for_action(move |action| {
+            if action == "default" {
+                let _ = app.emit("notification-clicked", session_id.clone());
             }
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = handle;
+        });
+    });
     Ok(())
 }
 
@@ -14929,7 +14917,7 @@ fn update_tray_sessions(
     let menu = tauri::menu::Menu::with_items(&app, &refs).map_err(|e| e.to_string())?;
     let slot = tray.0.lock().map_err(|_| "tray state poisoned".to_string())?;
     if let Some(icon) = slot.as_ref() {
-        icon.set_menu(menu).map_err(|e| e.to_string())?;
+        icon.set_menu(Some(menu)).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
