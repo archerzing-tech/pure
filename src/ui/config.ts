@@ -253,11 +253,11 @@ export function defaults(): PureConfig {
     theme: 'light',
     fontSize: 'medium',
     density: 'comfortable',
-    permissionMode: 'confirm',
+    permissionMode: 'auto',
     sandboxCommands: true,
     autoPermRead: true,
-    autoPermWrite: false,
-    autoPermCmd: false,
+    autoPermWrite: true,
+    autoPermCmd: true,
     autoPermGit: true,
     toolFS: true,
     toolCmd: true,
@@ -287,7 +287,7 @@ export function defaults(): PureConfig {
     mapTileCacheMB: DEFAULT_MAP_TILE_CACHE_MB,
     mapTileKey: '',
     schedules: [],
-    configVersion: 14,
+    configVersion: 15,
   };
 }
 
@@ -703,6 +703,22 @@ export function loadConfig(): PureConfig | null {
         cfg.autoContinue = true;
         cfg.planContinueGuard = true;
         cfg.configVersion = 14;
+        needsPersist = true;
+      }
+      // Config v15: authorization prompts are OFF by default (2026-09-17
+      // product decision — pure runs without waiting for approvals; the
+      // irreversible-destruction UI confirms are unaffected). Existing configs
+      // still carrying the old ask-first defaults flip ONCE: 'confirm' (the
+      // old default — almost certainly never a deliberate choice) becomes
+      // 'auto', and the write/cmd auto-approve toggles turn on. A value saved
+      // afterwards in Settings persists (configVersion stays 15), so it never
+      // silently reverts; 'restricted' is deliberately left alone — that is an
+      // explicit stronger intent, not an old default.
+      if ((parsed.configVersion ?? 1) < 15) {
+        if (cfg.permissionMode === 'confirm') cfg.permissionMode = 'auto';
+        cfg.autoPermWrite = true;
+        cfg.autoPermCmd = true;
+        cfg.configVersion = 15;
         needsPersist = true;
       }
       if (isTauriRuntime() && cfg.apiKey) {

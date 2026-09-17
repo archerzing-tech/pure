@@ -3079,7 +3079,6 @@ export class ChatController {
         keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
         return;
       }
-      let pauseAfterPlanning = false;
       if (workflow.userContext.buildProtocol) {
         userBuildProtocol = workflow.userContext.buildProtocol;
       }
@@ -3170,16 +3169,14 @@ export class ChatController {
           maybeShowAssessment();
           maybeShowPlanSummary();
           showPlanCard(planForReview);
-          const approvePlan = (explicitlyApproved = false) => {
+          const approvePlan = () => {
             if (assessmentFlow) {
-              // 计划已确认：先落定风险与闸门两个前置节点，再进入执行/等待。
+              // 计划已确认：先落定风险与闸门两个前置节点，再进入执行。
               assessmentFlow.completePhase('risk', `风险等级已确认：${riskLabelOf(effectiveIntent.riskLevel)}`);
               assessmentFlow.completePhase('gate', effectiveIntent.requiresConfirmation
-                ? '你已确认影响范围，安全闸门已通过。'
+                ? '影响范围已评估，安全闸门已通过。'
                 : '评估完成，当前请求可以进入执行阶段。');
-              assessmentFlow.setPhase('execute', pauseAfterPlanning
-                ? '计划已就绪，等待你回复后开始第一个可验证步骤…'
-                : '边界已确认，准备按小步策略执行…');
+              assessmentFlow.setPhase('execute', '边界已确认，准备按小步策略执行…');
             }
             // Keep the approved plan and cursor outside this send() so the next
             // user message continues the same phase/Todo instead of reopening
@@ -3188,16 +3185,13 @@ export class ChatController {
             this.activePlanNumber = 1;
             this.activeTodoNumber = 1;
             this.activePlanStarted = false;
-            // 用户已在确认卡上明确批准（项目构建/高风险/强制计划模式）：直接进入执行，
-            // 不再二次暂停等一句“开始”；自动检测的复杂任务保留“计划就绪→回复开工”的节奏。
-            if (!forcedMode && !explicitlyApproved) pauseAfterPlanning = true;
             // Inject the validated plan object, never the raw model response.
             // This keeps repaired JSON out of context while still ensuring the
             // approved project steps are the instructions the build follows.
-            // !pauseAfterPlanning = 本轮无需等待用户“开工”消息（确认卡已批准，或
-            // forced-yolo 直接放行）→ 模型第一轮必须立即开始执行，不能再要求“等用户
-            // 下一条消息才开工”，否则引擎第一轮就空转完成，界面会直接从计划跳到交付。
-            userPlan = formatPlanForPrompt(planForReview, needsDeliveryGate, !pauseAfterPlanning);
+            // 计划一就绪本轮直接开工（2026-09-17 产品决策：不再有“计划批准暂停”）
+            // → approved=true，模型第一轮必须立即开始执行，不能再要求“等用户下一条
+            // 消息才开工”，否则引擎第一轮就空转完成，界面会直接从计划跳到交付。
+            userPlan = formatPlanForPrompt(planForReview, needsDeliveryGate, true);
             // Plan is ready: the bubble no longer promises generation.
             if (modeBubble) modeBubble.textContent = forcedMode
               ? t('plan.modeActive', '已切换为 {mode} 模式，按方案执行').replace('{mode}', modeLabel(analysis.mode))
@@ -3208,7 +3202,9 @@ export class ChatController {
           };
           // 用户强制 yolo 时不做任何门控：即使请求是项目级构建，也直接放行执行
           // （forceMode 是用户明确的“不要问我”选择）。
-          const needsInteractiveApproval = riskReview || forcedMode === 'plan' || forcedMode === 'build';
+          // 高风险不再单独触发确认卡（2026-09-17 产品决策：默认自动允许，不等授权）；
+          // 只有用户主动选择的计划/构建模式保留确认流程——那是模式本身的语义。
+          const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';
           if (needsInteractiveApproval) {
             if (riskReview) {
               assessmentFlow?.setPhase('gate', '高风险请求需要你的明确确认，尚未执行任何写入…');
@@ -3244,12 +3240,12 @@ export class ChatController {
               discardPlanCard();
               modeBubble?.remove();
             } else {
-              approvePlan(true);
+              approvePlan();
             }
           } else {
             // Auto-detected work keeps moving. The plan is visible context,
             // not a second confirmation prompt the user has to dismiss.
-            approvePlan(true);
+            approvePlan();
           }
         } else if (forcedMode === 'plan' || forcedMode === 'build') {
           // The plan gate needs a real filesystem root (and the Planning skill);
@@ -3621,7 +3617,7 @@ export class ChatController {
         }
       }
 
-      if ((pauseAfterPlanning || planPauseRequested) && this.activeComplexPlan) {
+      if (planPauseRequested && this.activeComplexPlan) {
         // 计划就绪并停在第一个 Todo 前：明确切到「等待你回复」状态，而不是
         // 让执行节点一直“进行中”地空转。计划卡、暂停气泡、评估卡三处联动。
         assessmentFlow?.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
@@ -3678,7 +3674,7 @@ export class ChatController {
       // 检查都已真实完成，闸门随检查结果落定，卡片再随执行/验证进度推进。
       maybeShowAssessment();
       maybeShowPlanSummary();
-      if (assessmentFlow && !pauseAfterPlanning) {
+      if (assessmentFlow) {
         assessmentFlow.setPhase('execute', '已通过评估闸门，开始按确认范围小步执行…');
       }
       const finalPromptTools = effectiveWorkspace

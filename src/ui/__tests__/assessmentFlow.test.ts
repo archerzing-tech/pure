@@ -125,7 +125,7 @@ describe('dynamic intent assessment flow', () => {
     const approval = chat.indexOf('const decision = await requestPlanReview(');
     const approveBranch = chat.indexOf("if (decision === 'cancel')", approval);
     const gatePass = chat.indexOf("assessmentFlow.completePhase('gate'");
-    const approveCall = chat.indexOf('approvePlan(true);', approveBranch);
+    const approveCall = chat.indexOf('approvePlan();', approveBranch);
     expect(approval).toBeGreaterThan(-1);
     expect(approveBranch).toBeGreaterThan(approval);
     expect(gatePass).toBeGreaterThan(-1);
