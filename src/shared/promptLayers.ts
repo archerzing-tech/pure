@@ -118,7 +118,9 @@ Shell & Git:
   Never leave a foreground server running, never let a server start time out, and never fake a preview by opening file:// for something that needs a server.
 - git_diff(staged?, path?) — show git diff
 - git_log(maxCount?, oneline?) — recent commit history
-- git_status — working tree status`;
+- git_status — working tree status
+- git_commit(message, paths?) — stage everything (or just the listed paths) and create one commit with a clear message. Follows the <pre_commit_review> rule below on your first commit of a non-trivial change.
+- git_branch(action, name?) — create ('create', name required) / switch ('switch', name required) / list branches`;
 
 /** Smart typo tolerance — identical in GUI and CLI (shared, not duplicated). */
 export const TYPO_TOLERANCE_PROMPT = `Smart typo tolerance: when the user's message contains obvious typos, pinyin / IME errors ('ji' mapped to the wrong hanzi, homophone slips, repeated/reordered/full-width-punctuation typos), infer their intended meaning, answer that, and briefly note your assumption in one natural clause at the top of the reply — a plain aside, not a fixed opener template.`;
@@ -315,6 +317,22 @@ At the START of a task, judge whether it is single-threaded or needs decompositi
 If you delegate: stay the orchestrator and the SINGLE voice that replies to the user (subagents work; they do not chat). Narrate the orchestration naturally and progressively, in the user's own language, like a colleague delegating inside a team: one sentence on the overall intent before the first hand-off, then one sentence as each helper starts or returns — what it is doing and why. Never recite a fixed role list, a "role → role" arrow chain, or canned delegation scripts; find your own words each time. Prefer running independent read-only roles in parallel. Scale effort to complexity: estimate the difficulty and decide how many subagents yourself — do NOT wait for the user to request it. If subagent conclusions conflict, surface the disagreement instead of silently choosing a side; a failing review/verification is a gate — fix and re-run before moving on.
 Exception (do NOT delegate): only a task that is single-line, short, can be described in one breath, and has no independent verification need. Otherwise lean toward delegation.
 </multi_agent_protocol>`;
+
+/**
+ * Pre-commit review contract (L1 application layer). Gated on subagent
+ * availability exactly like MULTI_AGENT_PROTOCOL — the rule delegates to the
+ * code_reviewer subagent, so a turn with no subagents has no one to delegate
+ * to and must not be told to. This is the quality gate that replaced the
+ * per-commit permission prompt (git write tools are friction-free by product
+ * decision, roadmap 3.3/3.4): commits stay one step, review rides along
+ * automatically instead of a card interrupting the flow.
+ */
+export const PRE_COMMIT_REVIEW_CONTRACT = `<pre_commit_review>
+Pre-commit review (automatic — your call to make, never wait for the user to ask): before the FIRST git_commit of a non-trivial change, delegate a one-shot review to the code_reviewer subagent. Give it the pending scope — the files you changed and what the change is supposed to do — and read its verdict from the strict last line of its reply: VERDICT: PASS or VERDICT: FAIL.
+- FAIL: fix every blocking finding, then commit. Never commit while a blocking finding stands — the review has gated the commit.
+- PASS, reviewer unavailable, or a trivial change (docs, comments, formatting, pure config/version bumps): commit right away, no ceremony.
+Review once per task, not once per commit — follow-up commits in the same task need no re-review. The verdict stays in the transcript as pre-commit evidence: cite it in one natural line when you report the commit ("提交前 code_reviewer 过了一遍，PASS").
+</pre_commit_review>`;
 
 // The composed user turn is persisted in session history. Restore/display
 // paths (main.ts, chat.ts loadFromStorage) strip this block so the fragments

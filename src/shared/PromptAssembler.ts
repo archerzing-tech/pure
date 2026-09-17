@@ -19,6 +19,7 @@ import {
   LOGICAL_TRAPS_PROMPT,
   MULTI_AGENT_PROTOCOL,
   PLAUSIBILITY_REVIEW_PROMPT,
+  PRE_COMMIT_REVIEW_CONTRACT,
   PUBLIC_API_DIRECTORIES_PROMPT,
   SVG_OUTPUT_PROMPT,
   SYSTEM_CORE_PROMPT,
@@ -320,7 +321,12 @@ export class PromptAssembler {
       // or a workspace-less turn has no subagent tools and must not be told to
       // delegate; delivery_contract is safe to always include.
       ...(context.hasSubagents
-        ? [fragment('multi_agent', MULTI_AGENT_PROTOCOL, 115, true)]
+        ? [
+            fragment('multi_agent', MULTI_AGENT_PROTOCOL, 115, true),
+            // Pre-commit review delegates to code_reviewer, so it shares the
+            // subagent gate: no subagents → no reviewer to run → no contract.
+            fragment('pre_commit_review', PRE_COMMIT_REVIEW_CONTRACT, 113, true),
+          ]
         : []),
       fragment('delivery_contract', DELIVERY_CONTRACT, 112, true),
       fragment('output_style', buildOutputStyle(context.surface, context.imageGeneration === true), 65),

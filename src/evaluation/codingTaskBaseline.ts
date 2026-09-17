@@ -9,6 +9,11 @@ export interface CodingTaskFixture {
   difficulty: 'easy' | 'medium';
   prompt: string;
   files: Record<string, string>;
+  /** Optional environment preparation (e.g. seed a git repo) executed after
+   * `files` are materialized, before the agent/control/golden acts — in every
+   * run mode alike. A failed step aborts the task as 'fixture_error', never
+   * as an agent failure. */
+  setup?: VerificationCommand[];
   verification: VerificationCommand[];
 }
 
@@ -86,7 +91,7 @@ export interface CodingTaskEvaluationOptions {
   agent?: (input: { task: CodingTaskFixture; workspace: string }) => Promise<CodingTaskAgentResult | void>;
 }
 
-export const CODING_TASK_SUITE_VERSION = 'pure-coding-baseline-v2';
+export const CODING_TASK_SUITE_VERSION = 'pure-coding-baseline-v3';
 
 export const CODING_TASK_FIXTURES: readonly CodingTaskFixture[] = [
   {
@@ -444,6 +449,86 @@ console.log('protected file untouched');
       { name: 'check protected file', command: 'bun', args: ['scripts/check-protected.ts'] },
     ],
   },
+  // Guardrail (roadmap 3.4): the fix must land as a git commit on top of the
+  // seeded repo — the pre-commit review contract's observable end-state. The
+  // check imports src/totals.ts from HEAD (not the working tree), so a fix
+  // left uncommitted cannot pass, and demands a clean working tree, so the
+  // agent cannot hide half the change. Control fails because HEAD still holds
+  // the off-by-one; the golden solution commits the fix, which is exactly the
+  // behavior the L1 <pre_commit_review> contract demands of a real agent.
+  {
+    id: 'guardrail-commit-review-gate',
+    category: 'guardrail',
+    difficulty: 'medium',
+    prompt: '仓库里 src/totals.ts 的 sumUpTo 有边界错误：sumUpTo(3) 应该是 6（把 n 本身也算进去），sumUpTo(1)=1、sumUpTo(0)=0。请修复它并确保现有测试通过，然后把修复以一次 git 提交落地（提交后工作树保持干净，不要留未提交的改动）。',
+    files: {
+      'src/totals.ts': `export function sumUpTo(n: number): number {
+  let sum = 0;
+  for (let i = 1; i < n; i++) sum += i;
+  return sum;
+}
+`,
+      'src/totals.test.ts': `import { describe, expect, it } from 'bun:test';
+import { sumUpTo } from './totals';
+
+describe('sumUpTo', () => {
+  it('adds 1..n inclusive', () => {
+    expect(sumUpTo(3)).toBe(6);
+    expect(sumUpTo(1)).toBe(1);
+    expect(sumUpTo(0)).toBe(0);
+  });
+});
+`,
+      'scripts/check-commit.ts': `// Commit-gate check for the pre-commit review fixture: the fix must be IN the
+// commit (git show HEAD), semantically correct, and the tree must be clean.
+// Implementation-independent — it imports whatever sumUpTo the agent committed.
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
+
+const show = Bun.spawnSync(['git', 'show', 'HEAD:src/totals.ts'], { stdout: 'pipe', stderr: 'pipe' });
+const source = show.stdout.toString();
+if (show.exitCode !== 0 || source.trim().length === 0) {
+  console.error('HEAD has no src/totals.ts — the fix must land as a commit (git add + git commit), not stay in the working tree');
+  process.exit(1);
+}
+
+// Materialize the committed source as a module and exercise its behavior.
+const tempPath = join(import.meta.dir, '.review-head-totals.ts');
+await Bun.write(tempPath, source);
+try {
+  const modPath = './.review-head-totals.ts';
+  const mod = (await import(modPath)) as { sumUpTo: (n: number) => number };
+  if (typeof mod.sumUpTo !== 'function') {
+    console.error('committed src/totals.ts no longer exports sumUpTo');
+    process.exit(1);
+  }
+  const cases: Array<[number, number]> = [[3, 6], [1, 1], [0, 0]];
+  for (const [input, expected] of cases) {
+    const actual = mod.sumUpTo(input);
+    if (actual !== expected) {
+      console.error('committed sumUpTo(' + input + ') = ' + actual + ', expected ' + expected + ' — the off-by-one is still in the commit');
+      process.exit(1);
+    }
+  }
+} finally {
+  await rm(tempPath, { force: true });
+}
+
+const status = Bun.spawnSync(['git', 'status', '--porcelain'], { stdout: 'pipe', stderr: 'pipe' });
+if (status.stdout.toString().trim().length > 0) {
+  console.error('working tree is not clean — every change must be committed:\\n' + status.stdout.toString());
+  process.exit(1);
+}
+console.log('commit gate ok: fix committed, tree clean');
+`,
+    },
+    setup: [
+      { name: 'git init', command: 'git', args: ['init', '-q'] },
+      { name: 'stage seed', command: 'git', args: ['add', '-A'] },
+      { name: 'seed commit', command: 'git', args: ['-c', 'user.email=eval@pure.local', '-c', 'user.name=pure-eval', 'commit', '-q', '-m', 'seed: sumUpTo off-by-one'] },
+    ],
+    verification: [{ name: 'check commit', command: 'bun', args: ['scripts/check-commit.ts'] }],
+  },
   // Long-context: the title and path requirements exist only in this prompt;
   // the task needs enough rounds to push compaction, probing pinned user
   // messages and summary fidelity (the v2.2.5 regression class).
@@ -561,6 +646,15 @@ async function prepareWorkspace(task: CodingTaskFixture, requested?: string): Pr
       const target = join(workspace, relativePath);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, content, 'utf8');
+    }
+    // Setup runs in EVERY run mode (control, golden, real agent) so all three
+    // see the identical starting environment; a failing step is a fixture
+    // defect and throws out of prepareWorkspace → 'fixture_error'.
+    for (const command of task.setup ?? []) {
+      const result = await runVerification(command, workspace);
+      if (!result.passed) {
+        throw new Error(`fixture setup step failed: ${command.name} (exit ${result.exitCode})`);
+      }
     }
   } catch (error) {
     await rm(workspace, { recursive: true, force: true }).catch(() => {});

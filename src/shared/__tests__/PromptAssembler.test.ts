@@ -227,6 +227,29 @@ describe('PromptAssembler', () => {
     expect(assembly.systemPrompt).toContain('<delivery_contract>');
   });
 
+  it('injects the pre-commit review contract only when subagents are available (3.4)', () => {
+    // The contract delegates to code_reviewer, so it rides the same gate as
+    // the multi-agent protocol: present with subagents, absent without.
+    const withSubagents = assembler.assemble({
+      surface: 'gui',
+      capabilities: 'capabilities',
+      hasSubagents: true,
+    }, '改完记得提交');
+
+    expect(withSubagents.budget.includedFragmentIds).toContain('pre_commit_review');
+    expect(withSubagents.systemPrompt).toContain('<pre_commit_review>');
+    expect(withSubagents.systemPrompt).toContain('code_reviewer');
+
+    const withoutSubagents = assembler.assemble({
+      surface: 'gui',
+      capabilities: 'capabilities',
+      // hasSubagents unset = plain chat / no workspace → no subagent tools.
+    }, '2 + 2 = ?');
+
+    expect(withoutSubagents.budget.includedFragmentIds).not.toContain('pre_commit_review');
+    expect(withoutSubagents.systemPrompt).not.toContain('<pre_commit_review>');
+  });
+
   it('omits the multi_agent protocol when no subagents are available, but keeps delivery_contract', () => {
     const assembly = assembler.assemble({
       surface: 'gui',
