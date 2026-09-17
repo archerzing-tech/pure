@@ -2,6 +2,12 @@
 // veto a call (exit 2) before it touches locks or the adapter, on_post_tool
 // stdout lands in the model-visible string result, and everything degrades to
 // "no hooks" when no runner is wired.
+//
+// Timing: every test here spawns a real shell. On a cold Windows runner the
+// first powershell.exe launches cost seconds each (module warm-up plus initial
+// AV scanning — measured >5s on CI), and the hook budget itself is 10s, so
+// bun's 5s default test timeout would report a hang that is not there. Each
+// spawning test therefore carries explicit headroom.
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -66,26 +72,26 @@ describe('ToolExecutionCoordinator user hooks', () => {
     const error = (result?.result as ToolResult).error ?? '';
     expect(error.startsWith('[on_pre_tool hook]')).toBe(true);
     expect(error).toContain('not-allowed');
-  });
+  }, 30_000);
 
   it('on_pre_tool non-zero exits other than 2 are non-blocking', async () => {
     const tools = new FakeTools({ id: 'c1', toolName: 'write_file', result: 'tool-ok', success: true, duration: 1 });
     const result = await executeWith(tools, { on_pre_tool: [{ command: 'exit 1' }] });
     expect(tools.calls).toHaveLength(1);
     expect(result?.result.success).toBe(true);
-  });
+  }, 30_000);
 
   it('on_post_tool stdout is appended to the model-visible string result', async () => {
     const tools = new FakeTools({ id: 'c1', toolName: 'write_file', result: 'tool-ok', success: true, duration: 1 });
     const result = await executeWith(tools, { on_post_tool: [{ command: 'echo lint-ok' }] });
     expect((result?.result as ToolResult).result).toBe('tool-ok\n[hook] lint-ok');
-  });
+  }, 30_000);
 
   it('on_post_tool also fires when the tool reports failure', async () => {
     const tools = new FakeTools({ id: 'c1', toolName: 'write_file', result: 'boom', success: false, duration: 1 });
     const result = await executeWith(tools, { on_post_tool: [{ command: 'echo cleaned-up' }] });
     expect((result?.result as ToolResult).result).toBe('boom\n[hook] cleaned-up');
-  });
+  }, 30_000);
 
   it('a matcher that does not match the tool skips the hook', async () => {
     const tools = new FakeTools({ id: 'c1', toolName: 'write_file', result: 'tool-ok', success: true, duration: 1 });

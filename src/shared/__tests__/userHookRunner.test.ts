@@ -46,6 +46,11 @@ describe('createNodeUserHookRunner', () => {
     rmSync(workspace, { recursive: true, force: true });
   });
 
+  // Every test below spawns a real shell, and bun's 5s default test timeout is
+  // shorter than a cold Windows powershell.exe launch on CI (module warm-up +
+  // initial AV scanning) — the same headroom argument as the coordinator tests.
+  const SPAWN_TIMEOUT_MS = 30_000;
+
   // Hooks are shell commands, and the shell is platform-native by design
   // (bash -c on POSIX, PowerShell -EncodedCommand on Windows — the same
   // transport execute_command documents). Each behaviour therefore needs its
@@ -70,14 +75,14 @@ describe('createNodeUserHookRunner', () => {
     expect(result.exitCode).toBe(0);
     expect(result.timedOut).toBe(false);
     expect(result.stdout.trim()).toBe('bound');
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   it('passes the payload as JSON on stdin', async () => {
     const run = createNodeUserHookRunner({ cwd: workspace });
     const payload: UserHookPayload = { event: 'on_post_tool', tool: 'write_file', args: { path: 'a.txt' }, success: true };
     const result = await run({ command: hookCommands.echoStdin }, payload);
     expect(JSON.parse(result.stdout)).toEqual(payload);
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   it('kills hooks that exceed the clamped timeout', async () => {
     const run = createNodeUserHookRunner({ cwd: workspace });
@@ -86,7 +91,7 @@ describe('createNodeUserHookRunner', () => {
     expect(result.timedOut).toBe(true);
     expect(result.exitCode).toBeNull();
     expect(Date.now() - started).toBeLessThan(10_000);
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   it('clamps sub-minimum overrides up to 1s', async () => {
     const run = createNodeUserHookRunner({ cwd: workspace });
@@ -94,13 +99,13 @@ describe('createNodeUserHookRunner', () => {
     // 1ms would otherwise race the kill timer; the clamp must hold it at 1s.
     await run({ command: hookCommands.sleepLong, timeoutMs: 1 }, { event: 'on_turn_complete' });
     expect(Date.now() - started).toBeGreaterThanOrEqual(1000);
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   it('caps captured stdout', async () => {
     const run = createNodeUserHookRunner({ cwd: workspace });
     const result = await run({ command: hookCommands.flood }, { event: 'on_turn_complete' });
     expect(result.stdout.length).toBe(HOOK_STDOUT_CAP_CHARS);
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   // Windows parity, testable anywhere: the runner must not hand PowerShell's
   // CLIXML warm-up blob back as the hook's stderr. An on_pre_tool veto reports
@@ -116,15 +121,19 @@ describe('createNodeUserHookRunner', () => {
     const run = createNodeUserHookRunner({ cwd: workspace });
     const result = await run({ command: dump }, { event: 'on_pre_tool' });
     expect(result.exitCode).toBe(2);
-    expect(result.stderr).toBe('');
-  });
+    // The runner's captured stderr may hold PowerShell's own warm-up document
+    // in addition to the one the hook dumped — neither may reach the caller.
+    expect(result.stderr).not.toContain('CLIXML');
+    expect(result.stderr).not.toContain('Preparing modules for first use');
+    expect(result.stderr.trim()).toBe('');
+  }, SPAWN_TIMEOUT_MS);
 
   it('reports non-zero exits without throwing', async () => {
     const run = createNodeUserHookRunner({ cwd: workspace });
     const result = await run({ command: hookCommands.failWithMessage }, { event: 'on_pre_tool' });
     expect(result.exitCode).toBe(2);
     expect(result.stderr.trim()).toBe('bad');
-  });
+  }, SPAWN_TIMEOUT_MS);
 });
 
 describe('runUserHooksForEvent', () => {
