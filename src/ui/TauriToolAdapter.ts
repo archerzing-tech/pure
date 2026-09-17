@@ -50,12 +50,14 @@ export type InvokeFunction = (cmd: string, args?: Record<string, unknown>) => Pr
 // uses (`sh -c` on Unix, PowerShell on Windows): inside single quotes every
 // byte is literal except the quote itself — written as '\'' for sh, '' for
 // PowerShell. Used by the git_commit/git_branch cases, whose commit messages
-// and branch names are arbitrary model-supplied text.
-function isWindowsHost(): boolean {
+// and branch names are arbitrary model-supplied text. Exported for other UI
+// callers that rebuild execute_command strings outside the adapter (the 4.1
+// auto-worktree resolver in workspace.ts runs plain git the same way).
+export function isWindowsHost(): boolean {
   return typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
 }
 
-function quoteShellArg(value: string): string {
+export function quoteShellArg(value: string): string {
   const escaped = isWindowsHost() ? value.replace(/'/g, "''") : value.replace(/'/g, `'\\''`);
   return `'${escaped}'`;
 }

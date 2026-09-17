@@ -10,7 +10,9 @@ import { t } from '../shared/i18n';
 import { escapeHtml } from '../shared/html';
 import { showToast } from '../shared/toast';
 import { workspaceBase } from '../shared/paths';
-import { saveSessionWorkspace } from './store';
+import { resolveSessionWorkspace, type GitRunner } from '../shared/worktreeBinding';
+import { quoteShellArg } from './TauriToolAdapter';
+import { saveSessionWorkspace, loadSessionList } from './store';
 import {
   loadRecentWorkspaces,
   touchRecentWorkspace,
@@ -39,6 +41,40 @@ function getDialogModule(): Promise<DialogModule> {
 // Start loading the native dialog bridge as soon as the UI module is evaluated
 // so the first click does not wait for a lazy chunk or plugin initialization.
 if (isTauriRuntime()) void getDialogModule().catch(() => {});
+
+// Roadmap 4.1 — auto worktree: when the picked directory is a git repo that
+// ANOTHER session already works in, this session silently gets its own linked
+// worktree (see shared/worktreeBinding.ts) instead of sharing the directory,
+// so the two can edit the same files without interfering. Failures never
+// block the workspace pick — the user's path wins as-is. Returns the
+// (possibly rewritten) workspace, or null when nothing changed.
+async function resolveAutoWorktree(sessionId: string, requested: string): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    const [pathApi, sessions] = await Promise.all([
+      import('@tauri-apps/api/path'),
+      loadSessionList(),
+    ]);
+    // Git runs through the same Rust execute_command the tool adapter uses —
+    // no new native surface (same reasoning as the git write tools, 3.2).
+    const runGit: GitRunner = async (args, cwd) => {
+      const command = ['git', ...args].map(quoteShellArg).join(' ');
+      const res = await tauriInvoke('execute_command', { workspace: cwd, command }) as { exitCode: number; stdout: string; stderr: string };
+      if (res.exitCode !== 0) throw new Error(res.stderr || `git exited with ${res.exitCode}`);
+      return res.stdout;
+    };
+    const decision = await resolveSessionWorkspace({
+      sessionId,
+      requestedWorkspace: requested,
+      otherWorkspaces: sessions.filter((s) => s.id !== sessionId && s.workspace).map((s) => s.workspace!),
+      pureHome: await pathApi.join(await pathApi.homeDir(), '.pure'),
+    }, runGit);
+    return decision.kind === 'linked-worktree' && decision.workspace !== requested ? decision.workspace : null;
+  } catch (err) {
+    console.error('[pure] auto worktree resolution failed:', err);
+    return null;
+  }
+}
 
 export interface WorkspaceDeps {
   chat: Pick<ChatController, 'getWorkspace' | 'setWorkspace' | 'getSessionId'>;
@@ -178,22 +214,37 @@ export class WorkspaceController {
   }
 
   async commit(value: string): Promise<void> {
-    const ws = value.trim();
-    if (ws) {
+    const requested = value.trim();
+    if (requested) {
       // Record usage in the independent recent list (MRU bump + pin state).
-      touchRecentWorkspace(ws);
+      // The REQUESTED path is what the user would pick again next time — the
+      // auto worktree below rewrites only this session's binding.
+      touchRecentWorkspace(requested);
     }
-    if (ws === this.chat.getWorkspace()) {
+    if (requested === this.chat.getWorkspace()) {
       // Nothing changed (e.g. re-applying the current path) — just close.
       this.closePopover();
       return;
+    }
+    // 4.1: a second session on the same repo is redirected into its own
+    // linked worktree before anything downstream (tools, snapshot, queue)
+    // binds to the path. Null = no collision / resolution skipped.
+    let ws = requested;
+    let autoWorktree = false;
+    if (ws) {
+      const isolated = await resolveAutoWorktree(this.chat.getSessionId(), ws);
+      if (isolated) {
+        ws = isolated;
+        autoWorktree = true;
+      }
     }
     this.chat.setWorkspace(ws);
     // closePopover() already refreshes the visible workspace labels. Do not
     // refresh a second time here: the duplicate status/layout pass was visible
     // as a small hitch immediately after dismissing the native macOS picker.
     this.closePopover();
-    showToast(ws ? t('workspace.saved') : t('workspace.cleared'));
+    if (autoWorktree) showToast(t('workspace.worktreeAuto'));
+    else showToast(ws ? t('workspace.saved') : t('workspace.cleared'));
     this.onCommitted();
 
     // Persistence is deliberately detached from the interaction. The selected
