@@ -35,11 +35,21 @@ describe('stripPowerShellStartupProgress', () => {
     expect(stripPowerShellStartupProgress(`bad\n${WARMUP}\nalso bad\n`)).toBe('bad\nalso bad');
   });
 
+  it('recognizes the blob without the #< CLIXML header line', () => {
+    // Windows runners regularly deliver the document without the header, so
+    // matching on the header alone left the blob in place (observed in the
+    // v2.2.6-alpha release run).
+    const headerless = WARMUP.replace('#< CLIXML\n', '');
+    expect(stripPowerShellStartupProgress(headerless)).toBe('');
+    expect(stripPowerShellStartupProgress(`hook said: no\n${headerless}`)).toBe('hook said: no');
+  });
+
   it('removes every warm-up blob, not just the first', () => {
     // PowerShell writes one when the host starts and another when a module is
     // auto-loaded mid-command, so more than one can land in the same stream.
     expect(stripPowerShellStartupProgress(`${WARMUP}${WARMUP}bad`)).toBe('bad');
     expect(stripPowerShellStartupProgress(`${WARMUP}bad${WARMUP}`)).toBe('bad');
+    expect(stripPowerShellStartupProgress(`${WARMUP.replace('#< CLIXML\n', '')}${WARMUP}`)).toBe('');
   });
 
   it('leaves a truncated blob alone rather than cutting into real output', () => {
