@@ -59,7 +59,7 @@ export async function resolveSessionWorkspace(
 
   let repoRoot: string;
   try {
-    repoRoot = (await git(['rev-parse', '--show-toplevel'], requested)).trim();
+    repoRoot = toNativePath((await git(['rev-parse', '--show-toplevel'], requested)).trim());
   } catch {
     // Not a git repository (or git unusable) — nothing to isolate, and the
     // directory is small enough that sharing it is the honest answer.
@@ -84,7 +84,9 @@ export async function resolveSessionWorkspace(
   const sessionId = sanitizeSegment(request.sessionId);
   // The hash disambiguates two unrelated repos that share a basename
   // (~/work/a and ~/other/work/a never merge their worktree areas).
-  const repoSlug = `${sanitizeSegment(repoRoot.split('/').pop() || 'repo')}-${hashPath(repoNorm)}`;
+  // Split on BOTH separators: repoRoot is native by now (backslashes on
+  // Windows), and taking the basename must not degrade to the whole path.
+  const repoSlug = `${sanitizeSegment(repoRoot.split(/[\\/]/).pop() || 'repo')}-${hashPath(repoNorm)}`;
   const worktreePath = `${pureWorktreeArea(request.pureHome)}/${repoSlug}/${sessionId}`;
   // Branch is hyphenated + lowercased for hygiene: the GUI's `session_<ts>_<n>`
   // ids read as `pure/session-<ts>-<n>` (the id's own leading "session" is
@@ -140,7 +142,7 @@ export async function describeWorktree(git: GitRunner, worktreePath: string): Pr
   let here: string;
   let list: string;
   try {
-    here = (await git(['rev-parse', '--show-toplevel'], worktreePath)).trim();
+    here = toNativePath((await git(['rev-parse', '--show-toplevel'], worktreePath)).trim());
     list = await git(['worktree', 'list', '--porcelain'], worktreePath);
   } catch {
     return null;
@@ -153,7 +155,7 @@ export async function describeWorktree(git: GitRunner, worktreePath: string): Pr
     const lines = block.split('\n').map((line) => line.trim()).filter(Boolean);
     const wtLine = lines.find((line) => line.startsWith('worktree '));
     if (!wtLine) continue;
-    const path = wtLine.slice('worktree '.length).trim();
+    const path = toNativePath(wtLine.slice('worktree '.length).trim());
     const blockBranch = (lines.find((line) => line.startsWith('branch ')) ?? '').slice('branch '.length).trim();
     // The main worktree is always listed first — its branch is the merge
     // target the finish flow (4.4) diffs against.
@@ -171,6 +173,22 @@ export async function describeWorktree(git: GitRunner, worktreePath: string): Pr
 
 function trimSlashes(path: string): string {
   return path.replace(/[\\/]+$/, '');
+}
+
+/**
+ * git prints paths with forward slashes even on Windows (`C:/Users/...`,
+ * `git worktree list` included). Callers compare these against natively
+ * formatted workspace paths — the session's own workspace, the recent-workspace
+ * list, FS APIs — so the platform form is restored here. Detected from the
+ * string rather than from `process.platform` because this module is bundled
+ * into the browser, where node is not available: a drive letter or an existing
+ * backslash means Windows. POSIX paths pass through untouched.
+ */
+function toNativePath(path: string): string {
+  const trimmed = path.trim();
+  return /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.includes('\\')
+    ? trimmed.replace(/\//g, '\\')
+    : trimmed;
 }
 
 function normalizePath(path: string): string {

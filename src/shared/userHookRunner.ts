@@ -15,6 +15,7 @@
 //    hook is killed and reports exitCode null.
 
 import type { UserHook, UserHookEvent, UserHooksConfig } from './userHooks';
+import { stripPowerShellStartupProgress } from './powershellOutput';
 
 export const DEFAULT_HOOK_TIMEOUT_MS = 10_000;
 export const MIN_HOOK_TIMEOUT_MS = 1_000;
@@ -95,12 +96,17 @@ export function createNodeUserHookRunner(opts: { cwd?: string } = {}): UserHookR
         new Response(proc.stderr).text(),
       ]);
       await proc.exited;
+      // PowerShell writes its module warm-up to stderr as a CLIXML blob. On
+      // Windows that blob would BE the hook's stderr (an on_pre_tool veto
+      // reports stderr first), so the model and the user would read
+      // `#< CLIXML …Preparing modules for first use…` instead of the hook's
+      // actual message. Same strip the execute_command tool adapter applies.
       return {
         command: hook.command,
         exitCode: timedOut ? null : proc.exitCode,
         timedOut,
-        stdout: cap(stdout),
-        stderr: cap(stderr),
+        stdout: cap(stripPowerShellStartupProgress(stdout)),
+        stderr: cap(stripPowerShellStartupProgress(stderr)),
         durationMs: Date.now() - started,
       };
     } finally {

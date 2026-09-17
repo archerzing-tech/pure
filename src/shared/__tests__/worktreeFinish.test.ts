@@ -45,6 +45,10 @@ async function seedRepo(name: string): Promise<string> {
   await init.exited;
   await git(['config', 'user.email', 'test@pure.local'], repo);
   await git(['config', 'user.name', 'pure-test'], repo);
+  // Windows git defaults to core.autocrlf=true: it would rewrite the LF
+  // fixtures to CRLF on checkout (worktree add, merge) and fail the content
+  // assertions for a reason that has nothing to do with the merge flow.
+  await git(['config', 'core.autocrlf', 'false'], repo);
   await writeFile(join(repo, 'README.md'), 'seed\n', 'utf8');
   await git(['add', '-A'], repo);
   await git(['commit', '-q', '-m', 'seed'], repo);
