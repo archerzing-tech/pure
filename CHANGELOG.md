@@ -5,6 +5,13 @@ release summary when publishing (see `.github/workflows/release.yml`).
 
 ## v2.2.6-alpha
 
+**MCP prompt 模板可在输入框直接调用**
+
+- 新增 `/mcp-prompt <服务器__模板名> [参数=值 …]` 命令：在输入框敲出即可把 MCP 服务器发布的 prompt 模板展开成本轮任务（GUI 与 CLI REPL 同一条语法）。参数支持引号（`path="a b.md"`）；必填参数缺失、模板名不存在（会列出可用项）、服务器报错，都直接在输入框旁提示，**草稿不会被吃掉**（展开成功才会清空）。
+- 输入框自动补全新增 MCP 模板候选（⚡ 图标，标签带描述与参数名），选中即插入命令骨架让人填参数。候选只读已连接客户端已知的模板，**绝不因打字而拉起第三方子进程**。
+- CLI REPL 新增 `/prompts` 列出已连接服务器的全部模板（含参数说明与必填标记）。
+- 模板正文里的二进制内容（image/audio/blob 资源）不进提示词，而是以 `[image omitted: image/png]` 这类标记显式占位，模型不会误以为自己看过图；assistant 角色的块带 `[assistant]` 标注，混合角色的模板仍可读。
+
 **MCP resources 进上下文：服务器发布的只读文档自动可见**
 
 - 连接 MCP 服务器时，若服务器在 initialize 握手声明了 `resources` 能力，客户端会列目录并读取内容（`resources/list` + `resources/read`），渲染成 `<mcp_resources>` 片段随系统提示一起发给模型 —— 服务器发布的文档（笔记、项目约定、数据集说明）不再要靠用户手动粘贴。根因：此前 pure 只消费 MCP 的 tools，资源的发现与读取整条链路缺失，模型对已连接服务器里的文档一无所知。

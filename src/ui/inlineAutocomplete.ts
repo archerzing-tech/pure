@@ -16,13 +16,20 @@ export interface AutocompleteCandidate {
   label: string;
   /** Text inserted at the caret (replaces the current token). */
   insert: string;
-  kind: 'session' | 'command' | 'path';
+  kind: 'session' | 'command' | 'path' | 'prompt';
+}
+
+/** Extra candidates the host supplies (live runtime state rather than the
+ *  cached store scan) — e.g. MCP prompt templates from connected servers. */
+export interface AutocompleteSources {
+  extraCandidates?: () => Promise<AutocompleteCandidate[]> | AutocompleteCandidate[];
 }
 
 const KIND_LABEL: Record<AutocompleteCandidate['kind'], string> = {
   session: '⌘',
   command: '$',
   path: '📁',
+  prompt: '⚡',
 };
 
 /** Word characters for token extraction (incl. CJK, path separators, dots). */
@@ -109,7 +116,7 @@ export class InlineAutocomplete {
   private candidatesPromise: Promise<AutocompleteCandidate[]> | null = null;
   private suppressNextInput = false;
 
-  constructor(input: HTMLTextAreaElement) {
+  constructor(input: HTMLTextAreaElement, private readonly sources: AutocompleteSources = {}) {
     this.input = input;
     input.addEventListener('input', this.onInput);
     input.addEventListener('keydown', this.onKeydown);
@@ -154,7 +161,11 @@ export class InlineAutocomplete {
     if (document.activeElement !== this.input) return;
     if (!this.candidatesPromise) this.candidatesPromise = buildContextCandidates();
     const candidates = await this.candidatesPromise;
-    const matches = filterCandidates(prefix, candidates);
+    // Host-supplied candidates are live state, so they are fetched per query
+    // (not cached with the store scan) and ranked first: an MCP prompt the user
+    // just typed a prefix of should not be pushed out by historic paths.
+    const extra = this.sources.extraCandidates ? await this.sources.extraCandidates() : [];
+    const matches = filterCandidates(prefix, [...extra, ...candidates]);
     if (matches.length === 0) {
       this.close();
       return;

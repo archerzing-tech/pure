@@ -16,8 +16,11 @@ import type {
   MCPToolDescription,
   MCPResourceDescription,
   MCPResourceContents,
+  MCPPromptDescription,
+  MCPPromptMessage,
 } from '../../adapter/mcp/MCPTransport';
 import { mcpToolToDefinition } from '../../adapter/mcp/MCPTransport';
+import { missingRequiredArgs, renderMcpPromptMessages } from '../../shared/mcpPrompt';
 
 // Limits for injected resource context. Resources are OPTIONAL context that
 // competes with the user's actual request: a chatty server (a docs site, a
@@ -93,6 +96,10 @@ interface ServerState {
   hasResources: boolean;
   /** Resource metadata from `resources/list` (empty when not advertised). */
   resources: MCPResourceDescription[];
+  /** Advertised via `capabilities.prompts`; gates `prompts/list`. */
+  hasPrompts: boolean;
+  /** Prompt templates from `prompts/list` (user-invoked, never model-callable). */
+  prompts: MCPPromptDescription[];
   /** Rendered body for the prompt fragment — undefined until read, '' when the
    *  server advertised resources but none could be read. */
   resourceBody?: string;
@@ -103,6 +110,16 @@ export interface MCPResourceContextOptions {
   waitMs?: number;
 }
 
+/** A prompt template from a connected server, addressed as `server__name`. */
+export interface MCPPromptSummary extends MCPPromptDescription {
+  serverName: string;
+  key: string;
+}
+
+export type MCPPromptResult =
+  | { ok: true; key: string; description?: string; text: string }
+  | { ok: false; error: string };
+
 export class MCPClient implements ToolAdapter {
   private servers = new Map<string, ServerState>();
   private toolToServer = new Map<string, string>(); // toolName → serverName
@@ -110,6 +127,9 @@ export class MCPClient implements ToolAdapter {
    *  bounded (see collectResourceContext), so a hung server costs one wait,
    *  not a per-turn stall. */
   private resourcePrefetch = new Map<string, Promise<void>>();
+  /** In-flight prompt-list prefetches, keyed by server name (same contract as
+   *  resourcePrefetch: bounded wait, failures logged and swallowed). */
+  private promptPrefetch = new Map<string, Promise<void>>();
 
   constructor(private config: MCPClientConfig) {}
 
@@ -159,7 +179,16 @@ export class MCPClient implements ToolAdapter {
             : new StdioTransport(config.command ?? [], config.env, config.requestTimeoutMs))
         : new HttpTransport(config.url ?? 'http://localhost:3000', this.config.proxyUrl ?? '', config.requestTimeoutMs));
 
-    const state: ServerState = { config, transport, tools: [], connected: false, hasResources: false, resources: [] };
+    const state: ServerState = {
+      config,
+      transport,
+      tools: [],
+      connected: false,
+      hasResources: false,
+      resources: [],
+      hasPrompts: false,
+      prompts: [],
+    };
     this.servers.set(config.name, state);
 
     // Initialize handshake — offer the newest protocol version we speak
@@ -169,7 +198,7 @@ export class MCPClient implements ToolAdapter {
       protocolVersion: '2026-07-28',
       capabilities: { tools: {} },
       clientInfo: { name: 'pure', version: '1.1.0' },
-    })) as { capabilities?: { resources?: unknown } } | undefined;
+    })) as { capabilities?: { resources?: unknown; prompts?: unknown } } | undefined;
 
     // Send initialized notification (no response expected)
     await transport.notify('notifications/initialized', {});
@@ -180,6 +209,11 @@ export class MCPClient implements ToolAdapter {
     // connectAll() resolves as soon as the tools are known.
     state.hasResources = Boolean(initResult?.capabilities?.resources);
     if (state.hasResources) this.prefetchResources(state);
+    // Prompts are capability-gated the same way. Their list is cheap metadata,
+    // so it is prefetched too — the composer can then offer templates without
+    // a round-trip on every keystroke.
+    state.hasPrompts = Boolean(initResult?.capabilities?.prompts);
+    if (state.hasPrompts) this.prefetchPrompts(state);
 
     // Discover tools
     const toolsResult = (await transport.send('tools/list', {})) as {
@@ -217,9 +251,98 @@ export class MCPClient implements ToolAdapter {
       state.resources = [];
       state.resourceBody = undefined;
       state.hasResources = false;
+      state.prompts = [];
+      state.hasPrompts = false;
     }
     this.toolToServer.clear();
     this.resourcePrefetch.clear();
+    this.promptPrefetch.clear();
+  }
+
+  // ── Prompts (server-published templates the user invokes) ──
+
+  private prefetchPrompts(state: ServerState): void {
+    const name = state.config.name;
+    const pending = (async () => {
+      const listed = (await state.transport.send('prompts/list', {})) as {
+        prompts?: MCPPromptDescription[];
+      };
+      state.prompts = (listed?.prompts ?? []).filter((p) => p && typeof p.name === 'string');
+    })().catch((err) => {
+      console.warn(`[MCP] prompts for "${name}" unavailable:`, err instanceof Error ? err.message : err);
+    });
+    this.promptPrefetch.set(name, pending);
+  }
+
+  /** Bounded wait for in-flight prefetches so a caller never hangs on a slow
+   *  third-party server. A timed-out prefetch stays pending and simply misses
+   *  this call. */
+  private async awaitPrefetches(waitMs: number, ...maps: Array<Map<string, Promise<void>>>): Promise<void> {
+    const pending = maps.flatMap((map) => [...map.values()]);
+    if (pending.length === 0) return;
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise((resolve) => setTimeout(resolve, waitMs)),
+    ]);
+  }
+
+  /** Prompt templates from every connected server, addressed by `server__name`. */
+  async listPrompts(waitMs = RESOURCE_PREFETCH_WAIT_MS): Promise<MCPPromptSummary[]> {
+    await this.awaitPrefetches(waitMs, this.promptPrefetch);
+    const out: MCPPromptSummary[] = [];
+    for (const [, state] of this.servers) {
+      if (!state.connected) continue;
+      for (const prompt of state.prompts) {
+        out.push({ ...prompt, serverName: state.config.name, key: `${state.config.name}__${prompt.name}` });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Render one prompt template: `prompts/get` → the text the user's turn should
+   * carry. Errors are returned, not thrown — every caller (composer command,
+   * CLI) shows the message verbatim to the user.
+   */
+  async getPrompt(key: string, args: Record<string, string> = {}): Promise<MCPPromptResult> {
+    const separator = key.indexOf('__');
+    const serverName = separator > 0 ? key.slice(0, separator) : '';
+    const promptName = separator > 0 ? key.slice(separator + 2) : key;
+    const state = serverName ? this.servers.get(serverName) : undefined;
+    if (!state || !state.connected) {
+      const known = await this.listPrompts(0);
+      return { ok: false, error: this.unknownPromptError(key, known) };
+    }
+
+    await this.awaitPrefetches(RESOURCE_PREFETCH_WAIT_MS, this.promptPrefetch);
+    const prompt = state.prompts.find((p) => p.name === promptName);
+    if (!prompt) {
+      return { ok: false, error: this.unknownPromptError(key, await this.listPrompts(0)) };
+    }
+    const missing = missingRequiredArgs(prompt, args);
+    if (missing.length > 0) {
+      return { ok: false, error: `${key} 缺少必填参数: ${missing.join(', ')}` };
+    }
+
+    try {
+      const result = (await state.transport.send('prompts/get', {
+        name: promptName,
+        arguments: args,
+      })) as { description?: string; messages?: MCPPromptMessage[] };
+      const text = renderMcpPromptMessages(result?.messages ?? []);
+      if (!text) return { ok: false, error: `${key} 没有返回可用的内容。` };
+      return { ok: true, key, description: result?.description ?? prompt.description, text };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: `获取 MCP prompt ${key} 失败：${message}` };
+    }
+  }
+
+  private unknownPromptError(key: string, known: MCPPromptSummary[]): string {
+    if (known.length === 0) {
+      return `未找到 MCP prompt "${key}"（当前没有已连接服务器提供 prompt 模板）。`;
+    }
+    return `未找到 MCP prompt "${key}"。可用：${known.map((p) => p.key).join(', ')}`;
   }
 
   // ── Resources (server-published read-only context) ──
@@ -282,14 +405,7 @@ export class MCPClient implements ToolAdapter {
    *  connected server published readable text. Waits (bounded) for the
    *  in-flight prefetch so the first turn isn't systematically empty. */
   async collectResourceContext(options: MCPResourceContextOptions = {}): Promise<string> {
-    const waitMs = options.waitMs ?? RESOURCE_PREFETCH_WAIT_MS;
-    const pending = [...this.resourcePrefetch.values()];
-    if (pending.length > 0) {
-      await Promise.race([
-        Promise.allSettled(pending),
-        new Promise((resolve) => setTimeout(resolve, waitMs)),
-      ]);
-    }
+    await this.awaitPrefetches(options.waitMs ?? RESOURCE_PREFETCH_WAIT_MS, this.resourcePrefetch);
     const bodies: string[] = [];
     for (const [, state] of this.servers) {
       if (!state.connected || !state.resourceBody?.trim()) continue;
