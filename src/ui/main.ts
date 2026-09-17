@@ -53,6 +53,7 @@ import { WorkspaceController, tauriGitRunner } from './workspace';
 import { inspectWorktreeFinish, mergeWorktreeBack, discardWorktree } from '../shared/worktreeFinish';
 import { WorktreeFinishCard, bindWorktreeFinishCard, retentionMessage, type WorktreeFinishCardDeps } from './worktreeFinishCard';
 import { SettleNotifier } from './notify';
+import { buildTraySessionItems } from './traySessions';
 import { SessionSidebar, openPureWindow } from './sessionSidebar';
 import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
 import { groupConversationTurns, segmentConversationTurns } from './conversationTurns';
@@ -368,6 +369,14 @@ if (worktreeFinishHost) {
   void worktreeFinishCard.refresh();
 }
 
+// Display title for a session (5.2 notifications, 5.3 tray list): persisted
+// row title first, else the workspace basename, else a stable id suffix.
+async function resolveSessionTitle(sessionId: string): Promise<string> {
+  const live = chat.controllerFor(sessionId)?.getWorkspace() ?? '';
+  const row = (await loadSessionList()).find((s) => s.id === sessionId);
+  return row?.title || workspaceBase(live) || `…${sessionId.slice(-4)}`;
+}
+
 // ── System notifications (5.2) ──
 // A settled background session (done / waiting for your confirmation /
 // failed — classified from the transcript tail) raises a native notification;
@@ -388,17 +397,28 @@ const settleNotifier = new SettleNotifier({
   },
   hostOf: (sessionId) => chat.sessionHost(sessionId),
   messagesOf: (sessionId) => chat.controllerFor(sessionId)?.getMessages() ?? null,
-  titleOf: async (sessionId) => {
-    const live = chat.controllerFor(sessionId)?.getWorkspace() ?? '';
-    const row = (await loadSessionList()).find((s) => s.id === sessionId);
-    return row?.title || workspaceBase(live) || `…${sessionId.slice(-4)}`;
-  },
+  titleOf: (sessionId) => resolveSessionTitle(sessionId),
   notify: async (payload) => {
     if (!isTauriRuntime()) return;
     await tauriInvoke('send_turn_notification', { notification: payload });
   },
 });
 onRunningSessionsChanged(() => settleNotifier.refresh());
+
+// ── Tray running-session list (5.3) ──
+// The frontend owns session state; every running-set change re-resolves the
+// titles and pushes a fresh snapshot to Rust, which rebuilds the tray menu
+// wholesale. Menu clicks come back as tray-open-session / tray-cancel-session
+// (listeners bound below). Plain-web runtime has no tray — skip the push.
+async function pushTraySessions(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const ids = runningSessionIdList();
+  const titles = await Promise.all(ids.map((id) => resolveSessionTitle(id)));
+  const items = buildTraySessionItems(ids, (id) => titles[ids.indexOf(id)]);
+  await tauriInvoke('update_tray_sessions', { sessions: items });
+}
+onRunningSessionsChanged(() => void pushTraySessions());
+void pushTraySessions();
 
 // ── Scheduled tasks (frontend scheduler) ──
 // Schedules live in the config (Settings → 定时任务). A due task enqueues into
@@ -1614,6 +1634,22 @@ document.getElementById('status-new-window')?.addEventListener('click', () => {
   void openPureWindow();
 });
 
+// Bring the app out of the tray (if hidden) and switch to a session — shared
+// by notification clicks (5.2) and the tray menu 前往 entry (5.3).
+function revealSession(sessionId: string): void {
+  void (async () => {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const win = getCurrentWindow();
+      await win.show();
+      await win.setFocus();
+    } catch {
+      // Window API unavailable — the session switch below still happens.
+    }
+  })();
+  chat.setSessionId(sessionId);
+}
+
 // Native macOS menu bar actions (Rust emits these): 新建对话 / 设置…
 if (isTauriRuntime()) {
   void (async () => {
@@ -1626,18 +1662,18 @@ if (isTauriRuntime()) {
       // bring the window out of the tray and switch to that conversation.
       await listen('notification-clicked', (event) => {
         const sessionId = String((event as unknown as { payload?: unknown }).payload ?? '');
-        if (!sessionId) return;
-        void (async () => {
-          try {
-            const { getCurrentWindow } = await import('@tauri-apps/api/window');
-            const win = getCurrentWindow();
-            await win.show();
-            await win.setFocus();
-          } catch {
-            // Window API unavailable — the session switch below still happens.
-          }
-        })();
-        chat.setSessionId(sessionId);
+        if (sessionId) revealSession(sessionId);
+      });
+      // Tray session-list clicks (5.3): 前往 reveals the session (same reveal
+      // as a notification click), 取消 stops its running turn — the same
+      // semantics as the dock card's stop button.
+      await listen('tray-open-session', (event) => {
+        const sessionId = String((event as unknown as { payload?: unknown }).payload ?? '');
+        if (sessionId) revealSession(sessionId);
+      });
+      await listen('tray-cancel-session', (event) => {
+        const sessionId = String((event as unknown as { payload?: unknown }).payload ?? '');
+        if (sessionId) taskQueue.cancelForSession(sessionId);
       });
     } catch (err) {
       console.error('[pure] native menu event bind failed:', err);
