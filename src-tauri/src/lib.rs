@@ -14873,6 +14873,68 @@ fn send_turn_notification(app: tauri::AppHandle, notification: TurnNotification)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  Tray session list (roadmap 5.3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Clone, serde::Deserialize)]
+struct TraySessionItem {
+    id: String,
+    title: String,
+}
+
+// The tray icon handle lives in managed state so the menu can be rebuilt
+// (set_menu) whenever the running-session set changes. The frontend owns the
+// session state; Rust only renders what it is handed.
+#[derive(Default)]
+struct TrayHandle(StdMutex<Option<tauri::tray::TrayIcon>>);
+
+#[tauri::command]
+fn update_tray_sessions(
+    app: tauri::AppHandle,
+    tray: tauri::State<'_, TrayHandle>,
+    sessions: Vec<TraySessionItem>,
+) -> Result<(), String> {
+    // The menu is rebuilt WHOLESALE on every push — menu items belong to
+    // their menu, so the static entries (显示 / 退出) are recreated here too
+    // rather than threaded through as partial state.
+    let show_item = tauri::menu::MenuItem::with_id(&app, "tray-show", "显示 pure", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let quit_item = tauri::menu::MenuItem::with_id(&app, "tray-quit", "退出 pure", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = vec![Box::new(show_item), Box::new(quit_item)];
+    if sessions.is_empty() {
+        let idle = tauri::menu::MenuItem::with_id(&app, "tray-idle", "没有运行中的会话", false, None::<&str>)
+            .map_err(|e| e.to_string())?;
+        items.push(Box::new(idle));
+    } else {
+        let separator = tauri::menu::PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
+        items.push(Box::new(separator));
+        for session in sessions.iter() {
+            let jump = tauri::menu::MenuItem::with_id(&app, format!("tray-open:{}", session.id), "前往", true, None::<&str>)
+                .map_err(|e| e.to_string())?;
+            let cancel = tauri::menu::MenuItem::with_id(&app, format!("tray-cancel:{}", session.id), "取消", true, None::<&str>)
+                .map_err(|e| e.to_string())?;
+            let sub = tauri::menu::Submenu::with_id_and_items(
+                &app,
+                format!("tray-session:{}", session.id),
+                session.title.clone(),
+                true,
+                &[&jump, &cancel],
+            )
+            .map_err(|e| e.to_string())?;
+            items.push(Box::new(sub));
+        }
+    }
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items.iter().map(|item| item.as_ref()).collect();
+    let menu = tauri::menu::Menu::with_items(&app, &refs).map_err(|e| e.to_string())?;
+    let slot = tray.0.lock().map_err(|_| "tray state poisoned".to_string())?;
+    if let Some(icon) = slot.as_ref() {
+        icon.set_menu(menu).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  Tauri App Entry
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -14901,6 +14963,7 @@ pub fn run() {
         .manage(CommandRegistry::new(BTreeMap::new()))
         .manage(ChatStreamRegistry::new(StdMutex::new(BTreeMap::new())))
         .manage(DownloadCancelRegistry::default())
+        .manage(TrayHandle::default())
         .setup(|_app| {
             // Warm the sys_info caches at startup so the first tool call /
             // prompt probe returns instantly instead of paying the full
@@ -15029,10 +15092,26 @@ pub fn run() {
                 // Left click = come back on screen; the menu lives on right
                 // click (the convention every tray app the user knows uses).
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "tray-show" => show_all_windows(app),
-                    "tray-quit" => app.exit(0),
-                    _ => {}
+                .on_menu_event(|app, event| {
+                    let id = event.id().as_ref();
+                    match id {
+                        "tray-show" => show_all_windows(app),
+                        "tray-quit" => app.exit(0),
+                        // Roadmap 5.3: per-session entries pushed by the
+                        // frontend — 前往 comes out of the tray AND switches
+                        // (the frontend listener does the switch); 取消 stops
+                        // the session's turn + queued tasks.
+                        _ => {
+                            if let Some(session) = id.strip_prefix("tray-open:") {
+                                show_all_windows(app);
+                                use tauri::Emitter;
+                                let _ = app.emit("tray-open-session", session.to_string());
+                            } else if let Some(session) = id.strip_prefix("tray-cancel:") {
+                                use tauri::Emitter;
+                                let _ = app.emit("tray-cancel-session", session.to_string());
+                            }
+                        }
+                    }
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Click {
@@ -15050,7 +15129,11 @@ pub fn run() {
             if let Some(icon) = _app.default_window_icon().cloned() {
                 tray = tray.icon(icon);
             }
-            tray.build(handle)?;
+            let tray_icon = tray.build(handle)?;
+            // 5.3: update_tray_sessions rebuilds this menu — keep the handle.
+            if let Ok(mut slot) = _app.state::<TrayHandle>().0.lock() {
+                *slot = Some(tray_icon);
+            }
 
             Ok(())
         })
@@ -15159,6 +15242,7 @@ pub fn run() {
             load_session_stats,
             load_all_session_stats,
             send_turn_notification,
+            update_tray_sessions,
         ])
         .build(tauri::generate_context!())
         .expect("error while building pure")
