@@ -489,4 +489,47 @@ describe('SubagentOrchestrator segment continuation + liveness watchdog', () => 
     const last = interrupted!.state.messages[interrupted!.state.messages.length - 1];
     expect(last.role === 'assistant' && !!last.toolCalls?.length).toBe(false);
   }, 10_000);
+
+  it('rescues output from the transcript when the final round is empty (empty-response Completed)', async () => {
+    // finalOutput is only the LAST THINK round's text. When the sub-agent's
+    // closing round is empty, Completed carried output: "" while the rail
+    // card turned done — the "done card above, blank tool-row Output below"
+    // desync. The orchestrator must fall back to the closest preceding
+    // assistant text.
+    //
+    // The default verifier would FAIL an empty output and push the engine
+    // back into THINK (the normal self-correction path), so this test injects
+    // a permissive verifier to reach the empty-Completed directly — the same
+    // hole custom verifiers or check-bypass paths can hit in production.
+    let round = 0;
+    const llm: LLMAdapter = {
+      async *stream(): AsyncGenerator<LLMChunk, void, void> {
+        round++;
+        if (round === 1) {
+          yield { type: 'content', content: '调研完成：pure 采用分层引擎架构，Harness 负责上下文与检查点。' };
+          yield { type: 'done', content: '调研完成：pure 采用分层引擎架构，Harness 负责上下文与检查点。', toolCalls: [] };
+          return;
+        }
+        // Final round: content is empty — the finalOutput killer.
+        yield { type: 'done', content: '', toolCalls: [] };
+      },
+      async complete() { throw new Error('not used'); },
+    };
+    // Zero checks → evaluate always passes → the empty round completes.
+    const permissiveVerifier = new Verifier();
+    const orch = new SubagentOrchestrator({
+      llm,
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      verifier: permissiveVerifier,
+    });
+    orch.register(subagentDef('test_rescuer'));
+    const result = await orch.execute(toolCall('test_rescuer', { prompt: 'research pure' }));
+    expect(result.success).toBe(true);
+    const sub = result.result as SubagentResult;
+    // The empty final round must NOT blank the payload: the earlier summary
+    // rides instead, so the tool-row Output panel has something to render.
+    expect(sub.output).toContain('分层引擎架构');
+  }, 10_000);
 });

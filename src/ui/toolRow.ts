@@ -189,6 +189,10 @@ export function shouldUseTerminalPanel(toolName: string): boolean {
     case 'code_editor':
     case 'bash_executor':
       return true;
+    case 'researcher':
+    case 'deep_thinker':
+    case 'ui_designer':
+      return false;
     default:
       return false;
   }
@@ -825,6 +829,15 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
     // Do not change the open state here. Every row starts open, and preserving
     // the native details state lets the user's collapse/reopen choice win even
     // when a result arrives asynchronously.
+  } else if (meta.success && isSubagentTool(row.toolName)) {
+    // Subagent success with no text payload: the engine's finalOutput is empty
+    // when the sub-agent's last round issued tool calls (content = ""), so
+    // finalize gets nothing to render. An EMPTY Output panel next to a green
+    // rail card reads as a desync bug — show the handoff explicitly instead.
+    const note = document.createElement('div');
+    note.className = 'tool-result-empty';
+    note.textContent = '子 Agent 已完成，未产出文本结果 —— 结论已直接交给主 agent 汇总。';
+    row.resultEl.appendChild(note);
   }
 }
 

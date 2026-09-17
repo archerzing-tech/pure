@@ -696,6 +696,47 @@ describe('subagent delegations read as agents, not tool calls (2026-09-17)', () 
     }
   });
 
+  it('tints the row edge cyan and keeps the summary tinted after finalize', () => {
+    // Second-pass distinction (2026-09-17 follow-up): the badge alone drowned
+    // once the row opened — the body was the SAME black console as
+    // execute_command. The 3px cyan left edge must mark the whole row.
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('code_reviewer', { prompt: '审查' });
+      const details = row.details as any;
+      // The fake DOM records className assignments, so the edge style itself
+      // is CSS-side; here we pin the structural contract the CSS keys on.
+      expect(details.classList.contains('subagent-row')).toBe(true);
+      finalizeToolRow(row, { success: true, duration: 1200, resultText: '结论：通过' });
+      expect(details.classList.contains('success')).toBe(true);
+      expect(details.classList.contains('subagent-row')).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('renders an explicit handoff note when a successful subagent produced no text', () => {
+    // The engine's finalOutput is empty when the sub-agent ended on a tool
+    // call or an empty response; a green rail card next to a BLANK Output
+    // panel read as a desync bug. The row must explain the handoff instead.
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('ui_designer', { requirement: '设计登录页' });
+      finalizeToolRow(row, { success: true, duration: 8000, resultText: '' });
+      const note = (row.resultEl as any).children.find?.((el: any) => el.className === 'tool-result-empty')
+        ?? Array.from((row.resultEl as any).children).find((el: any) => el.className === 'tool-result-empty');
+      expect(note).toBeTruthy();
+      expect(String(note.textContent)).toContain('子 Agent 已完成');
+      // A NON-subagent row with no text stays blank — the note is agent-only.
+      const plain = createToolRow('read_file', { path: 'a.ts' });
+      finalizeToolRow(plain, { success: true, duration: 5, resultText: '' });
+      const plainChildren = Array.from((plain.resultEl as any).children) as any[];
+      expect(plainChildren.some((el) => el.className === 'tool-result-empty')).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
   it('keeps tool rows badge-free — bash_executor included, same ruling as the rail', () => {
     // bash_executor IS Tags.AGENT, but it is a shell command wearing an agent
     // wrapper: the activity rail already refused to card it, and the

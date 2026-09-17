@@ -501,6 +501,25 @@ export class SubagentOrchestrator implements ToolAdapter {
           emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'completed', lifecycle: 'observing', toolTrace: [...toolTrace.values()] });
         } else if (event.type === 'Completed') {
           finalOutput = event.payload.finalOutput;
+          // finalOutput is only the LAST THINK round's text — empty when the
+          // sub-agent ended on an empty response (reasoning models burning the
+          // whole output budget on thinking are the known case). The rail card
+          // still turns done via onDone, so an empty payload desyncs the two
+          // views (done card above, blank tool-row Output below). Fall back to
+          // the transcript: the closest preceding non-empty assistant text is
+          // the best available summary voice — last resort only, it never
+          // overrides a real finalOutput.
+          if (!finalOutput || !finalOutput.trim()) {
+            const transcript = event.payload.messages ?? [];
+            for (let i = transcript.length - 1; i >= 0; i--) {
+              const m = transcript[i];
+              if (m.role !== 'assistant' || m.internal) continue;
+              if (typeof m.content === 'string' && m.content.trim()) {
+                finalOutput = m.content;
+                break;
+              }
+            }
+          }
           await persist('subagent_completed', event.payload.messages, event.payload.turnCount ?? 0);
           emit(progress?.onDone, { success: true, output: finalOutput, status: 'done', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
           return {

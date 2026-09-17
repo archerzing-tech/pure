@@ -1128,9 +1128,11 @@ describe('subagent tool body renders the delegated output', () => {
     expect(candidate).toBeGreaterThan(-1);
     // The object path must pull .output for subagents (bash conclusion, review
     // verdict), not fall through to String(object) === "[object Object]".
-    expect(src.slice(candidate, candidate + 650)).toContain("'summary' in rawResult");
-    expect(src.slice(candidate, candidate + 650)).toContain("'output' in rawResult");
-    expect(src.slice(candidate, candidate + 650)).toContain('(rawResult as { output?: string }).output as string');
+    expect(src.slice(candidate, candidate + 700)).toContain("'summary' in rawResult");
+    expect(src.slice(candidate, candidate + 700)).toContain("'output' in rawResult");
+    // A SubagentResult with output: undefined must become "" (the empty-result
+    // note in finalizeToolRow), never the object-stringify fallback.
+    expect(src.slice(candidate, candidate + 700)).toContain("(rawResult as { output?: unknown }).output ?? ''");
   });
 
   it('line-caps subagent bodies like live execute_command output', () => {
