@@ -14876,12 +14876,56 @@ struct TraySessionItem {
 #[derive(Default)]
 struct TrayHandle(StdMutex<Option<tauri::tray::TrayIcon>>);
 
+// Mirror of the latest pushed running-session snapshot (the same pushes that
+// rebuild the menu). The close handler (on_window_event below) reads it to
+// decide hide-vs-quit without owning session state itself.
+#[derive(Default)]
+struct TraySessions(StdMutex<Vec<TraySessionItem>>);
+
+/// What a window-close press means (2026-09-17 close policy, user option A):
+/// tasks running → hide to tray with a one-shot hint (5.1's async core
+/// survives); idle + last window → really quit; idle + secondary window →
+/// close just that window.
+enum CloseDisposition {
+    BackgroundAndHint,
+    Quit,
+    Close,
+}
+
+fn close_disposition(running_sessions: usize, open_windows: usize) -> CloseDisposition {
+    if running_sessions > 0 {
+        CloseDisposition::BackgroundAndHint
+    } else if open_windows <= 1 {
+        CloseDisposition::Quit
+    } else {
+        CloseDisposition::Close
+    }
+}
+
+#[cfg(test)]
+mod close_disposition_tests {
+    use super::*;
+
+    #[test]
+    fn hide_with_tasks_quit_when_idle_on_last_window_else_just_close() {
+        assert!(matches!(close_disposition(2, 1), CloseDisposition::BackgroundAndHint));
+        assert!(matches!(close_disposition(0, 1), CloseDisposition::Quit));
+        assert!(matches!(close_disposition(0, 2), CloseDisposition::Close));
+    }
+}
+
 #[tauri::command]
 fn update_tray_sessions(
     app: tauri::AppHandle,
     tray: tauri::State<'_, TrayHandle>,
+    mirror: tauri::State<'_, TraySessions>,
     sessions: Vec<TraySessionItem>,
 ) -> Result<(), String> {
+    // Refresh the close handler's mirror FIRST — a failed menu rebuild must
+    // not leave a stale running count behind for the next close press.
+    if let Ok(mut slot) = mirror.0.lock() {
+        *slot = sessions.clone();
+    }
     // The menu is rebuilt WHOLESALE on every push — menu items belong to
     // their menu, so the static entries (显示 / 退出) are recreated here too
     // rather than threaded through as partial state.
@@ -14952,6 +14996,7 @@ pub fn run() {
         .manage(ChatStreamRegistry::new(StdMutex::new(BTreeMap::new())))
         .manage(DownloadCancelRegistry::default())
         .manage(TrayHandle::default())
+        .manage(TraySessions::default())
         .setup(|_app| {
             // Warm the sys_info caches at startup so the first tool call /
             // prompt probe returns instantly instead of paying the full
@@ -15125,16 +15170,33 @@ pub fn run() {
 
             Ok(())
         })
-        // Roadmap 5.1 — the minimal-async core: the red button hides instead
-        // of closing. Every window's WebView carries its own streaming
-        // sessions, queue lanes and worktree work; destroying a window would
-        // kill all of that mid-flight, while hiding just takes it off screen.
-        // Ways back in: the tray icon/menu, the macOS dock icon (RunEvent::
-        // Reopen below). App quit stays an explicit 托盘 → 退出 pure action.
+        // Roadmap 5.1 + the 2026-09-17 close policy (option A): the red
+        // button only means quit when the fleet is idle; with tasks running
+        // it hides the window (the WebView keeps its streaming sessions,
+        // queue lanes and worktree work alive) and fires a one-shot hint, so
+        // "the app just vanished" never happens. Ways back in: the tray
+        // icon/menu, the macOS dock icon (RunEvent::Reopen below).
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                let app = window.app_handle();
+                let running = app.state::<TraySessions>().0.lock().map(|s| s.len()).unwrap_or(0);
+                match close_disposition(running, app.webview_windows().len()) {
+                    CloseDisposition::BackgroundAndHint => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        // Best effort — a failed hint must never block hiding.
+                        let body = format!("还有 {running} 个任务在跑，窗口关了它们也继续；进度和取消都在托盘菜单里。");
+                        let _ = notify_rust::Notification::new()
+                            .summary("pure")
+                            .body(&body)
+                            .show();
+                    }
+                    CloseDisposition::Quit => {
+                        api.prevent_close();
+                        app.exit(0);
+                    }
+                    CloseDisposition::Close => {}
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
