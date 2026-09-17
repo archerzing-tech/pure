@@ -10,11 +10,11 @@ jobs:
   # (Tauri cannot cross-compile the NSIS/MSI bundle from macOS). tauri-action
   # creates the release for the tag if it does not exist yet, then uploads the
   # NSIS installer plus the Windows updater artifacts (createUpdaterArtifacts)
-  # and the windows-x86_64 entry of latest.json. The macOS Intel job runs after
-  # this one: the release already exists, and tauri-action merges the Intel
-  # platform entry into the same latest.json (see tauri-action's
-  # upload-version-json.ts — it reads the existing asset and keeps its
-  # platforms map before adding its own).
+  # and the windows-x86_64 entry of latest.json (the action creates that file).
+  # The macOS Intel job runs after this one and adds the darwin-x86_64 entry —
+  # but via its own jq merge step, NOT via tauri-action's built-in
+  # read-merge-reupload of the existing asset, which failed silently in the
+  # 2.2.6-alpha runs (step died right after the bundle uploads, no error text).
   windows-release:
     runs-on: windows-latest
     permissions:
@@ -88,9 +88,12 @@ jobs:
   # used to build the Intel installer (the job would sit queued forever and the
   # run get cancelled). Instead we build on the available Apple Silicon runner
   # (`macos-latest`) and CROSS-COMPILE to x86_64-apple-darwin. This still
-  # produces a genuine Intel bundle (app + dmg + .app.tar.gz updater artifacts)
-  # and remains the source of the darwin-x86_64 entry in latest.json, so macOS
-  # auto-update keeps working on Intel Macs (via Rosetta for Apple Silicon).
+  # produces a genuine Intel bundle (app + dmg + .app.tar.gz updater artifacts).
+  # The darwin-x86_64 entry in latest.json comes from the explicit jq merge
+  # step at the end of this job — tauri-action runs here with
+  # includeUpdaterJson: false so it never touches latest.json (its built-in
+  # merge died without output in the 2.2.6-alpha runs) — keeping macOS
+  # auto-update working on Intel Macs (via Rosetta for Apple Silicon).
   # A job timeout fails fast instead of hanging ~24h if a runner is unavailable.
   macos-x64-release:
     needs: windows-release
@@ -135,6 +138,8 @@ jobs:
           releaseName: 'Pure v__VERSION__'
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+          # latest.json is merged by the dedicated step at the end of this job.
+          includeUpdaterJson: false
           args: --target x86_64-apple-darwin
 
       - name: Build and publish GUI (unsigned, Intel cross-compiled)
@@ -149,6 +154,8 @@ jobs:
           releaseName: 'Pure v__VERSION__'
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+          # latest.json is merged by the dedicated step at the end of this job.
+          includeUpdaterJson: false
           args: --target x86_64-apple-darwin
 
       - name: Build CLI binary (macOS x86_64, cross-compiled on ARM host)
@@ -163,3 +170,25 @@ jobs:
           files: pure_x86_64
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # tauri-action's built-in version-JSON merge (read the existing
+      # latest.json asset, keep its platforms map, re-upload with the extra
+      # platform) died without output in the 2.2.6-alpha runs — right after
+      # the bundle uploads, leaving latest.json windows-only and skipping
+      # every later step. This step is the deterministic replacement: plain
+      # jq on the file the Windows job created, plus the macOS updater
+      # signature that the action just uploaded above. Runs only when every
+      # earlier step succeeded, so the signature is always this run's.
+      - name: Merge darwin-x86_64 entry into latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ github.ref_name }}" --pattern 'latest.json' --output latest.json --clobber
+          gh release download "${{ github.ref_name }}" --pattern 'pure_x64.app.tar.gz.sig' --output macos.sig --clobber
+          jq --arg sig "$(base64 < macos.sig | tr -d '\n')" \
+             --arg url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/pure_x64.app.tar.gz" \
+             --arg date "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+             '.pub_date = $date | .platforms["darwin-x86_64"] = {signature: $sig, url: $url}' \
+             latest.json > latest.json.next
+          mv latest.json.next latest.json
+          gh release upload "${{ github.ref_name }}" latest.json --clobber
