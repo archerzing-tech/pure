@@ -21,6 +21,7 @@ import type {
 } from '../../adapter/mcp/MCPTransport';
 import { mcpToolToDefinition } from '../../adapter/mcp/MCPTransport';
 import { missingRequiredArgs, renderMcpPromptMessages } from '../../shared/mcpPrompt';
+import { scanMcpTool, type PoisonFinding } from '../../shared/mcpPoisonScan';
 
 // Limits for injected resource context. Resources are OPTIONAL context that
 // competes with the user's actual request: a chatty server (a docs site, a
@@ -133,6 +134,9 @@ export type MCPPromptResult =
 export class MCPClient implements ToolAdapter {
   private servers = new Map<string, ServerState>();
   private toolToServer = new Map<string, string>(); // toolName → serverName
+  /** 6.3 poisoning scan verdicts per tool (keyed by full registered name).
+   *  Informational only — consumed by the Settings probe; never gates. */
+  private poisonFindings = new Map<string, { serverName: string; findings: PoisonFinding[] }>();
   /** In-flight resource prefetches, keyed by server name. Awaiting them is
    *  bounded (see collectResourceContext), so a hung server costs one wait,
    *  not a per-turn stall. */
@@ -244,6 +248,19 @@ export class MCPClient implements ToolAdapter {
         // built-in tool selection. The server stays connected; only its
         // filtered tools are hidden from the model.
         if (excluded.some((p) => p && tagged.name.startsWith(p))) continue;
+        // 6.3 poisoning scan on the raw server-provided name/description.
+        // Policy (2026-09-17): informational — the verdict goes to the card
+        // and the console; nothing here blocks, filters, or waits. Collision
+        // reference is everything already registered from OTHER servers
+        // (same-server tools share the prefix and can't shadow anything).
+        const knownNames = [...this.toolToServer]
+          .filter(([, owner]) => owner !== config.name)
+          .map(([toolName]) => toolName);
+        const poison = scanMcpTool({ name: tagged.name, description: t.description ?? '', knownNames });
+        if (poison.length) {
+          this.poisonFindings.set(tagged.name, { serverName: config.name, findings: poison });
+          console.warn(`[MCP] poison scan flagged "${tagged.name}":`, poison.map((f) => `${f.kind}(${f.severity}): ${f.evidence}`).join('; '));
+        }
         state.tools.push(tagged);
         this.toolToServer.set(tagged.name, config.name);
         this.config.onToolDiscovered?.(tagged);
@@ -265,6 +282,7 @@ export class MCPClient implements ToolAdapter {
       state.hasPrompts = false;
     }
     this.toolToServer.clear();
+    this.poisonFindings.clear();
     this.resourcePrefetch.clear();
     this.promptPrefetch.clear();
   }
@@ -453,6 +471,19 @@ export class MCPClient implements ToolAdapter {
     for (const [toolName, owner] of this.toolToServer) {
       if (owner === serverName) this.toolToServer.delete(toolName);
     }
+    for (const [toolName, entry] of this.poisonFindings) {
+      if (entry.serverName === serverName) this.poisonFindings.delete(toolName);
+    }
+  }
+
+  /** 6.3 poisoning verdicts collected at discovery — read by the Settings
+   *  probe to render the server card's warning row. Informational only. */
+  listPoisonFindings(): { toolName: string; serverName: string; findings: PoisonFinding[] }[] {
+    return [...this.poisonFindings].map(([toolName, entry]) => ({
+      toolName,
+      serverName: entry.serverName,
+      findings: entry.findings,
+    }));
   }
 
   getServerNames(): string[] {

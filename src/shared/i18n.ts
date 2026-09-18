@@ -691,6 +691,8 @@ const translations: Record<Language, Record<string, string>> = {
     'mcp.resources.unsupported': '这个服务器没有提供 resources',
     'mcp.resources.hint': '文本类 resource 会作为上下文注入每一轮（6.1）；二进制 / 只带 blob 的不会进提示词',
     'mcp.resources.live': '来自当前会话',
+    'mcp.poison.count': '投毒扫描：{n} 个可疑特征',
+    'mcp.poison.hint': '6.3 投毒特征扫描，仅提示不拦截：指令注入短语、隐形字符、名字仿冒已知工具等。悬停工具名看具体证据。',
 
     // ── Appearance Page ──
     'appearance.title': '外观',
@@ -1594,6 +1596,8 @@ const translations: Record<Language, Record<string, string>> = {
     'mcp.resources.unsupported': 'This server offers no resources',
     'mcp.resources.hint': 'Text resources are injected as context on every turn (6.1); binary / blob-only ones never enter the prompt',
     'mcp.resources.live': 'from the running session',
+    'mcp.poison.count': 'Poison scan: {n} suspicious findings',
+    'mcp.poison.hint': '6.3 poisoning scan, informational only: injection phrases, invisible characters, shadowing of known tool names. Hover a tool chip for the evidence.',
 
     // ── Appearance Page ──
     'appearance.title': 'Appearance',

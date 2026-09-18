@@ -4975,6 +4975,22 @@ body {
   color: var(--text-tertiary);
 }
 
+/* 6.3 poisoning scan (informational): amber for medium findings, the danger
+   tone only when something high-severity was flagged — the row must draw the
+   eye without pretending it blocked anything. */
+.mcp-poison-row {
+  margin-top: 4px;
+  color: var(--warning, #d97706);
+}
+.mcp-poison-row.mcp-poison-high {
+  color: var(--danger);
+}
+.mcp-poison-chip {
+  border-color: currentColor;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
 .mcp-probe-hint {
   margin: 6px 0 0;
 }
