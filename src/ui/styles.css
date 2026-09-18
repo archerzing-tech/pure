@@ -13679,3 +13679,69 @@ button svg,
   color: var(--text-tertiary);
   word-break: break-all;
 }
+
+/* E1.4 子代理角色建议：左侧一条色带表示严重度，卡片本身只读（不提供一键修复）。 */
+.evo-advice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.evo-advice-row {
+  padding: 10px 12px;
+  border: 1px solid var(--border-light);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.evo-advice-high {
+  border-left-color: var(--danger);
+}
+
+.evo-advice-medium {
+  border-left-color: #D97706;
+}
+
+.evo-advice-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.evo-advice-role {
+  font-weight: 700;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.evo-advice-time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.evo-badge-high {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.evo-badge-medium {
+  color: #D97706;
+  background: color-mix(in srgb, #D97706 14%, transparent);
+}
+
+.evo-advice-evidence {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.evo-advice-action {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}

@@ -12,10 +12,12 @@ import {
   renderErrorClusters,
   renderExperienceList,
   renderObservationStats,
+  renderSubagentAdvice,
   renderTotals,
   renderTrendCards,
   relativeTime,
 } from '../evolutionDashboard';
+import type { SubagentAdvice } from '../../shared/subagentAdvisory';
 import type { MemoryEntry } from '../../adapter/memory/IMemoryStore';
 import { buildEvolutionDashboard, startOfLocalDay, type TrendBucket } from '../../shared/evolutionDashboard';
 import { parsePromptObservations, type AgentRunObservation, type PromptObservation } from '../../shared/promptObservability';
@@ -226,6 +228,58 @@ describe('renderErrorClusters', () => {
     ], NOW);
     expect(html).not.toContain('<img');
     expect(html).toContain('&lt;img');
+  });
+});
+
+describe('renderSubagentAdvice (E1.4)', () => {
+  function advice(overrides: Partial<SubagentAdvice> = {}): SubagentAdvice {
+    return {
+      role: 'researcher',
+      reason: 'timeout',
+      severity: 'high',
+      delegations: 4,
+      failures: 3,
+      failureRate: 75,
+      timeoutCount: 3,
+      dominantKind: 'timeout',
+      avgDurationMs: 92_000,
+      lastFailureAt: NOW - 2 * 3600_000,
+      action: 'skill-gate',
+      skillId: 'web-research',
+      ...overrides,
+    };
+  }
+
+  it('explains an empty window (no advice is not the same as all healthy)', () => {
+    const html = renderSubagentAdvice([], NOW);
+    expect(html).toContain('evo-empty');
+    expect(html).toContain('太少');
+  });
+
+  it('renders role, evidence and the concrete lever for a gated role', () => {
+    const html = renderSubagentAdvice([advice()], NOW);
+    expect(html).toContain('资料调研');
+    expect(html).toContain('4'); // dispatches
+    expect(html).toContain('75%');
+    expect(html).toContain('1m 32s'); // avg duration
+    expect(html).toContain('网页搜索'); // the skill the user can actually turn off
+    expect(html).toContain('evo-advice-high');
+  });
+
+  it('tells the truth for a role with no switch', () => {
+    const html = renderSubagentAdvice([advice({ role: 'deep_thinker', action: 'prompt', skillId: undefined, severity: 'medium', reason: 'failure', timeoutCount: 0 })], NOW);
+    expect(html).toContain('深度思考');
+    expect(html).toContain('没有开关');
+    expect(html).toContain('evo-advice-medium');
+    // No switch offered, and no timeout clause when nothing timed out.
+    expect(html).not.toContain('网页搜索');
+    expect(html).not.toContain('超时');
+  });
+
+  it('never injects markup through role names or skill ids', () => {
+    const html = renderSubagentAdvice([advice({ role: '<img src=x>', skillId: '"><script>' })], NOW);
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('<script>');
   });
 });
 
