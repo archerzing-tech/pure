@@ -7276,6 +7276,30 @@ fn write_app_skill(name: String, description: String, body: String) -> Result<St
     Ok(dir.to_string_lossy().into_owned())
 }
 
+/// Remove a skill directory from the app-owned skills directory. Same
+/// single-safe-component validation as write_app_skill (a crafted name must
+/// never escape via PathBuf::join). E2.2: distilled skills surface a delete
+/// button in Settings → Skills; only `auto-` prefixed ones show it in the UI,
+/// but the command itself accepts any valid name so future callers decide.
+#[tauri::command]
+fn delete_app_skill(name: String) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.len() > 120
+        || name == "."
+        || name == ".."
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err("skill name must contain only letters, numbers, '-', '_' or '.'".to_string());
+    }
+    let dir = app_skills_dir().join(name);
+    if !dir.is_dir() {
+        return Err(format!("skill directory not found: {}", dir.display()));
+    }
+    fs::remove_dir_all(&dir).map_err(|e| format!("remove skill directory: {}", e))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 /// A SKILL.md fetched from a GitHub repo, plus the route that actually
 /// delivered it — the caller surfaces `via` so the user (and the model) can
 /// see how the bytes arrived instead of guessing.
@@ -7508,6 +7532,33 @@ mod app_skills_tests {
         assert!(write_app_skill("vision-ocr".to_string(), "d".to_string(), "body".to_string()).is_ok());
         let installed = app_skills_dir().join("vision-ocr").join("SKILL.md");
         assert!(installed.exists());
+
+        match prev {
+            Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
+            None => std::env::remove_var("PURE_SKILLS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn delete_app_skill_removes_only_valid_installed_dirs() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("pure-skills-delete-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prev = std::env::var("PURE_SKILLS_DIR").ok();
+        std::env::set_var("PURE_SKILLS_DIR", &base);
+
+        // Traversal names are rejected before any filesystem access.
+        assert!(delete_app_skill("..".to_string()).is_err());
+        assert!(delete_app_skill("a/b".to_string()).is_err());
+        // A missing but well-formed name is an honest error, not a panic.
+        assert!(delete_app_skill("auto-nope".to_string()).is_err());
+        // Install → delete round trip removes the whole directory.
+        assert!(write_app_skill("auto-demo".to_string(), "d".to_string(), "body".to_string()).is_ok());
+        assert!(app_skills_dir().join("auto-demo").join("SKILL.md").exists());
+        let removed = delete_app_skill("auto-demo".to_string()).expect("deletes");
+        assert!(removed.ends_with("auto-demo"));
+        assert!(!app_skills_dir().join("auto-demo").exists());
 
         match prev {
             Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
@@ -15564,6 +15615,7 @@ pub fn run() {
             list_app_skills,
             app_skills_dirs,
             write_app_skill,
+            delete_app_skill,
             fetch_skill_markdown,
             fetch_url_text,
             test_llm_connection,

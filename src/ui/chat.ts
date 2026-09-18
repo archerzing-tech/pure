@@ -9,6 +9,7 @@ import { mergeTokenUsage } from '../shared/usage';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, resolveNetRoute, netRouteProxyPair, recordNetOutcome } from '../shared/netRoute';
 import { memoryStore } from './memoryStore';
+import { distillSkill, matchSkillDistillInstruction, pickDistillSource } from '../shared/skillDistill';
 import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
 import { mergeConventions } from '../shared/conventions';
@@ -1652,6 +1653,50 @@ export class ChatController {
   }
 
   /**
+   * E2.2 —「把这个做法沉淀成技能」。用户触发（正则识别，见 skillDistill）：
+   * 取最近的过程记忆，一次 LLM 调用扩写成 SKILL.md，经 Rust write_app_skill
+   * 落到 ~/.pure/skills/auto-<name>/，下个会话 <skills> 注入自动带上。任何
+   * 一步失败都在原状态条上讲人话，不留半成品。
+   */
+  private async runSkillDistill(instruction: string): Promise<void> {
+    this.addBubble('user', instruction);
+    const wrapper = this.addStatusBubble(t('skill.distill.running'), true);
+    const bubble = wrapper.querySelector<HTMLElement>('.bubble');
+    const fail = (text: string) => {
+      wrapper.classList.remove('pending');
+      wrapper.classList.add('error');
+      if (bubble) bubble.textContent = text;
+    };
+    try {
+      if (!isTauriRuntime()) {
+        fail(t('skill.distill.desktopOnly'));
+        return;
+      }
+      const source = pickDistillSource(memoryStore.list());
+      if (!source) {
+        fail(t('skill.distill.noSource'));
+        return;
+      }
+      const config = loadConfig();
+      if (!config || !hasConfiguredKey(config)) {
+        fail(t('skill.distill.failed'));
+        return;
+      }
+      const skill = await distillSkill(createLLMAdapter(config), source.content, instruction);
+      if (!skill) {
+        fail(t('skill.distill.failed'));
+        return;
+      }
+      await invoke('write_app_skill', { name: skill.name, description: skill.description, body: skill.body });
+      wrapper.classList.remove('pending');
+      wrapper.classList.add('hl-success');
+      if (bubble) bubble.textContent = t('skill.distill.done').replace('{name}', skill.name);
+    } catch (err) {
+      fail(t('chat.error', 'Error: {msg}').replace('{msg}', err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  /**
    * Connect MCP on demand for composer-level work. Reuses the live client when
    * one exists; otherwise builds it from the config the same way `send()` would
    * (a `servers: []` client that connects each configured server by hand), then
@@ -2242,6 +2287,12 @@ export class ChatController {
     // composer expands the draft itself (so a failed expansion keeps the text
     // in the box) and hands the template over as userText.
     if (!isAuto && displayUserText === userText) {
+      // E2.2 —「把这个做法沉淀成技能」：元指令，不进引擎。拦在 beginLiveTurn
+      // 之前自己渲染气泡，失败也不留 ghost 消息。
+      if (matchSkillDistillInstruction(userText) !== null) {
+        await this.runSkillDistill(userText);
+        return;
+      }
       const expansion = await this.expandMcpPromptCommand(userText);
       if (expansion?.ok === false) {
         showToast(expansion.error);

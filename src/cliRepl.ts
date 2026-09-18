@@ -36,11 +36,13 @@ import type { Harness } from './harness/Harness';
 import type { MCPClient } from './harness/mcp/MCPClient';
 import { parseMcpPromptCommand, describeMcpPrompt, MCP_PROMPT_COMMAND } from './shared/mcpPrompt';
 import type { EngineEvent, Message, ToolAdapter, ToolDefinition } from './shared/types';
+import type { LLMAdapter } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
 import { loadConfig, DEFAULT_CLI_AUTO_APPROVE, PURE_DIR } from './cliConfig';
 import type { CliArgs } from './cliConfig';
 import { createAdapter } from './cliAdapter';
-import { createHarness, learnFromInput, printToolCorrectionHints } from './cliHarness';
+import { createHarness, distillSkillFromMemory, learnFromInput, printToolCorrectionHints } from './cliHarness';
+import { matchSkillDistillInstruction } from './shared/skillDistill';
 
 // CLI version for the banner + startup line. The standalone binary bakes the
 // released version in at compile time via scripts/build-cli.ts (--define
@@ -571,11 +573,42 @@ async function runCliDeliveryGateWithRepair(
 
 // ── One-shot mode ──
 
+// E2.2 —「把这个做法沉淀成技能」的 CLI 输出侧：编排在 cliHarness（挑来源、
+// 扩写、落盘），这里只管把结果用人话讲出来。one-shot / REPL 两个入口共用。
+async function runSkillDistillCli(llm: LLMAdapter, instruction: string): Promise<void> {
+  process.stdout.write(`  ${dim('🛠 正在把最近沉淀的做法整理成技能…')}\n`);
+  const outcome = await distillSkillFromMemory(llm, instruction);
+  if (outcome.ok) {
+    process.stdout.write(`  ${green('✓')} 已沉淀为技能 ${cyan(outcome.name)}\n`);
+    process.stdout.write(`    ${dim(`${outcome.dir} — 下个会话自动带上；GUI 设置 → 技能 里可删。`)}\n`);
+    return;
+  }
+  if (outcome.reason === 'no-source') {
+    process.stdout.write(`  ${yellow('!')} 暂时没有可沉淀的过程记忆——先完整跑一个多步任务，再说「沉淀成技能」。\n`);
+  } else if (outcome.reason === 'llm-failed') {
+    process.stdout.write(`  ${yellow('!')} 这次没整理成技能（模型回复不完整），换个说法再试一次。\n`);
+  } else {
+    process.stdout.write(`  ${red('!')} 技能写盘失败：${outcome.detail ?? '未知原因'}\n`);
+  }
+}
+
 async function runOneShot(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
   const { harness, tools, sessionId, projectPath, toolsDefs, mcpClient } = await createHarness(args);
   const hasTools = toolsDefs.length > 0;
   await learnFromInput(args.prompt, sessionId, projectPath);
+
+  // E2.2 — 沉淀指令在 one-shot 里直接处理掉：不进引擎（这是一条给 pure 自己
+  // 的元指令，不是任务）。MCP 子进程照常断开，避免挂住退出。
+  if (matchSkillDistillInstruction(args.prompt)) {
+    renderLogo();
+    console.log(`  ${bold('pure')}  ${dim(CLI_VERSION)} ${dim('—')} ${cyan(label)}`);
+    console.log(`  📝 ${args.prompt}`);
+    console.log(dim('─'.repeat(50)));
+    await runSkillDistillCli(adapter, args.prompt);
+    mcpClient?.disconnectAll();
+    return;
+  }
 
   renderLogo();
   console.log(`  ${bold('pure')}  ${dim(CLI_VERSION)} ${dim('—')} ${cyan(label)}`);
@@ -784,6 +817,17 @@ async function runRepl(args: CliArgs) {
 
     if (input === '/prompts') {
       await printMcpPrompts(mcpClient);
+      continue;
+    }
+
+    // E2.2 —「把这个做法沉淀成技能」拦在引擎外：取最近过程记忆 → 模型扩写
+    // → 落 ~/.pure/skills/auto-<name>/。生成中不接受（和 /undo 同规）。
+    if (matchSkillDistillInstruction(input)) {
+      if (generating) {
+        process.stdout.write(`  ${yellow('⏳')} ${dim('请先等待当前执行结束。')}\n`);
+        continue;
+      }
+      await runSkillDistillCli(adapter, input);
       continue;
     }
 
