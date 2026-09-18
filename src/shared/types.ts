@@ -193,8 +193,20 @@ export interface VerificationSummary {
   evidence: VerificationEvidence[];
 }
 
+/** E0.3 — engine phases that may select their own LLM adapter. THINK is the
+ * main reasoning stream; HANDOVER is the policy-stop wrap-up round (never
+ * streams to the user, so it is cheap-model-friendly); REFLECT is reserved
+ * for the post-turn lesson reflector (E1.1), which runs outside the loop.
+ * VERIFY routes through ctx.verifier, not an adapter. */
+export type EngineLlmPhase = 'THINK' | 'HANDOVER' | 'REFLECT';
+
 export interface EngineContext {
   llm: LLMAdapter;
+  /** E0.3 — per-phase adapter override. Return the adapter for a phase, or
+   * undefined to fall back to `llm`. Absent ⇒ every phase uses `llm` and the
+   * engine is byte-identical to the single-adapter behavior. The reflector
+   * (E1.1) reads REFLECT to reach its cheap model. */
+  llmFor?: (phase: EngineLlmPhase) => LLMAdapter | undefined;
   tools?: ToolAdapter;
   toolsDefs: ToolDefinition[];
   /** Recompute the LLM-visible tool list before each THINK iteration so

@@ -1236,3 +1236,72 @@ describe('AgentLoopEngine', () => {
     }
   });
 });
+
+describe('AgentLoopEngine per-phase adapter routing (E0.3)', () => {
+  /** Wrap an adapter so the test can count how many times the engine streamed from it. */
+  function countingLLM(inner: LLMAdapter, counter: { count: number }): LLMAdapter {
+    return {
+      stream(messages, tools, signal) {
+        counter.count++;
+        return inner.stream(messages, tools, signal);
+      },
+      complete: (messages, tools, signal) => inner.complete(messages, tools, signal),
+    };
+  }
+
+  it('streams THINK through the phase adapter and never touches the default', async () => {
+    const thinkCalls = { count: 0 };
+    const defaultCalls = { count: 0 };
+    const engine = new AgentLoopEngine();
+    const events = await collect(engine.run(
+      { sessionId: 's-phase-think', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      baseCtx({
+        llm: countingLLM(textLLM('default adapter answered'), defaultCalls),
+        llmFor: (phase) => (phase === 'THINK' ? countingLLM(textLLM('phase adapter answered'), thinkCalls) : undefined),
+      }),
+    ));
+
+    expect(thinkCalls.count).toBe(1);
+    expect(defaultCalls.count).toBe(0);
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed?.type === 'Completed' && completed.payload.finalOutput).toBe('phase adapter answered');
+  });
+
+  it('serves the HANDOVER wrap-up from its own adapter on a policy stop', async () => {
+    const handoverCalls = { count: 0 };
+    const engine = new AgentLoopEngine();
+    // THINK explodes on the first round; the policy stops immediately, which
+    // triggers the graceful-handover LLM round — routed to the HANDOVER
+    // adapter, not back to the (dead) THINK one.
+    const events = await collect(engine.run(
+      { sessionId: 's-phase-handover', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      baseCtx({
+        llm: errorLLM('provider down'),
+        failurePolicy: { decide: () => ({ kind: 'stop', reason: 'stop now' }) },
+        llmFor: (phase) => (phase === 'HANDOVER' ? countingLLM(textLLM('handover summary'), handoverCalls) : undefined),
+      }),
+    ));
+
+    expect(handoverCalls.count).toBe(1);
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted?.type === 'Interrupted' && interrupted.payload.reason).toBe('stop now');
+    // The handover summary the user actually sees comes from the phase adapter.
+    const completed = events.find(e => e.type === 'Completed');
+    const messages = completed?.type === 'Completed' ? completed.payload.messages : undefined;
+    const lastAssistant = messages
+      ? [...messages].reverse().find(m => m.role === 'assistant')
+      : undefined;
+    expect(lastAssistant?.content).toContain('handover');
+  });
+
+  it('keeps the single-adapter behavior when llmFor is absent', async () => {
+    const defaultCalls = { count: 0 };
+    const engine = new AgentLoopEngine();
+    await collect(engine.run(
+      { sessionId: 's-phase-default', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      baseCtx({ llm: countingLLM(textLLM('only adapter'), defaultCalls) }),
+    ));
+
+    expect(defaultCalls.count).toBe(1);
+  });
+});
