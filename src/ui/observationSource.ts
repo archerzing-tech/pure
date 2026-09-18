@@ -24,8 +24,30 @@ function unavailable(): ObservationReadResult {
   return { available: false, records: [], totalBytes: 0, readBytes: 0, truncated: false, path: '' };
 }
 
+/**
+ * 回归专用注入点：浏览器里没有 Rust 侧的观测日志，e2e 需要一份**确定的**记录
+ * 才能验证仪表盘的渲染链路（趋势 / 错误簇 / 策略维度）。显式挂在 globalThis
+ * 上、只有真的塞了 JSONL 字符串时才生效 —— 没设的浏览器模式行为逐字不变，
+ * 也永远不会短路 Tauri 路径。值走与 Rust 尾巴读同一条解析器。
+ */
+function injectedObservationFeed(): string | null {
+  const feed = (globalThis as { __PURE_OBSERVATION_FEED__?: unknown }).__PURE_OBSERVATION_FEED__;
+  return typeof feed === 'string' ? feed : null;
+}
+
 /** 读取观测日志尾巴并解析成记录；永不抛异常。 */
 export async function readGuiObservations(): Promise<ObservationReadResult> {
+  const feed = injectedObservationFeed();
+  if (feed !== null) {
+    return {
+      available: true,
+      records: parsePromptObservations(feed),
+      totalBytes: feed.length,
+      readBytes: feed.length,
+      truncated: false,
+      path: '(injected e2e feed)',
+    };
+  }
   if (!isTauriRuntime()) return unavailable();
   try {
     const dump = await tauriInvoke<{

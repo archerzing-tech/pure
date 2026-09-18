@@ -85,6 +85,68 @@ const SEEDED_CONTENT = 'E2E seeded procedure: search before editing';
 /** 未翻译 key 会以 `evolution.xxx` 字面量出现在页面上。 */
 const RAW_KEY_PATTERN = /evolution\.(title|desc|chart|tile|errors|experience|stats|table|roles|dimension|level|strategy|advice)/;
 
+/**
+ * 种给仪表盘的观测记录：两条 agent_run，五个策略维度各有两个档位 —— 逐维
+ * 切换时才能看出"表里只该有选中维度的档位"。时间放在现在附近，周/月窗口都进。
+ */
+function buildStrategyFeed(): string {
+  const now = Date.now();
+  const base = {
+    schemaVersion: 1,
+    type: 'agent_run',
+    sessionId: 'e2e-obs',
+    eventCounts: {},
+    toolCalls: [] as Array<{ toolName: string; success: boolean; durationMs: number }>,
+    reasoningChars: 0,
+    outputChars: 0,
+  };
+  const strategy = (overrides: Record<string, unknown>) => ({
+    exploration: 'broad',
+    verification: 'thorough',
+    delegation: 'parallel',
+    autonomy: 'assisted',
+    recovery: 'continue-with-evidence',
+    complexity: 'complex',
+    confidence: 0.82,
+    intentTags: ['build'],
+    recommendedRoles: ['code_editor'],
+    parallelRoles: ['researcher'],
+    priorArtHint: true,
+    ...overrides,
+  });
+  return [
+    {
+      ...base,
+      traceId: 'e2e-obs-1',
+      startedAt: now - 120_000,
+      endedAt: now - 110_000,
+      durationMs: 10_000,
+      outcome: { isComplete: true, interrupted: false },
+      verification: { status: 'passed', evidence: [] },
+      strategy: strategy({}),
+    },
+    {
+      ...base,
+      traceId: 'e2e-obs-2',
+      startedAt: now - 60_000,
+      endedAt: now - 55_000,
+      durationMs: 5_000,
+      outcome: { isComplete: true, interrupted: false },
+      verification: { status: 'passed', evidence: [] },
+      toolCalls: [{ toolName: 'researcher', success: true, durationMs: 900 }],
+      strategy: strategy({
+        verification: 'standard',
+        delegation: 'targeted',
+        recovery: 'switch-approach',
+        complexity: 'simple',
+        confidence: 0.6,
+        intentTags: ['quick'],
+        priorArtHint: false,
+      }),
+    },
+  ].map((record) => JSON.stringify(record)).join('\n');
+}
+
 interface StepFailure extends Error {
   step?: string;
 }
@@ -312,6 +374,52 @@ try {
     };
   })()`, 10000, 'lesson removed from the memory store');
 
+  // ── 6. 种一份观测记录（浏览器里没有 Rust 尾巴读）→ 五个策略维度都要能渲染 ──
+  // 注入走 observationSource 的 __PURE_OBSERVATION_FEED__（JSONL 文本，与 Rust
+  // 尾巴读同一条解析器）；点一下周/月切换触发重读，再逐维点过去验证渲染。
+  await evaluate(`(() => { window.__PURE_OBSERVATION_FEED__ = ${JSON.stringify(buildStrategyFeed())}; return 'fed'; })()`);
+  await clickUntil(
+    `document.querySelector('#evolution-range [data-range="month"]')?.click();`,
+    `(() => {
+      const btns = [...document.querySelectorAll('#evolution-strategy-tabs .evo-range-btn')];
+      const first = btns[0];
+      return {
+        ok: btns.length === 5 && first?.dataset.strategyDim === 'verification' && first?.classList.contains('active'),
+        n: btns.length,
+      };
+    })()`,
+    15000,
+    'five strategy dimension tabs (default verification)',
+  );
+
+  // 每个维度点一下：只有选中维度的那几个档位值能出现在表里。
+  const dimensionCases = [
+    { dimension: 'verification', expect: ['全面', '常规'], absent: ['广泛'] },
+    { dimension: 'delegation', expect: ['并行', '定向'], absent: ['全面'] },
+    { dimension: 'exploration', expect: ['广泛'], absent: ['全面'] },
+    { dimension: 'recovery', expect: ['带证据继续', '换思路'], absent: ['广泛'] },
+    { dimension: 'complexity', expect: ['复杂', '简单'], absent: ['全面'] },
+  ];
+  for (const testCase of dimensionCases) {
+    await clickUntil(
+      `document.querySelector('#evolution-strategy-tabs [data-strategy-dim="${testCase.dimension}"]')?.click();`,
+      `(() => {
+        const text = document.getElementById('evolution-strategy')?.textContent ?? '';
+        const hasAll = ${JSON.stringify(testCase.expect)}.every((s) => text.includes(s));
+        const hasNone = ${JSON.stringify(testCase.absent)}.every((s) => !text.includes(s));
+        return { ok: hasAll && hasNone && !!document.querySelector('#evolution-strategy .evo-table'), text: text.slice(0, 100) };
+      })()`,
+      15000,
+      `${testCase.dimension} dimension rendered`,
+    );
+  }
+  await waitFor(
+    `({ ok: (document.getElementById('evolution-strategy')?.textContent ?? '').includes('子 Agent 角色') })`,
+    10000,
+    'role slices stay visible next to the dimension table',
+  );
+  log('[e2e] strategy dimensions ok — five tabs, one dimension table at a time, roles still sliced');
+
   const exceptions = consoleLogs.filter((line) => line.startsWith('[exception]'));
   if (exceptions.length > 0) {
     const err = new Error(`page threw during the dashboard flow:\n${exceptions.join('\n')}`) as StepFailure;
@@ -319,7 +427,7 @@ try {
     throw err;
   }
 
-  log('[e2e] PASS — dashboard mounts every section, says why it is empty in browser mode, switches week/month, and deletes a lesson end to end');
+  log('[e2e] PASS — dashboard mounts every section, says why it is empty in browser mode, switches week/month, slices all five strategy dimensions, and deletes a lesson end to end');
   ws.close();
   process.exit(0);
 } catch (err) {
