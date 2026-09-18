@@ -10952,6 +10952,48 @@ mod observation_tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// E4.2 的端到端面：GUI 点开「进化」就是走这条路径 —— HOME 解析 → 尾巴读 →
+    /// IPC 字段名。Rust 侧的守护测试，因为它盯的是「桌面版会不会一直显示浏览器
+    /// 模式的提示」这个只有真实运行时才露头的失败。
+    #[test]
+    fn read_observations_serves_the_dashboard_from_the_real_home_dir() {
+        let _home_guard = super::test_home_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "pure-obs-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let _ = fs::remove_dir_all(&home);
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+
+        let first = r#"{"schemaVersion":1,"type":"agent_run","traceId":"a"}"#;
+        let second = r#"{"schemaVersion":1,"type":"prompt_assembly","traceId":"b"}"#;
+        append_observation_to(&observations_dir(), first, u64::MAX, 10).unwrap();
+        append_observation_to(&observations_dir(), second, u64::MAX, 10).unwrap();
+
+        let dump = read_observations(None).unwrap();
+        assert!(dump.text.contains("agent_run"));
+        assert!(dump.text.contains("prompt_assembly"));
+        assert_eq!(dump.total_bytes, dump.read_bytes);
+        assert!(!dump.truncated);
+        let normalized = dump.path.replace('\\', "/");
+        assert!(normalized.ends_with("/.pure/observations/app.jsonl"), "unexpected path: {}", dump.path);
+
+        // IPC 契约：字段名逐个与 src/ui/observationSource.ts 读的一致（改一边要改两边）。
+        let value = serde_json::to_value(&dump).unwrap();
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["path", "readBytes", "text", "totalBytes", "truncated"]);
+        assert!(value["totalBytes"].is_u64());
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn tail_read_drops_the_partial_head_line_and_flags_truncation() {
         let dir = std::env::temp_dir().join(format!("pure-obs-read-tail-{}", std::process::id()));
