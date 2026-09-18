@@ -1993,9 +1993,9 @@ export class SettingsPanel {
 
   /** Skills on disk — ~/.pure/skills (user) plus <workspace>/.agents/skills
    *  (project) — the ones the agent installs mid-session and the Skill Hub
-   *  knows nothing about. Read-only: disk skills are always injected into the
-   *  prompt, so there is no toggle here, just visibility and an open-folder
-   *  affordance for managing them by hand. */
+   *  knows nothing about. Disk skills are always injected into the prompt, so
+   *  there is no toggle here, just visibility, an open-folder affordance, and
+   *  (E2.2) a delete button on distilled `auto-` skills in the user dir. */
   private async renderAppSkills(): Promise<void> {
     const listEl = document.getElementById('app-skills-list');
     const dirsEl = document.getElementById('skills-dir-rows');
@@ -2056,14 +2056,34 @@ export class SettingsPanel {
     const sourceBadge = (source?: string) => source === 'project'
       ? `<span class="skill-source-badge skill-source-project" data-i18n="skills.source.project">${escapeHtml(t('skills.source.project'))}</span>`
       : `<span class="skill-source-badge" data-i18n="skills.source.user">${escapeHtml(t('skills.source.user'))}</span>`;
+    // E2.2 — 沉淀出来的技能（auto- 前缀，用户目录）给一键删除；手工装的
+    // 和项目目录里的保持只读——那些是用户自己放的，不在这次范围内。
+    const deleteButton = (entry: AppSkillEntry) => entry.source === 'user' && entry.name.startsWith('auto-')
+      ? `<button class="settings-btn app-skill-delete" data-skill-delete="${escapeHtml(entry.name)}">${escapeHtml(t('skills.installed.delete'))}</button>`
+      : '';
     listEl.innerHTML = entries.map((entry) => `
       <div class="skill-card app-skill-card" title="${escapeHtml(entry.path ?? '')}">
         <div class="skill-card-header">
           <span class="skill-name">${escapeHtml(entry.name)}</span>
           ${sourceBadge(entry.source)}
+          ${deleteButton(entry)}
         </div>
         <p class="skill-desc">${escapeHtml(entry.description || '')}</p>
       </div>`).join('');
+    listEl.querySelectorAll<HTMLButtonElement>('.app-skill-delete').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const name = btn.getAttribute('data-skill-delete');
+        if (!name) return;
+        btn.disabled = true;
+        try {
+          await core.invoke('delete_app_skill', { name });
+          void this.renderAppSkills();
+        } catch (err) {
+          btn.disabled = false;
+          this.toast(err instanceof Error ? err.message : String(err));
+        }
+      });
+    });
     applyTranslations();
   }
 

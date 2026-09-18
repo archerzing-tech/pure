@@ -4822,6 +4822,17 @@ body {
   gap: 8px;
 }
 
+/* E2.2 — 沉淀技能（auto- 前缀）的一键删除：低调描边按钮，悬停转危险色。 */
+.app-skill-delete {
+  margin-left: auto;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+.app-skill-delete:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger, #e5484d) 55%, var(--border));
+  color: var(--danger, #e5484d);
+}
+
 /* ── MCP Server List ── */
 #mcp-server-list {
   min-height: 60px;

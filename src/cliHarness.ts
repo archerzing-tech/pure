@@ -19,6 +19,8 @@ import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
 import { scanToolCorrections } from './adapter/memory/toolCorrections';
 import { createEmbeddingMemoryStore } from './shared/memoryFactory';
 import { harvestUserPreferences } from './shared/memory';
+import { distillSkill, pickDistillSource } from './shared/skillDistill';
+import { writeAutoSkillDir } from './cliSkillStore';
 import { promptBudgetForProvider } from './shared/providers';
 import { promptAssembler } from './shared/PromptAssembler';
 import { promptObservability } from './shared/promptObservability';
@@ -26,7 +28,7 @@ import { FilePromptObservationStore } from './shared/FilePromptObservationStore'
 import { failureHistoryFromMemories } from './engine/FailurePolicy';
 import { cyan, dim, green, red, yellow } from './termcolors';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
-import type { IStateStore, IMemoryStore, ToolAdapter, ToolDefinition } from './shared/types';
+import type { IStateStore, IMemoryStore, LLMAdapter, ToolAdapter, ToolDefinition } from './shared/types';
 import { createAdapter } from './cliAdapter';
 import { DEFAULT_BUDGET, evolutionCfg, PURE_DIR } from './cliConfig';
 import { loadUserHooks } from './shared/userHooks';
@@ -116,6 +118,34 @@ function printToolCorrectionHints(): void {
 function learnFromInput(text: string, sessionId: string, projectPath: string): Promise<unknown> {
   const entries = harvestUserPreferences(text, { sessionId, projectPath });
   return Promise.all(entries.map(e => memoryStore.add(e).catch(() => '')));
+}
+
+// ── E2.2 沉淀成技能（CLI 侧编排）──
+// 「把这个做法沉淀成技能」命中后：从全部项目桶挑最近的过程记忆，让模型扩写成
+// SKILL.md，落 ~/.pure/skills/auto-<name>/。结果用可判别联合返回，文案归
+// cliRepl（这里不打印）。
+export type SkillDistillOutcome =
+  | { ok: true; name: string; dir: string }
+  | { ok: false; reason: 'no-source' | 'llm-failed' | 'write-failed'; detail?: string };
+
+async function distillSkillFromMemory(llm: LLMAdapter, instruction: string): Promise<SkillDistillOutcome> {
+  let source;
+  try {
+    source = pickDistillSource(buildInnerMemoryStore().listAllEntries());
+  } catch {
+    return { ok: false, reason: 'no-source' };
+  }
+  if (!source) return { ok: false, reason: 'no-source' };
+
+  const skill = await distillSkill(llm, source.content, instruction);
+  if (!skill) return { ok: false, reason: 'llm-failed' };
+
+  try {
+    const dir = writeAutoSkillDir(skill);
+    return { ok: true, name: skill.name, dir };
+  } catch (err) {
+    return { ok: false, reason: 'write-failed', detail: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 // ── Terminal rendering for subagent activity ──
@@ -322,4 +352,4 @@ async function createHarness(args: CliArgs) {
   return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient };
 }
 
-export { memoryStore, learnFromInput, cliSubagentProgress, createTools, createStore, createHarness, printToolCorrectionHints };
+export { memoryStore, learnFromInput, cliSubagentProgress, createTools, createStore, createHarness, printToolCorrectionHints, distillSkillFromMemory };

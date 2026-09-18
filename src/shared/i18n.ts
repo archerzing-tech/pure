@@ -529,6 +529,11 @@ const translations: Record<Language, Record<string, string>> = {
     'tools.corrections.empty': '最近没有值得注意的工具失败模式。',
     'tools.corrections.approve': '采纳',
     'tools.corrections.approved': '已采纳',
+    'skill.distill.running': '正在把最近沉淀的做法整理成技能…',
+    'skill.distill.noSource': '现在还没有可沉淀的过程记忆——先完整跑一个多步任务，回头再说「沉淀成技能」。',
+    'skill.distill.failed': '这次没整理成技能（模型回复不完整），换个说法再试一次。',
+    'skill.distill.done': '已沉淀为技能 {name}，下个会话自动生效；设置 → 技能 里可删。',
+    'skill.distill.desktopOnly': '沉淀技能需要桌面版——浏览器模式写不了技能目录。',
 
     // ── Skills Page ──
     'skills.title': '技能',
@@ -563,6 +568,7 @@ const translations: Record<Language, Record<string, string>> = {
     'skills.installed.title': '已安装技能',
     'skills.installed.hint': '从本机技能目录读取，随对话自动注入。Skill Hub 之外的技能（比如助手在会话里装的）也会显示在这里。',
     'skills.installed.empty': '这里还没有技能。把含 SKILL.md 的文件夹放进下面的目录，或者在聊天里让助手用 install_agent_skill 装一个。',
+    'skills.installed.delete': '删除',
     'skills.installed.browserEmpty': '浏览器模式下读不到本机技能目录，用桌面版就能看到',
     'skills.source.user': '用户级',
     'skills.source.project': '项目级',
@@ -1439,6 +1445,11 @@ const translations: Record<Language, Record<string, string>> = {
     'tools.corrections.empty': 'No notable tool failure patterns recently.',
     'tools.corrections.approve': 'Approve',
     'tools.corrections.approved': 'Approved',
+    'skill.distill.running': 'Distilling the recent procedure into a skill…',
+    'skill.distill.noSource': "Nothing to distill yet — finish a full multi-step task first, then ask me to save it as a skill.",
+    'skill.distill.failed': "Couldn't shape that into a skill this time (the model's reply was unusable) — try rephrasing.",
+    'skill.distill.done': 'Saved as skill {name} — active from the next session; remove it any time in Settings → Skills.',
+    'skill.distill.desktopOnly': "Distilling needs the desktop app — browser mode can't write the skills directory.",
 
     // ── Skills Page ──
     'skills.title': 'Skills',
@@ -1473,6 +1484,7 @@ const translations: Record<Language, Record<string, string>> = {
     'skills.installed.title': 'Installed skills',
     'skills.installed.hint': 'Read from the local skill directories and injected into chat automatically. Skills from outside the Skill Hub — say, one the assistant installed mid-session — show up here too.',
     'skills.installed.empty': 'Nothing here yet. Drop a folder with a SKILL.md into one of the directories below, or ask the assistant to install one with install_agent_skill.',
+    'skills.installed.delete': 'Delete',
     'skills.installed.browserEmpty': "Skill directories are only readable in the desktop app — the browser build can't see them",
     'skills.source.user': 'User',
     'skills.source.project': 'Project',
