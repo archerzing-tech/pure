@@ -55,6 +55,10 @@ export interface AdaptiveStrategy {
   recommendedRoles: string[];
   /** Of those, the ones that are independent + read-only and may run in parallel. */
   parallelRoles: string[];
+  /** P1 — true when the task is a known code problem class with no stored
+   * procedure to reuse: the directive then tells the model to look for a
+   * ready-made open-source/official solution before writing bespoke code. */
+  priorArtHint: boolean;
 }
 
 // ── Content-aware delegation signals (看人下菜) ──
@@ -251,6 +255,9 @@ function buildDirective(strategy: Omit<AdaptiveStrategy, 'directive'>): string {
   const roles = strategy.recommendedRoles.length > 0
     ? `\n- 推荐的本任务子 agent：${strategy.recommendedRoles.join(', ')}。${strategy.parallelRoles.length > 0 ? ` 其中可并行：${strategy.parallelRoles.join(', ')}。` : ''}（建议人选；具体怎么跟用户说由你自然表达，不要列成机械清单。）`
     : '';
+  const priorArt = strategy.priorArtHint
+    ? '\n- Prior art: no stored procedure covers this task. Before writing bespoke code, search for a ready-made open-source solution or official documentation, and reuse or adapt the best fit instead of building from scratch.'
+    : '';
   const complexityLine = `\n- Task complexity: ${strategy.complexity}.${strategy.intentTags.length > 0 ? ` Intent: ${strategy.intentTags.join(', ')}.` : ''}`;
   const recovery = strategy.recovery === 'switch-approach'
     ? 'Treat prior failures as evidence: change the hypothesis, tool, or scope instead of repeating the failed path.'
@@ -262,7 +269,7 @@ function buildDirective(strategy: Omit<AdaptiveStrategy, 'directive'>): string {
     : strategy.autonomy === 'assisted'
       ? 'Proceed on safe local work, but surface missing capability or decisions before crossing a boundary.'
       : 'Do not claim autonomous progress when the workspace or required capability is unavailable.';
-  return `<adaptive_strategy>\nRuntime-selected strategy (not a fixed task plan):\n- Signals: ${strategy.signals.join(', ')}\n- Exploration: ${strategy.exploration}\n- Verification: ${strategy.verification}\n- Delegation: ${strategy.delegation}\n- Recovery: ${strategy.recovery}\n- Autonomy: ${strategy.autonomy}\n- Confidence: ${strategy.confidence.toFixed(2)}\n- Rationale: ${strategy.rationale}\n${exploration}\n${verification}\n${delegation}${complexityLine}${roles}\n${recovery}\n${autonomy}\nRevise this strategy when workspace evidence, tool results, or verification contradict it. Never weaken permission, path, budget, or external-side-effect safeguards.\n</adaptive_strategy>`;
+  return `<adaptive_strategy>\nRuntime-selected strategy (not a fixed task plan):\n- Signals: ${strategy.signals.join(', ')}\n- Exploration: ${strategy.exploration}\n- Verification: ${strategy.verification}\n- Delegation: ${strategy.delegation}\n- Recovery: ${strategy.recovery}\n- Autonomy: ${strategy.autonomy}\n- Confidence: ${strategy.confidence.toFixed(2)}\n- Rationale: ${strategy.rationale}\n${exploration}\n${verification}\n${delegation}${complexityLine}${roles}${priorArt}\n${recovery}\n${autonomy}\nRevise this strategy when workspace evidence, tool results, or verification contradict it. Never weaken permission, path, budget, or external-side-effect safeguards.\n</adaptive_strategy>`;
 }
 
 export class AdaptiveControlPlane {
@@ -332,6 +339,13 @@ export class AdaptiveControlPlane {
       : procedures.length > 0
         ? 'use-verified-procedure'
         : 'continue-with-evidence';
+    // P1 现成方案优先：任务属于代码类已知问题（构建/重构/修复等）且没有可复用
+    // 的 procedure 时，在 directive 里附加“先找现成方案再动手”，避免重复造轮子。
+    // 关键词复杂度对短代码请求经常打成 trivial（如“实现导出 Excel”），所以门槛
+    // 只看代码类 + 非 quick——真正的顺手小改由 quick 兜住。
+    const priorArtHint = procedures.length === 0
+      && !intent.quick
+      && involvesCode(intent, input.prompt);
     const autonomy: AdaptiveAutonomy = !environment.hasWorkspace || !hasCapability
       ? 'blocked'
       : environment.verifierAvailable && phase !== 'morning'
@@ -362,6 +376,7 @@ export class AdaptiveControlPlane {
       intentTags: Object.entries(intent).filter(([, v]) => v).map(([k]) => k),
       recommendedRoles,
       parallelRoles,
+      priorArtHint,
     };
     return { ...base, directive: buildDirective(base) };
   }
