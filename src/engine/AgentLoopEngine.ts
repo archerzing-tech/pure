@@ -3,7 +3,7 @@
 // Fixes: BudgetWarning events, completedSteps/lastState tracking, note injection for recoverable errors,
 //        VERIFY_FAILED → loop back to THINK with reflection note instead of completing.
 
-import type { Message, EngineContext, EngineEvent, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult } from '../shared/types';
+import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -68,10 +68,24 @@ function capToolResult(text: string, toolName: string): string {
   return text.slice(0, TOOL_RESULT_MAX_CHARS) + notice;
 }
 
-export class AgentLoopEngine {
-  private toolCoordinator = new ToolExecutionCoordinator();
+/**
+ * E0.3 — resolve the adapter for an engine phase. The single-model contract:
+ * a phase WITHOUT a dedicated adapter (the resolver returns undefined, or no
+ * resolver is configured at all) always falls back to ctx.llm, so a user who
+ * configured one model gets exactly the single-adapter behavior. A throwing
+ * resolver is treated the same way — a config-layer bug must not kill a run.
+ */
+function llmForPhase(ctx: EngineContext, phase: EngineLlmPhase): LLMAdapter {
+  if (!ctx.llmFor) return ctx.llm;
+  try {
+    return ctx.llmFor(phase) ?? ctx.llm;
+  } catch {
+    return ctx.llm;
+  }
+}
 
-  async *run(
+export class AgentLoopEngine {
+  private toolCoordinator = new ToolExecutionCoordinator();  async *run(
     input: RunInput,
     ctx: EngineContext,
   ): AsyncGenerator<EngineEvent, void, void> {
@@ -216,7 +230,7 @@ export class AgentLoopEngine {
           let text = '';
           // E0.3 — the handover round is a summarization chore, not the user's
           // answer stream; a per-phase adapter (cheap model) may serve it.
-          for await (const chunk of streamLlmTurn({ llm: ctx.llmFor?.('HANDOVER') ?? ctx.llm, messages: [...messages, ask], tools: [], signal: ctx.signal, timeoutMs: 60_000 })) {
+          for await (const chunk of streamLlmTurn({ llm: llmForPhase(ctx, 'HANDOVER'), messages: [...messages, ask], tools: [], signal: ctx.signal, timeoutMs: 60_000 })) {
             if (chunk.type === 'content' && chunk.content) {
               text += chunk.content;
               budget.addTokens(chunk.content);
@@ -241,9 +255,6 @@ export class AgentLoopEngine {
       try {
         const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
         const toolsDefs = ctx.tools && currentToolsDefs.length > 0 ? currentToolsDefs : [];
-        // E0.3 — THINK may stream through its own adapter (per-phase model
-        // routing); undefined falls back to the default single adapter.
-        const thinkLlm = ctx.llmFor?.('THINK') ?? ctx.llm;
         // Stream deadline follows the budget line that ACTUALLY ends the run
         // (hardMaxTime, else the soft cap while it lasts, else the soft cap
         // duration once the run is elastic). remaining().time clamps at 0
@@ -251,7 +262,7 @@ export class AgentLoopEngine {
         // that instantly timed out every remaining round.
         const streamTimeoutMs = budget.streamDeadlineMs();
         for await (const chunk of streamLlmTurn({
-          llm: thinkLlm,
+          llm: llmForPhase(ctx, 'THINK'),
           messages,
           tools: toolsDefs,
           signal: ctx.signal,
