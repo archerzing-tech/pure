@@ -21,15 +21,18 @@ import { showToastHtml } from '../shared/toast';
 import { showConfirmModal } from './modal';
 import { renderSchedulesSettings } from './scheduleSettings';
 import { buildEvolutionDashboard, DASHBOARD_WINDOW_DAYS, type DashboardRange } from '../shared/evolutionDashboard';
+import type { StrategyDimension } from '../shared/strategyEffect';
 import { scanSubagentAdvice } from '../shared/subagentAdvisory';
 import { readGuiObservations } from './observationSource';
 import {
   buildExperienceItems,
+  DEFAULT_STRATEGY_DIMENSION,
   MAX_EXPERIENCE_ROWS,
   renderErrorClusters,
   renderExperienceList,
   renderObservationStats,
   renderStrategySection,
+  renderStrategyTabs,
   renderSubagentAdvice,
   renderTotals,
   renderTrendCards,
@@ -157,6 +160,8 @@ export class SettingsPanel {
   private liveMcpResourcesSource: (() => Promise<MCPResourceSummary[]>) | null = null;
   /** E4.2 仪表盘的时间范围（周/月），只活在面板生命周期里 —— 下次打开回到周视图。 */
   private evolutionRange: DashboardRange = 'week';
+  /** E4.2 策略区当前展示的维度（五选一），同样只活在面板生命周期里。 */
+  private evolutionStrategyDimension: StrategyDimension = DEFAULT_STRATEGY_DIMENSION;
 
   /** Registered once by main.ts: "what has the running session's MCP client
    *  already discovered?". Never connects (see ChatController.listMcpResources). */
@@ -974,6 +979,17 @@ export class SettingsPanel {
       document.querySelectorAll('#evolution-range [data-range]').forEach(el => {
         el.classList.toggle('active', el.getAttribute('data-range') === range);
       });
+      void this.renderEvolutionDashboard();
+    });
+
+    // ── Evolution dashboard：策略维度切换 ──
+    // 五个维度共用一个表格位，切换只是换数据切片（tab 的 active 态由重渲染时
+    // 的 renderStrategyTabs 给出，不像静态的周/月那样手动 toggle）。
+    document.getElementById('evolution-strategy-tabs')?.addEventListener('click', (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-strategy-dim]');
+      const dimension = btn?.dataset.strategyDim as StrategyDimension | undefined;
+      if (!dimension || dimension === this.evolutionStrategyDimension) return;
+      this.evolutionStrategyDimension = dimension;
       void this.renderEvolutionDashboard();
     });
 
@@ -2582,8 +2598,11 @@ export class SettingsPanel {
     const errorsEl = document.getElementById('evolution-errors');
     if (errorsEl) errorsEl.innerHTML = renderErrorClusters(dashboard.errorClusters, now);
 
+    const strategyTabsEl = document.getElementById('evolution-strategy-tabs');
+    if (strategyTabsEl) strategyTabsEl.innerHTML = renderStrategyTabs(dashboard.strategy, this.evolutionStrategyDimension);
+
     const strategyEl = document.getElementById('evolution-strategy');
-    if (strategyEl) strategyEl.innerHTML = renderStrategySection(dashboard.strategy);
+    if (strategyEl) strategyEl.innerHTML = renderStrategySection(dashboard.strategy, this.evolutionStrategyDimension);
 
     // E1.4 角色建议：与趋势同一个观测切片（同一窗口、同一次读取），只建议不改配置。
     const adviceEl = document.getElementById('evolution-advice');

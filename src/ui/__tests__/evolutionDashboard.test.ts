@@ -13,11 +13,13 @@ import {
   renderExperienceList,
   renderObservationStats,
   renderStrategySection,
+  renderStrategyTabs,
   renderSubagentAdvice,
   renderTotals,
   renderTrendCards,
   relativeTime,
 } from '../evolutionDashboard';
+import { emptyRunSlice, type StrategyEffectSummary } from '../../shared/strategyEffect';
 import type { SubagentAdvice } from '../../shared/subagentAdvisory';
 import type { MemoryEntry } from '../../adapter/memory/IMemoryStore';
 import { buildEvolutionDashboard, startOfLocalDay, type TrendBucket } from '../../shared/evolutionDashboard';
@@ -232,9 +234,8 @@ describe('renderErrorClusters', () => {
   });
 });
 
-describe('renderStrategySection (E4.1)', () => {
-  // 五个维度都记在观测里（E4.1），仪表盘就得五个都上表 —— 只展示两个等于
-  // 把 exploration / recovery / complexity 的数据烂在库里。
+describe('strategy dimension switching (E4.1)', () => {
+  // 五个维度都记在观测里，但一次只展示一个 —— 五张表堆成一面墙没人看。
   const strategy = {
     exploration: 'broad' as const,
     verification: 'thorough' as const,
@@ -249,41 +250,79 @@ describe('renderStrategySection (E4.1)', () => {
     priorArtHint: false,
   };
 
-  it('renders every strategy dimension, with its levels translated', () => {
-    const dashboard = buildEvolutionDashboard([run({ strategy })], { range: 'week', now: NOW });
-    const html = renderStrategySection(dashboard.strategy);
-    for (const title of ['验证档位', '委派档位', '探索档位', '恢复档位', '复杂度']) {
-      expect(html).toContain(title);
+  const strategySummaryOf = (records: PromptObservation[]) =>
+    buildEvolutionDashboard(records, { range: 'week', now: NOW }).strategy;
+
+  it('offers one tab per dimension and marks the active one', () => {
+    const tabs = renderStrategyTabs(strategySummaryOf([run({ strategy })]), 'recovery');
+    for (const label of ['验证', '委派', '探索', '恢复', '复杂度']) {
+      expect(tabs).toContain(label);
     }
-    for (const level of ['全面', '并行', '广泛', '换思路', '复杂']) {
-      expect(html).toContain(level);
-    }
+    expect(tabs).toContain('data-strategy-dim="recovery"');
+    expect(tabs).toContain('aria-pressed="true"');
+    expect(tabs.split('evo-range-btn').length - 1).toBe(5);
   });
 
-  it('ranks the levels of each dimension by run count', () => {
+  it('renders only the selected dimension, translated', () => {
+    const summary = strategySummaryOf([run({ strategy })]);
+    expect(renderStrategySection(summary, 'verification')).toContain('全面');
+    expect(renderStrategySection(summary, 'delegation')).toContain('并行');
+    expect(renderStrategySection(summary, 'exploration')).toContain('广泛');
+    expect(renderStrategySection(summary, 'recovery')).toContain('换思路');
+    expect(renderStrategySection(summary, 'complexity')).toContain('复杂');
+    // 默认是验证档位；别的维度的档位值不该出现在这一屏。
+    const fallback = renderStrategySection(summary);
+    expect(fallback).toContain('全面');
+    expect(fallback).not.toContain('广泛');
+  });
+
+  it('ranks levels within the selected dimension by run count', () => {
     const records = [
       run({ strategy: { ...strategy, verification: 'thorough', complexity: 'complex' } }),
       run({ strategy: { ...strategy, verification: 'thorough', complexity: 'complex' } }),
       run({ strategy: { ...strategy, verification: 'standard', complexity: 'simple' } }),
     ];
-    const html = renderStrategySection(buildEvolutionDashboard(records, { range: 'week', now: NOW }).strategy);
-    expect(html.indexOf('全面')).toBeLessThan(html.indexOf('常规'));
-    expect(html.indexOf('复杂')).toBeLessThan(html.indexOf('简单'));
+    const summary = strategySummaryOf(records);
+    const verification = renderStrategySection(summary, 'verification');
+    expect(verification.indexOf('全面')).toBeLessThan(verification.indexOf('常规'));
+    const complexity = renderStrategySection(summary, 'complexity');
+    expect(complexity.indexOf('复杂')).toBeLessThan(complexity.indexOf('简单'));
   });
 
-  it('explains an empty strategy section instead of rendering empty tables', () => {
-    const html = renderStrategySection(buildEvolutionDashboard([], { range: 'week', now: NOW }).strategy);
-    expect(html).toContain('evo-empty');
-    expect(html).not.toContain('evo-table');
+  it('says a dimension has no runs instead of rendering an empty table', () => {
+    const empty = emptyRunSlice();
+    const partial: StrategyEffectSummary = {
+      overall: empty,
+      byDimension: {
+        exploration: {},
+        verification: { standard: { ...empty, runs: 1 } },
+        delegation: {},
+        recovery: {},
+        complexity: {},
+      },
+      byRole: {},
+    };
+    const html = renderStrategySection(partial, 'recovery');
+    expect(html).toContain('这个维度还没有带策略标记的记录');
+    expect(html).not.toContain('evo-table-wrap');
+    expect(renderStrategySection(partial, 'verification')).toContain('evo-table-wrap');
+  });
+
+  it('hides the tabs and explains itself when no run carries a strategy', () => {
+    const summary = strategySummaryOf([]);
+    expect(renderStrategyTabs(summary, 'verification')).toBe('');
+    const html = renderStrategySection(summary);
+    expect(html).toContain('还没有带策略标记的运行记录');
+    expect(html).not.toContain('evo-table-wrap');
   });
 
   it('still slices roles for runs recorded before strategy existed', () => {
-    const records = [
+    const summary = strategySummaryOf([
       run({ toolCalls: [{ toolName: 'researcher', success: true, durationMs: 120 }] }),
-    ];
-    const html = renderStrategySection(buildEvolutionDashboard(records, { range: 'week', now: NOW }).strategy);
+    ]);
+    const html = renderStrategySection(summary);
     expect(html).toContain('子 Agent 角色');
-    expect(html).not.toContain('验证档位');
+    expect(html).not.toContain('data-strategy-dim');
   });
 });
 
