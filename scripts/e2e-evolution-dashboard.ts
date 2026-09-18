@@ -245,10 +245,12 @@ try {
     const page = document.querySelector('.settings-page[data-page="evolution"]');
     const tiles = page?.querySelectorAll('#evolution-totals .evo-tile').length ?? 0;
     const charts = page?.querySelectorAll('#evolution-charts .evo-chart-card').length ?? 0;
+    const sections = ['#evolution-errors', '#evolution-strategy', '#evolution-advice', '#evolution-experience', '#evolution-stats']
+      .every((sel) => (page?.querySelector(sel)?.childElementCount ?? 0) > 0);
     const text = page?.textContent ?? "";
     return {
-      ok: tiles === 7 && charts === 3 && !${RAW_KEY_PATTERN}.test(text),
-      tiles, charts,
+      ok: tiles === 7 && charts === 3 && sections && !${RAW_KEY_PATTERN}.test(text),
+      tiles, charts, sections,
       rawKey: ${RAW_KEY_PATTERN}.test(text),
     };
   })()`, 15000, 'dashboard sections mounted (7 tiles / 3 charts / no raw i18n keys)');
@@ -258,6 +260,7 @@ try {
     return {
       ok: !!page?.querySelector("#evolution-errors .evo-empty")
         && !!page?.querySelector("#evolution-charts .evo-chart-empty")
+        && !!page?.querySelector("#evolution-advice .evo-empty")
         && !!page?.querySelector("#evolution-stats .evo-empty"),
       errors: page?.querySelector("#evolution-errors .evo-empty")?.textContent ?? null,
       stats: page?.querySelector("#evolution-stats .evo-empty")?.textContent ?? null,

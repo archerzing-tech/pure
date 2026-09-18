@@ -21,6 +21,7 @@ import { showToastHtml } from '../shared/toast';
 import { showConfirmModal } from './modal';
 import { renderSchedulesSettings } from './scheduleSettings';
 import { buildEvolutionDashboard, DASHBOARD_WINDOW_DAYS, type DashboardRange } from '../shared/evolutionDashboard';
+import { scanSubagentAdvice } from '../shared/subagentAdvisory';
 import { readGuiObservations } from './observationSource';
 import {
   buildExperienceItems,
@@ -29,6 +30,7 @@ import {
   renderExperienceList,
   renderObservationStats,
   renderStrategySection,
+  renderSubagentAdvice,
   renderTotals,
   renderTrendCards,
 } from './evolutionDashboard';
@@ -2582,6 +2584,10 @@ export class SettingsPanel {
 
     const strategyEl = document.getElementById('evolution-strategy');
     if (strategyEl) strategyEl.innerHTML = renderStrategySection(dashboard.strategy);
+
+    // E1.4 角色建议：与趋势同一个观测切片（同一窗口、同一次读取），只建议不改配置。
+    const adviceEl = document.getElementById('evolution-advice');
+    if (adviceEl) adviceEl.innerHTML = renderSubagentAdvice(scanSubagentAdvice(read.records, { now }), now);
 
     const statsEl = document.getElementById('evolution-stats');
     if (statsEl) {

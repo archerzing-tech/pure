@@ -17,6 +17,7 @@ import { healthScore, lifecycleOf, type EvolutionConfig, type MemoryLifecycle } 
 import { isDraftEntry } from '../adapter/memory/correctionDrafts';
 import type { MemoryEntry } from '../adapter/memory/IMemoryStore';
 import type { DashboardTotals, ErrorCluster, EvolutionDashboard, TrendBucket } from '../shared/evolutionDashboard';
+import { SUBAGENT_ADVICE_WINDOW_DAYS, type SubagentAdvice } from '../shared/subagentAdvisory';
 import type { RoleEffectSlice, RunEffectSlice, StrategyEffectSummary } from '../shared/strategyEffect';
 import { toolDisplayName } from './toolRow';
 
@@ -318,6 +319,52 @@ export function renderStrategySection(strategy: StrategyEffectSummary): string {
     return `<div class="evo-empty">${escapeHtml(t('evolution.strategy.empty', '还没有带策略标记的运行记录 —— 攒够几次再看结论'))}</div>`;
   }
   return `<div class="evo-tables">${tables}</div>`;
+}
+
+// ── 子代理角色建议（E1.4）──
+
+/**
+ * 角色建议卡：哪个角色在反复掉链子 + 证据 + **用户能拉的那个闸**。
+ * 卡片刻意不给"一键修复"按钮 —— 第一版只建议，pure 不自动改配置（E1.4 设计）。
+ */
+export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: number): string {
+  if (advice.length === 0) {
+    return `<div class="evo-empty">${escapeHtml(t('evolution.advice.empty', '窗口内没有需要调整的角色 —— 要么派发次数还太少，要么各角色都稳。'))}</div>`;
+  }
+  const rows = advice.map((item) => {
+    const reason = item.reason === 'timeout'
+      ? t('evolution.advice.reason.timeout', '超时为主')
+      : t('evolution.advice.reason.failure', '失败率偏高');
+    const severity = t(`evolution.advice.severity.${item.severity}`, item.severity);
+    const evidence = [
+      t('evolution.advice.evidence', '近 {days} 天 {n} 次派发，{m} 次失败（{rate}%）')
+        .replace('{days}', String(SUBAGENT_ADVICE_WINDOW_DAYS))
+        .replace('{n}', String(item.delegations))
+        .replace('{m}', String(item.failures))
+        .replace('{rate}', formatPercent(item.failureRate)),
+      item.timeoutCount > 0
+        ? t('evolution.advice.evidence.timeouts', '超时 {n} 次').replace('{n}', String(item.timeoutCount))
+        : '',
+      item.avgDurationMs !== null
+        ? t('evolution.advice.evidence.avg', '平均 {t}').replace('{t}', formatDuration(item.avgDurationMs))
+        : '',
+    ].filter(Boolean).join(' · ');
+    const action = item.action === 'skill-gate'
+      ? t('evolution.advice.action.skillGate', '想停就关掉「设置 → 技能 → {skill}」；想留就把任务范围写小一点。')
+        .replace('{skill}', t(`skills.${item.skillId}`, item.skillId ?? ''))
+      : t('evolution.advice.action.prompt', '这个角色没有开关：建议把任务描述写小、把这一步拆窄，或改用别的角色。');
+    return `<div class="evo-advice-row evo-advice-${item.severity}">
+      <div class="evo-advice-head">
+        <span class="evo-advice-role">${escapeHtml(toolDisplayName(item.role))}</span>
+        <span class="memory-badge memory-type-error_pattern">${escapeHtml(reason)}</span>
+        <span class="memory-badge evo-badge-${item.severity}">${escapeHtml(severity)}</span>
+        <span class="evo-advice-time">${escapeHtml(relativeTime(item.lastFailureAt, now))}</span>
+      </div>
+      <div class="evo-advice-evidence">${escapeHtml(evidence)}</div>
+      <div class="evo-advice-action">${escapeHtml(action)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="evo-advice-list">${rows}</div>`;
 }
 
 // ── 经验条目（直达清理）──
