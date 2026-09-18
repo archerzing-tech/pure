@@ -83,7 +83,7 @@ const MEMORY_KEY = 'pure_memories_v2';
 const SEEDED_ID = 'e2e-procedure-1';
 const SEEDED_CONTENT = 'E2E seeded procedure: search before editing';
 /** 未翻译 key 会以 `evolution.xxx` 字面量出现在页面上。 */
-const RAW_KEY_PATTERN = /evolution\.(title|desc|chart|tile|errors|experience|stats|table|roles)/;
+const RAW_KEY_PATTERN = /evolution\.(title|desc|chart|tile|errors|experience|stats|table|roles|dimension|level|strategy|advice)/;
 
 interface StepFailure extends Error {
   step?: string;
@@ -261,6 +261,8 @@ try {
       ok: !!page?.querySelector("#evolution-errors .evo-empty")
         && !!page?.querySelector("#evolution-charts .evo-chart-empty")
         && !!page?.querySelector("#evolution-advice .evo-empty")
+        && !!page?.querySelector("#evolution-strategy .evo-empty")
+        && !page?.querySelector("#evolution-strategy-tabs .evo-range-btn")
         && !!page?.querySelector("#evolution-stats .evo-empty"),
       errors: page?.querySelector("#evolution-errors .evo-empty")?.textContent ?? null,
       stats: page?.querySelector("#evolution-stats .evo-empty")?.textContent ?? null,

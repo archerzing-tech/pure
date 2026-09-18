@@ -13380,6 +13380,12 @@ button svg,
   color: #fff;
 }
 
+/* 策略维度切换：五个胶囊在窄面板上会换行（周/月只有两个，不会）。 */
+.evo-dim-tabs {
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
 .evo-window-label {
   font-size: 12px;
   color: var(--text-tertiary);
