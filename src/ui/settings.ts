@@ -8,6 +8,7 @@ import { fetchAndDisplayVersion, checkForUpdatesManual } from './updater';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { escapeHtml } from '../shared/html';
 import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } from '../shared/i18n';
+import { approveToolCorrection, scanToolCorrections } from '../adapter/memory/toolCorrections';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { formatBytes } from '../shared/format';
 import { memoryStore } from './memoryStore';
@@ -296,6 +297,19 @@ export class SettingsPanel {
     // Update check
     fetchAndDisplayVersion();
     document.getElementById('cfg-check-updates')?.addEventListener('click', () => checkForUpdatesManual());
+
+    // E1.3 tool-correction approve buttons — event-delegated (the card list
+    // re-renders after every approval). The click is the whole approval flow:
+    // nothing is written to memory until this button is pressed.
+    document.getElementById('tool-corrections')?.addEventListener('click', async (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.tool-correction-approve');
+      if (!btn || btn.disabled) return;
+      const key = btn.dataset.correctionKey;
+      if (!key) return;
+      btn.disabled = true;
+      btn.textContent = t('tools.corrections.approved');
+      await this.approveToolCorrectionClick(key);
+    });
 
     // ── Temp paste files: usage + one-click cleanup (Tauri only) ──
     const tmpUsageEl = document.getElementById('tmp-usage');
@@ -1891,6 +1905,7 @@ export class SettingsPanel {
   private renderToolInventory(): void {
     const host = document.getElementById('tool-inventory');
     if (!host) return;
+    this.renderToolCorrections();
     const cfg = loadConfig() ?? defaults();
     const toggleLabels: Record<string, string> = {
       fs: t('tools.fs'), cmd: t('tools.cmd'), git: t('tools.git'), browser: t('tools.browser'),
@@ -1929,6 +1944,49 @@ export class SettingsPanel {
       </div>`;
     }).join('');
     applyTranslations();
+  }
+
+  // ── E1.3 工具使用建议（tool corrections）──
+
+  /** Scan the memory store for (tool × error-class) clusters and render one
+   *  card per suggestion with an approve button. Approval writes the note as
+   *  a machine-global tool_preference (dedupeKey-keyed) via the SAME memory
+   *  store the agent injects from — so the note reaches every later session's
+   *  prompt. Never automatic: the card only suggests, the click decides. */
+  private renderToolCorrections(): void {
+    const host = document.getElementById('tool-corrections');
+    if (!host) return;
+    let suggestions: ReturnType<typeof scanToolCorrections> = [];
+    try {
+      // list() 不带条件 = 全部条目（含已采纳的 tool_preference，扫描器用它排重）。
+      suggestions = scanToolCorrections(memoryStore.list());
+    } catch {
+      suggestions = [];
+    }
+    if (suggestions.length === 0) {
+      host.innerHTML = `<div class="mcp-server-empty" data-i18n="tools.corrections.empty">${escapeHtml(t('tools.corrections.empty'))}</div>`;
+      applyTranslations();
+      return;
+    }
+    host.innerHTML = suggestions.map((s) => `
+      <div class="tool-inv-row tool-correction-row" title="${escapeHtml(s.sampleMessage)}">
+        <code class="tool-inv-name">${escapeHtml(s.toolName)}</code>
+        <span class="tool-inv-desc">${escapeHtml(s.note)}</span>
+        <button class="settings-btn tool-correction-approve" data-correction-key="${escapeHtml(s.dedupeKey)}">${escapeHtml(t('tools.corrections.approve'))}</button>
+      </div>`).join('');
+    applyTranslations();
+  }
+
+  private async approveToolCorrectionClick(key: string): Promise<void> {
+    const entries = memoryStore.list();
+    const suggestion = scanToolCorrections(entries).find((s) => s.dedupeKey === key);
+    if (!suggestion) return; // already approved or cluster aged out — nothing to do
+    try {
+      await approveToolCorrection(memoryStore, suggestion);
+    } catch {
+      return; // store write failed — the card stays so the user can retry
+    }
+    this.renderToolCorrections();
   }
 
   // ── Skills page: installed app skills (disk inventory) ──

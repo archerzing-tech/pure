@@ -92,6 +92,23 @@ export class FSMemoryStore implements IMemoryStore {
     return entries;
   }
 
+  /**
+   * E1.3 — 全部项目桶的条目拼起来（机器级扫描用：工具使用注意不分项目）。
+   * 同 list() 一样同步；目录枚举与 migrateLegacyToolPreferences 同一模式，
+   * 命中的桶走内存缓存。
+   */
+  listAllEntries(): MemoryEntry[] {
+    if (!existsSync(this.rootPath)) return [];
+    const all: MemoryEntry[] = [];
+    for (const dir of readdirSync(this.rootPath)) {
+      if (dir === 'meta.json') continue;
+      const file = join(this.rootPath, dir, 'memories.jsonl');
+      if (!existsSync(file)) continue;
+      all.push(...this.loadFromFile(file));
+    }
+    return all;
+  }
+
   /** 上次衰减运行信息（诊断用；非 IMemoryStore 接口成员）。返回拷贝，
    *  调用方 mutate 不影响内部缓存（与 LocalStorageMemoryStore 每次
    *  readMeta() 重新 parse 的"新鲜独立对象"语义一致）。 */
