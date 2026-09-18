@@ -1456,6 +1456,135 @@ describe('Harness lesson reflector (E1.1)', () => {
     expect(sys).toContain('grounded lesson about flaky deploy scripts');
     expect(sys).not.toContain('speculative lesson about lunar retrograde deploys');
   });
+
+  describe('correction drafts (E3.1)', () => {
+    const CORRECTION_REPLY = JSON.stringify({
+      symptom: 'output style corrected',
+      rootCause: 'added comments against house rules',
+      prevention: 'keep code comment-free',
+      recovery: 'rewrote without comments',
+      evidence: [],
+      correction: { kind: 'project_convention', statement: 'No comments in this repo — names must speak for themselves.' },
+    });
+
+    it('writes a low-confidence draft entry with a content-hash dedupeKey', async () => {
+      const memStore = new FakeMemoryStore();
+      const main = multiStepLLM(3, 'done');
+      const reflect = reflectLLM(async () => ({ content: CORRECTION_REPLY }));
+      const harness = harnessWith({ memStore, llm: main, reflect });
+
+      await collect(harness.run('SYS', 'inspect several files'));
+      await harness.settleReflections();
+
+      const drafts = memStore.entries.filter(e => e.type === 'project_convention');
+      expect(drafts).toHaveLength(1);
+      expect(drafts[0].confidence).toBe('low');
+      expect(drafts[0].content).toBe('No comments in this repo — names must speak for themselves.');
+      expect(drafts[0].dedupeKey).toMatch(/^correction:project_convention:[0-9a-f]{12}$/);
+      expect(drafts[0].projectPath).toBe('/ws');
+      // 草稿是 lesson 之外的独立条目，lesson 本体照旧写。
+      expect(memStore.entries.some(e => e.dedupeKey?.startsWith('reflect:'))).toBe(true);
+    });
+
+    it('hashes the same statement to the same dedupeKey across turns', async () => {
+      // Harness 的契约是"同一句纠正 → 同一 dedupeKey"；真 store（FS/
+      // LocalStorage）按 dedupeKey 去重落一条，FakeMemoryStore 不去重，
+      // 所以这里断言两次写入的 key 一致而不是条数。
+      const memStore = new FakeMemoryStore();
+      const reflect = reflectLLM(async () => ({ content: CORRECTION_REPLY }));
+      const harness1 = harnessWith({ memStore, llm: multiStepLLM(3, 'done'), reflect });
+      await collect(harness1.run('SYS', 'first task'));
+      await harness1.settleReflections();
+      const harness2 = harnessWith({ memStore, llm: multiStepLLM(3, 'done'), reflect });
+      await collect(harness2.run('SYS', 'second task'));
+      await harness2.settleReflections();
+
+      const keys = memStore.entries.filter(e => e.type === 'project_convention').map(e => e.dedupeKey);
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toBe(keys[1]);
+    });
+
+    it('writes no draft when the reflection carries no correction', async () => {
+      const memStore = new FakeMemoryStore();
+      const main = multiStepLLM(3, 'done');
+      const reflect = reflectLLM(async () => ({
+        content: JSON.stringify({ symptom: 's', rootCause: 'r', prevention: 'p', recovery: 'r', evidence: [] }),
+      }));
+      const harness = harnessWith({ memStore, llm: main, reflect });
+
+      await collect(harness.run('SYS', 'inspect several files'));
+      await harness.settleReflections();
+
+      expect(memStore.entries.some(e => e.type === 'project_convention' || e.type === 'user_preference')).toBe(false);
+    });
+
+    it('keeps drafts out of the prompt until confirmed, then injects both kinds', async () => {
+      const memStore = new FakeMemoryStore();
+      const convention = 'No comments in this repo — names must speak for themselves.';
+      const preference = 'Always answer in Chinese.';
+      await memStore.add({
+        type: 'project_convention',
+        content: convention,
+        timestamp: Date.now(),
+        sessionId: 'old',
+        projectPath: '/ws',
+        dedupeKey: 'correction:project_convention:aaa',
+        confidence: 'low',
+      });
+      await memStore.add({
+        type: 'user_preference',
+        content: preference,
+        timestamp: Date.now(),
+        sessionId: 'old',
+        projectPath: '/ws',
+        dedupeKey: 'correction:user_preference:bbb',
+        confidence: 'low',
+      });
+      const llm = recordingLLM('answer');
+      const harness = new Harness({
+        sessionId: 'sess-draft-gate',
+        llm,
+        toolsDefs: [],
+        budget: STD_BUDGET,
+        memory: memStore,
+        projectPath: '/ws',
+      });
+
+      await collect(harness.run('SYS', 'how should I answer — any comments in this repo?'));
+      const draftSys = llm.received[0][0].content;
+      expect(draftSys).not.toContain(convention);
+      expect(draftSys).not.toContain(preference);
+
+      // 用户在仪表盘点「确认」→ removeById + 重写（IMemoryStore 无 update）。
+      for (const id of memStore.entries.map(e => e.id)) {
+        const e = memStore.entries.find(x => x.id === id)!;
+        if (e.confidence !== 'low') continue;
+        await memStore.removeById(id);
+        await memStore.add({
+          type: e.type, content: e.content, timestamp: e.timestamp,
+          sessionId: e.sessionId, projectPath: e.projectPath,
+          dedupeKey: e.dedupeKey, confidence: 'high',
+        });
+      }
+
+      const llm2 = recordingLLM('answer');
+      const harness2 = new Harness({
+        sessionId: 'sess-draft-confirmed',
+        llm: llm2,
+        toolsDefs: [],
+        budget: STD_BUDGET,
+        memory: memStore,
+        projectPath: '/ws',
+      });
+      await collect(harness2.run('SYS', 'how should I answer — any comments in this repo?'));
+
+      const sys = llm2.received[0][0].content;
+      expect(sys).toContain(convention);
+      expect(sys).toContain('Project conventions you corrected or confirmed');
+      expect(sys).toContain(preference);
+      expect(sys).toContain('User preferences:');
+    });
+  });
 });
 
 describe('Harness tool-correction notes (E1.3)', () => {

@@ -147,6 +147,68 @@ describe('parseReflectedLesson', () => {
   });
 });
 
+describe('parseReflectedLesson corrections (E3.1)', () => {
+  const evidence: TurnEvidence[] = buildTurnEvidence([
+    toolCallMessage('edit_file', '{"path":"a.ts"}', 'c1'),
+  ]);
+
+  const base = {
+    symptom: 'user corrected the output',
+    rootCause: `see ${evidence[0].id}`,
+    evidence: [evidence[0].id],
+  };
+
+  it('parses a well-formed correction', () => {
+    const lesson = parseReflectedLesson(JSON.stringify({
+      ...base,
+      correction: { kind: 'project_convention', statement: '  No comments in this repo — names must speak for themselves.  ' },
+    }), evidence);
+    expect(lesson?.correction).toEqual({
+      kind: 'project_convention',
+      statement: 'No comments in this repo — names must speak for themselves.',
+    });
+  });
+
+  it('accepts both whitelist kinds and drops unknown ones', () => {
+    const pref = parseReflectedLesson(JSON.stringify({
+      ...base,
+      correction: { kind: 'user_preference', statement: 'Always answer in Chinese.' },
+    }), evidence);
+    expect(pref?.correction?.kind).toBe('user_preference');
+
+    const offWhitelist = parseReflectedLesson(JSON.stringify({
+      ...base,
+      correction: { kind: 'output_style', statement: 'Always answer in Chinese.' },
+    }), evidence);
+    expect(offWhitelist?.correction).toBeUndefined();
+  });
+
+  it('drops corrections whose statement is too short or the field is malformed', () => {
+    const tooShort = parseReflectedLesson(JSON.stringify({
+      ...base,
+      correction: { kind: 'user_preference', statement: 'sure' },
+    }), evidence);
+    expect(tooShort?.correction).toBeUndefined();
+
+    const notObject = parseReflectedLesson(JSON.stringify({
+      ...base,
+      correction: 'always use bun',
+    }), evidence);
+    expect(notObject?.correction).toBeUndefined();
+
+    const absent = parseReflectedLesson(JSON.stringify(base), evidence);
+    expect(absent?.correction).toBeUndefined();
+  });
+
+  it('trims whitespace, then caps the statement at 200 characters', () => {
+    const lesson = parseReflectedLesson(JSON.stringify({
+      ...base,
+      correction: { kind: 'project_convention', statement: `${'x'.repeat(300)}` },
+    }), evidence);
+    expect(lesson?.correction?.statement).toHaveLength(200);
+  });
+});
+
 describe('countReflectionsToday', () => {
   const projectPath = '/ws';
 

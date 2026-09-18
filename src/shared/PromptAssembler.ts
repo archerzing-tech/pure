@@ -135,6 +135,10 @@ export interface PromptMemoryContext {
    *  holds even when the new prompt is phrased differently. */
   projectSuccesses?: string[];
   procedures?: string[];
+  /** E3.1 — user-CONFIRMED project conventions harvested by the reflector
+   *  (drafts are confidence:'low' and never reach this list). Injected so
+   *  "how we do things here" survives across sessions. */
+  projectConventions?: string[];
   /** Platform-verified tool preferences (from agent exploration / user asks),
    *  filtered to the CURRENT platform. Injected so the model prefers tools
    *  that actually work well on this machine — without being limited to them. */
@@ -439,6 +443,7 @@ export class PromptAssembler {
       || (memory.successes?.length ?? 0) > 0
       || (memory.projectSuccesses?.length ?? 0) > 0
       || (memory.procedures?.length ?? 0) > 0
+      || (memory.projectConventions?.length ?? 0) > 0
       || (memory.toolPreferences?.length ?? 0) > 0
       || Boolean(memory.adaptiveStrategy?.trim())
     );
@@ -447,6 +452,9 @@ export class PromptAssembler {
     const memoryFragments = [
       fragment('memory_project', memory?.project ? `Project: ${memory.project}` : '', 35),
       fragment('memory_preferences', memory?.preferences.length ? `User preferences:\n${memory.preferences.map((value) => `- ${value}`).join('\n')}` : '', 45),
+      // Confirmed conventions sit right next to explicit preferences: both are
+      // things the user TOLD us to do, not things we inferred.
+      fragment('memory_project_conventions', memory?.projectConventions?.length ? `Project conventions you corrected or confirmed (always follow in this project):\n${memory.projectConventions.map((value) => `- ${value}`).join('\n')}` : '', 46),
       fragment('memory_tools', memory?.toolPreferences?.length ? `Platform-verified tools (prefer these on this machine when the situation fits — you are not limited to them):\n${memory.toolPreferences.map((value) => `- ${value}`).join('\n')}` : '', 58),
       // Same-project proven approaches rank FIRST among the success signals:
       // they were verified in THIS project, so the model should reach for them
