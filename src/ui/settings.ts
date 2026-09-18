@@ -20,6 +20,18 @@ import { buildMemoryExportJson, buildMemoryExportMarkdown, parseMemoryImport } f
 import { showToastHtml } from '../shared/toast';
 import { showConfirmModal } from './modal';
 import { renderSchedulesSettings } from './scheduleSettings';
+import { buildEvolutionDashboard, DASHBOARD_WINDOW_DAYS, type DashboardRange } from '../shared/evolutionDashboard';
+import { readGuiObservations } from './observationSource';
+import {
+  buildExperienceItems,
+  MAX_EXPERIENCE_ROWS,
+  renderErrorClusters,
+  renderExperienceList,
+  renderObservationStats,
+  renderStrategySection,
+  renderTotals,
+  renderTrendCards,
+} from './evolutionDashboard';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { buildExportSavedToast } from './statsExportToast';
 import {
@@ -141,6 +153,8 @@ export class SettingsPanel {
   private liveMcpResources = new Map<string, McpProbeResource[]>();
   /** Live-session lookup, wired by main.ts. Absent in tests / CLI. */
   private liveMcpResourcesSource: (() => Promise<MCPResourceSummary[]>) | null = null;
+  /** E4.2 仪表盘的时间范围（周/月），只活在面板生命周期里 —— 下次打开回到周视图。 */
+  private evolutionRange: DashboardRange = 'week';
 
   /** Registered once by main.ts: "what has the running session's MCP client
    *  already discovered?". Never connects (see ChatController.listMcpResources). */
@@ -195,6 +209,9 @@ export class SettingsPanel {
     // Reopening straight onto the 网络代理 page must also auto-probe —
     // switchCategory never fires when the page is already active.
     if (this.currentCategory === 'proxy') void this.autoDetectProxyForPage();
+    // Same for the evolution dashboard: reopening on it (or opening the panel
+    // for the first time while it is the active page) must refresh its data.
+    if (this.currentCategory === 'evolution') void this.renderEvolutionDashboard();
     this.onOpen?.();
     // Move keyboard focus into the settings view so opening it never leaves
     // the user tabbing through controls behind the squeezed chat view.
@@ -258,6 +275,8 @@ export class SettingsPanel {
       const el = document.getElementById('schedules-dashboard');
       if (el) renderSchedulesSettings(el, () => this.onSave());
     }
+    // 进化仪表盘：切过来就重读观测日志 + 记忆库（刚跑完的会话立刻反映在趋势里）。
+    if (category === 'evolution') void this.renderEvolutionDashboard();
     // 工具清单与已装技能都是"进页面读最新"的只读区块：开关刚拨过、
     // workspace 刚切换、或助手刚在会话里装了新技能，切过来就能看到。
     if (category === 'tools') this.renderToolInventory();
@@ -938,6 +957,46 @@ export class SettingsPanel {
       } catch (err) {
         console.error('[pure] memory confirm failed:', err);
         this.toast(t('memory.confirmFailed'));
+      }
+    });
+
+    // ── Evolution dashboard（E4.2）时间范围切换 ──
+    // 只重渲染，不重读后端：观测记录已经拿在手里（renderEvolutionDashboard 每次
+    // 进页会重读），切周/月只是换个窗口重新切桶。
+    document.getElementById('evolution-range')?.addEventListener('click', (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-range]');
+      if (!btn) return;
+      const range: DashboardRange = btn.dataset.range === 'month' ? 'month' : 'week';
+      if (range === this.evolutionRange) return;
+      this.evolutionRange = range;
+      document.querySelectorAll('#evolution-range [data-range]').forEach(el => {
+        el.classList.toggle('active', el.getAttribute('data-range') === range);
+      });
+      void this.renderEvolutionDashboard();
+    });
+
+    // ── Evolution dashboard：经验条目直达清理（与记忆页同一条删除通道）──
+    document.getElementById('evolution-experience')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-evo-del]');
+      if (!btn) return;
+      event.stopPropagation();
+      const id = btn.dataset.evoDel || '';
+      if (!id) return;
+      const ok = await showConfirmModal({
+        title: t('evolution.experience.deleteTitle'),
+        message: t('evolution.experience.deleteConfirm'),
+        okLabel: t('memory.deleteOk'),
+        cancelLabel: t('common.cancel'),
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        await memoryStore.removeById(id);
+        this.toast(t('evolution.experience.deleted'));
+        void this.renderEvolutionDashboard();
+      } catch (err) {
+        console.error('[pure] evolution experience delete failed:', err);
+        this.toast(t('evolution.experience.deleteFailed'));
       }
     });
 
@@ -2489,6 +2548,68 @@ export class SettingsPanel {
         </div>`;
       })
       .join('');
+  }
+
+  // ── Evolution dashboard（E4.2 进化仪表盘）──
+
+  /**
+   * 进化仪表盘：一次读三处数据再交给纯渲染模块 ——
+   *   1. 观测日志（Rust 尾巴读 ~/.pure/observations/app.jsonl）→ 趋势/错误簇/策略切片
+   *   2. 记忆库（memoryStore.list()）→ 经验条目 + 直达清理
+   *   3. 面板自己的周/月选择器
+   * 读失败一律降级成"没有数据"而不是报错：仪表盘空了应该能看出原因（下面各区块
+   * 自己的空状态文案），绝不能让设置页白屏。
+   */
+  private async renderEvolutionDashboard(): Promise<void> {
+    const now = Date.now();
+    const read = await readGuiObservations();
+    const dashboard = buildEvolutionDashboard(read.records, { range: this.evolutionRange, now });
+
+    const windowEl = document.getElementById('evolution-window');
+    if (windowEl) {
+      windowEl.textContent = t('evolution.window')
+        .replace('{days}', String(DASHBOARD_WINDOW_DAYS[this.evolutionRange]));
+    }
+
+    const totalsEl = document.getElementById('evolution-totals');
+    if (totalsEl) totalsEl.innerHTML = renderTotals(dashboard);
+
+    const chartsEl = document.getElementById('evolution-charts');
+    if (chartsEl) chartsEl.innerHTML = renderTrendCards(dashboard);
+
+    const errorsEl = document.getElementById('evolution-errors');
+    if (errorsEl) errorsEl.innerHTML = renderErrorClusters(dashboard.errorClusters, now);
+
+    const strategyEl = document.getElementById('evolution-strategy');
+    if (strategyEl) strategyEl.innerHTML = renderStrategySection(dashboard.strategy);
+
+    const statsEl = document.getElementById('evolution-stats');
+    if (statsEl) {
+      statsEl.innerHTML = renderObservationStats(dashboard.observations, read, now);
+    }
+
+    const experienceEl = document.getElementById('evolution-experience');
+    const cappedEl = document.getElementById('evolution-experience-capped');
+    if (!experienceEl) return;
+    // 记忆功能关着时，这里和记忆页同一口径：不列卡片，只说清为什么空。
+    const cfg = loadConfig() ?? defaults();
+    if (!(cfg.skills?.memory ?? true)) {
+      experienceEl.innerHTML = `<div class="evo-empty">${escapeHtml(t('memory.disabled'))}</div>`;
+      if (cappedEl) cappedEl.hidden = true;
+      return;
+    }
+    let entries: MemoryEntry[] = [];
+    try {
+      entries = memoryStore.list();
+    } catch (err) {
+      console.error('[pure] evolution dashboard memory list failed:', err);
+    }
+    const items = buildExperienceItems(entries, now, cfg.evolution);
+    experienceEl.innerHTML = renderExperienceList(items, now);
+    if (cappedEl) {
+      cappedEl.textContent = t('evolution.experience.capped').replace('{n}', String(MAX_EXPERIENCE_ROWS));
+      cappedEl.hidden = items.length < MAX_EXPERIENCE_ROWS;
+    }
   }
 
   // ── Memory export / import（导出/导入，迁移到新机器）──

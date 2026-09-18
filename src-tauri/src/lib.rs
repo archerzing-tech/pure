@@ -10809,6 +10809,86 @@ fn append_observation(record_json: String) -> Result<(), String> {
     append_observation_to(&observations_dir(), &record_json, OBSERVATION_ROTATE_BYTES, OBSERVATION_KEEP_RECORDS)
 }
 
+/// Default read budget for the dashboard: 16MB of JSONL is tens of thousands of
+/// records — enough for a 30-day window at real usage — while staying well below
+/// the 64MB the log is allowed to grow to.
+const OBSERVATION_DUMP_TAIL_BYTES: u64 = 16 * 1024 * 1024;
+
+/// E4.2 — the evolution dashboard's read side. Returns the TAIL of the log so a
+/// long-lived install never ships a 64MB string across the IPC boundary; the
+/// caller sees how much was actually read in `readBytes` / `truncated` and can
+/// say so in the UI instead of silently under-reporting.
+#[derive(Serialize)]
+struct ObservationDump {
+    #[serde(rename = "path")]
+    path: String,
+    #[serde(rename = "totalBytes")]
+    total_bytes: u64,
+    #[serde(rename = "readBytes")]
+    read_bytes: u64,
+    #[serde(rename = "truncated")]
+    truncated: bool,
+    #[serde(rename = "text")]
+    text: String,
+}
+
+/// Tail-read the JSONL log. Split out from the command so it is testable
+/// without a Tauri app. Two edge cases matter: seeking into the middle of a
+/// line (the partial head line is dropped, otherwise the caller would parse
+/// half a record), and bytes landing mid-UTF-8 character (decoded lossily
+/// first, then the broken head line is dropped with the rest of it).
+fn read_observation_tail(dir: &std::path::Path, tail_bytes: u64) -> Result<ObservationDump, String> {
+    let path = dir.join("app.jsonl");
+    let display = path.to_string_lossy().to_string();
+    let empty = |total_bytes: u64| ObservationDump {
+        path: display.clone(),
+        total_bytes,
+        read_bytes: 0,
+        truncated: false,
+        text: String::new(),
+    };
+    let total_bytes = match fs::metadata(&path) {
+        Ok(meta) => meta.len(),
+        // A machine that has not recorded anything yet is not an error.
+        Err(_) => return Ok(empty(0)),
+    };
+    let start = total_bytes.saturating_sub(tail_bytes.max(1));
+    let mut file = fs::File::open(&path).map_err(|e| format!("open observations file: {}", e))?;
+    if start > 0 {
+        use std::io::Seek as _;
+        file.seek(std::io::SeekFrom::Start(start)).map_err(|e| format!("seek observations: {}", e))?;
+    }
+    let mut buffer = Vec::new();
+    {
+        use std::io::Read as _;
+        file.read_to_end(&mut buffer).map_err(|e| format!("read observations: {}", e))?;
+    }
+    let read_bytes = buffer.len() as u64;
+    let mut text = String::from_utf8_lossy(&buffer).into_owned();
+    if start > 0 {
+        match text.find('\n') {
+            Some(index) => {
+                text.drain(..=index);
+            }
+            // No newline in the whole window: every byte here is a fragment of
+            // one long line — nothing parseable to hand back.
+            None => text.clear(),
+        }
+    }
+    Ok(ObservationDump {
+        path: display,
+        total_bytes,
+        read_bytes,
+        truncated: start > 0,
+        text,
+    })
+}
+
+#[tauri::command]
+fn read_observations(tail_bytes: Option<u64>) -> Result<ObservationDump, String> {
+    read_observation_tail(&observations_dir(), tail_bytes.unwrap_or(OBSERVATION_DUMP_TAIL_BYTES))
+}
+
 #[cfg(test)]
 mod observation_tests {
     use super::*;
@@ -10836,6 +10916,58 @@ mod observation_tests {
         let content = fs::read_to_string(dir.join("app.jsonl")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines, vec![r#"{"traceId":"b"}"#, r#"{"traceId":"c"}"#]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_an_empty_or_missing_log_as_an_empty_dump() {
+        let dir = std::env::temp_dir().join(format!("pure-obs-read-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let missing = read_observation_tail(&dir, 1024).unwrap();
+        assert_eq!(missing.total_bytes, 0);
+        assert_eq!(missing.read_bytes, 0);
+        assert!(!missing.truncated);
+        assert!(missing.text.is_empty());
+
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("app.jsonl"), "").unwrap();
+        let empty = read_observation_tail(&dir, 1024).unwrap();
+        assert_eq!(empty.total_bytes, 0);
+        assert!(empty.text.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn returns_the_whole_log_when_it_fits_the_budget() {
+        let dir = std::env::temp_dir().join(format!("pure-obs-read-all-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let first = r#"{"traceId":"a"}"#;
+        let second = r#"{"traceId":"b"}"#;
+        append_observation_to(&dir, first, u64::MAX, 10).unwrap();
+        append_observation_to(&dir, second, u64::MAX, 10).unwrap();
+        let dump = read_observation_tail(&dir, 1024).unwrap();
+        assert!(!dump.truncated);
+        assert_eq!(dump.text, format!("{}\n{}\n", first, second));
+        assert_eq!(dump.total_bytes, dump.read_bytes);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_read_drops_the_partial_head_line_and_flags_truncation() {
+        let dir = std::env::temp_dir().join(format!("pure-obs-read-tail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let first = r#"{"traceId":"aaaaaaaaaa"}"#;
+        let second = r#"{"traceId":"bbbbbbbbbb"}"#;
+        append_observation_to(&dir, first, u64::MAX, 10).unwrap();
+        append_observation_to(&dir, second, u64::MAX, 10).unwrap();
+        // Budget lands inside the first line, so only the second survives intact.
+        let dump = read_observation_tail(&dir, second.len() as u64 + 5).unwrap();
+        assert!(dump.truncated);
+        assert_eq!(dump.text, format!("{}\n", second));
+        // Every returned line stays parseable JSON.
+        for line in dump.text.lines() {
+            assert!(serde_json::from_str::<serde_json::Value>(line).is_ok());
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }
@@ -15650,6 +15782,7 @@ pub fn run() {
             get_tmp_workspace,
             // Prompt observation persistence (E0.1, ~/.pure/observations/)
             append_observation,
+            read_observations,
             save_paste_file,
             save_paste_image,
             import_dropped_file,

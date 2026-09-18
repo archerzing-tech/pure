@@ -13343,3 +13343,339 @@ button svg,
   color: #083344;
   white-space: nowrap;
 }
+
+/* ══ Evolution dashboard（Settings → 进化，E4.2）════════════════════════════ */
+/* 徽章/删除按钮/记忆类型色刻意复用 .memory-* 那套 —— 同一种记忆在两张页面上
+   应该长得一样，不另造一套颜色。这里只补仪表盘独有的排版。 */
+
+.evo-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.evo-range {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  background: var(--bg);
+}
+
+.evo-range-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: 600 12px var(--font-sans);
+  padding: 3px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.evo-range-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.evo-window-label {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.evo-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.evo-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.evo-tile-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.evo-tile-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.evo-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.evo-chart-card {
+  padding: 10px 12px 6px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.evo-chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.evo-chart-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.evo-chart-latest {
+  font-size: 13px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.evo-chart-svg {
+  display: block;
+  width: 100%;
+  height: 120px;
+}
+
+.evo-chart-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.evo-chart-dot {
+  fill: var(--accent);
+}
+
+.evo-chart-bar {
+  fill: var(--accent);
+  opacity: .75;
+}
+
+.evo-chart-axis {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.evo-chart-grid {
+  stroke: var(--border-light);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.evo-chart-label {
+  font-size: 9px;
+  fill: var(--text-tertiary);
+}
+
+.evo-chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.evo-cluster-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.evo-cluster-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.evo-cluster-tool {
+  font-weight: 600;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.evo-cluster-count {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.evo-cluster-meta {
+  color: var(--text-tertiary);
+}
+
+.evo-tables {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.evo-table-wrap {
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.evo-table-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.evo-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.evo-table th {
+  text-align: right;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  padding: 2px 4px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.evo-table th:first-child,
+.evo-table td:first-child {
+  text-align: left;
+}
+
+.evo-table td {
+  text-align: right;
+  padding: 4px;
+  color: var(--text-secondary);
+}
+
+.evo-table-key {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.evo-experience-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.evo-experience-row {
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.evo-experience-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.evo-experience-head .memory-delete-btn {
+  margin-left: 0;
+}
+
+.evo-experience-score {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.evo-experience-content {
+  margin: 4px 0 2px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.evo-experience-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* E1.1 的低可信度反思 lesson：没有草稿确认通道，用虚线安静徽章与"已生效"区分。 */
+.evo-badge-low {
+  color: var(--text-tertiary);
+  background: color-mix(in srgb, var(--text-tertiary) 10%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--text-tertiary) 35%, transparent);
+}
+
+.evo-empty {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  background: var(--bg-card);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+
+.evo-capped {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.evo-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+}
+
+.evo-stat-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-secondary);
+}
+
+.evo-stat-row b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.evo-stat-note {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: #D97706;
+}
+
+.evo-stat-path {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  word-break: break-all;
+}

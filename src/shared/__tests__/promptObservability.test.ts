@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { FilePromptObservationStore } from '../FilePromptObservationStore';
-import { InMemoryPromptObservationStore, PromptObservability } from '../promptObservability';
+import { InMemoryPromptObservationStore, parsePromptObservations, PromptObservability } from '../promptObservability';
 import type { EngineEvent } from '../types';
 
 describe('PromptObservability', () => {
@@ -269,5 +269,23 @@ describe('PromptObservability', () => {
     const third = observability.startRun({ sessionId: 's' });
     observability.finishRun(third);
     expect(sunk).toEqual([second]);
+  });
+});
+
+describe('parsePromptObservations (E4.2 shared reader)', () => {
+  it('keeps only readable run/assembly lines and skips garbage', () => {
+    const jsonl = [
+      JSON.stringify({ type: 'agent_run', traceId: 'a', startedAt: 1, eventCounts: {}, toolCalls: [], reasoningChars: 0, outputChars: 0 }),
+      '{not-json}',
+      '',
+      JSON.stringify({ type: 'prompt_assembly', traceId: 'b', timestamp: 2 }),
+      JSON.stringify({ type: 'something_else', traceId: 'c' }),
+    ].join('\n');
+    expect(parsePromptObservations(jsonl).map((record) => record.traceId)).toEqual(['a', 'b']);
+  });
+
+  it('returns nothing for an empty dump', () => {
+    expect(parsePromptObservations('')).toEqual([]);
+    expect(parsePromptObservations('\n\n')).toEqual([]);
   });
 });
