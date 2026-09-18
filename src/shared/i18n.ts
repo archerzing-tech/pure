@@ -524,6 +524,11 @@ const translations: Record<Language, Record<string, string>> = {
     'tools.inventory.offReason': '已被「{toggle}」开关停用',
     'tools.inventory.needWorkspace': '需要选择工作区',
     'tools.inventory.imageGenUnsupported': '当前模型不支持图片生成',
+    'tools.corrections.title': '工具使用建议',
+    'tools.corrections.hint': '从最近的失败记录里聚出来的工具注意事项。采纳后写进长期记忆，之后每个会话都会自动注入；不采纳就只是展示，不会落库。',
+    'tools.corrections.empty': '最近没有值得注意的工具失败模式。',
+    'tools.corrections.approve': '采纳',
+    'tools.corrections.approved': '已采纳',
 
     // ── Skills Page ──
     'skills.title': '技能',
@@ -1429,6 +1434,11 @@ const translations: Record<Language, Record<string, string>> = {
     'tools.inventory.offReason': 'Turned off by "{toggle}"',
     'tools.inventory.needWorkspace': 'Needs a workspace',
     'tools.inventory.imageGenUnsupported': "Current model can't generate images",
+    'tools.corrections.title': 'Tool usage suggestions',
+    'tools.corrections.hint': 'Clustered from recent failure records. Approving one writes it into long-term memory so every future session gets it injected; ignoring it changes nothing.',
+    'tools.corrections.empty': 'No notable tool failure patterns recently.',
+    'tools.corrections.approve': 'Approve',
+    'tools.corrections.approved': 'Approved',
 
     // ── Skills Page ──
     'skills.title': 'Skills',

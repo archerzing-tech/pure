@@ -25,6 +25,7 @@ import type {
   ToolResult,
 } from '../../shared/types';
 import { GLOBAL_MEMORY_SCOPE } from '../../shared/types';
+import { approveToolCorrection, scanToolCorrections } from '../../adapter/memory/toolCorrections';
 
 const STD_BUDGET: BudgetConfig = {
   maxTurns: 30,
@@ -1454,5 +1455,43 @@ describe('Harness lesson reflector (E1.1)', () => {
     const sys = llm.received[0][0].content;
     expect(sys).toContain('grounded lesson about flaky deploy scripts');
     expect(sys).not.toContain('speculative lesson about lunar retrograde deploys');
+  });
+});
+
+describe('Harness tool-correction notes (E1.3)', () => {
+  it('injects an approved correction note into every later session prompt', async () => {
+    const memStore = new FakeMemoryStore();
+    const now = Date.now();
+    const fail = 'Stopped by failure policy: error sending request to https://api.example.com: connection refused (tool: web_fetch). giving up';
+    for (let i = 0; i < 3; i++) {
+      await memStore.add({
+        type: 'error_pattern',
+        content: fail,
+        timestamp: now - i * 60_000,
+        sessionId: `s-${i}`,
+        projectPath: i === 2 ? '/other-project' : '/ws',
+      });
+    }
+    const [suggestion] = scanToolCorrections(memStore.list());
+    expect(suggestion.toolName).toBe('web_fetch');
+
+    // 用户点「采纳」→ 写入机器级 tool_preference；之后每个会话都该看到。
+    await approveToolCorrection(memStore, suggestion, process.platform);
+
+    const llm = recordingLLM('answer');
+    const harness = new Harness({
+      sessionId: 'sess-tool-note',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+    // 与工具名零 token 重叠的提示词 —— 常驻注入必须仍然带上这张卡。
+    await collect(harness.run('SYS', 'unrelated question about mathematics'));
+
+    const sys = llm.received[0][0].content;
+    expect(sys).toContain('Platform-verified tools');
+    expect(sys).toContain(suggestion.note);
   });
 });

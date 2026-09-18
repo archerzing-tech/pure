@@ -40,7 +40,7 @@ import type { UserTurnContext } from './shared/promptLayers';
 import { loadConfig, DEFAULT_CLI_AUTO_APPROVE, PURE_DIR } from './cliConfig';
 import type { CliArgs } from './cliConfig';
 import { createAdapter } from './cliAdapter';
-import { createHarness, learnFromInput } from './cliHarness';
+import { createHarness, learnFromInput, printToolCorrectionHints } from './cliHarness';
 
 // CLI version for the banner + startup line. The standalone binary bakes the
 // released version in at compile time via scripts/build-cli.ts (--define
@@ -623,6 +623,7 @@ async function runOneShot(args: CliArgs) {
   const userTurn = assembly.userPrompt ?? args.prompt;
   const budgetDiagnostic = formatPromptBudgetDiagnostic(assembly.budget);
   if (budgetDiagnostic) process.stderr.write(`  ${yellow('⚠')} ${dim(budgetDiagnostic)}\\n`);
+  printToolCorrectionHints();
 
   const streamMgr = new StreamManager(chunk => process.stdout.write(chunk), { flushIntervalMs: 16 });
   streamMgr.start();
@@ -666,6 +667,7 @@ async function runRepl(args: CliArgs) {
   if (hasTools) process.stdout.write(`  📁 ${dim(process.cwd())} ${dim(`| ${toolsDefs.length} tools`)}\n`);
   process.stdout.write(`  💾 ${dim(sessionId.slice(0, 12))}…\n`);
   process.stdout.write(`  ${dim('/exit /quit — leave   /clear — reset context   /compact — compact context   /undo — restore last write   /prompts — list MCP prompts   Ctrl+C — cancel')}\n`);
+  printToolCorrectionHints();
   console.log('');
 
   let messages: Message[] = [];

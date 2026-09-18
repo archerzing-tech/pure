@@ -4735,6 +4735,35 @@ body {
   border: 1px solid var(--border);
 }
 
+/* E1.3 tool-correction suggestion rows (Settings → Tools). The note replaces
+   the description slot; approve is a quiet outline button that goes solid
+   green once the note is written to memory. */
+.tool-correction-row .tool-inv-desc {
+  white-space: normal;
+  line-height: 1.45;
+}
+.tool-correction-approve {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.tool-correction-approve:hover {
+  border-color: var(--success);
+  color: var(--success);
+}
+.tool-correction-approve:disabled {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  cursor: default;
+}
+
 /* ── Installed App Skills (Settings → Skills) ── */
 
 .skills-dir-row {

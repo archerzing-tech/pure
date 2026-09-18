@@ -16,6 +16,7 @@ import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type Suba
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler, createCliHookGate } from './cli_permission';
 import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
+import { scanToolCorrections } from './adapter/memory/toolCorrections';
 import { createEmbeddingMemoryStore } from './shared/memoryFactory';
 import { harvestUserPreferences } from './shared/memory';
 import { promptBudgetForProvider } from './shared/providers';
@@ -90,6 +91,27 @@ async function buildCliMemoryStore(): Promise<IMemoryStore> {
 }
 
 const memoryStore = await buildCliMemoryStore();
+
+// E1.3 — startup surfacing for tool-correction suggestions. Scans ALL project
+// buckets of the inner FS store (tool cautions are machine-level, not
+// per-project) and prints a compact list to stderr — advisory only, piped
+// one-shot output stays clean. Approval lives in the GUI settings
+// (工具使用建议 card); the CLI never writes these notes by itself.
+function printToolCorrectionHints(): void {
+  try {
+    const suggestions = scanToolCorrections(buildInnerMemoryStore().listAllEntries());
+    if (suggestions.length === 0) return;
+    process.stderr.write(`  ${yellow('⚠')} ${dim(`近期工具失败模式（GUI 设置页 → 工具，可采纳为长期注意）：`)}\n`);
+    for (const s of suggestions.slice(0, 3)) {
+      process.stderr.write(`    ${dim(`· ${s.toolName} — ${s.errorClass} ×${s.count}（近 ${s.windowDays} 天）`)}\n`);
+    }
+    if (suggestions.length > 3) {
+      process.stderr.write(`    ${dim(`… 等 ${suggestions.length} 条`)}\n`);
+    }
+  } catch {
+    // Suggestions are informational — a scan failure never blocks startup.
+  }
+}
 
 function learnFromInput(text: string, sessionId: string, projectPath: string): Promise<unknown> {
   const entries = harvestUserPreferences(text, { sessionId, projectPath });
@@ -300,4 +322,4 @@ async function createHarness(args: CliArgs) {
   return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient };
 }
 
-export { memoryStore, learnFromInput, cliSubagentProgress, createTools, createStore, createHarness };
+export { memoryStore, learnFromInput, cliSubagentProgress, createTools, createStore, createHarness, printToolCorrectionHints };
