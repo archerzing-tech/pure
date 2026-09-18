@@ -1286,7 +1286,8 @@ export class ChatController {
    * mid-run insert as related/unrelated (set by send(); null before first run). */
   private turnLlm?: import('../shared/types').LLMAdapter;
   // Background pre-compaction cache: the ContextEngine's LLM summarization —
-  // the dominant pre-send cost once a long session crosses maxMessages — runs
+  // the dominant pre-send cost once a long session crosses the token budget —
+  // runs
   // after each completed turn (idle) instead of blocking the next send. The
   // reuse guard (sessionId + message count) makes a stale window inert.
   private contextEngine?: {

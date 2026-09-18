@@ -1,5 +1,10 @@
 // src/harness/ContextEngine.ts
 // v0.6 — context compaction with tool-call atomicity and explicit results.
+// 8.1 — the token budget is the primary retention bound: when maxTokens is
+// configured (the production default via configureBudget) the message-count
+// window stands down entirely, so small messages are kept as long as they
+// fit the provider window instead of being cut at the count. maxMessages
+// governs only when no token budget is known (standalone/test use).
 
 import { estimateToolDefinitionTokens } from '../shared/providers';
 import { estimateTextTokens } from '../shared/tokenEstimate';
@@ -7,6 +12,8 @@ import { stripUserTurnContext } from '../shared/promptLayers';
 import type { Message, LLMAdapter, ToolDefinition } from '../shared/types';
 
 export interface ContextEngineConfig {
+  /** Retention bound when no token budget is configured. With a token
+   *  budget (production always resolves one) this window does not bind. */
   maxMessages: number;
   summaryThreshold?: number;
   /** Token budget for messages plus the provider's output reserve. */
@@ -101,7 +108,10 @@ export class ContextEngine {
     const nonSystem = messages.filter(message => message.role !== 'system');
     const toolTokens = estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools);
     const currentTokens = estimateTokens([...systemMessages, ...nonSystem]) + toolTokens;
-    const overMessageBudget = nonSystem.length > this.config.maxMessages;
+    // Token budget primary (8.1): with one configured, the count window is not
+    // a trigger — a 40-message transcript of short turns is healthy, not over
+    // budget. Without a token budget the count window is all we know.
+    const overMessageBudget = this.config.maxTokens === undefined && nonSystem.length > this.config.maxMessages;
     const overTokenBudget = this.config.maxTokens !== undefined && currentTokens > this.config.maxTokens;
 
     const groups = this.groupAtomicPairs(nonSystem);
@@ -133,7 +143,11 @@ export class ContextEngine {
       if (isUserGroup(group)) continue; // pinned below, outside the count budget
 
       const groupTokens = estimateTokens(group.messages);
-      const exceedsCount = keptCount > 0 && keptCount + group.messages.length > this.config.maxMessages;
+      // The count bound applies only in the no-token-budget fallback; with a
+      // token budget the loop stops on tokens alone, keeping as many groups
+      // as the provider window actually fits.
+      const exceedsCount = this.config.maxTokens === undefined &&
+        keptCount > 0 && keptCount + group.messages.length > this.config.maxMessages;
       const exceedsTokens = remainingTokens !== undefined && keptCount > 0 && remainingTokens - groupTokens < 0;
       if (exceedsCount || exceedsTokens) break;
 
