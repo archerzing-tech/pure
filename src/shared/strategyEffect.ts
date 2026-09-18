@@ -13,7 +13,9 @@ import type { AgentRunObservation, PromptObservation, StrategyObservation } from
 
 export type StrategyDimension = 'exploration' | 'verification' | 'delegation' | 'recovery' | 'complexity';
 
-const DIMENSIONS: StrategyDimension[] = ['exploration', 'verification', 'delegation', 'recovery', 'complexity'];
+/** 可切分的五个策略维度（与 StrategyObservation 中被记录的那部分一致）。
+ *  导出是为了让消费端（E4.2 仪表盘）按同一顺序遍历，不各自抄一份清单。 */
+export const STRATEGY_DIMENSIONS: readonly StrategyDimension[] = ['exploration', 'verification', 'delegation', 'recovery', 'complexity'];
 
 export interface RunEffectSlice {
   runs: number;
@@ -129,7 +131,7 @@ export function summarizeStrategyEffects(records: readonly PromptObservation[]):
     if (isStrategyRun(record)) accumulate(overall, record);
   }
   const byDimension = Object.fromEntries(
-    DIMENSIONS.map((dimension) => [dimension, summarizeByDimension(records, dimension)]),
+    STRATEGY_DIMENSIONS.map((dimension) => [dimension, summarizeByDimension(records, dimension)]),
   ) as Record<StrategyDimension, Record<string, RunEffectSlice>>;
   return { overall, byDimension, byRole: summarizeByRole(records) };
 }
