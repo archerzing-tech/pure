@@ -12,6 +12,7 @@ import type {
   BudgetConfig,
   EngineContext,
   EngineEvent,
+  EngineLlmPhase,
   FailureAction,
   FailurePolicy,
   FailureRecord,
@@ -26,6 +27,17 @@ import type {
   VerificationSummary,
 } from '../shared/types';
 import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
+import {
+  REFLECT_DEDUPE_PREFIX,
+  REFLECTION_DEFAULTS,
+  buildTurnEvidence,
+  countReflectionsToday,
+  reflectTurn,
+  shouldReflect,
+  type ReflectionConfig,
+  type ReflectedLesson,
+  type TurnEvidence,
+} from './LessonReflector';
 import { runUserHooksForEvent } from '../shared/userHookRunner';
 import type { UserHookRunner } from '../shared/userHookRunner';
 import type { UserHooksConfig } from '../shared/userHooks';
@@ -105,6 +117,15 @@ export interface HarnessConfig {
    * (see EngineContext.continueGuard). The GUI supplies a plan-state-aware
    * guard; omitted for CLI and subagents. */
   continueGuard?: EngineContext['continueGuard'];
+  /** E0.3/E1.1 — per-phase adapter resolver (THINK / HANDOVER / REFLECT).
+   * Threaded into the engine context (THINK/HANDOVER) and read by the lesson
+   * reflector (REFLECT). A phase without a dedicated adapter — or an omitted
+   * or throwing resolver — always falls back to llm: the single-model
+   * contract from E0.3 holds no matter what. */
+  llmFor?: (phase: EngineLlmPhase) => LLMAdapter | undefined;
+  /** E1.1 lesson reflector tuning; omitted = defaults (enabled, 20/day,
+   * multi-step threshold 3 tool calls). */
+  reflection?: ReflectionConfig;
 }
 
 export class Harness {
@@ -132,10 +153,17 @@ export class Harness {
   // block or a shifted adaptive directive. Mid-session lessons still reach
   // the model through the failure-policy hint channel (engine user messages).
   private sessionSystemPrompt?: string;
+  // E1.1 — lesson reflections launched at turn end. Fire-and-forget on the
+  // turn's critical path, but tracked so entrypoints that exit right after a
+  // one-shot turn can drain them (settleReflections) instead of killing the
+  // reflection call mid-flight.
+  private readonly inFlightReflections = new Set<Promise<void>>();
+  private readonly reflection: Required<ReflectionConfig>;
 
   constructor(config: HarnessConfig) {
     this.engine = new AgentLoopEngine();
     this.config = config;
+    this.reflection = { ...REFLECTION_DEFAULTS, ...config.reflection };
     this.promptAssembler = config.promptAssembler ?? promptAssembler;
     // The compiler is the source of truth when callers provide both objects;
     // this prevents assembly and run spans from landing in different sinks.
@@ -161,6 +189,9 @@ export class Harness {
   private buildContext(signal?: AbortSignal): EngineContext {
     return {
       llm: this.config.llm,
+      // E0.3 — per-phase adapter selection (THINK/HANDOVER); the engine reads
+      // it through llmForPhase and falls back to llm per phase.
+      llmFor: this.config.llmFor,
       tools: this.config.tools,
       toolsDefs: this.currentToolsDefs(),
       toolsDefsProvider: this.config.toolsDefsProvider,
@@ -418,14 +449,18 @@ export class Harness {
             if (stopWrittenKeys.has(key)) continue;
             await this.writeSingleFailureMemory(failure, userPrompt).catch(() => {});
           }
+          const drainedFailures = [...failedCalls.values()];
           failedCalls.clear();
           if (event.payload.isComplete) {
-            await this.writeSessionMemory(
+            // E1.1 — reflection-triggered turns write their lesson through the
+            // reflector (fire-and-forget); everything else keeps the template.
+            await this.writeSessionLesson(
               userPrompt,
               event.payload.finalOutput,
               event.payload.messages,
               retriedFailures,
-            ).catch(() => {});
+              drainedFailures,
+            );
           }
           if (event.payload.isComplete && retriedFailures.length > 0) {
             await this.writeRetriedErrorPatterns(retriedFailures, userPrompt).catch(() => {});
@@ -617,14 +652,18 @@ export class Harness {
           if (stopWrittenKeys.has(key)) continue;
           await this.writeSingleFailureMemory(failure, newUserPrompt).catch(() => {});
         }
+        const drainedFailures = [...failedCalls.values()];
         failedCalls.clear();
         if (event.payload.isComplete) {
-          await this.writeSessionMemory(
+          // E1.1 — same Completed seam as run(): reflector for triggered
+          // turns (fire-and-forget), template write for the rest.
+          await this.writeSessionLesson(
             newUserPrompt,
             event.payload.finalOutput,
             event.payload.messages,
             retriedFailures,
-          ).catch(() => {});
+            drainedFailures,
+          );
           if (retriedFailures.length > 0) {
             await this.writeRetriedErrorPatterns(retriedFailures, newUserPrompt).catch(() => {});
           }
@@ -729,6 +768,10 @@ export class Harness {
     } catch {
       memories = [];
     }
+    // E1.1 防幻觉纪律：反思器拿不出本轮证据的 lesson 打 confidence:'low'，
+    // 默认不注入（条目仍在库里，供设置页/仪表盘查看）。模板 lesson 不带
+    // confidence 字段，照旧注入。
+    memories = memories.filter(m => m.confidence !== 'low');
 
     const preferences = memories
       .filter(m => m.type === 'user_preference')
@@ -914,6 +957,143 @@ export class Harness {
    * The next similar task can retrieve the symptom/tool/recovery path from the
    * existing <session_memory> pipeline without replaying the whole transcript.
    */
+  /**
+   * E1.1 — the Completed seam for session lessons. Triggered turns (failures,
+   * or a genuinely multi-step process) spend ONE reflection call on the cheap
+   * REFLECT adapter and persist its structured lesson fire-and-forget — the
+   * turn ends while it runs and settleReflections() drains it before process
+   * exit. Everything else keeps the synchronous template write, unchanged.
+   * The template version is also the reflector's designed fallback: a
+   * reflection that throws, times out, hits the daily cap, or returns garbage
+   * degrades to it, so every completed turn still leaves a lesson behind.
+   */
+  private async writeSessionLesson(
+    userPrompt: string,
+    finalOutput: string | undefined,
+    messages: Message[] | undefined,
+    retriedFailures: FailureRecord[],
+    failedCalls: FailureRecord[],
+  ): Promise<void> {
+    if (!this.config.memory) return;
+    const evidence = buildTurnEvidence(messages ?? []);
+    const failureCount = retriedFailures.length + failedCalls.length;
+    if (!shouldReflect(evidence.length, failureCount, this.reflection)) {
+      await this.writeSessionMemory(userPrompt, finalOutput, messages, retriedFailures).catch(() => {});
+      return;
+    }
+    // Daily cap counts today's already-written reflections straight from the
+    // store (the reflect: dedupe prefix marks them) — no second state file.
+    if (countReflectionsToday(this.config.memory, this.projectPath()) >= this.reflection.dailyCap) {
+      await this.writeSessionMemory(userPrompt, finalOutput, messages, retriedFailures).catch(() => {});
+      return;
+    }
+    const task = this.reflectLesson({ userPrompt, finalOutput, messages, retriedFailures, failedCalls, evidence });
+    this.inFlightReflections.add(task);
+    void task.finally(() => { this.inFlightReflections.delete(task); });
+  }
+
+  /**
+   * Run the reflection and persist the result. NEVER rejects: every failure
+   * mode (resolver, transport, timeout, unusable reply) falls back to the
+   * template write. A grounded lesson lands as a successful_pattern entry
+   * carrying the structured lesson + evidence hashes + confidence, and — on a
+   * verified multi-step success — an extra procedure entry (E2.1 piggyback).
+   */
+  private async reflectLesson(input: {
+    userPrompt: string;
+    finalOutput: string | undefined;
+    messages: Message[] | undefined;
+    retriedFailures: FailureRecord[];
+    failedCalls: FailureRecord[];
+    evidence: TurnEvidence[];
+  }): Promise<void> {
+    const memory = this.config.memory;
+    if (!memory) return;
+    let lesson: ReflectedLesson | undefined;
+    try {
+      // E0.3 single-model contract: a missing or throwing REFLECT resolver
+      // falls back to the main adapter, same as the engine phases do.
+      let llm: LLMAdapter;
+      try {
+        llm = this.config.llmFor?.('REFLECT') ?? this.config.llm;
+      } catch {
+        llm = this.config.llm;
+      }
+      lesson = await reflectTurn(llm, {
+        userPrompt: input.userPrompt,
+        finalOutput: input.finalOutput,
+        evidence: input.evidence,
+        failures: [...input.retriedFailures, ...input.failedCalls].map((f) => ({
+          toolName: f.toolName,
+          message: f.message,
+        })),
+        verificationSummary: this.verificationSummary,
+        verificationPassed: this.verificationPassed,
+      });
+    } catch {
+      lesson = undefined;
+    }
+    if (!lesson) {
+      await this.writeSessionMemory(input.userPrompt, input.finalOutput, input.messages, input.retriedFailures).catch(() => {});
+      return;
+    }
+    const dedupeKey = `${REFLECT_DEDUPE_PREFIX}${this.config.sessionId}:${input.userPrompt.trim().toLowerCase()}`;
+    if (this.writtenLessonKeys.has(dedupeKey)) return;
+    this.writtenLessonKeys.add(dedupeKey);
+    const evidenceNote = lesson.evidence.length > 0
+      ? ` Evidence: ${lesson.evidence.length} tool call(s) (${lesson.evidence.join(', ')}).`
+      : '';
+    const parts = [
+      `Symptom: ${lesson.symptom}`,
+      `Root cause: ${lesson.rootCause}`,
+      `Prevention: ${lesson.prevention}`,
+      `Recovery: ${lesson.recovery}`,
+    ];
+    await memory.add({
+      type: 'successful_pattern',
+      content: `Reflected lesson — ${parts.join('. ')}.${evidenceNote}`.slice(0, 900),
+      timestamp: Date.now(),
+      sessionId: this.config.sessionId,
+      projectPath: this.projectPath(),
+      lesson: {
+        symptom: lesson.symptom,
+        rootCause: lesson.rootCause,
+        recoveryPath: lesson.recovery,
+        verification: this.verificationSummary,
+        avoidNextTime: lesson.prevention,
+        ...(lesson.evidence.length > 0 ? { evidence: lesson.evidence } : {}),
+      },
+      dedupeKey,
+      // 防幻觉纪律：证据目录里引用不出东西的根因猜测 → low，注入端默认跳过。
+      confidence: lesson.confidence,
+    });
+    if (lesson.procedure && this.verificationPassed) {
+      await memory.add({
+        type: 'procedure',
+        content: lesson.procedure.slice(0, 600),
+        timestamp: Date.now(),
+        sessionId: this.config.sessionId,
+        projectPath: this.projectPath(),
+        dedupeKey: `procedure:${dedupeKey}`,
+      }).catch(() => {});
+    }
+  }
+
+  /**
+   * E1.1 — resolve every in-flight lesson reflection. Entrypoints that exit
+   * right after a one-shot turn (CLI runOneShot) await this so the
+   * fire-and-forget reflection still lands instead of dying with the process;
+   * the timeout bounds the wait when the reflect LLM is slow or dead. No-op
+   * when nothing is in flight.
+   */
+  async settleReflections(timeoutMs = 30_000): Promise<void> {
+    if (this.inFlightReflections.size === 0) return;
+    await Promise.race([
+      Promise.allSettled([...this.inFlightReflections]),
+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+  }
+
   private async writeSessionMemory(
     userPrompt: string,
     finalOutput?: string,

@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { Harness } from '../Harness';
+import { buildTurnEvidence } from '../LessonReflector';
 import { PromptAssembler } from '../../shared/PromptAssembler';
 import { DefaultHookRouter } from '../../engine/HookRouter';
 import { DefaultFailurePolicy } from '../../engine/FailurePolicy';
@@ -1239,5 +1240,219 @@ describe('Harness resume (P1-7)', () => {
     expect(session).not.toBeNull();
     expect(session!.checkpoints.some(cp => cp.label === 'turn_completed')).toBe(true);
     expect(memStore.entries.some(e => e.type === 'successful_pattern')).toBe(true);
+  });
+});
+
+// ── E1.1 — lesson reflector at the Completed seam ──
+
+describe('Harness lesson reflector (E1.1)', () => {
+  /** Main-turn LLM that makes `steps` DISTINCT tool calls, then answers —
+   *  enough evidence to cross the multi-step reflection threshold. */
+  function multiStepLLM(steps: number, finalText: string): LLMAdapter {
+    let call = 0;
+    return {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        call++;
+        if (call <= steps) {
+          const tc = { id: `call_${call}`, index: 0, function: { name: 'read_file', arguments: `{"path":"f${call}.ts"}` } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'read_file', arguments: tc.function.arguments };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'content', content: finalText };
+          yield { type: 'done', content: finalText, toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: finalText, toolCalls: [] }),
+    };
+  }
+
+  function reflectLLM(reply: () => Promise<{ content: string }>): LLMAdapter & { calls: number } {
+    const adapter = {
+      calls: 0,
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> { yield { type: 'done', content: '', toolCalls: [] }; },
+      complete: async () => { adapter.calls++; return reply(); },
+    };
+    return adapter;
+  }
+
+  function harnessWith(opts: {
+    memStore: FakeMemoryStore;
+    llm: LLMAdapter;
+    reflect?: LLMAdapter;
+    reflection?: { enabled?: boolean; dailyCap?: number };
+  }): Harness {
+    // A working read_file adapter so the engine actually executes the tool
+    // rounds — without one it abandons the loop after the first call and the
+    // turn never accumulates multi-step evidence.
+    const okTool: ToolAdapter = {
+      execute: async (call): Promise<ToolResult> => ({
+        id: call.id,
+        toolName: call.function.name,
+        result: 'file body',
+        success: true,
+        duration: 1,
+      }),
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'read_file', description: 'read', input_schema: {} }],
+    };
+    return new Harness({
+      sessionId: 'sess-reflect',
+      llm: opts.llm,
+      tools: okTool,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: opts.memStore,
+      projectPath: '/ws',
+      llmFor: (phase) => (phase === 'REFLECT' ? opts.reflect : undefined),
+      reflection: opts.reflection,
+    });
+  }
+
+  it('reflects a multi-step turn and lands the structured lesson instead of the template', async () => {
+    const memStore = new FakeMemoryStore();
+    const main = multiStepLLM(3, 'all done');
+    const reflect = reflectLLM(async () => ({
+      content: JSON.stringify({
+        symptom: 'multi-step inspection task',
+        rootCause: 'plain reading sufficed',
+        prevention: 'batch the reads',
+        recovery: 'not needed',
+        evidence: ['whatever-id'], // validated below against the REAL catalog
+      }),
+    }));
+    const harness = harnessWith({ memStore, llm: main, reflect });
+
+    await collect(harness.run('SYS', 'inspect several files'));
+    // Fire-and-forget: the Completed event is already in the caller's hands.
+    await harness.settleReflections();
+
+    const reflected = memStore.entries.filter(e => e.dedupeKey?.startsWith('reflect:'));
+    expect(reflected).toHaveLength(1);
+    // Evidence ids are validated against the turn's real catalog — the model's
+    // invented id is stripped, so nothing citable remains → confidence low.
+    expect(reflected[0].confidence).toBe('low');
+    expect(reflected[0].lesson?.evidence).toBeUndefined();
+    expect(reflected[0].content).toContain('Reflected lesson');
+    expect(reflect.calls).toBe(1);
+    // The template lesson is NOT written when reflection succeeded.
+    expect(memStore.entries.some(e => e.content.startsWith('Reusable lesson'))).toBe(false);
+  });
+
+  it('cites real evidence ids as high confidence when the model uses the catalog', async () => {
+    const memStore = new FakeMemoryStore();
+    const main = multiStepLLM(3, 'done');
+    // Evidence ids are content hashes of (toolName, args) — the exact ids the
+    // turn will produce are computable up front, so the reflection reply can
+    // cite a REAL catalog id from the moment the reflection fires (it starts
+    // inside run(), before Completed reaches the caller).
+    const ids = buildTurnEvidence(Array.from({ length: 3 }, (_, i) => ({
+      role: 'assistant' as const,
+      content: '',
+      toolCalls: [{ id: `c${i}`, index: 0, function: { name: 'read_file', arguments: `{"path":"f${i + 1}.ts"}` } }],
+    }))).map(e => e.id);
+    const reflect = reflectLLM(async () => ({
+      content: JSON.stringify({
+        symptom: 's',
+        rootCause: 'r',
+        prevention: 'p',
+        recovery: 'r',
+        evidence: [ids[0]],
+      }),
+    }));
+    const harness = harnessWith({ memStore, llm: main, reflect });
+
+    const events = await collect(harness.run('SYS', 'inspect several files'));
+    // Cross-check: the precomputed ids really are the transcript's ids.
+    const completed = events.find(e => e.type === 'Completed')!;
+    expect(buildTurnEvidence(completed.payload.messages ?? []).map(e => e.id)).toEqual(ids);
+    await harness.settleReflections();
+
+    const reflected = memStore.entries.find(e => e.dedupeKey?.startsWith('reflect:'));
+    expect(reflected?.confidence).toBe('high');
+    expect(reflected?.lesson?.evidence).toEqual([ids[0]]);
+  });
+
+  it('falls back to the template write when the reflector fails', async () => {
+    const memStore = new FakeMemoryStore();
+    const main = multiStepLLM(3, 'done');
+    const reflect = reflectLLM(async () => { throw new Error('provider down'); });
+    const harness = harnessWith({ memStore, llm: main, reflect });
+
+    await collect(harness.run('SYS', 'inspect several files'));
+    await harness.settleReflections();
+
+    expect(memStore.entries.filter(e => e.dedupeKey?.startsWith('reflect:'))).toHaveLength(0);
+    expect(memStore.entries.some(e => e.content.startsWith('Reusable lesson'))).toBe(true);
+  });
+
+  it('keeps the plain template path when reflection is disabled', async () => {
+    const memStore = new FakeMemoryStore();
+    const main = multiStepLLM(3, 'done');
+    const reflect = reflectLLM(async () => ({ content: '{}' }));
+    const harness = harnessWith({ memStore, llm: main, reflect, reflection: { enabled: false } });
+
+    await collect(harness.run('SYS', 'inspect several files'));
+    await harness.settleReflections();
+
+    expect(reflect.calls).toBe(0);
+    expect(memStore.entries.some(e => e.content.startsWith('Reusable lesson'))).toBe(true);
+  });
+
+  it('stops reflecting once the daily cap is reached', async () => {
+    const memStore = new FakeMemoryStore();
+    for (let i = 0; i < 20; i++) {
+      await memStore.add({
+        type: 'successful_pattern',
+        content: `earlier reflected lesson ${i}`,
+        timestamp: Date.now(),
+        sessionId: `old-${i}`,
+        projectPath: '/ws',
+        dedupeKey: `reflect:old-${i}:task`,
+      });
+    }
+    const main = multiStepLLM(3, 'done');
+    const reflect = reflectLLM(async () => ({ content: '{}' }));
+    const harness = harnessWith({ memStore, llm: main, reflect, reflection: { dailyCap: 20 } });
+
+    await collect(harness.run('SYS', 'inspect several files'));
+    await harness.settleReflections();
+
+    expect(reflect.calls).toBe(0);
+    expect(memStore.entries.some(e => e.content.startsWith('Reusable lesson'))).toBe(true);
+  });
+
+  it('never injects low-confidence lessons into the system prompt (default)', async () => {
+    const memStore = new FakeMemoryStore();
+    await memStore.add({
+      type: 'successful_pattern',
+      content: 'grounded lesson about flaky deploy scripts',
+      timestamp: Date.now(),
+      sessionId: 'old-a',
+      projectPath: '/ws',
+      confidence: 'high',
+    });
+    await memStore.add({
+      type: 'successful_pattern',
+      content: 'speculative lesson about lunar retrograde deploys',
+      timestamp: Date.now(),
+      sessionId: 'old-b',
+      projectPath: '/ws',
+      confidence: 'low',
+    });
+    const llm = recordingLLM('answer');
+    const harness = new Harness({
+      sessionId: 'sess-inject',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('SYS', 'how do I fix the deploy scripts'));
+
+    const sys = llm.received[0][0].content;
+    expect(sys).toContain('grounded lesson about flaky deploy scripts');
+    expect(sys).not.toContain('speculative lesson about lunar retrograde deploys');
   });
 });
