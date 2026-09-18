@@ -214,7 +214,9 @@ export class AgentLoopEngine {
             internal: true,
           };
           let text = '';
-          for await (const chunk of streamLlmTurn({ llm: ctx.llm, messages: [...messages, ask], tools: [], signal: ctx.signal, timeoutMs: 60_000 })) {
+          // E0.3 — the handover round is a summarization chore, not the user's
+          // answer stream; a per-phase adapter (cheap model) may serve it.
+          for await (const chunk of streamLlmTurn({ llm: ctx.llmFor?.('HANDOVER') ?? ctx.llm, messages: [...messages, ask], tools: [], signal: ctx.signal, timeoutMs: 60_000 })) {
             if (chunk.type === 'content' && chunk.content) {
               text += chunk.content;
               budget.addTokens(chunk.content);
@@ -239,6 +241,9 @@ export class AgentLoopEngine {
       try {
         const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
         const toolsDefs = ctx.tools && currentToolsDefs.length > 0 ? currentToolsDefs : [];
+        // E0.3 — THINK may stream through its own adapter (per-phase model
+        // routing); undefined falls back to the default single adapter.
+        const thinkLlm = ctx.llmFor?.('THINK') ?? ctx.llm;
         // Stream deadline follows the budget line that ACTUALLY ends the run
         // (hardMaxTime, else the soft cap while it lasts, else the soft cap
         // duration once the run is elastic). remaining().time clamps at 0
@@ -246,7 +251,7 @@ export class AgentLoopEngine {
         // that instantly timed out every remaining round.
         const streamTimeoutMs = budget.streamDeadlineMs();
         for await (const chunk of streamLlmTurn({
-          llm: ctx.llm,
+          llm: thinkLlm,
           messages,
           tools: toolsDefs,
           signal: ctx.signal,
