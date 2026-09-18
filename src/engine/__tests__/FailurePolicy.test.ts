@@ -4,7 +4,7 @@
 // with explicit "do not repeat this exact call" guidance.
 
 import { describe, it, expect } from 'bun:test';
-import { DefaultFailurePolicy } from '../FailurePolicy';
+import { DefaultFailurePolicy, failureHistoryFromMemories } from '../FailurePolicy';
 import type { FailureRecord, FailureAction } from '../../shared/types';
 
 const toolError = (toolName: string, message: string, turnNumber = 1): FailureRecord => ({
@@ -273,5 +273,87 @@ describe('DefaultFailurePolicy repeated-error detection (v0.11)', () => {
         expect(action.hint).toContain('logical trap');
       }
     });
+  });
+});
+
+describe('DefaultFailurePolicy cross-session acceleration (E1.2)', () => {
+  const historyOf = (count: number, lesson = '') => ({
+    lookup: (toolName: string | undefined, errorClass: string) => {
+      if (toolName === 'web_fetch' && errorClass === 'network') return { count, lesson };
+      return { count: 0, lesson: '' };
+    },
+  });
+
+  it('reflects with the recorded lesson on the FIRST failure of a known trap', () => {
+    const policy = new DefaultFailurePolicy(historyOf(2, 'switch to the mirror registry'));
+    const action = policy.decide([toolError('web_fetch', 'Error sending request: connection refused')]);
+    expect(action.kind).toBe('reflect');
+    if (action.kind === 'reflect') {
+      expect(action.hint).toContain('Past session(s) already recorded 2 failure(s)');
+      expect(action.hint).toContain('switch to the mirror registry');
+      expect(action.hint).toContain('"network"');
+    }
+  });
+
+  it('moves the second repeat of a known trap straight to degrade', () => {
+    const policy = new DefaultFailurePolicy(historyOf(1));
+    const action = policy.decide([
+      toolError('web_fetch', 'Error sending request: connection refused'),
+      toolError('web_fetch', 'Error sending request: connection refused'),
+    ]);
+    expect(action.kind).toBe('degrade');
+    if (action.kind === 'degrade') {
+      expect(action.reason).toContain('This is a repeat — SKIP the failing call now');
+      expect(action.reason).toContain('CONTINUE the task');
+    }
+  });
+
+  it('keeps the stock session-local ladder for a NEW trap even with history present', () => {
+    const policy = new DefaultFailurePolicy(historyOf(3, 'irrelevant lesson'));
+    // read_file + not-found was never recorded by this history stub.
+    const action = policy.decide([toolError('read_file', 'No such file or directory: src/app.ts')]);
+    expect(action.kind).toBe('retry');
+  });
+
+  it('never accelerates a generic-class failure, even when the tool was seen before', () => {
+    const policy = new DefaultFailurePolicy({
+      lookup: () => ({ count: 5, lesson: 'anything' }),
+    });
+    // 'same dead end' classifies as generic — no transferable signal.
+    const action = policy.decide([toolError('web_fetch', 'same dead end')]);
+    expect(action.kind).toBe('retry');
+  });
+
+  it('behaves as the stock ladder when no history is injected', () => {
+    const policy = new DefaultFailurePolicy(undefined);
+    const action = policy.decide([toolError('web_fetch', 'Error sending request: connection refused')]);
+    expect(action.kind).toBe('retry');
+  });
+});
+
+describe('failureHistoryFromMemories (E1.2 snapshot builder)', () => {
+  it('aggregates error_pattern records by tool and class, and skips other types', () => {
+    const history = failureHistoryFromMemories([
+      { type: 'error_pattern', content: 'Stopped by failure policy: Error sending request: connection refused (tool: web_fetch). reason' },
+      { type: 'error_pattern', content: 'Stopped by failure policy: connection reset by peer (tool: web_fetch). reason' },
+      { type: 'successful_pattern', content: 'Error sending request: connection refused (tool: web_fetch)' },
+    ]);
+    const entry = history.lookup('web_fetch', 'network');
+    expect(entry.count).toBe(2);
+    expect(entry.lesson).toContain('connection refused');
+    expect(history.lookup('other_tool', 'network').count).toBe(0);
+    expect(history.lookup('web_fetch', 'timeout').count).toBe(0);
+  });
+
+  it('skips unclassifiable (generic) records — no transferable signal', () => {
+    const history = failureHistoryFromMemories([
+      { type: 'error_pattern', content: 'Stopped by failure policy: same dead end (tool: web_fetch). reason' },
+    ]);
+    expect(history.lookup('web_fetch', 'generic').count).toBe(0);
+  });
+
+  it('returns an empty history for an empty memory list', () => {
+    const history = failureHistoryFromMemories([]);
+    expect(history.lookup('web_fetch', 'network')).toEqual({ count: 0, lesson: '' });
   });
 });

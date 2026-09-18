@@ -22,6 +22,7 @@ import { promptBudgetForProvider } from './shared/providers';
 import { promptAssembler } from './shared/PromptAssembler';
 import { promptObservability } from './shared/promptObservability';
 import { FilePromptObservationStore } from './shared/FilePromptObservationStore';
+import { failureHistoryFromMemories } from './engine/FailurePolicy';
 import { cyan, dim, green, red, yellow } from './termcolors';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
 import type { IStateStore, ToolAdapter, ToolDefinition } from './shared/types';
@@ -190,6 +191,9 @@ async function createHarness(args: CliArgs) {
     llm: adapter,
     promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
     toolsProvider: () => tools?.getTools() ?? toolsDefs,
+    // E1.2 — preload the cross-session failure history from error_pattern
+    // memories so already-seen traps escalate the failure ladder immediately.
+    failureHistory: failureHistoryFromMemories(memoryStore.list({ type: 'error_pattern', activeOnly: true })),
   });
 
   if (tools && tools instanceof ToolRegistry) {

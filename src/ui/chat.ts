@@ -15,6 +15,7 @@ import { mergeConventions } from '../shared/conventions';
 import { compileRequestWorkflow } from '../shared/requestWorkflow';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { CodingAgent } from '../coding-agent/CodingAgent';
+import { failureHistoryFromMemories } from '../engine/FailurePolicy';
 import { ContextEngine, type ContextCompactionResult } from '../harness/ContextEngine';
 import { isGitMutationCommand, Tags } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
@@ -2944,6 +2945,11 @@ export class ChatController {
         // Cross-session memory: passed only when the Memory skill is enabled;
         // the Harness composes it into the system prompt at session start.
         memory: memoryEnabled ? memoryStore : undefined,
+        // E1.2 — cross-session failure history: traps past sessions recorded
+        // in error_pattern memories escalate the failure ladder immediately.
+        failureHistory: memoryEnabled
+          ? failureHistoryFromMemories(memoryStore.list({ type: 'error_pattern', activeOnly: true }))
+          : undefined,
         projectPath: effectiveWorkspace || undefined,
         workspaceAvailable: Boolean(effectiveWorkspace),
         promptAssembler,

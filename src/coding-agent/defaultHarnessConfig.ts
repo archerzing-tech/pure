@@ -13,7 +13,7 @@ import { DefaultFailurePolicy } from '../engine/FailurePolicy';
 import { Verifier, createDefaultVerifier } from './Verifier';
 import { resolvePromptBudget } from '../shared/PromptAssembler';
 import type { PromptBudgetConfig } from '../shared/providers';
-import type { LLMAdapter, ToolDefinition, FailurePolicy, HookRouter } from '../shared/types';
+import type { LLMAdapter, ToolDefinition, FailurePolicy, FailureHistory, HookRouter } from '../shared/types';
 
 export interface DefaultHarnessPlumbing {
   contextEngine: ContextEngine;
@@ -28,6 +28,9 @@ export interface DefaultHarnessConfigOptions {
   promptBudget?: PromptBudgetConfig;
   /** Resolves the model-visible tool list lazily (after MCP/subagents register). */
   toolsProvider: () => ToolDefinition[];
+  /** E1.2 — preloaded cross-session failure history; accelerates the failure
+   * ladder for traps past sessions already recorded (undefined = stock ladder). */
+  failureHistory?: FailureHistory;
 }
 
 export function createDefaultHarnessConfig(options: DefaultHarnessConfigOptions): DefaultHarnessPlumbing {
@@ -40,6 +43,6 @@ export function createDefaultHarnessConfig(options: DefaultHarnessConfigOptions)
     }),
     verifier: createDefaultVerifier(),
     hooks: new DefaultHookRouter(),
-    failurePolicy: new DefaultFailurePolicy(),
+    failurePolicy: new DefaultFailurePolicy(options.failureHistory),
   };
 }

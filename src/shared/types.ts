@@ -291,6 +291,22 @@ export interface FailurePolicy {
   decide(failures: FailureRecord[]): FailureAction;
 }
 
+/** E1.2 — one cross-session failure record, aggregated per (tool, error class). */
+export interface FailureHistoryEntry {
+  /** How many past-session memories recorded this tool failing with this class. */
+  count: number;
+  /** The first recorded lesson text (empty when none). */
+  lesson: string;
+}
+
+/** E1.2 — synchronous snapshot of cross-session failure experience. Loaded
+ * ONCE per session from the memory store (a list query, not per-decision),
+ * so FailurePolicy.decide() keeps its synchronous signature and the policy
+ * core stays stateless and testable. */
+export interface FailureHistory {
+  lookup(toolName: string | undefined, errorClass: string): FailureHistoryEntry;
+}
+
 export interface AgentResult {
   finalOutput?: string;
   isComplete: boolean;
