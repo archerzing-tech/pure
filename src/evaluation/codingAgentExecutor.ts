@@ -11,7 +11,7 @@ import {
 import { PromptAssembler, buildCliCapabilities } from '../shared/PromptAssembler';
 import { promptBudgetForProvider, type PromptBudgetConfig } from '../shared/providers';
 import { PromptObservability } from '../shared/promptObservability';
-import type { BudgetConfig, EngineEvent, LLMAdapter } from '../shared/types';
+import type { BudgetConfig, EngineEvent, IMemoryStore, LLMAdapter } from '../shared/types';
 import type { CodingTaskAgentResult, CodingTaskFixture } from './codingTaskBaseline';
 
 export interface CodingAgentEvaluationExecutorOptions {
@@ -24,6 +24,22 @@ export interface CodingAgentEvaluationExecutorOptions {
   observability?: PromptObservability;
   promptBudget?: PromptBudgetConfig;
   budget?: BudgetConfig;
+  /** E0.2 — when set, the run reads and writes this store at session start/end.
+   *  Memory scoping keys on evalProjectKey(fixture id), not the workspace path:
+   *  eval workspaces are fresh mkdtemp dirs every pass, so path-based scoping
+   *  would make pass A's memories invisible to pass B and flatten any A/B
+   *  comparison to zero. */
+  memory?: IMemoryStore;
+}
+
+/**
+ * E0.2 — fixture-stable memory scope. FSMemoryStore buckets entries by
+ * projectPath; this fake scheme keeps both passes of a --compare pair in one
+ * bucket per fixture while real file work still happens in the per-pass
+ * mkdtemp workspace (tools never see this key).
+ */
+export function evalProjectKey(fixtureId: string): string {
+  return `pure-eval://fixture/${fixtureId}`;
 }
 
 const EVAL_BUDGET: BudgetConfig = {
@@ -82,7 +98,8 @@ export async function runCodingAgentEvaluationTask(
     promptBudget: budget,
     observability,
     permissionMode: 'YOLO',
-    projectPath: workspace,
+    projectPath: options.memory ? evalProjectKey(task.id) : workspace,
+    memory: options.memory,
   });
   const assembly = assembler.assemble({
     surface: 'cli',
