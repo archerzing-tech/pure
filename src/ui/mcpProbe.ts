@@ -16,6 +16,7 @@ import { MCPClient } from '../harness/mcp/MCPClient';
 import type { MCPServerConfig, MCPTransport } from '../adapter/mcp/MCPTransport';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
+import { summarizeMcpPoison, type PoisonFinding } from '../shared/mcpPoisonScan';
 
 export interface McpProbeTool {
   /** Full registered name, e.g. `filesystem__read_file`. */
@@ -25,6 +26,9 @@ export interface McpProbeTool {
    *  discovered here anyway so the UI can show it as hidden instead of
    *  silently omitting it. */
   excluded: boolean;
+  /** 6.3 poisoning-scan verdicts from the connect-time scan. Absent/empty on
+   *  clean tools. Informational — nothing here blocks anything. */
+  findings?: PoisonFinding[];
 }
 
 export interface McpProbeResource {
@@ -81,6 +85,29 @@ export function renderMcpResourcesRow(probe?: McpProbeResult, source: 'probe' | 
     </div>`;
 }
 
+/**
+ * Poisoning-scan row of an MCP server card (6.3): empty for clean servers,
+ * otherwise a count plus one chip per flagged tool with the evidence as its
+ * tooltip. Pure and exported for tests. Display-only by design — a finding
+ * is something to look at, not a gate.
+ */
+export function renderMcpPoisonRow(probe?: McpProbeResult): string {
+  const flagged = (probe?.tools ?? []).filter((tool) => (tool.findings?.length ?? 0) > 0);
+  if (flagged.length === 0) return '';
+  const allFindings = flagged.flatMap((tool) => tool.findings!);
+  const { count, maxSeverity } = summarizeMcpPoison(allFindings);
+  const severityClass = maxSeverity === 'high' ? 'mcp-poison-high' : 'mcp-poison-medium';
+  const chips = flagged.map((tool) => {
+    const short = tool.name.slice(tool.name.indexOf('__') + 2);
+    const detail = tool.findings!.map((f) => `[${f.severity}] ${f.kind}: ${f.evidence}`).join('\n');
+    return `<span class="mcp-tool-chip mcp-poison-chip" title="${escapeHtml(detail)}">${escapeHtml(short)} · ${tool.findings!.length}</span>`;
+  }).join('');
+  return `<div class="mcp-server-tools mcp-poison-row ${severityClass}">
+      <div class="mcp-probe-summary" title="${escapeHtml(t('mcp.poison.hint'))}">${escapeHtml(t('mcp.poison.count').replace('{n}', String(count)))}</div>
+      <div class="mcp-tool-chips">${chips}</div>
+    </div>`;
+}
+
 /** Same rule as MCPClient's connect-time filter (MCPClient.ts:128). */
 function isExcluded(fullName: string, prefixes: string[]): boolean {
   return prefixes.some((p) => p && fullName.startsWith(p));
@@ -127,6 +154,7 @@ export async function probeMcpServerTools(
   try {
     const label = opts.timeoutLabel ?? '连接 MCP 服务器超时';
     await withTimeout(client.connectServer(server), opts.timeoutMs ?? 30_000, label);
+    const poisonByTool = new Map(client.listPoisonFindings().map((p) => [p.toolName, p.findings]));
     const tools = client.getTaggedTools()
       .filter((t) => t.name.startsWith(`${server.name}__`))
       .map((t) => ({
@@ -135,6 +163,8 @@ export async function probeMcpServerTools(
         // redundant next to the server card it renders in.
         description: t.description.replace(/^\[MCP:[^\]]+\]\s*/, ''),
         excluded: isExcluded(t.name, opts.excludedPrefixes),
+        // The client scanned at discovery; carry the verdict to the card.
+        findings: poisonByTool.get(t.name) ?? [],
       }));
     // Resource metadata only: the same client already listed them in the
     // background at connect, so this is a bounded wait, not a second probe.

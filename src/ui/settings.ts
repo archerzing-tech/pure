@@ -86,7 +86,7 @@ import {
   type HubSkill,
 } from './skillHub';
 import { listToolInventory } from './toolInventory';
-import { probeMcpServerTools, renderMcpResourcesRow, type McpProbeResult, type McpProbeResource } from './mcpProbe';
+import { probeMcpServerTools, renderMcpPoisonRow, renderMcpResourcesRow, type McpProbeResult, type McpProbeResource } from './mcpProbe';
 import type { MCPResourceSummary } from '../harness/mcp/MCPClient';
 import type { AppSkillEntry } from '../shared/skillFiles';
 
@@ -1761,6 +1761,7 @@ export class SettingsPanel {
             <span class="mcp-server-badge">${escapeHtml(s.transport)}</span>${builtin}
             <div class="mcp-server-command">${escapeHtml(label)}</div>
             <div class="mcp-server-tools">${this.mcpToolsRowHtml(s, i)}</div>
+            ${this.mcpPoisonRowHtml(s)}
             ${this.mcpResourcesRowHtml(s)}
           </div>
         </div>
@@ -1825,6 +1826,14 @@ export class SettingsPanel {
     if (probe) return renderMcpResourcesRow(probe);
     const live = this.liveMcpResources.get(s.name);
     return live ? renderMcpResourcesRow({ serverName: s.name, tools: [], resources: live, resourcesSupported: true, durationMs: 0 }, 'live') : '';
+  }
+
+  /** Poisoning-scan row (6.3): only rendered from a probe — the scan runs at
+   *  discovery, so there is no live-session fallback (the probe is the card's
+   *  one source of tool metadata). Rendering lives in mcpProbe.ts. */
+  private mcpPoisonRowHtml(s: PureConfig['mcpServers'][number]): string {
+    const probe = this.mcpToolProbes.get(s.name);
+    return probe ? renderMcpPoisonRow(probe) : '';
   }
 
   /** Prefill the resource rows from the running session's MCP client. */
