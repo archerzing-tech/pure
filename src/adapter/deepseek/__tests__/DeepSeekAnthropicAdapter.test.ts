@@ -1,8 +1,15 @@
 // src/adapter/deepseek/__tests__/DeepSeekAnthropicAdapter.test.ts
 // P0 fix: consecutive user messages must be merged for the Anthropic API.
+// 8.2: cache breakpoints mark only the stable prefix; usage translation maps
+// Anthropic's split billing fields into the normalized shape.
 
 import { describe, it, expect } from 'bun:test';
-import { mapAnthropicMessages } from '../DeepSeekAnthropicAdapter';
+import {
+  anthropicUsageToOpenAI,
+  applyAnthropicCacheBreakpoints,
+  cacheableAnthropicRequest,
+  mapAnthropicMessages,
+} from '../DeepSeekAnthropicAdapter';
 import type { Message } from '../../../shared/types';
 
 describe('mapAnthropicMessages — consecutive user merging', () => {
@@ -89,5 +96,60 @@ describe('mapAnthropicMessages — consecutive user merging', () => {
     const blocks = conversationMessages[0].content as unknown as Array<{ type: string; text?: string; tool_use_id?: string }>;
     expect(blocks[0]).toMatchObject({ type: 'text', text: 'a hint from an earlier flow' });
     expect(blocks[1]).toMatchObject({ type: 'tool_result', tool_use_id: 'call_9' });
+  });
+});
+
+describe('8.2 — anthropic prompt-cache breakpoints', () => {
+  it('marks the second-to-last message and leaves the newest turn unmarked', () => {
+    const { conversationMessages } = mapAnthropicMessages([
+      { role: 'user', content: 'turn one' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 't1', index: 0, function: { name: 'a', arguments: '{}' } }] },
+      { role: 'tool', toolCallId: 't1', toolName: 'a', content: 'ok' },
+      { role: 'user', content: 'newest ask' },
+    ]);
+    const marked = applyAnthropicCacheBreakpoints(conversationMessages);
+    expect(marked).toHaveLength(3);
+
+    // The prefix message (assistant with the tool_use block) is promoted so
+    // its LAST block carries the marker.
+    const prefix = marked[1].content as unknown as Array<Record<string, unknown>>;
+    expect(prefix[prefix.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+    // The newest message — the merged tool-result + ask turn — stays unmarked:
+    // it is the delta every request re-bills.
+    const newest = marked[2].content as unknown as Array<Record<string, unknown>>;
+    expect(newest.some((block) => block.cache_control)).toBe(false);
+  });
+
+  it('leaves a single-message transcript untouched (nothing stable yet)', () => {
+    const { conversationMessages } = mapAnthropicMessages([{ role: 'user', content: 'only ask' }]);
+    const marked = applyAnthropicCacheBreakpoints(conversationMessages);
+    expect(marked[0].content).toBe('only ask');
+  });
+
+  it('wraps the system prompt as a breakpoint-carrying text block', () => {
+    const request = cacheableAnthropicRequest('the system prompt', [{ role: 'user', content: 'hi' }]);
+    expect(request.system).toEqual([
+      { type: 'text', text: 'the system prompt', cache_control: { type: 'ephemeral' } },
+    ]);
+    expect(cacheableAnthropicRequest('', []).system).toBeUndefined();
+  });
+
+  it('translates Anthropic usage into the normalized cache split', () => {
+    const mapped = anthropicUsageToOpenAI({
+      input_tokens: 100,
+      cache_read_input_tokens: 700,
+      cache_creation_input_tokens: 50,
+      output_tokens: 42,
+    });
+    // Total billed prompt includes cached + cache-write portions.
+    expect(mapped.prompt_tokens).toBe(850);
+    expect(mapped.prompt_cache_hit_tokens).toBe(700);
+    expect(mapped.prompt_cache_miss_tokens).toBe(150);
+    expect(mapped.completion_tokens).toBe(42);
+
+    // Absent fields degrade to zero, never NaN.
+    const bare = anthropicUsageToOpenAI({ input_tokens: 10 });
+    expect(bare.prompt_cache_hit_tokens).toBe(0);
+    expect(bare.completion_tokens).toBe(0);
   });
 });

@@ -11724,6 +11724,76 @@ fn resolve_api_key(secrets: &serde_json::Value, arg_key: &str, secret_key: &str)
         .unwrap_or_default()
 }
 
+/// 8.2 — prompt-cache breakpoints for the anthropic protocol (mirrors the TS
+/// `applyAnthropicCacheBreakpoints` in DeepSeekAnthropicAdapter). Mark the
+/// stable prefix — system prompt, tools block (last tool carries the marker),
+/// and the last content block of the second-to-last message — so providers
+/// implementing Anthropic prompt caching bill the prefix at the cache-hit
+/// rate from the second request of a session on. At most 4 breakpoints are
+/// allowed per request; this scheme spends 3. No-op shapes (single message,
+/// empty tools) are left untouched.
+fn apply_anthropic_cache_breakpoints(body: &mut serde_json::Value) {
+    if let Some(tools) = body.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        if let Some(last) = tools.last_mut() {
+            if last.is_object() {
+                last["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+            }
+        }
+    }
+    if let Some(system) = body.get_mut("system") {
+        if let Some(text) = system.as_str().map(|s| s.to_string()) {
+            if !text.is_empty() {
+                *system = serde_json::json!([
+                    { "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }
+                ]);
+            }
+        }
+    }
+    if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        if messages.len() < 2 {
+            return;
+        }
+        let prefix_index = messages.len() - 2;
+        let prefix_last = &mut messages[prefix_index];
+        match prefix_last.get_mut("content") {
+            Some(serde_json::Value::String(text)) => {
+                if !text.is_empty() {
+                    let text = text.clone();
+                    prefix_last["content"] = serde_json::json!([
+                        { "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }
+                    ]);
+                }
+            }
+            Some(serde_json::Value::Array(blocks)) => {
+                if let Some(last) = blocks.last_mut() {
+                    if last.is_object() {
+                        last["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 8.2 — translate Anthropic wire usage into the OpenAI-style raw shape the
+/// WebView's normalizeTokenUsage already understands (mirrors the TS
+/// `anthropicUsageToOpenAI`). Anthropic's `input_tokens` excludes the cached
+/// and cache-write portions; total billed prompt is the sum of all three.
+/// Cache reads → hit, uncached input (incl. cache writes) → miss.
+fn anthropic_usage_to_openai(usage: &serde_json::Value) -> serde_json::Value {
+    let num = |v: &serde_json::Value, key: &str| v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let input = num(usage, "input_tokens");
+    let cache_read = num(usage, "cache_read_input_tokens");
+    let cache_write = num(usage, "cache_creation_input_tokens");
+    serde_json::json!({
+        "prompt_tokens": input + cache_read + cache_write,
+        "completion_tokens": num(usage, "output_tokens"),
+        "prompt_cache_hit_tokens": cache_read,
+        "prompt_cache_miss_tokens": input + cache_write,
+    })
+}
+
 async fn send_chat_request(
     client: &reqwest::Client,
     url: &str,
@@ -11891,7 +11961,7 @@ async fn chat_stream(
             "max_tokens": args.max_tokens_override.unwrap_or(32768),
             "stream": true,
         });
-        if !system_parts.is_empty() { value["system"] = serde_json::json!(system_parts.join("\\n\\n")); }
+        if !system_parts.is_empty() { value["system"] = serde_json::json!(system_parts.join("\n\n")); }
         if !args.tools.is_empty() {
             value["tools"] = serde_json::Value::Array(args.tools.iter().map(|tool| serde_json::json!({
                 "name": tool["function"]["name"],
@@ -11899,6 +11969,7 @@ async fn chat_stream(
                 "input_schema": tool["function"]["parameters"],
             })).collect());
         }
+        apply_anthropic_cache_breakpoints(&mut value);
         value
     } else {
         serde_json::json!({
@@ -11981,6 +12052,11 @@ async fn chat_stream(
         let mut buffer: Vec<u8> = Vec::new();
         let mut text = String::new();
         let mut usage: Option<serde_json::Value> = None;
+        // 8.2: anthropic reports usage across two events — message_start
+        // (input + cache split) then message_delta (final output_tokens).
+        // Held here until the delta completes the picture, then translated
+        // and forwarded through the same `usage` channel as the openai branch.
+        let mut anthropic_usage: Option<serde_json::Value> = None;
         let mut tc_map: BTreeMap<u32, serde_json::Value> = BTreeMap::new();
         let mut stream_emitted = false;
         let mut stream_error: Option<String> = None;
@@ -12060,6 +12136,35 @@ async fn chat_stream(
             if anthropic {
                 let event_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match event_type {
+                    "message_start" => {
+                        if let Some(u) = json.get("message").and_then(|m| m.get("usage")) {
+                            if u.is_object() {
+                                anthropic_usage = Some(u.clone());
+                            }
+                        }
+                    }
+                    "message_delta" => {
+                        // The single emission point: message_delta arrives once
+                        // near the end carrying the final cumulative
+                        // output_tokens (message_start alone lacks it —
+                        // forwarding there would double-count the prompt).
+                        if let (Some(start), Some(delta_u)) =
+                            (anthropic_usage.as_ref(), json.get("usage"))
+                        {
+                            if delta_u.is_object() {
+                                let mut merged = start.clone();
+                                if let Some(o) = delta_u.get("output_tokens") {
+                                    merged["output_tokens"] = o.clone();
+                                }
+                                let mapped = anthropic_usage_to_openai(&merged);
+                                usage = Some(mapped.clone());
+                                let chunk = serde_json::json!({ "type": "usage", "usage": mapped });
+                                if on_chunk.send(chunk.to_string()).is_err() {
+                                    return Err("cancelled".into());
+                                }
+                            }
+                        }
+                    }
                     "content_block_delta" => {
                         let delta = &json["delta"];
                         match delta.get("type").and_then(|v| v.as_str()).unwrap_or("") {
@@ -15942,5 +16047,87 @@ mod session_stats_tests {
             assert_eq!(missing.as_object().unwrap().len(), 0);
         });
         let _ = fs::remove_dir_all(&home);
+    }
+
+    // ── 8.2 anthropic prompt-cache breakpoints + usage translation ──
+
+    #[test]
+    fn anthropic_cache_breakpoints_mark_the_stable_prefix() {
+        let mut body = serde_json::json!({
+            "model": "m",
+            "system": "sys prompt",
+            "tools": [
+                { "name": "a", "input_schema": {} },
+                { "name": "b", "input_schema": {} },
+            ],
+            "messages": [
+                { "role": "user", "content": "turn one" },
+                { "role": "assistant", "content": [
+                    { "type": "text", "text": "working" },
+                    { "type": "tool_use", "id": "t1", "name": "a", "input": {} },
+                ] },
+                { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "t1", "content": "ok" } ] },
+            ],
+        });
+        apply_anthropic_cache_breakpoints(&mut body);
+
+        // System promoted to blocks with the marker.
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        // Last tool marked, earlier tools untouched.
+        assert!(body["tools"][1].get("cache_control").is_some());
+        assert!(body["tools"][0].get("cache_control").is_none());
+        // Second-to-last message's LAST block marked (tool_use), its text block not.
+        let prefix = &body["messages"][1];
+        assert!(prefix["content"][1].get("cache_control").is_some());
+        assert!(prefix["content"][0].get("cache_control").is_none());
+        // The newest message stays unmarked — it changes every request.
+        assert!(body["messages"][2]["content"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn anthropic_cache_breakpoints_handle_string_content_and_single_message() {
+        // String-content prefix message (plain user turn) is promoted to blocks.
+        let mut body = serde_json::json!({
+            "messages": [
+                { "role": "user", "content": "earlier ask" },
+                { "role": "user", "content": "newest ask" },
+            ],
+        });
+        apply_anthropic_cache_breakpoints(&mut body);
+        let prefix = &body["messages"][0];
+        assert_eq!(prefix["content"][0]["type"], "text");
+        assert_eq!(prefix["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["messages"][1]["content"].is_string());
+
+        // Single message: nothing is stable yet — complete no-op.
+        let mut single = serde_json::json!({
+            "messages": [ { "role": "user", "content": "only ask" } ],
+        });
+        apply_anthropic_cache_breakpoints(&mut single);
+        assert!(single["messages"][0]["content"].is_string());
+        assert!(single.get("system").is_none());
+        assert!(single.get("tools").is_none());
+    }
+
+    #[test]
+    fn anthropic_usage_translates_to_openai_shape() {
+        let mapped = anthropic_usage_to_openai(&serde_json::json!({
+            "input_tokens": 100,
+            "cache_read_input_tokens": 700,
+            "cache_creation_input_tokens": 50,
+            "output_tokens": 42,
+        }));
+        // Total billed prompt includes cached + cache-write portions.
+        assert_eq!(mapped["prompt_tokens"], 850.0);
+        assert_eq!(mapped["completion_tokens"], 42.0);
+        assert_eq!(mapped["prompt_cache_hit_tokens"], 700.0);
+        assert_eq!(mapped["prompt_cache_miss_tokens"], 150.0);
+
+        // Missing/absent fields degrade to zero, never NaN.
+        let bare = anthropic_usage_to_openai(&serde_json::json!({ "input_tokens": 10 }));
+        assert_eq!(bare["prompt_tokens"], 10.0);
+        assert_eq!(bare["prompt_cache_hit_tokens"], 0.0);
+        assert_eq!(bare["completion_tokens"], 0.0);
     }
 }

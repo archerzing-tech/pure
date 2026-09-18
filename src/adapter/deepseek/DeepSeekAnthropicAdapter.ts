@@ -2,10 +2,15 @@
 // v0.2 — DeepSeek via Anthropic-compatible endpoint.
 // Base URL: https://api.deepseek.com/anthropic
 // Uses native Anthropic message format (system top-level param, tool_result content blocks).
+// 8.2 — prompt-cache breakpoints on the stable prefix (system + tools +
+// conversation up to the newest turn) and billing-usage capture from the
+// stream, so anthropic-protocol sessions show the same cache-hit cost drop
+// the openai protocol already reports via DeepSeek's automatic caching.
 
 import Anthropic from '@anthropic-ai/sdk';
 import type { LLMAdapter, Message, ToolDefinition, LLMChunk, LLMResponse, ToolCall } from '../../shared/types';
 import { safeParseArgs } from '../../shared/format';
+import { normalizeTokenUsage } from '../../shared/usage';
 
 export interface DeepSeekAnthropicConfig {
   apiKey: string;
@@ -47,11 +52,12 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
     signal?: AbortSignal,
   ): AsyncGenerator<LLMChunk, void, void> {
     const { system, conversationMessages } = this.splitSystemMessage(messages);
+    const cacheable = cacheableAnthropicRequest(system, conversationMessages);
 
     const stream = this.client.messages.stream({
       model: this.model,
-      system: system || undefined,
-      messages: conversationMessages,
+      system: cacheable.system,
+      messages: cacheable.conversationMessages,
       tools: tools.length > 0 ? this.mapTools(tools) : undefined,
       max_tokens: this.maxTokens,
       temperature: this.temperature,
@@ -61,9 +67,28 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
 
     const toolBlocks: Map<number, ToolBlock> = new Map();
     let content = '';
+    // Anthropic reports billing usage as message_start (input + cache split)
+    // plus message_delta (final cumulative output_tokens) — captured here and
+    // emitted once through the same `usage` chunk the OpenAI adapters yield,
+    // so per-session cost and cache-hit rate work for this protocol too.
+    let startUsage: Record<string, unknown> | undefined;
+    let usageEmitted = false;
 
     for await (const event of stream) {
       switch (event.type) {
+        case 'message_start': {
+          startUsage = event.message.usage as unknown as Record<string, unknown>;
+          break;
+        }
+        case 'message_delta': {
+          if (!usageEmitted && event.usage) {
+            usageEmitted = true;
+            const merged = { ...(startUsage ?? {}), output_tokens: event.usage.output_tokens };
+            const usage = normalizeTokenUsage(anthropicUsageToOpenAI(merged));
+            if (usage) yield { type: 'usage', usage };
+          }
+          break;
+        }
         case 'content_block_delta':
           if (event.delta.type === 'text_delta') {
             content += event.delta.text;
@@ -129,11 +154,12 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
     signal?: AbortSignal,
   ): Promise<LLMResponse> {
     const { system, conversationMessages } = this.splitSystemMessage(messages);
+    const cacheable = cacheableAnthropicRequest(system, conversationMessages);
 
     const response = await this.client.messages.create({
       model: this.model,
-      system: system || undefined,
-      messages: conversationMessages,
+      system: cacheable.system,
+      messages: cacheable.conversationMessages,
       tools: tools.length > 0 ? this.mapTools(tools) : undefined,
       max_tokens: this.maxTokens,
       temperature: this.temperature,
@@ -150,7 +176,11 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
       function: { name: b.name, arguments: JSON.stringify(b.input) },
     }));
 
-    return { content, toolCalls: toolCalls.length > 0 ? toolCalls : undefined };
+    return {
+      content,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage: normalizeTokenUsage(anthropicUsageToOpenAI(response.usage as unknown as Record<string, unknown>)),
+    };
   }
 
   private splitSystemMessage(messages: Message[]): {
@@ -161,11 +191,16 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
   }
 
   private mapTools(tools: ToolDefinition[]): Anthropic.Tool[] {
-    return tools.map(t => ({
+    const mapped = tools.map(t => ({
       name: t.name,
       description: t.description,
       input_schema: t.input_schema as Anthropic.Tool.InputSchema,
     }));
+    // 8.2: the last tool carries the cache breakpoint — the whole tools block
+    // (identical every turn) is then cached as one prefix segment.
+    const last = mapped[mapped.length - 1] as (Anthropic.Tool & { cache_control?: unknown }) | undefined;
+    if (last) last.cache_control = CACHE_CONTROL;
+    return mapped;
   }
 }
 
@@ -178,6 +213,74 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
  * the original user prompt or after `tool` results — so consecutive `user`
  * turns must be merged here, otherwise `deepseek-anthropic` fails with 400.
  */
+
+/** 8.2 — the ephemeral marker that turns a content block into a cache
+ *  breakpoint for providers that implement Anthropic prompt caching. */
+export const CACHE_CONTROL = { type: 'ephemeral' } as const;
+
+/**
+ * 8.2 — prompt-cache breakpoints. Mark the stable prefix so providers bill it
+ * at the cache-hit rate from the second request of a session on: the system
+ * prompt (identical every turn), the tools block (marked in mapTools), and —
+ * here — the last content block of the second-to-last message. Everything
+ * before that block is the reusable prefix; only the newest turn is billed
+ * as fresh input. Anthropic allows at most 4 breakpoints per request; this
+ * scheme spends 3 and leaves one spare. Mutates and returns the array.
+ */
+export function applyAnthropicCacheBreakpoints(
+  conversationMessages: Anthropic.MessageParam[],
+): Anthropic.MessageParam[] {
+  const prefixLast = conversationMessages[conversationMessages.length - 2] as
+    | { content: Anthropic.MessageParam['content'] }
+    | undefined;
+  if (!prefixLast) return conversationMessages;
+  if (typeof prefixLast.content === 'string') {
+    if (prefixLast.content) {
+      prefixLast.content = [{ type: 'text', text: prefixLast.content, cache_control: CACHE_CONTROL }];
+    }
+  } else if (Array.isArray(prefixLast.content) && prefixLast.content.length > 0) {
+    const last = prefixLast.content[prefixLast.content.length - 1] as { cache_control?: unknown };
+    if (last && typeof last === 'object') last.cache_control = CACHE_CONTROL;
+  }
+  return conversationMessages;
+}
+
+/**
+ * 8.2 — assemble the cacheable request shape: system as a breakpoint-carrying
+ * text block plus the breakpoint-marked conversation prefix.
+ */
+export function cacheableAnthropicRequest(
+  system: string,
+  conversationMessages: Anthropic.MessageParam[],
+): { system: Anthropic.TextBlockParam[] | undefined; conversationMessages: Anthropic.MessageParam[] } {
+  return {
+    system: system
+      ? [{ type: 'text', text: system, cache_control: CACHE_CONTROL }]
+      : undefined,
+    conversationMessages: applyAnthropicCacheBreakpoints(conversationMessages),
+  };
+}
+
+/**
+ * 8.2 — translate Anthropic wire usage into the OpenAI-style raw shape that
+ * normalizeTokenUsage already understands. Anthropic's `input_tokens` excludes
+ * the cached and cache-write portions (reported separately); the total billed
+ * prompt is the sum of all three. Cache reads map to the hit field, uncached
+ * input (including the 1.25×-billed cache writes) to the miss field.
+ */
+export function anthropicUsageToOpenAI(usage: unknown): Record<string, number> {
+  const u = (usage ?? {}) as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const input = num(u.input_tokens);
+  const cacheRead = num(u.cache_read_input_tokens);
+  const cacheWrite = num(u.cache_creation_input_tokens);
+  return {
+    prompt_tokens: input + cacheRead + cacheWrite,
+    completion_tokens: num(u.output_tokens),
+    prompt_cache_hit_tokens: cacheRead,
+    prompt_cache_miss_tokens: input + cacheWrite,
+  };
+}
 function parseAnthropicImageSource(dataUrl: string, mimeType: string): { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } | null {
   if (!dataUrl) return null;
   if (!dataUrl.startsWith('data:')) return { type: 'url', url: dataUrl };
