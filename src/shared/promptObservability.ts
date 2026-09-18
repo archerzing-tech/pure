@@ -43,6 +43,19 @@ export interface ToolObservation {
   error?: { kind: string; hash: string; chars: number };
 }
 
+/** 8.3 — provider context-cache outcome for a run's input, derived from the
+ *  Completed usage the provider reported (DeepSeek prompt_cache_hit_tokens,
+ *  Anthropic cache_read_input_tokens — both normalized into TokenUsage).
+ *  Written next to the hash-based metadata so a trace answers "was this
+ *  input cache-served, and how much of it?" without storing prompt text. */
+export interface CacheObservation {
+  hitTokens?: number;
+  missTokens?: number;
+  /** Percentage 0–100 (one decimal); null when the provider billed no
+   *  split input at all. */
+  hitRate: number | null;
+}
+
 export interface AgentRunObservation {
   type: 'agent_run';
   traceId: string;
@@ -55,6 +68,7 @@ export interface AgentRunObservation {
   eventCounts: Record<string, number>;
   toolCalls: ToolObservation[];
   usage?: TokenUsage;
+  cache?: CacheObservation;
   reasoningChars: number;
   outputChars: number;
   verification?: VerificationObservation;
@@ -166,6 +180,22 @@ function observeVerification(summary: VerificationSummary | undefined): Verifica
   };
 }
 
+function observeCache(usage: TokenUsage | undefined): CacheObservation | undefined {
+  const hit = usage?.cacheHitTokens;
+  const miss = usage?.cacheMissTokens;
+  // A provider with no cache concept reports neither field — no marker,
+  // so a record without `cache` cleanly means "nothing to say".
+  if (hit === undefined && miss === undefined) return undefined;
+  const hitTokens = hit ?? 0;
+  const missTokens = miss ?? 0;
+  const total = hitTokens + missTokens;
+  return {
+    hitTokens: hitTokens || undefined,
+    missTokens: missTokens || undefined,
+    hitRate: total > 0 ? Math.round((hitTokens / total) * 1000) / 10 : null,
+  };
+}
+
 export class PromptObservability {
   private readonly store: PromptObservationStore;
   private readonly enabled: boolean;
@@ -258,6 +288,7 @@ export class PromptObservability {
         break;
       case 'Completed':
         record.usage = event.payload.usage;
+        record.cache = observeCache(event.payload.usage);
         record.verification = observeVerification(event.payload.verification);
         record.outcome = {
           isComplete: event.payload.isComplete,

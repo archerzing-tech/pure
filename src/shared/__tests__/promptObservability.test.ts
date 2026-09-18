@@ -97,6 +97,56 @@ describe('PromptObservability', () => {
     expect(observability.toJsonl()).not.toContain('private failure output');
   });
 
+  it('writes the provider cache split onto the run record as a marker (8.3)', () => {
+    const observability = new PromptObservability();
+    const traceId = observability.startRun();
+    const event: EngineEvent = {
+      type: 'Completed',
+      timestamp: Date.now(),
+      payload: {
+        finalOutput: 'done',
+        isComplete: true,
+        interrupted: false,
+        turnCount: 1,
+        usage: { promptTokens: 850, completionTokens: 20, cacheHitTokens: 700, cacheMissTokens: 150 },
+      },
+    };
+    observability.recordEvent(traceId, event);
+    observability.finishRun(traceId);
+
+    const record = observability.records().find((item) => item.type === 'agent_run');
+    if (record?.type !== 'agent_run') throw new Error('missing agent_run record');
+    // 700 / 850 = 82.35… → one decimal.
+    expect(record.cache).toEqual({ hitTokens: 700, missTokens: 150, hitRate: 82.4 });
+  });
+
+  it('omits the cache marker when the provider reports no split, and nulls the rate on an empty one', () => {
+    const observability = new PromptObservability();
+
+    const noCacheRun = observability.startRun();
+    observability.recordEvent(noCacheRun, {
+      type: 'Completed',
+      timestamp: Date.now(),
+      payload: { finalOutput: '', isComplete: true, interrupted: false, turnCount: 1, usage: { promptTokens: 10, completionTokens: 5 } },
+    });
+    observability.finishRun(noCacheRun);
+
+    const emptySplitRun = observability.startRun();
+    observability.recordEvent(emptySplitRun, {
+      type: 'Completed',
+      timestamp: Date.now(),
+      payload: { finalOutput: '', isComplete: true, interrupted: false, turnCount: 1, usage: { promptTokens: 10, completionTokens: 5, cacheHitTokens: 0, cacheMissTokens: 0 } },
+    });
+    observability.finishRun(emptySplitRun);
+
+    const runs = observability.records().filter((record) => record.type === 'agent_run');
+    expect(runs).toHaveLength(2);
+    if (runs[0].type === 'agent_run' && runs[1].type === 'agent_run') {
+      expect(runs[0].cache).toBeUndefined();
+      expect(runs[1].cache).toEqual({ hitRate: null });
+    }
+  });
+
   it('correlates a Harness run with the matching assembly trace', () => {
     const observability = new PromptObservability();
     const systemPrompt = 'system';
