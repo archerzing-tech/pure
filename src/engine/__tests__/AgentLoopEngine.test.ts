@@ -1304,4 +1304,48 @@ describe('AgentLoopEngine per-phase adapter routing (E0.3)', () => {
 
     expect(defaultCalls.count).toBe(1);
   });
+
+  it('falls back to the default adapter for phases the resolver leaves undefined (single-model config)', async () => {
+    const defaultCalls = { count: 0 };
+    const engine = new AgentLoopEngine();
+    const events = await collect(engine.run(
+      { sessionId: 's-phase-partial', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      baseCtx({
+        llm: countingLLM(textLLM('default adapter'), defaultCalls),
+        // Only THINK got a dedicated model — and it is down. HANDOVER has no
+        // dedicated model: it must fall back to the default adapter.
+        llmFor: (phase) => (phase === 'THINK' ? errorLLM('dedicated think model is down') : undefined),
+        failurePolicy: { decide: () => ({ kind: 'stop', reason: 'stop now' }) },
+      }),
+    ));
+
+    // The policy stop fires, and the HANDOVER wrap-up streams through the
+    // DEFAULT adapter — the user still gets a graceful summary even though
+    // their dedicated THINK model just died.
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted?.type === 'Interrupted' && interrupted.payload.reason).toBe('stop now');
+    const completed = events.find(e => e.type === 'Completed');
+    const messages = completed?.type === 'Completed' ? completed.payload.messages : undefined;
+    const lastAssistant = messages ? [...messages].reverse().find(m => m.role === 'assistant') : undefined;
+    expect(lastAssistant?.content).toContain('default');
+    expect(defaultCalls.count).toBe(1);
+  });
+
+  it('survives a throwing resolver by falling back to the default adapter', async () => {
+    const defaultCalls = { count: 0 };
+    const engine = new AgentLoopEngine();
+    const events = await collect(engine.run(
+      { sessionId: 's-phase-throwing', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      baseCtx({
+        llm: countingLLM(textLLM('default adapter saved the run'), defaultCalls),
+        llmFor: () => {
+          throw new Error('misconfigured per-phase routing');
+        },
+      }),
+    ));
+
+    expect(defaultCalls.count).toBe(1);
+    const completed = events.find(e => e.type === 'Completed');
+    expect(completed?.type === 'Completed' && completed.payload.finalOutput).toBe('default adapter saved the run');
+  });
 });
