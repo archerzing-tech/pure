@@ -12,6 +12,7 @@ import {
   renderErrorClusters,
   renderExperienceList,
   renderObservationStats,
+  renderStrategySection,
   renderSubagentAdvice,
   renderTotals,
   renderTrendCards,
@@ -228,6 +229,61 @@ describe('renderErrorClusters', () => {
     ], NOW);
     expect(html).not.toContain('<img');
     expect(html).toContain('&lt;img');
+  });
+});
+
+describe('renderStrategySection (E4.1)', () => {
+  // 五个维度都记在观测里（E4.1），仪表盘就得五个都上表 —— 只展示两个等于
+  // 把 exploration / recovery / complexity 的数据烂在库里。
+  const strategy = {
+    exploration: 'broad' as const,
+    verification: 'thorough' as const,
+    delegation: 'parallel' as const,
+    recovery: 'switch-approach' as const,
+    autonomy: 'assisted' as const,
+    complexity: 'complex' as const,
+    confidence: 0.8,
+    intentTags: ['research'],
+    recommendedRoles: ['researcher'],
+    parallelRoles: ['researcher'],
+    priorArtHint: false,
+  };
+
+  it('renders every strategy dimension, with its levels translated', () => {
+    const dashboard = buildEvolutionDashboard([run({ strategy })], { range: 'week', now: NOW });
+    const html = renderStrategySection(dashboard.strategy);
+    for (const title of ['验证档位', '委派档位', '探索档位', '恢复档位', '复杂度']) {
+      expect(html).toContain(title);
+    }
+    for (const level of ['全面', '并行', '广泛', '换思路', '复杂']) {
+      expect(html).toContain(level);
+    }
+  });
+
+  it('ranks the levels of each dimension by run count', () => {
+    const records = [
+      run({ strategy: { ...strategy, verification: 'thorough', complexity: 'complex' } }),
+      run({ strategy: { ...strategy, verification: 'thorough', complexity: 'complex' } }),
+      run({ strategy: { ...strategy, verification: 'standard', complexity: 'simple' } }),
+    ];
+    const html = renderStrategySection(buildEvolutionDashboard(records, { range: 'week', now: NOW }).strategy);
+    expect(html.indexOf('全面')).toBeLessThan(html.indexOf('常规'));
+    expect(html.indexOf('复杂')).toBeLessThan(html.indexOf('简单'));
+  });
+
+  it('explains an empty strategy section instead of rendering empty tables', () => {
+    const html = renderStrategySection(buildEvolutionDashboard([], { range: 'week', now: NOW }).strategy);
+    expect(html).toContain('evo-empty');
+    expect(html).not.toContain('evo-table');
+  });
+
+  it('still slices roles for runs recorded before strategy existed', () => {
+    const records = [
+      run({ toolCalls: [{ toolName: 'researcher', success: true, durationMs: 120 }] }),
+    ];
+    const html = renderStrategySection(buildEvolutionDashboard(records, { range: 'week', now: NOW }).strategy);
+    expect(html).toContain('子 Agent 角色');
+    expect(html).not.toContain('验证档位');
   });
 });
 

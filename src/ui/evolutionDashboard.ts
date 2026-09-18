@@ -18,7 +18,7 @@ import { isDraftEntry } from '../adapter/memory/correctionDrafts';
 import type { MemoryEntry } from '../adapter/memory/IMemoryStore';
 import type { DashboardTotals, ErrorCluster, EvolutionDashboard, TrendBucket } from '../shared/evolutionDashboard';
 import { SUBAGENT_ADVICE_WINDOW_DAYS, type SubagentAdvice } from '../shared/subagentAdvisory';
-import type { RoleEffectSlice, RunEffectSlice, StrategyEffectSummary } from '../shared/strategyEffect';
+import type { RoleEffectSlice, RunEffectSlice, StrategyDimension, StrategyEffectSummary } from '../shared/strategyEffect';
 import { toolDisplayName } from './toolRow';
 
 // ── 数字格式化 ──
@@ -306,13 +306,24 @@ function renderRoleTable(byRole: Record<string, RoleEffectSlice>): string {
   </div>`;
 }
 
-/** 策略维度（验证 / 委派）+ 角色切片。没数据时给一句"还在攒"而不是空表格。 */
+/** 五个策略维度都上表（E4.1 记了五个，只展示两个等于把数据烂在库里）。
+ *  顺序：验证 / 委派最可操作在前，探索 / 恢复 / 复杂度在后。 */
+const STRATEGY_SLICE_TABLES: ReadonlyArray<{ dimension: StrategyDimension; titleKey: string; titleDefault: string }> = [
+  { dimension: 'verification', titleKey: 'evolution.table.verification', titleDefault: '验证档位' },
+  { dimension: 'delegation', titleKey: 'evolution.table.delegation', titleDefault: '委派档位' },
+  { dimension: 'exploration', titleKey: 'evolution.table.exploration', titleDefault: '探索档位' },
+  { dimension: 'recovery', titleKey: 'evolution.table.recovery', titleDefault: '恢复档位' },
+  { dimension: 'complexity', titleKey: 'evolution.table.complexity', titleDefault: '复杂度' },
+];
+
+/** 策略维度切片（五档）+ 角色切片。某一维度没有带策略的记录就跳过该表；
+ *  全空时给一句"还在攒"而不是一排空表格。 */
 export function renderStrategySection(strategy: StrategyEffectSummary): string {
-  const verification = Object.entries(strategy.byDimension.verification).sort((a, b) => b[1].runs - a[1].runs);
-  const delegation = Object.entries(strategy.byDimension.delegation).sort((a, b) => b[1].runs - a[1].runs);
   const tables = [
-    renderSliceTable(verification, t('evolution.table.verification', '验证档位')),
-    renderSliceTable(delegation, t('evolution.table.delegation', '委派档位')),
+    ...STRATEGY_SLICE_TABLES.map((spec) => renderSliceTable(
+      Object.entries(strategy.byDimension[spec.dimension]).sort((a, b) => b[1].runs - a[1].runs),
+      t(spec.titleKey, spec.titleDefault),
+    )),
     renderRoleTable(strategy.byRole),
   ].filter(Boolean).join('');
   if (!tables) {
