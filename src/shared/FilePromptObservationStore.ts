@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { PromptObservation, PromptObservationStore } from './promptObservability';
+import { parsePromptObservations, type PromptObservation, type PromptObservationStore } from './promptObservability';
 
 /** Default retention ≈ 50k records (~64MB at a 1.2KB average record) so a week
  *  of real usage still supports time-window statistics (E0.1 — the old 2k cap
@@ -41,16 +41,8 @@ export class FilePromptObservationStore implements PromptObservationStore {
 
   list(): PromptObservation[] {
     if (!existsSync(this.path)) return [];
-    const records: PromptObservation[] = [];
-    for (const line of readFileSync(this.path, 'utf8').split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        const parsed = JSON.parse(line) as PromptObservation;
-        if (parsed && (parsed.type === 'prompt_assembly' || parsed.type === 'agent_run')) records.push(parsed);
-      } catch {
-        // A truncated/corrupt line must not hide later observations.
-      }
-    }
+    // Shared parser (same line policy as the GUI dashboard's Rust tail read).
+    const records = parsePromptObservations(readFileSync(this.path, 'utf8'));
     return records.slice(-this.maxRecords).map((record) => structuredClone(record));
   }
 
