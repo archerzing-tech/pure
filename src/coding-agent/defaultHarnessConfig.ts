@@ -1,6 +1,7 @@
 // src/coding-agent/defaultHarnessConfig.ts
 // Both entrypoints assemble the same "default Harness plumbing": a ContextEngine
-// (20-message window, maxTokens sized from the prompt budget), the rule-based
+// (maxTokens sized from the prompt budget governs retention; the 20-message
+// count is only the no-token-budget fallback, see 8.1), the rule-based
 // default verifier, an empty default hook router, and the escalating default
 // failure policy. The CLI builds Harness directly (cliHarness.ts) and the GUI
 // goes through CodingAgent — without a shared factory these four pieces lived

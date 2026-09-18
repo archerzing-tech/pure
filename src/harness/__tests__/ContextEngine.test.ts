@@ -113,6 +113,46 @@ describe('ContextEngine', () => {
     expect(result.messages.some(m => m.role === 'user' && m.content === 'ask')).toBe(true);
   });
 
+  // ═══ 8.1 — token budget primary ═══
+  // When a token budget is configured (production always resolves one), the
+  // message-count window no longer truncates: short turns are kept as long
+  // as the provider window fits them. The count window governs only the
+  // no-token-budget fallback path.
+
+  it('keeps short turns far past the count window when the token budget allows', async () => {
+    const engine = new ContextEngine({ maxMessages: 2, maxTokens: 10_000 });
+    const msgs: Message[] = [];
+    for (let i = 0; i < 30; i++) msgs.push(...pair(`p${i}`)); // 60 messages >> 2
+
+    const result = await engine.compact(msgs);
+
+    expect(result.messages).toHaveLength(60);
+    expect(result.compacted).toBe(false);
+    expect(result.evictedMessages).toBe(0);
+    expect(result.overBudget).toBe(false);
+  });
+
+  it('still evicts by size when the token budget is the small bound', async () => {
+    // maxMessages would keep everything here; tokens refuse. The weighting
+    // must evict the oldest pairs, newest intact — the inverse of the count
+    // fallback above.
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 220 });
+    const bigPair = (id: string): Message[] => [
+      { role: 'assistant', content: '', toolCalls: [{ id, index: 0, function: { name: 'read_file', arguments: '{}' } }] },
+      { role: 'tool', content: 'x'.repeat(400), toolCallId: id, toolName: 'read_file' }, // ~100 tokens
+    ];
+    const msgs: Message[] = [
+      ...bigPair('p0'), ...bigPair('p1'), ...bigPair('p2'), ...bigPair('p3'), ...bigPair('p4'),
+    ];
+
+    const result = await engine.compact(msgs);
+
+    expect(result.evictedMessages).toBeGreaterThanOrEqual(2);
+    expect(result.messages.some(m => m.role === 'assistant' && m.toolCalls?.some(tc => tc.id === 'p0'))).toBe(false);
+    expect(result.messages.some(m => m.role === 'assistant' && m.toolCalls?.some(tc => tc.id === 'p4'))).toBe(true);
+    expect(result.messages.at(-1)?.content).toBe('x'.repeat(400));
+  });
+
   // ═══ LLM summary fallback (G-3 fix) ═══
 
   it('summarizes evicted messages when llm is provided and threshold is exceeded', async () => {
