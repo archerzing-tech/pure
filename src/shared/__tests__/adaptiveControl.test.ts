@@ -172,4 +172,35 @@ describe('AdaptiveControlPlane', () => {
     expect(strategy.delegation).toBe('none');
     expect(strategy.directive).toContain('trivial/simple task — keep the loop local');
   });
+
+  it('hints at ready-made solutions for a code task with no stored procedure (P1)', () => {
+    const strategy = plane.select({
+      prompt: '帮这个项目实现一个导出 Excel 报表的功能，需要支持多个 sheet',
+      environment: environment(),
+    });
+
+    expect(strategy.priorArtHint).toBe(true);
+    expect(strategy.directive).toContain('search for a ready-made open-source solution or official documentation');
+  });
+
+  it('drops the prior-art hint once a learned procedure is available', () => {
+    const strategy = plane.select({
+      prompt: '帮这个项目实现一个导出 Excel 报表的功能，需要支持多个 sheet',
+      environment: environment(),
+      learnedProcedures: ['export excel: use xlsx library, write per-sheet, verify by reopening'],
+    });
+
+    expect(strategy.priorArtHint).toBe(false);
+    expect(strategy.directive).not.toContain('ready-made open-source solution');
+  });
+
+  it('does not spend the prior-art hint on a quick code fix', () => {
+    const strategy = plane.select({
+      prompt: '快速修一下这个文件里的 typo',
+      environment: environment(),
+    });
+
+    expect(strategy.priorArtHint).toBe(false);
+    expect(strategy.directive).not.toContain('ready-made open-source solution');
+  });
 });
