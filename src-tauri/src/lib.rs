@@ -755,7 +755,11 @@ fn has_symlink_component(workspace: &str, path: &str) -> bool {
 
 
 #[tauri::command]
-fn read_file(workspace: String, path: String) -> Result<String, String> {
+async fn read_file(workspace: String, path: String) -> Result<String, String> {
+    run_blocking(move || read_file_impl(workspace, path)).await
+}
+
+fn read_file_impl(workspace: String, path: String) -> Result<String, String> {
     let full = resolve(&workspace, &path)?;
     let meta = fs::metadata(&full).map_err(|e| format!("read_file: {}", e))?;
     if meta.is_dir() {
@@ -794,7 +798,11 @@ fn path_info(workspace: String, path: String) -> Result<serde_json::Value, Strin
 }
 
 #[tauri::command]
-fn remove_path(workspace: String, path: String, recursive: Option<bool>) -> Result<String, String> {
+async fn remove_path(workspace: String, path: String, recursive: Option<bool>) -> Result<String, String> {
+    run_blocking(move || remove_path_impl(workspace, path, recursive)).await
+}
+
+fn remove_path_impl(workspace: String, path: String, recursive: Option<bool>) -> Result<String, String> {
     if has_symlink_component(&workspace, &path) {
         return Err(format!("refusing to remove a symlink path: {}", path));
     }
@@ -917,7 +925,11 @@ fn save_file(path: String, content: String) -> Result<(), String> {
 /// mkdir-parent behavior; the payload is decoded by the same helper that
 /// handles pasted screenshots, so malformed input can never persist garbage.
 #[tauri::command]
-fn save_file_binary(path: String, data_base64: String) -> Result<(), String> {
+async fn save_file_binary(path: String, data_base64: String) -> Result<(), String> {
+    run_blocking(move || save_file_binary_impl(path, data_base64)).await
+}
+
+fn save_file_binary_impl(path: String, data_base64: String) -> Result<(), String> {
     let bytes = decode_paste_image(&data_base64)?;
     let p = PathBuf::from(&path);
     if let Some(parent) = p.parent() {
@@ -1038,7 +1050,18 @@ fn search_one_file(
 }
 
 #[tauri::command]
-fn search_files(
+async fn search_files(
+    workspace: String,
+    pattern: String,
+    path: Option<String>,
+    file_pattern: Option<String>,
+    max_results: Option<usize>,
+    case_sensitive: Option<bool>,
+) -> Result<String, String> {
+    run_blocking(move || search_files_impl(workspace, pattern, path, file_pattern, max_results, case_sensitive)).await
+}
+
+fn search_files_impl(
     workspace: String,
     pattern: String,
     path: Option<String>,
@@ -1195,7 +1218,18 @@ fn tokenize_find_query(query: &str) -> Vec<String> {
 /// 3) return top files each with up to 3 snippet lines (never full content),
 /// 4) actionable fallback guidance when nothing matches.
 #[tauri::command]
-fn find_files(
+async fn find_files(
+    workspace: String,
+    query: String,
+    path: Option<String>,
+    file_pattern: Option<String>,
+    max_results: Option<usize>,
+    case_sensitive: Option<bool>,
+) -> Result<String, String> {
+    run_blocking(move || find_files_impl(workspace, query, path, file_pattern, max_results, case_sensitive)).await
+}
+
+fn find_files_impl(
     workspace: String,
     query: String,
     path: Option<String>,
@@ -1693,7 +1727,7 @@ mod find_files_tests {
     #[test]
     fn finds_content_hit_after_stripping_cjk_stop_words() {
         let (ws, workspace) = seed_workspace("cjk");
-        let result = find_files(workspace.clone(), "我的学历".to_string(), None, None, None, None).expect("find_files succeeds");
+        let result = find_files_impl(workspace.clone(), "我的学历".to_string(), None, None, None, None).expect("find_files succeeds");
         assert!(result.contains("resume.txt"), "content hit listed: {}", result);
         assert!(result.contains("1 处命中"), "hit count shown: {}", result);
         fs::remove_dir_all(&ws).expect("remove test workspace");
@@ -1702,7 +1736,7 @@ mod find_files_tests {
     #[test]
     fn ranks_content_hit_above_filename_only_match() {
         let (ws, workspace) = seed_workspace("rank");
-        let result = find_files(workspace.clone(), "学历".to_string(), None, None, None, None).expect("find_files succeeds");
+        let result = find_files_impl(workspace.clone(), "学历".to_string(), None, None, None, None).expect("find_files succeeds");
         assert!(result.contains("resume.txt"), "content hit listed: {}", result);
         assert!(result.contains("仅文件名命中"), "filename-only tier labeled: {}", result);
         let content_idx = result.find("resume.txt").expect("resume.txt present");
@@ -1714,7 +1748,7 @@ mod find_files_tests {
     #[test]
     fn reports_fallback_when_nothing_matches() {
         let (ws, workspace) = seed_workspace("miss");
-        let result = find_files(workspace.clone(), "太空旅行".to_string(), None, None, None, None).expect("find_files succeeds");
+        let result = find_files_impl(workspace.clone(), "太空旅行".to_string(), None, None, None, None).expect("find_files succeeds");
         assert!(result.contains("未找到匹配文件"), "fallback headline: {}", result);
         assert!(result.contains("兜底建议"), "fallback guidance: {}", result);
         fs::remove_dir_all(&ws).expect("remove test workspace");
@@ -1723,7 +1757,7 @@ mod find_files_tests {
     #[test]
     fn rejects_empty_query() {
         let (ws, workspace) = seed_workspace("empty");
-        let err = find_files(workspace.clone(), "   ".to_string(), None, None, None, None).unwrap_err();
+        let err = find_files_impl(workspace.clone(), "   ".to_string(), None, None, None, None).unwrap_err();
         assert!(err.contains("query 不能为空"), "empty-query message: {}", err);
         fs::remove_dir_all(&ws).expect("remove test workspace");
     }
@@ -1731,7 +1765,7 @@ mod find_files_tests {
     #[test]
     fn rejects_query_that_tokenizes_to_only_stop_words() {
         let (ws, workspace) = seed_workspace("stops");
-        let err = find_files(workspace.clone(), "的的的".to_string(), None, None, None, None).unwrap_err();
+        let err = find_files_impl(workspace.clone(), "的的的".to_string(), None, None, None, None).unwrap_err();
         assert!(err.contains("无法从查询"), "stop-word message: {}", err);
         fs::remove_dir_all(&ws).expect("remove test workspace");
     }
@@ -1768,7 +1802,16 @@ mod tokenize_find_query_tests {
 }
 
 #[tauri::command]
-fn list_files(
+async fn list_files(
+    workspace: String,
+    path: String,
+    recursive: Option<bool>,
+    max_results: Option<usize>,
+) -> Result<String, String> {
+    run_blocking(move || list_files_impl(workspace, path, recursive, max_results)).await
+}
+
+fn list_files_impl(
     workspace: String,
     path: String,
     recursive: Option<bool>,
@@ -1834,7 +1877,16 @@ fn list_files(
 }
 
 #[tauri::command]
-fn glob_files(
+async fn glob_files(
+    workspace: String,
+    pattern: String,
+    path: Option<String>,
+    max_results: Option<usize>,
+) -> Result<String, String> {
+    run_blocking(move || glob_files_impl(workspace, pattern, path, max_results)).await
+}
+
+fn glob_files_impl(
     workspace: String,
     pattern: String,
     path: Option<String>,
@@ -2816,6 +2868,22 @@ mod sys_info_manual_regression {
     }
 }
 
+/// Runs a command body on the tokio blocking pool. Tauri executes sync
+/// (`fn`) commands inline on the main thread, so a heavy walkdir search, a
+/// large session serialize+fsync, or a synchronous `git log` there freezes
+/// the whole WebView. Async commands that delegate their (unchanged) body
+/// through this helper keep the identical signature and return shape while
+/// moving the work off the UI thread.
+async fn run_blocking<T, F>(body: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(body)
+        .await
+        .map_err(|e| format!("blocking task failed: {e}"))?
+}
+
 /// Decide whether to wrap this command in the Seatbelt sandbox: requested via
 /// the `sandbox` argument AND actually available on this machine AND the
 /// workspace exists (sandbox-exec profiles reference it).
@@ -2875,9 +2943,33 @@ async fn execute_command(workspace: String, command: String, proxy_url: Option<S
                 .env("ALL_PROXY", &resolved)
                 .env("NO_PROXY", "localhost,127.0.0.1,::1");
         }
-        cmd.output()
-            .await
-            .map_err(|e| format!("execute_command: {}", e))?
+        // Same bound as the streaming variant: a hung command (daemon, waiter
+        // for input) must not leave this future — and its child — alive
+        // forever. wait_with_output consumes the child, so on timeout the
+        // dropped future takes it along: kill_on_drop makes that drop a
+        // SIGKILL, and kill_process_group (pid captured before the move)
+        // additionally takes out any descendants the command spawned.
+        cmd.kill_on_drop(true);
+        // spawn() inherits our stdio by default (output() used to pipe it for
+        // us); pipe explicitly so wait_with_output still captures both streams.
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let child = cmd.spawn().map_err(|e| format!("execute_command: {}", e))?;
+        let pid = child.id();
+        match tokio::time::timeout(COMMAND_STREAM_TIMEOUT, child.wait_with_output()).await {
+            Ok(result) => result.map_err(|e| format!("execute_command: {}", e))?,
+            Err(_) => {
+                if let Some(pid) = pid {
+                    let _ = kill_process_group(pid as i32);
+                }
+                return Ok(serde_json::json!({
+                    "exitCode": 124,
+                    "stdout": "",
+                    "stderr": format!("Command timed out after {}s and was terminated.", COMMAND_STREAM_TIMEOUT.as_secs()),
+                }));
+            }
+        }
     };
 
     #[cfg(windows)]
@@ -3671,7 +3763,15 @@ fn run_git(workspace: &str, args: &[String]) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn git_diff(
+async fn git_diff(
+    workspace: String,
+    staged: Option<bool>,
+    path: Option<String>,
+) -> Result<String, String> {
+    run_blocking(move || git_diff_impl(workspace, staged, path)).await
+}
+
+fn git_diff_impl(
     workspace: String,
     staged: Option<bool>,
     path: Option<String>,
@@ -3688,7 +3788,15 @@ fn git_diff(
 }
 
 #[tauri::command]
-fn git_log(
+async fn git_log(
+    workspace: String,
+    max_count: Option<u32>,
+    oneline: Option<bool>,
+) -> Result<String, String> {
+    run_blocking(move || git_log_impl(workspace, max_count, oneline)).await
+}
+
+fn git_log_impl(
     workspace: String,
     max_count: Option<u32>,
     oneline: Option<bool>,
@@ -3706,7 +3814,11 @@ fn git_log(
 }
 
 #[tauri::command]
-fn git_status(workspace: String) -> Result<String, String> {
+async fn git_status(workspace: String) -> Result<String, String> {
+    run_blocking(move || git_status_impl(workspace)).await
+}
+
+fn git_status_impl(workspace: String) -> Result<String, String> {
     run_git(&workspace, &["status".into(), "--short".into()])
 }
 
@@ -3726,7 +3838,11 @@ fn create_directory(workspace: String, path: String) -> Result<String, String> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tauri::command]
-fn diff_files(workspace: String, path_a: String, path_b: String) -> Result<String, String> {
+async fn diff_files(workspace: String, path_a: String, path_b: String) -> Result<String, String> {
+    run_blocking(move || diff_files_impl(workspace, path_a, path_b)).await
+}
+
+fn diff_files_impl(workspace: String, path_a: String, path_b: String) -> Result<String, String> {
     let full_a = resolve(&workspace, &path_a)?;
     let full_b = resolve(&workspace, &path_b)?;
 
@@ -6098,9 +6214,9 @@ mod resolve_tests {
         let info = path_info(ws.clone(), "new.txt".into()).unwrap();
         assert_eq!(info["exists"], true);
         assert_eq!(info["isDirectory"], false);
-        remove_path(ws.clone(), "new.txt".into(), Some(false)).unwrap();
+        remove_path_impl(ws.clone(), "new.txt".into(), Some(false)).unwrap();
         assert!(!file.exists());
-        assert!(remove_path(ws.clone(), ".".into(), Some(true)).is_err());
+        assert!(remove_path_impl(ws.clone(), ".".into(), Some(true)).is_err());
         fs::remove_dir_all(&ws).unwrap();
     }
 
@@ -6159,7 +6275,7 @@ mod resolve_tests {
         for name in ["a.txt", "b.txt", "c.txt"] {
             fs::write(PathBuf::from(&ws).join(name), "").unwrap();
         }
-        let output = list_files(ws.clone(), ".".into(), Some(false), Some(2)).unwrap();
+        let output = list_files_impl(ws.clone(), ".".into(), Some(false), Some(2)).unwrap();
         assert!(output.contains("[截断]"));
         assert_eq!(
             output.split("\n\n[截断]").next().unwrap().lines().count(),
@@ -6337,7 +6453,7 @@ mod file_text_extraction_tests {
         fs::write(dir.join("legacy.doc"), ole).unwrap();
 
         let ws = dir.to_string_lossy().into_owned();
-        let result = search_files(ws.clone(), "北极星".into(), None, None, None, None).unwrap();
+        let result = search_files_impl(ws.clone(), "北极星".into(), None, None, None, None).unwrap();
         assert!(result.contains("notes.docx"), "docx content searchable: {}", result);
         assert!(result.contains("report.txt"));
         assert!(result.contains("legacy.doc"), "skipped binary listed in hint: {}", result);
@@ -6351,9 +6467,9 @@ mod file_text_extraction_tests {
         fs::write(dir.join("upper.txt"), "Apple Pie").unwrap();
         fs::write(dir.join("lower.txt"), "apple pie").unwrap();
         let ws = dir.to_string_lossy().into_owned();
-        let loose = search_files(ws.clone(), "apple".into(), None, None, None, None).unwrap();
+        let loose = search_files_impl(ws.clone(), "apple".into(), None, None, None, None).unwrap();
         assert!(loose.contains("upper.txt") && loose.contains("lower.txt"));
-        let strict = search_files(ws.clone(), "apple".into(), None, None, None, Some(true)).unwrap();
+        let strict = search_files_impl(ws.clone(), "apple".into(), None, None, None, Some(true)).unwrap();
         assert!(strict.contains("lower.txt"));
         assert!(!strict.contains("upper.txt"));
         fs::remove_dir_all(&dir).unwrap();
@@ -6365,7 +6481,7 @@ mod file_text_extraction_tests {
         let file = dir.join("target.docx");
         fs::write(&file, make_docx_bytes()).unwrap();
         let ws = dir.to_string_lossy().into_owned();
-        let result = search_files(ws.clone(), "北极星".into(), Some(file.to_string_lossy().into_owned()), None, None, None).unwrap();
+        let result = search_files_impl(ws.clone(), "北极星".into(), Some(file.to_string_lossy().into_owned()), None, None, None).unwrap();
         assert!(result.contains("target.docx"), "single-file search: {}", result);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -10842,7 +10958,14 @@ fn import_dropped_file_inner(
 /// The source path comes from the OS drag/drop API, while the destination is
 /// always sanitized and collision-safe inside ~/.pure/workspace/<session-id>/.
 #[tauri::command]
-fn import_dropped_file(
+async fn import_dropped_file(
+    session_id: String,
+    source_path: String,
+) -> Result<serde_json::Value, String> {
+    run_blocking(move || import_dropped_file_impl(session_id, source_path)).await
+}
+
+fn import_dropped_file_impl(
     session_id: String,
     source_path: String,
 ) -> Result<serde_json::Value, String> {
@@ -12006,9 +12129,29 @@ async fn chat_stream(
     // self-heal within the same turn instead of surfacing as an error. The
     // route that ACTUALLY served is reported back so the WebView's learning
     // pins what worked.
+    // Register the cancel channel BEFORE the request goes out (Stop →
+    // cancel_chat_stream → this receiver fires → the select!s below abort the
+    // request or the read loop). Previously registration happened only after
+    // send_chat_request returned, so a Stop during the connect/retry window
+    // (slow proxy, dead endpoint burning retries) found no entry and the
+    // request kept running — and billing — until it timed out on its own. The
+    // guard removes the entry on ANY exit path — normal finish, error, or
+    // cancel — so a stale id can never fire a reused slot.
+    let request_id = args.request_id.clone();
+    let reg = state.inner().clone();
+    let mut cancel_rx = register_chat_cancel(&reg, &request_id);
+    let _guard = ChatCancelGuard {
+        registry: reg,
+        key: request_id,
+    };
+
     let mut resp;
     let served_route: &'static str;
-    match send_chat_request(&client, &url, &body, anthropic, &api_key).await {
+    match tokio::select! {
+        biased;
+        _ = &mut cancel_rx => return Err("cancelled".into()),
+        r = send_chat_request(&client, &url, &body, anthropic, &api_key) => r,
+    } {
         Ok(r) => {
             resp = r;
             served_route = primary_route;
@@ -12020,27 +12163,18 @@ async fn chat_stream(
                 .transpose();
             match fallback_client {
                 Ok(Some(fallback)) => {
-                    resp = send_chat_request(&fallback, &url, &body, anthropic, &api_key)
-                        .await
-                        .map_err(|fallback_err| format!("{primary_err}\n兜底路由也失败：{fallback_err}"))?;
+                    resp = tokio::select! {
+                        biased;
+                        _ = &mut cancel_rx => return Err("cancelled".into()),
+                        r = send_chat_request(&fallback, &url, &body, anthropic, &api_key) => r,
+                    }
+                    .map_err(|fallback_err| format!("{primary_err}\n兜底路由也失败：{fallback_err}"))?;
                     served_route = route_of(Some(fallback_spec.as_deref().unwrap_or("")));
                 }
                 _ => return Err(primary_err),
             }
         }
     }
-
-    // Register the cancel channel for this call (Stop → cancel_chat_stream →
-    // this receiver fires → the select! below aborts the read loop). The
-    // guard removes the entry on ANY exit path — normal finish, error, or
-    // cancel — so a stale id can never fire a reused slot.
-    let request_id = args.request_id.clone();
-    let reg = state.inner().clone();
-    let mut cancel_rx = register_chat_cancel(&reg, &request_id);
-    let _guard = ChatCancelGuard {
-        registry: reg,
-        key: request_id,
-    };
 
     let mut stream_attempt: u32 = 0;
     let (text, usage, tc_map) = 'stream_attempts: loop {
@@ -12555,11 +12689,11 @@ mod generate_image_tests {
                 "uiState": {}
             })
         };
-        let first_save = save_session(revision_session_id.clone(), snapshot(2, "new"), Some(String::new()));
+        let first_save = save_session_impl(revision_session_id.clone(), snapshot(2, "new"), Some(String::new()));
         assert!(first_save.is_ok(), "first save failed: {first_save:?}");
-        let error = save_session(revision_session_id.clone(), snapshot(1, "old"), Some(String::new())).unwrap_err();
+        let error = save_session_impl(revision_session_id.clone(), snapshot(1, "old"), Some(String::new())).unwrap_err();
         assert_eq!(error, "stale session revision");
-        let stored = load_session(revision_session_id).unwrap().unwrap();
+        let stored = load_session_impl(revision_session_id).unwrap().unwrap();
         assert_eq!(stored["snapshot"]["revision"], 2);
         assert_eq!(stored["snapshot"]["modelContext"]["messages"][0]["content"], "new");
         match old_home {
@@ -12594,11 +12728,11 @@ mod generate_image_tests {
             "transcript": [],
             "uiState": {}
         });
-        let first_save = save_session(workspace_session_id.clone(), snapshot, Some("/old/workspace".to_string()));
+        let first_save = save_session_impl(workspace_session_id.clone(), snapshot, Some("/old/workspace".to_string()));
         assert!(first_save.is_ok(), "first save failed: {first_save:?}");
         let workspace_save = save_session_workspace_sync(&workspace_session_id, "/new/workspace");
         assert!(workspace_save.is_ok(), "workspace save failed: {workspace_save:?}");
-        let loaded = load_session(workspace_session_id.clone()).unwrap().unwrap();
+        let loaded = load_session_impl(workspace_session_id.clone()).unwrap().unwrap();
         assert_eq!(loaded["workspace"], "/new/workspace");
         let workspace_path = workspace_override_path(&workspace_session_id);
         assert!(workspace_path.exists());
@@ -12720,7 +12854,15 @@ fn write_workspace_override(session_id: &str, workspace: &str) -> Result<(), Str
 }
 
 #[tauri::command]
-fn save_session(
+async fn save_session(
+    session_id: String,
+    snapshot: serde_json::Value,
+    workspace: Option<String>,
+) -> Result<(), String> {
+    run_blocking(move || save_session_impl(session_id, snapshot, workspace)).await
+}
+
+fn save_session_impl(
     session_id: String,
     snapshot: serde_json::Value,
     workspace: Option<String>,
@@ -12792,7 +12934,11 @@ fn save_session(
 }
 
 #[tauri::command]
-fn load_session(session_id: String) -> Result<Option<serde_json::Value>, String> {
+async fn load_session(session_id: String) -> Result<Option<serde_json::Value>, String> {
+    run_blocking(move || load_session_impl(session_id)).await
+}
+
+fn load_session_impl(session_id: String) -> Result<Option<serde_json::Value>, String> {
     validate_session_id(&session_id)?;
     let path = sessions_dir().join(&session_id).join("session.json");
     if !path.exists() {
@@ -12877,7 +13023,11 @@ fn load_session_stats(session_id: String) -> Result<Option<serde_json::Value>, S
 /// (hundreds of files on a long-lived install). None = the full sweep (the
 /// "export all as ZIP" path needs every session).
 #[tauri::command]
-fn load_all_session_stats(session_ids: Option<Vec<String>>) -> Result<serde_json::Value, String> {
+async fn load_all_session_stats(session_ids: Option<Vec<String>>) -> Result<serde_json::Value, String> {
+    run_blocking(move || load_all_session_stats_impl(session_ids)).await
+}
+
+fn load_all_session_stats_impl(session_ids: Option<Vec<String>>) -> Result<serde_json::Value, String> {
     if let Some(ids) = &session_ids {
         for id in ids {
             validate_session_id(id)?;
@@ -12929,7 +13079,7 @@ fn load_last_session() -> Result<Option<serde_json::Value>, String> {
     let list: Vec<SessionMeta> = serde_json::from_str(&raw).unwrap_or_default();
     let latest = list.iter().max_by_key(|s| s.updated_at);
     match latest {
-        Some(s) => load_session(s.id.clone()),
+        Some(s) => load_session_impl(s.id.clone()),
         None => Ok(None),
     }
 }
@@ -15710,7 +15860,7 @@ mod save_paste_file_tests {
         let path = dir.join("chart.png");
         let bytes = vec![0x89u8, b'P', b'N', b'G', 13, 10, 26, 10, 42, 43, 44];
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        save_file_binary(path.to_string_lossy().to_string(), b64).unwrap();
+        save_file_binary_impl(path.to_string_lossy().to_string(), b64).unwrap();
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 
@@ -15719,7 +15869,7 @@ mod save_paste_file_tests {
         let dir = temp_paste_dir("save-file-binary-bad");
         let path = dir.join("bad.png");
         assert!(
-            save_file_binary(path.to_string_lossy().to_string(), "@@nope@@".to_string()).is_err()
+            save_file_binary_impl(path.to_string_lossy().to_string(), "@@nope@@".to_string()).is_err()
         );
         assert!(!path.exists());
     }
@@ -16028,7 +16178,7 @@ mod session_stats_tests {
             let dir = sessions_dir().join("sess-no-stats");
             fs::create_dir_all(&dir).unwrap();
 
-            let all = load_all_session_stats(None).unwrap();
+            let all = load_all_session_stats_impl(None).unwrap();
             let map = all.as_object().unwrap();
             assert_eq!(map.len(), 2);
             assert_eq!(map["sess-a"], stats_a);
@@ -16037,13 +16187,13 @@ mod session_stats_tests {
 
             // 5) An allow-list narrows the read to exactly those sessions (the
             // sidebar passes its visible ids; the full sweep stays the default).
-            let subset = load_all_session_stats(Some(vec!["sess-b".to_string()])).unwrap();
+            let subset = load_all_session_stats_impl(Some(vec!["sess-b".to_string()])).unwrap();
             let sub_map = subset.as_object().unwrap();
             assert_eq!(sub_map.len(), 1);
             assert_eq!(sub_map["sess-b"], stats_b);
             assert!(!sub_map.contains_key("sess-a"));
             // A requested id without a stats file is simply absent, not fatal.
-            let missing = load_all_session_stats(Some(vec!["nope".to_string()])).unwrap();
+            let missing = load_all_session_stats_impl(Some(vec!["nope".to_string()])).unwrap();
             assert_eq!(missing.as_object().unwrap().len(), 0);
         });
         let _ = fs::remove_dir_all(&home);
