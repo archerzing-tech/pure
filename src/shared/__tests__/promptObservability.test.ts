@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { FilePromptObservationStore } from '../FilePromptObservationStore';
 import { InMemoryPromptObservationStore, PromptObservability } from '../promptObservability';
@@ -203,6 +204,23 @@ describe('PromptObservability', () => {
     }
   });
 
+  it('compacts the file once the size budget is exceeded, keeping recent records', async () => {
+    const directory = await mkdtemp('/tmp/pure-observability-rotate-');
+    try {
+      const path = join(directory, 'traces.jsonl');
+      // 1-byte budget → every append after the first trips the compacting pass.
+      const store = new FilePromptObservationStore(path, 2, 1);
+      for (let index = 0; index < 4; index++) {
+        store.append({ type: 'agent_run', traceId: `run-${index}`, startedAt: Date.now(), eventCounts: {}, toolCalls: [], reasoningChars: 0, outputChars: 0 });
+      }
+      const retained = store.list();
+      expect(retained.map((record) => record.traceId)).toEqual(['run-2', 'run-3']);
+      expect(existsSync(`${path}.tmp-${process.pid}`)).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('bounds stored records and clears active runs', () => {
     const store = new InMemoryPromptObservationStore(2);
     const observability = new PromptObservability({}, store);
@@ -213,5 +231,43 @@ describe('PromptObservability', () => {
     expect(observability.records()).toHaveLength(2);
     observability.clear();
     expect(observability.records()).toEqual([]);
+  });
+
+  it('mirrors every persisted record to the sink (E0.1 durability)', () => {
+    const sunk: string[] = [];
+    const observability = new PromptObservability({ sink: { append: (record) => { sunk.push(record.traceId); } } });
+    const assemblyTrace = observability.recordAssembly({
+      sessionId: 's',
+      systemPrompt: 'system',
+      promptVersion: 'prompt_test',
+      budget: {
+        contextWindowTokens: 100, outputReserveTokens: 10, safetyMarginTokens: 5, availableInputTokens: 85,
+        estimatedInputTokens: 2, estimatedToolTokens: 0, includedFragmentIds: [], omittedFragmentIds: [], overBudget: false,
+      },
+    });
+    const runTrace = observability.startRun({ sessionId: 's' });
+    observability.finishRun(runTrace, { isComplete: true, interrupted: false });
+    expect(sunk).toEqual([assemblyTrace, runTrace]);
+  });
+
+  it('keeps recording when the sink fails — persistence must not break a run', () => {
+    const observability = new PromptObservability({ sink: { append: () => { throw new Error('disk on fire'); } } });
+    const traceId = observability.startRun({ sessionId: 's' });
+    expect(() => observability.finishRun(traceId, { isComplete: true, interrupted: false })).not.toThrow();
+    expect(observability.records()).toHaveLength(1);
+  });
+
+  it('can attach and detach the sink after construction', () => {
+    const sunk: string[] = [];
+    const observability = new PromptObservability();
+    const traceId = observability.startRun({ sessionId: 's' });
+    observability.finishRun(traceId);
+    observability.setSink({ append: (record) => { sunk.push(record.traceId); } });
+    const second = observability.startRun({ sessionId: 's' });
+    observability.finishRun(second);
+    observability.setSink(undefined);
+    const third = observability.startRun({ sessionId: 's' });
+    observability.finishRun(third);
+    expect(sunk).toEqual([second]);
   });
 });

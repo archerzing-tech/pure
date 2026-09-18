@@ -10708,6 +10708,87 @@ fn write_paste_bytes(dir: &std::path::Path, name: &str, bytes: &[u8]) -> Result<
     Ok(path.to_string_lossy().to_string())
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Prompt observation persistence (~/.pure/observations/app.jsonl) — E0.1
+// ═══════════════════════════════════════════════════════════════════════════════
+//  The TS promptObservability singleton historically wrote to an in-process
+//  ring buffer with zero product readers ("只写不读"). The GUI sink mirrors
+//  every finished record here as one JSONL line. Records arrive as opaque
+//  JSON so this side never couples to TS schema drift. Rotation is
+//  size-gated (one stat per append) and keeps the most recent records.
+
+const OBSERVATION_ROTATE_BYTES: u64 = 64 * 1024 * 1024;
+const OBSERVATION_KEEP_RECORDS: usize = 50_000;
+
+fn observations_dir() -> PathBuf {
+    PathBuf::from(pure_home_dir()).join(".pure").join("observations")
+}
+
+fn append_observation_to(dir: &std::path::Path, record_json: &str, rotate_bytes: u64, keep_records: usize) -> Result<(), String> {
+    let trimmed = record_json.trim();
+    if trimmed.is_empty() {
+        return Err("observation record is required".to_string());
+    }
+    fs::create_dir_all(dir).map_err(|e| format!("create observations dir: {}", e))?;
+    let path = dir.join("app.jsonl");
+    if let Ok(meta) = fs::metadata(&path) {
+        if meta.len() > rotate_bytes {
+            let content = fs::read_to_string(&path).map_err(|e| format!("read observations: {}", e))?;
+            let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+            let start = lines.len().saturating_sub(keep_records);
+            let mut retained = String::with_capacity(content.len() / 2);
+            for line in &lines[start..] {
+                retained.push_str(line);
+                retained.push('\n');
+            }
+            let tmp = dir.join("app.jsonl.tmp");
+            fs::write(&tmp, retained).map_err(|e| format!("write observations tmp: {}", e))?;
+            fs::rename(&tmp, &path).map_err(|e| format!("rotate observations: {}", e))?;
+        }
+    }
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(&path)
+        .map_err(|e| format!("open observations file: {}", e))?;
+    use std::io::Write as _;
+    writeln!(file, "{}", trimmed).map_err(|e| format!("append observation: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn append_observation(record_json: String) -> Result<(), String> {
+    append_observation_to(&observations_dir(), &record_json, OBSERVATION_ROTATE_BYTES, OBSERVATION_KEEP_RECORDS)
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_an_empty_record() {
+        let dir = std::env::temp_dir().join(format!("pure-obs-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(append_observation_to(&dir, "  ", u64::MAX, 10).is_err());
+        assert!(!dir.join("app.jsonl").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn appends_jsonl_and_rotates_keeping_the_most_recent_records() {
+        let dir = std::env::temp_dir().join(format!("pure-obs-rotate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // 15 bytes is below one record line ("{"traceId":"a"}\n" = 16), so every
+        // append after the first trips rotation; keeping the most recent 1 record
+        // then appending the new line leaves exactly [b, c].
+        let tiny_rotate = 15u64;
+        append_observation_to(&dir, r#"{"traceId":"a"}"#, tiny_rotate, 1).unwrap();
+        append_observation_to(&dir, r#"{"traceId":"b"}"#, tiny_rotate, 1).unwrap();
+        append_observation_to(&dir, r#"{"traceId":"c"}"#, tiny_rotate, 1).unwrap();
+        let content = fs::read_to_string(dir.join("app.jsonl")).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines, vec![r#"{"traceId":"b"}"#, r#"{"traceId":"c"}"#]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
 /// Decode a base64 image payload sent over IPC (split out for unit tests).
 /// Whitespace-only payloads decode to zero bytes under the STANDARD engine
 /// (it ignores whitespace) — reject them explicitly so we never persist an
@@ -15515,6 +15596,8 @@ pub fn run() {
             mcp_list,
             // Application temporary workspace + secret management
             get_tmp_workspace,
+            // Prompt observation persistence (E0.1, ~/.pure/observations/)
+            append_observation,
             save_paste_file,
             save_paste_image,
             import_dropped_file,

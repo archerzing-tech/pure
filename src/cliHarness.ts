@@ -20,6 +20,8 @@ import { createEmbeddingMemoryStore } from './shared/memoryFactory';
 import { harvestUserPreferences } from './shared/memory';
 import { promptBudgetForProvider } from './shared/providers';
 import { promptAssembler } from './shared/PromptAssembler';
+import { promptObservability } from './shared/promptObservability';
+import { FilePromptObservationStore } from './shared/FilePromptObservationStore';
 import { cyan, dim, green, red, yellow } from './termcolors';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
 import type { IStateStore, ToolAdapter, ToolDefinition } from './shared/types';
@@ -29,6 +31,11 @@ import { loadUserHooks } from './shared/userHooks';
 import { createGatedUserHookRunner, createNodeUserHookRunner } from './shared/userHookRunner';
 import { loadHookApprovals } from './shared/userHookApprovals';
 import type { CliArgs } from './cliConfig';
+
+// E0.1 — mirror finished prompt/run observations to ~/.pure/observations/cli.jsonl.
+// The singleton previously only fed the in-process ring buffer (no durable
+// record); the sink is best-effort and never breaks a run.
+promptObservability.setSink(new FilePromptObservationStore(`${PURE_DIR}/observations/cli.jsonl`));
 
 // ── CLI cross-session memory (IMemoryStore) ──
 // File-backed store under ~/.pure/memories/{projectHash}/memories.jsonl,

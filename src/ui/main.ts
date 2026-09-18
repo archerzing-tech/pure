@@ -19,6 +19,8 @@ import { stripUserTurnContext } from '../shared/promptLayers';
 import { checkForUpdatesSilently, fetchAppVersion } from './updater';
 import { t, updateLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
+import { createTauriObservationSink } from '../shared/tauriObservationSink';
+import { promptObservability } from '../shared/promptObservability';
 import { workspaceBase } from '../shared/paths';
 import { loadSessionList, loadSessionStatsForList, flushSessionSaves, saveSessionWorkspace, type SessionMeta, type SessionStats } from './store';
 import type { Language as I18nLanguage } from '../shared/i18n';
@@ -61,6 +63,13 @@ import { groupConversationTurns, segmentConversationTurns } from './conversation
 import { loadDeferredStyles } from './deferredStyles';
 
 const chat = new SessionChatManager();
+
+// E0.1 — mirror every prompt/run observation to ~/.pure/observations/app.jsonl
+// via Rust. The singleton previously fed only an in-process ring buffer with
+// no product reader; this makes the data durable for later analysis without
+// touching the run loop (a failed write is swallowed inside the sink).
+const observationSink = createTauriObservationSink();
+if (observationSink) promptObservability.setSink(observationSink);
 
 // Long text submissions are converted into the same temporary text-file chip
 // used by oversized pastes, so the model receives a read_file reference rather
