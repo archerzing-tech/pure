@@ -101,12 +101,24 @@ export interface AgentRunObservationInput {
 export interface PromptObservabilityOptions {
   maxRecords?: number;
   enabled?: boolean;
+  sink?: PromptObservationSink;
 }
 
 export interface PromptObservationStore {
   append(record: PromptObservation): void;
   list(): PromptObservation[];
   clear(): void;
+}
+
+/**
+ * E0.1 — durable mirror for records that land in the in-process store. The
+ * product historically wrote to a memory ring buffer with zero readers
+ * ("只写不读"); a sink makes every record durable without changing the
+ * read model. Failures are swallowed by the observability layer —
+ * persistence must never break a run.
+ */
+export interface PromptObservationSink {
+  append(record: PromptObservation): void;
 }
 
 export class InMemoryPromptObservationStore implements PromptObservationStore {
@@ -199,11 +211,28 @@ function observeCache(usage: TokenUsage | undefined): CacheObservation | undefin
 export class PromptObservability {
   private readonly store: PromptObservationStore;
   private readonly enabled: boolean;
+  private sink?: PromptObservationSink;
   private readonly activeRuns = new Map<string, AgentRunObservation>();
 
   constructor(options: PromptObservabilityOptions = {}, store?: PromptObservationStore) {
     this.enabled = options.enabled ?? true;
     this.store = store ?? new InMemoryPromptObservationStore(options.maxRecords ?? 500);
+    this.sink = options.sink;
+  }
+
+  /** Attach (or replace) the durable mirror; safe to call before any recording. */
+  setSink(sink: PromptObservationSink | undefined): void {
+    this.sink = sink;
+  }
+
+  private persist(record: PromptObservation): void {
+    this.store.append(record);
+    if (!this.sink) return;
+    try {
+      this.sink.append(record);
+    } catch {
+      // Durability is best-effort; recording must not throw into the run loop.
+    }
   }
 
   isEnabled(): boolean {
@@ -213,7 +242,7 @@ export class PromptObservability {
   recordAssembly(input: PromptAssemblyObservationInput): string {
     const traceId = input.traceId ?? nextId('prompt');
     if (!this.enabled) return traceId;
-    this.store.append({
+    this.persist({
       type: 'prompt_assembly',
       traceId,
       timestamp: Date.now(),
@@ -310,7 +339,7 @@ export class PromptObservability {
     record.endedAt = endedAt;
     record.durationMs = endedAt - record.startedAt;
     if (outcome) record.outcome = outcome;
-    this.store.append(record);
+    this.persist(record);
     this.activeRuns.delete(traceId);
   }
 
