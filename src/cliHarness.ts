@@ -25,7 +25,7 @@ import { FilePromptObservationStore } from './shared/FilePromptObservationStore'
 import { failureHistoryFromMemories } from './engine/FailurePolicy';
 import { cyan, dim, green, red, yellow } from './termcolors';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
-import type { IStateStore, ToolAdapter, ToolDefinition } from './shared/types';
+import type { IStateStore, IMemoryStore, ToolAdapter, ToolDefinition } from './shared/types';
 import { createAdapter } from './cliAdapter';
 import { DEFAULT_BUDGET, evolutionCfg, PURE_DIR } from './cliConfig';
 import { loadUserHooks } from './shared/userHooks';
@@ -52,18 +52,44 @@ promptObservability.setSink(new FilePromptObservationStore(`${PURE_DIR}/observat
 // model / WASM unavailable) falls back to keyword search, so the CLI keeps
 // working exactly as before in every environment. Scripts/CI that don't want
 // the first-search download can force keyword mode with PURE_MEMORY_KEYWORD=1.
-// Note: standalone released binaries ship with @huggingface/transformers
-// external (package.json cli:build — onnxruntime-node can't be bundled), so
-// their runtime import always fails and they use keyword search; WASM recall
-// is active for repo/dev runs (`bun run cli`).
-const memoryStore = process.env.PURE_MEMORY_KEYWORD
-  ? new FSMemoryStore(`${PURE_DIR}/memories`, '', evolutionCfg)
-  : createEmbeddingMemoryStore({
-      store: new FSMemoryStore(`${PURE_DIR}/memories`, '', evolutionCfg),
-      // 包装层与内层 store 用同一份配置：WASM 检索路径的 dormant 过滤
-      // 必须跟随 PURE_MEMORY_DORMANT_MAX，否则语义检索时阈值静默失效。
-      getEvolution: () => evolutionCfg,
-    });
+//
+// E0.4 — released single-file binaries can't load transformers.js (its static
+// onnxruntime-node import can't be bundled), so the compiled build injects the
+// OrtWebEmbedder (embedded ort-wasm runtime + q8 MiniLM) through the wrapper's
+// embedder seam instead. Dev runs (`bun run cli`) keep the transformers.js
+// path; the embedder module never loads there.
+function buildInnerMemoryStore(): FSMemoryStore {
+  return new FSMemoryStore(`${PURE_DIR}/memories`, '', evolutionCfg);
+}
+
+async function buildCliMemoryStore(): Promise<IMemoryStore> {
+  if (process.env.PURE_MEMORY_KEYWORD) return buildInnerMemoryStore();
+  if (process.env.PURE_CLI_VERSION) {
+    try {
+      const { createOrtWebEmbedder } = await import('./adapter/memory/OrtWebEmbedder');
+      const ortEmbedder = createOrtWebEmbedder({
+        onProgress: (message) => process.stderr.write(`${dim(`[memory] ${message}`)}\n`),
+      });
+      return createEmbeddingMemoryStore({
+        store: buildInnerMemoryStore(),
+        getEvolution: () => evolutionCfg,
+        embed: ortEmbedder.embed,
+        embedBatch: ortEmbedder.embedBatch,
+      });
+    } catch (err) {
+      // Embedder module failed to load — fall through to the plain wrapper;
+      // its transformers import will fail in a binary too and degrade to
+      // keyword search (pre-E0.4 released behavior).
+      process.stderr.write(`${dim(`[memory] ort embedder unavailable (${err instanceof Error ? err.message : String(err)}); keyword fallback`)}\n`);
+    }
+  }
+  return createEmbeddingMemoryStore({
+    store: buildInnerMemoryStore(),
+    getEvolution: () => evolutionCfg,
+  });
+}
+
+const memoryStore = await buildCliMemoryStore();
 
 function learnFromInput(text: string, sessionId: string, projectPath: string): Promise<unknown> {
   const entries = harvestUserPreferences(text, { sessionId, projectPath });
