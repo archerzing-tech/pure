@@ -9,7 +9,9 @@
 // 默认跳过 low 条目。成本护栏：每日反思次数上限、触发条件门控、可整体关闭
 // （HarnessConfig.reflection）。
 
-import { createHash } from 'node:crypto';
+// 浏览器安全哈希：共享内核的纯 TS sha256，而不是 node:crypto —— Harness 在 GUI
+// 路径上是静态导入的，node:crypto 会让整个 Vite 浏览器构建失败。
+import { sha256Hex } from '../shared/sha256';
 import type { LLMAdapter, Message } from '../shared/types';
 import type { IMemoryStore } from '../shared/types';
 
@@ -56,7 +58,7 @@ export function buildTurnEvidence(messages: Message[]): TurnEvidence[] {
       if (!call.function?.name) continue;
       const args = typeof call.function.arguments === 'string' ? call.function.arguments : '';
       evidence.push({
-        id: createHash('sha256').update(`${call.function.name}::${args}`).digest('hex').slice(0, EVIDENCE_ID_LENGTH),
+        id: sha256Hex(`${call.function.name}::${args}`).slice(0, EVIDENCE_ID_LENGTH),
         toolName: call.function.name,
         argsPreview: args.slice(0, ARGS_PREVIEW_MAX),
       });
@@ -178,7 +180,7 @@ const CORRECTION_KINDS = new Set(['project_convention', 'user_preference']);
 
 /** 草稿条目的 dedupeKey：同一句纠正（内容哈希）跨会话、跨轮次只落一条。 */
 export function correctionDedupeKey(correction: ReflectedCorrection): string {
-  return `correction:${correction.kind}:${createHash('sha256').update(correction.statement).digest('hex').slice(0, EVIDENCE_ID_LENGTH)}`;
+  return `correction:${correction.kind}:${sha256Hex(correction.statement).slice(0, EVIDENCE_ID_LENGTH)}`;
 }
 
 /** 纠正草稿的校验：kind 白名单之外、statement 短于 8 个有效字符的一律丢弃 ——
