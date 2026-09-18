@@ -46,6 +46,9 @@ export interface PlanStep {
   todosRequired?: boolean;
   /** Concrete (1)/(2)/(3) work items shown under the active top-level step. */
   substeps?: PlanSubstep[];
+  /** E2.3 — 与其他带此标记的步骤相互独立（只读/研究类工作），批准后可以在
+   *  同一轮里并行派发（运行端 reads 并发池真正并行）。计划层只做标注。 */
+  parallel?: boolean;
 }
 
 export interface Plan {

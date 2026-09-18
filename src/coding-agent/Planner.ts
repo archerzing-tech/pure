@@ -14,6 +14,38 @@ import { KNOWN_SUBAGENT_ROLES } from '../shared/adaptiveControl';
 const MAX_PLAN_STEPS = 10;
 const MAX_PLAN_SUBSTEPS = 8;
 
+// ── E2.3 计划层并行标注 ──
+// 策略层的 parallelRoles 说的是"这个任务推荐了哪些可并行的角色"；计划步骤是
+// 规则生成的通用模板，两者靠步骤文本里的角色域关键词对接。纯规则标注、不
+// 加 LLM 调用：标注错了顶多是少并行/多并行一次只读派发，代价可控。
+const PARALLEL_STEP_DOMAINS: Record<string, RegExp> = {
+  researcher: /调研|研究|搜集|收集|查资?料|搜索|查一下|查查|背景|现状|research|investigat|gather|survey/i,
+  deep_thinker: /评估|权衡|比较|方案对比|多方案|可行性|trade-?offs?|evaluat|compar[ei]/i,
+  project_auditor: /审计|依赖检查|安全检查|安全审查|漏洞|audit|vulnerab|dependency check/i,
+  code_reviewer: /评审|审查|review/i,
+  ui_designer: /界面设计|视觉|交互设计|设计稿|ui\s*design|mockup|wireframe/i,
+};
+
+/** 把策略层的 parallelRoles 接到计划步骤上：推荐的并行安全角色里只要有一个
+ *  的域关键词命中某步，该步就标 parallel。不足两步可并行时不标——单个标记
+ *  没有组批对象，只会让卡片和提示词多噪声。返回新 Plan，不改入参。 */
+export function markParallelPlanSteps(plan: Plan, parallelRoles: readonly string[]): Plan {
+  const domains = parallelRoles
+    .map(role => PARALLEL_STEP_DOMAINS[role])
+    .filter((re): re is RegExp => Boolean(re));
+  if (domains.length === 0) return plan;
+  const qualifies = (step: PlanStep): boolean => {
+    const text = `${step.action} ${step.description}`;
+    return domains.some(re => re.test(text));
+  };
+  const marked = plan.steps.filter(qualifies);
+  if (marked.length < 2) return plan;
+  return {
+    ...plan,
+    steps: plan.steps.map(step => (qualifies(step) ? { ...step, parallel: true } : step)),
+  };
+}
+
 export interface PlannerConfig {
   /** Threshold for explicit, concrete file-operation evidence. */
   complexFileThreshold?: number;

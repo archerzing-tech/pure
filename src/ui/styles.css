@@ -2982,6 +2982,21 @@ body {
   font-size: 11px;
   color: var(--text-tertiary);
 }
+
+/* E2.3 — 可并行标记：小徽章贴在步骤名后，青色系表示"并排跑"，与可并行的
+ * 语义（独立只读、同轮派发）一致。完成态跟着整行变灰，不打断划线视觉。 */
+.plan-progress-step-parallel {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  white-space: nowrap;
+}
 .plan-progress-step.active {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   color: var(--text);

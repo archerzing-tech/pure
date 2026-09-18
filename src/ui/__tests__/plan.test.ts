@@ -716,3 +716,58 @@ describe('plan auto-continue badge', () => {
     expect(src).toContain('if (scheduled) this.activePlanCardHandle?.setAutoContinue(this.autoContinue.roundCount + 1, max);');
   });
 });
+
+describe('plan parallel marks (E2.3)', () => {
+  const parallelPlan: Plan = {
+    reasoning: 'fixture',
+    steps: [
+      { id: '1', action: '理解需求', description: '拆解目标', expectedOutcome: '一致' },
+      { id: '2', action: '调研竞品', description: '搜集资料', expectedOutcome: '笔记', parallel: true },
+      { id: '3', action: '调研技术方案', description: '搜索现状', expectedOutcome: '选型', parallel: true },
+    ],
+  };
+
+  it('formats parallel steps with the ⫲ mark and the batching rule', () => {
+    const out = formatPlanForPrompt(parallelPlan, false, true);
+    expect(out).toContain('2. 调研竞品: 搜集资料 ⫲ ');
+    expect(out).toContain('3. 调研技术方案: 搜索现状 ⫲ ');
+    expect(out).toContain('Steps marked ⫲ are mutually independent read-only work');
+    expect(out).toContain('Keep emitting the stage markers in numeric order');
+  });
+
+  it('adds nothing for plans without parallel steps', () => {
+    const plain: Plan = { reasoning: 'x', steps: [{ id: '1', action: 'a', description: 'b', expectedOutcome: 'c' }] };
+    const out = formatPlanForPrompt(plain, false, true);
+    expect(out).not.toContain('⫲');
+  });
+
+  it('renders a parallel badge on the plan card step row', () => {
+    const oldDocument = (globalThis as any).document;
+    const fakeDocument = {
+      createElement: (tag: string) => {
+        const children: any[] = [];
+        const classes = new Set<string>();
+        return {
+          tagName: tag.toUpperCase(), children, childNodes: children, className: '', dataset: {},
+          classList: { add: (...names: string[]) => names.forEach((name) => classes.add(name)), remove: (...names: string[]) => names.forEach((name) => classes.delete(name)), contains: (name: string) => classes.has(name) },
+          append: (...items: any[]) => items.forEach((item) => children.push(item)), appendChild: (item: any) => { children.push(item); return item; },
+          querySelector: () => null, setAttribute: () => {}, textContent: '', isConnected: true,
+        } as any;
+      },
+    };
+    (globalThis as any).document = fakeDocument;
+    try {
+      const { handle } = createProgressCard(parallelPlan);
+      const badgeOf = (row: any): any => {
+        const body = row.children.find((c: any) => c.className === 'plan-progress-step-body');
+        return body?.children.find((c: any) => c.className === 'plan-progress-step-parallel') ?? null;
+      };
+      expect(badgeOf(handle.stepEls[0])).toBeNull();
+      expect(badgeOf(handle.stepEls[1])?.textContent).toBe(t('plan.step.parallel', '⫲ 可并行'));
+      expect(badgeOf(handle.stepEls[2])?.textContent).toBe(t('plan.step.parallel', '⫲ 可并行'));
+    } finally {
+      if (oldDocument === undefined) delete (globalThis as any).document;
+      else (globalThis as any).document = oldDocument;
+    }
+  });
+});

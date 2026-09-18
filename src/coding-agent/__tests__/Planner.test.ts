@@ -3,8 +3,9 @@
 // and the logical-trap detection that primes premise verification.
 
 import { describe, it, expect } from 'bun:test';
-import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, isPlainConversational, classifyInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
+import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, isPlainConversational, markParallelPlanSteps, classifyInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
 import type { LLMAdapter, Message } from '../../shared/types';
+import type { Plan } from '../types';
 
 describe('Planner', () => {
   it('classifies straightforward tasks as simple (no plan, yolo mode)', () => {
@@ -622,5 +623,50 @@ describe('classifyInsertion', () => {
   it('returns related true for an empty prompt (no-op fallback)', async () => {
     const cls = await classifyInsertion(mockLlm('{"related":false}'), 'context', '');
     expect(cls.related).toBe(true);
+  });
+});
+
+describe('markParallelPlanSteps (E2.3)', () => {
+  const basePlan: Plan = {
+    reasoning: 'fixture',
+    steps: [
+      { id: '1', action: '理解与分析需求', description: '拆解目标与约束', expectedOutcome: '理解一致' },
+      { id: '2', action: '调研竞品背景', description: '搜集同类产品的资料', expectedOutcome: '调研笔记' },
+      { id: '3', action: '调研技术方案现状', expectedOutcome: '选型依据', description: '搜索主流做法与依赖现状' },
+      { id: '4', action: '搭建项目骨架', description: '建立目录与脚本', expectedOutcome: '可运行骨架' },
+    ],
+  };
+
+  it('marks the independent research steps when researcher is recommended', () => {
+    const marked = markParallelPlanSteps(basePlan, ['researcher']);
+    expect(marked.steps.map(s => s.parallel)).toEqual([undefined, true, true, undefined]);
+    // 入参不被改写——分析结果还要以原样喂给其他流程。
+    expect(basePlan.steps[1].parallel).toBeUndefined();
+  });
+
+  it('merges domains across recommended roles', () => {
+    const marked = markParallelPlanSteps(basePlan, ['researcher', 'project_auditor']);
+    // fixture 没有审计步骤，审计域不命中；researcher 域照常标 2、3。
+    expect(marked.steps.map(s => s.parallel)).toEqual([undefined, true, true, undefined]);
+  });
+
+  it('marks nothing when no recommended role domain matches', () => {
+    const marked = markParallelPlanSteps(basePlan, ['code_editor']);
+    expect(marked.steps.some(s => s.parallel)).toBe(false);
+  });
+
+  it('marks nothing when fewer than two steps qualify', () => {
+    const lone = {
+      reasoning: 'fixture',
+      steps: [
+        { id: '1', action: '调研现状', description: '搜集资料', expectedOutcome: '笔记' },
+        { id: '2', action: '实现功能', description: '写代码', expectedOutcome: '可用' },
+      ],
+    };
+    expect(markParallelPlanSteps(lone, ['researcher']).steps.some(s => s.parallel)).toBe(false);
+  });
+
+  it('returns the plan untouched for an empty role list', () => {
+    expect(markParallelPlanSteps(basePlan, [])).toBe(basePlan);
   });
 });

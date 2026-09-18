@@ -21,7 +21,8 @@ import { ContextEngine, type ContextCompactionResult } from '../harness/ContextE
 import { isGitMutationCommand, Tags } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
-import { formatIntentPrompt, inferSemanticRoute, isPlainConversational, shouldBypassSemanticRoute } from '../coding-agent/Planner';
+import { formatIntentPrompt, inferSemanticRoute, isPlainConversational, markParallelPlanSteps, shouldBypassSemanticRoute } from '../coding-agent/Planner';
+import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
@@ -3295,6 +3296,25 @@ export class ChatController {
           // 诉求生成的起步步骤兜底，执行中由模型按实际情况推进，绝不假装“已经想清楚”，
           // 也绝不套用与上下文无关的“探明工作区现状”之类固定话术。
           let planForReview: Plan = analysis.plan ?? deriveFallbackPlan(userText);
+          // E2.3 — 策略层的 parallelRoles 接进计划卡：这里与 buildContext 用同一
+          // 份输入复算一次 select（纯计算，无副作用），把推荐里可并行的角色域
+          // 对到独立的只读步骤上；批准后的提示词让模型把这些步的派发合并进同一
+          // 轮，reads 并发池真正并行。
+          const planStrategy = adaptiveControlPlane.select({
+            prompt: userText,
+            environment: {
+              now: Date.now(),
+              projectPath: sendWorkspace || undefined,
+              hasWorkspace: Boolean(sendWorkspace),
+              toolCount: effectiveWorkspace ? 1 : 0,
+              verifierAvailable: true,
+              memoryAvailable: true,
+            },
+            semantic: semanticRoute
+              ? { tags: [semanticRoute.intent], complexity: semanticRoute.complexity, roles: semanticRoute.subagents }
+              : undefined,
+          });
+          planForReview = markParallelPlanSteps(planForReview, planStrategy.parallelRoles);
           const showPlanCard = (plan: Plan, refining = false): void => {
             if (!planProgress) {
               // 新计划：本会话内计划编号 +1，并把触发它的用户输入带给卡头，

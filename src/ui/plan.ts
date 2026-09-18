@@ -89,9 +89,15 @@ export function formatPlanForPrompt(plan: Plan, projectBuild = false, approved =
         .map((sub, j) => `\n   (${j + 1}) ${sub.action}: ${sub.description}`)
         .join('');
       const todoRule = s.todosRequired === false ? ' [atomic step — no Todo list supplied]' : ' [show a Todo list only when it helps clarify the work]';
-      return `${i + 1}. ${s.action}: ${s.description}${todoRule}${substeps}`;
+      // E2.3 — 可并行步在提示词里带同样的标记，执行端据此组批。
+      const parallelMark = s.parallel ? ' ⫲' : '';
+      return `${i + 1}. ${s.action}: ${s.description}${parallelMark}${todoRule}${substeps}`;
     })
     .join('\n');
+  const hasParallel = plan.steps.some(s => s.parallel);
+  const parallelRule = hasParallel
+    ? '\nSteps marked ⫲ are mutually independent read-only work: dispatch their delegations (subagent calls / research lookups) in the SAME response — multiple tool calls in one turn — instead of waiting for each to finish; the runtime executes read-only calls concurrently. Keep emitting the stage markers in numeric order even when several ⫲ steps complete in one response.'
+    : '';
   // approved=true means the user has already approved the execution direction,
   // so the first response should begin useful work rather than wait for a second
   // approval. approved=false keeps the planning pause used by auto-detected plans.
@@ -105,7 +111,7 @@ export function formatPlanForPrompt(plan: Plan, projectBuild = false, approved =
     : 'On the first response after this plan is approved, introduce the relevant plan context without executing tools; end by saying what you recommend starting with.';
   // Only the format constraints that the protocol does not cover stay here;
   // the stage-marker mechanics are stated once in PLAN_STAGE_PROTOCOL above.
-  return `\n\n## 整体安排\n${steps}\n${execution}\n\n${PLAN_STAGE_PROTOCOL}\n\nKeep the plan list and the active Todo list as two separate plain-text lists; do not use a card, tree menu, or nested plan structure. Before the next plan starts, show the updated plan context. ${firstTurn} Finish by summarizing what changed.`;
+  return `\n\n## 整体安排\n${steps}\n${execution}${parallelRule}\n\n${PLAN_STAGE_PROTOCOL}\n\nKeep the plan list and the active Todo list as two separate plain-text lists; do not use a card, tree menu, or nested plan structure. Before the next plan starts, show the updated plan context. ${firstTurn} Finish by summarizing what changed.`;
 }
 
 /** Build the assistant-side history entry for the first planning pause. */
@@ -296,6 +302,15 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
     action.className = 'plan-progress-step-action';
     action.textContent = s.action;
     body.appendChild(action);
+    // E2.3 — 可并行标记：这几步相互独立，批准后模型会把它们的派发合并进
+    // 同一轮（运行端 reads 并发池真正并行）。卡片上一眼看出哪些步是并排跑的。
+    if (s.parallel) {
+      const parallelBadge = document.createElement('span');
+      parallelBadge.className = 'plan-progress-step-parallel';
+      parallelBadge.title = t('plan.step.parallelTip', '这一步和其他带同样标记的步骤相互独立，会并行推进');
+      parallelBadge.textContent = t('plan.step.parallel', '⫲ 可并行');
+      body.appendChild(parallelBadge);
+    }
     if (s.description) {
       const desc = document.createElement('span');
       desc.className = 'plan-progress-step-desc';
