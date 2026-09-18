@@ -119,6 +119,27 @@ export interface AgentRunObservation {
 
 export type PromptObservation = PromptAssemblyObservation | AgentRunObservation;
 
+/**
+ * E4.2 — parse a JSONL dump back into records. The GUI dashboard (Rust tail
+ * read of app.jsonl) and the CLI file store both read the same file format, so
+ * "what counts as a readable line" lives here instead of being re-implemented
+ * on each side. Malformed or truncated lines are skipped: one broken line must
+ * never hide the later observations.
+ */
+export function parsePromptObservations(jsonl: string): PromptObservation[] {
+  const records: PromptObservation[] = [];
+  for (const line of jsonl.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as PromptObservation;
+      if (parsed && (parsed.type === 'prompt_assembly' || parsed.type === 'agent_run')) records.push(parsed);
+    } catch {
+      // Ignore the bad line, keep reading.
+    }
+  }
+  return records;
+}
+
 export interface PromptAssemblyObservationInput {
   traceId?: string;
   sessionId?: string;

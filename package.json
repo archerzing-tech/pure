@@ -23,6 +23,7 @@
     "eval:sanity": "bun run scripts/run-evals.ts --sanity",
     "eval:notes": "bun run scripts/run-evals.ts --notes",
     "e2e:apikey": "bun run scripts/e2e-settings-apikey.ts",
+    "e2e:evolution": "bun run scripts/e2e-evolution-dashboard.ts",
     "typecheck": "bun run --no-run tsc --noEmit",
     "lint:conventions": "bun run scripts/check-conventions.ts",
     "build": "bun run typecheck && npx vite build && bun run cli:build",
