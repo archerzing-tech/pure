@@ -55,6 +55,10 @@ describe('L1 behavior contracts', () => {
     // end (user feedback: npm blocked → declared "cannot install" and gave up
     // while the official docs offered several install methods).
     expect(WORKFLOW_PROMPT).toContain('ROUTE problem, not a dead end');
+    // P2 — the model must consult session memory for procedures and error
+    // lessons BEFORE starting work (self-evolution: recorded experience only
+    // helps if the workflow contract tells the model to look at it up front).
+    expect(WORKFLOW_PROMPT).toContain('check the <session_memory> block for a matching procedure');
     expect(COMPLETION_PROMPT).toContain('Completion report');
     expect(COMPLETION_PROMPT).toContain('依据');
     expect(COMPLETION_PROMPT).toContain('改动');
