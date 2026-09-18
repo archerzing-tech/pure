@@ -86,12 +86,14 @@ async function collect(gen: AsyncGenerator<EngineEvent, void, void>): Promise<En
 class FakeMemoryStore implements IMemoryStore {
   entries: MemoryEntry[] = [];
   decayCalls = 0;
+  searchCalls = 0;
   async add(entry: Omit<MemoryEntry, 'id'>): Promise<string> {
     const id = `mem_${this.entries.length}`;
     this.entries.push({ ...entry, id, decayScore: 1 });
     return id;
   }
   async search(query: string, opts?: { type?: MemoryEntry['type']; k?: number; projectPath?: string }): Promise<MemoryEntry[]> {
+    this.searchCalls++;
     const tokens = query.toLowerCase().split(/\s+/).filter(t => t.length >= 2);
     return this.entries
       .filter(e => (opts?.projectPath === undefined || e.projectPath === opts.projectPath))
@@ -307,6 +309,105 @@ describe('Harness cross-session memory (v0.10)', () => {
     expect(llm.received[0][0].content).toContain('<adaptive_strategy>');
     expect(llm.received[0][0].content).not.toContain('User prefers');
     expect(llm.received[0][0].content).not.toContain('Known error patterns:');
+  });
+});
+
+// ── E0.2 §2.1 — system-prompt cache freeze ──
+// <session_memory> (and the adaptive directive) are composed once at run()
+// and reused verbatim for every continuation: a re-searched memory block
+// rewrites the system prefix mid-session and invalidates provider-side
+// prompt-cache breakpoints that assume an identical system prompt.
+
+describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
+  it('reuses the run()-composed system prompt on continueTurn instead of re-searching memory', async () => {
+    const memStore = new FakeMemoryStore();
+    await memStore.add({
+      type: 'user_preference',
+      content: 'User prefers the TypeScript language',
+      timestamp: Date.now(),
+      sessionId: 'old-session',
+      projectPath: '/ws',
+    });
+    const llm = recordingLLM('first answer');
+    const harness = new Harness({
+      sessionId: 'sess-freeze',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('BASE SYSTEM', 'write the module in typescript'));
+    expect(memStore.searchCalls).toBe(1);
+    const coldSystem = llm.received[0][0].content;
+
+    // A session-end write lands a NEW memory the follow-up would match.
+    // Pre-freeze, continueTurn re-searched and rewrote the system prompt —
+    // exactly what invalidates the provider cache breakpoint.
+    await memStore.add({
+      type: 'error_pattern',
+      content: 'typescript build fails without a tsconfig module setting',
+      timestamp: Date.now(),
+      sessionId: 'sess-freeze',
+      projectPath: '/ws',
+    });
+
+    const messages: Message[] = [
+      { role: 'system', content: coldSystem },
+      { role: 'user', content: 'write the module in typescript' },
+      { role: 'assistant', content: 'first answer' },
+    ];
+    await collect(harness.continueTurn('BASE SYSTEM', messages, 'the typescript build now fails, fix it'));
+
+    expect(memStore.searchCalls).toBe(1); // frozen — continuation does not re-search
+    expect(llm.received[1][0].content).toBe(coldSystem); // byte-identical system prompt
+  });
+
+  it('composes once on a restored session and freezes that prompt for later turns', async () => {
+    const memStore = new FakeMemoryStore();
+    await memStore.add({
+      type: 'user_preference',
+      content: 'User prefers the TypeScript language',
+      timestamp: Date.now(),
+      sessionId: 'old-session',
+      projectPath: '/ws',
+    });
+    const llm = recordingLLM('restored answer');
+    const harness = new Harness({
+      sessionId: 'sess-freeze-restored',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    // Session restored from a checkpoint: the first continueTurn in this
+    // process has no run()-composed prompt, so it composes (and freezes) one.
+    const messages: Message[] = [
+      { role: 'system', content: 'BASE SYSTEM' },
+      { role: 'user', content: 'write the module in typescript' },
+    ];
+    await collect(harness.continueTurn('BASE SYSTEM', messages, 'the typescript build now fails, fix it'));
+    expect(memStore.searchCalls).toBe(1);
+
+    await memStore.add({
+      type: 'error_pattern',
+      content: 'typescript build fails without a tsconfig module setting',
+      timestamp: Date.now(),
+      sessionId: 'sess-freeze-restored',
+      projectPath: '/ws',
+    });
+    const followUp: Message[] = [
+      { role: 'system', content: llm.received[0][0].content },
+      { role: 'user', content: 'write the module in typescript' },
+      { role: 'assistant', content: 'restored answer' },
+    ];
+    await collect(harness.continueTurn('BASE SYSTEM', followUp, 'one more typescript question'));
+
+    expect(memStore.searchCalls).toBe(1); // still frozen
+    expect(llm.received[1][0].content).toBe(llm.received[0][0].content);
   });
 
   it('throttles memory decay to once per interval even across turns (v0.13)', async () => {

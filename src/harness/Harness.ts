@@ -125,6 +125,13 @@ export class Harness {
   private readonly observability: PromptObservability;
   private readonly adaptiveControl: AdaptiveControlPlane;
   private currentAdaptiveStrategy?: AdaptiveStrategy;
+  // E0.2 §2.1 — system prompt frozen for the whole session: composed once at
+  // run() (or first continueTurn on a restored session), reused verbatim by
+  // every later continueTurn so provider-side prompt-cache breakpoints on the
+  // system prefix are never invalidated by a re-searched <session_memory>
+  // block or a shifted adaptive directive. Mid-session lessons still reach
+  // the model through the failure-policy hint channel (engine user messages).
+  private sessionSystemPrompt?: string;
 
   constructor(config: HarnessConfig) {
     this.engine = new AgentLoopEngine();
@@ -221,6 +228,9 @@ export class Harness {
     // relevant preferences / error patterns into the system prompt's
     // <session_memory> section (composeMemoryPrompt → promptAssembler).
     const effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, userPrompt, semantic);
+    // §2.1 cache freeze: this composed prompt is the session's system prompt
+    // from now on — continueTurn reuses it instead of recomposing.
+    this.sessionSystemPrompt = effectiveSystemPrompt;
 
     // ── Resume (P1-7): feed the checkpoint as initial context ──
     // Previously the loaded messages were only used for checkpoint saving —
@@ -466,9 +476,16 @@ export class Harness {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.verificationPassed = false;
     this.scheduleMemoryDecay();
-    // Memory refresh on continuation: compose the current prompt with memories
-    // relevant to the new follow-up (same layer as run()).
-    const effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, newUserPrompt, semantic);
+    // §2.1 cache freeze — do NOT recompose here. Re-searching memory against
+    // the follow-up prompt (and re-running the adaptive strategy) rewrites the
+    // system prompt between turns, which invalidates provider-side cache
+    // breakpoints that assume an identical system prefix. Reuse the prompt
+    // frozen at run(); compose only when this Harness never ran in this
+    // process (session restored from a checkpoint) and freeze that instead.
+    if (this.sessionSystemPrompt === undefined) {
+      this.sessionSystemPrompt = await this.composeMemoryPrompt(systemPrompt, newUserPrompt, semantic);
+    }
+    const effectiveSystemPrompt = this.sessionSystemPrompt;
 
     let msgs = messages[0]?.role === 'system'
       ? [{ role: 'system' as const, content: effectiveSystemPrompt }, ...messages.slice(1)]

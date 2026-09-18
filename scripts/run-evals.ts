@@ -1,9 +1,12 @@
-import { CODING_TASK_FIXTURES, evaluateCodingTask, evaluateCodingTaskSuite, writeEvaluationReport } from '../src/evaluation/codingTaskBaseline';
+import { CODING_TASK_FIXTURES, evaluateCodingTask, evaluateCodingTaskSuite, writeEvaluationReport, type CodingTaskSuiteReport } from '../src/evaluation/codingTaskBaseline';
 import { GOLDEN_SOLUTIONS } from '../src/evaluation/codingTaskGoldenSolutions';
 import { runCodingAgentEvaluationTask } from '../src/evaluation/codingAgentExecutor';
+import { FSMemoryStore } from '../src/adapter/memory/FSMemoryStore';
 import { PromptObservability } from '../src/shared/promptObservability';
 import { FilePromptObservationStore } from '../src/shared/FilePromptObservationStore';
 import { defaultModelFor } from '../src/shared/providers';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 
 const argv = process.argv.slice(2);
 const reportFlag = argv.indexOf('--report');
@@ -12,6 +15,8 @@ const keepWorkspaces = argv.includes('--keep-workspaces');
 const strict = argv.includes('--strict');
 const sanity = argv.includes('--sanity');
 const notes = argv.includes('--notes');
+const withMemory = argv.includes('--with-memory');
+const compare = argv.includes('--compare');
 const agentFlag = argv.indexOf('--agent');
 const traceFlag = argv.indexOf('--trace');
 const requestedAgent = agentFlag >= 0
@@ -25,7 +30,7 @@ const tracePath = traceFlag >= 0
 const traceStore = tracePath ? new FilePromptObservationStore(tracePath) : undefined;
 
 if ((reportFlag >= 0 && (!reportPath || reportPath.startsWith('--'))) || (traceFlag >= 0 && (!tracePath || tracePath.startsWith('--')))) {
-  console.error('Usage: bun run eval:baseline -- [--agent provider] [--report path] [--trace path] [--sanity] [--notes] [--keep-workspaces] [--strict]');
+  console.error('Usage: bun run eval:baseline -- [--agent provider] [--report path] [--trace path] [--sanity] [--notes] [--with-memory] [--compare] [--keep-workspaces] [--strict]');
   process.exit(2);
 }
 
@@ -94,6 +99,27 @@ if (sanity || notes) {
   process.exit(0);
 }
 
+// E0.2 — cross-session memory for eval runs. `--with-memory` runs the suite
+// once with an IMemoryStore wired in; `--compare` (a superset) runs every
+// fixture twice against the SAME per-fixture store: pass A starts cold and
+// seeds it via the normal session-end memory writes, pass B retrieves them.
+// Stores key on the fixture id (see evalProjectKey) — not the workspace path,
+// which is a fresh mkdtemp dir every pass and would flatten A/B to zero.
+const memoryStores = withMemory || compare ? new Map<string, FSMemoryStore>() : undefined;
+let memoryRoot: string | undefined;
+const storeFor = async (fixtureId: string): Promise<FSMemoryStore> => {
+  const existing = memoryStores!.get(fixtureId);
+  if (existing) return existing;
+  memoryRoot ??= await mkdtemp(join(resolve('/tmp'), 'pure-eval-memories-'));
+  const store = new FSMemoryStore(join(memoryRoot, fixtureId));
+  memoryStores!.set(fixtureId, store);
+  return store;
+};
+if ((withMemory || compare) && !requestedAgent) {
+  console.error('--with-memory/--compare need an agent run to remember with (add --agent <provider>).');
+  process.exit(2);
+}
+
 let agent;
 let model = process.env.PURE_EVAL_MODEL;
 const numericEnv = (name: string): number | undefined => {
@@ -118,7 +144,7 @@ if (requestedAgent) {
     console.error('Qwen evaluation requires PURE_EVAL_QWEN_WORKSPACE_ID or DASHSCOPE_WORKSPACE_ID.');
     process.exit(2);
   }
-  agent = ({ task, workspace }: { task: import('../src/evaluation/codingTaskBaseline').CodingTaskFixture; workspace: string }) =>
+  agent = async ({ task, workspace }: { task: import('../src/evaluation/codingTaskBaseline').CodingTaskFixture; workspace: string }) =>
     runCodingAgentEvaluationTask(task, workspace, {
       provider: requestedAgent,
       model: model!,
@@ -126,29 +152,119 @@ if (requestedAgent) {
       qwenWorkspaceId: process.env.PURE_EVAL_QWEN_WORKSPACE_ID ?? process.env.DASHSCOPE_WORKSPACE_ID,
       baseURL: process.env.PURE_EVAL_BASE_URL,
       observability,
+      ...(memoryStores ? { memory: await storeFor(task.id) } : {}),
       ...(hasEvaluationPromptBudget ? { promptBudget: { provider: requestedAgent, model: model!, ...evaluationPromptBudget } } : {}),
     });
 }
 
-const report = await evaluateCodingTaskSuite(undefined, {
-  keepWorkspace: keepWorkspaces,
-  agent,
-  metadata: {
-    provider: requestedAgent,
-    model,
-    promptVersion: process.env.PURE_EVAL_PROMPT_VERSION ?? (requestedAgent ? 'dynamic' : undefined),
-    gitRevision: process.env.GIT_COMMIT ?? process.env.GITHUB_SHA,
-    seed: process.env.PURE_EVAL_SEED,
-  },
-});
-if (reportPath) {
-  await writeEvaluationReport(reportPath, report);
-  process.stdout.write(`Wrote ${reportPath}\n`);
-}
-process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+const suiteMetadata = {
+  provider: requestedAgent,
+  model,
+  promptVersion: process.env.PURE_EVAL_PROMPT_VERSION ?? (requestedAgent ? 'dynamic' : undefined),
+  gitRevision: process.env.GIT_COMMIT ?? process.env.GITHUB_SHA,
+  seed: process.env.PURE_EVAL_SEED,
+};
 
-// The default fixture run is a control baseline and intentionally scores 0 on
-// every fixture (see the fixture-sanity test in codingTaskBaseline.test.ts).
-// Strict mode is for real agent runs/report consumers, where any failed task
-// should be a non-zero process result.
-if (strict && report.tasks.some((task) => task.status !== 'passed')) process.exitCode = 1;
+// ── E0.2 compare table ──
+
+interface MemoryCompareRow {
+  taskId: string;
+  cold: { status: string; toolCalls: number; durationMs: number; promptTokens?: number; cacheHitTokens?: number };
+  warm: { status: string; toolCalls: number; durationMs: number; promptTokens?: number; cacheHitTokens?: number };
+  delta: { toolCalls: number; durationMs: number; promptTokens: number; cacheHitTokens: number };
+  changed: boolean;
+}
+
+function compareSide(result: CodingTaskSuiteReport['tasks'][number]) {
+  return {
+    status: result.status,
+    toolCalls: result.agent?.toolCalls ?? 0,
+    durationMs: result.durationMs,
+    promptTokens: result.agent?.usage?.promptTokens,
+    cacheHitTokens: result.agent?.usage?.cacheHitTokens,
+  };
+}
+
+function memoryCompareRows(cold: CodingTaskSuiteReport, warm: CodingTaskSuiteReport): MemoryCompareRow[] {
+  return cold.tasks.map((coldTask) => {
+    const warmTask = warm.tasks.find((task) => task.taskId === coldTask.taskId);
+    const c = compareSide(coldTask);
+    const w = warmTask ? compareSide(warmTask) : { status: 'missing', toolCalls: 0, durationMs: 0 };
+    const num = (value: number | undefined) => value ?? 0;
+    return {
+      taskId: coldTask.taskId,
+      cold: c,
+      warm: w,
+      delta: {
+        toolCalls: w.toolCalls - c.toolCalls,
+        durationMs: w.durationMs - c.durationMs,
+        promptTokens: num(w.promptTokens) - num(c.promptTokens),
+        cacheHitTokens: num(w.cacheHitTokens) - num(c.cacheHitTokens),
+      },
+      changed: c.status !== w.status || w.toolCalls !== c.toolCalls || w.promptTokens !== c.promptTokens,
+    };
+  });
+}
+
+function printMemoryComparison(cold: CodingTaskSuiteReport, warm: CodingTaskSuiteReport): void {
+  const rows = memoryCompareRows(cold, warm);
+  process.stdout.write('\nE0.2 memory compare (same fixtures, pass A cold → seeds store, pass B warm → retrieves):\n');
+  process.stdout.write('fixture                        cold              warm              Δtools  Δprompt   ΔcacheHit\n');
+  for (const row of rows) {
+    const pad = (value: string, width: number) => value.padEnd(width);
+    process.stdout.write(
+      `${pad(row.taskId, 30)}${pad(`${row.cold.status}/${row.cold.toolCalls}t`, 17)}${pad(`${row.warm.status}/${row.warm.toolCalls}t`, 17)}${pad(String(row.delta.toolCalls), 7)}${pad(String(row.delta.promptTokens), 9)}${String(row.delta.cacheHitTokens)}\n`,
+    );
+  }
+  const changed = rows.filter((row) => row.changed).length;
+  process.stdout.write(`compare: ${changed}/${rows.length} fixtures show a nonzero A/B delta`);
+  if (changed === 0) {
+    process.stdout.write(' — memory injection produced no measurable difference (expected for --agent mock; suspicious for a real provider)');
+  }
+  process.stdout.write('\n');
+}
+
+try {
+  if (compare) {
+    const suiteOptions = (memoryPhase: string) => ({
+      keepWorkspace: keepWorkspaces,
+      agent,
+      metadata: { ...suiteMetadata, memoryPhase },
+    });
+    const cold = await evaluateCodingTaskSuite(undefined, suiteOptions('cold-seed'));
+    const warm = await evaluateCodingTaskSuite(undefined, suiteOptions('warm-reuse'));
+    printMemoryComparison(cold, warm);
+    if (reportPath) {
+      const compareReport = { mode: 'memory-compare', generatedAt: new Date().toISOString(), cold, warm, fixtures: memoryCompareRows(cold, warm) };
+      await writeFile(reportPath, `${JSON.stringify(compareReport, null, 2)}\n`, 'utf-8');
+      process.stdout.write(`Wrote ${reportPath}\n`);
+    }
+    // Strict gates on the warm pass: it is the memory-enabled run whose
+    // quality --compare exists to inspect.
+    if (strict && warm.tasks.some((task) => task.status !== 'passed')) process.exitCode = 1;
+  } else {
+    const report = await evaluateCodingTaskSuite(undefined, {
+      keepWorkspace: keepWorkspaces,
+      agent,
+      metadata: {
+        ...suiteMetadata,
+        ...(memoryStores ? { memoryPhase: 'single' } : {}),
+      },
+    });
+    if (reportPath) {
+      await writeEvaluationReport(reportPath, report);
+      process.stdout.write(`Wrote ${reportPath}\n`);
+    }
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+
+    // The default fixture run is a control baseline and intentionally scores 0 on
+    // every fixture (see the fixture-sanity test in codingTaskBaseline.test.ts).
+    // Strict mode is for real agent runs/report consumers, where any failed task
+    // should be a non-zero process result.
+    if (strict && report.tasks.some((task) => task.status !== 'passed')) process.exitCode = 1;
+  }
+} finally {
+  if (memoryRoot && !keepWorkspaces) {
+    await rm(memoryRoot, { recursive: true, force: true }).catch(() => {});
+  }
+}
