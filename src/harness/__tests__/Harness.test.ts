@@ -26,6 +26,7 @@ import type {
 } from '../../shared/types';
 import { GLOBAL_MEMORY_SCOPE } from '../../shared/types';
 import { approveToolCorrection, scanToolCorrections } from '../../adapter/memory/toolCorrections';
+import { PromptObservability, type AgentRunObservation } from '../../shared/promptObservability';
 
 const STD_BUDGET: BudgetConfig = {
   maxTurns: 30,
@@ -1584,6 +1585,67 @@ describe('Harness lesson reflector (E1.1)', () => {
       expect(sys).toContain(preference);
       expect(sys).toContain('User preferences:');
     });
+  });
+});
+
+// ── E4.1 — strategy effect recording ──
+
+describe('Harness strategy effect records (E4.1)', () => {
+  it('records the selected strategy on the finished run observation', async () => {
+    const memStore = new FakeMemoryStore();
+    const observability = new PromptObservability();
+    const harness = new Harness({
+      sessionId: 'sess-strategy',
+      llm: recordingLLM('all done'),
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      observability,
+    });
+
+    await collect(harness.run('SYS', 'fix the flaky deploy scripts'));
+
+    const runs = observability.records().filter(r => r.type === 'agent_run') as AgentRunObservation[];
+    expect(runs).toHaveLength(1);
+    const run = runs[0];
+    // composeMemoryPrompt selects the strategy BEFORE startRun, so the record
+    // carries THIS turn's strategy — not a stale one and not undefined.
+    expect(run.strategy).toBeDefined();
+    expect(['focused', 'standard', 'thorough']).toContain(run.strategy!.verification);
+    expect(['targeted', 'broad']).toContain(run.strategy!.exploration);
+    expect(['none', 'targeted', 'parallel']).toContain(run.strategy!.delegation);
+    expect(Array.isArray(run.strategy!.intentTags)).toBe(true);
+    expect(typeof run.strategy!.confidence).toBe('number');
+    // The whole point of E4.1: strategy and outcome on the SAME record.
+    expect(run.outcome?.isComplete).toBe(true);
+    expect(run.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('keeps attributing the session-frozen strategy to continueTurn records', async () => {
+    const memStore = new FakeMemoryStore();
+    const observability = new PromptObservability();
+    const harness = new Harness({
+      sessionId: 'sess-strategy-continue',
+      llm: recordingLLM('same answer'),
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      observability,
+    });
+
+    const first = await collect(harness.run('SYS', 'first task'));
+    const completed = first.find(e => e.type === 'Completed');
+    expect(completed?.payload.messages).toBeDefined();
+    await collect(harness.continueTurn('SYS', completed!.payload.messages!, 'second task'));
+
+    const runs = observability.records().filter(r => r.type === 'agent_run') as AgentRunObservation[];
+    expect(runs).toHaveLength(2);
+    // §2.1 cache freeze: continueTurn reuses the session prompt, so the frozen
+    // strategy it embeds IS what the model saw — attribution is faithful.
+    expect(runs[1].strategy).toBeDefined();
+    expect(runs[1].outcome?.isComplete).toBe(true);
   });
 });
 

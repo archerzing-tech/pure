@@ -6,7 +6,7 @@ import { AgentLoopEngine } from '../engine/AgentLoopEngine';
 import { StateManager } from './StateManager';
 import { ContextEngine, type ContextCompactionResult } from './ContextEngine';
 import { PromptAssembler, promptAssembler, resolvePromptBudget, estimatePromptTokens, estimateToolDefinitionTokens, type PromptBudgetConfig } from '../shared/PromptAssembler';
-import { promptObservability, promptVersion, type PromptObservability } from '../shared/promptObservability';
+import { promptObservability, promptVersion, observeStrategy, type PromptObservability } from '../shared/promptObservability';
 import { AdaptiveControlPlane, adaptiveControlPlane, type AdaptiveStrategy } from '../shared/adaptiveControl';
 import type {
   BudgetConfig,
@@ -307,6 +307,10 @@ export class Harness {
       sessionId: this.config.sessionId,
       provider: this.config.promptBudget?.provider,
       model: this.config.promptBudget?.model,
+      // E4.1 — the strategy selected in composeMemoryPrompt governs THIS run's
+      // prompt; recording it on the run record makes strategy → outcome a
+      // zero-join slice (same record holds toolCalls/verification/outcome).
+      strategy: observeStrategy(this.currentAdaptiveStrategy),
     });
     let traceFinished = false;
     const finishTrace = () => {
@@ -548,6 +552,10 @@ export class Harness {
       sessionId: this.config.sessionId,
       provider: this.config.promptBudget?.provider,
       model: this.config.promptBudget?.model,
+      // E4.1 — continueTurn reuses the strategy frozen with the session prompt
+      // (§2.1 cache freeze); attributing later turns to it is faithful, since
+      // that directive is literally what the model saw.
+      strategy: observeStrategy(this.currentAdaptiveStrategy),
     });
     let traceFinished = false;
     const finishTrace = () => {
