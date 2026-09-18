@@ -425,8 +425,12 @@ export class Harness {
       // User on_turn_complete hooks (hooks.json) fire after the run settles,
       // awaited so a notify-style hook finishes before the CLI exits. v1: the
       // hook's real-world side effect is the value; output is not fed back
-      // into context.
-      if (this.config.userHooks?.on_turn_complete?.length && this.config.userHookRunner) {
+      // into context. Gated on Completed: without the check every streamed
+      // TokenDelta would spawn the hook processes once per delta.
+      if (
+        event.type === 'Completed' &&
+        this.config.userHooks?.on_turn_complete?.length && this.config.userHookRunner
+      ) {
         await runUserHooksForEvent(this.config.userHooks, 'on_turn_complete', { event: 'on_turn_complete' }, this.config.userHookRunner);
       }
       if (this.stateMgr && event.type === 'Interrupted') {
@@ -609,8 +613,12 @@ export class Harness {
           }
         }
       }
-      // User on_turn_complete hooks — same contract as run().
-      if (this.config.userHooks?.on_turn_complete?.length && this.config.userHookRunner) {
+      // User on_turn_complete hooks — same contract as run(): Completed only,
+      // never per streamed delta.
+      if (
+        event.type === 'Completed' &&
+        this.config.userHooks?.on_turn_complete?.length && this.config.userHookRunner
+      ) {
         await runUserHooksForEvent(this.config.userHooks, 'on_turn_complete', { event: 'on_turn_complete' }, this.config.userHookRunner);
       }
       if (this.stateMgr && event.type === 'Interrupted') {
