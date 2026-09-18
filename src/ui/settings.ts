@@ -9,6 +9,7 @@ import { copyTextToClipboard } from '../shared/clipboard';
 import { escapeHtml } from '../shared/html';
 import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } from '../shared/i18n';
 import { approveToolCorrection, scanToolCorrections } from '../adapter/memory/toolCorrections';
+import { confirmedDraftEntry, isDraftEntry } from '../adapter/memory/correctionDrafts';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { formatBytes } from '../shared/format';
 import { memoryStore } from './memoryStore';
@@ -908,6 +909,35 @@ export class SettingsPanel {
       } catch (err) {
         console.error('[pure] memory delete failed:', err);
         this.toast(t('memory.deleteFailed'));
+      }
+    });
+
+    // ── Memory: draft confirm（E3.1 纠正草稿转正 —— 点头才获得注入资格）──
+    // 同一容器委托。确认 = removeById + 重写一条（IMemoryStore 无 update）：
+    // confidence 抬到 'high'，注入端放行、健康分不再减半；dedupeKey 原样保留，
+    // 反思器之后再写同一句纠正会被去重，不再冒草稿卡。确认是安全方向的操
+    // 作，不再叠一层确认弹窗。
+    document.getElementById('memory-list')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-mem-confirm]');
+      if (!btn) return;
+      event.stopPropagation();
+      const id = btn.dataset.memConfirm || '';
+      if (!id) return;
+      let entry: MemoryEntry | undefined;
+      try {
+        entry = memoryStore.list().find(e => e.id === id);
+      } catch (err) {
+        console.error('[pure] memory confirm lookup failed:', err);
+      }
+      if (!entry) return;
+      try {
+        await memoryStore.removeById(id);
+        await memoryStore.add(confirmedDraftEntry(entry));
+        this.toast(t('memory.confirmed'));
+        this.renderMemoryDashboard();
+      } catch (err) {
+        console.error('[pure] memory confirm failed:', err);
+        this.toast(t('memory.confirmFailed'));
       }
     });
 
@@ -2428,12 +2458,22 @@ export class SettingsPanel {
         const platformBadge = e.type === 'tool_preference' && e.platform
           ? `<span class="memory-badge memory-badge-platform" title="${escapeHtml(t('memory.platformTitle').replace('{p}', e.platform))}">${escapeHtml(e.platform)}</span>`
           : '';
+        // E3.1 — 反思器纠正草稿：确认前没有注入资格，卡片上标"草稿"并给
+        // 确认按钮，让用户一眼分得清"已生效的规矩"和"待拍板的建议"。
+        const draftBadge = isDraftEntry(e)
+          ? `<span class="memory-badge memory-badge-draft" title="${escapeHtml(t('memory.draftTitle'))}">${t('memory.draft')}</span>`
+          : '';
+        const confirmBtn = isDraftEntry(e)
+          ? `<button type="button" class="memory-confirm-btn" data-mem-confirm="${escapeHtml(e.id)}" title="${escapeHtml(t('memory.confirmDraftTitle'))}" aria-label="${escapeHtml(t('memory.confirmDraftTitle'))}">${t('memory.confirmDraft')}</button>`
+          : '';
         return `<div class="memory-card">
           <div class="memory-card-header">
             <span class="memory-badge memory-badge-type${typeClass}">${typeLabel}</span>
             ${platformBadge}
+            ${draftBadge}
             <span class="memory-badge memory-badge-life memory-life-${lifecycle}">${t(`memory.lifecycle.${lifecycle}`, lifecycle)}</span>
             ${superseded}
+            ${confirmBtn}
             <button type="button" class="memory-delete-btn" data-mem-del="${escapeHtml(e.id)}" title="${escapeHtml(t('memory.deleteTitle'))}" aria-label="${escapeHtml(t('memory.deleteTitle'))}">✕</button>
           </div>
           <div class="memory-content" title="${escapeHtml(e.content)}">${escapeHtml(this.truncateForMemory(e.content, 160))}</div>

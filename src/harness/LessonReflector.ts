@@ -65,6 +65,13 @@ export function buildTurnEvidence(messages: Message[]): TurnEvidence[] {
   return evidence;
 }
 
+/** E3.1 便车：用户纠正过的规矩/偏好 —— 只做草稿，确认前没有注入资格。 */
+export interface ReflectedCorrection {
+  kind: 'project_convention' | 'user_preference';
+  /** 以用户原话概括的规矩/偏好（≤200 字符）。 */
+  statement: string;
+}
+
 export interface ReflectedLesson {
   symptom: string;
   rootCause: string;
@@ -76,6 +83,8 @@ export interface ReflectedLesson {
   confidence: 'high' | 'low';
   /** E2.1 便车：成功多步任务上额外提炼的步骤骨架（≤600 字符）。 */
   procedure?: string;
+  /** E3.1 便车：本轮里用户明确纠正过的做法/规矩（草稿，待用户确认）。 */
+  correction?: ReflectedCorrection;
 }
 
 const REFLECT_SYSTEM_PROMPT = `You are a meticulous engineering retrospective analyst. You receive the transcript facts of one completed agent turn (the user request, the tool calls it made, any failures, and the final outcome). Produce ONE reusable lesson for future sessions on this project.
@@ -87,12 +96,14 @@ Respond with STRICT JSON only — no markdown fences, no prose outside the JSON:
   "prevention": "what a future session should do differently (or keep doing)",
   "recovery": "how the turn recovered, or 'not needed'",
   "evidence": ["id1", "id2"],
-  "procedure": "optional: for a SUCCESSFUL multi-step task, a compact step skeleton (intent -> steps -> how it was verified), under 600 chars; omit for trivial or failed turns"
+  "procedure": "optional: for a SUCCESSFUL multi-step task, a compact step skeleton (intent -> steps -> how it was verified), under 600 chars; omit for trivial or failed turns",
+  "correction": "optional: if the user explicitly corrected how the agent should work, {\"kind\": \"project_convention\" or \"user_preference\", \"statement\": \"the rule as the user stated it, under 200 chars\"}; omit otherwise"
 }
 
 Hard rules:
 - "evidence" may ONLY contain ids from the provided tool-call catalog. Never invent ids.
 - If you cannot ground the root cause in catalog evidence, keep your best guess in rootCause but the system will downgrade confidence automatically.
+- Output "correction" ONLY for explicit user corrections of output style, working practice, or project rules (e.g. "no comments in this repo", "always run tests before commit"). Never infer it from tone alone.
 - Keep every string under 300 characters. Write in English.`;
 
 export interface ReflectTurnInput {
@@ -163,6 +174,25 @@ function asString(value: unknown, max: number): string {
   return typeof value === 'string' ? value.slice(0, max) : '';
 }
 
+const CORRECTION_KINDS = new Set(['project_convention', 'user_preference']);
+
+/** 草稿条目的 dedupeKey：同一句纠正（内容哈希）跨会话、跨轮次只落一条。 */
+export function correctionDedupeKey(correction: ReflectedCorrection): string {
+  return `correction:${correction.kind}:${createHash('sha256').update(correction.statement).digest('hex').slice(0, EVIDENCE_ID_LENGTH)}`;
+}
+
+/** 纠正草稿的校验：kind 白名单之外、statement 短于 8 个有效字符的一律丢弃 ——
+ *  宁可漏收，不往仪表盘塞噪音草稿。 */
+function parseCorrection(value: unknown): ReflectedCorrection | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const raw = value as Record<string, unknown>;
+  const kind = typeof raw.kind === 'string' ? raw.kind : '';
+  if (!CORRECTION_KINDS.has(kind)) return undefined;
+  const statement = asString(raw.statement, 240).trim().slice(0, 200);
+  if (statement.length < 8) return undefined;
+  return { kind: kind as ReflectedCorrection['kind'], statement };
+}
+
 /** Validate + sanitize a model reply against THIS turn's evidence catalog.
  *  Returns undefined when the reply isn't a usable lesson (caller falls back
  *  to the template write). Evidence ids outside the catalog are stripped;
@@ -182,6 +212,7 @@ export function parseReflectedLesson(reply: string, turnEvidence: TurnEvidence[]
   const prevention = asString(parsed.prevention, 300) || 'Keep the same inspection and verification sequence for similar tasks.';
   const recovery = asString(parsed.recovery, 300) || 'not needed';
   const procedure = asString(parsed.procedure, 600);
+  const correction = parseCorrection(parsed.correction);
 
   return {
     symptom,
@@ -191,6 +222,7 @@ export function parseReflectedLesson(reply: string, turnEvidence: TurnEvidence[]
     evidence,
     confidence: evidence.length > 0 ? 'high' : 'low',
     ...(procedure ? { procedure } : {}),
+    ...(correction ? { correction } : {}),
   };
 }
 

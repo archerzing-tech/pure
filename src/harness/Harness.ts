@@ -31,6 +31,7 @@ import {
   REFLECT_DEDUPE_PREFIX,
   REFLECTION_DEFAULTS,
   buildTurnEvidence,
+  correctionDedupeKey,
   countReflectionsToday,
   reflectTurn,
   shouldReflect,
@@ -819,6 +820,11 @@ export class Harness {
     const procedures = memories
       .filter(m => m.type === 'procedure')
       .map(m => m.content);
+    // E3.1 — confirmed project conventions ride the same confidence filter as
+    // everything else: drafts stay out (low), user-confirmed ones inject.
+    const projectConventions = memories
+      .filter(m => m.type === 'project_convention')
+      .map(m => m.content);
     const strategy = this.adaptiveControl.select({
       prompt: userPrompt,
       environment: {
@@ -847,6 +853,7 @@ export class Harness {
         successes,
         errorPatterns,
         procedures,
+        projectConventions,
         toolPreferences,
         project: this.config.memory ? this.projectPath() : undefined,
         adaptiveStrategy: strategy.directive,
@@ -1075,6 +1082,20 @@ export class Harness {
         sessionId: this.config.sessionId,
         projectPath: this.projectPath(),
         dedupeKey: `procedure:${dedupeKey}`,
+      }).catch(() => {});
+    }
+    // E3.1 便车：用户明确纠正过的做法/规矩 → 低置信草稿。确认前没有注入资格
+    // （confidence:'low' 在 composeMemoryPrompt 被过滤），落库只为仪表盘待确认
+    // 卡片；dedupeKey 用内容哈希，同一句纠正跨会话只落一条。
+    if (lesson.correction) {
+      await memory.add({
+        type: lesson.correction.kind,
+        content: lesson.correction.statement.slice(0, 300),
+        timestamp: Date.now(),
+        sessionId: this.config.sessionId,
+        projectPath: this.projectPath(),
+        dedupeKey: correctionDedupeKey(lesson.correction),
+        confidence: 'low',
       }).catch(() => {});
     }
   }
