@@ -644,6 +644,11 @@ async function runOneShot(args: CliArgs) {
   const turn = dim(`| turn ${result.turnCount}`);
   process.stdout.write(`  ${emoji} ${time} ${turn}\n`);
 
+  // E1.1 — a triggered turn launched a fire-and-forget lesson reflection; give
+  // it a bounded window to land before the process exits (no-op when the turn
+  // didn't trigger one).
+  await harness.settleReflections();
+
   // MCP subprocesses keep stdio pipes open — without an explicit disconnect the
   // event loop never drains and the one-shot CLI would hang after finishing.
   mcpClient?.disconnectAll();
@@ -707,6 +712,9 @@ async function runRepl(args: CliArgs) {
     if (!input) continue;
 
     if (input === '/exit' || input === '/quit') {
+      // E1.1 — brief bounded drain so an in-flight lesson reflection from the
+      // last turn still lands; never holds the exit hostage.
+      await harness.settleReflections(5_000);
       process.stdout.write(`  ${dim('👋 Goodbye.')}\n`);
       mcpClient?.disconnectAll();
       break;

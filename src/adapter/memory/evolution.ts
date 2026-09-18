@@ -133,7 +133,10 @@ export function healthScore(entry: MemoryEntry, now = Date.now(), cfg?: Partial<
   // 系统静默失效。下限 1ms 保证公式始终有限，坏配置最多让衰减极快而非崩溃。
   const halfLife = Math.max(1, c.recencyHalfLifeMs);
   const recency = Math.exp(-(Math.max(0, now - lastUsed) / halfLife) * ln2);
-  const credibility = EVOLUTION.CREDIBILITY[entry.type] ?? 0.8;
+  // E1.1：反思器标记 confidence:'low'（根因无证据支撑）的条目在可信度维度
+  // 直接减半 —— 即使将来被显式放行注入，也会更快沉底，不占高分位。
+  const confidenceFactor = entry.confidence === 'low' ? 0.5 : 1;
+  const credibility = (EVOLUTION.CREDIBILITY[entry.type] ?? 0.8) * confidenceFactor;
   const usage = Math.min(1, (entry.hitCount ?? 0) / c.hitsForFullUsage);
   const superseded = entry.supersededBy ? c.supersededPenalty : 1;
   return recency * (0.55 * credibility + 0.45 * (0.5 + 0.5 * usage)) * superseded;

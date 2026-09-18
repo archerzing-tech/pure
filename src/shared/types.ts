@@ -353,6 +353,9 @@ export interface MemoryLesson {
   verification: string;
   avoidNextTime: string;
   tools?: string[];
+  /** E1.1 反思器：lesson 引用的本轮工具调用哈希（证据目录内的 id）。
+   *  模板 lesson 不写；反思 lesson 拿不出有效证据时 confidence 强制 low。 */
+  evidence?: string[];
 }
 
 // ── v1.5 智能进化记忆（Adapter Layer 设计文档 §12.8）──
@@ -386,6 +389,9 @@ export interface MemoryEntry {
   supersededBy?: string;
   lesson?: MemoryLesson;
   dedupeKey?: string;
+  /** E1.1 防幻觉纪律：反思器产出的可信度。'low' = 根因没有本轮证据支撑，
+   *  注入端（Harness.composeMemoryPrompt）默认跳过，evolution 健康分减半。 */
+  confidence?: 'high' | 'low';
 }
 
 export interface MemorySearchOptions {

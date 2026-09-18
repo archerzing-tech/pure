@@ -3,6 +3,7 @@
 // Includes SubagentOrchestrator + MCPClient integration.
 
 import { Harness, type HarnessConfig } from '../harness/Harness';
+import type { ReflectionConfig } from '../harness/LessonReflector';
 import { DefaultSubagentRegistry } from '../harness/SubagentRegistry';
 import { Planner } from './Planner';
 import { PermissionManager } from './PermissionManager';
@@ -18,6 +19,7 @@ import type {
   BudgetConfig,
   EngineContext,
   EngineEvent,
+  EngineLlmPhase,
   FailurePolicy,
   FailureHistory,
   HookRouter,
@@ -76,6 +78,11 @@ export interface CodingAgentConfig {
   /** Optional plan-completion guard (EngineContext.continueGuard) — recovers
    * turns where the model stopped calling tools while plan work remained. */
   continueGuard?: EngineContext['continueGuard'];
+  /** E0.3/E1.1 — per-phase adapter resolver (THINK / HANDOVER / REFLECT);
+   * phases without a dedicated adapter fall back to the main llm. */
+  llmFor?: (phase: EngineLlmPhase) => LLMAdapter | undefined;
+  /** E1.1 lesson reflector tuning; omitted = defaults. */
+  reflection?: ReflectionConfig;
   subagents?: SubagentDefinition[];
   /** Optional UI sink to surface which subagent is currently working. */
   subagentProgress?: SubagentProgress;
@@ -225,6 +232,8 @@ export class CodingAgent {
       hooks: this.hooks,
       failurePolicy: this.failurePolicy,
       continueGuard: this.continueGuard,
+      llmFor: config.llmFor,
+      reflection: config.reflection,
     });
   }
 
