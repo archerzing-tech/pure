@@ -11,7 +11,7 @@
 //        Mirrors the adapters' error text and the shared PromptAssembler contract
 //        so the policy reinforces it even when the raw error message does not.
 
-import type { FailureRecord, FailureAction, FailurePolicy } from '../shared/types';
+import type { FailureRecord, FailureAction, FailurePolicy, FailureHistory } from '../shared/types';
 import { classifyFailure, FAILURE_CLASS_HINTS } from '../shared/netGuard';
 
 // Trap-escape guidance appended to retry/reflect hints once the first attempt
@@ -66,6 +66,10 @@ function repeatKey(f: FailureRecord): string {
 }
 
 export class DefaultFailurePolicy implements FailurePolicy {
+  /** E1.2 — optional cross-session failure experience (a synchronous snapshot,
+   *  preloaded once per session). Absent ⇒ the stock session-local ladder. */
+  constructor(private readonly history?: FailureHistory) {}
+
   decide(failures: FailureRecord[]): FailureAction {
     if (failures.length === 0) {
       return { kind: 'retry', hint: 'Continue.' };
@@ -83,6 +87,34 @@ export class DefaultFailurePolicy implements FailurePolicy {
       ? WEB_SEARCH_RECOVERY_HINT
       : '';
     const editHint = isEditMismatch(last) ? EDIT_MISMATCH_RECOVERY_HINT : '';
+    // Failure class of the most recent failure (shared by the E1.2 gate below
+    // and the class-level loop detection further down).
+    const lastClass = classifyFailure(last.message);
+
+    // ── Cross-session acceleration (E1.2) ──
+    // Past sessions already recorded this tool failing with this error class:
+    // move the ladder's entry point forward — the FIRST failure reflects with
+    // the recorded lesson instead of blindly retrying, the second degrades
+    // straight to skip-it. Gated to a non-generic class: a generic message
+    // carries no transferable signal, so an unrelated one-off last session
+    // must not escalate today's first failure. New traps keep the stock
+    // session-local ladder below.
+    const historyEntry = this.history && repeats <= 2 && lastClass !== 'generic'
+      ? this.history.lookup(last.toolName, lastClass)
+      : undefined;
+    if (historyEntry && historyEntry.count > 0) {
+      const seen = `Past session(s) already recorded ${historyEntry.count} failure(s) of ${last.toolName ?? 'this tool'} in the "${lastClass}" class, most recently: "${last.message}"${historyEntry.lesson ? ` — lesson recorded then: "${historyEntry.lesson}"` : ''}.`;
+      if (repeats === 1) {
+        return {
+          kind: 'reflect',
+          hint: `${seen} Do not walk the same path again — skip the naive retry and change approach now (different tool, route, or premise).${webHint}${TRAP_ESCAPE_HINT}`,
+        };
+      }
+      return {
+        kind: 'degrade',
+        reason: `${seen} This is a repeat — SKIP the failing call now. Do not retry it with the same or trivially-different arguments: take a workable alternative that still serves the user's goal and CONTINUE the task.${webHint}`,
+      };
+    }
 
     // Same call failed 5+ times with the same error: it kept failing even
     // after the skip-it directive below — a genuine stuck loop. Stop instead
@@ -122,7 +154,6 @@ export class DefaultFailurePolicy implements FailurePolicy {
     // three different network errors against the same dead host used to evade
     // the identical-repeat detector and grind to the generic 6-failure
     // ceiling. Same tool + same class is a loop even when the messages differ.
-    const lastClass = classifyFailure(last.message);
     const classHint = FAILURE_CLASS_HINTS[lastClass];
     const classRepeats = lastClass === 'generic'
       ? 0
@@ -183,4 +214,34 @@ export class DefaultFailurePolicy implements FailurePolicy {
       reason: `${count} consecutive failures (last: ${last.message}). Switched to degraded / simplified mode: stop retrying the failing approach, minimize further tool use, and deliver the simplest complete answer — or hand control back to the user with a clear summary of what was attempted and what failed.`,
     };
   }
+}
+
+/**
+ * E1.2 — build the synchronous FailureHistory snapshot from error_pattern
+ * memories (`memoryStore.list({ type: 'error_pattern' })`), the exact
+ * records the Harness writes when the failure policy stops/degrades. The
+ * tool name is recovered from the recorded "(tool: x)" suffix; the class is
+ * classified over the recorded content. Unclassifiable (generic) records
+ * are skipped — they carry no transferable signal, mirroring the gate in
+ * decide(). Takes a structural record type so the engine never imports the
+ * memory adapter.
+ */
+export function failureHistoryFromMemories(memories: Array<{ type: string; content: string }>): FailureHistory {
+  const counts = new Map<string, number>();
+  const lessons = new Map<string, string>();
+  for (const memory of memories) {
+    if (memory.type !== 'error_pattern') continue;
+    const toolMatch = memory.content.match(/\(tool: ([^)]+)\)/);
+    const errorClass = classifyFailure(memory.content);
+    if (errorClass === 'generic') continue;
+    const key = `${toolMatch?.[1] ?? ''}::${errorClass}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (!lessons.has(key)) lessons.set(key, memory.content.slice(0, 200));
+  }
+  return {
+    lookup(toolName, errorClass) {
+      const key = `${toolName ?? ''}::${errorClass}`;
+      return { count: counts.get(key) ?? 0, lesson: lessons.get(key) ?? '' };
+    },
+  };
 }

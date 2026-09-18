@@ -19,6 +19,7 @@ import type {
   EngineContext,
   EngineEvent,
   FailurePolicy,
+  FailureHistory,
   HookRouter,
   IMemoryStore,
   LLMAdapter,
@@ -69,6 +70,9 @@ export interface CodingAgentConfig {
   hooks?: HookRouter;
   /** Custom failure policy — defaults to the built-in escalating policy. */
   failurePolicy?: FailurePolicy;
+  /** E1.2 — preloaded cross-session failure history for the default policy
+   * (ignored when a custom failurePolicy is supplied). */
+  failureHistory?: FailureHistory;
   /** Optional plan-completion guard (EngineContext.continueGuard) — recovers
    * turns where the model stopped calling tools while plan work remained. */
   continueGuard?: EngineContext['continueGuard'];
@@ -110,6 +114,7 @@ export class CodingAgent {
       llm: config.llm,
       promptBudget: config.promptBudget,
       toolsProvider: () => this.toolRegistry.getTools(),
+      failureHistory: config.failureHistory,
     });
     this.verifier = config.verifier ?? plumbing.verifier;
     this.hooks = config.hooks ?? plumbing.hooks;
