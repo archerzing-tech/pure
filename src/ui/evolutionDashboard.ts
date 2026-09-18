@@ -259,7 +259,7 @@ function sliceAvgSteps(slice: RunEffectSlice): number | null {
   return slice.runs > 0 ? Math.round((slice.toolCalls / slice.runs) * 10) / 10 : null;
 }
 
-function renderSliceTable(rows: Array<[string, RunEffectSlice]>, title: string): string {
+function renderSliceTable(rows: Array<[string, RunEffectSlice]>): string {
   if (rows.length === 0) return '';
   const body = rows.map(([level, slice]) => `<tr>
     <td class="evo-table-key">${escapeHtml(t(`evolution.level.${level}`, level))}</td>
@@ -269,7 +269,6 @@ function renderSliceTable(rows: Array<[string, RunEffectSlice]>, title: string):
     <td>${escapeHtml(formatCount(slice.toolFailures))}</td>
   </tr>`).join('');
   return `<div class="evo-table-wrap">
-    <div class="evo-table-title">${escapeHtml(title)}</div>
     <table class="evo-table">
       <thead><tr>
         <th>${escapeHtml(t('evolution.table.level', '档位'))}</th>
@@ -306,30 +305,53 @@ function renderRoleTable(byRole: Record<string, RoleEffectSlice>): string {
   </div>`;
 }
 
-/** 五个策略维度都上表（E4.1 记了五个，只展示两个等于把数据烂在库里）。
- *  顺序：验证 / 委派最可操作在前，探索 / 恢复 / 复杂度在后。 */
-const STRATEGY_SLICE_TABLES: ReadonlyArray<{ dimension: StrategyDimension; titleKey: string; titleDefault: string }> = [
-  { dimension: 'verification', titleKey: 'evolution.table.verification', titleDefault: '验证档位' },
-  { dimension: 'delegation', titleKey: 'evolution.table.delegation', titleDefault: '委派档位' },
-  { dimension: 'exploration', titleKey: 'evolution.table.exploration', titleDefault: '探索档位' },
-  { dimension: 'recovery', titleKey: 'evolution.table.recovery', titleDefault: '恢复档位' },
-  { dimension: 'complexity', titleKey: 'evolution.table.complexity', titleDefault: '复杂度' },
+/** E4.1 记了五个策略维度 —— 五个都上表会堆成一面墙，所以一次只展示一个，
+ *  维度由 tab 切换（与周/月同一套胶囊视觉）。顺序：验证 / 委派最可操作在前，
+ *  探索 / 恢复 / 复杂度在后。tab 用短维度名（不是"XX 档位"长标题），才排得下。 */
+export const STRATEGY_SLICE_TABS: ReadonlyArray<{ dimension: StrategyDimension; labelKey: string; labelDefault: string }> = [
+  { dimension: 'verification', labelKey: 'evolution.dimension.verification', labelDefault: '验证' },
+  { dimension: 'delegation', labelKey: 'evolution.dimension.delegation', labelDefault: '委派' },
+  { dimension: 'exploration', labelKey: 'evolution.dimension.exploration', labelDefault: '探索' },
+  { dimension: 'recovery', labelKey: 'evolution.dimension.recovery', labelDefault: '恢复' },
+  { dimension: 'complexity', labelKey: 'evolution.dimension.complexity', labelDefault: '复杂度' },
 ];
 
-/** 策略维度切片（五档）+ 角色切片。某一维度没有带策略的记录就跳过该表；
- *  全空时给一句"还在攒"而不是一排空表格。 */
-export function renderStrategySection(strategy: StrategyEffectSummary): string {
-  const tables = [
-    ...STRATEGY_SLICE_TABLES.map((spec) => renderSliceTable(
-      Object.entries(strategy.byDimension[spec.dimension]).sort((a, b) => b[1].runs - a[1].runs),
-      t(spec.titleKey, spec.titleDefault),
-    )),
-    renderRoleTable(strategy.byRole),
-  ].filter(Boolean).join('');
-  if (!tables) {
-    return `<div class="evo-empty">${escapeHtml(t('evolution.strategy.empty', '还没有带策略标记的运行记录 —— 攒够几次再看结论'))}</div>`;
+/** 打开面板时先看的维度 —— 验证档位是最能直接指导调参的那个。 */
+export const DEFAULT_STRATEGY_DIMENSION: StrategyDimension = 'verification';
+
+function dimensionHasRuns(strategy: StrategyEffectSummary, dimension: StrategyDimension): boolean {
+  return Object.keys(strategy.byDimension[dimension]).length > 0;
+}
+
+/**
+ * 策略维度的切换器。窗口里没有任何带策略的记录时不渲染控件 —— 空窗口下一排
+ * 点不出东西的胶囊只是噪音，让 renderStrategySection 的空态去解释。
+ */
+export function renderStrategyTabs(strategy: StrategyEffectSummary, active: StrategyDimension): string {
+  if (!STRATEGY_SLICE_TABS.some((spec) => dimensionHasRuns(strategy, spec.dimension))) return '';
+  const buttons = STRATEGY_SLICE_TABS.map((spec) => {
+    const on = spec.dimension === active;
+    return `<button type="button" class="evo-range-btn${on ? ' active' : ''}" data-strategy-dim="${spec.dimension}" aria-pressed="${on}">${escapeHtml(t(spec.labelKey, spec.labelDefault))}</button>`;
+  }).join('');
+  return `<div class="evo-range evo-dim-tabs" role="group" aria-label="${escapeHtml(t('evolution.strategy.title', '策略效果'))}">${buttons}</div>`;
+}
+
+/** 当前选中的维度表 + 角色表（角色是另一个视角，不参与维度切换）。表本身不带
+ *  标题 —— 紧贴上方的 tab 就是它的标题。所选维度没记录时给一句该维度的空态，
+ *  而不是一个空表格；连角色都没有（完全没跑过）时才是"还在攒"。 */
+export function renderStrategySection(strategy: StrategyEffectSummary, dimension: StrategyDimension = DEFAULT_STRATEGY_DIMENSION): string {
+  const hasStrategyRuns = STRATEGY_SLICE_TABS.some((spec) => dimensionHasRuns(strategy, spec.dimension));
+  let table: string;
+  if (!hasStrategyRuns) {
+    table = `<div class="evo-empty">${escapeHtml(t('evolution.strategy.empty', '还没有带策略标记的运行记录 —— 攒够几次再看结论'))}</div>`;
+  } else {
+    const spec = STRATEGY_SLICE_TABS.find((item) => item.dimension === dimension) ?? STRATEGY_SLICE_TABS[0];
+    const rows = Object.entries(strategy.byDimension[spec.dimension]).sort((a, b) => b[1].runs - a[1].runs);
+    table = rows.length > 0
+      ? renderSliceTable(rows)
+      : `<div class="evo-empty">${escapeHtml(t('evolution.dimension.empty', '这个维度还没有带策略标记的记录'))}</div>`;
   }
-  return `<div class="evo-tables">${tables}</div>`;
+  return `<div class="evo-tables">${[table, renderRoleTable(strategy.byRole)].filter(Boolean).join('')}</div>`;
 }
 
 // ── 子代理角色建议（E1.4）──
