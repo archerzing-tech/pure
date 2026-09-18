@@ -1,4 +1,5 @@
 import type { EngineEvent, TokenUsage, VerificationSummary } from './types';
+import type { AdaptiveStrategy } from './adaptiveControl';
 
 export interface VerificationObservation {
   status: VerificationSummary['status'];
@@ -43,6 +44,44 @@ export interface ToolObservation {
   error?: { kind: string; hash: string; chars: number };
 }
 
+/** E4.1 — the slice-able dimensions of the runtime-selected strategy,
+ *  recorded ON the agent_run record so strategy → outcome correlation needs
+ *  no join: the same record already carries toolCalls, verification, and
+ *  outcome. Prose fields (signals / rationale / directive) are deliberately
+ *  left out — they can't be sliced and would bloat the JSONL. */
+export interface StrategyObservation {
+  exploration: AdaptiveStrategy['exploration'];
+  verification: AdaptiveStrategy['verification'];
+  delegation: AdaptiveStrategy['delegation'];
+  recovery: AdaptiveStrategy['recovery'];
+  autonomy: AdaptiveStrategy['autonomy'];
+  complexity: AdaptiveStrategy['complexity'];
+  confidence: number;
+  intentTags: string[];
+  recommendedRoles: string[];
+  parallelRoles: string[];
+  priorArtHint: boolean;
+}
+
+/** Map the live strategy onto its slice-able observation shape. undefined when
+ *  no strategy was selected (plain subagent/aux harnesses). */
+export function observeStrategy(strategy: AdaptiveStrategy | undefined): StrategyObservation | undefined {
+  if (!strategy) return undefined;
+  return {
+    exploration: strategy.exploration,
+    verification: strategy.verification,
+    delegation: strategy.delegation,
+    recovery: strategy.recovery,
+    autonomy: strategy.autonomy,
+    complexity: strategy.complexity,
+    confidence: Math.round(strategy.confidence * 100) / 100,
+    intentTags: [...strategy.intentTags],
+    recommendedRoles: [...strategy.recommendedRoles],
+    parallelRoles: [...strategy.parallelRoles],
+    priorArtHint: strategy.priorArtHint,
+  };
+}
+
 /** 8.3 — provider context-cache outcome for a run's input, derived from the
  *  Completed usage the provider reported (DeepSeek prompt_cache_hit_tokens,
  *  Anthropic cache_read_input_tokens — both normalized into TokenUsage).
@@ -73,6 +112,9 @@ export interface AgentRunObservation {
   outputChars: number;
   verification?: VerificationObservation;
   outcome?: { isComplete: boolean; interrupted: boolean; turnCount?: number; finalOutput?: TextObservation };
+  /** E4.1 — the strategy this run ran under; absent on records from before
+   *  this field existed (the aggregator skips those). */
+  strategy?: StrategyObservation;
 }
 
 export type PromptObservation = PromptAssemblyObservation | AgentRunObservation;
@@ -96,6 +138,7 @@ export interface AgentRunObservationInput {
   provider?: string;
   model?: string;
   startedAt?: number;
+  strategy?: StrategyObservation;
 }
 
 export interface PromptObservabilityOptions {
@@ -269,6 +312,7 @@ export class PromptObservability {
       startedAt: input.startedAt ?? Date.now(),
       provider: input.provider,
       model: input.model,
+      strategy: input.strategy,
       eventCounts: {},
       toolCalls: [],
       reasoningChars: 0,
