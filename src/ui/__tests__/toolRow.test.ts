@@ -963,6 +963,14 @@ describe('toolCardKind / groupToolRoundRuns (tool rows vs agent rows)', () => {
       ['researcher'],
       ['web_search'],
     ]);
+    // The full six-card case: probe A alone, the four agents in ONE run (the
+    // 4th wraps within the same grid at max three columns — still parallel,
+    // never merged into a tool row), tool B alone at the end.
+    expect(groupToolRoundRuns(['sys_info', 'researcher', 'researcher', 'researcher', 'researcher', 'execute_command'], toolCardKind)).toEqual([
+      ['sys_info'],
+      ['researcher', 'researcher', 'researcher', 'researcher'],
+      ['execute_command'],
+    ]);
     // Pure rounds behave exactly as before the split.
     expect(groupToolRoundRuns(['web_search', 'web_search'], toolCardKind)).toEqual([['web_search', 'web_search']]);
     expect(groupToolRoundRuns([], toolCardKind)).toEqual([]);
