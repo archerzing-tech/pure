@@ -69,3 +69,36 @@ describe('ToolExecutionCoordinator tool budget', () => {
     expect(String(results[0].result.error)).toContain('timed out');
   }, 5_000);
 });
+
+describe('ToolExecutionCoordinator streaming completion', () => {
+  it('executeStream yields the fast read while the slow sibling is still running', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    let slowResolved = false;
+    const ctx = makeContext(async (tc) => {
+      if (tc.function.name === 'slow_subagent') {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        slowResolved = true;
+      }
+      return ok(tc);
+    });
+
+    const yielded: string[] = [];
+    for await (const tr of coordinator.executeStream([call('slow_subagent'), call('fast_subagent')], ctx, BUDGET)) {
+      // The fast tool's result must surface while the slow one is still in
+      // flight — that is the whole point (GUI finalizes finished cards early).
+      if (tr.toolCallId === 'call_fast_subagent') expect(slowResolved).toBe(false);
+      yielded.push(tr.toolCallId);
+    }
+    expect(yielded).toContain('call_fast_subagent');
+    expect(yielded).toContain('call_slow_subagent');
+    expect(slowResolved).toBe(true);
+  }, 5_000);
+
+  it('execute() keeps returning the full result set after the batch (back-compat)', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const ctx = makeContext(async (tc) => ok(tc));
+
+    const results = await coordinator.execute([call('a'), call('b'), call('c')], ctx, BUDGET);
+    expect(results.map((r) => r.toolCallId).sort()).toEqual(['call_a', 'call_b', 'call_c']);
+  }, 5_000);
+});

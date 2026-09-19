@@ -1318,6 +1318,55 @@ describe('AgentLoopEngine', () => {
       expect(String(r.type === 'ToolResult' && r.payload.result.result)).not.toContain('[dedupe]');
     }
   });
+
+  it('emits each parallel read result as it settles — the fast one is not held hostage by the slow one', async () => {
+    // Batch [slow, fast]: fast must reach the consumer BEFORE the slow tool
+    // resolves (GUI: the finished subagent's card settles while its sibling
+    // still runs). Regression guard for the batch-wide Promise.all that held
+    // every ToolResult until the slowest read finished.
+    const engine = new AgentLoopEngine();
+    let releaseSlow: (() => void) | null = null;
+    let slowReleased = false;
+    const adapter: ToolAdapter = {
+      execute: async (tc) => {
+        if (tc.id === 'call_1_0') {
+          await new Promise<void>((resolve) => { releaseSlow = () => { slowReleased = true; resolve(); }; });
+        }
+        return { id: tc.id, toolName: tc.function.name, result: `executed ${tc.id}`, success: true, duration: 1 };
+      },
+      getMetadata: () => undefined,
+      getTools: () => [READ_FILE_TOOL],
+    };
+    const ctx = baseCtx({
+      llm: parallelRoundsLLM([[
+        { toolName: 'read_file', toolArgs: '{"path":"slow.ts"}' },
+        { toolName: 'read_file', toolArgs: '{"path":"fast.ts"}' },
+      ]], 'all done'),
+      tools: adapter,
+      toolsDefs: [READ_FILE_TOOL],
+    });
+
+    const seenToolResults: string[] = [];
+    let completed: Extract<EngineEvent, { type: 'Completed' }> | undefined;
+    for await (const event of engine.run(
+      { sessionId: 's-parallel-stream', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    )) {
+      if (event.type === 'ToolResult') seenToolResults.push(event.payload.toolCallId);
+      if (event.type === 'Completed') completed = event;
+      if (event.type === 'ToolResult' && event.payload.toolCallId === 'call_1_1') {
+        // The fast result arrived — the slow sibling must still be blocked.
+        expect(slowReleased).toBe(false);
+        expect(releaseSlow).not.toBeNull();
+        releaseSlow!();
+      }
+    }
+
+    expect(seenToolResults).toEqual(['call_1_1', 'call_1_0']); // completion order, fast first
+    expect(completed).toBeDefined();
+    expect(completed!.payload.messages.filter((m) => m.role === 'tool')).toHaveLength(2);
+    expect(transcriptIsPaired(completed!.payload.messages)).toBe(true);
+  }, 5_000);
 });
 
 describe('AgentLoopEngine per-phase adapter routing (E0.3)', () => {

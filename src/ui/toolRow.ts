@@ -119,15 +119,39 @@ export function formatToolArgsSummary(toolName: string, args: Record<string, unk
     case 'create_directory':
       return typeof v('path') === 'string' ? `path="${String(v('path'))}"` : '';
     case 'execute_command':
+    case 'bash_executor':
       return typeof v('command') === 'string' ? `$ ${String(v('command')).slice(0, 100)}` : '';
     case 'generate_image':
       return typeof v('prompt') === 'string' ? `prompt="${String(v('prompt')).slice(0, 80)}"` : '';
     case 'search_files':
     case 'glob_files':
       return typeof v('pattern') === 'string' ? `pattern="${String(v('pattern'))}"` : '';
+    // Subagent delegations: surface the ask itself, clipped. A parallel batch
+    // otherwise renders N look-alike "🤖 角色名 · 子 Agent" cards with no way
+    // to tell which instance is which — the delegated question is the only
+    // distinguishing mark (each role names its ask differently).
+    case 'code_reviewer':
+    case 'project_auditor':
+      return typeof v('prompt') === 'string' ? `prompt="${clipSummary(String(v('prompt')))}"` : '';
+    case 'task_planner':
+      return typeof v('task') === 'string' ? `task="${clipSummary(String(v('task')))}"` : '';
+    case 'code_editor':
+      return typeof v('plan') === 'string' ? `plan="${clipSummary(String(v('plan')))}"` : '';
+    case 'deep_thinker':
+      return typeof v('question') === 'string' ? `question="${clipSummary(String(v('question')))}"` : '';
+    case 'ui_designer':
+      return typeof v('requirement') === 'string' ? `requirement="${clipSummary(String(v('requirement')))}"` : '';
+    case 'researcher':
+      return typeof v('topic') === 'string' ? `topic="${clipSummary(String(v('topic')))}"` : '';
     default:
       return '';
   }
+}
+
+/** One-line clip for delegation arg summaries: collapse whitespace, cap length. */
+function clipSummary(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat;
 }
 
 export interface ToolRowResultMeta {

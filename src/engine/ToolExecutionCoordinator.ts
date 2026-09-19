@@ -30,7 +30,27 @@ export class ToolExecutionCoordinator {
     ctx: EngineContext,
     budget: ToolExecutionBudget,
   ): Promise<ExecutedToolResult[]> {
-    if (!ctx.tools) return [];
+    const results: ExecutedToolResult[] = [];
+    for await (const tr of this.executeStream(toolCalls, ctx, budget)) results.push(tr);
+    return results;
+  }
+
+  /**
+   * Streaming twin of execute(): yields each result THE MOMENT its tool
+   * settles instead of holding the whole batch. Parallel reads (a batch of
+   * subagents / research calls) otherwise report every ToolResult only after
+   * the slowest sibling finishes — the GUI showed finished subagents as
+   * spinning empty cards until the entire Promise.all resolved.
+   * Reads run concurrently and yield in completion order; writes stay
+   * sequential (lock discipline) and yield as each finishes. Budget is
+   * incremented exactly once per call, same as execute() did.
+   */
+  async *executeStream(
+    toolCalls: ToolCall[],
+    ctx: EngineContext,
+    budget: ToolExecutionBudget,
+  ): AsyncGenerator<ExecutedToolResult, void, unknown> {
+    if (!ctx.tools) return;
     const reads: ToolCall[] = [];
     const writes: ToolCall[] = [];
     for (const call of toolCalls) {
@@ -40,10 +60,23 @@ export class ToolExecutionCoordinator {
       else reads.push(call);
     }
 
-    const readResults = await Promise.all(reads.map(call => this.executeOne(call, ctx, budget, false)));
-    const writeResults: ExecutedToolResult[] = [];
-    for (const call of writes) writeResults.push(await this.executeOne(call, ctx, budget, true));
-    return [...readResults, ...writeResults];
+    // Each read settles into a tagged entry that carries its own promise, so
+    // the loop can remove exactly the entry it raced on. (Deleting inside a
+    // .then is racy: for an already-settled promise the delete microtask runs
+    // before the awaiting generator resumes, draining the set mid-batch.)
+    const pending = new Set<Promise<{ p: Promise<unknown>; tr: ExecutedToolResult }>>();
+    for (const call of reads) {
+      const entry = this.executeOne(call, ctx, budget, false).then((tr) => ({ p: entry, tr }));
+      pending.add(entry);
+    }
+    while (pending.size > 0) {
+      const { p, tr } = await Promise.race(pending);
+      pending.delete(p);
+      yield tr;
+    }
+    for (const call of writes) {
+      yield await this.executeOne(call, ctx, budget, true);
+    }
   }
 
   private async executeOne(
