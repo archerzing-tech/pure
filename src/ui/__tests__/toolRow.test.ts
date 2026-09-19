@@ -531,6 +531,34 @@ describe('pendingActionLabel', () => {
     expect(pendingActionLabel('project_auditor', {})).toBe('正在审计项目安全与交付风险…');
   });
 
+  it('summarizes each delegation ask so parallel subagent cards are tellable apart', () => {
+    // A parallel batch used to render N look-alike "🤖 角色名 · 子 Agent"
+    // cards — the delegated question is the only distinguishing mark.
+    expect(formatToolArgsSummary('code_reviewer', { prompt: '审查 auth 模块的越界检查' }))
+      .toBe('prompt="审查 auth 模块的越界检查"');
+    expect(formatToolArgsSummary('project_auditor', { prompt: 'audit deps for known CVEs' }))
+      .toBe('prompt="audit deps for known CVEs"');
+    expect(formatToolArgsSummary('task_planner', { task: '拆解登录页改版' }))
+      .toBe('task="拆解登录页改版"');
+    expect(formatToolArgsSummary('code_editor', { plan: '1. 抽出 hook 2. 补测试' }))
+      .toBe('plan="1. 抽出 hook 2. 补测试"');
+    expect(formatToolArgsSummary('deep_thinker', { question: '状态管理选型对比' }))
+      .toBe('question="状态管理选型对比"');
+    expect(formatToolArgsSummary('ui_designer', { requirement: '设置页两栏布局' }))
+      .toBe('requirement="设置页两栏布局"');
+    expect(formatToolArgsSummary('researcher', { topic: 'Tauri 2 updater 最佳实践' }))
+      .toBe('topic="Tauri 2 updater 最佳实践"');
+    expect(formatToolArgsSummary('bash_executor', { command: 'bun test src/engine' }))
+      .toBe('$ bun test src/engine');
+    // Long asks clip to one line (whitespace flattened, 60 chars + ellipsis).
+    const long = 'x'.repeat(80);
+    const summary = formatToolArgsSummary('code_reviewer', { prompt: long });
+    expect(summary).toBe(`prompt="${'x'.repeat(60)}…"`);
+    expect(formatToolArgsSummary('researcher', { topic: 'a\n\nb   c' })).toBe('topic="a b c"');
+    // No ask field → empty (not "undefined").
+    expect(formatToolArgsSummary('code_reviewer', {})).toBe('');
+  });
+
   it('counts CJK content as its UTF-8 bytes, not chars', () => {
     const label = pendingActionLabel('write_file', { path: 'a.txt', content: '中文'.repeat(512) });
     // 2 chars × 3 bytes = 6 bytes per repeat × 512 = 3072 bytes = 3.0 KB
