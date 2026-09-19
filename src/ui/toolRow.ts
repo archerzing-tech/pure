@@ -11,7 +11,7 @@ import { formatBytes } from '../shared/format';
 import { stripAnsi } from '../shared/ansi';
 import { isTauriRuntime } from '../shared/tauri';
 import { loadConfig } from './config';
-import type { GeneratedImage } from '../shared/types';
+import type { GeneratedImage, SubagentActivityEvent } from '../shared/types';
 // Structured (JSON/YAML) highlighting reuses the same tree-shaken hljs core
 // as markdown.ts — re-registering the grammars here is idempotent and keeps
 // toolRow.ts self-contained (it is imported by chat.ts, main.ts and tests).
@@ -162,6 +162,10 @@ export interface ToolRowResultMeta {
   /** Generated images (data URLs) rendered as <img> cards, ChatGPT/Gemini style. */
   resultImages?: GeneratedImage[];
   resultText?: string;
+  /** Subagent interior-activity trace (live SubagentActivity lines), rendered
+   * after the result wipe so finalize never shrinks the panel, and by session
+   * replay so restored delegation cards show the same run narrative. */
+  subagentTrace?: string[];
 }
 
 export interface ToolRowHandle {
@@ -791,6 +795,22 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
 
   // Result body (clear first so double-invocation never duplicates output)
   row.resultEl.innerHTML = '';
+  // Subagent interior trace: re-render the lines the card streamed live so
+  // finalize never visibly shrinks the panel (the wipe above clears them).
+  // Session replay (main.ts passes the persisted ToolExecMeta straight here)
+  // gets the identical narrative for free.
+  if (meta.subagentTrace?.length) {
+    const lines = meta.subagentTrace.slice(-MAX_LIVE_STREAM_LINES);
+    row.resultEl.dataset.streamLines = String(lines.length);
+    for (const line of lines) {
+      const div = document.createElement('div');
+      // Our own formatter prefixes failures with ✗ — keep the stderr identity
+      // so a broken delegation reads as an error at a glance.
+      div.className = line.startsWith('✗') ? 'tool-row-stream-line stderr' : 'tool-row-stream-line';
+      appendHighlightSegments(div, line);
+      row.resultEl.appendChild(div);
+    }
+  }
   if (meta.success && meta.resultKind === 'search' && meta.resultItems?.length) {
     const list = document.createElement('ol');
     list.className = 'search-result-list';
@@ -870,6 +890,30 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
     note.className = 'tool-result-empty';
     note.textContent = '子 Agent 已完成，未产出文本结果 —— 结论已直接交给主 agent 汇总。';
     row.resultEl.appendChild(note);
+  }
+}
+
+/**
+ * One human line of subagent interior activity for the delegation card's
+ * Output panel — live via SubagentActivity events, replay via subagentTrace.
+ * `state` transitions (THINK/OBSERVE churn) are deliberately skipped: they'd
+ * flood the trace without saying anything the tool lines don't already say.
+ */
+export function formatSubagentTraceLine(e: SubagentActivityEvent): string | null {
+  const who = e.agentName || 'subagent';
+  switch (e.kind) {
+    case 'start':
+      return e.summary ? `▶ ${who} 接活：${clipSummary(e.summary)}` : `▶ ${who} 开工`;
+    case 'tool':
+      if (!e.toolName) return null;
+      if (e.toolState === 'completed') return `✓ ${e.toolName} 完成`;
+      return `→ ${e.toolName}${e.toolArgsHint ? ` ${e.toolArgsHint}` : ''}`;
+    case 'done':
+      return `✓ ${who} 交付${e.durationMs != null ? ` · 用时 ${formatDuration(e.durationMs)}` : ''}`;
+    case 'error':
+      return `✗ ${who} 中断${e.error ? `：${clipSummary(e.error)}` : ''}`;
+    default:
+      return null;
   }
 }
 

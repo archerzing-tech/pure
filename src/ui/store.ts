@@ -205,6 +205,12 @@ export interface ToolExecMeta {
    * so the payload size is a non-issue there.
    */
   resultImages?: GeneratedImage[];
+  /**
+   * Subagent interior-activity trace for delegation tools (one line per
+   * SubagentActivity event the engine streamed). Persisted so session replay
+   * restores the same run narrative the live card showed.
+   */
+  subagentTrace?: string[];
 }
 
 export interface StoredMessage {

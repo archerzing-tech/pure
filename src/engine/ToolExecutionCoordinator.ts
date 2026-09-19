@@ -50,6 +50,9 @@ export class ToolExecutionCoordinator {
     ctx: EngineContext,
     budget: ToolExecutionBudget,
   ): AsyncGenerator<ExecutedToolResult, void, unknown> {
+    // A read entry tags its own promise so the race loop can remove exactly
+    // the entry it raced on (see the pending set below).
+    type TaggedRead = { p: Promise<TaggedRead>; tr: ExecutedToolResult };
     if (!ctx.tools) return;
     const reads: ToolCall[] = [];
     const writes: ToolCall[] = [];
@@ -64,9 +67,12 @@ export class ToolExecutionCoordinator {
     // the loop can remove exactly the entry it raced on. (Deleting inside a
     // .then is racy: for an already-settled promise the delete microtask runs
     // before the awaiting generator resumes, draining the set mid-batch.)
-    const pending = new Set<Promise<{ p: Promise<unknown>; tr: ExecutedToolResult }>>();
+    const pending = new Set<Promise<TaggedRead>>();
     for (const call of reads) {
-      const entry = this.executeOne(call, ctx, budget, false).then((tr) => ({ p: entry, tr }));
+      // Explicit annotation: the closure reads `entry` itself, which the
+      // inference algorithm refuses to untangle on its own (TS7022).
+      const entry: Promise<TaggedRead> =
+        this.executeOne(call, ctx, budget, false).then((tr) => ({ p: entry, tr }));
       pending.add(entry);
     }
     while (pending.size > 0) {
