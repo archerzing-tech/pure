@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine, isSubagentTool } from '../toolRow';
+import { invalidateConfigCache, STORAGE_KEY } from '../config';
 import type { GeneratedImage } from '../../shared/types';
 
 // Minimal fake DOM sufficient for createToolRow + finalizeToolRow's image
@@ -115,6 +116,44 @@ describe('tool row expansion policy', () => {
     expect(shouldExpandToolRowInitially('write_file')).toBe(true);
     expect(shouldExpandToolRowInitially('read_file')).toBe(true);
     expect(shouldExpandToolRowInitially('web_search')).toBe(true);
+  });
+
+  // 设置 → 外观 → 工具卡片：关掉后（配置落了 localStorage）新卡片生来折叠；
+  // 旧配置没有这个字段时走默认值 true，行为不变。
+  it('collapses new rows when the appearance toggle stored toolCardsExpanded=false', () => {
+    const mem: Record<string, string> = {};
+    const prevStorage = (globalThis as Record<string, unknown>).localStorage;
+    const prevWindow = (globalThis as Record<string, unknown>).window;
+    (globalThis as Record<string, unknown>).localStorage = {
+      getItem: (k: string) => mem[k] ?? null,
+      setItem: (k: string, v: string) => { mem[k] = v; },
+      removeItem: (k: string) => { delete mem[k]; },
+    };
+    (globalThis as Record<string, unknown>).window = { location: { search: '' } };
+    try {
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 10, toolCardsExpanded: false });
+      invalidateConfigCache();
+      expect(shouldExpandToolRowInitially('read_file')).toBe(false);
+
+      const restoreDoc = installFakeDocument();
+      try {
+        const row = createToolRow('read_file', { path: 'src/foo.ts' });
+        expect(row.details.open).toBe(false); // born collapsed, still click-to-open
+      } finally {
+        restoreDoc();
+      }
+
+      // Legacy config without the field → defaults to open (historic behavior).
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 10 });
+      invalidateConfigCache();
+      expect(shouldExpandToolRowInitially('read_file')).toBe(true);
+    } finally {
+      delete (globalThis as Record<string, unknown>).localStorage;
+      if (prevStorage !== undefined) (globalThis as Record<string, unknown>).localStorage = prevStorage;
+      delete (globalThis as Record<string, unknown>).window;
+      if (prevWindow !== undefined) (globalThis as Record<string, unknown>).window = prevWindow;
+      invalidateConfigCache();
+    }
   });
 
 });

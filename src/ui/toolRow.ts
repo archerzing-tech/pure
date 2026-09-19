@@ -10,6 +10,7 @@ import { linkifyPaths } from './pathLink';
 import { formatBytes } from '../shared/format';
 import { stripAnsi } from '../shared/ansi';
 import { isTauriRuntime } from '../shared/tauri';
+import { loadConfig } from './config';
 import type { GeneratedImage } from '../shared/types';
 // Structured (JSON/YAML) highlighting reuses the same tree-shaken hljs core
 // as markdown.ts — re-registering the grammars here is idempotent and keeps
@@ -155,9 +156,16 @@ export interface ToolRowHandle {
 
 // Every tool row is a live execution trace. Open it initially so the user can
 // follow inputs and outputs as they arrive; the native <details> control still
-// lets the user collapse and reopen any row at any time.
+// lets the user collapse and reopen any row at any time. Settings → 外观 →
+// 工具卡片 turns the auto-open off: rows then render as one-line summaries
+// (still click-to-open). Unreadable config (pure DOM tests) keeps the
+// historic open-by-default behavior.
 export function shouldExpandToolRowInitially(_toolName: string): boolean {
-  return true;
+  try {
+    return loadConfig()?.toolCardsExpanded ?? true;
+  } catch {
+    return true;
+  }
 }
 
 export function shouldUseTerminalPanel(toolName: string): boolean {
