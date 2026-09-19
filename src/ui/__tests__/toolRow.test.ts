@@ -963,9 +963,10 @@ describe('toolCardKind / groupToolRoundRuns (tool rows vs agent rows)', () => {
       ['researcher'],
       ['web_search'],
     ]);
-    // The full six-card case: probe A alone, the four agents in ONE run (the
-    // 4th wraps within the same grid at max three columns — still parallel,
-    // never merged into a tool row), tool B alone at the end.
+    // The full six-card case: probe A alone, the four agents in ONE run (a
+    // wrapped agent stays within its own grid — still parallel, never merged
+    // into a tool row; how many fit per line is the CSS width calculation),
+    // tool B alone at the end.
     expect(groupToolRoundRuns(['sys_info', 'researcher', 'researcher', 'researcher', 'researcher', 'execute_command'], toolCardKind)).toEqual([
       ['sys_info'],
       ['researcher', 'researcher', 'researcher', 'researcher'],
