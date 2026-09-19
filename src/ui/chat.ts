@@ -63,7 +63,7 @@ import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './art
 import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
@@ -2805,23 +2805,28 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     // run narrative instead of a bare final output.
     const subagentEventFanout = new EventFanout<SubagentActivityEvent>();
     const subagentTraceByCall = new Map<string, string[]>();
-    // Tool-round grid: tool calls issued in the SAME LLM iteration (e.g. two
-    // parallel web_search calls, or a web_search + list_files batch) render
-    // side by side in one horizontal grid, so the transcript reads "running
-    // simultaneously" instead of a vertical stack of identical-looking rows.
-    // A single-call round renders as one full-width item (the grid collapses
-    // to one column). Closed by the next StateChange → THINK.
-    let toolGrid: HTMLElement | null = null;
-    const appendToolRow = (toolName: string, args: Record<string, unknown>): ToolRowHandle => {
+    // Tool-round grids: tool calls issued in the SAME LLM iteration (e.g. two
+    // parallel web_search calls) render side by side so the transcript reads
+    // "running simultaneously" instead of a vertical stack of identical rows.
+    // Cards group into CONSECUTIVE same-kind runs (toolCardKind): a plain tool
+    // probe and subagent delegation cards never share one row — [sys_info,
+    // agent×3] reads as one setup step above a row of three parallel
+    // colleagues. A kind change opens a new row BELOW, never back into an
+    // earlier row, so the timeline stays monotone (no visual reordering). A
+    // single-card run is full-width (grid collapses to one column). Closed by
+    // the next StateChange → THINK.
+    let roundGrid: { el: HTMLElement; kind: ToolCardKind } | null = null;
+    const appendToolRow = (toolName: string, args: Record<string, unknown>, kind: ToolCardKind): ToolRowHandle => {
       // Tool calls interrupt text streaming — the bubble above the new row
       // stops blinking now, not at turn completion (see above).
       finalizeStreamingSegments();
-      if (!toolGrid) {
-        toolGrid = document.createElement('div');
-        toolGrid.className = 'bubble-row tool-grid';
-        this.appendToTranscript(toolGrid);
+      if (!roundGrid || roundGrid.kind !== kind) {
+        const el = document.createElement('div');
+        el.className = 'bubble-row tool-grid';
+        this.appendToTranscript(el);
+        roundGrid = { el, kind };
       }
-      return this.addToolRow(toolName, args, toolGrid);
+      return this.addToolRow(toolName, args, roundGrid.el);
     };
     // Live thinking card: created once the user bubble lands, finalized on the
     // first content/tool delta, and nulled so a later reasoning phase (after
@@ -4099,7 +4104,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
               // A new LLM iteration = a new tool round: close the previous
               // round's parallel grid so the next batch of tool rows starts
               // its own horizontal group.
-              toolGrid = null;
+              roundGrid = null;
             }
             break;
           }
@@ -4222,7 +4227,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
                       pendingRows.set(toolCallId, entry);
                     } else {
                       endThinking();
-                      const row = appendToolRow(toolName, args);
+                      const row = appendToolRow(toolName, args, subagentNames.has(toolName) ? 'agent' : 'tool');
                       toolRowSinceSegment = true;
                       entry = { row, toolName, args, toolCallId };
                       if (subagentNames.has(toolName)) row.el.dataset.agentCallId = toolCallId;
@@ -4256,7 +4261,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
                       pendingByName.set(toolName, { ...collapse, toolName });
                     } else {
                       endThinking();
-                      const row = appendToolRow(toolName, args ?? {});
+                      const row = appendToolRow(toolName, args ?? {}, subagentNames.has(toolName) ? 'agent' : 'tool');
                       toolRowSinceSegment = true;
                       pendingByName.set(toolName, { row, toolName, args: args ?? {} });
                     }
