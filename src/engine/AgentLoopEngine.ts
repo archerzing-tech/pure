@@ -461,9 +461,19 @@ export class AgentLoopEngine {
           runAnchorId = call.id;
           toExecute.push(call);
         }
-        const executedResults = toExecute.length > 0
-          ? await this.toolCoordinator.execute(toExecute, ctx, budget)
-          : [];
+        // Stream per-call completion: a parallel batch reports each tool the
+        // moment it settles, so the GUI finalizes the fast subagent's card
+        // while slower siblings still run (they used to all wait for the
+        // whole Promise.all). executedResults ends up completion-ordered;
+        // everything below (dedupe reuse, failure policy, transcript pairing)
+        // keys by toolCallId / assembles in original order, so the reorder is
+        // safe. lastExecuted's cursor now means "last to finish", which for a
+        // concurrent batch is the truest "immediately preceding call".
+        const executedResults: ExecutedToolResult[] = [];
+        for await (const tr of this.toolCoordinator.executeStream(toExecute, ctx, budget)) {
+          executedResults.push(tr);
+          yield { type: 'ToolResult', payload: tr, timestamp: Date.now() };
+        }
         const textOfResult = (tr: ExecutedToolResult): string => tr.result.success
           ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
           : `Error: ${tr.result.error}`;
@@ -475,7 +485,10 @@ export class AgentLoopEngine {
             .filter((dup) => !passOne.get(dup.anchorId)?.result.success)
             .map((dup) => dup.call);
           if (retried.length > 0) {
-            executedResults.push(...await this.toolCoordinator.execute(retried, ctx, budget));
+            for await (const tr of this.toolCoordinator.executeStream(retried, ctx, budget)) {
+              executedResults.push(tr);
+              yield { type: 'ToolResult', payload: tr, timestamp: Date.now() };
+            }
           }
         }
         const executedByCallId = new Map(executedResults.map((tr) => [tr.toolCallId, tr]));
@@ -510,7 +523,12 @@ export class AgentLoopEngine {
           const tr = executedByCallId.get(call.id);
           if (tr) toolResults.push(tr);
         }
+        // Real executions already streamed their ToolResult at completion
+        // time; this tail loop emits only the synthetic results (dedupe
+        // reuse / same-round repeats), so no card hears its result twice.
+        const liveEmitted = new Set(executedResults.map((tr) => tr.toolCallId));
         for (const result of toolResults) {
+          if (liveEmitted.has(result.toolCallId)) continue;
           yield { type: 'ToolResult', payload: result, timestamp: Date.now() };
         }
         // Advance the consecutive-call cursor from the last REAL execution
