@@ -3,12 +3,12 @@
 // Fixes: BudgetWarning events, completedSteps/lastState tracking, note injection for recoverable errors,
 //        VERIFY_FAILED → loop back to THINK with reflection note instead of completing.
 
-import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter } from '../shared/types';
+import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, SubagentActivityEvent } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
 import { BudgetManager } from './BudgetManager';
-import { ToolExecutionCoordinator, type ExecutedToolResult } from './ToolExecutionCoordinator';
+import { ToolExecutionCoordinator, type ExecutedToolResult, type ToolExecutionBudget } from './ToolExecutionCoordinator';
 
 // v1.9.15 — research-loop guard: successful web searches never trip the
 // failure policy (empty/relevance-gated-out result sets return success so the
@@ -85,7 +85,73 @@ function llmForPhase(ctx: EngineContext, phase: EngineLlmPhase): LLMAdapter {
 }
 
 export class AgentLoopEngine {
-  private toolCoordinator = new ToolExecutionCoordinator();  async *run(
+  private toolCoordinator = new ToolExecutionCoordinator();
+
+  /**
+   * One tool-execution batch as a unified event stream: tool completions
+   * (`tool`) and live subagent interior activity (`subagent`) interleaved in
+   * arrival order. The engine's generator can only yield from its own body,
+   * so tool-interior events must be raced against the tool completions here —
+   * draining only at completion points would make a slow subagent's stream go
+   * stale until some tool settles. The reader is per-batch and always closed
+   * (finally), so the fanout never accumulates dead queues; no feed (CLI /
+   * nested subagent runs) degrades to the plain tool stream.
+   */
+  private async *runBatch(
+    toExecute: ToolCall[],
+    ctx: EngineContext,
+    budget: ToolExecutionBudget,
+  ): AsyncGenerator<{ kind: 'tool'; tr: ExecutedToolResult } | { kind: 'subagent'; event: SubagentActivityEvent }> {
+    const reader = ctx.subagentEvents?.subscribe();
+    const toolsIter = this.toolCoordinator.executeStream(toExecute, ctx, budget);
+    try {
+      if (!reader) {
+        for await (const tr of toolsIter) yield { kind: 'tool', tr };
+        return;
+      }
+      let toolsDone = false;
+      let toolsNext: Promise<IteratorResult<ExecutedToolResult>> | null = toolsIter.next();
+      // Armed only when the buffer is empty (see loop head): calling next()
+      // eagerly after each reader win would swallow the OLDEST buffered event
+      // into a promise while the loop-head drain emits the NEWER ones first —
+      // a visible reordering of the subagent's trace.
+      let readerNext: Promise<IteratorResult<SubagentActivityEvent>> | null = null;
+      while (true) {
+        // Chatter that queued up while we were between awaits goes out first,
+        // in arrival order, before anything newer can overtake it.
+        for (const event of reader.drainAvailable()) yield { kind: 'subagent', event };
+        if (toolsDone) return;
+        if (!readerNext) readerNext = reader.next();
+        // Reader FIRST in the race: for two already-settled promises
+        // Promise.race picks by registration order, and a queued reader event
+        // is always older than a tool result we haven't yielded yet. Tools
+        // first STRANDED that event when the last tool of a batch settled at
+        // the same moment — consumed from the queue but never yielded before
+        // the `toolsDone` return (test-verified loss).
+        const winner = await Promise.race([
+          readerNext.then((r) => ({ which: 'reader' as const, r })),
+          toolsNext!.then((r) => ({ which: 'tools' as const, r })),
+        ]);
+        if (winner.which === 'tools') {
+          if (winner.r.done) { toolsDone = true; toolsNext = null; }
+          else {
+            yield { kind: 'tool', tr: winner.r.value };
+            toolsNext = toolsIter.next();
+          }
+        } else if (!winner.r.done) {
+          yield { kind: 'subagent', event: winner.r.value };
+          readerNext = null; // re-armed at the loop head, after the drain
+        } else {
+          // Reader closed under us — keep going on the synchronous buffer.
+          readerNext = null;
+        }
+      }
+    } finally {
+      reader?.close();
+    }
+  }
+
+  async *run(
     input: RunInput,
     ctx: EngineContext,
   ): AsyncGenerator<EngineEvent, void, void> {
@@ -470,9 +536,13 @@ export class AgentLoopEngine {
         // safe. lastExecuted's cursor now means "last to finish", which for a
         // concurrent batch is the truest "immediately preceding call".
         const executedResults: ExecutedToolResult[] = [];
-        for await (const tr of this.toolCoordinator.executeStream(toExecute, ctx, budget)) {
-          executedResults.push(tr);
-          yield { type: 'ToolResult', payload: tr, timestamp: Date.now() };
+        for await (const step of this.runBatch(toExecute, ctx, budget)) {
+          if (step.kind === 'tool') {
+            executedResults.push(step.tr);
+            yield { type: 'ToolResult', payload: step.tr, timestamp: Date.now() };
+          } else {
+            yield { type: 'SubagentActivity', payload: step.event, timestamp: Date.now() };
+          }
         }
         const textOfResult = (tr: ExecutedToolResult): string => tr.result.success
           ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
@@ -485,9 +555,13 @@ export class AgentLoopEngine {
             .filter((dup) => !passOne.get(dup.anchorId)?.result.success)
             .map((dup) => dup.call);
           if (retried.length > 0) {
-            for await (const tr of this.toolCoordinator.executeStream(retried, ctx, budget)) {
-              executedResults.push(tr);
-              yield { type: 'ToolResult', payload: tr, timestamp: Date.now() };
+            for await (const step of this.runBatch(retried, ctx, budget)) {
+              if (step.kind === 'tool') {
+                executedResults.push(step.tr);
+                yield { type: 'ToolResult', payload: step.tr, timestamp: Date.now() };
+              } else {
+                yield { type: 'SubagentActivity', payload: step.event, timestamp: Date.now() };
+              }
             }
           }
         }

@@ -10,12 +10,13 @@ import { PermissionManager } from './PermissionManager';
 import { Verifier } from './Verifier';
 import { createDefaultHarnessConfig } from './defaultHarnessConfig';
 import { ToolRegistry } from './ToolRegistry';
-import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentOrchestratorConfig, type SubagentProgress } from './SubagentOrchestrator';
+import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentOrchestratorConfig, type SubagentProgress } from './SubagentOrchestrator';
 import { MCPClient, type MCPClientConfig } from '../harness/mcp/MCPClient';
 import { PromptAssembler, type PromptBudgetConfig } from '../shared/PromptAssembler';
 import type { PromptObservability } from '../shared/promptObservability';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import type {
+  AsyncQueueLike,
   BudgetConfig,
   EngineContext,
   EngineEvent,
@@ -27,6 +28,7 @@ import type {
   LLMAdapter,
   Message,
   MessageImage,
+  SubagentActivityEvent,
   ToolAdapter,
   ToolDefinition,
   IStateStore,
@@ -85,6 +87,16 @@ export interface CodingAgentConfig {
    * boundary so a mid-round user message steers the next round instead of
    * restarting the turn. The GUI supplies it; CLI / subagents omit it. */
   takeSteerMessages?: EngineContext['takeSteerMessages'];
+  /** Live subagent activity feed (parallel multi-agent): a fanout owned by
+   * the host. CodingAgent publishes every orchestrator progress callback onto
+   * it, and the Harness hands it to the engine context, which subscribes a
+   * fresh reader per tool batch and re-emits the events as `SubagentActivity`.
+   * Omitting it keeps the legacy pure-side-channel behavior (CLI / nested
+   * runs). */
+  subagentEvents?: {
+    publish(event: SubagentActivityEvent): void;
+    subscribe(): AsyncQueueLike<SubagentActivityEvent>;
+  };
   /** E1.1 lesson reflector tuning; omitted = defaults. */
   reflection?: ReflectionConfig;
   subagents?: SubagentDefinition[];
@@ -142,7 +154,10 @@ export class CodingAgent {
       parentTools: this.toolRegistry,
       parentToolsDefsProvider: () => this.toolRegistry.getTools(),
       defaultBudget: config.budget,
-      progress: config.subagentProgress,
+      // Composite progress sink: the legacy UI sink keeps working unchanged,
+      // and every callback simultaneously lands on the event feed so the
+      // ENGINE event stream carries subagent interior activity (callId namespacing).
+      progress: this.makeSubagentProgressSink(config),
       // Subagent resume + bounded budget: propagate the parent session id and
       // (when a stateStore exists) so a re-delegated identical sub-task can
       // continue, and so a single subagent can't burn the whole parent budget.
@@ -238,8 +253,48 @@ export class CodingAgent {
       continueGuard: this.continueGuard,
       llmFor: config.llmFor,
       takeSteerMessages: config.takeSteerMessages,
+      subagentEvents: config.subagentEvents,
       reflection: config.reflection,
     });
+  }
+
+  /**
+   * Composite progress sink for the orchestrator: every callback forwards to
+   * the legacy UI sink unchanged (activity panel keeps its rich model) and
+   * simultaneously maps onto the lean shared event shape and publishes to the
+   * feed, so the engine event stream carries subagent interior activity
+   * namespaced by the delegation toolCallId. Subagents are one activity per
+   * emit — the mapping is 1:1, no aggregation.
+   */
+  private makeSubagentProgressSink(config: CodingAgentConfig): SubagentProgress {
+    const feed = config.subagentEvents;
+    const ui = config.subagentProgress;
+    if (!feed && !ui) return {};
+    const publish = (a: SubagentActivity, kind: SubagentActivityEvent['kind']): void => {
+      feed?.publish({
+        callId: a.callId,
+        agentName: a.agentName,
+        agentRole: a.agentRole,
+        kind,
+        state: a.state,
+        toolName: a.toolName,
+        toolState: a.toolState,
+        toolArgsHint: a.toolTrace?.find((t) => t.name === a.toolName)?.args,
+        lifecycle: a.lifecycle,
+        success: a.success,
+        error: a.error,
+        summary: a.inputSnippet,
+        durationMs: a.durationMs,
+        tokensUsed: a.tokensUsed,
+      });
+    };
+    return {
+      onStart: (a) => { publish(a, 'start'); ui?.onStart?.(a); },
+      onState: (a) => { publish(a, 'state'); ui?.onState?.(a); },
+      onTool: (a) => { publish(a, 'tool'); ui?.onTool?.(a); },
+      onDone: (a) => { publish(a, 'done'); ui?.onDone?.(a); },
+      onError: (a) => { publish(a, 'error'); ui?.onError?.(a); },
+    };
   }
 
   /** Analyze a user prompt to determine complexity and optionally generate a plan. */

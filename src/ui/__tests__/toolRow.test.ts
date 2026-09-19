@@ -1,7 +1,7 @@
 // src/ui/__tests__/toolRow.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine, isSubagentTool } from '../toolRow';
+import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine, isSubagentTool, formatSubagentTraceLine } from '../toolRow';
 import { invalidateConfigCache, STORAGE_KEY } from '../config';
 import type { GeneratedImage } from '../../shared/types';
 
@@ -819,6 +819,111 @@ describe('subagent delegations read as agents, not tool calls (2026-09-17)', () 
       expect((summary.children as any[]).some(
         (el) => el.className === 'tool-row-agent-badge',
       )).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('formatSubagentTraceLine (delegation card interior trace)', () => {
+  it('renders start / tool / done / error as one human line each', () => {
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'start', summary: 'review the diff for off-by-one' }))
+      .toBe('▶ code_reviewer 接活：review the diff for off-by-one');
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'start' }))
+      .toBe('▶ code_reviewer 开工');
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'tool', toolName: 'read_file', toolState: 'running', toolArgsHint: 'src/a.ts' }))
+      .toBe('→ read_file src/a.ts');
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'tool', toolName: 'read_file', toolState: 'completed' }))
+      .toBe('✓ read_file 完成');
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'done', success: true, durationMs: 1500 }))
+      .toBe('✓ code_reviewer 交付 · 用时 1.5s');
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'error', error: 'budget exhausted' }))
+      .toBe('✗ code_reviewer 中断：budget exhausted');
+  });
+
+  it('clips long asks and drops contentless kinds', () => {
+    const longAsk = 'x'.repeat(200);
+    const line = formatSubagentTraceLine({ callId: 'c1', agentName: 'code_editor', kind: 'start', summary: longAsk })!;
+    expect(line.length).toBeLessThan(100);
+    expect(line.endsWith('…')).toBe(true);
+    // THINK/OBSERVE state churn says nothing the tool lines don't — skipped.
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_editor', kind: 'state', state: 'THINK' })).toBeNull();
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_editor', kind: 'tool', toolState: 'running' })).toBeNull();
+  });
+});
+
+describe('finalizeToolRow subagentTrace (live lines survive the result wipe)', () => {
+  function textOf(el: any): string {
+    return Array.from(el.childNodes).map((c: any) => c.textContent ?? '').join('');
+  }
+  function streamLines(row: ReturnType<typeof createToolRow>): any[] {
+    return Array.from((row.resultEl as any).children).filter((c: any) =>
+      String(c.className).includes('tool-row-stream-line'));
+  }
+
+  it('re-renders the trace after the wipe, before the final output', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('code_reviewer', { prompt: 'review auth.ts' });
+      finalizeToolRow(row, {
+        success: true,
+        duration: 4200,
+        resultText: 'LGTM with 2 suggestions',
+        subagentTrace: [
+          '▶ code_reviewer 接活：review auth.ts',
+          '→ read_file src/auth.ts',
+          '✓ read_file 完成',
+          '✓ code_reviewer 交付 · 用时 4.2s',
+        ],
+      });
+      const lines = streamLines(row);
+      expect(lines.map((l) => textOf(l))).toEqual([
+        '▶ code_reviewer 接活：review auth.ts',
+        '→ read_file src/auth.ts',
+        '✓ read_file 完成',
+        '✓ code_reviewer 交付 · 用时 4.2s',
+      ]);
+      // The final body renders AFTER the trace (trace first = run narrative).
+      // (The fake DOM's textContent setter swallows text into a scalar, so the
+      // <pre> body is asserted by presence + position, not by its text.)
+      const body = Array.from((row.resultEl as any).children).filter((c: any) => c.tagName === 'PRE');
+      expect(body).toHaveLength(1);
+      expect(Array.from((row.resultEl as any).children).indexOf(lines[3]))
+        .toBeLessThan(Array.from((row.resultEl as any).children).indexOf(body[0]));
+      // The live-stream counter is reset to the re-rendered count, honest for
+      // any later appendToolStreamLine (a retried delegation on the same row).
+      expect(Number(row.resultEl.dataset.streamLines)).toBe(4);
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps failed trace lines on the stderr surface', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('bash_executor', { command: 'bun test' });
+      finalizeToolRow(row, {
+        success: false,
+        duration: 800,
+        resultText: 'subagent failed',
+        subagentTrace: ['→ read_file a.ts', '✗ bash_executor 中断：timeout'],
+      });
+      const lines = streamLines(row);
+      expect(String(lines[0].className)).toBe('tool-row-stream-line');
+      expect(String(lines[1].className)).toBe('tool-row-stream-line stderr');
+    } finally {
+      restore();
+    }
+  });
+
+  it('caps the re-rendered trace like the live stream', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('code_reviewer', { prompt: 'review' });
+      const flood = Array.from({ length: MAX_LIVE_STREAM_LINES + 50 }, (_, i) => `→ tool_${i}`);
+      finalizeToolRow(row, { success: true, duration: 10, resultText: 'done', subagentTrace: flood });
+      expect(streamLines(row)).toHaveLength(MAX_LIVE_STREAM_LINES);
+      expect(Number(row.resultEl.dataset.streamLines)).toBe(MAX_LIVE_STREAM_LINES);
     } finally {
       restore();
     }

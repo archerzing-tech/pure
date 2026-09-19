@@ -128,6 +128,10 @@ export interface HarnessConfig {
    *  boundary so user messages typed mid-round steer the next round instead of
    *  restarting the turn. Omitted = no steering channel (CLI / subagents). */
   takeSteerMessages?: EngineContext['takeSteerMessages'];
+  /** Live subagent activity feed (parallel multi-agent): the engine subscribes
+   *  a reader per tool batch and re-emits the events as `SubagentActivity`.
+   *  Omitted = silent tools (CLI / nested subagent runs), as before. */
+  subagentEvents?: EngineContext['subagentEvents'];
   /** E1.1 lesson reflector tuning; omitted = defaults (enabled, 20/day,
    * multi-step threshold 3 tool calls). */
   reflection?: ReflectionConfig;
@@ -199,6 +203,8 @@ export class Harness {
       llmFor: this.config.llmFor,
       // Mid-run steering: the engine drains this at each THINK boundary.
       takeSteerMessages: this.config.takeSteerMessages,
+      // Live subagent interior events, re-emitted during tool batches.
+      subagentEvents: this.config.subagentEvents,
       tools: this.config.tools,
       toolsDefs: this.currentToolsDefs(),
       toolsDefsProvider: this.config.toolsDefsProvider,

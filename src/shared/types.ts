@@ -214,6 +214,16 @@ export interface EngineContext {
    *  assistant tool_call and its result) — and reconciles it in the very next
    *  reasoning round. Return-and-clear; absent ⇒ no steering channel. */
   takeSteerMessages?: () => Message[];
+  /**
+   * Live subagent interior activity as FIRST-CLASS engine events (2026-09-19).
+   * CodingAgent maps the orchestrator's progress-sink callbacks onto this
+   * feed; during each tool-execution batch the engine subscribes a reader and
+   * re-emits everything as `SubagentActivity` events, namespaced by the
+   * delegation toolCallId (`callId`). GUI/CLI/evals therefore see what each
+   * parallel subagent is doing without the ephemeral side channel. Absent ⇒
+   * no subagent events (CLI, nested subagent runs) — behavior unchanged.
+   */
+  subagentEvents?: { subscribe(): AsyncQueueLike<SubagentActivityEvent> };
   tools?: ToolAdapter;
   toolsDefs: ToolDefinition[];
   /** Recompute the LLM-visible tool list before each THINK iteration so
@@ -455,6 +465,40 @@ export interface IMemoryStore {
 }
 
 // EngineEvent union
+
+/** The reader the engine pulls subagent events from during a tool batch
+ * (shared/asyncQueue.ts AsyncQueue conforms; spelled as an interface so
+ * shared/types.ts does not import the implementation). */
+export interface AsyncQueueLike<T> extends AsyncIterableIterator<T> {
+  drainAvailable(): T[];
+  close(): void;
+}
+
+/** One subagent interior event riding the ENGINE event stream (first-class,
+ * persisted-adjacent, consumed by GUI/CLI/evals alike). `callId` is the
+ * delegation tool call that spawned the subagent — the namespace key that
+ * maps events back to the right transcript card. Lean on purpose: the rich
+ * activity-panel model stays in coding-agent/SubagentOrchestrator. */
+export interface SubagentActivityEvent {
+  /** Delegation toolCallId that spawned this subagent. */
+  callId: string;
+  agentName: string;
+  agentRole?: string;
+  kind: 'start' | 'state' | 'tool' | 'done' | 'error';
+  state?: string;
+  /** The tool the subagent invoked (kind 'tool'). */
+  toolName?: string;
+  toolState?: 'running' | 'completed';
+  toolArgsHint?: string;
+  lifecycle?: string;
+  success?: boolean;
+  error?: string;
+  /** Truncated delegated ask (args.prompt/task/…) for context on the line. */
+  summary?: string;
+  durationMs?: number;
+  tokensUsed?: number;
+}
+
 export type EngineEvent =
   | { type: 'TokenDelta'; payload: { content: string; stateId: string; isToolCall: boolean; toolCallBuffer?: string; toolCallName?: string; toolCallId?: string }; timestamp: number }
   | { type: 'ToolStarted'; payload: { toolName: string; toolCallId: string; toolCallArgs?: string }; timestamp: number }
@@ -477,6 +521,12 @@ export type EngineEvent =
   // chat surface; this event lets tests and observers pin down the round
   // where steering took effect.
   | { type: 'SteerInjected'; payload: { count: number; turnNumber: number }; timestamp: number }
+  // Live subagent interior activity (parallel multi-agent): forwarded from the
+  // orchestrator's progress sink through ctx.subagentEvents while the engine
+  // awaits the tool batch, namespaced by the delegation toolCallId. Between a
+  // delegation's ToolStarted and its ToolResult the conversation card can show
+  // what the subagent is actually doing instead of a silent spinner.
+  | { type: 'SubagentActivity'; payload: SubagentActivityEvent; timestamp: number }
   | { type: 'Error'; payload: { code: string; message: string; stateType: AgentStateType; recoverable: boolean; recoveryAction?: 'retry' | 'reflect' | 'skip' | 'terminate' }; timestamp: number }
   | { type: 'Completed'; payload: { finalOutput?: string; isComplete: boolean; interrupted: boolean; turnCount: number; messages?: Message[]; usage?: TokenUsage; verification?: VerificationSummary }; timestamp: number }
   | { type: 'Interrupted'; payload: { reason: string; lastState?: AgentStateType; completedSteps: string[]; messages?: Message[]; turnCount?: number }; timestamp: number };
