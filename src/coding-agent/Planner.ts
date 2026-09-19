@@ -268,14 +268,19 @@ export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
   };
 }
 
-/** Result of judging whether a mid-run insert is related to the current task. */
+/** Result of judging a mid-run insert against the current task.
+ *
+ * 插话重构：判定不再问"相关与否"，而是直接问"人看到这句话会怎么处理"——
+ * question 侧路回答、steer 顺路带上、goal-change 推翻重来、task 排队、
+ * chatter 会心一笑。Stop 不走 LLM（正则即可，停止等不起一次分类往返）。 */
+export type InsertionKind = 'question' | 'steer' | 'goal-change' | 'task' | 'chatter';
+
 export interface InsertionClassification {
-  /** True → fold into the current task & re-plan; False → queue as a separate task. */
-  related: boolean;
+  kind: InsertionKind;
   reason: string;
 }
 
-const INSERTION_CLASSIFY_PROMPT = `You decide whether a NEW user message, sent while an agent is ALREADY working on a task, is RELATED to that task or NOT.
+const INSERTION_CLASSIFY_PROMPT = `You route a NEW user message that arrives WHILE an agent is already mid-task. Pick what a competent human colleague would do with it — the two hard rules: the user's words must never be dropped, and work must never restart without a real reason.
 
 The current task the agent is working on:
 <current_task>
@@ -287,19 +292,23 @@ The new message the user just inserted mid-run:
 {{PROMPT}}
 </new_message>
 
-Judgment:
-- RELATED: the new message changes, refines, constrains, fixes, or directly extends the current task — e.g. a tweak to the deliverable being built ("把首页改成深色"), a correction, an added requirement, a comment about the exact file/feature in progress.
-- UNRELATED: the new message is a separate, independent request that does not touch the current task — e.g. a brand-new question, a lookup, a different file/feature not being worked on, a whole different task.
+Categories (pick exactly one):
+- "question": the user asks something and expects an answer NOW — a status check ("跑完了吗", "现在到哪了"), a request for explanation, a decision only they can make. Answering must not disturb the running task.
+- "steer": the message refines, corrects, or extends the CURRENT task without overturning it — a small tweak ("记得跑测试", "文案再口语一点"), a constraint or caution, extra context, a related small addition. The agent should take it into account at its very next step and keep going.
+- "goal-change": the user overturns the current direction — replace the goal/approach/output, undo what was built, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…").
+- "task": an independent piece of work that does not touch the current task — another file, another feature, a separate errand. It should wait its turn as a new task, not interrupt.
+- "chatter": small talk, thanks, reactions, filler ("哈哈", "好的", "辛苦了", "+1"). Nothing to act on.
 
 Return ONLY one JSON object:
-{"related":true|false,"reason":"<one short line>"}`;
+{"kind":"question|steer|goal-change|task|chatter","reason":"<one short line>"}`;
 
 /**
- * Lightweight single-call judgment of whether a message the user inserts while
- * the agent is mid-run is related to the current task. Mirrors
- * inferSemanticRoute's (signal + timeout + JSON-parse) shape. On any failure,
- * timeout, or parse miss it defaults to RELATED so the new input is never
- * silently dropped — folding it in lets the model reconcile it during re-plan.
+ * Lightweight single-call routing of a message the user inserts while the
+ * agent is mid-run. Mirrors inferSemanticRoute's (signal + timeout + JSON-
+ * parse) shape. On any failure, timeout, or parse miss it falls back to
+ * "steer": the message always reaches the engine (never dropped), and the
+ * model reconciles it in the next round — the conservative choice is to keep
+ * working with more information, not to abort.
  */
 export async function classifyInsertion(
   llm: LLMAdapter,
@@ -309,7 +318,7 @@ export async function classifyInsertion(
   images?: MessageImage[],
   timeoutMs = 8_000,
 ): Promise<InsertionClassification> {
-  const fallback: InsertionClassification = { related: true, reason: 'classification unavailable; treated as related' };
+  const fallback: InsertionClassification = { kind: 'steer', reason: 'classification unavailable; delivered as a steer' };
   if (!prompt.trim() || signal?.aborted) return fallback;
   const system = INSERTION_CLASSIFY_PROMPT
     .replace('{{CONTEXT}}', context.slice(0, 3_200))
@@ -318,7 +327,8 @@ export async function classifyInsertion(
     { role: 'system', content: system },
     { role: 'user', content: prompt, images },
   ];
-  const parsed = await streamUntilParsed<{ related?: unknown; reason?: unknown }>(
+  const KINDS: readonly string[] = ['question', 'steer', 'goal-change', 'task', 'chatter'];
+  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown }>(
     llm,
     request,
     signal,
@@ -327,15 +337,15 @@ export async function classifyInsertion(
       const match = raw.match(/\{[\s\S]*\}/);
       if (!match) return null;
       try {
-        const value = JSON.parse(match[0]) as { related?: unknown; reason?: unknown };
-        return value && typeof value.related === 'boolean' ? value : null;
+        const value = JSON.parse(match[0]) as { kind?: unknown; reason?: unknown };
+        return value && typeof value.kind === 'string' && KINDS.includes(value.kind) ? value : null;
       } catch {
         return null;
       }
     },
   );
-  if (parsed && typeof parsed.related === 'boolean') {
-    return { related: parsed.related, reason: typeof parsed.reason === 'string' ? parsed.reason : '' };
+  if (parsed && typeof parsed.kind === 'string' && KINDS.includes(parsed.kind)) {
+    return { kind: parsed.kind as InsertionKind, reason: typeof parsed.reason === 'string' ? parsed.reason : '' };
   }
   return fallback;
 }

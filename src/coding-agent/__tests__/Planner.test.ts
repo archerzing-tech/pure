@@ -586,9 +586,9 @@ describe('detectFictionIntent', () => {
   });
 });
 
-describe('classifyInsertion', () => {
+describe('classifyInsertion — 插话重构：五分类路由', () => {
   /** Build an LLMAdapter whose stream() delivers the given content (the
-   * classification now consumes the stream incrementally). */
+   * classification consumes the stream incrementally). */
   function mockLlm(content: string): LLMAdapter {
     const stream = async function* (_messages: Message[], _tools: unknown[], _signal?: AbortSignal) {
       const mid = Math.max(1, Math.floor(content.length / 2));
@@ -598,31 +598,51 @@ describe('classifyInsertion', () => {
     return { stream } as unknown as LLMAdapter;
   }
 
-  it('returns related true for a related insert', async () => {
-    const cls = await classifyInsertion(mockLlm('{"related":true,"reason":"tweak to the page being built"}'), '正在构建一个网页', '把首页改成深色');
-    expect(cls.related).toBe(true);
-    expect(cls.reason).toContain('tweak');
+  it('routes a status question to question', async () => {
+    const cls = await classifyInsertion(mockLlm('{"kind":"question","reason":"status check"}'), '正在构建一个网页', '现在跑到哪了？');
+    expect(cls.kind).toBe('question');
+    expect(cls.reason).toContain('status');
   });
 
-  it('returns related false for an unrelated insert', async () => {
-    const cls = await classifyInsertion(mockLlm('{"related":false,"reason":"separate lookup"}'), '正在构建一个网页', '查一下北京的天气');
-    expect(cls.related).toBe(false);
+  it('routes a small tweak to steer', async () => {
+    const cls = await classifyInsertion(mockLlm('{"kind":"steer","reason":"constraint on current task"}'), '正在构建一个网页', '记得跑测试');
+    expect(cls.kind).toBe('steer');
   });
 
-  it('defaults to related when the model output cannot be parsed', async () => {
+  it('routes an independent request to task', async () => {
+    const cls = await classifyInsertion(mockLlm('{"kind":"task","reason":"separate lookup"}'), '正在构建一个网页', '查一下北京的天气');
+    expect(cls.kind).toBe('task');
+  });
+
+  it('routes small talk to chatter', async () => {
+    const cls = await classifyInsertion(mockLlm('{"kind":"chatter","reason":"filler"}'), 'context', '哈哈 辛苦了');
+    expect(cls.kind).toBe('chatter');
+  });
+
+  it('routes an overturn to goal-change', async () => {
+    const cls = await classifyInsertion(mockLlm('{"kind":"goal-change","reason":"user replaced the approach"}'), 'context', '别用方案A了，换一个思路');
+    expect(cls.kind).toBe('goal-change');
+  });
+
+  it('rejects an unknown kind and falls back to steer', async () => {
+    const cls = await classifyInsertion(mockLlm('{"kind":"banana","reason":"junk"}'), 'context', 'anything');
+    expect(cls.kind).toBe('steer'); // never drop the user's input
+  });
+
+  it('falls back to steer when the model output cannot be parsed', async () => {
     const cls = await classifyInsertion(mockLlm('not json at all'), 'context', 'anything');
-    expect(cls.related).toBe(true); // never drop the user's input
+    expect(cls.kind).toBe('steer'); // deliver the words, keep the work running
   });
 
-  it('defaults to related when the LLM throws', async () => {
+  it('falls back to steer when the LLM throws', async () => {
     const bad = { stream: async function* () { throw new Error('boom'); } } as unknown as LLMAdapter;
     const cls = await classifyInsertion(bad, 'context', 'anything');
-    expect(cls.related).toBe(true);
+    expect(cls.kind).toBe('steer');
   });
 
-  it('returns related true for an empty prompt (no-op fallback)', async () => {
-    const cls = await classifyInsertion(mockLlm('{"related":false}'), 'context', '');
-    expect(cls.related).toBe(true);
+  it('falls back to steer for an empty prompt (no-op fallback)', async () => {
+    const cls = await classifyInsertion(mockLlm('{"kind":"chatter"}'), 'context', '');
+    expect(cls.kind).toBe('steer');
   });
 });
 
