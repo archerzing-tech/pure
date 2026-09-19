@@ -44,7 +44,7 @@ Pure is not just a chat window with shell access. Its unique design is the combi
 - **上下文管理独立于任务复杂度** — 自动 / 手动压缩、可检查、可逆；tool-call 组原子保留，provider 请求永远合法；展示层转录与模型上下文分离，不会被展示内容污染下一次请求。
 - **GUI 与 CLI 共享同一套决策** — `requestWorkflow` / `PromptAssembler` / `adaptiveControl` 一次编译、两个表面一致，不会 GUI 一套判断、CLI 另一套判断。
 - **本地优先 + 隐私** — 提示词可观测性只记 hash / 长度、不存原文；API key 走 Rust 中转，不进 JS 上下文；web 结果缓存到本地并在 CLI / GUI 间共享。
-- **可复现的评测基线** — 三个确定性的 bugfix / feature / refactor fixture + 真实 Bun 验证命令，作为每次发布的回归门。
+- **可复现的评测基线** — 13 个确定性 fixture（bugfix / feature / refactor / multi-step / recovery / guardrail / long-context，含 4 个困难组）+ 真实 Bun 验证命令，作为每次发布的回归门；真实 provider 的成绩与成本记在 `evals/BASELINE.md`。
 
 **独特之处 / What's unique**
 
@@ -148,7 +148,7 @@ Pure includes a local-first observability path for prompt assembly and agent run
 
 ### 1.8 Real coding-task evaluation baseline
 
-The repository includes three deterministic bugfix/feature/refactor fixtures, isolated per task in disposable workspaces and checked by real Bun verification commands. Run without `--agent` for the `0/3` control sanity baseline, or run the real CodingAgent executor against a provider:
+The repository includes 13 deterministic fixtures (bugfix / feature / refactor / multi-step / recovery / guardrail / long-context, four of them a hard tier), isolated per task in disposable workspaces and checked by real Bun verification commands. Run without `--agent` for the `0/13` control sanity baseline, or run the real CodingAgent executor against a provider:
 
 ```bash
 bun run eval:baseline
@@ -506,7 +506,7 @@ pure --prompt-on-tool "Run the migration"
 ### Coding-task evaluation
 
 ```bash
-bun run eval:baseline                                      # control baseline (expected 0/3)
+bun run eval:baseline                                      # control baseline (expected 0/13)
 PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent deepseek-openai --strict
 PURE_EVAL_TRACE=evals/traces.jsonl bun run eval:baseline -- --agent deepseek-openai
 ```
