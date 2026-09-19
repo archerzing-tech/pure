@@ -9,6 +9,7 @@ import {
   formatDuration,
   formatPercent,
   formatSteps,
+  renderBaselineSection,
   renderErrorClusters,
   renderExperienceList,
   renderObservationStats,
@@ -24,6 +25,7 @@ import type { SubagentAdvice } from '../../shared/subagentAdvisory';
 import type { MemoryEntry } from '../../adapter/memory/IMemoryStore';
 import { buildEvolutionDashboard, startOfLocalDay, type TrendBucket } from '../../shared/evolutionDashboard';
 import { parsePromptObservations, type AgentRunObservation, type PromptObservation } from '../../shared/promptObservability';
+import { BASELINE_SUITE_VERSION, type BaselineSnapshot } from '../../shared/baseline';
 
 const NOW = startOfLocalDay(Date.now()) + 12 * 3600 * 1000;
 
@@ -436,5 +438,60 @@ describe('renderObservationStats', () => {
   it('says so when the tail read was truncated', () => {
     const html = renderObservationStats(stats, { available: true, totalBytes: 70_000_000, readBytes: 16_000_000, truncated: true, path: '/p/app.jsonl' }, NOW);
     expect(html).toContain('evo-stat-note');
+  });
+});
+
+describe('renderBaselineSection', () => {
+  function snapshot(overrides: Partial<BaselineSnapshot> = {}): BaselineSnapshot {
+    return {
+      suiteVersion: BASELINE_SUITE_VERSION,
+      fixtureHash: 'a1c00907',
+      generatedAt: '2026-09-19T00:00:00.000Z',
+      rows: [
+        {
+          provider: 'deepseek-openai',
+          model: 'deepseek-v4-flash',
+          gitRevision: 'abc1234',
+          passAt1: 15,
+          taskCount: 15,
+          meanDurationMs: 39_500,
+          estimatedCostUsd: 0.0184,
+          promptTokens: 1_085_574,
+          cacheHitTokens: 1_040_000,
+          report: 'evals/deepseek.v5.json',
+        },
+      ],
+      excluded: [],
+      ...overrides,
+    };
+  }
+
+  it('renders the release-scoped scoreboard with revision and cache rate', () => {
+    const html = renderBaselineSection(snapshot());
+    expect(html).toContain('deepseek-v4-flash');
+    expect(html).toContain('15/15');
+    expect(html).toContain('39.5s');
+    expect(html).toContain('$0.018');
+    expect(html).toContain('abc1234');
+    expect(html).toContain('95.8%');
+    expect(html).not.toContain('evo-stat-note');
+  });
+
+  it('shouts when the snapshot is from an older suite', () => {
+    const html = renderBaselineSection(snapshot({ suiteVersion: 'pure-coding-baseline-v4' }));
+    expect(html).toContain('evo-stat-note');
+    expect(html).toContain('pure-coding-baseline-v4');
+    expect(html).toContain(BASELINE_SUITE_VERSION);
+  });
+
+  it('lists excluded reports from other suites', () => {
+    const html = renderBaselineSection(snapshot({ excluded: [{ report: 'evals/old.v4.json', suiteVersion: 'pure-coding-baseline-v4' }] }));
+    expect(html).toContain('已排除 1 份');
+  });
+
+  it('explains an empty snapshot instead of rendering an empty table', () => {
+    const html = renderBaselineSection(snapshot({ rows: [] }));
+    expect(html).toContain('evo-empty');
+    expect(html).not.toContain('evo-table-wrap');
   });
 });

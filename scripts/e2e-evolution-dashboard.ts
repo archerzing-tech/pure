@@ -83,7 +83,7 @@ const MEMORY_KEY = 'pure_memories_v2';
 const SEEDED_ID = 'e2e-procedure-1';
 const SEEDED_CONTENT = 'E2E seeded procedure: search before editing';
 /** 未翻译 key 会以 `evolution.xxx` 字面量出现在页面上。 */
-const RAW_KEY_PATTERN = /evolution\.(title|desc|chart|tile|errors|experience|stats|table|roles|dimension|level|strategy|advice)/;
+const RAW_KEY_PATTERN = /evolution\.(title|desc|chart|tile|errors|experience|stats|table|roles|dimension|level|strategy|advice|baseline|window|range)/;
 
 /**
  * 种给仪表盘的观测记录：两条 agent_run，五个策略维度各有两个档位 —— 逐维
@@ -307,7 +307,7 @@ try {
     const page = document.querySelector('.settings-page[data-page="evolution"]');
     const tiles = page?.querySelectorAll('#evolution-totals .evo-tile').length ?? 0;
     const charts = page?.querySelectorAll('#evolution-charts .evo-chart-card').length ?? 0;
-    const sections = ['#evolution-errors', '#evolution-strategy', '#evolution-advice', '#evolution-experience', '#evolution-stats']
+    const sections = ['#evolution-errors', '#evolution-strategy', '#evolution-advice', '#evolution-experience', '#evolution-stats', '#evolution-baseline']
       .every((sel) => (page?.querySelector(sel)?.childElementCount ?? 0) > 0);
     const text = page?.textContent ?? "";
     return {
@@ -336,6 +336,26 @@ try {
     throw err;
   }
   log(`[e2e] empty states ok — errors="${emptyStates.errors}" stats="${emptyStates.stats}"`);
+
+  // ── 2b. 基线区块：快照是随发布提交进来的静态数据（浏览器模式也有内容）──
+  // 只断言"要么真表格、要么明确说为什么空"，不断言必须有多少行 —— 行数取决于
+  // 最近一次 eval:snapshot 时仓库里有哪些真实报告。
+  const baseline = await evaluate(`(() => {
+    const el = document.querySelector('#evolution-baseline');
+    const ok = !!el && (!!el.querySelector('.evo-table-wrap') || !!el.querySelector('.evo-empty'));
+    return {
+      ok,
+      suite: (el?.textContent ?? '').includes('pure-coding-baseline-v5'),
+      rows: el?.querySelectorAll('.evo-table tbody tr').length ?? 0,
+      text: (el?.textContent ?? '').slice(0, 200),
+    };
+  })()`);
+  if (!baseline.ok || !baseline.suite) {
+    const err = new Error(`baseline section did not render: ${JSON.stringify(baseline)}`) as StepFailure;
+    err.step = 'baseline-section';
+    throw err;
+  }
+  log(`[e2e] baseline section ok — ${baseline.rows} provider row(s), suite tag present`);
 
   // ── 3. 种下的 procedure 出现在经验区，且删除按钮就位 ──
   await waitFor(`(() => {

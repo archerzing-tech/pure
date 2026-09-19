@@ -44,7 +44,7 @@ Pure 不只是一个可以调用 Shell 的聊天窗口。它的独特性来自�
 - **上下文管理独立于任务复杂度** — 自动 / 手动压缩、可检查、可逆；tool-call 组原子保留，provider 请求永远合法；展示层转录与模型上下文分离。
 - **GUI 与 CLI 共享同一套决策** — `requestWorkflow` / `PromptAssembler` / `adaptiveControl` 一次编译、两个表面一致。
 - **本地优先 + 隐私** — 提示词可观测性只记 hash / 长度、不存原文；API key 走 Rust 中转；web 结果缓存到本地并在 CLI / GUI 间共享。
-- **可复现的评测基线** — 13 个确定性 fixture（含 4 个困难组）+ 真实 Bun 验证命令，作为每次发布的回归门；真实 provider 的成绩与成本记在 `evals/BASELINE.md`。
+- **可复现的评测基线** — 15 个确定性 fixture（含 4 个困难组 + 2 个极端组）+ 真实 Bun 验证命令，作为每次发布的回归门；真实 provider 的成绩与成本记在 `evals/BASELINE.md`，并由 `eval:snapshot` 同步到设置页的进化仪表盘。
 
 **独特之处**
 
@@ -142,7 +142,7 @@ Pure 增加了本地优先的 observability 链路，用于观察 Prompt 组装�
 
 ### 1.8 真实编码任务评测基线
 
-仓库内置 13 个确定性 fixture（bugfix / feature / refactor / multi-step / recovery / guardrail / long-context，其中 4 个困难组），每个任务都在独立临时工作区中执行，并通过真实 Bun 验证命令评分。不带 `--agent` 时运行 `0/13` control sanity baseline；也可以使用真实 CodingAgent executor 连接 provider：
+仓库内置 15 个确定性 fixture（bugfix / feature / refactor / multi-step / recovery / guardrail / long-context / repo-scale / performance，其中 4 个困难组 + 2 个极端组），每个任务都在独立临时工作区中执行，并通过真实 Bun 验证命令评分。不带 `--agent` 时运行 `0/15` control sanity baseline；也可以使用真实 CodingAgent executor 连接 provider：
 
 ```bash
 bun run eval:baseline
@@ -492,7 +492,7 @@ pure --prompt-on-tool "执行这次迁移"
 ### 编码任务评测
 
 ```bash
-bun run eval:baseline                                      # control baseline（预期 0/13）
+bun run eval:baseline                                      # control baseline（预期 0/15）
 PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent deepseek-openai --strict
 PURE_EVAL_TRACE=evals/traces.jsonl bun run eval:baseline -- --agent deepseek-openai
 ```

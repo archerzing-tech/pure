@@ -36,6 +36,8 @@ describe('coding task baseline', () => {
   // Fixture sanity: every built-in task must FAIL its verification from the
   // seeded state alone. A fixture whose control run passes cannot measure
   // anything — it would report 1/1 for a no-op agent.
+  // 整个 control 套件的上限：故意跑得宽（不少 fixture 是几秒级的真实验证命令，
+  // 性能 fixture 的种子实现还要跑到验收超时），所以不能吃 bun 的 5s 默认值。
   it('control run fails every built-in fixture', async () => {
     const report = await evaluateCodingTaskSuite();
     expect(report.taskCount).toBe(CODING_TASK_FIXTURES.length);
@@ -44,7 +46,7 @@ describe('coding task baseline', () => {
       expect(task.verificationPassed).toBe(false);
       expect(task.verification[0]?.passed).toBe(false);
     }
-  });
+  }, 120_000);
 
   // Fixture sanity, the solvable half: a known-correct solution applied
   // without an LLM must pass every verification command. When this fails the
