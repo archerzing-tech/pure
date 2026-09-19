@@ -18,7 +18,20 @@ const notes = argv.includes('--notes');
 const withMemory = argv.includes('--with-memory');
 const compare = argv.includes('--compare');
 const agentFlag = argv.indexOf('--agent');
+// --model was documented in BASELINE.md's reproduce commands but never
+// actually parsed — following it verbatim silently ran the provider default
+// instead. Same precedence as the provider/model resolution everywhere else:
+// flag > env.
+const modelFlag = argv.indexOf('--model');
+const modelArg = modelFlag >= 0 && argv[modelFlag + 1] && !argv[modelFlag + 1].startsWith('--')
+  ? argv[modelFlag + 1]
+  : undefined;
 const traceFlag = argv.indexOf('--trace');
+// 9.3 — THINK-phase model override (same provider), flag or env.
+const thinkModelFlag = argv.indexOf('--think-model');
+const thinkModel = thinkModelFlag >= 0 && argv[thinkModelFlag + 1] && !argv[thinkModelFlag + 1].startsWith('--')
+  ? argv[thinkModelFlag + 1]
+  : process.env.PURE_EVAL_THINK_MODEL;
 const requestedAgent = agentFlag >= 0
   ? (argv[agentFlag + 1] && !argv[agentFlag + 1].startsWith('--') ? argv[agentFlag + 1] : process.env.PURE_EVAL_AGENT ?? 'deepseek-openai')
   : process.env.PURE_EVAL_AGENT;
@@ -30,7 +43,7 @@ const tracePath = traceFlag >= 0
 const traceStore = tracePath ? new FilePromptObservationStore(tracePath) : undefined;
 
 if ((reportFlag >= 0 && (!reportPath || reportPath.startsWith('--'))) || (traceFlag >= 0 && (!tracePath || tracePath.startsWith('--')))) {
-  console.error('Usage: bun run eval:baseline -- [--agent provider] [--report path] [--trace path] [--sanity] [--notes] [--with-memory] [--compare] [--keep-workspaces] [--strict]');
+  console.error('Usage: bun run eval:baseline -- [--agent provider] [--model model] [--think-model model] [--report path] [--trace path] [--sanity] [--notes] [--with-memory] [--compare] [--keep-workspaces] [--strict]');
   process.exit(2);
 }
 
@@ -121,7 +134,7 @@ if ((withMemory || compare) && !requestedAgent) {
 }
 
 let agent;
-let model = process.env.PURE_EVAL_MODEL;
+let model = modelArg ?? process.env.PURE_EVAL_MODEL;
 const numericEnv = (name: string): number | undefined => {
   const value = process.env[name];
   if (!value) return undefined;
@@ -152,6 +165,7 @@ if (requestedAgent) {
       qwenWorkspaceId: process.env.PURE_EVAL_QWEN_WORKSPACE_ID ?? process.env.DASHSCOPE_WORKSPACE_ID,
       baseURL: process.env.PURE_EVAL_BASE_URL,
       observability,
+      ...(thinkModel ? { thinkModel } : {}),
       ...(memoryStores ? { memory: await storeFor(task.id) } : {}),
       ...(hasEvaluationPromptBudget ? { promptBudget: { provider: requestedAgent, model: model!, ...evaluationPromptBudget } } : {}),
     });
@@ -160,6 +174,9 @@ if (requestedAgent) {
 const suiteMetadata = {
   provider: requestedAgent,
   model,
+  // 9.3 — record the routing so a mixed run is never mistaken for a plain
+  // single-model baseline row.
+  ...(thinkModel ? { thinkModel } : {}),
   promptVersion: process.env.PURE_EVAL_PROMPT_VERSION ?? (requestedAgent ? 'dynamic' : undefined),
   gitRevision: process.env.GIT_COMMIT ?? process.env.GITHUB_SHA,
   seed: process.env.PURE_EVAL_SEED,

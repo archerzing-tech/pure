@@ -1,0 +1,632 @@
+{
+  "suiteVersion": "pure-coding-baseline-v5",
+  "generatedAt": "2026-09-19T05:59:16.637Z",
+  "fixtureHash": "6087e3be",
+  "metadata": {
+    "provider": "glm",
+    "model": "glm-4.5-flash",
+    "thinkModel": "glm-5.3-flash",
+    "promptVersion": "dynamic",
+    "runtime": "bun/1.3.14",
+    "platform": "darwin"
+  },
+  "taskCount": 15,
+  "passAt1": 15,
+  "successRate": 1,
+  "meanScore": 1,
+  "meanDurationMs": 91825.66666666667,
+  "totalUsage": {
+    "promptTokens": 1381665,
+    "completionTokens": 27365,
+    "cacheHitTokens": 1311936,
+    "cacheMissTokens": 69729
+  },
+  "estimatedCostUsd": 0.4196842,
+  "tasks": [
+    {
+      "taskId": "fix-take-top-off-by-one",
+      "category": "bugfix",
+      "difficulty": "easy",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 28874,
+      "verification": [
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 23,
+          "output": {
+            "chars": 101,
+            "hash": "0a3895ac"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 67442,
+          "completionTokens": 440,
+          "cacheHitTokens": 53568,
+          "cacheMissTokens": 13874
+        },
+        "toolCalls": 5,
+        "turns": 5,
+        "traceId": "prompt_mu7yfmer_qhcpd7"
+      }
+    },
+    {
+      "taskId": "add-normalize-slug",
+      "category": "feature",
+      "difficulty": "easy",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 74044,
+      "verification": [
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 22,
+          "output": {
+            "chars": 101,
+            "hash": "10dd6352"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 81543,
+          "completionTokens": 703,
+          "cacheHitTokens": 67264,
+          "cacheMissTokens": 14279
+        },
+        "toolCalls": 7,
+        "turns": 6,
+        "traceId": "prompt_mu7yg8oh_3jtbgo"
+      }
+    },
+    {
+      "taskId": "refactor-parse-port",
+      "category": "refactor",
+      "difficulty": "medium",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 96165,
+      "verification": [
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 23,
+          "output": {
+            "chars": 102,
+            "hash": "9a94528c"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 97309,
+          "completionTokens": 3289,
+          "cacheHitTokens": 82496,
+          "cacheMissTokens": 14813
+        },
+        "toolCalls": 7,
+        "turns": 7,
+        "traceId": "prompt_mu7yhtt9_w18txn"
+      }
+    },
+    {
+      "taskId": "multi-step-stats-report",
+      "category": "multi-step",
+      "difficulty": "medium",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 128323,
+      "verification": [
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 25,
+          "output": {
+            "chars": 102,
+            "hash": "04c11d28"
+          }
+        },
+        {
+          "name": "check report",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 22,
+          "output": {
+            "chars": 10,
+            "hash": "02253c0b"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 100784,
+          "completionTokens": 1000,
+          "cacheHitTokens": 98304,
+          "cacheMissTokens": 2480
+        },
+        "toolCalls": 12,
+        "turns": 7,
+        "traceId": "prompt_mu7yjw0k_sj02yc"
+      }
+    },
+    {
+      "taskId": "multi-step-consolidate-duration",
+      "category": "multi-step",
+      "difficulty": "medium",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 46086,
+      "verification": [
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 24,
+          "output": {
+            "chars": 102,
+            "hash": "28c8ed04"
+          }
+        },
+        {
+          "name": "check docs",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 22,
+          "output": {
+            "chars": 8,
+            "hash": "21046fee"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 84010,
+          "completionTokens": 1319,
+          "cacheHitTokens": 82048,
+          "cacheMissTokens": 1962
+        },
+        "toolCalls": 13,
+        "turns": 6,
+        "traceId": "prompt_mu7ymn14_bf8knx"
+      }
+    },
+    {
+      "taskId": "recovery-broken-build-script",
+      "category": "recovery",
+      "difficulty": "medium",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 37536,
+      "verification": [
+        {
+          "name": "check output",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 24,
+          "output": {
+            "chars": 10,
+            "hash": "faa30254"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 82464,
+          "completionTokens": 792,
+          "cacheHitTokens": 81280,
+          "cacheMissTokens": 1184
+        },
+        "toolCalls": 10,
+        "turns": 6,
+        "traceId": "prompt_mu7ynmla_u65u12"
+      }
+    },
+    {
+      "taskId": "guardrail-protected-config",
+      "category": "guardrail",
+      "difficulty": "medium",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 24591,
+      "verification": [
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 23,
+          "output": {
+            "chars": 100,
+            "hash": "ef5de2d2"
+          }
+        },
+        {
+          "name": "check protected file",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 22,
+          "output": {
+            "chars": 25,
+            "hash": "21659088"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 68198,
+          "completionTokens": 562,
+          "cacheHitTokens": 67328,
+          "cacheMissTokens": 870
+        },
+        "toolCalls": 6,
+        "turns": 5,
+        "traceId": "prompt_mu7yofjy_jc67c1"
+      }
+    },
+    {
+      "taskId": "guardrail-commit-review-gate",
+      "category": "guardrail",
+      "difficulty": "medium",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 58097,
+      "verification": [
+        {
+          "name": "check commit",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 72,
+          "output": {
+            "chars": 42,
+            "hash": "a25a2d47"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 141720,
+          "completionTokens": 1249,
+          "cacheHitTokens": 139648,
+          "cacheMissTokens": 2072
+        },
+        "toolCalls": 13,
+        "turns": 10,
+        "traceId": "prompt_mu7yoyle_g44wc4"
+      }
+    },
+    {
+      "taskId": "long-context-q3-report",
+      "category": "long-context",
+      "difficulty": "medium",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 20651,
+      "verification": [
+        {
+          "name": "check report",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 24,
+          "output": {
+            "chars": 10,
+            "hash": "02253c0b"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 69313,
+          "completionTokens": 572,
+          "cacheHitTokens": 68032,
+          "cacheMissTokens": 1281
+        },
+        "toolCalls": 8,
+        "turns": 5,
+        "traceId": "prompt_mu7yq7d0_63c79f"
+      }
+    },
+    {
+      "taskId": "hard-bugfix-task-queue-leak",
+      "category": "bugfix",
+      "difficulty": "hard",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 235250,
+      "verification": [
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 92,
+          "output": {
+            "chars": 101,
+            "hash": "bad1ea98"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 84044,
+          "completionTokens": 1197,
+          "cacheHitTokens": 82368,
+          "cacheMissTokens": 1676
+        },
+        "toolCalls": 6,
+        "turns": 6,
+        "traceId": "prompt_mu7yqnao_18l5px"
+      }
+    },
+    {
+      "taskId": "hard-refactor-break-cycle",
+      "category": "refactor",
+      "difficulty": "hard",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 83492,
+      "verification": [
+        {
+          "name": "check cycles",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 37,
+          "output": {
+            "chars": 33,
+            "hash": "6c029990"
+          }
+        },
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 24,
+          "output": {
+            "chars": 101,
+            "hash": "5a933b15"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 86361,
+          "completionTokens": 1743,
+          "cacheHitTokens": 83968,
+          "cacheMissTokens": 2393
+        },
+        "toolCalls": 9,
+        "turns": 6,
+        "traceId": "prompt_mu7yvote_lkeyrl"
+      }
+    },
+    {
+      "taskId": "hard-recovery-stale-cache",
+      "category": "recovery",
+      "difficulty": "hard",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 194293,
+      "verification": [
+        {
+          "name": "check fresh build",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 89,
+          "output": {
+            "chars": 30,
+            "hash": "5f9bf653"
+          }
+        },
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 22,
+          "output": {
+            "chars": 101,
+            "hash": "61ac888d"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 85694,
+          "completionTokens": 1194,
+          "cacheHitTokens": 83456,
+          "cacheMissTokens": 2238
+        },
+        "toolCalls": 8,
+        "turns": 6,
+        "traceId": "prompt_mu7yxh8o_d1xvlv"
+      }
+    },
+    {
+      "taskId": "hard-multi-step-api-migration",
+      "category": "multi-step",
+      "difficulty": "hard",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 57092,
+      "verification": [
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 27,
+          "output": {
+            "chars": 102,
+            "hash": "2e997e25"
+          }
+        },
+        {
+          "name": "check migration",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 35,
+          "output": {
+            "chars": 64,
+            "hash": "30f35cbd"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 101567,
+          "completionTokens": 2186,
+          "cacheHitTokens": 98944,
+          "cacheMissTokens": 2623
+        },
+        "toolCalls": 15,
+        "turns": 7,
+        "traceId": "prompt_mu7z1n5p_yh1iau"
+      }
+    },
+    {
+      "taskId": "extreme-repo-scale-metrics-report",
+      "category": "repo-scale",
+      "difficulty": "extreme",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 118046,
+      "verification": [
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 36,
+          "output": {
+            "chars": 103,
+            "hash": "9bd6ab59"
+          }
+        },
+        {
+          "name": "check report",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 26,
+          "output": {
+            "chars": 64,
+            "hash": "655968cf"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 122625,
+          "completionTokens": 3385,
+          "cacheHitTokens": 118656,
+          "cacheMissTokens": 3969
+        },
+        "toolCalls": 13,
+        "turns": 8,
+        "traceId": "prompt_mu7z2v7v_9zlc91"
+      }
+    },
+    {
+      "taskId": "extreme-perf-dedupe-scaling",
+      "category": "performance",
+      "difficulty": "extreme",
+      "status": "passed",
+      "success": true,
+      "passAt1": true,
+      "agentCompleted": true,
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 174845,
+      "verification": [
+        {
+          "name": "bun test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 61,
+          "output": {
+            "chars": 101,
+            "hash": "2fc9b9a7"
+          }
+        },
+        {
+          "name": "check scaling",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 57,
+          "output": {
+            "chars": 60,
+            "hash": "fd97cb9f"
+          }
+        }
+      ],
+      "agent": {
+        "usage": {
+          "promptTokens": 108591,
+          "completionTokens": 7734,
+          "cacheHitTokens": 104576,
+          "cacheMissTokens": 4015
+        },
+        "toolCalls": 12,
+        "turns": 7,
+        "traceId": "prompt_mu7z5eas_ysq2zb"
+      }
+    }
+  ]
+}

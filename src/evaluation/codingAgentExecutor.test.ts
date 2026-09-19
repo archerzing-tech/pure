@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { collectAgentRunEvents } from './codingAgentExecutor';
+import { collectAgentRunEvents, thinkPhaseModel } from './codingAgentExecutor';
 import type { EngineEvent } from '../shared/types';
 
 async function* events(...list: EngineEvent[]): AsyncIterable<EngineEvent> {
@@ -73,5 +73,21 @@ describe('evaluation run event collection', () => {
     const result = await collectAgentRunEvents(events(completed()));
     expect(result.fatalError).toBeUndefined();
     expect(result.completed).toBe(true);
+  });
+});
+
+describe('9.3 — thinkPhaseModel routing decision', () => {
+  it('routes THINK only when the override names a different model', () => {
+    expect(thinkPhaseModel({ model: 'glm-4.5-flash', thinkModel: 'glm-5.3-flash' })).toBe('glm-5.3-flash');
+  });
+
+  it('keeps the run single-adapter for the main model or whitespace', () => {
+    expect(thinkPhaseModel({ model: 'glm-4.5-flash', thinkModel: 'glm-4.5-flash' })).toBeUndefined();
+    expect(thinkPhaseModel({ model: 'glm-4.5-flash', thinkModel: '   ' })).toBeUndefined();
+    expect(thinkPhaseModel({ model: 'glm-4.5-flash' })).toBeUndefined();
+  });
+
+  it('trims a padded override', () => {
+    expect(thinkPhaseModel({ model: 'glm-4.5-flash', thinkModel: ' glm-5.3-flash ' })).toBe('glm-5.3-flash');
   });
 });
