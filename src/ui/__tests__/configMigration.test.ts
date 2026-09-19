@@ -310,3 +310,27 @@ describe('config v15 migration — authorization prompts off by default', () => 
     expect(optOut.configVersion).toBe(15);
   });
 });
+
+describe('phaseModels — 9.2 按阶段模型路由的加载清洗', () => {
+  it('keeps well-formed entries and trims whitespace', () => {
+    seedConfig({
+      provider: 'glm',
+      phaseModels: { think: '  glm-5.3 ', reflect: 'glm-4.5-flash' },
+    });
+    const cfg = loadConfig()!;
+    expect(cfg.phaseModels).toEqual({ think: 'glm-5.3', reflect: 'glm-4.5-flash' });
+  });
+
+  it('drops a corrupted shape instead of letting it reach the adapters', () => {
+    // phaseModels 只该有三字符串字段；存储层可能被手改坏（数组/数字/空对象）。
+    // 坏形状直接归 undefined —— 路由关掉，加载不炸。
+    seedConfig({ provider: 'glm', phaseModels: ['glm-5.3'] });
+    expect(loadConfig()!.phaseModels).toBeUndefined();
+
+    seedConfig({ provider: 'glm', phaseModels: { think: 42, reflect: null } });
+    expect(loadConfig()!.phaseModels).toBeUndefined();
+
+    seedConfig({ provider: 'glm', phaseModels: {} });
+    expect(loadConfig()!.phaseModels).toBeUndefined();
+  });
+});

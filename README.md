@@ -487,6 +487,13 @@ pure --resume session_1712345678901
 # Override provider/model per invocation
 pure --provider qwen --model qwen3-coder-next "Write a React hook for form validation"
 
+# Per-phase model routing (experimental): give individual phases their own
+# model on the SAME provider — the classic money saver is a strong model for
+# THINK and cheaper ones for wrap-ups and reflection. Flags win over the
+# phaseModels field in ~/.pure/config.json (the GUI's Settings → LLM section
+# writes the same field).
+pure --think-model deepseek-reasoner --reflect-model deepseek-v4-flash "Refactor the auth module"
+
 # REPL commands
 /exit       # leave
 /clear      # reset conversation context

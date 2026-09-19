@@ -14,6 +14,7 @@ import { bold, cyan, dim, green, red } from './termcolors';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
 import { autoDetectProvider, DEFAULT_CLI_AUTO_APPROVE, envKeyForProvider, hasAnyApiKeyEnv, loadConfig, mergeWizardConfig, resolveDefaultModel, resolveOverrideSecretKey, saveConfig, CONFIG_PATH } from './cliConfig';
 import type { CliArgs } from './cliConfig';
+import { mergePhaseModelConfig } from './shared/phaseModels';
 import { PROVIDER_ENV_HINT, PROVIDER_LABELS } from './cliAdapter';
 import { renderLogo, runOneShot, runRepl } from './cliRepl';
 
@@ -119,6 +120,15 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
     ...repeatableFlag(raw, 'mcp-exclude-prefix'),
   ];
 
+  // 9.2 — per-phase model routing (experimental): config.json phaseModels
+  // first, one-off --think-model / --handover-model / --reflect-model flags
+  // win per field (same precedence as provider/model).
+  const phaseModels = mergePhaseModelConfig(fileCfg?.phaseModels, {
+    think: flags['think-model'],
+    handover: flags['handover-model'],
+    reflect: flags['reflect-model'],
+  });
+
   return {
     args: {
       prompt: promptParts.join(' '),
@@ -127,6 +137,7 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
       providerOverrides: fileCfg?.providerOverrides,
       mcpServers,
       mcpExcludedPrefixes,
+      phaseModels,
     },
     command,
   };
