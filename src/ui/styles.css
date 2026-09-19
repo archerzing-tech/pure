@@ -4369,6 +4369,18 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 定宽控制列：setting-row 是 space-between 右对齐，若让"输入框+链接"的
+   * 自然宽度决定块宽，链接文字（随语言变化）就会把输入框的左缘推来推去，
+   * 上下行的输入框对不齐。固定总宽后左缘恒定；输入框填满除链接外的空间，
+   * 裸输入行（如 SearXNG 地址）套同一结构即天然对齐。 */
+  width: 300px;
+  min-width: 300px;
+  flex: 0 0 300px;
+}
+.key-field .setting-input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
 }
 
 .key-links {
