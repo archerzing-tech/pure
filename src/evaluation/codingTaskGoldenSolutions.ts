@@ -273,4 +273,94 @@ export async function emailReport(body: string): Promise<SendResult> {
 export const pushDigest = (body: string): Promise<SendResult> => sendMessage({ payload: body, retries: 3 });
 `, 'utf8');
   },
+  // 1.6 repo-scale — the one wrong file out of 45: nearest-rank instead of
+  // truncation (equal only when n*p lands exactly on a rank, which is exactly
+  // the case the 20-sample series hits).
+  'extreme-repo-scale-metrics-report': async (workspace) => {
+    await writeFile(join(workspace, 'src/aggregate/percentile.ts'), `import { assertNonEmpty } from '../util/guard';
+import { sortAscending } from '../util/sort';
+
+/** nearest-rank 百分位（口径见 docs/metrics.md）。 */
+export function percentile(values: readonly number[], p: number): number {
+  assertNonEmpty(values, 'percentile');
+  if (!(p > 0 && p <= 1)) throw new Error('percentile: p must be in (0, 1]');
+  const sorted = sortAscending(values);
+  const rank = Math.ceil(sorted.length * p);
+  return sorted[rank - 1]!;
+}
+`, 'utf8');
+  },
+  // 1.6 resource ceiling — bucket by normalized message, then a single sorted
+  // sweep per bucket turns the pairwise window test into an adjacent check.
+  // Same output, near-linear cost.
+  'extreme-perf-dedupe-scaling': async (workspace) => {
+    await writeFile(join(workspace, 'src/dedupe.ts'), `import { normalizeMessage } from './normalize';
+import type { DuplicateGroup, LogRecord } from './types';
+
+/** 两条记录时间戳相差不超过这个值就算同一时段。 */
+export const DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * 把每一批记录里互为重复的记录聚成组（规则见 docs/dedupe.md）。
+ *
+ * 先按规范化消息分桶，再把每个桶按时间排序做一次相邻扫描：同一个桶里的重复
+ * 关系是窗口上的链，链上传递等价于相邻两点在窗口内，于是两两判定就可以去掉。
+ */
+export function findDuplicateGroups(records: readonly LogRecord[]): DuplicateGroup[] {
+  const parent = records.map((_, index) => index);
+
+  function find(index: number): number {
+    let current = index;
+    while (parent[current] !== current) {
+      parent[current] = parent[parent[current]!]!;
+      current = parent[current]!;
+    }
+    return current;
+  }
+
+  function union(a: number, b: number): void {
+    const rootA = find(a);
+    const rootB = find(b);
+    if (rootA === rootB) return;
+    // 始终让较小的下标当代表，组的代表就是批里最早的那条记录。
+    if (rootA < rootB) parent[rootB] = rootA;
+    else parent[rootA] = rootB;
+  }
+
+  const buckets = new Map<string, number[]>();
+  for (let index = 0; index < records.length; index += 1) {
+    const key = normalizeMessage(records[index]!.message);
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(index);
+    else buckets.set(key, [index]);
+  }
+
+  for (const indexes of buckets.values()) {
+    if (indexes.length < 2) continue;
+    indexes.sort((a, b) => records[a]!.at - records[b]!.at);
+    for (let k = 1; k < indexes.length; k += 1) {
+      const current = indexes[k]!;
+      const previous = indexes[k - 1]!;
+      if (records[current]!.at - records[previous]!.at <= DUPLICATE_WINDOW_MS) union(current, previous);
+    }
+  }
+
+  const members = new Map<number, number[]>();
+  for (let index = 0; index < records.length; index += 1) {
+    const root = find(index);
+    const bucket = members.get(root);
+    if (bucket) bucket.push(index);
+    else members.set(root, [index]);
+  }
+
+  return [...members.entries()]
+    .filter(([, indexes]) => indexes.length > 1)
+    .sort(([a], [b]) => a - b)
+    .map(([root, indexes]) => ({
+      key: normalizeMessage(records[root]!.message),
+      ids: indexes.map((index) => records[index]!.id),
+    }));
+}
+`, 'utf8');
+  },
 };
