@@ -12373,6 +12373,12 @@ button svg,
 }
 .llm-phase-input {
   width: 100%;
+  /* .setting-input 默认按横向 setting-row 设计（width/min-width 220px +
+   * flex-basis 220px）。相模型行是纵向 flex —— basis 220px 在纵轴上是
+   * 220px 高，把输入框撑成一根柱子。这里全部收回：撑满格子、不高不设限。 */
+  min-width: 0;
+  height: 38px;
+  flex: 0 0 auto;
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;
 }
