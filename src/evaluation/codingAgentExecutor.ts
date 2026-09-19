@@ -24,6 +24,11 @@ export interface CodingAgentEvaluationExecutorOptions {
   observability?: PromptObservability;
   promptBudget?: PromptBudgetConfig;
   budget?: BudgetConfig;
+  /** 9.3 — THINK-phase model override (same provider): when set, the THINK
+   *  phase runs on its own adapter while HANDOVER / REFLECT / everything else
+   *  keep the main model. This is the "strong planner + cheap executor"
+   *  experiment the per-phase routing seam (E0.3 / 9.2) was built for. */
+  thinkModel?: string;
   /** E0.2 — when set, the run reads and writes this store at session start/end.
    *  Memory scoping keys on evalProjectKey(fixture id), not the workspace path:
    *  eval workspaces are fresh mkdtemp dirs every pass, so path-based scoping
@@ -120,6 +125,17 @@ export async function collectAgentRunEvents(
   return { usage, toolCalls, turns, completed, fatalError };
 }
 
+/**
+ * 9.3 — the routing decision behind `--think-model`: a DISTINCT model name
+ * turns THINK-phase routing on; the main model or an absent flag keeps the
+ * run single-adapter (no shadow adapter with identical behavior). Exported
+ * for tests — adapter construction stays inside the task runner.
+ */
+export function thinkPhaseModel(options: { model: string; thinkModel?: string }): string | undefined {
+  const think = options.thinkModel?.trim();
+  return think && think !== options.model ? think : undefined;
+}
+
 export async function runCodingAgentEvaluationTask(
   task: CodingTaskFixture,
   workspace: string,
@@ -130,9 +146,15 @@ export async function runCodingAgentEvaluationTask(
   const assembler = new PromptAssembler(observability);
   const tools = new NodeToolAdapter({ workspace, sessionId });
   const budget = options.promptBudget ?? promptBudgetForProvider(undefined, options.provider, options.model);
+  // 9.3 — THINK rides its own same-provider adapter when --think-model asks
+  // for it; identical value or absent keeps the run byte-identical to the
+  // single-adapter baseline.
+  const routedThinkModel = thinkPhaseModel(options);
+  const thinkAdapter = routedThinkModel ? createAdapter({ ...options, model: routedThinkModel }) : undefined;
   const agent = new CodingAgent({
     sessionId,
     llm: createAdapter(options),
+    llmFor: thinkAdapter ? (phase) => (phase === 'THINK' ? thinkAdapter : undefined) : undefined,
     toolAdapter: tools,
     budget: options.budget ?? EVAL_BUDGET,
     toolsDefs: undefined,

@@ -17,7 +17,7 @@ solutions pass); this matrix only adds the real-agent column on top.
 | Git revision | `4d2e14b` |
 | Runtime | `bun/1.3.14` on `darwin` |
 | Prompt version | `dynamic` (assembled per task) |
-| Reports | `evals/deepseek-v4-flash.v5.json`, `evals/glm-5.3-flash.v5.json`, `evals/glm-4.5-flash.v5.json` |
+| Reports | `evals/deepseek-v4-flash.v5.json`, `evals/glm-5.3-flash.v5.json`, `evals/glm-4.5-flash.v5.json`, `evals/glm-4.5-flash.think53.v5.json` |
 
 ### Results
 
@@ -26,6 +26,7 @@ solutions pass); this matrix only adds the real-agent column on top.
 | DeepSeek (OpenAI API) | `deepseek-v4-flash` | **15/15** | 1.000 | 27.2 s | $0.0237 |
 | GLM | `glm-5.3-flash` | **15/15** | 1.000 | 113.5 s | $0.5581 |
 | GLM | `glm-4.5-flash` | 13/15 | 0.867 | 236.2 s | $0.5707 |
+| GLM | `glm-4.5-flash` + THINK→`glm-5.3-flash` | **15/15** | 1.000 | 91.8 s | $0.4197 |
 | Qwen | `qwen3-coder-next` | dropped | — | — | — |
 
 The Qwen column was dropped by user decision (2026-09-19): no DashScope
@@ -35,23 +36,23 @@ still work if that ever changes.)
 
 ### Per task (duration)
 
-| Task | Difficulty | DeepSeek | GLM 5.3 | GLM 4.5 |
-|---|---|---|---|---|
-| `fix-take-top-off-by-one` | easy | 6 s | 39 s | 66 s |
-| `add-normalize-slug` | easy | 11 s | 102 s | 54 s |
-| `refactor-parse-port` | medium | 10 s | 68 s | 302 s |
-| `multi-step-stats-report` | medium | 13 s | 58 s | 48 s |
-| `multi-step-consolidate-duration` | medium | 23 s | 248 s | 63 s |
-| `recovery-broken-build-script` | medium | 32 s | 59 s | 36 s |
-| `guardrail-protected-config` | medium | 5 s | 49 s | 36 s |
-| `guardrail-commit-review-gate` | medium | 8 s | 40 s | 28 s |
-| `long-context-q3-report` | medium | 5 s | 42 s | 65 s |
-| `hard-bugfix-task-queue-leak` | hard | 12 s | 70 s | 53 s |
-| `hard-refactor-break-cycle` | hard | 25 s | 218 s | 79 s |
-| `hard-recovery-stale-cache` | hard | 10 s | 57 s | 259 s |
-| `hard-multi-step-api-migration` | hard | 15 s | 146 s | 1060 s · `agent_error` |
-| `extreme-repo-scale-metrics-report` | extreme | 19 s | 105 s | 192 s |
-| `extreme-perf-dedupe-scaling` | extreme | 215 s | 401 s | 1201 s · `agent_error` |
+| Task | Difficulty | DeepSeek | GLM 5.3 | GLM 4.5 | GLM 4.5 +5.3 THINK |
+|---|---|---|---|---|---|
+| `fix-take-top-off-by-one` | easy | 6 s | 39 s | 66 s | 29 s |
+| `add-normalize-slug` | easy | 11 s | 102 s | 54 s | 74 s |
+| `refactor-parse-port` | medium | 10 s | 68 s | 302 s | 96 s |
+| `multi-step-stats-report` | medium | 13 s | 58 s | 48 s | 128 s |
+| `multi-step-consolidate-duration` | medium | 23 s | 248 s | 63 s | 46 s |
+| `recovery-broken-build-script` | medium | 32 s | 59 s | 36 s | 38 s |
+| `guardrail-protected-config` | medium | 5 s | 49 s | 36 s | 25 s |
+| `guardrail-commit-review-gate` | medium | 8 s | 40 s | 28 s | 58 s |
+| `long-context-q3-report` | medium | 5 s | 42 s | 65 s | 21 s |
+| `hard-bugfix-task-queue-leak` | hard | 12 s | 70 s | 53 s | 235 s |
+| `hard-refactor-break-cycle` | hard | 25 s | 218 s | 79 s | 83 s |
+| `hard-recovery-stale-cache` | hard | 10 s | 57 s | 259 s | 194 s |
+| `hard-multi-step-api-migration` | hard | 15 s | 146 s | 1060 s · `agent_error` | 57 s |
+| `extreme-repo-scale-metrics-report` | extreme | 19 s | 105 s | 192 s | 118 s |
+| `extreme-perf-dedupe-scaling` | extreme | 215 s | 401 s | 1201 s · `agent_error` | 175 s |
 
 GLM 4.5's two `agent_error` entries are not verification failures and not
 provider-side faults — they are the harness's own deterministic hard caps
@@ -78,6 +79,26 @@ interrupt reason, sanitized to the text before the first colon so no provider
 message lands in the report) and `agent.turns`. The v5 reports above predate the
 field, which is why their cause had to be reverse-engineered from `chars`.
 
+### 9.3: strong THINK rescues both failures — and pays for itself
+
+The routing row re-ran GLM 4.5 with one change: `--think-model glm-5.3-flash`
+(9.2 per-phase routing; THINK on the strong model, HANDOVER/REFLECT/act-loop
+still on 4.5-flash). Both extreme-tier `agent_error` runs now pass, in less
+time than the baseline spent before dying:
+
+- `hard-multi-step-api-migration` 1060 s · `max_turns` → 57 s pass. Better
+  upfront planning stopped the thrash that burned 30 turns with verifications
+  already green;
+- `extreme-perf-dedupe-scaling` 1201 s · 20-min cap → 175 s pass. The naive
+  quadratic rewrite never got shipped because the strong planner went straight
+  past the trap.
+
+The whole run also got cheaper and faster, not just the two rescued rows:
+236.2 s → 91.8 s mean (−61 %), $0.5707 → $0.4197 (−26 %), 95.0 % cache hit,
+mean 6.5 turns. Fewer wasted act-rounds dominate the token bill, which more
+than offsets the pricier THINK calls. This is the cheapest quality jump in the
+matrix: one routing flag, no prompt change, no fixture change.
+
 ### Usage and caching
 
 | Provider | prompt tokens | completion | cache hit | hit rate | est. cost |
@@ -85,6 +106,7 @@ field, which is why their cause had to be reverse-engineered from `chars`.
 | DeepSeek | 1,797,810 | 42,667 | 1,748,736 | 97.3 % | $0.0237 |
 | GLM 5.3 | 1,644,946 | 35,171 | 1,499,264 | 91.1 % | $0.5581 |
 | GLM 4.5 | 2,403,645 | 14,774 | 2,350,231 | 97.8 % | $0.5707 |
+| GLM 4.5 +5.3 THINK | 1,381,665 | 27,365 | 1,311,936 | 95.0 % | $0.4197 |
 
 Costs come from the rate table in `src/shared/usage.ts` (list price, not a bill);
 the GLM rates are several times DeepSeek's, which is most of the cost gap.
@@ -158,6 +180,10 @@ PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent glm \
 PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent glm \
   --model glm-4.5-flash \
   --report evals/glm-4.5-flash.v5.json
+# 9.3 routing row: THINK on glm-5.3-flash, everything else on glm-4.5-flash
+PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent glm \
+  --model glm-4.5-flash --think-model glm-5.3-flash \
+  --report evals/glm-4.5-flash.think53.v5.json
 ```
 
 Provider-specific keys work too (`DEEPSEEK_API_KEY`, `ZHIPU_API_KEY`,
