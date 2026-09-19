@@ -845,7 +845,7 @@ export class SettingsPanel {
       // re-rendered on every save, so a static binding would go stale.
       '#cfg-language',
       '#cfg-city',
-      '#cfg-fontsize', '#cfg-density',
+      '#cfg-fontsize', '#cfg-density', '#cfg-tool-cards-expanded',
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
       '#cfg-tavily-key', '#cfg-serper-key',
       '#cfg-mcp-exclude-prefixes',
@@ -885,6 +885,15 @@ export class SettingsPanel {
           });
         }
       });
+    });
+
+    // ── 外观：工具卡片默认展开 ──
+    // 关掉的瞬间就把当前对话里还开着的卡片全部折起（此后新卡片生来折叠）；
+    // 重新打开只影响之后的新卡片，不强行掀开用户手动折起的行。
+    document.getElementById('cfg-tool-cards-expanded')?.addEventListener('change', (e) => {
+      if (!(e.target as HTMLInputElement).checked) {
+        document.querySelectorAll<HTMLDetailsElement>('details.tool-row[open]').forEach((d) => { d.open = false; });
+      }
     });
 
     // ── Memory forgetting-speed: reset to engine defaults ──
@@ -1801,6 +1810,8 @@ export class SettingsPanel {
 
     (document.getElementById('cfg-fontsize') as HTMLSelectElement).value = cfg.fontSize;
     (document.getElementById('cfg-density') as HTMLSelectElement).value = cfg.density;
+    const toolCardsEl = document.getElementById('cfg-tool-cards-expanded') as HTMLInputElement | null;
+    if (toolCardsEl) toolCardsEl.checked = cfg.toolCardsExpanded ?? true;
 
     const permMode = document.getElementById('cfg-permission-mode') as HTMLSelectElement | null;
     if (permMode) permMode.value = cfg.permissionMode;
@@ -3347,6 +3358,7 @@ export class SettingsPanel {
       theme: (document.querySelector('.theme-option.active')?.getAttribute('data-theme') || 'light') as PureConfig['theme'],
       fontSize: (document.getElementById('cfg-fontsize') as HTMLSelectElement).value as PureConfig['fontSize'],
       density: (document.getElementById('cfg-density') as HTMLSelectElement).value as PureConfig['density'],
+      toolCardsExpanded: (document.getElementById('cfg-tool-cards-expanded') as HTMLInputElement | null)?.checked ?? true,
       hasApiKey: (loadConfig() ?? defaults()).hasApiKey,
       permissionMode: (document.getElementById('cfg-permission-mode') as HTMLSelectElement | null)?.value as PureConfig['permissionMode'] || 'auto',
       autoPermRead: (document.getElementById('cfg-perm-read') as HTMLInputElement | null)?.checked ?? true,
