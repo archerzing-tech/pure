@@ -1,7 +1,7 @@
 // src/ui/__tests__/toolRow.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine, isSubagentTool, formatSubagentTraceLine } from '../toolRow';
+import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine, isSubagentTool, formatSubagentTraceLine, toolCardKind, groupToolRoundRuns } from '../toolRow';
 import { invalidateConfigCache, STORAGE_KEY } from '../config';
 import type { GeneratedImage } from '../../shared/types';
 
@@ -927,5 +927,44 @@ describe('finalizeToolRow subagentTrace (live lines survive the result wipe)', (
     } finally {
       restore();
     }
+  });
+});
+
+describe('toolCardKind / groupToolRoundRuns (tool rows vs agent rows)', () => {
+  it('classifies delegation tools as agent cards, everything else as tool cards', () => {
+    expect(toolCardKind('sys_info')).toBe('tool');
+    expect(toolCardKind('execute_command')).toBe('tool');
+    expect(toolCardKind('web_search')).toBe('tool');
+    // bash_executor stays a tool — same ruling as the badge/rail (a shell
+    // command wearing an agent wrapper).
+    expect(toolCardKind('bash_executor')).toBe('tool');
+    expect(toolCardKind('researcher')).toBe('agent');
+    expect(toolCardKind('code_reviewer')).toBe('agent');
+  });
+
+  it('splits a mixed round into consecutive same-kind runs, preserving order', () => {
+    // The travel-planner shape: a location probe, then three parallel agents.
+    // The probe reads as its own step ABOVE the swarm — never a fourth cell
+    // squeezed next to the agents it feeds.
+    const round = ['sys_info', 'researcher', 'researcher', 'researcher'];
+    expect(groupToolRoundRuns(round, toolCardKind)).toEqual([
+      ['sys_info'],
+      ['researcher', 'researcher', 'researcher'],
+    ]);
+    // The mirror case: agents first, probe after → probe stays BELOW the
+    // agents. 分类不能重排时间顺序 — no visual jumping into an earlier row.
+    expect(groupToolRoundRuns(['code_reviewer', 'code_editor', 'sys_info'], toolCardKind)).toEqual([
+      ['code_reviewer', 'code_editor'],
+      ['sys_info'],
+    ]);
+    // Alternating kinds never merge across an interruption.
+    expect(groupToolRoundRuns(['web_search', 'researcher', 'web_search'], toolCardKind)).toEqual([
+      ['web_search'],
+      ['researcher'],
+      ['web_search'],
+    ]);
+    // Pure rounds behave exactly as before the split.
+    expect(groupToolRoundRuns(['web_search', 'web_search'], toolCardKind)).toEqual([['web_search', 'web_search']]);
+    expect(groupToolRoundRuns([], toolCardKind)).toEqual([]);
   });
 });
