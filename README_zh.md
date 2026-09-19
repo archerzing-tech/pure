@@ -473,6 +473,11 @@ pure --resume session_1712345678901
 # 单次覆盖供应商/模型
 pure --provider qwen --model qwen3-coder-next "写一个 React 表单验证 Hook"
 
+# 按阶段模型路由（实验性）：给不同阶段单独指定模型（同供应商），省成本的
+# 经典组合是"思考用强的、干活和反思用便宜的"。旗标优先于 ~/.pure/config.json
+# 的 phaseModels 字段（GUI 设置 → LLM → 按阶段模型路由 写同一份配置）。
+pure --think-model deepseek-reasoner --reflect-model deepseek-v4-flash "重构认证模块"
+
 # REPL 命令
 /exit       # 退出
 /clear      # 清空对话上下文

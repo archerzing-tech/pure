@@ -13,6 +13,7 @@ import type { CustomProvider, ProviderOverride } from './shared/providers';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
 import type { EvolutionConfig } from './adapter/memory/evolution';
 import type { BudgetConfig } from './shared/types';
+import type { PhaseModelConfig } from './shared/phaseModels';
 
 // ── CLI persistence paths (file-based, since Bun doesn't have localStorage) ──
 
@@ -54,6 +55,13 @@ export interface PureConfig {
   mcpServers?: MCPServerConfig[];
   /** MCP tool-name prefixes to hide (GUI Settings → MCP). */
   mcpExcludedPrefixes?: string[];
+  /**
+   * 9.2 — per-phase model routing (experimental): the GUI's Settings → LLM →
+   * 按阶段模型路由 section writes the same field the GUI reads, so terminal
+   * and desktop sessions route phases identically. Model ids stay on the
+   * configured provider.
+   */
+  phaseModels?: PhaseModelConfig;
 }
 
 export function loadConfig(): PureConfig | null {
@@ -140,6 +148,9 @@ export interface CliArgs {
   mcpServers?: MCPServerConfig[];
   /** MCP tool-name prefixes to hide (config.json + --mcp-exclude-prefix). */
   mcpExcludedPrefixes?: string[];
+  /** 9.2 — phase-model overrides after merging config.json with
+   * --think-model / --handover-model / --reflect-model (flags win). */
+  phaseModels?: PhaseModelConfig;
   /**
    * True when every tool call (read, write, execute_command, web_search, …)
    * should be approved without prompting. Defaults to true so a one-shot

@@ -95,7 +95,9 @@ import type {
   GeneratedImage,
   IStateStore,
   Checkpoint,
+  EngineLlmPhase,
 } from '../shared/types';
+import { phaseModelOverrides } from '../shared/phaseModels';
 import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, TaskMode, IntentAssessment } from '../coding-agent/types';
 import type { SessionAgentActivity } from './store';
 import { createOptimizeCard } from './optimizeCard';
@@ -2913,6 +2915,19 @@ export class ChatController {
 
       const llm = createLLMAdapter(config);
       this.turnLlm = llm;
+      // 9.2 — per-phase model routing (experimental). Each phase naming a
+      // different model gets its own same-provider adapter through the shared
+      // factory; blank / main-model entries fall through to `llm` via the E0.3
+      // fallback contract (llmForPhase). Built once per turn — the factory
+      // resolves provider key + protocol and is not free.
+      const phaseOverrides = phaseModelOverrides(config.phaseModels, config.model);
+      const phaseAdapters = new Map<EngineLlmPhase, LLMAdapter>();
+      for (const [phase, model] of Object.entries(phaseOverrides) as [EngineLlmPhase, string][]) {
+        phaseAdapters.set(phase, createLLMAdapter({ ...config, model }));
+      }
+      const llmFor = phaseAdapters.size > 0
+        ? (phase: EngineLlmPhase) => phaseAdapters.get(phase)
+        : undefined;
       const toolAdapter = this.getOrCreateSessionToolAdapter(effectiveWorkspace, config, sendSessionId);
       this.snapshotPort = toolAdapter.getSnapshotPort?.();
       this.onSnapshotChanged?.(!!this.snapshotPort?.getLatestWriteBatch());
@@ -2976,6 +2991,7 @@ export class ChatController {
       const codingAgent = new CodingAgent({
         sessionId: this.sessionId,
         llm,
+        llmFor,
         toolAdapter,
         subagents,
         // In-memory subagent checkpoint store: lets the GUI resume a sub-task

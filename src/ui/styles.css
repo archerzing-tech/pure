@@ -12335,6 +12335,47 @@ button svg,
   background: var(--bg-card);
   box-shadow: var(--shadow-sm);
 }
+/* ── 9.2 — per-phase model routing (experimental) ── */
+.llm-phase-routing {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+}
+.llm-phase-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--warning, #b45309);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warning, #b45309);
+  vertical-align: 1px;
+}
+.llm-phase-rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px 14px;
+}
+.llm-phase-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.llm-phase-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.llm-phase-input {
+  width: 100%;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
 .llm-default-bar-copy {
   display: flex;
   flex-direction: column;

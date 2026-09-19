@@ -12,6 +12,8 @@ import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
 import type { ProxyConfig } from '../shared/proxy';
 import { normalizeProxyConfig } from '../shared/proxy';
+import type { PhaseModelConfig } from '../shared/phaseModels';
+import { sanitizePhaseModelConfig } from '../shared/phaseModels';
 
 export interface PureConfig {
   /** Provider id — typed from the registry so the two can never drift. */
@@ -49,6 +51,13 @@ export interface PureConfig {
    */
   city: string;
   model: string;
+  /**
+   * 9.2 — per-phase model routing (experimental, Settings → LLM → 按阶段模型
+   * 路由): model ids on the SAME provider for the THINK / HANDOVER / REFLECT
+   * phases. Undefined or missing phases follow the main model; reroute
+   * filtering (main-model equality) happens at adapter-build time.
+   */
+  phaseModels?: PhaseModelConfig;
   baseURL: string;
   language: 'zh-CN' | 'en';
   theme: 'light' | 'dark' | 'system';
@@ -729,6 +738,10 @@ export function loadConfig(): PureConfig | null {
         cfg.apiKey = '';
         needsPersist = true;
       }
+      // 9.2: per-phase model routing (experimental). Type-check the stored
+      // shape only — values are kept raw so switching the main model later
+      // doesn't lose what the user picked per phase.
+      cfg.phaseModels = sanitizePhaseModelConfig(parsed.phaseModels);
       if (isTauriRuntime() && cfg.proxy?.password) {
         // Lazy migration: a proxy password previously persisted to
         // localStorage moves into Rust secrets (slot `proxy.password`), and

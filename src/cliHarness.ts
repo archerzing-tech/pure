@@ -28,7 +28,8 @@ import { FilePromptObservationStore } from './shared/FilePromptObservationStore'
 import { failureHistoryFromMemories } from './engine/FailurePolicy';
 import { cyan, dim, green, red, yellow } from './termcolors';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
-import type { IStateStore, IMemoryStore, LLMAdapter, ToolAdapter, ToolDefinition } from './shared/types';
+import type { IStateStore, IMemoryStore, LLMAdapter, ToolAdapter, ToolDefinition, EngineLlmPhase } from './shared/types';
+import { phaseModelOverrides } from './shared/phaseModels';
 import { createAdapter } from './cliAdapter';
 import { DEFAULT_BUDGET, evolutionCfg, PURE_DIR } from './cliConfig';
 import { loadUserHooks } from './shared/userHooks';
@@ -254,6 +255,23 @@ function createStore(args: CliArgs): IStateStore | undefined {
 
 async function createHarness(args: CliArgs) {
   const { adapter } = createAdapter(args);
+  // 9.2 — per-phase model routing (experimental): each phase naming a
+  // different model rebuilds through createAdapter ({ ...args, model }), so
+  // endpoint overrides, prompt budgets and provider quirks resolve exactly
+  // like the main adapter. The main call above already validated the key, so
+  // the phase rebuilds cannot hit the missing-key exit again.
+  const phaseOverrides = phaseModelOverrides(args.phaseModels, args.model);
+  const phaseAdapters = new Map<EngineLlmPhase, LLMAdapter>();
+  for (const [phase, model] of Object.entries(phaseOverrides) as [EngineLlmPhase, string][]) {
+    phaseAdapters.set(phase, createAdapter({ ...args, model }).adapter);
+  }
+  const llmFor = phaseAdapters.size > 0
+    ? (phase: EngineLlmPhase) => phaseAdapters.get(phase)
+    : undefined;
+  if (llmFor) {
+    const routed = Object.entries(phaseOverrides).map(([phase, model]) => `${phase}→${model}`).join(', ');
+    process.stderr.write(`  ${dim('[phase-routing]')} ${dim(routed)}\n`);
+  }
   const sessionId = args.resume || `session_${Date.now()}`;
   const createdTools = await createTools(args.workspace, args.autoApprove, sessionId, args.mcpServers, args.mcpExcludedPrefixes);
   const tools = createdTools.tools;
@@ -324,6 +342,7 @@ async function createHarness(args: CliArgs) {
   const harness = new Harness({
     sessionId,
     llm: adapter,
+    llmFor,
     tools,
     toolsDefs,
     budget: DEFAULT_BUDGET,
