@@ -135,4 +135,142 @@ console.log('wrote ' + rows.length + ' rows to dist/out.csv');
     await mkdir(join(workspace, 'dist'), { recursive: true });
     await writeFile(join(workspace, 'dist/q3-report.md'), lines.join('\n') + '\n', 'utf8');
   },
+  // 1.5 hard tier — both defects fixed (limit and slot release), not just the
+  // one the prompt leads with.
+  'hard-bugfix-task-queue-leak': async (workspace) => {
+    await writeFile(join(workspace, 'src/task-queue.ts'), `// A tiny concurrency-limited queue used by the ingest pipeline.
+export class TaskQueue {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(private readonly concurrency: number) {
+    if (concurrency < 1) throw new Error('concurrency must be at least 1');
+  }
+
+  get stats(): { active: number; waiting: number } {
+    return { active: this.active, waiting: this.waiting.length };
+  }
+
+  private async acquire(): Promise<void> {
+    while (this.active >= this.concurrency) {
+      await new Promise<void>((resolve) => this.waiting.push(resolve));
+    }
+    this.active += 1;
+  }
+
+  private release(): void {
+    this.active -= 1;
+    this.waiting.shift()?.();
+  }
+
+  async run<T>(job: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await job();
+    } finally {
+      this.release();
+    }
+  }
+}
+`, 'utf8');
+  },
+  // Break the order <-> pricing cycle by moving the shared pieces (the Line
+  // type and the tax table) into their own modules.
+  'hard-refactor-break-cycle': async (workspace) => {
+    await writeFile(join(workspace, 'src/orders/types.ts'), `export interface Line {
+  sku: string;
+  qty: number;
+}
+`, 'utf8');
+    await writeFile(join(workspace, 'src/orders/tax.ts'), `export const REGION_TAX: Record<string, number> = { eu: 0.2, us: 0.07 };
+
+export function taxRateFor(region: string): number {
+  return REGION_TAX[region] ?? 0;
+}
+`, 'utf8');
+    await writeFile(join(workspace, 'src/orders/pricing.ts'), `import type { Line } from './types';
+
+const UNIT_PRICE: Record<string, number> = { apple: 2, pear: 3 };
+
+export function priceOf(line: Line): number {
+  const unit = UNIT_PRICE[line.sku];
+  if (unit === undefined) throw new Error('unknown sku: ' + line.sku);
+  return unit * line.qty;
+}
+
+export { taxRateFor } from './tax';
+`, 'utf8');
+    await writeFile(join(workspace, 'src/orders/order.ts'), `import { priceOf } from './pricing';
+import { REGION_TAX, taxRateFor } from './tax';
+import type { Line } from './types';
+
+export type { Line } from './types';
+export { REGION_TAX };
+
+export function orderTotal(lines: Line[], region: string): number {
+  const tax = taxRateFor(region);
+  if (REGION_TAX[region] === undefined) throw new Error('unknown region: ' + region);
+  const net = lines.reduce((sum, line) => sum + priceOf(line), 0);
+  return net * (1 + tax);
+}
+`, 'utf8');
+  },
+  // Read the real input instead of serving the previous run from disk.
+  'hard-recovery-stale-cache': async (workspace) => {
+    await writeFile(join(workspace, 'scripts/build.ts'), `import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { totalsOf } from '../src/derive';
+
+const snapshot = JSON.parse(await readFile('data/input.json', 'utf8'));
+const totals = totalsOf(snapshot);
+await mkdir('dist', { recursive: true });
+await writeFile('dist/out.json', JSON.stringify(totals, null, 2) + '\\n', 'utf8');
+console.log('wrote dist/out.json');
+`, 'utf8');
+  },
+  // Implement the documented options-object API, migrate every call site, and
+  // retire the legacy export the checker scans for.
+  'hard-multi-step-api-migration': async (workspace) => {
+    await writeFile(join(workspace, 'src/api.ts'), `import { deliver } from './transport';
+
+export interface SendOptions {
+  payload: string;
+  retries?: number;
+}
+
+export interface SendResult {
+  ok: boolean;
+  attempts: number;
+}
+
+export async function sendMessage(options: SendOptions): Promise<SendResult> {
+  if (!options.payload) throw new Error('payload is required');
+  const maxAttempts = Math.max(1, options.retries ?? 1);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await deliver(options.payload);
+      return { ok: true, attempts: attempt };
+    } catch {
+      if (attempt === maxAttempts) return { ok: false, attempts: attempt };
+    }
+  }
+  return { ok: false, attempts: maxAttempts };
+}
+`, 'utf8');
+    await writeFile(join(workspace, 'src/notify.ts'), `import { sendMessage, type SendResult } from './api';
+
+export async function notifyUser(text: string): Promise<SendResult> {
+  return sendMessage({ payload: text, retries: 2 });
+}
+`, 'utf8');
+    await writeFile(join(workspace, 'src/report.ts'), `import { sendMessage, type SendResult } from './api';
+
+export async function emailReport(body: string): Promise<SendResult> {
+  return sendMessage({ payload: body, retries: 1 });
+}
+`, 'utf8');
+    await writeFile(join(workspace, 'src/digest.ts'), `import { sendMessage, type SendResult } from './api';
+
+export const pushDigest = (body: string): Promise<SendResult> => sendMessage({ payload: body, retries: 3 });
+`, 'utf8');
+  },
 };

@@ -6,7 +6,11 @@ import { estimateCostUsd } from '../shared/usage';
 export interface CodingTaskFixture {
   id: string;
   category: 'bugfix' | 'feature' | 'refactor' | 'multi-step' | 'recovery' | 'guardrail' | 'long-context';
-  difficulty: 'easy' | 'medium';
+  /** `hard` is the 1.5 tier: the suite's other fixtures sit below a frontier
+   *  model's ceiling, so these exist to make the baseline discriminate again.
+   *  They stay deterministic (control fails from seed, golden passes) — "hard"
+   *  means more real reasoning, not flakier checks. */
+  difficulty: 'easy' | 'medium' | 'hard';
   prompt: string;
   files: Record<string, string>;
   /** Optional environment preparation (e.g. seed a git repo) executed after
@@ -91,7 +95,7 @@ export interface CodingTaskEvaluationOptions {
   agent?: (input: { task: CodingTaskFixture; workspace: string }) => Promise<CodingTaskAgentResult | void>;
 }
 
-export const CODING_TASK_SUITE_VERSION = 'pure-coding-baseline-v3';
+export const CODING_TASK_SUITE_VERSION = 'pure-coding-baseline-v4';
 
 export const CODING_TASK_FIXTURES: readonly CodingTaskFixture[] = [
   {
@@ -583,6 +587,515 @@ console.log('report ok');
 `,
     },
     verification: [{ name: 'check report', command: 'bun', args: ['scripts/check-report.ts'] }],
+  },
+  // ── 1.5 hard tier ────────────────────────────────────────────────────────
+  // These exist because the v3 suite sits below a frontier model's ceiling:
+  // every fixture here needs real reasoning (two interacting defects, a
+  // structural change, a root cause, a breaking migration), and each is
+  // observable only through behavior — pattern-matching the source cannot
+  // satisfy it. Determinism is unchanged: control still fails from seed and
+  // the golden solution still passes.
+  //
+  // Bugfix, hard: the concurrency limit is off by one AND a rejecting job
+  // never releases its slot. Fixing only the visible symptom still fails.
+  {
+    id: 'hard-bugfix-task-queue-leak',
+    category: 'bugfix',
+    difficulty: 'hard',
+    prompt: '生产环境上报了 src/task-queue.ts 的两个问题：1) 同时执行的任务会超过构造时给的 concurrency 上限；2) 只要有一个任务抛错，队列就再也不执行后续任务（后续任务永远挂起）。请把这两处行为都修好，让现有测试全部通过，不要修改测试文件。',
+    files: {
+      'src/task-queue.ts': `// A tiny concurrency-limited queue used by the ingest pipeline.
+export class TaskQueue {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(private readonly concurrency: number) {
+    if (concurrency < 1) throw new Error('concurrency must be at least 1');
+  }
+
+  get stats(): { active: number; waiting: number } {
+    return { active: this.active, waiting: this.waiting.length };
+  }
+
+  private async acquire(): Promise<void> {
+    // Wait until there is room, then claim the slot.
+    while (this.active > this.concurrency) {
+      await new Promise<void>((resolve) => this.waiting.push(resolve));
+    }
+    this.active += 1;
+  }
+
+  private release(): void {
+    this.active -= 1;
+    this.waiting.shift()?.();
+  }
+
+  async run<T>(job: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    // Hand the result back to the caller once the job settled.
+    const result = await job();
+    this.release();
+    return result;
+  }
+}
+`,
+      'src/task-queue.test.ts': `import { describe, expect, it } from 'bun:test';
+import { TaskQueue } from './task-queue';
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+describe('TaskQueue', () => {
+  it('never runs more jobs at once than its concurrency allows', async () => {
+    const queue = new TaskQueue(2);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const job = async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await sleep(20);
+      inFlight -= 1;
+    };
+
+    await Promise.all(Array.from({ length: 6 }, () => queue.run(job)));
+
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+    expect(queue.stats).toEqual({ active: 0, waiting: 0 });
+  });
+
+  it('releases the slot when a job rejects, so later jobs still run', async () => {
+    const queue = new TaskQueue(1);
+    await expect(queue.run(async () => {
+      throw new Error('boom');
+    })).rejects.toThrow('boom');
+
+    const settled = await Promise.race([
+      queue.run(async () => 'ok'),
+      sleep(400).then(() => 'timeout'),
+    ]);
+
+    expect(settled).toBe('ok');
+  });
+
+  it('counts a failed job as finished', async () => {
+    const queue = new TaskQueue(1);
+    await queue.run(async () => {
+      throw new Error('x');
+    }).catch(() => undefined);
+
+    expect(queue.stats).toEqual({ active: 0, waiting: 0 });
+  });
+});
+`,
+    },
+    verification: [{ name: 'bun test', command: 'bun', args: ['test', 'src/task-queue.test.ts'] }],
+  },
+  // Refactor, hard: a real import cycle must be broken without changing
+  // behavior. The checker walks the src/ import graph, so any structural fix
+  // is accepted (extract a module, invert the dependency, move the type).
+  {
+    id: 'hard-refactor-break-cycle',
+    category: 'refactor',
+    difficulty: 'hard',
+    prompt: 'src/orders 下出现了模块循环依赖：order.ts 与 pricing.ts 互相 import，打包工具与测试都受影响。请在保持对外行为与现有测试完全不变的前提下，消除 src/ 下的循环依赖，并用 bun scripts/check-cycles.ts 确认没有环。',
+    files: {
+      'src/orders/order.ts': `import { priceOf, taxRateFor } from './pricing';
+
+export interface Line {
+  sku: string;
+  qty: number;
+}
+
+export const REGION_TAX: Record<string, number> = { eu: 0.2, us: 0.07 };
+
+export function orderTotal(lines: Line[], region: string): number {
+  const tax = taxRateFor(region);
+  if (REGION_TAX[region] === undefined) throw new Error('unknown region: ' + region);
+  const net = lines.reduce((sum, line) => sum + priceOf(line), 0);
+  return net * (1 + tax);
+}
+`,
+      'src/orders/pricing.ts': `import { REGION_TAX, type Line } from './order';
+
+const UNIT_PRICE: Record<string, number> = { apple: 2, pear: 3 };
+
+export function priceOf(line: Line): number {
+  const unit = UNIT_PRICE[line.sku];
+  if (unit === undefined) throw new Error('unknown sku: ' + line.sku);
+  return unit * line.qty;
+}
+
+export function taxRateFor(region: string): number {
+  return REGION_TAX[region] ?? 0;
+}
+`,
+      'src/orders/order.test.ts': `import { describe, expect, it } from 'bun:test';
+import { orderTotal } from './order';
+import { priceOf, taxRateFor } from './pricing';
+
+describe('orders', () => {
+  it('prices lines by sku and quantity', () => {
+    expect(priceOf({ sku: 'apple', qty: 3 })).toBe(6);
+    expect(() => priceOf({ sku: 'fig', qty: 1 })).toThrow('unknown sku: fig');
+  });
+
+  it('applies the region tax to the order total', () => {
+    expect(orderTotal([{ sku: 'apple', qty: 2 }, { sku: 'pear', qty: 1 }], 'us')).toBeCloseTo(7 * 1.07, 6);
+    expect(orderTotal([{ sku: 'apple', qty: 2 }], 'eu')).toBeCloseTo(4 * 1.2, 6);
+    expect(() => orderTotal([{ sku: 'apple', qty: 1 }], 'mars')).toThrow('unknown region: mars');
+  });
+
+  it('reports a tax rate for known regions', () => {
+    expect(taxRateFor('eu')).toBe(0.2);
+    expect(taxRateFor('mars')).toBe(0);
+  });
+});
+`,
+      'scripts/check-cycles.ts': `// Fails when any src/ module takes part in an import cycle. It only follows
+// relative \`from '...'\` imports, so external packages are out of scope.
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
+
+const root = 'src';
+const files: string[] = [];
+const walk = (dir: string): void => {
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      walk(full);
+    } else if (full.endsWith('.ts') && !full.endsWith('.test.ts')) {
+      files.push(resolve(full));
+    }
+  }
+};
+walk(root);
+
+const graph = new Map<string, string[]>();
+for (const file of files) {
+  const source = readFileSync(file, 'utf8');
+  const deps: string[] = [];
+  const pattern = /from\\s+['"](\\.[^'"]+)['"]/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(source)) !== null) {
+    let target = resolve(dirname(file), match[1]);
+    if (!target.endsWith('.ts')) target += '.ts';
+    if (files.includes(target)) deps.push(target);
+  }
+  graph.set(file, deps);
+}
+
+const state = new Map<string, 'visiting' | 'done'>();
+const cycles: string[][] = [];
+const visit = (node: string, stack: string[]): void => {
+  const current = state.get(node);
+  if (current === 'done') return;
+  if (current === 'visiting') {
+    const cycle = stack.slice(stack.indexOf(node));
+    cycles.push([...cycle, node].map((path) => relative(process.cwd(), path)));
+    return;
+  }
+  state.set(node, 'visiting');
+  for (const dep of graph.get(node) ?? []) visit(dep, [...stack, node]);
+  state.set(node, 'done');
+};
+for (const file of graph.keys()) visit(file, []);
+
+if (cycles.length > 0) {
+  console.error('import cycles detected:\\n' + cycles.map((cycle) => cycle.join(' -> ')).join('\\n'));
+  process.exit(1);
+}
+console.log('no import cycles among ' + graph.size + ' modules');
+`,
+    },
+    verification: [
+      { name: 'check cycles', command: 'bun', args: ['scripts/check-cycles.ts'] },
+      { name: 'bun test', command: 'bun', args: ['test', 'src/orders/order.test.ts'] },
+    ],
+  },
+  // Recovery, hard: the symptom is a wrong artifact, the cause is a stale
+  // cache. The check rebuilds twice with a mutated input, so hard-coding the
+  // current answer or editing dist/ by hand cannot pass — only fixing the
+  // build does.
+  {
+    id: 'hard-recovery-stale-cache',
+    category: 'recovery',
+    difficulty: 'hard',
+    prompt: '数据打包流程出问题了：跑 bun scripts/build.ts 之后，dist/out.json 的内容和 data/input.json 对不上；改了输入再跑，输出还是不更新。请查明根因并修好，让 bun scripts/check-fresh.ts 通过。注意：检查脚本会连续构建两次（中间会改输入）来验证输出确实跟随输入，不要修改它，也不要把结果写死在输出里。',
+    files: {
+      'data/input.json': `{
+  "version": 3,
+  "items": [
+    { "id": "a", "qty": 2 },
+    { "id": "b", "qty": 5 }
+  ]
+}
+`,
+      'cache/last-run.json': `{
+  "version": 1,
+  "items": [
+    { "id": "a", "qty": 1 }
+  ]
+}
+`,
+      'src/derive.ts': `export interface Item {
+  id: string;
+  qty: number;
+}
+
+export interface Snapshot {
+  version: number;
+  items: Item[];
+}
+
+export interface Totals {
+  totalQty: number;
+  ids: string[];
+}
+
+export function totalsOf(snapshot: Snapshot): Totals {
+  return {
+    totalQty: snapshot.items.reduce((sum, item) => sum + item.qty, 0),
+    ids: snapshot.items.map((item) => item.id).sort(),
+  };
+}
+`,
+      'src/derive.test.ts': `import { describe, expect, it } from 'bun:test';
+import { totalsOf } from './derive';
+
+describe('totalsOf', () => {
+  it('sums quantities and lists ids', () => {
+    expect(totalsOf({ version: 1, items: [{ id: 'b', qty: 5 }, { id: 'a', qty: 2 }] })).toEqual({
+      totalQty: 7,
+      ids: ['a', 'b'],
+    });
+  });
+
+  it('handles an empty snapshot', () => {
+    expect(totalsOf({ version: 0, items: [] })).toEqual({ totalQty: 0, ids: [] });
+  });
+});
+`,
+      'scripts/build.ts': `import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { totalsOf } from '../src/derive';
+
+// Reuse the snapshot from the previous run instead of reading data/input.json
+// again — the input is not supposed to change between builds.
+const cached = JSON.parse(await readFile('cache/last-run.json', 'utf8'));
+const totals = totalsOf(cached);
+await mkdir('dist', { recursive: true });
+await writeFile('dist/out.json', JSON.stringify(totals, null, 2) + '\\n', 'utf8');
+console.log('wrote dist/out.json from cache');
+`,
+      'scripts/check-fresh.ts': `// Proves dist/out.json tracks data/input.json: build once and compare against
+// the input, then change the input, rebuild, and require the output to follow.
+// A build that hard-codes an answer cannot pass the second half.
+import { readFile, writeFile } from 'node:fs/promises';
+
+interface Snapshot {
+  version: number;
+  items: Array<{ id: string; qty: number }>;
+}
+
+const totalsOf = (snapshot: Snapshot) => ({
+  totalQty: snapshot.items.reduce((sum, item) => sum + item.qty, 0),
+  ids: snapshot.items.map((item) => item.id).sort(),
+});
+
+const build = async (): Promise<void> => {
+  const proc = Bun.spawn(['bun', 'scripts/build.ts'], { cwd: process.cwd(), stdout: 'pipe', stderr: 'pipe' });
+  const stderr = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    console.error('build failed (exit ' + exitCode + '): ' + stderr);
+    process.exit(1);
+  }
+};
+
+const readOut = async () => JSON.parse(await readFile('dist/out.json', 'utf8'));
+
+const original = await readFile('data/input.json', 'utf8');
+try {
+  await build();
+  const first = await readOut();
+  const expectedFirst = totalsOf(JSON.parse(original));
+  if (JSON.stringify(first) !== JSON.stringify(expectedFirst)) {
+    console.error('dist/out.json does not match data/input.json after a fresh build');
+    console.error('expected ' + JSON.stringify(expectedFirst) + ' but got ' + JSON.stringify(first));
+    process.exit(1);
+  }
+
+  const mutated: Snapshot = JSON.parse(original);
+  mutated.items = [...mutated.items, { id: 'z', qty: 4 }];
+  await writeFile('data/input.json', JSON.stringify(mutated, null, 2) + '\\n', 'utf8');
+  await build();
+  const second = await readOut();
+  const expectedSecond = totalsOf(mutated);
+  if (JSON.stringify(second) !== JSON.stringify(expectedSecond)) {
+    console.error('dist/out.json did not follow the changed input — the build is still serving stale data');
+    console.error('expected ' + JSON.stringify(expectedSecond) + ' but got ' + JSON.stringify(second));
+    process.exit(1);
+  }
+  console.log('build output tracks the input');
+} finally {
+  await writeFile('data/input.json', original, 'utf8');
+}
+`,
+    },
+    verification: [
+      { name: 'check fresh build', command: 'bun', args: ['scripts/check-fresh.ts'] },
+      { name: 'bun test', command: 'bun', args: ['test', 'src/derive.test.ts'] },
+    ],
+  },
+  // Multi-step, hard: a breaking migration across four files plus the retired
+  // entry point itself. The checker scans src/ for the old name and demands the
+  // call sites still exist, so deleting work is not a shortcut.
+  {
+    id: 'hard-multi-step-api-migration',
+    category: 'multi-step',
+    difficulty: 'hard',
+    prompt: '把消息发送迁移到新 API：src/api.ts 里现在只有旧的 legacySend，调用点散在 src/notify.ts、src/report.ts、src/digest.ts。请按 docs/api.md 的契约在 src/api.ts 实现并导出 sendMessage(options)，把三个调用点改过去（保持各自的默认重试次数：notify 2、report 1、digest 3），并彻底删除 legacySend。现有测试必须全部通过，bun scripts/check-migration.ts 也要通过。',
+    files: {
+      'docs/api.md': `# Messaging API
+
+The only supported entry point is sendMessage(options) from src/api.ts.
+
+SendOptions: { payload: string; retries?: number }
+SendResult: { ok: boolean; attempts: number }
+
+Contract:
+
+- an empty payload throws 'payload is required' and never touches the transport;
+- retries is the maximum number of attempts (default 1), not extra attempts;
+- a successful delivery returns { ok: true, attempts } with the attempt that succeeded;
+- when every attempt fails the call resolves (does not throw) with { ok: false, attempts }.
+
+legacySend is retired once every call site has moved over.
+`,
+      'src/transport.ts': `// In-memory transport shared by the call sites. There is no network here on
+// purpose: the fixture verifies behavior, not connectivity.
+export const sent: string[] = [];
+
+export async function deliver(payload: string): Promise<void> {
+  if (payload.startsWith('flaky')) throw new Error('transport down');
+  sent.push(payload);
+}
+`,
+      'src/api.ts': `import { deliver } from './transport';
+
+// Legacy entry point, kept alive for the old call sites.
+export async function legacySend(payload: string, retries: number): Promise<boolean> {
+  for (let attempt = 0; attempt < Math.max(1, retries); attempt++) {
+    try {
+      await deliver(payload);
+      return true;
+    } catch {
+      // keep trying
+    }
+  }
+  return false;
+}
+`,
+      'src/api.test.ts': `import { beforeEach, describe, expect, it } from 'bun:test';
+import { sendMessage } from './api';
+import { sent } from './transport';
+
+describe('sendMessage', () => {
+  beforeEach(() => {
+    sent.length = 0;
+  });
+
+  it('delivers the payload once by default', async () => {
+    const result = await sendMessage({ payload: 'hello' });
+    expect(result).toEqual({ ok: true, attempts: 1 });
+    expect(sent).toEqual(['hello']);
+  });
+
+  it('rejects an empty payload without touching the transport', async () => {
+    await expect(sendMessage({ payload: '' })).rejects.toThrow('payload is required');
+    expect(sent).toEqual([]);
+  });
+
+  it('reports a failure after the configured attempts', async () => {
+    const result = await sendMessage({ payload: 'flaky', retries: 3 });
+    expect(result).toEqual({ ok: false, attempts: 3 });
+    expect(sent).toEqual([]);
+  });
+});
+`,
+      'src/notify.ts': `import { legacySend } from './api';
+
+export async function notifyUser(text: string): Promise<boolean> {
+  return legacySend(text, 2);
+}
+`,
+      'src/report.ts': `import { legacySend } from './api';
+
+export async function emailReport(body: string): Promise<boolean> {
+  return legacySend(body, 1);
+}
+`,
+      'src/digest.ts': `import { legacySend } from './api';
+
+export const pushDigest = (body: string): Promise<boolean> => legacySend(body, 3);
+`,
+      'src/notify.test.ts': `import { beforeEach, describe, expect, it } from 'bun:test';
+import { notifyUser } from './notify';
+import { sent } from './transport';
+
+describe('notifyUser', () => {
+  beforeEach(() => {
+    sent.length = 0;
+  });
+
+  it('delivers the message through the transport', async () => {
+    await notifyUser('deploy finished');
+    expect(sent).toEqual(['deploy finished']);
+  });
+});
+`,
+      'scripts/check-migration.ts': `// The legacy entry point must be fully retired: no module under src/ may
+// mention it, sendMessage must be exported, and the call sites must survive the
+// migration (deleting them is not a migration).
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+const files: string[] = [];
+const walk = (dir: string): void => {
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      walk(full);
+    } else if (full.endsWith('.ts')) {
+      files.push(full);
+    }
+  }
+};
+walk('src');
+
+const offenders = files.filter((file) => readFileSync(file, 'utf8').includes('legacySend'));
+if (offenders.length > 0) {
+  console.error('legacySend is still referenced in: ' + offenders.join(', '));
+  process.exit(1);
+}
+
+const api = readFileSync('src/api.ts', 'utf8');
+if (!api.includes('sendMessage')) {
+  console.error('src/api.ts must export sendMessage');
+  process.exit(1);
+}
+
+for (const callSite of ['src/notify.ts', 'src/report.ts', 'src/digest.ts']) {
+  if (!existsSync(callSite)) {
+    console.error('call site was deleted instead of migrated: ' + callSite);
+    process.exit(1);
+  }
+}
+console.log('migration complete: no legacySend references, call sites intact');
+`,
+    },
+    verification: [
+      { name: 'bun test', command: 'bun', args: ['test'] },
+      { name: 'check migration', command: 'bun', args: ['scripts/check-migration.ts'] },
+    ],
   },
 ];
 
