@@ -21,7 +21,18 @@ describe('evaluation run event collection', () => {
     expect(result.toolCalls).toBe(1);
     expect(result.completed).toBe(true);
     expect(result.usage?.promptTokens).toBe(10);
+    expect(result.turns).toBe(1);
     expect(result.fatalError).toBeUndefined();
+  });
+
+  it('keeps the turn count from the terminal event when a cap ends the run', async () => {
+    const result = await collectAgentRunEvents(events(
+      { type: 'Interrupted', payload: { reason: 'max_turns', completedSteps: [], turnCount: 30 }, timestamp: 0 },
+      completed({ isComplete: false, interrupted: true, turnCount: 30 }),
+    ));
+    expect(result.turns).toBe(30);
+    expect(result.fatalError?.code).toBe('AGENT_INTERRUPTED');
+    expect(result.fatalError?.message).toBe('max_turns');
   });
 
   // A dead key or an unknown model code must NOT be scorable as a plain failed

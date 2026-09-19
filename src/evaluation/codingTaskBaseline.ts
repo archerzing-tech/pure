@@ -42,6 +42,8 @@ export interface VerificationResult {
 export interface CodingTaskAgentResult {
   usage?: TokenUsage;
   toolCalls?: number;
+  /** Engine turn count at the last Completed/Interrupted event. */
+  turns?: number;
   traceId?: string;
 }
 
@@ -62,7 +64,10 @@ export interface CodingTaskResult {
   durationMs: number;
   verification: VerificationResult[];
   agent?: CodingTaskAgentResult;
-  agentError?: { kind: string; chars: number; hash: string };
+  /** `code`/`reason` identify the harness cap or engine fault that ended the
+   * run; the reason is sanitized (text before the first colon) so no provider
+   * message text ever lands in the report. */
+  agentError?: { kind: string; code?: string; reason?: string; chars: number; hash: string };
   workspace?: string;
 }
 
@@ -1345,7 +1350,7 @@ function observationHash(text: string): string {
   return hashText(text);
 }
 
-function observeAgentError(error: unknown): { kind: string; chars: number; hash: string } {
+function observeAgentError(error: unknown): CodingTaskResult['agentError'] {
   const message = error instanceof Error ? error.message : String(error);
   const lower = message.toLowerCase();
   const kind = /timeout|abort/.test(lower)
@@ -1353,7 +1358,21 @@ function observeAgentError(error: unknown): { kind: string; chars: number; hash:
     : /permission|denied|unauthorized/.test(lower)
       ? 'permission'
       : 'agent_error';
-  return { kind, chars: message.length, hash: observationHash(message) };
+  // The evaluation executor attaches its code and the engine's raw interrupt
+  // reason to the error it throws; only the cause's fixed shape is recorded —
+  // everything after the first colon is provider/engine free text and is
+  // stripped (privacy discipline: reports carry hashes, not messages).
+  const cause = error as { code?: unknown; interruptReason?: unknown };
+  const code = typeof cause?.code === 'string' && cause.code ? cause.code : undefined;
+  const rawReason = typeof cause?.interruptReason === 'string' && cause.interruptReason ? cause.interruptReason : undefined;
+  const reason = rawReason ? rawReason.split(':')[0] : undefined;
+  return {
+    kind,
+    ...(code ? { code } : {}),
+    ...(reason ? { reason } : {}),
+    chars: message.length,
+    hash: observationHash(message),
+  };
 }
 
 export async function evaluateCodingTask(

@@ -50,13 +50,30 @@ Qwen still needs a DashScope key plus `PURE_EVAL_QWEN_WORKSPACE_ID`.
 | `extreme-repo-scale-metrics-report` | extreme | 19 s | 105 s | 192 s |
 | `extreme-perf-dedupe-scaling` | extreme | 215 s | 401 s | 1201 s · `agent_error` |
 
-GLM 4.5's two `agent_error` entries are not verification failures —
-`hard-multi-step-api-migration` had **all verifications green** (bun test + the
-migration checker both passed) when the run aborted at the ~18-minute mark, and the
-perf task aborted at ~20 minutes with the scaling check never reached. The executor
-also refuses to let a run look like a scored zero when the provider never delivered
-a completed turn (`agent_error`, not plain `failed`), which is the fix that shipped
-in `4d2e14b`.
+GLM 4.5's two `agent_error` entries are not verification failures and not
+provider-side faults — they are the harness's own deterministic hard caps
+(`EVAL_BUDGET` in `codingAgentExecutor.ts`: 30 turns / 200k tokens / 20 min, by
+design so a run cannot go elastic). The executor's fatal message has a fixed
+39-char prefix (`model call failed (AGENT_INTERRUPTED): `), so the recorded
+`agentError.chars` reverses to the engine's interrupt reason exactly:
+
+- `hard-multi-step-api-migration` — 48 chars → `max_turns`: the 30-turn ceiling
+  ran out at 17.7 min **with every verification green** (bun test + the migration
+  checker both passed); the row scores 0 purely because VERIFY never started;
+- `extreme-perf-dedupe-scaling` — 54 chars → `Budget exceeded`: the 20-min
+  `hardMaxTime` fired at 20.0 min and the scaling check (which itself allows 40 s)
+  never ran, so `verificationPassed: false` means "never reached", not "failed".
+
+The provider side was healthy throughout (97.8 % cache hit; the run was still
+making progress when the caps fired). The executor's refusal to score an
+unreached provider as a plain zero (`agent_error`, not `failed`) is the separate
+fix that shipped in `4d2e14b`.
+
+Reports generated after this diagnosis record the cause explicitly instead of
+relying on that reversal: `agentError.code` / `agentError.reason` (the engine's
+interrupt reason, sanitized to the text before the first colon so no provider
+message lands in the report) and `agent.turns`. The v5 reports above predate the
+field, which is why their cause had to be reverse-engineered from `chars`.
 
 ### Usage and caching
 
