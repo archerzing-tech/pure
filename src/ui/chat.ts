@@ -63,7 +63,7 @@ import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './art
 import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
@@ -96,7 +96,9 @@ import type {
   IStateStore,
   Checkpoint,
   EngineLlmPhase,
+  SubagentActivityEvent,
 } from '../shared/types';
+import { EventFanout } from '../shared/asyncQueue';
 import { phaseModelOverrides } from '../shared/phaseModels';
 import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, TaskMode, IntentAssessment } from '../coding-agent/types';
 import type { SessionAgentActivity } from './store';
@@ -2791,6 +2793,14 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     // toolCallId → outcome, replayed as status rows (StoredMessage.toolExec)
     // when the session is restored from storage.
     const toolResults = new Map<string, ToolExecMeta>();
+    // Subagent interior activity, round-tripped through the engine: CodingAgent
+    // publishes orchestrator progress onto this fanout, the engine re-emits it
+    // as SubagentActivity events (namespaced by the delegation toolCallId), and
+    // the event loop below streams the lines into the matching delegation card.
+    // The trace also lands in toolResults, so session replay restores the full
+    // run narrative instead of a bare final output.
+    const subagentEventFanout = new EventFanout<SubagentActivityEvent>();
+    const subagentTraceByCall = new Map<string, string[]>();
     // Tool-round grid: tool calls issued in the SAME LLM iteration (e.g. two
     // parallel web_search calls, or a web_search + list_files batch) render
     // side by side in one horizontal grid, so the transcript reads "running
@@ -3140,6 +3150,10 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         continueGuard: config.planContinueGuard === false ? undefined : (args) => this.planContinueGuard(args),
         // Surface each spawned subagent as a live "which agent is working" card.
         subagentProgress,
+        // And feed the same activity into the engine's event stream so the
+        // delegation card can live-stream interior progress (see the
+        // SubagentActivity case below).
+        subagentEvents: subagentEventFanout,
       });
       // Text-to-image support: computed once per send from the connected
       // provider/model (see imageGenContextFor). When enabled, register the
@@ -4282,6 +4296,28 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
             break;
           }
 
+          case 'SubagentActivity': {
+            // Interior progress of a running subagent, namespaced by the
+            // delegation toolCallId: stream one human line into the matching
+            // delegation card and accumulate the trace — finalize re-renders
+            // it after the result wipe, and session replay restores it from
+            // toolResults. A delegation card no longer sits silently spinning
+            // while its sub-agent works.
+            const activity = event.payload;
+            const trace = subagentTraceByCall.get(activity.callId) ?? [];
+            subagentTraceByCall.set(activity.callId, trace);
+            const line = formatSubagentTraceLine(activity);
+            if (line === null) break;
+            trace.push(line);
+            if (trace.length > MAX_LIVE_STREAM_LINES) trace.splice(0, trace.length - MAX_LIVE_STREAM_LINES);
+            const agentRow = pendingRows.get(activity.callId);
+            if (agentRow) {
+              appendToolStreamLine(agentRow.row, activity.kind === 'error' ? 'stderr' : 'stdout', line);
+              scrollChatToBottomIfPinned(chatEl);
+            }
+            break;
+          }
+
           case 'ToolResult': {
             if (event.payload.result.success) hasToolSuccess = true;
             const status = event.payload.result.success ? '✓' : '✗';
@@ -4375,6 +4411,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
               resultItems,
               resultImages,
               resultText: resultPreview,
+              subagentTrace: subagentTraceByCall.get(event.payload.toolCallId),
             });
             // Feed the session's activity history (search / file / command records).
             const resultArgs = (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args;
@@ -4456,6 +4493,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
                 resultItems,
                 resultImages,
                 resultText: resultPreview,
+                subagentTrace: subagentTraceByCall.get(event.payload.toolCallId),
               });
               if (downloadMeta && event.payload.result.success) {
                 pending.row.el.appendChild(createDownloadCard(downloadMeta.path, downloadMeta.size, downloadMeta.via));

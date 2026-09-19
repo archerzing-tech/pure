@@ -5,6 +5,7 @@ import { describe, it, expect } from 'bun:test';
 import { AgentLoopEngine } from '../AgentLoopEngine';
 import { DefaultHookRouter } from '../HookRouter';
 import { DefaultFailurePolicy } from '../FailurePolicy';
+import { EventFanout } from '../../shared/asyncQueue';
 import type {
   LLMAdapter,
   LLMChunk,
@@ -16,6 +17,7 @@ import type {
   EngineContext,
   EngineEvent,
   BudgetConfig,
+  SubagentActivityEvent,
 } from '../../shared/types';
 
 const STD_BUDGET: BudgetConfig = {
@@ -1364,8 +1366,56 @@ describe('AgentLoopEngine', () => {
 
     expect(seenToolResults).toEqual(['call_1_1', 'call_1_0']); // completion order, fast first
     expect(completed).toBeDefined();
-    expect(completed!.payload.messages.filter((m) => m.role === 'tool')).toHaveLength(2);
-    expect(transcriptIsPaired(completed!.payload.messages)).toBe(true);
+    expect(completed?.payload.messages?.filter((m) => m.role === 'tool')).toHaveLength(2);
+    expect(transcriptIsPaired(completed?.payload.messages ?? [])).toBe(true);
+  }, 5_000);
+
+  it('re-emits subagent interior activity from the feed, namespaced and ahead of its ToolResult', async () => {
+    // The tool publishes interior progress onto the fanout mid-execution (the
+    // real publisher is CodingAgent's composite progress sink): the engine must
+    // merge those events into its own stream — BEFORE that tool's ToolResult —
+    // so a delegation card streams its sub-agent's trace live instead of after
+    // the fact. Afterwards the per-batch reader must be gone, not leaked.
+    const engine = new AgentLoopEngine();
+    const fanout = new EventFanout<SubagentActivityEvent>();
+    const adapter: ToolAdapter = {
+      execute: async (tc) => {
+        fanout.publish({ callId: tc.id, agentName: 'code_reviewer', kind: 'start' });
+        fanout.publish({ callId: tc.id, agentName: 'code_reviewer', kind: 'tool', toolName: 'read_file', toolState: 'running', toolArgsHint: 'a.ts' });
+        fanout.publish({ callId: tc.id, agentName: 'code_reviewer', kind: 'tool', toolName: 'read_file', toolState: 'completed' });
+        fanout.publish({ callId: tc.id, agentName: 'code_reviewer', kind: 'done', success: true, durationMs: 5 });
+        return { id: tc.id, toolName: tc.function.name, result: 'review done', success: true, duration: 1 };
+      },
+      getMetadata: () => undefined,
+      getTools: () => [READ_FILE_TOOL],
+    };
+    const ctx = baseCtx({
+      llm: parallelRoundsLLM([[{ toolName: 'read_file', toolArgs: '{"path":"a.ts"}' }]], 'all done'),
+      tools: adapter,
+      toolsDefs: [READ_FILE_TOOL],
+      subagentEvents: fanout,
+    });
+
+    const sequence: string[] = [];
+    for await (const event of engine.run(
+      { sessionId: 's-subagent-feed', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    )) {
+      if (event.type === 'SubagentActivity') sequence.push(`sub:${event.payload.kind}:${event.payload.callId}`);
+      if (event.type === 'ToolResult') sequence.push(`tool:${event.payload.toolCallId}`);
+    }
+
+    expect(sequence).toEqual([
+      'sub:start:call_1_0',
+      'sub:tool:call_1_0',
+      'sub:tool:call_1_0',
+      'sub:done:call_1_0',
+      'tool:call_1_0',
+    ]);
+    // The batch's reader is closed; the next publish prunes it — a long session
+    // must not accumulate dead queues on the fanout.
+    fanout.publish({ callId: 'late', agentName: 'x', kind: 'state' });
+    expect(fanout.readerCount()).toBe(0);
   }, 5_000);
 });
 
