@@ -20,6 +20,9 @@ import type { DashboardTotals, ErrorCluster, EvolutionDashboard, TrendBucket } f
 import { SUBAGENT_ADVICE_WINDOW_DAYS, type SubagentAdvice } from '../shared/subagentAdvisory';
 import type { RoleEffectSlice, RunEffectSlice, StrategyDimension, StrategyEffectSummary } from '../shared/strategyEffect';
 import { toolDisplayName } from './toolRow';
+import { formatCostUsd } from '../shared/usage';
+import { BASELINE_SUITE_VERSION, type BaselineSnapshot } from '../shared/baseline';
+import { baselineCacheHitRate, isBaselineStale } from '../shared/baselineSnapshot';
 
 // ── 数字格式化 ──
 
@@ -487,4 +490,66 @@ export function renderObservationStats(
     ? `<div class="evo-stat-note">${escapeHtml(t('evolution.stats.truncated', '日志较大，本次只统计了最近 {n} —— 更早的数据仍是完整的，只是没进这张图。').replace('{n}', formatBytes(file.readBytes)))}</div>`
     : '';
   return `${rows}${truncated}<div class="evo-stat-path" title="${escapeHtml(file.path)}">${escapeHtml(t('evolution.stats.path', '存储位置'))}: ${escapeHtml(file.path)}</div>`;
+}
+
+// ── 发布口径的评测基线（evals/ → eval:snapshot 生成的快照）──
+
+/**
+ * 基线成绩：真实 provider 在同一套 fixture 上的 pass@1 / 耗时 / 成本。数据来自
+ * 提交进仓库的快照模块（`bun run eval:snapshot` 生成），所以浏览器模式下也看得到
+ * ——它不是运行时读盘，而是发布时钉下来的一份记录；git revision 就是那次发布的
+ * commit。快照落后于当前套件时**必须**说出来：旧套件的数字与新套件不可比，
+ * 静默展示会让人误以为这是当前成绩。
+ */
+export function renderBaselineSection(snapshot: BaselineSnapshot): string {
+  const meta = [
+    [t('evolution.baseline.suite', '套件'), snapshot.suiteVersion],
+    [t('evolution.baseline.fixtureHash', 'fixture 指纹'), snapshot.fixtureHash],
+    [t('evolution.baseline.generatedAt', '快照时间'), new Date(snapshot.generatedAt).toLocaleString()],
+  ].map(([label, value]) => `<div class="evo-stat-row"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join('');
+
+  const stale = isBaselineStale(snapshot)
+    ? `<div class="evo-stat-note">${escapeHtml(
+        t('evolution.baseline.stale', '这份快照取自套件 {old}，当前套件是 {current} —— 数字不可比，请跑 bun run eval:snapshot 重新生成。')
+          .replace('{old}', snapshot.suiteVersion)
+          .replace('{current}', BASELINE_SUITE_VERSION),
+      )}</div>`
+    : '';
+
+  const excluded = snapshot.excluded.length > 0
+    ? `<div class="evo-stat-note">${escapeHtml(
+        t('evolution.baseline.excluded', '已排除 {n} 份旧套件的报告（套件不同，数字不可比）').replace('{n}', String(snapshot.excluded.length)),
+      )}</div>`
+    : '';
+
+  if (snapshot.rows.length === 0) {
+    return `${meta}${stale}${excluded}<div class="evo-empty">${escapeHtml(
+      t('evolution.baseline.empty', '还没有当前套件的真实 provider 报告 —— 跑一轮 eval:baseline 后用 eval:snapshot 生成快照'),
+    )}</div>`;
+  }
+
+  const body = snapshot.rows.map((row) => `<tr>
+    <td class="evo-table-key">${escapeHtml(row.provider)}</td>
+    <td>${escapeHtml(row.model)}</td>
+    <td>${escapeHtml(`${row.passAt1}/${row.taskCount}`)}</td>
+    <td>${escapeHtml(formatDuration(row.meanDurationMs))}</td>
+    <td>${escapeHtml(formatCostUsd(row.estimatedCostUsd))}</td>
+    <td>${escapeHtml(formatPercent(baselineCacheHitRate(row)))}</td>
+    <td>${escapeHtml(row.gitRevision)}</td>
+  </tr>`).join('');
+
+  return `${meta}${stale}${excluded}<div class="evo-table-wrap">
+    <table class="evo-table">
+      <thead><tr>
+        <th>${escapeHtml(t('evolution.baseline.table.provider', 'provider'))}</th>
+        <th>${escapeHtml(t('evolution.baseline.table.model', '模型'))}</th>
+        <th>${escapeHtml(t('evolution.baseline.table.pass', 'pass@1'))}</th>
+        <th>${escapeHtml(t('evolution.baseline.table.duration', '平均耗时'))}</th>
+        <th>${escapeHtml(t('evolution.baseline.table.cost', '估算成本'))}</th>
+        <th>${escapeHtml(t('evolution.baseline.table.cache', '缓存命中'))}</th>
+        <th>${escapeHtml(t('evolution.baseline.table.revision', 'revision'))}</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>`;
 }

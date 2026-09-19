@@ -28,6 +28,7 @@ import {
   buildExperienceItems,
   DEFAULT_STRATEGY_DIMENSION,
   MAX_EXPERIENCE_ROWS,
+  renderBaselineSection,
   renderErrorClusters,
   renderExperienceList,
   renderObservationStats,
@@ -37,6 +38,7 @@ import {
   renderTotals,
   renderTrendCards,
 } from './evolutionDashboard';
+import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { buildExportSavedToast } from './statsExportToast';
 import {
@@ -2612,6 +2614,11 @@ export class SettingsPanel {
     if (statsEl) {
       statsEl.innerHTML = renderObservationStats(dashboard.observations, read, now);
     }
+
+    // 发布口径的基线成绩：数据是随发布提交进仓库的快照（不读盘、不依赖
+    // Tauri），所以浏览器模式与桌面版看到的是同一份记录。
+    const baselineEl = document.getElementById('evolution-baseline');
+    if (baselineEl) baselineEl.innerHTML = renderBaselineSection(BASELINE_SNAPSHOT);
 
     const experienceEl = document.getElementById('evolution-experience');
     const cappedEl = document.getElementById('evolution-experience-capped');

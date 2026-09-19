@@ -251,6 +251,17 @@ try {
         ...(memoryStores ? { memoryPhase: 'single' } : {}),
       },
     });
+    // An agent_error means the provider never produced a usable answer (unknown
+    // model code, dead key, unreachable endpoint). Such a run is not a baseline:
+    // every task would read as failed for a reason the report can't show.
+    const agentErrors = report.tasks.filter((task) => task.status === 'agent_error').length;
+    if (agentErrors > 0) {
+      process.stderr.write(`\n!! ${agentErrors}/${report.taskCount} tasks ended in agent_error — the provider was not reachable. This run is NOT a baseline.\n`);
+      if (agentErrors === report.taskCount) {
+        process.stderr.write('!! refusing to write a report where every task failed to reach the model\n');
+        process.exit(2);
+      }
+    }
     if (reportPath) {
       await writeEvaluationReport(reportPath, report);
       process.stdout.write(`Wrote ${reportPath}\n`);

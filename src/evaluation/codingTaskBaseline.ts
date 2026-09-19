@@ -2,15 +2,18 @@ import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import type { TokenUsage } from '../shared/types';
 import { estimateCostUsd } from '../shared/usage';
+import { BASELINE_SUITE_VERSION } from '../shared/baseline';
 
 export interface CodingTaskFixture {
   id: string;
-  category: 'bugfix' | 'feature' | 'refactor' | 'multi-step' | 'recovery' | 'guardrail' | 'long-context';
+  category: 'bugfix' | 'feature' | 'refactor' | 'multi-step' | 'recovery' | 'guardrail' | 'long-context' | 'repo-scale' | 'performance';
   /** `hard` is the 1.5 tier: the suite's other fixtures sit below a frontier
    *  model's ceiling, so these exist to make the baseline discriminate again.
    *  They stay deterministic (control fails from seed, golden passes) — "hard"
-   *  means more real reasoning, not flakier checks. */
-  difficulty: 'easy' | 'medium' | 'hard';
+   *  means more real reasoning, not flakier checks. `extreme` is the 1.6 tier:
+   *  repo-scale search (the relevant module is one of dozens) and a hard
+   *  resource ceiling (a naive algorithm cannot finish, at any machine speed). */
+  difficulty: 'easy' | 'medium' | 'hard' | 'extreme';
   prompt: string;
   files: Record<string, string>;
   /** Optional environment preparation (e.g. seed a git repo) executed after
@@ -95,7 +98,15 @@ export interface CodingTaskEvaluationOptions {
   agent?: (input: { task: CodingTaskFixture; workspace: string }) => Promise<CodingTaskAgentResult | void>;
 }
 
-export const CODING_TASK_SUITE_VERSION = 'pure-coding-baseline-v4';
+/** 套件版本的单一来源在 shared/baseline.ts：进化仪表盘也要用它判断快照是否
+ *  落后于当前套件，而仪表盘不能 import 本模块（node:fs 依赖）。 */
+export const CODING_TASK_SUITE_VERSION = BASELINE_SUITE_VERSION;
+
+/** 套件指纹：一组 fixture 的内容哈希。套件版本与指纹必须同时变——报告就靠这两个
+ *  字段判定"能不能与当前套件比较"，而进化仪表盘的基线快照也只收对得上的报告。 */
+export function codingTaskFixtureHash(fixtures: readonly CodingTaskFixture[] = CODING_TASK_FIXTURES): string {
+  return hashText(JSON.stringify(fixtures));
+}
 
 export const CODING_TASK_FIXTURES: readonly CodingTaskFixture[] = [
   {
@@ -1097,7 +1108,161 @@ console.log('migration complete: no legacySend references, call sites intact');
       { name: 'check migration', command: 'bun', args: ['scripts/check-migration.ts'] },
     ],
   },
+  // Repo-scale, extreme: the symptom is a wrong number in an end-to-end report.
+  // The repo is 45 files across eight collectors, six normalizers, seven
+  // aggregators and five sinks, and the prompt names none of them, so the agent
+  // has to follow the number back to its source instead of reading everything.
+  {
+    id: 'extreme-repo-scale-metrics-report',
+    category: 'repo-scale',
+    difficulty: 'extreme',
+    prompt: '这个仓库的指标报表验收对不上：`bun test` 有一个测试失败，`bun scripts/check-report.ts` 还会列出几行 p95 不匹配。请定位根因并修好，让这两条命令都通过，同时保持 mean / median / rate / spread / total 的口径不变。tests/ 与 scripts/check-report.ts 是验收口径，不得修改。',
+    files: repoScaleFixtureFiles(),
+    verification: [
+      { name: 'bun test', command: 'bun', args: ['test'], timeoutMs: 60_000 },
+      { name: 'check report', command: 'bun', args: ['scripts/check-report.ts'], timeoutMs: 30_000 },
+    ],
+  },
+  // Resource ceiling, extreme: the seeded implementation is CORRECT but
+  // quadratic, so it cannot pass at the documented batch size no matter how
+  // fast the machine is. The ceiling is a scaling ratio (4x the records must
+  // cost well under 16x the time), not a wall-clock number, so it does not
+  // depend on the host; the verification timeout is the only absolute bound.
+  {
+    id: 'extreme-perf-dedupe-scaling',
+    category: 'performance',
+    difficulty: 'extreme',
+    prompt: 'src/dedupe.ts 的重复日志检测结果是对的，但线上单批 100 万条时跑不完（目前的实现要几分钟）。请在**输出完全不变**的前提下把它改成能扛住生产的实现：`bun test` 与 `bun scripts/check-scaling.ts` 都必须通过。tests/ 与 scripts/check-scaling.ts 是验收口径，不得修改；docs/dedupe.md 定义了"重复"的判定规则与批处理规模要求。',
+    files: {
+      'package.json': `${JSON.stringify({
+        name: 'pure-log-dedupe',
+        private: true,
+        type: 'module',
+        scripts: { test: 'bun test', 'check:scaling': 'bun scripts/check-scaling.ts' },
+      }, null, 2)}\n`,
+      'README.md': `# pure-log-dedupe\n\n重复日志检测（ingest worker 的一个组件）。判定规则见 \`docs/dedupe.md\`，验收命令：\n\n\`\`\`bash\nbun test\nbun scripts/check-scaling.ts\n\`\`\`\n`,
+      'docs/dedupe.md': `# 重复日志检测\n\n## 判定规则\n\n两条记录是**重复**，当且仅当：\n\n1. 它们规范化后的消息文本相同（\`normalizeMessage\`：小写、非字母数字压成单个空格）；且\n2. 时间戳相差不超过 5 分钟（\`DUPLICATE_WINDOW_MS\`）。\n\n重复关系是可传递的：A-B、B-C 各自在窗口内，即使 A-C 超出窗口，三条也属于同一组。\n\n输出按组内最早记录在输入中的位置排序；组内 \`ids\` 保持输入顺序；\`key\` 是规范化后的消息。\n\n## 规模要求\n\n生产单批最多 **100 万条**，ingest worker 的验收门槛是「批处理时间随批大小近似线性增长」：\n记录数变成 4 倍时，耗时不应超过 7 倍（纯二次实现约 16 倍）。\n\n验收跑了 2000 / 8000 两级而不是直接跑 100 万条：判的是**增长速度**（比值），\n它在任何机器上都成立；绝对值会把验收绑死在某台机器上。\n`,
+      'src/types.ts': `export interface LogRecord {\n  id: string;\n  message: string;\n  /** epoch ms */\n  at: number;\n}\n\nexport interface DuplicateGroup {\n  /** normalizeMessage(record.message) */\n  key: string;\n  /** record ids, in input order */\n  ids: string[];\n}\n`,
+      'src/normalize.ts': `/** 规范化消息文本：小写，非字母数字压成单个空格，去掉首尾空白。 */\nexport function normalizeMessage(message: string): string {\n  return message.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();\n}\n`,
+      'src/sample-data.ts': `import type { LogRecord } from './types';\n\nexport const SAMPLE_BASE_AT = 1_700_000_000_000;\n\nconst MESSAGES = ['disk full', 'disk full!!', 'timeout', 'Timeout', 'auth failed', 'queue stalled'];\n\n/** 确定性样本生成器（无时钟、无 Math.random）：基准与验收脚本共用同一批数据。 */\nexport function makeRecords(count: number, seed = 7): LogRecord[] {\n  let state = seed >>> 0;\n  const next = (): number => {\n    state = (Math.imul(state, 1103515245) + 12345) >>> 0;\n    return state;\n  };\n  return Array.from({ length: count }, (_, index) => ({\n    id: 'r' + index,\n    message: MESSAGES[next() % MESSAGES.length]!,\n    at: SAMPLE_BASE_AT + (next() % 400) * 1000,\n  }));\n}\n`,
+      'src/dedupe.ts': `import { normalizeMessage } from './normalize';\nimport type { DuplicateGroup, LogRecord } from './types';\n\n/** 两条记录时间戳相差不超过这个值就算同一时段。 */\nexport const DUPLICATE_WINDOW_MS = 5 * 60 * 1000;\n\n/**\n * 把每一批记录里互为重复的记录聚成组（规则见 docs/dedupe.md）。\n *\n * 当前实现直接对每一对记录做判定：结果正确，但代价是 O(n^2)。\n */\nexport function findDuplicateGroups(records: readonly LogRecord[]): DuplicateGroup[] {\n  const parent = records.map((_, index) => index);\n\n  function find(index: number): number {\n    let current = index;\n    while (parent[current] !== current) {\n      parent[current] = parent[parent[current]!]!;\n      current = parent[current]!;\n    }\n    return current;\n  }\n\n  function union(a: number, b: number): void {\n    const rootA = find(a);\n    const rootB = find(b);\n    if (rootA === rootB) return;\n    // 始终让较小的下标当代表，组的代表就是批里最早的那条记录。\n    if (rootA < rootB) parent[rootB] = rootA;\n    else parent[rootA] = rootB;\n  }\n\n  for (let i = 0; i < records.length; i += 1) {\n    const left = records[i]!;\n    const leftKey = normalizeMessage(left.message);\n    for (let j = i + 1; j < records.length; j += 1) {\n      const right = records[j]!;\n      if (Math.abs(left.at - right.at) > DUPLICATE_WINDOW_MS) continue;\n      if (leftKey !== normalizeMessage(right.message)) continue;\n      union(i, j);\n    }\n  }\n\n  const members = new Map<number, number[]>();\n  for (let index = 0; index < records.length; index += 1) {\n    const root = find(index);\n    const bucket = members.get(root);\n    if (bucket) bucket.push(index);\n    else members.set(root, [index]);\n  }\n\n  return [...members.entries()]\n    .filter(([, indexes]) => indexes.length > 1)\n    .sort(([a], [b]) => a - b)\n    .map(([root, indexes]) => ({\n      key: normalizeMessage(records[root]!.message),\n      ids: indexes.map((index) => records[index]!.id),\n    }));\n}\n`,
+      'tests/dedupe.test.ts': `import { describe, expect, it } from 'bun:test';\nimport { findDuplicateGroups } from '../src/dedupe';\nimport { makeRecords, SAMPLE_BASE_AT } from '../src/sample-data';\nimport type { LogRecord } from '../src/types';\n\nconst record = (id: string, message: string, minute: number): LogRecord => ({\n  id,\n  message,\n  at: SAMPLE_BASE_AT + minute * 60_000,\n});\n\ndescribe('findDuplicateGroups', () => {\n  it('groups equal normalized messages inside the window', () => {\n    const groups = findDuplicateGroups([\n      record('a', 'Disk full', 0),\n      record('b', 'disk  FULL!!', 1),\n      record('c', 'Disk full', 9),\n      record('d', 'timeout', 0),\n      record('e', 'timeout', 2),\n    ]);\n    expect(groups).toEqual([\n      { key: 'disk full', ids: ['a', 'b'] },\n      { key: 'timeout', ids: ['d', 'e'] },\n    ]);\n  });\n\n  it('merges a transitive chain into one group', () => {\n    const groups = findDuplicateGroups([\n      record('a', 'auth failed', 0),\n      record('b', 'auth failed', 3),\n      record('c', 'auth failed', 6),\n      record('d', 'auth failed', 40),\n    ]);\n    // 单成员组不算重复，'d' 距 'c' 34 分钟，自己一组但要被过滤掉。\n    expect(groups).toEqual([{ key: 'auth failed', ids: ['a', 'b', 'c'] }]);\n  });\n\n  it('keeps production batches inside the scaling ceiling', () => {\n    const smallRecords = makeRecords(2_000);\n    const largeRecords = makeRecords(8_000);\n    const time = (records: LogRecord[]): number => {\n      const started = performance.now();\n      findDuplicateGroups(records);\n      return performance.now() - started;\n    };\n\n    time(smallRecords.slice(0, 200));\n    const smallMs = Math.min(time(smallRecords), time(smallRecords), time(smallRecords));\n    const largeMs = Math.min(time(largeRecords), time(largeRecords), time(largeRecords));\n\n    expect(findDuplicateGroups(largeRecords).length).toBeGreaterThan(0);\n    // 记录数 4 倍：近似线性的工作量涨 ~4 倍，纯二次 ~16 倍。\n    expect(largeMs).toBeLessThan(Math.max(smallMs, 0.5) * 7);\n  }, 20_000);\n});\n`,
+      'scripts/check-scaling.ts': `import { findDuplicateGroups } from '../src/dedupe';\nimport { makeRecords } from '../src/sample-data';\n\nconst SMALL = 2_000;\nconst LARGE = 8_000;\nconst RATIO_CEILING = 7;\n\nconst smallRecords = makeRecords(SMALL);\nconst largeRecords = makeRecords(LARGE);\nif (smallRecords.length !== SMALL || largeRecords.length !== LARGE) {\n  console.error('sample generator did not produce the requested batch sizes');\n  process.exit(1);\n}\n\nconst time = (records: ReturnType<typeof makeRecords>): number => {\n  const started = performance.now();\n  findDuplicateGroups(records);\n  return performance.now() - started;\n};\n\ntime(smallRecords.slice(0, 200));\nconst smallMs = Math.min(time(smallRecords), time(smallRecords), time(smallRecords));\nconst largeMs = Math.min(time(largeRecords), time(largeRecords), time(largeRecords));\nconst ratio = largeMs / smallMs;\n\nconsole.log(\`4x records: \${SMALL} in \${smallMs.toFixed(1)}ms, \${LARGE} in \${largeMs.toFixed(1)}ms (x\${ratio.toFixed(2)})\`);\n\nif (!(ratio < RATIO_CEILING)) {\n  console.error(\`scaling ceiling exceeded: x\${ratio.toFixed(2)} >= x\${RATIO_CEILING} (quadratic work grows ~x16 for 4x the records)\`);\n  process.exit(1);\n}\n\nif (findDuplicateGroups(largeRecords).length === 0) {\n  console.error('no duplicate groups found in the large batch');\n  process.exit(1);\n}\n\nconsole.log('scaling ok');\n`,
+    },
+    verification: [
+      { name: 'bun test', command: 'bun', args: ['test'], timeoutMs: 40_000 },
+      { name: 'check scaling', command: 'bun', args: ['scripts/check-scaling.ts'], timeoutMs: 40_000 },
+    ],
+  },
 ];
+
+/**
+ * 仓库级 fixture 的源码树（45 个文件）。重复度高的模块由生成器写出，fixture
+ * 定义里不贴几千行字面量——但落到工作区里的仍是 45 个互相 import 的独立文件，
+ * agent 必须自己判断哪些与失败的报表有关。
+ */
+function repoScaleFixtureFiles(): Record<string, string> {
+  const files: Record<string, string> = {};
+
+  files['package.json'] = `${JSON.stringify({
+    name: 'pure-metrics-report',
+    private: true,
+    type: 'module',
+    scripts: { report: 'bun scripts/report.ts', check: 'bun scripts/check-report.ts', test: 'bun test' },
+  }, null, 2)}\n`;
+
+  files['README.md'] = `# pure-metrics-report\n\n把每台机器的指标采集、规范化、聚合、输出四层串成一张报表。指标口径见 \`docs/metrics.md\`。\n\n\`\`\`bash\nbun run report\nbun run check\n\`\`\`\n`;
+
+  files['docs/metrics.md'] = `# 指标口径\n\n每一行报表由一个指标的样本序列算出：\n\n- \`count\`：样本数；\n- \`mean\`：算术平均；\n- \`median\`：中位数（偶数个取中间两个的平均）；\n- \`p95\`：**nearest-rank** 百分位——把样本升序排列，取第 ceil(n * 0.95) 个（第 1 个是最小值）\n  （从 1 开始数）；例如 n=20 时取第 19 个。\n\n数值统一四舍五入到两位小数（\`roundTo\`）。采集是确定性的：同样的采集器永远产出\nsample 序列，\`util/series.ts\` 是唯一的数据源。\n`;
+
+  files['src/model/metric.ts'] = `export interface MetricSample {\n  metric: string;\n  /** epoch ms */\n  at: number;\n  value: number;\n}\n\nexport interface MetricRow {\n  metric: string;\n  count: number;\n  mean: number;\n  median: number;\n  p95: number;\n}\n`;
+
+  files['src/model/index.ts'] = `export type { MetricRow, MetricSample } from './metric';\n`;
+
+  files['src/util/series.ts'] = `import type { MetricSample } from '../model/metric';\n\n/** 确定性样本序列：没有时钟、没有随机数，fixture 必须可复现。 */\nexport function series(metric: string, base: number, step: number, count = 20, jitter = 0): MetricSample[] {\n  return Array.from({ length: count }, (_, index) => ({\n    metric,\n    at: 1_700_000_000_000 + index * 60_000,\n    value: base + step * index + (jitter === 0 ? 0 : (index % 3) * jitter),\n  }));\n}\n`;
+
+  files['src/util/guard.ts'] = `export function assertNonEmpty(values: readonly unknown[], label: string): void {\n  if (values.length === 0) throw new Error(label + ': empty series');\n}\n`;
+
+  files['src/util/reduce.ts'] = `export function sum(values: readonly number[]): number {\n  return values.reduce((acc, value) => acc + value, 0);\n}\n\nexport function maxOf(values: readonly number[]): number {\n  return values.reduce((acc, value) => (value > acc ? value : acc), -Infinity);\n}\n\nexport function minOf(values: readonly number[]): number {\n  return values.reduce((acc, value) => (value < acc ? value : acc), Infinity);\n}\n`;
+
+  files['src/util/sort.ts'] = `export function sortAscending(values: readonly number[]): number[] {\n  return [...values].sort((a, b) => a - b);\n}\n\nexport function sortByTime<T extends { at: number }>(items: readonly T[]): T[] {\n  return [...items].sort((a, b) => a.at - b.at);\n}\n`;
+
+  files['src/util/round.ts'] = `export function roundTo(value: number, digits = 2): number {\n  const factor = 10 ** digits;\n  return Math.round(value * factor) / factor;\n}\n`;
+
+  const collectors: Array<[string, string, number, number, number]> = [
+    ['cpu', 'collectCpu', 12.5, 1.75, 0.4],
+    ['memory', 'collectMemory', 40, 2.5, 0],
+    ['disk', 'collectDisk', 5, 0.5, 0],
+    ['network', 'collectNetwork', 100, -1.5, 0],
+    ['latency', 'collectLatency', 8, 0.75, 0.25],
+    ['errors', 'collectErrors', 0, 0.25, 0],
+    ['queue', 'collectQueue', 3, 1, 0],
+    ['uptime', 'collectUptime', 100, 0, 0],
+  ];
+
+  const collectorEntries: string[] = [];
+  for (const [name, fn, base, step, jitter] of collectors) {
+    const camel = name[0]!.toUpperCase() + name.slice(1);
+    files[`src/collectors/${name}.ts`] = `import { series } from '../util/series';\nimport type { MetricSample } from '../model/metric';\n\n/** ${name} 采集器：从 agent 侧读一段确定性的样本。 */\nexport function ${fn}(): MetricSample[] {\n  return series('${name}', ${base}, ${step}, 20, ${jitter});\n}\n\nexport const ${camel}Collector = { name: '${name}', collect: ${fn} };\n`;
+    collectorEntries.push(`  { name: '${name}', collect: ${fn} },`);
+  }
+
+  files['src/collectors/index.ts'] = `import type { MetricSample } from '../model/metric';\n${collectors.map(([name, fn]) => `import { ${fn} } from './${name}';`).join('\n')}\n\nexport interface Collector {\n  name: string;\n  collect: () => MetricSample[];\n}\n\n/** 采集器注册表——报表按这里的顺序逐行输出。 */\nexport const COLLECTORS: readonly Collector[] = [\n${collectorEntries.join('\n')}\n];\n`;
+
+  files['src/normalize/scale.ts'] = `export function scaleValues(values: readonly number[], factor: number): number[] {\n  return values.map((value) => value * factor);\n}\n`;
+
+  files['src/normalize/clamp.ts'] = `export function clampValue(value: number, min: number, max: number): number {\n  if (value < min) return min;\n  if (value > max) return max;\n  return value;\n}\n`;
+
+  files['src/normalize/merge.ts'] = `import type { MetricSample } from '../model/metric';\n\nexport function mergeSamples(...lists: ReadonlyArray<readonly MetricSample[]>): MetricSample[] {\n  return lists.flatMap((list) => [...list]);\n}\n`;
+
+  files['src/normalize/window.ts'] = `import type { MetricSample } from '../model/metric';\n\n/** 两端都是 undefined 时原样返回（默认全窗口）。 */\nexport function withinWindow(\n  samples: readonly MetricSample[],\n  from: number | undefined,\n  to: number | undefined,\n): MetricSample[] {\n  if (from === undefined || to === undefined) return [...samples];\n  return samples.filter((sample) => sample.at >= from && sample.at <= to);\n}\n`;
+
+  files['src/normalize/rename.ts'] = `import type { MetricSample } from '../model/metric';\n\nexport function renameSamples(samples: readonly MetricSample[], metric: string): MetricSample[] {\n  return samples.map((sample) => ({ ...sample, metric }));\n}\n`;
+
+  files['src/normalize/index.ts'] = `export { clampValue } from './clamp';\nexport { mergeSamples } from './merge';\nexport { renameSamples } from './rename';\nexport { scaleValues } from './scale';\nexport { withinWindow } from './window';\n`;
+
+  files['src/aggregate/mean.ts'] = `import { assertNonEmpty } from '../util/guard';\nimport { sum } from '../util/reduce';\n\nexport function mean(values: readonly number[]): number {\n  assertNonEmpty(values, 'mean');\n  return sum(values) / values.length;\n}\n`;
+
+  files['src/aggregate/median.ts'] = `import { assertNonEmpty } from '../util/guard';\nimport { sortAscending } from '../util/sort';\n\nexport function median(values: readonly number[]): number {\n  assertNonEmpty(values, 'median');\n  const sorted = sortAscending(values);\n  const middle = Math.floor(sorted.length / 2);\n  return sorted.length % 2 === 1\n    ? sorted[middle]!\n    : (sorted[middle - 1]! + sorted[middle]!) / 2;\n}\n`;
+
+  files['src/aggregate/percentile.ts'] = `import { assertNonEmpty } from '../util/guard';\nimport { sortAscending } from '../util/sort';\n\n/** nearest-rank 百分位（口径见 docs/metrics.md）。 */\nexport function percentile(values: readonly number[], p: number): number {\n  assertNonEmpty(values, 'percentile');\n  if (!(p > 0 && p <= 1)) throw new Error('percentile: p must be in (0, 1]');\n  const sorted = sortAscending(values);\n  const rank = Math.floor(sorted.length * p);\n  return sorted[Math.min(rank, sorted.length - 1)]!;\n}\n`;
+
+  files['src/aggregate/spread.ts'] = `import { assertNonEmpty } from '../util/guard';\nimport { maxOf, minOf } from '../util/reduce';\n\nexport function spread(values: readonly number[]): number {\n  assertNonEmpty(values, 'spread');\n  return maxOf(values) - minOf(values);\n}\n`;
+
+  files['src/aggregate/total.ts'] = `import { sum } from '../util/reduce';\nimport type { MetricSample } from '../model/metric';\n\nexport function total(samples: readonly MetricSample[]): number {\n  return sum(samples.map((sample) => sample.value));\n}\n`;
+
+  files['src/aggregate/rate.ts'] = `import { sortByTime } from '../util/sort';\nimport type { MetricSample } from '../model/metric';\n\n/** 每秒变化量（首尾两点之间）。样本不足两点时是 0。 */\nexport function rate(samples: readonly MetricSample[]): number {\n  if (samples.length < 2) return 0;\n  const ordered = sortByTime(samples);\n  const first = ordered[0]!;\n  const last = ordered[ordered.length - 1]!;\n  const seconds = (last.at - first.at) / 1000;\n  return seconds > 0 ? (last.value - first.value) / seconds : 0;\n}\n`;
+
+  files['src/aggregate/index.ts'] = `import { roundTo } from '../util/round';\nimport { sortAscending } from '../util/sort';\nimport type { MetricRow, MetricSample } from '../model/metric';\nimport { mean } from './mean';\nimport { median } from './median';\nimport { percentile } from './percentile';\n\nexport { mean } from './mean';\nexport { median } from './median';\nexport { percentile } from './percentile';\nexport { rate } from './rate';\nexport { spread } from './spread';\nexport { total } from './total';\n\n/** 把一个指标的样本序列折成报表里的一行。 */\nexport function buildRow(metric: string, samples: readonly MetricSample[]): MetricRow {\n  const values = sortAscending(samples.map((sample) => sample.value));\n  return {\n    metric,\n    count: values.length,\n    mean: roundTo(mean(values)),\n    median: roundTo(median(values)),\n    p95: roundTo(percentile(values, 0.95)),\n  };\n}\n`;
+
+  files['src/sinks/console.ts'] = `import type { MetricRow } from '../model/metric';\n\nexport function toConsoleLines(rows: readonly MetricRow[]): string[] {\n  return rows.map((row) => \`\${row.metric}: p95=\${row.p95}\`);\n}\n`;
+
+  files['src/sinks/json.ts'] = `import type { MetricRow } from '../model/metric';\n\nexport function toJson(rows: readonly MetricRow[]): string {\n  return JSON.stringify({ rows }, null, 2);\n}\n`;
+
+  files['src/sinks/csv.ts'] = `import type { MetricRow } from '../model/metric';\n\nexport function toCsv(rows: readonly MetricRow[]): string {\n  return ['metric,count,mean,median,p95', ...rows.map((row) => [row.metric, row.count, row.mean, row.median, row.p95].join(','))].join('\\n');\n}\n`;
+
+  files['src/sinks/markdown.ts'] = `import type { MetricRow } from '../model/metric';\n\nexport function toMarkdownTable(rows: readonly MetricRow[]): string {\n  const head = '| metric | count | mean | median | p95 |';\n  const rule = '| --- | --- | --- | --- | --- |';\n  const body = rows.map((row) => \`| \${row.metric} | \${row.count} | \${row.mean} | \${row.median} | \${row.p95} |\`);\n  return [head, rule, ...body].join('\\n');\n}\n`;
+
+  files['src/sinks/index.ts'] = `export { toConsoleLines } from './console';\nexport { toCsv } from './csv';\nexport { toJson } from './json';\nexport { toMarkdownTable } from './markdown';\n`;
+
+  files['src/pipeline.ts'] = `import { buildRow, type MetricRow } from './aggregate';\nimport { COLLECTORS } from './collectors';\nimport { renameSamples, withinWindow } from './normalize';\n\nexport interface PipelineOptions {\n  /** epoch ms；两边都给才会裁剪窗口。 */\n  from?: number;\n  to?: number;\n}\n\n/** 采集 → 规范化 → 聚合：报表的每一行都从这里产出。 */\nexport function buildReport(options: PipelineOptions = {}): MetricRow[] {\n  return COLLECTORS.map(({ name, collect }) => {\n    const samples = renameSamples(collect(), name);\n    return buildRow(name, withinWindow(samples, options.from, options.to));\n  });\n}\n`;
+
+  files['src/registry.ts'] = `import { buildReport } from './pipeline';\nimport type { MetricRow } from './model/metric';\n\nexport interface ReportPlugin {\n  id: string;\n  title: string;\n  build: () => MetricRow[];\n}\n\n/** 报表插件注册表：目前只有默认报表，历史上有过一个已删除的 'compact'。 */\nexport const PLUGINS: readonly ReportPlugin[] = [\n  { id: 'default', title: '默认报表', build: () => buildReport() },\n];\n\nexport function pluginById(id: string): ReportPlugin | undefined {\n  return PLUGINS.find((plugin) => plugin.id === id);\n}\n`;
+
+  files['scripts/report.ts'] = `import { buildReport } from '../src/pipeline';\nimport { toMarkdownTable } from '../src/sinks';\n\nprocess.stdout.write(toMarkdownTable(buildReport()) + '\\n');\n`;
+
+  files['scripts/check-report.ts'] = `import { buildReport } from '../src/pipeline';\nimport { percentile } from '../src/aggregate';\n\n// 口径见 docs/metrics.md：nearest-rank，n=20 时 p95 是升序里的第 19 个。\nconst EXPECTED_P95: Record<string, number> = {\n  cpu: 44,\n  memory: 85,\n  latency: 21.5,\n};\n\nlet offenders = 0;\nconst rows = buildReport();\n\nif (rows.length !== 8) {\n  console.error('expected 8 metric rows, got ' + rows.length);\n  offenders += 1;\n}\n\nfor (const row of rows) {\n  const expected = EXPECTED_P95[row.metric];\n  if (expected === undefined) continue;\n  if (row.p95 !== expected) {\n    console.error(\`p95 mismatch for \${row.metric}: expected \${expected}, got \${row.p95}\`);\n    offenders += 1;\n  }\n}\n\nconst twenty = Array.from({ length: 20 }, (_, index) => index + 1);\nif (percentile(twenty, 0.95) !== 19) {\n  console.error('percentile(1..20, 0.95) should be 19 (nearest-rank), got ' + percentile(twenty, 0.95));\n  offenders += 1;\n}\n\nif (offenders > 0) process.exit(1);\nconsole.log('report ok: 8 rows, p95 matches the documented nearest-rank rule');\n`;
+
+  files['tests/collectors.test.ts'] = `import { describe, expect, it } from 'bun:test';\nimport { COLLECTORS } from '../src/collectors';\n\ndescribe('collectors', () => {\n  it('registers eight deterministic collectors', () => {\n    expect(COLLECTORS).toHaveLength(8);\n    for (const collector of COLLECTORS) {\n      const first = collector.collect();\n      expect(first).toHaveLength(20);\n      expect(first).toEqual(collector.collect());\n    }\n  });\n});\n`;
+
+  files['tests/normalize.test.ts'] = `import { describe, expect, it } from 'bun:test';\nimport { clampValue, mergeSamples, renameSamples, scaleValues, withinWindow } from '../src/normalize';\nimport { series } from '../src/util/series';\n\ndescribe('normalize', () => {\n  it('scales, clamps and merges without touching the inputs', () => {\n    expect(scaleValues([1, 2], 3)).toEqual([3, 6]);\n    expect(clampValue(7, 0, 5)).toBe(5);\n    expect(clampValue(-1, 0, 5)).toBe(0);\n    expect(mergeSamples([1, 2], [3])).toEqual([1, 2, 3]);\n  });\n\n  it('filters by window only when both ends are given', () => {\n    const samples = series('cpu', 1, 1, 5);\n    expect(withinWindow(samples, undefined, undefined)).toHaveLength(5);\n    const from = samples[1]!.at;\n    const to = samples[3]!.at;\n    expect(withinWindow(samples, from, to)).toHaveLength(3);\n  });\n\n  it('renames samples without mutating them', () => {\n    const samples = series('cpu', 1, 1, 2);\n    expect(renameSamples(samples, 'mem')[0]!.metric).toBe('mem');\n    expect(samples[0]!.metric).toBe('cpu');\n  });\n});\n`;
+
+  files['tests/aggregate.test.ts'] = `import { describe, expect, it } from 'bun:test';\nimport { mean, median, rate, spread, total } from '../src/aggregate';\nimport { series } from '../src/util/series';\n\ndescribe('aggregate', () => {\n  it('computes the plain statistics', () => {\n    expect(mean([1, 2, 3, 4])).toBe(2.5);\n    expect(median([4, 1, 3, 2])).toBe(2.5);\n    expect(median([3, 1, 2])).toBe(2);\n    expect(spread([2, 9, 4])).toBe(7);\n    expect(total(series('cpu', 10, 2, 3))).toBe(36);\n  });\n\n  it('measures change per second between the first and last sample', () => {\n    const samples = series('cpu', 0, 1, 3);\n    expect(rate(samples)).toBeCloseTo(1 / 60, 6);\n    expect(rate(samples.slice(0, 1))).toBe(0);\n  });\n});\n`;
+
+  files['tests/pipeline.test.ts'] = `import { describe, expect, it } from 'bun:test';\nimport { buildReport } from '../src/pipeline';\nimport { toMarkdownTable } from '../src/sinks';\n\ndescribe('buildReport', () => {\n  it('renders one row per collector', () => {\n    const rows = buildReport();\n    expect(rows.map((row) => row.metric)).toEqual(['cpu', 'memory', 'disk', 'network', 'latency', 'errors', 'queue', 'uptime']);\n    expect(toMarkdownTable(rows).split('\\n')).toHaveLength(10);\n  });\n\n  it('reports the documented p95 for every series', () => {\n    const rows = buildReport();\n    const p95 = (metric: string) => rows.find((row) => row.metric === metric)!.p95;\n    expect(p95('cpu')).toBe(44);\n    expect(p95('memory')).toBe(85);\n    expect(p95('latency')).toBe(21.5);\n  });\n});\n`;
+
+  return files;
+}
 
 async function runVerification(command: VerificationCommand, workspace: string): Promise<VerificationResult> {
   const started = Date.now();
@@ -1273,7 +1438,7 @@ export async function evaluateCodingTaskSuite(
   for (const task of tasks) results.push(await evaluateCodingTask(task, options));
   const totalUsage = results.reduce<TokenUsage | undefined>((sum, result) => mergeUsage(sum, result.agent?.usage), undefined);
   const passAt1 = results.filter((result) => result.passAt1).length;
-  const fixtureHash = hashText(JSON.stringify(tasks));
+  const fixtureHash = codingTaskFixtureHash(tasks);
   return {
     suiteVersion: CODING_TASK_SUITE_VERSION,
     generatedAt: new Date().toISOString(),

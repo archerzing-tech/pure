@@ -78,6 +78,45 @@ function createAdapter(options: CodingAgentEvaluationExecutorOptions): LLMAdapte
   }
 }
 
+/**
+ * Drain an engine event stream into the fields the suite report keeps.
+ *
+ * A fatal LLM failure (bad model code, dead key, unreachable endpoint) does NOT
+ * throw out of the engine: the failure policy retries, then emits `Interrupted`
+ * and a trailing `Completed` with `interrupted: true` (the terminal
+ * `Error { recoverable: false }` only appears when no policy is installed).
+ * Scoring either shape as a plain `failed` task made an unreachable provider
+ * look like a model that tried and failed: a whole suite could come back 0/N in
+ * ~1s per task with zero tool calls and no cost, and nothing in the report said
+ * why. `fatalError` carries the cause so the executor can raise instead.
+ */
+export async function collectAgentRunEvents(
+  stream: AsyncIterable<EngineEvent>,
+): Promise<{ usage?: CodingTaskAgentResult['usage']; toolCalls: number; completed: boolean; fatalError?: { code: string; message: string } }> {
+  let usage: CodingTaskAgentResult['usage'];
+  let toolCalls = 0;
+  let completed = false;
+  let interrupted: { code: string; message: string } | undefined;
+  let fatalError: { code: string; message: string } | undefined;
+  for await (const event of stream) {
+    if (event.type === 'ToolResult') toolCalls++;
+    if (event.type === 'Error' && event.payload.recoverable === false) {
+      fatalError = { code: event.payload.code, message: event.payload.message };
+    }
+    if (event.type === 'Interrupted') {
+      interrupted = { code: 'AGENT_INTERRUPTED', message: event.payload.reason };
+    }
+    if (event.type === 'Completed') {
+      completed = true;
+      usage = event.payload.usage;
+      if (!event.payload.isComplete && !fatalError) {
+        fatalError = interrupted ?? { code: 'AGENT_INTERRUPTED', message: 'run ended without completing its turn' };
+      }
+    }
+  }
+  return { usage, toolCalls, completed, fatalError };
+}
+
 export async function runCodingAgentEvaluationTask(
   task: CodingTaskFixture,
   workspace: string,
@@ -110,15 +149,11 @@ export async function runCodingAgentEvaluationTask(
     sessionId,
   }, task.prompt);
 
-  let usage: CodingTaskAgentResult['usage'];
-  let toolCalls = 0;
-  let completed = false;
-  for await (const event of agent.run(assembly.systemPrompt, assembly.userPrompt ?? task.prompt)) {
-    if (event.type === 'ToolResult') toolCalls++;
-    if (event.type === 'Completed') {
-      completed = true;
-      usage = event.payload.usage;
-    }
+  const { usage, toolCalls, completed, fatalError } = await collectAgentRunEvents(
+    agent.run(assembly.systemPrompt, assembly.userPrompt ?? task.prompt),
+  );
+  if (fatalError) {
+    throw new Error(`model call failed (${fatalError.code}): ${fatalError.message}`);
   }
   if (!completed) throw new Error('CodingAgent evaluation run ended without a Completed event');
   return { usage, toolCalls, traceId: assembly.traceId };
