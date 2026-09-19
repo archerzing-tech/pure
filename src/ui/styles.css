@@ -4561,16 +4561,15 @@ body {
 
 /* ── Skill Cards ── */
 .skill-card {
-  padding: 16px 15px;
-  border: 1px solid var(--border-light);
+  /* 与工具页 .setting-row 同款的无边框行：平时透明，悬停浅底。
+   * 卡片描边在这里显得每个技能都像独立盒子，页面碎。 */
+  padding: 14px 16px;
   border-radius: var(--radius-sm);
-  margin-bottom: 7px;
-  transition: border-color var(--transition), background var(--transition), transform var(--transition);
+  margin-bottom: 2px;
+  transition: background var(--transition);
 }
 .skill-card:hover {
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
-  background: var(--bg-card);
-  transform: translateY(-1px);
+  background: var(--bg-hover);
 }
 .skill-card-header {
   display: flex;
@@ -7014,10 +7013,6 @@ select:focus-visible,
 .setting-input,
 .setting-select {
   background: color-mix(in srgb, var(--bg-input) 92%, transparent);
-}
-
-.skill-card {
-  background: color-mix(in srgb, var(--bg-card) 72%, transparent);
 }
 
 .plan-step {
@@ -10803,20 +10798,22 @@ button svg,
 }
 .setting-row.proxy-url-row .proxy-btn {
   height: 38px;
-  padding: 0 12px;
+  padding: 0 14px;
   font-size: 12px;
+  font-weight: 600;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-secondary);
+  /* 无边框 + 主题色填充：透明底描边钮紧挨着输入框时长得一模一样，
+   * 看不出能点。柔和的 accent 底 + accent 字，一眼是按钮不是输入框。 */
+  border: none;
+  background: var(--accent-soft);
+  color: var(--accent);
   white-space: nowrap;
   cursor: pointer;
-  transition: color 0.15s var(--ease-out), border-color 0.15s var(--ease-out), background 0.15s var(--ease-out);
+  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out);
 }
 .setting-row.proxy-url-row .proxy-btn:hover {
+  background: color-mix(in srgb, var(--accent) 16%, var(--accent-soft));
   color: var(--accent);
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent-soft) 18%, transparent);
 }
 .setting-row.proxy-url-row .proxy-btn:disabled {
   opacity: 0.4;
