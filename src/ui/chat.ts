@@ -320,6 +320,10 @@ type ToolRowEntry = {
   toolName: string;
   args: Record<string, unknown>;
   toolCallId?: string;
+  /** Live interior trace this card has shown (delegation tools only). Kept on
+   *  the entry so a deduped repeat — collapsed onto this card and finalized
+   *  with a synthetic result — keeps the trace the card already streamed. */
+  subagentTrace?: string[];
 };
 
 /** Deterministic key for a tool call's arguments (sorted object keys), used to
@@ -4312,6 +4316,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
             if (trace.length > MAX_LIVE_STREAM_LINES) trace.splice(0, trace.length - MAX_LIVE_STREAM_LINES);
             const agentRow = pendingRows.get(activity.callId);
             if (agentRow) {
+              agentRow.subagentTrace = trace;
               appendToolStreamLine(agentRow.row, activity.kind === 'error' ? 'stderr' : 'stdout', line);
               scrollChatToBottomIfPinned(chatEl);
             }
@@ -4493,7 +4498,10 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
                 resultItems,
                 resultImages,
                 resultText: resultPreview,
-                subagentTrace: subagentTraceByCall.get(event.payload.toolCallId),
+                // A deduped repeat has no trace of its own — fall back to the
+                // lines this collapsed card already streamed, so the synthetic
+                // finalize doesn't wipe them.
+                subagentTrace: subagentTraceByCall.get(event.payload.toolCallId) ?? pending.subagentTrace,
               });
               if (downloadMeta && event.payload.result.success) {
                 pending.row.el.appendChild(createDownloadCard(downloadMeta.path, downloadMeta.size, downloadMeta.via));
