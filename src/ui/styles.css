@@ -3601,15 +3601,18 @@ body {
 }
 
 /* Memory list scrollarea — show native scrollbar when many cards are stored,
-   consistent with the app's design system (matching .wp-popover-recent pattern). */
+   consistent with the app's design system (matching .wp-popover-recent pattern).
+   No `scrollbar-width` here: it would hand the surface to the native overlay bar,
+   which reserves no gutter on macOS (see the settings block). */
 #memory-list {
   max-height: 400px;
   overflow-y: auto;
-  scrollbar-width: thin; /* Firefox */
-  scrollbar-color: var(--accent) var(--bg-card);
+  scrollbar-width: auto;
 }
 #memory-list::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
+  display: block;
 }
 #memory-list::-webkit-scrollbar-track {
   background: transparent;
@@ -3620,6 +3623,13 @@ body {
 }
 #memory-list::-webkit-scrollbar-thumb:hover {
   background-color: var(--accent-hover, var(--accent));
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  #memory-list {
+    scrollbar-width: thin;
+    scrollbar-color: var(--accent) var(--bg-card);
+  }
 }
 
 /* ── Drag & drop overlay (drop a folder to switch workspace) ──
@@ -4154,6 +4164,8 @@ body {
   padding: 0;
   position: relative;
   background: color-mix(in srgb, var(--bg) 96%, var(--bg-sidebar));
+  /* 滚动条占 6px：留出固定槽位，页面长短切换（不同菜单页）时内容不会左右跳 6px。 */
+  scrollbar-gutter: stable;
 }
 
 .settings-page {
@@ -4178,7 +4190,8 @@ body {
   color: var(--text);
 }
 .settings-page-desc {
-  max-width: 620px;
+  /* 页面说明用满内容宽度：900px 的面板里 620px 只是白白多折一行。 */
+  max-width: 760px;
   font-size: 13px;
   line-height: 1.55;
   color: var(--text-secondary);
@@ -4196,6 +4209,19 @@ body {
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--bg-card) 88%, transparent);
   box-shadow: var(--shadow-sm);
+}
+
+/* 卡片里直接落着的内容（提示、诊断块、子列表…）与 .setting-row 的文字对齐到
+ * 同一条基准线：行内文字的内缩是 7px（卡片）+ 16px（行）= 23px，而这些内容
+ * 原来只吃到卡片的 7px，比行内文字近 16px —— 一块卡片里两种左边界，读起来
+ * 就是"文字贴边"。这里把它们的水平内边距补到 16px，高度（上下）保持不动。 */
+.settings-section > :not(.setting-row) {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+/* 堆在卡片里的非行内容之间留一口气：行本身有 14px 上下内边距，这些块没有。 */
+.settings-section > :not(.setting-row) + :not(.setting-row) {
+  margin-top: 8px;
 }
 
 .settings-section-title {
@@ -4234,7 +4260,8 @@ body {
   color: var(--text);
 }
 .setting-hint {
-  max-width: 560px;
+  /* 不再设 560px 上限：窄面板里 560px 会让明明放得下的中文提示折成两行。 */
+  max-width: none;
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--text-tertiary);
@@ -4394,13 +4421,19 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /* 按钮文字不换行、不被行内其他控件挤扁："检测" 这种两字标签曾经被压成
+   * 两行（内容盒只剩 22px），按钮该按文字宽度把输入框挤窄，而不是反过来。 */
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 .setting-btn:active {
   transform: scale(0.97);
 }
+/* 实心按钮上的文字色单独一个 token：深色主题的 accent 是亮青（#71e5ff），
+ * 白字只有 1.5:1；这里跟 --accent-contrast 走，两种主题都能看清。 */
 .setting-btn.primary {
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast, #fff);
 }
 .setting-btn.primary:hover {
   background: var(--accent-hover);
@@ -4419,7 +4452,7 @@ body {
 }
 .setting-btn.danger:hover {
   background: var(--danger);
-  color: white;
+  color: var(--danger-contrast, #fff);
 }
 
 .settings-divider {
@@ -5839,11 +5872,21 @@ body {
  * restores a thin visible scrollbar whenever content overflows. Non-scrolling
  * elements never paint one, so the panel stays clean unless a card actually
  * scrolls. Styling matches the #memory-list precedent (accent thumb on a
- * transparent track). */
+ * transparent track).
+ *
+ * Deliberately no `scrollbar-width`/`scrollbar-color` on these surfaces.
+ * Chrome treats a specified standard property as authoritative and then
+ * paints the *native* bar; on macOS that is an overlay bar, which reserves no
+ * gutter at all (measured: offsetWidth - clientWidth stays 0) and stays
+ * invisible until the user scrolls, so a long list reads as unscrollable. The
+ * ::-webkit-scrollbar rules below only win while the standard properties are
+ * unset, and they do reserve real space. Firefox has no pseudo-element to
+ * style, so it gets the thin bar from the guarded block under them. */
 #settings-content,
 #settings-content * {
-  scrollbar-width: thin; /* Firefox */
-  scrollbar-color: var(--accent) var(--bg-card);
+  /* Undo the global `* { scrollbar-width: none }`: `none` would let Blink hide
+     the bar natively and keep ignoring the pseudo-element rules below. */
+  scrollbar-width: auto;
 }
 #settings-content::-webkit-scrollbar,
 #settings-content *::-webkit-scrollbar {
@@ -5865,6 +5908,51 @@ body {
 #settings-content::-webkit-scrollbar-thumb:hover,
 #settings-content *::-webkit-scrollbar-thumb:hover {
   background-color: var(--accent-hover, var(--accent));
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  #settings-content,
+  #settings-content * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--accent) var(--bg-card);
+  }
+}
+
+/* ── Long lists scroll inside their card ──
+ * 同一页里几十条工具 / 技能 / 经验时，整页会被撑成一条长带，滚的是整页而不是
+ * 列表本身。给这些列表一个统一的高度上限：超过就在卡片内滚动（滚动条样式由上面
+ * 的 #settings-content 规则给出，非滚动时不会画出来）。高度统一，页面节奏一致。
+ * #memory-list 有自己的 400px 规则，故意留原样。 */
+#tool-inventory,
+#tool-corrections,
+#skills-dir-rows,
+#app-skills-list,
+#hub-grouped,
+#hub-installed,
+#evolution-errors,
+#evolution-advice,
+#evolution-experience,
+#mcp-server-list {
+  max-height: 420px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* 滚动条与内容之间留 2px，免得贴着文字。 */
+  padding-right: 2px;
+}
+/* 上面给卡片直系子元素补的 16px 水平内边距在这些列表上要保留，所以只在它们
+ * 需要滚动时再收一点右侧空间。 */
+.settings-section > #tool-inventory,
+.settings-section > #tool-corrections,
+.settings-section > #skills-dir-rows,
+.settings-section > #app-skills-list,
+.settings-section > #hub-grouped,
+.settings-section > #hub-installed,
+.settings-section > #evolution-errors,
+.settings-section > #evolution-advice,
+.settings-section > #evolution-experience,
+.settings-section > #mcp-server-list {
+  padding-left: 16px;
+  padding-right: 18px;
 }
 
 /* ════════════════════════════════════════
@@ -6022,7 +6110,7 @@ body {
 .bubble pre .code-copy-btn:hover,
 .bubble pre .code-save-btn:hover {
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast, #fff);
   border-color: var(--accent);
 }
 .bubble pre .code-copy-btn.copied,
@@ -6316,16 +6404,30 @@ body {
   --bg-hover: #e3eaf6;
   --bg-card: #ffffff;
   --text: #0f2333;
-  --text-secondary: #5b6b84;
-  --text-tertiary: #8b9cb5;
-  --border: #d8e2f0;
-  --border-light: #e7edf8;
-  --accent: #0b7cb0;
-  --accent-hover: #0a6896;
+  /* #5b6b84 在 hover 底（#e3eaf6）上只有 4.47:1，压深一点点把这类"二级文字
+     压在浅蓝底上"蹭过 4.5。 */
+  --text-secondary: #55657e;
+  /* 浅色下原来的 #8b9cb5 只在 2.5:1 左右（白色卡片 2.79:1、页面底色 2.5:1），
+     11px/11.5px 的说明文字与分组标题都看不清。深一档到 4.7:1 以上，同时仍比
+     --text-secondary 浅，层级不丢。 */
+  --text-tertiary: #5b6d85;
+  /* 边框：交互控件（输入框、下拉、次要按钮）要看得见 —— 原 #d8e2f0 只有
+     1.3:1；卡片轮廓保持轻柔但可辨（1.18:1 → 1.55:1）。 */
+  --border: #778ba6;
+  --border-light: #a8bbd6;
+  /* accent 从 #0b7cb0 压深一档：白字在它上面从 4.0:1 提到 5.6:1，作为文字色
+     在 accent-soft 底上也有 4.9:1。 */
+  --accent: #0a6f9e;
+  --accent-hover: #085a80;
   --accent-soft: #e1f4fd;
-  --danger: #d94b5b;
+  /* 实心按钮/胶囊上的文字色（深色主题的 accent 很亮，必须换深色文字）。 */
+  --accent-contrast: #ffffff;
+  --danger: #c93a4c;
   --danger-soft: #fff0f2;
-  --success: #0e9f8a;
+  --danger-contrast: #ffffff;
+  --success: #0b7a6a;
+  /* 提醒色：原来的 #d97706 在白色上只有 3.2:1，作文字色不够；深色主题用亮橘。 */
+  --warning: #9a5b06;
   --radius-lg: 16px;
   --radius: 12px;
   --radius-sm: 9px;
@@ -6349,17 +6451,22 @@ body {
   --bg-card: #141d30;
   --text: #eef4ff;
   --text-secondary: #8c9bb7;
-  --text-tertiary: #64748f;
-  --border: rgba(255, 255, 255, 0.14);
-  --border-light: rgba(255, 255, 255, 0.08);
+  /* 深色下原 #64748f 在卡片上只有 3.56:1；提到 5.4:1。 */
+  --text-tertiary: #8494ad;
+  /* 深色边框同样太淡（0.14 ≈ 1.5:1），提到 2.5:1 / 1.67:1。 */
+  --border: rgba(255, 255, 255, 0.28);
+  --border-light: rgba(255, 255, 255, 0.16);
   --accent: #71e5ff;
   --accent-hover: #9df0ff;
   --accent-soft: #153c56;
+  --accent-contrast: #06202b;
   --selection-bg: rgba(113, 229, 255, 0.38);
   --selection-fg: #ffffff;
   --danger: #f3a2b5;
   --danger-soft: #3a2639;
+  --danger-contrast: #2a1218;
   --success: #86f0c8;
+  --warning: #e5a44a;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
   --shadow-md: 0 12px 34px rgba(0, 0, 0, 0.28);
   --shadow-lg: 0 26px 80px rgba(0, 0, 0, 0.48);
@@ -9131,7 +9238,7 @@ button svg,
   border: 0;
   border-radius: var(--radius-sm);
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
   cursor: pointer;
 }
 .paste-viewer-truncated {
@@ -10163,7 +10270,9 @@ button svg,
 }
 
 .settings-page {
-  width: min(100%, 900px);
+  /* 用满面板宽度：900px 的上限在 1046px 的面板里空掉近 150px，中文提示句只能
+   * 白白多折一行。上限 1120px 仍然挡住超宽屏上的超长行，正文说明另有 760px 上限。 */
+  width: min(100%, 1120px);
   max-width: none;
   margin-inline: auto;
   padding: 42px clamp(24px, 5vw, 72px) 72px;
@@ -10274,7 +10383,7 @@ button svg,
   height: 20px;
   border-radius: 50%;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
   font-size: 12px;
   font-weight: 700;
   opacity: 0;
@@ -10368,9 +10477,11 @@ button svg,
   letter-spacing: 0.03em;
 }
 
-.provider-mark-deepseek { background: #dff3ff; color: #2078aa; }
-.provider-mark-qwen { background: #e9e4ff; color: #6755d9; }
-.provider-mark-glm { background: #ffe8dc; color: #b25b32; }
+/* 品牌小标签上的字母也是文字：浅色底上的原色只有 3.7–4.4:1，全部压深一档到
+ * 4.9:1 以上（深色主题各自一套，本就达标）。 */
+.provider-mark-deepseek { background: #dff3ff; color: #1c6895; }
+.provider-mark-qwen { background: #e9e4ff; color: #5a48c8; }
+.provider-mark-glm { background: #ffe8dc; color: #9c4a26; }
 [data-theme="dark"] .provider-mark-deepseek { background: #173a4d; color: #8fd9ff; }
 [data-theme="dark"] .provider-mark-qwen { background: #342d5b; color: #bcb0ff; }
 [data-theme="dark"] .provider-mark-glm { background: #4b2d21; color: #ffb18d; }
@@ -10462,7 +10573,7 @@ button svg,
 .provider-config-activate:hover {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
 }
 
 .provider-config-fields { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
@@ -10523,7 +10634,7 @@ button svg,
   padding: 1px 6px;
   border-radius: 999px;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
   font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -10554,7 +10665,6 @@ button svg,
   padding: 2px;
   border: 1px solid var(--border-light);
   border-radius: var(--radius-sm);
-  scrollbar-width: thin;
 }
 .provider-model-chip {
   display: flex;
@@ -10769,9 +10879,9 @@ button svg,
   cursor: not-allowed;
 }
 
-.provider-mark-custom { background: #e4f7ec; color: #2e8b5d; }
+.provider-mark-custom { background: #e4f7ec; color: #25714a; }
 [data-theme="dark"] .provider-mark-custom { background: #1d3b2c; color: #7fd6a4; }
-.provider-mark-ollama { background: #e8f1fe; color: #3f6fb5; }
+.provider-mark-ollama { background: #e8f1fe; color: #35619f; }
 [data-theme="dark"] .provider-mark-ollama { background: #24344e; color: #9cc0f0; }
 
 .provider-card-keyless {
@@ -11235,8 +11345,7 @@ button svg,
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary)) transparent;
+  scrollbar-width: auto;
 }
 
 /* Search history rows (stat-search-list) get the same scroll window as the
@@ -11250,8 +11359,7 @@ button svg,
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary)) transparent;
+  scrollbar-width: auto;
 }
 #context-panel #stat-search-list::-webkit-scrollbar {
   width: 7px;
@@ -11265,6 +11373,27 @@ button svg,
   background: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary));
 }
 #context-panel #stat-search-list::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+#context-panel #stat-write-list::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+  display: block;
+}
+#context-panel #stat-write-list::-webkit-scrollbar-track { background: transparent; }
+#context-panel #stat-write-list::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary));
+}
+#context-panel #stat-write-list::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+/* Standard-property fallback for Firefox only — see the settings block for why
+ * these two must not be set where the pseudo-element is supported. */
+@supports not selector(::-webkit-scrollbar) {
+  #context-panel #stat-write-list,
+  #context-panel #stat-search-list {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--accent) 62%, var(--text-tertiary)) transparent;
+  }
+}
 #context-panel #stat-search-list .stats-list-item {
   flex: 0 0 auto;
   min-height: 34px;
@@ -12786,11 +12915,11 @@ button svg,
 }
 
 /* ── Provider marks for the new built-in registry entries ── */
-.provider-mark-moonshot { background: #e7f0ff; color: #2f6fb5; }
-.provider-mark-minimax { background: #ffe9ef; color: #c2456a; }
-.provider-mark-openai { background: #e9f7ef; color: #2e8b5d; }
-.provider-mark-openrouter { background: #f0ecff; color: #6a4fc9; }
-.provider-mark-nvidia { background: #e9f5e6; color: #4c8a3d; }
+.provider-mark-moonshot { background: #e7f0ff; color: #285f9e; }
+.provider-mark-minimax { background: #ffe9ef; color: #ab3459; }
+.provider-mark-openai { background: #e9f7ef; color: #24704a; }
+.provider-mark-openrouter { background: #f0ecff; color: #5c42b8; }
+.provider-mark-nvidia { background: #e9f5e6; color: #3d7530; }
 [data-theme="dark"] .provider-mark-moonshot { background: #16304d; color: #8fb8e8; }
 [data-theme="dark"] .provider-mark-minimax { background: #45212d; color: #f2a0b8; }
 [data-theme="dark"] .provider-mark-openai { background: #1d3b2c; color: #7fd6a4; }
@@ -13274,7 +13403,7 @@ button svg,
 }
 .wf-merge {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
 }
 .wf-merge:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 85%, #000);
@@ -13359,7 +13488,8 @@ button svg,
   display: inline-flex;
   gap: 2px;
   padding: 2px;
-  border: 1px solid var(--border-light);
+  /* 可点的分段控件：用交互色边框（能在白色/浅蓝底上都看清），不用卡片那档。 */
+  border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg);
 }
@@ -13377,7 +13507,7 @@ button svg,
 
 .evo-range-btn.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
 }
 
 /* 策略维度切换：五个胶囊在窄面板上会换行（周/月只有两个，不会）。 */
@@ -13676,7 +13806,7 @@ button svg,
 .evo-stat-note {
   margin-top: 6px;
   font-size: 11.5px;
-  color: #D97706;
+  color: var(--warning, #d97706);
 }
 
 .evo-stat-path {
