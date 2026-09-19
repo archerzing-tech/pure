@@ -9,8 +9,45 @@ import type { BaselineSnapshot } from './baseline';
 export const BASELINE_SNAPSHOT: BaselineSnapshot = {
   "suiteVersion": "pure-coding-baseline-v5",
   "fixtureHash": "6087e3be",
-  "generatedAt": "2026-09-19T01:04:07.453Z",
-  "rows": [],
+  "generatedAt": "2026-09-19T03:38:34.607Z",
+  "rows": [
+    {
+      "provider": "deepseek-openai",
+      "model": "deepseek-v4-flash",
+      "gitRevision": "4d2e14b",
+      "passAt1": 15,
+      "taskCount": 15,
+      "meanDurationMs": 27240.8,
+      "estimatedCostUsd": 0.023713580800000002,
+      "promptTokens": 1797810,
+      "cacheHitTokens": 1748736,
+      "report": "evals/deepseek-v4-flash.v5.json"
+    },
+    {
+      "provider": "glm",
+      "model": "glm-5.3-flash",
+      "gitRevision": "4d2e14b",
+      "passAt1": 15,
+      "taskCount": 15,
+      "meanDurationMs": 113479.26666666666,
+      "estimatedCostUsd": 0.558082,
+      "promptTokens": 1644946,
+      "cacheHitTokens": 1499264,
+      "report": "evals/glm-5.3-flash.v5.json"
+    },
+    {
+      "provider": "glm",
+      "model": "glm-4.5-flash",
+      "gitRevision": "4d2e14b",
+      "passAt1": 13,
+      "taskCount": 15,
+      "meanDurationMs": 236241.4,
+      "estimatedCostUsd": 0.570737,
+      "promptTokens": 2403645,
+      "cacheHitTokens": 2350231,
+      "report": "evals/glm-4.5-flash.v5.json"
+    }
+  ],
   "excluded": [
     {
       "report": "evals/deepseek-v4-flash.json",
