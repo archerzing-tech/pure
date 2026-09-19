@@ -6,89 +6,119 @@ arguments, or verification output. The fixture suite's own integrity is enforced
 separately by `bun run eval:sanity` (control fails from seed, recorded golden
 solutions pass); this matrix only adds the real-agent column on top.
 
-## Current suite: `pure-coding-baseline-v4` (13 fixtures)
+## Current suite: `pure-coding-baseline-v5` (15 fixtures)
 
 ### Environment
 
 | Field | Value |
 |---|---|
-| Suite | `pure-coding-baseline-v4` (13 fixtures: 9 core + 4 hard) |
-| `fixtureHash` | `a1c00907` |
-| Git revision | `ccc210b` |
+| Suite | `pure-coding-baseline-v5` (15 fixtures: 9 core + 4 hard + 2 extreme) |
+| `fixtureHash` | `6087e3be` |
+| Git revision | `4d2e14b` |
 | Runtime | `bun/1.3.14` on `darwin` |
 | Prompt version | `dynamic` (assembled per task) |
-| Reports | `evals/deepseek-v4-flash.v4.json`, `evals/glm-5.3-flash.v4.json` |
+| Reports | `evals/deepseek-v4-flash.v5.json`, `evals/glm-5.3-flash.v5.json`, `evals/glm-4.5-flash.v5.json` |
 
 ### Results
 
 | Provider | Model | pass@1 | successRate | mean duration | est. cost |
 |---|---|---|---|---|---|
-| DeepSeek (OpenAI API) | `deepseek-v4-flash` | **13/13** | 1.000 | 39.5 s | $0.0184 |
-| GLM | `glm-5.3-flash` | **13/13** | 1.000 | 87.6 s | $0.4270 |
+| DeepSeek (OpenAI API) | `deepseek-v4-flash` | **15/15** | 1.000 | 27.2 s | $0.0237 |
+| GLM | `glm-5.3-flash` | **15/15** | 1.000 | 113.5 s | $0.5581 |
+| GLM | `glm-4.5-flash` | 13/15 | 0.867 | 236.2 s | $0.5707 |
 | Qwen | `qwen3-coder-next` | not run | — | — | — |
 
 Qwen still needs a DashScope key plus `PURE_EVAL_QWEN_WORKSPACE_ID`.
 
-### Per task (duration / tool calls)
+### Per task (duration)
 
-| Task | Difficulty | DeepSeek | GLM |
-|---|---|---|---|
-| `fix-take-top-off-by-one` | easy | 9 s / 5 | 59 s / 7 |
-| `add-normalize-slug` | easy | 12 s / 8 | 51 s / 6 |
-| `refactor-parse-port` | medium | 10 s / 6 | 85 s / 5 |
-| `multi-step-stats-report` | medium | 9 s / 13 | 123 s / 12 |
-| `multi-step-consolidate-duration` | medium | 39 s / 16 | 70 s / 12 |
-| `recovery-broken-build-script` | medium | 9 s / 13 | 66 s / 8 |
-| `guardrail-protected-config` | medium | 9 s / 12 | 81 s / 8 |
-| `guardrail-commit-review-gate` | medium | 9 s / 12 | 172 s / 9 |
-| `long-context-q3-report` | medium | 27 s / 8 | 28 s / 7 |
-| `hard-bugfix-task-queue-leak` | hard | 11 s / 7 | 100 s / 6 |
-| `hard-refactor-break-cycle` | hard | 94 s / 16 | 154 s / 17 |
-| `hard-recovery-stale-cache` | hard | 15 s / 13 | 88 s / 10 |
-| `hard-multi-step-api-migration` | hard | 259 s / 17 | 63 s / 15 |
+| Task | Difficulty | DeepSeek | GLM 5.3 | GLM 4.5 |
+|---|---|---|---|---|
+| `fix-take-top-off-by-one` | easy | 6 s | 39 s | 66 s |
+| `add-normalize-slug` | easy | 11 s | 102 s | 54 s |
+| `refactor-parse-port` | medium | 10 s | 68 s | 302 s |
+| `multi-step-stats-report` | medium | 13 s | 58 s | 48 s |
+| `multi-step-consolidate-duration` | medium | 23 s | 248 s | 63 s |
+| `recovery-broken-build-script` | medium | 32 s | 59 s | 36 s |
+| `guardrail-protected-config` | medium | 5 s | 49 s | 36 s |
+| `guardrail-commit-review-gate` | medium | 8 s | 40 s | 28 s |
+| `long-context-q3-report` | medium | 5 s | 42 s | 65 s |
+| `hard-bugfix-task-queue-leak` | hard | 12 s | 70 s | 53 s |
+| `hard-refactor-break-cycle` | hard | 25 s | 218 s | 79 s |
+| `hard-recovery-stale-cache` | hard | 10 s | 57 s | 259 s |
+| `hard-multi-step-api-migration` | hard | 15 s | 146 s | 1060 s · `agent_error` |
+| `extreme-repo-scale-metrics-report` | extreme | 19 s | 105 s | 192 s |
+| `extreme-perf-dedupe-scaling` | extreme | 215 s | 401 s | 1201 s · `agent_error` |
+
+GLM 4.5's two `agent_error` entries are not verification failures —
+`hard-multi-step-api-migration` had **all verifications green** (bun test + the
+migration checker both passed) when the run aborted at the ~18-minute mark, and the
+perf task aborted at ~20 minutes with the scaling check never reached. The executor
+also refuses to let a run look like a scored zero when the provider never delivered
+a completed turn (`agent_error`, not plain `failed`), which is the fix that shipped
+in `4d2e14b`.
 
 ### Usage and caching
 
 | Provider | prompt tokens | completion | cache hit | hit rate | est. cost |
 |---|---|---|---|---|---|
-| DeepSeek | 1,422,347 | 30,765 | 1,380,096 | 97.0 % | $0.0184 |
-| GLM | 1,270,483 | 17,137 | 1,122,944 | 88.4 % | $0.4270 |
+| DeepSeek | 1,797,810 | 42,667 | 1,748,736 | 97.3 % | $0.0237 |
+| GLM 5.3 | 1,644,946 | 35,171 | 1,499,264 | 91.1 % | $0.5581 |
+| GLM 4.5 | 2,403,645 | 14,774 | 2,350,231 | 97.8 % | $0.5707 |
 
 Costs come from the rate table in `src/shared/usage.ts` (list price, not a bill);
-the GLM rates are several times DeepSeek's, which is most of the 23× cost gap.
+the GLM rates are several times DeepSeek's, which is most of the cost gap.
 
-## What the v4 run actually shows
+## What the v5 run actually shows
 
-**On pass/fail, the suite still does not discriminate.** Both models solved all 13
-fixtures including the four new `hard` ones. The hard tier raised *work* (DeepSeek's
-hard tasks averaged 95 s vs 12 s for the rest; GLM's 101 s vs 91 s) but not the
-*solve rate*, so the new fixtures are harder-to-do, not harder-to-get-right, for
-these two models.
+**Pass/fail discrimination arrived with the extreme tier.** After the hard tier
+still left both models at 13/13 (see Superseded below), the two `extreme` fixtures
+did what the hard tier could not: `glm-4.5-flash` drops to 13/15 while DeepSeek and
+`glm-5.3-flash` hold 15/15. The two failures are `agent_error` timeouts/aborts at
+the 18–20-minute marks, not wrong answers — but on pass/fail they count, which is
+exactly the separation the tier was built to produce.
 
-**On cost and time, it discriminates clearly.** Same fixtures, same harness: GLM
-takes 2.2× the wall clock and costs 23× DeepSeek — with 3.5× the cache misses on a
-comparable prompt volume. That is a real, reproducible difference between two
-providers, and it is the number to watch when the loop changes (a regression that
-lowers solve rate shows up as failures; one that raises cost shows up here).
+**Cost and time still discriminate harder.** Same fixtures, same harness: GLM 5.3
+takes 4.2× the wall clock and ~24× the cost of DeepSeek; GLM 4.5 is slower still on
+wall clock (8.7×) at a comparable cost. The cost gap is dominated by the rate table,
+not by behavior — cache hit rates are comparable (91–98 %) across all three runs.
 
-So treat v4 as **a regression gate plus a cost/efficiency benchmark**, not a
-difficulty ladder. A 13/13 does not mean the loop is good — it means the suite has
-stopped being able to tell the difference, and only the cost columns carry signal.
+The two extreme tiers justify themselves differently:
+
+- `extreme-repo-scale` (45 files, prompt names no file) was cleared by all three —
+  repo-scale search is inside range for all of them;
+- `extreme-perf` (a scaling ratio, not a wall-clock number) is where GLM 4.5 died:
+  the naive quadratic implementation was the trap, and the model either never got
+  to a passing rewrite or ran out of runway.
 
 ### If pass/fail discrimination is the goal
 
-More of the same will not do it: four fixtures designed around interacting defects,
-a structural refactor, a root cause and a breaking migration were all cleared. The
-dimensions that were *not* exercised are where the next attempt should go:
+More of the same will not do it. The dimensions already covered — repo-scale
+search, a scaling-ratio performance ceiling, interacting defects, structural
+refactor, root cause, breaking migration — were cleared by at least two of the
+three models. What remains uncovered:
 
-- **Repo-scale** — a task spanning dozens of files where the agent must find the
-  relevant code itself, instead of a workspace that fits in one read;
-- **Hard resource constraints** — a performance or memory ceiling the naive
-  implementation misses (needs care to stay deterministic across machines);
 - **Long-horizon recovery** — a task that only completes after several failed
   approaches, probing whether the loop recovers or thrashes;
-- **Weaker models** — the same 13 fixtures against a smaller model would likely
-  separate on hard tier immediately, which is itself a useful matrix column.
+- **Tighter resource ceilings** — the perf fixture's bound is generous (4× records
+  must cost under 7× time); a stricter ratio or a memory ceiling would catch more;
+- **Weaker models** — a smaller/older model column separates exactly the way GLM 4.5
+  just did, which makes it the cheapest way to keep the matrix honest.
+
+## Superseded: `pure-coding-baseline-v4` (13 fixtures)
+
+| Provider | Model | pass@1 | mean duration | est. cost | Report |
+|---|---|---|---|---|---|
+| DeepSeek (OpenAI API) | `deepseek-v4-flash` | 13/13 | 39.5 s | $0.0184 | `evals/deepseek-v4-flash.v4.json` |
+| GLM | `glm-5.3-flash` | 13/13 | 87.6 s | $0.4270 | `evals/glm-5.3-flash.v4.json` |
+
+Environment for that run: `fixtureHash a1c00907`, revision `ccc210b`. The hard tier
+raised work but not solve rate — both models cleared all four hard fixtures, so v4's
+conclusion was "a regression gate plus a cost/efficiency benchmark, not a difficulty
+ladder", which is what motivated the extreme tier in v5. Kept because the v4 and v5
+numbers are not comparable — v5 adds two fixtures and changes the fixture hash, so
+the suite has to be re-measured rather than carried forward (which is exactly why
+the reports record the hash).
 
 ## Superseded: `pure-coding-baseline-v3` (9 fixtures)
 
@@ -96,20 +126,22 @@ dimensions that were *not* exercised are where the next attempt should go:
 |---|---|---|---|---|---|
 | DeepSeek (OpenAI API) | `deepseek-v4-flash` | 9/9 | 15.1 s | $0.0143 | `evals/deepseek-v4-flash.json` |
 
-Environment for that run: `fixtureHash c80c0ab4`, revision `084a133`. Kept because
-the v3 and v4 numbers are not comparable — v4 adds four fixtures and changes the
-fixture hash, so the suite has to be re-measured rather than carried forward (which
-is exactly why the reports record the hash).
+Environment for that run: `fixtureHash c80c0ab4`, revision `084a133`.
 
 ## How to reproduce
 
 ```bash
 PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent deepseek-openai \
-  --strict --report evals/deepseek-v4-flash.v4.json
+  --strict --report evals/deepseek-v4-flash.v5.json
 PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent glm \
-  --strict --report evals/glm-5.3-flash.v4.json
+  --strict --report evals/glm-5.3-flash.v5.json
+PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent glm \
+  --model glm-4.5-flash \
+  --report evals/glm-4.5-flash.v5.json
 ```
 
 Provider-specific keys work too (`DEEPSEEK_API_KEY`, `ZHIPU_API_KEY`,
 `DASHSCOPE_API_KEY`); Qwen also needs `PURE_EVAL_QWEN_WORKSPACE_ID`. `--strict`
-exits non-zero if any task fails, which is what CI-style consumption wants.
+exits non-zero if any task fails — GLM 4.5's row above is why the reproduce
+commands for that column drop `--strict`. Then publish the numbers into the app
+with `bun run eval:snapshot` (see `evals/README.md`).

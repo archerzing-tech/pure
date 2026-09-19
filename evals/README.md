@@ -19,6 +19,18 @@ Provider/model/prompt/revision metadata can be supplied through `PURE_EVAL_MODEL
 
 `bun run eval:sanity` is the no-LLM CI gate over the same contract: it asserts the control run fails every fixture from its seed and the recorded golden solutions (`src/evaluation/codingTaskGoldenSolutions.ts`) pass every fixture. A failure there means the fixture suite itself regressed, independent of any provider.
 
+A run where the provider was never reached is not a baseline. An unknown model code, a dead key, or an unreachable endpoint makes the engine end the turn with `interrupted: true`, and the executor raises on that (or on a fatal `Error` event) so the task is reported as `agent_error` instead of a plain failure. If every task comes back `agent_error`, `run-evals` refuses to write a report at all and exits `2` — otherwise a misconfigured provider would look like a model that tried and scored zero.
+
+## Publish the baseline to the app
+
+The evolution dashboard (Settings → 进化 → 评测基线) reads a snapshot rather than the raw reports:
+
+```bash
+bun run eval:snapshot
+```
+
+It folds every report in `evals/` into `src/shared/baselineSnapshotData.ts` — commit that file with the release. Only reports matching the current suite version are rowed; reports from older suites are listed as excluded, and the dashboard flags a snapshot whose suite no longer matches instead of presenting stale numbers as current. A unit test keeps the snapshot's suite version and `fixtureHash` in step with the live fixtures, so bumping the suite without regenerating fails `bun test`.
+
 ## Release notes
 
 Every release entry in CHANGELOG.md carries an evaluation-baseline line. Run `bun run eval:notes` and paste its output under the new version heading: it re-measures the control and golden runs on the spot (so the numbers are never copied from an older release) and refuses to emit anything while the fixture sanity gate is red. The emitted `fixtureHash` ties the release to the exact suite state it was measured against. Once real-provider runs are recorded (see Baseline interpretation), add their scores to the same section.
@@ -54,4 +66,6 @@ Prompt assembly records are local and opt-in at the integration boundary. They s
 
 ## Baseline interpretation
 
-This is a compact regression gate, not a replacement for SWE-bench/Terminal-Bench. It measures whether Pure can complete a few representative local tasks — bugfix, feature, refactor, multi-step, recovery, guardrail, and long-context — under the exact verification commands. Expand the fixture set only when each new task has a deterministic behavioral check and a clear reason to exist.
+This is a compact regression gate, not a replacement for SWE-bench/Terminal-Bench. It measures whether Pure can complete a few representative local tasks — bugfix, feature, refactor, multi-step, recovery, guardrail, long-context, repo-scale, and performance — under the exact verification commands. Expand the fixture set only when each new task has a deterministic behavioral check and a clear reason to exist.
+
+The two `extreme` tiers exist because adding more tasks of the same kind stopped discriminating: a repo-scale fixture puts the relevant module among dozens of files and names none of them in the prompt, and the performance fixture enforces a *scaling ratio* rather than a wall-clock number, so a correct-but-quadratic solution cannot pass on any machine. Neither changes the determinism contract — control still fails from seed and the golden solution still passes.
