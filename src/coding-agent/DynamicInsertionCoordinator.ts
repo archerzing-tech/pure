@@ -1,7 +1,14 @@
 import type { LLMAdapter, MessageImage } from '../shared/types';
 import { classifyInsertion, type InsertionClassification } from './Planner';
 
-export type DynamicInsertionKind = 'unrelated' | 'supplement' | 'constraint-change' | 'goal-change' | 'stop';
+/**
+ * 插话重构（2026-09-19）：一个人在埋头干活时听到同事插话，只有两种情况
+ * 值得停下手里的活——对方说"别干了"（stop），或者对方把方向掀了
+ * （goal-change）。其余一切都不值得推倒重来：提醒、约束、补充顺着下个动作
+ * 带上就好（steer）；提问先答一句（question）；新活儿排到手里这单后面
+ * （task）；寒暄点头收下（chatter）。
+ */
+export type DynamicInsertionKind = 'stop' | 'goal-change' | 'steer' | 'question' | 'task' | 'chatter';
 
 export interface DynamicInsertion {
   text: string;
@@ -11,9 +18,10 @@ export interface DynamicInsertion {
 
 export interface DynamicInsertionDecision {
   kind: DynamicInsertionKind;
-  related: boolean;
   reason: string;
-  requiresReplan: boolean;
+  /** True → the running turn must end so the insert can re-enter as a fresh
+   *  send (stop / goal-change only). False → the turn keeps running and the
+   *  insert is handled out-of-band (steer / question / task / chatter). */
   shouldAbort: boolean;
 }
 
@@ -27,9 +35,12 @@ export interface DynamicInsertionCoordinatorOptions {
   ) => Promise<InsertionClassification>;
 }
 
-const STOP_RE = /^(?:停止|停下|取消|中止|别做了|先别做|abort|stop|cancel|halt|nevermind)(?:\b|$|[\u4e00-\u9fff])/i;
-const GOAL_CHANGE_RE = /(?:改成|改为|换成|不要再|推翻|重新来|重做|从头|换个方案|换一种思路|instead|replace|start over|redo|rethink|different approach)/i;
-const CONSTRAINT_CHANGE_RE = /(?:必须|不要|不能|不允许|限制|要求|兼容|支持|改为|改成|加上|去掉|remove|require|must|should|constraint|support)/i;
+const STOP_RE = /^(?:停止|停下|取消|中止|别做了|先别做|abort|stop|cancel|halt|nevermind)(?:\b|$|[一-鿿])/i;
+// Fast path limited to unambiguous overturn verbs: anything softer ("改成X",
+// "不要再Y") is judged by the LLM with the task in view — a constraint phrased
+// as 不要 is still just a steer, and aborting on it used to restart work the
+// user never asked to restart.
+const GOAL_CHANGE_RE = /(?:推翻|重新来|重做|从头来|换个方案|换一种思路|换个思路|start over|redo it|rethink|different approach|scrap (?:that|this|it))/i;
 
 export class DynamicInsertionCoordinator {
   private readonly classify: NonNullable<DynamicInsertionCoordinatorOptions['classify']>;
@@ -46,34 +57,22 @@ export class DynamicInsertionCoordinator {
   ): Promise<DynamicInsertionDecision> {
     const text = insertion.text.trim();
     if (STOP_RE.test(text)) {
-      return { kind: 'stop', related: true, reason: 'user requested the current run to stop', requiresReplan: false, shouldAbort: true };
+      // Mechanical, high-precision, and latency-free: a stop must not wait on
+      // (or be misread by) a classification round-trip.
+      return { kind: 'stop', reason: 'user requested the current run to stop', shouldAbort: true };
+    }
+    if (GOAL_CHANGE_RE.test(text)) {
+      // Same rationale as STOP_RE: these verbs leave no room for "keep
+      // going with a tweak", so restart without burning a classify call.
+      return { kind: 'goal-change', reason: 'overturn phrasing matched the fast path', shouldAbort: true };
     }
     if (!llm) {
-      return this.heuristicDecision(text, 'classification unavailable; queued as unrelated');
+      // No classifier available: deliver the words as a steer. The engine
+      // reconciles them at the next THINK boundary — working with more
+      // information is the safe default, aborting is not.
+      return { kind: 'steer', reason: 'classification unavailable; delivered as a steer', shouldAbort: false };
     }
     const result = await this.classify(llm, context, text, signal, insertion.images);
-    if (!result.related) {
-      return { kind: 'unrelated', related: false, reason: result.reason, requiresReplan: false, shouldAbort: false };
-    }
-    const kind = this.relatedKind(text);
-    return {
-      kind,
-      related: true,
-      reason: result.reason,
-      requiresReplan: kind === 'constraint-change' || kind === 'goal-change',
-      shouldAbort: true,
-    };
-  }
-
-  private relatedKind(text: string): Exclude<DynamicInsertionKind, 'unrelated' | 'stop'> {
-    if (GOAL_CHANGE_RE.test(text)) return 'goal-change';
-    if (CONSTRAINT_CHANGE_RE.test(text)) return 'constraint-change';
-    return 'supplement';
-  }
-
-  private heuristicDecision(text: string, reason: string): DynamicInsertionDecision {
-    if (GOAL_CHANGE_RE.test(text)) return { kind: 'goal-change', related: true, reason, requiresReplan: true, shouldAbort: true };
-    if (CONSTRAINT_CHANGE_RE.test(text)) return { kind: 'constraint-change', related: true, reason, requiresReplan: true, shouldAbort: true };
-    return { kind: 'unrelated', related: false, reason, requiresReplan: false, shouldAbort: false };
+    return { kind: result.kind, reason: result.reason, shouldAbort: result.kind === 'goal-change' };
   }
 }

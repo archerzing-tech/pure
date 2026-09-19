@@ -124,6 +124,10 @@ export interface HarnessConfig {
    * or throwing resolver — always falls back to llm: the single-model
    * contract from E0.3 holds no matter what. */
   llmFor?: (phase: EngineLlmPhase) => LLMAdapter | undefined;
+  /** Mid-run steering queue (插话重构): drained by the engine at each THINK
+   *  boundary so user messages typed mid-round steer the next round instead of
+   *  restarting the turn. Omitted = no steering channel (CLI / subagents). */
+  takeSteerMessages?: EngineContext['takeSteerMessages'];
   /** E1.1 lesson reflector tuning; omitted = defaults (enabled, 20/day,
    * multi-step threshold 3 tool calls). */
   reflection?: ReflectionConfig;
@@ -193,6 +197,8 @@ export class Harness {
       // E0.3 — per-phase adapter selection (THINK/HANDOVER); the engine reads
       // it through llmForPhase and falls back to llm per phase.
       llmFor: this.config.llmFor,
+      // Mid-run steering: the engine drains this at each THINK boundary.
+      takeSteerMessages: this.config.takeSteerMessages,
       tools: this.config.tools,
       toolsDefs: this.currentToolsDefs(),
       toolsDefsProvider: this.config.toolsDefsProvider,

@@ -207,6 +207,13 @@ export interface EngineContext {
    * engine is byte-identical to the single-adapter behavior. The reflector
    * (E1.1) reads REFLECT to reach its cheap model. */
   llmFor?: (phase: EngineLlmPhase) => LLMAdapter | undefined;
+  /** Mid-run steering (插话重构): user messages typed while the turn was busy
+   *  inside a tool round. The engine drains this queue at each THINK boundary
+   *  — the one point where appending keeps the message protocol clean (every
+   *  tool result is already in; a user turn must never sit between an
+   *  assistant tool_call and its result) — and reconciles it in the very next
+   *  reasoning round. Return-and-clear; absent ⇒ no steering channel. */
+  takeSteerMessages?: () => Message[];
   tools?: ToolAdapter;
   toolsDefs: ToolDefinition[];
   /** Recompute the LLM-visible tool list before each THINK iteration so
@@ -464,6 +471,12 @@ export type EngineEvent =
   // the session completes successfully ("retry 且最终成功").
   | { type: 'FailurePolicyDecision'; payload: { action: FailureAction; failure: FailureRecord; turnNumber: number }; timestamp: number }
   | { type: 'BudgetWarning'; payload: { exhausted: boolean; reason: string; remaining: { turns: number; tokens: number; time: number }; gracePeriodEnds: number }; timestamp: number }
+  // Mid-run steering (插话重构): user messages queued while tools were running
+  // were appended at the THINK boundary and ride into the next reasoning
+  // round. Observability only — the user's words themselves render via the
+  // chat surface; this event lets tests and observers pin down the round
+  // where steering took effect.
+  | { type: 'SteerInjected'; payload: { count: number; turnNumber: number }; timestamp: number }
   | { type: 'Error'; payload: { code: string; message: string; stateType: AgentStateType; recoverable: boolean; recoveryAction?: 'retry' | 'reflect' | 'skip' | 'terminate' }; timestamp: number }
   | { type: 'Completed'; payload: { finalOutput?: string; isComplete: boolean; interrupted: boolean; turnCount: number; messages?: Message[]; usage?: TokenUsage; verification?: VerificationSummary }; timestamp: number }
   | { type: 'Interrupted'; payload: { reason: string; lastState?: AgentStateType; completedSteps: string[]; messages?: Message[]; turnCount?: number }; timestamp: number };

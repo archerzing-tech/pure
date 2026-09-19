@@ -81,6 +81,10 @@ export interface CodingAgentConfig {
   /** E0.3/E1.1 — per-phase adapter resolver (THINK / HANDOVER / REFLECT);
    * phases without a dedicated adapter fall back to the main llm. */
   llmFor?: (phase: EngineLlmPhase) => LLMAdapter | undefined;
+  /** Mid-run steering queue (插话重构): drained by the engine at each THINK
+   * boundary so a mid-round user message steers the next round instead of
+   * restarting the turn. The GUI supplies it; CLI / subagents omit it. */
+  takeSteerMessages?: EngineContext['takeSteerMessages'];
   /** E1.1 lesson reflector tuning; omitted = defaults. */
   reflection?: ReflectionConfig;
   subagents?: SubagentDefinition[];
@@ -233,6 +237,7 @@ export class CodingAgent {
       failurePolicy: this.failurePolicy,
       continueGuard: this.continueGuard,
       llmFor: config.llmFor,
+      takeSteerMessages: config.takeSteerMessages,
       reflection: config.reflection,
     });
   }

@@ -1287,9 +1287,19 @@ export class ChatController {
    * lose the user's words for good. */
   private insertClassificationChain: Promise<void> = Promise.resolve();
   private dynamicInsertionCoordinator = new DynamicInsertionCoordinator();
-  /** The LLM adapter for the current turn — interject() reuses it to classify a
-   * mid-run insert as related/unrelated (set by send(); null before first run). */
+  /** The LLM adapter for the current turn — interject() reuses it to classify
+   * a mid-run insert (set by send(); null before first run). */
   private turnLlm?: import('../shared/types').LLMAdapter;
+  /** 插话重构 — steering channel into the RUNNING turn. classifyAndApplyInterject
+   * pushes here; the engine drains the queue at each THINK boundary (via
+   * takeSteerMessages) so the very next round reconciles the words mid-flight —
+   * no abort, no replan. Leftovers after the turn ends fall back to a normal
+   * send in dispatchDeferred so nothing typed is ever lost. */
+  private pendingSteers: import('../shared/types').Message[] = [];
+  /** 插话重构 — REFLECT-phase adapter for the current turn, when 9.2 phase
+   * routing is on: side-channel mid-run questions prefer the cheap model
+   * (an answer is a summarization chore, not the main reasoning stream). */
+  private turnPhaseLlm?: import('../shared/types').LLMAdapter;
   // Background pre-compaction cache: the ContextEngine's LLM summarization —
   // the dominant pre-send cost once a long session crosses the token budget —
   // runs
@@ -2165,13 +2175,17 @@ export class ChatController {
 
   /**
    * Handle a message the user typed while a turn is running (interrupt-and-
-   * insert). Judges RELATED vs UNRELATED against the current task:
-   *   - RELATED   → abort the running round and re-enter the SAME task with the
-   *                 new directive, so the model re-plans/rewrites around it.
-   *   - UNRELATED → queue it (pendingTasks); it starts as a fresh task once the
-   *                 current task/plan reaches a terminal state.
-   * Falls back to "unrelated → queue" when classification is unavailable so the
-   * input is never dropped.
+   * insert). 插话重构 — 判定的依据从"相不相关"换成了"一个埋头干活的人听到
+   * 这句话会怎么处理"，只有两种情况值得停下手里的活：
+   *   - stop        → 用户叫停，结束当前任务（正则直判，不占分类往返）。
+   *   - goal-change → 方向被掀掉，停下并把这句话作为新指令重新出发。
+   * 其余全部不打断：
+   *   - steer   → 进引擎转向通道（takeSteerMessages），下一个 THINK 轮顺路
+   *               带上，手头的活继续干。
+   *   - question → 侧路回答一句，主循环毫无感知。
+   *   - task    → 排队（pendingTasks），当前任务收尾后作为新任务启动。
+   *   - chatter → 收下即可，用户的话以自己的气泡上屏，不打扰干活的人。
+   * 分类不可用时保守按 steer 处理：话一定送到，活绝不推倒重来。
    */
   async interject(text: string, images: MessageImage[] = [], displayText = text): Promise<void> {
     if (!text.trim()) return;
@@ -2191,7 +2205,7 @@ export class ChatController {
   }
 
   /** One link of the interject chain: runs only after every earlier insert has
-   * been judged. Re-checks isStreaming() because an earlier RELATED insert
+   * been judged. Re-checks isStreaming() because an earlier stop/goal-change
    * aborts the turn — by the time this link runs, the insert may belong to a
    * fresh send instead. */
   private async classifyAndApplyInterject(text: string, images: MessageImage[], displayText: string): Promise<void> {
@@ -2199,9 +2213,18 @@ export class ChatController {
       void this.send(text, images, displayText);
       return;
     }
+    // The user's words always land as their own bubble first — steer / question
+    // / chatter never re-render them later, so this is the only chance for the
+    // transcript to show who said what.
+    const echoUserBubble = (): void => {
+      this.addBubble('user', displayText, images);
+    };
     const llm = this.turnLlm;
     if (!llm) {
-      this.queueInterjectTask(text, images, displayText);
+      // No classifier for this turn: steer is the safe default — the words
+      // reach the engine and the work keeps running.
+      echoUserBubble();
+      this.steerRunningTurn(text, images);
       return;
     }
     const decision = await this.dynamicInsertionCoordinator.decide(llm, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
@@ -2211,19 +2234,73 @@ export class ChatController {
       this.queueInterjectTask(text, images, displayText);
       return;
     }
-    if (decision.kind === 'stop') {
-      this.addStatusBubble('已收到停止请求，正在结束当前任务。', true, false, 'info');
-      this.abortController?.abort();
-    } else if (decision.related) {
-      this.relatedInsert = { text, images, displayText };
-      this.addStatusBubble(decision.requiresReplan ? '检测到目标或约束变化，正在重新评估并规划…' : '已并入这条补充要求，正在重新评估…', true, false, 'info');
-      this.abortController?.abort();
-      // Same late-classification hazard as queueInterjectTask: if the turn
-      // already finished while we were judging, no finalize will dispatch the
-      // held insert — re-arm the deferred dispatch here.
-      if (!this.isStreaming()) this.scheduleDeferred();
-    } else {
-      this.queueInterjectTask(text, images, displayText);
+    switch (decision.kind) {
+      case 'stop':
+        this.addStatusBubble('收到，停。正在收尾当前任务。', true, false, 'info');
+        this.abortController?.abort();
+        return;
+      case 'goal-change':
+        echoUserBubble();
+        this.relatedInsert = { text, images, displayText };
+        this.addStatusBubble('方向变了——停下来重新对齐，马上按新的来。', true, false, 'info');
+        this.abortController?.abort();
+        // Same late-classification hazard as queueInterjectTask: if the turn
+        // already finished while we were judging, no finalize will dispatch
+        // the held insert — re-arm the deferred dispatch here.
+        if (!this.isStreaming()) this.scheduleDeferred();
+        return;
+      case 'steer':
+        echoUserBubble();
+        this.steerRunningTurn(text, images);
+        return;
+      case 'question':
+        echoUserBubble();
+        void this.answerMidrunQuestion(text, images);
+        return;
+      case 'task':
+        this.queueInterjectTask(text, images, displayText);
+        return;
+      case 'chatter':
+        // 收下了。同事埋头干活时说了句"哈哈"，你不会停下来回一句"收到"——
+        // 气泡已上屏，这就够了，别再打扰干活的人。
+        echoUserBubble();
+        return;
+    }
+  }
+
+  /** 插话重构 — hand a remark to the RUNNING turn via the steering channel:
+   * the engine drains it at the next THINK boundary and reconciles it in
+   * stride. No abort, no replan, no queue — a nudge should steer, not
+   * restart. */
+  private steerRunningTurn(text: string, images: MessageImage[]): void {
+    this.pendingSteers.push({ role: 'user', content: text, images });
+    this.addStatusBubble('已转达——手头的活不停，下个动作就带上。', false, false);
+  }
+
+  /** 插话重构 — answer a mid-run question out-of-band: one LLM call with the
+   * current task snapshot (cheap REFLECT-phase adapter when 9.2 routing is
+   * on). The running turn is never touched — no abort, no message injection;
+   * the main loop doesn't even know it happened. */
+  private async answerMidrunQuestion(text: string, images: MessageImage[]): Promise<void> {
+    const llm = this.turnPhaseLlm ?? this.turnLlm;
+    if (!llm) return;
+    const system = `The user asked you something WHILE you are mid-task. Answer now, briefly and like a colleague who keeps working while talking: 2-4 sentences of plain flowing text in the user's language, no lists, no headings, no promises beyond what the current state supports. Here is where the task stands:
+<current_task>
+${this.buildInsertionContext(images).slice(0, 3_200)}
+</current_task>`;
+    const request: import('../shared/types').Message[] = [
+      { role: 'system', content: system },
+      { role: 'user', content: text, images },
+    ];
+    try {
+      const response = await llm.complete(request, [], this.abortController?.signal);
+      const answer = response.content?.trim();
+      if (!answer) return;
+      const bubble = this.addBubble('assistant', '');
+      bubble.textContent = `（边干边答）${answer}`;
+    } catch {
+      // 分类/回答这类旁路调用失败不该有声响——主任务还在跑，问题没答上
+      // 用户自然会再问一次。
     }
   }
 
@@ -2244,9 +2321,11 @@ export class ChatController {
   }
 
   /** After the current turn is over:
-   *  - a RELATED insert → immediately re-enter the same task with it (fold in).
-   *  - else, if an UNRELATED task is queued AND the task is terminal (no
-   *    auto-continue pending) → start it as a fresh task.
+   *  - a goal-change insert → immediately re-enter the same task with it (fold in).
+   *  - else, steers that never reached a THINK boundary (queued in the turn's
+   *    final seconds) → send them as a normal message, so nothing typed is lost.
+   *  - else, if a queued task waits AND the task is terminal (no auto-continue
+   *    pending) → start it as a fresh task.
    * The isStreaming guard makes overlapping schedules (turn finalize + a late
    * interject classification) safe: the first dispatch enters send(), which
    * flips streaming on synchronously, and the second becomes a no-op instead
@@ -2258,6 +2337,16 @@ export class ChatController {
       this.relatedInsert = null;
       this.autoContinue.cancel(); // folding in supersedes the '继续' chain
       void this.send(ri.text, ri.images, ri.displayText);
+      return;
+    }
+    // 插话重构 — steers left over when the turn already ended never reached a
+    // THINK boundary. A colleague would just say them out loud as the next
+    // thing to do; so does pure: they open the next turn as the user's words.
+    if (this.pendingSteers.length > 0) {
+      const drained = this.pendingSteers.splice(0);
+      this.autoContinue.cancel(); // the user's own words supersede '继续'
+      const text = drained.map((m) => m.content).join('\n');
+      void this.send(text, drained.flatMap((m) => m.images ?? []));
       return;
     }
     if (this.pendingTasks.length > 0 && !this.autoContinue.pending) {
@@ -2928,6 +3017,9 @@ export class ChatController {
       const llmFor = phaseAdapters.size > 0
         ? (phase: EngineLlmPhase) => phaseAdapters.get(phase)
         : undefined;
+      // 插话重构 — side-channel mid-run questions answer on the REFLECT-phase
+      // (cheap) adapter when routing is on, else the main model.
+      this.turnPhaseLlm = phaseAdapters.get('REFLECT');
       const toolAdapter = this.getOrCreateSessionToolAdapter(effectiveWorkspace, config, sendSessionId);
       this.snapshotPort = toolAdapter.getSnapshotPort?.();
       this.onSnapshotChanged?.(!!this.snapshotPort?.getLatestWriteBatch());
@@ -2992,6 +3084,14 @@ export class ChatController {
         sessionId: this.sessionId,
         llm,
         llmFor,
+        // 插话重构 — the engine pulls queued steers at each THINK boundary, so
+        // a mid-run remark lands in the very next reasoning round instead of
+        // killing the turn.
+        takeSteerMessages: () => {
+          const drained = this.pendingSteers;
+          this.pendingSteers = [];
+          return drained;
+        },
         toolAdapter,
         subagents,
         // In-memory subagent checkpoint store: lets the GUI resume a sub-task
@@ -5126,6 +5226,8 @@ export class ChatController {
     this.activeComplexPlan = null;
     this.pendingTasks = [];
     this.relatedInsert = null;
+    // 插话重构 — new chat discards steers aimed at the old conversation.
+    this.pendingSteers = [];
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;

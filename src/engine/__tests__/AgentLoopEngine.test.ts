@@ -368,6 +368,89 @@ describe('AgentLoopEngine', () => {
     expect(completed!.payload.turnCount).toBe(3); // initial + 2 tool rounds
   });
 
+  // 插话重构 — mid-run steering lands at the THINK boundary, not mid-ACT.
+
+  it('injects queued steering at the next THINK boundary, after every tool result', async () => {
+    const engine = new AgentLoopEngine();
+    const steerQueue: Message[] = [];
+    const seenRounds: Message[][] = [];
+    let drains = 0;
+    let round = 0; // per-adapter: stream() is called once per THINK round
+    const steeringLLM: LLMAdapter = {
+      stream: (messages) => {
+        return (async function* (): AsyncGenerator<LLMChunk, void, void> {
+          seenRounds.push([...messages]);
+          if (round++ === 0) {
+            const tc: ToolCall = { id: 'call_s1', index: 0, function: { name: 'read_file', arguments: '{"path":"a.ts"}' } };
+            yield { type: 'tool_call_delta', index: 0, name: 'read_file', arguments: '{"path":"a.ts"}' };
+            yield { type: 'done', content: '', toolCalls: [tc] };
+          } else {
+            yield { type: 'content', content: 'Steered and done.' };
+            yield { type: 'done', content: 'Steered and done.', toolCalls: [] };
+          }
+        })();
+      },
+      complete: async () => ({ content: 'Steered and done.', toolCalls: [] }),
+    };
+    const ctx = baseCtx({
+      llm: steeringLLM,
+      tools: {
+        // The user types WHILE round 1's tool executes — the queue is empty at
+        // the first THINK boundary and holds the words by the second.
+        execute: async (tc: ToolCall): Promise<ToolResult> => {
+          steerQueue.push({ role: 'user', content: '记得跑测试' });
+          return {
+            id: tc.id,
+            toolName: tc.function.name,
+            result: `executed ${tc.function.name}`,
+            success: true,
+            duration: 5,
+          };
+        },
+        getMetadata: () => undefined,
+        getTools: () => [READ_FILE_TOOL],
+      },
+      toolsDefs: [READ_FILE_TOOL],
+      // Drained by the engine at every THINK boundary.
+      takeSteerMessages: () => {
+        drains++;
+        return steerQueue.splice(0);
+      },
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-steer', systemPrompt: 'Code.', userPrompt: 'do the thing', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const steerEvents = events.filter(e => e.type === 'SteerInjected');
+    expect(steerEvents).toHaveLength(1);
+    // turnCount increments at round END, so the drain inside round 2's THINK
+    // still reports the in-flight round (1) — assert only the count here.
+    expect(steerEvents[0].payload.count).toBe(1);
+    // Drained on every THINK round (round 1 empty, round 2 delivers).
+    expect(drains).toBe(2);
+    // Protocol-safe placement: the steer sits AFTER the tool result it
+    // followed, and the whole round-2 transcript stays paired.
+    const round2 = seenRounds[1];
+    const steerIdx = round2.findIndex((m) => m.role === 'user' && m.content === '记得跑测试');
+    const toolResultIdx = round2.findIndex((m) => m.role === 'tool');
+    expect(steerIdx).toBeGreaterThan(toolResultIdx);
+    expect(transcriptIsPaired(round2)).toBe(true);
+    expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
+  });
+
+  it('never drains when no steering channel is wired (byte-identical legacy path)', async () => {
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm: textLLM('plain completion') });
+    const events = await collect(engine.run(
+      { sessionId: 's-nosteer', systemPrompt: 'Code.', userPrompt: 'hi', budget: STD_BUDGET },
+      ctx,
+    ));
+    expect(events.some(e => e.type === 'SteerInjected')).toBe(false);
+    expect(events.find(e => e.type === 'Completed')?.payload.finalOutput).toBe('plain completion');
+  });
+
   it('injects a wrap-up directive after consecutive web-research rounds', async () => {
     const engine = new AgentLoopEngine();
     const tools: ToolDefinition[] = [

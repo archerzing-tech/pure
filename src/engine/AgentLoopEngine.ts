@@ -200,6 +200,21 @@ export class AgentLoopEngine {
         }
       }
 
+      // Mid-run steering: user messages queued while tools were running join
+      // here, after the before_think hooks (so a wholesale hook rewrite can't
+      // clobber them) and before the model call. The protocol is clean at this
+      // exact point — every tool result is already appended, and OBSERVE ends
+      // with a `continue` — so the next THINK round simply reconciles them in
+      // stride. No abort, no replan: a nudge should steer, not restart.
+      const steered = ctx.takeSteerMessages?.() ?? [];
+      if (steered.length > 0) {
+        for (const m of steered) {
+          messages.push(m);
+          budget.addTokens(m.content);
+        }
+        yield { type: 'SteerInjected', payload: { count: steered.length, turnNumber: turnCount }, timestamp: Date.now() };
+      }
+
       let content = '';
       let reasoningText = '';
       let toolCalls: ToolCall[] = [];
