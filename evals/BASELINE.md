@@ -26,9 +26,12 @@ solutions pass); this matrix only adds the real-agent column on top.
 | DeepSeek (OpenAI API) | `deepseek-v4-flash` | **15/15** | 1.000 | 27.2 s | $0.0237 |
 | GLM | `glm-5.3-flash` | **15/15** | 1.000 | 113.5 s | $0.5581 |
 | GLM | `glm-4.5-flash` | 13/15 | 0.867 | 236.2 s | $0.5707 |
-| Qwen | `qwen3-coder-next` | not run | — | — | — |
+| Qwen | `qwen3-coder-next` | dropped | — | — | — |
 
-Qwen still needs a DashScope key plus `PURE_EVAL_QWEN_WORKSPACE_ID`.
+The Qwen column was dropped by user decision (2026-09-19): no DashScope
+account, so the matrix finalizes at three providers and this cell stays
+permanently blank. (`PURE_EVAL_QWEN_WORKSPACE_ID` / `DASHSCOPE_WORKSPACE_ID`
+still work if that ever changes.)
 
 ### Per task (duration)
 
@@ -158,7 +161,9 @@ PURE_EVAL_API_KEY=... bun run eval:baseline -- --agent glm \
 ```
 
 Provider-specific keys work too (`DEEPSEEK_API_KEY`, `ZHIPU_API_KEY`,
-`DASHSCOPE_API_KEY`); Qwen also needs `PURE_EVAL_QWEN_WORKSPACE_ID`. `--strict`
+`DASHSCOPE_API_KEY` — the Qwen column needs
+`PURE_EVAL_QWEN_WORKSPACE_ID` as well, though it is currently dropped from
+the matrix). `--strict`
 exits non-zero if any task fails — GLM 4.5's row above is why the reproduce
 commands for that column drop `--strict`. Then publish the numbers into the app
 with `bun run eval:snapshot` (see `evals/README.md`).
