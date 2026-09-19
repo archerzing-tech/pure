@@ -79,6 +79,38 @@ export function isSubagentTool(toolName: string): boolean {
   return SUBAGENT_TOOLS.has(toolName);
 }
 
+/**
+ * The two card species a tool round can contain: plain tool calls (read /
+ * bash / search / sys_info…) and subagent delegations (parallel colleagues).
+ * They never share one grid row — a sys_info probe and the three agents it
+ * feeds must not read as simultaneous equals.
+ */
+export type ToolCardKind = 'tool' | 'agent';
+
+export function toolCardKind(toolName: string): ToolCardKind {
+  return isSubagentTool(toolName) ? 'agent' : 'tool';
+}
+
+/**
+ * Group a round's tool cards into CONSECUTIVE same-kind runs: a kind change
+ * opens a new row BELOW, never back into an earlier row. The transcript must
+ * stay a monotone timeline — 分类不能重排时间顺序：[sys_info, agent×3] splits
+ * into a tool row above an agent row (setup step, then the parallel swarm),
+ * while [agent, agent, sys_info] keeps the sys_info BELOW the agents, because
+ * that is the order the model issued those calls. Live rendering (chat.ts)
+ * applies the same rule incrementally as cards stream in.
+ */
+export function groupToolRoundRuns<T>(items: T[], kindOf: (item: T) => ToolCardKind): Array<Array<T>> {
+  const runs: Array<Array<T>> = [];
+  for (const item of items) {
+    const kind = kindOf(item);
+    const last = runs[runs.length - 1];
+    if (last && kindOf(last[0]) === kind) last.push(item);
+    else runs.push([item]);
+  }
+  return runs;
+}
+
 export function toolDisplayName(toolName: string): string {
   return TOOL_META[toolName]?.name ?? toolName;
 }

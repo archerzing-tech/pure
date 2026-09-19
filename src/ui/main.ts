@@ -31,7 +31,7 @@ import { resolvePromptBudget } from '../shared/PromptAssembler';
 import type { Message } from '../shared/types';
 import { ComposerSelect, type ComposerSelectOption } from './composerSelect';
 import { renderMarkdown, stripToolCallXml } from './markdownLoader';
-import { createToolRow, finalizeToolRow, markToolRowStopped } from './toolRow';
+import { createToolRow, finalizeToolRow, markToolRowStopped, groupToolRoundRuns, toolCardKind } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
 import { createAssessmentFlowCard } from './assessmentFlow';
 import { createRestoredPlanCard } from './plan';
@@ -972,15 +972,21 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
     const replayTools: Array<{ exec: ToolExecMeta; stopped: boolean }> = [];
     const flushReplayTools = (): void => {
       if (replayTools.length === 0) return;
-      const grid = document.createElement('div');
-      grid.className = 'bubble-row tool-grid';
-      for (const item of replayTools) {
-        const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
-        if (item.stopped) markToolRowStopped(row);
-        else finalizeToolRow(row, item.exec);
-        grid.appendChild(row.el);
+      // Same rule as live rendering (chat.ts roundGrid): consecutive
+      // same-kind cards share a grid row, a kind change starts a new row
+      // below — tool probes and parallel subagent cards never mix in one row,
+      // and the replayed timeline never reorders.
+      for (const run of groupToolRoundRuns(replayTools, (item) => toolCardKind(item.exec.toolName))) {
+        const grid = document.createElement('div');
+        grid.className = 'bubble-row tool-grid';
+        for (const item of run) {
+          const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
+          if (item.stopped) markToolRowStopped(row);
+          else finalizeToolRow(row, item.exec);
+          grid.appendChild(row.el);
+        }
+        target.appendChild(grid);
       }
-      target.appendChild(grid);
       replayTools.length = 0;
     };
 
