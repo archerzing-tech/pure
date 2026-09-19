@@ -63,6 +63,13 @@ export interface PureConfig {
   theme: 'light' | 'dark' | 'system';
   fontSize: 'small' | 'medium' | 'large';
   density: 'compact' | 'comfortable' | 'spacious';
+  /**
+   * Settings → Appearance → 工具卡片默认展开. Tool rows open as they appear
+   * so the user can follow input/output live (historic behavior, default).
+   * Off: new rows render collapsed to the one-line summary; clicking a row
+   * still opens it. Applies at creation time in both live chat and replay.
+   */
+  toolCardsExpanded: boolean;
   permissionMode: 'auto' | 'confirm' | 'restricted';
   /**
    * Optional macOS Seatbelt sandbox for agent shell commands (Settings →
@@ -262,6 +269,7 @@ export function defaults(): PureConfig {
     theme: 'light',
     fontSize: 'medium',
     density: 'comfortable',
+    toolCardsExpanded: true,
     permissionMode: 'auto',
     sandboxCommands: true,
     autoPermRead: true,
