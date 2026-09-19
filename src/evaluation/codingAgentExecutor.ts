@@ -92,9 +92,10 @@ function createAdapter(options: CodingAgentEvaluationExecutorOptions): LLMAdapte
  */
 export async function collectAgentRunEvents(
   stream: AsyncIterable<EngineEvent>,
-): Promise<{ usage?: CodingTaskAgentResult['usage']; toolCalls: number; completed: boolean; fatalError?: { code: string; message: string } }> {
+): Promise<{ usage?: CodingTaskAgentResult['usage']; toolCalls: number; turns?: number; completed: boolean; fatalError?: { code: string; message: string } }> {
   let usage: CodingTaskAgentResult['usage'];
   let toolCalls = 0;
+  let turns: number | undefined;
   let completed = false;
   let interrupted: { code: string; message: string } | undefined;
   let fatalError: { code: string; message: string } | undefined;
@@ -105,16 +106,18 @@ export async function collectAgentRunEvents(
     }
     if (event.type === 'Interrupted') {
       interrupted = { code: 'AGENT_INTERRUPTED', message: event.payload.reason };
+      turns = event.payload.turnCount;
     }
     if (event.type === 'Completed') {
       completed = true;
       usage = event.payload.usage;
+      turns = event.payload.turnCount;
       if (!event.payload.isComplete && !fatalError) {
         fatalError = interrupted ?? { code: 'AGENT_INTERRUPTED', message: 'run ended without completing its turn' };
       }
     }
   }
-  return { usage, toolCalls, completed, fatalError };
+  return { usage, toolCalls, turns, completed, fatalError };
 }
 
 export async function runCodingAgentEvaluationTask(
@@ -149,12 +152,22 @@ export async function runCodingAgentEvaluationTask(
     sessionId,
   }, task.prompt);
 
-  const { usage, toolCalls, completed, fatalError } = await collectAgentRunEvents(
+  const { usage, toolCalls, turns, completed, fatalError } = await collectAgentRunEvents(
     agent.run(assembly.systemPrompt, assembly.userPrompt ?? task.prompt),
   );
   if (fatalError) {
-    throw new Error(`model call failed (${fatalError.code}): ${fatalError.message}`);
+    // The interrupt reason rides on the error (not just the message) so the
+    // suite report can name the cap that ended the run — `max_turns`,
+    // `Budget exceeded`, an `llm_*` fault — instead of leaving report readers
+    // to reverse-engineer it from the message length.
+    const error = new Error(`model call failed (${fatalError.code}): ${fatalError.message}`) as Error & {
+      code?: string;
+      interruptReason?: string;
+    };
+    error.code = fatalError.code;
+    error.interruptReason = fatalError.message;
+    throw error;
   }
   if (!completed) throw new Error('CodingAgent evaluation run ended without a Completed event');
-  return { usage, toolCalls, traceId: assembly.traceId };
+  return { usage, toolCalls, turns, traceId: assembly.traceId };
 }

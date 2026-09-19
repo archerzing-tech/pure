@@ -96,6 +96,40 @@ describe('coding task baseline', () => {
     expect(JSON.stringify(result)).not.toContain('secret-token');
   });
 
+  it('names the cap that ended the run and strips free text after the reason', async () => {
+    const cap = new Error('model call failed (AGENT_INTERRUPTED): max_turns') as Error & { code?: string; interruptReason?: string };
+    cap.code = 'AGENT_INTERRUPTED';
+    cap.interruptReason = 'max_turns';
+    const result = await evaluateCodingTask(fixture, {
+      agent: async () => {
+        throw cap;
+      },
+    });
+    expect(result.agentError?.code).toBe('AGENT_INTERRUPTED');
+    expect(result.agentError?.reason).toBe('max_turns');
+
+    const chatter = new Error('model call failed (AGENT_INTERRUPTED): Budget exceeded: tokens 250k > 200k (key sk-live-xyz)') as Error & { code?: string; interruptReason?: string };
+    chatter.code = 'AGENT_INTERRUPTED';
+    chatter.interruptReason = 'Budget exceeded: tokens 250k > 200k (key sk-live-xyz)';
+    const withChatter = await evaluateCodingTask(fixture, {
+      agent: async () => {
+        throw chatter;
+      },
+    });
+    expect(withChatter.agentError?.reason).toBe('Budget exceeded');
+    expect(JSON.stringify(withChatter)).not.toContain('sk-live-xyz');
+  });
+
+  it('records the turn count the agent reached', async () => {
+    const result = await evaluateCodingTask(fixture, {
+      agent: async ({ workspace }) => {
+        await writeFile(join(workspace, 'answer.txt'), 'ok', 'utf8');
+        return { turns: 4 };
+      },
+    });
+    expect(result.agent?.turns).toBe(4);
+  });
+
   it('includes fixture and runtime metadata in suite reports', async () => {
     const report = await evaluateCodingTaskSuite([fixture], {
       metadata: { provider: 'mock', model: 'fixture-agent', promptVersion: 'prompt_test', seed: '1' },
