@@ -97,6 +97,7 @@ import {
   uniqueModels,
   type PureConfig,
 } from './config';
+import type { PhaseModelConfig } from '../shared/phaseModels';
 import {
   DEFAULT_HUB_REPO,
   fetchHubIndex,
@@ -857,6 +858,8 @@ export class SettingsPanel {
       '.cfg-skill-toggle',
       // Map-tile cache cap (number input saves on change/blur).
       '#cfg-map-tile-cache-mb', '#cfg-map-tianditu-key',
+      // 9.2 — per-phase model routing ids (text inputs, debounced save).
+      '#cfg-phase-think', '#cfg-phase-handover', '#cfg-phase-reflect',
       // Memory evolution thresholds (number inputs save on change/blur).
       '#cfg-mem-half-life', '#cfg-mem-active-min', '#cfg-mem-dormant-max',
       '#cfg-mem-delete-floor', '#cfg-mem-grace', '#cfg-mem-supersede-sim'
@@ -1412,6 +1415,37 @@ export class SettingsPanel {
       nameEl.classList.add('llm-default-model-name-empty');
       providerEl.textContent = '';
     }
+    // The phase-model datalist follows the provider that would serve the next
+    // request — after a default-model switch the suggestions must too.
+    this.refreshPhaseModelOptions();
+  }
+
+  // ── 9.2 — per-phase model routing (experimental) ──
+
+  /** Suggest the CURRENT provider's model library for the phase inputs. A
+   * phase model rides the same provider key/endpoint, so only same-provider
+   * ids are offered; free typing stays allowed for models not yet saved in
+   * the library. */
+  private refreshPhaseModelOptions(): void {
+    const datalist = document.getElementById('llm-phase-model-options');
+    if (!datalist) return;
+    const cfg = loadConfig() ?? defaults();
+    const models = modelListForProvider(cfg, cfg.provider);
+    datalist.innerHTML = models.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('');
+  }
+
+  /** Gather the three phase inputs; empty strings collapse to a missing
+   * config (routing off), not an empty object. */
+  private gatherPhaseModels(): PhaseModelConfig | undefined {
+    const read = (id: string) => (document.getElementById(id) as HTMLInputElement | null)?.value.trim() ?? '';
+    const cfg: PhaseModelConfig = {};
+    const think = read('cfg-phase-think');
+    const handover = read('cfg-phase-handover');
+    const reflect = read('cfg-phase-reflect');
+    if (think) cfg.think = think;
+    if (handover) cfg.handover = handover;
+    if (reflect) cfg.reflect = reflect;
+    return Object.keys(cfg).length > 0 ? cfg : undefined;
   }
 
   private toggleDefaultModelMenu(): void {
@@ -1740,6 +1774,15 @@ export class SettingsPanel {
     this.editingProvider = null;
     this.renderProviderGrid();
     this.renderDefaultBar();
+    // 9.2 — per-phase model routing inputs follow the stored config; the
+    // datalist refreshes against the current provider's model library.
+    const phaseThinkEl = document.getElementById('cfg-phase-think') as HTMLInputElement | null;
+    const phaseHandoverEl = document.getElementById('cfg-phase-handover') as HTMLInputElement | null;
+    const phaseReflectEl = document.getElementById('cfg-phase-reflect') as HTMLInputElement | null;
+    if (phaseThinkEl) phaseThinkEl.value = cfg.phaseModels?.think ?? '';
+    if (phaseHandoverEl) phaseHandoverEl.value = cfg.phaseModels?.handover ?? '';
+    if (phaseReflectEl) phaseReflectEl.value = cfg.phaseModels?.reflect ?? '';
+    this.refreshPhaseModelOptions();
     (document.getElementById('cfg-language') as HTMLSelectElement).value = cfg.language;
     const cityEl = document.getElementById('cfg-city') as HTMLInputElement | null;
     if (cityEl) cityEl.value = cfg.city ?? '';
@@ -3294,6 +3337,7 @@ export class SettingsPanel {
       providerOverrides: this.gatherProviderOverrides(),
       apiKey: editingActive ? apiKey : prev.apiKey,
       model: editingActive ? model : prev.model,
+      phaseModels: this.gatherPhaseModels(),
       // The legacy global baseURL is frozen after the v10 migration (a stale
       // value once hijacked every provider's endpoint); per-provider edits now
       // land in providerOverrides via gatherProviderOverrides().

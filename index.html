@@ -462,6 +462,29 @@
                     <button type="button" id="llm-default-model-btn" class="llm-default-model-btn" aria-expanded="false" aria-controls="llm-default-model-menu" data-i18n="llm.defaultBar.switch">切换模型</button>
                     <div id="llm-default-model-menu" class="llm-default-model-menu" hidden></div>
                   </div>
+                  <!-- 9.2 — per-phase model routing (experimental). Model ids only:
+                       a phase model rides the current provider's key/endpoint. -->
+                  <div class="llm-phase-routing" id="llm-phase-routing">
+                    <div class="llm-grid-head-copy">
+                      <h3 class="llm-grid-title"><span data-i18n="llm.phase.title">按阶段模型路由</span> <span class="llm-phase-badge" data-i18n="llm.phase.badge">实验性</span></h3>
+                      <p class="llm-grid-hint" data-i18n="llm.phase.hint">想省成本可以让不同阶段用不同模型——比如思考用强的，交接总结和反思用便宜的。留空就跟着默认模型走；这里只换模型，不换供应商。</p>
+                    </div>
+                    <div class="llm-phase-rows">
+                      <label class="llm-phase-row">
+                        <span class="llm-phase-label" data-i18n="llm.phase.think">思考（计划与决策）</span>
+                        <input id="cfg-phase-think" class="setting-input llm-phase-input" type="text" list="llm-phase-model-options" data-i18n-placeholder="llm.phase.placeholder" placeholder="留空跟随默认模型" autocomplete="off" spellcheck="false" />
+                      </label>
+                      <label class="llm-phase-row">
+                        <span class="llm-phase-label" data-i18n="llm.phase.handover">交接总结（收尾小结）</span>
+                        <input id="cfg-phase-handover" class="setting-input llm-phase-input" type="text" list="llm-phase-model-options" data-i18n-placeholder="llm.phase.placeholder" placeholder="留空跟随默认模型" autocomplete="off" spellcheck="false" />
+                      </label>
+                      <label class="llm-phase-row">
+                        <span class="llm-phase-label" data-i18n="llm.phase.reflect">反思（经验沉淀）</span>
+                        <input id="cfg-phase-reflect" class="setting-input llm-phase-input" type="text" list="llm-phase-model-options" data-i18n-placeholder="llm.phase.placeholder" placeholder="留空跟随默认模型" autocomplete="off" spellcheck="false" />
+                      </label>
+                    </div>
+                    <datalist id="llm-phase-model-options"></datalist>
+                  </div>
                   <div class="llm-grid-head">
                     <div class="llm-grid-head-copy">
                       <h3 class="llm-grid-title" data-i18n="llm.grid.title">供应商</h3>
