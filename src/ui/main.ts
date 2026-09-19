@@ -978,7 +978,10 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
       // and the replayed timeline never reorders.
       for (const run of groupToolRoundRuns(replayTools, (item) => toolCardKind(item.exec.toolName))) {
         const grid = document.createElement('div');
-        grid.className = 'bubble-row tool-grid';
+        // Agent rows cap at three columns — same as live rendering.
+        grid.className = toolCardKind(run[0].exec.toolName) === 'agent'
+          ? 'bubble-row tool-grid tool-grid-agents'
+          : 'bubble-row tool-grid';
         for (const item of run) {
           const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
           if (item.stopped) markToolRowStopped(row);

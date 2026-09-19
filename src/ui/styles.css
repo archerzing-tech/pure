@@ -1587,6 +1587,16 @@ body {
   width: 100%;
   margin: 2px 0 6px;
 }
+/* Agent grids cap at three columns: a 4th parallel agent wraps to the next
+   visual line but stays inside the same grid — still part of the swarm, just
+   wrapped for space — and never spills into a tool card's row (the kind-run
+   split guarantees separate grids; this only caps the columns). Plain tool
+   grids keep the uncapped auto-fit. The track min is max(240px, a third of
+   the row): wide windows can't fit a 4th 1fr track (3 × third = full width),
+   narrow windows fall back to the 240px floor and degrade to 2 / 1 columns. */
+.bubble-row.tool-grid.tool-grid-agents {
+  grid-template-columns: repeat(auto-fit, minmax(max(240px, calc((100% - 20px) / 3)), 1fr));
+}
 .bubble-row.tool-grid > .bubble-row.tool-row-row {
   margin: 0;
   min-width: 0;
