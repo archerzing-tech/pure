@@ -2822,9 +2822,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       finalizeStreamingSegments();
       if (!roundGrid || roundGrid.kind !== kind) {
         const el = document.createElement('div');
-        // Agent rows cap at three columns (CSS): a 4th parallel agent wraps
-        // within its own grid instead of stretching into four skinny columns.
-        el.className = kind === 'agent' ? 'bubble-row tool-grid tool-grid-agents' : 'bubble-row tool-grid';
+        el.className = 'bubble-row tool-grid';
         this.appendToTranscript(el);
         roundGrid = { el, kind };
       }
