@@ -276,6 +276,7 @@ export class CodingAgent {
     const publish = (a: SubagentActivity, kind: SubagentActivityEvent['kind']): void => {
       feed?.publish({
         callId: a.callId,
+        agentId: a.agentId,
         agentName: a.agentName,
         agentRole: a.agentRole,
         kind,

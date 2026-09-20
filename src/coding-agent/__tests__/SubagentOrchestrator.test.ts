@@ -8,7 +8,7 @@
 // clean Completed event — no network, no real provider.
 
 import { describe, expect, it } from 'bun:test';
-import { SubagentOrchestrator, deriveSubagentBudget, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentProgress } from '../SubagentOrchestrator';
+import { SubagentOrchestrator, deriveSubagentBudget, makeAgentId, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentProgress } from '../SubagentOrchestrator';
 import { Verifier } from '../Verifier';
 import { Tags, ToolRegistry } from '../ToolRegistry';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
@@ -697,5 +697,44 @@ describe('SubagentOrchestrator steer channel (北极星第二步)', () => {
 
     expect(result.success).toBe(true);
     expect(seen.some((a) => a.lifecycle === 'steered')).toBe(false);
+  });
+});
+
+// Agent run id（ag-xxxxxxxx，2026-09-20 用户要求）：每个委派一个可引用的短 ID。
+// 卡片、错误行、终态工具结果、会话存档四处指向同一个 ID——报错时用户贴一个
+// token 就能定位是哪个 agent，而不是"第二个灰色的卡片"。
+describe('SubagentOrchestrator agent run id', () => {
+  it('stamps one stable agentId on every activity emit and the terminal result', async () => {
+    const seen: SubagentActivity[] = [];
+    const orch = new SubagentOrchestrator({
+      llm: new MockLLMAdapter('findings'),
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      progress: {
+        onStart: (a) => seen.push(a),
+        onState: (a) => seen.push(a),
+        onDone: (a) => seen.push(a),
+      },
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const result = await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
+
+    expect(seen.length).toBeGreaterThan(0);
+    const ids = new Set(seen.map((a) => a.agentId));
+    expect(ids.size).toBe(1);
+    const id = [...ids][0]!;
+    expect(id).toMatch(/^ag-[0-9a-f]{8}$/);
+    // The terminal payload the parent transcript stores carries the same id.
+    expect((result.result as SubagentResult).agentId).toBe(id);
+  });
+
+  it('makeAgentId yields distinct well-shaped ids across runs', () => {
+    const a = makeAgentId();
+    const b = makeAgentId();
+    expect(a).toMatch(/^ag-[0-9a-f]{8}$/);
+    expect(b).toMatch(/^ag-[0-9a-f]{8}$/);
+    expect(a).not.toBe(b);
   });
 });
