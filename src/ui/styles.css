@@ -1613,7 +1613,7 @@ body {
    web_search / list_files / …) render side by side so the transcript reads
    "running simultaneously" instead of a vertical stack of identical rows.
    A 264px minimum column still yields 3 windows for a 3-call round at the real
-   #chat width (940px max-width minus 32px padding × 2 = 876px content →
+   #chat width (948px max-width minus 32px padding × 2 = 884px content →
    3 × 264 + 2 × 10 gap = 812), collapsing to 2 / 1 on narrower windows;
    auto-fit also COLLAPSES empty tracks, so a single-call round spans one
    full-width item.
@@ -2077,8 +2077,16 @@ body {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--term-ink);
+  /* Theme ink by default: delegation cards for deep_thinker / researcher /
+     ui_designer have NO black panel behind their output (shouldUseTerminalPanel
+     → false), and the console ink (--term-ink #f2f2f2, white-on-black) vanished
+     on the light card — the "→ execute_command …" trace read as blank
+     (2026-09-20 user report). Only the black terminal panel keeps white. */
+  color: var(--text);
   padding: 0 2px;
+}
+.tool-row-section.terminal-panel .tool-row-stream-line {
+  color: var(--term-ink);
 }
 .tool-row-stream-line.stderr {
   /* 错误文字用大红：在任何工具表面（含蓝色 web 内容区）上都醒目。 */
@@ -6882,7 +6890,7 @@ select:focus-visible,
 }
 
 #chat {
-  max-width: 940px;
+  max-width: 948px;
   box-sizing: border-box;
   /* Same constant right gutter as the base rule — keeps the chat width stable
      and leaves room for the multi-agent cards / context panel overlay. */
@@ -7019,12 +7027,12 @@ select:focus-visible,
   gap: 10px;
   padding: 12px 32px 16px;
   border-top: 1px solid var(--border);
-  /* Match the centered chat column (#chat is max-width 940px) so the
+  /* Match the centered chat column (#chat is max-width 948px) so the
      composer aligns with the transcript instead of spanning the whole
      window — same width + same 32px side padding means the folder button,
      input and send button line up exactly with the message column edges. */
   width: 100%;
-  max-width: 940px;
+  max-width: 948px;
   margin: 0 auto;
 }
 
