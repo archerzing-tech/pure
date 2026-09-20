@@ -15,10 +15,15 @@ const BUDGET = {
   streamDeadlineMs: () => 60_000,
 };
 
-function makeContext(execute: (tc: ToolCall) => Promise<ToolResult>, timeoutMs?: number): EngineContext {
+type ToolMetadata = { sideEffects?: boolean; isWrite?: boolean; timeoutMs?: number };
+
+function makeContext(
+  execute: (tc: ToolCall) => Promise<ToolResult>,
+  metadata?: ToolMetadata | ((name: string) => ToolMetadata | undefined),
+): EngineContext {
   const tools: ToolAdapter = {
     getTools: () => [],
-    getMetadata: () => (timeoutMs === undefined ? undefined : { sideEffects: false, isWrite: false, timeoutMs }),
+    getMetadata: (name: string) => (typeof metadata === 'function' ? metadata(name) : metadata),
     execute,
   };
   return { tools } as unknown as EngineContext;
@@ -38,7 +43,7 @@ describe('ToolExecutionCoordinator tool budget', () => {
     const ctx = makeContext(async (tc) => {
       await new Promise((resolve) => setTimeout(resolve, 200));
       return ok(tc);
-    }, 50);
+    }, { timeoutMs: 50 });
 
     const results = await coordinator.execute([call('slow_tool')], ctx, BUDGET);
     expect(results).toHaveLength(1);
@@ -61,7 +66,7 @@ describe('ToolExecutionCoordinator tool budget', () => {
     const ctx = makeContext(async (tc) => {
       await new Promise((resolve) => setTimeout(resolve, 200));
       return ok(tc);
-    }, 600_000);
+    }, { timeoutMs: 600_000 });
     const tightBudget = { incrementToolCall: () => {}, remaining: () => ({ time: 10 }), streamDeadlineMs: () => 10 };
 
     const results = await coordinator.execute([call('reviewer')], ctx, tightBudget);
@@ -100,5 +105,62 @@ describe('ToolExecutionCoordinator streaming completion', () => {
 
     const results = await coordinator.execute([call('a'), call('b'), call('c')], ctx, BUDGET);
     expect(results.map((r) => r.toolCallId).sort()).toEqual(['call_a', 'call_b', 'call_c']);
+  }, 5_000);
+});
+
+describe('ToolExecutionCoordinator concurrency policy (2026-09-20)', () => {
+  // Regression anchor: sideEffects used to force the writes pool, so four
+  // bash_executor delegations scanning four folders ran one-after-another —
+  // the exact fan-out users delegate subagents for (2026-09-20 user report).
+  it('side-effecting-but-not-writing calls overlap in one batch', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    let inFlight = 0;
+    let peak = 0;
+    const ctx = makeContext(async (tc) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      inFlight--;
+      return ok(tc);
+    }, { sideEffects: true, isWrite: false });
+
+    const results = await coordinator.execute([call('scan_a'), call('scan_b'), call('scan_c'), call('scan_d')], ctx, BUDGET);
+    expect(results).toHaveLength(4);
+    expect(results.every((r) => r.result.success)).toBe(true);
+    expect(peak).toBe(4);
+  }, 5_000);
+
+  it('isWrite tools stay sequential (lock discipline for file mutators)', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    let inFlight = 0;
+    let peak = 0;
+    const ctx = makeContext(async (tc) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      inFlight--;
+      return ok(tc);
+    }, { sideEffects: true, isWrite: true });
+
+    const results = await coordinator.execute([call('write_a'), call('write_b')], ctx, BUDGET);
+    expect(results).toHaveLength(2);
+    expect(peak).toBe(1);
+  }, 5_000);
+
+  it('a mixed batch overlaps the side-effecting call and queues the write behind reads', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const events: string[] = [];
+    const metadataFor = (name: string) => (name === 'mutator' ? { sideEffects: true, isWrite: true } : { sideEffects: true, isWrite: false });
+    const ctx = makeContext(async (tc) => {
+      events.push(`start:${tc.function.name}`);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      events.push(`end:${tc.function.name}`);
+      return ok(tc);
+    }, metadataFor);
+
+    await coordinator.execute([call('mutator'), call('scanner')], ctx, BUDGET);
+    // Reads fire first (concurrently), the write runs after they settle.
+    expect(events[0]).toBe('start:scanner');
+    expect(events.indexOf('start:mutator')).toBeGreaterThan(events.indexOf('end:scanner'));
   }, 5_000);
 });

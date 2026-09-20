@@ -256,7 +256,9 @@ describe('SubagentOrchestrator P1', () => {
       isWrite: false,
       timeoutMs: 600_000,
     });
-    // …while file-mutating ones stay serialized so they never race.
+    // …and file-mutating ones too (2026-09-20): no delegation is isWrite —
+    // they overlap in the reads pool; same-file safety is the inner
+    // FileLockManager's job, not whole-agent serialization.
     expect(registry.getMetadata('test_editor')).toEqual({
       sideEffects: true,
       isWrite: false,
