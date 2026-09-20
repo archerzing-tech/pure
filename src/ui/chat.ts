@@ -105,6 +105,8 @@ import type { SessionAgentActivity } from './store';
 import { createOptimizeCard } from './optimizeCard';
 import { LiveTranscriptWindow, type LiveTurnHandle } from './liveTranscriptWindow';
 import { setInlineCardHost } from './inlineCard';
+import { createPathRepairNote } from './pathRepairNote';
+import { warmPathIndex, type PathRepair } from './pathIndex';
 
 // Insert a `-v{n}` segment before the extension (or append it for extension-less
 // files) so a written file `a/b/index.html` snapshots to `a/b/index-v1.html`.
@@ -1213,6 +1215,8 @@ export class ChatController {
   private streaming = false;
   private abortController: AbortController | null = null;
   private onStreamingChange?: (streaming: boolean) => void;
+  /** 11.2 — set by the shell via onRestoreDraft (see that method). */
+  private restoreDraftHandler?: (text: string) => void;
   private workspace: string = '';
   private effectiveWorkspace: string = '';
   private sessionId: string = '';
@@ -2114,6 +2118,12 @@ export class ChatController {
     // Keep the transcript's clickable-path resolver in sync with the session's
     // workspace so relative paths in bubbles/tool rows resolve correctly.
     setPathLinkWorkspace(path);
+    // 11.2 — every workspace change funnels through here (picker, session load,
+    // landing reset), so this is the one place that can warm the path index the
+    // moment the workspace is known: by the time the user has typed a prompt the
+    // index is ready, and the FIRST send already gets path repair. Fire and
+    // forget — the composer never waits for it.
+    void warmPathIndex(path, { force: true });
   }
 
   getWorkspace(): string {
@@ -2361,7 +2371,14 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     }
   }
 
-  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false, userAttachments: import('../shared/types').MessageAttachment[] = [], attachmentViewer?: (attachment: import('../shared/types').MessageAttachment) => void) {
+  /** 11.2 — how a path-repair note puts the original draft back in the
+   *  composer. This controller does not own the composer; the shell (main.ts)
+   *  registers it via SessionChatManager.onRestoreDraft. */
+  onRestoreDraft(fn: (text: string) => void): void {
+    this.restoreDraftHandler = fn;
+  }
+
+  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false, userAttachments: import('../shared/types').MessageAttachment[] = [], attachmentViewer?: (attachment: import('../shared/types').MessageAttachment) => void, userPathRepairs: PathRepair[] = []) {
     const chatEl = this.scrollRoot();
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
@@ -2424,6 +2441,13 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         userBubble.appendChild(renderAttachmentCard(attachment, () => openUserAttachment?.(attachment)));
       }
     }
+
+    // 11.2 — path slips: the bubble keeps the user's OWN words (displayUserText),
+    // the note names what pure read instead, and one click puts the original
+    // draft back in the composer. Appended AFTER the block above, which
+    // rewrites the bubble's textContent and would otherwise wipe the note.
+    const repairNote = createPathRepairNote(userPathRepairs, () => this.restoreDraftHandler?.(displayUserText));
+    if (repairNote) userBubble.appendChild(repairNote);
 
     // Snapshot the user-selected workspace separately from the effective tool
     // workspace. An empty user workspace uses an application-owned tmp folder,
@@ -3984,6 +4008,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
           displayUserText,
+          userPathRepairs,
           deliveredThisTurn,
         );
         return;
@@ -5072,6 +5097,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
           displayUserText,
+          userPathRepairs,
           deliveredThisTurn,
         );
       }
@@ -5113,6 +5139,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
           displayUserText,
+          userPathRepairs,
           deliveredThisTurn,
         );
       } else if (thinkingPhases.length > 0 && gen === this.generation) {
@@ -5138,6 +5165,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
           assistantSegments.map(segment => segment.text),
           turnArtifacts,
           displayUserText,
+          userPathRepairs,
           deliveredThisTurn,
         );
       }
@@ -5375,6 +5403,10 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     renderedAssistantTexts: string[] = [],
     artifacts: Array<{ path: string; op?: 'edit' | 'create' }> = [],
     visibleUserText = '',
+    /** 11.2 — path repairs this turn applied, so the transcript note survives a
+     *  reload (the bubble shows the original words, modelContext the fixed
+     *  text; the pairs are the only record of the difference). */
+    pathRepairs: PathRepair[] = [],
     /** Only persist the artifact block when this turn genuinely delivered the
      * project (projectDelivered). Without this, an interrupted / unverified
      * turn writes its artifacts into the transcript and the directory/file
@@ -5461,6 +5493,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         message: m,
         modelMessageIndex: index,
         content: m.role === 'user' && index === latestUserIndex && visibleUserText ? visibleUserText : m.content,
+        pathRepairs: m.role === 'user' && index === latestUserIndex && pathRepairs.length > 0 ? pathRepairs : undefined,
         images: m.images,
         attachments: m.attachments,
         analysis,
@@ -5732,6 +5765,7 @@ export class SessionChatManager {
   private streamingCb?: (streaming: boolean) => void;
   private statsCb?: (stats: SessionStats) => void;
   private snapshotCb?: (available: boolean) => void;
+  private restoreDraftCb?: (text: string) => void;
 
   private container(): HTMLElement {
     return document.getElementById('chat')!;
@@ -5763,6 +5797,14 @@ export class SessionChatManager {
     controller.onWorkspaceSnapshotChanged((available) => {
       if (controller === this.current) this.snapshotCb?.(available);
     });
+    controller.onRestoreDraft((text) => {
+      if (controller === this.current) this.restoreDraftCb?.(text);
+    });
+  }
+
+  /** 11.2 — register the composer's "put the original draft back" action. */
+  onRestoreDraft(fn: (text: string) => void): void {
+    this.restoreDraftCb = fn;
   }
 
   /** The visible controller; creates the first session lazily when needed. */

@@ -1,5 +1,6 @@
 import type { IntentAssessment } from '../coding-agent/types';
 import type { MessageAttachment, MessageImage } from '../shared/types';
+import type { PathRepair } from './pathIndex';
 import {
   buildTranscriptToolExec,
   getTranscriptContent,
@@ -10,7 +11,7 @@ import {
 } from './store';
 
 export type TranscriptReplayBlock =
-  | { type: 'user'; content: string; images: MessageImage[]; attachments: MessageAttachment[] }
+  | { type: 'user'; content: string; images: MessageImage[]; attachments: MessageAttachment[]; repairs?: PathRepair[] }
   | { type: 'analysis'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'assessment'; assessment: IntentAssessment }
@@ -123,7 +124,7 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
       turnHasExplicitArtifacts = false;
       lastUserRequest = entry.content ?? '';
       if (entry.content || entry.images?.length || entry.attachments?.length) {
-        blocks.push({ type: 'user', content: visibleUserContent(entry.content ?? ''), images: entry.images ?? [], attachments: entry.attachments ?? [] });
+        blocks.push({ type: 'user', content: visibleUserContent(entry.content ?? ''), images: entry.images ?? [], attachments: entry.attachments ?? [], repairs: entry.pathRepairs });
       }
       continue;
     }
@@ -220,7 +221,7 @@ export function projectSessionEvents(events: import('./store').SessionEvent[]): 
         flushTurnArtifacts();
         turnHasExplicitArtifacts = false;
         lastUserRequest = event.content ?? '';
-        blocks.push({ type: 'user', content: visibleUserContent(event.content ?? ''), images: event.images ?? [], attachments: event.attachments ?? [] });
+        blocks.push({ type: 'user', content: visibleUserContent(event.content ?? ''), images: event.images ?? [], attachments: event.attachments ?? [], repairs: event.pathRepairs });
         break;
       case 'analysis':
         if (event.content) blocks.push({ type: 'analysis', text: event.content });

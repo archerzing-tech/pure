@@ -700,7 +700,14 @@ export function assessIntent(prompt: string): IntentAssessment {
   const text = prompt.trim();
   const lower = text.toLowerCase();
   const chinese = /[\u4e00-\u9fff]/.test(text);
-  const destructive = /(?:删除|移除|清理|销毁|不可逆|drop\s+(?:table|database)|destroy|rm\s+-rf|reset\s+--hard|force\s+push|delete\s+(?:all|the|entire)|remove\s+(?:all|the|entire))/i.test(lower);
+  // 破坏性说法（高危档）。2026-09-20 扩展：口语化的「删了 / 删掉」、清空、重置、
+  // 覆盖此前完全不在底线里——拼对也拦不住，比错字更糟（错字至少还能靠别名表展开
+  // 补上）。三个负向断言是刻意的，它们把同一个词在工程语境里的良性用法挡在外面：
+  // 清空输入框（UI 行为）、重置密码 / 重置按钮（功能需求）、覆盖率 / 覆盖测试（不是
+  // 覆写）。误判的代价不只是一次确认：CLI 会把整轮的自动批准关掉
+  // （cliRepl.ts 的 applyCliIntentPermission），所以这条底线宁窄勿宽——宁可漏掉
+  // 一个含糊说法，也不把日常请求拉进高危通道。
+  const destructive = /(?:删除|移除|清理|清空(?!输入框)|清掉|抹掉|销毁|重置(?!密码|按钮|表单|输入|选项|筛选)|覆盖(?!率|测试|范围|报告|度|统计|场景)|删(?:了|掉)|删库|删表|清库|清表|不可逆|drop\s+(?:table|database)|destroy|rm\s+-rf|reset\s+--hard|force\s+push|delete\s+(?:all|the|entire)|remove\s+(?:all|the|entire))/i.test(lower);
   const migration = /(?:迁移|升级依赖|替换底层|切换框架|schema|database migration|migrat|upgrade dependencies|breaking change)/i.test(lower);
   const refactor = /(?:重构|重写|大规模修改|全量修改|refactor|rewrite|rewrite the whole|across the project)/i.test(lower);
   const riskLevel: IntentAssessment['riskLevel'] = destructive ? 'high' : migration || refactor ? 'medium' : 'low';

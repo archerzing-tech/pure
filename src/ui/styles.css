@@ -1421,6 +1421,39 @@ body {
   background: var(--bg-user);
   color: var(--text);
 }
+/* 11.2 — path-repair note inside a user bubble. Quiet by design: it reports what
+   pure read the draft as (the bubble above keeps the user's own words), so it
+   reads as a footnote, not as a warning, with the one action that matters —
+   putting the original draft back — sitting next to it. */
+.path-repair-note {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-light);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+  white-space: normal;
+}
+.path-repair-note-text {
+  word-break: break-word;
+}
+.path-repair-note-btn {
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.path-repair-note-btn:hover {
+  color: var(--accent-hover);
+}
 /* Assistant output reads as plain transcript text (Claude Code style) instead
    of a heavy colored bubble — the content is what matters, not a box. */
 .bubble-row.assistant .bubble {
