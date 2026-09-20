@@ -5,6 +5,7 @@
 
 import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, SubagentActivityEvent } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
+import { interruptedReasonFor } from '../shared/pauseSignal';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
 import { BudgetManager } from './BudgetManager';
@@ -217,7 +218,7 @@ export class AgentLoopEngine {
 
     while (true) {
       if (ctx.signal?.aborted) {
-        yield { type: 'Interrupted', payload: { reason: 'aborted', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+        yield { type: 'Interrupted', payload: { reason: interruptedReasonFor(ctx.signal), lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
         interrupted = true;
         break;
       }
@@ -412,7 +413,7 @@ export class AgentLoopEngine {
       } catch (err: any) {
         if (ctx.signal?.aborted) {
           flushPartialAssistant();
-          yield { type: 'Interrupted', payload: { reason: 'aborted', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+          yield { type: 'Interrupted', payload: { reason: interruptedReasonFor(ctx.signal), lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
           interrupted = true;
           break;
         }
@@ -732,7 +733,7 @@ export class AgentLoopEngine {
       // top-of-loop check would catch this next iteration, but only after the
       // verifier had already been invoked.
       if (ctx.signal?.aborted) {
-        yield { type: 'Interrupted', payload: { reason: 'aborted', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+        yield { type: 'Interrupted', payload: { reason: interruptedReasonFor(ctx.signal), lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
         interrupted = true;
         break;
       }
@@ -819,7 +820,7 @@ export class AgentLoopEngine {
           }
         } catch (err: any) {
           if (ctx.signal?.aborted || err?.name === 'AbortError') {
-            yield { type: 'Interrupted', payload: { reason: 'aborted', lastState: 'VERIFY', completedSteps, messages, turnCount }, timestamp: Date.now() };
+            yield { type: 'Interrupted', payload: { reason: interruptedReasonFor(ctx.signal), lastState: 'VERIFY', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true;
             break;
           }

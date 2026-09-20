@@ -6,6 +6,7 @@ import { AgentLoopEngine } from '../AgentLoopEngine';
 import { DefaultHookRouter } from '../HookRouter';
 import { DefaultFailurePolicy } from '../FailurePolicy';
 import { EventFanout } from '../../shared/asyncQueue';
+import { abortPaused } from '../../shared/pauseSignal';
 import type {
   LLMAdapter,
   LLMChunk,
@@ -1529,5 +1530,122 @@ describe('AgentLoopEngine per-phase adapter routing (E0.3)', () => {
     expect(defaultCalls.count).toBe(1);
     const completed = events.find(e => e.type === 'Completed');
     expect(completed?.type === 'Completed' && completed.payload.finalOutput).toBe('default adapter saved the run');
+  });
+});
+
+// ── 阶段 12: pause semantics (pauseSignal.ts) ──
+// A pause is an abort carrying the PAUSE_ABORT_REASON: the engine cuts the LLM
+// stream at once and reports Interrupted reason 'paused', but in-flight tools
+// keep their own clean signal and their results still land in the archive. A
+// plain abort stays the hard stop it always was.
+
+describe('AgentLoopEngine pause semantics (阶段 12)', () => {
+  it('a pause abort yields Interrupted reason "paused" and keeps the partial answer', async () => {
+    const ac = new AbortController();
+    const partialLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        yield { type: 'content', content: 'half-finished answer when the user hit pause' };
+        while (!ac.signal.aborted) {
+          await new Promise((r) => setTimeout(r, 1));
+        }
+        throw new Error('aborted');
+      },
+      complete: async () => ({ content: 'x', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm: partialLLM, signal: ac.signal });
+    const gen = engine.run(
+      { sessionId: 's-pause-text', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    );
+    const collected = collect(gen);
+    setTimeout(() => abortPaused(ac), 0);
+    const events = await collected;
+
+    const interrupted = events.find((e) => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reason).toBe('paused');
+    const msgs = interrupted!.payload.messages ?? [];
+    const last = msgs[msgs.length - 1];
+    expect(last?.role).toBe('assistant');
+    expect(String((last as any).content)).toContain('half-finished answer when the user hit pause');
+  });
+
+  it('lets an in-flight tool finish and archives its result when paused mid-batch', async () => {
+    const ac = new AbortController();
+    let toolSawAbort = false;
+    // A "long command": it does not finish until the pause has fired, then
+    // keeps working a few more ticks INSIDE the drain window — exactly the
+    // "等当前工具收尾" contract. Its own signal must never abort.
+    const slowTool: ToolAdapter = {
+      getTools: () => [],
+      getMetadata: () => undefined,
+      execute: async (tc: ToolCall, signal?: AbortSignal): Promise<ToolResult> => {
+        while (!ac.signal.aborted) {
+          await new Promise((r) => setTimeout(r, 1));
+        }
+        await new Promise((r) => setTimeout(r, 5));
+        toolSawAbort = signal?.aborted ?? false;
+        return { id: tc.id, toolName: tc.function.name, result: 'slow tool finished after pause', success: true, duration: 30 };
+      },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm: toolThenTextLLM('slow_read', '{"path":"a.ts"}', 'wrapped up'),
+      tools: slowTool,
+      signal: ac.signal,
+    });
+    const gen = engine.run(
+      { sessionId: 's-pause-tool', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    );
+    const collected = collect(gen);
+    setTimeout(() => abortPaused(ac), 10);
+    const events = await collected;
+
+    const interrupted = events.find((e) => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reason).toBe('paused');
+    expect(toolSawAbort).toBe(false);
+    const msgs = interrupted!.payload.messages ?? [];
+    expect(transcriptIsPaired(msgs)).toBe(true);
+    expect(msgs.some((m) => m.role === 'tool' && String((m as any).content ?? '').includes('slow tool finished after pause'))).toBe(true);
+  });
+
+  it('a plain abort stays a hard stop: reason "aborted", in-flight tool killed', async () => {
+    const ac = new AbortController();
+    let toolSawAbort = false;
+    const slowTool: ToolAdapter = {
+      getTools: () => [],
+      getMetadata: () => undefined,
+      execute: async (tc: ToolCall, signal?: AbortSignal): Promise<ToolResult> => {
+        // Record the kill synchronously in the child signal's own abort event:
+        // the coordinator's deadline race stops waiting for this tool the
+        // instant it aborts, so a post-await assignment would run after the
+        // test already finished.
+        signal?.addEventListener('abort', () => { toolSawAbort = true; });
+        await new Promise((r) => setTimeout(r, 60));
+        // Never observed — the hard stop already surfaced the failure.
+        return { id: tc.id, toolName: tc.function.name, result: 'late finish', success: true, duration: 60 };
+      },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm: toolThenTextLLM('slow_read', '{"path":"a.ts"}', 'never reached'),
+      tools: slowTool,
+      signal: ac.signal,
+    });
+    const gen = engine.run(
+      { sessionId: 's-hard-stop', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    );
+    const collected = collect(gen);
+    setTimeout(() => ac.abort(), 10);
+    const events = await collected;
+
+    const interrupted = events.find((e) => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reason).toBe('aborted');
+    expect(toolSawAbort).toBe(true);
   });
 });

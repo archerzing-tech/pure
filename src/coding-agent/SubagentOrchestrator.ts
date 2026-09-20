@@ -5,6 +5,7 @@
 
 import { AgentLoopEngine } from '../engine/AgentLoopEngine';
 import { parseToolArguments } from '../shared/parseRepair';
+import { isPauseAbort } from '../shared/pauseSignal';
 import type {
   BudgetConfig,
   EngineContext,
@@ -25,8 +26,10 @@ import { Tags } from './ToolRegistry';
 import { createDefaultVerifier, type Verifier } from './Verifier';
 
 /** Terminal outcome of a subagent, used by the UI to color the badge and by
- * the orchestrator to distinguish a timeout/cancel from an ordinary failure. */
-export type SubagentStatus = 'running' | 'done' | 'failed' | 'timed_out' | 'cancelled';
+ * the orchestrator to distinguish a timeout/cancel from an ordinary failure.
+ * 'paused' (阶段 12): the user paused the run — the checkpoint was saved and a
+ * re-delegation of the SAME subtask resumes from it instead of starting over. */
+export type SubagentStatus = 'running' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused';
 
 /** Shared tail appended to EVERY built-in subagent system prompt: the reply is
  * consumed by the orchestrator agent, never shown raw to the user, so the
@@ -75,7 +78,7 @@ export interface SubagentActivity {
   error?: string;
   output?: string;
   /** Explicit lifecycle status used to derive the current active-agent set. */
-  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled';
+  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused';
   /** High-level outcome (filled by onStart/onDone/onError). */
   status?: SubagentStatus;
   /** Monotonic per-call progress sequence; stale UI updates must be ignored. */
@@ -542,6 +545,23 @@ export class SubagentOrchestrator implements ToolAdapter {
         } else if (event.type === 'Interrupted') {
           await persist('subagent_interrupted', event.payload.messages, event.payload.turnCount ?? 0);
           if (combinedSignal.aborted) {
+            // 阶段 12 pause: the parent aborted with the pause reason — this is
+            // NOT a cancellation. The archive above (subagent_interrupted) is
+            // exactly the resume point; the stable sessionId guarantees a
+            // re-delegation of the same subtask lands back here. Tell the UI
+            // (paused card state) and the parent model (re-delegate hint)
+            // instead of reporting a failure.
+            if (isPauseAbort(parentSignal) || isPauseAbort(combinedSignal)) {
+              const pausedNote = 'The user PAUSED this subtask mid-run. Its progress is saved; to continue, re-delegate the SAME subtask with identical arguments — it will resume from its checkpoint, not start over.';
+              emit(progress?.onDone, { success: false, error: pausedNote, status: 'paused', lifecycle: 'paused', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+              return {
+                id: toolCall.id,
+                toolName: def.name,
+                result: { aborted: true, reason: pausedNote, finalOutput },
+                success: false,
+                duration: done(0),
+              };
+            }
             const cancelled = parentSignal?.aborted === true && !timeoutSignal.aborted && !watchdog.signal.aborted;
             const stalled = watchdog.signal.aborted && !timeoutSignal.aborted;
             // A timeout here is the delegation's TOTAL wall (defaultTimeoutMs)

@@ -54,8 +54,10 @@ export interface SessionAgentActivity {
   instanceNo?: number;
   agentRole?: string;
   state?: string;
-  /** Explicit lifecycle used to answer which agents are active right now. */
-  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled';
+  /** Explicit lifecycle used to answer which agents are active right now.
+   * 'paused' (阶段 12): the parent run was paused mid-delegation; the worker's
+   * progress is archived and it resumes from its checkpoint on re-delegation. */
+  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused';
   /** Monotonic progress sequence for rejecting late concurrent updates. */
   sequence?: number;
   /** Epoch ms when this activity snapshot was emitted. */
@@ -65,7 +67,7 @@ export interface SessionAgentActivity {
   success?: boolean;
   error?: string;
   output?: string;
-  status?: 'running' | 'done' | 'failed' | 'timed_out' | 'cancelled';
+  status?: 'running' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused';
   durationMs?: number;
   tokensUsed?: number;
   inputSnippet?: string;

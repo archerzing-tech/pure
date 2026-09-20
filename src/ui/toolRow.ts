@@ -963,6 +963,10 @@ export function formatSubagentTraceLine(e: SubagentActivityEvent): string | null
       return `→ ${e.toolName}${e.toolArgsHint ? ` ${e.toolArgsHint}` : ''}`;
     case 'done':
       return `✓ ${who} 交付${e.durationMs != null ? ` · 用时 ${formatDuration(e.durationMs)}` : ''}`;
+    case 'paused':
+      // 阶段 12: paused is not a failure — the archive is on disk and a
+      // re-delegation resumes from it. Keep the line calm and actionable.
+      return `⏸ ${who} 已暂停（进度已存档，点「继续」接着跑）`;
     case 'error':
       return `✗ ${who} 中断${e.error ? `：${clipSummary(e.error)}` : ''}`;
     default:

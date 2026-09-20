@@ -1421,7 +1421,8 @@ promptEl.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape' && chat.isStreaming()) {
     queuedWhileStreaming = null;
-    chat.cancel();
+    // 阶段 12: Escape pauses too — same resumable semantics as the ⏹ button.
+    chat.pause();
   }
 });
 
@@ -1481,7 +1482,10 @@ bindCompactContextButton('landing-compact-btn');
 function handleSendOrStop() {
   if (chat.isStreaming()) {
     queuedWhileStreaming = null;
-    chat.cancel();
+    // 阶段 12: the button pauses (drain-style, resumable) instead of hard-
+    // stopping — in-flight tools finish into the archive and a 继续 brings
+    // the whole fan-out back from its checkpoints.
+    chat.pause();
     return;
   }
   sendMessage(promptEl);
@@ -1490,7 +1494,7 @@ function handleSendOrStop() {
 function handleLandingSendOrStop() {
   if (chat.isStreaming()) {
     queuedWhileStreaming = null;
-    chat.cancel();
+    chat.pause();
     return;
   }
   sendMessage(landingPrompt);

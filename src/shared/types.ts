@@ -484,7 +484,7 @@ export interface SubagentActivityEvent {
   callId: string;
   agentName: string;
   agentRole?: string;
-  kind: 'start' | 'state' | 'tool' | 'done' | 'error';
+  kind: 'start' | 'state' | 'tool' | 'done' | 'error' | 'paused';
   state?: string;
   /** The tool the subagent invoked (kind 'tool'). */
   toolName?: string;

@@ -56,6 +56,9 @@ export function isAgentActivityActive(activity: SessionAgentActivity): boolean {
 
 function stateClass(activity: SessionAgentActivity, historical: boolean): string {
   if (historical && isAgentActivityActive(activity)) return 'paused';
+  // 阶段 12: an explicit pause is its own state — visually distinct from a
+  // failure, and (unlike historical) resumable.
+  if (activity.lifecycle === 'paused' || activity.status === 'paused') return 'paused';
   if (activity.lifecycle === 'cancelled') return 'cancelled';
   if (activity.lifecycle === 'done' || activity.status === 'done') return 'done';
   if (activity.lifecycle === 'failed' || activity.status === 'failed') return 'failed';
