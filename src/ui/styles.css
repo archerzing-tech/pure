@@ -14053,6 +14053,25 @@ button svg,
   color: var(--text-tertiary);
 }
 
+/* 13.2 生成半边 — 建议卡上的「生成收窄版角色草稿」小按钮：低调描边款，
+   与卡片内文字同级，hover 才亮起来。 */
+.evo-advice-draft-btn {
+  margin-top: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.evo-advice-draft-btn:hover {
+  border-color: var(--accent, #6c8cff);
+  color: var(--accent, #6c8cff);
+  background: color-mix(in srgb, var(--accent, #6c8cff) 8%, transparent);
+}
+
 /* 阶段 12 — 暂停后续跑条：居中的一枚「继续」按钮，轻背景不抢对话内容。 */
 .paused-resume-bar {
   display: flex;

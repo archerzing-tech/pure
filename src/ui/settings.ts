@@ -11,6 +11,7 @@ import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } f
 import { approveToolCorrection, scanToolCorrections } from '../adapter/memory/toolCorrections';
 import { confirmedDraftEntry, isDraftEntry } from '../adapter/memory/correctionDrafts';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { join, homeDir } from '@tauri-apps/api/path';
 import { formatBytes } from '../shared/format';
 import { memoryStore } from './memoryStore';
 import { EVOLUTION_DEFAULTS, healthScore, lifecycleOf, resolveEvolutionConfig } from '../adapter/memory/evolution';
@@ -23,6 +24,9 @@ import { renderSchedulesSettings } from './scheduleSettings';
 import { buildEvolutionDashboard, DASHBOARD_WINDOW_DAYS, type DashboardRange } from '../shared/evolutionDashboard';
 import type { StrategyDimension } from '../shared/strategyEffect';
 import { scanSubagentAdvice } from '../shared/subagentAdvisory';
+import { buildDraftRoleManifest } from '../shared/subagentDraft';
+import { compileExternalSubagents } from '../harness/externalSubagents';
+import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES } from '../coding-agent/SubagentOrchestrator';
 import { readGuiObservations } from './observationSource';
 import {
   buildExperienceItems,
@@ -1008,8 +1012,7 @@ export class SettingsPanel {
     });
 
     // ── Evolution dashboard：经验条目直达清理（与记忆页同一条删除通道）──
-    document.getElementById('evolution-experience')?.addEventListener('click', async (event) => {
-      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-evo-del]');
+    document.getElementById('evolution-experience')?.addEventListener('click', async (event) => {      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-evo-del]');
       if (!btn) return;
       event.stopPropagation();
       const id = btn.dataset.evoDel || '';
@@ -1029,6 +1032,56 @@ export class SettingsPanel {
       } catch (err) {
         console.error('[pure] evolution experience delete failed:', err);
         this.toast(t('evolution.experience.deleteFailed'));
+      }
+    });
+
+    // ── 13.2 生成半边 MVP：角色建议卡 → 一键生成收窄版角色草稿 ──
+    // 草稿落盘 ~/.pure/subagents/<role>_focused.json，用户改完重启生效。
+    // 三道门都保留：自己生成的草稿也要过加载半边的校验器；落盘前弹确认；
+    // 同名文件已存在时拒绝覆盖（那是用户手改过的草稿，不是 ours to clobber）。
+    document.getElementById('evolution-advice')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-evo-draft]');
+      if (!btn || !isTauriRuntime()) return;
+      const role = btn.dataset.evoDraft || '';
+      if (!role) return;
+      // 处理器端重扫拿完整失败画像（按钮只带角色名），与卡片同一数据源。
+      const read = await readGuiObservations();
+      const advice = scanSubagentAdvice(read.records, { now: Date.now() }).find((item) => item.role === role);
+      if (!advice) {
+        this.toast(t('evolution.advice.draft.stale'));
+        return;
+      }
+      const draft = buildDraftRoleManifest(advice);
+      const reserved = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name);
+      const { errors } = compileExternalSubagents([{ file: draft.file, text: draft.json }], reserved);
+      if (errors.length > 0) {
+        console.error('[pure] draft role manifest failed validation:', errors);
+        this.toast(t('evolution.advice.draft.invalid'));
+        return;
+      }
+      const core = await loadTauriCore();
+      if (!core) return;
+      const pureHome = await join(await homeDir(), '.pure');
+      try {
+        await core.invoke('read_file', { workspace: pureHome, path: `subagents/${draft.file}` });
+        this.toast(t('evolution.advice.draft.exists').replace('{file}', draft.file));
+        return;
+      } catch {
+        // 读不到 = 文件还不存在，正是我们要的落盘前提。
+      }
+      const ok = await showConfirmModal({
+        title: t('evolution.advice.draft.title'),
+        message: t('evolution.advice.draft.confirm').replace('{file}', `${pureHome}/subagents/${draft.file}`),
+        okLabel: t('common.ok'),
+        cancelLabel: t('common.cancel'),
+      });
+      if (!ok) return;
+      try {
+        await core.invoke('write_file', { workspace: pureHome, path: `subagents/${draft.file}`, content: draft.json });
+        this.toast(t('evolution.advice.draft.done').replace('{file}', draft.file));
+      } catch (err) {
+        console.error('[pure] draft role manifest write failed:', err);
+        this.toast(t('evolution.advice.draft.failed'));
       }
     });
 
