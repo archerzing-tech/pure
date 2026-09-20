@@ -19,6 +19,7 @@ import type {
 } from '../shared/types';
 import { DefaultFailurePolicy } from '../engine/FailurePolicy';
 import { trimUnresolvedToolCalls } from '../harness/Harness';
+import { THIRD_PARTY_SCOPE_NOTE_EN, THIRD_PARTY_SCOPE_NOTE_ZH } from '../shared/thirdPartyScope';
 import type { SubagentDefinition, SubagentResult } from './types';
 import { Tags } from './ToolRegistry';
 import { createDefaultVerifier, type Verifier } from './Verifier';
@@ -677,7 +678,7 @@ export const BUILT_IN_SUBAGENTS: SubagentDefinition[] = [
 4. Performance — are there obvious optimizations?
 5. Edge cases — what might break?
 
-Be concise. Structure your review with clear sections.${filesHint}`;
+Be concise. Structure your review with clear sections.${filesHint}${THIRD_PARTY_SCOPE_NOTE_EN}`;
     },
     // A real review reads several files then writes a structured verdict; keep
     // this above the subagent budget cap so the budget (not a stray timeout)
@@ -707,7 +708,7 @@ Check:
 3. Unsafe scripts, shell injection surfaces, permissive configuration, and missing validation around external input.
 4. Whether the project's documented typecheck, test, lint, and build commands are reproducible and whether their real output supports the conclusion.
 
-Distinguish a vulnerability/finding from an unavailable audit tool, missing lockfile, network failure, or inconclusive result. Do not call an unavailable check a pass. Report evidence under concise headings, then end with exactly one line: AUDIT: PASS when no blocking finding remains and all required checks have evidence, otherwise AUDIT: FAIL.${filesHint}`;
+Distinguish a vulnerability/finding from an unavailable audit tool, missing lockfile, network failure, or inconclusive result. Do not call an unavailable check a pass. Report evidence under concise headings, then end with exactly one line: AUDIT: PASS when no blocking finding remains and all required checks have evidence, otherwise AUDIT: FAIL.${filesHint}${THIRD_PARTY_SCOPE_NOTE_EN}`;
     },
     // Same reasoning as code_reviewer: a read-only audit walks manifests and
     // runs checks, so 120s was too tight. Bounded by the subagent budget cap.
@@ -949,7 +950,7 @@ ${description ? `命令用途：${description}` : ''}
 5. 包含相关的代码示例或API签名
 6. 标注版本相关注意事项和最佳实践
 
-保持研究全面但简洁，使用清晰的标题组织。最终输出结构化的研究报告。`;
+保持研究全面但简洁，使用清晰的标题组织。最终输出结构化的研究报告。${THIRD_PARTY_SCOPE_NOTE_ZH}`;
     },
     defaultTimeoutMs: 1_800_000,
   },

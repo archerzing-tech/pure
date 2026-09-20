@@ -75,7 +75,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'find_files',
-    description: 'Smartly locate the files most likely to contain a topic or keyword (e.g. "学历", "education", "毕业证", "发票") without reading every file. Strategy: filename matches are ranked first (cheap, no content reads), then content hits across files are counted and the TOP candidate files are returned with a few snippet lines each (never full content). Works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK-encoded text. Use this FIRST when asked to find information spread across many files, then read_file only the top 1-2 candidates (optionally with startLine/endLine). Returns actionable fallback guidance when nothing matches.',
+    description: 'Smartly locate the files most likely to contain a topic or keyword (e.g. "学历", "education", "毕业证", "发票") without reading every file. Strategy: filename matches are ranked first (cheap, no content reads), then content hits across files are counted and the TOP candidate files are returned with a few snippet lines each (never full content). Works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK-encoded text. Use this FIRST when asked to find information spread across many files, then read_file only the top 1-2 candidates (optionally with startLine/endLine). Returns actionable fallback guidance when nothing matches. Dependency directories (node_modules, venv, target, vendor, …) are skipped unless path/filePattern names one explicitly.',
     input_schema: {
       type: 'object',
       properties: {
@@ -90,7 +90,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'list_files',
-    description: 'List files and directories in the workspace. Large results are capped and report when truncated.',
+    description: 'List files and directories in the workspace. Large results are capped and report when truncated. Third-party dependency directories (node_modules, venv, target, dist, …) are skipped by default — pass one explicitly in `path` (or when the user asks to audit dependencies) to list it.',
     input_schema: {
       type: 'object',
       properties: {
@@ -254,7 +254,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'glob_files',
-    description: 'Find files matching a glob pattern. Returns sorted file paths relative to workspace.',
+    description: 'Find files matching a glob pattern. Returns sorted file paths relative to workspace. Paths under dependency directories (node_modules, venv, target, vendor, …) are excluded unless `pattern`/`path` names one explicitly.',
     input_schema: {
       type: 'object',
       properties: {
