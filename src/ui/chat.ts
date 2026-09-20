@@ -63,7 +63,7 @@ import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './art
 import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, isWebSearchLike, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, isWebSearchLike, toolGridClass, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
@@ -2822,7 +2822,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       finalizeStreamingSegments();
       if (!roundGrid || roundGrid.kind !== kind) {
         const el = document.createElement('div');
-        el.className = 'bubble-row tool-grid';
+        el.className = toolGridClass(kind);
         this.appendToTranscript(el);
         roundGrid = { el, kind };
       }

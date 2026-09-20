@@ -1575,17 +1575,42 @@ body {
 /* Parallel tool round: tool calls issued in the SAME LLM iteration (multiple
    web_search / list_files / …) render side by side so the transcript reads
    "running simultaneously" instead of a vertical stack of identical rows.
-   auto-fit yields 3 windows for a 3-call round at the real #chat width
-   (1100px minus padding ≈ 1000px content → 3 × ~330px columns), collapsing
-   to 2 / 1 on narrower windows; auto-fit also COLLAPSES empty tracks, so a
-   single-call round spans one full-width item. */
+   A 264px minimum column still yields 3 windows for a 3-call round at the real
+   #chat width (940px max-width minus 32px padding × 2 = 876px content →
+   3 × 264 + 2 × 10 gap = 812), collapsing to 2 / 1 on narrower windows;
+   auto-fit also COLLAPSES empty tracks, so a single-call round spans one
+   full-width item.
+   The minimum is set by the HEADER budget, measured in a real engine rather
+   than guessed: a card spends ~165px on marker + icon + status + expand button
+   + gaps, so the longest friendly label (`Generate Image`, ~95px) needs ~260px
+   to stay whole — below that the name used to be the item that gave way. */
 .bubble-row.tool-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(264px, 1fr));
   gap: 6px 10px;
   align-items: start;
   width: 100%;
   margin: 2px 0 6px;
+}
+/* An agent card spends ~250px on the same header PLUS the 子 Agent chip, so a
+   row of parallel agents gets a wider minimum still: 3 × 280 + 2 × 10 gap =
+   860 ≤ 876, i.e. three agents still share one row at the regular transcript
+   width, and anything narrower wraps to the next row instead of crushing the
+   cards into vertical one-character-per-line names. */
+.bubble-row.tool-grid--agents {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+/* Agent cards that SHARE their row (a lone agent card keeps the airy spacing,
+   it has the full transcript width): the ~250px header above plus a 47px CJK
+   role label leaves ~10px of slack at a 280px column, so the inter-item gaps
+   tighten and the args — a per-card stub of a long research prompt, always
+   truncated to two or three characters here — steps aside entirely. The task
+   itself stays visible one click away in the expanded card's Input section. */
+.bubble-row.tool-grid--agents > .bubble-row.tool-row-row:not(:only-child) .tool-row-summary {
+  gap: 5px;
+}
+.bubble-row.tool-grid--agents > .bubble-row.tool-row-row:not(:only-child) .tool-row-args {
+  display: none;
 }
 .bubble-row.tool-grid > .bubble-row.tool-row-row {
   margin: 0;
@@ -1664,6 +1689,20 @@ body {
 .tool-row-name {
   font-weight: 600;
   color: var(--accent);
+  /* A tool/agent name is NEVER a vertical column of characters. CJK breaks at
+     any character, so once the summary flex row ran out of room the name was
+     the item that absorbed the squeeze and 资料调研 collapsed into one char per
+     line (measured 11.8px × 68px at a 255px card, 2026-09-20 user report).
+     `flex: 0 0 auto` goes further than no-wrap: the name never yields at all —
+     which tool/agent ran is the one field that must survive ANY card width —
+     so the squeeze lands on the args below, whose basis is the (long) args
+     text and which can therefore give way all the way to zero. 12em caps a
+     pathological name so it can never push the expand button off the card. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 0 auto;
+  max-width: 12em;
 }
 .tool-row-args {
   color: var(--text-secondary);
@@ -1672,7 +1711,13 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex: 1;
+  /* `flex: 1 1 auto`, not `1 1 0%`: shrink is distributed in proportion to the
+     flex BASE size, so a zero basis left the args at full width while the name
+     (basis = its own text) absorbed every pixel of overflow — `Bash` itself
+     rendered as "…" in a 285px card. An auto basis makes the long args string
+     the one that gives way, which is the reading order the header wants: name
+     first, then the args, never the other way round. */
+  flex: 1 1 auto;
   min-width: 0;
 }
 .tool-row-status {
@@ -8394,6 +8439,27 @@ button svg,
 .tool-row.web-tool .fetch-preview {
   color: #1d3a5f;
 }
+/* Subagent interior trace on this pale-blue surface (2026-09-20 user report:
+   “白色文字，配上淡蓝色背景，看不清”). The trace lines carry the CONSOLE ink
+   (--term-ink #f2f2f2, meant for the black .terminal-panel), which on #c8daf0
+   measures 1.1:1 — the whole point of an expanded delegation card was
+   invisible. The surface's own ink wins here; a web-research subagent
+   (researcher / web_researcher / researcher_web) is exactly this case, since
+   it renders as a .web-tool row. Error red also darkens: #ff4d4f is 2.3:1 on
+   this surface, #b3261e is 4.6:1. */
+.tool-row.web-tool .tool-row-stream-line,
+.tool-row.sys-info .tool-row-stream-line {
+  color: #1d3a5f;
+}
+.tool-row.web-tool .tool-row-stream-line.stderr,
+.tool-row.sys-info .tool-row-stream-line.stderr,
+.tool-row.web-tool .stream-hl-error,
+.tool-row.web-tool .stream-hl-warn {
+  color: #b3261e;
+}
+.tool-row.web-tool .stream-hl-success {
+  color: #146b32;
+}
 .tool-row.web-tool .search-result-item {
   border-bottom-color: #b9d0ea;
 }
@@ -8421,6 +8487,13 @@ button svg,
 [data-theme="dark"] .tool-row.sys-info .tool-row-result,
 [data-theme="dark"] .tool-row.sys-info .tool-result-preview,
 [data-theme="dark"] .tool-row.sys-info .fetch-preview {
+  color: #d8e8fb;
+}
+/* Dark theme: this surface is a deep blue where the console ink stays
+   readable — the override only aligns the trace lines with the row's own
+   result ink (#d8e8fb) instead of leaking the terminal's #f2f2f2. */
+[data-theme="dark"] .tool-row.web-tool .tool-row-stream-line,
+[data-theme="dark"] .tool-row.sys-info .tool-row-stream-line {
   color: #d8e8fb;
 }
 [data-theme="dark"] .tool-row.web-tool .tool-row-summary,

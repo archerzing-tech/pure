@@ -1,7 +1,8 @@
 // src/ui/__tests__/toolRow.test.ts
 
 import { describe, expect, it } from 'bun:test';
-import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine, isSubagentTool, formatSubagentTraceLine, toolCardKind, groupToolRoundRuns } from '../toolRow';
+import { readFileSync } from 'node:fs';
+import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine, isSubagentTool, formatSubagentTraceLine, toolCardKind, groupToolRoundRuns, toolGridClass } from '../toolRow';
 import { invalidateConfigCache, STORAGE_KEY } from '../config';
 import type { GeneratedImage } from '../../shared/types';
 
@@ -975,5 +976,102 @@ describe('toolCardKind / groupToolRoundRuns (tool rows vs agent rows)', () => {
     // Pure rounds behave exactly as before the split.
     expect(groupToolRoundRuns(['web_search', 'web_search'], toolCardKind)).toEqual([['web_search', 'web_search']]);
     expect(groupToolRoundRuns([], toolCardKind)).toEqual([]);
+  });
+});
+
+// ── Subagent card readability (2026-09-20 user feedback) ──
+// Two reported defects, both measured in a real engine before fixing:
+//  1. a web-research subagent renders as a .web-tool row (pale-blue surface)
+//     while its interior trace lines carried the terminal ink #f2f2f2 → 1.1:1
+//     contrast, i.e. invisible Output text;
+//  2. three parallel agents sharing one 255px-wide grid column squeezed the
+//     CJK role label into a vertical stack (11.8px × 68px) and collapsed the
+//     args to 0px.
+const readUi = (relative: string): string => readFileSync(new URL(relative, import.meta.url), 'utf8');
+
+/**
+ * Extract the declaration block of the first rule whose selector list STARTS a
+ * line with `selector`. The line anchor matters: a descendant selector that
+ * merely ends in the same text (`.tool-grid--agents … .tool-row-args {`) must
+ * not answer for the base rule.
+ */
+const cssRuleBlock = (css: string, selector: string, contains?: string): string => {
+  const anchor = `\n${selector}`;
+  let from = 0;
+  for (;;) {
+    const index = css.indexOf(anchor, from);
+    if (index === -1) return '';
+    const open = css.indexOf('{', index);
+    const close = css.indexOf('}', open);
+    const block = open === -1 || close === -1 ? '' : css.slice(open + 1, close);
+    // A selector can appear more than once (`.bubble-row.tool-grid` is also
+    // used for the animation reset), so callers can pin the rule they mean by
+    // one of its declarations.
+    if (!contains || block.includes(contains)) return block;
+    from = index + anchor.length;
+  }
+};
+
+describe('subagent card readability', () => {
+  const css = readUi('../styles.css');
+
+  it('gives the agent grid its own wider minimum column', () => {
+    expect(toolGridClass('agent')).toBe('bubble-row tool-grid tool-grid--agents');
+    expect(toolGridClass('tool')).toBe('bubble-row tool-grid');
+    expect(toolGridClass('agent')).toContain(toolGridClass('tool'));
+    // The minimums come from the measured header budget: ~165px of chrome for a
+    // tool card (longest label `Generate Image` ≈ 95px) and ~250px for an agent
+    // card, which also carries the 子 Agent chip.
+    expect(cssRuleBlock(css, '.bubble-row.tool-grid {', 'grid-template-columns')).toContain('minmax(264px');
+    expect(cssRuleBlock(css, '.bubble-row.tool-grid--agents')).toContain('minmax(280px');
+    // Three agent cards still share one row at the regular transcript width
+    // (940px #chat max-width minus 2 × 32px padding = 876px content).
+    expect(3 * 280 + 2 * 10).toBeLessThanOrEqual(940 - 32 * 2);
+    expect(3 * 264 + 2 * 10).toBeLessThanOrEqual(940 - 32 * 2);
+  });
+
+  it('tightens the agent header only when agent cards share a row', () => {
+    const shared = '.bubble-row.tool-grid--agents > .bubble-row.tool-row-row:not(:only-child)';
+    // The args stub is the first thing to go: in a 280px card it is a two- or
+    // three-character stub of a long research prompt, while the name and the
+    // 子 Agent chip are what the header is FOR. A lone agent card keeps it.
+    expect(cssRuleBlock(css, `${shared} .tool-row-args {`)).toContain('display: none');
+    expect(cssRuleBlock(css, `${shared} .tool-row-summary {`)).toContain('gap: 5px');
+  });
+
+  it('keeps live rendering and replay on the shared grid class', () => {
+    for (const file of ['../chat.ts', '../main.ts']) {
+      const source = readUi(file);
+      expect(source).toContain('toolGridClass(');
+      expect(source).not.toContain("className = 'bubble-row tool-grid'");
+    }
+  });
+
+  it('never lets a tool or agent name wrap into a vertical column', () => {
+    const name = cssRuleBlock(css, '.tool-row-name {');
+    expect(name).toContain('white-space: nowrap');
+    expect(name).toContain('text-overflow: ellipsis');
+    // `flex: 0 0 auto`: the name never yields at all, so no card width can turn
+    // it into a stack of single characters (measured before the fix: CJK names
+    // at 11.8px × 68px, i.e. one character per line). 12em caps a pathological
+    // name so it can never push the expand button off the card.
+    expect(name).toContain('flex: 0 0 auto');
+    expect(name).toContain('max-width: 12em');
+    // The squeeze lands on the args instead — its auto basis lets the long args
+    // string shrink to zero. A `1 1 0%` basis did the opposite and rendered
+    // `Bash` itself as "…" in a 285px card.
+    expect(cssRuleBlock(css, '.tool-row-args {')).toContain('flex: 1 1 auto');
+  });
+
+  it('prints the delegation trace in the pale-blue surface ink, not the console ink', () => {
+    const light = cssRuleBlock(css, '.tool-row.web-tool .tool-row-stream-line,');
+    expect(light).toContain('color: #1d3a5f');
+    expect(light).not.toContain('var(--term-ink)');
+    // stderr and the error/warn tokens darken too (#ff4d4f is 2.3:1 on #c8daf0).
+    expect(cssRuleBlock(css, '.tool-row.web-tool .tool-row-stream-line.stderr,')).toContain('color: #b3261e');
+    expect(cssRuleBlock(css, '.tool-row.web-tool .stream-hl-error,')).toContain('color: #b3261e');
+    expect(cssRuleBlock(css, '.tool-row.web-tool .stream-hl-success')).toContain('color: #146b32');
+    const dark = cssRuleBlock(css, '[data-theme="dark"] .tool-row.web-tool .tool-row-stream-line,');
+    expect(dark).toContain('color: #d8e8fb');
   });
 });
