@@ -14078,6 +14078,19 @@ button svg,
   justify-content: center;
   padding: 10px 0 6px;
 }
+/* 点击瞬间的过渡态：只是告知"收到，正在收尾"，不可交互、带轻微呼吸感。 */
+.paused-resume-bar--pausing {
+  opacity: 0.85;
+}
+.paused-resume-bar--pausing .paused-resume-note {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  animation: pausing-pulse 1.4s ease-in-out infinite;
+}
+@keyframes pausing-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
 
 .paused-resume-btn {
   appearance: none;
