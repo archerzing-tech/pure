@@ -1767,22 +1767,10 @@ body {
 .tool-row.success .tool-row-status {
   color: var(--success);
 }
-/* Success state: the summary (header) takes a soft green tint and framed
-   surfaces (web-tool pale-blue) flip their border to green — one glance
-   tells the user this step succeeded. Kept as a low-alpha TINT, not a solid
-   fill, so a transcript full of successful tools doesn't turn into a green
-   wall. */
-.tool-row.success .tool-row-summary {
-  background: color-mix(in srgb, var(--success) 8%, transparent);
-  border-radius: 6px;
-}
-.tool-row.success.web-tool {
-  border-color: color-mix(in srgb, var(--success) 45%, transparent);
-}
-.tool-row.success.web-tool .tool-row-summary,
-.tool-row.success.web-tool .tool-row-summary:hover {
-  background: color-mix(in srgb, var(--success) 10%, transparent);
-}
+/* Success state: the header stays plain — the green ✓ in the status slot is
+   the completion signal (2026-09-20 user feedback: the green header wash read
+   as decoration; the checkmark alone is enough). Failure keeps its red frame
+   + tint: that one is an alarm, not a celebration. */
 .tool-row.failure .tool-row-status {
   color: var(--danger);
 }
@@ -13598,13 +13586,11 @@ button svg,
  * A "colleague doing work" must never read as a tool call: accent-tinted
  * surface + the rail's cyan 子 Agent chip on the summary line. The exact
  * machine id rides on the row's title attribute (hover).
- * 2026-09-17 second pass: the badge alone drowned once the row opened — the
- * body was the SAME black console as execute_command. The 3px cyan left edge
- * marks the whole row at any scroll depth, and the summary tint is strong
- * enough to read as a different species of card, not a highlight. */
+ * The frame keeps the cyan tint at the standard 1px so the row still reads as
+ * a different species of card; the 3px left rail is gone (2026-09-20 user
+ * report: the thick left edge read as a shadow artifact, not a marker). */
 .tool-row.subagent-row {
   border-color: color-mix(in srgb, #22d3ee 35%, var(--border-light));
-  border-left: 3px solid color-mix(in srgb, #22d3ee 78%, var(--border-light));
 }
 .tool-row.subagent-row > summary {
   background: color-mix(in srgb, #22d3ee 8%, transparent);
@@ -13612,9 +13598,10 @@ button svg,
 .tool-row.subagent-row > summary:hover {
   background: color-mix(in srgb, #22d3ee 14%, transparent);
 }
-.tool-row.subagent-row.success > summary,
+/* Completion tints the status ✓, not the header (2026-09-20 user feedback);
+   failure keeps the summary wash — red is an alarm. */
 .tool-row.subagent-row.failure > summary {
-  background: color-mix(in srgb, #22d3ee 12%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 /* The terminal-tool subagents keep the console body, but their Input/Output
  * labels switch to the agent voice so the panel never reads as a plain shell
