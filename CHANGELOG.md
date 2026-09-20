@@ -3,11 +3,11 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v3.0.0-beta
+## v3.0.0
 
-**输入纠错 + 三方件出圈 + 全家桶视觉修整**
+**输入纠错 + 三方件出圈 + 并行执行 + 全家桶视觉修整**
 
-alpha 之后的一轮实打实打磨：发消息更抗错字，理解项目不再钻依赖目录，外加一批看着难受的地方。
+alpha 之后的一轮实打实打磨：发消息更抗错字，理解项目不再钻依赖目录，并行子 Agent 真正一块干活，外加一批看着难受的地方。这是 3.0 的正式版。
 
 **外观新增「工具卡片」开关**
 
