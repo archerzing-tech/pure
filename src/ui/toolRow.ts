@@ -544,6 +544,9 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   const name = document.createElement('span');
   name.className = 'tool-row-name';
   name.textContent = toolDisplayName(toolName);
+  // Narrow parallel columns ellipsize the header text; the title carries the
+  // full string so a hover (or screen reader) still tells the whole story.
+  name.title = toolDisplayName(toolName);
 
   // Identity chip for delegations — the same cyan "Agent" badge the floating
   // rail uses, so the transcript and the rail speak one language.
@@ -558,6 +561,7 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   const argsEl = document.createElement('span');
   argsEl.className = 'tool-row-args';
   argsEl.textContent = formatToolArgsSummary(toolName, args);
+  argsEl.title = argsEl.textContent;
 
   const statusEl = document.createElement('span');
   statusEl.className = 'tool-row-status';
@@ -814,6 +818,7 @@ export function updateToolRowArgs(
   refreshInput = true,
 ): void {
   row.argsEl.textContent = formatToolArgsSummary(toolName, args);
+  row.argsEl.title = row.argsEl.textContent;
   // Refresh the pending label as the streamed args converge: a write row
   // created before its args arrived upgrades from "正在写入文件…" to
   // "正在写入 src/foo.ts（12.3 KB）" the moment path + content are known.
