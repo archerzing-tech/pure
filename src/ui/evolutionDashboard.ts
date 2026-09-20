@@ -361,7 +361,9 @@ export function renderStrategySection(strategy: StrategyEffectSummary, dimension
 
 /**
  * 角色建议卡：哪个角色在反复掉链子 + 证据 + **用户能拉的那个闸**。
- * 卡片刻意不给"一键修复"按钮 —— 第一版只建议，pure 不自动改配置（E1.4 设计）。
+ * 有技能开关 → 指路设置页（E1.4 原样）；没有开关的角色 → 追加一个"生成收窄
+ * 草稿"按钮（13.2 生成半边 MVP）：按下才落盘一个可编辑的 manifest 草稿，
+ * pure 依然不静默改配置。
  */
 export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: number): string {
   if (advice.length === 0) {
@@ -389,6 +391,12 @@ export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: num
       ? t('evolution.advice.action.skillGate', '想停就关掉「设置 → 技能 → {skill}」；想留就把任务范围写小一点。')
         .replace('{skill}', t(`skills.${item.skillId}`, item.skillId ?? ''))
       : t('evolution.advice.action.prompt', '这个角色没有开关：建议把任务描述写小、把这一步拆窄，或改用别的角色。');
+    // 13.2 生成半边 MVP：没有开关的角色给一条"生成收窄草稿"的出路。草稿写进
+    // ~/.pure/subagents/，用户改完重启生效；处理器端按角色名重新扫描拿到完整
+    // 画像（所以按钮只带角色名），落盘前有确认弹窗且不覆盖已有文件。
+    const draftButton = item.action === 'prompt'
+      ? `<button class="evo-advice-draft-btn" data-evo-draft="${escapeHtml(item.role)}">${escapeHtml(t('evolution.advice.draft', '生成收窄版角色草稿'))}</button>`
+      : '';
     return `<div class="evo-advice-row evo-advice-${item.severity}">
       <div class="evo-advice-head">
         <span class="evo-advice-role">${escapeHtml(toolDisplayName(item.role))}</span>
@@ -398,6 +406,7 @@ export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: num
       </div>
       <div class="evo-advice-evidence">${escapeHtml(evidence)}</div>
       <div class="evo-advice-action">${escapeHtml(action)}</div>
+      ${draftButton}
     </div>`;
   }).join('');
   return `<div class="evo-advice-list">${rows}</div>`;
