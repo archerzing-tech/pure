@@ -3821,7 +3821,10 @@ body {
      the bottom edge (in chat mode #chat's flex:1 already absorbs the space,
      so the margin resolves to 0 there). */
   margin-top: auto;
-  min-height: 28px;
+  /* Same height as #sidebar-bottom so the two top borders meet on one line
+     (the sidebar's divider and this one are neighbours on screen). The 20px
+     new-window button clears this bar's 2×4px padding with 1px to spare. */
+  min-height: var(--bottom-bar-h);
   padding: 4px 20px;
   border-top: 1px solid var(--border-light);
   background: var(--bg-header);
@@ -3947,15 +3950,13 @@ body {
   50% { opacity: 1; }
 }
 
-/* App version — monospace pill on the far right. */
+/* App version — plain monospace text on the far right; the status bar's
+   spacing carries the separation, no pill border (2026-09-20 report). */
 .status-bar-version {
   flex-shrink: 0;
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--text-tertiary);
-  border: 1px solid var(--border-light);
-  border-radius: 999px;
-  padding: 1px 8px;
 }
 
 /* Footer context-window budget: slim progress bar + % chip, measuring the
@@ -6611,7 +6612,11 @@ select:focus-visible,
 }
 
 #sidebar-bottom {
-  padding: 12px 16px;
+  /* Pinned to the same height as #status-bar: both dividers sit at the very
+     bottom of the window and must line up (2026-09-20 report). Content is
+     the 24px settings button — 30px leaves it centered with 3px of air. */
+  height: var(--bottom-bar-h);
+  padding: 0 16px;
   background: color-mix(in srgb, var(--bg-sidebar) 78%, var(--bg));
 }
 
