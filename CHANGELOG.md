@@ -5,9 +5,9 @@ release summary when publishing (see `.github/workflows/release.yml`).
 
 ## v3.0.0-beta
 
-**工具卡片可折叠 + 设置页视觉修整**
+**输入纠错 + 三方件出圈 + 全家桶视觉修整**
 
-alpha 之后的一轮打磨：一个新开关，几处看着难受的地方。
+alpha 之后的一轮实打实打磨：发消息更抗错字，理解项目不再钻依赖目录，外加一批看着难受的地方。
 
 **外观新增「工具卡片」开关**
 
