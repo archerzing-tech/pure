@@ -31,7 +31,7 @@ import { resolvePromptBudget } from '../shared/PromptAssembler';
 import type { Message } from '../shared/types';
 import { ComposerSelect, type ComposerSelectOption } from './composerSelect';
 import { renderMarkdown, stripToolCallXml } from './markdownLoader';
-import { createToolRow, finalizeToolRow, markToolRowStopped, groupToolRoundRuns, toolCardKind } from './toolRow';
+import { createToolRow, finalizeToolRow, markToolRowStopped, groupToolRoundRuns, toolCardKind, toolGridClass } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
 import { createAssessmentFlowCard } from './assessmentFlow';
 import { createRestoredPlanCard } from './plan';
@@ -978,7 +978,7 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
       // and the replayed timeline never reorders.
       for (const run of groupToolRoundRuns(replayTools, (item) => toolCardKind(item.exec.toolName))) {
         const grid = document.createElement('div');
-        grid.className = 'bubble-row tool-grid';
+        grid.className = toolGridClass(toolCardKind(run[0].exec.toolName));
         for (const item of run) {
           const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
           if (item.stopped) markToolRowStopped(row);
