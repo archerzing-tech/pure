@@ -292,8 +292,11 @@ export class CodingAgent {
       onStart: (a) => { publish(a, 'start'); ui?.onStart?.(a); },
       onState: (a) => { publish(a, 'state'); ui?.onState?.(a); },
       onTool: (a) => { publish(a, 'tool'); ui?.onTool?.(a); },
-      onDone: (a) => { publish(a, 'done'); ui?.onDone?.(a); },
-      onError: (a) => { publish(a, 'error'); ui?.onError?.(a); },
+      // 阶段 12: a pause lands on the onDone channel (it IS terminal for this
+      // run) but must not read as "✓ 交付" or "✗ 中断" on the transcript card
+      // — bridge it as its own event kind so consumers can render ⏸.
+      onDone: (a) => { publish(a, a.status === 'paused' ? 'paused' : 'done'); ui?.onDone?.(a); },
+      onError: (a) => { publish(a, a.status === 'paused' ? 'paused' : 'error'); ui?.onError?.(a); },
     };
   }
 

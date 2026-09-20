@@ -12,6 +12,7 @@ import { SubagentOrchestrator, deriveSubagentBudget, BUILT_IN_SUBAGENTS, CODING_
 import { Verifier } from '../Verifier';
 import { Tags, ToolRegistry } from '../ToolRegistry';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
+import { abortPaused } from '../../shared/pauseSignal';
 import type { BudgetConfig, Checkpoint, IStateStore, LLMAdapter, LLMChunk, Message, ToolAdapter, ToolCall, ToolResult } from '../../shared/types';
 import type { SubagentDefinition, SubagentResult } from '../types';
 
@@ -534,4 +535,101 @@ describe('SubagentOrchestrator segment continuation + liveness watchdog', () => 
     // rides instead, so the tool-row Output panel has something to render.
     expect(sub.output).toContain('分层引擎架构');
   }, 10_000);
+});
+
+// ── 阶段 12: pause (pauseSignal.ts) ──
+// A parent abort carrying PAUSE_ABORT_REASON is a PAUSE, not a cancellation:
+// the subagent archives its checkpoint and reports status 'paused' so the UI
+// renders a resumable ⏸ card instead of a ✗ failure. A plain abort keeps the
+// existing 'cancelled' semantics.
+
+describe('SubagentOrchestrator pause (阶段 12)', () => {
+  function memoryStore() {
+    const sessions = new Map<string, { checkpoints: Checkpoint[] }>();
+    const store: IStateStore = {
+      loadSession: () => null,
+      saveCheckpoint: async (id, cp) => {
+        const cur = sessions.get(id) ?? { checkpoints: [] };
+        cur.checkpoints.push(cp);
+        sessions.set(id, cur);
+      },
+      deleteSession: async (id) => { sessions.delete(id); },
+    };
+    return { sessions, store };
+  }
+
+  it('a pause abort archives the checkpoint and reports paused, not cancelled', async () => {
+    const ac = new AbortController();
+    const { sessions, store } = memoryStore();
+    const seen: SubagentActivity[] = [];
+    // An LLM that streams nothing until the parent aborts — the pause lands
+    // mid-THINK, the engine reports Interrupted, the orchestrator classifies it.
+    const pausingLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        while (!ac.signal.aborted) {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        throw new Error('aborted');
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    const orch = new SubagentOrchestrator({
+      llm: pausingLLM,
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      stateStore: store,
+      parentSessionId: 'parentp',
+      progress: { onDone: (a) => seen.push(a), onError: (a) => seen.push(a) },
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const exec = orch.execute(toolCall('test_researcher', { prompt: 'long research' }), ac.signal);
+    setTimeout(() => abortPaused(ac), 10);
+    const result = await exec;
+
+    expect(result.success).toBe(false);
+    const payload = result.result as { aborted?: boolean; reason?: string };
+    expect(payload.aborted).toBe(true);
+    expect(String(payload.reason)).toContain('PAUSED');
+    const paused = seen.find((a) => a.status === 'paused');
+    expect(paused).toBeDefined();
+    expect(paused!.lifecycle).toBe('paused');
+    // The archive exists under the stable sessionId — a re-delegation of the
+    // SAME subtask resumes from it.
+    const subSessionId = Array.from(sessions.keys()).find((id) => id.startsWith('sub_parentp_test_researcher_'));
+    expect(subSessionId).toBeDefined();
+    expect(sessions.get(subSessionId!)!.checkpoints.some((c) => c.label === 'subagent_interrupted')).toBe(true);
+  });
+
+  it('a plain parent abort still reports cancelled (hard stop unchanged)', async () => {
+    const ac = new AbortController();
+    const seen: SubagentActivity[] = [];
+    const pausingLLM: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        while (!ac.signal.aborted) {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        throw new Error('aborted');
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    const orch = new SubagentOrchestrator({
+      llm: pausingLLM,
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      progress: { onDone: (a) => seen.push(a), onError: (a) => seen.push(a) },
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const exec = orch.execute(toolCall('test_researcher', { prompt: 'long research' }), ac.signal);
+    setTimeout(() => ac.abort(), 10);
+    const result = await exec;
+
+    expect(result.success).toBe(false);
+    const cancelled = seen.find((a) => a.status === 'cancelled');
+    expect(cancelled).toBeDefined();
+    expect(seen.find((a) => a.status === 'paused')).toBeUndefined();
+  });
 });
