@@ -18,6 +18,10 @@ const call = (name: string, args: Record<string, unknown>): ToolCall => ({
   function: { name, arguments: JSON.stringify(args) },
 });
 
+/** Adapter output paths are platform-native (backslashes on Windows);
+ *  normalize so assertions are separator-agnostic. */
+const norm = (s: string): string => s.replaceAll('\\', '/');
+
 beforeAll(() => {
   workspace = mkdtempSync(join(tmpdir(), 'pure-third-party-'));
   mkdirSync(join(workspace, 'src'), { recursive: true });
@@ -41,7 +45,7 @@ describe('list_files skips dependency directories by default', () => {
   it('recursive listing hides node_modules / dist / .venv, keeps first-party files', async () => {
     const r: ToolResult = await adapter.execute(call('list_files', { recursive: true }));
     expect(r.success).toBe(true);
-    const out = String(r.result);
+    const out = norm(String(r.result));
     expect(out).toContain('src/a.ts');
     expect(out).not.toContain('node_modules');
     expect(out).not.toContain('dist/b.js');
@@ -51,7 +55,7 @@ describe('list_files skips dependency directories by default', () => {
   it('an explicitly named dependency directory is still listable', async () => {
     const r = await adapter.execute(call('list_files', { path: 'node_modules', recursive: true }));
     expect(r.success).toBe(true);
-    expect(String(r.result)).toContain('pkg/index.js');
+    expect(norm(String(r.result))).toContain('pkg/index.js');
   });
 });
 
@@ -59,7 +63,7 @@ describe('glob_files skips dependency directories by default', () => {
   it('**/*.js never returns vendored files', async () => {
     const r = await adapter.execute(call('glob_files', { pattern: '**/*.js' }));
     expect(r.success).toBe(true);
-    const out = String(r.result);
+    const out = norm(String(r.result));
     expect(out).not.toContain('node_modules');
     expect(out).not.toContain('dist/b.js');
   });
@@ -67,7 +71,7 @@ describe('glob_files skips dependency directories by default', () => {
   it('a pattern naming the dependency directory passes through', async () => {
     const r = await adapter.execute(call('glob_files', { pattern: 'node_modules/**/*.js' }));
     expect(r.success).toBe(true);
-    expect(String(r.result)).toContain('pkg/index.js');
+    expect(norm(String(r.result))).toContain('pkg/index.js');
   });
 });
 
@@ -75,7 +79,7 @@ describe('find_files skips dependency directories by default', () => {
   it('content hits come from first-party files only', async () => {
     const r = await adapter.execute(call('find_files', { query: 'needle' }));
     expect(r.success).toBe(true);
-    const out = String(r.result);
+    const out = norm(String(r.result));
     expect(out).toContain('src/a.ts');
     expect(out).not.toContain('node_modules');
   });
