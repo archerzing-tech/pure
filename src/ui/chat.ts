@@ -2544,10 +2544,14 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     const turnController = new AbortController();
     this.abortController = turnController;
     this.setStreaming(true);
+    // Set by the Interrupted(paused) branch; the release path must not eat the
+    // 「继续」 bar it just showed. Any other ending clears a stale pausing notice.
+    let pausedThisTurn = false;
     const releaseSupersededTurn = (): void => {
       if (this.abortController !== turnController) return;
       this.setStreaming(false);
       this.abortController = null;
+      if (!pausedThisTurn) this.dismissPausedResumeBar();
     };
     // A turn paused BEFORE the engine ran (Stop/Escape during pre-flight) keeps
     // its request as a visible bubble AND must enter the live model history.
@@ -5082,6 +5086,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
               // the subagent cards already flipped to ⏸ via the progress
               // sink. Friendly copy + the resume affordance instead of the
               // alarming "⏹ Interrupted".
+              pausedThisTurn = true;
               const pausedText = t('chat.paused', '⏸ 已暂停：进度已存档，随时接着跑。');
               if (hasContent) {
                 this.addStatusBubble(pausedText);
@@ -5418,9 +5423,31 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
    * continue) does the rest — resume is a plain "继续" send away. Hard cancel
    * (session switch, new chat) stays on cancel(). */
   pause() {
+    if (!this.isStreaming()) return;
+    // 手感修复（2026-09-20 用户试用反馈）：中断后的收尾——在跑的工具先做完、
+    // 排队的合成跳过、子 agent 走到 THINK 边界——可能要几秒到几十秒。回执必须
+    // 与点击同步出现，否则收尾期间的连点全是无声 no-op，读起来就是"暂停失灵"。
+    this.showPausingNotice();
     abortPaused(this.abortController);
     this.autoContinue.cancel();
     this.activePlanCardHandle?.clearAutoContinue();
+  }
+
+  /** Transitional notice the instant the user asks for a pause. Replaced by
+   * the 「继续」 bar when the Interrupted(paused) event lands; cleared by the
+   * turn-release path if the turn ended some other way (pause raced the end). */
+  private showPausingNotice(): void {
+    if (this.pausedResumeBar?.dataset.state === 'pausing') return;
+    this.dismissPausedResumeBar();
+    const bar = document.createElement('div');
+    bar.className = 'paused-resume-bar paused-resume-bar--pausing';
+    bar.dataset.state = 'pausing';
+    const note = document.createElement('span');
+    note.className = 'paused-resume-note';
+    note.textContent = t('chat.paused.draining', '⏸ 正在暂停：等在跑的步骤收尾（子 agent 会存档进度），马上停下…');
+    bar.appendChild(note);
+    this.transcriptElement().appendChild(bar);
+    this.pausedResumeBar = bar;
   }
 
   /** The resume affordance under a paused turn: one 「继续」 button. Clicking
@@ -5434,6 +5461,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     this.dismissPausedResumeBar();
     const bar = document.createElement('div');
     bar.className = 'paused-resume-bar';
+    bar.dataset.state = 'paused';
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'paused-resume-btn';
