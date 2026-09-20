@@ -41,9 +41,15 @@ export class ToolExecutionCoordinator {
    * subagents / research calls) otherwise report every ToolResult only after
    * the slowest sibling finishes — the GUI showed finished subagents as
    * spinning empty cards until the entire Promise.all resolved.
-   * Reads run concurrently and yield in completion order; writes stay
-   * sequential (lock discipline) and yield as each finishes. Budget is
-   * incremented exactly once per call, same as execute() did.
+   * Concurrency policy (2026-09-20): ONLY isWrite tools serialize. The
+   * sideEffects flag used to force the writes pool too, which ran four
+   * parallel bash_executor delegations one-after-another — exactly the
+   * fan-out users delegate subagents FOR. Now side-effecting-but-not-writing
+   * calls (SHELL/AGENT/MCP-tagged) overlap in the reads pool; cross-sibling
+   * same-file writes stay safe the other way: every subagent run shares the
+   * orchestrator's single engine coordinator, so their inner write_file /
+   * edit_file serialize per-path on its FileLockManager. Budget is
+   * incremented exactly once per call.
    */
   async *executeStream(
     toolCalls: ToolCall[],
@@ -59,7 +65,7 @@ export class ToolExecutionCoordinator {
     for (const call of toolCalls) {
       budget.incrementToolCall();
       const metadata = ctx.tools.getMetadata(call.function.name);
-      if (metadata?.isWrite || metadata?.sideEffects) writes.push(call);
+      if (metadata?.isWrite) writes.push(call);
       else reads.push(call);
     }
 

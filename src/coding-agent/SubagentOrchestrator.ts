@@ -197,11 +197,13 @@ export class SubagentOrchestrator implements ToolAdapter {
     return tools;
   }
 
-  /** Parallel/serial classification: read-only subagents (no WRITE/SHELL/
-   * DESTRUCTIVE tag) may run concurrently in the parent's `reads` pool; agents
-   * that edit files or run commands stay serial (`sideEffects: true`) so they
-   * never race on shared filesystem state. `timeoutMs` publishes the
-   * definition's own budget so the parent's tool-execution wrapper brackets
+  /** Parallel/serial classification (2026-09-20): delegations are NEVER
+   * isWrite — side-effecting agents (WRITE/SHELL/DESTRUCTIVE tags) overlap in
+   * the parent's reads pool like read-only ones; `sideEffects` stays in the
+   * metadata contract as information only (the coordinator no longer keys a
+   * serial pool on it). Same-file safety between concurrent siblings is the
+   * shared FileLockManager at the inner file-tool level. `timeoutMs` publishes
+   * the definition's own budget so the parent's tool-execution wrapper brackets
    * the delegation by IT instead of the generic tool cap — a review agent
    * legitimately runs longer than three minutes. */
   getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean; timeoutMs?: number } | undefined {

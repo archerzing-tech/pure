@@ -157,10 +157,11 @@ export class ToolRegistry implements ToolAdapter {
     // A delegation is one tool call wrapping a whole nested agent loop, so the
     // executor's declared budget must reach the engine's tool-execution cap —
     // otherwise the generic tool timeout kills subagents that were given far
-    // more. The executor also classifies parallel/serial: read-only agents
-    // (review / research / think) run concurrently in the parent's reads pool;
-    // agents that write files or run commands stay serialized so they never
-    // race on shared filesystem state.
+    // more. Delegations are NEVER isWrite: they run concurrently in the
+    // parent's reads pool (2026-09-20 — four bash_executor scans must overlap,
+    // not queue). Same-file write safety comes from the shared FileLockManager
+    // at the inner write_file/edit_file level, not from serializing whole
+    // agents — serializing them killed the fan-out delegations exist for.
     if (tool.tags.includes(Tags.AGENT)) {
       const sub = this.subagentExecutor?.getMetadata(toolName);
       if (sub) return { sideEffects: sub.sideEffects ?? true, isWrite: false, timeoutMs: sub.timeoutMs };
