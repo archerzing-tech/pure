@@ -77,8 +77,10 @@ export interface SubagentActivity {
   success?: boolean;
   error?: string;
   output?: string;
-  /** Explicit lifecycle status used to derive the current active-agent set. */
-  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused';
+  /** Explicit lifecycle status used to derive the current active-agent set.
+   * 'steered' (北极星第二步): a mid-run user steer was injected into this
+   * subagent's next THINK — a momentary receipt, the run itself continues. */
+  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused' | 'steered';
   /** High-level outcome (filled by onStart/onDone/onError). */
   status?: SubagentStatus;
   /** Monotonic per-call progress sequence; stale UI updates must be ignored. */
@@ -173,6 +175,15 @@ export interface SubagentOrchestratorConfig {
    * killed by it, a wedged run is. Defaults to 5 minutes; injectable so
    * tests can exercise the watchdog in milliseconds. */
   noProgressTimeoutMs?: number;
+  /** 北极星第二步（插话通道进子 agent）：mid-run user steers, queued by the
+   * host's interject classifier. While a delegation is in flight the PARENT is
+   * blocked inside the tool batch, so its THINK-boundary drain can't run —
+   * handing the same queue to the subagent's engine lets the correction reach
+   * whoever is actually working ("纠偏直达干活的人"). Drain semantics keep this
+   * duplication-free: a drained steer is gone, so the parent never sees it
+   * again at its own next THINK; with parallel delegations the first subagent
+   * THINK claims it — one user remark, one recipient. */
+  takeSteerMessages?: () => Message[];
 }
 
 export class SubagentOrchestrator implements ToolAdapter {
@@ -392,6 +403,9 @@ export class SubagentOrchestrator implements ToolAdapter {
       failurePolicy: this.config.failurePolicy ?? new DefaultFailurePolicy(),
       depth,
       maxDepth: this.config.maxDepth ?? 1,
+      // 插话通道：与父引擎共享宿主的 steer 队列（见 config 注释）。引擎在
+      // THINK 边界拉取并注入为 user 消息，随子代理 transcript 一起存档。
+      takeSteerMessages: this.config.takeSteerMessages,
     };
 
     // Stable subagent sessionId for checkpoint resume; only meaningful when a
@@ -490,6 +504,11 @@ export class SubagentOrchestrator implements ToolAdapter {
                 : event.payload.to === 'TERMINATE' ? 'done'
                   : 'started';
           emit(progress?.onState, { state: event.payload.to, lifecycle, toolState: event.payload.to === 'ACT' ? undefined : 'completed' });
+        } else if (event.type === 'SteerInjected') {
+          // 插话已并入子代理的下一轮 THINK —— 给活动卡一条可见回执（lifecycle
+          // 'steered' → 卡片 trace 行 📨），别让用户猜"话到底递到没有"。
+          kickWatchdog();
+          emit(progress?.onState, { state: 'STEER', lifecycle: 'steered' });
         } else if (event.type === 'ToolStarted') {
           toolInFlight = true;
           stopWatchdogTimer();

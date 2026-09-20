@@ -633,3 +633,60 @@ describe('SubagentOrchestrator pause (阶段 12)', () => {
     expect(seen.find((a) => a.status === 'paused')).toBeUndefined();
   });
 });
+
+describe('SubagentOrchestrator steer channel (北极星第二步)', () => {
+  // 插话通道进子 agent：宿主的 steer 队列同时挂到子代理引擎的 ctx 上。父任务被
+  // 委派工具占住的那几分钟里，插话由干活中的子代理在其 THINK 边界取走——"纠偏
+  // 直达干活的人"。drain 语义保证不重复：取走即消失，父引擎不会再次看到。
+  it('a queued steer reaches the subagent THINK input as a user message, with a steered receipt', async () => {
+    const seen: SubagentActivity[] = [];
+    const seenMessages: Message[][] = [];
+    const capturingLLM: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        seenMessages.push(messages);
+        yield { type: 'content' as const, content: 'ok' };
+        yield { type: 'done' as const, content: 'ok', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const queue: Message[] = [{ role: 'user', content: '顺手把深色主题也改了' }];
+    const orch = new SubagentOrchestrator({
+      llm: capturingLLM,
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      takeSteerMessages: () => queue.splice(0),
+      progress: { onState: (a) => seen.push(a), onDone: (a) => seen.push(a) },
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const result = await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
+
+    expect(result.success).toBe(true);
+    // The steer was drained into the subagent's THINK input as a user message.
+    expect(seenMessages.length).toBeGreaterThan(0);
+    expect(seenMessages[0]!.some((m) => m.role === 'user' && String(m.content).includes('深色主题'))).toBe(true);
+    // Drained exactly once — nothing left for a later boundary to re-deliver.
+    expect(queue).toHaveLength(0);
+    // …and the activity stream carries the 📨 delivery receipt.
+    expect(seen.some((a) => a.lifecycle === 'steered')).toBe(true);
+  });
+
+  it('an empty steer queue changes nothing: no receipt, delegation unaffected', async () => {
+    const seen: SubagentActivity[] = [];
+    const orch = new SubagentOrchestrator({
+      llm: new MockLLMAdapter('findings'),
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      takeSteerMessages: () => [],
+      progress: { onState: (a) => seen.push(a), onDone: (a) => seen.push(a) },
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const result = await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
+
+    expect(result.success).toBe(true);
+    expect(seen.some((a) => a.lifecycle === 'steered')).toBe(false);
+  });
+});
