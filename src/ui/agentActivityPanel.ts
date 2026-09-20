@@ -125,13 +125,10 @@ export function createAgentActivityPanel(
     const active = visible.filter(isAgentActivityActive).sort((a, b) => (b.startedAt ?? b.lastUpdatedAt ?? 0) - (a.startedAt ?? a.lastUpdatedAt ?? 0));
     const completed = visible.filter((activity) => !isAgentActivityActive(activity)).sort((a, b) => (b.startedAt ?? b.lastUpdatedAt ?? 0) - (a.startedAt ?? a.lastUpdatedAt ?? 0));
     const ordered = [...active, ...completed];
-    // Same agent delegated N times reads as one ambiguous name — number the
-    // instances (ui_designer（1）（2）…) whenever a name appears more than
-    // once in the task. A lone agent keeps its bare name.
-    const nameCounts = new Map<string, number>();
-    for (const activity of visible) {
-      nameCounts.set(activity.agentName, (nameCounts.get(activity.agentName) ?? 0) + 1);
-    }
+    // Same agent delegated N times used to render numbered instances
+    // (ui_designer（1）（2）…) — the user found the suffixes noise, so cards
+    // show the bare name again; instanceNo stays in the stored activity for
+    // dispatch-order bookkeeping only.
 
     list.replaceChildren();
 
@@ -164,13 +161,8 @@ export function createAgentActivityPanel(
       entry.row.className = `agent-worker agent-worker--${state}${entering ? ' agent-worker--entering' : ''}`;
       // Row 2: the machine id in FULL (web_searcher / code_reviewer / …) —
       // wraps instead of ellipsizing so the exact agent is always readable.
-      const numbered = (nameCounts.get(activity.agentName) ?? 0) > 1 && activity.instanceNo !== undefined;
       entry.name.replaceChildren();
-      entry.name.append(
-        document.createTextNode(numbered
-          ? `${activity.agentName}（${activity.instanceNo}）`
-          : activity.agentName),
-      );
+      entry.name.append(document.createTextNode(activity.agentName));
       // The run id rides the name row as a quiet chip: every agent is
       // individually quotable when something goes wrong ("ag-1a2b3c4d 报错了").
       if (activity.agentId) {

@@ -6098,15 +6098,14 @@ body {
 }
 .bubble a:hover { text-decoration-color: var(--accent); }
 
-/* Tables */
+/* Tables — square corners: border-collapse + a radius clip the corner cells'
+ * borders ("圆角显示不全"), so the table renders with plain straight edges. */
 .bubble table {
   border-collapse: collapse;
   width: 100%;
   margin: 8px 0;
   font-size: 13px;
   background: var(--bg-card);
-  border-radius: var(--radius-xs);
-  overflow: hidden;
 }
 .bubble th, .bubble td {
   border: 1px solid var(--border);
@@ -13643,9 +13642,8 @@ button svg,
   color: #083344;
   white-space: nowrap;
 }
-/* Agent run id（ag-xxxxxxxx）：报错时报得出的定位符。会话卡和浮动卡同一副
-   等宽小字样式，两处一眼认得出是同一个 ID。 */
-.tool-row-agent-id,
+/* Agent run id（ag-xxxxxxxx）：报错时报得出的定位符。只挂在浮动卡的名字行
+   （会话卡按用户要求不带 ID），等宽小字一眼认得出是同一个 ID。 */
 .agent-worker-id {
   flex: none;
   margin-left: 5px;

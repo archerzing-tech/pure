@@ -31,7 +31,7 @@ import { resolvePromptBudget } from '../shared/PromptAssembler';
 import type { Message } from '../shared/types';
 import { ComposerSelect, type ComposerSelectOption } from './composerSelect';
 import { renderMarkdown, stripToolCallXml } from './markdownLoader';
-import { createToolRow, finalizeToolRow, markToolRowStopped, groupToolRoundRuns, toolCardKind, toolGridClass } from './toolRow';
+import { createToolRow, finalizeToolRow, markToolRowStopped, appendToolStreamLine, groupToolRoundRuns, toolCardKind, toolGridClass } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
 import { createAssessmentFlowCard } from './assessmentFlow';
 import { createRestoredPlanCard } from './plan';
@@ -984,8 +984,13 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
         grid.className = toolGridClass(toolCardKind(run[0].exec.toolName));
         for (const item of run) {
           const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
-          if (item.stopped) markToolRowStopped(row);
-          else finalizeToolRow(row, item.exec);
+          if (item.stopped) {
+            // Restored orphan (its turn died before any result) — same
+            // self-explaining interruption line as the live sweep, so a
+            // historical gray card never reads as an unexplained failure.
+            markToolRowStopped(row);
+            appendToolStreamLine(row, 'stdout', '本轮输出在此中断，该调用未执行完成');
+          } else finalizeToolRow(row, item.exec);
           grid.appendChild(row.el);
         }
         target.appendChild(grid);
