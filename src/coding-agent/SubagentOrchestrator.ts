@@ -961,7 +961,7 @@ ${description ? `命令用途：${description}` : ''}
   // Researches topics and summarizes findings
   {
     name: 'researcher',
-    description: '研究主题并总结发现，包括查阅网络资源和文档。用于技术调研、API研究等：调研前置（先出事实 baseline 再给生产环节），只读且可并行（T2/T3），把检索源与引用隔离出主会话。',
+    description: '研究主题并总结发现，包括查阅网络资源和文档。用于技术调研、API研究等：调研前置（先出事实 baseline 再给生产环节），只读且可并行（T2/T3），把检索源与引用隔离出主会话。一个任务含 N 个独立子主题时，在同一批里发起 N 个 researcher 调用（每调用一个主题），它们会并发执行——不要让一个调用包办全部主题。',
     input_schema: {
       type: 'object',
       properties: {
