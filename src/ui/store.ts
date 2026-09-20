@@ -56,8 +56,9 @@ export interface SessionAgentActivity {
   state?: string;
   /** Explicit lifecycle used to answer which agents are active right now.
    * 'paused' (阶段 12): the parent run was paused mid-delegation; the worker's
-   * progress is archived and it resumes from its checkpoint on re-delegation. */
-  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused';
+   * progress is archived and it resumes from its checkpoint on re-delegation.
+   * 'steered' (北极星第二步): momentary steer receipt — the run continues. */
+  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused' | 'steered';
   /** Monotonic progress sequence for rejecting late concurrent updates. */
   sequence?: number;
   /** Epoch ms when this activity snapshot was emitted. */

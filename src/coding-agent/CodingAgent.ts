@@ -167,6 +167,9 @@ export class CodingAgent {
       // Subagents inherit the parent's escalating failure policy so a transient
       // LLM/API error retries inside the subagent instead of killing it.
       failurePolicy: this.failurePolicy,
+      // 插话通道进子 agent（北极星第二步）：同一 steer 队列交给子代理引擎。
+      // 父任务被委派工具占住时，插话由干活中的子代理在其 THINK 边界取走。
+      takeSteerMessages: config.takeSteerMessages,
     };
     this.subagentOrchestrator = new SubagentOrchestrator(orchConfig);
 
@@ -290,7 +293,9 @@ export class CodingAgent {
     };
     return {
       onStart: (a) => { publish(a, 'start'); ui?.onStart?.(a); },
-      onState: (a) => { publish(a, 'state'); ui?.onState?.(a); },
+      // 北极星第二步: a steer receipt rides the onState channel but bridges as
+      // its own event kind so the transcript card can render 📨, not a state blip.
+      onState: (a) => { publish(a, a.lifecycle === 'steered' ? 'steered' : 'state'); ui?.onState?.(a); },
       onTool: (a) => { publish(a, 'tool'); ui?.onTool?.(a); },
       // 阶段 12: a pause lands on the onDone channel (it IS terminal for this
       // run) but must not read as "✓ 交付" or "✗ 中断" on the transcript card

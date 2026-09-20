@@ -967,6 +967,10 @@ export function formatSubagentTraceLine(e: SubagentActivityEvent): string | null
       // 阶段 12: paused is not a failure — the archive is on disk and a
       // re-delegation resumes from it. Keep the line calm and actionable.
       return `⏸ ${who} 已暂停（进度已存档，点「继续」接着跑）`;
+    case 'steered':
+      // 北极星第二步: delivery receipt for a mid-run steer — the user's own
+      // bubble is already on screen; this line closes the "did it land?" loop.
+      return `📨 ${who} 收到你的插话，并入它的下一步`;
     case 'error':
       return `✗ ${who} 中断${e.error ? `：${clipSummary(e.error)}` : ''}`;
     default:
