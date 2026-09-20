@@ -29,6 +29,7 @@ import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeVi
 import { extractMetaRefreshUrl, extractPdfText, extractPdfViaPdftotext, fetchWithRetry, refererFor, resolveRedirectTarget, scrapeViaFirecrawl, scrapeViaWayback } from './fetchFallback';
 import { extractFileText, MAX_SEARCH_FILE_BYTES } from './fileText';
 import { BROWSER_UA } from '../../shared/platformUa';
+import { isThirdPartyPath, THIRD_PARTY_DIR_NAMES } from '../../shared/thirdPartyScope';
 
 /** Windows has no POSIX shell (`sh`) or `diff` binary — PowerShell / Git for
  * Windows provide the equivalents. Module-level so every handler branches
@@ -508,8 +509,11 @@ export class NodeToolAdapter implements ToolAdapter {
       // 1) Filename matches first — cheapest and strongest signal.
       const fileGlob = String(args.filePattern || '**/*');
       const globAll = new Bun.Glob(!IS_WINDOWS ? fileGlob.replace(/\\/g, '/') : fileGlob);
+      // 三方件默认不在理解范围：搜索目录或 filePattern 明确指名依赖目录才进去。
+      const explicitScope = isThirdPartyPath(pathRelative(this.workspace, searchDir)) || isThirdPartyPath(fileGlob);
       const allFiles: { entry: string; nameScore: number }[] = [];
       for await (const entry of globAll.scan({ cwd: searchDir, absolute: false })) {
+        if (!explicitScope && isThirdPartyPath(entry)) continue;
         const folded = fold(basename(entry));
         let nameScore = 0;
         for (const n of needles) if (folded.includes(n)) nameScore++;
@@ -605,8 +609,15 @@ export class NodeToolAdapter implements ToolAdapter {
     const items: string[] = [];
     const glob = new Bun.Glob(recursive ? '**/*' : '*');
     let truncated = false;
+    // 三方件默认不在理解范围：请求本身落在依赖目录里（明确指名）才不过滤。
+    const explicitScope = isThirdPartyPath(pathRelative(this.workspace, dirPath));
+    let skippedThirdParty = false;
 
     for await (const entry of glob.scan({ cwd: dirPath, absolute: false, onlyFiles: false })) {
+      if (!explicitScope && isThirdPartyPath(entry)) {
+        skippedThirdParty = true;
+        continue;
+      }
       if (items.length >= maxResults) {
         truncated = true;
         break;
@@ -617,7 +628,7 @@ export class NodeToolAdapter implements ToolAdapter {
     items.sort();
     const listing = items.length > 0 ? items.join('\n') : '(empty directory)';
     const result = truncated
-      ? `${listing}\n\n[截断] 仅显示前 ${maxResults} 项；目录还有更多内容，请缩小 path 或使用 glob_files。`
+      ? `${listing}\n\n[截断] 仅显示前 ${maxResults} 项；目录还有更多内容，请缩小 path 或使用 glob_files。${skippedThirdParty ? '依赖目录（node_modules 等）默认跳过。' : ''}`
       : listing;
     return {
       id: `tool_${Date.now()}`,
@@ -945,7 +956,10 @@ export class NodeToolAdapter implements ToolAdapter {
     const timeoutSeconds = typeof args.timeoutSeconds === 'number' && Number.isFinite(args.timeoutSeconds)
       ? Math.min(30, Math.max(1, args.timeoutSeconds))
       : 10;
-    const rgArgs = ['--json', '--no-config', '--line-number', '--color', 'never', '--hidden', '--max-filesize', '8M', '--glob', '!.git/**', '--glob', '!node_modules/**', '--glob', '!dist/**', '--glob', '!build/**', '--glob', '!target/**'];
+    // 排除表与 THIRD_PARTY_DIR_NAMES 同源：列目录 / glob / find / rg 四条路
+    // 口径一致，三方件默认都在理解范围之外。
+    const rgArgs = ['--json', '--no-config', '--line-number', '--color', 'never', '--hidden', '--max-filesize', '8M'];
+    for (const dir of THIRD_PARTY_DIR_NAMES) rgArgs.push('--glob', `!**/${dir}/**`);
     if (args.caseSensitive === false) rgArgs.push('--ignore-case');
     if (Array.isArray(args.globs)) {
       for (const glob of args.globs) {
@@ -2406,8 +2420,12 @@ export class NodeToolAdapter implements ToolAdapter {
 
     const results: string[] = [];
     const glob = new Bun.Glob(pattern);
+    // 三方件默认不在理解范围：path 落在依赖目录里、或 pattern 本身指名了
+    // 依赖目录（如 "node_modules/**"）才算明确请求，否则跳过。
+    const explicitScope = isThirdPartyPath(pathRelative(this.workspace, searchDir)) || isThirdPartyPath(pattern);
 
     for await (const entry of glob.scan({ cwd: searchDir, absolute: false, onlyFiles: true })) {
+      if (!explicitScope && isThirdPartyPath(entry)) continue;
       if (results.length >= maxResults) break;
       results.push(entry);
     }
