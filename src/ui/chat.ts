@@ -3,6 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
+import { abortPaused } from '../shared/pauseSignal';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
@@ -1214,6 +1215,9 @@ export interface ChatControllerOptions {
 export class ChatController {
   private streaming = false;
   private abortController: AbortController | null = null;
+  /** 阶段 12: the 「继续」 affordance appended under a paused turn. One at a
+   * time; dismissed by any new send (a send IS the resume) or by clicking. */
+  private pausedResumeBar: HTMLElement | null = null;
   private onStreamingChange?: (streaming: boolean) => void;
   /** 11.2 — set by the shell via onRestoreDraft (see that method). */
   private restoreDraftHandler?: (text: string) => void;
@@ -2466,6 +2470,9 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       this.activePlanCardHandle?.clearAutoContinue();
     }
     const gen = ++this.generation;
+    // 阶段 12: a new send IS the resume (or a fresh task) — the paused-turn
+    // affordance has served its purpose the moment anything streams again.
+    this.dismissPausedResumeBar();
 
     // The activity panel is task-scoped: a continuation keeps the existing
     // rows, while a new top-level task starts a fresh collaboration trace.
@@ -5039,7 +5046,24 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
             }
             const hasContent = assistantSegments.some(s => s.el.textContent || s.el.children.length > 0);
             const lastSeg = assistantSegments.length ? assistantSegments[assistantSegments.length - 1] : null;
-            if (event.payload.reason !== 'aborted') {
+            if (event.payload.reason === 'paused') {
+              // 阶段 12: paused is not an interruption — the archive is on
+              // disk (this branch's merge/persist above IS the archive) and
+              // the subagent cards already flipped to ⏸ via the progress
+              // sink. Friendly copy + the resume affordance instead of the
+              // alarming "⏹ Interrupted".
+              const pausedText = t('chat.paused', '⏸ 已暂停：进度已存档，随时接着跑。');
+              if (hasContent) {
+                this.addStatusBubble(pausedText);
+              } else if (lastSeg) {
+                lastSeg.el.textContent = pausedText;
+              } else {
+                const seg = createSegment();
+                seg.el.classList.remove('streaming');
+                seg.el.textContent = pausedText;
+              }
+              this.showPausedResumeBar();
+            } else if (event.payload.reason !== 'aborted') {
               // Keep the already-rendered content; surface the reason as a
               // separate status row instead of flattening a bubble to text.
               // Runtime interrupt notices follow the UI language (were hard-
@@ -5355,6 +5379,49 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     // Stop / Escape take the human back: kill any pending auto-continue too.
     this.autoContinue.cancel();
     this.activePlanCardHandle?.clearAutoContinue();
+  }
+
+  /** 阶段 12 — pause, not stop: aborts the turn with the pause reason so the
+   * engine cuts the LLM stream immediately, in-flight tools finish and land in
+   * the archive, queued tools never start, and subagent cards flip to ⏸. The
+   * checkpoint machinery (stable sessionId + subagent_interrupted + engine
+   * continue) does the rest — resume is a plain "继续" send away. Hard cancel
+   * (session switch, new chat) stays on cancel(). */
+  pause() {
+    abortPaused(this.abortController);
+    this.autoContinue.cancel();
+    this.activePlanCardHandle?.clearAutoContinue();
+  }
+
+  /** The resume affordance under a paused turn: one 「继续」 button. Clicking
+   * injects a resume turn through the normal send path — the parent sees its
+   * archived transcript (paused delegation results included) and naturally
+   * re-delegates; identical subtasks hit the same stable sessionIds and the
+   * subagents continue from their checkpoints. Single-flight: ignored while
+   * another turn streams — two writers on one session is the one thing we
+   * never allow. */
+  private showPausedResumeBar(): void {
+    this.dismissPausedResumeBar();
+    const bar = document.createElement('div');
+    bar.className = 'paused-resume-bar';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'paused-resume-btn';
+    btn.textContent = `▶ ${t('chat.paused.resume', '继续')}`;
+    btn.title = t('chat.paused.resumeTitle', '从暂停点接着跑——子 agent 从存档续，不重头来');
+    btn.addEventListener('click', () => {
+      if (this.isStreaming()) return;
+      this.dismissPausedResumeBar();
+      void this.send('继续');
+    });
+    bar.appendChild(btn);
+    this.transcriptElement().appendChild(bar);
+    this.pausedResumeBar = bar;
+  }
+
+  private dismissPausedResumeBar(): void {
+    this.pausedResumeBar?.remove();
+    this.pausedResumeBar = null;
   }
 
   /** Cancel a pending auto-continue (user started typing / any other takeover). */
@@ -5961,6 +6028,13 @@ export class SessionChatManager {
 
   cancel(): void {
     this.activeNow().cancel();
+  }
+
+  /** 阶段 12: pause = resumable stop. Delegates to the visible controller;
+   * the 「继续」 bar lives inside it, so a pause in a background session waits
+   * there until that session is shown again. */
+  pause(): void {
+    this.activeNow().pause();
   }
 
   cancelAutoContinue(): void {

@@ -1,5 +1,6 @@
 import type { EngineContext, ToolCall, ToolResult } from '../shared/types';
 import { safeParseArgs } from '../shared/format';
+import { isPauseAbort } from '../shared/pauseSignal';
 import { FileLockManager } from './FileLockManager';
 import { HOOK_BLOCK_EXIT_CODE, runUserHooksForEvent } from '../shared/userHookRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -127,42 +128,71 @@ export class ToolExecutionCoordinator {
         };
       }
     }
+    // 阶段 12 pause semantics (pauseSignal.ts): a PAUSE abort must NOT kill
+    // in-flight work — "hand the current step a clean finish, keep the
+    // archive". So the tool's view of the world hangs off its own toolStop
+    // controller, which forwards only NON-pause aborts; a pause therefore
+    // reaches the engine's THINK boundary (which yields Interrupted once the
+    // batch drains) but never the tool itself. The deadline race listens on a
+    // SECOND controller (raceStop) because onTimeout aborts toolStop to kill
+    // the tool — if the race itself listened to toolStop, that abort would
+    // surface as AbortError and mask the TimeoutError (the budget tests
+    // regress to "aborted" instead of "timed out"). On old webviews where
+    // AbortSignal.reason is unreadable, isPauseAbort is always false and this
+    // degrades to today's forward-everything hard stop.
+    if (ctx.signal?.aborted) {
+      // Dequeued after the abort: a pause skips queued work entirely ("排队
+      // 工具不再启动"), a hard stop used to start-then-kill them — either way
+      // the call still needs a result or the transcript pairing would hang a
+      // toolCall without an observation (next LLM call would 400).
+      const skipped = isPauseAbort(ctx.signal) ? 'paused — not started' : 'cancelled — not started';
+      return {
+        toolName: call.function.name,
+        result: { id: call.id, toolName: call.function.name, error: skipped, success: false, duration: 0 },
+        duration: 0,
+        toolCallId: call.id,
+      };
+    }
+    const toolStop = new AbortController();
+    const raceStop = new AbortController();
+    const forwardAbort = (): void => {
+      if (!isPauseAbort(ctx.signal)) {
+        toolStop.abort(ctx.signal?.reason);
+        raceStop.abort(ctx.signal?.reason);
+      }
+    };
+    ctx.signal?.addEventListener('abort', forwardAbort, { once: true });
     const lockManager = ctx.lockManager ?? this.fallbackLock;
     let executed: ToolResult | undefined;
     try {
       if (path) {
-        if (write) await lockManager.acquireWrite(path, ctx.signal);
-        else await lockManager.acquireRead(path, ctx.signal);
+        if (write) await lockManager.acquireWrite(path, toolStop.signal);
+        else await lockManager.acquireRead(path, toolStop.signal);
       }
       try {
-        const controller = new AbortController();
-        const forwardAbort = (): void => controller.abort();
-        ctx.signal?.addEventListener('abort', forwardAbort, { once: true });
-        try {
-          // A tool may declare its own budget (subagent delegations bracket a
-          // whole nested agent loop); the generic cap covers everything that
-          // doesn't. The engine's remaining wall clock still wins.
-          const metadata = ctx.tools!.getMetadata(call.function.name);
-          const cap = Math.min(
-            metadata?.timeoutMs ?? TOOL_EXECUTION_TIMEOUT_MS,
-            budget.streamDeadlineMs(),
-          );
-          executed = await runWithDeadline(
-            () => ctx.tools!.execute(call, controller.signal),
-            ctx.signal,
-            cap,
-            `tool ${call.function.name}`,
-            () => controller.abort(),
-          );
-        } finally {
-          ctx.signal?.removeEventListener('abort', forwardAbort);
-        }
+        // A tool may declare its own budget (subagent delegations bracket a
+        // whole nested agent loop); the generic cap covers everything that
+        // doesn't. The engine's remaining wall clock still wins.
+        const metadata = ctx.tools!.getMetadata(call.function.name);
+        const cap = Math.min(
+          metadata?.timeoutMs ?? TOOL_EXECUTION_TIMEOUT_MS,
+          budget.streamDeadlineMs(),
+        );
+        executed = await runWithDeadline(
+          () => ctx.tools!.execute(call, toolStop.signal),
+          raceStop.signal,
+          cap,
+          `tool ${call.function.name}`,
+          () => toolStop.abort(),
+        );
       } finally {
-        if (path) lockManager.release(path);
+        ctx.signal?.removeEventListener('abort', forwardAbort);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       executed = { id: call.id, toolName: call.function.name, error: message || 'unknown', success: false, duration: 0 };
+    } finally {
+      if (path) lockManager.release(path);
     }
     // on_post_tool runs after the lock is released, on both success and
     // failure. stdout the model should see on its next THINK is appended to a
