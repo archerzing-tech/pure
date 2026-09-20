@@ -47,6 +47,9 @@ import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { memoryStore } from './memoryStore';
 import { showConfirmModal } from './modal';
 import { checkPreflight, type PreflightGate } from './preflight';
+import { normalizeDraft } from './inputRepair';
+import { correctWorkspacePaths, getPathIndex, warmPathIndex } from './pathIndex';
+import { createPathRepairNote } from './pathRepairNote';
 import { InlineAutocomplete, type AutocompleteCandidate } from './inlineAutocomplete';
 import { MCP_PROMPT_COMMAND, describeMcpPrompt } from '../shared/mcpPrompt';
 import { TaskQueue } from './taskQueue';
@@ -1015,6 +1018,10 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
           }
           bindUserBubbleSelectAll(bubble);
           linkifyPaths(bubble);
+          // 11.2 — a restored turn that had paths repaired keeps the note under
+          // the bubble, with the same way back to the original draft.
+          const replayRepairNote = createPathRepairNote(block.repairs ?? [], () => restoreDraftToComposer(block.content));
+          if (replayRepairNote) bubble.appendChild(replayRepairNote);
           wrapper.appendChild(bubble);
           target.appendChild(wrapper);
         } else if (block.type === 'analysis' || block.type === 'thinking') {
@@ -1289,7 +1296,27 @@ promptEl.addEventListener('input', () => {
       sendBtn.disabled = !promptEl.value.trim() && !pasteChips.hasAttachments();
     }
   });
+  // 11.2 — warm the workspace path index while the user types, so the FIRST
+  // send already gets path repair. TTL-guarded and never awaited: with a warm
+  // index this is one comparison, so the keystroke path stays free. Gated on
+  // hasStartedChat because chat.getWorkspace() lazily creates the first
+  // session — typing on the landing page must not spawn one.
+  if (hasStartedChat && getPathIndex().length === 0) void warmPathIndex(chat.getWorkspace());
 });
+
+// 11.2 — the "use my original words" action on a path-repair note. The note is
+// a way BACK to the user's own draft, not a resend: a click that replayed a
+// turn by itself would be an unasked-for side effect (and cost) from a click in
+// the transcript, and the composer is also where they can fix the typo their way.
+function restoreDraftToComposer(text: string): void {
+  enterChatMode();
+  promptEl.value = stripUserTurnContext(text);
+  promptEl.dispatchEvent(new Event('input'));
+  focusPromptCaretEnd();
+  showToast(t('repair.restored'));
+}
+
+chat.onRestoreDraft(restoreDraftToComposer);
 
 // Double-click either composer to copy the current draft without disturbing
 // the selection or send behavior. Empty drafts are ignored.
@@ -1470,9 +1497,13 @@ function handleLandingSendOrStop() {
 }
 
 async function sendMessage(sourceEl: HTMLTextAreaElement) {
-  const text = sourceEl.value.trim();
+  // 阶段 11.1：先做无损归一化，后面每一步都用它 —— 全角字母/数字、零宽字符和
+  // 全角标点会让 `/mcp-prompt` 名字、路径和高危词全部匹配失手。归一化不改变
+  // 语义，所以不上屏解释、也不问用户；风险判定若因此读到更高档，由确认框
+  // （confirmHighRiskDraft）解释一句。取消发送时输入框原文原样留着。
+  const normalized = normalizeDraft(sourceEl.value);
   // Empty typed text is fine when pasted file chips carry the message.
-  if ((!text && !pasteChips.hasAttachments()) || chat.isStreaming()) return;
+  if ((!normalized && !pasteChips.hasAttachments()) || chat.isStreaming()) return;
 
   // Validate BEFORE clearing the input: without a key we return here and the
   // user's draft stays in the box (doSend's own check covers the queued path).
@@ -1482,9 +1513,19 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
     return;
   }
 
+  // 11.2 — path slips. Only a UNIQUE candidate within a small edit distance is
+  // applied, and only from an index warmed in the background: a cold index
+  // means "no correction this turn", never a send that waits on a glob.
+  const correction = correctWorkspacePaths(normalized, getPathIndex());
+  const text = correction.text;
+  const pathRepairs = correction.repairs;
+  void warmPathIndex(chat.getWorkspace());
+
   // Error prediction & prevention: a destructive intent (delete / clear /
   // reset / drop…) must be explicitly confirmed before the draft leaves the
-  // composer. Cancelling returns here with the draft untouched.
+  // composer. Cancelling returns here with the draft untouched. 阶段 11.1：
+  // 同音错字（"闪除"）也算破坏性意图 —— 门后用的是原文与错字展开文本中更高的
+  // 风险档，但发给模型的始终是用户原话。
   const gate = checkPreflight(text);
   if (gate && !(await confirmHighRiskDraft(gate))) return;
 
@@ -1505,7 +1546,11 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
     syncLandingHasText();
   }
   sendBtn.disabled = true;
-  await doSend(expansion?.ok ? expansion.text : text, expansion?.ok ? text : undefined);
+  // Display channel: an expanded `/mcp-prompt` shows the command the user typed,
+  // a repaired path shows their ORIGINAL words with the note underneath (the
+  // engine still receives the corrected text).
+  const displayOverride = expansion?.ok ? text : pathRepairs.length > 0 ? normalized : undefined;
+  await doSend(expansion?.ok ? expansion.text : text, displayOverride, expansion?.ok ? [] : pathRepairs);
 }
 
 /**
@@ -1515,7 +1560,7 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
  * `displayOverride` keeps an expanded `/mcp-prompt` command visible in the
  * transcript instead of the (long) template that actually reaches the engine.
  */
-async function doSend(text: string, displayOverride?: string) {
+async function doSend(text: string, displayOverride?: string, pathRepairs: import('./pathIndex').PathRepair[] = []) {
   if (!hasConfiguredKey(loadConfig())) {
     showToast(t('toast.setApiKey'));
     void openSettings();
@@ -1540,7 +1585,7 @@ async function doSend(text: string, displayOverride?: string) {
   pasteChips.clear();
   try {
     enterChatMode();
-    await chat.send(fullText, images, displayText, false, attachmentMetadata, openAttachment);
+    await chat.send(fullText, images, displayText, false, attachmentMetadata, openAttachment, pathRepairs);
   } catch (err: any) {
     showToast(`${t('toast.sendFailed')}: ${err?.message || err}`);
     console.error('[pure] sendMessage failed:', err);
@@ -1554,6 +1599,10 @@ async function doSend(text: string, displayOverride?: string) {
     // (resetToLanding) and the list highlight correct.
     sessionSidebar.setActive(chat.getSessionId());
     sessionSidebar.refresh();
+    // 11.2 — the turn just wrote files, and those are exactly what the next
+    // prompt will name. Force past the warm TTL so the index sees them, still
+    // fire-and-forget (a glob in the background, never on the send path).
+    void warmPathIndex(chat.getWorkspace(), { force: true });
     flushQueued();
   }
 }
@@ -2489,12 +2538,19 @@ function confirmDialog(message: string): Promise<boolean> {
 
 /** Preflight confirmation for a high-risk draft. The assessment's impact /
  * recommendation strings are already localized by assessIntent. Focus stays on
- * Cancel: Esc / Enter-on-cancel can never confirm a destructive send. */
+ * Cancel: Esc / Enter-on-cancel can never confirm a destructive send.
+ *
+ * 阶段 11.1：只有当门是「错字展开」读出来的才解释一句（用户原话本身就高危时
+ * 不啰嗦）。文案要同时说清两件事：为什么突然拦截，以及**没有替你改写输入** ——
+ * 否则用户会以为 pure 擅自改了他的话，或者根本不知道自己打错了字。 */
 function confirmHighRiskDraft(gate: PreflightGate): Promise<boolean> {
   const a = gate.assessment;
+  const typoNote = gate.repairs?.length
+    ? `${t('preflight.typo').replace('{pairs}', gate.repairs.map((r) => `${r.from} → ${r.to}`).join('，'))}\n\n`
+    : '';
   return showConfirmModal({
     title: t('preflight.title'),
-    message: `${a.impact}\n\n${a.recommendation}`,
+    message: `${typoNote}${a.impact}\n\n${a.recommendation}`,
     okLabel: t('preflight.ok'),
     cancelLabel: t('confirm.cancel'),
     danger: true,

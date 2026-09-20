@@ -12,6 +12,7 @@
 import type { Message, MessageAttachment, MessageImage, TokenUsage, GeneratedImage } from '../shared/types';
 import type { IntentAssessment, Plan } from '../coding-agent/types';
 import type { PlanProgressSnapshot } from './planProgress';
+import type { PathRepair } from './pathIndex';
 
 export const SESSION_SNAPSHOT_VERSION = 3;
 
@@ -26,6 +27,10 @@ export interface TranscriptEntry {
   /** User-uploaded images shown in the restored conversation bubble. */
   images?: MessageImage[];
   attachments?: MessageAttachment[];
+  /** 11.2 — path slips pure corrected before sending this turn: the bubble keeps
+   *  the user's original words (content) while modelContext holds the corrected
+   *  text, and the note under the bubble rebuilds from these pairs. */
+  pathRepairs?: PathRepair[];
   displayOverride?: boolean;
   toolCallId?: string;
   toolName?: string;
@@ -109,6 +114,8 @@ export interface TranscriptDraft {
   content?: string | null;
   images?: MessageImage[];
   attachments?: MessageAttachment[];
+  /** 11.2 — what pure corrected in the draft before sending (see TranscriptEntry). */
+  pathRepairs?: PathRepair[];
   displayOverride?: boolean;
   analysis?: string;
   thinking?: string;
@@ -129,6 +136,8 @@ export interface SessionEvent {
   internal?: boolean;
   images?: MessageImage[];
   attachments?: MessageAttachment[];
+  /** 11.2 — path repairs applied to this user turn (see TranscriptEntry). */
+  pathRepairs?: PathRepair[];
   toolCallId?: string;
   toolName?: string;
   toolCalls?: StoredToolCallInfo[];
@@ -359,6 +368,7 @@ export function createSessionSnapshot(
       internal: message.role === 'user' && message.internal ? true : undefined,
       images: draft.images ?? message.images,
       attachments: draft.attachments ?? message.attachments,
+      pathRepairs: draft.pathRepairs,
       displayOverride: draft.displayOverride,
       toolCallId: message.toolCallId,
       toolName: message.toolName,
@@ -410,6 +420,7 @@ export function mergeSessionSnapshotMetadata(
       content: entry.displayOverride ? entry.content : prior.content || entry.content,
       images: entry.images ?? prior.images,
       attachments: entry.attachments ?? prior.attachments,
+      pathRepairs: entry.pathRepairs ?? prior.pathRepairs,
       displayOverride: entry.displayOverride || prior.displayOverride,
       analysis: entry.analysis ?? prior.analysis,
       thinking: entry.thinking ?? prior.thinking,
@@ -433,7 +444,7 @@ function snapshotV2ToV3(snapshot: SessionSnapshotV2Legacy): SessionSnapshotV3 {
   const events: SessionEvent[] = [];
   for (const entry of snapshot.transcript) {
     if (entry.role === 'user') {
-      events.push({ id: entry.id, type: 'user', content: entry.content ?? '', images: entry.images, attachments: entry.attachments, internal: entry.internal });
+      events.push({ id: entry.id, type: 'user', content: entry.content ?? '', images: entry.images, attachments: entry.attachments, pathRepairs: entry.pathRepairs, internal: entry.internal });
       continue;
     }
     if (entry.analysis) events.push({ id: `${entry.id}-analysis`, type: 'analysis', content: entry.analysis });
