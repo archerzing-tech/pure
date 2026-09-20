@@ -29,6 +29,8 @@ import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
+import type { SubagentDefinition } from '../coding-agent/types';
+import { compileExternalSubagents } from '../harness/externalSubagents';
 import { requestPermission } from './permission';
 import { MemoryStateStore } from '../adapter/storage/MemoryStateStore';
 import {
@@ -630,6 +632,28 @@ async function loadGuiConventions(userWorkspace?: string): Promise<string> {
   } catch {
     return '';
   }
+}
+
+/** 阶段 13.2 (loading half) — external subagent roles from ~/.pure/subagents/*.json.
+ * Scanned once per app run (Rust does the IO, the shared compiler validates);
+ * adding/removing a manifest takes effect on the next app start. Errors are
+ * logged once, never thrown — a broken file must not block a turn. */
+let externalSubagentsPromise: Promise<SubagentDefinition[]> | null = null;
+function loadGuiExternalSubagents(): Promise<SubagentDefinition[]> {
+  externalSubagentsPromise ??= (async () => {
+    if (!isTauriRuntime()) return [];
+    try {
+      const sources = await tauriInvoke<Array<{ file: string; text: string }>>('list_external_subagents');
+      const reserved = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name);
+      const { defs, errors } = compileExternalSubagents(sources ?? [], reserved);
+      for (const line of errors) console.warn(`[external-subagents] ${line}`);
+      return defs;
+    } catch (error) {
+      console.warn('[external-subagents] scan failed:', error);
+      return [];
+    }
+  })();
+  return externalSubagentsPromise;
 }
 
 function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null, toolDefinitions: ToolDefinition[] = [], imageGeneration = false, conventions?: string): string {
@@ -3083,6 +3107,10 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       // roles (task_planner / code_editor / deep_thinker / ui_designer /
       // bash_executor / researcher). Skill toggles gate by role name.
       const allSubagents = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES];
+      // 阶段 13.2 — declarative roles from ~/.pure/subagents/ join the
+      // delegation surface. They skip the skill toggles (they aren't skills)
+      // and can never shadow a built-in (the compiler rejects the collision).
+      const externalSubagents = await loadGuiExternalSubagents();
       const subagents = (() => {
         const keep = allSubagents.filter((def) => {
           if (def.name === 'task_planner') return config.skills?.planning ?? true;
@@ -3091,7 +3119,9 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
           if (def.name === 'researcher') return config.skills?.['web-research'] ?? true;
           return true;
         });
-        return keep.length === allSubagents.length ? undefined : keep;
+        const kept = keep.length === allSubagents.length ? undefined : keep;
+        if (!externalSubagents.length) return kept;
+        return [...(kept ?? allSubagents), ...externalSubagents];
       })();
 
       // Names of every subagent the model may delegate to — used to tag a
