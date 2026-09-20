@@ -225,9 +225,26 @@ export interface ToolRowHandle {
   resultEl: HTMLElement;
   expandButton: HTMLButtonElement;
   toolName: string;
+  // Delegation run id (ag-xxxxxxxx) once the SubagentActivity events or the
+  // terminal result delivered it — shown as a chip next to the 子 Agent badge.
+  agentId?: string;
   // Browser interval id for the "已运行 Ns" pending heartbeat (see
   // startElapsedTicker); undefined when no window (DOM tests) or after stop.
   elapsedTimer?: number;
+}
+
+/** Show the run id chip on a delegation card's summary line. Idempotent; safe
+ *  to call repeatedly as events/finalize rediscover the same id. */
+export function setToolRowAgentId(handle: ToolRowHandle, agentId: string): void {
+  if (!agentId || handle.agentId === agentId) return;
+  handle.agentId = agentId;
+  const badge = handle.details.querySelector('.tool-row-agent-badge');
+  if (!badge || badge.nextElementSibling?.classList.contains('tool-row-agent-id')) return;
+  const chip = document.createElement('span');
+  chip.className = 'tool-row-agent-id';
+  chip.textContent = agentId;
+  chip.title = 'Agent 运行 ID：报错或异常时引用它定位这个 agent';
+  badge.after(chip);
 }
 
 // Every tool row is a live execution trace. Open it initially so the user can
@@ -549,7 +566,8 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   name.title = toolDisplayName(toolName);
 
   // Identity chip for delegations — the same cyan "Agent" badge the floating
-  // rail uses, so the transcript and the rail speak one language.
+  // rail uses, so the transcript and the rail speak one language. The run id
+  // chip arrives later via setToolRowAgentId (SubagentActivity events).
   const summaryItems: HTMLElement[] = [icon, name];
   if (isSubagentTool(toolName)) {
     const agentBadge = document.createElement('span');
@@ -976,7 +994,9 @@ export function formatSubagentTraceLine(e: SubagentActivityEvent): string | null
       // 读起来像死了。同一行随每次 tick 刷新，恢复出字后由正常行接管。
       return `⏳ ${who} 在等模型响应（可能是限流排队）——卡住会自动重试`;
     case 'error':
-      return `✗ ${who} 中断${e.error ? `：${clipSummary(e.error)}` : ''}`;
+      // The id rides the error line: a pasted traceback or screenshot is then
+      // locatable by grepping that one token in the transcript/dump.
+      return `✗ ${e.agentId ? `[${e.agentId}] ` : ''}${who} 中断${e.error ? `：${clipSummary(e.error)}` : ''}`;
     default:
       return null;
   }

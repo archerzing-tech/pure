@@ -165,9 +165,21 @@ export function createAgentActivityPanel(
       // Row 2: the machine id in FULL (web_searcher / code_reviewer / …) —
       // wraps instead of ellipsizing so the exact agent is always readable.
       const numbered = (nameCounts.get(activity.agentName) ?? 0) > 1 && activity.instanceNo !== undefined;
-      entry.name.textContent = numbered
-        ? `${activity.agentName}（${activity.instanceNo}）`
-        : activity.agentName;
+      entry.name.replaceChildren();
+      entry.name.append(
+        document.createTextNode(numbered
+          ? `${activity.agentName}（${activity.instanceNo}）`
+          : activity.agentName),
+      );
+      // The run id rides the name row as a quiet chip: every agent is
+      // individually quotable when something goes wrong ("ag-1a2b3c4d 报错了").
+      if (activity.agentId) {
+        const idChip = document.createElement('span');
+        idChip.className = 'agent-worker-id';
+        idChip.textContent = activity.agentId;
+        idChip.title = 'Agent 运行 ID：报错或异常时引用它定位这个 agent';
+        entry.name.append(idChip);
+      }
       entry.row.title = activity.agentRole || activity.agentName;
       entry.time.textContent = startedClock(activity.startedAt);
       list.appendChild(entry.row);

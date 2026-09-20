@@ -65,6 +65,10 @@ export interface SubagentToolTrace {
 export interface SubagentActivity {
   /** Parent tool-call id that spawned this subagent (stable UI key). */
   callId: string;
+  /** Short quotable run id (ag-xxxxxxxx) shown on cards and embedded in
+   *  terminal results — the locator when a specific run needs to be found in
+   *  logs, transcripts, or a bug report. */
+  agentId?: string;
   /** Subagent definition name, e.g. 'code_editor'. */
   agentName: string;
   /** Human description of the subagent's role. */
@@ -146,6 +150,16 @@ export function deriveSubagentBudget(parent: BudgetConfig): BudgetConfig {
     warningThreshold: parent.warningThreshold ?? 0.8,
     graceTurns: parent.graceTurns ?? 1,
   };
+}
+
+/** Short random run id (`ag-` + 8 lowercase hex). WebCrypto is available in
+ *  every runtime pure runs in (WebView, bun tests, CLI); a module-level helper
+ *  so tests can assert the shape. */
+export function makeAgentId(): string {
+  const bytes = new Uint8Array(4);
+  globalThis.crypto.getRandomValues(bytes);
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `ag-${hex}`;
 }
 
 export interface SubagentOrchestratorConfig {
@@ -341,8 +355,15 @@ export class SubagentOrchestrator implements ToolAdapter {
       sequence: ++progressSequence,
       lastUpdatedAt: Date.now(),
     });
+    // Short, quotable run id (ag- + 8 hex): the locator a user pastes back when
+    // something went wrong. The toolCallId is the durable key but it is a
+    // UUID — useless to read aloud or grep casually. The agentId rides EVERY
+    // activity emit, the terminal tool result, and the persisted roster, so a
+    // card, an error line, and a session.json dump all point at the same run.
+    const agentId = makeAgentId();
     const activity = (): SubagentActivity => ({
       callId: toolCall.id,
+      agentId,
       agentName: def.name,
       agentRole: def.description,
       timeoutMs,
@@ -577,6 +598,7 @@ export class SubagentOrchestrator implements ToolAdapter {
             toolName: def.name,
             result: {
               id: toolCall.id,
+              agentId,
               agentName: def.name,
               success: true,
               output: finalOutput,
@@ -601,7 +623,7 @@ export class SubagentOrchestrator implements ToolAdapter {
               return {
                 id: toolCall.id,
                 toolName: def.name,
-                result: { aborted: true, reason: pausedNote, finalOutput },
+                result: { aborted: true, agentId, reason: pausedNote, finalOutput },
                 success: false,
                 duration: done(0),
               };
@@ -621,7 +643,7 @@ export class SubagentOrchestrator implements ToolAdapter {
             return {
               id: toolCall.id,
               toolName: def.name,
-              result: { aborted: true, reason: timeoutNote, finalOutput },
+              result: { aborted: true, agentId, reason: timeoutNote, finalOutput },
               success: false,
               duration: done(0),
             };
@@ -645,7 +667,7 @@ export class SubagentOrchestrator implements ToolAdapter {
             id: toolCall.id,
             toolName: def.name,
             error: event.payload.reason,
-            result: { aborted: false, reason: event.payload.reason, finalOutput },
+            result: { aborted: false, agentId, reason: event.payload.reason, finalOutput },
             success: false,
             duration: done(0),
           };
@@ -676,6 +698,7 @@ export class SubagentOrchestrator implements ToolAdapter {
             id: toolCall.id,
             toolName: def.name,
             error: errorText,
+            result: { agentId },
             success: false,
             duration: done(0),
           };
@@ -690,6 +713,7 @@ export class SubagentOrchestrator implements ToolAdapter {
 
       const result: SubagentResult = {
         id: toolCall.id,
+        agentId,
         agentName: def.name,
         success: true,
         output: finalOutput,
@@ -710,6 +734,7 @@ export class SubagentOrchestrator implements ToolAdapter {
         id: toolCall.id,
         toolName: def.name,
         error: err?.message ?? String(err),
+        result: { agentId },
         success: false,
         duration: done(0),
       };

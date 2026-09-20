@@ -47,6 +47,10 @@ export interface TranscriptEntry {
 
 export interface SessionAgentActivity {
   callId: string;
+  /** Short quotable run id (ag-xxxxxxxx) shown on the card — quote it when
+   *  reporting a problem with a specific agent run; it matches the id in the
+   *  transcript's delegation card, the error lines, and the session dump. */
+  agentId?: string;
   agentName: string;
   /** 1-based instance number among THIS task's delegations of the same agent
    * name (the 3rd ui_designer of a task is 3). Assigned by the host when the

@@ -66,7 +66,7 @@ import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './art
 import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, isWebSearchLike, toolGridClass, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, setToolRowAgentId, isWebSearchLike, toolGridClass, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
@@ -4387,6 +4387,9 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
             if (trace.length > MAX_LIVE_STREAM_LINES) trace.splice(0, trace.length - MAX_LIVE_STREAM_LINES);
             const agentRow = pendingRows.get(activity.callId);
             if (agentRow) {
+              // Stamp the run id onto the card the moment events name it —
+              // the chip is the quotable locator for this specific agent.
+              if (activity.agentId) setToolRowAgentId(agentRow.row, activity.agentId);
               agentRow.subagentTrace = trace;
               appendToolStreamLine(agentRow.row, activity.kind === 'error' ? 'stderr' : 'stdout', line);
               scrollChatToBottomIfPinned(chatEl);
@@ -4562,6 +4565,12 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
               // collapses onto it instead of rendering twice.
               if (pending.args) completedToolRowKeys.set(`${toolName}::${stableArgsStringify(pending.args)}`, pending);
               if (pending.toolCallId && subagentNames.has(pending.toolName)) pending.row.el.dataset.agentCallId = pending.toolCallId;
+              // Terminal stamp: the delegation result payload carries the same
+              // run id the activity events showed — idempotent when already set.
+              if (event.payload.result.result && typeof event.payload.result.result === 'object') {
+                const rid = (event.payload.result.result as { agentId?: unknown }).agentId;
+                if (typeof rid === 'string') setToolRowAgentId(pending.row, rid);
+              }
               finalizeToolRow(pending.row, {
                 success: event.payload.result.success,
                 duration,

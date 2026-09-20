@@ -493,6 +493,9 @@ export interface AsyncQueueLike<T> extends AsyncIterableIterator<T> {
 export interface SubagentActivityEvent {
   /** Delegation toolCallId that spawned this subagent. */
   callId: string;
+  /** Short quotable run id (ag-xxxxxxxx) shown on cards and error lines —
+   *  the locator when one specific run needs to be found or reported. */
+  agentId?: string;
   agentName: string;
   agentRole?: string;
   kind: 'start' | 'state' | 'tool' | 'done' | 'error' | 'paused' | 'steered' | 'waiting';
