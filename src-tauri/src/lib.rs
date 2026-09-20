@@ -7235,6 +7235,44 @@ fn list_app_skills(workspace: String) -> Vec<serde_json::Value> {
     out
 }
 
+/// 阶段 13.2 (loading half) — external subagent roles. Every `*.json` in
+/// `~/.pure/subagents/` is a declarative role manifest; this scans the
+/// directory and hands the raw texts to the frontend, where
+/// `compileExternalSubagents` (single source of truth, unit-tested in TS)
+/// validates and compiles them into SubagentDefinitions. Rust only does IO —
+/// the same split as list_app_skills. `PURE_SUBAGENTS_DIR` overrides the
+/// directory for tests.
+fn external_subagents_dir() -> PathBuf {
+    let base = std::env::var("PURE_SUBAGENTS_DIR").unwrap_or_else(|_| format!("{}/.pure", pure_home_dir()));
+    PathBuf::from(base).join("subagents")
+}
+
+#[tauri::command]
+fn list_external_subagents() -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let dir = external_subagents_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".json"))
+        .collect();
+    names.sort();
+    for name in names {
+        let Ok(text) = std::fs::read_to_string(dir.join(&name)) else {
+            continue;
+        };
+        out.push(serde_json::json!({
+            "file": name,
+            "text": text,
+        }));
+    }
+    out
+}
+
 /// Directories the app reads skills from, for the Settings → Skills "open
 /// folder" affordance. `project` is null when no workspace is set, so the
 /// frontend never has to expand `~` or join workspace paths itself.
@@ -15787,6 +15825,7 @@ pub fn run() {
             check_system_permission,
             request_system_permission,
             list_app_skills,
+            list_external_subagents,
             app_skills_dirs,
             write_app_skill,
             delete_app_skill,
