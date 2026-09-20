@@ -174,6 +174,9 @@ export interface SubagentDefinition extends TaggedTool {
 
 export interface SubagentResult {
   id: string;
+  /** Short quotable run id (ag-xxxxxxxx) — the locator across cards, errors,
+   *  and persisted transcripts for this specific delegation run. */
+  agentId?: string;
   agentName: string;
   success: boolean;
   output?: string;
