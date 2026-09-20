@@ -115,11 +115,18 @@ export class InlineAutocomplete {
   private queryTimer: number | null = null;
   private candidatesPromise: Promise<AutocompleteCandidate[]> | null = null;
   private suppressNextInput = false;
+  /** IME composition (拼音→汉字) owns the keyboard while it runs. */
+  private composing = false;
+  /** Whether the user has touched the popup itself (arrows / mouse). Enter
+   *  only accepts a candidate once this is true — see onKeydown. */
+  private userNavigated = false;
 
   constructor(input: HTMLTextAreaElement, private readonly sources: AutocompleteSources = {}) {
     this.input = input;
     input.addEventListener('input', this.onInput);
     input.addEventListener('keydown', this.onKeydown);
+    input.addEventListener('compositionstart', this.onCompositionStart);
+    input.addEventListener('compositionend', this.onCompositionEnd);
     input.addEventListener('blur', this.close);
     input.addEventListener('scroll', this.close);
   }
@@ -128,9 +135,26 @@ export class InlineAutocomplete {
     this.close();
     this.input.removeEventListener('input', this.onInput);
     this.input.removeEventListener('keydown', this.onKeydown);
+    this.input.removeEventListener('compositionstart', this.onCompositionStart);
+    this.input.removeEventListener('compositionend', this.onCompositionEnd);
     this.input.removeEventListener('blur', this.close);
     this.input.removeEventListener('scroll', this.close);
   }
+
+  /**
+   * 输入法组字（拼音→汉字）时，键盘是输入法的：那个 Enter 是确认候选字，不是
+   * 给这个弹窗的命令。main.ts 发给引擎的 Enter 早就这么防了，这里当初漏了 ——
+   * 后果是在中文句子里插进一条历史命令（用户完全没打过的东西），而且整个弹窗
+   * 会把组字过程中的 input 事件当成"前缀查询"，边拼边弹。
+   */
+  private readonly onCompositionStart = (): void => {
+    this.composing = true;
+    this.close();
+  };
+
+  private readonly onCompositionEnd = (): void => {
+    this.composing = false;
+  };
 
   private currentToken(): { token: string; start: number } | null {
     const caret = this.input.selectionStart ?? this.input.value.length;
@@ -145,6 +169,9 @@ export class InlineAutocomplete {
       this.suppressNextInput = false;
       return;
     }
+    // Mid-composition text is a pinyin buffer, not a prefix the user meant to
+    // search with: querying it opens a popup over the sentence being typed.
+    if (this.composing) return;
     this.close();
     const tok = this.currentToken();
     if (!tok || tok.token.length < 2) return;
@@ -178,6 +205,7 @@ export class InlineAutocomplete {
     this.items = items;
     this.tokenStart = tokenStart;
     this.activeIndex = 0;
+    this.userNavigated = false;
 
     this.popup = document.createElement('div');
     this.popup.className = 'ac-popup';
@@ -197,6 +225,7 @@ export class InlineAutocomplete {
       row.append(kind, text);
       row.addEventListener('mouseenter', () => {
         this.activeIndex = index;
+        this.userNavigated = true;
         this.highlight();
       });
       row.addEventListener('mousedown', (e) => e.preventDefault());
@@ -246,15 +275,33 @@ export class InlineAutocomplete {
 
   private readonly onKeydown = (e: KeyboardEvent): void => {
     if (!this.open) return;
+    // The IME gets the keyboard first — see onCompositionStart.
+    if (this.composing || e.isComposing || e.keyCode === 229) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       this.activeIndex = (this.activeIndex + 1) % this.items.length;
+      this.userNavigated = true;
       this.highlight();
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       this.activeIndex = (this.activeIndex - 1 + this.items.length) % this.items.length;
+      this.userNavigated = true;
       this.highlight();
-    } else if (e.key === 'Enter' || e.key === 'Tab') {
+    } else if (e.key === 'Tab') {
+      // Tab has no other meaning in a composer, so it accepts unconditionally.
+      e.preventDefault();
+      this.choose(this.activeIndex);
+    } else if (e.key === 'Enter') {
+      // Enter means "send" unless the user has demonstrably stepped INTO this
+      // popup (arrows or mouse): a popup that opens by itself while someone
+      // types must never overwrite their draft with a stored command. That
+      // splice — usually a 300-char shell line the agent once ran — is exactly
+      // the "text I never typed" bug; closing and falling through here keeps
+      // the message going out as written.
+      if (!this.userNavigated) {
+        this.close();
+        return;
+      }
       e.preventDefault();
       this.choose(this.activeIndex);
     } else if (e.key === 'Escape') {
