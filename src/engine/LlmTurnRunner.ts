@@ -24,6 +24,9 @@ export interface LlmTurnRunnerOptions {
   tools: ToolDefinition[];
   signal?: AbortSignal;
   timeoutMs: number;
+  /** First-chunk ceiling (see BudgetConfig.firstTokenTimeoutMs); default keeps
+   * the historical 5-minute tolerance for parent conversations. */
+  firstTokenTimeoutMs?: number;
   onChunk?: (chunk: LLMChunk) => void;
 }
 
@@ -32,7 +35,7 @@ function contentLooksTruncated(text: string): boolean {
 }
 
 export async function* streamLlmTurn(options: LlmTurnRunnerOptions): AsyncGenerator<LLMChunk, void, void> {
-  yield* streamWithDeadline(options.llm, options.messages, options.tools, options.signal, options.timeoutMs);
+  yield* streamWithDeadline(options.llm, options.messages, options.tools, options.signal, options.timeoutMs, options.firstTokenTimeoutMs);
 }
 
 export async function runLlmTurn(options: LlmTurnRunnerOptions): Promise<LlmTurnResult> {

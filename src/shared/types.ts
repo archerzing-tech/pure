@@ -151,6 +151,17 @@ export interface BudgetConfig {
   hardMaxTurns?: number;
   hardMaxTokens?: number;
   hardMaxTime?: number;
+  /**
+   * Ceiling for ONE LLM stream round to produce its FIRST chunk (any token /
+   * reasoning delta / tool-call delta counts). A connection that accepts but
+   * never streams is a queued or dead provider, not slow generation —
+   * reasoning models emit reasoning_content deltas as they think, so real
+   * work flips this clock within seconds. Default 5 min (parent conversations
+   * tolerate long queues); subagent budgets tighten it (deriveSubagentBudget)
+   * so a stalled fan-out sibling fails fast into the retry policy instead of
+   * holding the whole batch as silent gray cards.
+   */
+  firstTokenTimeoutMs?: number;
 }
 
 export interface RunInput {
@@ -484,7 +495,7 @@ export interface SubagentActivityEvent {
   callId: string;
   agentName: string;
   agentRole?: string;
-  kind: 'start' | 'state' | 'tool' | 'done' | 'error' | 'paused' | 'steered';
+  kind: 'start' | 'state' | 'tool' | 'done' | 'error' | 'paused' | 'steered' | 'waiting';
   state?: string;
   /** The tool the subagent invoked (kind 'tool'). */
   toolName?: string;
