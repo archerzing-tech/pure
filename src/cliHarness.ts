@@ -13,6 +13,9 @@ import { SQLiteStore } from './adapter/storage/SQLiteStore';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
+import { compileExternalSubagents } from './harness/externalSubagents';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler, createCliHookGate } from './cli_permission';
 import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
@@ -310,7 +313,27 @@ async function createHarness(args: CliArgs) {
     // and the coding roles (task_planner / code_editor / researcher /
     // ui_designer / deep_thinker / bash_executor), so the CLI can satisfy the
     // multi_agent protocol instead of only being able to review/audit.
-    for (const def of [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES]) {
+    // 阶段 13.2 — declarative roles from ~/.pure/subagents/*.json join the
+    // surface too (compile once at startup; a broken file warns and is skipped).
+    const externalRoles = (() => {
+      const dir = process.env.PURE_SUBAGENTS_DIR
+        ?? join(process.env.HOME ?? process.env.USERPROFILE ?? '.', '.pure', 'subagents');
+      let sources: { file: string; text: string }[] = [];
+      try {
+        sources = readdirSync(dir).filter((f) => f.endsWith('.json')).sort().map((file) => ({
+          file,
+          text: readFileSync(join(dir, file), 'utf8'),
+        }));
+      } catch {
+        return { defs: [], errors: [] as string[] };
+      }
+      const reserved = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name);
+      return compileExternalSubagents(sources, reserved);
+    })();
+    for (const line of externalRoles.errors) {
+      process.stderr.write(`  ${yellow('[external-subagents]')} ${dim(line)}\n`);
+    }
+    for (const def of [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES, ...externalRoles.defs]) {
       orchestrator.register(def);
       tools.register(def);
     }
