@@ -79,8 +79,11 @@ export interface SubagentActivity {
   output?: string;
   /** Explicit lifecycle status used to derive the current active-agent set.
    * 'steered' (北极星第二步): a mid-run user steer was injected into this
-   * subagent's next THINK — a momentary receipt, the run itself continues. */
-  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused' | 'steered';
+   * subagent's next THINK — a momentary receipt, the run itself continues.
+   * 'waiting': no progress for 30s (usually the model endpoint queueing) —
+   * the run is alive but the provider is silent; reported so the card never
+   * reads as dead. */
+  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused' | 'steered' | 'waiting';
   /** High-level outcome (filled by onStart/onDone/onError). */
   status?: SubagentStatus;
   /** Monotonic per-call progress sequence; stale UI updates must be ignored. */
@@ -135,6 +138,11 @@ export function deriveSubagentBudget(parent: BudgetConfig): BudgetConfig {
     // re-delegation hint the parent model could ignore.
     maxExecutionTime: Math.min(parent.maxExecutionTime, 1_800_000),
     hardMaxTime: Math.min(parent.maxExecutionTime, 600_000),
+    // 首 token 90 秒（父会话默认 5 分钟）：免费档并发排队/僵死连接曾把一整批
+    // 委派拖成无声灰卡 5 分钟（2026-09-20 "两个子 agent 无法执行"）。90 秒内
+    // 一个字都没吐的连接是排队或挂了，快速失败进 failurePolicy 重试，健康但
+    // 慢的生成不受影响——reasoning 模型思考时会持续吐 reasoning 增量。
+    firstTokenTimeoutMs: 90_000,
     warningThreshold: parent.warningThreshold ?? 0.8,
     graceTurns: parent.graceTurns ?? 1,
   };
@@ -366,16 +374,33 @@ export class SubagentOrchestrator implements ToolAdapter {
     const watchdog = new AbortController();
     let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
     let toolInFlight = false;
+    let lastProgressAt = Date.now();
+    // 卡片活性播报（2026-09-20 "两个子 agent 无法执行"）：子代理卡在"模型不吐
+    // 字"时（免费档并发排队是常态），卡片不该一声不吭地灰着——每 30s 无进展
+    // 就报一条 waiting，用户看得见"在等模型"，而不是"死了"。工具在跑时安静：
+    // trace 行已经显示它在执行什么。
+    const STALL_TICK_MS = 30_000;
+    let stallTimer: ReturnType<typeof setInterval> | undefined;
     const stopWatchdogTimer = (): void => {
       if (watchdogTimer !== undefined) {
         clearTimeout(watchdogTimer);
         watchdogTimer = undefined;
       }
+      if (stallTimer !== undefined) {
+        clearInterval(stallTimer);
+        stallTimer = undefined;
+      }
     };
     const kickWatchdog = (): void => {
+      lastProgressAt = Date.now();
       if (toolInFlight) return;
       stopWatchdogTimer();
       watchdogTimer = setTimeout(() => watchdog.abort(), noProgressMs);
+      stallTimer = setInterval(() => {
+        if (toolInFlight) return;
+        if (Date.now() - lastProgressAt < STALL_TICK_MS) return;
+        emit(progress?.onState, { state: 'THINK', lifecycle: 'waiting' });
+      }, STALL_TICK_MS);
     };
 
     // Build combined signal: parent abort OR total wall clock OR liveness.

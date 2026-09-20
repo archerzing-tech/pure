@@ -20,6 +20,14 @@ describe('BudgetManager', () => {
     expect(bm.check()).toBe('ok');
   });
 
+  it('defaults the first-token ceiling to 5 min and honors an override', () => {
+    // Parent conversations keep the historical tolerance; subagent budgets
+    // (deriveSubagentBudget) override it to 90s so a stalled provider fails
+    // fast instead of holding a fan-out batch as silent cards.
+    expect(new BudgetManager(BASE).streamFirstTokenMs()).toBe(300_000);
+    expect(new BudgetManager({ ...BASE, firstTokenTimeoutMs: 90_000 }).streamFirstTokenMs()).toBe(90_000);
+  });
+
   it('returns warning at threshold', () => {
     const bm = new BudgetManager({ ...BASE, maxTurns: 10 });
     for (let i = 0; i < 8; i++) bm.incrementTurn();

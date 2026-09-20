@@ -110,6 +110,15 @@ export class BudgetManager {
     return softLeft > 0 ? softLeft : Math.max(1, this.config.maxExecutionTime);
   }
 
+  /**
+   * First-chunk ceiling for one stream round (see BudgetConfig). A stalled
+   * connection is a provider problem, not slow generation — reasoning models
+   * emit reasoning deltas while they think, so genuine work never trips this.
+   */
+  streamFirstTokenMs(): number {
+    return this.config.firstTokenTimeoutMs ?? 300_000;
+  }
+
   snapshot(): BudgetSnapshot {
     return {
       turns: { used: this.turnCount, max: this.config.maxTurns },

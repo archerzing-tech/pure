@@ -8,6 +8,8 @@ function makeLifecycleError(name: 'AbortError' | 'TimeoutError', message: string
   return error;
 }
 
+export { FIRST_TOKEN_TIMEOUT_MS };
+
 export function runWithDeadline<T>(
   operation: () => Promise<T> | T,
   signal: AbortSignal | undefined,
@@ -57,6 +59,7 @@ export async function* streamWithDeadline(
   tools: ToolDefinition[],
   signal: AbortSignal | undefined,
   timeoutMs: number,
+  firstTokenTimeoutMs: number = FIRST_TOKEN_TIMEOUT_MS,
 ): AsyncGenerator<LLMChunk, void, void> {
   const linkedController = new AbortController();
   const forwardAbort = (): void => linkedController.abort();
@@ -66,7 +69,7 @@ export async function* streamWithDeadline(
   let firstChunk = true;
   try {
     while (true) {
-      const idleCap = firstChunk ? FIRST_TOKEN_TIMEOUT_MS : 120_000;
+      const idleCap = firstChunk ? firstTokenTimeoutMs : 120_000;
       const remaining = Math.min(deadline - Date.now(), idleCap);
       if (remaining <= 0) {
         linkedController.abort();
@@ -78,7 +81,11 @@ export async function* streamWithDeadline(
         () => iterator.next(),
         signal,
         remaining,
-        'LLM stream read',
+        // The label rides into the TimeoutError text: a stall BEFORE the first
+        // chunk is a provider problem (queue/dead endpoint) and must read as
+        // one — "stream read timed out after 0s" sent users hunting for a
+        // network bug that isn't theirs.
+        firstChunk ? 'LLM stream first token' : 'LLM stream read',
         () => linkedController.abort(),
       );
       if (next.done) return;

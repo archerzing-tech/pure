@@ -361,6 +361,15 @@ describe('deriveSubagentBudget (code_reviewer timeout regression)', () => {
     expect(sub.maxTotalTokens).toBeLessThanOrEqual(200_000);
   });
 
+  it('gives subagents a 90s first-token ceiling (stalled fan-out siblings fail fast)', () => {
+    // 2026-09-20: two of a fan-out batch never produced a token; the shared
+    // 5-minute first-token deadline held the whole tool batch as silent gray
+    // cards until the user gave up. Subagents must hit the retry policy in
+    // seconds-to-a-minute, not minutes; the parent keeps the 5-min default.
+    const sub = deriveSubagentBudget(PARENT);
+    expect(sub.firstTokenTimeoutMs).toBe(90_000);
+  });
+
   it('keeps a smaller parent budget tight', () => {
     const sub = deriveSubagentBudget({ maxTurns: 3, maxTotalTokens: 8000, maxExecutionTime: 30000, warningThreshold: 0.8, graceTurns: 1 });
     expect(sub.maxTurns).toBe(3);

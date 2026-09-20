@@ -349,6 +349,7 @@ export class AgentLoopEngine {
           tools: toolsDefs,
           signal: ctx.signal,
           timeoutMs: streamTimeoutMs,
+          firstTokenTimeoutMs: budget.streamFirstTokenMs(),
         })) {
           switch (chunk.type) {
             case 'content':
