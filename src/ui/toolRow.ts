@@ -971,6 +971,10 @@ export function formatSubagentTraceLine(e: SubagentActivityEvent): string | null
       // 北极星第二步: delivery receipt for a mid-run steer — the user's own
       // bubble is already on screen; this line closes the "did it land?" loop.
       return `📨 ${who} 收到你的插话，并入它的下一步`;
+    case 'waiting':
+      // 模型端静默 ≥30s（免费档并发排队最常见）：明说"在等模型"，别让卡片
+      // 读起来像死了。同一行随每次 tick 刷新，恢复出字后由正常行接管。
+      return `⏳ ${who} 在等模型响应（可能是限流排队）——卡住会自动重试`;
     case 'error':
       return `✗ ${who} 中断${e.error ? `：${clipSummary(e.error)}` : ''}`;
     default:
