@@ -92,6 +92,22 @@ export function toolCardKind(toolName: string): ToolCardKind {
 }
 
 /**
+ * Class string for a tool-round grid, shared by live rendering (chat.ts) and
+ * session replay (main.ts) so the two never drift.
+ *
+ * Agent runs carry an extra modifier: three parallel colleagues in one row at
+ * the default 240px minimum squeezed each card down to ~255px, where the role
+ * label (资料调研) broke into a vertical stack of single characters and the
+ * args collapsed to zero width (2026-09-20 user report). `.tool-grid--agents`
+ * raises the minimum column so the agents wrap to the next row instead of
+ * being crushed — at the regular 876px transcript width three still share one
+ * row.
+ */
+export function toolGridClass(kind: ToolCardKind): string {
+  return kind === 'agent' ? 'bubble-row tool-grid tool-grid--agents' : 'bubble-row tool-grid';
+}
+
+/**
  * Group a round's tool cards into CONSECUTIVE same-kind runs: a kind change
  * opens a new row BELOW, never back into an earlier row. The transcript must
  * stay a monotone timeline — 分类不能重排时间顺序：[sys_info, agent×3] splits
