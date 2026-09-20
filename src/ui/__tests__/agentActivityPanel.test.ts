@@ -58,6 +58,16 @@ describe('agent activity panel', () => {
     expect(isAgentActivityActive(activity({ lifecycle: 'cancelled', status: 'cancelled' }))).toBe(false);
   });
 
+  it('keeps the quotable run id as a chip on the floating card (the transcript card carries none)', () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([activity({ agentId: 'ag-493f7261' })]);
+
+    const chip = panel.el.querySelector('[data-call-id="call-1"] .agent-worker-id');
+    expect(chip?.textContent).toBe('ag-493f7261');
+    panel.el.remove();
+  });
+
   it('keeps task context when a later activity update only changes the state', () => {
     const initial = activity({ inputSnippet: '检查权限边界', startedAt: 1234, timeoutMs: 60000 });
     const merged = mergeAgentActivity(initial, { callId: initial.callId, agentName: initial.agentName, state: 'VERIFY' });
@@ -180,7 +190,7 @@ describe('agent activity panel', () => {
     panel.el.remove();
   });
 
-  it('numbers repeated delegations of the same agent (ui_designer（1）（2）…)', () => {
+  it('renders repeated delegations of the same agent under the bare name (no （1）（2）… suffixes)', () => {
     const panel = createAgentActivityPanel();
     document.body.appendChild(panel.el);
     panel.update([
@@ -193,11 +203,11 @@ describe('agent activity panel', () => {
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(4);
     const nameOf = (id: string): string =>
       panel.el.querySelector(`[data-call-id="${id}"] .agent-worker-name`)?.textContent ?? '';
-    // Every instance of the repeated name gets its number…
-    expect(nameOf('d1')).toBe('ui_designer（1）');
-    expect(nameOf('d2')).toBe('ui_designer（2）');
-    expect(nameOf('d3')).toBe('ui_designer（3）');
-    // …while a name that appears once stays bare.
+    // The instance number stays dispatch-order bookkeeping — the card itself
+    // shows the plain agent name, however many times it was delegated.
+    expect(nameOf('d1')).toBe('ui_designer');
+    expect(nameOf('d2')).toBe('ui_designer');
+    expect(nameOf('d3')).toBe('ui_designer');
     expect(nameOf('s1')).toBe('code_editor');
     panel.el.remove();
   });

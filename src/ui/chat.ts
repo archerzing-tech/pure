@@ -66,7 +66,7 @@ import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './art
 import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, setToolRowAgentId, isWebSearchLike, toolGridClass, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, isWebSearchLike, toolGridClass, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
@@ -495,7 +495,9 @@ export function parseToolCallBuffer(buf: string | undefined): { name?: string; a
 
 // Resolve every still-pending tool row (stream ended without a ToolResult —
 // aborted mid-call, error, or budget stop) so none remains in `pending` state.
-// Rows stay in the transcript, marked stopped (⏹) instead of dismissed.
+// Rows stay in the transcript, marked stopped (⏹) instead of dismissed, and
+// carry one muted line saying WHY — a bare gray card reads as a mystery
+// ("这张卡为什么是灰的"), the line turns it into a legible interruption.
 // The per-call parse-throttle map is cleared alongside so stale keys never
 // accumulate across turns.
 function resolvePendingToolRows(refresh: Map<string, number>, ...maps: Map<string, ToolRowEntry>[]): void {
@@ -503,6 +505,7 @@ function resolvePendingToolRows(refresh: Map<string, number>, ...maps: Map<strin
   for (const map of maps) {
     for (const [, entry] of map) {
       markToolRowStopped(entry.row);
+      appendToolStreamLine(entry.row, 'stdout', '本轮输出在此中断，该调用未执行完成');
     }
     map.clear();
   }
@@ -4387,9 +4390,9 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
             if (trace.length > MAX_LIVE_STREAM_LINES) trace.splice(0, trace.length - MAX_LIVE_STREAM_LINES);
             const agentRow = pendingRows.get(activity.callId);
             if (agentRow) {
-              // Stamp the run id onto the card the moment events name it —
-              // the chip is the quotable locator for this specific agent.
-              if (activity.agentId) setToolRowAgentId(agentRow.row, activity.agentId);
+              // The run id deliberately does NOT decorate the transcript card —
+              // the floating rail card carries the id chip (and error trace
+              // lines quote it); the conversation keeps clean cards.
               agentRow.subagentTrace = trace;
               appendToolStreamLine(agentRow.row, activity.kind === 'error' ? 'stderr' : 'stdout', line);
               scrollChatToBottomIfPinned(chatEl);
@@ -4565,12 +4568,6 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
               // collapses onto it instead of rendering twice.
               if (pending.args) completedToolRowKeys.set(`${toolName}::${stableArgsStringify(pending.args)}`, pending);
               if (pending.toolCallId && subagentNames.has(pending.toolName)) pending.row.el.dataset.agentCallId = pending.toolCallId;
-              // Terminal stamp: the delegation result payload carries the same
-              // run id the activity events showed — idempotent when already set.
-              if (event.payload.result.result && typeof event.payload.result.result === 'object') {
-                const rid = (event.payload.result.result as { agentId?: unknown }).agentId;
-                if (typeof rid === 'string') setToolRowAgentId(pending.row, rid);
-              }
               finalizeToolRow(pending.row, {
                 success: event.payload.result.success,
                 duration,
