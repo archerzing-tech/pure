@@ -29,6 +29,24 @@ describe('Planner', () => {
     expect(result.plan).toBeDefined();
   });
 
+  it('flags the spoken and overwrite forms of destruction', () => {
+    // 2026-09-20: these used to pass as low risk even when spelled correctly —
+    // the floor only knew 删除/移除/清理/销毁/不可逆.
+    for (const draft of ['帮我把 build 目录清空', '删掉这些临时文件', '把缓存删了', '把 config.json 覆盖掉', '把数据库重置一下']) {
+      expect([draft, assessIntent(draft).riskLevel]).toEqual([draft, 'high']);
+    }
+    expect(assessIntent('删掉这些临时文件').requiresConfirmation).toBe(true);
+  });
+
+  it('keeps the benign engineering senses of those words out of the gate', () => {
+    // A UI behaviour, a password-reset feature, and test coverage — each one
+    // would otherwise cost a confirmation and, in the CLI, a whole turn of
+    // auto-approval.
+    for (const draft of ['清空输入框后再发送', '加一个重置密码的入口', '把测试覆盖率提到 90%', '补一下覆盖测试的用例']) {
+      expect([draft, assessIntent(draft).riskLevel]).toEqual([draft, 'low']);
+    }
+  });
+
   it('recommends a read-only probe for broad but recoverable changes (fallback safety net)', () => {
     // 语义路由不可用时，关键词兜底仍要把“重构 / 迁移”这类波及面大的改动标记为中等风险、
     // 需要探针——这是安全兜底策略，不是把用户意图归类为固定类型。
