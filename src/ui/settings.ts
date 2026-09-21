@@ -3506,7 +3506,7 @@ export class SettingsPanel {
     return {
       provider: prev.provider,
       planContinueGuard: prev.planContinueGuard ?? true,
-      sandboxCommands: prev.sandboxCommands ?? true,
+      sandboxCommands: prev.sandboxCommands ?? false,
       customProviders: this.gatherCustomProviders(),
       providerModels: this.gatherProviderModels(),
       providerModelNames: this.gatherProviderModelNames(),

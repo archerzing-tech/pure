@@ -48,7 +48,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(15);
+    expect(cfg.configVersion).toBe(16);
   });
 
   it('moves a non-default global Base URL to the active built-in override', () => {
@@ -61,7 +61,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides.glm?.baseURL).toBe('https://my-gateway.example.com/v1');
-    expect(cfg.configVersion).toBe(15);
+    expect(cfg.configVersion).toBe(16);
   });
 
   it('never overwrites an existing override during migration', () => {
@@ -85,7 +85,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(15);
+    expect(cfg.configVersion).toBe(16);
   });
 
   it('persists the migrated config back to storage (idempotent re-read)', () => {
@@ -95,13 +95,13 @@ describe('config v10 migration — legacy global Base URL', () => {
     });
     loadConfig();
     const persisted = JSON.parse(mem[STORAGE_KEY]!) as PureConfig;
-    expect(persisted.configVersion).toBe(15);
+    expect(persisted.configVersion).toBe(16);
     expect(persisted.baseURL).toBe('');
     expect(persisted.providerOverrides.qwen?.baseURL).toBe('https://gateway.example.com/v1');
     // A second read must not re-migrate or change anything.
     invalidateConfigCache();
     const again = loadConfig()!;
-    expect(again.configVersion).toBe(15);
+    expect(again.configVersion).toBe(16);
     expect(again.baseURL).toBe('');
     expect(again.providerOverrides.qwen?.baseURL).toBe('https://gateway.example.com/v1');
   });
@@ -117,7 +117,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     mem[STORAGE_KEY] = JSON.stringify(v13);
     const cfg = loadConfig()!;
     expect(cfg.providerOverrides.qwen?.baseURL).toBe('https://mirror.example.com/v1');
-    expect(cfg.configVersion).toBe(15);
+    expect(cfg.configVersion).toBe(16);
     // v14: long-task auto-continue becomes default-on for existing configs.
     expect(cfg.autoContinue).toBe(true);
     // Migrated → persisted; a re-read is stable and does NOT re-flip an
@@ -129,7 +129,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     invalidateConfigCache();
     const explicitOff = loadConfig()!;
     expect(explicitOff.autoContinue).toBe(false);
-    expect(explicitOff.configVersion).toBe(15);
+    expect(explicitOff.configVersion).toBe(16);
   });
 
   it('chains older migrations (v1 → v11) without breaking the final state', () => {
@@ -141,7 +141,7 @@ describe('config v10 migration — legacy global Base URL', () => {
       toolBrowser: false, // pre-v2 decorative false must be restored
     });
     const cfg = loadConfig()!;
-    expect(cfg.configVersion).toBe(15);
+    expect(cfg.configVersion).toBe(16);
     expect(cfg.toolBrowser).toBe(true); // v2 restored the real gate
     expect(cfg.baseURL).toBe(''); // v10 scrubbed the global field
     expect(cfg.providerOverrides.glm?.baseURL).toBe('https://gateway.example.com/v1');
@@ -164,7 +164,7 @@ describe('config v11 migration — scrub registry-default override leftovers', (
     });
     const cfg = loadConfig()!;
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(15);
+    expect(cfg.configVersion).toBe(16);
   });
 
   it('removes a cross-provider default (DashScope URL sitting on DeepSeek)', () => {
@@ -251,17 +251,34 @@ describe('config v12 migration — DeepSeek is ONE provider', () => {
     });
   });
 
-  it('stays put when the config is already at v15', () => {
+  it('at v15, only the v16 sandbox reset applies; explicit opt-outs survive', () => {
     const raw = JSON.stringify({ configVersion: 15, provider: 'glm', model: 'glm-5.2', autoContinue: false, permissionMode: 'confirm', autoPermWrite: false, autoPermCmd: false });
     mem[STORAGE_KEY] = raw;
     const cfg = loadConfig()!;
-    expect(cfg.configVersion).toBe(15);
-    // Already at the newest schema → no rewrite, and explicit user opt-outs
-    // (v14 flipped auto-continue once, v15 flipped auto-allow once) are
-    // preserved byte-identically.
+    // v16 (2026-09-21) turns the command sandbox off ONCE — the flag never
+    // had a Settings toggle, so the persisted `true` was gatherForm
+    // backfill, not a deliberate choice.
+    expect(cfg.configVersion).toBe(16);
+    expect(cfg.sandboxCommands).toBe(false);
+    // Deliberate opt-outs for the OTHER flipped defaults stay byte-identical
+    // (v14 flipped auto-continue once, v15 flipped auto-allow once) — v16
+    // touches nothing else.
     expect(cfg.autoContinue).toBe(false);
     expect(cfg.permissionMode).toBe('confirm');
     expect(cfg.autoPermWrite).toBe(false);
+    expect(cfg.autoPermCmd).toBe(false);
+  });
+
+  it('stays put when the config is already at v16', () => {
+    const raw = JSON.stringify({ configVersion: 16, provider: 'glm', model: 'glm-5.2', autoContinue: false, permissionMode: 'confirm', autoPermWrite: false, autoPermCmd: false, sandboxCommands: true });
+    mem[STORAGE_KEY] = raw;
+    const cfg = loadConfig()!;
+    expect(cfg.configVersion).toBe(16);
+    // Already at the newest schema → no rewrite, and even a hand-edited
+    // sandbox opt-in (the flag's only entry point) is preserved as-is.
+    expect(cfg.sandboxCommands).toBe(true);
+    expect(cfg.autoContinue).toBe(false);
+    expect(cfg.permissionMode).toBe('confirm');
     expect(mem[STORAGE_KEY]).toBe(raw);
   });
 });
@@ -281,7 +298,7 @@ describe('config v15 migration — authorization prompts off by default', () => 
     expect(cfg.permissionMode).toBe('auto');
     expect(cfg.autoPermWrite).toBe(true);
     expect(cfg.autoPermCmd).toBe(true);
-    expect(cfg.configVersion).toBe(15);
+    expect(cfg.configVersion).toBe(16);
   });
 
   it('never downgrades an explicit stronger choice (restricted stays)', () => {
@@ -290,7 +307,7 @@ describe('config v15 migration — authorization prompts off by default', () => 
     seedConfig({ provider: 'deepseek-openai', permissionMode: 'restricted' });
     const cfg = loadConfig()!;
     expect(cfg.permissionMode).toBe('restricted');
-    expect(cfg.configVersion).toBe(15);
+    expect(cfg.configVersion).toBe(16);
   });
 
   it('does not re-flip a deliberate opt-out saved after the migration', () => {
@@ -307,7 +324,7 @@ describe('config v15 migration — authorization prompts off by default', () => 
     expect(optOut.permissionMode).toBe('confirm');
     expect(optOut.autoPermWrite).toBe(false);
     expect(optOut.autoPermCmd).toBe(false);
-    expect(optOut.configVersion).toBe(15);
+    expect(optOut.configVersion).toBe(16);
   });
 });
 

@@ -72,11 +72,18 @@ export interface PureConfig {
   toolCardsExpanded: boolean;
   permissionMode: 'auto' | 'confirm' | 'restricted';
   /**
-   * Optional macOS Seatbelt sandbox for agent shell commands (Settings →
-   * Tools). When enabled, commands run under /usr/bin/sandbox-exec with
-   * writes confined to the workspace + temp dirs and network outbound-only —
-   * a kernel-level backstop for high-autonomy runs (auto/confirm-all). No-op
-   * on non-macOS or when sandbox-exec is unavailable. Default: on.
+   * Optional macOS Seatbelt sandbox for agent shell commands. When enabled,
+   * commands run under /usr/bin/sandbox-exec with writes confined to the
+   * workspace + temp dirs and network outbound-only. No-op on non-macOS or
+   * when sandbox-exec is unavailable.
+   *
+   * Default: OFF (config v16, 2026-09-21) — pure's permission mode already
+   * defaults to auto-approve, and auto-approve + kernel write confinement is
+   * a contradictory pair: every pip/venv install into the user home dies with
+   * EPERM ("我的命令沙箱只允许写 /tmp 和工作区"). Full-disk absolute-path
+   * reachability is the product contract; the sandbox stays as an explicit
+   * opt-in backstop (set "sandboxCommands": true in the stored config) for
+   * anyone who wants kernel-level confinement back.
    */
   sandboxCommands: boolean;
   autoPermRead: boolean;
@@ -281,7 +288,7 @@ export function defaults(): PureConfig {
     density: 'comfortable',
     toolCardsExpanded: true,
     permissionMode: 'auto',
-    sandboxCommands: true,
+    sandboxCommands: false,
     autoPermRead: true,
     autoPermWrite: true,
     autoPermCmd: true,
@@ -314,7 +321,7 @@ export function defaults(): PureConfig {
     mapTileCacheMB: DEFAULT_MAP_TILE_CACHE_MB,
     mapTileKey: '',
     schedules: [],
-    configVersion: 15,
+    configVersion: 16,
   };
 }
 
@@ -746,6 +753,19 @@ export function loadConfig(): PureConfig | null {
         cfg.autoPermWrite = true;
         cfg.autoPermCmd = true;
         cfg.configVersion = 15;
+        needsPersist = true;
+      }
+      // Config v16: the command sandbox is OFF by default (2026-09-21 product
+      // decision — full-disk absolute-path reachability is the product
+      // contract, and auto-approve + kernel write confinement contradicted
+      // each other: venv/pip installs into the user home died with EPERM).
+      // Forced ONCE here because the flag never had a Settings toggle, so a
+      // persisted `true` (gatherForm backfilled it on every save since the
+      // key shipped) was something the user could not turn off from the UI.
+      // Setting it back to true afterwards persists (configVersion stays 16).
+      if ((parsed.configVersion ?? 1) < 16) {
+        cfg.sandboxCommands = false;
+        cfg.configVersion = 16;
         needsPersist = true;
       }
       if (isTauriRuntime() && cfg.apiKey) {

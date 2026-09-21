@@ -299,11 +299,14 @@ export class TauriToolAdapter implements ToolAdapter {
   private readonly capabilityHooks?: DynamicCapabilityHooks;
   /** Pass `sandbox: true` to shell-command invocations so the Rust backend
    * wraps them in the macOS Seatbelt profile (workspace-confined writes,
-   * outbound-only network) when available. Default on; user toggleable. */
+   * outbound-only network) when available. Default OFF (config v16,
+   * 2026-09-21): auto-approve + kernel write confinement contradicted each
+   * other — venv installs into the user home died with EPERM. Explicit
+   * opt-in via the config flag only. */
   private readonly sandbox: boolean;
   private readonly mcpCandidates = new Map<string, McpCandidate>();
 
-  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks, sandbox = true) {
+  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks, sandbox = false) {
     this.workspace = workspace;
     this.tavilyApiKey = tavilyApiKey;
     this.serperApiKey = serperApiKey;
