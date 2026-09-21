@@ -214,7 +214,7 @@ describe('ToolExecutionCoordinator relay pipeline', () => {
     const seen: Record<string, string> = {};
     const ctx = makeContext(async (tc) => {
       const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
-      const output = { stage_a: 'A_OUT', stage_b: `B(A=${String(args.input ?? '')})`, stage_c: `C(B=${String(args.plan ?? '')})` }[tc.function.name];
+      const output = { stage_a: 'A_OUT', stage_b: `B(A=${String(args.input ?? '')})`, stage_c: `C(B=${String(args.plan ?? '')})` }[tc.function.name] ?? '';
       if (tc.function.name !== 'stage_a') seen[tc.function.name] = output;
       return { id: tc.id, toolName: tc.function.name, result: output, success: true, duration: 1 };
     });
