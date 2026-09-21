@@ -1,0 +1,11 @@
+{
+  "id": "case-03",
+  "description": "手写种子：跨模块 bug 修复计划要写清每个步骤的预期结果（base persona 四要素之一）",
+  "args": {
+    "task": "修复订单金额计算错误：折扣在后端 services/order.ts 和前端 components/CartSummary.tsx 各算了一遍，导致双重折扣。",
+    "context": "前端只做展示，金额以分为单位的整数存库。",
+    "constraints": "不改数据库 schema。"
+  },
+  "must": ["预期结果", "文件"],
+  "mustNot": []
+}

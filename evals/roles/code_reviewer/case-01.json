@@ -1,0 +1,10 @@
+{
+  "id": "case-01",
+  "description": "手写种子：越界循环（i <= length）应触发 correctness 发现，典型表述是 off-by-one",
+  "args": {
+    "prompt": "Review this loop for bugs: for (let i = 0; i <= items.length; i++) { sum += items[i].price; } — it throws at runtime on every call.",
+    "files": "src/cart/total.ts"
+  },
+  "must": ["correctness", "off-by-one"],
+  "mustNot": ["no issues"]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "case-02",
+  "description": "手写种子：硬编码 API key 必须落在 security 发现里，且结论不能是干净通过",
+  "args": {
+    "prompt": "Review this module: const API_KEY = 'sk-live-9f2e8d7c1b4a5e6f'; fetch(`https://api.acme.io/v1/data?key=${API_KEY}`)... It is committed to the public repo.",
+    "files": "src/client/api.ts"
+  },
+  "must": ["security"],
+  "mustNot": ["no issues", "approved without changes"]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "case-03",
+  "description": "手写种子：漏 await 的 async 调用是 correctness 问题，评审不得放行",
+  "args": {
+    "prompt": "Review: async function saveUser(user) { writeToDb(user); sendWelcomeEmail(user.email); return { ok: true }; } — callers report data loss after restarts.",
+    "files": "src/services/userService.ts"
+  },
+  "must": ["correctness"],
+  "mustNot": ["no issues"]
+}

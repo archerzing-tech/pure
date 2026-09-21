@@ -1,0 +1,11 @@
+{
+  "id": "case-01",
+  "description": "手写种子：多文件新功能计划必须给出步骤编号和文件列表（base persona 的四要素）",
+  "args": {
+    "task": "给现有的 Express 服务新增一个 /api/reports 导出端点，支持 CSV 格式，需要鉴权中间件和单元测试。",
+    "context": "TypeScript + Express + Prisma，测试用 vitest，源码在 src/ 下按 routes/services/models 分层。",
+    "constraints": "不引入新的重依赖；CSV 生成自己实现。"
+  },
+  "must": ["步骤", "文件"],
+  "mustNot": []
+}

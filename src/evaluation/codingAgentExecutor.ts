@@ -60,7 +60,9 @@ const EVAL_BUDGET: BudgetConfig = {
   hardMaxTime: 20 * 60 * 1000,
 };
 
-function createAdapter(options: CodingAgentEvaluationExecutorOptions): LLMAdapter {
+/** Exported so the role-regression runner (13.3 part 2) builds its subagent
+ *  LLM from the exact same provider switch — no drift between the two evals. */
+export function createAdapter(options: CodingAgentEvaluationExecutorOptions): LLMAdapter {
   switch (options.provider) {
     case 'mock':
       return new MockLLMAdapter();

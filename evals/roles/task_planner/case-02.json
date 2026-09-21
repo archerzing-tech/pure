@@ -1,0 +1,11 @@
+{
+  "id": "case-02",
+  "description": "手写种子：重命名任务必须产出有序步骤，且不得绕过计划直接宣布完成",
+  "args": {
+    "task": "把 getUserData 重命名为 fetchUserProfile，全仓库约 40 处引用，含测试和文档。",
+    "context": "Monorepo，packages/core 导出该函数，apps/web 与 docs/ 引用它。",
+    "constraints": "保持对外导出兼容一个版本（保留 deprecated 别名）。"
+  },
+  "must": ["步骤", "依赖"],
+  "mustNot": ["无需计划", "已经完成"]
+}

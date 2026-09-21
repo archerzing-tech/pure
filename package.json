@@ -23,6 +23,7 @@
     "eval:sanity": "bun run scripts/run-evals.ts --sanity",
     "eval:notes": "bun run scripts/run-evals.ts --notes",
     "eval:snapshot": "bun run scripts/build-baseline-snapshot.ts",
+    "eval:roles": "bun run scripts/run-role-regression.ts",
     "e2e:apikey": "bun run scripts/e2e-settings-apikey.ts",
     "e2e:evolution": "bun run scripts/e2e-evolution-dashboard.ts",
     "typecheck": "bun run --no-run tsc --noEmit",
