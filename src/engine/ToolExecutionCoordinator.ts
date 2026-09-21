@@ -4,6 +4,13 @@ import { isPauseAbort } from '../shared/pauseSignal';
 import { FileLockManager } from './FileLockManager';
 import { HOOK_BLOCK_EXIT_CODE, runUserHooksForEvent } from '../shared/userHookRunner';
 import { runWithDeadline } from './streamDeadline';
+import {
+  applyRelaySubstitution,
+  relayNode,
+  relayReceipt,
+  planRelayLevels,
+  type RelayNode,
+} from './relayPipeline';
 
 export const TOOL_EXECUTION_TIMEOUT_MS = 180_000;
 
@@ -51,21 +58,157 @@ export class ToolExecutionCoordinator {
    * orchestrator's single engine coordinator, so their inner write_file /
    * edit_file serialize per-path on its FileLockManager. Budget is
    * incremented exactly once per call.
+   *
+   * 接力流水线（北极星第 5 步）：批内调用可用保留参数 relay 声明接力——
+   * relay.as 登记产出阶段名，relay.from 把上游阶段产出直接灌进本调用的参数
+   * 槽（委派参数的声明式扩展，交接在本编排器完成，不经父级上下文中转）。
+   * 无 relay 的批次与历史行为完全一致（单层、读完并发、写串行、随完成随
+   * 上报）；有 relay 的批次按拓扑分层推进，同层保持原并发语义。上游产出被
+   * 下游全部成功消费后，父级观察替换为一行收据（完整输出仍在活动卡与存
+   * 档）——这是接力真正的收益：主会话不被中间产出刷屏；任一消费者失败则
+   * 回灌完整产出，父级拿得到原料做重规划。
    */
   async *executeStream(
     toolCalls: ToolCall[],
     ctx: EngineContext,
     budget: ToolExecutionBudget,
   ): AsyncGenerator<ExecutedToolResult, void, unknown> {
+    if (!ctx.tools) return;
+    // Known narrow edge: the engine's consecutive-identical dedupe keys on
+    // (name, raw arguments) — the raw string still contains the relay
+    // DECLARATION but not the substituted upstream output. A model re-sending
+    // a byte-identical downstream call in the next round gets the deduped
+    // (stale-input) result. That is the dedupe contract applied uniformly;
+    // not worth a cross-layer channel to fix.
+    const nodes = toolCalls.map(relayNode);
+    const plan = planRelayLevels(nodes);
+    const nodeByCallId = new Map<string, RelayNode>(nodes.map((node) => [node.call.id, node]));
+
+    // Budget parity with the pre-relay behavior: every call in the batch
+    // counts exactly once — relay-skipped ones included (they still produce
+    // a pairing result).
+    for (const _node of nodes) budget.incrementToolCall();
+
+    // Stage bookkeeping: which stages have consumers (→ hold their result
+    // until every consumer settles), how many consumers are left, how many
+    // succeeded, and the labels the receipt names.
+    const consumerTotal = new Map<string, number>();
+    const consumerLabels = new Map<string, string[]>();
+    for (const level of plan.levels) {
+      for (const node of level) {
+        for (const stage of node.deps) {
+          consumerTotal.set(stage, (consumerTotal.get(stage) ?? 0) + 1);
+          const labels = consumerLabels.get(stage) ?? [];
+          labels.push(node.decl?.as ?? node.call.function.name);
+          consumerLabels.set(stage, labels);
+        }
+      }
+    }
+    const stageOutputs = new Map<string, ExecutedToolResult>();
+    const consumerOk = new Map<string, number>();
+    const consumerSettled = new Map<string, number>();
+    const held = new Map<string, ExecutedToolResult>();
+
+    // A consumer settled (ran, or was skipped because its upstream died):
+    // count it, and release its held upstream once the last one lands. The
+    // upstream ships as a receipt only when EVERY consumer succeeded — any
+    // failure keeps the full output so the parent can re-plan from it.
+    const noteSettled = (node: RelayNode, tr: ExecutedToolResult): ExecutedToolResult[] => {
+      const releases: ExecutedToolResult[] = [];
+      for (const stage of node.deps) {
+        if (tr.result.success) consumerOk.set(stage, (consumerOk.get(stage) ?? 0) + 1);
+        const settled = (consumerSettled.get(stage) ?? 0) + 1;
+        consumerSettled.set(stage, settled);
+        const total = consumerTotal.get(stage);
+        if (total !== undefined && settled === total) {
+          const upstream = held.get(stage);
+          if (upstream) {
+            held.delete(stage);
+            releases.push(
+              (consumerOk.get(stage) ?? 0) === total
+                ? relayReceipt(upstream, consumerLabels.get(stage) ?? [])
+                : upstream,
+            );
+          }
+        }
+      }
+      return releases;
+    };
+
+    // Invalid declarations never run — pairing results go out first so the
+    // transcript never hangs a call without an observation.
+    for (const e of plan.errors) {
+      yield {
+        toolName: e.toolName,
+        result: { id: e.callId, toolName: e.toolName, error: e.message, success: false, duration: 0 },
+        duration: 0,
+        toolCallId: e.callId,
+      };
+    }
+
+    for (const level of plan.levels) {
+      const levelCalls: ToolCall[] = [];
+      for (const node of level) {
+        // Fail-fast: a consumer whose upstream failed is skipped with a
+        // reason naming the dead stage (its error rides along for triage).
+        const deadStage = node.decl?.from
+          ? Object.keys(node.decl.from).find((stage) => stageOutputs.get(stage)?.result.success !== true)
+          : undefined;
+        if (deadStage !== undefined) {
+          const upstreamError = stageOutputs.get(deadStage)?.result.error ?? '未知原因';
+          const detail = upstreamError.length > 200 ? `${upstreamError.slice(0, 200)}…` : upstreamError;
+          const skip: ExecutedToolResult = {
+            toolName: node.call.function.name,
+            result: {
+              id: node.call.id,
+              toolName: node.call.function.name,
+              error: `relay 上游阶段 "${deadStage}" 执行失败（${detail}），本调用未执行——修复后可直接重新发起，上游完整产出见上方。`,
+              success: false,
+              duration: 0,
+            },
+            duration: 0,
+            toolCallId: node.call.id,
+          };
+          for (const released of noteSettled(node, skip)) yield released;
+          yield skip;
+          continue;
+        }
+        levelCalls.push(
+          node.decl?.from ? applyRelaySubstitution(node.call, node.decl.from, stageOutputs) : node.call,
+        );
+      }
+      for await (const tr of this.runPool(levelCalls, ctx, budget)) {
+        const node = nodeByCallId.get(tr.toolCallId);
+        const as = node?.decl?.as;
+        if (as) stageOutputs.set(as, tr);
+        for (const released of node && node.deps.length > 0 ? noteSettled(node, tr) : []) yield released;
+        // Hold a consumed stage's result until its consumers settle; anything
+        // else streams out the moment it lands (GUI card liveness unchanged).
+        if (as && consumerTotal.has(as)) held.set(as, tr);
+        else yield tr;
+      }
+    }
+    // Defensive flush: every consumer settles exactly once by construction,
+    // so `held` drains itself — this only guards against an invariant break.
+    for (const tr of held.values()) yield tr;
+  }
+
+  /** One concurrency pool over calls that are mutually independent (same
+   * topological relay level): reads overlap and stream as they settle, writes
+   * serialize after them. Extracted verbatim from the pre-relay
+   * executeStream so the no-relay path keeps its exact behavior. */
+  private async *runPool(
+    calls: ToolCall[],
+    ctx: EngineContext,
+    budget: ToolExecutionBudget,
+  ): AsyncGenerator<ExecutedToolResult, void, unknown> {
     // A read entry tags its own promise so the race loop can remove exactly
     // the entry it raced on (see the pending set below).
     type TaggedRead = { p: Promise<TaggedRead>; tr: ExecutedToolResult };
-    if (!ctx.tools) return;
     const reads: ToolCall[] = [];
     const writes: ToolCall[] = [];
-    for (const call of toolCalls) {
-      budget.incrementToolCall();
-      const metadata = ctx.tools.getMetadata(call.function.name);
+    for (const call of calls) {
+      const metadata = ctx.tools!.getMetadata(call.function.name);
       if (metadata?.isWrite) writes.push(call);
       else reads.push(call);
     }
