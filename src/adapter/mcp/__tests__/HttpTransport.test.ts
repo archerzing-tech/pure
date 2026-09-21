@@ -153,4 +153,82 @@ describe('MCP Streamable HTTP transport', () => {
       server.stop(true);
     }
   });
+
+  it('attaches the bearer token and gets through to an OAuth-protected server', async () => {
+    // No initializer — the assignment happens inside the server closure, and
+    // tsc would otherwise narrow the variable to its initial type.
+    let sawAuthorization: string | null | undefined;
+    const server = serve({
+      port: 0,
+      fetch: async (req) => {
+        const body = await req.text();
+        const msg = JSON.parse(body) as { id?: number; method?: string };
+        if (msg.method === 'initialize') {
+          if (req.headers.get('authorization') !== 'Bearer tok-1') {
+            return new Response('unauthorized', {
+              status: 401,
+              headers: { 'WWW-Authenticate': 'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"' },
+            });
+          }
+          sawAuthorization = req.headers.get('authorization');
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: MCP_HTTP_PROTOCOL_VERSION, capabilities: {} } }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }), { headers: { 'Content-Type': 'application/json' } });
+      },
+    });
+    try {
+      const challenges: (string | undefined)[] = [];
+      const t = new HttpTransport(server.url.origin, '', 30_000, {
+        getAccessToken: async () => 'tok-1',
+        onAuthRequired: (challenge) => challenges.push(challenge),
+      });
+      const init = await t.send('initialize', { protocolVersion: MCP_HTTP_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'pure', version: 'test' } }) as { protocolVersion: string };
+      expect(init.protocolVersion).toBe(MCP_HTTP_PROTOCOL_VERSION);
+      expect(sawAuthorization).toBe('Bearer tok-1');
+      expect(challenges).toHaveLength(0);
+      t.close();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it('surfaces MCPAuthRequiredError (with the challenge) when no token is available', async () => {
+    let authSeen: string | null | undefined;
+    const server = serve({
+      port: 0,
+      fetch: async (req) => {
+        authSeen = req.headers.get('authorization');
+        return new Response('unauthorized', {
+          status: 401,
+          headers: {
+            'Content-Type': 'text/plain',
+            'WWW-Authenticate': 'Bearer scope="mcp:tools", resource_metadata="https://meta.example.com/.well-known/oauth-protected-resource"',
+          },
+        });
+      },
+    });
+    try {
+      const challenges: (string | undefined)[] = [];
+      const t = new HttpTransport(server.url.origin, '', 30_000, {
+        getAccessToken: async () => undefined,
+        onAuthRequired: (challenge) => challenges.push(challenge),
+      });
+      let caught: unknown;
+      try {
+        await t.send('initialize', { protocolVersion: MCP_HTTP_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'pure', version: 'test' } });
+      } catch (err) {
+        caught = err;
+      }
+      expect((caught as Error)?.name).toBe('MCPAuthRequiredError');
+      expect((caught as Error & { challenge?: string }).challenge).toContain('resource_metadata');
+      expect(challenges).toHaveLength(1);
+      // The request went out unauthenticated — no fabricated token.
+      expect(authSeen).toBeNull();
+      t.close();
+    } finally {
+      server.stop(true);
+    }
+  });
 });
