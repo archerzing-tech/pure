@@ -10,6 +10,8 @@ import { t } from '../shared/i18n';
 import { showToast } from '../shared/toast';
 import { isTauriRuntime } from '../shared/tauri';
 import { workspaceBase } from '../shared/paths';
+import { relativeTime } from '../shared/format';
+import { copyTextToClipboard } from '../shared/clipboard';
 import { estimateCostUsd, formatCostUsd, formatTokensCompact } from '../shared/usage';
 import {
   deleteAllSessions,
@@ -83,6 +85,35 @@ function saveCollapsedGroups(groups: Set<string>): void {
 function sessionIdCreatedAt(id: string): number {
   const m = id.match(/^session_(\d+)_/);
   return m ? Number(m[1]) : Date.now();
+}
+
+/** Stable short fingerprint of a session id for the card's id chip: the full
+ * `session_<ms>_<seq>` is too long to show, so each card carries a derived
+ * base36 hash instead — deterministic across renders (seeded, order-free),
+ * full id stays one hover away in the tooltip, one click copies it. */
+function shortSessionSeed(id: string, seed: number): string {
+  let h = seed >>> 0;
+  for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) >>> 0;
+  return h.toString(36).padStart(6, '0').slice(0, 6);
+}
+
+/** Assign the visible batch collision-free short ids: on the (astronomically
+ * unlikely) hash clash, re-derive with the next seed — deterministic because
+ * it depends only on the id set, not on render order. */
+export function assignShortIds(ids: string[]): Map<string, string> {
+  const used = new Set<string>();
+  const out = new Map<string, string>();
+  for (const id of ids) {
+    let seed = 5381;
+    let s = shortSessionSeed(id, seed);
+    while (used.has(s) && seed < 5381 + 16) {
+      seed += 1;
+      s = shortSessionSeed(id, seed);
+    }
+    used.add(s);
+    out.set(id, s);
+  }
+  return out;
 }
 
 /** Open a NEW pure app window (Tauri WebviewWindow; browser fallback = new
@@ -272,7 +303,9 @@ export class SessionSidebar {
       el.classList.toggle('session-running', running);
       const existing = el.querySelector('.sidebar-session-running-dot');
       if (running && !existing) {
-        el.querySelector('.sidebar-session-item-main')?.insertAdjacentHTML(
+        // The dot lives in the title row (same line as the title), not on the
+        // card body — fall back to main for any pre-restructure DOM.
+        (el.querySelector('.sidebar-session-item-top') ?? el.querySelector('.sidebar-session-item-main'))?.insertAdjacentHTML(
           'afterbegin',
           `<span class="sidebar-session-running-dot" role="status" aria-label="${escapeHtml(t('sidebar.running'))}" title="${escapeHtml(t('sidebar.running'))}"></span>`,
         );
@@ -308,6 +341,10 @@ export class SessionSidebar {
       }
 
       const sorted = [...(list ?? []), ...live].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 30);
+      // Card id chips: collision-free within the visible batch (the list is
+      // sorted last-updated first, so the batch — and thus the assignment —
+      // is deterministic).
+      const shortIds = assignShortIds(sorted.map(s => s.id));
 
       // Per-session token/cost summary line: bulk-load stats for every visible
       // row (one IPC round-trip) and show a compact `1.2k · $0.01` line under
@@ -353,10 +390,17 @@ export class SessionSidebar {
           const dot = isSessionRunning(s.id)
             ? `<span class="sidebar-session-running-dot" role="status" aria-label="${escapeHtml(t('sidebar.running'))}" title="${escapeHtml(t('sidebar.running'))}"></span>`
             : '';
+          // Card meta row: unique id chip (click copies the full id) + the
+          // last-updated time, which also makes the updatedAt sort legible.
+          const when = escapeHtml(relativeTime(s.updatedAt, Date.now()));
           return `<div class="sidebar-session-item${dot ? ' session-running' : ''}" data-sid="${s.id}">
           <div class="sidebar-session-item-main">
-            ${dot}<span class="sidebar-session-item-title" title="${title}">${title}</span>
-            ${usageLine(s)}
+            <div class="sidebar-session-item-top">${dot}<span class="sidebar-session-item-title" title="${title}">${title}</span></div>
+            <div class="sidebar-session-item-meta">
+              <button class="sidebar-session-item-id" data-copy-id="${escapeHtml(s.id)}" title="${escapeHtml(s.id)}">#${shortIds.get(s.id) ?? '??????'}</button>
+              <span class="sidebar-session-item-time" title="${escapeHtml(new Date(s.updatedAt).toLocaleString())}">${when}</span>
+              ${usageLine(s)}
+            </div>
           </div>
           <button class="sidebar-session-delete" data-sid="${s.id}" title="${t('sidebar.delete.title')}">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -388,9 +432,20 @@ export class SessionSidebar {
       container.querySelectorAll('.sidebar-session-item').forEach(el => {
         el.addEventListener('click', (e) => {
           const sid = el.getAttribute('data-sid');
-          if (sid && !(e.target as HTMLElement).closest('.sidebar-session-delete') && !(e.target as HTMLElement).closest('.sidebar-session-open-window')) {
+          if (sid && !(e.target as HTMLElement).closest('.sidebar-session-delete') && !(e.target as HTMLElement).closest('.sidebar-session-item-id') && !(e.target as HTMLElement).closest('.sidebar-session-open-window')) {
             void this.load(sid);
           }
+        });
+      });
+
+      // Click the id chip → copy the FULL session id (the visible `#xxxxxx`
+      // is just the display fingerprint; the tooltip/copy carry the real one).
+      container.querySelectorAll<HTMLButtonElement>('.sidebar-session-item-id').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          void copyTextToClipboard(btn.dataset.copyId ?? '').then((ok) => {
+            if (ok) showToast(t('paste.copied'));
+          });
         });
       });
 

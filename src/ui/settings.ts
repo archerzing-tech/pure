@@ -12,7 +12,7 @@ import { approveToolCorrection, scanToolCorrections } from '../adapter/memory/to
 import { confirmedDraftEntry, isDraftEntry } from '../adapter/memory/correctionDrafts';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { join, homeDir } from '@tauri-apps/api/path';
-import { formatBytes } from '../shared/format';
+import { formatBytes, relativeTime } from '../shared/format';
 import { memoryStore } from './memoryStore';
 import { EVOLUTION_DEFAULTS, healthScore, lifecycleOf, resolveEvolutionConfig } from '../adapter/memory/evolution';
 import type { MemoryEntry } from '../adapter/memory/IMemoryStore';
@@ -2597,7 +2597,7 @@ export class SettingsPanel {
     const info = memoryStore.getLastDecayInfo();
     const now = Date.now();
     const parts: string[] = [];
-    if (info.lastDecayAt) parts.push(this.relativeTime(info.lastDecayAt, now));
+    if (info.lastDecayAt) parts.push(relativeTime(info.lastDecayAt, now));
     const del = info.lastDeleted ?? 0;
     const upd = info.lastUpdated ?? 0;
     if (parts.length > 0 && (del > 0 || upd > 0)) {
@@ -2659,17 +2659,7 @@ export class SettingsPanel {
     'user_preference', 'error_pattern', 'successful_pattern', 'project_convention', 'procedure', 'tool_preference',
   ]);
 
-  /** 相对时间标签：刚刚 / {n} 分钟前 / {n} 小时前 / {n} 天前。 */
-  private relativeTime(ts: number, now: number): string {
-    const diff = Math.max(0, now - ts);
-    const MIN = 60_000;
-    const HOUR = 3_600_000;
-    const DAY = 86_400_000;
-    if (diff < MIN) return t('memory.justNow');
-    if (diff < HOUR) return t('memory.minAgo').replace('{n}', String(Math.floor(diff / MIN)));
-    if (diff < DAY) return t('memory.hourAgo').replace('{n}', String(Math.floor(diff / HOUR)));
-    return t('memory.dayAgo').replace('{n}', String(Math.floor(diff / DAY)));
-  }
+  // 相对时间标签改用 shared/format 的 relativeTime（原先这里又抄了一份）。
 
   private truncateForMemory(text: string, n: number): string {
     return text.length > n ? `${text.slice(0, n)}…` : text;
@@ -2791,7 +2781,7 @@ export class SettingsPanel {
               <b>${pct}%</b>
             </span>
             <span class="memory-meta-item">${t('memory.hits').replace('{n}', String(e.hitCount ?? 0))}</span>
-            <span class="memory-meta-item">${t('memory.lastUsed').replace('{t}', this.relativeTime(lastUsed, now))}</span>
+            <span class="memory-meta-item">${t('memory.lastUsed').replace('{t}', relativeTime(lastUsed, now))}</span>
             ${project ? `<span class="memory-meta-item memory-project" title="${escapeHtml(isGlobalScope ? t('memory.globalScopeTitle') : project)}">${escapeHtml(projectShort)}</span>` : ''}
           </div>
         </div>`;

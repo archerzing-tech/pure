@@ -12,7 +12,7 @@
 
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
-import { formatBytes } from '../shared/format';
+import { formatBytes, relativeTime } from '../shared/format';
 import { healthScore, lifecycleOf, type EvolutionConfig, type MemoryLifecycle } from '../adapter/memory/evolution';
 import { isDraftEntry } from '../adapter/memory/correctionDrafts';
 import type { MemoryEntry } from '../adapter/memory/IMemoryStore';
@@ -50,17 +50,9 @@ export function formatDuration(ms: number | null | undefined): string {
   return `${minutes}m ${Math.round((ms - minutes * 60_000) / 1000)}s`;
 }
 
-/** 相对时间：复用记忆库那套文案（同一个用户感受，不另造词）。 */
-export function relativeTime(ts: number, now: number): string {
-  const diff = Math.max(0, now - ts);
-  const MIN = 60_000;
-  const HOUR = 3_600_000;
-  const DAY = 86_400_000;
-  if (diff < MIN) return t('memory.justNow', '刚刚');
-  if (diff < HOUR) return t('memory.minAgo', '{n} 分钟前').replace('{n}', String(Math.floor(diff / MIN)));
-  if (diff < DAY) return t('memory.hourAgo', '{n} 小时前').replace('{n}', String(Math.floor(diff / HOUR)));
-  return t('memory.dayAgo', '{n} 天前').replace('{n}', String(Math.floor(diff / DAY)));
-}
+// 相对时间已收拢到 shared/format.ts（原先三处各抄一份）——这里保持原导出面，
+// 既有引用与测试不用动。
+export { relativeTime };
 
 // ── 趋势图（纯 SVG）──
 

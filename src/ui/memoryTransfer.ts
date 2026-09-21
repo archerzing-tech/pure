@@ -16,6 +16,7 @@ import type { MemoryEntry, MemoryType } from '../adapter/memory/IMemoryStore';
 import type { MemoryLifecycle } from '../shared/types';
 import { healthScore, lifecycleOf, type EvolutionConfig } from '../adapter/memory/evolution';
 import { repairJsonSource } from '../shared/parseRepair';
+import { relativeTime } from '../shared/format';
 
 export const MEMORY_EXPORT_APP = 'pure';
 export const MEMORY_EXPORT_KIND = 'memory-library';
@@ -64,16 +65,6 @@ export function buildMemoryExportJson(
   // healthScore/liveLifecycle 是快照字段（Record 展开后），转为 MemoryEntry
   // 时经 unknown 中转 —— 编译期无需逐字段证明，字段本就来自 MemoryEntry。
   return JSON.stringify(envelope, null, 2);
-}
-
-/** 人类可读的相对时间（与 settings.ts 仪表盘同一口径，避免重复依赖）。 */
-function relativeTime(ts: number, now: number): string {
-  const diff = Math.max(0, now - ts);
-  const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
-  if (diff < MIN) return '刚刚';
-  if (diff < HOUR) return `${Math.floor(diff / MIN)} 分钟前`;
-  if (diff < DAY) return `${Math.floor(diff / HOUR)} 小时前`;
-  return `${Math.floor(diff / DAY)} 天前`;
 }
 
 const TYPE_LABEL: Record<MemoryType, string> = {

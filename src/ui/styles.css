@@ -376,22 +376,27 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 10px;
-  border-radius: var(--radius-xs);
+  padding: 7px 9px;
+  margin-bottom: 4px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
   cursor: pointer;
   font-size: 13px;
   color: var(--text-secondary);
-  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out);
+  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
   -webkit-app-region: no-drag;
 }
 
 .sidebar-session-item:hover {
   background: var(--bg-hover);
+  border-color: var(--border);
   color: var(--text);
 }
 
 .sidebar-session-item.active {
   background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   color: var(--accent);
   font-weight: 500;
 }
@@ -401,13 +406,52 @@ body {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 3px;
+}
+
+/* Title row: running dot + conversation title share one line. */
+.sidebar-session-item-top {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
 }
 
 .sidebar-session-item-title {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Meta row: unique id chip · last-updated time · token/cost usage. Makes the
+   last-updated sort order visible instead of implied. */
+.sidebar-session-item-meta {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+  font: 10px var(--font-mono);
+  color: var(--text-tertiary);
+}
+
+.sidebar-session-item-id {
+  flex: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: copy;
+}
+.sidebar-session-item-id:hover {
+  color: var(--accent);
+}
+
+.sidebar-session-item-time {
+  flex: none;
 }
 
 .sidebar-session-item-ws {
@@ -462,6 +506,11 @@ body {
 .sidebar-session-item.active .sidebar-session-item-usage {
   color: var(--accent);
   opacity: 0.7;
+}
+
+.sidebar-session-item.active .sidebar-session-item-meta {
+  color: var(--accent);
+  opacity: 0.8;
 }
 
 .sidebar-session-delete {
