@@ -377,26 +377,21 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 7px 9px;
-  margin-bottom: 4px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-card);
-  border: 1px solid var(--border-light);
+  border-radius: var(--radius-xs);
   cursor: pointer;
   font-size: 13px;
   color: var(--text-secondary);
-  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
+  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out);
   -webkit-app-region: no-drag;
 }
 
 .sidebar-session-item:hover {
   background: var(--bg-hover);
-  border-color: var(--border);
   color: var(--text);
 }
 
 .sidebar-session-item.active {
   background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   color: var(--accent);
   font-weight: 500;
 }
