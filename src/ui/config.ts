@@ -113,7 +113,17 @@ export interface PureConfig {
    * enabled entries are injected into the system prompt (chat.ts / cli.ts).
    */
   hubSkills: HubSkill[];
-  mcpServers: Array<{ name: string; transport: 'stdio' | 'http'; command?: string[]; url?: string; requestTimeoutMs?: number }>;
+  mcpServers: Array<{
+    name: string;
+    transport: 'stdio' | 'http';
+    command?: string[];
+    url?: string;
+    requestTimeoutMs?: number;
+    /** OAuth (6.4) for protected HTTP servers: presence of this field turns
+     *  on the 登录 button in Settings → MCP. scopes/clientId are optional —
+     *  without a clientId the flow uses RFC 7591 dynamic registration. */
+    auth?: { scopes?: string[]; clientId?: string; clientSecret?: string };
+  }>;
   /**
    * MCP tool-name prefixes to hide from the model (e.g. ['scrapling__bulk_']).
    * Filtered tools stay connected server-side but are never registered, so

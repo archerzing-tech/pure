@@ -5096,6 +5096,38 @@ body {
   font-size: 11px;
 }
 
+/* 6.4 OAuth login row on an MCP server card */
+.mcp-auth-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 6px;
+}
+.mcp-auth-badge-in {
+  color: var(--success, #34c77b);
+}
+.mcp-auth-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.mcp-auth-btn:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.mcp-auth-btn-quiet {
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+.mcp-auth-btn-quiet:hover {
+  color: var(--text-primary);
+  background: transparent;
+}
+
 .mcp-probe-status {
   font-size: 11px;
   color: var(--text-tertiary);

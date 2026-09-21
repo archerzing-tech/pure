@@ -13,7 +13,7 @@
 // that child, on success, failure, and timeout alike.
 
 import { MCPClient } from '../harness/mcp/MCPClient';
-import type { MCPServerConfig, MCPTransport } from '../adapter/mcp/MCPTransport';
+import { MCPAuthRequiredError, type MCPServerConfig, type MCPTransport } from '../adapter/mcp/MCPTransport';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { summarizeMcpPoison, type PoisonFinding } from '../shared/mcpPoisonScan';
@@ -48,6 +48,9 @@ export interface McpProbeResult {
   resourcesSupported: boolean;
   /** Set when connect / tools/list failed or timed out. */
   error?: string;
+  /** The failure was a 401 — the card points at the OAuth 登录 button
+   *  instead of a generic connection error. */
+  authRequired?: boolean;
   durationMs: number;
 }
 
@@ -178,7 +181,15 @@ export async function probeMcpServerTools(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { serverName: server.name, tools: [], resources: [], resourcesSupported: false, error: message, durationMs: Date.now() - started };
+    return {
+      serverName: server.name,
+      tools: [],
+      resources: [],
+      resourcesSupported: false,
+      error: message,
+      authRequired: err instanceof MCPAuthRequiredError,
+      durationMs: Date.now() - started,
+    };
   } finally {
     client.disconnectAll();
   }
