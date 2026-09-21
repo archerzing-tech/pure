@@ -11,6 +11,7 @@ import { describe, expect, it } from 'bun:test';
 import { SubagentOrchestrator, deriveSubagentBudget, makeAgentId, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentProgress } from '../SubagentOrchestrator';
 import { Verifier } from '../Verifier';
 import { Tags, ToolRegistry } from '../ToolRegistry';
+import { MULTI_AGENT_PROTOCOL } from '../../shared/promptLayers';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
 import { abortPaused } from '../../shared/pauseSignal';
 import type { BudgetConfig, Checkpoint, IStateStore, LLMAdapter, LLMChunk, Message, ToolAdapter, ToolCall, ToolResult } from '../../shared/types';
@@ -736,5 +737,55 @@ describe('SubagentOrchestrator agent run id', () => {
     expect(a).toMatch(/^ag-[0-9a-f]{8}$/);
     expect(b).toMatch(/^ag-[0-9a-f]{8}$/);
     expect(a).not.toBe(b);
+  });
+});
+
+describe('SubagentOrchestrator relay schema exposure (北极星第 5 步)', () => {
+  it('every delegation tool advertises the reserved relay argument; shared definitions stay untouched', () => {
+    const orch = new SubagentOrchestrator({ llm: stubAdapter as unknown as LLMAdapter, defaultBudget: BUDGET });
+    orch.register(subagentDef('relay_probe'));
+    const tools = orch.getTools();
+    const probe = tools.find((t) => t.name === 'relay_probe')!;
+    const props = probe.input_schema.properties as Record<string, unknown>;
+    expect(props.relay).toBeDefined();
+
+    // Definitions are shared singletons — the schema injection must be a
+    // clone, or repeated registrations would accumulate relay keys.
+    const def = subagentDef('relay_probe');
+    expect('relay' in (def.input_schema.properties as Record<string, unknown>)).toBe(false);
+    const builtinProps = BUILT_IN_SUBAGENTS[0]!.input_schema.properties as Record<string, unknown>;
+    expect('relay' in builtinProps).toBe(false);
+    const codingProps = CODING_AGENT_ROLES[0]!.input_schema.properties as Record<string, unknown>;
+    expect('relay' in codingProps).toBe(false);
+  });
+
+  it('a definition that already documents its own relay argument keeps its version', () => {
+    const orch = new SubagentOrchestrator({ llm: stubAdapter as unknown as LLMAdapter, defaultBudget: BUDGET });
+    const def = subagentDef('relay_owner');
+    (def.input_schema.properties as Record<string, unknown>).relay = { type: 'string', description: 'custom' };
+    orch.register(def);
+    const tools = orch.getTools();
+    const props = tools.find((t) => t.name === 'relay_owner')!.input_schema.properties as Record<string, unknown>;
+    expect((props.relay as Record<string, unknown>).type).toBe('string');
+  });
+
+  it('getSubagentTools (the model-facing chokepoint) injects the relay schema', () => {
+    const registry = new ToolRegistry(stubAdapter);
+    registry.register(subagentDef('relay_registry_probe'));
+    const exposed = registry.getSubagentTools().find((t) => t.name === 'relay_registry_probe')!;
+    const props = exposed.input_schema.properties as Record<string, unknown>;
+    expect(props.relay).toBeDefined();
+    const relay = props.relay as Record<string, unknown>;
+    expect((relay.properties as Record<string, unknown>).as).toBeDefined();
+    expect((relay.properties as Record<string, unknown>).from).toBeDefined();
+    // Idempotent: a second exposure round-trips without nesting.
+    const again = registry.getSubagentTools().find((t) => t.name === 'relay_registry_probe')!;
+    expect((again.input_schema.properties as Record<string, unknown>).relay).toEqual(relay);
+  });
+
+  it('the multi-agent protocol teaches the relay rule', () => {
+    expect(MULTI_AGENT_PROTOCOL).toContain('Relay rule');
+    expect(MULTI_AGENT_PROTOCOL).toContain('"relay": {"as"');
+    expect(MULTI_AGENT_PROTOCOL).toContain('"relay": {"from"');
   });
 });

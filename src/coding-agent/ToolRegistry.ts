@@ -12,6 +12,7 @@ import type { WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import type { PermissionManager } from './PermissionManager';
 import { BUILT_IN_TOOL_DEFS, isPublicToolName } from '../shared/toolDefs';
 import { safeParseArgs } from '../shared/format';
+import { withRelaySchema } from '../engine/relayPipeline';
 
 // ── Tag constants ──
 
@@ -133,11 +134,14 @@ export class ToolRegistry implements ToolAdapter {
   /** Subagent tools (Tags.AGENT) — the parent LLM's delegation surface. These
    * are deliberately NOT part of getTools() (the public tool list); callers
    * that want the model to actually spawn subagents must merge them into the
-   * model-visible tool list (CodingAgent / CLI createHarness do). */
+   * model-visible tool list (CodingAgent / CLI createHarness do).
+   * 接力流水线（北极星第 5 步）：出口处给每个委派工具注入保留参数 relay
+   * （as/from）的 schema——这里是所有模型可见路径（CodingAgent / CLI /
+   * GUI chat）的单一咽喉，注册表里存的定义保持原样不被污染。 */
   getSubagentTools(): ToolDefinition[] {
     return this.tools
       .filter(({ tags }) => tags.includes(Tags.AGENT))
-      .map(({ name, description, input_schema }) => ({ name, description, input_schema }));
+      .map(({ name, description, input_schema }) => ({ name, description, input_schema: withRelaySchema(input_schema) }));
   }
 
   getSnapshotPort(): WorkspaceSnapshotPort | undefined {
