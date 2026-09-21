@@ -844,6 +844,15 @@ const translations: Record<Language, Record<string, string>> = {
     'mcp.resources.live': '来自当前会话',
     'mcp.poison.count': '投毒扫描：{n} 个可疑特征',
     'mcp.poison.hint': '6.3 投毒特征扫描，仅提示不拦截：指令注入短语、隐形字符、名字仿冒已知工具等。悬停工具名看具体证据。',
+    'mcp.auth.login': 'OAuth 登录',
+    'mcp.auth.logout': '登出',
+    'mcp.auth.loggedIn': '已登录',
+    'mcp.auth.loggedOut': '未登录',
+    'mcp.auth.required': '服务器要求 OAuth 登录，点上面的「OAuth 登录」后再试',
+    'mcp.auth.stage.opening': '正在打开浏览器…',
+    'mcp.auth.stage.waiting': '等待授权完成…（在浏览器里完成后自动继续）',
+    'mcp.auth.stage.exchanging': '交换令牌…',
+    'mcp.auth.failed': '登录失败',
 
     // ── Appearance Page ──
     'appearance.title': '外观',
@@ -1910,6 +1919,15 @@ const translations: Record<Language, Record<string, string>> = {
     'mcp.resources.live': 'from the running session',
     'mcp.poison.count': 'Poison scan: {n} suspicious findings',
     'mcp.poison.hint': '6.3 poisoning scan, informational only: injection phrases, invisible characters, shadowing of known tool names. Hover a tool chip for the evidence.',
+    'mcp.auth.login': 'OAuth sign in',
+    'mcp.auth.logout': 'Sign out',
+    'mcp.auth.loggedIn': 'Signed in',
+    'mcp.auth.loggedOut': 'Not signed in',
+    'mcp.auth.required': 'This server requires OAuth — sign in above, then retry',
+    'mcp.auth.stage.opening': 'Opening the browser…',
+    'mcp.auth.stage.waiting': 'Waiting for authorization… (continues automatically once you finish in the browser)',
+    'mcp.auth.stage.exchanging': 'Exchanging tokens…',
+    'mcp.auth.failed': 'Sign-in failed',
 
     // ── Appearance Page ──
     'appearance.title': 'Appearance',
