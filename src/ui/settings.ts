@@ -113,6 +113,7 @@ import {
 } from './skillHub';
 import { listToolInventory } from './toolInventory';
 import { probeMcpServerTools, renderMcpPoisonRow, renderMcpResourcesRow, type McpProbeResult, type McpProbeResource } from './mcpProbe';
+import { loginMcpServer, logoutMcpServer, mcpLoginState, type McpLoginState, type McpOAuthStage } from './mcpOAuthFlow';
 import type { MCPResourceSummary } from '../harness/mcp/MCPClient';
 import type { AppSkillEntry } from '../shared/skillFiles';
 
@@ -177,6 +178,15 @@ export class SettingsPanel {
   }
   /** Server names with a probe in flight (guards double-clicks). */
   private mcpProbing = new Set<string>();
+  /** 6.4 OAuth login state per auth-configured HTTP server, from the token
+   *  store. Fetched once per panel open (refreshMcpLoginStates), then updated
+   *  locally by the login/logout buttons. */
+  private mcpLoginStates = new Map<string, McpLoginState>();
+  private mcpLoginStatesLoaded = false;
+  /** Server names with an OAuth flow in flight → the stage to display. */
+  private mcpLoginBusy = new Map<string, McpOAuthStage>();
+  /** Last login failure per server, shown inside the auth row. */
+  private mcpLoginErrors = new Map<string, string>();
   /** Bound in the constructor; refreshes the paste-file footprint on open. */
   private refreshTmpUsage: () => Promise<void> = async () => {};
   /** Bound in the constructor; refreshes the offline map-tile cache footprint. */
@@ -1953,6 +1963,9 @@ export class SettingsPanel {
 
     // ── MCP servers ──
     this.mcpServers = cfg.mcpServers ? [...cfg.mcpServers] : [];
+    // Each panel open re-reads OAuth login states from the token store —
+    // tokens can change while the panel is closed.
+    this.mcpLoginStatesLoaded = false;
     const excludeInput = document.getElementById('cfg-mcp-exclude-prefixes') as HTMLInputElement | null;
     if (excludeInput) excludeInput.value = (cfg.mcpExcludedPrefixes ?? []).join(', ');
     this.renderMcpServers();
@@ -1991,6 +2004,7 @@ export class SettingsPanel {
             <span class="mcp-server-badge">${escapeHtml(s.transport)}</span>${builtin}
             <div class="mcp-server-command">${escapeHtml(label)}</div>
             <div class="mcp-server-tools">${this.mcpToolsRowHtml(s, i)}</div>
+            ${this.mcpAuthRowHtml(s, i)}
             ${this.mcpPoisonRowHtml(s)}
             ${this.mcpResourcesRowHtml(s)}
           </div>
@@ -2017,6 +2031,25 @@ export class SettingsPanel {
         if (!isNaN(idx)) void this.probeMcpTools(idx);
       });
     });
+    // Bind OAuth login / logout (6.4)
+    list.querySelectorAll('[data-mcp-login]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.getAttribute('data-mcp-login') || '', 10);
+        if (!isNaN(idx)) void this.startMcpLogin(idx);
+      });
+    });
+    list.querySelectorAll('[data-mcp-logout]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.getAttribute('data-mcp-logout') || '', 10);
+        if (!isNaN(idx)) void this.startMcpLogout(idx);
+      });
+    });
+
+    // Login states come from the token store (async); the first render of a
+    // panel open triggers one fetch, later renders reuse the cached verdict.
+    if (!this.mcpLoginStatesLoaded) void this.refreshMcpLoginStates();
   }
 
   /** Second row of an MCP server card: probe button → probing state → tool
@@ -2031,7 +2064,12 @@ export class SettingsPanel {
     }
     const again = `<button class="mcp-probe-btn mcp-probe-again" data-index="${index}" title="${t('mcp.tools.probe')}">↻</button>`;
     if (probe.error) {
-      return `<span class="mcp-probe-status mcp-probe-status-error">${t('mcp.tools.failed')}：${escapeHtml(probe.error)}</span>${again}`;
+      // A 401 is not a broken connection — point at the 登录 button instead
+      // of a generic failure the user can't act on.
+      const label = probe.authRequired
+        ? t('mcp.auth.required')
+        : `${t('mcp.tools.failed')}：${escapeHtml(probe.error)}`;
+      return `<span class="mcp-probe-status mcp-probe-status-error">${label}</span>${again}`;
     }
     if (probe.tools.length === 0) {
       return `<span class="mcp-probe-status">${t('mcp.tools.none')}</span>${again}`;
@@ -2064,6 +2102,90 @@ export class SettingsPanel {
   private mcpPoisonRowHtml(s: PureConfig['mcpServers'][number]): string {
     const probe = this.mcpToolProbes.get(s.name);
     return probe ? renderMcpPoisonRow(probe) : '';
+  }
+
+  // ── MCP OAuth login (6.4) ──
+  // User-triggered only: the 登录 button below is the sole entry point. The
+  // flow itself lives in mcpOAuthFlow.ts; this is presentation + state.
+
+  private static MCP_AUTH_STAGE_KEYS: Record<McpOAuthStage, string> = {
+    opening: 'mcp.auth.stage.opening',
+    waiting: 'mcp.auth.stage.waiting',
+    exchanging: 'mcp.auth.stage.exchanging',
+  };
+
+  /** Auth row of an HTTP server card with an `auth` block: login state badge,
+   *  登录/登出 button, in-flight stage, and the last failure. Nothing renders
+   *  without a config `auth` block or outside the desktop runtime. */
+  private mcpAuthRowHtml(s: PureConfig['mcpServers'][number], index: number): string {
+    if (s.transport !== 'http' || !s.auth) return '';
+    const state = this.mcpLoginStates.get(s.name);
+    if (!state || state === 'unsupported') return '';
+    const busy = this.mcpLoginBusy.get(s.name);
+    if (busy) {
+      return `<div class="mcp-auth-row"><span class="mcp-probe-status">${t(SettingsPanel.MCP_AUTH_STAGE_KEYS[busy])}</span></div>`;
+    }
+    const loggedIn = state === 'logged_in';
+    const badge = `<span class="mcp-server-badge${loggedIn ? ' mcp-auth-badge-in' : ''}">${loggedIn ? t('mcp.auth.loggedIn') : t('mcp.auth.loggedOut')}</span>`;
+    const button = loggedIn
+      ? `<button class="mcp-auth-btn mcp-auth-btn-quiet" data-mcp-logout="${index}">${t('mcp.auth.logout')}</button>`
+      : `<button class="mcp-auth-btn" data-mcp-login="${index}">${t('mcp.auth.login')}</button>`;
+    const error = this.mcpLoginErrors.get(s.name);
+    const errorHtml = error
+      ? `<span class="mcp-probe-status mcp-probe-status-error" title="${escapeHtml(error)}">${t('mcp.auth.failed')}：${escapeHtml(error.slice(0, 80))}</span>`
+      : '';
+    return `<div class="mcp-auth-row">${badge}${button}${errorHtml}</div>`;
+  }
+
+  /** Token-store verdict for every auth-configured server, once per open. */
+  private async refreshMcpLoginStates(): Promise<void> {
+    this.mcpLoginStatesLoaded = true;
+    const targets = this.mcpServers.filter((s) => s.transport === 'http' && s.auth);
+    if (targets.length === 0) return;
+    const results = await Promise.all(targets.map(async (s) => [s.name, await mcpLoginState(s)] as const));
+    for (const [name, state] of results) {
+      if (!this.mcpLoginBusy.has(name)) this.mcpLoginStates.set(name, state);
+    }
+    this.renderMcpServers();
+  }
+
+  /** One login, start to finish. Stage updates re-render the row; success
+   *  flips the badge and re-probes so the card shows what the token unlocks. */
+  private async startMcpLogin(index: number): Promise<void> {
+    const server = this.mcpServers[index];
+    if (!server || this.mcpLoginBusy.has(server.name)) return;
+    this.mcpLoginErrors.delete(server.name);
+    this.mcpLoginBusy.set(server.name, 'opening');
+    this.renderMcpServers();
+    await loginMcpServer(server, {
+      onStage: (stage) => {
+        if (!this.mcpLoginBusy.has(server.name)) return;
+        this.mcpLoginBusy.set(server.name, stage);
+        this.renderMcpServers();
+      },
+      onSuccess: () => {
+        this.mcpLoginBusy.delete(server.name);
+        this.mcpLoginStates.set(server.name, 'logged_in');
+        this.renderMcpServers();
+        void this.probeMcpTools(index);
+      },
+      onError: (message) => {
+        this.mcpLoginBusy.delete(server.name);
+        this.mcpLoginErrors.set(server.name, message);
+        this.renderMcpServers();
+      },
+    });
+  }
+
+  private async startMcpLogout(index: number): Promise<void> {
+    const server = this.mcpServers[index];
+    if (!server) return;
+    try {
+      await logoutMcpServer(server);
+    } finally {
+      this.mcpLoginStates.set(server.name, 'logged_out');
+      this.renderMcpServers();
+    }
   }
 
   /** Prefill the resource rows from the running session's MCP client. */
