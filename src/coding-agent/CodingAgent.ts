@@ -100,6 +100,9 @@ export interface CodingAgentConfig {
   /** E1.1 lesson reflector tuning; omitted = defaults. */
   reflection?: ReflectionConfig;
   subagents?: SubagentDefinition[];
+  /** 阶段 13.3 — role → 进化 overlay（宿主从 ~/.pure/personas/ 装载后传入）；
+   * 命中角色的 system prompt 在 base 之后追加 overlay。 */
+  personaOverlays?: Map<string, string>;
   /** Optional UI sink to surface which subagent is currently working. */
   subagentProgress?: SubagentProgress;
   mcpServers?: MCPServerConfig[];
@@ -170,6 +173,8 @@ export class CodingAgent {
       // 插话通道进子 agent（北极星第二步）：同一 steer 队列交给子代理引擎。
       // 父任务被委派工具占住时，插话由干活中的子代理在其 THINK 边界取走。
       takeSteerMessages: config.takeSteerMessages,
+      // 13.3：宿主装载好的角色 overlay 透传给编排器（spawn 时合并进 system prompt）。
+      personaOverlays: config.personaOverlays,
     };
     this.subagentOrchestrator = new SubagentOrchestrator(orchConfig);
 

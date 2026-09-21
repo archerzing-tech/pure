@@ -14,6 +14,7 @@ import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
 import { compileExternalSubagents } from './harness/externalSubagents';
+import { compilePersonaOverlays } from './harness/personaOverlays';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PermissionManager } from './coding-agent/PermissionManager';
@@ -44,6 +45,29 @@ import type { CliArgs } from './cliConfig';
 // The singleton previously only fed the in-process ring buffer (no durable
 // record); the sink is best-effort and never breaks a run.
 promptObservability.setSink(new FilePromptObservationStore(`${PURE_DIR}/observations/cli.jsonl`));
+
+// 阶段 13.3 — persona overlays for the CLI host: node:fs does the IO, the
+// shared compiler validates (same split as the GUI's Tauri invoke). Pure
+// function of the filesystem + role set; a broken file warns, never throws.
+function loadCliPersonaOverlays(externalDefs: { name: string }[]): Map<string, string> {
+  const dir = process.env.PURE_PERSONAS_DIR
+    ?? join(process.env.HOME ?? process.env.USERPROFILE ?? '.', '.pure', 'personas');
+  let sources: { file: string; text: string }[] = [];
+  try {
+    sources = readdirSync(dir).filter((f) => f.endsWith('.overlay.md')).sort().map((file) => ({
+      file,
+      text: readFileSync(join(dir, file), 'utf8'),
+    }));
+  } catch {
+    return new Map();
+  }
+  const knownRoles = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES, ...externalDefs].map((d) => d.name);
+  const { overlays, errors } = compilePersonaOverlays(sources, knownRoles);
+  for (const line of errors) {
+    process.stderr.write(`  ${yellow('[persona-overlays]')} ${dim(line)}\n`);
+  }
+  return overlays;
+}
 
 // ── CLI cross-session memory (IMemoryStore) ──
 // File-backed store under ~/.pure/memories/{projectHash}/memories.jsonl,
@@ -296,19 +320,6 @@ async function createHarness(args: CliArgs) {
   });
 
   if (tools && tools instanceof ToolRegistry) {
-    const orchestrator = new SubagentOrchestrator({
-      llm: adapter,
-      parentTools: tools,
-      parentToolsDefsProvider: () => tools.getTools(),
-      defaultBudget: DEFAULT_BUDGET,
-      // Subagent resume (CLI has a stateStore) + bounded budget + live progress
-      // so the terminal shows which subagent is working.
-      parentSessionId: sessionId,
-      stateStore: store,
-      progress: cliSubagentProgress,
-      // Same escalating retry policy as the CLI parent harness.
-      failurePolicy: plumbing.failurePolicy,
-    });
     // Full delegation surface, mirroring the GUI: both the built-in reviewers
     // and the coding roles (task_planner / code_editor / researcher /
     // ui_designer / deep_thinker / bash_executor), so the CLI can satisfy the
@@ -333,6 +344,22 @@ async function createHarness(args: CliArgs) {
     for (const line of externalRoles.errors) {
       process.stderr.write(`  ${yellow('[external-subagents]')} ${dim(line)}\n`);
     }
+    const orchestrator = new SubagentOrchestrator({
+      llm: adapter,
+      parentTools: tools,
+      parentToolsDefsProvider: () => tools.getTools(),
+      defaultBudget: DEFAULT_BUDGET,
+      // Subagent resume (CLI has a stateStore) + bounded budget + live progress
+      // so the terminal shows which subagent is working.
+      parentSessionId: sessionId,
+      stateStore: store,
+      progress: cliSubagentProgress,
+      // Same escalating retry policy as the CLI parent harness.
+      failurePolicy: plumbing.failurePolicy,
+      // 阶段 13.3 — persona overlays (~/.pure/personas/*.overlay.md) merge into
+      // the matching role's system prompt at spawn time.
+      personaOverlays: loadCliPersonaOverlays(externalRoles.defs),
+    });
     for (const def of [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES, ...externalRoles.defs]) {
       orchestrator.register(def);
       tools.register(def);

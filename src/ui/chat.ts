@@ -31,6 +31,7 @@ import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
 import type { SubagentDefinition } from '../coding-agent/types';
 import { compileExternalSubagents } from '../harness/externalSubagents';
+import { compilePersonaOverlays } from '../harness/personaOverlays';
 import { requestPermission } from './permission';
 import { MemoryStateStore } from '../adapter/storage/MemoryStateStore';
 import {
@@ -657,6 +658,27 @@ function loadGuiExternalSubagents(): Promise<SubagentDefinition[]> {
     }
   })();
   return externalSubagentsPromise;
+}
+
+/** 阶段 13.3 — persona overlays from ~/.pure/personas/*.overlay.md. Same shape
+ * as the 13.2 scan: Rust does the IO, the shared compiler validates; scanned
+ * once per app run, a broken file warns instead of blocking a turn. Deleting
+ * an overlay file reverts the role at the next app start. */
+let personaOverlaysPromise: Promise<Map<string, string>> | null = null;
+function loadGuiPersonaOverlays(knownRoles: string[]): Promise<Map<string, string>> {
+  personaOverlaysPromise ??= (async () => {
+    if (!isTauriRuntime()) return new Map<string, string>();
+    try {
+      const sources = await tauriInvoke<Array<{ file: string; text: string }>>('list_persona_overlays');
+      const { overlays, errors } = compilePersonaOverlays(sources ?? [], knownRoles);
+      for (const line of errors) console.warn(`[persona-overlays] ${line}`);
+      return overlays;
+    } catch (error) {
+      console.warn('[persona-overlays] scan failed:', error);
+      return new Map<string, string>();
+    }
+  })();
+  return personaOverlaysPromise;
 }
 
 function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null, toolDefinitions: ToolDefinition[] = [], imageGeneration = false, conventions?: string): string {
@@ -3118,6 +3140,11 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       // delegation surface. They skip the skill toggles (they aren't skills)
       // and can never shadow a built-in (the compiler rejects the collision).
       const externalSubagents = await loadGuiExternalSubagents();
+      // 13.3 — overlays load alongside the roles; unknown-role files are
+      // rejected at compile time against the full delegable surface.
+      const personaOverlays = await loadGuiPersonaOverlays(
+        [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES, ...externalSubagents].map((d) => d.name),
+      );
       const subagents = (() => {
         const keep = allSubagents.filter((def) => {
           if (def.name === 'task_planner') return config.skills?.planning ?? true;
@@ -3181,6 +3208,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         },
         toolAdapter,
         subagents,
+        personaOverlays,
         // In-memory subagent checkpoint store: lets the GUI resume a sub-task
         // after a stop + continue in this same conversation.
         stateStore: this.subagentStore,

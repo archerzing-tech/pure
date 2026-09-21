@@ -21,6 +21,7 @@ import type {
 import { DefaultFailurePolicy } from '../engine/FailurePolicy';
 import { withRelaySchema } from '../engine/relayPipeline';
 import { trimUnresolvedToolCalls } from '../harness/Harness';
+import { applyPersonaOverlay } from '../harness/personaOverlays';
 import { THIRD_PARTY_SCOPE_NOTE_EN, THIRD_PARTY_SCOPE_NOTE_ZH } from '../shared/thirdPartyScope';
 import type { SubagentDefinition, SubagentResult } from './types';
 import { Tags } from './ToolRegistry';
@@ -207,6 +208,10 @@ export interface SubagentOrchestratorConfig {
    * again at its own next THINK; with parallel delegations the first subagent
    * THINK claims it — one user remark, one recipient. */
   takeSteerMessages?: () => Message[];
+  /** 阶段 13.3 — role name → 进化 overlay 文本（~/.pure/personas/<role>.overlay.md）。
+   * 命中的角色在 spawn 时把 overlay 追加在 base persona 之后（只增补，不重写）；
+   * 无命中的角色 prompt 逐字节不变。宿主装载（启动扫描），运行中不热删。 */
+  personaOverlays?: Map<string, string>;
 }
 
 export class SubagentOrchestrator implements ToolAdapter {
@@ -470,7 +475,10 @@ export class SubagentOrchestrator implements ToolAdapter {
       : `subagent_${def.name}_${startTime}`;
 
     try {
-      const systemPrompt = def.createSystemPrompt(args) + subagentReportNote(def.name);
+      // 13.3 合并点：base（代码里，不动）+ 进化 overlay（命中才追加）+ 机械性
+      // 汇报格式说明。删 overlay 文件即回滚——下一个会话自然回原样。
+      const overlay = this.config.personaOverlays?.get(def.name);
+      const systemPrompt = applyPersonaOverlay(def.createSystemPrompt(args), overlay) + subagentReportNote(def.name);
       const userPrompt = typeof args.prompt === 'string'
         ? args.prompt
         : JSON.stringify(args);

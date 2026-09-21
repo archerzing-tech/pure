@@ -7273,6 +7273,43 @@ fn list_external_subagents() -> Vec<serde_json::Value> {
     out
 }
 
+/// 阶段 13.3 — persona overlays. Every `*.overlay.md` in `~/.pure/personas/`
+/// is an evolution overlay for one subagent role; this scans the directory and
+/// hands the raw texts to the frontend, where `compilePersonaOverlays`
+/// (single source of truth, unit-tested in TS) validates them. Rust only does
+/// IO — the same split as list_external_subagents. `PURE_PERSONAS_DIR`
+/// overrides the directory for tests.
+fn persona_overlays_dir() -> PathBuf {
+    let base = std::env::var("PURE_PERSONAS_DIR").unwrap_or_else(|_| format!("{}/.pure", pure_home_dir()));
+    PathBuf::from(base).join("personas")
+}
+
+#[tauri::command]
+fn list_persona_overlays() -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let dir = persona_overlays_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".overlay.md"))
+        .collect();
+    names.sort();
+    for name in names {
+        let Ok(text) = std::fs::read_to_string(dir.join(&name)) else {
+            continue;
+        };
+        out.push(serde_json::json!({
+            "file": name,
+            "text": text,
+        }));
+    }
+    out
+}
+
 /// Directories the app reads skills from, for the Settings → Skills "open
 /// folder" affordance. `project` is null when no workspace is set, so the
 /// frontend never has to expand `~` or join workspace paths itself.
@@ -16037,6 +16074,7 @@ pub fn run() {
             request_system_permission,
             list_app_skills,
             list_external_subagents,
+            list_persona_overlays,
             app_skills_dirs,
             write_app_skill,
             delete_app_skill,

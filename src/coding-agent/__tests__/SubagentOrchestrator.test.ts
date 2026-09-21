@@ -789,3 +789,68 @@ describe('SubagentOrchestrator relay schema exposure (北极星第 5 步)', () =
     expect(MULTI_AGENT_PROTOCOL).toContain('"relay": {"from"');
   });
 });
+
+describe('SubagentOrchestrator persona overlays (北极星第 6 步 13.3)', () => {
+  const ZH_NOTE = '你的回复是给主 agent 汇总用的';
+
+  /** Records the system prompt the engine assembled (messages[0]) and ends the
+   * loop cleanly — same shape as the mock-driven tests above. */
+  function capturingLlm(captured: { system: string }, reply: string): LLMAdapter {
+    return {
+      async *stream(messages: Message[]) {
+        captured.system = messages[0]?.content ?? '';
+        yield { type: 'content' as const, content: reply };
+        yield { type: 'done' as const, content: reply, toolCalls: [] };
+      },
+      async complete() {
+        return { content: reply, toolCalls: [] };
+      },
+    };
+  }
+
+  it('overlay 追加在 base persona 之后、机械性汇报说明之前', async () => {
+    const captured = { system: '' };
+    const orch = new SubagentOrchestrator({
+      llm: capturingLlm(captured, 'done'),
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      personaOverlays: new Map([['test_researcher', '新增约束：结论必须给出文件:行号证据。']]),
+    });
+    orch.register(subagentDef('test_researcher'));
+    const result = await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
+    expect(result.success).toBe(true);
+    // base 一字打头，overlay 紧随其后，汇报格式说明垫底。
+    expect(captured.system.startsWith('You are test_researcher. Task: research X')).toBe(true);
+    expect(captured.system).toContain('新增约束：结论必须给出文件:行号证据。');
+    expect(captured.system).toContain(ZH_NOTE);
+    expect(captured.system.indexOf('新增约束')).toBeLessThan(captured.system.indexOf(ZH_NOTE));
+  });
+
+  it('无 overlay 命中时 prompt 与 13.3 之前逐字节一致', async () => {
+    const withEmpty = { system: '' };
+    const orchA = new SubagentOrchestrator({
+      llm: capturingLlm(withEmpty, 'done'),
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      personaOverlays: new Map([['some_other_role', '别的角色的 overlay，与本角色无关。']]),
+    });
+    orchA.register(subagentDef('test_researcher'));
+    await orchA.execute(toolCall('test_researcher', { prompt: 'research X' }));
+
+    const withoutConfig = { system: '' };
+    const orchB = new SubagentOrchestrator({
+      llm: capturingLlm(withoutConfig, 'done'),
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+    });
+    orchB.register(subagentDef('test_researcher'));
+    await orchB.execute(toolCall('test_researcher', { prompt: 'research X' }));
+
+    expect(withEmpty.system).toBe(withoutConfig.system);
+    expect(withEmpty.system.startsWith('You are test_researcher. Task: research X')).toBe(true);
+    expect(withEmpty.system).toContain(ZH_NOTE);
+  });
+});
