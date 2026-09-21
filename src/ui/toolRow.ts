@@ -225,7 +225,7 @@ export interface ToolRowHandle {
   resultEl: HTMLElement;
   expandButton: HTMLButtonElement;
   toolName: string;
-  // Browser interval id for the "已运行 Ns" pending heartbeat (see
+  // Browser interval id for the elapsed-seconds pending heartbeat (see
   // startElapsedTicker); undefined when no window (DOM tests) or after stop.
   elapsedTimer?: number;
 }
@@ -658,23 +658,26 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   return handle;
 }
 
-// ── Pending heartbeat (已运行 Ns) ──
+// ── Pending heartbeat (elapsed seconds next to the spinner) ──
 // A ticking elapsed-time indicator next to the pending spinner. A silent,
 // long-running command (npm/bun/pip install) otherwise reads as frozen — the
 // spinner and blinking cursor never change, and the waiting placeholder is
-// removed the moment the first line streams. The "已运行 Ns" counter advances
-// every second regardless of output, so the row is visibly alive. It's plain
+// removed the moment the first line streams. The bare "Ns / Nm Ns" counter
+// (no textual prefix — user feedback 2026-09-21) advances every second
+// regardless of output, so the row is visibly alive. It's plain
 // text (not a CSS animation), so it still works under prefers-reduced-motion,
 // where the project suppresses every animation. Guarded on window so the bun
 // DOM tests (no window) never start a leaked interval.
 
 function formatElapsedSince(startedAt: number): string {
+  // 计时裸显（不带「已运行」前缀）：卡片 header 上转圈圈旁边跟着的只是
+  // 秒表本身，用户反馈三个字是噪音（2026-09-21）。
   const total = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-  if (total < 60) return `已运行 ${total}s`;
+  if (total < 60) return `${total}s`;
   const m = Math.floor(total / 60);
-  if (m < 60) return `已运行 ${m}m ${total % 60}s`;
+  if (m < 60) return `${m}m ${total % 60}s`;
   const h = Math.floor(m / 60);
-  return `已运行 ${h}h ${m % 60}m`;
+  return `${h}h ${m % 60}m`;
 }
 
 function stopElapsedTicker(row: ToolRowHandle): void {
