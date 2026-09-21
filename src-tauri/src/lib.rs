@@ -10601,6 +10601,7 @@ async fn mcp_http_request(
     headers: Option<std::collections::HashMap<String, String>>,
     timeout_secs: Option<u64>,
     return_headers: Option<bool>,
+    content_type: Option<String>,
 ) -> Result<String, String> {
     let client = build_http_client(
         std::time::Duration::from_secs(timeout_secs.unwrap_or(30).max(1)),
@@ -10617,21 +10618,34 @@ async fn mcp_http_request(
         }
     }
     if let Some(body) = body {
+        // OAuth token requests post form-encoded bodies; JSON-RPC posts JSON.
         request = request
-            .header("Content-Type", "application/json")
+            .header(
+                "Content-Type",
+                content_type.as_deref().unwrap_or("application/json"),
+            )
             .body(body);
     }
     let response = request.send().await.map_err(|e| format!("request: {}", e))?;
     let status = response.status();
-    if !status.is_success() {
+    // Headers must be read before `.text()` consumes the response.
+    let header_value = |name: &str| -> Option<String> {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+    let session_id = header_value("mcp-session-id");
+    let resp_content_type = header_value("content-type");
+    let www_authenticate = header_value("www-authenticate");
+    // Envelope-mode callers (OAuth login) need to see 401s — the status and the
+    // WWW-Authenticate challenge drive the discovery flow. Plain callers keep
+    // the legacy "non-2xx is an error" contract.
+    if !status.is_success() && !return_headers.unwrap_or(false) {
         let text = response.text().await.unwrap_or_default();
         return Err(format!("MCP HTTP {}: {}", status.as_u16(), text));
     }
-    let session_id = response
-        .headers()
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
     let text = response.text().await.map_err(|e| format!("read: {}", e))?;
     if return_headers.unwrap_or(false) {
         let mut envelope = serde_json::Map::new();
@@ -10640,11 +10654,207 @@ async fn mcp_http_request(
         if let Some(sid) = &session_id {
             header_map.insert("mcp-session-id".into(), serde_json::json!(sid));
         }
+        if let Some(ct) = &resp_content_type {
+            header_map.insert("content-type".into(), serde_json::json!(ct));
+        }
+        if let Some(wa) = &www_authenticate {
+            header_map.insert("www-authenticate".into(), serde_json::json!(wa));
+        }
         envelope.insert("__headers".into(), serde_json::Value::Object(header_map));
         envelope.insert("body".into(), serde_json::json!(text));
         Ok(serde_json::Value::Object(envelope).to_string())
     } else {
         Ok(text)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MCP OAuth (6.4): loopback redirect receiver + token store.
+//
+//  The login flow itself runs in TypeScript (src/adapter/mcp/oauth.ts); Rust
+//  owns the two pieces TypeScript cannot do on its own: a 127.0.0.1 loopback
+//  listener that catches the provider's redirect, and
+//  ~/.pure/mcp/oauth/<server>.json (0600) keeping access/refresh tokens out of
+//  WebView storage.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// One pending login: the accept-loop task plus the one-shot channel that
+/// hands the full redirect URL to `mcp_oauth_loopback_wait`.
+struct OAuthLoopbackFlow {
+    task: tokio::task::JoinHandle<()>,
+    redirect: tokio::sync::oneshot::Receiver<String>,
+}
+
+type OAuthLoopbackRegistry = tokio::sync::Mutex<BTreeMap<String, OAuthLoopbackFlow>>;
+
+static NEXT_LOOPBACK_FLOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[tauri::command]
+async fn mcp_oauth_loopback_start(
+    state: tauri::State<'_, OAuthLoopbackRegistry>,
+    preferred_port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    // A preferred port may collide with a leftover socket — fall back to an
+    // ephemeral one so a login never blocks on stale cleanup.
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", preferred_port.unwrap_or(0))).await {
+        Ok(l) => l,
+        Err(_) => tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .map_err(|e| format!("bind loopback: {}", e))?,
+    };
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("local addr: {}", e))?
+        .port();
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let task = tokio::spawn(async move {
+        // Accept exactly one connection — the provider's redirect request.
+        let Ok((mut socket, _)) = listener.accept().await else { return; };
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match socket.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 64 * 1024 {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        // Request line: `GET /callback?code=…&state=… HTTP/1.1`
+        let head = String::from_utf8_lossy(&buf);
+        let target = head.split_whitespace().nth(1).unwrap_or("");
+        let redirect = if target.starts_with("http://") || target.starts_with("https://") {
+            target.to_string()
+        } else {
+            format!("http://127.0.0.1:{}{}", port, target)
+        };
+        let body = "<!doctype html><meta charset=\"utf-8\"><title>pure</title><body style=\"font-family:-apple-system,sans-serif;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0\"><p>登录完成 — 请回到 pure 窗口继续。</p></body>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.shutdown().await;
+        let _ = tx.send(redirect);
+    });
+    let flow_id = format!(
+        "oauth-loopback-{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        NEXT_LOOPBACK_FLOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    state.lock().await.insert(
+        flow_id.clone(),
+        OAuthLoopbackFlow { task, redirect: rx },
+    );
+    Ok(serde_json::json!({ "flowId": flow_id, "port": port }))
+}
+
+/// Resolve the callback URL of a started flow. One-shot: the flow is consumed
+/// either here or by cancel.
+#[tauri::command]
+async fn mcp_oauth_loopback_wait(
+    state: tauri::State<'_, OAuthLoopbackRegistry>,
+    flow_id: String,
+    timeout_secs: Option<u64>,
+) -> Result<String, String> {
+    let flow = {
+        let mut registry = state.lock().await;
+        registry
+            .remove(&flow_id)
+            .ok_or_else(|| format!("OAuth 回调流程不存在或已被消费: {}", flow_id))?
+    };
+    let OAuthLoopbackFlow { task, redirect } = flow;
+    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(300).max(1));
+    match tokio::time::timeout(timeout, redirect).await {
+        Ok(Ok(url)) => Ok(url),
+        Ok(Err(_)) => Err("OAuth 回调通道已关闭（流程被取消）".into()),
+        Err(_) => {
+            task.abort();
+            Err("等待 OAuth 回调超时".into())
+        }
+    }
+}
+
+#[tauri::command]
+async fn mcp_oauth_loopback_cancel(
+    state: tauri::State<'_, OAuthLoopbackRegistry>,
+    flow_id: String,
+) -> Result<(), String> {
+    if let Some(flow) = state.lock().await.remove(&flow_id) {
+        flow.task.abort();
+    }
+    Ok(())
+}
+
+// Token persistence: ~/.pure/mcp/oauth/<server>.json — same 0600 contract as
+// secrets.json. The payload is the StoredOAuth JSON the TS side owns; Rust
+// treats it as opaque bytes.
+
+fn mcp_oauth_token_path(server: &str) -> Result<PathBuf, String> {
+    // Server names double as file names: keep them to a safe charset so the
+    // path stays inside the oauth dir (validity check, not a scope limit).
+    let safe: String = server
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        return Err("MCP 服务器名不能为空".into());
+    }
+    Ok(PathBuf::from(pure_home_dir())
+        .join(".pure")
+        .join("mcp")
+        .join("oauth")
+        .join(format!("{}.json", safe)))
+}
+
+#[tauri::command]
+fn mcp_oauth_token_read(server: String) -> Result<Option<String>, String> {
+    let path = mcp_oauth_token_path(&server)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|e| format!("read oauth tokens: {}", e))
+}
+
+#[tauri::command]
+fn mcp_oauth_token_write(server: String, payload: String) -> Result<(), String> {
+    let path = mcp_oauth_token_path(&server)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+    }
+    fs::write(&path, payload.as_bytes()).map_err(|e| format!("write oauth tokens: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn mcp_oauth_token_delete(server: String) -> Result<(), String> {
+    let path = mcp_oauth_token_path(&server)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("delete oauth tokens: {}", e)),
     }
 }
 
@@ -15591,6 +15801,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(McpRegistry::new(BTreeMap::new()))
+        .manage(OAuthLoopbackRegistry::new(BTreeMap::new()))
         .manage(CommandRegistry::new(BTreeMap::new()))
         .manage(ChatStreamRegistry::new(StdMutex::new(BTreeMap::new())))
         .manage(DownloadCancelRegistry::default())
@@ -15856,6 +16067,12 @@ pub fn run() {
             spawn_mcp,
             mcp_request,
             mcp_http_request,
+            mcp_oauth_loopback_start,
+            mcp_oauth_loopback_wait,
+            mcp_oauth_loopback_cancel,
+            mcp_oauth_token_read,
+            mcp_oauth_token_write,
+            mcp_oauth_token_delete,
             mcp_notify,
             mcp_shutdown,
             mcp_list,
