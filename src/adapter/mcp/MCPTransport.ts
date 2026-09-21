@@ -102,6 +102,23 @@ export interface MCPServerConfig {
    * MCP servers like Scrapling's stealthy_fetch) need longer — set it on the
    * server config (e.g. the Scrapling preset uses 120s). */
   requestTimeoutMs?: number;
+  /** OAuth (6.4) knobs for OAuth-protected HTTP servers. `clientId` skips
+   *  dynamic registration for providers that don't offer it; `scopes`
+   *  overrides the server-advertised scope list. */
+  auth?: { scopes?: string[]; clientId?: string; clientSecret?: string };
+}
+
+/** A request came back 401 — the server wants a login (or a fresh one). The
+ *  UI catches this (not string-matched errors) to offer the 登录 button. */
+export class MCPAuthRequiredError extends Error {
+  constructor(
+    /** Raw WWW-Authenticate challenge from the 401, when present. */
+    readonly challenge?: string,
+    message = 'MCP server requires authentication (HTTP 401)',
+  ) {
+    super(message);
+    this.name = 'MCPAuthRequiredError';
+  }
 }
 
 // ── Transport interface ──

@@ -3,7 +3,9 @@
 // discovers tools, and invokes them. Implements ToolAdapter for ToolRegistry routing.
 
 import { StdioTransport } from '../../adapter/mcp/StdioTransport';
-import { HttpTransport } from '../../adapter/mcp/HttpTransport';
+import { HttpTransport, type HttpTransportAuth } from '../../adapter/mcp/HttpTransport';
+import { McpOAuthSession } from '../../adapter/mcp/oauth';
+import { oauthBindings } from '../../adapter/mcp/oauthBindings';
 import { TauriStdioTransport } from '../../adapter/mcp/TauriStdioTransport';
 import { isTauriRuntime } from '../../shared/tauri';
 import { parseToolArguments } from '../../shared/parseRepair';
@@ -89,6 +91,9 @@ export interface MCPClientConfig {
    * spend a doc server's budget on bodies nobody will look at.
    */
   readResourceContents?: boolean;
+  /** An OAuth-protected server answered 401 — the Settings card shows the
+   *  登录 button for `serverName`. */
+  onAuthRequired?: (serverName: string) => void;
   /** Test seam: inject a transport factory (defaults to stdio/http by config). */
   transportFactory?: (config: MCPServerConfig) => MCPTransport;
 }
@@ -111,6 +116,10 @@ interface ServerState {
   /** Rendered body for the prompt fragment — undefined until read, '' when the
    *  server advertised resources but none could be read. */
   resourceBody?: string;
+  /** The server answered 401 — its tools stay listed but every call fails
+   *  until the user logs in (Settings → MCP → 登录). Cleared by a successful
+   *  (re)connect. */
+  needsAuth?: boolean;
 }
 
 export interface MCPResourceContextOptions {
@@ -191,7 +200,12 @@ export class MCPClient implements ToolAdapter {
         ? (this.config.sessionId && isTauriRuntime()
             ? new TauriStdioTransport(this.config.sessionId, config.name, config.command ?? [], config.env, this.config.proxyUrl ?? '', config.requestTimeoutMs)
             : new StdioTransport(config.command ?? [], config.env, config.requestTimeoutMs))
-        : new HttpTransport(config.url ?? 'http://localhost:3000', this.config.proxyUrl ?? '', config.requestTimeoutMs));
+        : new HttpTransport(
+            config.url ?? 'http://localhost:3000',
+            this.config.proxyUrl ?? '',
+            config.requestTimeoutMs,
+            config.auth ? this.oauthProviderFor(config) : undefined,
+          ));
 
     const state: ServerState = {
       config,
@@ -268,6 +282,34 @@ export class MCPClient implements ToolAdapter {
     }
 
     state.connected = true;
+    // The initialize handshake succeeded — any earlier 401 verdict is stale.
+    state.needsAuth = false;
+  }
+
+  /** Bearer-token provider for one OAuth-protected HTTP server (6.4): cached
+   *  token reads for the transport, plus a needsAuth flag the Settings card
+   *  (and the login flow, commit ④) listens for when the server 401s. */
+  private oauthProviderFor(config: MCPServerConfig): HttpTransportAuth {
+    const { http, store } = oauthBindings();
+    const session = new McpOAuthSession(
+      {
+        serverName: config.name,
+        serverUrl: config.url ?? '',
+        scopes: config.auth?.scopes,
+        clientId: config.auth?.clientId,
+        clientSecret: config.auth?.clientSecret,
+      },
+      http,
+      store,
+    );
+    return {
+      getAccessToken: () => session.getAccessToken(),
+      onAuthRequired: () => {
+        const state = this.servers.get(config.name);
+        if (state) state.needsAuth = true;
+        this.config.onAuthRequired?.(config.name);
+      },
+    };
   }
 
   disconnectAll(): void {
@@ -492,6 +534,11 @@ export class MCPClient implements ToolAdapter {
 
   isConnected(serverName: string): boolean {
     return this.servers.get(serverName)?.connected ?? false;
+  }
+
+  /** Whether the server last answered 401 — Settings shows the login button. */
+  needsLogin(serverName: string): boolean {
+    return this.servers.get(serverName)?.needsAuth ?? false;
   }
 
   // ── ToolAdapter implementation ──
