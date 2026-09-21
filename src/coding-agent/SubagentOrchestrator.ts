@@ -19,6 +19,7 @@ import type {
   ToolResult,
 } from '../shared/types';
 import { DefaultFailurePolicy } from '../engine/FailurePolicy';
+import { withRelaySchema } from '../engine/relayPipeline';
 import { trimUnresolvedToolCalls } from '../harness/Harness';
 import { THIRD_PARTY_SCOPE_NOTE_EN, THIRD_PARTY_SCOPE_NOTE_ZH } from '../shared/thirdPartyScope';
 import type { SubagentDefinition, SubagentResult } from './types';
@@ -227,7 +228,11 @@ export class SubagentOrchestrator implements ToolAdapter {
       tools.push({
         name: def.name,
         description: def.description,
-        input_schema: def.input_schema,
+        // 接力流水线（北极星第 5 步）：每个委派工具的 schema 都带上保留参数
+        // relay（as/from），模型用它在同一条消息里声明串行依赖链，运行时在
+        // ToolExecutionCoordinator 里按拓扑序交接。克隆注入——定义是共享
+        // 单例，不能被 schema 扩展污染。
+        input_schema: withRelaySchema(def.input_schema),
       });
     }
     return tools;

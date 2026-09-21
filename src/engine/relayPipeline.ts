@@ -226,6 +226,32 @@ export function applyRelaySubstitution(
   return { ...call, function: { ...call.function, arguments: JSON.stringify(args) } };
 }
 
+/** The reserved relay argument as exposed on every delegation tool's schema,
+ * so the model declares pipelines with documented parameters instead of
+ * out-of-band conventions. Description is model-facing. */
+export const RELAY_INPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  description: '接力声明（仅同批调用间生效）：as 把本调用的产出登记为一个阶段名；from 把上游阶段的产出直接灌进本调用的参数（阶段名→参数名）。串行依赖链用它一次性声明整条链，运行时按序执行并直传产出，不要逐跳经过主会话中转。',
+  properties: {
+    as: { type: 'string', description: '本调用产出的阶段名，供同批下游调用的 relay.from 引用' },
+    from: {
+      type: 'object',
+      additionalProperties: { type: 'string' },
+      description: '上游阶段名 → 本调用的参数名：该阶段的完整产出会直接写入该参数',
+    },
+  },
+};
+
+/** Clone a tool's input schema with the relay argument added. Definitions are
+ * shared singletons — never mutate them; and a definition that already
+ * documents its own relay argument keeps its version. */
+export function withRelaySchema(inputSchema: Record<string, unknown>): Record<string, unknown> {
+  const props = inputSchema.properties;
+  const existing = props && typeof props === 'object' && !Array.isArray(props) ? props : {};
+  if ('relay' in existing) return inputSchema;
+  return { ...inputSchema, properties: { ...existing, relay: RELAY_INPUT_SCHEMA } };
+}
+
 /** The parent-visible receipt that replaces a consumed upstream's raw output:
  * the pipeline was the transport, so the main session gets one line instead
  * of the full text (which stays on the run's activity card and archives). */
