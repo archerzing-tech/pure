@@ -149,6 +149,12 @@ sessionSidebar = new SessionSidebar({
   },
 });
 
+// A session switch can start outside the sidebar — clicking a parallel-task
+// dock card, the tray 前往 menu, a notification click — and those paths used
+// to leave the sidebar highlighting the previous conversation (only load()
+// moved it). The sidebar follows the activation chokepoint instead.
+chat.onActiveSessionChanged((sessionId) => sessionSidebar.setActive(sessionId));
+
 // ── Settings panel: lazy-loaded on first open so the eager startup bundle
 //    stays lean. The panel binds its DOM (index.html) when constructed. ──
 

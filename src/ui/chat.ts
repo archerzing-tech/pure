@@ -5897,6 +5897,7 @@ export class SessionChatManager {
   private statsCb?: (stats: SessionStats) => void;
   private snapshotCb?: (available: boolean) => void;
   private restoreDraftCb?: (text: string) => void;
+  private activeSessionCb?: (sessionId: string) => void;
 
   private container(): HTMLElement {
     return document.getElementById('chat')!;
@@ -5938,6 +5939,15 @@ export class SessionChatManager {
     this.restoreDraftCb = fn;
   }
 
+  /** Register a "the visible session changed" listener. Session switches have
+   * many entry points — sidebar click, parallel-task dock card, tray 前往,
+   * notification click, lazy first session — and every one funnels through
+   * openSession/makeActive, so this is the single chokepoint for UI that must
+   * follow the visible conversation (the sidebar's active highlight). */
+  onActiveSessionChanged(fn: (sessionId: string) => void): void {
+    this.activeSessionCb = fn;
+  }
+
   /** The visible controller; creates the first session lazily when needed. */
   private activeNow(): ChatController {
     if (this.current) return this.current;
@@ -5967,6 +5977,9 @@ export class SessionChatManager {
       // an explicit refresh here.
       this.snapshotCb?.(controller.hasUndoableWrites());
       this.statsCb?.(controller.getSessionStats());
+      // The switch may have come from outside the sidebar (dock card, tray,
+      // notification) — let listeners move the sidebar highlight along.
+      this.activeSessionCb?.(sessionId);
       const scroll = document.getElementById('chat');
       if (scroll && typeof requestAnimationFrame === 'function') forceScrollToBottom(scroll);
     }
