@@ -56,11 +56,15 @@ const PROMPT_BUDGET_FALLBACK = {
 function promptBudgetDefaults(provider: string, model: string): { contextWindowTokens: number; outputReserveTokens: number } | undefined {
   const id = provider.toLowerCase();
   const name = model.toLowerCase();
-  // DeepSeek V4 (app default deepseek-v4-flash): 1M context, output ceiling
-  // reported at 384k — cap requests at a 128k tier. Legacy V3 endpoints
-  // (deepseek-chat / deepseek-reasoner) stay on the 128k/32k generation.
+  // DeepSeek V4.x (app default `deepseek-flash` = V4.1-Flash, plus
+  // `deepseek-v4-pro` and the `deepseek-v4-flash` compatibility alias): 1M
+  // context, output ceiling reported at 384k — cap requests at a 128k tier.
+  // Legacy V3 endpoints (deepseek-chat / deepseek-reasoner) stay on the
+  // 128k/32k generation. The V4 line is named by generation (`v4`) *or* by
+  // tier (`flash` / `pro`) — matching only `v4` left the current default on
+  // the legacy tier.
   if (id.includes('deepseek') || name.includes('deepseek')) {
-    return name.includes('v4')
+    return /v4|flash|pro/.test(name)
       ? { contextWindowTokens: 1_000_000, outputReserveTokens: 131_072 }
       : { contextWindowTokens: 128_000, outputReserveTokens: 32_768 };
   }
@@ -358,7 +362,7 @@ export interface ProviderDef {
 }
 
 export const PROVIDERS: readonly ProviderDef[] = [
-  { id: 'deepseek-openai', label: 'DeepSeek', defaultModel: 'deepseek-v4-flash', models: ['deepseek-v4-flash', 'deepseek-reasoner'], i18nKey: 'provider.deepseek-openai', baseURL: 'https://api.deepseek.com', protocol: 'openai', deepSeekFamily: true },
+  { id: 'deepseek-openai', label: 'DeepSeek', defaultModel: 'deepseek-flash', models: ['deepseek-flash', 'deepseek-v4-pro'], i18nKey: 'provider.deepseek-openai', baseURL: 'https://api.deepseek.com', protocol: 'openai', deepSeekFamily: true },
   { id: 'qwen', label: 'Qwen', defaultModel: 'qwen3-coder-next', models: ['qwen3-coder-next', 'qwen3-max'], i18nKey: 'provider.qwen', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', protocol: 'openai', deepSeekFamily: false },
   { id: 'glm', label: 'GLM', defaultModel: 'glm-5.3-flash', models: ['glm-5.3-flash', 'glm-5.3', 'glm-5.2', 'glm-5.2-flash'], i18nKey: 'provider.glm', baseURL: 'https://api.z.ai/api/coding/paas/v4', protocol: 'openai', deepSeekFamily: false },
   { id: 'moonshot', label: 'Moonshot', defaultModel: 'kimi-k3', models: ['kimi-k3', 'kimi-k2.6'], i18nKey: 'provider.moonshot', baseURL: 'https://api.moonshot.cn/v1', protocol: 'openai', deepSeekFamily: false },
@@ -622,7 +626,7 @@ export function providerLabel(id: string | undefined | null): string {
 
 /** Default model for a provider; falls back to the DeepSeek default. */
 export function defaultModelFor(id: string): string {
-  return providerDef(id)?.defaultModel ?? 'deepseek-v4-flash';
+  return providerDef(id)?.defaultModel ?? 'deepseek-flash';
 }
 
 /** Default base URL for a provider; falls back to the DeepSeek endpoint. */

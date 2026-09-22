@@ -176,7 +176,7 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
 
 // ── Pre-configured factory functions ──
 
-export function createDeepSeekAdapter(apiKey: string, model = 'deepseek-v4-flash', baseURL?: string, maxTokens?: number) {
+export function createDeepSeekAdapter(apiKey: string, model = 'deepseek-flash', baseURL?: string, maxTokens?: number) {
   return new OpenAICompatibleAdapter({
     // A per-provider override (Settings → LLM → 连接设置, synced via
     // providerOverrides) wins over the official endpoint.

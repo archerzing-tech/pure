@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import { defaults, hasConfiguredKey, modelListForProvider, normalizeProviderModels, providerHasKey, SCRAPLING_MCP_PRESET, withDefaultModel } from '../config';
+import { defaultModelFor } from '../../shared/providers';
 
 describe('provider model lists', () => {
   it('keeps a built-in provider usable with one default model', () => {
-    const cfg = { ...defaults(), model: 'deepseek-v4-flash' };
+    // Resolve the current default instead of pinning the id: the assertion is
+    // that the registry default is IN the list it hands the picker.
+    const cfg = { ...defaults(), model: defaultModelFor('deepseek-openai') };
     // Empty library falls back to the registry's default model list.
-    expect(modelListForProvider(cfg, 'deepseek-openai')).toEqual(['deepseek-v4-flash', 'deepseek-reasoner']);
+    expect(modelListForProvider(cfg, 'deepseek-openai')).toEqual(['deepseek-flash', 'deepseek-v4-pro']);
   });
 
   it('returns all configured models for a provider without mixing providers', () => {

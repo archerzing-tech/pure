@@ -38,7 +38,7 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
       apiKey: config.apiKey,
       baseURL: config.baseURL || 'https://api.deepseek.com/anthropic',
     });
-    this.model = config.model ?? 'deepseek-v4-flash';
+    this.model = config.model ?? 'deepseek-flash';
     // Same reasoning-vs-content budget rationale as createDeepSeekAdapter: the
     // default 8192 leaves the visible answer empty on complex tasks because
     // reasoning_content consumes the whole budget first.

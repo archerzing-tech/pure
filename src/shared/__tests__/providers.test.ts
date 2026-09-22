@@ -62,6 +62,13 @@ describe('resolvePromptBudget', () => {
     // Legacy V3-era DeepSeek endpoints keep the previous generation's window.
     const legacy = resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-chat' });
     expect(legacy.contextWindowTokens).toBe(128_000);
+    // The V4 line is named by generation (`v4`) OR by tier (`flash` / `pro`):
+    // the current default `deepseek-flash` is V4.1-Flash, so matching only `v4`
+    // had silently left the app default on the legacy 128k window.
+    expect(defaultModelFor('deepseek-openai')).toBe('deepseek-flash');
+    expect(resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-flash' }).contextWindowTokens).toBe(1_000_000);
+    expect(resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-v4-pro' }).contextWindowTokens).toBe(1_000_000);
+    expect(resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-reasoner' }).contextWindowTokens).toBe(128_000);
     // Claude 1M tiers (Sonnet 5 / Opus 5) vs the 4.5-and-earlier 200k window.
     expect(resolvePromptBudget({ provider: 'anthropic', model: 'claude-sonnet-5' }).contextWindowTokens).toBe(1_000_000);
     expect(resolvePromptBudget({ provider: 'anthropic', model: 'claude-sonnet-4-5' }).contextWindowTokens).toBe(200_000);
