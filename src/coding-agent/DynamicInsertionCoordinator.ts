@@ -43,6 +43,17 @@ const STOP_RE = /^(?:停止|停下|取消|中止|别做了|先别做|abort|stop|
 // as 不要 is still just a steer, and aborting on it used to restart work the
 // user never asked to restart.
 const GOAL_CHANGE_RE = /(?:推翻|重新来|重做|从头来|换个方案|换一种思路|换个思路|start over|redo it|rethink|different approach|scrap (?:that|this|it))/i;
+// Scope additions take the SAME deterministic road into the task queue. Both
+// 2026-09-22 losses ("再加一个 爱奇艺平台") were acknowledged as steer and then
+// forgotten: the LLM kept judging additions steerable, and steer's promise
+// ("the next step carries it") is uncashable while the parent is blocked
+// collecting parallel delegations — the engine drains the words at the final
+// summary round, nothing acts on them, and the leftover-drain net only catches
+// steers the engine never took. Queuing makes no promise it can't keep: the
+// item runs to completion right after the current task. So obvious additions
+// skip the classifier entirely (like STOP_RE), conservative high-precision
+// family only, negated forms fall through to the LLM.
+const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先不)(?<!莫)(?:再加(?!一?句)|再添|再补(?!一?句)|再算上|再算一个|顺便(?!问|说|提|聊)(?:也)?(?:查|调研|研究|搜|分析|做|跑|处理|加)|也帮?我?(?:查|调研|研究|搜|分析|处理|跑)(?:一?下|一遍)?|把.{1,16}也(?:查|调研|研究|搜|分析|处理|跑|做|算)(?:一?下|一遍)?|同样(?:处理|调研|分析|跑|做)|也来一?份|add (?:one more|another)|also (?:add|check|research|look into|run|include))/i;
 
 export class DynamicInsertionCoordinator {
   private readonly classify: NonNullable<DynamicInsertionCoordinatorOptions['classify']>;
@@ -67,6 +78,10 @@ export class DynamicInsertionCoordinator {
       // Same rationale as STOP_RE: these verbs leave no room for "keep
       // going with a tweak", so restart without burning a classify call.
       return { kind: 'goal-change', reason: 'overturn phrasing matched the fast path', shouldAbort: true };
+    }
+    if (SCOPE_ADD_RE.test(text)) {
+      // 加活的量不走分类赌局：排队是唯一保证跑完的投递（见 SCOPE_ADD_RE 注）。
+      return { kind: 'task', reason: 'scope-addition phrasing matched the fast path; queued so it cannot be forgotten', shouldAbort: false };
     }
     if (!llm) {
       // No classifier available: deliver the words as a steer. The engine

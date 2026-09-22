@@ -1361,6 +1361,12 @@ export class ChatController {
    * no abort, no replan. Leftovers after the turn ends fall back to a normal
    * send in dispatchDeferred so nothing typed is ever lost. */
   private pendingSteers: import('../shared/types').Message[] = [];
+  /** 阶段感知的 scope 追加（2026-09-22 用户定稿）：并行委派还没收齐时插进
+   * 来的追加活不走"收尾后排队"——那会先输出一份没有它的汇总。折入汇合轮：
+   * takeSteerMessages 在委派返回后的第一个 THINK 边界注入强框架指令（先补
+   * 这项，再合并汇总）。收尾时核验：投递后若没有新委派发起（模型直奔汇总
+   * 或投递没发生），转 pendingTasks 兜底，话绝不丢。 */
+  private pendingFoldIns: Array<{ text: string; images: MessageImage[]; displayText: string; delivered: boolean; activityCountAtDelivery: number }> = [];
   /** 插话重构 — REFLECT-phase adapter for the current turn, when 9.2 phase
    * routing is on: side-channel mid-run questions prefer the cheap model
    * (an answer is a summarization chore, not the main reasoning stream). */
@@ -2254,7 +2260,9 @@ export class ChatController {
    *   - steer   → 进引擎转向通道（takeSteerMessages），下一个 THINK 轮顺路
    *               带上，手头的活继续干。
    *   - question → 侧路回答一句，主循环毫无感知。
-   *   - task    → 排队（pendingTasks），当前任务收尾后作为新任务启动。
+   *   - task    → 阶段感知：委派还在飞 → 折入汇合轮（foldInScopeAddition，
+   *               先补这项再合并汇总，收尾核验没折入就转排队兜底）；
+   *               委派收齐 → 排队（pendingTasks），收尾后作为新任务启动。
    *   - chatter → 收下即可，用户的话以自己的气泡上屏，不打扰干活的人。
    * 分类不可用时保守按 steer 处理：话一定送到，活绝不推倒重来。
    */
@@ -2343,9 +2351,18 @@ export class ChatController {
         echoUserBubble();
         void this.answerMidrunQuestion(text, images);
         return;
-      case 'task':
-        this.queueInterjectTask(text, images, displayText);
+      case 'task': {
+        // 阶段感知（2026-09-22 用户定稿）：并行委派还没收齐时插进来的追加活，
+        // 不进"当前任务完成后处理"的队列——那会先输出一份没有它的汇总。折入
+        // 汇合轮：正在跑的收齐后先补这项，再合并输出一份覆盖全部的汇总。
+        // 委派都收齐了才插的，照旧排队（先出已有结果，再单独补跑）。
+        if (this.hasDelegationInFlight()) {
+          this.foldInScopeAddition(text, images, displayText);
+        } else {
+          this.queueInterjectTask(text, images, displayText);
+        }
         return;
+      }
       case 'chatter':
         // 收下了。同事埋头干活时说了句"哈哈"，你不会停下来回一句"收到"——
         // 气泡已上屏，这就够了，别再打扰干活的人。
@@ -2401,6 +2418,43 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     if (!this.isStreaming()) this.scheduleDeferred();
   }
 
+  /** 阶段判据：还有在飞的并行委派吗（agentActivities 首见即入列，
+   * 终态只改 status——有 running 就说明委派还没收齐）。 */
+  private hasDelegationInFlight(): boolean {
+    return this.agentActivities.some((item) => item.status === 'running');
+  }
+
+  /** 阶段感知：把 scope 追加折入当前任务的汇合轮。用户原话照常上屏（气泡），
+   * 引擎侧送的是强框架指令（"先补这项，再合并汇总"），并在收尾时核验是否
+   * 真的发起了新委派——没发起就转排队兜底，话绝不丢。 */
+  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string): void {
+    this.addBubble('user', displayText, images);
+    this.pendingFoldIns.push({ text, images, displayText, delivered: false, activityCountAtDelivery: -1 });
+    this.addStatusBubble('已收到——正在跑的调研收齐后先补这项，然后合并出一份覆盖全部的汇总。', false, false);
+  }
+
+  /** 引擎侧的折入指令：命令式框架，把"别光汇总"说死——模型在汇合轮看到
+   * 的不是一句转达，而是排定的追加委派。 */
+  private foldInInstruction(text: string): string {
+    return `【中途追加的任务，不是闲聊】用户要求在本次任务里追加：${text}\n执行要求：把这项追加的工作像其他委派一样派出去做完；拿到结果后，把它与本次任务已产出的全部内容合并，输出一份覆盖所有对象的最终汇总。在此之前不要输出最终汇总。`;
+  }
+
+  /** 折入没被照办时的兜底口径（转排队后作为新指令重入）。 */
+  private foldInFollowUpText(text: string): string {
+    return `（中途追加）${text}\n把这项追加的工作做完，然后把结果与此前任务的产出合并，输出一份覆盖全部对象的完整汇总（此前的产出在会话历史里）。`;
+  }
+
+  /** 收尾核验折入的追加：投递后 agentActivities 有新增（真的发起了新委派）
+   * → 算数；没有（模型直奔汇总）或根本没投递（回合提前终止）→ 转
+   * pendingTasks 按合并口径补跑。由 dispatchDeferred 在回合收尾时调用。 */
+  private settleFoldIns(): void {
+    for (const fold of this.pendingFoldIns.splice(0)) {
+      const honored = fold.delivered && this.agentActivities.length > fold.activityCountAtDelivery;
+      if (honored) continue;
+      this.pendingTasks.push({ text: this.foldInFollowUpText(fold.text), images: fold.images, displayText: fold.displayText, ts: Date.now() });
+    }
+  }
+
   /** Schedule the deferred dispatch just after a turn fully finalizes. */
   private scheduleDeferred(): void {
     window.setTimeout(() => this.dispatchDeferred(), 40);
@@ -2418,6 +2472,9 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
    * of starting a second concurrent turn. */
   private dispatchDeferred(): void {
     if (this.isStreaming()) return;
+    // 折入追加的收尾核验先行：没被照办的转进 pendingTasks，下面同一趟
+    // dispatchDeferred 就会把它们作为新指令派发出去。
+    this.settleFoldIns();
     if (this.relatedInsert) {
       const ri = this.relatedInsert;
       this.relatedInsert = null;
@@ -3221,6 +3278,15 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         takeSteerMessages: () => {
           const drained = this.pendingSteers;
           this.pendingSteers = [];
+          // 阶段感知的折入追加：委派未收齐时插的活在这里注入汇合轮——记录
+          // 投递时刻的委派计数，收尾时核验是否真的发起了新委派（没发起就
+          // 转排队兜底，见 settleFoldIns）。
+          for (const fold of this.pendingFoldIns) {
+            if (fold.delivered) continue;
+            fold.delivered = true;
+            fold.activityCountAtDelivery = this.agentActivities.length;
+            drained.push({ role: 'user', content: this.foldInInstruction(fold.text), images: fold.images });
+          }
           return drained;
         },
         toolAdapter,
@@ -5417,6 +5483,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     this.relatedInsert = null;
     // 插话重构 — new chat discards steers aimed at the old conversation.
     this.pendingSteers = [];
+    this.pendingFoldIns = [];
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;

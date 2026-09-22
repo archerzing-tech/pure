@@ -28,6 +28,33 @@ describe('DynamicInsertionCoordinator', () => {
     expect(calls).toBe(0);
   });
 
+  it('queues scope additions via the fast path, classifier never consulted', async () => {
+    // 用户两次实测暴露：委派在飞时"再加一个 X"被判 steer，而父任务阻塞等
+    // 子 agent 返回根本没有"下个动作"可带上——话被收下然后忘掉。加活的量
+    // 不进分类赌局：字面命中直送排队（唯一保证跑完的投递），与 STOP 同款
+    // 机制。
+    let calls = 0;
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '' }; } });
+    for (const text of ['再加一个 爱奇艺平台', '顺便也查一下 芒果TV', '把爱奇艺也查一下', '芒果TV也来一份', 'also check Douban']) {
+      const decision = await coordinator.decide(llm(), '正在并行调研 B站/腾讯/优酷 三个平台', { text });
+      expect(decision.kind).toBe('task');
+      expect(decision.shouldAbort).toBe(false); // 排队不打断，收尾后必跑
+    }
+    expect(calls).toBe(0);
+  });
+
+  it('lets negated additions fall through to the classifier', async () => {
+    // 否定前置（不用加/别再加/不要再加）不是加活——绝不能误送排队。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'steer', reason: 'not actually adding work' }),
+    });
+    for (const text of ['不用再加了，就这样', '别再加新平台了', '不要再加注释了', '顺便问一下，跑完了吗']) {
+      const decision = await coordinator.decide(llm(), 'current task', { text });
+      expect(decision.kind).toBe('steer');
+      expect(decision.shouldAbort).toBe(false);
+    }
+  });
+
   it('does NOT abort on a constraint phrased with 不要 — the LLM judges it a steer', async () => {
     // 老世界里 CONSTRAINT_CHANGE_RE 会把"不要再加注释"判成 abort + 重规划；
     // 现在约束只是顺路带上的话。

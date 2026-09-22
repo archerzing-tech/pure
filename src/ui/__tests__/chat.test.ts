@@ -922,6 +922,32 @@ describe('plan overview completion state', () => {
     expect(dispatchBody.indexOf('if (this.isStreaming()) return;')).toBeGreaterThan(-1);
   });
 
+  it('folds mid-flight scope additions into the aggregation round, with a deterministic fallback', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 用户三次实测暴露 + 定稿阶段语义：委派没收齐时插的追加活不能排到
+    // "汇总输出之后"——要折入汇合轮（先补这项，再合并汇总）；委派收齐才
+    // 插的照旧排队。折入不是祈祷模型听话：投递时记录委派水位，收尾核验
+    // 没有新委派就转排队兜底，话绝不丢。
+    const task = src.indexOf("case 'task': {");
+    expect(task).toBeGreaterThan(-1);
+    const taskBody = src.slice(task, src.indexOf("case 'chatter':", task));
+    expect(taskBody.indexOf('this.hasDelegationInFlight()')).toBeGreaterThan(-1);
+    expect(taskBody.indexOf('this.foldInScopeAddition(')).toBeGreaterThan(-1);
+    expect(taskBody.indexOf('this.queueInterjectTask(')).toBeGreaterThan(-1);
+    // 折入三件套：原话上屏 + 投递记录水位 + 收尾核验。
+    expect(src.indexOf('this.pendingFoldIns.push(')).toBeGreaterThan(-1);
+    expect(src.indexOf('this.addBubble(\'user\', displayText, images)', src.indexOf('private foldInScopeAddition('))).toBeGreaterThan(-1);
+    expect(src.indexOf('fold.activityCountAtDelivery = this.agentActivities.length')).toBeGreaterThan(-1);
+    const settle = src.indexOf('private settleFoldIns(');
+    expect(settle).toBeGreaterThan(-1);
+    const settleBody = src.slice(settle, settle + 500);
+    expect(settleBody.indexOf('this.agentActivities.length > fold.activityCountAtDelivery')).toBeGreaterThan(-1);
+    expect(settleBody.indexOf('this.pendingTasks.push(')).toBeGreaterThan(-1);
+    // dispatchDeferred 一进门先结算折入，同一趟把兜底任务派出去。
+    const dispatch = src.indexOf('private dispatchDeferred(): void');
+    expect(src.slice(dispatch, dispatch + 400).indexOf('this.settleFoldIns()')).toBeGreaterThan(-1);
+  });
+
   it('background sessions never yank the shared scroll container', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 后台会话的自动续跑也走 send()：无守卫的 forceScrollToBottom 会把用户
