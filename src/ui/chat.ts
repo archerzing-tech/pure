@@ -3344,7 +3344,12 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
             fold.syntheticCallId = callId;
             // 恰好一行的因果叙述：把"追加"和"第三张卡"在对话流里接起来。
             this.addStatusBubble(`你追加的安排上了——派 ${role} 单独补跑，跑完和前面的产出一起汇总。`, false, false, 'info');
-            calls.push({ id: callId, index: calls.length, function: { name: role, arguments: JSON.stringify({ prompt: fold.text }) } });
+            // 子代理没有对话上下文——fold.text 是用户原话速记（"新增一个平台，
+            // 爱奇艺"），原样当任务书它只能瞎猜调研对象（2026-09-22 实测跑成了
+            // 爱奇艺开放平台 API 文档）。任务书必须带上主任务原文，并约束它
+            // 只补追加项、口径与兄弟调研对齐。
+            const brief = `用户的主任务：「${userText}」。任务进行中用户追加了新要求：${fold.text}。请只针对这项追加内容完成工作，口径与主任务其他部分一致（如调研需给出时间范围、来源、关键事实与遗留风险），不要重复主任务已覆盖的其他对象。`;
+            calls.push({ id: callId, index: calls.length, function: { name: role, arguments: JSON.stringify({ prompt: brief }) } });
           }
           return calls;
         },

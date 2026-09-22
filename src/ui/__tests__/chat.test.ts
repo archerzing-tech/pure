@@ -959,7 +959,11 @@ describe('plan overview completion state', () => {
     expect(synthBody.indexOf('fold.delivered = true;')).toBeGreaterThan(-1);
     expect(synthBody.indexOf('fold.syntheticCallId = callId;')).toBeGreaterThan(-1);
     expect(synthBody.indexOf('你追加的安排上了')).toBeGreaterThan(-1);
-    expect(synthBody.indexOf('JSON.stringify({ prompt: fold.text })')).toBeGreaterThan(-1);
+    // 任务书必须带主任务上下文（2026-09-22 实测教训：用户原话速记原样当
+    // 任务书，子代理把「爱奇艺」跑成了爱奇艺开放平台 API 文档）。
+    expect(synthBody.indexOf('JSON.stringify({ prompt: brief })')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('用户的主任务：「${userText}」')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('${fold.text}')).toBeGreaterThan(-1);
     // steer 闭包只管指令型折入的交付 + 代执行回合的合并口径铺垫（每条只铺
     // 一次）；机械折入留给代执行闭包。此前所有手搓 UI 补丁（宿主内直接
     // orchestrator.execute / 合成卡片 / 事件泵 / 思考卡接管）必须不存在。
