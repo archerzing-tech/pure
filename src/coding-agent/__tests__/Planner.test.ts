@@ -649,6 +649,14 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(cls.kind).toBe('premise-change');
   });
 
+  it('routes a scope addition to task, not steer (2026-09-22 加平台被遗忘缺口)', async () => {
+    // 用户实测暴露：委派在飞时"再加一个 X"被判 steer，而 steer 只剩空头
+    // 承诺（父任务阻塞等子 agent 返回，没有"下个动作"）——提示词现在明确
+    // scope 追加一律 task：排队保底，当前活收尾后必跑，话不会被忘掉。
+    const cls = await classifyInsertion(mockLlm('{"kind":"task","reason":"new work item: research one more platform"}'), '正在并行调研 B站/腾讯/优酷 三个平台的国漫剧集', '再加一个 爱奇艺平台');
+    expect(cls.kind).toBe('task');
+  });
+
   it('rejects an unknown kind and falls back to steer', async () => {
     const cls = await classifyInsertion(mockLlm('{"kind":"banana","reason":"junk"}'), 'context', 'anything');
     expect(cls.kind).toBe('steer'); // never drop the user's input
