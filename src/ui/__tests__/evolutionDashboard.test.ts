@@ -16,6 +16,7 @@ import {
   renderStrategySection,
   renderStrategyTabs,
   renderSubagentAdvice,
+  renderTeamRosterSection,
   renderTotals,
   renderTrendCards,
   relativeTime,
@@ -527,5 +528,51 @@ describe('renderBaselineSection', () => {
     const html = renderBaselineSection(snapshot({ rows: [] }));
     expect(html).toContain('evo-empty');
     expect(html).not.toContain('evo-table-wrap');
+  });
+});
+
+describe('renderTeamRosterSection (T3)', () => {
+  const runRecord = (overrides: Partial<AgentRunObservation> = {}): PromptObservation => ({
+    type: 'agent_run',
+    traceId: 'run-team',
+    startedAt: Date.now() - 1000,
+    eventCounts: {},
+    toolCalls: [],
+    reasoningChars: 0,
+    outputChars: 0,
+    delegations: [
+      { agentId: 'ag-aaa11111', role: 'researcher', startedAt: Date.now() - 1000, durationMs: 12000, success: true, usage: { promptTokens: 500, completionTokens: 100, cacheHitTokens: 300, cacheMissTokens: 200 } },
+      { agentId: 'ag-bbb22222', role: 'researcher', startedAt: Date.now() - 900, durationMs: 8000, success: false, errorKind: 'timeout' },
+    ],
+    ...overrides,
+  } as PromptObservation);
+
+  it('renders the roster with usage from T1 delegations and the sample gate column', () => {
+    const html = renderTeamRosterSection([runRecord()], { caseCounts: { researcher: 3 }, minCases: 5 });
+    expect(html).toContain('团队阵容');
+    expect(html).toContain('evo-table-wrap');
+    expect(html).toContain('还差 2 条');
+    expect(html).toContain('A/B 门槛 5 条');
+  });
+
+  it('treats pre-T1 records without delegations as no data, not zero', () => {
+    const legacy: PromptObservation = {
+      type: 'agent_run',
+      traceId: 'legacy',
+      startedAt: Date.now() - 1000,
+      eventCounts: {},
+      toolCalls: [{ toolName: 'researcher', success: true, durationMs: 5000 }],
+      reasoningChars: 0,
+      outputChars: 0,
+    } as PromptObservation;
+    const html = renderTeamRosterSection([legacy], { caseCounts: {} });
+    expect(html).toContain('无数据');
+    expect(html).toContain('还差 5 条');
+  });
+
+  it('shows the empty state when no roles were ever delegated or harvested', () => {
+    const html = renderTeamRosterSection([], {});
+    expect(html).toContain('evo-stat-note');
+    expect(html).not.toContain('<tbody>');
   });
 });

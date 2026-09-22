@@ -23,6 +23,7 @@ import { toolDisplayName } from './toolRow';
 import { formatCostUsd } from '../shared/usage';
 import { BASELINE_SUITE_VERSION, isBaselineCostPriced, orderBaselineRows, type BaselineSnapshot } from '../shared/baseline';
 import { baselineCacheHitRate, isBaselineStale } from '../shared/baselineSnapshot';
+import { summarizeTeamRoster, type TeamRosterOptions } from '../shared/teamObservability';
 
 // ── 数字格式化 ──
 
@@ -500,6 +501,57 @@ export function renderObservationStats(
     ? `<div class="evo-stat-note">${escapeHtml(t('evolution.stats.truncated', '日志较大，本次只统计了最近 {n} —— 更早的数据仍是完整的，只是没进这张图。').replace('{n}', formatBytes(file.readBytes)))}</div>`
     : '';
   return `${rows}${truncated}<div class="evo-stat-path" title="${escapeHtml(file.path)}">${escapeHtml(t('evolution.stats.path', '存储位置'))}: ${escapeHtml(file.path)}</div>`;
+}
+
+// ── 团队阵容表（T3）──
+
+/**
+ * 团队卡：这支多 agent 团队都有谁、最近被用得怎样、A/B 样本存量离门槛多远。
+ * 数据全部来自观测记录（T1 起带 delegations）+ 宿主传进的每角色 case 计数；
+ * 本函数纯渲染。旧记录无 delegations 时该列显示「无数据」而不是 0。
+ */
+export function renderTeamRosterSection(records: readonly import('../shared/promptObservability').PromptObservation[], options: TeamRosterOptions & { caseCounts?: Record<string, number> } = {}): string {
+  const roster = summarizeTeamRoster(records, options);
+  const rows = roster.rows.filter((row) => row.delegations !== null || row.caseCount > 0);
+  if (rows.length === 0) {
+    return `<div class="evo-table-wrap"><div class="evo-table-title">${escapeHtml(t('evolution.team.title', '团队阵容'))}</div>
+      <div class="evo-stat-note">${escapeHtml(t('evolution.team.empty', '还没有角色委派记录——跑一个多 agent 任务后这里会显示团队的派发与样本存量。'))}</div></div>`;
+  }
+  const body = rows.map((row) => {
+    const gate = row.caseCount >= (options.minCases ?? 5)
+      ? `<span class="evo-badge-overlay">${escapeHtml(t('evolution.team.gateOk', '门槛已过'))}</span>`
+      : escapeHtml(t('evolution.team.gateShort', '还差 {n} 条').replace('{n}', String((options.minCases ?? 5) - row.caseCount)));
+    return `<tr>
+    <td class="evo-table-key">${escapeHtml(toolDisplayName(row.role))}</td>
+    <td>${escapeHtml(row.delegations === null ? t('evolution.team.noData', '无数据') : formatCount(row.delegations))}</td>
+    <td>${escapeHtml(formatPercent(row.successRate))}</td>
+    <td>${escapeHtml(formatDuration(row.avgDurationMs))}</td>
+    <td>${row.totalTokens ? escapeHtml(formatCount(row.totalTokens)) : t('evolution.team.noData', '无数据')}</td>
+    <td>${escapeHtml(formatCount(row.caseCount))} · ${gate}</td>
+  </tr>`;
+  }).join('');
+  const short = roster.rolesShortOfGate.length > 0
+    ? `<div class="evo-stat-note">${escapeHtml(
+        t('evolution.team.gateNote', 'A/B 门槛 {min} 条：{roles} 还差样本——补样本的方式是多跑覆盖这些角色的多 agent 任务，然后收割。')
+          .replace('{min}', String(options.minCases ?? 5))
+          .replace('{roles}', roster.rolesShortOfGate.map((entry) => toolDisplayName(entry.role)).join('、')),
+      )}</div>`
+    : '';
+  return `<div class="evo-table-wrap">
+    <div class="evo-table-title">${escapeHtml(t('evolution.team.title', '团队阵容'))}</div>
+    <table class="evo-table">
+      <thead><tr>
+        <th>${escapeHtml(t('evolution.table.role', '角色'))}</th>
+        <th>${escapeHtml(t('evolution.table.delegations', '派发'))}</th>
+        <th>${escapeHtml(t('evolution.table.success', '成功率'))}</th>
+        <th>${escapeHtml(t('evolution.table.avgDuration', '平均耗时'))}</th>
+        <th>${escapeHtml(t('evolution.team.tokens', 'token（含拆分）'))}</th>
+        <th>${escapeHtml(t('evolution.team.samples', '样本存量'))}</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+    ${short}
+  </div>`;
 }
 
 // ── 发布口径的评测基线（evals/ → eval:snapshot 生成的快照）──
