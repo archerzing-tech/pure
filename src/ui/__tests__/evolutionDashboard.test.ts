@@ -9,6 +9,7 @@ import {
   formatDuration,
   formatPercent,
   formatSteps,
+  renderAppliedAdviceSection,
   renderBaselineSection,
   renderErrorClusters,
   renderExperienceList,
@@ -23,6 +24,7 @@ import {
 } from '../evolutionDashboard';
 import { emptyRunSlice, type StrategyEffectSummary } from '../../shared/strategyEffect';
 import type { SubagentAdvice } from '../../shared/subagentAdvisory';
+import type { AdviceAppliedObservation } from '../../shared/promptObservability';
 import type { MemoryEntry } from '../../adapter/memory/IMemoryStore';
 import { buildEvolutionDashboard, startOfLocalDay, type TrendBucket } from '../../shared/evolutionDashboard';
 import { parsePromptObservations, type AgentRunObservation, type PromptObservation } from '../../shared/promptObservability';
@@ -390,9 +392,105 @@ describe('renderSubagentAdvice (E1.4)', () => {
     expect(html).toContain('evo-advice-overlay-btn');
   });
 
+  it('offers a one-click apply button on skill-gate advice (13.1)', () => {
+    const html = renderSubagentAdvice([advice()], NOW);
+    expect(html).toContain('data-evo-apply="researcher"');
+    expect(html).toContain('evo-advice-apply-btn');
+    expect(html).toContain('一键应用');
+    expect(html).toContain('网页搜索');
+  });
+
+  it('swaps the apply button for an applied note once the gate is off', () => {
+    const html = renderSubagentAdvice([advice()], NOW, new Set(['researcher']));
+    expect(html).not.toContain('data-evo-apply');
+    expect(html).toContain('evo-advice-applied-note');
+    expect(html).toContain('已应用');
+  });
+
+  it('gives no apply button to a role without a switch', () => {
+    const html = renderSubagentAdvice([advice({ role: 'deep_thinker', action: 'prompt', skillId: undefined })], NOW);
+    expect(html).not.toContain('data-evo-apply');
+  });
+
   it('never injects markup through role names or skill ids', () => {
     const html = renderSubagentAdvice([advice({ role: '<img src=x>', skillId: '"><script>' })], NOW);
     expect(html).not.toContain('<img');
+    expect(html).not.toContain('<script>');
+  });
+});
+
+describe('renderAppliedAdviceSection (13.1 回看半边)', () => {
+  function applied(overrides: Partial<AdviceAppliedObservation> = {}): AdviceAppliedObservation {
+    return {
+      type: 'advice_applied',
+      appliedAt: NOW - 3600_000,
+      kind: 'skill-gate',
+      target: 'researcher',
+      detail: 'web-research',
+      evidence: { delegations: 4, failures: 3, failureRate: 75 },
+      ...overrides,
+    };
+  }
+
+  function runCall(toolName: string, success: boolean, startedAt: number): AgentRunObservation {
+    return {
+      type: 'agent_run',
+      traceId: `run_${Math.random().toString(36).slice(2, 8)}`,
+      startedAt,
+      endedAt: startedAt + 1000,
+      eventCounts: {},
+      toolCalls: [{ toolName, success, durationMs: 1000, ...(success ? {} : { error: { kind: 'timeout', hash: 'h', chars: 5 } }) }],
+      reasoningChars: 0,
+      outputChars: 0,
+    };
+  }
+
+  it('explains the empty state', () => {
+    const html = renderAppliedAdviceSection([], [], NOW);
+    expect(html).toContain('evo-empty');
+    expect(html).toContain('还没有应用过建议');
+  });
+
+  it('shows an applied gate with its before-snapshot and an idle after-picture', () => {
+    const html = renderAppliedAdviceSection([applied()], [], NOW);
+    expect(html).toContain('资料调研');
+    expect(html).toContain('evo-badge-applied');
+    expect(html).toContain('已关技能');
+    expect(html).toContain('应用时：4 次派发、3 次失败（75%）');
+    expect(html).toContain('应用后：还没有再派发过');
+  });
+
+  it('recomputes the after-picture from later agent_run records', () => {
+    const appliedAt = NOW - 3600_000;
+    const records: PromptObservation[] = [
+      runCall('researcher', true, appliedAt + 1000),
+      runCall('researcher', false, appliedAt + 2000),
+      runCall('researcher', true, appliedAt - 1000), // 应用前：不算
+    ];
+    const html = renderAppliedAdviceSection([applied({ appliedAt })], records, NOW);
+    expect(html).toContain('应用后：2 次派发、1 次失败');
+  });
+
+  it('tells a tool-note row honestly: failures counted per tool, not per class', () => {
+    const appliedAt = NOW - 3600_000;
+    const records: PromptObservation[] = [
+      runCall('web_fetch', false, appliedAt + 1000),
+      runCall('web_fetch', false, appliedAt + 2000),
+    ];
+    const html = renderAppliedAdviceSection([applied({ kind: 'tool-note', target: 'web_fetch', detail: 'network', evidence: { count: 3, windowDays: 14 } })], records, NOW);
+    expect(html).toContain('Fetch'); // toolDisplayName(web_fetch)
+    expect(html).toContain('已采纳工具注意');
+    expect(html).toContain('应用时：14 天内 3 次同类失败');
+    expect(html).toContain('应用后：该工具失败 2 次（不分错误类）');
+  });
+
+  it('celebrates a clean after-picture for tool notes', () => {
+    const html = renderAppliedAdviceSection([applied({ kind: 'tool-note', target: 'web_fetch', detail: 'network', evidence: { count: 3, windowDays: 14 } })], [], NOW);
+    expect(html).toContain('应用后：该工具没有再失败');
+  });
+
+  it('never injects markup through targets', () => {
+    const html = renderAppliedAdviceSection([applied({ target: '<script>' })], [], NOW);
     expect(html).not.toContain('<script>');
   });
 });

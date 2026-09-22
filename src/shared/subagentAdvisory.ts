@@ -12,7 +12,7 @@
 // 只读纯函数：输入观测记录 + 时间窗口，输出建议列表；不碰存储、不碰 DOM。
 
 import { KNOWN_SUBAGENT_ROLES } from './adaptiveControl';
-import type { AgentRunObservation, PromptObservation, ToolObservation } from './promptObservability';
+import type { AdviceAppliedObservation, AgentRunObservation, PromptObservation, ToolObservation } from './promptObservability';
 
 /** 默认观察窗口（天）——与仪表盘月视图同一口径，够看出"持续"而不是一次偶然。 */
 export const SUBAGENT_ADVICE_WINDOW_DAYS = 30;
@@ -179,4 +179,26 @@ export function scanSubagentAdvice(
       || b.lastFailureAt - a.lastFailureAt
       || a.role.localeCompare(b.role))
     .slice(0, SUBAGENT_MAX_ADVICE);
+}
+
+/**
+ * 13.1 — 把一次「一键应用技能闸」记成观测记录（建议层接进度量闭环的写入半边）。
+ * evidence 是应用时刻的快照（即"应用前"），"应用后"由仪表盘从其后的 agent_run
+ * 记录现算（postApplyStats）。只对 action === 'skill-gate' 的建议有意义；其余
+ * 建议没有可机械执行的闸，返回 undefined，调用方（设置页）本来也会先做同样的校验。
+ */
+export function buildSkillGateAppliedRecord(advice: SubagentAdvice, now: number): AdviceAppliedObservation | undefined {
+  if (advice.action !== 'skill-gate' || !advice.skillId) return undefined;
+  return {
+    type: 'advice_applied',
+    appliedAt: now,
+    kind: 'skill-gate',
+    target: advice.role,
+    detail: advice.skillId,
+    evidence: {
+      delegations: advice.delegations,
+      failures: advice.failures,
+      failureRate: advice.failureRate,
+    },
+  };
 }

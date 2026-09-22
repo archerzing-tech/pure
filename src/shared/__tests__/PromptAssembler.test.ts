@@ -19,7 +19,8 @@ describe('PromptAssembler', () => {
     const observability = new PromptObservability({}, store);
     const isolatedAssembler = new PromptAssembler(observability);
     const assembly = isolatedAssembler.assemble({ surface: 'cli', capabilities: 'test' }, 'hello');
-    expect(assembly.traceId).toBe(store.list()[0].traceId);
+    const persisted = store.list()[0];
+    expect(assembly.traceId).toBe(persisted.type === 'prompt_assembly' ? persisted.traceId : '');
     expect(isolatedAssembler.getObservability()).toBe(observability);
   });
 

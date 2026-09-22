@@ -9,6 +9,7 @@
 // 原样携带进 <session_memory> 的 tools 段——零新类型、零新注入通道。
 
 import { FAILURE_CLASS_HINTS, classifyFailure, type FailureClass } from '../../shared/netGuard';
+import type { AdviceAppliedObservation } from '../../shared/promptObservability';
 import { GLOBAL_MEMORY_SCOPE, type IMemoryStore, type MemoryEntry } from '../../shared/types';
 
 export interface ToolCorrectionOptions {
@@ -121,4 +122,20 @@ export async function approveToolCorrection(
     platform,
     dedupeKey: suggestion.dedupeKey,
   });
+}
+
+/**
+ * 13.1 — 采纳的同时记一条观测（建议层接进度量闭环的写入半边）。evidence 是
+ * 采纳时刻的簇快照（"应用前"）；"应用后"由仪表盘从其后的 agent_run 记录现算
+ * （postApplyStats，按工具计失败，不分错误类——观测里没有错误原文，分不了）。
+ */
+export function buildToolNoteAppliedRecord(suggestion: ToolCorrectionSuggestion, now: number): AdviceAppliedObservation {
+  return {
+    type: 'advice_applied',
+    appliedAt: now,
+    kind: 'tool-note',
+    target: suggestion.toolName,
+    detail: suggestion.errorClass,
+    evidence: { count: suggestion.count, windowDays: suggestion.windowDays },
+  };
 }

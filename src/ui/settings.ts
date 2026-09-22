@@ -8,7 +8,7 @@ import { fetchAndDisplayVersion, checkForUpdatesManual } from './updater';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { escapeHtml } from '../shared/html';
 import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } from '../shared/i18n';
-import { approveToolCorrection, scanToolCorrections } from '../adapter/memory/toolCorrections';
+import { approveToolCorrection, buildToolNoteAppliedRecord, scanToolCorrections } from '../adapter/memory/toolCorrections';
 import { confirmedDraftEntry, isDraftEntry } from '../adapter/memory/correctionDrafts';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { join, homeDir } from '@tauri-apps/api/path';
@@ -24,12 +24,14 @@ import { renderSchedulesSettings } from './scheduleSettings';
 import { buildEvolutionDashboard, DASHBOARD_WINDOW_DAYS, type DashboardRange } from '../shared/evolutionDashboard';
 import { TEAM_ROLES } from '../shared/teamObservability';
 import type { StrategyDimension } from '../shared/strategyEffect';
-import { scanSubagentAdvice } from '../shared/subagentAdvisory';
+import { buildSkillGateAppliedRecord, scanSubagentAdvice } from '../shared/subagentAdvisory';
 import { buildDraftRoleManifest } from '../shared/subagentDraft';
 import { compileExternalSubagents } from '../harness/externalSubagents';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '../coding-agent/SubagentOrchestrator';
 import type { SubagentDefinition } from '../coding-agent/types';
 import { readGuiObservations } from './observationSource';
+import { createTauriObservationSink } from '../shared/tauriObservationSink';
+import { toolDisplayName } from './toolRow';
 import { createLLMAdapter } from './chat';
 import { TauriToolAdapter } from './TauriToolAdapter';
 import { getApplicationTmpWorkspace } from '../shared/tauri';
@@ -42,6 +44,7 @@ import {
   buildExperienceItems,
   DEFAULT_STRATEGY_DIMENSION,
   MAX_EXPERIENCE_ROWS,
+  renderAppliedAdviceSection,
   renderBaselineSection,
   renderErrorClusters,
   renderExperienceList,
@@ -53,6 +56,7 @@ import {
   renderTotals,
   renderTrendCards,
 } from './evolutionDashboard';
+import { collectAppliedAdvice } from '../shared/adviceApplication';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { buildExportSavedToast } from './statsExportToast';
@@ -1259,6 +1263,35 @@ export class SettingsPanel {
         case 'cancelled':
           break;
       }
+    });
+
+    // ── 13.1：建议卡「一键应用技能闸」——按下 = 写开关 + 记观测，不再只是指路 ──
+    // 与 draft/overlay 同一套自我防护：处理器端重扫确认建议仍在（数据可能刚过
+    // 期）；只认 skill-gate（其余建议没有可机械执行的闸，按钮本就不会渲染）。
+    // 应用照记一条 advice_applied 观测，仪表盘的回看半边（postApplyStats）
+    // 从这一刻起算"应用后"。观测走 Tauri 落盘，浏览器模式没有意义，直接不接。
+    document.getElementById('evolution-advice')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-evo-apply]');
+      if (!btn || !isTauriRuntime()) return;
+      const role = btn.dataset.evoApply || '';
+      if (!role) return;
+      const read = await readGuiObservations();
+      const advice = scanSubagentAdvice(read.records, { now: Date.now() }).find((item) => item.role === role);
+      if (!advice) {
+        this.toast(t('evolution.advice.apply.stale'));
+        return;
+      }
+      const appliedRecord = buildSkillGateAppliedRecord(advice, Date.now());
+      if (!appliedRecord || !advice.skillId) return;
+      const cfg = loadConfig() ?? defaults();
+      cfg.skills[advice.skillId] = false;
+      persistConfig(cfg);
+      invalidateConfigCache();
+      createTauriObservationSink()?.append(appliedRecord);
+      this.toast(t('evolution.advice.apply.done')
+        .replace('{skill}', t(`skills.${advice.skillId}`, advice.skillId))
+        .replace('{role}', toolDisplayName(advice.role)));
+      void this.renderEvolutionDashboard(); // 卡片换"已应用"说明、回看列表立刻跟上
     });
 
     // ── Memory export/import（记忆页导出/导入，迁移到新机器）──
@@ -2490,6 +2523,8 @@ export class SettingsPanel {
     } catch {
       return; // store write failed — the card stays so the user can retry
     }
+    // 13.1 — 采纳照记一条观测（写入半边）："应用后有没有用"从这里起算。
+    createTauriObservationSink()?.append(buildToolNoteAppliedRecord(suggestion, Date.now()));
     this.renderToolCorrections();
   }
 
@@ -3006,8 +3041,16 @@ export class SettingsPanel {
     if (strategyEl) strategyEl.innerHTML = renderStrategySection(dashboard.strategy, this.evolutionStrategyDimension, overlayRoles);
 
     // E1.4 角色建议：与趋势同一个观测切片（同一窗口、同一次读取），只建议不改配置。
+    // 13.1：已应用过一键关闸的角色，卡上换成"已应用"说明，不再重复给按钮。
+    const applied = collectAppliedAdvice(read.records);
+    const appliedSkills = new Set(applied.filter((item) => item.kind === 'skill-gate').map((item) => item.target));
     const adviceEl = document.getElementById('evolution-advice');
-    if (adviceEl) adviceEl.innerHTML = renderSubagentAdvice(scanSubagentAdvice(read.records, { now }), now);
+    if (adviceEl) adviceEl.innerHTML = renderSubagentAdvice(scanSubagentAdvice(read.records, { now }), now, appliedSkills);
+
+    // 13.1 已应用的建议：同一份记录的回看半边——"应用前"是落盘时的快照，
+    // "应用后"由 postApplyStats 从其后的 agent_run 记录现算。
+    const appliedEl = document.getElementById('evolution-applied');
+    if (appliedEl) appliedEl.innerHTML = renderAppliedAdviceSection(applied, read.records, now);
 
     // T3 团队阵容：同一观测切片 + 每角色已入库 case 数（读 ~/.pure/roles/<role>/
     // 的文件名清单，浏览器模式为空 → 样本列全部显示 0 但派发数据照常）。

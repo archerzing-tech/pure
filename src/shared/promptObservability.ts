@@ -142,7 +142,32 @@ export interface DelegationObservation {
  *  shared layer must not import it (same split as the observation sink). */
 export type DelegationRolePredicate = (toolName: string) => boolean;
 
-export type PromptObservation = PromptAssemblyObservation | AgentRunObservation;
+/** 13.1 — one suggestion the user APPLIED from an advice card (E1.4 skill gate
+ *  / E1.3 tool note). Written by the settings page through the same observation
+ *  sink, so the dashboard can look back at "did the applied suggestion help":
+ *  `evidence` is the before-snapshot taken at apply time; the after side is
+ *  recomputed from the agent_run records that follow (see postApplyStats). */
+export interface AdviceAppliedObservation {
+  type: 'advice_applied';
+  appliedAt: number;
+  /** Which suggestion family produced the action. */
+  kind: 'skill-gate' | 'tool-note';
+  /** skill-gate: the role the advice was about; tool-note: the tool name. */
+  target: string;
+  /** skill-gate: the skill id that was switched off; tool-note: the failure class. */
+  detail?: string;
+  /** Before-snapshot at apply time, keyed by what the family can measure. */
+  evidence?: {
+    delegations?: number;
+    failures?: number;
+    /** Percent (one decimal), same scale as SubagentAdvice.failureRate. */
+    failureRate?: number;
+    count?: number;
+    windowDays?: number;
+  };
+}
+
+export type PromptObservation = PromptAssemblyObservation | AgentRunObservation | AdviceAppliedObservation;
 
 /**
  * E4.2 — parse a JSONL dump back into records. The GUI dashboard (Rust tail
@@ -157,7 +182,7 @@ export function parsePromptObservations(jsonl: string): PromptObservation[] {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as PromptObservation;
-      if (parsed && (parsed.type === 'prompt_assembly' || parsed.type === 'agent_run')) records.push(parsed);
+      if (parsed && (parsed.type === 'prompt_assembly' || parsed.type === 'agent_run' || parsed.type === 'advice_applied')) records.push(parsed);
     } catch {
       // Ignore the bad line, keep reading.
     }

@@ -175,9 +175,13 @@ function buildObservationStats(records: readonly PromptObservation[]): Observati
     if (isRun(record)) {
       runs++;
       see(record.startedAt);
-    } else {
+    } else if (record.type === 'prompt_assembly') {
       assemblies++;
       see(record.timestamp);
+    } else {
+      // advice_applied（13.1）：既不是 run 也不是 assembly，不进这两个计数，
+      // 但 appliedAt 照样参与观测窗口的边界——它真实占用日志里的时间跨度。
+      see(record.appliedAt);
     }
   }
   return { total: records.length, runs, assemblies, oldestAt, newestAt };

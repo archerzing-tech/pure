@@ -18,6 +18,8 @@ import { isDraftEntry } from '../adapter/memory/correctionDrafts';
 import type { MemoryEntry } from '../adapter/memory/IMemoryStore';
 import type { DashboardTotals, ErrorCluster, EvolutionDashboard, TrendBucket } from '../shared/evolutionDashboard';
 import { SUBAGENT_ADVICE_WINDOW_DAYS, type SubagentAdvice } from '../shared/subagentAdvisory';
+import { postApplyStats } from '../shared/adviceApplication';
+import type { AdviceAppliedObservation, PromptObservation } from '../shared/promptObservability';
 import type { RoleEffectSlice, RunEffectSlice, StrategyDimension, StrategyEffectSummary } from '../shared/strategyEffect';
 import { toolDisplayName } from './toolRow';
 import { formatCostUsd } from '../shared/usage';
@@ -360,11 +362,15 @@ export function renderStrategySection(
 
 /**
  * 角色建议卡：哪个角色在反复掉链子 + 证据 + **用户能拉的那个闸**。
- * 有技能开关 → 指路设置页（E1.4 原样）；没有开关的角色 → 追加一个"生成收窄
+ * 有技能开关 → 指路设置页（E1.4 原样），13.1 起另有「一键应用」直接把闸拉上
+ * （写技能开关 + 记观测，可回看）；没有开关的角色 → 追加一个"生成收窄
  * 草稿"按钮（13.2 生成半边 MVP）：按下才落盘一个可编辑的 manifest 草稿，
  * pure 依然不静默改配置。
+ *
+ * `appliedSkills`：本窗口内已一键应用过闸的角色集——行内按钮换成"已应用"
+ * 说明，防止重复点击重复写观测。
  */
-export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: number): string {
+export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: number, appliedSkills?: ReadonlySet<string>): string {
   if (advice.length === 0) {
     return `<div class="evo-empty">${escapeHtml(t('evolution.advice.empty', '窗口内没有需要调整的角色 —— 要么派发次数还太少，要么各角色都稳。'))}</div>`;
   }
@@ -399,6 +405,12 @@ export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: num
     // 13.3 part 3：给任何有持续短板的角色一条"起草 prompt overlay"的出路。
     // 起草走便宜模型，落盘前必过该角色的回归 A/B 门槛（写盘前强跑）。
     const overlayButton = `<button class="evo-advice-overlay-btn" data-evo-overlay="${escapeHtml(item.role)}">${escapeHtml(t('evolution.advice.overlay', '起草 prompt overlay（过 A/B 后落盘）'))}</button>`;
+    // 13.1：skill-gate 类给一键应用——按下 = 写技能开关 + 记一条观测，不再只是指路。
+    const applyButton = item.action === 'skill-gate'
+      ? appliedSkills?.has(item.role)
+        ? `<span class="evo-advice-applied-note">${escapeHtml(t('evolution.advice.appliedNote', '已应用：技能已关（新会话生效），见下方「已应用的建议」'))}</span>`
+        : `<button class="evo-advice-apply-btn" data-evo-apply="${escapeHtml(item.role)}">${escapeHtml(t('evolution.advice.apply', '一键应用：关闭「{skill}」技能').replace('{skill}', t(`skills.${item.skillId}`, item.skillId ?? '')))}</button>`
+      : '';
     return `<div class="evo-advice-row evo-advice-${item.severity}">
       <div class="evo-advice-head">
         <span class="evo-advice-role">${escapeHtml(toolDisplayName(item.role))}</span>
@@ -408,10 +420,61 @@ export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: num
       </div>
       <div class="evo-advice-evidence">${escapeHtml(evidence)}</div>
       <div class="evo-advice-action">${escapeHtml(action)}</div>
-      ${draftButton}${overlayButton}
+      ${draftButton}${overlayButton}${applyButton}
     </div>`;
   }).join('');
   return `<div class="evo-advice-list">${rows}</div>`;
+}
+
+// ── 已应用的建议（13.1 回看）──
+
+/**
+ * 已应用建议列表：每条 = 应用时刻的快照（写入半边记的 evidence）+ 其后到现在
+ * 的后继行为（postApplyStats 现算）。skill-gate 看"应用后该角色还派不派、
+ * 还败不败"；tool-note 的后继行为只能按工具计失败（观测里没有错误原文，分
+ * 不了错误类），UI 如实标注，不冒充精确归因。
+ */
+export function renderAppliedAdviceSection(
+  applied: readonly AdviceAppliedObservation[],
+  records: readonly PromptObservation[],
+  now: number,
+): string {
+  if (applied.length === 0) {
+    return `<div class="evo-empty">${escapeHtml(t('evolution.applied.empty', '还没有应用过建议 —— 建议卡上的「一键应用」会落在这里。'))}</div>`;
+  }
+  const rows = applied.map((item) => {
+    const badge = item.kind === 'skill-gate'
+      ? t('evolution.applied.kind.skillGate', '已关技能')
+      : t('evolution.applied.kind.toolNote', '已采纳工具注意');
+    const evidence = item.kind === 'skill-gate'
+      ? t('evolution.applied.evidence.role', '应用时：{n} 次派发、{m} 次失败（{rate}）')
+        .replace('{n}', String(item.evidence?.delegations ?? 0))
+        .replace('{m}', String(item.evidence?.failures ?? 0))
+        .replace('{rate}', formatPercent(item.evidence?.failureRate ?? 0))
+      : t('evolution.applied.evidence.tool', '应用时：{d} 天内 {n} 次同类失败')
+        .replace('{d}', String(item.evidence?.windowDays ?? 0))
+        .replace('{n}', String(item.evidence?.count ?? 0));
+    const after = postApplyStats(records, item, now);
+    const afterLine = item.kind === 'skill-gate'
+      ? after.delegations === 0
+        ? t('evolution.applied.after.idle', '应用后：还没有再派发过')
+        : t('evolution.applied.after.role', '应用后：{n} 次派发、{m} 次失败')
+          .replace('{n}', String(after.delegations))
+          .replace('{m}', String(after.failures))
+      : after.failures === 0
+        ? t('evolution.applied.after.clean', '应用后：该工具没有再失败')
+        : t('evolution.applied.after.tool', '应用后：该工具失败 {n} 次（不分错误类）')
+          .replace('{n}', String(after.failures));
+    return `<div class="evo-applied-row">
+      <div class="evo-advice-head">
+        <span class="evo-advice-role">${escapeHtml(toolDisplayName(item.target))}</span>
+        <span class="memory-badge evo-badge-applied">${escapeHtml(badge)}</span>
+        <span class="evo-advice-time">${escapeHtml(relativeTime(item.appliedAt, now))}</span>
+      </div>
+      <div class="evo-advice-evidence">${escapeHtml(evidence)} · ${escapeHtml(afterLine)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="evo-applied-list">${rows}</div>`;
 }
 
 // ── 经验条目（直达清理）──

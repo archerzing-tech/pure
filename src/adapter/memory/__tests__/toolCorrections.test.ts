@@ -8,6 +8,7 @@ import { describe, it, expect } from 'bun:test';
 import type { MemoryEntry } from '../../../shared/types';
 import {
   approveToolCorrection,
+  buildToolNoteAppliedRecord,
   detectPlatform,
   scanToolCorrections,
   TOOL_NOTE_DEDUPE_PREFIX,
@@ -151,5 +152,21 @@ describe('approveToolCorrection', () => {
 describe('detectPlatform', () => {
   it('matches the test process platform', () => {
     expect(detectPlatform()).toBe(process.platform);
+  });
+});
+
+describe('buildToolNoteAppliedRecord', () => {
+  it('snapshots the cluster (tool × class × count × window) into an observation record', () => {
+    const entries = [errorEntry(NETWORK_FAIL, 0), errorEntry(NETWORK_FAIL, 1), errorEntry(NETWORK_FAIL, 2)];
+    const [suggestion] = scanToolCorrections(entries, { now: NOW });
+    const record = buildToolNoteAppliedRecord(suggestion, NOW + 5);
+    expect(record).toEqual({
+      type: 'advice_applied',
+      appliedAt: NOW + 5,
+      kind: 'tool-note',
+      target: 'web_fetch',
+      detail: 'network',
+      evidence: { count: 3, windowDays: 14 },
+    });
   });
 });

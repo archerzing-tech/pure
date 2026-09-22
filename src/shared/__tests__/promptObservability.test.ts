@@ -174,7 +174,7 @@ describe('PromptObservability', () => {
     });
     expect(runTrace).toBe(assemblyTrace);
     observability.finishRun(runTrace);
-    expect(observability.records().filter((record) => record.traceId === assemblyTrace)).toHaveLength(2);
+    expect(observability.records().filter((record) => record.type !== 'advice_applied' && record.traceId === assemblyTrace)).toHaveLength(2);
   });
 
   it('can be disabled without changing trace ids or retaining records', () => {
@@ -214,7 +214,7 @@ describe('PromptObservability', () => {
         store.append({ type: 'agent_run', traceId: `run-${index}`, startedAt: Date.now(), eventCounts: {}, toolCalls: [], reasoningChars: 0, outputChars: 0 });
       }
       const retained = store.list();
-      expect(retained.map((record) => record.traceId)).toEqual(['run-2', 'run-3']);
+      expect(retained.filter((record) => record.type !== 'advice_applied').map((record) => record.traceId)).toEqual(['run-2', 'run-3']);
       expect(existsSync(`${path}.tmp-${process.pid}`)).toBe(false);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -235,7 +235,7 @@ describe('PromptObservability', () => {
 
   it('mirrors every persisted record to the sink (E0.1 durability)', () => {
     const sunk: string[] = [];
-    const observability = new PromptObservability({ sink: { append: (record) => { sunk.push(record.traceId); } } });
+    const observability = new PromptObservability({ sink: { append: (record) => { if (record.type !== 'advice_applied') sunk.push(record.traceId); } } });
     const assemblyTrace = observability.recordAssembly({
       sessionId: 's',
       systemPrompt: 'system',
@@ -262,7 +262,7 @@ describe('PromptObservability', () => {
     const observability = new PromptObservability();
     const traceId = observability.startRun({ sessionId: 's' });
     observability.finishRun(traceId);
-    observability.setSink({ append: (record) => { sunk.push(record.traceId); } });
+    observability.setSink({ append: (record) => { if (record.type !== 'advice_applied') sunk.push(record.traceId); } });
     const second = observability.startRun({ sessionId: 's' });
     observability.finishRun(second);
     observability.setSink(undefined);
@@ -369,7 +369,19 @@ describe('parsePromptObservations (E4.2 shared reader)', () => {
       JSON.stringify({ type: 'prompt_assembly', traceId: 'b', timestamp: 2 }),
       JSON.stringify({ type: 'something_else', traceId: 'c' }),
     ].join('\n');
-    expect(parsePromptObservations(jsonl).map((record) => record.traceId)).toEqual(['a', 'b']);
+    expect(parsePromptObservations(jsonl).filter((record) => record.type !== 'advice_applied').map((record) => record.traceId)).toEqual(['a', 'b']);
+  });
+
+  it('reads advice_applied records through (13.1) and still skips unknown types', () => {
+    const jsonl = [
+      JSON.stringify({ type: 'advice_applied', appliedAt: 10, kind: 'skill-gate', target: 'researcher', detail: 'web-research', evidence: { delegations: 4, failures: 3, failureRate: 75 } }),
+      JSON.stringify({ type: 'advice_applied', appliedAt: 20, kind: 'tool-note', target: 'web_fetch' }),
+      JSON.stringify({ type: 'advice_applied_noth', appliedAt: 30 }),
+    ].join('\n');
+    const parsed = parsePromptObservations(jsonl);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]).toMatchObject({ type: 'advice_applied', kind: 'skill-gate', target: 'researcher', detail: 'web-research' });
+    expect(parsed[1]).toMatchObject({ type: 'advice_applied', kind: 'tool-note', target: 'web_fetch' });
   });
 
   it('returns nothing for an empty dump', () => {

@@ -14153,13 +14153,14 @@ button svg,
 }
 
 /* 13.2 生成半边 — 建议卡上的「生成收窄版角色草稿」小按钮：低调描边款，
-   与卡片内文字同级，hover 才亮起来。 */
+   与卡片内文字同级，hover 才亮起来。（原稿误写 var(--border-color)——
+   该令牌不存在，边框从未渲染过；修正为 --border-light。） */
 .evo-advice-draft-btn {
   margin-top: 6px;
   padding: 3px 10px;
   font-size: 12px;
   border-radius: 999px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-light);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -14169,6 +14170,52 @@ button svg,
   border-color: var(--accent, #6c8cff);
   color: var(--accent, #6c8cff);
   background: color-mix(in srgb, var(--accent, #6c8cff) 8%, transparent);
+}
+
+/* 13.1/13.2 — 建议卡上的其余动作按钮（overlay 起草、13.1 一键应用）：同
+   draft-btn 一款描边小按钮。overlay-btn 上轮提交时漏了样式，一直以浏览器
+   默认款渲染，这里一并归队。 */
+.evo-advice-overlay-btn,
+.evo-advice-apply-btn {
+  margin-top: 6px;
+  margin-right: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-light);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.evo-advice-overlay-btn:hover,
+.evo-advice-apply-btn:hover {
+  border-color: var(--accent, #6c8cff);
+  color: var(--accent, #6c8cff);
+  background: color-mix(in srgb, var(--accent, #6c8cff) 8%, transparent);
+}
+/* 已应用的建议行：徽章走中性确认色（不是 high/medium 那种告警色）。 */
+.evo-badge-applied {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+/* 已应用的回看行：结构复用 advice-row（左边框换成确认色）。 */
+.evo-applied-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.evo-applied-row {
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-left: 3px solid var(--success);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.evo-advice-applied-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--success);
 }
 
 /* 阶段 12 — 暂停后续跑条：居中的一枚「继续」按钮，轻背景不抢对话内容。 */

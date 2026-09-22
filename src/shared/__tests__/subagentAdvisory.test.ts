@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'bun:test';
 import type { AgentRunObservation, PromptObservation, ToolObservation } from '../promptObservability';
 import {
+  buildSkillGateAppliedRecord,
   scanSubagentAdvice,
   SUBAGENT_MAX_ADVICE,
   SUBAGENT_MIN_DELEGATIONS,
@@ -165,5 +166,26 @@ describe('scanSubagentAdvice', () => {
     // 2/3 = 66.7% 已够高严重度；超时占失败过半 → 归因超时。
     expect(advice[0]).toMatchObject({ delegations: 3, failures: 2, timeoutCount: 2, reason: 'timeout', severity: 'high' });
     expect(SUBAGENT_MIN_DELEGATIONS).toBe(3);
+  });
+});
+
+describe('buildSkillGateAppliedRecord', () => {
+  it('snapshots the before-picture of a skill-gate advice into an observation record', () => {
+    const advice = scanSubagentAdvice(delegations('researcher', 4, 3, 'timeout'), { now: NOW })[0];
+    const record = buildSkillGateAppliedRecord(advice, NOW + 5);
+    expect(record).toMatchObject({
+      type: 'advice_applied',
+      appliedAt: NOW + 5,
+      kind: 'skill-gate',
+      target: 'researcher',
+      detail: 'web-research',
+      evidence: { delegations: 4, failures: 3, failureRate: 75 },
+    });
+  });
+
+  it('refuses prompt-action advice — there is no mechanical gate to pull', () => {
+    const advice = scanSubagentAdvice(delegations('deep_thinker', 3, 2), { now: NOW })[0];
+    expect(advice.action).toBe('prompt');
+    expect(buildSkillGateAppliedRecord(advice, NOW)).toBeUndefined();
   });
 });
