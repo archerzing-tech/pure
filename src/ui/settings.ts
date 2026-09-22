@@ -22,6 +22,7 @@ import { showToastHtml } from '../shared/toast';
 import { showConfirmModal } from './modal';
 import { renderSchedulesSettings } from './scheduleSettings';
 import { buildEvolutionDashboard, DASHBOARD_WINDOW_DAYS, type DashboardRange } from '../shared/evolutionDashboard';
+import { TEAM_ROLES } from '../shared/teamObservability';
 import type { StrategyDimension } from '../shared/strategyEffect';
 import { scanSubagentAdvice } from '../shared/subagentAdvisory';
 import { buildDraftRoleManifest } from '../shared/subagentDraft';
@@ -48,6 +49,7 @@ import {
   renderStrategySection,
   renderStrategyTabs,
   renderSubagentAdvice,
+  renderTeamRosterSection,
   renderTotals,
   renderTrendCards,
 } from './evolutionDashboard';
@@ -3006,6 +3008,25 @@ export class SettingsPanel {
     // E1.4 角色建议：与趋势同一个观测切片（同一窗口、同一次读取），只建议不改配置。
     const adviceEl = document.getElementById('evolution-advice');
     if (adviceEl) adviceEl.innerHTML = renderSubagentAdvice(scanSubagentAdvice(read.records, { now }), now);
+
+    // T3 团队阵容：同一观测切片 + 每角色已入库 case 数（读 ~/.pure/roles/<role>/
+    // 的文件名清单，浏览器模式为空 → 样本列全部显示 0 但派发数据照常）。
+    const teamEl = document.getElementById('evolution-team');
+    if (teamEl) {
+      const caseCounts: Record<string, number> = {};
+      try {
+        const core = await loadTauriCore();
+        if (core) {
+          for (const role of TEAM_ROLES) {
+            const cases = await core.invoke<Array<{ file: string }>>('list_role_cases', { role }).catch(() => [] as Array<{ file: string }>);
+            if (cases.length > 0) caseCounts[role] = cases.length;
+          }
+        }
+      } catch {
+        // Browser mode: delegation data still renders; stock shows 0.
+      }
+      teamEl.innerHTML = renderTeamRosterSection(read.records, { now, caseCounts });
+    }
 
     const statsEl = document.getElementById('evolution-stats');
     if (statsEl) {
