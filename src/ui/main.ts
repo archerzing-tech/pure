@@ -147,6 +147,20 @@ sessionSidebar = new SessionSidebar({
     const status = await inspectWorktreeFinish(tauriGitRunner(), ws);
     return status && (status.commits.length > 0 || status.uncommitted > 0) ? retentionMessage(status) : null;
   },
+  delegationNotice: async (sessionId) => {
+    if (!isTauriRuntime()) return null;
+    try {
+      const summary = await tauriInvoke<{ delegationCount?: number; byRole?: Record<string, number> }>('summarize_session_delegations', { sessionId });
+      const count = summary?.delegationCount ?? 0;
+      if (count <= 0) return null;
+      const detail = Object.entries(summary?.byRole ?? {})
+        .map(([role, n]) => `${role}×${n}`)
+        .join('、');
+      return t('confirm.deleteSessionDelegations').replace('{n}', String(count)) + (detail ? `（${detail}）` : '');
+    } catch {
+      return null;
+    }
+  },
 });
 
 // A session switch can start outside the sidebar — clicking a parallel-task

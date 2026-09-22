@@ -49,6 +49,11 @@ export interface SessionSidebarDeps {
    * Null/absent → the plain delete confirm. Deleting a session never deletes
    * its worktree — retention is the default, this only makes it visible. */
   retentionNotice?(sessionId: string): Promise<string | null>;
+  /** T2 (team observability): when the session's archive holds role
+   *  delegations, return a line for the delete confirm saying the harvestable
+   *  samples will be gone. Null/absent → no extra line; deletion is never
+   *  blocked. */
+  delegationNotice?(sessionId: string): Promise<string | null>;
   /** Render a loaded session's transcript into its session host (main.ts owns
    * the chat DOM). Called only for COLD sessions — warm sessions already have
    * their live transcript mounted. */
@@ -458,7 +463,11 @@ export class SessionSidebar {
           // 4.4: a worktree-bound session with unmerged work gets the
           // retention wording — delete removes the session, not its worktree.
           const retention = this.deps.retentionNotice ? await this.deps.retentionNotice(sid) : null;
-          if (!(await this.deps.confirm(retention ?? t('confirm.deleteSession')))) return;
+          // T2: a session with role-delegation archives loses its harvestable
+          // samples on delete — say so instead of deleting silently.
+          const delegationNotice = this.deps.delegationNotice ? await this.deps.delegationNotice(sid) : null;
+          const message = [retention, delegationNotice].filter(Boolean).join('\n') || t('confirm.deleteSession');
+          if (!(await this.deps.confirm(message))) return;
           // Tear the controller down BEFORE the disk delete: a background run
           // between the two steps would re-persist the session the user just
           // deleted, and a live-only entry (never persisted, sidebar-merged)

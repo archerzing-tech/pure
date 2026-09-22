@@ -13796,6 +13796,108 @@ fn save_session_workspace_sync(session_id: &str, workspace: &str) -> Result<(), 
     Ok(())
 }
 
+/// Team observability T2 — read-only delegation stats for one session, shown
+/// on the delete confirmation card. The archive is the only place role
+/// delegation args/outputs live, so deleting it silently destroys harvestable
+/// samples; surfacing the count lets the user decide with eyes open. Reads
+/// the session.json messages and counts assistant toolCalls whose function
+/// name is a registered role (single pass, no schema parsing beyond that).
+#[tauri::command]
+fn summarize_session_delegations(session_id: String) -> Result<serde_json::Value, String> {
+    validate_session_id(&session_id)?;
+    let path = sessions_dir().join(&session_id).join("session.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        // No archive (live-only session) — nothing to lose, no warning.
+        return Ok(serde_json::json!({ "delegationCount": 0, "byRole": {} }));
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(serde_json::json!({ "delegationCount": 0, "byRole": {} })),
+    };
+    let by_role = count_role_delegations(&parsed_messages(&parsed));
+    let delegation_count: u64 = by_role.values().sum();
+    Ok(serde_json::json!({ "delegationCount": delegation_count, "byRole": by_role }))
+}
+
+/// The role roster as plain names, shared by summarize_session_delegations.
+/// Mirrors the GUI-side predicate wiring: everything the hosts register as a
+/// subagent role (the roster compiles into the binary, so no IO here).
+fn subagent_role_names() -> std::collections::HashSet<String> {
+    // Keep in sync with BUILT_IN_SUBAGENTS + CODING_AGENT_ROLES + the
+    // external-role loader's tag whitelist (non-delegable names excluded).
+    [
+        "researcher", "code_reviewer", "project_auditor", "task_planner",
+        "code_editor", "deep_thinker", "ui_designer",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+#[cfg(test)]
+mod delegation_summary_tests {
+    use super::*;
+
+    #[test]
+    fn summary_counts_role_delegations_and_ignores_plain_tools() {
+        let session = serde_json::json!({
+            "messages": [
+                { "role": "assistant", "toolCalls": [
+                    { "id": "c1", "function": { "name": "researcher", "arguments": "{}" } },
+                    { "id": "c2", "function": { "name": "read_file", "arguments": "{}" } },
+                    { "id": "c3", "function": { "name": "code_reviewer", "arguments": "{}" } },
+                    { "id": "c4", "function": { "name": "researcher", "arguments": "{}" } }
+                ] },
+                { "role": "assistant", "content": "no calls here" }
+            ]
+        });
+        let dir = std::env::temp_dir().join(format!("pure-delsum-{}", std::process::id()));
+        let session_dir = dir.join("session_delsum_test");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join("session.json"), serde_json::to_string(&session).unwrap()).unwrap();
+        // Point sessions_dir at the temp tree for this check.
+        // sessions_dir() resolves via pure_home_dir(); use the real command
+        // path but with an isolated home through PURE_HOME if available.
+        let count = count_role_delegations(&parsed_messages(&session));
+        assert_eq!(count.get("researcher"), Some(&2));
+        assert_eq!(count.get("code_reviewer"), Some(&1));
+        assert!(!count.contains_key("read_file"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn role_roster_matches_the_registered_subagent_roles() {
+        let roles = subagent_role_names();
+        for role in ["researcher", "code_reviewer", "project_auditor", "task_planner", "code_editor", "deep_thinker", "ui_designer"] {
+            assert!(roles.contains(role), "roster missing {role}");
+        }
+        assert!(!roles.contains("bash_executor"), "bash_executor is a tool, not a role");
+    }
+}
+
+fn parsed_messages(session: &serde_json::Value) -> Vec<serde_json::Value> {
+    session
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn count_role_delegations(messages: &[serde_json::Value]) -> std::collections::BTreeMap<String, u64> {
+    let roles = subagent_role_names();
+    let mut by_role = std::collections::BTreeMap::new();
+    for message in messages {
+        let Some(calls) = message.get("toolCalls").and_then(|c| c.as_array()) else { continue };
+        for call in calls {
+            let Some(name) = call.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) else { continue };
+            if roles.contains(name) {
+                *by_role.entry(name.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    by_role
+}
+
 #[tauri::command]
 fn delete_session(session_id: String) -> Result<(), String> {
     validate_session_id(&session_id)?;
@@ -16203,6 +16305,7 @@ pub fn run() {
             save_session_workspace,
             delete_session,
             delete_all_sessions,
+            summarize_session_delegations,
             // Per-session usage stats
             save_session_stats,
             load_session_stats,
