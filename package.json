@@ -30,6 +30,7 @@
     "e2e:overlay-flow": "bun run scripts/e2e-overlay-flow.ts",
     "typecheck": "bun run --no-run tsc --noEmit",
     "lint:conventions": "bun run scripts/check-conventions.ts",
+    "agents:sync": "bun run scripts/sync-default-agents-md.ts",
     "build": "bun run typecheck && npx vite build && bun run cli:build",
     "build:cli": "bun run cli:build",
     "sign:mac": "bash scripts/sign-app.sh",
