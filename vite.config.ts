@@ -1,4 +1,5 @@
 import { createReadStream, existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import type { Plugin, ResolvedConfig } from 'vite';
@@ -25,6 +26,16 @@ const LAZY_DIAGRAM_DEPS = [
 
 const require = createRequire(import.meta.url);
 const APP_VERSION = JSON.parse(readFileSync(join(import.meta.dirname, 'package.json'), 'utf8')).version as string;
+
+// 构建戳（2026-09-22）：git 短哈希 + 构建时间随 define 烤进包里，显示在
+// 设置 → Updates 的版本行。Tauri 不热更新——装机后必须能一眼分辨跑的是
+// 不是新二进制，否则修了等于没修（插话重设计验证时踩过）。
+let BUILD_HASH = 'nogit';
+try {
+  BUILD_HASH = execSync('git rev-parse --short HEAD', { cwd: import.meta.dirname, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+} catch { /* not a git checkout */ }
+const BUILD_TIME = new Date().toLocaleString('zh-CN', { hour12: false });
+const BUILD_INFO = `${BUILD_HASH} · ${BUILD_TIME}`;
 let ORT_WASM_DIR = dirname(require.resolve('onnxruntime-web/ort-wasm-simd-threaded.wasm'));
 let ORT_OUTPUT_DIR = join(process.cwd(), 'dist');
 const ORT_WASM_FILES = [
@@ -174,6 +185,7 @@ export default defineConfig({
   plugins,
   define: {
     __APP_VERSION__: JSON.stringify(APP_VERSION),
+    __BUILD_INFO__: JSON.stringify(BUILD_INFO),
   },
   clearScreen: false,
   // See LAZY_DIAGRAM_DEPS above.

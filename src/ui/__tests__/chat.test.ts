@@ -947,27 +947,35 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('this.pendingFoldIns.push(')).toBeGreaterThan(-1);
     expect(src.indexOf('this.addBubble(\'user\', displayText, images)', src.indexOf('private foldInScopeAddition('))).toBeGreaterThan(-1);
     expect(src.indexOf('fold.activityCountAtDelivery = this.agentActivities.length')).toBeGreaterThan(-1);
-    // 2026-09-22 机械执行：折入的 scope 追加不再赌模型听话——takeSteerMessages
-    // 异步化，在"没有任何在飞委派"的边界（恰好=父任务汇合轮；steer 队列父子
-    // 共享，子 agent 在跑时自身条目恒为 running，天然挡住偷取）直接把追加跑
-    // 完、把结果作为观察喂给汇总轮；settle 对 mechanicallyDone 直接放行。
-    expect(src.indexOf('takeSteerMessages: async () =>')).toBeGreaterThan(-1);
+    // 2026-09-22 插话重设计（代执行回合）：委派收齐后的第一个 THINK 边界，
+    // 宿主把 scope 追加包成普通委派调用交还引擎——引擎跳过本轮模型调用，走
+    // 原生 ACT 管线（ToolStarted 出卡片 / SubagentActivity 流明细 / ToolResult
+    // 收尾入档）。顺序由结构保证，卡片与正常委派同源，不再手搓任何 UI。
+    expect(src.indexOf('takeSyntheticToolCalls: async () =>')).toBeGreaterThan(-1);
+    const synth = src.indexOf('takeSyntheticToolCalls: async () =>');
+    const synthBody = src.slice(synth, synth + 1_500);
+    expect(synthBody.indexOf('if (this.hasDelegationInFlight()) return [];')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('fold.delivered || !fold.mechanical) continue;')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('fold.delivered = true;')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('fold.syntheticCallId = callId;')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('你追加的安排上了')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('JSON.stringify({ prompt: fold.text })')).toBeGreaterThan(-1);
+    // steer 闭包只管指令型折入的交付 + 代执行回合的合并口径铺垫（每条只铺
+    // 一次）；机械折入留给代执行闭包。此前所有手搓 UI 补丁（宿主内直接
+    // orchestrator.execute / 合成卡片 / 事件泵 / 思考卡接管）必须不存在。
     const closure = src.indexOf('takeSteerMessages: async () =>');
-    const closureBody = src.slice(closure, closure + 6_000);
+    const closureBody = src.slice(closure, synth);
     expect(closureBody.indexOf('if (this.hasDelegationInFlight())')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('subagentOrchestrator.execute(')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('fold.mechanicallyDone = true')).toBeGreaterThan(-1);
-    // 2026-09-22 补跑可见性（第二次实测后收紧）：机械执行绕过父引擎的工具事件
-    // 流——补跑卡片必须与正常委派同款：appendToolRow 合成 agent 网格卡；父引擎
-    // 正阻塞在本边界、fanout 事件转发不出去，专用泵把 orchestrator 事件实时
-    // 灌进卡片面板，收尾 finalizeToolRow 带 trace 重渲染；思考卡为空时开新卡
-    // 接管（不能依赖已置空的旧引用，否则用户盯着的还是"等待模型首字"误导）。
-    expect(closureBody.indexOf("appendToolRow(role, { prompt: fold.displayText }, 'agent')")).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('subagentEventFanout.subscribe()')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('formatSubagentTraceLine(evt)')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('finalizeToolRow(row, {')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('thinkingCard = openThinkingCard()')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf("?.output === 'string'")).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('fold.delivered || fold.mechanical) continue;')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('fold.mergeFramed = true;')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('subagentOrchestrator.execute(')).toBe(-1);
+    expect(closureBody.indexOf('appendToolRow(')).toBe(-1);
+    expect(closureBody.indexOf('finalizeToolRow(')).toBe(-1);
+    expect(closureBody.indexOf('subagentEventFanout.subscribe()')).toBe(-1);
+    // 兑现回写：foldin_* 的 ToolResult 成功 ⇒ mechanicallyDone（settle 放行）。
+    const toolResultCase = src.indexOf("case 'ToolResult': {");
+    expect(toolResultCase).toBeGreaterThan(-1);
+    expect(src.slice(toolResultCase, toolResultCase + 900).indexOf('f.syntheticCallId === event.payload.toolCallId')).toBeGreaterThan(-1);
     const settle = src.indexOf('private settleFoldIns(');
     expect(settle).toBeGreaterThan(-1);
     const settleBody = src.slice(settle, settle + 500);

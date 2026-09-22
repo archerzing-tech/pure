@@ -288,6 +288,15 @@ export class AgentLoopEngine {
       let content = '';
       let reasoningText = '';
       let toolCalls: ToolCall[] = [];
+      // 代执行回合（2026-09-22 插话重设计）：宿主在本边界直接给出本轮的
+      // toolCalls 时，完全跳过模型调用，把这些调用交给下面原生的 ACT 管线
+      // （ToolStarted → runBatch → ToolResult → transcript 配对）。用意：必须
+      // 落地的中途插话（并行委派在飞期间的 scope 追加）变成一个普通委派回合
+      // ——卡片/明细/持久化全部原生渲染，顺序保证是结构性的：模型第一次被
+      // 咨询时，追加项的结果已经在它的 transcript 里。
+      const syntheticCalls = (await ctx.takeSyntheticToolCalls?.()) ?? [];
+      const syntheticRound = syntheticCalls.length > 0 && !!ctx.tools;
+      if (syntheticRound) toolCalls = syntheticCalls;
       // Mid-stream interruptions (Ctrl+C / budget-stop) leave the in-flight
       // answer only in `content` — the push below (after a completed stream)
       // never runs, so the partial text was never persisted and interrupted
@@ -338,81 +347,83 @@ export class AgentLoopEngine {
       let sawDone = false;
 
       try {
-        const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
-        const toolsDefs = ctx.tools && currentToolsDefs.length > 0 ? currentToolsDefs : [];
-        // Stream deadline follows the budget line that ACTUALLY ends the run
-        // (hardMaxTime, else the soft cap while it lasts, else the soft cap
-        // duration once the run is elastic). remaining().time clamps at 0
-        // after the soft cap — Math.max(1, 0) used to become a 1ms deadline
-        // that instantly timed out every remaining round.
-        const streamTimeoutMs = budget.streamDeadlineMs();
-        for await (const chunk of streamLlmTurn({
-          llm: llmForPhase(ctx, 'THINK'),
-          messages,
-          tools: toolsDefs,
-          signal: ctx.signal,
-          timeoutMs: streamTimeoutMs,
-          firstTokenTimeoutMs: budget.streamFirstTokenMs(),
-        })) {
-          switch (chunk.type) {
-            case 'content':
-              content += chunk.content;
-              yield { type: 'TokenDelta', payload: { content: chunk.content, stateId: sid(), isToolCall: false }, timestamp: Date.now() };
-              break;
-            case 'reasoning':
-              reasoningText += chunk.content;
-              yield { type: 'ReasoningDelta', payload: { content: chunk.content, stateId: sid() }, timestamp: Date.now() };
-              break;
-            case 'tool_call_delta':
-              sawToolCall = true;
-              yield { type: 'TokenDelta', payload: { content: chunk.arguments ?? '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name }, timestamp: Date.now() };
-              break;
-            case 'tool_call':
-              sawToolCall = true;
-              yield { type: 'TokenDelta', payload: { content: '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name, toolCallId: chunk.id }, timestamp: Date.now() };
-              break;
-            case 'usage':
-              turnUsage = mergeTokenUsage(turnUsage, chunk.usage);
-              break;
-            case 'done':
-              content = chunk.content || content;
-              toolCalls = chunk.toolCalls;
-              sawDone = true;
-              if (toolCalls.length > 0) sawToolCall = true;
-              for (const tc of toolCalls) {
-                yield { type: 'TokenDelta', payload: { content: '', stateId: sid(), isToolCall: true, toolCallBuffer: tc.function.arguments, toolCallName: tc.function.name, toolCallId: tc.id }, timestamp: Date.now() };
-              }
-              break;
+        if (!syntheticRound) {
+          const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
+          const toolsDefs = ctx.tools && currentToolsDefs.length > 0 ? currentToolsDefs : [];
+          // Stream deadline follows the budget line that ACTUALLY ends the run
+          // (hardMaxTime, else the soft cap while it lasts, else the soft cap
+          // duration once the run is elastic). remaining().time clamps at 0
+          // after the soft cap — Math.max(1, 0) used to become a 1ms deadline
+          // that instantly timed out every remaining round.
+          const streamTimeoutMs = budget.streamDeadlineMs();
+          for await (const chunk of streamLlmTurn({
+            llm: llmForPhase(ctx, 'THINK'),
+            messages,
+            tools: toolsDefs,
+            signal: ctx.signal,
+            timeoutMs: streamTimeoutMs,
+            firstTokenTimeoutMs: budget.streamFirstTokenMs(),
+          })) {
+            switch (chunk.type) {
+              case 'content':
+                content += chunk.content;
+                yield { type: 'TokenDelta', payload: { content: chunk.content, stateId: sid(), isToolCall: false }, timestamp: Date.now() };
+                break;
+              case 'reasoning':
+                reasoningText += chunk.content;
+                yield { type: 'ReasoningDelta', payload: { content: chunk.content, stateId: sid() }, timestamp: Date.now() };
+                break;
+              case 'tool_call_delta':
+                sawToolCall = true;
+                yield { type: 'TokenDelta', payload: { content: chunk.arguments ?? '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name }, timestamp: Date.now() };
+                break;
+              case 'tool_call':
+                sawToolCall = true;
+                yield { type: 'TokenDelta', payload: { content: '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name, toolCallId: chunk.id }, timestamp: Date.now() };
+                break;
+              case 'usage':
+                turnUsage = mergeTokenUsage(turnUsage, chunk.usage);
+                break;
+              case 'done':
+                content = chunk.content || content;
+                toolCalls = chunk.toolCalls;
+                sawDone = true;
+                if (toolCalls.length > 0) sawToolCall = true;
+                for (const tc of toolCalls) {
+                  yield { type: 'TokenDelta', payload: { content: '', stateId: sid(), isToolCall: true, toolCallBuffer: tc.function.arguments, toolCallName: tc.function.name, toolCallId: tc.id }, timestamp: Date.now() };
+                }
+                break;
+            }
           }
-        }
 
-        const silentlyTruncated =
-          (sawDone && !sawToolCall && content.length > 0 && (content.match(/```/g) ?? []).length % 2 === 1) ||
-          (!sawDone && !sawToolCall && content.length > 0);
-        if (silentlyTruncated && streamResumes < MAX_STREAM_RESUMES) {
-          streamResumes++;
-          messages.push({ role: 'assistant' as const, content });
-          messages.push({ role: 'user' as const, content: STREAM_RESUME_HINT, internal: true });
-          turnCount++;
-          budget.incrementTurn();
-          yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
-          continue;
-        }
-        // A tool call that started streaming but never saw its terminal `done`
-        // chunk: `toolCalls` stays empty and the round would fall through to
-        // VERIFY with the call silently DROPPED — the model asked to act, the
-        // act never ran, the turn "completed". Recover instead: keep any
-        // partial text, tell the model its call was cut off, let it re-issue
-        // the complete call. Bounded; past the cap the legacy path applies.
-        if (sawToolCall && !sawDone && toolCallResumes < MAX_TOOL_CALL_RESUMES) {
-          toolCallResumes++;
-          if (content.length > 0) messages.push({ role: 'assistant' as const, content });
-          messages.push({ role: 'user' as const, content: TOOL_CALL_RESUME_HINT, internal: true });
-          budget.addTokens(TOOL_CALL_RESUME_HINT);
-          turnCount++;
-          budget.incrementTurn();
-          yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
-          continue;
+          const silentlyTruncated =
+            (sawDone && !sawToolCall && content.length > 0 && (content.match(/```/g) ?? []).length % 2 === 1) ||
+            (!sawDone && !sawToolCall && content.length > 0);
+          if (silentlyTruncated && streamResumes < MAX_STREAM_RESUMES) {
+            streamResumes++;
+            messages.push({ role: 'assistant' as const, content });
+            messages.push({ role: 'user' as const, content: STREAM_RESUME_HINT, internal: true });
+            turnCount++;
+            budget.incrementTurn();
+            yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+            continue;
+          }
+          // A tool call that started streaming but never saw its terminal `done`
+          // chunk: `toolCalls` stays empty and the round would fall through to
+          // VERIFY with the call silently DROPPED — the model asked to act, the
+          // act never ran, the turn "completed". Recover instead: keep any
+          // partial text, tell the model its call was cut off, let it re-issue
+          // the complete call. Bounded; past the cap the legacy path applies.
+          if (sawToolCall && !sawDone && toolCallResumes < MAX_TOOL_CALL_RESUMES) {
+            toolCallResumes++;
+            if (content.length > 0) messages.push({ role: 'assistant' as const, content });
+            messages.push({ role: 'user' as const, content: TOOL_CALL_RESUME_HINT, internal: true });
+            budget.addTokens(TOOL_CALL_RESUME_HINT);
+            turnCount++;
+            budget.incrementTurn();
+            yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+            continue;
+          }
         }
       } catch (err: any) {
         if (ctx.signal?.aborted) {

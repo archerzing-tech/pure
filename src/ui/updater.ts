@@ -3,6 +3,7 @@
 
 // Injected by Vite (build time) as a fallback for non-Tauri / dev runs.
 declare const __APP_VERSION__: string;
+declare const __BUILD_INFO__: string;
 
 let _checkedOnStartup = false;
 
@@ -101,5 +102,7 @@ export async function fetchAppVersion(): Promise<string> {
 }
 
 export async function fetchAndDisplayVersion(): Promise<void> {
-  setCurrentVersion(await fetchAppVersion());
+  const version = await fetchAppVersion();
+  // 版本行带上构建戳（git 短哈希 · 构建时间）——装机验证就看它。
+  setCurrentVersion(`${version} · ${__BUILD_INFO__}`);
 }

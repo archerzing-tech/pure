@@ -225,6 +225,17 @@ export interface EngineContext {
    *  assistant tool_call and its result) — and reconciles it in the very next
    *  reasoning round. Return-and-clear; absent ⇒ no steering channel. */
   takeSteerMessages?: () => Message[] | Promise<Message[]>;
+  /** Host-owned actions for this round (代执行回合, 2026-09-22): when this
+   *  returns calls at a THINK boundary, the engine skips the model call for
+   *  that round and dispatches these calls through the NORMAL ACT pipeline —
+   *  ToolStarted events, runBatch, ToolResult, transcript pairing. The point
+   *  of the seam: a mid-run insertion that must execute (e.g. a scope
+   *  addition while parallel delegations are in flight) becomes an ordinary
+   *  delegation round, so cards/trace/persistence render natively and the
+   *  ordering guarantee is structural — the model is first consulted only
+   *  AFTER the addition's result is already in its transcript. Absent or
+   *  empty ⇒ the model is consulted normally. */
+  takeSyntheticToolCalls?: () => ToolCall[] | Promise<ToolCall[]>;
   /**
    * Live subagent interior activity as FIRST-CLASS engine events (2026-09-19).
    * CodingAgent maps the orchestrator's progress-sink callbacks onto this

@@ -87,6 +87,10 @@ export interface CodingAgentConfig {
    * boundary so a mid-round user message steers the next round instead of
    * restarting the turn. The GUI supplies it; CLI / subagents omit it. */
   takeSteerMessages?: EngineContext['takeSteerMessages'];
+  /** 代执行回合（2026-09-22 插话重设计）：宿主在 THINK 边界给出的本轮
+   *  toolCalls——引擎跳过模型调用，走原生 ACT 管线。只接父引擎；子代理
+   *  引擎不传（折入的交付只属于父任务汇合轮，闸门在宿主闭包里）。 */
+  takeSyntheticToolCalls?: EngineContext['takeSyntheticToolCalls'];
   /** Live subagent activity feed (parallel multi-agent): a fanout owned by
    * the host. CodingAgent publishes every orchestrator progress callback onto
    * it, and the Harness hands it to the engine context, which subscribes a
@@ -267,6 +271,7 @@ export class CodingAgent {
       continueGuard: this.continueGuard,
       llmFor: config.llmFor,
       takeSteerMessages: config.takeSteerMessages,
+      takeSyntheticToolCalls: config.takeSyntheticToolCalls,
       subagentEvents: config.subagentEvents,
       reflection: config.reflection,
     });

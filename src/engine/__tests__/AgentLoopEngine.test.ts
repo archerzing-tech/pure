@@ -1420,6 +1420,78 @@ describe('AgentLoopEngine', () => {
   }, 5_000);
 });
 
+describe('AgentLoopEngine synthetic delegation rounds (代执行回合, 2026-09-22)', () => {
+  const DELEGATE_TOOL: ToolDefinition = {
+    name: 'researcher',
+    description: 'Research delegation',
+    input_schema: { type: 'object', properties: { prompt: { type: 'string' } }, required: ['prompt'] },
+  };
+
+  it('skips the model call for the round and flows host calls through the native ACT pipeline', async () => {
+    let llmCalls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* () {
+        llmCalls++;
+        yield { type: 'content', content: '合并汇总' };
+        yield { type: 'done', content: '合并汇总', toolCalls: [] };
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    const adapter = countingToolAdapter([DELEGATE_TOOL]);
+    const pending: ToolCall[] = [
+      { id: 'foldin_1_0', index: 0, function: { name: 'researcher', arguments: '{"prompt":"新增一个平台 爱奇艺"}' } },
+    ];
+    const engine = new AgentLoopEngine();
+    const events = await collect(engine.run(
+      { sessionId: 's-synthetic', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      baseCtx({
+        llm,
+        tools: adapter,
+        toolsDefs: [DELEGATE_TOOL],
+        // 代执行接缝：只在本轮给出调用（splice 保证后续边界返回空）。
+        takeSyntheticToolCalls: async () => pending.splice(0),
+      }),
+    ));
+
+    // 模型只在代执行之后的汇总轮被咨询了一次——追加回合完全跳过模型。
+    expect(llmCalls).toBe(1);
+    // 调用走了原生 ACT 管线：ToolStarted 出卡、ToolResult 收尾、真执行。
+    expect(events.some(e => e.type === 'ToolStarted' && (e as any).payload.toolCallId === 'foldin_1_0')).toBe(true);
+    const toolResult = events.find(e => e.type === 'ToolResult' && (e as any).payload.toolCallId === 'foldin_1_0') as any;
+    expect(toolResult).toBeDefined();
+    expect(toolResult.payload.result.success).toBe(true);
+    expect(adapter.executions).toHaveLength(1);
+    // THINK → ACT 状态流转照常发生（UI 靠它关网格开新卡）。
+    expect(events.some(e => e.type === 'StateChange' && (e as any).payload.to === 'ACT')).toBe(true);
+    // transcript 配对：assistant(toolCalls) + tool 结果成对，且模型汇总轮能看到结果。
+    const completed = events.find(e => e.type === 'Completed') as any;
+    const messages: Message[] = completed.payload.messages;
+    expect(messages.some((m) => m.role === 'assistant' && m.toolCalls?.some((t) => t.id === 'foldin_1_0'))).toBe(true);
+    expect(messages.some((m) => m.role === 'tool' && m.toolCallId === 'foldin_1_0')).toBe(true);
+    expect(transcriptIsPaired(messages)).toBe(true);
+    expect(completed.payload.finalOutput).toBe('合并汇总');
+  });
+
+  it('consults the model normally when the hook returns nothing', async () => {
+    let llmCalls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* () {
+        llmCalls++;
+        yield { type: 'content', content: '直接回答' };
+        yield { type: 'done', content: '直接回答', toolCalls: [] };
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const events = await collect(engine.run(
+      { sessionId: 's-synthetic-empty', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      baseCtx({ llm, takeSyntheticToolCalls: async () => [] }),
+    ));
+    expect(llmCalls).toBe(1);
+    expect((events.find(e => e.type === 'Completed') as any).payload.finalOutput).toBe('直接回答');
+  });
+});
+
 describe('AgentLoopEngine per-phase adapter routing (E0.3)', () => {
   /** Wrap an adapter so the test can count how many times the engine streamed from it. */
   function countingLLM(inner: LLMAdapter, counter: { count: number }): LLMAdapter {

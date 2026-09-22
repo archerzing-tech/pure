@@ -1363,10 +1363,14 @@ export class ChatController {
   private pendingSteers: import('../shared/types').Message[] = [];
   /** 阶段感知的 scope 追加（2026-09-22 用户定稿）：并行委派还没收齐时插进
    * 来的追加活不走"收尾后排队"——那会先输出一份没有它的汇总。折入汇合轮：
-   * takeSteerMessages 在委派返回后的第一个 THINK 边界注入强框架指令（先补
-   * 这项，再合并汇总）。收尾时核验：投递后若没有新委派发起（模型直奔汇总
-   * 或投递没发生），转 pendingTasks 兜底，话绝不丢。 */
-  private pendingFoldIns: Array<{ text: string; images: MessageImage[]; displayText: string; delivered: boolean; activityCountAtDelivery: number; mechanical: boolean; mechanicallyDone?: boolean }> = [];
+   * 代执行回合（takeSyntheticToolCalls，2026-09-22 重设计）在委派收齐后的
+   * 第一个 THINK 边界把追加包成普通委派调用交还引擎，走原生 ACT 管线——
+   * 卡片/明细/回放全部原生，顺序由结构保证。syntheticCallId 记录代执行
+   * 调用 id，ToolResult 事件据此回写 mechanicallyDone（机器核验兑现）；
+   * mergeFramed 保证合并口径指令只铺一次。指令型折入（mechanical=false）
+   * 仍走 takeSteerMessages 框架注入 + 水位核验。收尾 settleFoldIns 兜底
+   * 转排队，话绝不丢。 */
+  private pendingFoldIns: Array<{ text: string; images: MessageImage[]; displayText: string; delivered: boolean; activityCountAtDelivery: number; mechanical: boolean; mechanicallyDone?: boolean; syntheticCallId?: string; mergeFramed?: boolean }> = [];
   /** 插话重构 — REFLECT-phase adapter for the current turn, when 9.2 phase
    * routing is on: side-channel mid-run questions prefer the cheap model
    * (an answer is a summarization chore, not the main reasoning stream). */
@@ -3291,110 +3295,58 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
           this.pendingSteers = [];
           // 折入只在"没有任何在飞委派"的边界处理——那恰好是父任务的汇合轮。
           // steer 队列是父子引擎共享的（北极星第二步），子 agent 在调研中途
-          // 也有 THINK 边界；没有这个闸门，折入会被子 agent 偷走甚至在其内
-          // 触发机械执行。子 agent 自身条目在跑时恒为 running，天然挡住。
+          // 也有 THINK 边界；没有这个闸门，折入会被子 agent 偷走。子 agent
+          // 自身条目在跑时恒为 running，天然挡住。
           if (this.hasDelegationInFlight()) {
             return drained;
           }
-          // 阶段感知的折入追加：在汇合边界处理——scope 追加优先机械执行
-          // （直接把追加调研跑完，把结果作为观察喂给模型：顺序由机制保证，
-          // 不赌模型听话）；跑不动（没有可复用角色/执行失败/被中止）才退回
-          // 指令注入。收尾核验（settleFoldIns）仍兜底转排队。
+          // 指令型折入：合并口径框架随转向通道注入。scope 追加（mechanical）
+          // 不在这里交付——它们走 takeSyntheticToolCalls 的代执行回合（见下），
+          // 这里只提前铺一句合并口径，交付标记留给代执行闭包。
           for (const fold of this.pendingFoldIns) {
-            if (fold.delivered) continue;
+            if (fold.delivered || fold.mechanical) continue;
             fold.delivered = true;
             fold.activityCountAtDelivery = this.agentActivities.length;
-            if (fold.mechanical) {
-              const role = this.agentActivities[this.agentActivities.length - 1]?.agentName;
-              if (role) {
-                // 机械执行绕过了父引擎的工具事件流，对话流里不会出现委派卡——
-                // 用户只看到"等待模型首字"的误导提示，体感就是卡死（2026-09-22
-                // 实测 140s）。补跑必须和正常委派长得一样：
-                // ① 用同款 appendToolRow 合成子代理卡（agent 网格、🤖 样式）；
-                // ② 父引擎此刻正阻塞在本边界上，fanout 事件转发不出去——另开
-                //    一个专用订阅把 orchestrator 的活动事件实时泵进卡片面板；
-                // ③ 状态条 + 思考卡标签/等待提示全部换成补跑文案。
-                const callId = `foldin_${Date.now()}`;
-                const startedAt = Date.now();
-                const row = appendToolRow(role, { prompt: fold.displayText }, 'agent');
-                const trace: string[] = [];
-                const mechEvents = subagentEventFanout.subscribe();
-                void (async () => {
-                  for await (const evt of mechEvents) {
-                    if (evt.callId !== callId) continue;
-                    const line = formatSubagentTraceLine(evt);
-                    if (line === null) continue;
-                    trace.push(line);
-                    if (trace.length > MAX_LIVE_STREAM_LINES) trace.splice(0, trace.length - MAX_LIVE_STREAM_LINES);
-                    if (row.details.classList.contains('pending')) {
-                      appendToolStreamLine(row, evt.kind === 'error' ? 'stderr' : 'stdout', line);
-                      scrollChatToBottomIfPinned(chatEl);
-                    }
-                  }
-                })().catch(() => { /* 泵只服务 UI；宿主异常不得影响补跑本身。 */ });
-                const mechBubble = this.addStatusBubble(
-                  `委派收齐。现在直接补跑你追加的这项（已派给 ${role}）——完成后一次性出覆盖全部的汇总。`,
-                  true, false, 'info',
-                );
-                if (thinkingCard === null) {
-                  // 上一轮卡片已随工具批次收尾置空：补跑是新阶段，开一张新卡
-                  // 接管——否则用户只能盯着旧卡残留的"等待模型首字"提示。
-                  thinkingCard = openThinkingCard();
-                }
-                setThinkingLabel(thinkingCard, `正在补跑追加的调研（${role}）…`);
-                stopThinkingTimer(thinkingCard);
-                startThinkingTimer(thinkingCard, { hintAfterMs: 30_000, hintText: '正在由系统直接补跑追加的任务，与正常委派一样需要几分钟；对话流里能看到补跑卡片和它的实时工具明细，跑完会自动合并汇总。' });
-                try {
-                  const result = await codingAgent.subagentOrchestrator.execute(
-                    { id: callId, index: 0, function: { name: role, arguments: JSON.stringify({ prompt: fold.text }) } },
-                    this.abortController?.signal,
-                  );
-                  const payload = result.result;
-                  const detail = typeof payload === 'string'
-                    ? payload
-                    : typeof (payload as { output?: unknown } | undefined)?.output === 'string'
-                      ? (payload as { output: string }).output
-                      : JSON.stringify(payload) ?? '';
-                  mechEvents.close();
-                  finalizeToolRow(row, {
-                    success: result.success && !!detail,
-                    duration: Date.now() - startedAt,
-                    resultText: (result.success ? detail : '子任务执行未产出结果。').slice(0, 8_000),
-                    subagentTrace: trace,
-                  });
-                  mechBubble.classList.remove('pending');
-                  if (result.success && detail) {
-                    fold.mechanicallyDone = true;
-                    mechBubble.textContent = `追加的调研（${role}）补跑完毕，正在合并出覆盖全部的汇总。`;
-                    linkifyPaths(mechBubble);
-                    setThinkingLabel(thinkingCard, '正在合并汇总…');
-                    drained.push({
-                      role: 'user',
-                      content: `【追加任务已由系统直接执行完毕，无需再委派】任务：${fold.text}\n执行结果：\n${detail.slice(0, 6_000)}\n请把这份结果与本次任务此前委派的全部产出合并，输出一份覆盖所有对象的最终汇总。`,
-                      images: fold.images,
-                    });
-                    continue;
-                  }
-                  // 机械执行失败 → 退回指令注入；收尾核验仍会兜底。
-                  mechBubble.textContent = '直接补跑没跑成，改由调研角色自行补派——这项不会丢。';
-                  linkifyPaths(mechBubble);
-                } catch (err) {
-                  mechEvents.close();
-                  finalizeToolRow(row, {
-                    success: false,
-                    duration: Date.now() - startedAt,
-                    resultText: `直接补跑异常：${err instanceof Error ? err.message : String(err)}`.slice(0, 2_000),
-                    subagentTrace: trace,
-                  });
-                  mechBubble.classList.remove('pending');
-                  mechBubble.textContent = '直接补跑没跑成，改由调研角色自行补派——这项不会丢。';
-                  linkifyPaths(mechBubble);
-                }
-              }
-            }
             drained.push({ role: 'user', content: this.foldInInstruction(fold.text), images: fold.images });
           }
+          // 代执行回合的合并口径（每条折入只铺一次）：本轮系统将直接委派执行
+          // 追加项，模型下一个 THINK 才被咨询——这句话先入档，让"合并全部
+          // 产出"成为它睁眼后的自然任务。
+          for (const fold of this.pendingFoldIns) {
+            if (fold.delivered || !fold.mechanical || fold.mergeFramed) continue;
+            const role = this.agentActivities[this.agentActivities.length - 1]?.agentName;
+            if (!role) continue;
+            fold.mergeFramed = true;
+            drained.push({
+              role: 'user',
+              content: `【系统接管执行】用户中途追加的任务「${fold.text}」将在本轮由系统直接委派给 ${role} 执行，结果稍后回收到本对话。请在追加结果回收后，把本次任务全部产出（含这项追加）合并，输出一份覆盖所有对象的最终汇总。`,
+              images: fold.images,
+            });
+          }
           return drained;
+        },
+        // 代执行回合（2026-09-22 插话重设计）：委派收齐后的第一个 THINK 边界，
+        // 宿主把 scope 追加包成普通委派调用交还引擎——引擎跳过本轮模型调用，
+        // 让这些调用走原生 ACT 管线（ToolStarted 出卡片、SubagentActivity 流
+        // 明细、ToolResult 收尾入档、会话回放恢复）。顺序由结构保证：追加结果
+        // 落地前模型不会被咨询，"先汇总再补跑"没有发生的材料；卡片和正常委派
+        // 完全同源，不再手搓任何 UI（此前的合成卡片/事件泵/思考卡接管全删）。
+        takeSyntheticToolCalls: async () => {
+          if (this.hasDelegationInFlight()) return [];
+          const calls: ToolCall[] = [];
+          for (const fold of this.pendingFoldIns) {
+            if (fold.delivered || !fold.mechanical) continue;
+            const role = this.agentActivities[this.agentActivities.length - 1]?.agentName;
+            if (!role) continue;
+            fold.delivered = true;
+            fold.activityCountAtDelivery = this.agentActivities.length;
+            const callId = `foldin_${Date.now()}_${calls.length}`;
+            fold.syntheticCallId = callId;
+            // 恰好一行的因果叙述：把"追加"和"第三张卡"在对话流里接起来。
+            this.addStatusBubble(`你追加的安排上了——派 ${role} 单独补跑，跑完和前面的产出一起汇总。`, false, false, 'info');
+            calls.push({ id: callId, index: calls.length, function: { name: role, arguments: JSON.stringify({ prompt: fold.text }) } });
+          }
+          return calls;
         },
         toolAdapter,
         subagents,
@@ -4620,6 +4572,12 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
 
           case 'ToolResult': {
             if (event.payload.result.success) hasToolSuccess = true;
+            // 代执行回合的兑现回写（2026-09-22 重设计）：foldin_* 调用成功
+            // 结束 ⇒ 对应折入机器核验完成，settle 直接放行。
+            if (event.payload.toolCallId.startsWith('foldin_')) {
+              const fold = this.pendingFoldIns.find((f) => f.syntheticCallId === event.payload.toolCallId);
+              if (fold && event.payload.result.success) fold.mechanicallyDone = true;
+            }
             const status = event.payload.result.success ? '✓' : '✗';
             const toolName = event.payload.toolName;
             const duration = event.payload.duration;
