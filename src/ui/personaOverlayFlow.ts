@@ -44,6 +44,10 @@ export interface OverlayFlowDeps {
   runCase: RunRoleCase;
   /** 阶段回调（宿主做进度提示）。 */
   onStage?: (stage: 'draft' | 'gate' | 'write', detail?: string) => void;
+  /** 可取消：A/B 在每例前后检查，abort 后流程返回 'cancelled' 且不落盘。 */
+  signal?: AbortSignal;
+  /** A/B 样本数上限（宿主可收更紧；核心另有硬上限）。 */
+  maxCases?: number;
 }
 
 export interface OverlayFlowResult {
@@ -82,8 +86,17 @@ export async function runPersonaOverlayFlow(deps: OverlayFlowDeps): Promise<Over
   deps.onStage?.('gate', String(fixtures.length));
   let ab: RoleRegressionResult;
   try {
-    ab = await runRoleRegressionAB({ role, fixtures, overlay, runCase: deps.runCase });
+    ab = await runRoleRegressionAB({
+      role,
+      fixtures,
+      overlay,
+      runCase: deps.runCase,
+      ...(deps.signal ? { signal: deps.signal } : {}),
+      ...(deps.maxCases !== undefined ? { maxCases: deps.maxCases } : {}),
+    });
   } catch (err) {
+    // Cancellation is not a failure — nothing was written either way.
+    if (err instanceof Error && err.name === 'AbortError') return { outcome: 'cancelled' };
     return { outcome: 'failed', reason: err instanceof Error ? err.message : String(err) };
   }
   if (ab.verdict === 'deny_insufficient_data') return { outcome: 'deny', reason: ab.reason, base: ab.base, overlay: ab.overlay };

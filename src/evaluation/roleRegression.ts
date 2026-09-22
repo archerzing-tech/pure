@@ -103,6 +103,16 @@ export function extractSubagentOutput(result: ToolResult): string {
   return result.error ? `[RUN_FAILED] ${result.error}` : '';
 }
 
+/** Does an output indicate the RUN failed (crash / timeout / budget) rather
+ *  than the assertions failing? `extractSubagentOutput` emits the [RUN_FAILED]
+ *  marker; a blank output means the delegation produced nothing. The A/B
+ *  retries these instead of counting a transient provider hiccup as a
+ *  regression — otherwise a single stall can flip ALLOW into a false REJECT. */
+export function isRunFailureOutput(output: string): boolean {
+  const trimmed = output.trim();
+  return trimmed.length === 0 || trimmed.startsWith('[RUN_FAILED]');
+}
+
 /** Tally graded cases into a side score (kept next to the verdict so the
  *  runner and future reflector share one definition of "通过率"). */
 export function roleSideScore(grades: RoleCaseGrade[]): RoleSideScore {
