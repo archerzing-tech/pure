@@ -32,8 +32,9 @@ export type SubagentAdviceReason = 'timeout' | 'failure';
 export type SubagentAdviceSeverity = 'high' | 'medium';
 
 /** bash_executor 不算角色：它是"穿了 agent 外壳的 shell 命令"（与活动栏、工具卡片
- *  同一裁决），命令失败该修命令，不该建议用户关掉一个"角色"。 */
-const NON_ROLE_SUBAGENTS: ReadonlySet<string> = new Set(['bash_executor']);
+ *  同一裁决），命令失败该修命令，不该建议用户关掉一个"角色"。导出供样本收割器
+ *  共用同一条裁决。 */
+export const NON_ROLE_SUBAGENTS: ReadonlySet<string> = new Set(['bash_executor']);
 
 /** 角色 → 对应的技能开关（镜像 chat.ts 的 subagents 过滤逻辑，改那边要改这里）。 */
 const ROLE_SKILL_GATES: Readonly<Record<string, string>> = {

@@ -60,6 +60,44 @@ overlay（只增补约束/技巧，不重写 base）→ **准入门槛**：该�
 真实派发抽 5–10 例）A/B，overlay 版不输 base 版才落盘。删 overlay 文件即回原样；
 仪表盘标出哪些角色带 overlay。
 
+#### 13.3 part 3 起草流 —— 实现机制（2026-09-22 补充）
+
+part 1（装载合并 `47cb2da`）与 part 2（回归 A/B 门槛 `b4abd2b`）已落地，本段是把
+两者接成闭环的机制：
+
+1. **触发**：`scanSubagentAdvice`（E1.4，已有）在窗口内发现某角色"派发够多、失败
+   够密" → 出建议卡。起草流不另设发现逻辑。
+2. **起草**：新增 `PersonaOverlayReflector`，复用 E1.1 `LessonReflector` 的便宜模型
+   往返模式——输入该角色的失败画像（dominantKind / timeoutCount / avgDurationMs /
+   失败样本）与 base persona 摘要，输出一段 ≤ `MAX_OVERLAY_CHARS` 的 overlay 文本。
+   防幻觉纪律同 E1.1：只准引用证据目录里的调用哈希，编造的 id 一律剥掉。
+3. **校验**：草稿必须过 part 1 的同一编译器 `compilePersonaOverlays`（role 名合法 /
+   ≥8 字符 / ≤4000 / 角色存在）才许进入下一关——与 13.2 生成半边"草稿必须过 S2 同一
+   校验器"同一条纪律。
+4. **准入**：该角色回归小套件跑 base vs base+overlay，`roleRegressionVerdict` 裁决；
+   DENY（样本不足）/ REJECT（回归）→ 草稿不落盘，回执说明原因；ALLOW → 落盘前确认
+   弹窗 + 同名文件不覆盖（比照 13.2 三道门）。
+5. **标记**：`list_persona_overlays`（Rust，part 1 已有）→ E4.1 角色切片表加「overlay」
+   徽章（有/无）。删文件即回滚，徽章自然消失。
+
+**关键依赖（顺序）**：准入要求 ≥ `MIN_ROLE_CASES`=5 例真实样本，而当前
+`evals/roles/` 是 3 个手写种子、刻意不达标 → **落盘路径在真实样本到位前始终是 DENY**。
+所以样本来源必须先于起草流的落盘落地。
+
+**样本来源（2026-09-22 核实，含一处文档修正）**：
+
+- `evals/roles/README.md` 原话"真实样本来自 E4.1 outcome 数据里该角色的委派 args"
+  **不成立**——`AgentRunObservation.toolCalls` 的 `ToolObservation` 只记
+  `toolName / success / durationMs / result(哈希) / error`，**不存 args 也不存产出文本**
+  （E0.1 设计明写"不存任何 prompt 文本"）。
+- 真实样本可回收的地方是**会话存档**：`~/.pure/sessions/<id>/checkpoints/*.json` 的
+  `state.messages` 含 assistant toolCall 的 `function.arguments`（= 委派 args）与其配对
+  的 tool result（= 子 agent 产出）。Harvester 从这里抽 `{role, args, output}`。
+- **待拍板**：真实产出不能自动变成"该出现什么"（内容断言 must/mustNot）。两条候选
+  路——(a) reflector 用一次便宜模型从（base 产出 + 角色契约）起草断言，断言只在
+  base 侧通过时才收录（自洽门）；(b) 只自动收割 `{args, output}` 候选，人工从清单里
+  挑并写断言。
+
 ### 13.4 工具生成
 
 形态：脚本工具包 = `~/.pure/tools/<name>/` 一目录，`TOOL.json`（name / description /

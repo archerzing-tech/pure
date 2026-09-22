@@ -7,6 +7,8 @@
 // 支撑时落盘"。本模块是纯函数，无 IO：fixture 读取与编排器驱动在
 // scripts/run-role-regression.ts。
 
+import type { ToolResult } from '../shared/types';
+
 /** One regression case for one role. `args` mirrors a real delegation's
  *  arguments verbatim (each role has its own input_schema — prompt vs task
  *  vs topic), so fixtures collected from 历史真实派发 drop in unchanged. */
@@ -88,6 +90,17 @@ export function roleRegressionVerdict(
     verdict: 'reject',
     reason: `overlay 通过率 ${pct(overlayRate)} < base ${pct(baseRate)} — 角色回归`,
   };
+}
+
+/** Pull the subagent's final text out of a delegation ToolResult. A failed
+ *  delegation (crash / timeout / budget) yields whatever text exists, or a
+ *  visible RUN_FAILED marker so it grades as a failed case instead of an empty
+ *  string. Shared by the A/B runner and the sample harvest script. */
+export function extractSubagentOutput(result: ToolResult): string {
+  const payload = result.result as { output?: unknown; finalOutput?: unknown } | undefined;
+  if (typeof payload?.output === 'string' && payload.output.trim()) return payload.output;
+  if (typeof payload?.finalOutput === 'string' && payload.finalOutput.trim()) return payload.finalOutput;
+  return result.error ? `[RUN_FAILED] ${result.error}` : '';
 }
 
 /** Tally graded cases into a side score (kept next to the verdict so the

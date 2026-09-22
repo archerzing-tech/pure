@@ -17,6 +17,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createAdapter } from '../src/evaluation/codingAgentExecutor';
 import {
+  extractSubagentOutput,
   gradeRoleCase,
   roleRegressionVerdict,
   roleSideScore,
@@ -27,7 +28,7 @@ import { NodeToolAdapter } from '../src/adapter/node/NodeToolAdapter';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '../src/coding-agent/SubagentOrchestrator';
 import type { SubagentDefinition } from '../src/coding-agent/types';
 import { defaultModelFor } from '../src/shared/providers';
-import type { BudgetConfig, ToolCall, ToolResult } from '../src/shared/types';
+import type { BudgetConfig, ToolCall } from '../src/shared/types';
 
 const argv = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -139,15 +140,6 @@ const ROLE_BUDGET: BudgetConfig = {
 
 const adapter = createAdapter({ provider: requestedAgent!, model, apiKey: apiKeyForProvider(requestedAgent!) });
 
-/** A failed delegation (crash / timeout / budget) grades as a failed case:
- *  extract whatever text exists, or a visible RUN_FAILED marker. */
-function extractOutput(result: ToolResult): string {
-  const payload = result.result as { output?: unknown; finalOutput?: unknown } | undefined;
-  if (typeof payload?.output === 'string' && payload.output.trim()) return payload.output;
-  if (typeof payload?.finalOutput === 'string' && payload.finalOutput.trim()) return payload.finalOutput;
-  return result.error ? `[RUN_FAILED] ${result.error}` : '';
-}
-
 async function runSide(sideName: string, overlay: string | undefined): Promise<RoleCaseGrade[]> {
   // Throwaway workspace per side: subagent tool writes never touch the repo.
   const workspace = await mkdtemp(join(resolve('/tmp'), `pure-role-regression-${role}-${sideName}-`));
@@ -170,7 +162,7 @@ async function runSide(sideName: string, overlay: string | undefined): Promise<R
     };
     const started = Date.now();
     const result = await orch.execute(toolCall);
-    const grade = gradeRoleCase(extractOutput(result), fixture);
+    const grade = gradeRoleCase(extractSubagentOutput(result), fixture);
     grades.push(grade);
     const mark = grade.passed ? '✓' : '✗';
     process.stdout.write(`${sideName} ${fixture.id}: ${mark} (${Math.round((Date.now() - started) / 1000)}s)${grade.failures.length ? ` — ${grade.failures.join('; ')}` : ''}\n`);

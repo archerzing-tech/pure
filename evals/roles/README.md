@@ -31,5 +31,10 @@ base+overlay（`~/.pure/personas/<role>.overlay.md`）各跑一遍，裁决规�
 ## 当前目录里的 case 都是手写种子
 
 只用于打通管线，**刻意不达 5 个阈值**：门在真实数据到位前保持关闭。
-真实样本的来源是历史真实派发（E4.1 outcome 数据里该角色的委派 args + 主
-agent 采纳情况），后续由 reflector 流程沉淀进来后替换种子。
+
+真实样本的来源是**会话存档**（`~/.pure/sessions/<id>/checkpoints/*.json`）：
+`state.messages` 里 assistant toolCall 的 `function.arguments` 就是委派 args，
+配对的 tool result 就是子 agent 产出——harvester 从这里抽 `{role, args, output}`。
+（**修正**：早期这里写的是"来自 E4.1 outcome 数据的委派 args"，不成立——
+`AgentRunObservation.toolCalls` 的 `ToolObservation` 不存 args 也不存产出文本。）
+断言（must/mustNot）不能从真实产出自动得出，后续由 reflector 流程起草并替换种子。
