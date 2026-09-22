@@ -35,7 +35,7 @@ import { getApplicationTmpWorkspace } from '../shared/tauri';
 import { compilePersonaOverlays } from '../harness/personaOverlays';
 import { draftPersonaOverlay } from '../harness/personaOverlayReflector';
 import { extractSubagentOutput, type RoleCaseFixture } from '../evaluation/roleRegression';
-import { runRoleRegressionAB, type RunRoleCase } from '../evaluation/roleRegressionRun';
+import { runPersonaOverlayFlow } from './personaOverlayFlow';
 import type { BudgetConfig, ToolCall } from '../shared/types';
 import {
   buildExperienceItems,
@@ -1153,102 +1153,109 @@ export class SettingsPanel {
       const cfg = loadConfig() ?? defaults();
       const knownRoles = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name);
 
-      // 1) 起草（便宜模型）
-      this.toast(t('evolution.advice.overlay.drafting'));
-      let overlay: string | undefined;
-      try {
-        overlay = await draftPersonaOverlay(createLLMAdapter(cfg), { role, advice, baseContract: safeRoleContract(def) });
-      } catch (err) {
-        console.error('[pure] overlay draft failed:', err);
-        overlay = undefined;
-      }
-      if (!overlay) {
-        this.toast(t('evolution.advice.overlay.none'));
-        return;
-      }
-
-      // 2) 校验（part 1 的同一编译器）
-      const compiled = compilePersonaOverlays([{ file: `${role}.overlay.md`, text: overlay }], knownRoles);
-      if (compiled.errors.length > 0 || !compiled.overlays.has(role)) {
-        console.error('[pure] drafted overlay failed validation:', compiled.errors);
-        this.toast(t('evolution.advice.overlay.invalid'));
-        return;
-      }
-
-      // 3) A/B 门槛（写盘前强跑；样本不足一律 DENY）
-      let fixtures: RoleCaseFixture[] = [];
-      try {
-        const files = await core.invoke<Array<{ file: string; text: string }>>('list_role_cases', { role });
-        fixtures = (files ?? []).map((f) => JSON.parse(f.text)).filter(isRoleCaseFixture);
-      } catch {
-        fixtures = [];
-      }
-      this.toast(t('evolution.advice.overlay.gateRunning').replace('{n}', String(fixtures.length)));
-
-      const workspace = await getApplicationTmpWorkspace(`role-overlay-${role}`);
-      const runCase: RunRoleCase = async (fixture, ov) => {
-        const tools = new TauriToolAdapter(workspace, cfg.tavilyApiKey, cfg.serperApiKey, cfg.city, undefined, `role-overlay-${role}`);
-        const orch = new SubagentOrchestrator({
-          llm: createLLMAdapter(cfg),
-          parentTools: tools,
-          parentToolsDefsProvider: () => tools.getTools(),
-          defaultBudget: OVERLAY_AB_BUDGET,
-          parentSessionId: `role-overlay-${role}`,
-          ...(ov ? { personaOverlays: new Map([[role, ov]]) } : {}),
-        });
-        orch.register(def);
-        const toolCall: ToolCall = {
-          id: `call_${fixture.id}`,
-          index: 0,
-          function: { name: role, arguments: JSON.stringify(fixture.args) },
-        };
-        return extractSubagentOutput(await orch.execute(toolCall));
-      };
-
-      let ab: Awaited<ReturnType<typeof runRoleRegressionAB>>;
-      try {
-        ab = await runRoleRegressionAB({ role, fixtures, overlay, runCase });
-      } catch (err) {
-        console.error('[pure] overlay A/B failed:', err);
-        this.toast(t('evolution.advice.overlay.failed'));
-        return;
-      }
-      if (ab.verdict === 'deny_insufficient_data') {
-        this.toast(t('evolution.advice.overlay.deny').replace('{reason}', ab.reason));
-        return;
-      }
-      if (ab.verdict === 'reject') {
-        this.toast(t('evolution.advice.overlay.reject').replace('{reason}', ab.reason));
-        return;
-      }
-
-      // 4) 确认 + 落盘（同名不覆盖）
+      // 编排抽在 personaOverlayFlow（无 Tauri/DOM），这里只接 Tauri IO + adapter +
+      // 确认弹窗；e2e（scripts/e2e-overlay-flow.ts）用 mock provider 驱动同一段代码。
       const pureHome = await join(await homeDir(), '.pure');
-      try {
-        await core.invoke('read_file', { workspace: pureHome, path: `personas/${role}.overlay.md` });
-        this.toast(t('evolution.advice.overlay.exists').replace('{file}', `${role}.overlay.md`));
-        return;
-      } catch {
-        // 读不到 = 还没这个 overlay，正是落盘前提。
-      }
+      const workspace = await getApplicationTmpWorkspace(`role-overlay-${role}`);
+      const adapter = createLLMAdapter(cfg);
       const pct = (side: { passed: number; total: number }): string =>
         `${side.total > 0 ? Math.round((side.passed / side.total) * 100) : 0}%`;
-      const ok = await showConfirmModal({
-        title: t('evolution.advice.overlay.title'),
-        message: t('evolution.advice.overlay.confirm')
-          .replace('{basePct}', pct(ab.base))
-          .replace('{overlayPct}', pct(ab.overlay))
-          .replace('{file}', `${pureHome}/personas/${role}.overlay.md`),
-        okLabel: t('common.ok'),
-        cancelLabel: t('common.cancel'),
+
+      const result = await runPersonaOverlayFlow({
+        role,
+        baseContract: safeRoleContract(def),
+        advice,
+        knownRoles,
+        draft: (input) => draftPersonaOverlay(adapter, input),
+        // 逐文件校验：一个坏 fixture 不拖垮整批。
+        loadFixtures: async (r) => {
+          const out: RoleCaseFixture[] = [];
+          try {
+            const files = await core.invoke<Array<{ file: string; text: string }>>('list_role_cases', { role: r });
+            for (const file of files ?? []) {
+              try {
+                const parsed: unknown = JSON.parse(file.text);
+                if (isRoleCaseFixture(parsed)) out.push(parsed);
+              } catch {
+                // skip a broken fixture file, keep the rest
+              }
+            }
+          } catch {
+            return [];
+          }
+          return out;
+        },
+        overlayExists: async (r) => {
+          try {
+            await core.invoke('read_file', { workspace: pureHome, path: `personas/${r}.overlay.md` });
+            return true;
+          } catch {
+            return false; // 读不到 = 还没这个 overlay，正是落盘前提
+          }
+        },
+        writeOverlay: async (r, text) => {
+          await core.invoke('write_file', { workspace: pureHome, path: `personas/${r}.overlay.md`, content: `${text}\n` });
+        },
+        confirm: ({ role: target, base, overlay: overlayScore }) => showConfirmModal({
+          title: t('evolution.advice.overlay.title'),
+          message: t('evolution.advice.overlay.confirm')
+            .replace('{basePct}', pct(base))
+            .replace('{overlayPct}', pct(overlayScore))
+            .replace('{file}', `${pureHome}/personas/${target}.overlay.md`),
+          okLabel: t('common.ok'),
+          cancelLabel: t('common.cancel'),
+        }),
+        runCase: async (fixture, ov) => {
+          const tools = new TauriToolAdapter(workspace, cfg.tavilyApiKey, cfg.serperApiKey, cfg.city, undefined, `role-overlay-${role}`);
+          const orch = new SubagentOrchestrator({
+            llm: adapter,
+            parentTools: tools,
+            parentToolsDefsProvider: () => tools.getTools(),
+            defaultBudget: OVERLAY_AB_BUDGET,
+            parentSessionId: `role-overlay-${role}`,
+            ...(ov ? { personaOverlays: new Map([[role, ov]]) } : {}),
+          });
+          orch.register(def);
+          const toolCall: ToolCall = {
+            id: `call_${fixture.id}`,
+            index: 0,
+            function: { name: role, arguments: JSON.stringify(fixture.args) },
+          };
+          return extractSubagentOutput(await orch.execute(toolCall));
+        },
+        onStage: (stage, detail) => {
+          if (stage === 'draft') this.toast(t('evolution.advice.overlay.drafting'));
+          else if (stage === 'gate') this.toast(t('evolution.advice.overlay.gateRunning').replace('{n}', detail ?? '0'));
+        },
       });
-      if (!ok) return;
-      try {
-        await core.invoke('write_file', { workspace: pureHome, path: `personas/${role}.overlay.md`, content: `${overlay}\n` });
-        this.toast(t('evolution.advice.overlay.done').replace('{file}', `${role}.overlay.md`));
-      } catch (err) {
-        console.error('[pure] overlay write failed:', err);
-        this.toast(t('evolution.advice.overlay.failed'));
+
+      switch (result.outcome) {
+        case 'written':
+          this.toast(t('evolution.advice.overlay.done').replace('{file}', `${role}.overlay.md`));
+          void this.renderEvolutionDashboard(); // 徐章立刻跟上，不等下次渲染
+          break;
+        case 'none':
+          this.toast(t('evolution.advice.overlay.none'));
+          break;
+        case 'invalid':
+          console.error('[pure] drafted overlay failed validation:', result.reason);
+          this.toast(t('evolution.advice.overlay.invalid'));
+          break;
+        case 'deny':
+          this.toast(t('evolution.advice.overlay.deny').replace('{reason}', result.reason ?? ''));
+          break;
+        case 'reject':
+          this.toast(t('evolution.advice.overlay.reject').replace('{reason}', result.reason ?? ''));
+          break;
+        case 'exists':
+          this.toast(t('evolution.advice.overlay.exists').replace('{file}', `${role}.overlay.md`));
+          break;
+        case 'failed':
+          console.error('[pure] overlay flow failed:', result.reason);
+          this.toast(t('evolution.advice.overlay.failed'));
+          break;
+        case 'cancelled':
+          break;
       }
     });
 

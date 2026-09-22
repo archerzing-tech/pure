@@ -27,6 +27,7 @@
     "eval:harvest": "bun run scripts/harvest-role-samples.ts",
     "e2e:apikey": "bun run scripts/e2e-settings-apikey.ts",
     "e2e:evolution": "bun run scripts/e2e-evolution-dashboard.ts",
+    "e2e:overlay-flow": "bun run scripts/e2e-overlay-flow.ts",
     "typecheck": "bun run --no-run tsc --noEmit",
     "lint:conventions": "bun run scripts/check-conventions.ts",
     "build": "bun run typecheck && npx vite build && bun run cli:build",
