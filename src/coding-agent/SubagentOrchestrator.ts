@@ -19,6 +19,7 @@ import type {
   ToolResult,
 } from '../shared/types';
 import { DefaultFailurePolicy } from '../engine/FailurePolicy';
+import type { TokenUsage } from '../shared/types';
 import { withRelaySchema } from '../engine/relayPipeline';
 import { trimUnresolvedToolCalls } from '../harness/Harness';
 import { applyPersonaOverlay } from '../harness/personaOverlays';
@@ -485,6 +486,7 @@ export class SubagentOrchestrator implements ToolAdapter {
 
       let finalOutput: string | undefined;
       let tokensUsed = 0;
+      let usage: TokenUsage | undefined;
 
       const persist = async (label: string, messages: Message[] | undefined, turnCount: number): Promise<void> => {
         const store = this.config.stateStore;
@@ -585,6 +587,10 @@ export class SubagentOrchestrator implements ToolAdapter {
           emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'completed', lifecycle: 'observing', toolTrace: [...toolTrace.values()] });
         } else if (event.type === 'Completed') {
           finalOutput = event.payload.finalOutput;
+          // T1 — copy the delegation's own token split for per-role cost
+          // accounting. `tokensUsed` (the TokenDelta count) stays as-is: both
+          // observers keep their existing semantics.
+          usage = event.payload.usage;
           // finalOutput is only the LAST THINK round's text — empty when the
           // sub-agent ended on an empty response (reasoning models burning the
           // whole output budget on thinking are the known case). The rail card
@@ -617,6 +623,7 @@ export class SubagentOrchestrator implements ToolAdapter {
               output: finalOutput,
               duration: done(0),
               tokensUsed,
+              usage,
             },
             success: true,
             duration: done(0),

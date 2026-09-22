@@ -116,6 +116,34 @@ async function readSessions(): Promise<SessionFile[]> {
   return out;
 }
 
+/** T1/G2 对账：读观测日志里的角色委派统计（toolCalls 口径），与存档收割结果
+ *  对照。agent_run.sessionId 就是存档目录名，所以「观测有、存档无」直接等价于
+ *  「该会话的存档已删或不可读」——差距不是实现问题，是数据已经没了。只读，
+ *  读不到观测日志就返回空（CLI 场景没有 app.jsonl 是正常的）。 */
+async function readObservedDelegations(): Promise<Map<string, number>> {
+  const observed = new Map<string, number>();
+  try {
+    const raw = await readFile(join(homedir(), '.pure', 'observations', 'app.jsonl'), 'utf8');
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line) as { type?: string; toolCalls?: Array<{ toolName?: string }> };
+        if (record.type !== 'agent_run') continue;
+        for (const call of record.toolCalls ?? []) {
+          if (call.toolName && REGISTRY.has(call.toolName)) {
+            observed.set(call.toolName, (observed.get(call.toolName) ?? 0) + 1);
+          }
+        }
+      } catch {
+        // One broken line never hides the later observations.
+      }
+    }
+  } catch {
+    // No observation log (CLI-only machine) — nothing to reconcile against.
+  }
+  return observed;
+}
+
 const sessions = await readSessions();
 const wantedRoles = rolesFlag
   ? rolesFlag.split(',').map((r) => r.trim()).filter(Boolean)
@@ -133,6 +161,19 @@ for (const [role, group] of samples) {
 if (total === 0) {
   console.log('no real role delegations found — nothing to harvest (run more multi-agent sessions first).');
   process.exit(0);
+}
+
+// T1/G2 对账：观测里数得出的委派 vs 存档里收得回的样本。缺口 = 已删除/不可读
+// 存档里的历史委派——看清楚它，才不会误以为"多跑几次就能补"。
+const observed = await readObservedDelegations();
+if (observed.size > 0) {
+  console.log('observation cross-check (observed delegations vs harvestable samples):');
+  for (const [role, count] of [...observed.entries()].sort((a, b) => b[1] - a[1])) {
+    const harvestable = samples.get(role)?.length ?? 0;
+    const lost = count - harvestable;
+    const note = lost > 0 ? ` — ${lost} in deleted/unreadable archives (gone for good)` : '';
+    console.log(`  ${role}: observed ${count}, harvestable ${harvestable}${note}`);
+  }
 }
 
 if (dryRun) {

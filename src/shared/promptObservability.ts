@@ -1,4 +1,4 @@
-import type { EngineEvent, TokenUsage, VerificationSummary } from './types';
+import type { EngineEvent, TokenUsage, ToolResult, VerificationSummary } from './types';
 import type { AdaptiveStrategy } from './adaptiveControl';
 
 export interface VerificationObservation {
@@ -115,7 +115,32 @@ export interface AgentRunObservation {
   /** E4.1 — the strategy this run ran under; absent on records from before
    *  this field existed (the aggregator skips those). */
   strategy?: StrategyObservation;
+  /** Team observability T1 — per-delegation identity and outcome, parallel
+   *  to `toolCalls` (whose anonymous entries keep their E4.2 semantics and
+   *  aggregators untouched). Absent on pre-T1 records; the parser and the
+   *  aggregators treat a missing array as "no data", never as zero. */
+  delegations?: DelegationObservation[];
 }
+
+/** T1 — one role delegation observed with its identity (`ag-xxxxxxxx`),
+ *  timing, and usage split. Fields that only exist at delegation end
+ *  (duration/success/usage) are filled in when the ToolResult lands.
+ *  Hashes only: no args, no output text — the archive keeps those. */
+export interface DelegationObservation {
+  agentId: string;
+  role: string;
+  startedAt: number;
+  durationMs?: number;
+  success?: boolean;
+  usage?: TokenUsage;
+  outputChars?: number;
+  errorKind?: string;
+}
+
+/** T1 seam — decides whether a ToolResult for `toolName` is a subagent role
+ *  delegation. Injected because the role roster lives in coding-agent and the
+ *  shared layer must not import it (same split as the observation sink). */
+export type DelegationRolePredicate = (toolName: string) => boolean;
 
 export type PromptObservation = PromptAssemblyObservation | AgentRunObservation;
 
@@ -276,12 +301,20 @@ export class PromptObservability {
   private readonly store: PromptObservationStore;
   private readonly enabled: boolean;
   private sink?: PromptObservationSink;
+  private isDelegationRole?: DelegationRolePredicate;
   private readonly activeRuns = new Map<string, AgentRunObservation>();
 
   constructor(options: PromptObservabilityOptions = {}, store?: PromptObservationStore) {
     this.enabled = options.enabled ?? true;
     this.store = store ?? new InMemoryPromptObservationStore(options.maxRecords ?? 500);
     this.sink = options.sink;
+  }
+
+  /** T1 — attach the role predicate; unset (or set to undefined) keeps the
+   *  pre-T1 behavior byte-identical: every ToolResult lands only in
+   *  `toolCalls`, no delegations are ever written. */
+  setDelegationRolePredicate(predicate: DelegationRolePredicate | undefined): void {
+    this.isDelegationRole = predicate;
   }
 
   /** Attach (or replace) the durable mirror; safe to call before any recording. */
@@ -379,6 +412,14 @@ export class PromptObservability {
           result: observeText(typeof event.payload.result.result === 'string' ? event.payload.result.result : undefined),
           error: observeError(event.payload.result.error),
         });
+        // T1 — subagent delegations additionally land in `delegations[]` with
+        // their identity. `result.result` is the whole SubagentResult on the
+        // success path (the orchestrator returns it verbatim); parse leniently
+        // — a missing/foreign shape must not break the record.
+        if (this.isDelegationRole?.(event.payload.toolName)) {
+          record.delegations ??= [];
+          record.delegations.push(this.observeDelegation(event.payload));
+        }
         break;
       case 'Completed':
         record.usage = event.payload.usage;
@@ -420,6 +461,36 @@ export class PromptObservability {
   toJsonl(): string {
     return this.records().map((record) => JSON.stringify(record)).join('\n');
   }
+
+  /** T1 — extract delegation identity from a ToolResult payload. The success
+   *  path carries the whole SubagentResult in `result.result` (agentId,
+   *  tokensUsed, output, duration); the failure path carries `{agentId}`.
+   *  startedAt is derived (now − duration): the delegation has just ended by
+   *  construction, and no new event channel is opened for its start. */
+  private observeDelegation(payload: { toolName: string; result: ToolResult; duration: number }): DelegationObservation {
+    const inner = (typeof payload.result.result === 'object' && payload.result.result !== null
+      ? payload.result.result as Partial<SubagentResultLike>
+      : {}) as Partial<SubagentResultLike>;
+    const error = payload.result.error;
+    return {
+      agentId: typeof inner.agentId === 'string' && inner.agentId ? inner.agentId : `ag-unknown-${hashObservationText(`${payload.toolName}:${payload.result.id}`)}`,
+      role: payload.toolName,
+      startedAt: Date.now() - payload.duration,
+      durationMs: payload.duration,
+      success: payload.result.success,
+      usage: inner.usage,
+      outputChars: typeof inner.output === 'string' ? inner.output.length : undefined,
+      errorKind: error ? errorKind(error) : undefined,
+    };
+  }
+}
+
+/** T1 — the slice of SubagentResult the observer is allowed to read. Defined
+ *  structurally so the shared layer never imports coding-agent. */
+interface SubagentResultLike {
+  agentId?: string;
+  output?: string;
+  usage?: TokenUsage;
 }
 
 export const promptObservability = new PromptObservability();

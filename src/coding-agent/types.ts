@@ -1,7 +1,7 @@
 // src/coding-agent/types.ts
 // v0.2 — Coding Agent layer shared types (includes Subagent types).
 
-import type { ToolDefinition } from '../shared/types';
+import type { TokenUsage, ToolDefinition } from '../shared/types';
 
 export type PermissionMode = 'YOLO' | 'NORMAL' | 'PLAN' | 'DONT_ASK';
 
@@ -183,6 +183,10 @@ export interface SubagentResult {
   error?: string;
   duration: number;
   tokensUsed?: number;
+  /** T1 — the delegation's own token split, copied from the subagent engine's
+   *  Completed payload so cost per role is computable (total × rate is not).
+   *  Optional: absent on results produced before this field existed. */
+  usage?: TokenUsage;
 }
 
 export interface SubagentRegistry {

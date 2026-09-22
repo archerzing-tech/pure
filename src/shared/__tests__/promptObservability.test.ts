@@ -272,6 +272,94 @@ describe('PromptObservability', () => {
   });
 });
 
+describe('delegation observations (T1)', () => {
+  const delegationEvent = (overrides: Record<string, unknown> = {}): EngineEvent => ({
+    type: 'ToolResult',
+    timestamp: Date.now(),
+    payload: {
+      toolName: 'researcher',
+      duration: 1200,
+      toolCallId: 'call-r1',
+      result: {
+        id: 'call-r1',
+        toolName: 'researcher',
+        success: true,
+        duration: 1200,
+        result: {
+          id: 'call-r1',
+          agentId: 'ag-deadbeef',
+          agentName: 'researcher',
+          success: true,
+          output: 'findings so far'.repeat(10),
+          tokensUsed: 42,
+          usage: { promptTokens: 100, completionTokens: 20, cacheHitTokens: 60, cacheMissTokens: 40 },
+        },
+        ...overrides,
+      },
+    },
+  } as unknown as EngineEvent);
+
+  it('writes nothing without a predicate — pre-T1 behavior byte-identical', () => {
+    const observability = new PromptObservability({}, new InMemoryPromptObservationStore());
+    const run = observability.startRun();
+    observability.recordEvent(run, delegationEvent());
+    observability.finishRun(run);
+    const record = observability.records().find((r) => r.type === 'agent_run');
+    expect(record && 'delegations' in record ? record.delegations : undefined).toBeUndefined();
+    expect(record && record.type === 'agent_run' ? record.toolCalls : []).toHaveLength(1);
+  });
+
+  it('lands a delegation with identity, usage split, and derived startedAt', () => {
+    const observability = new PromptObservability({}, new InMemoryPromptObservationStore());
+    observability.setDelegationRolePredicate((name) => name === 'researcher');
+    const run = observability.startRun();
+    observability.recordEvent(run, delegationEvent());
+    observability.finishRun(run);
+    const record = observability.records().find((r) => r.type === 'agent_run');
+    expect(record && record.type === 'agent_run' ? record.delegations : undefined).toHaveLength(1);
+    const delegation = record && record.type === 'agent_run' ? record.delegations![0] : undefined;
+    expect(delegation?.agentId).toBe('ag-deadbeef');
+    expect(delegation?.role).toBe('researcher');
+    expect(delegation?.success).toBe(true);
+    expect(delegation?.outputChars).toBe(150);
+    expect(delegation?.usage?.cacheHitTokens).toBe(60);
+    expect(delegation?.startedAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('records the failure path with an error kind and no output size', () => {
+    const observability = new PromptObservability({}, new InMemoryPromptObservationStore());
+    observability.setDelegationRolePredicate(() => true);
+    const run = observability.startRun();
+    observability.recordEvent(run, delegationEvent({ success: false, result: { agentId: 'ag-failed1' }, error: 'Connection reset while fetching' }));
+    observability.finishRun(run);
+    const record = observability.records().find((r) => r.type === 'agent_run');
+    const delegation = record && record.type === 'agent_run' ? record.delegations![0] : undefined;
+    expect(delegation?.success).toBe(false);
+    expect(delegation?.agentId).toBe('ag-failed1');
+    expect(delegation?.errorKind).toBe('network');
+    expect(delegation?.outputChars).toBeUndefined();
+    expect(delegation?.usage).toBeUndefined();
+  });
+
+  it('keeps a stable fallback id when the result carries no agentId', () => {
+    const observability = new PromptObservability({}, new InMemoryPromptObservationStore());
+    observability.setDelegationRolePredicate(() => true);
+    const run = observability.startRun();
+    observability.recordEvent(run, delegationEvent({ result: 'plain string result' }));
+    observability.finishRun(run);
+    const record = observability.records().find((r) => r.type === 'agent_run');
+    const delegation = record && record.type === 'agent_run' ? record.delegations![0] : undefined;
+    expect(delegation?.agentId).toMatch(/^ag-unknown-[0-9a-f]{8}$/);
+  });
+
+  it('parser keeps pre-T1 records (no delegations field) readable', () => {
+    const jsonl = JSON.stringify({ type: 'agent_run', traceId: 'old', startedAt: 1, eventCounts: {}, toolCalls: [], reasoningChars: 0, outputChars: 0 });
+    const parsed = parsePromptObservations(jsonl);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.type === 'agent_run' ? parsed[0]!.delegations : undefined).toBeUndefined();
+  });
+});
+
 describe('parsePromptObservations (E4.2 shared reader)', () => {
   it('keeps only readable run/assembly lines and skips garbage', () => {
     const jsonl = [

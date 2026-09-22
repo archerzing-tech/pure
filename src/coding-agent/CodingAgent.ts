@@ -191,6 +191,12 @@ export class CodingAgent {
       this.toolRegistry.register(def);
     }
 
+    // T1 — the observation layer needs to know which tool names are role
+    // delegations. The roster is whatever this agent registered above; the
+    // predicate keeps the shared observer decoupled from roster types.
+    const registeredRoles = new Set(subagents.map((def) => def.name));
+    config.observability?.setDelegationRolePredicate((toolName) => registeredRoles.has(toolName));
+
     // ── MCP Client ──
     if (config.mcpClient) {
       this.mcpClient = config.mcpClient;
