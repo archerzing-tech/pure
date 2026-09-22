@@ -5,7 +5,7 @@
 // prompt-assembly / print helpers those loops need. Depends on cliConfig +
 // cliAdapter + cliHarness — never on cli.ts itself (acyclic graph).
 import * as readline from 'node:readline';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
@@ -28,6 +28,7 @@ import { parseSkillMarkdown } from './shared/skillFiles';
 import { mergeTranscriptWithTurn } from './shared/conversation';
 import { formatCliIntentAssessment, resolveCliAutoApprove } from './cliIntent';
 import { promptBudgetForProvider } from './shared/providers';
+import { parseInputHistory, rememberInput } from './shared/inputHistory';
 import { blockedHosts } from './shared/netGuard';
 import { detectNetworkSummary, detectRuntimeVersions } from './adapter/node/NodeToolAdapter';
 import { buildTaskContract, discoverWorkspace, formatTaskContract, workspaceProfileSummary, type TaskContract, type WorkspaceProfile } from './shared/delivery';
@@ -718,10 +719,32 @@ async function runRepl(args: CliArgs) {
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
+  // ── 输入历史（↑/↓ 翻回之前发过的指令，shell 口径）──
+  // 会话内的上下翻是 readline 自带的；这里补的是跨会话那份：
+  // 启动时把 ~/.pure/input-history.json（与 GUI 共用一份，格式=字符串数组
+  // newest-first）灌进 rl.history，退出时把这段会话新增的行存回去。
+  // 存不进/读不出都静默退化为空历史——历史只是锦上添花，绝不挡路。
+  const inputHistoryPath = `${os.homedir()}/.pure/input-history.json`;
+  let inputHistory: string[] = [];
+  try {
+    if (existsSync(inputHistoryPath)) inputHistory = parseInputHistory(JSON.parse(readFileSync(inputHistoryPath, 'utf8')));
+  } catch {
+    inputHistory = [];
+  }
+  (rl as unknown as { history: string[] }).history = [...inputHistory];
+  const saveInputHistory = (): void => {
+    try {
+      writeFileSync(inputHistoryPath, JSON.stringify(inputHistory));
+    } catch {
+      // 历史写不进磁盘就算了，退出流程不该被它绊住。
+    }
+  };
+
   rl.on('SIGINT', () => {
     if (generating && currentAbort) {
       if (currentAbort.signal.aborted) {
         process.stdout.write('\n  👋 Goodbye.\n');
+        saveInputHistory();
         rl.close();
         mcpClient?.disconnectAll();
         process.exit(0);
@@ -731,6 +754,7 @@ async function runRepl(args: CliArgs) {
       return;
     }
     process.stdout.write('\n  👋 Goodbye.\n');
+    saveInputHistory();
     rl.close();
     mcpClient?.disconnectAll();
     process.exit(0);
@@ -745,12 +769,14 @@ async function runRepl(args: CliArgs) {
   while (true) {
     const input = await askQuestion();
     if (!input) continue;
+    inputHistory = rememberInput(inputHistory, input);
 
     if (input === '/exit' || input === '/quit') {
       // E1.1 — brief bounded drain so an in-flight lesson reflection from the
       // last turn still lands; never holds the exit hostage.
       await harness.settleReflections(5_000);
       process.stdout.write(`  ${dim('👋 Goodbye.')}\n`);
+      saveInputHistory();
       mcpClient?.disconnectAll();
       break;
     }

@@ -51,6 +51,7 @@ import { normalizeDraft } from './inputRepair';
 import { correctWorkspacePaths, getPathIndex, warmPathIndex } from './pathIndex';
 import { createPathRepairNote } from './pathRepairNote';
 import { InlineAutocomplete, type AutocompleteCandidate } from './inlineAutocomplete';
+import { ComposerInputHistory } from './inputHistory';
 import { MCP_PROMPT_COMMAND, describeMcpPrompt } from '../shared/mcpPrompt';
 import { TaskQueue } from './taskQueue';
 import { ParallelTaskCards, bindParallelTaskCards, type ParallelTaskCardsDeps } from './parallelTaskCards';
@@ -347,6 +348,15 @@ const mcpPromptCandidates = async (): Promise<AutocompleteCandidate[]> => {
 };
 new InlineAutocomplete(promptEl, { extraCandidates: mcpPromptCandidates });
 if (landingPrompt) new InlineAutocomplete(landingPrompt, { extraCandidates: mcpPromptCandidates });
+
+// ── 输入历史（↑/↓ 翻回之前发过的指令，shell 口径）──
+// 两个 composer 各接一份状态（各自翻各自的），共享同一份磁盘历史
+// （~/.pure/input-history.json，与 CLI REPL 共用）。浏览器模式退化为
+// 页面内有效。发过的内容在 sendMessage / interject 两条路径上记。
+const promptHistory = new ComposerInputHistory(promptEl);
+void promptHistory.load();
+const landingHistory = landingPrompt ? new ComposerInputHistory(landingPrompt) : null;
+if (landingHistory) void landingHistory.load();
 
 // ── Batch task queue (single-flight per worktree since 4.2: tasks in the
 // visible conversation run through the facade; tasks of OTHER worktrees run
@@ -1301,6 +1311,8 @@ landingPrompt.addEventListener('input', () => {
 landingPrompt.addEventListener('keydown', (e) => {
   // 输入法组字（拼音→汉字）时，Enter 是确认候选字，绝不能当成发送。
   if (e.isComposing || e.keyCode === 229) return;
+  // 输入历史：首屏输入框与主输入框共用一份历史（弹层开着时让路）。
+  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && landingHistory?.handleArrowKeyDown(e)) return;
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     handleLandingSendOrStop();
@@ -1426,6 +1438,8 @@ document.addEventListener('contextmenu', (e) => {
 promptEl.addEventListener('keydown', (e) => {
   // 输入法组字（拼音→汉字）时，Enter 是确认候选字，绝不能当成发送。
   if (e.isComposing || e.keyCode === 229) return;
+  // 输入历史：↑/↓ 在 shell 口径下翻回之前发过的指令（弹层开着时让路）。
+  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && promptHistory.handleArrowKeyDown(e)) return;
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     if (chat.isStreaming()) {
@@ -1435,6 +1449,7 @@ promptEl.addEventListener('keydown', (e) => {
       // of the old behaviour of dumping it as a follow-up after the run.
       const text = promptEl.value.trim();
       if (text) {
+        promptHistory.remember(text);
         void chat.interject(text, [], text);
         promptEl.value = '';
         promptEl.style.height = 'auto';
@@ -1568,6 +1583,8 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
     return;
   }
 
+  // 过了所有门，这条指令真的要发了 —— 记进输入历史（之后 ↑ 可以翻回来）。
+  (sourceEl === promptEl ? promptHistory : landingHistory)?.remember(sourceEl.value);
   sourceEl.value = '';
   sourceEl.style.height = 'auto';
   if (sourceEl === landingPrompt) {
