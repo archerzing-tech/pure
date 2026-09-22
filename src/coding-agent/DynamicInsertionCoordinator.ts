@@ -2,13 +2,15 @@ import type { LLMAdapter, MessageImage } from '../shared/types';
 import { classifyInsertion, type InsertionClassification } from './Planner';
 
 /**
- * 插话重构（2026-09-19）：一个人在埋头干活时听到同事插话，只有两种情况
- * 值得停下手里的活——对方说"别干了"（stop），或者对方把方向掀了
- * （goal-change）。其余一切都不值得推倒重来：提醒、约束、补充顺着下个动作
+ * 插话重构（2026-09-19）：一个人在埋头干活时听到同事插话，只有三种情况
+ * 值得停下手里的活——对方说"别干了"（stop），对方把方向掀了
+ * （goal-change），或者对方纠正了手里这活所依据的事实（premise-change：
+ * "其实我在西安"——目标没变，但按错误前提算出来的东西全都不值钱了，接着
+ * 跑就是白烧）。其余一切都不值得推倒重来：提醒、约束、补充顺着下个动作
  * 带上就好（steer）；提问先答一句（question）；新活儿排到手里这单后面
  * （task）；寒暄点头收下（chatter）。
  */
-export type DynamicInsertionKind = 'stop' | 'goal-change' | 'steer' | 'question' | 'task' | 'chatter';
+export type DynamicInsertionKind = 'stop' | 'premise-change' | 'goal-change' | 'steer' | 'question' | 'task' | 'chatter';
 
 export interface DynamicInsertion {
   text: string;
@@ -73,6 +75,8 @@ export class DynamicInsertionCoordinator {
       return { kind: 'steer', reason: 'classification unavailable; delivered as a steer', shouldAbort: false };
     }
     const result = await this.classify(llm, context, text, signal, insertion.images);
-    return { kind: result.kind, reason: result.reason, shouldAbort: result.kind === 'goal-change' };
+    // premise-change 与 goal-change 同判：前提错了的在飞委派不会因为"下个
+    // 动作带上"就变对——止损要趁早，停掉重排比跑完再改便宜。
+    return { kind: result.kind, reason: result.reason, shouldAbort: result.kind === 'goal-change' || result.kind === 'premise-change' };
   }
 }

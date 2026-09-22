@@ -642,6 +642,13 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(cls.kind).toBe('goal-change');
   });
 
+  it('routes a corrected fact to premise-change (2026-09-22 止损缺口)', async () => {
+    // 用户实测暴露的缺口：规划按广东出发跑到一半，用户说"我在西安"——
+    // premise-change 必须是合法判定，收下后协调器会沿 abort 链止损重排。
+    const cls = await classifyInsertion(mockLlm('{"kind":"premise-change","reason":"origin city is wrong"}'), '正在规划从广东到广西的旅游', '我现在在西安');
+    expect(cls.kind).toBe('premise-change');
+  });
+
   it('rejects an unknown kind and falls back to steer', async () => {
     const cls = await classifyInsertion(mockLlm('{"kind":"banana","reason":"junk"}'), 'context', 'anything');
     expect(cls.kind).toBe('steer'); // never drop the user's input

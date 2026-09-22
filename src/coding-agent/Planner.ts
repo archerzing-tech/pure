@@ -271,9 +271,10 @@ export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
 /** Result of judging a mid-run insert against the current task.
  *
  * 插话重构：判定不再问"相关与否"，而是直接问"人看到这句话会怎么处理"——
- * question 侧路回答、steer 顺路带上、goal-change 推翻重来、task 排队、
- * chatter 会心一笑。Stop 不走 LLM（正则即可，停止等不起一次分类往返）。 */
-export type InsertionKind = 'question' | 'steer' | 'goal-change' | 'task' | 'chatter';
+ * question 侧路回答、steer 顺路带上、premise-change 前提被推翻止损重来、
+ * goal-change 方向推翻重来、task 排队、chatter 会心一笑。Stop 不走 LLM
+ * （正则即可，停止等不起一次分类往返）。 */
+export type InsertionKind = 'question' | 'steer' | 'premise-change' | 'goal-change' | 'task' | 'chatter';
 
 export interface InsertionClassification {
   kind: InsertionKind;
@@ -294,13 +295,14 @@ The new message the user just inserted mid-run:
 
 Categories (pick exactly one):
 - "question": the user asks something and expects an answer NOW — a status check ("跑完了吗", "现在到哪了"), a request for explanation, a decision only they can make. Answering must not disturb the running task.
-- "steer": the message refines, corrects, or extends the CURRENT task without overturning it — a small tweak ("记得跑测试", "文案再口语一点"), a constraint or caution, extra context, a related small addition. The agent should take it into account at its very next step and keep going.
+- "steer": the message refines or extends the CURRENT task and every bit of work already underway stays valid — a small tweak ("记得跑测试", "文案再口语一点"), a style or scope preference, a caution, extra detail that narrows but does not invalidate. The agent takes it into account at its very next step and keeps going.
+- "premise-change": the user corrects a FACT that the current work is built on — origin/place, dates/timing, environment ("我用的是 Windows"), versions, budget, who owns what, an "already/currently X" assumption. The goal itself stands, but anything being computed from the wrong fact comes out worthless, so the running work must be cut short and redone from the corrected fact ("其实我在西安，不是广东", "预算只有三千，不是一万"). Judge this over steer whenever the correction would change the ANSWER, not just its wording.
 - "goal-change": the user overturns the current direction — replace the goal/approach/output, undo what was built, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…").
 - "task": an independent piece of work that does not touch the current task — another file, another feature, a separate errand. It should wait its turn as a new task, not interrupt.
 - "chatter": small talk, thanks, reactions, filler ("哈哈", "好的", "辛苦了", "+1"). Nothing to act on.
 
 Return ONLY one JSON object:
-{"kind":"question|steer|goal-change|task|chatter","reason":"<one short line>"}`;
+{"kind":"question|steer|premise-change|goal-change|task|chatter","reason":"<one short line>"}`;
 
 /**
  * Lightweight single-call routing of a message the user inserts while the
@@ -327,7 +329,7 @@ export async function classifyInsertion(
     { role: 'system', content: system },
     { role: 'user', content: prompt, images },
   ];
-  const KINDS: readonly string[] = ['question', 'steer', 'goal-change', 'task', 'chatter'];
+  const KINDS: readonly string[] = ['question', 'steer', 'premise-change', 'goal-change', 'task', 'chatter'];
   const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown }>(
     llm,
     request,

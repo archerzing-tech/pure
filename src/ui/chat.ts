@@ -2320,6 +2320,16 @@ export class ChatController {
         // the held insert — re-arm the deferred dispatch here.
         if (!this.isStreaming()) this.scheduleDeferred();
         return;
+      case 'premise-change':
+        // 前提被推翻（"其实我在西安"）：目标没变，但在飞的委派按错误前提算
+        // 下去全是白跑——走同一条 abort 链止损，插话暂存，收尾后作为新指令
+        // 重新入场，按纠正后的事实重排。
+        echoUserBubble();
+        this.relatedInsert = { text, images, displayText };
+        this.addStatusBubble('前提变了——按旧前提跑的活先停下止损，马上按新的来。', true, false, 'info');
+        this.abortController?.abort();
+        if (!this.isStreaming()) this.scheduleDeferred();
+        return;
       case 'steer':
         echoUserBubble();
         this.steerRunningTurn(text, images);

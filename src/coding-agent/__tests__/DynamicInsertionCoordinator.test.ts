@@ -6,7 +6,7 @@ function llm(): LLMAdapter {
   return { complete: async (_messages: Message[]) => ({ content: '' } as never) } as unknown as LLMAdapter;
 }
 
-/** 插话重构后的决策矩阵：只有 stop / goal-change 停下手里
+/** 插话重构后的决策矩阵：stop / goal-change / premise-change 停下手里
  * 的活；其余一切不打断——steer 进转向通道、question 侧路回答、task 排队、
  * chatter 收下即可。 */
 describe('DynamicInsertionCoordinator', () => {
@@ -79,6 +79,15 @@ describe('DynamicInsertionCoordinator', () => {
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '这个方向走不通，换个做法吧' });
     expect(decision.kind).toBe('goal-change');
+    expect(decision.shouldAbort).toBe(true);
+  });
+
+  it('aborts on a judged premise-change — in-flight work under a wrong fact is a loss to cut (2026-09-22)', async () => {
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'premise-change', reason: 'origin city is wrong' }),
+    });
+    const decision = await coordinator.decide(llm(), '正在规划从广东到广西的旅游', { text: '我现在在西安' });
+    expect(decision.kind).toBe('premise-change');
     expect(decision.shouldAbort).toBe(true);
   });
 });
