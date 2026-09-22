@@ -6,7 +6,7 @@
     "provider": "glm",
     "model": "glm-5.3-flash",
     "promptVersion": "dynamic",
-    "gitRevision": "4d2e14b",
+    "gitRevision": "bc793e5",
     "runtime": "bun/1.3.14",
     "platform": "darwin"
   },

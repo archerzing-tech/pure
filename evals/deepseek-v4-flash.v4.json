@@ -6,7 +6,7 @@
     "provider": "deepseek-openai",
     "model": "deepseek-v4-flash",
     "promptVersion": "dynamic",
-    "gitRevision": "ccc210b",
+    "gitRevision": "9b7d102",
     "runtime": "bun/1.3.14",
     "platform": "darwin"
   },

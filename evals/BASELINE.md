@@ -14,7 +14,7 @@ solutions pass); this matrix only adds the real-agent column on top.
 |---|---|
 | Suite | `pure-coding-baseline-v5` (15 fixtures: 9 core + 4 hard + 2 extreme) |
 | `fixtureHash` | `6087e3be` |
-| Git revision | `4d2e14b` (DeepSeek v4-flash + GLM columns), `40f5693` (`deepseek-flash` + NVIDIA column) |
+| Git revision | `bc793e5` (DeepSeek v4-flash + GLM columns), `4f6b722` (`deepseek-flash` + NVIDIA column) |
 | Runtime | `bun/1.3.14` on `darwin` |
 | Prompt version | `dynamic` (assembled per task) |
 | Reports | `evals/deepseek-v4-flash.v5.json`, `evals/glm-5.3-flash.v5.json`, `evals/glm-4.5-flash.v5.json`, `evals/glm-4.5-flash.think53.v5.json`, `evals/deepseek-flash.v5.json`, `evals/nemotron-3-ultra-550b-a55b.v5.json` |
@@ -73,7 +73,7 @@ design so a run cannot go elastic). The executor's fatal message has a fixed
 The provider side was healthy throughout (97.8 % cache hit; the run was still
 making progress when the caps fired). The executor's refusal to score an
 unreached provider as a plain zero (`agent_error`, not `failed`) is the separate
-fix that shipped in `4d2e14b`.
+fix that shipped in `bc793e5`.
 
 Reports generated after this diagnosis record the cause explicitly instead of
 relying on that reversal: `agentError.code` / `agentError.reason` (the engine's
@@ -103,7 +103,7 @@ matrix: one routing flag, no prompt change, no fixture change.
 
 ### 2026-09-22: NVIDIA NIM column, DeepSeek model rename, OpenRouter blocked
 
-Two columns were added at revision `40f5693` (same suite, same `fixtureHash`):
+Two columns were added at revision `4f6b722` (same suite, same `fixtureHash`):
 
 - **NVIDIA NIM `nvidia/nemotron-3-ultra-550b-a55b` — 15/15, 84.8 s mean.** Both
   extreme fixtures pass (`extreme-repo-scale` 366 s, `extreme-perf` 225 s), so a
@@ -191,7 +191,7 @@ three models. What remains uncovered:
 | DeepSeek (OpenAI API) | `deepseek-v4-flash` | 13/13 | 39.5 s | $0.0184 | `evals/deepseek-v4-flash.v4.json` |
 | GLM | `glm-5.3-flash` | 13/13 | 87.6 s | $0.4270 | `evals/glm-5.3-flash.v4.json` |
 
-Environment for that run: `fixtureHash a1c00907`, revision `ccc210b`. The hard tier
+Environment for that run: `fixtureHash a1c00907`, revision `9b7d102`. The hard tier
 raised work but not solve rate — both models cleared all four hard fixtures, so v4's
 conclusion was "a regression gate plus a cost/efficiency benchmark, not a difficulty
 ladder", which is what motivated the extreme tier in v5. Kept because the v4 and v5
@@ -205,7 +205,7 @@ the reports record the hash).
 |---|---|---|---|---|---|
 | DeepSeek (OpenAI API) | `deepseek-v4-flash` | 9/9 | 15.1 s | $0.0143 | `evals/deepseek-v4-flash.json` |
 
-Environment for that run: `fixtureHash c80c0ab4`, revision `084a133`.
+Environment for that run: `fixtureHash c80c0ab4`, revision `e73e865`.
 
 ## How to reproduce
 

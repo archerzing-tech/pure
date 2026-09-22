@@ -9,12 +9,12 @@ import type { BaselineSnapshot } from './baseline';
 export const BASELINE_SNAPSHOT: BaselineSnapshot = {
   "suiteVersion": "pure-coding-baseline-v5",
   "fixtureHash": "6087e3be",
-  "generatedAt": "2026-09-22T03:14:00.942Z",
+  "generatedAt": "2026-09-22T03:25:23.742Z",
   "rows": [
     {
       "provider": "nvidia",
       "model": "nvidia/nemotron-3-ultra-550b-a55b",
-      "gitRevision": "40f5693",
+      "gitRevision": "4f6b722",
       "passAt1": 15,
       "taskCount": 15,
       "meanDurationMs": 84784.13333333333,
@@ -26,7 +26,7 @@ export const BASELINE_SNAPSHOT: BaselineSnapshot = {
     {
       "provider": "deepseek-openai",
       "model": "deepseek-v4-flash",
-      "gitRevision": "4d2e14b",
+      "gitRevision": "bc793e5",
       "passAt1": 15,
       "taskCount": 15,
       "meanDurationMs": 27240.8,
@@ -38,7 +38,7 @@ export const BASELINE_SNAPSHOT: BaselineSnapshot = {
     {
       "provider": "deepseek-openai",
       "model": "deepseek-flash",
-      "gitRevision": "40f5693",
+      "gitRevision": "4f6b722",
       "passAt1": 15,
       "taskCount": 15,
       "meanDurationMs": 33991.933333333334,
@@ -62,7 +62,7 @@ export const BASELINE_SNAPSHOT: BaselineSnapshot = {
     {
       "provider": "glm",
       "model": "glm-5.3-flash",
-      "gitRevision": "4d2e14b",
+      "gitRevision": "bc793e5",
       "passAt1": 15,
       "taskCount": 15,
       "meanDurationMs": 113479.26666666666,
@@ -74,7 +74,7 @@ export const BASELINE_SNAPSHOT: BaselineSnapshot = {
     {
       "provider": "glm",
       "model": "glm-4.5-flash",
-      "gitRevision": "4d2e14b",
+      "gitRevision": "bc793e5",
       "passAt1": 13,
       "taskCount": 15,
       "meanDurationMs": 236241.4,
