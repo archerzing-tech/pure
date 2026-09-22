@@ -373,6 +373,9 @@ body {
 }
 
 .sidebar-session-item {
+  /* position: relative anchors the delete button to the card's top-right corner
+     (it is absolutely placed, not a flex sibling). */
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -404,12 +407,15 @@ body {
   gap: 3px;
 }
 
-/* Title row: running dot + conversation title share one line. */
+/* Title row: running dot + conversation title share one line. The right padding
+   reserves the top-right corner for the absolutely-placed delete button so the
+   title ellipsis stops before it. */
 .sidebar-session-item-top {
   display: flex;
   align-items: center;
   gap: 2px;
   min-width: 0;
+  padding-right: 18px;
 }
 
 .sidebar-session-item-title {
@@ -509,6 +515,10 @@ body {
 }
 
 .sidebar-session-delete {
+  /* Pinned to the card's top-right corner (the card is position: relative). */
+  position: absolute;
+  top: 3px;
+  right: 3px;
   background: none;
   border: none;
   cursor: pointer;
