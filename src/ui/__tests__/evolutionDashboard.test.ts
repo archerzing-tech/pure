@@ -493,6 +493,24 @@ describe('renderBaselineSection', () => {
     expect(html).not.toContain('evo-stat-note');
   });
 
+  it('labels an unpriced provider and sorts it after the priced rows', () => {
+    const priced = snapshot().rows[0]!;
+    const html = renderBaselineSection(snapshot({
+      // 故意把未定价的那行放在前面：排序必须在渲染时纠正，不能靠快照存的顺序。
+      rows: [
+        { ...priced, provider: 'nvidia', model: 'nvidia/nemotron-3-ultra-550b-a55b', estimatedCostUsd: 0, promptTokens: 0, cacheHitTokens: 0 },
+        priced,
+      ],
+    }));
+    expect(html).toContain('未定价');
+    expect(html).toContain('evo-stat-note');
+    expect(html.indexOf('nvidia/nemotron')).toBeGreaterThan(html.indexOf('deepseek-v4-flash'));
+  });
+
+  it('does not raise the unpriced note when every row is priced', () => {
+    expect(renderBaselineSection(snapshot())).not.toContain('未定价');
+  });
+
   it('shouts when the snapshot is from an older suite', () => {
     const html = renderBaselineSection(snapshot({ suiteVersion: 'pure-coding-baseline-v4' }));
     expect(html).toContain('evo-stat-note');

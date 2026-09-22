@@ -12,7 +12,7 @@
 
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASELINE_SUITE_VERSION, type BaselineProviderRow, type BaselineSnapshot } from '../src/shared/baseline';
+import { BASELINE_SUITE_VERSION, isBaselineCostPriced, orderBaselineRows, type BaselineProviderRow, type BaselineSnapshot } from '../src/shared/baseline';
 import { codingTaskFixtureHash } from '../src/evaluation/codingTaskBaseline';
 
 const EVALS_DIR = 'evals';
@@ -65,14 +65,15 @@ for (const name of readdirSync(EVALS_DIR).filter((entry) => entry.endsWith('.jso
   });
 }
 
-// 便宜的在最前：一眼看出哪个模型/网关更省。
-rows.sort((a, b) => a.estimatedCostUsd - b.estimatedCostUsd || a.provider.localeCompare(b.provider));
+// 便宜的在最前：一眼看出哪个模型/网关更省。**未定价的排最后**——成本 0 是
+// 「没测到」（provider 不回 usage / 没有价目表），不是免费的证明。
+const ordered = orderBaselineRows(rows);
 
 const snapshot: BaselineSnapshot = {
   suiteVersion: BASELINE_SUITE_VERSION,
   fixtureHash: codingTaskFixtureHash(),
   generatedAt: new Date().toISOString(),
-  rows,
+  rows: ordered,
   excluded,
 };
 
@@ -90,8 +91,9 @@ writeFileSync(OUT_PATH, `${header}export const BASELINE_SNAPSHOT: BaselineSnapsh
 
 console.log(`Wrote ${OUT_PATH}`);
 console.log(`  ${rows.length} row(s) for ${BASELINE_SUITE_VERSION} (fixtureHash ${snapshot.fixtureHash})`);
-for (const row of rows) {
-  console.log(`  - ${row.provider}/${row.model} ${row.passAt1}/${row.taskCount} @ ${row.gitRevision} ($${row.estimatedCostUsd.toFixed(4)})`);
+for (const row of ordered) {
+  const cost = isBaselineCostPriced(row) ? `$${row.estimatedCostUsd.toFixed(4)}` : 'unpriced';
+  console.log(`  - ${row.provider}/${row.model} ${row.passAt1}/${row.taskCount} @ ${row.gitRevision} (${cost})`);
 }
 if (excluded.length > 0) {
   console.log(`  excluded ${excluded.length} report(s) from other suites:`);

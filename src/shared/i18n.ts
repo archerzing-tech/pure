@@ -763,6 +763,8 @@ const translations: Record<Language, Record<string, string>> = {
     'evolution.baseline.table.pass': 'pass@1',
     'evolution.baseline.table.duration': '平均耗时',
     'evolution.baseline.table.cost': '估算成本',
+    'evolution.baseline.costUnpriced': '未定价',
+    'evolution.baseline.unpricedNote': '有 {n} 行 provider 不回用量或没有价目表：它们的成本记为未定价，排在末尾、不参与「谁成本更低」的排序。',
     'evolution.baseline.table.cache': '缓存命中',
     'evolution.baseline.table.revision': 'revision',
 
@@ -1852,6 +1854,8 @@ const translations: Record<Language, Record<string, string>> = {
     'evolution.baseline.table.pass': 'pass@1',
     'evolution.baseline.table.duration': 'Mean duration',
     'evolution.baseline.table.cost': 'Est. cost',
+    'evolution.baseline.costUnpriced': 'Unpriced',
+    'evolution.baseline.unpricedNote': '{n} row(s) come from a provider that reports no usage or has no rate card: their cost is unpriced, listed last and kept out of the "cheapest" ordering.',
     'evolution.baseline.table.cache': 'Cache hit',
     'evolution.baseline.table.revision': 'Revision',
     'memory.supersededByTitle': 'Superseded by this newer memory — degrading faster to deletion: {content}',

@@ -6,7 +6,7 @@
 // 把"快照的套件版本与 fixture 指纹必须等于当前套件"钉死。
 
 import { describe, expect, it } from 'bun:test';
-import { BASELINE_SUITE_VERSION, type BaselineProviderRow } from '../baseline';
+import { BASELINE_SUITE_VERSION, isBaselineCostPriced, orderBaselineRows, type BaselineProviderRow } from '../baseline';
 import { BASELINE_SNAPSHOT, baselineCacheHitRate, isBaselineStale } from '../baselineSnapshot';
 import { CODING_TASK_SUITE_VERSION, codingTaskFixtureHash } from '../../evaluation/codingTaskBaseline';
 
@@ -41,7 +41,49 @@ describe('baseline snapshot helpers', () => {
   });
 });
 
+describe('priced vs unpriced baseline rows', () => {
+  it('calls a run with no usage unpriced — 0 is a gap, not a free run', () => {
+    expect(isBaselineCostPriced(row({ promptTokens: 0, cacheHitTokens: 0, estimatedCostUsd: 0 }))).toBe(false);
+  });
+
+  it('calls a provider with no rate card unpriced even when tokens were reported', () => {
+    // NVIDIA NIM has no entry in usage.ts, so its estimate is 0 by construction.
+    expect(isBaselineCostPriced(row({ provider: 'nvidia', promptTokens: 1_000_000, estimatedCostUsd: 0 }))).toBe(false);
+  });
+
+  it('keeps priced rows first by ascending cost and pushes unpriced rows to the tail', () => {
+    const ordered = orderBaselineRows([
+      row({ provider: 'nvidia', model: 'nemotron', promptTokens: 0, estimatedCostUsd: 0 }),
+      row({ provider: 'glm', model: 'glm-4.5-flash', estimatedCostUsd: 0.5707 }),
+      row({ provider: 'deepseek-openai', model: 'deepseek-flash', estimatedCostUsd: 0.0325 }),
+    ]);
+    expect(ordered.map((entry) => entry.model)).toEqual(['deepseek-flash', 'glm-4.5-flash', 'nemotron']);
+  });
+
+  it('orders the unpriced tail by provider then model, so it is stable', () => {
+    const ordered = orderBaselineRows([
+      row({ provider: 'nvidia', model: 'b', promptTokens: 0, estimatedCostUsd: 0 }),
+      row({ provider: 'nvidia', model: 'a', promptTokens: 0, estimatedCostUsd: 0 }),
+    ]);
+    expect(ordered.map((entry) => entry.model)).toEqual(['a', 'b']);
+  });
+
+  it('does not mutate the array it was given', () => {
+    const rows = [row({ estimatedCostUsd: 0.5 }), row({ estimatedCostUsd: 0.1 })];
+    orderBaselineRows(rows);
+    expect(rows[0]!.estimatedCostUsd).toBe(0.5);
+  });
+});
+
 describe('committed baseline snapshot', () => {
+  // 快照的顺序就是页面上的顺序：未定价的行必须待在末尾，否则它在页面上顶着
+  // 0 成本占「最省」的位置。重新生成时排序错了，这条会先红。
+  it('keeps every unpriced row after the priced ones', () => {
+    const firstUnpriced = BASELINE_SNAPSHOT.rows.findIndex((entry) => !isBaselineCostPriced(entry));
+    if (firstUnpriced < 0) return;
+    expect(BASELINE_SNAPSHOT.rows.slice(firstUnpriced).every((entry) => !isBaselineCostPriced(entry))).toBe(true);
+  });
+
   it('matches the current suite version and fixture hash', () => {
     expect(BASELINE_SNAPSHOT.suiteVersion).toBe(BASELINE_SUITE_VERSION);
     expect(BASELINE_SNAPSHOT.fixtureHash).toBe(codingTaskFixtureHash());

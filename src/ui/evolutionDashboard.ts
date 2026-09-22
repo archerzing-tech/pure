@@ -21,7 +21,7 @@ import { SUBAGENT_ADVICE_WINDOW_DAYS, type SubagentAdvice } from '../shared/suba
 import type { RoleEffectSlice, RunEffectSlice, StrategyDimension, StrategyEffectSummary } from '../shared/strategyEffect';
 import { toolDisplayName } from './toolRow';
 import { formatCostUsd } from '../shared/usage';
-import { BASELINE_SUITE_VERSION, type BaselineSnapshot } from '../shared/baseline';
+import { BASELINE_SUITE_VERSION, isBaselineCostPriced, orderBaselineRows, type BaselineSnapshot } from '../shared/baseline';
 import { baselineCacheHitRate, isBaselineStale } from '../shared/baselineSnapshot';
 
 // ── 数字格式化 ──
@@ -538,17 +538,27 @@ export function renderBaselineSection(snapshot: BaselineSnapshot): string {
     )}</div>`;
   }
 
-  const body = snapshot.rows.map((row) => `<tr>
+  // 与 eval:snapshot 共用同一份排序：未定价的行排在最后，不占「谁更省」的头名。
+  const rows = orderBaselineRows(snapshot.rows);
+  const unpriced = rows.filter((row) => !isBaselineCostPriced(row)).length;
+  const unpricedNote = unpriced > 0
+    ? `<div class="evo-stat-note">${escapeHtml(
+        t('evolution.baseline.unpricedNote', '有 {n} 行 provider 不回用量或没有价目表：它们的成本记为未定价，排在末尾、不参与「谁成本更低」的排序。')
+          .replace('{n}', String(unpriced)),
+      )}</div>`
+    : '';
+
+  const body = rows.map((row) => `<tr>
     <td class="evo-table-key">${escapeHtml(row.provider)}</td>
     <td>${escapeHtml(row.model)}</td>
     <td>${escapeHtml(`${row.passAt1}/${row.taskCount}`)}</td>
     <td>${escapeHtml(formatDuration(row.meanDurationMs))}</td>
-    <td>${escapeHtml(formatCostUsd(row.estimatedCostUsd))}</td>
+    <td>${escapeHtml(isBaselineCostPriced(row) ? formatCostUsd(row.estimatedCostUsd) : t('evolution.baseline.costUnpriced', '未定价'))}</td>
     <td>${escapeHtml(formatPercent(baselineCacheHitRate(row)))}</td>
     <td>${escapeHtml(row.gitRevision)}</td>
   </tr>`).join('');
 
-  return `${meta}${stale}${excluded}<div class="evo-table-wrap">
+  return `${meta}${stale}${excluded}${unpricedNote}<div class="evo-table-wrap">
     <table class="evo-table">
       <thead><tr>
         <th>${escapeHtml(t('evolution.baseline.table.provider', 'provider'))}</th>

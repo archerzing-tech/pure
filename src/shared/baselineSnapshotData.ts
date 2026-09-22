@@ -9,20 +9,8 @@ import type { BaselineSnapshot } from './baseline';
 export const BASELINE_SNAPSHOT: BaselineSnapshot = {
   "suiteVersion": "pure-coding-baseline-v5",
   "fixtureHash": "6087e3be",
-  "generatedAt": "2026-09-22T03:25:23.742Z",
+  "generatedAt": "2026-09-22T03:33:18.758Z",
   "rows": [
-    {
-      "provider": "nvidia",
-      "model": "nvidia/nemotron-3-ultra-550b-a55b",
-      "gitRevision": "4f6b722",
-      "passAt1": 15,
-      "taskCount": 15,
-      "meanDurationMs": 84784.13333333333,
-      "estimatedCostUsd": 0,
-      "promptTokens": 0,
-      "cacheHitTokens": 0,
-      "report": "evals/nemotron-3-ultra-550b-a55b.v5.json"
-    },
     {
       "provider": "deepseek-openai",
       "model": "deepseek-v4-flash",
@@ -82,6 +70,18 @@ export const BASELINE_SNAPSHOT: BaselineSnapshot = {
       "promptTokens": 2403645,
       "cacheHitTokens": 2350231,
       "report": "evals/glm-4.5-flash.v5.json"
+    },
+    {
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "gitRevision": "4f6b722",
+      "passAt1": 15,
+      "taskCount": 15,
+      "meanDurationMs": 84784.13333333333,
+      "estimatedCostUsd": 0,
+      "promptTokens": 0,
+      "cacheHitTokens": 0,
+      "report": "evals/nemotron-3-ultra-550b-a55b.v5.json"
     }
   ],
   "excluded": [
