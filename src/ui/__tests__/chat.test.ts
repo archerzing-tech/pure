@@ -953,10 +953,18 @@ describe('plan overview completion state', () => {
     // 完、把结果作为观察喂给汇总轮；settle 对 mechanicallyDone 直接放行。
     expect(src.indexOf('takeSteerMessages: async () =>')).toBeGreaterThan(-1);
     const closure = src.indexOf('takeSteerMessages: async () =>');
-    const closureBody = src.slice(closure, closure + 2_600);
+    const closureBody = src.slice(closure, closure + 3_600);
     expect(closureBody.indexOf('if (this.hasDelegationInFlight())')).toBeGreaterThan(-1);
     expect(closureBody.indexOf('subagentOrchestrator.execute(')).toBeGreaterThan(-1);
     expect(closureBody.indexOf('fold.mechanicallyDone = true')).toBeGreaterThan(-1);
+    // 2026-09-22 补跑可见性：机械执行绕过父引擎的工具事件流，对话流不会出现
+    // 委派卡——不亮出来就是"等待模型首字"的误导提示，体感即卡死（140s 实测）。
+    // 补跑起点/终点各有一条状态条，思考卡标签换成补跑文案并换上专用等待提示；
+    // 结果提取优先 payload.output（子代理的产出在 result.result.output 里）。
+    expect(closureBody.indexOf('this.addStatusBubble(')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('setThinkingLabel(')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('startThinkingTimer(')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf("?.output === 'string'")).toBeGreaterThan(-1);
     const settle = src.indexOf('private settleFoldIns(');
     expect(settle).toBeGreaterThan(-1);
     const settleBody = src.slice(settle, settle + 500);

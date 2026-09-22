@@ -3307,14 +3307,37 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
             if (fold.mechanical) {
               const role = this.agentActivities[this.agentActivities.length - 1]?.agentName;
               if (role) {
+                // 机械执行绕过了父引擎的工具事件流，对话流里不会出现委派卡——
+                // 用户只看到"等待模型首字"的误导提示，体感就是卡死（2026-09-22
+                // 实测 140s）。把"正在补跑"亮出来：对话流状态条 + 思考卡标签/
+                // 等待提示全部换成补跑文案；右侧活动卡照常由 onStart/onTool
+                // 事件点亮，能实时看到补跑的工具明细。
+                const mechBubble = this.addStatusBubble(
+                  `委派收齐。现在直接补跑你追加的这项（已派给 ${role}）——完成后一次性出覆盖全部的汇总。`,
+                  true, false, 'info',
+                );
+                if (thinkingCard) {
+                  setThinkingLabel(thinkingCard, `正在补跑追加的调研（${role}）…`);
+                  stopThinkingTimer(thinkingCard);
+                  startThinkingTimer(thinkingCard, { hintText: '正在由系统直接补跑追加的任务，与正常委派一样需要几分钟；期间能看到新增的子 Agent 卡片和它的实时工具明细，跑完会自动合并汇总。' });
+                }
                 try {
                   const result = await codingAgent.subagentOrchestrator.execute(
                     { id: `foldin_${Date.now()}`, index: 0, function: { name: role, arguments: JSON.stringify({ prompt: fold.text }) } },
                     this.abortController?.signal,
                   );
-                  const detail = typeof result.result === 'string' ? result.result : JSON.stringify(result.result) ?? '';
+                  const payload = result.result;
+                  const detail = typeof payload === 'string'
+                    ? payload
+                    : typeof (payload as { output?: unknown } | undefined)?.output === 'string'
+                      ? (payload as { output: string }).output
+                      : JSON.stringify(payload) ?? '';
+                  mechBubble.classList.remove('pending');
                   if (result.success && detail) {
                     fold.mechanicallyDone = true;
+                    mechBubble.textContent = `追加的调研（${role}）补跑完毕，正在合并出覆盖全部的汇总。`;
+                    linkifyPaths(mechBubble);
+                    if (thinkingCard) setThinkingLabel(thinkingCard, '正在合并汇总…');
                     drained.push({
                       role: 'user',
                       content: `【追加任务已由系统直接执行完毕，无需再委派】任务：${fold.text}\n执行结果：\n${detail.slice(0, 6_000)}\n请把这份结果与本次任务此前委派的全部产出合并，输出一份覆盖所有对象的最终汇总。`,
@@ -3322,8 +3345,13 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
                     });
                     continue;
                   }
-                } catch {
                   // 机械执行失败 → 退回指令注入；收尾核验仍会兜底。
+                  mechBubble.textContent = '直接补跑没跑成，改由调研角色自行补派——这项不会丢。';
+                  linkifyPaths(mechBubble);
+                } catch {
+                  mechBubble.classList.remove('pending');
+                  mechBubble.textContent = '直接补跑没跑成，改由调研角色自行补派——这项不会丢。';
+                  linkifyPaths(mechBubble);
                 }
               }
             }
