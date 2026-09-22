@@ -14,16 +14,18 @@ solutions pass); this matrix only adds the real-agent column on top.
 |---|---|
 | Suite | `pure-coding-baseline-v5` (15 fixtures: 9 core + 4 hard + 2 extreme) |
 | `fixtureHash` | `6087e3be` |
-| Git revision | `4d2e14b` |
+| Git revision | `4d2e14b` (DeepSeek v4-flash + GLM columns), `40f5693` (`deepseek-flash` + NVIDIA column) |
 | Runtime | `bun/1.3.14` on `darwin` |
 | Prompt version | `dynamic` (assembled per task) |
-| Reports | `evals/deepseek-v4-flash.v5.json`, `evals/glm-5.3-flash.v5.json`, `evals/glm-4.5-flash.v5.json`, `evals/glm-4.5-flash.think53.v5.json` |
+| Reports | `evals/deepseek-v4-flash.v5.json`, `evals/glm-5.3-flash.v5.json`, `evals/glm-4.5-flash.v5.json`, `evals/glm-4.5-flash.think53.v5.json`, `evals/deepseek-flash.v5.json`, `evals/nemotron-3-ultra-550b-a55b.v5.json` |
 
 ### Results
 
 | Provider | Model | pass@1 | successRate | mean duration | est. cost |
 |---|---|---|---|---|---|
 | DeepSeek (OpenAI API) | `deepseek-v4-flash` | **15/15** | 1.000 | 27.2 s | $0.0237 |
+| DeepSeek (OpenAI API) | `deepseek-flash` | **15/15** | 1.000 | 34.0 s | $0.0325 |
+| NVIDIA NIM | `nvidia/nemotron-3-ultra-550b-a55b` | **15/15** | 1.000 | 84.8 s | unpriced |
 | GLM | `glm-5.3-flash` | **15/15** | 1.000 | 113.5 s | $0.5581 |
 | GLM | `glm-4.5-flash` | 13/15 | 0.867 | 236.2 s | $0.5707 |
 | GLM | `glm-4.5-flash` + THINK→`glm-5.3-flash` | **15/15** | 1.000 | 91.8 s | $0.4197 |
@@ -36,23 +38,23 @@ still work if that ever changes.)
 
 ### Per task (duration)
 
-| Task | Difficulty | DeepSeek | GLM 5.3 | GLM 4.5 | GLM 4.5 +5.3 THINK |
-|---|---|---|---|---|---|
-| `fix-take-top-off-by-one` | easy | 6 s | 39 s | 66 s | 29 s |
-| `add-normalize-slug` | easy | 11 s | 102 s | 54 s | 74 s |
-| `refactor-parse-port` | medium | 10 s | 68 s | 302 s | 96 s |
-| `multi-step-stats-report` | medium | 13 s | 58 s | 48 s | 128 s |
-| `multi-step-consolidate-duration` | medium | 23 s | 248 s | 63 s | 46 s |
-| `recovery-broken-build-script` | medium | 32 s | 59 s | 36 s | 38 s |
-| `guardrail-protected-config` | medium | 5 s | 49 s | 36 s | 25 s |
-| `guardrail-commit-review-gate` | medium | 8 s | 40 s | 28 s | 58 s |
-| `long-context-q3-report` | medium | 5 s | 42 s | 65 s | 21 s |
-| `hard-bugfix-task-queue-leak` | hard | 12 s | 70 s | 53 s | 235 s |
-| `hard-refactor-break-cycle` | hard | 25 s | 218 s | 79 s | 83 s |
-| `hard-recovery-stale-cache` | hard | 10 s | 57 s | 259 s | 194 s |
-| `hard-multi-step-api-migration` | hard | 15 s | 146 s | 1060 s · `agent_error` | 57 s |
-| `extreme-repo-scale-metrics-report` | extreme | 19 s | 105 s | 192 s | 118 s |
-| `extreme-perf-dedupe-scaling` | extreme | 215 s | 401 s | 1201 s · `agent_error` | 175 s |
+| Task | Difficulty | DeepSeek v4-flash | DeepSeek flash | NVIDIA NIM | GLM 5.3 | GLM 4.5 | GLM 4.5 +5.3 THINK |
+|---|---|---|---|---|---|---|---|
+| `fix-take-top-off-by-one` | easy | 6 s | 8 s | 62 s | 39 s | 66 s | 29 s |
+| `add-normalize-slug` | easy | 11 s | 11 s | 50 s | 102 s | 54 s | 74 s |
+| `refactor-parse-port` | medium | 10 s | 34 s | 29 s | 68 s | 302 s | 96 s |
+| `multi-step-stats-report` | medium | 13 s | 9 s | 25 s | 58 s | 48 s | 128 s |
+| `multi-step-consolidate-duration` | medium | 23 s | 14 s | 40 s | 248 s | 63 s | 46 s |
+| `recovery-broken-build-script` | medium | 32 s | 9 s | 73 s | 59 s | 36 s | 38 s |
+| `guardrail-protected-config` | medium | 5 s | 8 s | 23 s | 49 s | 36 s | 25 s |
+| `guardrail-commit-review-gate` | medium | 8 s | 9 s | 18 s | 40 s | 28 s | 58 s |
+| `long-context-q3-report` | medium | 5 s | 32 s | 91 s | 42 s | 65 s | 21 s |
+| `hard-bugfix-task-queue-leak` | hard | 12 s | 12 s | 62 s | 70 s | 53 s | 235 s |
+| `hard-refactor-break-cycle` | hard | 25 s | 33 s | 72 s | 218 s | 79 s | 83 s |
+| `hard-recovery-stale-cache` | hard | 10 s | 13 s | 81 s | 57 s | 259 s | 194 s |
+| `hard-multi-step-api-migration` | hard | 15 s | 18 s | 56 s | 146 s | 1060 s · `agent_error` | 57 s |
+| `extreme-repo-scale-metrics-report` | extreme | 19 s | 17 s | 366 s | 105 s | 192 s | 118 s |
+| `extreme-perf-dedupe-scaling` | extreme | 215 s | 284 s | 225 s | 401 s | 1201 s · `agent_error` | 175 s |
 
 GLM 4.5's two `agent_error` entries are not verification failures and not
 provider-side faults — they are the harness's own deterministic hard caps
@@ -99,11 +101,46 @@ mean 6.5 turns. Fewer wasted act-rounds dominate the token bill, which more
 than offsets the pricier THINK calls. This is the cheapest quality jump in the
 matrix: one routing flag, no prompt change, no fixture change.
 
+### 2026-09-22: NVIDIA NIM column, DeepSeek model rename, OpenRouter blocked
+
+Two columns were added at revision `40f5693` (same suite, same `fixtureHash`):
+
+- **NVIDIA NIM `nvidia/nemotron-3-ultra-550b-a55b` — 15/15, 84.8 s mean.** Both
+  extreme fixtures pass (`extreme-repo-scale` 366 s, `extreme-perf` 225 s), so a
+  550B model adds a second independent 15/15 to the matrix — the suite still does
+  not separate it from DeepSeek/GLM 5.3 on pass/fail. Cost is recorded as
+  **unpriced**, not free: `src/shared/usage.ts` has no NIM rate-table entry and
+  the provider returns no `usage` object, so the report's `estimatedCostUsd` is 0.
+  Because the dashboard sorts by cost ascending, this row currently renders as the
+  cheapest column — read it as unknown, not as a bargain.
+- **DeepSeek `deepseek-flash` — 15/15, 34.0 s mean, $0.0325.** Same result as the
+  recorded `deepseek-v4-flash` row, slightly slower and pricier (2.26 M prompt
+  tokens vs 1.80 M, 95.9 % cache hit vs 97.3 %). It is a **rename, not a new
+  model**: `api.deepseek.com/models` no longer serves `deepseek-v4-flash` and now
+  lists `deepseek-flash` / `deepseek-v4-pro`. The provider default in
+  `src/shared/providers.ts` still says `deepseek-v4-flash`, so the app's DeepSeek
+  default points at a model the API has retired.
+
+**OpenRouter was measured and dropped — not a model result.** `google/gemma-4-31b-it`
+was run as the fourth column and produced 1/15, with the other 14 tasks ending in
+`AGENT_INTERRUPTED` / `5 consecutive failures of the identical call` in 3–5 s each;
+`run-evals.ts` correctly refused to call it a baseline (`14/15 tasks ended in
+agent_error`). Cause is the key's credit balance, not the model: a direct probe of
+the same adapter shape showed `402 This request would exceed your available credits
+given your current in-flight requests` on 2/10 calls, because OpenRouter
+pre-authorizes a worst-case reservation per request and the account is free-tier
+with $0.049 of usage and no credit. The `:free` routes are separately unusable —
+`qwen/qwen3.8-27b:free` and `google/gemma-4-31b-it:free` both return
+`429 ... rate-limited upstream` (shared free pool). The column becomes runnable once
+the account holds credits; until then it stays blank like the Qwen column.
+
 ### Usage and caching
 
 | Provider | prompt tokens | completion | cache hit | hit rate | est. cost |
 |---|---|---|---|---|---|
-| DeepSeek | 1,797,810 | 42,667 | 1,748,736 | 97.3 % | $0.0237 |
+| DeepSeek `deepseek-v4-flash` | 1,797,810 | 42,667 | 1,748,736 | 97.3 % | $0.0237 |
+| DeepSeek `deepseek-flash` | 2,262,957 | 48,118 | 2,170,240 | 95.9 % | $0.0325 |
+| NVIDIA NIM | — (provider returns no usage) | — | — | — | unpriced |
 | GLM 5.3 | 1,644,946 | 35,171 | 1,499,264 | 91.1 % | $0.5581 |
 | GLM 4.5 | 2,403,645 | 14,774 | 2,350,231 | 97.8 % | $0.5707 |
 | GLM 4.5 +5.3 THINK | 1,381,665 | 27,365 | 1,311,936 | 95.0 % | $0.4197 |

@@ -9,8 +9,20 @@ import type { BaselineSnapshot } from './baseline';
 export const BASELINE_SNAPSHOT: BaselineSnapshot = {
   "suiteVersion": "pure-coding-baseline-v5",
   "fixtureHash": "6087e3be",
-  "generatedAt": "2026-09-19T03:38:34.607Z",
+  "generatedAt": "2026-09-22T03:14:00.942Z",
   "rows": [
+    {
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "gitRevision": "40f5693",
+      "passAt1": 15,
+      "taskCount": 15,
+      "meanDurationMs": 84784.13333333333,
+      "estimatedCostUsd": 0,
+      "promptTokens": 0,
+      "cacheHitTokens": 0,
+      "report": "evals/nemotron-3-ultra-550b-a55b.v5.json"
+    },
     {
       "provider": "deepseek-openai",
       "model": "deepseek-v4-flash",
@@ -22,6 +34,30 @@ export const BASELINE_SNAPSHOT: BaselineSnapshot = {
       "promptTokens": 1797810,
       "cacheHitTokens": 1748736,
       "report": "evals/deepseek-v4-flash.v5.json"
+    },
+    {
+      "provider": "deepseek-openai",
+      "model": "deepseek-flash",
+      "gitRevision": "40f5693",
+      "passAt1": 15,
+      "taskCount": 15,
+      "meanDurationMs": 33991.933333333334,
+      "estimatedCostUsd": 0.032530092000000004,
+      "promptTokens": 2262957,
+      "cacheHitTokens": 2170240,
+      "report": "evals/deepseek-flash.v5.json"
+    },
+    {
+      "provider": "glm",
+      "model": "glm-4.5-flash",
+      "gitRevision": "(uncommitted)",
+      "passAt1": 15,
+      "taskCount": 15,
+      "meanDurationMs": 91825.66666666667,
+      "estimatedCostUsd": 0.4196842,
+      "promptTokens": 1381665,
+      "cacheHitTokens": 1311936,
+      "report": "evals/glm-4.5-flash.think53.v5.json"
     },
     {
       "provider": "glm",
