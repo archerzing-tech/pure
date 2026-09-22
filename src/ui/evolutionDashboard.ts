@@ -277,7 +277,7 @@ function renderSliceTable(rows: Array<[string, RunEffectSlice]>): string {
   </div>`;
 }
 
-function renderRoleTable(byRole: Record<string, RoleEffectSlice>): string {
+function renderRoleTable(byRole: Record<string, RoleEffectSlice>, overlays?: ReadonlySet<string>): string {
   const rows = Object.entries(byRole).sort((a, b) => b[1].delegations - a[1].delegations);
   if (rows.length === 0) return '';
   const body = rows.map(([role, slice]) => `<tr>
@@ -285,6 +285,7 @@ function renderRoleTable(byRole: Record<string, RoleEffectSlice>): string {
     <td>${escapeHtml(formatCount(slice.delegations))}</td>
     <td>${escapeHtml(formatPercent(slice.delegations > 0 ? Math.round((slice.successes / slice.delegations) * 1000) / 10 : null))}</td>
     <td>${escapeHtml(formatDuration(slice.avgDurationMs ?? null))}</td>
+    <td>${overlays?.has(role) ? `<span class="evo-badge-overlay">${escapeHtml(t('evolution.overlay.badge', 'overlay'))}</span>` : ''}</td>
   </tr>`).join('');
   return `<div class="evo-table-wrap">
     <div class="evo-table-title">${escapeHtml(t('evolution.roles.title', '子 Agent 角色'))}</div>
@@ -294,6 +295,7 @@ function renderRoleTable(byRole: Record<string, RoleEffectSlice>): string {
         <th>${escapeHtml(t('evolution.table.delegations', '派发'))}</th>
         <th>${escapeHtml(t('evolution.table.success', '成功率'))}</th>
         <th>${escapeHtml(t('evolution.table.avgDuration', '平均耗时'))}</th>
+        <th>${escapeHtml(t('evolution.table.overlay', 'prompt overlay'))}</th>
       </tr></thead>
       <tbody>${body}</tbody>
     </table>
@@ -334,7 +336,11 @@ export function renderStrategyTabs(strategy: StrategyEffectSummary, active: Stra
 /** 当前选中的维度表 + 角色表（角色是另一个视角，不参与维度切换）。表本身不带
  *  标题 —— 紧贴上方的 tab 就是它的标题。所选维度没记录时给一句该维度的空态，
  *  而不是一个空表格；连角色都没有（完全没跑过）时才是"还在攒"。 */
-export function renderStrategySection(strategy: StrategyEffectSummary, dimension: StrategyDimension = DEFAULT_STRATEGY_DIMENSION): string {
+export function renderStrategySection(
+  strategy: StrategyEffectSummary,
+  dimension: StrategyDimension = DEFAULT_STRATEGY_DIMENSION,
+  overlays?: ReadonlySet<string>,
+): string {
   const hasStrategyRuns = STRATEGY_SLICE_TABS.some((spec) => dimensionHasRuns(strategy, spec.dimension));
   let table: string;
   if (!hasStrategyRuns) {
@@ -346,7 +352,7 @@ export function renderStrategySection(strategy: StrategyEffectSummary, dimension
       ? renderSliceTable(rows)
       : `<div class="evo-empty">${escapeHtml(t('evolution.dimension.empty', '这个维度还没有带策略标记的记录'))}</div>`;
   }
-  return `<div class="evo-tables">${[table, renderRoleTable(strategy.byRole)].filter(Boolean).join('')}</div>`;
+  return `<div class="evo-tables">${[table, renderRoleTable(strategy.byRole, overlays)].filter(Boolean).join('')}</div>`;
 }
 
 // ── 子代理角色建议（E1.4）──
@@ -389,6 +395,9 @@ export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: num
     const draftButton = item.action === 'prompt'
       ? `<button class="evo-advice-draft-btn" data-evo-draft="${escapeHtml(item.role)}">${escapeHtml(t('evolution.advice.draft', '生成收窄版角色草稿'))}</button>`
       : '';
+    // 13.3 part 3：给任何有持续短板的角色一条"起草 prompt overlay"的出路。
+    // 起草走便宜模型，落盘前必过该角色的回归 A/B 门槛（写盘前强跑）。
+    const overlayButton = `<button class="evo-advice-overlay-btn" data-evo-overlay="${escapeHtml(item.role)}">${escapeHtml(t('evolution.advice.overlay', '起草 prompt overlay（过 A/B 后落盘）'))}</button>`;
     return `<div class="evo-advice-row evo-advice-${item.severity}">
       <div class="evo-advice-head">
         <span class="evo-advice-role">${escapeHtml(toolDisplayName(item.role))}</span>
@@ -398,7 +407,7 @@ export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: num
       </div>
       <div class="evo-advice-evidence">${escapeHtml(evidence)}</div>
       <div class="evo-advice-action">${escapeHtml(action)}</div>
-      ${draftButton}
+      ${draftButton}${overlayButton}
     </div>`;
   }).join('');
   return `<div class="evo-advice-list">${rows}</div>`;

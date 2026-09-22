@@ -895,7 +895,9 @@ function createPermissionHandler(config: PureConfig, hostFor?: () => HTMLElement
 
 // ── Adapter factory ──
 
-function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
+// Exported for the Settings evolution dashboard (13.3 part 3), which drafts a
+// persona overlay and runs its A/B gate on the SAME provider/adapter pipeline.
+export function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
   if (!config) {
     throw new Error('No configuration');
   }

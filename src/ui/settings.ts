@@ -26,8 +26,17 @@ import type { StrategyDimension } from '../shared/strategyEffect';
 import { scanSubagentAdvice } from '../shared/subagentAdvisory';
 import { buildDraftRoleManifest } from '../shared/subagentDraft';
 import { compileExternalSubagents } from '../harness/externalSubagents';
-import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES } from '../coding-agent/SubagentOrchestrator';
+import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '../coding-agent/SubagentOrchestrator';
+import type { SubagentDefinition } from '../coding-agent/types';
 import { readGuiObservations } from './observationSource';
+import { createLLMAdapter } from './chat';
+import { TauriToolAdapter } from './TauriToolAdapter';
+import { getApplicationTmpWorkspace } from '../shared/tauri';
+import { compilePersonaOverlays } from '../harness/personaOverlays';
+import { draftPersonaOverlay } from '../harness/personaOverlayReflector';
+import { extractSubagentOutput, type RoleCaseFixture } from '../evaluation/roleRegression';
+import { runRoleRegressionAB, type RunRoleCase } from '../evaluation/roleRegressionRun';
+import type { BudgetConfig, ToolCall } from '../shared/types';
 import {
   buildExperienceItems,
   DEFAULT_STRATEGY_DIMENSION,
@@ -1092,6 +1101,154 @@ export class SettingsPanel {
       } catch (err) {
         console.error('[pure] draft role manifest write failed:', err);
         this.toast(t('evolution.advice.draft.failed'));
+      }
+    });
+
+    // ── 13.3 part 3：角色建议卡 → 起草 prompt overlay → A/B 门槛 → 落盘 ──
+    // 设计口径（capability-self-extension-design.md §13.3）：overlay 只在跑通该
+    // 角色的回归 A/B 后落盘（写盘前强跑；样本不足一律 DENY）。草稿过
+    // compilePersonaOverlays 同一校验器；A/B 用共享编排核心（判卷/裁决只有一份
+    // 定义），宿主差异只在 runCase（GUI 用 TauriToolAdapter）。
+    document.getElementById('evolution-advice')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-evo-overlay]');
+      if (!btn || !isTauriRuntime()) return;
+      const role = btn.dataset.evoOverlay || '';
+      if (!role) return;
+
+      const safeRoleContract = (d: SubagentDefinition): string => {
+        try {
+          return d.createSystemPrompt({});
+        } catch {
+          return d.description;
+        }
+      };
+      const isRoleCaseFixture = (value: unknown): value is RoleCaseFixture => {
+        if (!value || typeof value !== 'object') return false;
+        const v = value as Record<string, unknown>;
+        return typeof v.id === 'string'
+          && typeof v.args === 'object' && v.args !== null
+          && Array.isArray(v.must) && v.must.every((m) => typeof m === 'string');
+      };
+      const OVERLAY_AB_BUDGET: BudgetConfig = {
+        maxTurns: 12,
+        maxTotalTokens: 120_000,
+        maxExecutionTime: 12 * 60 * 1000,
+        warningThreshold: 0.8,
+        graceTurns: 1,
+      };
+
+      const read = await readGuiObservations();
+      const advice = scanSubagentAdvice(read.records, { now: Date.now() }).find((item) => item.role === role);
+      if (!advice) {
+        this.toast(t('evolution.advice.overlay.stale'));
+        return;
+      }
+      const def = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].find((d) => d.name === role);
+      if (!def) {
+        this.toast(t('evolution.advice.overlay.invalid'));
+        return;
+      }
+      const core = await loadTauriCore();
+      if (!core) return;
+      const cfg = loadConfig() ?? defaults();
+      const knownRoles = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name);
+
+      // 1) 起草（便宜模型）
+      this.toast(t('evolution.advice.overlay.drafting'));
+      let overlay: string | undefined;
+      try {
+        overlay = await draftPersonaOverlay(createLLMAdapter(cfg), { role, advice, baseContract: safeRoleContract(def) });
+      } catch (err) {
+        console.error('[pure] overlay draft failed:', err);
+        overlay = undefined;
+      }
+      if (!overlay) {
+        this.toast(t('evolution.advice.overlay.none'));
+        return;
+      }
+
+      // 2) 校验（part 1 的同一编译器）
+      const compiled = compilePersonaOverlays([{ file: `${role}.overlay.md`, text: overlay }], knownRoles);
+      if (compiled.errors.length > 0 || !compiled.overlays.has(role)) {
+        console.error('[pure] drafted overlay failed validation:', compiled.errors);
+        this.toast(t('evolution.advice.overlay.invalid'));
+        return;
+      }
+
+      // 3) A/B 门槛（写盘前强跑；样本不足一律 DENY）
+      let fixtures: RoleCaseFixture[] = [];
+      try {
+        const files = await core.invoke<Array<{ file: string; text: string }>>('list_role_cases', { role });
+        fixtures = (files ?? []).map((f) => JSON.parse(f.text)).filter(isRoleCaseFixture);
+      } catch {
+        fixtures = [];
+      }
+      this.toast(t('evolution.advice.overlay.gateRunning').replace('{n}', String(fixtures.length)));
+
+      const workspace = await getApplicationTmpWorkspace(`role-overlay-${role}`);
+      const runCase: RunRoleCase = async (fixture, ov) => {
+        const tools = new TauriToolAdapter(workspace, cfg.tavilyApiKey, cfg.serperApiKey, cfg.city, undefined, `role-overlay-${role}`);
+        const orch = new SubagentOrchestrator({
+          llm: createLLMAdapter(cfg),
+          parentTools: tools,
+          parentToolsDefsProvider: () => tools.getTools(),
+          defaultBudget: OVERLAY_AB_BUDGET,
+          parentSessionId: `role-overlay-${role}`,
+          ...(ov ? { personaOverlays: new Map([[role, ov]]) } : {}),
+        });
+        orch.register(def);
+        const toolCall: ToolCall = {
+          id: `call_${fixture.id}`,
+          index: 0,
+          function: { name: role, arguments: JSON.stringify(fixture.args) },
+        };
+        return extractSubagentOutput(await orch.execute(toolCall));
+      };
+
+      let ab: Awaited<ReturnType<typeof runRoleRegressionAB>>;
+      try {
+        ab = await runRoleRegressionAB({ role, fixtures, overlay, runCase });
+      } catch (err) {
+        console.error('[pure] overlay A/B failed:', err);
+        this.toast(t('evolution.advice.overlay.failed'));
+        return;
+      }
+      if (ab.verdict === 'deny_insufficient_data') {
+        this.toast(t('evolution.advice.overlay.deny').replace('{reason}', ab.reason));
+        return;
+      }
+      if (ab.verdict === 'reject') {
+        this.toast(t('evolution.advice.overlay.reject').replace('{reason}', ab.reason));
+        return;
+      }
+
+      // 4) 确认 + 落盘（同名不覆盖）
+      const pureHome = await join(await homeDir(), '.pure');
+      try {
+        await core.invoke('read_file', { workspace: pureHome, path: `personas/${role}.overlay.md` });
+        this.toast(t('evolution.advice.overlay.exists').replace('{file}', `${role}.overlay.md`));
+        return;
+      } catch {
+        // 读不到 = 还没这个 overlay，正是落盘前提。
+      }
+      const pct = (side: { passed: number; total: number }): string =>
+        `${side.total > 0 ? Math.round((side.passed / side.total) * 100) : 0}%`;
+      const ok = await showConfirmModal({
+        title: t('evolution.advice.overlay.title'),
+        message: t('evolution.advice.overlay.confirm')
+          .replace('{basePct}', pct(ab.base))
+          .replace('{overlayPct}', pct(ab.overlay))
+          .replace('{file}', `${pureHome}/personas/${role}.overlay.md`),
+        okLabel: t('common.ok'),
+        cancelLabel: t('common.cancel'),
+      });
+      if (!ok) return;
+      try {
+        await core.invoke('write_file', { workspace: pureHome, path: `personas/${role}.overlay.md`, content: `${overlay}\n` });
+        this.toast(t('evolution.advice.overlay.done').replace('{file}', `${role}.overlay.md`));
+      } catch (err) {
+        console.error('[pure] overlay write failed:', err);
+        this.toast(t('evolution.advice.overlay.failed'));
       }
     });
 
@@ -2822,8 +2979,22 @@ export class SettingsPanel {
     const strategyTabsEl = document.getElementById('evolution-strategy-tabs');
     if (strategyTabsEl) strategyTabsEl.innerHTML = renderStrategyTabs(dashboard.strategy, this.evolutionStrategyDimension);
 
+    // 13.3 part 3 — 哪些角色带 prompt overlay（读 ~/.pure/personas/），角色表里标出来。
+    // 浏览器模式/无 Tauri 时是空集，不渲染徐章。
+    let overlayRoles = new Set<string>();
+    try {
+      const core = await loadTauriCore();
+      if (core) {
+        const sources = await core.invoke<Array<{ file: string; text: string }>>('list_persona_overlays');
+        const known = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name);
+        overlayRoles = new Set(compilePersonaOverlays(sources ?? [], known).overlays.keys());
+      }
+    } catch {
+      overlayRoles = new Set();
+    }
+
     const strategyEl = document.getElementById('evolution-strategy');
-    if (strategyEl) strategyEl.innerHTML = renderStrategySection(dashboard.strategy, this.evolutionStrategyDimension);
+    if (strategyEl) strategyEl.innerHTML = renderStrategySection(dashboard.strategy, this.evolutionStrategyDimension, overlayRoles);
 
     // E1.4 角色建议：与趋势同一个观测切片（同一窗口、同一次读取），只建议不改配置。
     const adviceEl = document.getElementById('evolution-advice');

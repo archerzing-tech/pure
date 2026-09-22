@@ -16,14 +16,8 @@ import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createAdapter } from '../src/evaluation/codingAgentExecutor';
-import {
-  extractSubagentOutput,
-  gradeRoleCase,
-  roleRegressionVerdict,
-  roleSideScore,
-  type RoleCaseFixture,
-  type RoleCaseGrade,
-} from '../src/evaluation/roleRegression';
+import { extractSubagentOutput, type RoleCaseFixture } from '../src/evaluation/roleRegression';
+import { runRoleRegressionAB, type RunRoleCase } from '../src/evaluation/roleRegressionRun';
 import { NodeToolAdapter } from '../src/adapter/node/NodeToolAdapter';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '../src/coding-agent/SubagentOrchestrator';
 import type { SubagentDefinition } from '../src/coding-agent/types';
@@ -64,7 +58,21 @@ function apiKeyForProvider(provider: string): string | undefined {
   }
 }
 
-const casesDir = resolve(casesFlag ?? join('evals', 'roles', role));
+/** Default fixture home: the runtime directory the GUI gate reads
+ *  (`~/.pure/roles/<role>/`, written by `bun run eval:harvest`), falling back to
+ *  the repo's committed seeds in `evals/roles/<role>/` when nothing was
+ *  harvested yet. */
+async function resolveDefaultCasesDir(): Promise<string> {
+  const runtime = join(homedir(), '.pure', 'roles', role!);
+  try {
+    if ((await readdir(runtime)).some((name) => name.endsWith('.json'))) return runtime;
+  } catch {
+    // No runtime fixtures — use the repo seeds.
+  }
+  return resolve(join('evals', 'roles', role!));
+}
+
+const casesDir = casesFlag ? resolve(casesFlag) : await resolveDefaultCasesDir();
 
 // Overlay targets are the roles pure actually exposes; an unknown role would
 // never receive an overlay from the reflector, so refuse it here too.
@@ -125,7 +133,7 @@ try {
   process.exit(2);
 }
 
-// ── Run one side (base = no overlay, overlay = base + overlay) ──
+// ── Run both sides (base = no overlay, overlay = base + overlay) ──
 
 // Subagents inherit the constrained deriveSubagentBudget from this parent
 // budget; small on purpose so a wedged case fails fast instead of burning
@@ -140,50 +148,62 @@ const ROLE_BUDGET: BudgetConfig = {
 
 const adapter = createAdapter({ provider: requestedAgent!, model, apiKey: apiKeyForProvider(requestedAgent!) });
 
-async function runSide(sideName: string, overlay: string | undefined): Promise<RoleCaseGrade[]> {
-  // Throwaway workspace per side: subagent tool writes never touch the repo.
-  const workspace = await mkdtemp(join(resolve('/tmp'), `pure-role-regression-${role}-${sideName}-`));
-  const tools = new NodeToolAdapter({ workspace, sessionId: `role-regression-${role}` });
-  const grades: RoleCaseGrade[] = [];
-  for (const fixture of fixtures) {
-    const orch = new SubagentOrchestrator({
-      llm: adapter,
-      parentTools: tools,
-      parentToolsDefsProvider: () => tools.getTools(),
-      defaultBudget: ROLE_BUDGET,
-      parentSessionId: `role-regression-${role}-${sideName}`,
-      ...(overlay ? { personaOverlays: new Map([[role, overlay]]) } : {}),
-    });
-    orch.register(REGISTRY.get(role)!);
-    const toolCall: ToolCall = {
-      id: `call_${fixture.id}`,
-      index: 0,
-      function: { name: role, arguments: JSON.stringify(fixture.args) },
-    };
-    const started = Date.now();
-    const result = await orch.execute(toolCall);
-    const grade = gradeRoleCase(extractSubagentOutput(result), fixture);
-    grades.push(grade);
-    const mark = grade.passed ? '✓' : '✗';
-    process.stdout.write(`${sideName} ${fixture.id}: ${mark} (${Math.round((Date.now() - started) / 1000)}s)${grade.failures.length ? ` — ${grade.failures.join('; ')}` : ''}\n`);
+// One throwaway workspace per side: subagent tool writes never touch the repo.
+const workspaces = new Map<string, string>();
+async function workspaceFor(side: string): Promise<string> {
+  let workspace = workspaces.get(side);
+  if (!workspace) {
+    workspace = await mkdtemp(join(resolve('/tmp'), `pure-role-regression-${role}-${side}-`));
+    workspaces.set(side, workspace);
   }
-  return grades;
+  return workspace;
 }
+
+/** The one host-specific seam: run one case under one side. Everything else
+ *  (grading, verdict) lives in the shared, injected-runCase core. */
+const runCase: RunRoleCase = async (fixture, overlay) => {
+  const side = overlay ? 'overlay' : 'base';
+  const workspace = await workspaceFor(side);
+  const tools = new NodeToolAdapter({ workspace, sessionId: `role-regression-${role}-${side}` });
+  const orch = new SubagentOrchestrator({
+    llm: adapter,
+    parentTools: tools,
+    parentToolsDefsProvider: () => tools.getTools(),
+    defaultBudget: ROLE_BUDGET,
+    parentSessionId: `role-regression-${role}-${side}`,
+    ...(overlay ? { personaOverlays: new Map([[role, overlay]]) } : {}),
+  });
+  orch.register(REGISTRY.get(role)!);
+  const toolCall: ToolCall = {
+    id: `call_${fixture.id}`,
+    index: 0,
+    function: { name: role, arguments: JSON.stringify(fixture.args) },
+  };
+  const started = Date.now();
+  const result = await orch.execute(toolCall);
+  const output = extractSubagentOutput(result);
+  process.stdout.write(`${side.padEnd(7)} ${fixture.id} (${Math.round((Date.now() - started) / 1000)}s)\n`);
+  return output;
+};
 
 console.log(`role regression: ${role} · agent=${requestedAgent} · model=${model}`);
 console.log(`cases: ${fixtures.length} from ${casesDir}`);
 console.log(`overlay: ${overlayPath} (${overlayText.length} chars)`);
 
-const baseGrades = await runSide('base   ', undefined);
-const overlayGrades = await runSide('overlay', overlayText);
+const ab = await runRoleRegressionAB({
+  role,
+  fixtures,
+  overlay: overlayText,
+  runCase,
+  onCase: (side, grade) => {
+    const mark = grade.passed ? '✓' : '✗';
+    if (!grade.passed) process.stdout.write(`  ${side} ${grade.id}: ${mark} — ${grade.failures.join('; ')}\n`);
+  },
+});
 
-const base = roleSideScore(baseGrades);
-const overlay = roleSideScore(overlayGrades);
-const { verdict, reason } = roleRegressionVerdict(base, overlay);
-
-console.log(`\nbase:    ${base.passed}/${base.total}`);
-console.log(`overlay: ${overlay.passed}/${overlay.total}`);
-console.log(`verdict: ${verdict} — ${reason}`);
+console.log(`\nbase:    ${ab.base.passed}/${ab.base.total}`);
+console.log(`overlay: ${ab.overlay.passed}/${ab.overlay.total}`);
+console.log(`verdict: ${ab.verdict} — ${ab.reason}`);
 
 const report = {
   suiteVersion: 'role-regression-v1',
@@ -195,13 +215,13 @@ const report = {
   caseCount: fixtures.length,
   cases: fixtures.map((f) => ({
     id: f.id,
-    base: baseGrades.find((g) => g.id === f.id),
-    overlay: overlayGrades.find((g) => g.id === f.id),
+    base: ab.grades.base.find((g) => g.id === f.id),
+    overlay: ab.grades.overlay.find((g) => g.id === f.id),
   })),
-  base,
-  overlay,
-  verdict,
-  reason,
+  base: ab.base,
+  overlay: ab.overlay,
+  verdict: ab.verdict,
+  reason: ab.reason,
   ranAt: new Date().toISOString(),
 };
 if (reportFlag) {
@@ -209,4 +229,4 @@ if (reportFlag) {
   await writeFile(resolve(reportFlag), `${JSON.stringify(report, null, 2)}\n`);
   console.log(`report: ${resolve(reportFlag)}`);
 }
-process.exit(verdict === 'allow' ? 0 : verdict === 'reject' ? 1 : 4);
+process.exit(ab.verdict === 'allow' ? 0 : ab.verdict === 'reject' ? 1 : 4);

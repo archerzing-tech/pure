@@ -326,6 +326,16 @@ describe('strategy dimension switching (E4.1)', () => {
     expect(html).toContain('子 Agent 角色');
     expect(html).not.toContain('data-strategy-dim');
   });
+
+  it('marks roles that carry a prompt overlay in the role table (13.3 part 3)', () => {
+    const summary = strategySummaryOf([
+      run({ toolCalls: [{ toolName: 'researcher', success: true, durationMs: 120 }] }),
+    ]);
+    const withOverlay = renderStrategySection(summary, 'verification', new Set(['researcher']));
+    expect(withOverlay).toContain('evo-badge-overlay');
+    const without = renderStrategySection(summary, 'verification', new Set());
+    expect(without).not.toContain('evo-badge-overlay');
+  });
 });
 
 describe('renderSubagentAdvice (E1.4)', () => {
@@ -371,6 +381,12 @@ describe('renderSubagentAdvice (E1.4)', () => {
     // No switch offered, and no timeout clause when nothing timed out.
     expect(html).not.toContain('网页搜索');
     expect(html).not.toContain('超时');
+  });
+
+  it('offers a prompt-overlay draft button for every role (13.3 part 3)', () => {
+    const html = renderSubagentAdvice([advice()], NOW);
+    expect(html).toContain('data-evo-overlay="researcher"');
+    expect(html).toContain('evo-advice-overlay-btn');
   });
 
   it('never injects markup through role names or skill ids', () => {

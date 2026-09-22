@@ -106,9 +106,15 @@ export function harvestRoleSamples(
   const wanted = new Set(roles);
   const samples: RoleDelegationSample[] = [];
   for (const session of sessions) {
+    // toolCallId → result. First-wins, deliberately: a session archive can carry
+    // the same result twice (verified: duplicates always have byte-identical
+    // content), and "the first occurrence is the result" is a rule we can state,
+    // not an accident of Map insertion order.
     const byCallId = new Map<string, HarvestMessage>();
     for (const message of session.messages) {
-      if (message.role === 'tool' && message.toolCallId) byCallId.set(message.toolCallId, message);
+      if (message.role === 'tool' && message.toolCallId && !byCallId.has(message.toolCallId)) {
+        byCallId.set(message.toolCallId, message);
+      }
     }
     session.messages.forEach((message, index) => {
       if (message.role !== 'assistant' || !message.toolCalls) return;
@@ -128,9 +134,25 @@ export function harvestRoleSamples(
   return samples;
 }
 
-/** 去重键：同角色 + 同 args 的委派只算一例（真实语料里同一任务常被重派）。 */
+/** Key-order-independent JSON. Plain JSON.stringify would treat `{a,b}` and
+ *  `{b,a}` as different delegations; semantically they are the same case, so
+ *  the dedupe key must sort object keys (recursively) before comparing. */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(obj[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/** 去重键：同角色 + 同 args 的委派只算一例（真实语料里同一任务常被重派）。
+ *  args 走规范化序列化，不受键顺序影响。 */
 export function sampleDedupeKey(sample: RoleDelegationSample): string {
-  return `${sample.role}::${JSON.stringify(sample.args)}`;
+  return `${sample.role}::${stableStringify(sample.args)}`;
 }
 
 /** 按去重键去重，保留首次出现的样本；顺序与输入一致（宿主已按时间读入）。 */

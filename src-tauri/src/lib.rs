@@ -7310,6 +7310,51 @@ fn list_persona_overlays() -> Vec<serde_json::Value> {
     out
 }
 
+/// 阶段 13.3 part 3 — role regression fixtures at runtime. The repo's
+/// `evals/roles/<role>/` is dev-only; a packaged GUI reads harvested cases from
+/// `~/.pure/roles/<role>/` (written by `bun run eval:harvest`). Path safety:
+/// the role is validated to a single safe segment before any join.
+/// `PURE_ROLES_DIR` overrides the directory for tests.
+fn role_cases_dir(role: &str) -> Option<PathBuf> {
+    let safe = !role.is_empty()
+        && role.len() <= 64
+        && role.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && role.as_bytes()[0].is_ascii_lowercase();
+    if !safe {
+        return None;
+    }
+    let base = std::env::var("PURE_ROLES_DIR").unwrap_or_else(|_| format!("{}/.pure", pure_home_dir()));
+    Some(PathBuf::from(base).join("roles").join(role))
+}
+
+#[tauri::command]
+fn list_role_cases(role: String) -> Vec<serde_json::Value> {
+    let Some(dir) = role_cases_dir(&role) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("case-") && n.ends_with(".json"))
+        .collect();
+    names.sort();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for name in names {
+        let Ok(text) = std::fs::read_to_string(dir.join(&name)) else {
+            continue;
+        };
+        out.push(serde_json::json!({
+            "file": name,
+            "text": text,
+        }));
+    }
+    out
+}
+
 /// Directories the app reads skills from, for the Settings → Skills "open
 /// folder" affordance. `project` is null when no workspace is set, so the
 /// frontend never has to expand `~` or join workspace paths itself.
@@ -7640,6 +7685,17 @@ mod app_skills_tests {
             None => std::env::remove_var("PURE_SKILLS_DIR"),
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn role_cases_dir_rejects_unsafe_role_names() {
+        // 13.3 part 3 — a role name must be a single safe directory segment.
+        for bad in ["", "..", "../x", "Upper", "a/b", "a.b", "-lead", "x y"] {
+            assert!(role_cases_dir(bad).is_none(), "should reject {bad:?}");
+        }
+        assert!(role_cases_dir(&"x".repeat(65)).is_none());
+        assert!(role_cases_dir("code_reviewer").is_some());
+        assert!(role_cases_dir("r2").is_some());
     }
 
     #[test]
@@ -16075,6 +16131,7 @@ pub fn run() {
             list_app_skills,
             list_external_subagents,
             list_persona_overlays,
+        list_role_cases,
             app_skills_dirs,
             write_app_skill,
             delete_app_skill,

@@ -89,6 +89,18 @@ describe('harvestRoleSamples', () => {
     );
     expect(samples).toEqual([]);
   });
+
+  it('重复 toolCallId 取首次（first-wins），不被后来的结果覆盖', () => {
+    // 会话存档里同一结果会重复出现（真实数据里内容逐字节相同）；"首次即结果"
+    // 是我们能陈述的规则，而不是 Map 插入顺序的副产物。
+    const messages = [
+      { role: 'assistant', toolCalls: [{ id: 'call_dup', function: { name: 'researcher', arguments: '{"topic":"x"}' } }] },
+      { role: 'tool', toolCallId: 'call_dup', content: JSON.stringify({ success: true, output: '第一次结果' }) },
+      { role: 'tool', toolCallId: 'call_dup', content: JSON.stringify({ success: true, output: '第二次结果' }) },
+    ];
+    const [sample] = harvestRoleSamples([{ id: 's1', messages }]);
+    expect(sample.output).toBe('第一次结果');
+  });
 });
 
 describe('dedupeSamples / groupSamplesByRole', () => {
@@ -100,6 +112,25 @@ describe('dedupeSamples / groupSamplesByRole', () => {
   it('同角色同 args 只留首次', () => {
     expect(sampleDedupeKey(a)).toBe(sampleDedupeKey(b));
     expect(dedupeSamples([a, b, c])).toEqual([a, c]);
+  });
+
+  it('同 args 不同键序视为同一例（规范化去重）', () => {
+    const first = { role: 'researcher', args: { topic: 'x', scope: 'y' }, output: 'o1', sessionId: 's1', messageIndex: 0 };
+    const second = { role: 'researcher', args: { scope: 'y', topic: 'x' }, output: 'o2', sessionId: 's2', messageIndex: 0 };
+    expect(sampleDedupeKey(first)).toBe(sampleDedupeKey(second));
+    expect(dedupeSamples([first, second])).toEqual([first]);
+  });
+
+  it('嵌套对象也按键序规范化', () => {
+    const first = { role: 'r', args: { filter: { b: 1, a: 2 } }, output: 'o', sessionId: 's', messageIndex: 0 };
+    const second = { role: 'r', args: { filter: { a: 2, b: 1 } }, output: 'o', sessionId: 's', messageIndex: 1 };
+    expect(sampleDedupeKey(first)).toBe(sampleDedupeKey(second));
+  });
+
+  it('数组顺序不同不等于同一例（规范化保留数组顺序）', () => {
+    const first = { role: 'r', args: { files: ['a', 'b'] }, output: 'o', sessionId: 's', messageIndex: 0 };
+    const second = { role: 'r', args: { files: ['b', 'a'] }, output: 'o', sessionId: 's', messageIndex: 1 };
+    expect(sampleDedupeKey(first)).not.toBe(sampleDedupeKey(second));
   });
 
   it('按角色分组，角色名升序', () => {
