@@ -2284,9 +2284,13 @@ export class ChatController {
       void this.send(text, images, displayText);
       return;
     }
-    // The user's words always land as their own bubble first — steer / question
-    // / chatter never re-render them later, so this is the only chance for the
-    // transcript to show who said what.
+    // Steer / question / chatter never re-render the user's words later, so the
+    // echo here is the only chance for the transcript to show who said what.
+    // The abort classes (goal-change / premise-change) are the exception: their
+    // insert is HELD and re-enters through send(), which renders the bubble as
+    // the fresh turn's opening line — echoing here too made the same message
+    // appear twice (user-reported). The status label carries the instant
+    // feedback while the abort drains.
     const echoUserBubble = (): void => {
       this.addBubble('user', displayText, images);
     };
@@ -2311,7 +2315,8 @@ export class ChatController {
         this.abortController?.abort();
         return;
       case 'goal-change':
-        echoUserBubble();
+        // 不在这里回显——held insert 从 send() 重入时会作为新回合开场气泡上屏，
+        // 先回显再重入 = 同一句话上两遍。
         this.relatedInsert = { text, images, displayText };
         this.addStatusBubble('方向变了——停下来重新对齐，马上按新的来。', true, false, 'info');
         this.abortController?.abort();
@@ -2323,8 +2328,8 @@ export class ChatController {
       case 'premise-change':
         // 前提被推翻（"其实我在西安"）：目标没变，但在飞的委派按错误前提算
         // 下去全是白跑——走同一条 abort 链止损，插话暂存，收尾后作为新指令
-        // 重新入场，按纠正后的事实重排。
-        echoUserBubble();
+        // 重新入场，按纠正后的事实重排。不预回显：重入 send() 时才上屏，
+        // 否则同一句话出现两遍（用户实测暴露）。
         this.relatedInsert = { text, images, displayText };
         this.addStatusBubble('前提变了——按旧前提跑的活先停下止损，马上按新的来。', true, false, 'info');
         this.abortController?.abort();
@@ -6025,6 +6030,11 @@ export class SessionChatManager {
     }
   }
 
+  /** Fires when the visible session changes (sidebar click, new chat, …).
+   * One-way notification for UI state that must follow the conversation —
+   * e.g. the per-session input history store warms the new session's bucket. */
+  onSessionIdChanged: ((sessionId: string) => void) | null = null;
+
   /** Make `sessionId` the visible conversation, reusing its live controller
    * when this app instance already has it open. Returns the session's host so
    * a cold session can be rendered from disk into it. Never cancels work. */
@@ -6044,6 +6054,7 @@ export class SessionChatManager {
       this.hosts.set(sessionId, host);
     }
     this.makeActive(controller, host!, sessionId);
+    this.onSessionIdChanged?.(sessionId);
     return { controller, host: host!, warm };
   }
 

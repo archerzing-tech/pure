@@ -51,7 +51,7 @@ import { normalizeDraft } from './inputRepair';
 import { correctWorkspacePaths, getPathIndex, warmPathIndex } from './pathIndex';
 import { createPathRepairNote } from './pathRepairNote';
 import { InlineAutocomplete, type AutocompleteCandidate } from './inlineAutocomplete';
-import { ComposerInputHistory } from './inputHistory';
+import { ComposerInputHistory, SessionInputHistoryStore } from './inputHistory';
 import { MCP_PROMPT_COMMAND, describeMcpPrompt } from '../shared/mcpPrompt';
 import { TaskQueue } from './taskQueue';
 import { ParallelTaskCards, bindParallelTaskCards, type ParallelTaskCardsDeps } from './parallelTaskCards';
@@ -349,14 +349,19 @@ const mcpPromptCandidates = async (): Promise<AutocompleteCandidate[]> => {
 new InlineAutocomplete(promptEl, { extraCandidates: mcpPromptCandidates });
 if (landingPrompt) new InlineAutocomplete(landingPrompt, { extraCandidates: mcpPromptCandidates });
 
-// ── 输入历史（↑/↓ 翻回之前发过的指令，shell 口径）──
-// 两个 composer 各接一份状态（各自翻各自的），共享同一份磁盘历史
-// （~/.pure/input-history.json，与 CLI REPL 共用）。浏览器模式退化为
-// 页面内有效。发过的内容在 sendMessage / interject 两条路径上记。
-const promptHistory = new ComposerInputHistory(promptEl);
+// ── 输入历史（↑/↓ 翻回之前发过的指令，shell 口径，按会话分桶）──
+// A 会话翻不到 B 会话发过的内容：每会话一份 ~/.pure/input-history/<id>.json
+// （CLI REPL 用旧的全局文件，互不串台）。landing 与主输入框共享同一个仓库，
+// 首条消息从哪个框发出都能被 ↑ 翻回来。浏览器模式退化为页面内按会话隔离。
+// 发过的内容在 sendMessage / interject 两条路径上记。
+const inputHistoryStore = new SessionInputHistoryStore();
+const promptHistory = new ComposerInputHistory(promptEl, inputHistoryStore, () => chat.getSessionId());
+const landingHistory = landingPrompt ? new ComposerInputHistory(landingPrompt, inputHistoryStore, () => chat.getSessionId()) : null;
 void promptHistory.load();
-const landingHistory = landingPrompt ? new ComposerInputHistory(landingPrompt) : null;
-if (landingHistory) void landingHistory.load();
+chat.onSessionIdChanged = (sessionId) => {
+  void promptHistory.onSessionChanged(sessionId);
+  landingHistory?.onSessionChanged(sessionId);
+};
 
 // ── Batch task queue (single-flight per worktree since 4.2: tasks in the
 // visible conversation run through the facade; tasks of OTHER worktrees run
