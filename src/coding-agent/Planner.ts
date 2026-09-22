@@ -308,9 +308,10 @@ Return ONLY one JSON object:
  * Lightweight single-call routing of a message the user inserts while the
  * agent is mid-run. Mirrors inferSemanticRoute's (signal + timeout + JSON-
  * parse) shape. On any failure, timeout, or parse miss it falls back to
- * "steer": the message always reaches the engine (never dropped), and the
- * model reconciles it in the next round — the conservative choice is to keep
- * working with more information, not to abort.
+ * "task": the message queues and runs deterministically after the current
+ * task. The old steer fallback predates a proven hole — a parent blocked on
+ * parallel delegations has no THINK boundary to cash a steer at, so
+ * "delivered as a remark" could silently drop. Queueing never drops.
  */
 export async function classifyInsertion(
   llm: LLMAdapter,
@@ -320,7 +321,11 @@ export async function classifyInsertion(
   images?: MessageImage[],
   timeoutMs = 8_000,
 ): Promise<InsertionClassification> {
-  const fallback: InsertionClassification = { kind: 'steer', reason: 'classification unavailable; delivered as a steer' };
+  // Fallback is a QUEUED task, not a steer (2026-09-22 redesign): a parent
+  // blocked on parallel delegations has no THINK boundary to cash a steer at,
+  // so "delivered as a remark" could silently drop. Queueing waits its turn
+  // and runs deterministically — the words can never be lost.
+  const fallback: InsertionClassification = { kind: 'task', reason: 'classification unavailable; queued so the words can never be lost' };
   if (!prompt.trim() || signal?.aborted) return fallback;
   const system = INSERTION_CLASSIFY_PROMPT
     .replace('{{CONTEXT}}', context.slice(0, 3_200))

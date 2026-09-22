@@ -2244,6 +2244,12 @@ export class ChatController {
         parts.push(`- ${(s.action ?? s.id).slice(0, 120)}`);
       }
     }
+    // 委派在飞状态喂给分类器：steer 的承诺（"下个动作带上"）只有在真有
+    // 下个动作时才可兑现——在飞/收尾的事实是 steer vs task 判定的关键输入。
+    if (this.agentActivities.length > 0) {
+      const inFlight = this.agentActivities.filter((item) => item.status === 'running').length;
+      parts.push(`并行委派：共 ${this.agentActivities.length} 个，在飞 ${inFlight} 个${inFlight === 0 ? '（已收齐，任务即将汇总收尾）' : ''}`);
+    }
     if (this.sessionArtifacts.length > 0) {
       parts.push(`本会话已写入文件：${this.sessionArtifacts.slice(0, 12).map((a) => a.path).join(', ')}`);
     }
@@ -2302,15 +2308,9 @@ export class ChatController {
     const echoUserBubble = (): void => {
       this.addBubble('user', displayText, images);
     };
-    const llm = this.turnLlm;
-    if (!llm) {
-      // No classifier for this turn: steer is the safe default — the words
-      // reach the engine and the work keeps running.
-      echoUserBubble();
-      this.steerRunningTurn(text, images);
-      return;
-    }
-    const decision = await this.dynamicInsertionCoordinator.decide(llm, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
+    // 分类器不可用（turnLlm 还没立起来）也照走 decide(null)：协调器的兜底
+    // 现在是 task（折入/排队，确定性目的地）——话绝不因没有分类器而失踪。
+    const decision = await this.dynamicInsertionCoordinator.decide(this.turnLlm ?? null, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
     if (this.abortController?.signal?.aborted) {
       // The turn was hard-stopped while we were classifying — don't drop the
       // insert; queue it so it still runs as a task.
@@ -2343,10 +2343,19 @@ export class ChatController {
         this.abortController?.abort();
         if (!this.isStreaming()) this.scheduleDeferred();
         return;
-      case 'steer':
+      case 'steer': {
+        // 委派在飞时 steer 的承诺（"下个动作带上"）结构性不可兑现：汇合轮
+        // 之前没有 THINK 边界，话被取走了也未必被照办（用户三次实测丢失）。
+        // 在飞期间 steer 不再是合法目的地——统一折入（强框架注入 + 收尾核验
+        // 兜底）。委派收齐后真正的"下个动作"存在，steer 照旧。
+        if (this.hasDelegationInFlight()) {
+          this.foldInScopeAddition(text, images, displayText);
+          return;
+        }
         echoUserBubble();
         this.steerRunningTurn(text, images);
         return;
+      }
       case 'question':
         echoUserBubble();
         void this.answerMidrunQuestion(text, images);

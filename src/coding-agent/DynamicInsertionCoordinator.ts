@@ -53,7 +53,7 @@ const GOAL_CHANGE_RE = /(?:推翻|重新来|重做|从头来|换个方案|换一
 // item runs to completion right after the current task. So obvious additions
 // skip the classifier entirely (like STOP_RE), conservative high-precision
 // family only, negated forms fall through to the LLM.
-const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先不)(?<!莫)(?:再加(?!一?句)|再添|再补(?!一?句)|再算上|再算一个|顺便(?!问|说|提|聊)(?:也)?(?:查|调研|研究|搜|分析|做|跑|处理|加)|也帮?我?(?:查|调研|研究|搜|分析|处理|跑)(?:一?下|一遍)?|把.{1,16}也(?:查|调研|研究|搜|分析|处理|跑|做|算)(?:一?下|一遍)?|同样(?:处理|调研|分析|跑|做)|也来一?份|add (?:one more|another)|also (?:add|check|research|look into|run|include))/i;
+const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先不)(?<!莫)(?:再加(?!一?句)|增加|增添|再添|再补(?!一?句)|再算上|再算一个|顺便(?!问|说|提|聊)(?:也)?(?:查|调研|研究|搜|分析|做|跑|处理|加)|也帮?我?(?:查|调研|研究|搜|分析|处理|跑)(?:一?下|一遍)?|把.{1,16}也(?:查|调研|研究|搜|分析|处理|跑|做|算)(?:一?下|一遍)?|同样(?:处理|调研|分析|跑|做)|也来一?份|add (?:one more|another)|also (?:add|check|research|look into|run|include))/i;
 
 export class DynamicInsertionCoordinator {
   private readonly classify: NonNullable<DynamicInsertionCoordinatorOptions['classify']>;
@@ -84,10 +84,13 @@ export class DynamicInsertionCoordinator {
       return { kind: 'task', reason: 'scope-addition phrasing matched the fast path; queued so it cannot be forgotten', shouldAbort: false };
     }
     if (!llm) {
-      // No classifier available: deliver the words as a steer. The engine
-      // reconciles them at the next THINK boundary — working with more
-      // information is the safe default, aborting is not.
-      return { kind: 'steer', reason: 'classification unavailable; delivered as a steer', shouldAbort: false };
+      // No classifier available: queue as a task, never steer. The old steer
+      // default trusted the engine to reconcile the words at the next THINK
+      // boundary — but a parent blocked on parallel delegations has no such
+      // boundary until the aggregation round, where remarks silently drop
+      // (user-reported three times). Queueing waits its turn and runs
+      // deterministically; the words can never be lost.
+      return { kind: 'task', reason: 'classification unavailable; queued so the words can never be lost', shouldAbort: false };
     }
     const result = await this.classify(llm, context, text, signal, insertion.images);
     // premise-change 与 goal-change 同判：前提错了的在飞委派不会因为"下个

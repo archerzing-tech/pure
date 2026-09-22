@@ -657,25 +657,27 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(cls.kind).toBe('task');
   });
 
-  it('rejects an unknown kind and falls back to steer', async () => {
+  it('rejects an unknown kind and falls back to a queued task', async () => {
+    // 2026-09-22 重新设计：兜底不再 steer——委派在飞时没有可兑现 steer 的
+    // THINK 边界，"转达"会静默丢话；排队是确定性目的地，话绝不丢。
     const cls = await classifyInsertion(mockLlm('{"kind":"banana","reason":"junk"}'), 'context', 'anything');
-    expect(cls.kind).toBe('steer'); // never drop the user's input
+    expect(cls.kind).toBe('task');
   });
 
-  it('falls back to steer when the model output cannot be parsed', async () => {
+  it('falls back to a queued task when the model output cannot be parsed', async () => {
     const cls = await classifyInsertion(mockLlm('not json at all'), 'context', 'anything');
-    expect(cls.kind).toBe('steer'); // deliver the words, keep the work running
+    expect(cls.kind).toBe('task'); // waits its turn, runs deterministically
   });
 
-  it('falls back to steer when the LLM throws', async () => {
+  it('falls back to a queued task when the LLM throws', async () => {
     const bad = { stream: async function* () { throw new Error('boom'); } } as unknown as LLMAdapter;
     const cls = await classifyInsertion(bad, 'context', 'anything');
-    expect(cls.kind).toBe('steer');
+    expect(cls.kind).toBe('task');
   });
 
-  it('falls back to steer for an empty prompt (no-op fallback)', async () => {
+  it('falls back to a queued task for an empty prompt (no-op fallback)', async () => {
     const cls = await classifyInsertion(mockLlm('{"kind":"chatter"}'), 'context', '');
-    expect(cls.kind).toBe('steer');
+    expect(cls.kind).toBe('task');
   });
 });
 

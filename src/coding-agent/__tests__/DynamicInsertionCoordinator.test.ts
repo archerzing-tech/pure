@@ -93,11 +93,24 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.shouldAbort).toBe(false);
   });
 
-  it('delivers as a steer when no classifier LLM is available (never drops, never aborts)', async () => {
+  it('queues as a task when no classifier LLM is available (never drops, never aborts)', async () => {
+    // 2026-09-22 重新设计：没有分类器时兜底从 steer 换成 task——委派在飞时
+    // steer 的承诺不可兑现（没有可兑现的 THINK 边界），排队才保真。
     const coordinator = new DynamicInsertionCoordinator();
     const decision = await coordinator.decide(null, 'current task', { text: '顺便把标题也改了' });
-    expect(decision.kind).toBe('steer');
+    expect(decision.kind).toBe('task');
     expect(decision.shouldAbort).toBe(false);
+  });
+
+  it('fast-paths the exact phrasing that was lost in the field ("增加一个平台")', async () => {
+    // 用户实测第三例："增加一个平台 爱奇艺"——此前字面族只有"再加"没有
+    // "增加"，快速路漏过、LLM 又判 steer，话被转达后丢失。这次进快速路。
+    let calls = 0;
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '' }; } });
+    const decision = await coordinator.decide(llm(), '正在并行调研 B站/腾讯/优酷', { text: '增加一个平台  爱奇艺' });
+    expect(decision.kind).toBe('task');
+    expect(decision.shouldAbort).toBe(false);
+    expect(calls).toBe(0);
   });
 
   it('passes the LLM kind through and aborts only on a judged goal-change', async () => {

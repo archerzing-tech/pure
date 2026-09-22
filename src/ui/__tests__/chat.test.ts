@@ -934,6 +934,15 @@ describe('plan overview completion state', () => {
     expect(taskBody.indexOf('this.hasDelegationInFlight()')).toBeGreaterThan(-1);
     expect(taskBody.indexOf('this.foldInScopeAddition(')).toBeGreaterThan(-1);
     expect(taskBody.indexOf('this.queueInterjectTask(')).toBeGreaterThan(-1);
+    // 2026-09-22 重新设计：委派在飞期间 steer 不再是合法目的地——steer 判定
+    // 也走折入（承诺不可兑现的"转达"就是丢话的根源）；分类器不可用不再旁路
+    // 成 steer，交给 decide(null) 的 task 兜底。
+    const steer = src.indexOf("case 'steer': {");
+    expect(steer).toBeGreaterThan(-1);
+    const steerBody = src.slice(steer, src.indexOf("case 'question':", steer));
+    expect(steerBody.indexOf('this.hasDelegationInFlight()')).toBeGreaterThan(-1);
+    expect(steerBody.indexOf('this.foldInScopeAddition(')).toBeGreaterThan(-1);
+    expect(src.indexOf('No classifier for this turn')).toBe(-1);
     // 折入三件套：原话上屏 + 投递记录水位 + 收尾核验。
     expect(src.indexOf('this.pendingFoldIns.push(')).toBeGreaterThan(-1);
     expect(src.indexOf('this.addBubble(\'user\', displayText, images)', src.indexOf('private foldInScopeAddition('))).toBeGreaterThan(-1);
