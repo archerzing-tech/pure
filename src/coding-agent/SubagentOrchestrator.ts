@@ -208,7 +208,7 @@ export interface SubagentOrchestratorConfig {
    * duplication-free: a drained steer is gone, so the parent never sees it
    * again at its own next THINK; with parallel delegations the first subagent
    * THINK claims it — one user remark, one recipient. */
-  takeSteerMessages?: () => Message[];
+  takeSteerMessages?: () => Message[] | Promise<Message[]>;
   /** 阶段 13.3 — role name → 进化 overlay 文本（~/.pure/personas/<role>.overlay.md）。
    * 命中的角色在 spawn 时把 overlay 追加在 base persona 之后（只增补，不重写）；
    * 无命中的角色 prompt 逐字节不变。宿主装载（启动扫描），运行中不热删。 */

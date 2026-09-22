@@ -1366,7 +1366,7 @@ export class ChatController {
    * takeSteerMessages 在委派返回后的第一个 THINK 边界注入强框架指令（先补
    * 这项，再合并汇总）。收尾时核验：投递后若没有新委派发起（模型直奔汇总
    * 或投递没发生），转 pendingTasks 兜底，话绝不丢。 */
-  private pendingFoldIns: Array<{ text: string; images: MessageImage[]; displayText: string; delivered: boolean; activityCountAtDelivery: number }> = [];
+  private pendingFoldIns: Array<{ text: string; images: MessageImage[]; displayText: string; delivered: boolean; activityCountAtDelivery: number; mechanical: boolean; mechanicallyDone?: boolean }> = [];
   /** 插话重构 — REFLECT-phase adapter for the current turn, when 9.2 phase
    * routing is on: side-channel mid-run questions prefer the cheap model
    * (an answer is a summarization chore, not the main reasoning stream). */
@@ -2349,7 +2349,7 @@ export class ChatController {
         // 在飞期间 steer 不再是合法目的地——统一折入（强框架注入 + 收尾核验
         // 兜底）。委派收齐后真正的"下个动作"存在，steer 照旧。
         if (this.hasDelegationInFlight()) {
-          this.foldInScopeAddition(text, images, displayText);
+          this.foldInScopeAddition(text, images, displayText, false); // steer 类：指令注入
           return;
         }
         echoUserBubble();
@@ -2366,7 +2366,7 @@ export class ChatController {
         // 汇合轮：正在跑的收齐后先补这项，再合并输出一份覆盖全部的汇总。
         // 委派都收齐了才插的，照旧排队（先出已有结果，再单独补跑）。
         if (this.hasDelegationInFlight()) {
-          this.foldInScopeAddition(text, images, displayText);
+          this.foldInScopeAddition(text, images, displayText, true); // scope 追加：机械执行
         } else {
           this.queueInterjectTask(text, images, displayText);
         }
@@ -2433,12 +2433,13 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     return this.agentActivities.some((item) => item.status === 'running');
   }
 
-  /** 阶段感知：把 scope 追加折入当前任务的汇合轮。用户原话照常上屏（气泡），
-   * 引擎侧送的是强框架指令（"先补这项，再合并汇总"），并在收尾时核验是否
-   * 真的发起了新委派——没发起就转排队兜底，话绝不丢。 */
-  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string): void {
+  /** 阶段感知：把插话折入当前任务的汇合轮。用户原话照常上屏（气泡）。
+   * mechanical=true（scope 追加）：汇合边界直接把这项跑完、把结果喂给汇总
+   * 轮——顺序由机制保证；mechanical=false（steer 类）：注入强框架指令。
+   * 两者收尾都核验，没兑现就转排队兜底，话绝不丢。 */
+  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean): void {
     this.addBubble('user', displayText, images);
-    this.pendingFoldIns.push({ text, images, displayText, delivered: false, activityCountAtDelivery: -1 });
+    this.pendingFoldIns.push({ text, images, displayText, delivered: false, activityCountAtDelivery: -1, mechanical });
     this.addStatusBubble('已收到——正在跑的调研收齐后先补这项，然后合并出一份覆盖全部的汇总。', false, false);
   }
 
@@ -2453,12 +2454,13 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     return `（中途追加）${text}\n把这项追加的工作做完，然后把结果与此前任务的产出合并，输出一份覆盖全部对象的完整汇总（此前的产出在会话历史里）。`;
   }
 
-  /** 收尾核验折入的追加：投递后 agentActivities 有新增（真的发起了新委派）
-   * → 算数；没有（模型直奔汇总）或根本没投递（回合提前终止）→ 转
-   * pendingTasks 按合并口径补跑。由 dispatchDeferred 在回合收尾时调用。 */
+  /** 收尾核验折入的追加：机械执行成功的直接算数；指令注入的看投递后
+   * agentActivities 是否有新增（真的发起了新委派）。都没有（模型直奔汇总）
+   * 或根本没投递（回合提前终止）→ 转 pendingTasks 按合并口径补跑。由
+   * dispatchDeferred 在回合收尾时调用。 */
   private settleFoldIns(): void {
     for (const fold of this.pendingFoldIns.splice(0)) {
-      const honored = fold.delivered && this.agentActivities.length > fold.activityCountAtDelivery;
+      const honored = fold.mechanicallyDone || (fold.delivered && this.agentActivities.length > fold.activityCountAtDelivery);
       if (honored) continue;
       this.pendingTasks.push({ text: this.foldInFollowUpText(fold.text), images: fold.images, displayText: fold.displayText, ts: Date.now() });
     }
@@ -3284,16 +3286,47 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         // 插话重构 — the engine pulls queued steers at each THINK boundary, so
         // a mid-run remark lands in the very next reasoning round instead of
         // killing the turn.
-        takeSteerMessages: () => {
+        takeSteerMessages: async () => {
           const drained = this.pendingSteers;
           this.pendingSteers = [];
-          // 阶段感知的折入追加：委派未收齐时插的活在这里注入汇合轮——记录
-          // 投递时刻的委派计数，收尾时核验是否真的发起了新委派（没发起就
-          // 转排队兜底，见 settleFoldIns）。
+          // 折入只在"没有任何在飞委派"的边界处理——那恰好是父任务的汇合轮。
+          // steer 队列是父子引擎共享的（北极星第二步），子 agent 在调研中途
+          // 也有 THINK 边界；没有这个闸门，折入会被子 agent 偷走甚至在其内
+          // 触发机械执行。子 agent 自身条目在跑时恒为 running，天然挡住。
+          if (this.hasDelegationInFlight()) {
+            return drained;
+          }
+          // 阶段感知的折入追加：在汇合边界处理——scope 追加优先机械执行
+          // （直接把追加调研跑完，把结果作为观察喂给模型：顺序由机制保证，
+          // 不赌模型听话）；跑不动（没有可复用角色/执行失败/被中止）才退回
+          // 指令注入。收尾核验（settleFoldIns）仍兜底转排队。
           for (const fold of this.pendingFoldIns) {
             if (fold.delivered) continue;
             fold.delivered = true;
             fold.activityCountAtDelivery = this.agentActivities.length;
+            if (fold.mechanical) {
+              const role = this.agentActivities[this.agentActivities.length - 1]?.agentName;
+              if (role) {
+                try {
+                  const result = await codingAgent.subagentOrchestrator.execute(
+                    { id: `foldin_${Date.now()}`, index: 0, function: { name: role, arguments: JSON.stringify({ prompt: fold.text }) } },
+                    this.abortController?.signal,
+                  );
+                  const detail = typeof result.result === 'string' ? result.result : JSON.stringify(result.result) ?? '';
+                  if (result.success && detail) {
+                    fold.mechanicallyDone = true;
+                    drained.push({
+                      role: 'user',
+                      content: `【追加任务已由系统直接执行完毕，无需再委派】任务：${fold.text}\n执行结果：\n${detail.slice(0, 6_000)}\n请把这份结果与本次任务此前委派的全部产出合并，输出一份覆盖所有对象的最终汇总。`,
+                      images: fold.images,
+                    });
+                    continue;
+                  }
+                } catch {
+                  // 机械执行失败 → 退回指令注入；收尾核验仍会兜底。
+                }
+              }
+            }
             drained.push({ role: 'user', content: this.foldInInstruction(fold.text), images: fold.images });
           }
           return drained;

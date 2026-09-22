@@ -947,6 +947,16 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('this.pendingFoldIns.push(')).toBeGreaterThan(-1);
     expect(src.indexOf('this.addBubble(\'user\', displayText, images)', src.indexOf('private foldInScopeAddition('))).toBeGreaterThan(-1);
     expect(src.indexOf('fold.activityCountAtDelivery = this.agentActivities.length')).toBeGreaterThan(-1);
+    // 2026-09-22 机械执行：折入的 scope 追加不再赌模型听话——takeSteerMessages
+    // 异步化，在"没有任何在飞委派"的边界（恰好=父任务汇合轮；steer 队列父子
+    // 共享，子 agent 在跑时自身条目恒为 running，天然挡住偷取）直接把追加跑
+    // 完、把结果作为观察喂给汇总轮；settle 对 mechanicallyDone 直接放行。
+    expect(src.indexOf('takeSteerMessages: async () =>')).toBeGreaterThan(-1);
+    const closure = src.indexOf('takeSteerMessages: async () =>');
+    const closureBody = src.slice(closure, closure + 2_600);
+    expect(closureBody.indexOf('if (this.hasDelegationInFlight())')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('subagentOrchestrator.execute(')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('fold.mechanicallyDone = true')).toBeGreaterThan(-1);
     const settle = src.indexOf('private settleFoldIns(');
     expect(settle).toBeGreaterThan(-1);
     const settleBody = src.slice(settle, settle + 500);

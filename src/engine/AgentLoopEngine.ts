@@ -273,7 +273,10 @@ export class AgentLoopEngine {
       // exact point — every tool result is already appended, and OBSERVE ends
       // with a `continue` — so the next THINK round simply reconciles them in
       // stride. No abort, no replan: a nudge should steer, not restart.
-      const steered = ctx.takeSteerMessages?.() ?? [];
+      // Async-capable so the host can resolve a fold-in at the boundary
+      // itself (run the addition to completion, inject its RESULT) instead of
+      // trusting the model to act on an instruction.
+      const steered = (await ctx.takeSteerMessages?.()) ?? [];
       if (steered.length > 0) {
         for (const m of steered) {
           messages.push(m);

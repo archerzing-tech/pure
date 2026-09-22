@@ -224,7 +224,7 @@ export interface EngineContext {
    *  tool result is already in; a user turn must never sit between an
    *  assistant tool_call and its result) — and reconciles it in the very next
    *  reasoning round. Return-and-clear; absent ⇒ no steering channel. */
-  takeSteerMessages?: () => Message[];
+  takeSteerMessages?: () => Message[] | Promise<Message[]>;
   /**
    * Live subagent interior activity as FIRST-CLASS engine events (2026-09-19).
    * CodingAgent maps the orchestrator's progress-sink callbacks onto this
