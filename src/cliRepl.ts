@@ -9,8 +9,9 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
-import { compileRequestWorkflow, type RequestWorkflowStage } from './shared/requestWorkflow';
-import { inferSemanticRoute, isPlainConversational, shouldBypassSemanticRoute } from './coding-agent/Planner';
+import type { RequestWorkflowStage } from './shared/requestWorkflow';
+import { decideTurnRoute, prefetchTurnRoute } from './coding-agent/turnRoute';
+import { describeTiming, type InputTiming } from './coding-agent/inputDecision';
 import type { IntentAssessment, TaskMode } from './coding-agent/types';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { PermissionManager } from './coding-agent/PermissionManager';
@@ -40,6 +41,34 @@ import type { EngineEvent, Message, ToolAdapter, ToolDefinition } from './shared
 import type { LLMAdapter } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
 import { loadConfig, DEFAULT_CLI_AUTO_APPROVE, PURE_DIR } from './cliConfig';
+
+/**
+ * Input-level time semantics in the terminal: nothing durable outlives the
+ * process, so the only honest way to honour "10 分钟后再跑" is to wait here. A
+ * foreground REPL is exactly the thing the user is watching, and the turn's own
+ * AbortController already owns "cancel this" (Ctrl-C / Stop).
+ *
+ * Returns false when the wait was aborted, so the caller can skip the turn
+ * instead of pretending it ran. `now` is never a deferral here, and a fresh CLI
+ * turn has nothing to queue behind either, so only `at` waits. */
+async function waitForScheduledInput(timing: InputTiming, signal?: AbortSignal): Promise<boolean> {
+  if (timing.mode !== 'at' || typeof timing.at !== 'number') return true;
+  const waitMs = timing.at - Date.now();
+  if (waitMs <= 0) return true;
+  if (signal?.aborted) return false;
+  process.stdout.write(`  ${yellow('⏳')} ${dim(`已排期：${describeTiming(timing)}执行（Ctrl-C 取消）`)}\n`);
+  return await new Promise<boolean>((resolve) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve(true);
+    }, waitMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 import type { CliArgs } from './cliConfig';
 import { createAdapter } from './cliAdapter';
 import { createHarness, distillSkillFromMemory, learnFromInput, printToolCorrectionHints } from './cliHarness';
@@ -621,11 +650,16 @@ async function runOneShot(args: CliArgs) {
   // Logical-trap pre-scan: if the request itself is contradictory/impossible,
   // warn the user and inject the trap notice into the system prompt so the
   // model verifies the premise instead of following it into a failure loop.
-  const semanticRoute = (shouldBypassSemanticRoute(args.prompt) || isPlainConversational(args.prompt))
-    ? null
-    : await inferSemanticRoute(adapter, args.prompt);
-  const workflow = compileRequestWorkflow(args.prompt, { hasTools, semanticRoute });
+  // One producer, shared with the GUI (turnRoute.ts): the same rules, the same
+  // recorded decision. The CLI used to re-derive this inline, which is how the
+  // two surfaces could drift apart.
+  const route = await decideTurnRoute(prefetchTurnRoute(args.prompt), adapter, { hasTools });
+  const workflow = route.workflow;
   const analysis = workflow.analysis;
+  if (route.defer && !(await waitForScheduledInput(route.timing))) {
+    mcpClient?.disconnectAll();
+    return;
+  }
   const traps = analysis.traps;
   if (traps.length > 0) {
     console.log(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}`);
@@ -663,7 +697,7 @@ async function runOneShot(args: CliArgs) {
   streamMgr.start();
 
   const startTime = Date.now();
-  const result = await consumeTurn(harness.run(systemPrompt, userTurn, undefined, undefined, semanticRoute), streamMgr);
+  const result = await consumeTurn(harness.run(systemPrompt, userTurn, undefined, undefined, route.route), streamMgr);
   let ok = result.ok;
   if (needsDeliveryGate && tools) {
     const profile = workspaceProfile ?? await discoverWorkspace(tools);
@@ -887,11 +921,24 @@ async function runRepl(args: CliArgs) {
 
     // Trap pre-scan per REPL turn (same as one-shot): surface the warning and
     // inject it into the system prompt so the model verifies the premise.
-    const semanticRoute = (shouldBypassSemanticRoute(turnInput) || isPlainConversational(turnInput))
-      ? null
-      : await inferSemanticRoute(adapter, turnInput, currentAbort.signal);
-    const workflow = compileRequestWorkflow(turnInput, { hasTools: toolsDefs.length > 0, semanticRoute });
+    const route = await decideTurnRoute(
+      prefetchTurnRoute(turnInput),
+      adapter,
+      { hasTools: toolsDefs.length > 0 },
+      currentAbort.signal,
+    );
+    const semanticRoute = route.route;
+    const workflow = route.workflow;
     const analysis = workflow.analysis;
+    if (route.defer) {
+      streamMgr.stop();
+      if (!(await waitForScheduledInput(route.timing, currentAbort.signal))) {
+        generating = false;
+        currentAbort = null;
+        continue;
+      }
+      streamMgr.start();
+    }
     const traps = analysis.traps;
     if (traps.length > 0) {
       process.stdout.write(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}\n`);

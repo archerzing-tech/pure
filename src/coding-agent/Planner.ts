@@ -9,6 +9,10 @@ import type { AnalysisResult, IntentAssessment, RequestIntent, SemanticRouteDeci
 import type { LLMAdapter, Message, MessageImage } from '../shared/types';
 import { repairJsonSource } from '../shared/parseRepair';
 import { KNOWN_SUBAGENT_ROLES } from '../shared/adaptiveControl';
+// Shared confidence vocabulary + gate. One-way dependency (inputDecision knows
+// nothing about Planner) so the router and the insertion classifier can be
+// judged by the same threshold without a cycle.
+import { INPUT_DEFAULT_CONFIDENCE, clampConfidence } from './inputDecision';
 
 /** Upper bound on LLM-plan steps kept in the review card / system prompt. */
 const MAX_PLAN_STEPS = 10;
@@ -54,7 +58,9 @@ export interface PlannerConfig {
 const SEMANTIC_ROUTE_PROMPT = `You are the routing layer for a coding assistant. Understand the user's complete message semantically; do not classify from isolated words or a fixed keyword list. Decide what outcome the user is asking for: answer/explanation, research, advice, debugging, a small change, a broad refactor/migration, or creation of a runnable artifact. Distinguish feedback about an existing result from a request to create a new result. A clear creative request is not a reasonableness review merely because it is large, has several variants, or contains style constraints.
 
 Return ONLY one JSON object with this shape:
-{"intent":"question|research|add|modify|debug|refactor|migrate|delete|build","complexity":"simple|complex","mode":"yolo|plan|build","requiresPlan":false,"needsDeliveryGate":false,"subagents":["researcher","deep_thinker"],"assessment":{"riskLevel":"low|medium|high","reversibility":"reversible|partially-reversible|hard-to-reverse|irreversible","impact":"...","recommendation":"...","requiresProbe":false,"requiresConfirmation":false}}
+{"intent":"question|research|add|modify|debug|refactor|migrate|delete|build","complexity":"simple|complex","mode":"yolo|plan|build","requiresPlan":false,"needsDeliveryGate":false,"subagents":["researcher","deep_thinker"],"confidence":0.9,"assessment":{"riskLevel":"low|medium|high","reversibility":"reversible|partially-reversible|hard-to-reverse|irreversible","impact":"...","recommendation":"...","requiresProbe":false,"requiresConfirmation":false}}
+
+"confidence" — how sure you are of the intent above, 0..1, and answer it honestly rather than politely: a message that genuinely reads two ways (a complaint that could be feedback or a request to change the code, a question that could also be an instruction) rates around 0.5, an unambiguous one 0.9+. Omit the field when the call is obvious — the caller treats a missing number as "not doubtful", so a number given out of habit is worse than no number.
 
 "subagents" — pick the SMALLEST useful subset of the real subagent roster below (exact names) that this request genuinely needs to delegate real work to. Use [] (empty) for anything you can answer or do directly yourself; never name a helper you would not actually invoke. Cap at 3-4 roles:
 - researcher — 查资料/网络/文档调研，只读可并行（查景点、天气、汇率、预算参考等）
@@ -256,6 +262,9 @@ export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
     requiresPlan: value.requiresPlan === true,
     needsDeliveryGate: value.needsDeliveryGate === true,
     subagents,
+    // 只在模型真的给了数字时带上：缺字段与 clamp 后的默认值必须能区分开，否则
+    // "没报"会被读成"报了 0.7"，日志里就再也看不出一轮路由到底有没有表态。
+    ...(Number.isFinite(Number(value.confidence)) ? { confidence: clampConfidence(value.confidence) } : {}),
     assessment: {
       intent,
       riskLevel,
@@ -279,6 +288,20 @@ export type InsertionKind = 'question' | 'steer' | 'premise-change' | 'goal-chan
 export interface InsertionClassification {
   kind: InsertionKind;
   reason: string;
+  /** The model's OWN confidence in `kind` (0..1). It is what lets the caller
+   *  ask instead of gambling — see applyConfidenceGate in inputDecision.ts.
+   *  Absent/ignored by a provider → INPUT_DEFAULT_CONFIDENCE (see there for why
+   *  the default sits ABOVE the gate). */
+  confidence: number;
+  /** True when the model answered WITHOUT a confidence number, so the value
+   *  above is INPUT_DEFAULT_CONFIDENCE rather than its own judgement. Without
+   *  this flag a default that keeps the app quiet would be indistinguishable
+   *  from a model that actually said "I am sure". */
+  confidenceDefaulted?: boolean;
+  /** The model's reading of WHEN this input wants to run, verbatim ("now",
+   *  "after", "10 分钟后", "下午三点"). Parsing happens in inputDecision.ts so
+   *  the clock arithmetic stays testable and provider-independent. */
+  when?: string;
 }
 
 const INSERTION_CLASSIFY_PROMPT = `You route a NEW user message that arrives WHILE an agent is already mid-task. Pick what a competent human colleague would do with it — the two hard rules: the user's words must never be dropped, and work must never restart without a real reason.
@@ -302,7 +325,19 @@ Categories (pick exactly one):
 - "chatter": small talk, thanks, reactions, filler ("哈哈", "好的", "辛苦了", "+1"). Nothing to act on.
 
 Return ONLY one JSON object:
-{"kind":"question|steer|premise-change|goal-change|task|chatter","reason":"<one short line>"}`;
+{"kind":"question|steer|premise-change|goal-change|task|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>"}
+
+"confidence" is how sure you are of the KIND and therefore of the action that
+follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
+reads two ways (a correction of facts that could also be a small tweak, an
+overturn that could also be a scope addition). Never inflate it: a low number is
+cheap (the agent asks the user one short question), a wrong high number is not
+(the agent restarts work or loses the message).
+
+"when" is the user's own words for WHEN this should run if they named a time
+("10 分钟后", "下午三点", "明天早上") — copy them, do not compute a time. Use
+"now" when the message implies it must be handled immediately, "after" when it
+explicitly belongs after the current task, and null when no timing was said.`;
 
 /**
  * Lightweight single-call routing of a message the user inserts while the
@@ -325,7 +360,14 @@ export async function classifyInsertion(
   // blocked on parallel delegations has no THINK boundary to cash a steer at,
   // so "delivered as a remark" could silently drop. Queueing waits its turn
   // and runs deterministically — the words can never be lost.
-  const fallback: InsertionClassification = { kind: 'task', reason: 'classification unavailable; queued so the words can never be lost' };
+  const fallback: InsertionClassification = {
+    kind: 'task',
+    reason: 'classification unavailable; queued so the words can never be lost',
+    // Queueing IS the confident action when no label could be produced — see
+    // INPUT_DEFAULT_CONFIDENCE (inputDecision.ts). This is the parse/timeout
+    // fallback; the no-classifier-at-all policy is the coordinator's.
+    confidence: INPUT_DEFAULT_CONFIDENCE,
+  };
   if (!prompt.trim() || signal?.aborted) return fallback;
   const system = INSERTION_CLASSIFY_PROMPT
     .replace('{{CONTEXT}}', context.slice(0, 3_200))
@@ -335,7 +377,7 @@ export async function classifyInsertion(
     { role: 'user', content: prompt, images },
   ];
   const KINDS: readonly string[] = ['question', 'steer', 'premise-change', 'goal-change', 'task', 'chatter'];
-  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown }>(
+  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown }>(
     llm,
     request,
     signal,
@@ -344,7 +386,7 @@ export async function classifyInsertion(
       const match = raw.match(/\{[\s\S]*\}/);
       if (!match) return null;
       try {
-        const value = JSON.parse(match[0]) as { kind?: unknown; reason?: unknown };
+        const value = JSON.parse(match[0]) as { kind?: unknown };
         return value && typeof value.kind === 'string' && KINDS.includes(value.kind) ? value : null;
       } catch {
         return null;
@@ -352,7 +394,16 @@ export async function classifyInsertion(
     },
   );
   if (parsed && typeof parsed.kind === 'string' && KINDS.includes(parsed.kind)) {
-    return { kind: parsed.kind as InsertionKind, reason: typeof parsed.reason === 'string' ? parsed.reason : '' };
+    const rawConfidence = typeof parsed.confidence === 'number' || typeof parsed.confidence === 'string'
+      ? Number(parsed.confidence)
+      : NaN;
+    return {
+      kind: parsed.kind as InsertionKind,
+      reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+      confidence: clampConfidence(parsed.confidence),
+      confidenceDefaulted: !Number.isFinite(rawConfidence),
+      when: typeof parsed.when === 'string' ? parsed.when : undefined,
+    };
   }
   return fallback;
 }

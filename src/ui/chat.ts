@@ -14,7 +14,6 @@ import { distillSkill, matchSkillDistillInstruction, pickDistillSource } from '.
 import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
 import { mergeConventions } from '../shared/conventions';
-import { compileRequestWorkflow } from '../shared/requestWorkflow';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { failureHistoryFromMemories } from '../engine/FailurePolicy';
@@ -22,7 +21,8 @@ import { ContextEngine, type ContextCompactionResult } from '../harness/ContextE
 import { isGitMutationCommand, Tags } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
-import { formatIntentPrompt, inferSemanticRoute, isPlainConversational, markParallelPlanSteps, shouldBypassSemanticRoute } from '../coding-agent/Planner';
+import { formatIntentPrompt, markParallelPlanSteps } from '../coding-agent/Planner';
+import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { sanitizeSkillName } from './skillHub';
@@ -2710,7 +2710,13 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       hideNewContentHint(); // a fresh user turn resumes following the newest content
     }
 
-    const fastConversationalTurn = !sendWorkspace && shouldBypassSemanticRoute(userText, userImages);
+    // Stage 1 of the turn-route decision (turnRoute.ts): the synchronous half,
+    // needed before the workspace await below. `workspaceFree` is deliberately
+    // narrower than "no router needed" — a conversational turn like "现有页面很难看，
+    // 从哪些设计方向改善" still wants to read the code, so it must keep its
+    // workspace. The async half re-runs nothing here: it receives this object.
+    const routePrefetch = prefetchTurnRoute(userText, userImages);
+    const fastConversationalTurn = !sendWorkspace && routePrefetch.workspaceFree;
     const effectiveWorkspace = sendWorkspace || (fastConversationalTurn ? '' : await withAbortTimeout(
       getApplicationTmpWorkspace(sendSessionId),
       turnController.signal,
@@ -3499,24 +3505,24 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       // classification round trip entirely: the sync fallback already
       // reproduces the router's verdict for it, and on slow providers that
       // call alone costs 6-12s of dead time before the first visible token.
-      const conversationalTurn = shouldBypassSemanticRoute(userText, userImages)
-        || isPlainConversational(userText, userImages);
-      const semanticRoute = continuingPlan
-        ? null
-        : conversationalTurn
-          ? null
-          : await inferSemanticRoute(llm, userText, this.abortController?.signal, userImages);
-      const workflow = compileRequestWorkflow(userText, {
+      // Stage 2: the ONE producer (turnRoute.ts). It runs the router when stage
+      // 1 said it is needed, folds the result through the shared workflow
+      // compiler, and records the whole decision — action, confidence, timing,
+      // scope, and which layer decided — into the replayable log. The callers
+      // below consume `route` / `workflow` exactly as the five separate
+      // derivations used to produce them.
+      const turnRoute = await decideTurnRoute(routePrefetch, llm, {
         forcedMode,
         hasTools: !!effectiveWorkspace,
         continuingPlan,
         planPauseRequested,
-        // The delivery gate follows the approved plan's build-ness across
+        // This gate belongs to the PROJECT-BUILD continuation, not to continuing
         // turns, not the continuation prompt ("继续" must not silently lose
         // the gate, and an ordinary complex plan must not gain it).
         continuingProjectBuild: this.activePlanProjectBuild,
-        semanticRoute,
-      });
+      }, this.abortController?.signal);
+      const semanticRoute = turnRoute.route;
+      const workflow = turnRoute.workflow;
       const analysis = workflow.analysis;
       let effectiveIntent: IntentAssessment = analysis.intent;
       if (workflow.userContext.traps) userTraps = workflow.userContext.traps;

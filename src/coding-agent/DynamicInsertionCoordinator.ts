@@ -1,5 +1,12 @@
 import type { LLMAdapter, MessageImage } from '../shared/types';
 import { classifyInsertion, type InsertionClassification } from './Planner';
+import {
+  applyConfidenceGate,
+  parseInputTiming,
+  type InputAction,
+  type InputDecision,
+  type InputScope,
+} from './inputDecision';
 
 /**
  * 插话重构（2026-09-19）：一个人在埋头干活时听到同事插话，只有三种情况
@@ -18,14 +25,39 @@ export interface DynamicInsertion {
   displayText?: string;
 }
 
-export interface DynamicInsertionDecision {
+/** The insert decision in the SHARED shape (inputDecision.ts): the kind is kept
+ *  verbatim for the UI's switch, while action/confidence/timing/scope are what
+ *  the rest of the app can reason about without knowing insertion vocabulary. */
+export interface DynamicInsertionDecision extends InputDecision {
+  source: 'mid-run-insert';
   kind: DynamicInsertionKind;
-  reason: string;
   /** True → the running turn must end so the insert can re-enter as a fresh
-   *  send (stop / goal-change only). False → the turn keeps running and the
-   *  insert is handled out-of-band (steer / question / task / chatter). */
+   *  send (stop / goal-change / premise-change only, and never while a
+   *  low-confidence decision is waiting for the user's answer). False → the
+   *  turn keeps running and the insert is handled out-of-band
+   *  (steer / question / task / chatter). */
   shouldAbort: boolean;
 }
+
+/** What each kind does to the running work, and what it touches — the join
+ *  between insertion vocabulary and the shared action/scope words. */
+const KIND_POLICY: Record<DynamicInsertionKind, { action: InputAction; scope: InputScope[] }> = {
+  stop:            { action: 'stop',   scope: ['plan', 'completed-steps'] },
+  'goal-change':   { action: 'replan', scope: ['goal', 'plan', 'completed-steps'] },
+  // The goal stands but the fact it is computed from is wrong: everything
+  // derived from it is worthless, so the plan and the done steps are in scope.
+  'premise-change': { action: 'replan', scope: ['plan', 'completed-steps'] },
+  steer:           { action: 'apply',  scope: ['constraints'] },
+  question:        { action: 'answer', scope: ['none'] },
+  task:            { action: 'queue',  scope: ['plan'] },
+  chatter:         { action: 'ignore', scope: ['none'] },
+};
+
+/** Confident by construction: a mechanical rule matched. */
+const RULE_CONFIDENCE = 1;
+/** Confident by policy: with no classifier, queueing is the chosen answer —
+ *  it is the one destination that cannot lose the words (see decide()). */
+const NO_CLASSIFIER_CONFIDENCE = 1;
 
 export interface DynamicInsertionCoordinatorOptions {
   classify?: (
@@ -67,21 +99,34 @@ export class DynamicInsertionCoordinator {
     context: string,
     insertion: DynamicInsertion,
     signal?: AbortSignal,
+    now = Date.now(),
   ): Promise<DynamicInsertionDecision> {
     const text = insertion.text.trim();
     if (STOP_RE.test(text)) {
       // Mechanical, high-precision, and latency-free: a stop must not wait on
       // (or be misread by) a classification round-trip.
-      return { kind: 'stop', reason: 'user requested the current run to stop', shouldAbort: true };
+      return this.build('stop', 'user requested the current run to stop', {
+        confidence: RULE_CONFIDENCE,
+        timing: { mode: 'now' },
+        signals: { rule: 'STOP_RE' },
+      });
     }
     if (GOAL_CHANGE_RE.test(text)) {
       // Same rationale as STOP_RE: these verbs leave no room for "keep
       // going with a tweak", so restart without burning a classify call.
-      return { kind: 'goal-change', reason: 'overturn phrasing matched the fast path', shouldAbort: true };
+      return this.build('goal-change', 'overturn phrasing matched the fast path', {
+        confidence: RULE_CONFIDENCE,
+        timing: { mode: 'now' },
+        signals: { rule: 'GOAL_CHANGE_RE' },
+      });
     }
     if (SCOPE_ADD_RE.test(text)) {
       // 加活的量不走分类赌局：排队是唯一保证跑完的投递（见 SCOPE_ADD_RE 注）。
-      return { kind: 'task', reason: 'scope-addition phrasing matched the fast path; queued so it cannot be forgotten', shouldAbort: false };
+      return this.build('task', 'scope-addition phrasing matched the fast path; queued so it cannot be forgotten', {
+        confidence: RULE_CONFIDENCE,
+        timing: { mode: 'after-current' },
+        signals: { rule: 'SCOPE_ADD_RE' },
+      });
     }
     if (!llm) {
       // No classifier available: queue as a task, never steer. The old steer
@@ -90,11 +135,53 @@ export class DynamicInsertionCoordinator {
       // boundary until the aggregation round, where remarks silently drop
       // (user-reported three times). Queueing waits its turn and runs
       // deterministically; the words can never be lost.
-      return { kind: 'task', reason: 'classification unavailable; queued so the words can never be lost', shouldAbort: false };
+      return this.build('task', 'classification unavailable; queued so the words can never be lost', {
+        confidence: NO_CLASSIFIER_CONFIDENCE,
+        timing: { mode: 'after-current' },
+        signals: { fallback: 'no-classifier' },
+      });
     }
     const result = await this.classify(llm, context, text, signal, insertion.images);
     // premise-change 与 goal-change 同判：前提错了的在飞委派不会因为"下个
-    // 动作带上"就变对——止损要趁早，停掉重排比跑完再改便宜。
-    return { kind: result.kind, reason: result.reason, shouldAbort: result.kind === 'goal-change' || result.kind === 'premise-change' };
+    // 动作带上"就变对——止损要趁早，停掉重排比跑完再改便宜（KIND_POLICY）。
+    const timing = parseInputTiming(result.when, text, now);
+    return this.build(result.kind, result.reason, {
+      confidence: result.confidence,
+      timing,
+      signals: {
+        classifier: 'llm',
+        ...(result.confidenceDefaulted ? { confidenceDefaulted: true } : {}),
+        ...(result.when ? { when: result.when } : {}),
+      },
+    });
+  }
+
+  /**
+   * Assemble the shared decision shape and run the confidence gate as the LAST
+   * step, so no producer path can bypass it.
+   */
+  private build(
+    kind: DynamicInsertionKind,
+    reason: string,
+    fields: Pick<DynamicInsertionDecision, 'confidence' | 'timing' | 'signals'>,
+  ): DynamicInsertionDecision {
+    const policy = KIND_POLICY[kind];
+    // A timed input cannot be applied to the running turn — it has to be HELD
+    // until its moment arrives, whatever the classifier thought of its content.
+    const action: InputAction = fields.timing.mode === 'at' && policy.action !== 'stop' ? 'queue' : policy.action;
+    const decision: DynamicInsertionDecision = {
+      source: 'mid-run-insert',
+      kind,
+      action,
+      confidence: fields.confidence,
+      timing: fields.timing,
+      scope: policy.scope,
+      shouldAbort: action === 'stop' || action === 'replan',
+      reason,
+      signals: fields.signals,
+    };
+    // The gate can downgrade the action to `clarify` and clears shouldAbort with
+    // it: asking the user must never tear down the running work first.
+    return applyConfidenceGate(decision) as DynamicInsertionDecision;
   }
 }

@@ -75,9 +75,15 @@ describe('CLI proactive intent assessment', () => {
     expect(entry).toContain("resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, DEFAULT_CLI_AUTO_APPROVE)");
   });
 
-  it('uses the shared workflow compiler and exposes unavailable-probe degradation', () => {
+  it('routes both CLI paths through the one shared turn-route producer', () => {
+    // The CLI used to re-derive the route inline (bypass / conversational /
+    // inferSemanticRoute / compileRequestWorkflow), which is exactly how the
+    // two surfaces drifted apart. Both loops now call the shared producer, and
+    // neither reaches for the individual layers any more.
     const source = readFileSync(new URL('../cliRepl.ts', import.meta.url), 'utf8');
-    expect((source.match(/compileRequestWorkflow\(/g) ?? []).length).toBe(2);
+    expect((source.match(/decideTurnRoute\(/g) ?? []).length).toBe(2);
+    expect(source).not.toContain('inferSemanticRoute');
+    expect(source).not.toContain('compileRequestWorkflow');
     expect(source).toContain('printWorkflowStage(workflow.stage)');
     expect(source).toContain('workflow.probeRequired && !workflow.probeAvailable');
   });

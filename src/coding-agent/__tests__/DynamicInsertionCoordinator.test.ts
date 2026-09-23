@@ -12,7 +12,7 @@ function llm(): LLMAdapter {
 describe('DynamicInsertionCoordinator', () => {
   it('aborts on an explicit stop without calling the classifier', async () => {
     let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '' }; } });
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '', confidence: 1 }; } });
     const decision = await coordinator.decide(llm(), 'current task', { text: '停止当前任务' });
     expect(decision.kind).toBe('stop');
     expect(decision.shouldAbort).toBe(true);
@@ -21,7 +21,7 @@ describe('DynamicInsertionCoordinator', () => {
 
   it('aborts on overturn phrasing via the fast path', async () => {
     let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '' }; } });
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '', confidence: 1 }; } });
     const decision = await coordinator.decide(llm(), 'current task', { text: '推翻当前方案，从头重新来' });
     expect(decision.kind).toBe('goal-change');
     expect(decision.shouldAbort).toBe(true);
@@ -34,7 +34,7 @@ describe('DynamicInsertionCoordinator', () => {
     // 不进分类赌局：字面命中直送排队（唯一保证跑完的投递），与 STOP 同款
     // 机制。
     let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '' }; } });
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '', confidence: 1 }; } });
     for (const text of ['再加一个 爱奇艺平台', '顺便也查一下 芒果TV', '把爱奇艺也查一下', '芒果TV也来一份', 'also check Douban']) {
       const decision = await coordinator.decide(llm(), '正在并行调研 B站/腾讯/优酷 三个平台', { text });
       expect(decision.kind).toBe('task');
@@ -46,7 +46,7 @@ describe('DynamicInsertionCoordinator', () => {
   it('lets negated additions fall through to the classifier', async () => {
     // 否定前置（不用加/别再加/不要再加）不是加活——绝不能误送排队。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ kind: 'steer', reason: 'not actually adding work' }),
+      classify: async () => ({ kind: 'steer', reason: 'not actually adding work', confidence: 1 }),
     });
     for (const text of ['不用再加了，就这样', '别再加新平台了', '不要再加注释了', '顺便问一下，跑完了吗']) {
       const decision = await coordinator.decide(llm(), 'current task', { text });
@@ -59,7 +59,7 @@ describe('DynamicInsertionCoordinator', () => {
     // 老世界里 CONSTRAINT_CHANGE_RE 会把"不要再加注释"判成 abort + 重规划；
     // 现在约束只是顺路带上的话。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ kind: 'steer', reason: 'constraint on current task' }),
+      classify: async () => ({ kind: 'steer', reason: 'constraint on current task', confidence: 1 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '不要再加注释' });
     expect(decision.kind).toBe('steer');
@@ -68,7 +68,7 @@ describe('DynamicInsertionCoordinator', () => {
 
   it('keeps the turn running for a question', async () => {
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ kind: 'question', reason: 'status check' }),
+      classify: async () => ({ kind: 'question', reason: 'status check', confidence: 1 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '现在跑到哪了？' });
     expect(decision.kind).toBe('question');
@@ -77,7 +77,7 @@ describe('DynamicInsertionCoordinator', () => {
 
   it('queues an independent task without aborting', async () => {
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ kind: 'task', reason: 'separate lookup' }),
+      classify: async () => ({ kind: 'task', reason: 'separate lookup', confidence: 1 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '查一下北京的天气' });
     expect(decision.kind).toBe('task');
@@ -86,7 +86,7 @@ describe('DynamicInsertionCoordinator', () => {
 
   it('acknowledges chatter without aborting', async () => {
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ kind: 'chatter', reason: 'filler' }),
+      classify: async () => ({ kind: 'chatter', reason: 'filler', confidence: 1 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '哈哈 辛苦了' });
     expect(decision.kind).toBe('chatter');
@@ -106,7 +106,7 @@ describe('DynamicInsertionCoordinator', () => {
     // 用户实测第三例："增加一个平台 爱奇艺"——此前字面族只有"再加"没有
     // "增加"，快速路漏过、LLM 又判 steer，话被转达后丢失。这次进快速路。
     let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '' }; } });
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '', confidence: 1 }; } });
     const decision = await coordinator.decide(llm(), '正在并行调研 B站/腾讯/优酷', { text: '增加一个平台  爱奇艺' });
     expect(decision.kind).toBe('task');
     expect(decision.shouldAbort).toBe(false);
@@ -115,7 +115,7 @@ describe('DynamicInsertionCoordinator', () => {
 
   it('passes the LLM kind through and aborts only on a judged goal-change', async () => {
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ kind: 'goal-change', reason: 'user replaced the approach' }),
+      classify: async () => ({ kind: 'goal-change', reason: 'user replaced the approach', confidence: 1 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '这个方向走不通，换个做法吧' });
     expect(decision.kind).toBe('goal-change');
@@ -124,7 +124,7 @@ describe('DynamicInsertionCoordinator', () => {
 
   it('aborts on a judged premise-change — in-flight work under a wrong fact is a loss to cut (2026-09-22)', async () => {
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ kind: 'premise-change', reason: 'origin city is wrong' }),
+      classify: async () => ({ kind: 'premise-change', reason: 'origin city is wrong', confidence: 1 }),
     });
     const decision = await coordinator.decide(llm(), '正在规划从广东到广西的旅游', { text: '我现在在西安' });
     expect(decision.kind).toBe('premise-change');

@@ -82,6 +82,10 @@ export interface SemanticRouteDecision {
   /** 任务真正需要的子 agent 角色（精确名，来自已知名录）。缺字段=路由没给，
    * 策略层回退关键词推荐；显式空数组=模型判断无需委派，不回退关键词。 */
   subagents?: string[];
+  /** 路由对自己这次判定的把握（0..1）。缺字段=没报（按 INPUT_DEFAULT_CONFIDENCE
+   * 记），报低分才说明它真的在两读之间摇摆——用于决策日志与低置信澄清，见
+   * inputDecision.ts 的 confidence 门。 */
+  confidence?: number;
   assessment: IntentAssessment;
 }
 export type Reversibility = 'reversible' | 'partially-reversible' | 'hard-to-reverse' | 'irreversible';
