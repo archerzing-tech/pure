@@ -257,3 +257,108 @@ describe('TaskQueue per-worktree lanes (4.2)', () => {
     queue.cancelAll();
   });
 });
+
+// ── Input-level time semantics ──
+// A task the user scheduled ("下午三点再跑一遍") is HELD, not skipped: it must
+// still run if nothing else happens to call runNext(), which is why the queue
+// arms its own wake-up timer instead of waiting for an unrelated event.
+
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe('TaskQueue scheduled input (dueAt)', () => {
+  it('holds a timed task until its moment and then runs it', async () => {
+    installStorage(fakeStorage([]));
+    const chat = makeChat();
+    const queue = new TaskQueue({
+      chat,
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj', sessionId: 'sess' }),
+    });
+    queue.enqueue('下午三点再跑一遍测试', { dueAt: Date.now() + 40 });
+    await wait(15);
+    expect(chat.sends).toEqual([]);
+    expect(queue.getTasks().map((t) => t.status)).toEqual(['pending']);
+
+    await wait(60);
+    expect(chat.sends).toEqual(['下午三点再跑一遍测试']);
+    queue.cancelAll();
+  });
+
+  it('keeps a timed task pending while the current lane is busy with other work', async () => {
+    installStorage(fakeStorage([]));
+    const gate = deferred();
+    const sends: string[] = [];
+    const chat: QueueChat = {
+      send: (text) => {
+        sends.push(text);
+        return text === '先跑这个' ? gate.promise : Promise.resolve();
+      },
+    };
+    const queue = new TaskQueue({
+      chat,
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj', sessionId: 'sess' }),
+    });
+    queue.enqueue('先跑这个');
+    queue.enqueue('10 分钟后再跑那个', { dueAt: Date.now() + 10 * 60_000 });
+    await flush();
+    expect(sends).toEqual(['先跑这个']);
+    // The queue chip counts the HELD item — the running one is not pending.
+    expect(queue.pendingCountFor('sess')).toBe(1);
+    expect(queue.getTasks().find((t) => t.text.includes('10 分钟'))?.status).toBe('pending');
+
+    gate.resolve();
+    await flush();
+    // The lane drained, but the timed task is still not due — "not skipped"
+    // and "not early" are different things.
+    expect(sends).toEqual(['先跑这个']);
+    queue.cancelAll();
+  });
+
+  it('runs a past dueAt immediately instead of rejecting it', async () => {
+    installStorage(fakeStorage([]));
+    const chat = makeChat();
+    const queue = new TaskQueue({
+      chat,
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj', sessionId: 'sess' }),
+    });
+    queue.enqueue('补跑一次', { dueAt: Date.now() - 1000 });
+    await flush();
+    expect(chat.sends).toEqual(['补跑一次']);
+    queue.cancelAll();
+  });
+
+  it('re-arms its own timer for a timed task restored from storage', async () => {
+    // Without the boot-time arm the restored task would sit until some
+    // unrelated event happened to call runNext().
+    installStorage(fakeStorage([
+      { ...storedTask({ id: 'q1', text: '到点就跑', workspace: '/proj', sessionId: 'sess' }), dueAt: Date.now() + 40 },
+    ]));
+    const chat = makeChat();
+    void new TaskQueue({
+      chat,
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj', sessionId: 'sess' }),
+    });
+    await wait(15);
+    expect(chat.sends).toEqual([]);
+    await wait(60);
+    expect(chat.sends).toEqual(['到点就跑']);
+  });
+
+  it('persists dueAt so a reload before the moment still holds the task', async () => {
+    const storage = fakeStorage([]);
+    installStorage(storage);
+    const queue = new TaskQueue({
+      chat: makeChat(),
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj', sessionId: 'sess' }),
+    });
+    const dueAt = Date.now() + 60_000;
+    queue.enqueue('晚点再跑', { dueAt });
+    const persisted = JSON.parse(storage.store.pure_task_queue_test) as Array<{ dueAt?: number }>;
+    expect(persisted[0].dueAt).toBe(dueAt);
+    queue.cancelAll();
+  });
+});

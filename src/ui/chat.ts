@@ -25,6 +25,7 @@ import { formatIntentPrompt, markParallelPlanSteps } from '../coding-agent/Plann
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
+import { describeTiming, type InputTiming } from '../coding-agent/inputDecision';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
@@ -2347,6 +2348,10 @@ export class ChatController {
       this.queueInterjectTask(text, images, displayText);
       return;
     }
+    // 输入级时间语义先于 kind 生效：这句话自己报了执行时刻，那它现在就不该被
+    // 执行——不管分类器把它读成什么（stop 除外：停是立即的，timing 恒为 now）。
+    // 少了这一步，"下午三点再跑一遍"会被当成当场追加的活跑掉。
+    if (decision.timing.mode === 'at' && this.deferTimedInsert(decision.timing, text, images, displayText)) return;
     switch (decision.kind) {
       case 'stop':
         this.addStatusBubble('收到，停。正在收尾当前任务。', true, false, 'info');
@@ -2455,6 +2460,19 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
     this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
     if (!this.isStreaming()) this.scheduleDeferred();
+  }
+
+  /** 把定了时刻的插话交给能定时的那一层（main.ts 的持久化队列）。返回 true
+   *  = 已接管，现在什么都不做。没有宿主队列（CLI / 单测）时返回 false，调用方
+   * 按原有目的地处理——话一定会跑到，只是按"当前任务之后"而不是指定时刻。 */
+  private deferTimedInsert(timing: InputTiming, text: string, images: MessageImage[], displayText: string): boolean {
+    const at = timing.at;
+    if (!at || !timedInputSink) return false;
+    if (!timedInputSink({ text, images, displayText, at, timingText: timing.text })) return false;
+    this.addBubble('user', displayText, images);
+    const preview = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+    this.addStatusBubble(`⏳ 已排期：${describeTiming(timing)}执行「${preview}」，当前任务不受影响。`, false, false, 'info');
+    return true;
   }
 
   /** 阶段判据：还有在飞的并行委派吗（agentActivities 首见即入列，
@@ -3558,7 +3576,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         hasTools: !!effectiveWorkspace,
         continuingPlan,
         planPauseRequested,
-        // This gate belongs to the PROJECT-BUILD continuation, not to continuing
+        // The delivery gate follows the approved plan's build-ness across
         // turns, not the continuation prompt ("继续" must not silently lose
         // the gate, and an ordinary complex plan must not gain it).
         continuingProjectBuild: this.activePlanProjectBuild,
@@ -6004,6 +6022,14 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
    *  - 'warn'    → amber: a defect/bug found, degraded mode, needs attention
    *  - 'info'    → accent: root-cause / probe findings, contract established
    */
+  /** Host-facing: leave a status line in the visible transcript for something
+   *  the host did around the engine. A held (scheduled) input needs it most —
+   *  the composer is already cleared, so with no trace the message reads as
+   *  dropped, and the status line is what quotes it back. */
+  notifyStatus(text: string): void {
+    this.addStatusBubble(text, false, false, 'info');
+  }
+
   private addStatusBubble(
     text: string,
     pending = false,
@@ -6085,6 +6111,34 @@ export interface OpenSessionResult {
 // on cards whose session is still working in the background.
 const runningSessionIds = new Set<string>();
 const runningSessionsListeners = new Set<() => void>();
+
+/** An input the user asked to run at a named moment. */
+export interface TimedInputRequest {
+  text: string;
+  images: MessageImage[];
+  displayText: string;
+  /** Absolute epoch ms. */
+  at: number;
+  /** The user's own words for the time, for echoing back. */
+  timingText?: string;
+}
+
+/**
+ * Host hook for input-level time semantics: `main.ts` owns the durable task
+ * queue (it survives a reload and re-arms its timer), so the queue is the only
+ * place a "下午三点再跑" can actually wait. A module-level sink rather than a
+ * per-session field because the queue it feeds is per-APP, while the decision
+ * to hold is taken inside whichever session's chat the input arrived on.
+ *
+ * Returning false means nobody can hold it (CLI, tests, a host without a
+ * queue) — the caller then keeps the words in its own in-memory lane rather
+ * than dropping them.
+ */
+let timedInputSink: ((request: TimedInputRequest) => boolean) | null = null;
+
+export function setTimedInputSink(sink: ((request: TimedInputRequest) => boolean) | null): void {
+  timedInputSink = sink;
+}
 
 /** True when `sessionId` has a live controller that is streaming right now. */
 export function isSessionRunning(sessionId: string): boolean {
@@ -6348,6 +6402,11 @@ export class SessionChatManager {
 
   async send(...args: Parameters<ChatController['send']>): Promise<void> {
     await this.activeNow().send(...args);
+  }
+
+  /** Append a status line to the visible transcript (see ChatController's). */
+  notifyStatus(text: string): void {
+    this.activeNow().notifyStatus(text);
   }
 
   /** MCP prompt templates of the visible session's client (composer
