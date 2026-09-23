@@ -130,4 +130,94 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.kind).toBe('premise-change');
     expect(decision.shouldAbort).toBe(true);
   });
+
+  // ── The shared decision shape (inputDecision.ts) ──
+  // The kind is the classifier's own word; the ACTION follows the shared
+  // vocabulary, and the confidence gate runs last so no path can bypass it.
+
+  it('asks instead of aborting when the classifier reports low confidence', async () => {
+    // Phrasing that does NOT match the GOAL_CHANGE_RE fast path — the gate is
+    // being tested, and the fast path is a different (mechanical) producer.
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'goal-change', reason: 'reads two ways', confidence: 0.4 }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '这节内容好像都不对了，要不要重新整理一下这一部分' });
+    // A doubtful destructive verdict must not tear down the running work —
+    // asking the user one short question is cheaper than a wrong restart.
+    expect(decision.kind).toBe('goal-change');
+    expect(decision.action).toBe('clarify');
+    expect(decision.shouldAbort).toBe(false);
+    expect(decision.signals.gatedFrom).toBe('replan');
+  });
+
+  it('keeps a confident destructive verdict — the gate is for doubt, not for caution', async () => {
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'goal-change', reason: 'clear overturn', confidence: 0.95 }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '不要了，全部重来' });
+    expect(decision.action).toBe('replan');
+    expect(decision.shouldAbort).toBe(true);
+  });
+
+  it('defaults a classifier that never reported confidence, without gating on it', async () => {
+    // INPUT_DEFAULT_CONFIDENCE sits ABOVE the gate on purpose (see
+    // inputDecision.ts): the gate exists for reported doubt, not for providers
+    // that drop the field. The confidenceDefaulted FLAG is added upstream by
+    // classifyInsertion — a mock here bypasses it, which is why it is absent.
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'task', reason: 'independent lookup' }),
+    } as never);
+    const decision = await coordinator.decide(llm(), 'current task', { text: '顺便查一下汇率' });
+    expect(decision.action).toBe('queue');
+    expect(decision.confidence).toBeGreaterThan(0.6);
+    expect(decision.shouldAbort).toBe(false);
+  });
+
+  it('holds a timed insert until its moment regardless of the judged kind', async () => {
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'steer', reason: 'a constraint', confidence: 1, when: '10 分钟后' }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '10 分钟后把标题改成 X' });
+    // A steer the user scheduled is not a steer NOW — it is a queued turn that
+    // starts at its moment. Applying it to the running turn would run the work
+    // ten minutes early.
+    expect(decision.kind).toBe('steer');
+    expect(decision.timing.mode).toBe('at');
+    expect(decision.action).toBe('queue');
+    expect(decision.shouldAbort).toBe(false);
+  });
+
+  it('carries the confidence the model reported', async () => {
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'question', reason: 'status check', confidence: 0.85 }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '现在跑哪一步了' });
+    expect(decision.action).toBe('answer');
+    expect(decision.confidence).toBe(0.85);
+  });
+
+  it('routes an unreportable confidence through the gate to clarify', async () => {
+    // A mock classifier that skips `confidence` hands the gate an undefined
+    // number (the real classifyInsertion would have defaulted it upstream —
+    // that contract is asserted in Planner's tests). The gate reads "no number"
+    // as "no confidence" and asks instead of acting.
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'chatter', reason: 'filler' }),
+    } as never);
+    const decision = await coordinator.decide(llm(), 'current task', { text: '哈哈' });
+    expect(decision.kind).toBe('chatter');
+    expect(decision.action).toBe('clarify');
+    expect(decision.shouldAbort).toBe(false);
+    expect(decision.signals.gatedFrom).toBe('ignore');
+  });
+
+  it('passes a reported timing through verbatim for the caller to parse', async () => {
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'task', reason: 'follow-up work', confidence: 0.9, when: '下午三点' }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '下午三点再跑一遍完整测试' });
+    expect(decision.signals.when).toBe('下午三点');
+    expect(decision.timing.mode).toBe('at');
+    expect(decision.action).toBe('queue');
+  });
 });
