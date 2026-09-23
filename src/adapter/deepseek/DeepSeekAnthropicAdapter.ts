@@ -34,9 +34,14 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
   private temperature: number;
 
   constructor(config: DeepSeekAnthropicConfig) {
+    // dangerouslyAllowBrowser matches OpenAICompatibleAdapter: the desktop build
+    // streams through Rust (RustLLMAdapter), so this SDK only ever runs in the
+    // browser dev harness — where the SDK's browser guard otherwise refuses to
+    // construct and every anthropic-protocol turn dies before the request.
     this.client = new Anthropic({
       apiKey: config.apiKey,
       baseURL: config.baseURL || 'https://api.deepseek.com/anthropic',
+      dangerouslyAllowBrowser: true,
     });
     this.model = config.model ?? 'deepseek-flash';
     // Same reasoning-vs-content budget rationale as createDeepSeekAdapter: the
