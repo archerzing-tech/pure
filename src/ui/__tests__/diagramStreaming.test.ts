@@ -7,10 +7,11 @@
 // 落地语义：闭合计时启动渲染（不再等 Completed），同时像 ```map 一样闸住
 // 后续文本，直到 data-state → preview（渲染失败 → error 也放行，绝不卡死流，
 // Completed 的最终渲染完全无视闸门，收尾文字必达）。
-// svg / puml 走行为验证（渲染路径全本地，puml 引擎打桩）；mermaid / chart
+// svg / puml 走行为验证（渲染路径全本地，puml 跑真引擎）；mermaid / chart
 // 共用同一套闸门/过滤/收养机制，在源码契约测试里锁定接线。
 
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 
 // DOMPurify needs a real browser DOM to initialize its default export; under
@@ -18,19 +19,45 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 // test strings, so stub sanitize as a pass-through (same rationale as
 // mapStreaming.test.ts).
 mock.module('dompurify', () => ({ default: { sanitize: (html: string) => html } }));
-// The streaming gate eagerly hydrates a closed ```puml fence — stub the 6MB
-// engine so the test never pays (or flakes on) a real module load.
-mock.module('../plantumlDiagram', () => {
-  (globalThis as Record<string, unknown>).__pumlEngineMocked = true;
-  return {
-    renderPlantumlToSvg: async () => '<svg width="10" height="10" xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>',
-  };
-});
+// The ```puml case below runs the REAL local engine — no module mock. bun's
+// module registry is shared across test files on serialized runners, and a
+// renderPlantumlToSvg stub registered here leaked into plantumlDiagram.test.ts
+// on the Windows release run (export-not-found at link time). The DOM setup
+// mirrors that file's contract for the engine instead.
 
 const { flushStreamingRender, renderMarkdown, scheduleStreamingRender } = await import('../markdown');
 const fs = await import('node:fs');
 
-beforeAll(() => GlobalRegistrator.register());
+beforeAll(() => {
+  // A real page URL matters: Emscripten-based engine bundles resolve their own
+  // asset paths against location.href, and "about:blank" is not a valid base.
+  GlobalRegistrator.register({ url: 'http://localhost:1420/' });
+  // happy-dom ships no canvas 2D context, and the engine measures every label
+  // with one before laying a diagram out. The stub only has to answer
+  // measureText — glyph widths move pixels around, they do not decide whether
+  // an SVG comes back.
+  const canvasPrototype = window.HTMLCanvasElement.prototype as unknown as {
+    getContext(id: string): unknown;
+  };
+  canvasPrototype.getContext = () => ({
+    font: '',
+    measureText: (text: string) => ({
+      width: text.length * 7,
+      actualBoundingBoxAscent: 8,
+      actualBoundingBoxDescent: 2,
+    }),
+  });
+  // Graphviz layout as a classic script — the same contract the app satisfies
+  // with a <script src="/plantuml/viz-global.js"> (publishes globalThis.Viz).
+  const host = globalThis as typeof globalThis & { Viz?: { instance?: unknown } };
+  if (!host.Viz || typeof host.Viz.instance !== 'function') {
+    const source = readFileSync(
+      new URL('../../../node_modules/@plantuml/core/viz-global.js', import.meta.url),
+      'utf8',
+    );
+    new Function(source)();
+  }
+});
 afterAll(() => GlobalRegistrator.unregister());
 
 const BEFORE = '先看结构：\n\n';
@@ -49,6 +76,18 @@ function renderOnce(container: HTMLElement, text: string): void {
 /** The hydration passes commit the loading state synchronously and paint the
  *  SVG after two animation frames — give them that frame budget. */
 const paint = (): Promise<void> => Bun.sleep(30);
+
+/** The ```puml hydration loads the real 6MB TeaVM engine, so settling takes
+ *  seconds, not frames — poll like the gate does until it can release. */
+async function waitForSettled(slot: HTMLElement, timeoutMs = 60_000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const state = slot.getAttribute('data-state');
+    if (state === 'preview' || state === 'error') return;
+    await Bun.sleep(100);
+  }
+  throw new Error(`diagram slot never settled (state=${slot.getAttribute('data-state')})`);
+}
 
 describe('streaming diagram gate (图渲染完，后面的文字才开始显示)', () => {
   it('a closed ```svg fence renders in place and HOLDS the text below until it paints', async () => {
@@ -132,8 +171,7 @@ describe('streaming diagram gate (图渲染完，后面的文字才开始显示)
       // Held: the text below waits for the engine render.
       expect(container.textContent).not.toContain(AFTER);
 
-      await paint();
-      expect((globalThis as Record<string, unknown>).__pumlEngineMocked).toBe(true);
+      await waitForSettled(slot!);
       expect(slot!.getAttribute('data-processed')).toBe('true');
       expect(slot!.getAttribute('data-state')).toBe('preview');
       expect(slot!.querySelector('.puml-target svg')).toBeTruthy();
@@ -144,7 +182,7 @@ describe('streaming diagram gate (图渲染完，后面的文字才开始显示)
     } finally {
       container.remove();
     }
-  });
+  }, 70_000);
 
   it('carries a painted diagram across the completion render without rebuilding it', async () => {
     const container = document.createElement('div');
