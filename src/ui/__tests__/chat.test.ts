@@ -1242,3 +1242,36 @@ describe('superseded-turn finally teardown', () => {
     expect(finallyBlock).toContain('if (gen !== this.generation) assessmentFlow?.cancel(');
   });
 });
+
+// First-token latency: every hidden pre-turn wait sits between the user's send
+// and the first visible token. These bounds keep that chain from growing back —
+// the hidden semantic route keeps its own full budget (it must decide, not be
+// truncated), while the first MCP handshake was awaited serially right before
+// the model call and now overlaps the preflight.
+describe('first-token preflight budgets', () => {
+  const src = readSource(new URL('../chat.ts', import.meta.url));
+
+  it('starts the first MCP handshake before the preflight and only awaits the remainder', () => {
+    // The warm-up must be wired right after the agent is built (before the
+    // plan/probe preflight), and the later await must use the short budget.
+    const warmup = src.indexOf('MCP warm-up: kick the transport handshake off HERE');
+    const awaitSite = src.indexOf("// ── Deferred init: the MCP handshake was started right after the agent");
+    expect(warmup).toBeGreaterThan(-1);
+    expect(awaitSite).toBeGreaterThan(warmup);
+    const warmupBlock = src.slice(warmup, warmup + 900);
+    expect(warmupBlock).toContain('mcpConnectPromise = this.mcpClient.connectAll()');
+    const awaitBlock = src.slice(awaitSite, awaitSite + 700);
+    expect(awaitBlock).toContain('if (mcpConnectPromise) {');
+    expect(awaitBlock).toContain('MCP_FIRST_TURN_BUDGET_MS');
+    // The 1.5s serial wait is gone for good.
+    expect(src).not.toContain("1_500,\n            'MCP initialization',");
+  });
+
+  it('caps the first-turn MCP resource wait and caches AGENTS.md reads', () => {
+    expect(src).toContain('const MCP_RESOURCE_FIRST_TURN_BUDGET_MS = 800;');
+    expect(src).toContain('collectResourceContext({ waitMs: MCP_RESOURCE_FIRST_TURN_BUDGET_MS })');
+    // Three IPC reads for AGENTS.md used to run on every single turn.
+    expect(src).toContain('let guiConventionsCache: { at: number; workspace: string; text: string } | null = null;');
+    expect(src).toContain('const text = await readGuiConventions(ws);');
+  });
+});

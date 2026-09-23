@@ -598,8 +598,23 @@ function buildModelIdentity(config: PureConfig | null): { provider: string; mode
 
 /** Load + merge the two AGENTS.md layers for the Tauri GUI. App-level defaults to
  * the app resource dir; user-level comes from the active workspace (optional).
- * Returns '' outside the Tauri runtime or on any read failure (best-effort). */
+ * Returns '' outside the Tauri runtime or on any read failure (best-effort).
+ * TTL-cached: the read is three IPC round trips and it used to run on EVERY
+ * turn, all of it before the first token. Same 30s window as app skills, so
+ * an edit to AGENTS.md still lands without a restart. */
+let guiConventionsCache: { at: number; workspace: string; text: string } | null = null;
+
 async function loadGuiConventions(userWorkspace?: string): Promise<string> {
+  const ws = userWorkspace ?? '';
+  if (guiConventionsCache && Date.now() - guiConventionsCache.at < 30_000 && guiConventionsCache.workspace === ws) {
+    return guiConventionsCache.text;
+  }
+  const text = await readGuiConventions(ws);
+  guiConventionsCache = { at: Date.now(), workspace: ws, text };
+  return text;
+}
+
+async function readGuiConventions(userWorkspace?: string): Promise<string> {
   if (!isTauriRuntime()) return '';
   try {
     const appRoot = await resourceDir();
@@ -1024,6 +1039,17 @@ async function loadAppSkills(workspace: string): Promise<PromptSkill[]> {
   appSkillsCache = { at: Date.now(), workspace: ws, items };
   return items;
 }
+// The first MCP handshake: a configured-but-slow stdio server
+// must not hold the first token hostage. The connection keeps running in the
+// background and registers its tools as soon as it answers (next turn).
+const MCP_FIRST_TURN_BUDGET_MS = 600;
+// MCP resource bodies are optional context that joins the prompt as a
+// lower-priority tier. Waiting the full 3s prefetch window on the FIRST turn
+// (when the prefetch has just started, so it is always in flight) put that
+// wait in front of the first token; the prefetch keeps running in the
+// background and the resources land from the next turn onward.
+const MCP_RESOURCE_FIRST_TURN_BUDGET_MS = 800;
+
 const MAX_MESSAGE_HISTORY = MAX_PERSISTED_MESSAGES;
 
 function limitMessageHistory(messages: Message[], max = MAX_MESSAGE_HISTORY): Message[] {
@@ -3413,6 +3439,22 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         // SubagentActivity case below).
         subagentEvents: subagentEventFanout,
       });
+      // MCP warm-up: kick the transport handshake off HERE so it overlaps the
+      // local preflight that follows, instead of being awaited on its own right
+      // before the first model call. A cold stdio server (spawn + initialize)
+      // used to spend the full budget serially in front of the first token.
+      let mcpConnectPromise: Promise<void> | null = null;
+      if (!this.deferredInitDone) {
+        this.mcpSessionId = sendSessionId;
+        this.mcpConfigSnapshot = JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy, 'tools')]);
+        this.mcpClient = codingAgent.mcpClient;
+        if (this.mcpClient && !fastConversationalTurn) {
+          this.deferredInitDone = true;
+          mcpConnectPromise = this.mcpClient.connectAll().catch((err: Error) => {
+            console.warn('[pure] MCP connection failed:', err.message);
+          });
+        }
+      }
       // Text-to-image support: computed once per send from the connected
       // provider/model (see imageGenContextFor). When enabled, register the
       // generate_image tool with the live registry so the LLM sees it in
@@ -4159,30 +4201,22 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         hideNewContentHint();
       }
 
-      // ── Deferred init: boot MCP on first use ──
-      if (!this.deferredInitDone) {
-        this.mcpSessionId = sendSessionId;
-        this.mcpConfigSnapshot = JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy, 'tools')]);
-        this.mcpClient = codingAgent.mcpClient;
-
-        if (this.mcpClient && !fastConversationalTurn) {
-          this.deferredInitDone = true;
-          // Await MCP connect so tools are registered before the first run builds
-          // its toolsDefs (toolsDefsProvider reads them live) — but never block
-          // the first send: race against a short timeout, then proceed without
-          // MCP tools if a server is slow. They'll appear on the next turn.
-          await withAbortTimeout(
-            this.mcpClient.connectAll().catch((err: Error) => {
-              console.warn('[pure] MCP connection failed:', err.message);
-            }),
-            this.abortController?.signal,
-            1_500,
-            'MCP initialization',
-          ).catch((err: Error) => {
-            if (err.name === 'AbortError') throw err;
-            console.warn('[pure] MCP initialization skipped:', err.message);
-          });
-        }
+      // ── Deferred init: the MCP handshake was started right after the agent
+      // was built (see the warm-up above). Only the REMAINING budget is awaited
+      // here, so the connection overlapped everything in between; a server that
+      // still has not answered registers its tools on a later turn.
+      if (mcpConnectPromise) {
+        const pendingConnect = mcpConnectPromise;
+        mcpConnectPromise = null;
+        await withAbortTimeout(
+          pendingConnect,
+          this.abortController?.signal,
+          MCP_FIRST_TURN_BUDGET_MS,
+          'MCP initialization',
+        ).catch((err: Error) => {
+          if (err.name === 'AbortError') throw err;
+          console.warn('[pure] MCP initialization skipped:', err.message);
+        });
       }
 
       if (planPauseRequested && this.activeComplexPlan) {
@@ -4267,7 +4301,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         // MCP resources join the same optional-context tier as skills. The
         // client prefetches them on connect and caches the rendered body, so a
         // slow server costs at most one bounded wait on the post-connect turn.
-        mcpResources: this.mcpClient ? await this.mcpClient.collectResourceContext() : undefined,
+        mcpResources: this.mcpClient ? await this.mcpClient.collectResourceContext({ waitMs: MCP_RESOURCE_FIRST_TURN_BUDGET_MS }) : undefined,
         mode: analysis.mode,
         budget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides),
         // Subagent tools join the model-visible list only in workspace mode
