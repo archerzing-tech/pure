@@ -392,7 +392,7 @@ function scheduleTimedInput(request: TimedInputRequest): boolean {
   // be able to see both.
   recordScheduledInput(prefetchTurnRoute(request.text, request.images), request.at);
   taskQueue.enqueue(request.text, { dueAt: request.at });
-  chat.notifyStatus(`⏳ 已排期：${label}执行「${preview}」——排期不占用当前对话，到时自动开始。`);
+  chat.notifyStatus(`⏳ 排期好了：${label}自动开始「${preview}」——到点自己跑，不用你盯着。`);
   showToast(`⏳ 已排期：${label}执行`, 4000);
   return true;
 }

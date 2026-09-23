@@ -899,7 +899,10 @@ describe('plan overview completion state', () => {
     // 前一个判定完成，永不丢弃；单个判定失败也不许毒化链条（run.catch）。
     expect(src.indexOf('if (this.insertInFlight) return')).toBe(-1);
     expect(src.indexOf('this.insertClassificationChain.then(')).toBeGreaterThan(-1);
-    expect(src.indexOf('this.insertClassificationChain = run.catch(() => {})')).toBeGreaterThan(-1);
+    // 判定失败除了不毒化链条，还必须把 pending 的临时回执收场——留着它就是
+    // 一条永远在闪的"看一下这句话怎么安排…"。
+    expect(src.indexOf('this.insertClassificationChain = run.catch(() => {')).toBeGreaterThan(-1);
+    expect(src.indexOf("'这句话没安排上——直接再发一次就行。'")).toBeGreaterThan(-1);
     // 链上的每一环重新检查 isStreaming()：前一条 RELATED 插话可能已中止回合，
     // 轮到本条时它应该走正常 send 而不是对已结束的回合做判定。
     const link = src.indexOf('private async classifyAndApplyInterject(');
@@ -920,6 +923,66 @@ describe('plan overview completion state', () => {
     expect(dispatch).toBeGreaterThan(-1);
     const dispatchBody = src.slice(dispatch, dispatch + 400);
     expect(dispatchBody.indexOf('if (this.isStreaming()) return;')).toBeGreaterThan(-1);
+  });
+
+  it('bridges the classification gap with one ack line the receipt replaces in place', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 插话判定是秒级 LLM 往返：期间用户的话不上屏（abort 类要从 send() 重入），
+    // 没有即时回执就是死空气——说了句话没人理。ack 是唯一一条 pending 状态行，
+    // 最终回执原行定格（settleAck）， transcript 不为一条插话出两行系统话。
+    expect(src.indexOf("'收到——看一下这句话怎么安排…'")).toBeGreaterThan(-1);
+    const settle = src.indexOf('private settleAck(');
+    expect(settle).toBeGreaterThan(-1);
+    // 每条插话路径都要收场 ack：定格（回执行）或移除（有自己的气泡/卡片），
+    // 不许留下一条永远 pending 的孤儿。
+    for (const marker of ["case 'stop':", "case 'goal-change':", "case 'premise-change':", "case 'question':", "case 'chatter':"]) {
+      const at = src.indexOf(marker);
+      expect(at).toBeGreaterThan(-1);
+      const body = src.slice(at, src.indexOf("case '", at + marker.length) === -1 ? src.length : src.indexOf("case '", at + marker.length));
+      expect(body.indexOf('this.settleAck(ack') !== -1 || body.indexOf('ack?.parentElement?.remove()') !== -1).toBe(true);
+    }
+    // 折入 / steer / 队列路径通过方法参数收场 ack。
+    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null)')).toBeGreaterThan(-1);
+    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null)')).toBeGreaterThan(-1);
+  });
+
+  it('honors the confidence gate in the interject path: destructive doubt asks, never aborts', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 置信门把没把握的破坏性判定降级成 clarify + shouldAbort=false，但分发
+    // 此前只看 kind——低置信 goal-change 照样拆任务，"问而不赌"形同虚设。
+    // 现在分发在 kind switch 之前先兑现门：gatedFrom 是停/重开就问一句，
+    // 手头的活照跑；用户的回答作为新插话重新分类。不破坏的误判自己能愈
+    // （排队晚点跑、旁答只答一次），照旧分发，不拿问题烦人。
+    const gate = src.indexOf('needsClarification(decision)');
+    expect(gate).toBeGreaterThan(-1);
+    expect(src.indexOf('isDestructiveAction(gatedFrom as InputAction)', gate)).toBeGreaterThan(-1);
+    const gateCheck = src.slice(gate, src.indexOf('switch (decision.kind)'));
+    expect(gateCheck.indexOf("this.askMidrunClarification(decision, text, images, ack)")).toBeGreaterThan(-1);
+    // 问询必须落到用户面前：LLM 失败/不可用时退模板问，绝不静默。
+    const ask = src.indexOf('private async askMidrunClarification(');
+    expect(ask).toBeGreaterThan(-1);
+    const askBody = src.slice(ask, src.indexOf('private steerRunningTurn', ask));
+    expect(askBody.indexOf('const fallback =')).toBeGreaterThan(-1);
+    expect(askBody.indexOf("bubble.textContent = question || fallback;")).toBeGreaterThan(-1);
+  });
+
+  it('shows the queue as one live card and narrates the handoff when it drains', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 每排一件发一行系统话是流水账；样本要的是"待办队列更新"——一张就地
+    // 重渲染的活卡。排空时先说一声再动手：用户的下一句话凭空开始跑，
+    // 没有衔接读起来就是无中生有。
+    expect(src.indexOf('private renderQueueCard(): void')).toBeGreaterThan(-1);
+    expect(src.indexOf('this.renderQueueCard();', src.indexOf('private queueInterjectTask('))).toBeGreaterThan(-1);
+    expect(src.indexOf('⏳ 待办队列（')).toBeGreaterThan(-1);
+    expect(src.indexOf('手头的活收尾了——先处理排队的，这后面还排着')).toBeGreaterThan(-1);
+    expect(src.indexOf('手头的活收尾了——现在处理刚才排下的那件。')).toBeGreaterThan(-1);
+    // 新会话清空 pendingTasks 时同步撤卡，不留上一场对话的幽灵队列。
+    const reset = src.indexOf('this.pendingTasks = [];');
+    expect(reset).toBeGreaterThan(-1);
+    expect(src.indexOf('this.queueCardEl = null;', reset)).toBeGreaterThan(-1);
+    // 折入回执不再点名任务类型（"调研"）——追加的活可能是任何一种。
+    expect(src.indexOf('正在跑的调研收齐后')).toBe(-1);
+    expect(src.indexOf('正在跑的活收齐后先补这项')).toBeGreaterThan(-1);
   });
 
   it('folds mid-flight scope additions into the aggregation round, with a deterministic fallback', () => {

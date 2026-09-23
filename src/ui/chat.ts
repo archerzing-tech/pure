@@ -25,7 +25,7 @@ import { formatIntentPrompt, markParallelPlanSteps } from '../coding-agent/Plann
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
-import { describeTiming, type InputTiming } from '../coding-agent/inputDecision';
+import { describeTiming, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
 import { sanitizeSkillName } from './skillHub';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
@@ -1369,6 +1369,8 @@ export class ChatController {
    * current task. They are queued and started as fresh tasks once the current
    * task/plan reaches a terminal state (no auto-continue pending). */
   private pendingTasks: Array<{ text: string; images: MessageImage[]; displayText: string; ts: number }> = [];
+  /** The live 待办队列 card (renderQueueCard); null while the queue is empty. */
+  private queueCardEl: HTMLElement | null = null;
   /** A message the user typed mid-run that IS related to the current task. Held
    * until the interrupted round finalizes, then re-entered as a continuation of
    * the SAME task so the model re-plans/rewrites around the new variable. */
@@ -2314,18 +2316,42 @@ export class ChatController {
     // old insertInFlight early-return silently discarded any message typed
     // while an earlier one was still being judged — and the caller has
     // already cleared the input box, so those words were gone.
-    const run = this.insertClassificationChain.then(() => this.classifyAndApplyInterject(text, images, displayText));
+    // The judge is an LLM round trip (seconds). During it the user's words
+    // are deliberately not on screen yet (the abort classes re-enter through
+    // send(), which renders its own bubble) — without an instant ack that
+    // window reads as dead air: you said something and nobody reacted. The
+    // ack is ONE pending status line that the final receipt REPLACES in
+    // place, so the transcript never shows two lines for one insert.
+    const ack = this.addStatusBubble('收到——看一下这句话怎么安排…', true, false);
+    const run = this.insertClassificationChain.then(() => this.classifyAndApplyInterject(text, images, displayText, ack));
     // A rejected link must never poison the chain for later inserts.
-    this.insertClassificationChain = run.catch(() => {});
+    this.insertClassificationChain = run.catch(() => {
+      this.settleAck(ack, '这句话没安排上——直接再发一次就行。');
+    });
     await run;
+  }
+
+  /** Flip the interject ack from "looking at it" to its final one-line receipt.
+   * Same row, new words — the conversation gains a sentence instead of a second
+   * system line. keepPending keeps the shimmer through an async abort drain;
+   * kind upgrades the row's highlight to match the old dedicated receipts. */
+  private settleAck(ack: HTMLElement | null, text: string, keepPending = false, kind?: 'success' | 'warn' | 'info'): void {
+    if (!ack) return;
+    ack.textContent = text;
+    if (!keepPending) ack.parentElement?.classList.remove('pending');
+    if (kind) ack.classList.add(`hl-${kind}`);
+    linkifyPaths(ack);
   }
 
   /** One link of the interject chain: runs only after every earlier insert has
    * been judged. Re-checks isStreaming() because an earlier stop/goal-change
    * aborts the turn — by the time this link runs, the insert may belong to a
    * fresh send instead. */
-  private async classifyAndApplyInterject(text: string, images: MessageImage[], displayText: string): Promise<void> {
+  private async classifyAndApplyInterject(text: string, images: MessageImage[], displayText: string, ack: HTMLElement | null): Promise<void> {
     if (!this.isStreaming()) {
+      // The turn is over; a normal send renders the user's own bubble, so the
+      // provisional ack would only orphan a promise nobody keeps.
+      ack?.parentElement?.remove();
       void this.send(text, images, displayText);
       return;
     }
@@ -2344,24 +2370,41 @@ export class ChatController {
     const decision = await this.dynamicInsertionCoordinator.decide(this.turnLlm ?? null, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
     if (this.abortController?.signal?.aborted) {
       // The turn was hard-stopped while we were classifying — don't drop the
-      // insert; queue it so it still runs as a task.
+      // insert; queue it so it still runs as a task. The queue card that
+      // queueInterjectTask renders is the receipt; the provisional ack would
+      // only duplicate it.
+      ack?.parentElement?.remove();
       this.queueInterjectTask(text, images, displayText);
       return;
     }
     // 输入级时间语义先于 kind 生效：这句话自己报了执行时刻，那它现在就不该被
     // 执行——不管分类器把它读成什么（stop 除外：停是立即的，timing 恒为 now）。
     // 少了这一步，"下午三点再跑一遍"会被当成当场追加的活跑掉。
-    if (decision.timing.mode === 'at' && this.deferTimedInsert(decision.timing, text, images, displayText)) return;
+    if (decision.timing.mode === 'at' && this.deferTimedInsert(decision.timing, text, images, displayText)) {
+      ack?.parentElement?.remove();
+      return;
+    }
+    // 置信门在这里兑现（此前门只改写决策、分发按 kind 照走——低置信的
+    // goal-change 照样拆任务，"问而不赌"从未发生）：分类器明确报告没把握、
+    // 且原判定是破坏性的（停/重开），先把问题问出来，手头的活照跑。不破坏的
+    // 误判自己能愈（排队晚点跑、旁答只答一次），照旧分发，不拿问题烦人。
+    const gatedFrom = decision.signals.gatedFrom;
+    if (needsClarification(decision) && typeof gatedFrom === 'string' && isDestructiveAction(gatedFrom as InputAction)) {
+      this.settleAck(ack, '先不动手——这句话我拿不准，问你一句…', true);
+      echoUserBubble();
+      void this.askMidrunClarification(decision, text, images, ack);
+      return;
+    }
     switch (decision.kind) {
       case 'stop':
-        this.addStatusBubble('收到，停。正在收尾当前任务。', true, false, 'info');
+        this.settleAck(ack, '收到，停——正在收尾当前任务，已经跑完的部分都留着。', true, 'info');
         this.abortController?.abort();
         return;
       case 'goal-change':
         // 不在这里回显——held insert 从 send() 重入时会作为新回合开场气泡上屏，
         // 先回显再重入 = 同一句话上两遍。
         this.relatedInsert = { text, images, displayText };
-        this.addStatusBubble('方向变了——停下来重新对齐，马上按新的来。', true, false, 'info');
+        this.settleAck(ack, '方向变了——在跑的先停下止损，已完成的不丢，马上按新的方向来。', true, 'info');
         this.abortController?.abort();
         // Same late-classification hazard as queueInterjectTask: if the turn
         // already finished while we were judging, no finalize will dispatch
@@ -2374,7 +2417,7 @@ export class ChatController {
         // 重新入场，按纠正后的事实重排。不预回显：重入 send() 时才上屏，
         // 否则同一句话出现两遍（用户实测暴露）。
         this.relatedInsert = { text, images, displayText };
-        this.addStatusBubble('前提变了——按旧前提跑的活先停下止损，马上按新的来。', true, false, 'info');
+        this.settleAck(ack, '前提变了——按旧前提跑下去只会白跑，先停下止损，马上按纠正后的事实重新来。', true, 'info');
         this.abortController?.abort();
         if (!this.isStreaming()) this.scheduleDeferred();
         return;
@@ -2384,14 +2427,16 @@ export class ChatController {
         // 在飞期间 steer 不再是合法目的地——统一折入（强框架注入 + 收尾核验
         // 兜底）。委派收齐后真正的"下个动作"存在，steer 照旧。
         if (this.hasDelegationInFlight()) {
-          this.foldInScopeAddition(text, images, displayText, false); // steer 类：指令注入
+          this.foldInScopeAddition(text, images, displayText, false, ack); // steer 类：指令注入
           return;
         }
         echoUserBubble();
-        this.steerRunningTurn(text, images);
+        this.steerRunningTurn(text, images, ack);
         return;
       }
       case 'question':
+        // 回答气泡马上就来（旁路一次 LLM 调用），临时回执不再留行。
+        ack?.parentElement?.remove();
         echoUserBubble();
         void this.answerMidrunQuestion(text, images);
         return;
@@ -2401,15 +2446,18 @@ export class ChatController {
         // 汇合轮：正在跑的收齐后先补这项，再合并输出一份覆盖全部的汇总。
         // 委派都收齐了才插的，照旧排队（先出已有结果，再单独补跑）。
         if (this.hasDelegationInFlight()) {
-          this.foldInScopeAddition(text, images, displayText, true); // scope 追加：机械执行
+          this.foldInScopeAddition(text, images, displayText, true, ack); // scope 追加：机械执行
         } else {
+          // 队列卡本身就是回执（逐条可见、就地更新），临时回执不再留行。
+          ack?.parentElement?.remove();
           this.queueInterjectTask(text, images, displayText);
         }
         return;
       }
       case 'chatter':
         // 收下了。同事埋头干活时说了句"哈哈"，你不会停下来回一句"收到"——
-        // 气泡已上屏，这就够了，别再打扰干活的人。
+        // 气泡已上屏，这就够了，别再打扰干活的人。临时回执也一并收走。
+        ack?.parentElement?.remove();
         echoUserBubble();
         return;
     }
@@ -2419,9 +2467,9 @@ export class ChatController {
    * the engine drains it at the next THINK boundary and reconciles it in
    * stride. No abort, no replan, no queue — a nudge should steer, not
    * restart. */
-  private steerRunningTurn(text: string, images: MessageImage[]): void {
+  private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null): void {
     this.pendingSteers.push({ role: 'user', content: text, images });
-    this.addStatusBubble('已转达——手头的活不停，下个动作就带上。', false, false);
+    this.settleAck(ack, '已转达——手头的活不停，下个动作就带上。');
   }
 
   /** 插话重构 — answer a mid-run question out-of-band: one LLM call with the
@@ -2451,6 +2499,37 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     }
   }
 
+  /** 置信门的「问」在这里落地：分类器对一句破坏性插话（停/重开）明确报告了
+   * 没把握时，不赌，把疑问一句话问出来。手头的活照跑；用户的回答作为新插话
+   * 重新分类。同事拿不准你会问「你是要全停？还是先继续？」——而不是先拆了
+   * 再说。ask 是旁路一次 LLM 调用（秒级），pending 的 ack 撑住这段空档。 */
+  private async askMidrunClarification(decision: DynamicInsertionDecision, text: string, images: MessageImage[], ack: HTMLElement | null): Promise<void> {
+    const llm = this.turnPhaseLlm ?? this.turnLlm;
+    const gatedFrom = typeof decision.signals.gatedFrom === 'string' ? (decision.signals.gatedFrom as InputAction) : 'replan';
+    const reading = gatedFrom === 'stop' ? '把当前任务停掉' : '推倒当前方向重来';
+    const fallback = `先不动手——你是想${reading}吗？还是我理解偏了，说一声我就照办。手头的活先照旧。`;
+    let question = '';
+    if (llm) {
+      const system = `The user typed something WHILE you are mid-task, and the router is genuinely unsure what they want. Its best reading: "${reading}" (confidence ${Math.round(decision.confidence * 100)}%). Ask ONE short confirming question in the user's language: name your best reading and ask them to confirm or correct it. Like a colleague who keeps working while asking — no apology, no filler, 1-2 sentences, no lists. Here is where the task stands:
+<current_task>
+${this.buildInsertionContext(images).slice(0, 2_000)}
+</current_task>`;
+      const request: import('../shared/types').Message[] = [
+        { role: 'system', content: system },
+        { role: 'user', content: text, images },
+      ];
+      try {
+        question = (await llm.complete(request, [], this.abortController?.signal)).content?.trim() ?? '';
+      } catch {
+        // 问询失败就用模板问——问题必须落到用户面前，静默等于赌了一把。
+      }
+    }
+    // 临时回执的历史使命完成：问题气泡接管对话。
+    ack?.parentElement?.remove();
+    const bubble = this.addBubble('assistant', '');
+    bubble.textContent = question || fallback;
+  }
+
   /** Queue an UNRELATED insert and make sure something will dispatch it. The
    * send() finally schedules the deferred dispatch only for turns that end
    * AFTER this point — a classification that lands after the turn already
@@ -2458,8 +2537,49 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
    * task or a RELATED insert frozen until the user's NEXT turn completed. */
   private queueInterjectTask(text: string, images: MessageImage[], displayText: string): void {
     this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
-    this.addStatusBubble(`⏳ 已排队：${text.length > 60 ? text.slice(0, 60) + "…" : text}（当前任务完成后处理）`, false, false);
+    this.renderQueueCard();
     if (!this.isStreaming()) this.scheduleDeferred();
+  }
+
+  /** The visible to-do queue: ONE card in the transcript that re-renders as
+   * items queue up and drain, instead of a system line per enqueue. A
+   * colleague keeps a running list you can glance at — "待办队列更新：1… 2…"
+   * — not a receipt for every entry. DOM-only by design: pendingTasks is live
+   * state (a restored session has none), so there is nothing to re-render on
+   * disk restore and nothing stale to clean up. */
+  private renderQueueCard(): void {
+    if (this.pendingTasks.length === 0) {
+      this.queueCardEl?.parentElement?.remove();
+      this.queueCardEl = null;
+      return;
+    }
+    if (!this.queueCardEl) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'bubble-row status';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble status hl-info queue-card';
+      wrapper.appendChild(bubble);
+      this.appendToTranscript(wrapper);
+      this.queueCardEl = bubble;
+    }
+    const bubble = this.queueCardEl;
+    bubble.textContent = '';
+    const title = document.createElement('div');
+    title.className = 'queue-card-title';
+    title.textContent = `⏳ 待办队列（${this.pendingTasks.length} 件）——当前任务完成后依次处理`;
+    bubble.appendChild(title);
+    const list = document.createElement('ol');
+    list.className = 'queue-card-items';
+    for (const t of this.pendingTasks) {
+      const item = document.createElement('li');
+      item.textContent = t.displayText.length > 60 ? `${t.displayText.slice(0, 60)}…` : t.displayText;
+      list.appendChild(item);
+    }
+    bubble.appendChild(list);
+    // 活卡必须活在"现在"：第一版可能落进早已归档的旧回合块（折叠/收起后
+    // 更新就没人看得见了），有在飞回合就把它挪进当前回合——计划卡同款处理。
+    const wrapper = bubble.parentElement;
+    if (wrapper && this.liveTurn) this.liveTranscript.moveNodeToTurn(wrapper, this.liveTurn);
   }
 
   /** 把定了时刻的插话交给能定时的那一层（main.ts 的持久化队列）。返回 true
@@ -2485,10 +2605,11 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
    * mechanical=true（scope 追加）：汇合边界直接把这项跑完、把结果喂给汇总
    * 轮——顺序由机制保证；mechanical=false（steer 类）：注入强框架指令。
    * 两者收尾都核验，没兑现就转排队兜底，话绝不丢。 */
-  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean): void {
+  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null): void {
     this.addBubble('user', displayText, images);
     this.pendingFoldIns.push({ text, images, displayText, delivered: false, activityCountAtDelivery: -1, mechanical });
-    this.addStatusBubble('已收到——正在跑的调研收齐后先补这项，然后合并出一份覆盖全部的汇总。', false, false);
+    // 不说"调研"——折入的追加可能是任何活，点名的任务类型说错了才突兀。
+    this.settleAck(ack, '已收到——正在跑的活收齐后先补这项，再合并出一份覆盖全部的汇总。');
   }
 
   /** 引擎侧的折入指令：命令式框架，把"别光汇总"说死——模型在汇合轮看到
@@ -2553,6 +2674,13 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     }
     if (this.pendingTasks.length > 0 && !this.autoContinue.pending) {
       const t = this.pendingTasks.shift()!;
+      const remaining = this.pendingTasks.length;
+      // 交接先说一声再动手（队列卡同步收掉这项/空了撤卡）——用户的下一句
+      // 话凭空开始跑，没有这句衔接读起来就是无中生有。
+      this.renderQueueCard();
+      this.addStatusBubble(remaining > 0
+        ? `手头的活收尾了——先处理排队的，这后面还排着 ${remaining} 件。`
+        : '手头的活收尾了——现在处理刚才排下的那件。', false, false, 'info');
       void this.send(t.text, t.images, t.displayText);
     }
   }
@@ -3924,7 +4052,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
         // 仅当是明确续跑指令时才输出“继续处理第 x 阶段第 y 个 Todo”的生硬框架；
         // 中途的新诉求沿用计划上下文，但不套用该文案，直接自然处理。
         if (isExplicitContinuation(userText)) {
-          this.addStatusBubble(`收到，我们继续处理第 ${this.activePlanNumber} 阶段的第 ${this.activeTodoNumber} 个 Todo，不重新规划。`, false, false);
+          this.addStatusBubble(`收到，接着第 ${this.activePlanNumber} 阶段的第 ${this.activeTodoNumber} 个 Todo 往下干。`, false, false);
         }
         // 用户回复即明确“开工”：聊天中的计划卡从「等待回复」切回「正在执行」。
         planProgress?.dispatch({ type: 'statusChanged', status: 'active' });
@@ -5608,6 +5736,8 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     this.hasHistory = false;
     this.activeComplexPlan = null;
     this.pendingTasks = [];
+    this.queueCardEl?.parentElement?.remove();
+    this.queueCardEl = null;
     this.relatedInsert = null;
     // 插话重构 — new chat discards steers aimed at the old conversation.
     this.pendingSteers = [];

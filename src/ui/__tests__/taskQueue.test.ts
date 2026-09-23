@@ -361,4 +361,47 @@ describe('TaskQueue scheduled input (dueAt)', () => {
     expect(persisted[0].dueAt).toBe(dueAt);
     queue.cancelAll();
   });
+
+  it('announces a scheduled task when its moment arrives, and stays silent for plain queue tasks', async () => {
+    // 定时任务到点开跑时用户一个字都没打——没有"到点了，现在开始"的衔接，
+    // 对话流里凭空冒出一段执行。非定时任务不宣告：用户刚排的队，语境还在。
+    const storage = fakeStorage([]);
+    installStorage(storage);
+    const statuses: string[] = [];
+    const chat: QueueChat & { sends: string[] } = {
+      sends: [],
+      send: (text: string) => {
+        chat.sends.push(text);
+        return Promise.resolve();
+      },
+      notifyStatus: (text: string) => statuses.push(text),
+    };
+    const queue = new TaskQueue({
+      chat,
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj', sessionId: 'sess' }),
+    });
+    queue.enqueue('下午三点的活', { dueAt: Date.now() + 30 });
+    const plainQueueChat: QueueChat & { sends: string[] } = {
+      sends: [],
+      send: (text: string) => {
+        plainQueueChat.sends.push(text);
+        return Promise.resolve();
+      },
+    };
+    void new TaskQueue({
+      chat: plainQueueChat,
+      storageKey: 'pure_task_queue_plain_test',
+      getContext: () => ({ workspace: '/proj', sessionId: 'sess' }),
+    }).enqueue('不定时的活', {});
+    await wait(60);
+    expect(chat.sends).toEqual(['下午三点的活']);
+    expect(statuses.length).toBe(1);
+    expect(statuses[0]).toContain('之前排期的活到点了');
+    expect(statuses[0]).toContain('下午三点的活');
+    // 不定时的那条没宣告，话照常跑到。
+    await wait(60);
+    expect(plainQueueChat.sends).toEqual(['不定时的活']);
+    queue.cancelAll();
+  });
 });

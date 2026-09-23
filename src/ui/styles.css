@@ -1590,6 +1590,32 @@ body {
   font-weight: 600;
 }
 
+/* ── 待办队列卡（chat.ts renderQueueCard）──
+ * Queued inserts render as ONE card that re-renders in place as items queue
+ * up and drain — a list you can glance at, not a system line per enqueue.
+ * Sits in the conversation flow like any status bubble; the <ol> adds the
+ * numbering the title promises ("N 件……依次处理"). */
+.bubble.queue-card {
+  white-space: normal;
+}
+.queue-card-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.queue-card-items {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 2px;
+  font-weight: 400;
+}
+.queue-card-items li::marker {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 @keyframes statusPulse {
   0%, 100% { opacity: 0.7; }
   50% { opacity: 1; }
