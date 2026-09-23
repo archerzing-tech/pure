@@ -1075,3 +1075,24 @@ describe('subagent card readability', () => {
     expect(dark).toContain('color: #d8e8fb');
   });
 });
+
+// The scroll window is the one place where a long transcript's cost lands: a
+// chatty command renders up to 500 highlighted lines per body, and dozens of
+// open bodies at once made scrolling miss every other frame (measured rAF gap
+// p95 33ms → 19ms with containment). It is a CSS-only fix, so a test is the
+// only thing standing between it and a future "cleanup".
+describe('tool card scroll cost', () => {
+  const css = readUi('../styles.css');
+
+  it('keeps the tool scroll window contained so long transcripts stay in frame', () => {
+    const scroll = cssRuleBlock(css, '.tool-row-scroll {', 'contain');
+    expect(scroll).toContain('overflow-y: auto');
+    expect(scroll).toContain('contain: layout paint');
+    // `style` is intentionally out (counters/quotes isolation, no measured
+    // benefit) and the rule must stay on the INNER window: containment on the
+    // outer body or on #chat is the variant that has left restored rows blank
+    // in WKWebView before.
+    expect(scroll).not.toContain('contain: content');
+    expect(scroll).not.toContain('contain: layout paint style');
+  });
+});
