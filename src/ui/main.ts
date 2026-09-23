@@ -6,7 +6,9 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, runningSessionIdList, BASE_SYSTEM_PROMPT } from './chat';
+import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, runningSessionIdList, setTimedInputSink, BASE_SYSTEM_PROMPT, type TimedInputRequest } from './chat';
+import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRoute';
+import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
@@ -63,7 +65,8 @@ import { SettleNotifier } from './notify';
 import { buildTraySessionItems } from './traySessions';
 import { SessionSidebar, openPureWindow } from './sessionSidebar';
 import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
-import { groupConversationTurns, segmentConversationTurns } from './conversationTurns';
+import { formatSegmentSummary, groupConversationTurns, segmentConversationTurns } from './conversationTurns';
+import { createHistoryGroup, type HistoryGroupHandle } from './transcriptHistory';
 import { loadDeferredStyles } from './deferredStyles';
 
 const chat = new SessionChatManager();
@@ -373,6 +376,41 @@ const taskQueue = new TaskQueue({
   chatFor: (ctx) => chat.controllerFor(ctx.sessionId),
   getContext: () => ({ workspace: chat.getWorkspace(), sessionId: chat.getSessionId() }),
 });
+
+// ── Input-level time semantics ────────────────────────────────────────────
+// "下午三点再跑一遍测试" must not start now. Only the queue can actually WAIT
+// (its `dueAt` is persisted and re-arms its own timer across a reload), so the
+// decision to hold is taken here and handed straight to it. Both echo surfaces
+// quote the user's OWN words for the time when they gave any — showing only a
+// resolved "15:00" reads like a schedule the user never asked for.
+function scheduleTimedInput(request: TimedInputRequest): boolean {
+  if (!Number.isFinite(request.at) || request.at <= Date.now()) return false;
+  const label = describeTiming({ mode: 'at', at: request.at, text: request.timingText });
+  const preview = request.displayText.length > 60 ? `${request.displayText.slice(0, 60)}…` : request.displayText;
+  // Recorded as its own decision, in the same log as the routing ones: "when
+  // does this run" is a second question about the same input, and a replay must
+  // be able to see both.
+  recordScheduledInput(prefetchTurnRoute(request.text, request.images), request.at);
+  taskQueue.enqueue(request.text, { dueAt: request.at });
+  chat.notifyStatus(`⏳ 已排期：${label}执行「${preview}」——排期不占用当前对话，到时自动开始。`);
+  showToast(`⏳ 已排期：${label}执行`, 4000);
+  return true;
+}
+setTimedInputSink(scheduleTimedInput);
+
+/** The host-side gate: does this input name its own run time? Returns true when
+ *  it was held, so the caller must not send it.
+ *
+ *  It sits at the HOST boundary (here / the interject key, not chat.send) for a
+ *  hard reason: a send that already reached the engine resolves the same clock
+ *  against "now" at a later moment, rolls to tomorrow, and quietly turns one
+ *  scheduled run into a daily one. The queue's own dispatches call chat.send
+ *  directly — one hop below this gate, so they can never be re-held. */
+function holdIfScheduled(text: string, displayText: string, images: import('../shared/types').MessageImage[] = []): boolean {
+  const prefetch = prefetchTurnRoute(text, images);
+  if (!prefetch.defer || !prefetch.timing.at) return false;
+  return scheduleTimedInput({ text, images, displayText, at: prefetch.timing.at, timingText: prefetch.timing.text });
+}
 
 // ── Parallel-task dock (4.3): one card per background streaming session ──
 // Same deps feed the renderer and the click wiring (card → jump, stop →
@@ -948,12 +986,11 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
   const grouped = groupConversationTurns(blocks);
   const segments = segmentConversationTurns(grouped.turns);
   const restoreGroups = [
-    ...(grouped.preamble.length > 0 ? [{ blocks: grouped.preamble, collapsed: false, startTurn: 0, endTurn: 0 }] : []),
+    ...(grouped.preamble.length > 0 ? [{ blocks: grouped.preamble, historical: false, segment: null }] : []),
     ...segments.map(segment => ({
       blocks: segment.turns.flatMap(turn => turn.blocks),
-      collapsed: segment.collapsed,
-      startTurn: segment.startTurn,
-      endTurn: segment.endTurn,
+      historical: segment.historical,
+      segment,
     })),
   ];
   const restoreToken = ++sessionRestoreToken;
@@ -1112,49 +1149,29 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
     flushReplayTools();
   };
 
+  // History groups come from the SAME container the live transcript folds
+  // with (transcriptHistory.ts): expanded by default, materialized as they
+  // approach the viewport, so scrolling up reveals history instead of a click
+  // being required — and a reopened session looks exactly like it did live.
+  const historyGroups: HistoryGroupHandle[] = [];
+
   try {
     for (const group of restoreGroups) {
       if (!isCurrentRestore()) return;
-      if (!group.collapsed) {
+      if (!group.historical || !group.segment) {
         await renderReplayBlocks(group.blocks, chatEl);
         continue;
       }
 
-      const segmentDetails = document.createElement('details');
-      segmentDetails.className = 'conversation-segment';
-      const summary = document.createElement('summary');
-      summary.className = 'conversation-segment-summary';
-      const first = group.blocks.find(block => block.type === 'user')?.content?.trim().replace(/\s+/g, ' ') || '历史内容';
-      const preview = first.length > 56 ? `${first.slice(0, 56)}…` : first;
-      summary.textContent = `第 ${group.startTurn}–${group.endTurn} 轮 · ${preview}`;
-      const body = document.createElement('div');
-      body.className = 'conversation-segment-body';
-      segmentDetails.append(summary, body);
-      chatEl.appendChild(segmentDetails);
-
-      const parkedSegmentContent: Node[] = [];
-      let renderPromise: Promise<void> | null = null;
-      const park = (): void => {
-        while (body.firstChild) parkedSegmentContent.push(body.removeChild(body.firstChild));
-      };
-      const mount = (): void => {
-        while (parkedSegmentContent.length > 0) body.appendChild(parkedSegmentContent.shift()!);
-      };
-      const renderOnDemand = async (): Promise<void> => {
-        mount();
-        if (body.childElementCount > 0) return;
-        if (!renderPromise) {
-          renderPromise = renderReplayBlocks(group.blocks, body).finally(() => {
-            renderPromise = null;
-            if (!segmentDetails.open) park();
-          });
-        }
-        await renderPromise;
-      };
-      segmentDetails.addEventListener('toggle', () => {
-        if (segmentDetails.open) void renderOnDemand();
-        else if (!renderPromise) park();
-      });
+      const segment = group.segment;
+      const historyGroup = createHistoryGroup({ scrollRoot: scrollContainer });
+      historyGroup.setSummary(formatSegmentSummary(segment));
+      chatEl.appendChild(historyGroup.el);
+      historyGroup.setLazyRenderer(() => renderReplayBlocks(group.blocks, historyGroup.body));
+      historyGroups.push(historyGroup);
+      // No IntersectionObserver (tests / old webviews) means nothing will ever
+      // ask for the content, so build it here.
+      if (typeof IntersectionObserver !== 'function') await historyGroup.renderNow();
       await yieldIfNeeded();
     }
     if (!isCurrentRestore()) return;
@@ -1176,6 +1193,14 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
     // when the restore was superseded, so a hidden session never keeps a stuck
     // "正在加载会话…" spinner in its transcript column.
     loadingRow.remove();
+    // Groups own the observers that drive their materialization; a superseded
+    // restore must not keep building DOM into a host the user has already
+    // navigated away from (the token guard in renderReplayBlocks would stop it,
+    // but leaving observers alive also leaks one per group).
+    if (!isCurrentRestore()) {
+      for (const group of historyGroups) group.disconnect();
+      historyGroups.length = 0;
+    }
   }
   // Only the CURRENT restore may dismiss the overlay: a stale restore (user
   // already clicked a newer session) must not hide the newer session's
@@ -1455,7 +1480,10 @@ promptEl.addEventListener('keydown', (e) => {
       const text = promptEl.value.trim();
       if (text) {
         promptHistory.remember(text);
-        void chat.interject(text, [], text);
+        // 插话也可能自带时刻（"下午三点再跑一遍"）——在收走输入框之前先判断，
+        // 否则这条会被当成"插进当前轮的活"当场跑掉。
+        const held = holdIfScheduled(text, text);
+        if (!held) void chat.interject(text, [], text);
         promptEl.value = '';
         promptEl.style.height = 'auto';
         promptEl.placeholder = t('input.queued');
@@ -1636,6 +1664,10 @@ async function doSend(text: string, displayOverride?: string, pathRepairs: impor
   pasteChips.clear();
   try {
     enterChatMode();
+    // 输入级时间语义：草稿自己报了执行时刻就不发出去，交给能等的队列（见
+    // holdIfScheduled）。放在 enterChatMode 之后，因为"已排期"的状态行要落在
+    // 真实会话的转录里，而不是 landing 视图上。
+    if (holdIfScheduled(fullText, displayText, images)) return;
     await chat.send(fullText, images, displayText, false, attachmentMetadata, openAttachment, pathRepairs);
   } catch (err: any) {
     showToast(`${t('toast.sendFailed')}: ${err?.message || err}`);

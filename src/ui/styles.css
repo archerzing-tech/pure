@@ -1305,15 +1305,18 @@ body {
   display: none;
 }
 
-/* ── Conversation history segments ── */
-.conversation-segment {
+/* ── Conversation history groups ──
+   ONE container for both producers (live transcript + disk restore); see
+   transcriptHistory.ts. Groups are expanded by default, so this is a reading
+   aid the user can fold away — never a place history hides. */
+.transcript-history-group {
   width: 100%;
   border: 1px solid var(--border-light);
   border-radius: 12px;
   background: color-mix(in srgb, var(--bg-card, #fff) 98%, var(--accent-soft));
   overflow: hidden;
 }
-.conversation-segment-summary {
+.transcript-history-group-summary {
   display: flex;
   align-items: center;
   min-height: 36px;
@@ -1324,26 +1327,26 @@ body {
   list-style: none;
   user-select: none;
 }
-.conversation-segment-summary::-webkit-details-marker { display: none; }
-.conversation-segment-summary::before {
+.transcript-history-group-summary::-webkit-details-marker { display: none; }
+.transcript-history-group-summary::before {
   content: '›';
   width: 16px;
   color: var(--text-tertiary);
   font-size: 17px;
   transition: transform var(--transition);
 }
-.conversation-segment[open] > .conversation-segment-summary {
+.transcript-history-group[open] > .transcript-history-group-summary {
   border-bottom: 1px solid var(--border-light);
   color: var(--text);
 }
-.conversation-segment[open] > .conversation-segment-summary::before { transform: rotate(90deg); }
-.conversation-segment-body {
+.transcript-history-group[open] > .transcript-history-group-summary::before { transform: rotate(90deg); }
+.transcript-history-group-body {
   display: flex;
   flex-direction: column;
   gap: 16px;
   padding: 0 12px 12px;
 }
-.conversation-segment-body > .bubble-row:first-child { margin-top: 12px; }
+.transcript-history-group-body > .bubble-row:first-child { margin-top: 12px; }
 
 /* ── Chat area ── */
 
@@ -1391,47 +1394,11 @@ body {
   width: 100%;
   gap: 16px;
 }
-.bubble-turn.archived {
-  gap: 0;
+/* Folded turns keep the gap their siblings have (their nodes now live inside
+   a .transcript-history-group). */
+.bubble-turn[data-turn-state="grouped"] {
+  display: none;
 }
-.live-turn-archive {
-  width: 100%;
-  border: 1px solid var(--border-light);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--bg-card, #fff) 98%, var(--accent-soft));
-  overflow: hidden;
-}
-.live-turn-archive-summary {
-  display: flex;
-  align-items: center;
-  min-height: 36px;
-  padding: 7px 12px;
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-size: 12px;
-  list-style: none;
-  user-select: none;
-}
-.live-turn-archive-summary::-webkit-details-marker { display: none; }
-.live-turn-archive-summary::before {
-  content: '›';
-  width: 16px;
-  color: var(--text-tertiary);
-  font-size: 17px;
-  transition: transform var(--transition);
-}
-.live-turn-archive[open] > .live-turn-archive-summary {
-  border-bottom: 1px solid var(--border-light);
-  color: var(--text);
-}
-.live-turn-archive[open] > .live-turn-archive-summary::before { transform: rotate(90deg); }
-.live-turn-archive-body {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 0 12px 12px;
-}
-.live-turn-archive-body > .bubble-row:first-child { margin-top: 12px; }
 .bubble-row {
   display: flex;
   flex-direction: column;
@@ -1932,6 +1899,28 @@ body {
 .tool-row-scroll {
   max-height: 320px;
   overflow-y: auto;
+  /* Layout + paint containment. A chatty command renders up to 500 lines (each
+     its own highlighted span) inside this window, and a mid-length transcript
+     carries dozens of such bodies at once: a 40-turn session with 120-line
+     outputs measured 30k px of transcript and 9.9k elements, all in one
+     layout/paint tree. Scrolling it made the main thread miss every other
+     frame (rAF gap p95 33ms vs 19ms; total task time 0.98s vs 0.70s per 9s of
+     wheel input), while Layout stayed at 0s and Script at 0.03s — so the cost
+     was repainting each body's subtree as it crossed the viewport, not JS and
+     not the node count (swapping 4,800 line spans for plain text kept p95 at
+     32ms). Containing the subtree here removes that walk: same content, same
+     DOM, p95 back to 19ms.
+     Nothing inside needs to escape this box. The image lightbox and the
+     mermaid/paste viewers mount on document.body, and the only absolutely
+     positioned child (the image download button) anchors to .image-card,
+     itself inside; overflow-y: auto already clipped this window, so paint
+     containment adds no visual change. `style` is deliberately left out —
+     layout + paint are what the measurement asked for, and style containment
+     would isolate counters/quotes for no gain.
+     Measured under headless Chromium; re-check in WKWebView before reusing
+     this recipe elsewhere (see the #chat note above about contain/
+     content-visibility leaving restored rows blank). */
+  contain: layout paint;
 }
 .tool-row-expanded .tool-row-scroll,
 .bubble-row.tool-grid > .bubble-row.tool-row-row:only-child .tool-row-scroll {

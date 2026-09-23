@@ -445,16 +445,21 @@ async function main(): Promise<number> {
     await evaluate(`document.querySelector('.sidebar-session-item[data-sid="${sid}"]').click()`);
     try {
       await waitFor(async () => {
-        const segments = Number(await evaluate(`document.querySelectorAll('#chat .conversation-segment').length`));
+        // History groups exist as containers immediately; their CONTENT is
+        // materialized by the viewport, so only the plain tail is guaranteed to
+        // be built here.
+        const groups = Number(await evaluate(`document.querySelectorAll('#chat .transcript-history-group').length`));
         const restoring = Number(await evaluate(`document.querySelectorAll('#chat .status.loading').length`));
-        const userRows = Number(await evaluate(`document.querySelectorAll('#chat .session-transcript:not([hidden]) .bubble-row.user, #chat .bubble-row.user').length`));
-        const last = String(await evaluate(`Array.from(document.querySelectorAll('#chat .session-transcript:not([hidden]) .bubble-row.user, #chat .bubble-row.user')).at(-1)?.textContent ?? ''`));
-        return segments === 20 && restoring === 0 && userRows === 8 && last.includes('第 200 轮用户请求');
+        // A restore appends the plain tail straight into the transcript column
+        // (no .bubble-turn wrapper — that container is the LIVE path's turn).
+        const plainUserRows = Number(await evaluate(`Array.from(document.querySelectorAll('#chat .bubble-row.user')).filter((el) => !el.closest('.transcript-history-group')).length`));
+        const last = String(await evaluate(`Array.from(document.querySelectorAll('#chat .bubble-row.user')).filter((el) => !el.closest('.transcript-history-group')).at(-1)?.textContent ?? ''`));
+        return groups === 20 && restoring === 0 && plainUserRows === 8 && last.includes('第 200 轮用户请求');
       }, 120000, '200-turn conversation render');
     } catch (error) {
       const diagnostic = await evaluate(`(() => JSON.stringify({
-        segments: document.querySelectorAll('#chat .conversation-segment').length,
-        collapsed: Array.from(document.querySelectorAll('#chat .conversation-segment')).filter((segment) => !segment.open).length,
+        groups: document.querySelectorAll('#chat .transcript-history-group').length,
+        collapsed: Array.from(document.querySelectorAll('#chat .transcript-history-group')).filter((group) => !group.open).length,
         userRows: document.querySelectorAll('#chat .bubble-row.user').length,
         loadingRows: document.querySelectorAll('#chat .status.loading').length,
         chatChildren: Array.from(document.querySelector('#chat')?.children ?? []).map((child) => ({ tag: child.tagName, className: child.className, text: child.textContent?.trim().slice(0, 80) ?? '' })),
@@ -464,42 +469,48 @@ async function main(): Promise<number> {
       throw error;
     }
     const longView = JSON.parse(String(await evaluate(`(() => JSON.stringify({
-      segments: document.querySelectorAll('#chat .conversation-segment').length,
-      collapsed: Array.from(document.querySelectorAll('#chat .conversation-segment')).filter((segment) => !segment.open).length,
-      expanded: Array.from(document.querySelectorAll('#chat .conversation-segment')).filter((segment) => segment.open).length,
-      recentRows: document.querySelectorAll('#chat .session-transcript:not([hidden]) .bubble-row.user, #chat .bubble-row.user').length,
-      mountedRows: document.querySelectorAll('#chat .session-transcript:not([hidden]) .bubble-row, #chat .bubble-row').length,
-      emptyCollapsedBodies: Array.from(document.querySelectorAll('#chat .conversation-segment-body')).filter((body) => body.childElementCount === 0).length,
-      lastText: Array.from(document.querySelectorAll('#chat .session-transcript:not([hidden]) .bubble-row.user, #chat .bubble-row.user')).at(-1)?.querySelector('.bubble')?.textContent ?? '',
+      groups: document.querySelectorAll('#chat .transcript-history-group').length,
+      collapsed: Array.from(document.querySelectorAll('#chat .transcript-history-group')).filter((group) => !group.open).length,
+      expanded: Array.from(document.querySelectorAll('#chat .transcript-history-group')).filter((group) => group.open).length,
+      recentRows: Array.from(document.querySelectorAll('#chat .bubble-row.user')).filter((el) => !el.closest('.transcript-history-group')).length,
+      mountedRows: Array.from(document.querySelectorAll('#chat .bubble-row')).filter((el) => !el.closest('.transcript-history-group')).length,
+      materializedGroups: Array.from(document.querySelectorAll('#chat .transcript-history-group-body')).filter((body) => body.childElementCount > 0).length,
+      summaries: Array.from(document.querySelectorAll('#chat .transcript-history-group-summary')).slice(0, 2).map((el) => el.textContent ?? ''),
+      lastText: Array.from(document.querySelectorAll('#chat .bubble-row.user')).filter((el) => !el.closest('.transcript-history-group')).at(-1)?.querySelector('.bubble')?.textContent ?? '',
     }))()`)));
-    const firstSegment = '#chat .conversation-segment:first-of-type';
-    await evaluate(`document.querySelector('${firstSegment} > summary')?.click()`);
+    // Groups are EXPANDED by default: history appears by scrolling to it, not by
+    // clicking a closed summary open (the old behaviour that made a reopened
+    // conversation look like it had lost everything).
+    const firstGroup = '#chat .transcript-history-group:first-of-type';
+    await evaluate(`document.querySelector('${firstGroup}')?.scrollIntoView({ block: 'start' })`);
     try {
-      await waitFor(async () => Number(await evaluate(`document.querySelector('${firstSegment} .conversation-segment-body')?.querySelectorAll('.bubble-row.user').length ?? 0`)) === 10, 25000, 'first history segment expansion');
+      await waitFor(async () => Number(await evaluate(`document.querySelector('${firstGroup} .transcript-history-group-body')?.querySelectorAll('.bubble-row.user').length ?? 0`)) === 10, 25000, 'first history group materialization');
     } catch (error) {
       const diagnostic = await evaluate(`(() => JSON.stringify({
-        selector: '${firstSegment}',
-        exists: !!document.querySelector('${firstSegment}'),
-        open: document.querySelector('${firstSegment}')?.open ?? null,
-        bodyChildren: document.querySelector('${firstSegment} .conversation-segment-body')?.childElementCount ?? null,
-        bodyText: document.querySelector('${firstSegment} .conversation-segment-body')?.textContent?.slice(0, 120) ?? '',
+        selector: '${firstGroup}',
+        exists: !!document.querySelector('${firstGroup}'),
+        open: document.querySelector('${firstGroup}')?.open ?? null,
+        bodyChildren: document.querySelector('${firstGroup} .transcript-history-group-body')?.childElementCount ?? null,
+        bodyText: document.querySelector('${firstGroup} .transcript-history-group-body')?.textContent?.slice(0, 120) ?? '',
       }))()`);
-      log(`[verify] first history segment expansion diagnostic: ${String(diagnostic)}`);
+      log(`[verify] first history group materialization diagnostic: ${String(diagnostic)}`);
       throw error;
     }
-    const expandedSegmentRows = Number(await evaluate(`document.querySelector('${firstSegment} .conversation-segment-body')?.querySelectorAll('.bubble-row').length ?? 0`));
-    await evaluate(`document.querySelector('${firstSegment} > summary')?.click()`);
-    await waitFor(async () => Number(await evaluate(`document.querySelector('${firstSegment} .conversation-segment-body')?.childElementCount ?? 0`)) === 0, 25000, 'first history segment unload');
+    const materializedGroupRows = Number(await evaluate(`document.querySelector('${firstGroup} .transcript-history-group-body')?.querySelectorAll('.bubble-row').length ?? 0`));
+    await evaluate(`document.querySelector('${firstGroup} > summary')?.click()`);
+    await waitFor(async () => Number(await evaluate(`document.querySelector('${firstGroup} .transcript-history-group-body')?.childElementCount ?? 0`)) === 0, 25000, 'first history group unload');
     const checks: Array<[string, unknown, unknown]> = [
-      ['200 轮恢复 → 旧段折叠数量', longView.collapsed, 20],
-      ['200 轮恢复 → 最近段展开数量', longView.expanded, 0],
+      ['200 轮恢复 → 历史组数量', longView.groups, 20],
+      ['200 轮恢复 → 历史组默认全部展开', longView.expanded, 20],
+      ['200 轮恢复 → 默认没有折叠的历史组', longView.collapsed, 0],
       ['200 轮恢复 → 最近 8 轮保留在主滚动层', longView.recentRows, 8],
       ['200 轮恢复 → live DOM 只挂载最近 8 轮', longView.mountedRows, 16],
-      ['200 轮恢复 → 折叠段内容已卸载', longView.emptyCollapsedBodies, 20],
-      ['200 轮恢复 → 展开历史段按需挂载 10 轮', expandedSegmentRows, 20],
+      ['200 轮恢复 → 历史组内容已构建（滚动即可见，无需点击）', longView.materializedGroups, 20],
+      ['200 轮恢复 → 历史组挂载 10 轮', materializedGroupRows, 20],
+      ['200 轮恢复 → 历史组摘要含工作量', longView.summaries[0]?.includes('轮') ?? false, true],
       ['200 轮恢复 → 最后一轮内容保留', longView.lastText, '第 200 轮用户请求'],
     ];
-    let longOk = longView.segments === 20;
+    let longOk = longView.groups === 20;
     for (const [name, actual, want] of checks) {
       const pass = actual === want;
       if (!pass) longOk = false;

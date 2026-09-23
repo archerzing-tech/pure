@@ -1,35 +1,49 @@
+import {
+  createHistoryGroup,
+  formatHistoryGroupSummary,
+  TRANSCRIPT_GROUP_THRESHOLD,
+  TRANSCRIPT_GROUP_TURNS,
+  TRANSCRIPT_RECENT_PLAIN_TURNS,
+  type HistoryGroupHandle,
+} from './transcriptHistory';
+
 export interface LiveTurnHandle {
   id: number;
   host: HTMLElement;
   userText: string;
   completed: boolean;
-  parked: Node[];
+  /** True once the turn has been folded into a history group. */
+  grouped: boolean;
 }
 
 export interface LiveTranscriptWindowOptions {
-  maxMountedTurns?: number;
   /** Session-owned transcript column this live window appends into. Defaults
    * to the shared #chat element (single-session mode). */
   root?: HTMLElement | null;
-}
-
-const DEFAULT_MAX_MOUNTED_TURNS = 8;
-
-export function summarizeLiveTurn(userText: string, turnNumber: number): string {
-  const preview = userText.trim().replace(/\s+/g, ' ');
-  const short = preview.length > 72 ? `${preview.slice(0, 72)}…` : preview;
-  return `第 ${turnNumber} 轮 · ${short || '无文本请求'}`;
+  /** Scrolling container the history groups observe. Defaults to #chat. */
+  scrollRoot?: HTMLElement | null;
+  groupSize?: number;
+  recentPlainTurns?: number;
+  groupThreshold?: number;
 }
 
 export class LiveTranscriptWindow {
-  private readonly maxMountedTurns: number;
   private readonly rootEl: HTMLElement | null;
+  private readonly scrollRoot: HTMLElement | null;
+  private readonly groupSize: number;
+  private readonly recentPlainTurns: number;
+  private readonly groupThreshold: number;
   private readonly turns: LiveTurnHandle[] = [];
+  private readonly groups: HistoryGroupHandle[] = [];
+  private groupedTurns = 0;
   private nextTurnId = 1;
 
   constructor(options: LiveTranscriptWindowOptions = {}) {
-    this.maxMountedTurns = Math.max(1, Math.floor(options.maxMountedTurns ?? DEFAULT_MAX_MOUNTED_TURNS));
     this.rootEl = options.root ?? null;
+    this.scrollRoot = options.scrollRoot ?? null;
+    this.groupSize = Math.max(1, Math.floor(options.groupSize ?? TRANSCRIPT_GROUP_TURNS));
+    this.recentPlainTurns = Math.max(0, Math.floor(options.recentPlainTurns ?? TRANSCRIPT_RECENT_PLAIN_TURNS));
+    this.groupThreshold = Math.max(0, Math.floor(options.groupThreshold ?? TRANSCRIPT_GROUP_THRESHOLD));
   }
 
   /** Root transcript container this live window writes into. */
@@ -53,10 +67,10 @@ export class LiveTranscriptWindow {
       host,
       userText,
       completed: false,
-      parked: [],
+      grouped: false,
     };
     this.turns.push(turn);
-    this.archiveOldTurns();
+    this.compactHistory();
     return turn;
   }
 
@@ -64,37 +78,46 @@ export class LiveTranscriptWindow {
     if (!this.turns.includes(turn)) return;
     turn.completed = true;
     turn.host.dataset.turnState = 'complete';
-    this.archiveOldTurns();
+    this.compactHistory();
   }
 
   reset(): void {
     this.turns.length = 0;
+    this.groups.length = 0;
+    this.groupedTurns = 0;
     this.nextTurnId = 1;
   }
 
+  /** Turns still mounted as plain, individually visible turns. */
   getMountedTurnCount(): number {
-    return this.turns.filter(turn => turn.host.dataset.turnState !== 'archived').length;
+    return this.turns.filter(turn => !turn.grouped).length;
   }
 
-  getArchivedTurnCount(): number {
-    return this.turns.filter(turn => turn.host.dataset.turnState === 'archived').length;
+  /** Turns folded into a history group (their content is mounted on demand). */
+  getGroupedTurnCount(): number {
+    return this.turns.filter(turn => turn.grouped).length;
+  }
+
+  /** The history groups built so far, oldest first (diagnostics + tests). */
+  getGroupHandles(): readonly HistoryGroupHandle[] {
+    return this.groups;
   }
 
   moveNodeToTurn(node: Node, target: LiveTurnHandle): boolean {
-    if (!this.turns.includes(target)) return false;
+    if (!this.turns.includes(target) || target.grouped) return false;
     for (const turn of this.turns) {
-      if (turn === target) continue;
-      const parkedIndex = turn.parked.indexOf(node);
-      if (parkedIndex >= 0) {
-        turn.parked.splice(parkedIndex, 1);
-        target.host.appendChild(node);
-        return true;
-      }
+      if (turn === target || turn.grouped) continue;
       if (turn.host.contains(node)) {
         node.parentNode?.removeChild(node);
         target.host.appendChild(node);
         return true;
       }
+    }
+    for (const group of this.groups) {
+      if (!group.contains(node)) continue;
+      group.detach(node);
+      target.host.appendChild(node);
+      return true;
     }
     const chat = this.root();
     if (chat && node.parentNode === chat) {
@@ -105,41 +128,61 @@ export class LiveTranscriptWindow {
     return false;
   }
 
-  private archiveOldTurns(): void {
-    const mountedCompleted = this.turns.filter(turn => turn.completed && turn.host.dataset.turnState !== 'archived');
-    const hasActiveTurn = this.turns.at(-1)?.completed === false;
-    const keepCount = Math.max(0, this.maxMountedTurns - (hasActiveTurn ? 1 : 0));
-    const keep = new Set(keepCount > 0 ? mountedCompleted.slice(-keepCount) : []);
-    for (const turn of mountedCompleted) {
-      if (keep.has(turn)) continue;
-      this.archive(turn);
+  /**
+   * Fold the oldest turns into history groups once the session is long enough
+   * that browsing it needs structure. The newest `recentPlainTurns` turns stay
+   * plain, and every `groupSize` turns before them become ONE group — the same
+   * segmentation a disk restore produces, and expanded by default either way.
+   */
+  private compactHistory(): void {
+    if (this.turns.length <= this.groupThreshold) return;
+    const targetGrouped = this.turns.length - this.recentPlainTurns;
+    while (this.groupedTurns + this.groupSize <= targetGrouped) {
+      const slice = this.turns.slice(this.groupedTurns, this.groupedTurns + this.groupSize);
+      this.foldTurns(slice);
+      this.groupedTurns += slice.length;
     }
   }
 
-  private archive(turn: LiveTurnHandle): void {
-    const host = turn.host;
-    const parked: Node[] = [];
-    while (host.firstChild) parked.push(host.removeChild(host.firstChild));
-    turn.parked = parked;
+  private foldTurns(slice: LiveTurnHandle[]): void {
+    const group = createHistoryGroup({ scrollRoot: this.scrollRoot, parkOffscreen: true });
+    const nodes: Node[] = [];
+    let toolCalls = 0;
+    let artifacts = 0;
+    for (const turn of slice) {
+      // The live transcript has no projected blocks, so the group summary is
+      // counted from the DOM the turns already built.
+      toolCalls += turn.host.querySelectorAll('.tool-row-row').length;
+      artifacts += turn.host.querySelectorAll('.bubble-row.artifact-row').length;
+      while (turn.host.firstChild) nodes.push(turn.host.removeChild(turn.host.firstChild));
+    }
+    group.setSummary(formatHistoryGroupSummary({
+      startTurn: slice[0].id,
+      endTurn: slice[slice.length - 1].id,
+      turnCount: slice.length,
+      toolCalls,
+      artifacts,
+      preview: slice[0].userText,
+    }));
 
-    const details = document.createElement('details');
-    details.className = 'live-turn-archive';
-    const summary = document.createElement('summary');
-    summary.className = 'live-turn-archive-summary';
-    summary.textContent = summarizeLiveTurn(turn.userText, turn.id);
-    const body = document.createElement('div');
-    body.className = 'live-turn-archive-body';
-    details.append(summary, body);
-    host.classList.add('archived');
-    host.dataset.turnState = 'archived';
-    host.appendChild(details);
+    const chat = this.root();
+    // The group takes the place of the turns it absorbs: before the first turn
+    // that is still plain, so the transcript order never changes.
+    const anchor = this.turns.find(turn => !turn.grouped && turn.host.isConnected)?.host ?? null;
+    if (anchor) chat.insertBefore(group.el, anchor);
+    else chat.appendChild(group.el);
 
-    details.addEventListener('toggle', () => {
-      if (details.open) {
-        while (turn.parked.length > 0) body.appendChild(turn.parked.shift()!);
-      } else {
-        while (body.firstChild) turn.parked.push(body.removeChild(body.firstChild));
-      }
-    });
+    for (const turn of slice) {
+      turn.grouped = true;
+      turn.host.dataset.turnState = 'grouped';
+      turn.host.remove();
+    }
+    group.adopt(nodes);
+    this.groups.push(group);
+    // A group covers the OLD part of a long session, so it is normally off
+    // screen: the group's viewport observer parks the content on its first
+    // callback and mounts it again the moment the reader scrolls up to it. No
+    // explicit park() here — a group that happens to land inside the viewport
+    // must keep its content mounted.
   }
 }

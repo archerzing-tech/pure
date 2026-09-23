@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { LiveTranscriptWindow, summarizeLiveTurn } from '../liveTranscriptWindow';
+import { LiveTranscriptWindow } from '../liveTranscriptWindow';
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -12,62 +12,96 @@ afterAll(() => {
 
 beforeEach(() => {
   document.body.innerHTML = '<div id="chat"></div>';
+  // These cases assert the folding MODEL (grouping, parking, adoption). The
+  // viewport-driven mounting is a browser concern — scripts/verify-plan-restore
+  // covers it against real Chrome, where IntersectionObserver exists.
+  delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
 });
 
+// Small numbers so the folding rules are exercised by a short test session.
+const SMALL = { groupThreshold: 4, recentPlainTurns: 2, groupSize: 2 };
+
+function runTurns(window: LiveTranscriptWindow, count: number): void {
+  for (let i = 1; i <= count; i++) {
+    const turn = window.startTurn(`任务 ${i}`);
+    turn.host.append(document.createElement('div'), document.createElement('div'));
+    window.finishTurn(turn);
+  }
+}
+
 describe('LiveTranscriptWindow', () => {
-  it('keeps the newest completed turns mounted and archives older whole turns', () => {
-    const window = new LiveTranscriptWindow({ maxMountedTurns: 3 });
-    for (let i = 1; i <= 6; i++) {
-      const turn = window.startTurn(`任务 ${i}`);
-      turn.host.append(document.createElement('div'), document.createElement('div'));
-      window.finishTurn(turn);
-    }
+  it('keeps a short session entirely plain — nothing folds below the threshold', () => {
+    const window = new LiveTranscriptWindow({ ...SMALL, groupThreshold: 10 });
+    runTurns(window, 6);
 
-    expect(window.getArchivedTurnCount()).toBe(3);
-    expect(window.getMountedTurnCount()).toBe(3);
-    expect(document.querySelectorAll('.live-turn-archive')).toHaveLength(3);
-    expect(document.querySelectorAll('#chat > .bubble-turn:not(.archived)')).toHaveLength(3);
-    expect(document.querySelectorAll('.live-turn-archive-body > *')).toHaveLength(0);
+    expect(window.getMountedTurnCount()).toBe(6);
+    expect(window.getGroupedTurnCount()).toBe(0);
+    expect(document.querySelectorAll('.transcript-history-group')).toHaveLength(0);
   });
 
-  it('keeps eight completed turns mounted when the window is idle', () => {
-    const window = new LiveTranscriptWindow({ maxMountedTurns: 8 });
-    for (let i = 1; i <= 12; i++) {
-      const turn = window.startTurn(`任务 ${i}`);
-      turn.host.append(document.createElement('div'));
-      window.finishTurn(turn);
-    }
-    expect(window.getArchivedTurnCount()).toBe(4);
-    expect(window.getMountedTurnCount()).toBe(8);
+  it('folds the oldest turns a chunk at a time and keeps the newest ones plain', () => {
+    const window = new LiveTranscriptWindow(SMALL);
+    runTurns(window, 10);
+
+    // 10 turns, newest 2 stay plain → [1,2] [3,4] [5,6] [7,8] grouped.
+    expect(window.getGroupedTurnCount()).toBe(8);
+    expect(window.getMountedTurnCount()).toBe(2);
+    const groups = [...document.querySelectorAll<HTMLDetailsElement>('.transcript-history-group')];
+    expect(groups).toHaveLength(4);
+    // Groups appear in transcript order, before the plain turns.
+    expect(document.querySelectorAll('#chat > .bubble-turn')).toHaveLength(2);
   });
 
-  it('keeps the active turn mounted while reserving the rest of the window for completed turns', () => {
-    const window = new LiveTranscriptWindow({ maxMountedTurns: 8 });
-    for (let i = 1; i <= 12; i++) {
-      const turn = window.startTurn(`任务 ${i}`);
-      turn.host.appendChild(document.createElement('div'));
-      window.finishTurn(turn);
-    }
-    window.startTurn('正在执行');
-    expect(window.getArchivedTurnCount()).toBe(5);
-    expect(window.getMountedTurnCount()).toBe(8);
-    expect(document.querySelector('#chat > .bubble-turn[data-turn-state="active"]')).not.toBeNull();
+  it('leaves every group expanded and summarizes what it holds', () => {
+    const window = new LiveTranscriptWindow(SMALL);
+    runTurns(window, 10);
+
+    const first = document.querySelector<HTMLDetailsElement>('.transcript-history-group')!;
+    expect(first.open).toBe(true);
+    const summary = first.querySelector('.transcript-history-group-summary')?.textContent ?? '';
+    expect(summary).toContain('第 1–2 轮');
+    expect(summary).toContain('共 2 轮');
+    expect(summary).toContain('任务 1');
+    // The folded nodes moved into the group body — history is not discarded.
+    expect(first.querySelector('.transcript-history-group-body')?.childElementCount).toBe(4);
   });
 
-  it('moves a parked node into the current turn without duplicating it', () => {
-    const window = new LiveTranscriptWindow({ maxMountedTurns: 1 });
-    const first = window.startTurn('第一项');
-    const node = document.createElement('div');
-    first.host.appendChild(node);
-    window.finishTurn(first);
-    const second = window.startTurn('第二项');
-    expect(window.moveNodeToTurn(node, second)).toBe(true);
-    expect(second.host.contains(node)).toBe(true);
-    expect(document.querySelectorAll('.live-turn-archive-body > *')).toHaveLength(0);
+  it('parks a collapsed group and mounts it again from the same nodes', () => {
+    const window = new LiveTranscriptWindow(SMALL);
+    runTurns(window, 10);
+
+    const group = window.getGroupHandles()[0];
+    const details = group.el;
+    const body = group.body;
+    // Group content is live and mounted while expanded.
+    const before = body.childElementCount;
+    expect(before).toBeGreaterThan(0);
+
+    details.open = false;
+    details.dispatchEvent(new Event('toggle'));
+    expect(body.childElementCount).toBe(0);
+
+    details.open = true;
+    details.dispatchEvent(new Event('toggle'));
+    expect(body.childElementCount).toBe(before);
+  });
+
+  it('moves a folded turn node into the current turn without duplicating it', () => {
+    const window = new LiveTranscriptWindow(SMALL);
+    runTurns(window, 10);
+
+    // The first turn is inside a history group now; the newest turn is plain.
+    const group = window.getGroupHandles()[0];
+    const folded = group.body.firstElementChild!;
+    const current = window.startTurn('正在执行');
+    expect(window.moveNodeToTurn(folded, current)).toBe(true);
+    expect(current.host.contains(folded)).toBe(true);
+    // Left the group rather than being duplicated into both places.
+    expect(group.contains(folded)).toBe(false);
   });
 
   it('adopts a transcript node that was mounted outside a live turn', () => {
-    const window = new LiveTranscriptWindow({ maxMountedTurns: 2 });
+    const window = new LiveTranscriptWindow({ ...SMALL, groupThreshold: 10 });
     const outside = document.createElement('div');
     document.getElementById('chat')!.appendChild(outside);
     const turn = window.startTurn('当前任务');
@@ -76,32 +110,12 @@ describe('LiveTranscriptWindow', () => {
     expect(document.getElementById('chat')!.contains(outside)).toBe(true);
   });
 
-  it('mounts an archived turn only while it is expanded', () => {
-    const window = new LiveTranscriptWindow({ maxMountedTurns: 1 });
-    const first = window.startTurn('第一项');
-    first.host.append(document.createElement('div'));
-    window.finishTurn(first);
-    const second = window.startTurn('第二项');
-    second.host.append(document.createElement('div'), document.createElement('div'));
-    window.finishTurn(second);
-
-    const details = document.querySelector<HTMLDetailsElement>('.live-turn-archive');
-    const body = details?.querySelector<HTMLElement>('.live-turn-archive-body');
-    expect(details).not.toBeNull();
-    expect(body?.childElementCount).toBe(0);
-
-    details!.open = true;
-    details!.dispatchEvent(new Event('toggle'));
-    expect(body?.childElementCount).toBe(1);
-
-    details!.open = false;
-    details!.dispatchEvent(new Event('toggle'));
-    expect(body?.childElementCount).toBe(0);
-  });
-
-  it('summarizes long requests without growing the archive header', () => {
-    const summary = summarizeLiveTurn('  alpha\n beta  '.repeat(20), 4);
-    expect(summary).toStartWith('第 4 轮 · alpha beta');
-    expect(summary.length).toBeLessThan(100);
+  it('ignores a node that belongs to no turn and no group', () => {
+    const window = new LiveTranscriptWindow(SMALL);
+    runTurns(window, 10);
+    const current = window.startTurn('新任务');
+    const stray = document.createElement('div');
+    document.body.appendChild(stray);
+    expect(window.moveNodeToTurn(stray, current)).toBe(false);
   });
 });
