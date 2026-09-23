@@ -1371,6 +1371,13 @@ export class ChatController {
   private pendingTasks: Array<{ text: string; images: MessageImage[]; displayText: string; ts: number }> = [];
   /** The live 待办队列 card (renderQueueCard); null while the queue is empty. */
   private queueCardEl: HTMLElement | null = null;
+  /** Status rows whose interject receipt promised an in-flight action (停 /
+   *  方向变了 / 前提变了). keepPending keeps the shimmer honest WHILE the
+   *  abort drains, but once the promise cashes — the turn finalizes, or the
+   *  held insert re-enters send() — nobody else touches that row, and a
+   *  shimmer that never stops reads as work still running. settleInterject
+   *  Receipts() cashes them at exactly those moments. */
+  private interjectReceiptRows = new Set<HTMLElement>();
   /** A message the user typed mid-run that IS related to the current task. Held
    * until the interrupted round finalizes, then re-entered as a continuation of
    * the SAME task so the model re-plans/rewrites around the new variable. */
@@ -2323,6 +2330,8 @@ export class ChatController {
     // ack is ONE pending status line that the final receipt REPLACES in
     // place, so the transcript never shows two lines for one insert.
     const ack = this.addStatusBubble('收到——看一下这句话怎么安排…', true, false);
+    const ackRow = ack.parentElement;
+    if (ackRow) this.interjectReceiptRows.add(ackRow);
     const run = this.insertClassificationChain.then(() => this.classifyAndApplyInterject(text, images, displayText, ack));
     // A rejected link must never poison the chain for later inserts.
     this.insertClassificationChain = run.catch(() => {
@@ -2341,6 +2350,17 @@ export class ChatController {
     if (!keepPending) ack.parentElement?.classList.remove('pending');
     if (kind) ack.classList.add(`hl-${kind}`);
     linkifyPaths(ack);
+  }
+
+  /** Cash the receipts that promised an in-flight action: the abort has drained
+   * (turn finalize) or the held insert is re-entering as a fresh turn (fresh
+   * send) — either way the shimmer's claim stopped being true the moment this
+   * runs. Called from dispatchDeferred (the finalize-side entry) and send()
+   * (the re-entry/new-send entry) so every path that ends the wait sweeps. */
+  private settleInterjectReceipts(): void {
+    if (this.interjectReceiptRows.size === 0) return;
+    for (const row of this.interjectReceiptRows) row.classList.remove('pending');
+    this.interjectReceiptRows.clear();
   }
 
   /** One link of the interject chain: runs only after every earlier insert has
@@ -2652,6 +2672,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * of starting a second concurrent turn. */
   private dispatchDeferred(): void {
     if (this.isStreaming()) return;
+    // 回执的账在这里结：收尾派发点就是"承诺的动作已兑现"的时刻——停的收尾
+    // 落定、被留下的插话正要重入、排队的活开始交接，微光都该停了。
+    this.settleInterjectReceipts();
     // 折入追加的收尾核验先行：没被照办的转进 pendingTasks，下面同一趟
     // dispatchDeferred 就会把它们作为新指令派发出去。
     this.settleFoldIns();
@@ -2696,6 +2719,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const chatEl = this.scrollRoot();
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
+    // A held insert re-entering here cashes its receipt ("马上按新的方向来" —
+    // it just did); a fresh user send cashes any stray one the same way.
+    this.settleInterjectReceipts();
     const config = loadConfig();
     if (!hasConfiguredKey(config)) return;
     // A fresh turn's signals supersede any that were never consumed (defensive;
@@ -5739,6 +5765,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.queueCardEl?.parentElement?.remove();
     this.queueCardEl = null;
     this.relatedInsert = null;
+    this.interjectReceiptRows.clear();
     // 插话重构 — new chat discards steers aimed at the old conversation.
     this.pendingSteers = [];
     this.pendingFoldIns = [];
