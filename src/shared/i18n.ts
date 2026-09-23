@@ -31,11 +31,6 @@ const translations: Record<Language, Record<string, string>> = {
     'workspace.worktreeAuto': '检测到其他会话正在同一仓库工作，已为本会话创建独立 worktree，两边改动互不干扰',
 
     // ── Parallel-task dock (roadmap 4.3) ──
-    'parallel.title': '并行任务',
-    'parallel.queued': '队列 {n}',
-    'parallel.queuedTitle': '排队等待的任务数',
-    'parallel.jump.title': '切换到此会话',
-    'parallel.stop.title': '停止：结束进行中的回答并清掉排队任务',
     // 4.4 — session worktree wrap-up card + retention notice.
     'worktreeFinish.title': '会话工作区收尾',
     'worktreeFinish.subtitle': '这个会话在独立的 worktree 里工作，成果还没回到主工作区',
@@ -1143,11 +1138,6 @@ const translations: Record<Language, Record<string, string>> = {
     'workspace.worktreeAuto': 'Another session is already working in this repo — created a dedicated worktree for this session so edits stay isolated',
 
     // ── Parallel-task dock (roadmap 4.3) ──
-    'parallel.title': 'Parallel tasks',
-    'parallel.queued': 'Queue {n}',
-    'parallel.queuedTitle': 'Tasks waiting in the queue',
-    'parallel.jump.title': 'Switch to this session',
-    'parallel.stop.title': 'Stop: end the running answer and clear queued tasks',
     // 4.4 — session worktree wrap-up card + retention notice.
     'worktreeFinish.title': 'Session worktree wrap-up',
     'worktreeFinish.subtitle': 'This session works in its own worktree — its results have not landed in the main workspace yet',

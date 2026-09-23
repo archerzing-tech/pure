@@ -1290,6 +1290,32 @@ export interface ChatControllerOptions {
   viewActive?: boolean;
 }
 
+// ── Agent activity host layout ──
+// The host is a full-height absolute overlay on #view-container's right edge
+// (see #agent-activity-host in styles.css). Its bottom must stop ABOVE the
+// composer, never over it (2026-09-23 user report: completed agent cards piled
+// up on top of the input box). The composer's height is dynamic (multiline
+// input, attachment previews), so no fixed CSS offset can be right; instead a
+// ResizeObserver on #input-bar keeps the host's --agent-host-bottom custom
+// property equal to the composer height plus a small gap. The ≤720px
+// bottom-sheet rules in the stylesheets set bottom: 0 directly, so narrow
+// windows keep their docked-sheet behavior regardless of this property.
+let agentActivityHostLayoutInstalled = false;
+function installAgentActivityHostLayout(): void {
+  if (agentActivityHostLayoutInstalled) return;
+  const host = document.getElementById('agent-activity-host');
+  const inputBar = document.getElementById('input-bar');
+  if (!host || !inputBar) return;
+  agentActivityHostLayoutInstalled = true;
+  const sync = (): void => {
+    const h = inputBar.offsetHeight;
+    host.style.setProperty('--agent-host-bottom', `${h > 0 ? h + 12 : 0}px`);
+  };
+  if (typeof ResizeObserver === 'function') new ResizeObserver(sync).observe(inputBar);
+  window.addEventListener('resize', sync);
+  sync();
+}
+
 export class ChatController {
   private streaming = false;
   private abortController: AbortController | null = null;
@@ -1959,6 +1985,7 @@ export class ChatController {
     if (!this.viewActive) return;
     const host = document.getElementById('agent-activity-host');
     if (!host) return;
+    installAgentActivityHostLayout();
     if (this.agentActivities.length === 0) {
       host.hidden = true;
       return;

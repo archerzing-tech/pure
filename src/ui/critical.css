@@ -263,12 +263,14 @@ body {
 #agent-activity-host[hidden] { display: none !important; }
 /* Floating overlay (see the full rule + rationale in styles.css): absolutely
  * positioned over the chat's right side, transparent host, sub-agent cards
- * as the only surface — the conversation is never squeezed by a 200px rail. */
+ * as the only surface — the conversation is never squeezed by a 200px rail.
+ * bottom follows the composer height via --agent-host-bottom (ResizeObserver
+ * in chat.ts) so the rail stops above the input box, never over it. */
 #agent-activity-host {
   position: absolute;
   top: 0;
   right: 0;
-  bottom: 0;
+  bottom: var(--agent-host-bottom, 0px);
   z-index: 18;
   width: 168px;
   max-width: 100%;

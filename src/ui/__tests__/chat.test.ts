@@ -1083,6 +1083,21 @@ describe('plan overview completion state', () => {
     }
   });
 
+  it('keeps the activity rail above the composer via the ResizeObserver offset', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 2026-09-23 用户实测：右下角漂浮卡片堆到输入框头上。composer 高度是
+    // 动态的（多行输入/附件），所以布局偏移必须由 #input-bar 的
+    // ResizeObserver 实时写进 --agent-host-bottom，而不是写死的 CSS 长度。
+    const fn = src.indexOf('function installAgentActivityHostLayout(');
+    expect(fn).toBeGreaterThan(-1);
+    const body = src.slice(fn, fn + 1_200);
+    expect(body.indexOf("new ResizeObserver(sync).observe(inputBar)")).toBeGreaterThan(-1);
+    expect(body.indexOf("host.style.setProperty('--agent-host-bottom'")).toBeGreaterThan(-1);
+    // 挂载点接线：面板一挂上就装观察器（幂等，重复调用是空操作）。
+    const mount = src.indexOf('mountAgentActivityPanel(): void');
+    expect(src.slice(mount, mount + 300).indexOf('installAgentActivityHostLayout();')).toBeGreaterThan(-1);
+  });
+
   it('no longer stalls the plan cursor on per-phase verification gates', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 逐阶段验证门禁（phaseVerifySeen / schedulePhaseBackstop）已被回合末的

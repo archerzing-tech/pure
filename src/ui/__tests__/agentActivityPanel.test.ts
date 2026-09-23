@@ -68,6 +68,33 @@ describe('agent activity panel', () => {
     panel.el.remove();
   });
 
+  it('carries the SESSION id on the rail, and follows a session switch', () => {
+    // 2026-09-23 user request: the floating rail must show the conversation's
+    // own id so a card can be quoted together with its session.
+    const panel = createAgentActivityPanel('session_1758624000000');
+    document.body.appendChild(panel.el);
+    panel.update([activity()], { sessionId: 'session_1758624000000' });
+    const chip = panel.el.querySelector<HTMLElement>('.agent-activity-session');
+    expect(chip?.textContent).toBe('session_1758624000000');
+
+    // Switching sessions swaps the id in place (and drops the old cards —
+    // covered by the leak test below).
+    panel.update([activity({ callId: 'w', agentName: 'deep_thinker' })], { sessionId: 'session_999' });
+    expect(panel.el.querySelector<HTMLElement>('.agent-activity-session')?.textContent).toBe('session_999');
+    panel.el.remove();
+  });
+
+  it('hides the session chip while the panel has no session id yet', () => {
+    const panel = createAgentActivityPanel('');
+    document.body.appendChild(panel.el);
+    panel.update([activity()]);
+    const chip = panel.el.querySelector<HTMLElement>('.agent-activity-session');
+    expect(chip).toBeTruthy();
+    expect(chip?.textContent).toBe('');
+    expect(chip?.style.display).toBe('none');
+    panel.el.remove();
+  });
+
   it('keeps task context when a later activity update only changes the state', () => {
     const initial = activity({ inputSnippet: '检查权限边界', startedAt: 1234, timeoutMs: 60000 });
     const merged = mergeAgentActivity(initial, { callId: initial.callId, agentName: initial.agentName, state: 'VERIFY' });

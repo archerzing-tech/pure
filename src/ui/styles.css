@@ -1038,7 +1038,13 @@ body {
   position: absolute;
   top: 0;
   right: 0;
-  bottom: 0;
+  /* Ends ABOVE the composer, not over it (2026-09-23 user report: completed
+     cards piled up over the input box). The composer's height is dynamic
+     (multiline input, attachments), so the offset arrives as a custom
+     property kept current by a ResizeObserver on #input-bar (chat.ts,
+     installAgentActivityHostLayout) instead of a fixed CSS length. The
+     ≤720px bottom-sheet rules below set bottom: 0 directly and win. */
+  bottom: var(--agent-host-bottom, 0px);
   z-index: 18; /* below the floating settings button (20) & context panel (30) */
   /* Shrinks with the window: on narrow viewports the rail takes less of the
      conversation. Cards stay opaque — the floating surface must not read as
@@ -1066,6 +1072,26 @@ body {
      gap to the window edge. No rail header — the cards ARE the UI. */
   padding: 54px 8px 16px;
   pointer-events: auto; /* the rail (scroll) + cards stay interactive */
+}
+/* The session id line: quiet, mono, one line — click copies the full id. */
+.agent-activity-session {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  color: var(--text-tertiary);
+  font: 10px var(--font-mono);
+  letter-spacing: .02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: copy;
+  user-select: none;
+}
+.agent-activity-session.copied { color: var(--accent); }
+/* Narrow windows dock the rail as a bottom sheet (critical.css carries the
+   rule); this restates bottom: 0 so the later-loaded base rule's custom
+   property can never lift the sheet off the window's bottom edge. */
+@media (max-width: 720px) {
+  #agent-activity-host { bottom: 0; }
 }
 .agent-activity-live {
   display: flex;
@@ -13441,118 +13467,6 @@ button svg,
 }
 .schedule-delete:hover { color: var(--danger); background: var(--danger-soft); }
 .schedule-add { margin-top: 4px; }
-
-/* ═══ Parallel-task dock (roadmap 4.3): one independent card per background
-   session — spinner / title / workspace / live elapsed / queue chip. The
-   dock shows only sessions that are NOT the visible one; hidden when empty. ═══ */
-#parallel-tasks-dock[hidden] { display: none !important; }
-#parallel-tasks-dock {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
-  z-index: 18; /* same band as the agent-activity rail, below panels */
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  width: 264px;
-  max-width: calc(100% - 24px);
-  padding: 10px 12px 12px;
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
-  backdrop-filter: blur(8px);
-  box-shadow: var(--shadow-lg);
-}
-.parallel-dock-label {
-  color: var(--text-tertiary);
-  font: 700 10px var(--font-mono);
-  letter-spacing: .08em;
-}
-.parallel-dock-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 40vh;
-  overflow-y: auto;
-}
-.parallel-card {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 8px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background .15s var(--ease-out);
-}
-.parallel-card:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.parallel-card-spinner {
-  width: 12px;
-  height: 12px;
-  flex: none;
-  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: parallelCardSpin .7s linear infinite;
-}
-@keyframes parallelCardSpin { to { transform: rotate(360deg); } }
-.parallel-card-body {
-  min-width: 0;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.parallel-card-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.parallel-card-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font: 10px var(--font-mono);
-  color: var(--text-tertiary);
-}
-.parallel-card-workspace {
-  max-width: 90px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.parallel-card-elapsed { font-variant-numeric: tabular-nums; }
-.parallel-card-queue {
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 700;
-}
-.parallel-card-stop {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  display: grid;
-  place-items: center;
-  border: none;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  transition: all .15s var(--ease-out);
-}
-.parallel-card-stop:hover {
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
-}
-/* Reduced motion kills the spinner; the live elapsed text keeps the card
-   reading as active (same reasoning as the tool-row elapsed). */
-@media (prefers-reduced-motion: reduce) {
-  .parallel-card-spinner { animation: none; }
-}
 
 /* ═══ Worktree wrap-up card (4.4) ═══
    Sits between the transcript and the composer whenever the visible session

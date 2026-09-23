@@ -606,7 +606,8 @@ function mermaidRawOf(slot: HTMLElement): string {
 }
 
 async function renderMermaidNodes(container: HTMLElement): Promise<void> {
-  const slots = Array.from(container.querySelectorAll<HTMLElement>('.mermaid-slot:not([data-processed])'));
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.mermaid-slot:not([data-processed])'))
+    .filter((slot) => !streamFenceOpen(slot));
   if (slots.length === 0) return;
   const attempts = slots.map((slot) => ({
     slot,
@@ -702,7 +703,8 @@ async function ensurePlantuml(): Promise<typeof import('./plantumlDiagram')> {
 
 /** Fill every unprocessed `.puml-slot`'s target with a locally rendered SVG. */
 async function renderPumlNodes(container: HTMLElement): Promise<void> {
-  const slots = Array.from(container.querySelectorAll<HTMLElement>('.puml-slot:not([data-processed])'));
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.puml-slot:not([data-processed])'))
+    .filter((slot) => !streamFenceOpen(slot));
   if (slots.length === 0) return;
   const attempts = slots.map((slot) => ({ slot, version: nextDiagramRenderVersion(slot) }));
   for (const { slot, version } of attempts) {
@@ -916,7 +918,8 @@ export function groupAdjacentSvgSlots(container: HTMLElement): void {
 
 /** Fill every unprocessed `.svg-slot`'s target with the rendered SVG. */
 async function renderSvgNodes(container: HTMLElement): Promise<void> {
-  const slots = Array.from(container.querySelectorAll<HTMLElement>('.svg-slot:not([data-processed])'));
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.svg-slot:not([data-processed])'))
+    .filter((slot) => !streamFenceOpen(slot));
   if (slots.length === 0) return;
   const attempts = slots.map((slot) => ({ slot, version: nextDiagramRenderVersion(slot) }));
 
@@ -1832,7 +1835,8 @@ async function ensureEchartsChart(): Promise<typeof import('./echartsChart')> {
 }
 
 async function renderChartNodes(container: HTMLElement): Promise<void> {
-  const slots = Array.from(container.querySelectorAll<HTMLElement>('.chart-slot:not([data-processed])'));
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.chart-slot:not([data-processed])'))
+    .filter((slot) => !streamFenceOpen(slot));
   if (slots.length === 0) return;
   const attempts = slots.map((slot) => ({ slot, version: nextDiagramRenderVersion(slot) }));
 
@@ -1930,8 +1934,9 @@ function mapRawOf(slot: HTMLElement): string {
     ?? '';
 }
 
-/** A hydrated (or errored) map slot that must survive an innerHTML swap. */
-interface PreservedMapSlot {
+/** A hydrated (or errored/in-flight) live slot that must survive an innerHTML
+ *  swap. Shared by maps and the four diagram kinds. */
+interface PreservedSlot {
   raw: string;
   el: HTMLElement;
 }
@@ -1944,8 +1949,8 @@ interface PreservedMapSlot {
  * re-render tear the render down and restart it — the loading↔blank flicker.
  * The adopted node keeps its hydration, tile cache, listeners and in-flight
  * render; renderMapNodes skips it via its data-processed marker. */
-function preserveLiveMapSlots(container: HTMLElement): PreservedMapSlot[] {
-  const preserved: PreservedMapSlot[] = [];
+function preserveLiveMapSlots(container: HTMLElement): PreservedSlot[] {
+  const preserved: PreservedSlot[] = [];
   for (const el of Array.from(container.querySelectorAll<HTMLElement>('.map-slot'))) {
     preserved.push({ raw: mapRawOf(el), el });
   }
@@ -1956,7 +1961,7 @@ function preserveLiveMapSlots(container: HTMLElement): PreservedMapSlot[] {
  * identical map payload (first-come-first-served for duplicates). The adopted
  * node keeps its hydration, tile cache, listeners and source-toggle state;
  * renderMapNodes skips it via its data-processed marker. */
-function adoptPreservedMapSlots(container: HTMLElement, preserved: PreservedMapSlot[]): void {
+function adoptPreservedMapSlots(container: HTMLElement, preserved: PreservedSlot[]): void {
   if (preserved.length === 0) return;
   const queue = new Map<string, HTMLElement[]>();
   for (const p of preserved) {
@@ -1967,6 +1972,45 @@ function adoptPreservedMapSlots(container: HTMLElement, preserved: PreservedMapS
   for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.map-slot'))) {
     const candidates = queue.get(mapRawOf(slot));
     const candidate = candidates?.shift();
+    if (!candidate) continue;
+    slot.replaceWith(candidate);
+  }
+}
+
+/** Same contract as the map adoption above, for the four diagram kinds. With
+ *  streaming hydration a diagram's SVG can paint while the answer is still
+ *  streaming; the completion render re-parses the same text, and a plain
+ *  innerHTML swap flashed every such diagram painted → loading → painted.
+ *  Finished AND still-loading slots are preserved: the adopted node keeps its
+ *  hydration, in-flight render, listeners and source-toggle state, and the
+ *  hydration passes below skip it via data-processed. */
+function preserveLiveDiagramSlots(container: HTMLElement): PreservedSlot[] {
+  const preserved: PreservedSlot[] = [];
+  for (const el of Array.from(container.querySelectorAll<HTMLElement>('.diagram-slot'))) {
+    preserved.push({ raw: diagramRawOf(el), el });
+  }
+  return preserved;
+}
+
+function adoptPreservedDiagramSlots(container: HTMLElement, preserved: PreservedSlot[]): void {
+  if (preserved.length === 0) return;
+  const queue = new Map<string, HTMLElement[]>();
+  for (const p of preserved) {
+    const list = queue.get(p.raw);
+    if (list) list.push(p.el);
+    else queue.set(p.raw, [p.el]);
+  }
+  // Multi-SVG fences adopt through their gallery wrapper: re-attach the whole
+  // gallery when every payload matches, otherwise leave it to a fresh render.
+  for (const gallery of Array.from(container.querySelectorAll<HTMLElement>('.svg-gallery'))) {
+    const slots = Array.from(gallery.children).filter((child): child is HTMLElement => child.classList.contains('diagram-slot'));
+    if (slots.length === 0) continue;
+    const matched = slots.map((slot) => queue.get(diagramRawOf(slot))?.shift() ?? null);
+    if (matched.some((m) => m === null)) continue;
+    gallery.replaceChildren(...(matched as HTMLElement[]));
+  }
+  for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.diagram-slot'))) {
+    const candidate = queue.get(diagramRawOf(slot))?.shift();
     if (!candidate) continue;
     slot.replaceWith(candidate);
   }
@@ -2259,12 +2303,14 @@ export async function renderMarkdown(
   // answers. Finished slots with an identical payload are adopted back
   // untouched; still-loading ones re-render through the normal hydration.
   const preservedMaps = preserveLiveMapSlots(container);
+  const preservedDiagrams = preserveLiveDiagramSlots(container);
   container.innerHTML = DOMPurify.sanitize(html, {
     // ADD_ATTR: target is ours on links, loading is ours on inline images —
     // neither is in DOMPurify's default allowed set.
     ADD_ATTR: ['target', 'loading'],
   });
   adoptPreservedMapSlots(container, preservedMaps);
+  adoptPreservedDiagramSlots(container, preservedDiagrams);
   // Bind image viewers immediately after DOM replacement. Waiting until after
   // Mermaid/chart work below leaves an already-visible image with no dblclick
   // handler while another diagram is still loading.
@@ -2322,11 +2368,14 @@ export async function renderMarkdown(
 // The streaming renderer is kept as close to the final one as possible so the
 // message the user watches grow is the message they end up with — no layout
 // "reset" at completion. Every block (including the still-growing last one) is
-// rendered through the normal marked pipeline; mermaid and puml blocks emit a
-// slot holding the source while the stream runs, then the Completed pass renders
-// the SVG into the same slot (CSS cross-fades source→diagram). The PlantUML
-// engine is only pulled in at completion — during streaming the block stays a
-// plain code block, so a long answer never stalls on a 6MB engine load.
+// rendered through the normal marked pipeline; mermaid / puml / chart / svg
+// blocks emit the same slot the completed render uses. While a diagram fence is
+// still OPEN the slot stays a plain loading card; the moment the fence closes,
+// streamingDiagramGate starts the render AND holds every later block until the
+// picture has painted — the text below a diagram only appears after the
+// diagram itself is on screen, and the diagram no longer waits for the whole
+// answer to finish (2026-09-23 user report + requirement). The PlantUML engine
+// chunk (~6MB) is still pulled lazily by that hydration, not at module load.
 
 const STREAM_THROTTLE_MS = 100;
 const STREAM_LONG_TEXT_MS = 160;
@@ -2368,6 +2417,7 @@ streamRenderer.link = function (
 streamRenderer.code = (token: { text: string; lang?: string }): string => {
   const lang = langOf(token.lang);
   if (lang === 'mermaid') return diagramSlot('mermaid', token.text, '');
+  if (lang === 'puml' || lang === 'plantuml') return diagramSlot('puml', token.text, '');
   if (lang === 'svg') {
     return svgSourcesHtml(splitTopLevelSvgSources(token.text));
   }
@@ -2430,6 +2480,24 @@ function mapFenceClosed(raw: string): boolean {
   return /```\s*$/.test(raw.trimEnd());
 }
 
+/** Fence langs whose streamed blocks mount a live slot (diagram slots for the
+ *  four image kinds, the map slot for ```map / ```leaflet). These get the
+ *  append-only stability rule below while their fence is still open. */
+function slotFenceLang(lang: string): boolean {
+  const l = (lang ?? '').trim().split(/\s+/)[0] ?? '';
+  return l === 'mermaid' || l === 'puml' || l === 'plantuml' || l === 'svg'
+    || l === 'chart' || l === 'charts' || l === 'map' || l === 'leaflet';
+}
+
+/** A streaming-mounted slot carries `data-md-raw` (the whole fenced token's
+ *  raw). An OPEN fence's slot must never hydrate — its source is still growing
+ *  and a later tick replaces the slot; slots from the completion render carry
+ *  no data-md-raw at all and always pass. */
+function streamFenceOpen(slot: HTMLElement): boolean {
+  const raw = slot.getAttribute('data-md-raw');
+  return raw !== null && !mapFenceClosed(raw);
+}
+
 /**
  * Streaming gate for ```map slots. Hydration happens EXACTLY ONCE, when the
  * streamed fence has actually closed: an open fence's raw grows on every
@@ -2453,6 +2521,66 @@ function streamingMapGate(el: HTMLElement): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * Streaming hydration kick for the four diagram kinds. A ```mermaid / ```puml /
+ * ```chart / ```svg fence that just CLOSED starts rendering immediately — the
+ * SVG paints in place instead of the slot sitting on its spinner until the
+ * Completed pass. The PlantUML engine chunk (~6MB) is still pulled lazily by
+ * this hydration, not at module load.
+ *
+ * Idempotent: the render*Nodes passes select `:not([data-processed])` slots
+ * only, the open-fence filter (streamFenceOpen) keeps a still-growing fence's
+ * slot out, and data-stream-kick stops a slow engine load from being re-kicked
+ * on every held tick.
+ */
+function kickStreamingDiagram(el: HTMLElement, container: HTMLElement): void {
+  const slots = el.classList.contains('svg-gallery')
+    ? Array.from(el.children).filter((child): child is HTMLElement => child.classList.contains('diagram-slot'))
+    : el.classList.contains('diagram-slot') ? [el] : [];
+  for (const slot of slots) {
+    if (slot.hasAttribute('data-processed') || slot.hasAttribute('data-stream-kick')) continue;
+    if (streamFenceOpen(slot)) continue;
+    slot.setAttribute('data-stream-kick', '1');
+    const kind = slot.getAttribute('data-diagram-kind');
+    if (kind === 'mermaid') {
+      void renderMermaidNodes(container).then(() => bindMermaidPopup(container));
+    } else if (kind === 'svg') {
+      void renderSvgNodes(container).then(() => bindVectorPopup(container));
+    } else if (kind === 'chart') {
+      void renderChartNodes(container).then(() => bindVectorPopup(container));
+    } else if (kind === 'puml') {
+      void renderPumlNodes(container).then(() => bindVectorPopup(container));
+    }
+  }
+}
+
+/**
+ * Streaming hold-gate for the four diagram kinds — the image-display
+ * counterpart of streamingMapGate. Once a diagram fence has CLOSED, every
+ * later block is held until the picture has actually painted: the user asked
+ * for text below a diagram to appear only AFTER the diagram renders, never a
+ * paragraph pile-up under a spinner (2026-09-23 user requirement).
+ *  - Open fence → false: the placeholder sits stable, later text flows.
+ *  - Closed and not yet painted → kick the render and return true (hold).
+ *  - Painted (preview) or failed (error) → false: later blocks always flow.
+ * A render failure can never wedge the stream — the error card is terminal
+ * for the gate and carries the 重试 button; the completion render also ignores
+ * gates entirely, so the tail always lands when the turn ends.
+ */
+function streamingDiagramGate(el: HTMLElement, container: HTMLElement): boolean {
+  const slots = el.classList.contains('svg-gallery')
+    ? Array.from(el.children).filter((child): child is HTMLElement => child.classList.contains('diagram-slot'))
+    : el.classList.contains('diagram-slot') ? [el] : [];
+  if (slots.length === 0) return false;
+  const settled = (slot: HTMLElement): boolean => {
+    const state = slot.getAttribute('data-state');
+    return state === 'preview' || state === 'error' || streamFenceOpen(slot);
+  };
+  if (slots.every(settled)) return false;
+  kickStreamingDiagram(el, container);
+  return true;
 }
 
 function diffStreaming(container: HTMLElement, text: string): void {
@@ -2500,29 +2628,39 @@ function diffStreaming(container: HTMLElement, text: string): void {
 
     // Same source slice ⇒ child is already the canonical rendering for this
     // token. Skip entirely — unless it is a still-loading ```map slot whose
-    // gate holds every later block (see streamingMapGate).
+    // gate holds every later block (see streamingMapGate), or a diagram slot
+    // whose gate holds until the picture has painted (streamingDiagramGate).
     if (oldEl && oldEl.getAttribute('data-md-raw') === tk.raw) {
       childIdx++;
       if (streamingMapGate(oldEl)) break;
+      if (streamingDiagramGate(oldEl, container)) break;
       continue;
     }
 
-    // ── Streaming ```map fences are append-only-stable ──
-    // While the model streams the map JSON the token's raw grows every tick;
-    // a naive replaceChild here tore down the previously mounted slot — live
-    // map, spinner, anything — and mounted a fresh one. That per-tick
-    // teardown was the map flicker that survived every other fix.
+    // ── Streaming slot fences are append-only-stable ──
+    // While the model streams a ```map / ```mermaid / ```puml / ```chart /
+    // ```svg fence the token's raw grows every tick; a naive replaceChild here
+    // tore down the previously mounted slot — live map, spinner, anything —
+    // and mounted a fresh one. That per-tick teardown was the map flicker that
+    // survived every other fix.
     // Rules: keep a mounted placeholder untouched while the fence is still
     // open (it renders as a plain loading card); once the fence CLOSES, a
-    // differing raw replaces it exactly once and the gate hydrates + holds.
+    // differing raw replaces it exactly once — then the map gate hydrates +
+    // holds, and kickStreamingDiagram starts the diagram render in place.
     const tokenLang = typeof (tk as { lang?: unknown }).lang === 'string'
       ? ((tk as { lang?: unknown }).lang as string)
       : '';
-    if (tk.type === 'code' && tokenLang.trim().split(/\s+/)[0] === 'map') {
+    if (tk.type === 'code' && slotFenceLang(tokenLang)) {
       const closed = mapFenceClosed(tk.raw);
-      if (oldEl && oldEl.classList.contains('map-slot') && (!closed || oldEl.getAttribute('data-md-raw') === tk.raw)) {
+      const lang0 = tokenLang.trim().split(/\s+/)[0];
+      const isMapSlot = lang0 === 'map' || lang0 === 'leaflet';
+      const oldIsSlot = isMapSlot
+        ? !!oldEl?.classList.contains('map-slot')
+        : !!(oldEl && (oldEl.classList.contains('diagram-slot') || oldEl.classList.contains('svg-gallery')));
+      if (oldEl && oldIsSlot && (!closed || oldEl.getAttribute('data-md-raw') === tk.raw)) {
         childIdx++;
         if (streamingMapGate(oldEl)) break;
+        if (streamingDiagramGate(oldEl, container)) break;
         continue;
       }
       // No mounted slot yet + open fence → fall through and mount the plain
@@ -2546,6 +2684,11 @@ function diffStreaming(container: HTMLElement, text: string): void {
     const newEl = tmp.firstElementChild as HTMLElement | null;
     if (!newEl) continue;
     newEl.setAttribute('data-md-raw', tk.raw);
+    // A multi-SVG fence mounts a gallery wrapper; each child slot needs the
+    // token raw too so streamFenceOpen can vet them individually.
+    if (newEl.classList.contains('svg-gallery')) {
+      for (const child of Array.from(newEl.children)) child.setAttribute('data-md-raw', tk.raw);
+    }
 
     // Highlight freshly-mounted code blocks only. Pre-existing hljs spans on
     // unchanged siblings are left intact.
@@ -2569,6 +2712,10 @@ function diffStreaming(container: HTMLElement, text: string): void {
     // A freshly mounted ```map slot closes the gate: hold every later token
     // until the map has actually painted (data-map-state → preview/error).
     if (streamingMapGate(newEl)) break;
+    // Same for the four diagram kinds: a closed fence renders right here and
+    // holds the text below it until the picture is on screen (or the render
+    // definitively failed) — 2026-09-23 user requirement.
+    if (streamingDiagramGate(newEl, container)) break;
   }
 
   // Trim trailing old children beyond the elements we just reconciled (rare

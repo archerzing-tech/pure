@@ -56,7 +56,6 @@ import { InlineAutocomplete, type AutocompleteCandidate } from './inlineAutocomp
 import { ComposerInputHistory, SessionInputHistoryStore } from './inputHistory';
 import { MCP_PROMPT_COMMAND, describeMcpPrompt } from '../shared/mcpPrompt';
 import { TaskQueue } from './taskQueue';
-import { ParallelTaskCards, bindParallelTaskCards, type ParallelTaskCardsDeps } from './parallelTaskCards';
 import { Scheduler } from './scheduler';
 import { WorkspaceController, tauriGitRunner } from './workspace';
 import { inspectWorktreeFinish, mergeWorktreeBack, discardWorktree } from '../shared/worktreeFinish';
@@ -412,30 +411,10 @@ function holdIfScheduled(text: string, displayText: string, images: import('../s
   return scheduleTimedInput({ text, images, displayText, at: prefetch.timing.at, timingText: prefetch.timing.text });
 }
 
-// ── Parallel-task dock (4.3): one card per background streaming session ──
-// Same deps feed the renderer and the click wiring (card → jump, stop →
-// cancel that session's lane + queued tasks). Guarded lookup: a missing
-// mount point must not throw during boot.
-const parallelCardsHost = document.getElementById('parallel-tasks-dock');
-if (parallelCardsHost) {
-  const parallelCardsDeps: ParallelTaskCardsDeps = {
-    host: parallelCardsHost,
-    chat: {
-      currentId: () => chat.getSessionId(),
-      runningIds: () => runningSessionIdList(),
-      workspaceOf: (sessionId) => chat.controllerFor(sessionId)?.getWorkspace() ?? '',
-      jumpTo: (sessionId) => chat.setSessionId(sessionId),
-    },
-    queue: taskQueue,
-    listTitles: async () => (await loadSessionList()).map((s) => ({ id: s.id, title: s.title, workspace: s.workspace ?? '' })),
-  };
-  const parallelCards = new ParallelTaskCards(parallelCardsDeps);
-  bindParallelTaskCards(parallelCardsHost, parallelCardsDeps);
-  taskQueue.subscribe(() => void parallelCards.refresh());
-  // Snappy card set updates on session start/stop — the class's own 1s tick
-  // is only the safety net and the elapsed refresher.
-  onRunningSessionsChanged(() => void parallelCards.refresh());
-}
+// The parallel-task dock (4.3) was removed on 2026-09-23 (user decision): a
+// floating bottom-right card per background streaming session duplicated what
+// the sidebar's pulsing running dot already says — the session list is the
+// single ambient surface for "this conversation is still working".
 
 // ── Worktree wrap-up card (4.4) ──
 // Diff preview + one-click merge-back/discard for the visible session when it

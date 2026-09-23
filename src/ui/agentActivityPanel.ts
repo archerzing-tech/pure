@@ -84,10 +84,37 @@ export function createAgentActivityPanel(
 
   // No rail header (the "本轮协作 / 协作现场" block): the cards themselves are
   // the entire UI — a header only added a second surface covering the chat.
+  // The one exception (2026-09-23 user request): the rail must carry the
+  // SESSION id, so a card can be quoted together with its conversation
+  // ("session_… 的 web_searcher 报错了"). One quiet mono line above the cards —
+  // click copies the full id; not a titled section, no second surface.
+  const sessionChip = document.createElement('div');
+  sessionChip.className = 'agent-activity-session';
+  sessionChip.title = '会话 ID（点击复制）';
+  sessionChip.addEventListener('click', () => {
+    const id = sessionChip.textContent ?? '';
+    if (!id) return;
+    try {
+      void navigator.clipboard?.writeText(id);
+    } catch { /* clipboard unavailable — the full id is still in the tooltip */ }
+    sessionChip.classList.add('copied');
+    sessionChip.title = '已复制会话 ID';
+    window.setTimeout(() => {
+      sessionChip.classList.remove('copied');
+      sessionChip.title = '会话 ID（点击复制）';
+    }, 1200);
+  });
 
   const list = document.createElement('div');
   list.className = 'agent-activity-list';
-  el.append(list);
+  el.append(sessionChip, list);
+
+  const setSessionId = (id: string): void => {
+    sessionChip.textContent = id;
+    // No id (brand-new session before its first save) → no empty chip line.
+    sessionChip.style.display = id ? '' : 'none';
+  };
+  setSessionId(initialSessionId);
 
   const rows = new Map<string, {
     row: HTMLElement;
@@ -104,6 +131,7 @@ export function createAgentActivityPanel(
       rows.clear();
       activeCallIds.clear();
       list.replaceChildren();
+      setSessionId(sessionId);
     }
     const historical = options.historical === true;
     // Live entry animation is strictly session-local: restored sessions render
