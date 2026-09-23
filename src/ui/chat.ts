@@ -2352,6 +2352,18 @@ export class ChatController {
     linkifyPaths(ack);
   }
 
+  /** 插话回显的次序保证：用户原话在前，宿主回执（ack 行）紧随其后。ack 在
+   * 插话瞬间就上屏（比秒级分类快），而回显气泡默认追加在它后面——不移一行，
+   * 「已收到…」这类回执就永远压在用户那句话的头上（用户实测报过这个顺序
+   * bug）。只在两行确实相邻时搬，避免打乱中间可能插进来的其他内容。 */
+  private placeAckAfterEcho(ack: HTMLElement | null, bubble: HTMLElement): void {
+    const ackRow = ack?.parentElement;
+    const bubbleRow = bubble.parentElement;
+    if (ackRow && bubbleRow && ackRow.previousElementSibling === bubbleRow) {
+      bubbleRow.insertAdjacentElement('afterend', ackRow);
+    }
+  }
+
   /** Cash the receipts that promised an in-flight action: the abort has drained
    * (turn finalize) or the held insert is re-entering as a fresh turn (fresh
    * send) — either way the shimmer's claim stopped being true the moment this
@@ -2383,7 +2395,9 @@ export class ChatController {
     // appear twice (user-reported). The status label carries the instant
     // feedback while the abort drains.
     const echoUserBubble = (): void => {
-      this.addBubble('user', displayText, images);
+      const bubble = this.addBubble('user', displayText, images);
+      // 回执行跟随到气泡下面——用户的话在前，宿主的收执在后。
+      this.placeAckAfterEcho(ack, bubble);
     };
     // 分类器不可用（turnLlm 还没立起来）也照走 decide(null)：协调器的兜底
     // 现在是 task（折入/排队，确定性目的地）——话绝不因没有分类器而失踪。
@@ -2626,7 +2640,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * 轮——顺序由机制保证；mechanical=false（steer 类）：注入强框架指令。
    * 两者收尾都核验，没兑现就转排队兜底，话绝不丢。 */
   private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null): void {
-    this.addBubble('user', displayText, images);
+    const bubble = this.addBubble('user', displayText, images);
+    this.placeAckAfterEcho(ack, bubble);
     this.pendingFoldIns.push({ text, images, displayText, delivered: false, activityCountAtDelivery: -1, mechanical });
     // 不说"调研"——折入的追加可能是任何活，点名的任务类型说错了才突兀。
     this.settleAck(ack, '已收到——正在跑的活收齐后先补这项，再合并出一份覆盖全部的汇总。');
@@ -4728,6 +4743,35 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 }
               }
             }
+            break;
+          }
+
+          case 'ToolStarted': {
+            // 代执行回合（fold-in 补跑）的委派卡在这里落地：合成回合完全跳过
+            // 模型流式调用，TokenDelta 里永远等不到它的 id 分块——没有这条
+            // 兜底，追加的委派在后台跑得欢，对话流里却一张卡都不出（用户实测
+            // 报过）。流式回合走到这里时行早已建好（id 分块先行），直接跳过，
+            // 不会重卡。
+            const callId = event.payload.toolCallId;
+            const toolName = event.payload.toolName;
+            if (!callId || !toolName || pendingRows.has(callId)) break;
+            const args = parseToolCallBuffer(event.payload.toolCallArgs ?? '').args || {};
+            const staged = pendingByName.get(toolName);
+            if (staged) {
+              // 极少见：流式半截行按名字暂存着还没等来 id 分块——迁移它，
+              // 别让 ToolStarted 再开一行。
+              pendingByName.delete(toolName);
+              const migrated = { ...staged, toolCallId: callId, args };
+              pendingRows.set(callId, migrated);
+              updateToolRowArgs(migrated.row, toolName, args);
+              break;
+            }
+            endThinking();
+            const row = appendToolRow(toolName, args, subagentNames.has(toolName) ? 'agent' : 'tool');
+            toolRowSinceSegment = true;
+            if (subagentNames.has(toolName)) row.el.dataset.agentCallId = callId;
+            pendingRows.set(callId, { row, toolName, args, toolCallId: callId });
+            scrollChatToBottomIfPinned(chatEl);
             break;
           }
 

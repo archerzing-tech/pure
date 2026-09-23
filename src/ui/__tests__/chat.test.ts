@@ -1043,6 +1043,20 @@ describe('plan overview completion state', () => {
     const toolResultCase = src.indexOf("case 'ToolResult': {");
     expect(toolResultCase).toBeGreaterThan(-1);
     expect(src.slice(toolResultCase, toolResultCase + 900).indexOf('f.syntheticCallId === event.payload.toolCallId')).toBeGreaterThan(-1);
+    // 代执行回合的卡片兜底（2026-09-23 用户实测：合成回合没有流式 TokenDelta，
+    // 卡片必须由 ToolStarted 补上，否则追加的委派后台在跑、对话流里无卡）。
+    const toolStartedCase = src.indexOf("case 'ToolStarted': {");
+    expect(toolStartedCase).toBeGreaterThan(-1);
+    const startedBody = src.slice(toolStartedCase, toolStartedCase + 1_400);
+    expect(startedBody.indexOf('pendingRows.has(callId)')).toBeGreaterThan(-1);
+    expect(startedBody.indexOf("appendToolRow(toolName, args, subagentNames.has(toolName) ? 'agent' : 'tool')")).toBeGreaterThan(-1);
+    expect(startedBody.indexOf('pendingRows.set(callId,')).toBeGreaterThan(-1);
+    // 插话回显次序（2026-09-23 用户实测：回执压在用户原话头上）：回显气泡后
+    // ack 行必须挪到气泡下面——折入与 echo 两条路径都要走 placeAckAfterEcho。
+    const foldInFn = src.indexOf('private foldInScopeAddition(');
+    expect(src.slice(foldInFn, foldInFn + 600).indexOf('this.placeAckAfterEcho(ack, bubble)')).toBeGreaterThan(-1);
+    const echoFn = src.indexOf('const echoUserBubble = (): void =>');
+    expect(src.slice(echoFn, echoFn + 400).indexOf('this.placeAckAfterEcho(ack, bubble)')).toBeGreaterThan(-1);
     const settle = src.indexOf('private settleFoldIns(');
     expect(settle).toBeGreaterThan(-1);
     const settleBody = src.slice(settle, settle + 500);
