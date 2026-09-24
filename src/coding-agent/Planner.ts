@@ -324,15 +324,21 @@ Categories (pick exactly one):
 - "task": any NEW, completable item of work — even one that EXTENDS the current job ("再加一个 X 平台", "顺便也查一下 Y", "把 Z 也照样处理"), another file, another feature, a separate errand. A scope addition must go here, never steer: queuing runs it to completion right after the current task, so nothing is forgotten; steering it only promises "the next step will pick it up" — a promise that goes unfulfilled when no real next step remains. When torn between steer and task over an addition of work, pick task.
 - "chatter": small talk, thanks, reactions, filler ("哈哈", "好的", "辛苦了", "+1"). Nothing to act on.
 
+One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the category of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
+
 Return ONLY one JSON object:
 {"kind":"question|steer|premise-change|goal-change|task|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>"}
 
 "confidence" is how sure you are of the KIND and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
 reads two ways (a correction of facts that could also be a small tweak, an
-overturn that could also be a scope addition). Never inflate it: a low number is
-cheap (the agent asks the user one short question), a wrong high number is not
-(the agent restarts work or loses the message).
+overturn that could also be a scope addition). Report genuine doubt (~0.5 or
+lower) also when the message is self-contradictory, or when it touches
+something irreversible (sending, publishing, deleting, paying, deploying)
+while staying unclear — the host will ask the user one short question instead
+of gambling with an action that cannot be undone. Never inflate the number: a
+low one is cheap (the agent asks the user one short question), a wrong high
+one is not (the agent restarts work or loses the message).
 
 "when" is the user's own words for WHEN this should run if they named a time
 ("10 分钟后", "下午三点", "明天早上") — copy them, do not compute a time. Use

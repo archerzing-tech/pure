@@ -15,6 +15,7 @@ import {
   IMAGE_GEN_OUTPUT_PROMPT,
   MAP_DSL_PROMPT,
   HUMAN_TONE_PROMPT,
+  INSERTION_PROTOCOL_PROMPT,
   FILE_TOOLS_CORE,
   CAPABILITY_GAP_PROMPT,
   PRE_COMMIT_REVIEW_CONTRACT,
@@ -45,6 +46,39 @@ describe('SYSTEM_CORE_PROMPT (L0)', () => {
 });
 
 describe('L1 behavior contracts', () => {
+  it('carries the mid-run insertion protocol (2026-09-24 案例集泛化)', () => {
+    // 学习案例集（11 例：补充/转向/取消/无关/多句/翻转/恢复/前提/不可逆）
+    // 的泛化表固化为行为协议——领域无关，九种插入各有一条最小动作。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('<insertion_protocol>');
+    // 核心规则：先判断影响面（需求/在跑步骤/已完成产物/下游依赖），再选最小动作。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('which stated requirement it changes');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('SMALLEST action');
+    // 补充不打断；取消约束只停受影响的活，产物标记不用而非删除。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('Never restart anything for it');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('marked not-used-for-decisions');
+    // 方向变更保留未冲突条件；前提变更立即止损回滚，不等跑完再补。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('does not contradict');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('instead of letting them finish and patching afterwards');
+    // 无关插入进待办；多句一批，不逐句抢跑。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('record it as a to-do');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('ONE batched decision');
+    // 翻转只认最后明确意图，不执行中间态；不可逆旁先问，问不毁。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('LAST explicit statement');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('never execute a middle state');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('irreversible action');
+    // 增强测试集（2026-09-24）补的两条：转向必须停掉在跑的执行资源并点名交代；
+    // 两条互斥需求不得自行二选一——挂起等用户裁决，其余照常。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('stopping anything still running for it');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('cannot both hold');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('stopped, kept, or re-dispatched');
+    // T22（2026-09-24）补的：用户说“错了算我的”也不能跳过不可逆确认——风险与被跳过的安全步骤（备份/演练）同行点名。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('takes the blame');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('safety step being skipped');
+    // 回复样式：一句说清 变更项/保留项/影响面；无关的已完成工作绝不丢弃。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('what changed, what stays, what it affects');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('never thrown away');
+  });
+
   it('re-exports the always-on workflow + completion contracts', () => {
     expect(WORKFLOW_PROMPT).toContain('Proactive problem-solving workflow');
     // Reuse-first: the model must check for an existing skill / MCP tool /

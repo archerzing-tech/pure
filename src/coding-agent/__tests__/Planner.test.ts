@@ -3,6 +3,7 @@
 // and the logical-trap detection that primes premise verification.
 
 import { describe, it, expect } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, isPlainConversational, markParallelPlanSteps, classifyInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
 import type { LLMAdapter, Message } from '../../shared/types';
 import type { Plan } from '../types';
@@ -678,6 +679,20 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
   it('falls back to a queued task for an empty prompt (no-op fallback)', async () => {
     const cls = await classifyInsertion(mockLlm('{"kind":"chatter"}'), 'context', '');
     expect(cls.kind).toBe('task');
+  });
+
+  it('classifies a multi-part message as ONE whole and flips by final intent (2026-09-24 案例集)', () => {
+    // 学习案例集案例 5/6/7/10 固化进分类提示词：一句话多条指令按整体判、
+    // 取影响最大的部分、其余在 reason 里点名；自相矛盾按最后明确意图，
+    // 不判中间态；自相矛盾/不可逆操作旁要报真疑（低置信）让宿主去问。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    expect(promptStart).toBeGreaterThan(-1);
+    const prompt = src.slice(promptStart, src.indexOf(';', src.indexOf('null when no timing was said', promptStart)));
+    expect(prompt).toContain('Judge it as ONE whole');
+    expect(prompt).toContain('LAST explicit statement');
+    expect(prompt).toContain('do NOT classify a middle state');
+    expect(prompt).toContain('irreversible');
   });
 });
 

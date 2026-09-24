@@ -39,6 +39,13 @@ describe('PromptAssembler', () => {
       expect(cli.split(header).length - 1).toBe(1);
     }
     expect(gui.indexOf('<agent_identity>')).toBeLessThan(gui.indexOf('<capabilities>'));
+    // Mid-run insertion protocol is a REQUIRED stable-zone fragment on both
+    // surfaces (2026-09-24 插话协议案例集): present exactly once, before the
+    // volatile tail, on GUI and CLI alike.
+    for (const prompt of [gui, cli]) {
+      expect(prompt.split('<insertion_protocol>').length - 1).toBe(1);
+      expect(prompt.indexOf('<insertion_protocol>')).toBeLessThan(prompt.indexOf('<capabilities>'));
+    }
     expect(gui).toContain('Path rule: pass file and directory paths relative');
     expect(cli).toContain('researcher_web(prompt');
   });

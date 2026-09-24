@@ -16,6 +16,7 @@ import {
   FILE_TOOLS_CORE,
   HUMAN_TONE_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
+  INSERTION_PROTOCOL_PROMPT,
   LOGICAL_TRAPS_PROMPT,
   MULTI_AGENT_PROTOCOL,
   PLAUSIBILITY_REVIEW_PROMPT,
@@ -325,7 +326,6 @@ export class PromptAssembler {
         ? [fragment('project_conventions', `<project_conventions>\n${context.conventions}\n</project_conventions>`, 250, true)]
         : []),
       fragment('model_identity', buildModelIdentity(context.modelIdentity), 118, true),
-      fragment('capabilities', `<capabilities>${capabilities ? `\n${capabilities}` : ''}\n</capabilities>`, 75),
       fragment('work_invariant', 'Work step by step. Read before you write. Verify after you change. Be concise.', 110, true),
       // Tone is REQUIRED: it is the persona of the product, not decoration —
       // it used to be priority 35, optional, and was silently dropped first
@@ -333,6 +333,10 @@ export class PromptAssembler {
       // below delivery_contract (112) on purpose: evidence discipline
       // outranks tone when the two ever conflict.
       fragment('human_tone', HUMAN_TONE_PROMPT, 108, true),
+      // Mid-run insertion protocol — REQUIRED (a dropped protocol means lost
+      // user words or unneeded restarts) and STATIC (never changes mid-session),
+      // so it lives in the stable zone, before the volatile tail.
+      fragment('insertion_protocol', INSERTION_PROTOCOL_PROMPT, 106, true),
       fragment('workflow', WORKFLOW_PROMPT, 90),
       fragment('completion', COMPLETION_PROMPT, 80),
       // Multi-agent delegation + delivery discipline are REQUIRED so they are
@@ -365,6 +369,14 @@ export class PromptAssembler {
       fragment('shell', context.shell ?? '', 58),
       fragment('skills', buildSkills(context.skills), 30),
       fragment('mcp_resources', buildMcpResources(context.mcpResources), 30),
+      // ── Volatile fragments LAST ──
+      // Everything that can legitimately change mid-session (the
+      // circuit-breaker blocked-hosts list inside `capabilities`, MCP
+      // resources, the task mode) sits at the tail of the system prompt:
+      // providers' implicit context caches match the longest byte-identical
+      // prefix, so a tail change only re-prefills the tail instead of
+      // invalidating ~25KB of stable instructions behind it.
+      fragment('capabilities', `<capabilities>${capabilities ? `\n${capabilities}` : ''}\n</capabilities>`, 75),
       fragment('task_mode', buildMode(context.mode), 85),
     ].filter((item): item is PromptFragment => item !== null);
   }

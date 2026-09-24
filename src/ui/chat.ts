@@ -2533,7 +2533,11 @@ export class ChatController {
    * <insertion_protocol> rules so the reconciliation follows the protocol
    * (smallest action, state what changed/stays, never discard finished work). */
   private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null): void {
-    this.pendingSteers.push({ role: 'user', content: text, images });
+    this.pendingSteers.push({
+      role: 'user',
+      content: `【用户插话·顺路带上】${text}\n（这是任务进行中的插话，不是新任务：按 <insertion_protocol> 判断它影响什么，选最小动作，手头的活继续。）`,
+      images,
+    });
     this.settleAck(ack, '已转达——手头的活不停，下个动作就带上。');
   }
 
