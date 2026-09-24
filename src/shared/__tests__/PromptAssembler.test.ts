@@ -115,6 +115,44 @@ describe('PromptAssembler', () => {
     expect(gui).not.toContain('wireframe');
   });
 
+  it('makes the BUILD-mode deliverable a workspace change, not an inline code block', () => {
+    const cli = assembler.buildSystemPrompt({
+      surface: 'cli',
+      capabilities: buildCliCapabilities(),
+      mode: 'build',
+    });
+    expect(cli).toContain('The deliverable lives in the workspace');
+    expect(cli).toContain('never an implement/fix request answered with inline code alone');
+  });
+
+  it('tells the model to inspect an existing project before writing (work invariant)', () => {
+    // S02 残留：写了自创文件名 fizzbuzzjazz.py 而不是补全种子的 fizzbuzz.py stub；
+    // S01 残留：全程没看工作区，用 execute_command 硬跑。work_invariant 必须
+    // 把「先看项目、按既有契约动手」立成不变量。
+    const cli = assembler.buildSystemPrompt({ surface: 'cli', capabilities: buildCliCapabilities() });
+    expect(cli).toContain('starts with list_files on the workspace');
+    expect(cli).toContain('the deliverable is the change written into those files plus their tests passing, never a code block in the reply');
+    expect(cli).toContain('existing file names, signatures, and test layout are the contract, not suggestions');
+  });
+
+  it('carries the engineering exception so project work lands in files, not inline code blocks', () => {
+    // 2026-09-24 编码测试集回放：S01–S03 全部 0 工具调用，模型把实现贴在回复里。
+    // 根因是 output_style 的 inline 默认 + 无路径即贴代码规则压过了「在项目里
+    // 实现/修复」的语境；修复后两个 surface 都必须携带这条工程例外。
+    for (const surface of ['cli', 'gui'] as const) {
+      const prompt = assembler.buildSystemPrompt({
+        surface,
+        capabilities: surface === 'cli' ? buildCliCapabilities() : buildGuiCapabilities(true),
+      });
+      expect(prompt).toContain('Engineering exception to that default');
+      expect(prompt).toContain('run the project\'s own verification (tests)');
+      // 例外必须限定在工程语境，不推翻无路径贴代码的默认（纯代码片段仍 inline）。
+      expect(prompt).toContain('when the workspace holds a project that the request builds into or fixes');
+      expect(prompt).toContain('Questions and explanations about code stay inline regardless');
+      expect(prompt).toContain('the engineering exception above applies instead');
+    }
+  });
+
   it('offers mermaid and puml as offline GUI diagram formats', () => {
     // GUI 的图全部本地渲染：mermaid 与 PlantUML 引擎都随应用打包，断网也能画，
     // 所以 puml 不再被禁止，只声明各自擅长的图型（mermaid 默认，PlantUML 负责
