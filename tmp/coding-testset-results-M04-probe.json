@@ -1,0 +1,72 @@
+{
+  "generatedAt": "2026-09-24T12:50:59.840Z",
+  "provider": {
+    "model": "glm-5.3-flash",
+    "baseURL": "https://open.bigmodel.cn/api/anthropic"
+  },
+  "records": [
+    {
+      "id": "M04",
+      "section": "M",
+      "title": "CSV → SQLite 导入器",
+      "prompt": "读 CSV 导入 SQLite，列名自动建表，重复导入不重复插入。",
+      "alignment": [
+        "测试集「幂等 + 事务 + 测试」→ pure：write_file + execute_command（sqlite3 走标准库，无外部服务）"
+      ],
+      "status": "passed",
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 128085,
+      "agent": {
+        "usage": {
+          "promptTokens": 101685,
+          "completionTokens": 4562,
+          "cacheHitTokens": 83136,
+          "cacheMissTokens": 18549
+        },
+        "toolCalls": 10,
+        "turns": 6,
+        "traceId": "prompt_mufj34u3_8urgmy"
+      },
+      "verification": [
+        {
+          "name": "pytest",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 667,
+          "output": {
+            "chars": 98,
+            "hash": "6905a9ba"
+          }
+        }
+      ],
+      "toolNames": [
+        "list_files",
+        "read_file",
+        "read_file",
+        "list_files",
+        "list_files",
+        "read_file",
+        "read_file",
+        "read_file",
+        "write_file",
+        "execute_command"
+      ],
+      "finalOutputChars": 420,
+      "finalOutput": "实现完成，测试全过（`2 passed`）。\n\n`import_csv.py` 按README 契约填好了：表名取文件名 `orders`，建表前先按每列所有非空值推断类型（全整数→INTEGER，全浮点→REAL，否则TEXT，空单元格存 NULL）；幂等用「插入前按整行 `IS ?` 查重」实现，所以重复导入不重插，追加新行能正常入库；整个导入包在一个 `with conn:` 事务里，中途报错整体回滚。另外补了两处测试没覆盖但容易踩的坑：CSV 带的 `\\ufeff` BOM 用 `utf-8-sig` 读掉，已有表的列名和表头不一致时直接报错而不是静默插错位。\n\n验证跑的是项目自带的 `python -m pytest -q`，幂等 + 增量 + 类型推断两条用例都通过。如果以后 CSV 会大到几万行以上，逐行 SELECT 查重会变慢，到时可以换成建唯一索引 + `INSERT OR IGNORE` 的方案，行为不变。",
+      "addedFiles": [],
+      "removedFiles": [],
+      "modifiedFiles": [
+        "import_csv.py"
+      ],
+      "boundary": [
+        {
+          "name": "幂等键必须覆盖全部列",
+          "passed": true,
+          "detail": "dedupe ok: 3 csv rows -> 2 stored rows"
+        }
+      ],
+      "audits": []
+    }
+  ]
+}

@@ -1,0 +1,516 @@
+{
+  "generatedAt": "2026-09-24T11:32:47.883Z",
+  "provider": {
+    "model": "glm-5.3-flash",
+    "baseURL": "https://open.bigmodel.cn/api/anthropic"
+  },
+  "records": [
+    {
+      "id": "S01",
+      "section": "S",
+      "title": "罗马数字转整数",
+      "prompt": "写一个函数 roman_to_int(s)，输入合法罗马数字，返回整数。",
+      "alignment": [
+        "测试集「一个函数 + 边界测试」→ pure 工具：write_file/edit_file 改 roman.py + execute_command 跑验收",
+        "验收命令 pytest → 回放环境按 PATH shim 提供（测试集假设的解释器/测试器属于环境，不是 pure 工具）"
+      ],
+      "status": "passed",
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 40190,
+      "agent": {
+        "usage": {
+          "promptTokens": 97128,
+          "completionTokens": 695,
+          "cacheHitTokens": 71808,
+          "cacheMissTokens": 25320
+        },
+        "toolCalls": 6,
+        "turns": 6,
+        "traceId": "prompt_mufg4zol_f5hw9b"
+      },
+      "verification": [
+        {
+          "name": "pytest",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 450,
+          "output": {
+            "chars": 98,
+            "hash": "0ea98e2e"
+          }
+        }
+      ],
+      "toolNames": [
+        "list_files",
+        "read_file",
+        "list_files",
+        "read_file",
+        "edit_file",
+        "execute_command"
+      ],
+      "finalOutputChars": 209,
+      "finalOutput": "搞定。`roman.py` 里的实现用一遍扫描：每个符号看右边一位，比右边小就是减写（减去自己），否则加上——这一条规则天然覆盖 IV、IX、XL、XC、CD、CM 全部组合，不需要枚举特殊对。`pytest` 跑过，2 个用例全绿（含 MCMXCIV → 1994）。\n\n一个小提醒：按题目约束没做非法输入校验（比如 \"IIII\" 或 \"IC\" 也会算出个结果），如果之后要面向用户输入，加一层正则校验再进来会更稳。",
+      "addedFiles": [],
+      "removedFiles": [],
+      "modifiedFiles": [
+        "roman.py"
+      ],
+      "boundary": [
+        {
+          "name": "空输入要有处理",
+          "passed": false,
+          "detail": "  File \"/Users/ericever/work/Anything/tmp/coding-testset/checks/s01_empty.py\", line 3, in <module> |     import roman | ModuleNotFoundError: No module named 'roman'"
+        }
+      ],
+      "audits": []
+    },
+    {
+      "id": "S02",
+      "section": "S",
+      "title": "FizzBuzz 变体",
+      "prompt": "打印 1-100，3 的倍数输出 Fizz，5 的倍数输出 Buzz，7 的倍数输出 Jazz，同时满足按 FizzBuzzJazz 顺序拼接。",
+      "alignment": [
+        "测试集默认「按 3→5→7 顺序拼」→ 不要求澄清即可推断，回放不放宽：直接按该顺序验收",
+        "纯文字打印任务 → verify 用 execute_command 跑 python + 捕获 stdout（pure 无专用测试工具）"
+      ],
+      "status": "failed",
+      "verificationPassed": false,
+      "score": 0,
+      "durationMs": 63558,
+      "agent": {
+        "usage": {
+          "promptTokens": 64622,
+          "completionTokens": 2227,
+          "cacheHitTokens": 55488,
+          "cacheMissTokens": 9134
+        },
+        "toolCalls": 3,
+        "turns": 4,
+        "traceId": "prompt_mufg5uop_r2k0cw"
+      },
+      "verification": [
+        {
+          "name": "pytest",
+          "passed": false,
+          "exitCode": 1,
+          "durationMs": 516,
+          "output": {
+            "chars": 2428,
+            "hash": "aedaa529"
+          }
+        }
+      ],
+      "toolNames": [
+        "execute_command",
+        "write_file",
+        "execute_command"
+      ],
+      "finalOutputChars": 355,
+      "finalOutput": "写好了，`fizzbuzzjazz.py`：\n\n```python\nfor i in range(1, 101):\n    s = \"\"\n    if i % 3 == 0:\n        s += \"Fizz\"\n    if i % 5 == 0:\n        s += \"Buzz\"\n    if i % 7 == 0:\n        s += \"Jazz\"\n    print(s or i)\n```\n\n已跑过，输出正好 100 行。抽查的点都符合预期：15→FizzBuzz、21→FizzJazz、35→BuzzJazz、105 不在范围内所以末尾是 100 行 Buzz。拼接顺序靠 if 判断的书写顺序（3→5→7）保证，不用额外排序。要换成 JS/Java 或其他语言版本，说一声就行。",
+      "addedFiles": [
+        "fizzbuzzjazz.py"
+      ],
+      "removedFiles": [],
+      "modifiedFiles": [],
+      "boundary": [
+        {
+          "name": "5 与 7 同时满足时的拼接顺序",
+          "passed": false,
+          "detail": "  File \"/Users/ericever/work/Anything/tmp/coding-testset/checks/s02_order.py\", line 3, in <module> |     from fizzbuzz import fizzbuzz | ModuleNotFoundError: No module named 'fizzbuzz'"
+        }
+      ],
+      "audits": []
+    },
+    {
+      "id": "S03",
+      "section": "S",
+      "title": "Bug 修复：差一错误",
+      "prompt": "def last_n(items, n): return items[len(items)-n: len(items)-n+1] —— 这个函数应该返回最后 n 个，实际只返回 1 个。",
+      "alignment": [
+        "测试集「一行修成 items[-n:]」→ pure：edit_file 最小改动，无需重构",
+        "反例「重写整个模块」→ 用运行后文件清单 + 目标文件行数人工/脚本复核"
+      ],
+      "status": "failed",
+      "verificationPassed": false,
+      "score": 0,
+      "durationMs": 17388,
+      "agent": {
+        "usage": {
+          "promptTokens": 15953,
+          "completionTokens": 661,
+          "cacheHitTokens": 0,
+          "cacheMissTokens": 15953
+        },
+        "toolCalls": 0,
+        "turns": 1,
+        "traceId": "prompt_mufg77qa_3p3wes"
+      },
+      "verification": [
+        {
+          "name": "pytest",
+          "passed": false,
+          "exitCode": 1,
+          "durationMs": 453,
+          "output": {
+            "chars": 679,
+            "hash": "dea4047f"
+          }
+        }
+      ],
+      "toolNames": [],
+      "finalOutputChars": 419,
+      "finalOutput": "问题出在切片终点：`len(items)-n+1` 只比起点多 1，所以切片长度恒为 1。把终点改成列表末尾即可：\n\n```python\ndef last_n(items, n):\n    return items[len(items)-n:]\n```\n\n或者等价的常见写法 `items[-n:]`——但注意有个坑：当 `n == 0` 时 `-0` 就是 `0`，`items[-0:]` 会返回**整个列表**；而 `items[len(items)-n:]` 在 `n=0` 时正确返回空列表。所以要么用上面的显式写法，要么写 `items[-n:] if n else []`。\n\n另外一个小边界：`n > len(items)` 时 Python 切片不会报错，只会返回全部元素。如果希望这种情况抛异常提醒调用方，就加一句 `if n > len(items): raise ValueError(...)`，看你的语义需求。",
+      "addedFiles": [],
+      "removedFiles": [],
+      "modifiedFiles": [],
+      "boundary": [
+        {
+          "name": "n 大于长度时的行为",
+          "passed": false,
+          "detail": "  File \"/Users/ericever/work/Anything/tmp/coding-testset/checks/s03_oversize.py\", line 3, in <module> |     from src.last_n import last_n | ModuleNotFoundError: No module named 'src'"
+        }
+      ],
+      "audits": [
+        {
+          "name": "反例：重写整个模块（-20）",
+          "passed": true,
+          "detail": "清单干净（新增 0 个文件）"
+        }
+      ]
+    },
+    {
+      "id": "S04",
+      "section": "S",
+      "title": "单文件 CSV 统计 CLI",
+      "prompt": "一个脚本，读 CSV，输出每列的非空数量、唯一值数、数值列的均值。",
+      "alignment": [
+        "测试集「单文件 + 用法示例」→ pure：write_file 写一个脚本 + execute_command 跑样例",
+        "输出格式由种子 README 固定（prompt 只说「输出…」，格式不定就无法自动验收）"
+      ],
+      "status": "passed",
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 97984,
+      "agent": {
+        "usage": {
+          "promptTokens": 101287,
+          "completionTokens": 2571,
+          "cacheHitTokens": 82240,
+          "cacheMissTokens": 19047
+        },
+        "toolCalls": 11,
+        "turns": 6,
+        "traceId": "prompt_mufg7l5d_9amqgu"
+      },
+      "verification": [
+        {
+          "name": "pytest",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 471,
+          "output": {
+            "chars": 98,
+            "hash": "4a23d3ab"
+          }
+        }
+      ],
+      "toolNames": [
+        "list_files",
+        "sys_info",
+        "read_file",
+        "read_file",
+        "read_file",
+        "list_files",
+        "list_files",
+        "read_file",
+        "read_file",
+        "write_file",
+        "bash_executor"
+      ],
+      "finalOutputChars": 371,
+      "finalOutput": "写完直接跑了真实验证：`pytest` 1 个用例通过，脚本对 `data/sample.csv` 的输出也符合 README 契约——`name` 无 mean、`city` unique=2（Xi'an 去重后）、age/score 均值 35.67 / 80.25。\n\n改动就一个文件：`stats_csv.py` 里补上了 `column_stats` 和 `main` 两个桩。做法上没用 pandas，只靠标准库 `csv`：非空按 strip 后非空算，unique 只统计非空值，一列的非空值全部能转 float 才追加 `mean=`，否则该列不显示均值；另外顺手处理了空行和 UTF-8 BOM。\n\n运行方式照旧：`python3 stats_csv.py data/sample.csv`，换自己的 CSV 传路径即可。",
+      "addedFiles": [],
+      "removedFiles": [],
+      "modifiedFiles": [
+        "stats_csv.py"
+      ],
+      "boundary": [
+        {
+          "name": "非数值列不得出现 mean",
+          "passed": true,
+          "detail": "ok: string column reports counts only"
+        }
+      ],
+      "audits": [
+        {
+          "name": "反例：拆成 5 个文件（-15）",
+          "passed": true,
+          "detail": "清单干净（新增 0 个文件）"
+        }
+      ]
+    },
+    {
+      "id": "S05",
+      "section": "S",
+      "title": "日期格式化工具",
+      "prompt": "函数 fmt_date(dt, style)，支持 \"iso\"、\"us\"、\"eu\" 三种。",
+      "alignment": [
+        "测试集「标准库够用」→ pure 环境无第三方日期库，写依赖会直接跑不起来（与反例检测同向）",
+        "prompt 只说三种 style，具体格式由种子 README 固定（否则 us/eu 无法自动验收）"
+      ],
+      "status": "passed",
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 44518,
+      "agent": {
+        "usage": {
+          "promptTokens": 97611,
+          "completionTokens": 1029,
+          "cacheHitTokens": 64448,
+          "cacheMissTokens": 33163
+        },
+        "toolCalls": 7,
+        "turns": 6,
+        "traceId": "prompt_mufg9or6_ivbnjx"
+      },
+      "verification": [
+        {
+          "name": "pytest",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 428,
+          "output": {
+            "chars": 98,
+            "hash": "683d24c8"
+          }
+        }
+      ],
+      "toolNames": [
+        "list_files",
+        "list_files",
+        "read_file",
+        "read_file",
+        "read_file",
+        "write_file",
+        "execute_command"
+      ],
+      "finalOutputChars": 283,
+      "finalOutput": "搞定，4 个测试全过。\n\n`src/fmt_date.py` 里原来是个 `NotImplementedError` 的 stub，现在实现了：naive 的 datetime 视作 UTC，带时区的先 `astimezone` 转成 UTC（对应那条 UTC+8 输入转成前一天的测试）；\"iso\" 直接 `isoformat()` 得到 `2026-03-04T05:06:07+00:00`，\"us\" 是月/日/年、\"eu\" 是日/月/年，未知 style 抛 `ValueError`。`python -m pytest -q` 跑了一遍，4 passed。",
+      "addedFiles": [],
+      "removedFiles": [],
+      "modifiedFiles": [
+        "src/fmt_date.py"
+      ],
+      "boundary": [
+        {
+          "name": "US/EU 时区换算",
+          "passed": false,
+          "detail": "  File \"/Users/ericever/work/Anything/tmp/coding-testset/checks/s05_tz.py\", line 4, in <module> |     from src.fmt_date import fmt_date | ModuleNotFoundError: No module named 'src'"
+        }
+      ],
+      "audits": [
+        {
+          "name": "反例：引入 pendulum/arrow（-10）",
+          "passed": true,
+          "detail": "ok"
+        }
+      ]
+    },
+    {
+      "id": "S06",
+      "section": "S",
+      "title": "正则提取邮箱",
+      "prompt": "从文本提取所有邮箱，去重，排序。",
+      "alignment": [
+        "测试集「用成熟正则 + 测试用例」→ pure：write_file + execute_command 跑 pytest",
+        "无网络/无第三方依赖，验收完全离线"
+      ],
+      "status": "passed",
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 56273,
+      "agent": {
+        "usage": {
+          "promptTokens": 97857,
+          "completionTokens": 1505,
+          "cacheHitTokens": 64576,
+          "cacheMissTokens": 33281
+        },
+        "toolCalls": 8,
+        "turns": 6,
+        "traceId": "prompt_mufgan3t_col13j"
+      },
+      "verification": [
+        {
+          "name": "pytest",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 418,
+          "output": {
+            "chars": 98,
+            "hash": "0ea98e2e"
+          }
+        }
+      ],
+      "toolNames": [
+        "list_files",
+        "read_file",
+        "read_file",
+        "read_file",
+        "list_files",
+        "read_file",
+        "write_file",
+        "execute_command"
+      ],
+      "finalOutputChars": 301,
+      "finalOutput": "搞定，2 个测试全过。\n\n实现落在 `emails.py`：一个收紧的正则抓 `local@domain.tld`（local 部分允许 `._%+-`，域名必须带点、TLD 至少两位字母），`findall` 后 `sorted(set(...))` 一步完成去重加字典序升序。测试里的边界都验证了——`a+b@c.co.uk` 能识别、尖括号里的 `admin@example.com` 能剥出、`invalid@`/`@@x.com`/`a@b` 正确排除、重复的 `a@b.com` 只留一份。\n\n用法就是 `extract_emails(你的文本)`，传任意字符串进去，返回排序后的邮箱列表。",
+      "addedFiles": [],
+      "removedFiles": [],
+      "modifiedFiles": [
+        "emails.py"
+      ],
+      "boundary": [
+        {
+          "name": "反例正则 .*@.* 的典型误报",
+          "passed": false,
+          "detail": "  File \"/Users/ericever/work/Anything/tmp/coding-testset/checks/s06_regex.py\", line 3, in <module> |     from emails import extract_emails | ModuleNotFoundError: No module named 'emails'"
+        }
+      ],
+      "audits": []
+    },
+    {
+      "id": "S07",
+      "section": "S",
+      "title": "简单 API 端点",
+      "prompt": "FastAPI 加一个 GET /health，返回 {\"status\":\"ok\",\"time\":<iso>}。",
+      "alignment": [
+        "测试集「curl /health 返回正确 JSON」→ pure 的 execute_command 起 uvicorn + curl 真探端口",
+        "FastAPI/uvicorn/httpx 属于环境依赖，回放环境按需提供（不是 pure 工具缺口）"
+      ],
+      "status": "passed",
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 37865,
+      "agent": {
+        "usage": {
+          "promptTokens": 114363,
+          "completionTokens": 580,
+          "cacheHitTokens": 80512,
+          "cacheMissTokens": 33851
+        },
+        "toolCalls": 8,
+        "turns": 7,
+        "traceId": "prompt_mufgbuj0_1d7sw3"
+      },
+      "verification": [
+        {
+          "name": "curl /health 真探活",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 759,
+          "output": {
+            "chars": 70,
+            "hash": "0d37de09"
+          }
+        },
+        {
+          "name": "pytest",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 734,
+          "output": {
+            "chars": 624,
+            "hash": "3da11811"
+          }
+        }
+      ],
+      "toolNames": [
+        "list_files",
+        "code_searcher",
+        "read_file",
+        "glob_files",
+        "read_file",
+        "edit_file",
+        "edit_file",
+        "execute_command"
+      ],
+      "finalOutputChars": 293,
+      "finalOutput": "加好了，`app/main.py` 里新增 `GET /health`，返回 `{\"status\": \"ok\", \"time\": <UTC ISO 时间>}`，原来的 `/ping` 没动。时间用的是带时区的 `datetime.now(timezone.utc).isoformat()`，比如 `2026-09-24T11:31:44.123456+00:00`。\n\n项目里本来就有一份 `tests/test_health.py` 在等这个接口，跑 `python -m pytest tests/ -q` 两条全过。之后部署时把 `/health` 指到负载均衡的健康检查就行。",
+      "addedFiles": [],
+      "removedFiles": [],
+      "modifiedFiles": [
+        "app/main.py"
+      ],
+      "boundary": [],
+      "audits": [
+        {
+          "name": "反例：建了 Docker/CI/多模块（-25）",
+          "passed": true,
+          "detail": "清单干净（新增 0 个文件）"
+        }
+      ]
+    },
+    {
+      "id": "S08",
+      "section": "S",
+      "title": "字符串压缩",
+      "prompt": "实现 \"aaabbc\" → \"a3b2c1\"，空字符串返回空。",
+      "alignment": [
+        "测试集「默认带 1 + 一行说明」→ 验收只查行为；「是否一行说明」进人类表达评分"
+      ],
+      "status": "passed",
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 30552,
+      "agent": {
+        "usage": {
+          "promptTokens": 96355,
+          "completionTokens": 444,
+          "cacheHitTokens": 79488,
+          "cacheMissTokens": 16867
+        },
+        "toolCalls": 8,
+        "turns": 6,
+        "traceId": "prompt_mufgcnqw_zf4v71"
+      },
+      "verification": [
+        {
+          "name": "pytest",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 420,
+          "output": {
+            "chars": 98,
+            "hash": "0ea98e2e"
+          }
+        }
+      ],
+      "toolNames": [
+        "list_files",
+        "read_file",
+        "list_files",
+        "list_files",
+        "read_file",
+        "read_file",
+        "write_file",
+        "execute_command"
+      ],
+      "finalOutputChars": 113,
+      "finalOutput": "搞定。`src/compress.py` 里实现了单遍遍历：相邻字符相同就累加计数，不同就把前一个字符连同计数写入结果，最后补上最后一段；空串直接短路返回空。`pytest` 跑过，两个用例（`a3b2c1` 和空串）都通过。",
+      "addedFiles": [],
+      "removedFiles": [],
+      "modifiedFiles": [
+        "src/compress.py"
+      ],
+      "boundary": [
+        {
+          "name": "单字符/无重复/回环",
+          "passed": false,
+          "detail": "  File \"/Users/ericever/work/Anything/tmp/coding-testset/checks/s08_edges.py\", line 3, in <module> |     from src.compress import compress | ModuleNotFoundError: No module named 'src'"
+        }
+      ],
+      "audits": []
+    }
+  ]
+}

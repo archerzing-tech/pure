@@ -1,0 +1,84 @@
+{
+  "generatedAt": "2026-09-24T12:54:07.842Z",
+  "provider": {
+    "model": "glm-5.3-flash",
+    "baseURL": "https://open.bigmodel.cn/api/anthropic"
+  },
+  "records": [
+    {
+      "id": "M07",
+      "section": "M",
+      "title": "单元测试补全",
+      "prompt": "这个模块覆盖率只有 20%，补到 ≥85%。",
+      "alignment": [
+        "测试集「覆盖率 ≥85%」→ pure：execute_command 跑 pytest --cov（pytest-cov 属环境依赖）",
+        "反例「pragma: no cover / 空断言」→ 源码扫描 + 断言计数独立记录"
+      ],
+      "status": "passed",
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 45181,
+      "agent": {
+        "usage": {
+          "promptTokens": 83418,
+          "completionTokens": 1461,
+          "cacheHitTokens": 64448,
+          "cacheMissTokens": 18970
+        },
+        "toolCalls": 8,
+        "turns": 5,
+        "traceId": "prompt_mufj8xv9_wns3zb"
+      },
+      "verification": [
+        {
+          "name": "pytest + coverage",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 586,
+          "output": {
+            "chars": 475,
+            "hash": "e4770eb8"
+          }
+        }
+      ],
+      "toolNames": [
+        "list_files",
+        "git_status",
+        "read_file",
+        "read_file",
+        "read_file",
+        "read_file",
+        "write_file",
+        "execute_command"
+      ],
+      "finalOutputChars": 242,
+      "finalOutput": "补测完成：`tests/test_calc.py` 从 2 个用例扩到 20 个，`calc.py` 覆盖率 ==100%==（目标 ≥85%），`pytest --cov-fail-under=85` 实跑 20 passed、0 miss，exit 0。\n\n六个函数全覆盖了：正常路径、边界（`clamp` 的上下界、`div` 非整除、负数）、异常分支（除零、空输入/非数字、`low > high`），异常断言用 `pytest.raises` 加了消息匹配，不是只看抛没抛。",
+      "addedFiles": [
+        ".coverage"
+      ],
+      "removedFiles": [],
+      "modifiedFiles": [
+        "tests/test_calc.py"
+      ],
+      "boundary": [
+        {
+          "name": "测试确实覆盖异常路径",
+          "passed": true,
+          "detail": "assertions=16 raises=5"
+        }
+      ],
+      "audits": [
+        {
+          "name": "反例：pragma: no cover（-50）",
+          "passed": true,
+          "detail": "ok"
+        },
+        {
+          "name": "反例：空断言（-30）",
+          "passed": true,
+          "detail": "ok"
+        }
+      ]
+    }
+  ]
+}

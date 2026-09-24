@@ -1,0 +1,74 @@
+{
+  "generatedAt": "2026-09-24T12:53:22.523Z",
+  "provider": {
+    "model": "glm-5.3-flash",
+    "baseURL": "https://open.bigmodel.cn/api/anthropic"
+  },
+  "records": [
+    {
+      "id": "M06",
+      "section": "M",
+      "title": "日志解析脚本",
+      "prompt": "解析 nginx access log，输出 top 10 IP、top 10 路径、状态码分布。",
+      "alignment": [
+        "测试集「正则 + 容错 + 流式」→ pure：write_file + execute_command 跑样例 log",
+        "流式是源码级反例（1GB log 无法在验收里真造），用源码扫描复核，不进 pass/fail"
+      ],
+      "status": "passed",
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 64381,
+      "agent": {
+        "usage": {
+          "promptTokens": 119420,
+          "completionTokens": 1849,
+          "cacheHitTokens": 83392,
+          "cacheMissTokens": 36028
+        },
+        "toolCalls": 11,
+        "turns": 7,
+        "traceId": "prompt_mufj7k37_0vh8ag"
+      },
+      "verification": [
+        {
+          "name": "pytest",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 562,
+          "output": {
+            "chars": 98,
+            "hash": "2a233696"
+          }
+        }
+      ],
+      "toolNames": [
+        "list_files",
+        "glob_files",
+        "read_file",
+        "read_file",
+        "list_files",
+        "read_file",
+        "read_file",
+        "read_file",
+        "write_file",
+        "execute_command",
+        "execute_command"
+      ],
+      "finalOutputChars": 492,
+      "finalOutput": "搞定。`parse_log.py` 里的 `summarize` 原来只是个 `NotImplementedError` 桩，我按 README 和测试钉死的约定补全了：正则解析 combined 格式，path 去掉 query string，脏行静默跳过，每段取 count 降序（同 count 按值升序）的前 10。\n\n跑 `python parse_log.py access.log` 的实际结果：\n\n```\n[top ips]\n4\t10.0.0.1\n4\t10.0.0.2\n2\t10.0.0.3\n2\t10.0.0.4\n1\t10.0.0.5\n1\t10.0.0.6\n[top paths]\n4\t/api/orders\n4\t/index.html\n3\t/api/users\n2\t/missing\n1\t/api/orders/9\n[status]\n7\t200\n3\t500\n2\t404\n1\t201\n1\t304\n```\n\n验证：`pytest -q` 3 个测试全过，上面也是真实 CLI 输出。日志里那行 `not a log line at all` 被正确跳过，没混进任何统计。",
+      "addedFiles": [],
+      "removedFiles": [],
+      "modifiedFiles": [
+        "parse_log.py"
+      ],
+      "boundary": [],
+      "audits": [
+        {
+          "name": "反例：全量读入内存（-10，1GB log 会 OOM）",
+          "passed": true,
+          "detail": "ok"
+        }
+      ]
+    }
+  ]
+}

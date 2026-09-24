@@ -1,0 +1,73 @@
+{
+  "generatedAt": "2026-09-24T12:42:50.637Z",
+  "provider": {
+    "model": "glm-5.3-flash",
+    "baseURL": "https://open.bigmodel.cn/api/anthropic"
+  },
+  "records": [
+    {
+      "id": "M01",
+      "section": "M",
+      "title": "CLI 待办工具",
+      "prompt": "命令行 todo，支持 add/list/done/rm，存 JSON 文件。",
+      "alignment": [
+        "测试集「argparse + 文件锁 + 测试」→ pure：write_file + execute_command（无专用锁工具，锁是代码里的事）",
+        "并发验收用 12 个真进程同时写同一文件（不是线程内 mock），对得起「否决：并发丢数据」"
+      ],
+      "status": "passed",
+      "verificationPassed": true,
+      "score": 1,
+      "durationMs": 246565,
+      "agent": {
+        "usage": {
+          "promptTokens": 123649,
+          "completionTokens": 7724,
+          "cacheHitTokens": 85184,
+          "cacheMissTokens": 38465
+        },
+        "toolCalls": 10,
+        "turns": 7,
+        "traceId": "prompt_mufiq3y2_u3xfp0"
+      },
+      "verification": [
+        {
+          "name": "pytest",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 875,
+          "output": {
+            "chars": 98,
+            "hash": "f7aab3f1"
+          }
+        }
+      ],
+      "toolNames": [
+        "list_files",
+        "sys_info",
+        "read_file",
+        "read_file",
+        "list_files",
+        "read_file",
+        "read_file",
+        "write_file",
+        "execute_command",
+        "bash_executor"
+      ],
+      "finalOutputChars": 485,
+      "finalOutput": "搞定，`todo.py` 已按 README 契约实现，自带测试和并发场景都验证过了。\n\n存储这块有个不显眼但关键的选型：锁加在独立的 `todo.json.lock` 上而不是数据文件本身——因为落盘用的是临时文件 + `os.replace` 原子替换，数据文件的 inode 会换，直接锁它的话并发方可能各自锁住新旧不同 inode，互斥就失效了。锁文件 inode 稳定，`flock` 串行化才真正可靠；非 POSIX 平台自动退化为无锁。\n\n验证结果：\n\n- `pytest` 2/2 通过（基本流程 + 缺 id 退出码 1）；\n- 真实 CLI 冒烟：add/list/done/rm 输出与格式逐条比对无误，`done 2` 正确报 `no such id: 2` 且退出码 1；\n- 并发压测：20 个进程同时 add，最终 20 条数据、id 1–20 无重复无丢失。\n\n用法就是 README 里那样，`TODO_FILE` 环境变量可把存储指到任意路径。一个已知限制：Windows 上没有 `flock`，并发保护不生效，单进程使用不受影响。",
+      "addedFiles": [],
+      "removedFiles": [],
+      "modifiedFiles": [
+        "todo.py"
+      ],
+      "boundary": [
+        {
+          "name": "并发写不丢数据（否决项）",
+          "passed": true,
+          "detail": "concurrent adds ok: 12/12"
+        }
+      ],
+      "audits": []
+    }
+  ]
+}
