@@ -16,7 +16,7 @@ export interface AutocompleteCandidate {
   label: string;
   /** Text inserted at the caret (replaces the current token). */
   insert: string;
-  kind: 'session' | 'command' | 'path' | 'prompt';
+  kind: 'session' | 'command' | 'path' | 'prompt' | 'slash';
 }
 
 /** Extra candidates the host supplies (live runtime state rather than the
@@ -30,6 +30,7 @@ const KIND_LABEL: Record<AutocompleteCandidate['kind'], string> = {
   command: '$',
   path: '📁',
   prompt: '⚡',
+  slash: '/',
 };
 
 /** Word characters for token extraction (incl. CJK, path separators, dots). */

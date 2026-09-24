@@ -5,7 +5,7 @@
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
 import { abortPaused } from '../shared/pauseSignal';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
+import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, resolveNetRoute, netRouteProxyPair, recordNetOutcome } from '../shared/netRoute';
@@ -2527,7 +2527,11 @@ export class ChatController {
   /** 插话重构 — hand a remark to the RUNNING turn via the steering channel:
    * the engine drains it at the next THINK boundary and reconciles it in
    * stride. No abort, no replan, no queue — a nudge should steer, not
-   * restart. */
+   * restart. The user prompt carries a light frame (2026-09-24 插话协议案例集):
+   * the model sees a bare mid-transcript user line and could read it as a new
+   * turn's instruction — the frame marks it as a steer and points at the
+   * <insertion_protocol> rules so the reconciliation follows the protocol
+   * (smallest action, state what changed/stays, never discard finished work). */
   private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null): void {
     this.pendingSteers.push({ role: 'user', content: text, images });
     this.settleAck(ack, '已转达——手头的活不停，下个动作就带上。');
@@ -2769,6 +2773,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // A fresh turn's signals supersede any that were never consumed (defensive;
     // the finally of a completed turn always consumes them).
     this.pendingAutoContinue = null;
+
+    // First-token observability: one timing record per send attempt. The stage
+    // stamps are filled in at each pre-request await below; the record is
+    // committed in the turn's finally (generation-guarded so a turn superseded
+    // by a session switch never writes into the session the user switched TO).
+    const turnStartMs = performance.now();
+    const turnTiming: TurnTiming = { ts: Date.now(), ttftMs: null, routeMs: null, probeMs: null, contextMs: null, totalMs: null };
+    // First STREAMED byte counts — reasoning deltas open the visible card just
+    // like answer text, so both TokenDelta and ReasoningDelta mark through here.
+    const markFirstToken = (): void => {
+      if (turnTiming.ttftMs === null) turnTiming.ttftMs = Math.round(performance.now() - turnStartMs);
+    };
 
     // A previous turn may have queued an idle pre-compaction pass. Cancel it
     // before handling this input so an optimization can never compete with the
@@ -3429,7 +3445,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // One-shot runtime probe (node/bun/python3/rustc/git versions) — the cached
       // promise resolves in ms after the first send; awaiting here guarantees
       // the first turn already carries the runtimes line in its prompt.
+      const probeStartMs = performance.now();
       await ensureRuntimesProbed(this.abortController?.signal);
+      turnTiming.probeMs = Math.round(performance.now() - probeStartMs);
       let systemPrompt = '';
       // L2 per-request context (promptLayers.ts): task-specific fragments ride
       // with the USER message via composeUserTurn, not the system prompt.
@@ -3767,6 +3785,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // scope, and which layer decided — into the replayable log. The callers
       // below consume `route` / `workflow` exactly as the five separate
       // derivations used to produce them.
+      const routeStartMs = performance.now();
       const turnRoute = await decideTurnRoute(routePrefetch, llm, {
         forcedMode,
         hasTools: !!effectiveWorkspace,
@@ -3777,6 +3796,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // the gate, and an ordinary complex plan must not gain it).
         continuingProjectBuild: this.activePlanProjectBuild,
       }, this.abortController?.signal);
+      // The hidden router round trip is the single largest pre-request cost
+      // (6-12s on slow providers) — timing it is what makes that visible.
+      turnTiming.routeMs = Math.round(performance.now() - routeStartMs);
       const semanticRoute = turnRoute.route;
       const workflow = turnRoute.workflow;
       const analysis = workflow.analysis;
@@ -4420,6 +4442,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // here, so the connection overlapped everything in between; a server that
       // still has not answered registers its tools on a later turn.
       if (mcpConnectPromise) {
+        const mcpConnectStartMs = performance.now();
         const pendingConnect = mcpConnectPromise;
         mcpConnectPromise = null;
         await withAbortTimeout(
@@ -4431,6 +4454,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           if (err.name === 'AbortError') throw err;
           console.warn('[pure] MCP initialization skipped:', err.message);
         });
+        turnTiming.contextMs = (turnTiming.contextMs ?? 0) + Math.round(performance.now() - mcpConnectStartMs);
       }
 
       if (planPauseRequested && this.activeComplexPlan) {
@@ -4501,6 +4525,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // join the enabled Skill Hub skills in the system prompt. TTL-cached: a
       // skill installed mid-session shows up within 30s, not after a restart.
       const appSkills = await loadAppSkills(effectiveWorkspace);
+      // MCP resources join the same optional-context tier as skills. The
+      // client prefetches them on connect and caches the rendered body, so a
+      // slow server costs at most one bounded wait on the post-connect turn.
+      // Hoisted out of the assemble() literal below so the wait lands in the
+      // turn's contextMs bucket (first-token observability).
+      const mcpResourceStartMs = performance.now();
+      const mcpResourceContext = this.mcpClient
+        ? await this.mcpClient.collectResourceContext({ waitMs: MCP_RESOURCE_FIRST_TURN_BUDGET_MS })
+        : undefined;
+      turnTiming.contextMs = (turnTiming.contextMs ?? 0) + Math.round(performance.now() - mcpResourceStartMs);
       const assembly = promptAssembler.assemble({
         surface: 'gui',
         capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen }),
@@ -4512,10 +4546,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         network: buildNetworkContext(),
         shell: buildShellContextLine(),
         skills: [...(config.hubSkills ?? []), ...appSkills],
-        // MCP resources join the same optional-context tier as skills. The
-        // client prefetches them on connect and caches the rendered body, so a
-        // slow server costs at most one bounded wait on the post-connect turn.
-        mcpResources: this.mcpClient ? await this.mcpClient.collectResourceContext({ waitMs: MCP_RESOURCE_FIRST_TURN_BUDGET_MS }) : undefined,
+        mcpResources: mcpResourceContext,
         mode: analysis.mode,
         budget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides),
         // Subagent tools join the model-visible list only in workspace mode
@@ -4641,6 +4672,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             if (!event.payload.isToolCall) {
               const delta = event.payload.content;
               if (delta) {
+                markFirstToken();
                 // Answer text is now visibly streaming: schedule the hint's
                 // 1s linger BEFORE endThinking finalizes the card, so a showing
                 // hint survives finalize and completes its own fade.
@@ -4805,6 +4837,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           case 'ReasoningDelta': {
             const content = event.payload.content;
             if (!content) break;
+            markFirstToken();
             cancelToolGapCard();
             // Reasoning can resume after tool rows (each LLM iteration), so a
             // fresh card opens below whatever was appended since the last one.
@@ -5724,6 +5757,17 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         showToast(t('chat.error', 'Error: {msg}').replace('{msg}', visibleError), 8000);
       }
     } finally {
+      // Commit the turn's timing record (completed, failed, or aborted — all
+      // three carry attribution). Superseded turns are dropped: their session
+      // id now points at the session the user switched TO, and writing there
+      // would pollute another conversation's stats.
+      if (gen === this.generation) {
+        turnTiming.totalMs = Math.round(performance.now() - turnStartMs);
+        const timings = this.sessionStats.turnTimings ?? (this.sessionStats.turnTimings = []);
+        timings.push(turnTiming);
+        if (timings.length > 20) timings.splice(0, timings.length - 20);
+        this.persistStats();
+      }
       if (liveToolOutputFrame !== undefined) {
         if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(liveToolOutputFrame);
         else clearTimeout(liveToolOutputFrame);

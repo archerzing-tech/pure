@@ -37,19 +37,57 @@ fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> R
     finalize_http_client(builder, proxy_url)
 }
 
-/// Client for STREAMING LLM requests: deliberately NO total timeout. reqwest's
-/// client `timeout` spans the whole request INCLUDING reading the streamed
-/// body, so the previous 180s killed perfectly healthy long generations at
-/// exactly the 3-minute mark — every big-project analysis turn streams longer
-/// than that, and the cut lands mid-answer ("上一条回复输出中断了"). Dead
-/// connections are already bounded by the SSE idle timeout in chat_stream's
-/// read loop (LLM_STREAM_IDLE_TIMEOUT_SECS with no data ⇒ error), which is the
-/// only guard a live stream needs.
-fn build_llm_stream_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+/// Build with an ALREADY-RESOLVED proxy URL (system:// expanded, auth
+/// injected). Deliberately NO total timeout: reqwest's client `timeout` spans
+/// the whole request INCLUDING reading the streamed body, so a timeout here
+/// killed perfectly healthy long generations at exactly the 3-minute mark —
+/// every big-project analysis turn streams longer than that, and the cut lands
+/// mid-answer ("上一条回复输出中断了"). Dead connections are already bounded by
+/// the SSE idle timeout in chat_stream's read loop
+/// (LLM_STREAM_IDLE_TIMEOUT_SECS with no data ⇒ error), which is the only
+/// guard a live stream needs.
+fn build_llm_stream_client_resolved(resolved_proxy: Option<&str>) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .http1_only();
-    finalize_http_client(builder, proxy_url)
+    let builder = if let Some(url) = resolved_proxy {
+        if !valid_proxy_url(url) {
+            return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
+        }
+        let proxy = reqwest::Proxy::all(url).map_err(|e| format!("proxy: {}", e))?;
+        builder.proxy(proxy)
+    } else {
+        builder
+    };
+    builder.build().map_err(|e| format!("client: {}", e))
+}
+
+/// Reused streaming clients, keyed by the RESOLVED proxy URL ("direct" when
+/// none). reqwest pools connections inside one client, so caching it turns
+/// every THINK round after the first into a warm TLS session instead of a
+/// fresh DNS+TCP+TLS handshake — previously a brand-new client was built per
+/// `chat_stream` call and every pool connection died with it. Keyed on the
+/// RESOLVED url (system:// already expanded), so a mid-session system-proxy
+/// change simply lands in a new entry instead of silently reusing a dead route.
+fn llm_stream_clients(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, reqwest::Client>> {
+    static CLIENTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, reqwest::Client>>> =
+        std::sync::OnceLock::new();
+    CLIENTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn cached_llm_stream_client(proxy_spec: Option<&str>) -> Result<reqwest::Client, String> {
+    let resolved = effective_proxy_url(proxy_spec.unwrap_or(""));
+    let key = resolved.clone().unwrap_or_else(|| "direct".to_string());
+    let mut map = llm_stream_clients()
+        .lock()
+        .map_err(|_| "llm client cache poisoned".to_string())?;
+    if let Some(client) = map.get(&key) {
+        return Ok(client.clone());
+    }
+    let client = build_llm_stream_client_resolved(resolved.as_deref())?;
+    map.insert(key, client.clone());
+    Ok(client)
 }
 
 /// Shared tail of every client builder: apply the optional proxy, then build.
@@ -12668,9 +12706,10 @@ async fn chat_stream(
     } else {
         format!("{}/chat/completions", base_url)
     };
-    // Streaming client: no total deadline (see build_llm_stream_client) — the
-    // idle timeout in the read loop below is the only connection guard.
-    let client = build_llm_stream_client(llm_proxy_url(&args))?;
+    // Streaming client: no total deadline (see build_llm_stream_client_resolved)
+    // — the idle timeout in the read loop below is the only connection guard.
+    // Cached per resolved route so connection pools survive across calls.
+    let client = cached_llm_stream_client(llm_proxy_url(&args))?;
     // Capture the route information BEFORE body construction moves pieces of
     // `args` (tools) — the borrow checker forbids reading it afterwards.
     let fallback_spec = llm_fallback_proxy_url(&args);
@@ -12747,6 +12786,13 @@ async fn chat_stream(
             "messages": args.messages,
             "max_tokens": args.max_tokens_override.unwrap_or(4096),
             "stream": true,
+            // OpenAI-spec providers (GLM among them) only report usage in a
+            // stream when this is set — without it the session stats (cost,
+            // cache-hit rate) stayed at zero on the GLM path. DeepSeek sends
+            // usage regardless, which is why the gap never showed there.
+            // Spec-tolerant local servers (Ollama / LM Studio / llama.cpp)
+            // either support the field or ignore it.
+            "stream_options": { "include_usage": true },
         })
     };
     if let Some(temp) = args.temperature {
@@ -12806,7 +12852,7 @@ async fn chat_stream(
         Err(primary_err) => {
             let fallback_client = fallback_spec
                 .as_ref()
-                .map(|spec| build_llm_stream_client(Some(spec.as_str())))
+                .map(|spec| cached_llm_stream_client(Some(spec.as_str())))
                 .transpose();
             match fallback_client {
                 Ok(Some(fallback)) => {

@@ -1004,6 +1004,15 @@ const translations: Record<Language, Record<string, string>> = {
     'composer.model.title': '模型',
     'composer.modelSaved': '模型已切换',
 
+    // ── Composer slash commands (/model /compact /help) ──
+    'slash.model.desc': '切换模型，如 /model glm-4.6',
+    'slash.compact.desc': '压缩当前会话上下文',
+    'slash.help.desc': '显示内置命令',
+    'slash.help.text': '内置命令 — /model <名称> 切换模型 · /compact 压缩上下文 · /help 本帮助',
+    'slash.model.usage': '用法：/model <模型名>（当前 {current}）',
+    'slash.model.ambiguous': '匹配到多个模型，再打具体一点：{matches}',
+    'slash.model.notFound': '没有找到「{query}」。已配置的模型：{list}',
+
     // ── Permission dialog ──
     'permission.title': '需要权限确认',
     'permission.titleHigh': '⚠ 高风险操作确认',
@@ -1026,6 +1035,12 @@ const translations: Record<Language, Record<string, string>> = {
     'stats.cacheRate': '缓存命中率',
     'stats.cacheHit': '缓存命中',
     'stats.cacheMiss': '未命中',
+    'stats.ttft': '首字延迟（均值）',
+    'stats.ttft.hint': '从发送到看见第一个字的平均耗时；首字慢多半卡在请求前的准备阶段',
+    'stats.ttft.last': '上次',
+    'stats.ttft.route': '其中路由',
+    'stats.ttft.route.hint': '上一轮花在隐藏语义路由（先用主模型判断意图）上的时间',
+    'stats.ttft.missing': '本轮未出字',
     'stats.searches': '搜索历史',
     'stats.fileWrites': '文件写入',
     'stats.write.success': '最近成功',
@@ -2108,6 +2123,15 @@ const translations: Record<Language, Record<string, string>> = {
     'composer.model.title': 'Model',
     'composer.modelSaved': 'Model switched',
 
+    // ── Composer slash commands (/model /compact /help) ──
+    'slash.model.desc': 'Switch model, e.g. /model glm-4.6',
+    'slash.compact.desc': 'Compact the current session context',
+    'slash.help.desc': 'Show built-in commands',
+    'slash.help.text': 'Built-in commands — /model <name> switch model · /compact compact context · /help this help',
+    'slash.model.usage': 'Usage: /model <name> (current {current})',
+    'slash.model.ambiguous': 'Multiple models match — be more specific: {matches}',
+    'slash.model.notFound': 'No model matches "{query}". Configured models: {list}',
+
     // ── Permission dialog ──
     'permission.title': 'Permission required',
     'permission.titleHigh': '⚠ High-risk action',
@@ -2130,6 +2154,12 @@ const translations: Record<Language, Record<string, string>> = {
     'stats.cacheRate': 'Cache hit rate',
     'stats.cacheHit': 'Cache hit',
     'stats.cacheMiss': 'Cache miss',
+    'stats.ttft': 'First token (avg)',
+    'stats.ttft.hint': 'Average send → first visible token. A slow first reply is usually pre-request prep, not the model',
+    'stats.ttft.last': 'Last',
+    'stats.ttft.route': 'of which routing',
+    'stats.ttft.route.hint': 'Time the previous turn spent in the hidden semantic router (a preliminary main-model call)',
+    'stats.ttft.missing': 'no output this turn',
     'stats.searches': 'Searches',
     'stats.fileWrites': 'File writes',
     'stats.write.success': 'Latest: success',

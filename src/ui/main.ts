@@ -24,14 +24,14 @@ import { isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
 import { createTauriObservationSink } from '../shared/tauriObservationSink';
 import { promptObservability } from '../shared/promptObservability';
 import { workspaceBase } from '../shared/paths';
-import { loadSessionList, loadSessionStatsForList, flushSessionSaves, saveSessionWorkspace, type SessionMeta, type SessionStats } from './store';
+import { loadSessionList, loadSessionStatsForList, flushSessionSaves, saveSessionWorkspace, type SessionMeta, type SessionStats, type TurnTiming } from './store';
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { providerDef, PROVIDERS, defaultModelFor, customProviderLabel, promptBudgetForProvider, estimatePromptTokens, estimateToolDefinitionTokens, imageGenEnabled, type ProviderId } from '../shared/providers';
 import { resolvePromptBudget } from '../shared/PromptAssembler';
 import type { Message } from '../shared/types';
-import { ComposerSelect, type ComposerSelectOption } from './composerSelect';
+import { ComposerSelect } from './composerSelect';
 import { renderMarkdown, stripToolCallXml } from './markdownLoader';
 import { createToolRow, finalizeToolRow, markToolRowStopped, appendToolStreamLine, groupToolRoundRuns, toolCardKind, toolGridClass } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
@@ -55,6 +55,7 @@ import { createPathRepairNote } from './pathRepairNote';
 import { InlineAutocomplete, type AutocompleteCandidate } from './inlineAutocomplete';
 import { ComposerInputHistory, SessionInputHistoryStore } from './inputHistory';
 import { MCP_PROMPT_COMMAND, describeMcpPrompt } from '../shared/mcpPrompt';
+import { SLASH_COMMANDS, SLASH_COMMAND_I18N, parseSlashCommand, pickModelEntry, type ModelEntry, type SlashCommand } from '../shared/slashCommands';
 import { TaskQueue } from './taskQueue';
 import { Scheduler } from './scheduler';
 import { WorkspaceController, tauriGitRunner } from './workspace';
@@ -348,8 +349,20 @@ const mcpPromptCandidates = async (): Promise<AutocompleteCandidate[]> => {
     kind: 'prompt' as const,
   }));
 };
-new InlineAutocomplete(promptEl, { extraCandidates: mcpPromptCandidates });
-if (landingPrompt) new InlineAutocomplete(landingPrompt, { extraCandidates: mcpPromptCandidates });
+// Built-in slash commands rank above the store-scan candidates: typing "/m"
+// should offer /model first, not an old shell line that happens to contain it.
+const slashCandidates = (): AutocompleteCandidate[] =>
+  SLASH_COMMANDS.map((name) => ({
+    label: `${name} — ${t(SLASH_COMMAND_I18N[name].desc)}`,
+    insert: name === '/model' ? '/model ' : name,
+    kind: 'slash' as const,
+  }));
+const composerExtraCandidates = async (): Promise<AutocompleteCandidate[]> => [
+  ...slashCandidates(),
+  ...(await mcpPromptCandidates()),
+];
+new InlineAutocomplete(promptEl, { extraCandidates: composerExtraCandidates });
+if (landingPrompt) new InlineAutocomplete(landingPrompt, { extraCandidates: composerExtraCandidates });
 
 // ── 输入历史（↑/↓ 翻回之前发过的指令，shell 口径，按会话分桶）──
 // A 会话翻不到 B 会话发过的内容：每会话一份 ~/.pure/input-history/<id>.json
@@ -572,26 +585,36 @@ function populateModeSelect(cs: ComposerSelect, cfg: PureConfig): void {
   cs.setOptions(modes.map(([value, label]) => ({ value, label })), cfg.taskMode ?? 'auto');
 }
 
-function populateModelSelect(cs: ComposerSelect, cfg: PureConfig): void {
-  const customs = cfg.customProviders ?? [];
-  const currentModel = cfg.model?.trim() || '';
-  const options: ComposerSelectOption[] = [];
-  let selectedValue = '';
-  const appendProviderModels = (provider: string, label: string): void => {
-    const models = modelListForProvider(cfg, provider);
-    models.forEach((model, index) => {
-      options.push({ value: `${provider}::${index}`, label: model, hint: label });
-      if (provider === cfg.provider && model === currentModel) selectedValue = `${provider}::${index}`;
+/** Every selectable model for the providers whose key is configured — the one
+ *  source both the dropdown (populateModelSelect) and the /model command read,
+ *  so the two can never disagree on what is selectable. Order follows the
+ *  registry (keyed providers, then customs). */
+function modelOptionsForConfig(cfg: PureConfig): Array<ModelEntry & { value: string }> {
+  const out: Array<ModelEntry & { value: string }> = [];
+  const appendProvider = (provider: string, providerLabel: string): void => {
+    modelListForProvider(cfg, provider).forEach((model, index) => {
+      out.push({ value: `${provider}::${index}`, provider, model, providerLabel });
     });
   };
   for (const p of PROVIDERS) {
     if (!providerHasKey(cfg, p.id)) continue;
-    appendProviderModels(p.id, t(p.i18nKey));
+    appendProvider(p.id, t(p.i18nKey));
   }
-  for (const c of customs) {
+  for (const c of cfg.customProviders ?? []) {
     if (!providerHasKey(cfg, c.id)) continue;
-    appendProviderModels(c.id, c.name);
+    appendProvider(c.id, c.name);
   }
+  return out;
+}
+
+function populateModelSelect(cs: ComposerSelect, cfg: PureConfig): void {
+  const entries = modelOptionsForConfig(cfg);
+  const currentModel = cfg.model?.trim() || '';
+  let selectedValue = '';
+  const options = entries.map((entry) => {
+    if (entry.provider === cfg.provider && entry.model === currentModel) selectedValue = entry.value;
+    return { value: entry.value, label: entry.model, hint: entry.providerLabel };
+  });
   cs.setOptions(options, selectedValue || undefined);
 }
 
@@ -1498,28 +1521,36 @@ function bindUndoWriteButton(id: string): void {
   });
 }
 
+/** Compact the active session's context and toast the outcome — shared by the
+ *  ⌁ toolbar button and the /compact command (one behavior, two doors). */
+async function compactContextWithToast(): Promise<void> {
+  if (chat.isStreaming()) return;
+  try {
+    const result = await chat.compactContext();
+    if (result.overBudget) {
+      showToast(t(result.oversizedNewestGroup ? 'context.compact.overBudget' : 'context.compact.contextOverBudget'));
+    } else if (result.evictedMessages > 0) {
+      const summary = result.summarized
+        ? '，已生成摘要'
+        : result.summaryUnavailable ? `，${t('context.compact.noSummary')}` : '';
+      showToast(t('context.compact.done').replace('{n}', String(result.evictedMessages)).replace('{summary}', summary));
+    } else if (result.messages.length === 0) {
+      showToast(t('context.compact.empty'));
+    } else {
+      showToast(t('context.compact.none'));
+    }
+  } catch (error) {
+    showToast(`上下文压缩失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function bindCompactContextButton(id: string): void {
   const button = document.getElementById(id) as HTMLButtonElement | null;
   if (!button) return;
   button.addEventListener('click', async () => {
-    if (chat.isStreaming()) return;
     button.disabled = true;
     try {
-      const result = await chat.compactContext();
-      if (result.overBudget) {
-        showToast(t(result.oversizedNewestGroup ? 'context.compact.overBudget' : 'context.compact.contextOverBudget'));
-      } else if (result.evictedMessages > 0) {
-        const summary = result.summarized
-          ? '，已生成摘要'
-          : result.summaryUnavailable ? `，${t('context.compact.noSummary')}` : '';
-        showToast(t('context.compact.done').replace('{n}', String(result.evictedMessages)).replace('{summary}', summary));
-      } else if (result.messages.length === 0) {
-        showToast(t('context.compact.empty'));
-      } else {
-        showToast(t('context.compact.none'));
-      }
-    } catch (error) {
-      showToast(`上下文压缩失败：${error instanceof Error ? error.message : String(error)}`);
+      await compactContextWithToast();
     } finally {
       button.disabled = chat.isStreaming();
     }
@@ -1530,6 +1561,64 @@ bindUndoWriteButton('undo-write-btn');
 bindUndoWriteButton('landing-undo-write-btn');
 bindCompactContextButton('compact-btn');
 bindCompactContextButton('landing-compact-btn');
+
+// ── Built-in slash commands (/model /compact /help) ──
+// Executed host-side, never sent to the engine: sendMessage intercepts the
+// draft before every message gate. /model resolves through the SAME option
+// list as the model dropdown and /compact reuses the ⌁ button's handler
+// verbatim, so there is exactly one behavior per action and the command is
+// only a second door into it. (No /clear — see slashCommands.ts.)
+
+function applyModelChoice(entry: ModelEntry): void {
+  const cfg = loadConfig() ?? defaults();
+  cfg.provider = entry.provider as ProviderId;
+  cfg.model = entry.model;
+  persistConfig(cfg);
+  invalidateConfigCache();
+  // Same cascade as the dropdown's onSelect: the composer selects re-mirror
+  // the persisted config, and updateSidebarModel() cascades into the status
+  // footer + context panel.
+  populateComposerSelects();
+  updateSidebarModel();
+  showToast(t('composer.modelSaved'));
+}
+
+function runModelCommand(arg: string): void {
+  const cfg = loadConfig() ?? defaults();
+  const entries = modelOptionsForConfig(cfg);
+  if (!arg) {
+    // Bare /model opens the same picker as the toolbar dropdown.
+    const select = modelSelects.get('composer-model-select');
+    if (select && entries.length > 0) {
+      select.showPicker();
+      return;
+    }
+    showToast(t('slash.model.usage').replace('{current}', cfg.model || '—'), 5000);
+    return;
+  }
+  const pick = pickModelEntry(arg, entries, cfg.provider);
+  if (pick.kind === 'exact' || pick.kind === 'unique') {
+    applyModelChoice(pick.entry);
+    return;
+  }
+  if (pick.kind === 'ambiguous') {
+    const names = [...new Set(pick.matches.map((e) => e.model))].slice(0, 6).join('、');
+    showToast(t('slash.model.ambiguous').replace('{matches}', names), 6000);
+    return;
+  }
+  const names = [...new Set(entries.map((e) => e.model))].slice(0, 8).join('、');
+  showToast(t('slash.model.notFound').replace('{query}', arg).replace('{list}', names || '—'), 6000);
+}
+
+function runHelpCommand(): void {
+  showToast(t('slash.help.text'), 6000);
+}
+
+async function runSlashCommand(command: SlashCommand, arg: string): Promise<void> {
+  if (command === '/model') runModelCommand(arg);
+  else if (command === '/compact') await compactContextWithToast();
+  else runHelpCommand();
+}
 
 function handleSendOrStop() {
   if (chat.isStreaming()) {
@@ -1560,6 +1649,25 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
   const normalized = normalizeDraft(sourceEl.value);
   // Empty typed text is fine when pasted file chips carry the message.
   if ((!normalized && !pasteChips.hasAttachments()) || chat.isStreaming()) return;
+
+  // Built-in slash commands run host-side and never reach the engine — parsed
+  // after normalization (full-width characters would break the match) but
+  // before every message gate: a command is not a draft, so the API-key
+  // check, path repair, preflight and MCP expansion don't apply. (While a
+  // turn is streaming the guard above holds the command too, same as any
+  // send; /model can always use the toolbar dropdown in the meantime.)
+  const slash = parseSlashCommand(normalized);
+  if (slash) {
+    (sourceEl === promptEl ? promptHistory : landingHistory)?.remember(sourceEl.value);
+    sourceEl.value = '';
+    sourceEl.style.height = 'auto';
+    if (sourceEl === landingPrompt) {
+      landingSend.disabled = true;
+      syncLandingHasText();
+    }
+    await runSlashCommand(slash.command, slash.arg);
+    return;
+  }
 
   // Validate BEFORE clearing the input: without a key we return here and the
   // user's draft stays in the box (doSend's own check covers the queued path).
@@ -1906,6 +2014,26 @@ initStatsExportMenu();
 // estimated cost, and tool-activity history (searches / file reads+writes /
 // commands). Refreshed on every completed turn, session switch, and restore.
 
+/** Human latency: sub-second in ms, under a minute in s, beyond in m+s. */
+function formatLatencyMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
+}
+
+/** TTFT aggregation over a session's turn timings: the average across turns
+ * that actually streamed, plus the newest record (null when none exist yet). */
+function summarizeTurnTimings(timings: TurnTiming[]): { avgTtftMs: number | null; last: TurnTiming | null } {
+  const streamed = timings.map((entry) => entry.ttftMs).filter((v): v is number => typeof v === 'number');
+  return {
+    avgTtftMs: streamed.length > 0 ? streamed.reduce((sum, v) => sum + v, 0) / streamed.length : null,
+    last: timings.length > 0 ? timings[timings.length - 1] : null,
+  };
+}
+
 function renderSessionStats() {
   const stats = chat.getSessionStats();
   const provider = stats.provider ?? loadConfig()?.provider ?? 'deepseek-openai';
@@ -1929,6 +2057,12 @@ function renderSessionStats() {
   setText('stat-cache-miss', formatTokens(miss));
   const bar = document.getElementById('stat-cache-bar');
   if (bar) bar.style.width = rate === null ? '0%' : `${Math.max(2, Math.min(100, rate))}%`;
+
+  // 首字延迟：均值 + 上一轮的 TTFT 与其中的路由耗时（隐藏语义路由是首字慢的头号嫌疑）。
+  const { avgTtftMs, last } = summarizeTurnTimings(stats.turnTimings ?? []);
+  setText('stat-ttft-avg', avgTtftMs === null ? '—' : formatLatencyMs(avgTtftMs));
+  setText('stat-ttft-last', !last || last.ttftMs === null ? t('stats.ttft.missing', '本轮未出字') : formatLatencyMs(last.ttftMs));
+  setText('stat-ttft-route', !last || last.routeMs === null ? '—' : formatLatencyMs(last.routeMs));
 
   const fileGroups = groupFileWrites(stats.fileWrites);
   setText('stat-search-count', String(stats.searches.length));
@@ -2199,6 +2333,7 @@ function buildStatsExportJson(stats: SessionStats, provider: string, meta?: Sess
       turns: stats.turns ?? 0,
       totalTokens: (stats.usage?.promptTokens ?? 0) + (stats.usage?.completionTokens ?? 0),
       cacheHitRate: total > 0 ? Math.round((hit / total) * 1000) / 10 : null,
+      turnTimings: stats.turnTimings ?? [],
       costUsd: cost,
       searches: stats.searches,
       fileWrites: stats.fileWrites,
@@ -2216,6 +2351,7 @@ function buildStatsExportMarkdown(stats: SessionStats, provider: string, meta?: 
   const miss = stats.usage?.cacheMissTokens ?? Math.max(0, (stats.usage?.promptTokens ?? 0) - hit);
   const total = hit + miss;
   const rate = total > 0 ? `${Math.round((hit / total) * 100)}%` : '—';
+  const { avgTtftMs, last } = summarizeTurnTimings(stats.turnTimings ?? []);
 
   const lines: string[] = [
     '# 会话统计',
@@ -2233,6 +2369,8 @@ function buildStatsExportMarkdown(stats: SessionStats, provider: string, meta?: 
     `- **缓存未命中**: ${formatTokens(miss)}`,
     `- **总 tokens**: ${formatTokens((stats.usage?.promptTokens ?? 0) + (stats.usage?.completionTokens ?? 0))}`,
     `- **估算花费**: ${formatCostUsd(cost)}`,
+    `- **首字延迟均值**: ${avgTtftMs === null ? '—' : formatLatencyMs(avgTtftMs)}`,
+    ...(last ? [`- **上轮首字延迟**: ${last.ttftMs === null ? '未出字' : formatLatencyMs(last.ttftMs)}（其中路由 ${last.routeMs === null ? '—' : formatLatencyMs(last.routeMs)}）`] : []),
     '',
     '## 搜索历史',
     ...(stats.searches.length

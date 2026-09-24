@@ -626,6 +626,25 @@ export function limitStoredMessages(messages: StoredMessage[], max = MAX_PERSIST
   return bounded;
 }
 
+/** One send() turn's latency breakdown (first-token observability). Written
+ * once per turn in chat.ts — the stamps name the pre-request stages so a slow
+ * first reply can be attributed (hidden router vs probe vs MCP wait vs model).
+ * All durations are integer ms; null means "never reached" / "no output". */
+export interface TurnTiming {
+  /** Turn start (send() entry), epoch ms. */
+  ts: number;
+  /** Send → first streamed token (reasoning or answer). Null if the turn ended without streaming anything. */
+  ttftMs: number | null;
+  /** Time in decideTurnRoute (the hidden semantic-router LLM call when it fires). */
+  routeMs: number | null;
+  /** Time awaiting the one-shot runtime probe (≈0 once cached). */
+  probeMs: number | null;
+  /** Bounded MCP waits on the critical path (connect budget + resource prefetch). */
+  contextMs: number | null;
+  /** Send → turn end (completed, failed, or aborted). */
+  totalMs: number | null;
+}
+
 export interface SessionStats {
   /** Provider id the session ran on (cost is priced per provider family). */
   provider?: string;
@@ -633,6 +652,8 @@ export interface SessionStats {
   usage?: TokenUsage;
   /** Number of internal LLM interaction rounds in the latest agent run. */
   turns?: number;
+  /** Latency breakdown of recent turns (oldest first, capped — the newest 20). */
+  turnTimings?: TurnTiming[];
   /** web_search history (query + timestamp). */
   searches: Array<{ query: string; ts: number }>;
   /** One latest entry per normalized file path. */
@@ -730,6 +751,9 @@ function normalizeLoadedStats(data: Partial<SessionStats>): SessionStats {
     fileWrites: data.fileWrites ?? [],
     fileReads: data.fileReads ?? [],
     commands: data.commands ?? [],
+    // Latency records survive the load path like every other stat; entries
+    // missing the ttft stamp still aggregate correctly (filtered by type).
+    turnTimings: data.turnTimings ?? [],
   });
 }
 

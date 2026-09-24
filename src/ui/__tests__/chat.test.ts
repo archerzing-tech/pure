@@ -39,10 +39,14 @@ describe('BASE_SYSTEM_PROMPT structure', () => {
     }
   });
 
-  it('wraps tools in <capabilities> and keeps L0 before L1', () => {
+  it('wraps tools in <capabilities> and keeps volatile fragments at the tail', () => {
     const prompt = BASE_SYSTEM_PROMPT(true);
     expect(prompt.indexOf('<capabilities>')).toBeGreaterThan(prompt.indexOf('</agent_identity>'));
-    expect(prompt.indexOf('Output style:')).toBeGreaterThan(prompt.indexOf('<capabilities>'));
+    // Cache stability: capabilities carries the mid-session-volatile
+    // blocked-hosts list, so it sits at the system-prompt TAIL — AFTER the
+    // stable L0/L1 blocks (the old order had it right after agent_identity,
+    // where any blocked-host change re-buffed the whole prefix).
+    expect(prompt.indexOf('<capabilities>')).toBeGreaterThan(prompt.indexOf('Output style:'));
   });
 });
 
@@ -1323,7 +1327,9 @@ describe('superseded-turn finally teardown', () => {
     // teardown lives in doSend's LAST finally.
     const finallyIdx = src.lastIndexOf('} finally {');
     expect(finallyIdx).toBeGreaterThan(-1);
-    const finallyBlock = src.slice(finallyIdx, finallyIdx + 2600);
+    // 3200: the finally also carries the turn-timing commit (first-token
+    // observability) ahead of the teardown calls asserted below.
+    const finallyBlock = src.slice(finallyIdx, finallyIdx + 3200);
     // Same teardown set the Interrupted branch runs, inside the finally:
     expect(finallyBlock).toContain('endThinking();');
     expect(finallyBlock).toContain('resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);');

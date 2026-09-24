@@ -34,6 +34,36 @@ describe('session stats persistence', () => {
   });
 });
 
+describe('session stats persistence', () => {
+  it('round-trips first-token latency records', () => {
+    const previousStorage = (globalThis as any).localStorage;
+    const values = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    };
+    try {
+      const sessionId = `stats-ttft-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      saveSessionStats(sessionId, {
+        turns: 1,
+        searches: [],
+        fileWrites: [],
+        fileReads: [],
+        commands: [],
+        turnTimings: [{ ts: 1_728_000_000_000, ttftMs: 8420, routeMs: 6100, probeMs: 12, contextMs: 340, totalMs: 15_230 }],
+      });
+      const loaded = loadSessionStats(sessionId);
+      // The load-path normalizer whitelists fields — turnTimings must survive it.
+      expect(loaded.turnTimings).toEqual([
+        { ts: 1_728_000_000_000, ttftMs: 8420, routeMs: 6100, probeMs: 12, contextMs: 340, totalMs: 15_230 },
+      ]);
+    } finally {
+      (globalThis as any).localStorage = previousStorage;
+    }
+  });
+});
+
 describe('session save ordering', () => {
   it('serializes consecutive snapshots and keeps the newest snapshot', async () => {
     const previousStorage = (globalThis as any).localStorage;
