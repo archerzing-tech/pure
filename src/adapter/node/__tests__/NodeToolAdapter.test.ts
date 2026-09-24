@@ -497,7 +497,10 @@ describe('detectRuntimeVersions', () => {
     expect(out[2].startsWith('python3:')).toBe(true);
     expect(out[3].startsWith('rustc:')).toBe(true);
     expect(out[4].startsWith('git:')).toBe(true);
-  });
+  // Five sequential process spawns can legitimately take seconds on a cold
+  // Windows runner — bun's 5s default per-test timeout killed this once in
+  // CI (6030ms) with nothing actually wrong. Give it real headroom.
+  }, 30_000);
 
   it('never injects multi-line banners (whitespace collapsed)', () => {
     const out = detectRuntimeVersions();
