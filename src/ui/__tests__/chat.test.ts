@@ -278,6 +278,30 @@ describe('send feedback timing', () => {
     expect(trim).toBeGreaterThan(yieldBeforeTrim);
     expect(src.match(/this\.cancelBackgroundPreCompaction\(\);/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
   });
+
+  it('keeps the env probe and load-time compaction off the send critical path', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // ⑤ 探针软等待：send 只 race 一个有上限的计时器；输掉竞争的一侧（探针慢、
+    // 或中止事件后到）不得变成未处理 rejection。
+    expect(src).toContain('const PROBE_SOFT_WAIT_MS');
+    expect(src).toContain('await Promise.race([probe, new Promise<void>((resolve) => setTimeout(resolve, PROBE_SOFT_WAIT_MS))]);');
+    expect(src).toContain('probe.catch(() => {})');
+    // ⑥ 载入期预压实：loadFromStorage 触发；占位系统提示词 + 廉价豁免闸 +
+    // 引擎/适配器惰性工厂，空闲窗口守卫与写缓存复用同一调度器。
+    expect(src).toContain('this.preCompactAfterLoad();');
+    const afterLoad = src.indexOf('private preCompactAfterLoad');
+    expect(afterLoad).toBeGreaterThan(-1);
+    expect(src.indexOf("BASE_SYSTEM_PROMPT(!!(this.effectiveWorkspace || this.workspace))", afterLoad)).toBeGreaterThan(afterLoad);
+    expect(src.indexOf('estimateTextTokens(', afterLoad)).toBeGreaterThan(afterLoad);
+    const scheduler = src.indexOf('private scheduleBackgroundPreCompaction');
+    expect(scheduler).toBeGreaterThan(afterLoad);
+    const factory = src.indexOf('() => new ContextEngine({', afterLoad);
+    expect(factory).toBeGreaterThan(afterLoad);
+    expect(factory).toBeLessThan(scheduler);
+    expect(src).toContain('ctxOrFactory: ContextEngine | (() => ContextEngine | null)');
+    // overBudget 的 toast 只在回合后入口发（发送期内联 trim 本就不弹，载入期同静默）。
+    expect(src).toContain('compaction.overBudget && notifyOverBudget');
+  });
 });
 
 describe('bounded session message history', () => {

@@ -15,6 +15,7 @@ import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
 import { mergeConventions } from '../shared/conventions';
 import { stripUserTurnContext } from '../shared/promptLayers';
+import { estimateTextTokens } from '../shared/tokenEstimate';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { failureHistoryFromMemories } from '../engine/FailurePolicy';
 import { ContextEngine, type ContextCompactionResult } from '../harness/ContextEngine';
@@ -782,6 +783,10 @@ let runtimesProbe: Promise<string> | null = null;
  * re-established once the network returns. */
 let runtimesProbeFailedAt = 0;
 const PROBE_RETRY_COOLDOWN_MS = 30_000;
+/** ⑤ 首回复延迟：send 对探针的软等待上限。探针通常早已温好（Rust 端开机预热、
+ * promise 会话内缓存），这里只是给冷启动/失败冷却重探兜底——超时不再扣住首 token，
+ * 本轮提示词先不带 runtimes 行，探针继续跑完供后续轮次使用。 */
+const PROBE_SOFT_WAIT_MS = 1_500;
 
 /** Kick off the one-shot environment probe (idempotent). Callers await the
  * same promise so the first send doesn't race the probe. A failed probe is
@@ -2213,6 +2218,9 @@ export class ChatController {
       if (savedProgress.status === 'complete') this.activePlanCardSnapshot = null;
     }
     this.hasHistory = this.messages.length > 0;
+    // ⑥ 长会话恢复后立刻把 trim/摘要挪进 idle 窗口，首次发送不再在关键路径上
+    // 同步等压实（见 preCompactAfterLoad）。
+    this.preCompactAfterLoad();
   }
 
   /** Restore last session for view-only display. Messages are NOT loaded into CodingAgent. */
@@ -3450,7 +3458,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // promise resolves in ms after the first send; awaiting here guarantees
       // the first turn already carries the runtimes line in its prompt.
       const probeStartMs = performance.now();
-      await ensureRuntimesProbed(this.abortController?.signal);
+      const probe = ensureRuntimesProbed(this.abortController?.signal);
+      // 输在竞争里的那一侧（探针慢于软等待、或中止事件后到）不得变成未处理 rejection。
+      probe.catch(() => {});
+      await Promise.race([probe, new Promise<void>((resolve) => setTimeout(resolve, PROBE_SOFT_WAIT_MS))]);
       turnTiming.probeMs = Math.round(performance.now() - probeStartMs);
       let systemPrompt = '';
       // L2 per-request context (promptLayers.ts): task-specific fragments ride
@@ -6208,6 +6219,61 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     ): void {
       const ctx = agent.getHarness().getContextEngine();
       if (!ctx) return;
+      this.scheduleBackgroundPreCompaction(ctx, systemPrompt, msgs, gen, transcriptMessages, true);
+    }
+
+    /**
+     * ⑥ 首回复延迟：载入会话时的后台预压实。刚恢复的长会话若不这样做，首次
+     * 发送就要在关键路径上同步跑 trim + LLM 摘要（摘要最长 60s）。要点：
+     * - 引擎与适配器经工厂惰性构建（idle 守卫全过之后才执行）；预算内的会话
+     *   被廉价估算直接豁免，一次适配器都不建；
+     * - 系统提示词用占位版本——Harness.continueTurn 会把 messages[0] 换成
+     *   真系统提示词，且 pickHistoryMessages 按 身份+条数 校验缓存窗口；
+     * - overBudget 静默：与今天发送期内联 trim 的行为一致（Harness 无 toast）。
+     */
+    private preCompactAfterLoad(): void {
+      if (this.streaming || this.messages.length === 0) return;
+      const transcriptMessages = this.messages;
+      const cfg = loadConfig();
+      const maxTokens = resolvePromptBudget(promptBudgetForProvider(cfg?.customProviders, cfg?.provider, cfg?.model, cfg?.providerOverrides)).availableInputTokens;
+      const placeholderSystem = BASE_SYSTEM_PROMPT(!!(this.effectiveWorkspace || this.workspace));
+      const priorSummaries = transcriptMessages.filter((message) => message.role === 'system' && message.content.startsWith('Earlier conversation summary:'));
+      const compactionInput: Message[] = [
+        { role: 'system', content: placeholderSystem },
+        ...priorSummaries,
+        ...transcriptMessages.filter((message) => message.role !== 'system'),
+      ];
+      // 廉价闸：窗口明显放得下（给工具 schema + 真提示词增量留足半个预算）时，
+      // 发送期 trim 本来就是 no-op，整条链路（含适配器构建）直接跳过。
+      if (estimateTextTokens(compactionInput.map((m) => m.content ?? '').join('')) < maxTokens / 2) return;
+      this.scheduleBackgroundPreCompaction(
+        () => new ContextEngine({
+          maxMessages: 20,
+          maxTokens,
+          llm: createLLMAdapter(cfg),
+        }),
+        placeholderSystem,
+        transcriptMessages,
+        this.generation,
+        transcriptMessages,
+        false,
+      );
+    }
+
+    /**
+     * Shared idle-slot scheduler behind both pre-compaction entry points. The
+     * engine is either the live harness one (post-turn) or lazily built for a
+     * freshly loaded transcript (preCompactAfterLoad); guards, double-yield
+     * and the cache write are identical.
+     */
+    private scheduleBackgroundPreCompaction(
+      ctxOrFactory: ContextEngine | (() => ContextEngine | null),
+      systemPrompt: string,
+      msgs: Message[],
+      gen: number,
+      transcriptMessages: Message[],
+      notifyOverBudget: boolean,
+    ): void {
       this.cancelBackgroundPreCompaction();
       let cancelled = false;
       const run = (): void => {
@@ -6221,6 +6287,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // before ContextEngine.trim begins its synchronous transcript scan.
             await new Promise<void>((resolve) => setTimeout(resolve, 0));
             if (cancelled || gen !== this.generation || this.messages !== transcriptMessages || this.streaming) return;
+            const ctx = typeof ctxOrFactory === 'function' ? ctxOrFactory() : ctxOrFactory;
+            if (!ctx) return;
             const priorSummaries = msgs.filter((message) => message.role === 'system' && message.content.startsWith('Earlier conversation summary:'));
             const compactionInput: Message[] = [
               { role: 'system', content: systemPrompt },
@@ -6230,7 +6298,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             const compaction = await ctx.compact(compactionInput);
             const trimmed = compaction.messages;
             if (gen === this.generation && this.messages === transcriptMessages) {
-              if (compaction.overBudget) {
+              if (compaction.overBudget && notifyOverBudget) {
                 showToast(t(compaction.oversizedNewestGroup ? 'context.compact.overBudget' : 'context.compact.contextOverBudget'));
               }
               this.preCompactedMessages = trimmed;
