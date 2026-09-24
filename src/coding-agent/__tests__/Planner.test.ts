@@ -694,6 +694,42 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(prompt).toContain('do NOT classify a middle state');
     expect(prompt).toContain('irreversible');
   });
+
+  it('teaches that cancelling a named part is steer, never task (2026-09-24 取消案例)', () => {
+    // 真实事故：并行调研中"X 就不调研了"被判成加活。提示词必须把裁决
+    // 说死：取消一部分=steer（cancels_part），绝不 task（排队=反向执行），
+    // 委派在飞也不改判——汇合轮正是兑现取消的那一步。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    expect(promptStart).toBeGreaterThan(-1);
+    const guidance = src.indexOf('Removing or cancelling a NAMED PART', promptStart);
+    expect(guidance).toBeGreaterThan(-1);
+    const guidanceBody = src.slice(guidance, guidance + 900);
+    expect(guidanceBody).toContain('is NEVER "task"');
+    expect(guidanceBody).toContain('stays true while parallel delegations are out');
+    expect(guidanceBody).toContain('the merge round that collects them is exactly the step that honors the removal');
+    expect(guidanceBody).toContain('"goal-change" only if the WHOLE direction is overturned');
+    const taskRule = src.indexOf('a REMOVAL of work never goes here', promptStart);
+    expect(taskRule).toBeGreaterThan(-1);
+    // 结构化字段：契约输出蛇形 cancels_part，仅 steer+取消一部分时为真。
+    const fieldDoc = src.indexOf('include it as true ONLY when kind is "steer"', promptStart);
+    expect(fieldDoc).toBeGreaterThan(-1);
+  });
+
+  it('parses the cancels_part contract field through to the classification', async () => {
+    const hit = await classifyInsertion(
+      mockLlm('{"kind":"steer","reason":"drops one branch","confidence":0.9,"cancels_part":true}'),
+      'context', 'X 就不调研了',
+    );
+    expect(hit.kind).toBe('steer');
+    expect(hit.cancelsPart).toBe(true);
+    // 缺省/非 true 都不带标记——宿主只认严格 === true。
+    const plain = await classifyInsertion(
+      mockLlm('{"kind":"steer","reason":"style tweak","confidence":0.9,"cancels_part":false}'),
+      'context', '文案口语一点',
+    );
+    expect(plain.cancelsPart).toBeUndefined();
+  });
 });
 
 describe('markParallelPlanSteps (E2.3)', () => {

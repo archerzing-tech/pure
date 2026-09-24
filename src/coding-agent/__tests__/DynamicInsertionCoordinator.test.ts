@@ -43,6 +43,49 @@ describe('DynamicInsertionCoordinator', () => {
     expect(calls).toBe(0);
   });
 
+  it('routes partial cancellation of a named part to steer via the fast path (2026-09-24 取消案例)', async () => {
+    // 真实事故：三方并行调研中"jev 这个就不调研了"被判成加活折入（回执
+    // "先补这项，再合并出一份覆盖全部的汇总"）——与意图正好相反。取消一
+    // 部分的字面族直判 steer + cancelsPart，不进分类赌局：判成 task 等于
+    // 把"取消"当活跑，反向执行。
+    let calls = 0;
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'task', reason: '', confidence: 1 }; } });
+    for (const text of ['jev 这个就不调研了', '知乎那个不用查了', '先别查了', 'RSIAgent 那部分别调研了吧', '芒果TV 就不用翻译了']) {
+      const decision = await coordinator.decide(llm(), '正在并行调研 RSIAgent、jev 不聊天的模型、LLM 未来趋势', { text });
+      expect(decision.kind).toBe('steer');
+      expect(decision.shouldAbort).toBe(false);
+      expect(decision.timing.mode).toBe('now');
+      expect(decision.signals.cancelsPart).toBe(true);
+      expect(decision.signals.rule).toBe('CANCEL_PART_RE');
+    }
+    expect(calls).toBe(0); // 与 STOP/加活同款：取消等不起、也赌不起一次分类往返
+  });
+
+  it('still sends non-cancellation shapes to the classifier, unqueued', async () => {
+    // 否定式加活（不用再加）、"取消"动词但无否定标记（把X取消掉）、无动
+    // 词的"X 就先不用了"都不在快路径字面族里——交给 LLM 结合上下文裁决。
+    let calls = 0;
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '', confidence: 1 }; } });
+    for (const text of ['不用再加知乎了', '把jev那个取消掉', '搜索就先不用了']) {
+      const decision = await coordinator.decide(llm(), '正在并行调研三个平台', { text });
+      expect(decision.kind).toBe('steer');
+      expect(decision.shouldAbort).toBe(false);
+      expect(decision.signals.cancelsPart).toBeUndefined(); // 只有 LLM 明说才带
+    }
+    expect(calls).toBe(3);
+  });
+
+  it('threads a classifier cancelsPart verdict into the decision signals', async () => {
+    // 字面族之外的取消改写（"第二个不要了"）靠分类器明说 cancels_part；
+    // 宿主只认 signals.cancelsPart 这一个读取点。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'steer', reason: 'removes one branch', confidence: 0.9, cancelsPart: true }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '第二个不要了' });
+    expect(decision.kind).toBe('steer');
+    expect(decision.signals.cancelsPart).toBe(true);
+  });
+
   it('lets negated additions fall through to the classifier', async () => {
     // 否定前置（不用加/别再加/不要再加）不是加活——绝不能误送排队。
     const coordinator = new DynamicInsertionCoordinator({

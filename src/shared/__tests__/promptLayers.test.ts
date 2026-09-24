@@ -78,6 +78,12 @@ describe('L1 behavior contracts', () => {
     // 回复样式：一句说清 变更项/保留项/影响面；无关的已完成工作绝不丢弃。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('what changed, what stays, what it affects');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('never thrown away');
+    // 并行分支取消（2026-09-24 取消案例）：幸存分支照跑不中止，取消分支的
+    // 部分产出不进合并，一句话交代取消与出结果的部分。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('named branch of parallel or delegated work cancelled mid-run');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('surviving branches keep running untouched');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('stays out of the final merge');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('the merge covers the survivors only');
   });
 
   it('carries the complex-task conduct protocol (2026-09-24 复杂任务案例集)', () => {

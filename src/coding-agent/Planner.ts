@@ -302,6 +302,11 @@ export interface InsertionClassification {
    *  "after", "10 分钟后", "下午三点"). Parsing happens in inputDecision.ts so
    *  the clock arithmetic stays testable and provider-independent. */
   when?: string;
+  /** True when the message CANCELS or removes a named part of the running
+   *  work rather than adding or adjusting one (2026-09-24 取消案例). The host
+   *  routes the removal away from the task queue on this flag — queuing a
+   *  removal would run the opposite of what was asked. */
+  cancelsPart?: boolean;
 }
 
 const INSERTION_CLASSIFY_PROMPT = `You route a NEW user message that arrives WHILE an agent is already mid-task. Pick what a competent human colleague would do with it — the two hard rules: the user's words must never be dropped, and work must never restart without a real reason.
@@ -318,16 +323,16 @@ The new message the user just inserted mid-run:
 
 Categories (pick exactly one):
 - "question": the user asks something and expects an answer NOW — a status check ("跑完了吗", "现在到哪了"), a request for explanation, a decision only they can make. Answering must not disturb the running task.
-- "steer": the message guides HOW the current work proceeds and every bit of work already underway stays valid — a small tweak ("记得跑测试", "文案再口语一点"), a style preference, a caution, a constraint, extra detail that narrows without adding work. Steer works only as a promise ("the next step will take it into account"), so it requires a real next step to still happen; if the task is wrapping up or blocked waiting on parallel delegations to return, there is no such step and the message would be silently lost.
+- "steer": the message guides HOW the current work proceeds and every bit of work already underway stays valid — a small tweak ("记得跑测试", "文案再口语一点"), a style preference, a caution, a constraint, extra detail that narrows without adding work. Steer works only as a promise ("the next step will take it into account"), so it requires a real next step to still happen; if the task is wrapping up or blocked waiting on parallel delegations to return, there is no such step and the message would be silently lost. Removing or cancelling a NAMED PART of the running work — one branch, topic, or item of a multi-part job ("X 就不调研了", "Y 那个别查了", "Z 不用了") — is steer, and this stays true while parallel delegations are out: the merge round that collects them is exactly the step that honors the removal (the cancelled part just leaves the result), so set "cancels_part": true. A removal is NEVER "task" — queuing a removal would run the exact opposite of what was asked — and "goal-change" only if the WHOLE direction is overturned, not one part of it.
 - "premise-change": the user corrects a FACT that the current work is built on — origin/place, dates/timing, environment ("我用的是 Windows"), versions, budget, who owns what, an "already/currently X" assumption. The goal itself stands, but anything being computed from the wrong fact comes out worthless, so the running work must be cut short and redone from the corrected fact ("其实我在西安，不是广东", "预算只有三千，不是一万"). Judge this over steer whenever the correction would change the ANSWER, not just its wording.
 - "goal-change": the user overturns the current direction — replace the goal/approach/output, undo what was built, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…").
-- "task": any NEW, completable item of work — even one that EXTENDS the current job ("再加一个 X 平台", "顺便也查一下 Y", "把 Z 也照样处理"), another file, another feature, a separate errand. A scope addition must go here, never steer: queuing runs it to completion right after the current task, so nothing is forgotten; steering it only promises "the next step will pick it up" — a promise that goes unfulfilled when no real next step remains. When torn between steer and task over an addition of work, pick task.
+- "task": any NEW, completable item of work — even one that EXTENDS the current job ("再加一个 X 平台", "顺便也查一下 Y", "把 Z 也照样处理"), another file, another feature, a separate errand. A scope addition must go here, never steer: queuing runs it to completion right after the current task, so nothing is forgotten; steering it only promises "the next step will pick it up" — a promise that goes unfulfilled when no real next step remains. When torn between steer and task over an addition of work, pick task. The reverse is just as fixed: a REMOVAL of work never goes here — a message that cancels or drops part of the job is a steer no matter how much it reads like a to-do, because queuing it would execute the opposite of what was asked.
 - "chatter": small talk, thanks, reactions, filler ("哈哈", "好的", "辛苦了", "+1"). Nothing to act on.
 
 One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the category of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"question|steer|premise-change|goal-change|task|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>"}
+{"kind":"question|steer|premise-change|goal-change|task|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true}
 
 "confidence" is how sure you are of the KIND and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
@@ -343,7 +348,11 @@ one is not (the agent restarts work or loses the message).
 "when" is the user's own words for WHEN this should run if they named a time
 ("10 分钟后", "下午三点", "明天早上") — copy them, do not compute a time. Use
 "now" when the message implies it must be handled immediately, "after" when it
-explicitly belongs after the current task, and null when no timing was said.`;
+explicitly belongs after the current task, and null when no timing was said.
+
+"cancels_part": include it as true ONLY when kind is "steer" AND the message
+cancels or removes a named part of the running work ("X 就不调研了"); omit it
+for every other message.`;
 
 /**
  * Lightweight single-call routing of a message the user inserts while the
@@ -383,7 +392,7 @@ export async function classifyInsertion(
     { role: 'user', content: prompt, images },
   ];
   const KINDS: readonly string[] = ['question', 'steer', 'premise-change', 'goal-change', 'task', 'chatter'];
-  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown }>(
+  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown }>(
     llm,
     request,
     signal,
@@ -409,6 +418,9 @@ export async function classifyInsertion(
       confidence: clampConfidence(parsed.confidence),
       confidenceDefaulted: !Number.isFinite(rawConfidence),
       when: typeof parsed.when === 'string' ? parsed.when : undefined,
+      // 契约字段是蛇形 cancels_part（见提示词 JSON 样例）；驼峰兜底防模型
+      // 自行改写。两处都严格 === true，缺省即 false。
+      ...(parsed.cancels_part === true || parsed.cancelsPart === true ? { cancelsPart: true } : {}),
     };
   }
   return fallback;

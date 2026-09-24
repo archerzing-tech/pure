@@ -1437,7 +1437,7 @@ export class ChatController {
    * mergeFramed 保证合并口径指令只铺一次。指令型折入（mechanical=false）
    * 仍走 takeSteerMessages 框架注入 + 水位核验。收尾 settleFoldIns 兜底
    * 转排队，话绝不丢。 */
-  private pendingFoldIns: Array<{ text: string; images: MessageImage[]; displayText: string; delivered: boolean; activityCountAtDelivery: number; mechanical: boolean; mechanicallyDone?: boolean; syntheticCallId?: string; mergeFramed?: boolean }> = [];
+  private pendingFoldIns: Array<{ text: string; images: MessageImage[]; displayText: string; delivered: boolean; activityCountAtDelivery: number; mechanical: boolean; cancels?: boolean; mechanicallyDone?: boolean; syntheticCallId?: string; mergeFramed?: boolean }> = [];
   /** 插话重构 — REFLECT-phase adapter for the current turn, when 9.2 phase
    * routing is on: side-channel mid-run questions prefer the cheap model
    * (an answer is a summarization chore, not the main reasoning stream). */
@@ -2494,9 +2494,10 @@ export class ChatController {
         // 委派在飞时 steer 的承诺（"下个动作带上"）结构性不可兑现：汇合轮
         // 之前没有 THINK 边界，话被取走了也未必被照办（用户三次实测丢失）。
         // 在飞期间 steer 不再是合法目的地——统一折入（强框架注入 + 收尾核验
-        // 兜底）。委派收齐后真正的"下个动作"存在，steer 照旧。
+        // 兜底）。委派收齐后真正的"下个动作"存在，steer 照旧。取消型
+        // （cancelsPart，2026-09-24 取消案例）折入走取消框架与取消回执。
         if (this.hasDelegationInFlight()) {
-          this.foldInScopeAddition(text, images, displayText, false, ack); // steer 类：指令注入
+          this.foldInScopeAddition(text, images, displayText, false, ack, decision.signals.cancelsPart === true); // steer 类：指令注入
           return;
         }
         echoUserBubble();
@@ -2510,6 +2511,18 @@ export class ChatController {
         void this.answerMidrunQuestion(text, images);
         return;
       case 'task': {
+        // 取消不是活（2026-09-24 取消案例的宿主兜底）：分类器万一仍把"收掉
+        // 一项"判成 task（cancelsPart 为真），绝不能让它进队列或被机械折入
+        // ——排队一个"取消"等于把它当活跑，反向执行。按取消型 steer 处理。
+        if (decision.signals.cancelsPart === true) {
+          if (this.hasDelegationInFlight()) {
+            this.foldInScopeAddition(text, images, displayText, false, ack, true);
+            return;
+          }
+          echoUserBubble();
+          this.steerRunningTurn(text, images, ack);
+          return;
+        }
         // 阶段感知（2026-09-22 用户定稿）：并行委派还没收齐时插进来的追加活，
         // 不进"当前任务完成后处理"的队列——那会先输出一份没有它的汇总。折入
         // 汇合轮：正在跑的收齐后先补这项，再合并输出一份覆盖全部的汇总。
@@ -2682,18 +2695,30 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * mechanical=true（scope 追加）：汇合边界直接把这项跑完、把结果喂给汇总
    * 轮——顺序由机制保证；mechanical=false（steer 类）：注入强框架指令。
    * 两者收尾都核验，没兑现就转排队兜底，话绝不丢。 */
-  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null): void {
+  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null, cancels = false): void {
     const bubble = this.addBubble('user', displayText, images);
     this.placeAckAfterEcho(ack, bubble);
-    this.pendingFoldIns.push({ text, images, displayText, delivered: false, activityCountAtDelivery: -1, mechanical });
-    // 不说"调研"——折入的追加可能是任何活，点名的任务类型说错了才突兀。
-    this.settleAck(ack, '已收到——正在跑的活收齐后先补这项，再合并出一份覆盖全部的汇总。');
+    this.pendingFoldIns.push({ text, images, displayText, delivered: false, activityCountAtDelivery: -1, mechanical, cancels });
+    // 取消型折入（2026-09-24 取消案例）：回执必须说"拿掉"，绝不能沿用追加
+    // 口径——案例里用户收掉一项，回执却说"先补这项"，与意图正好相反。
+    // 不说"调研"——折入的可能是任何活，点名的任务类型说错了才突兀。
+    this.settleAck(ack, cancels
+      ? '收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。'
+      : '已收到——正在跑的活收齐后先补这项，再合并出一份覆盖全部的汇总。');
   }
 
   /** 引擎侧的折入指令：命令式框架，把"别光汇总"说死——模型在汇合轮看到
    * 的不是一句转达，而是排定的追加委派。 */
   private foldInInstruction(text: string): string {
     return `【中途追加的任务，不是闲聊】用户要求在本次任务里追加：${text}\n执行要求：把这项追加的工作像其他委派一样派出去做完；拿到结果后，把它与本次任务已产出的全部内容合并，输出一份覆盖所有对象的最终汇总。在此之前不要输出最终汇总。`;
+  }
+
+  /** 取消型折入的汇合轮框架（2026-09-24 取消案例）：与追加框架反着说死——
+   * 不许为它派新委派、部分产出不算结论不进汇总；幸存分支照常合并，取消
+   * 用一句话入账。没有这个框架，取消在汇合轮会被追加口径（"派出去做完…
+   * 覆盖所有对象"）反向执行。 */
+  private cancelFoldInstruction(text: string): string {
+    return `【中途取消，不是追加】用户中途收掉了这项工作：${text}\n执行要求：不要再为它派任何委派；已经跑出的相关部分不算结论、不写入最终汇总（用户没说要保留）。委派收齐后，最终汇总只覆盖剩下的对象，并用一句话交代这项已按要求取消。`;
   }
 
   /** 折入没被照办时的兜底口径（转排队后作为新指令重入）。 */
@@ -2707,6 +2732,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * dispatchDeferred 在回合收尾时调用。 */
   private settleFoldIns(): void {
     for (const fold of this.pendingFoldIns.splice(0)) {
+      // 取消型折入不做"补跑"兜底（2026-09-24 取消案例）：排除一项永远不会
+      // 产生新委派活动，按追加的水位核验它恒算"没照办"；而取消一旦错过
+      // 汇合轮也无法事后补——转排队只会把"取消"当活重跑（反向伤害）。未
+      // 照办的取消接受为残差（与轻转向同款），靠汇合轮框架 + 协议文本保证。
+      if (fold.cancels) continue;
       const honored = fold.mechanicallyDone || (fold.delivered && this.agentActivities.length > fold.activityCountAtDelivery);
       if (honored) continue;
       this.pendingTasks.push({ text: this.foldInFollowUpText(fold.text), images: fold.images, displayText: fold.displayText, ts: Date.now() });
@@ -3586,7 +3616,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             if (fold.delivered || fold.mechanical) continue;
             fold.delivered = true;
             fold.activityCountAtDelivery = this.agentActivities.length;
-            drained.push({ role: 'user', content: this.foldInInstruction(fold.text), images: fold.images });
+            drained.push({ role: 'user', content: fold.cancels ? this.cancelFoldInstruction(fold.text) : this.foldInInstruction(fold.text), images: fold.images });
           }
           // 代执行回合的合并口径（每条折入只铺一次）：本轮系统将直接委派执行
           // 追加项，模型下一个 THINK 才被咨询——这句话先入档，让"合并全部

@@ -86,6 +86,17 @@ const GOAL_CHANGE_RE = /(?:推翻|重新来|重做|从头来|换个方案|换一
 // skip the classifier entirely (like STOP_RE), conservative high-precision
 // family only, negated forms fall through to the LLM.
 const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先不)(?<!莫)(?:再加(?!一?句)|增加|增添|再添|再补(?!一?句)|再算上|再算一个|顺便(?!问|说|提|聊)(?:也)?(?:查|调研|研究|搜|分析|做|跑|处理|加)|也帮?我?(?:查|调研|研究|搜|分析|处理|跑)(?:一?下|一遍)?|把.{1,16}也(?:查|调研|研究|搜|分析|处理|跑|做|算)(?:一?下|一遍)?|同样(?:处理|调研|分析|跑|做)|也来一?份|add (?:one more|another)|also (?:add|check|research|look into|run|include))/i;
+// Cancelling ONE PART of the running work ("X 就不调研了", "Y 那个不用查了"):
+// a steer with removal semantics, decided mechanically like the families
+// above. The 2026-09-24 real-world loss had exactly this shape — a branch of
+// a three-way parallel research cancelled mid-run was read as a scope
+// ADDITION and folded into the merge as "先补这项", the exact reverse of what
+// was asked. Deliberately narrow: the verb family excludes bare 做 (whether
+// "别做了" ends the whole run or one branch is context only the classifier
+// has), a negation marker is mandatory, and the 了/吧 tail keeps pure
+// keep-constraints ("不用改") out — anything softer falls through to the LLM,
+// including negated additions ("不用再加知乎了"), which stay unqueued.
+const CANCEL_PART_RE = /[^\n。！!？?]{0,24}(?:(?:不需|不用|不)要?再?|先不|别|莫)(?:帮?我?)?(?:查|调研|研究|分析|搜|跑|处理|翻译|改|写|画|生成)[^。，,；\n]{0,12}?(?:了|吧)(?![一-鿿A-Za-z])/i;
 
 export class DynamicInsertionCoordinator {
   private readonly classify: NonNullable<DynamicInsertionCoordinatorOptions['classify']>;
@@ -120,6 +131,15 @@ export class DynamicInsertionCoordinator {
         signals: { rule: 'GOAL_CHANGE_RE' },
       });
     }
+    if (CANCEL_PART_RE.test(text)) {
+      // 收掉的是活的一部分，不是全部：走 steering 通道（不打断、不重排），
+      // cancelsPart 让宿主按"该项出结果、不进汇总"折入/注入，绝不排队。
+      return this.build('steer', 'partial-cancellation phrasing matched the fast path; the named part leaves the result', {
+        confidence: RULE_CONFIDENCE,
+        timing: { mode: 'now' },
+        signals: { rule: 'CANCEL_PART_RE', cancelsPart: true },
+      });
+    }
     if (SCOPE_ADD_RE.test(text)) {
       // 加活的量不走分类赌局：排队是唯一保证跑完的投递（见 SCOPE_ADD_RE 注）。
       return this.build('task', 'scope-addition phrasing matched the fast path; queued so it cannot be forgotten', {
@@ -150,6 +170,7 @@ export class DynamicInsertionCoordinator {
       timing,
       signals: {
         classifier: 'llm',
+        ...(result.cancelsPart ? { cancelsPart: true } : {}),
         ...(result.confidenceDefaulted ? { confidenceDefaulted: true } : {}),
         ...(result.when ? { when: result.when } : {}),
       },

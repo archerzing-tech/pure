@@ -247,6 +247,9 @@ interface ScriptedClassification {
   reason: string;
   confidence: number;
   when?: string;
+  /** 与真模型按提示词契约回的字段同名（蛇形）——剧本原样 JSON.stringify，
+   *  走 classifyInsertion 的真解析，回放保真。 */
+  cancels_part?: boolean;
 }
 
 interface ScriptedLlm {
@@ -517,5 +520,47 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 折入进 pendingFoldIns 等收尾核验，不占待办队列。
     expect(h.chat.pendingFoldIns).toHaveLength(1);
     expect(queueCard(h.root)).toBeUndefined();
+  });
+
+  it('委派在飞时收掉一项（2026-09-24 取消案例）：折入按取消口径，不按加活', async () => {
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push({ role: '调研 Agent', status: 'running' });
+
+    // CANCEL_PART_RE 快路径：不经 LLM 直判"收掉一部分"。
+    await h.chat.interject('jev 这个就不调研了');
+    expect(llm.classifyCalls.length).toBe(0);
+    // 回执必须说"拿掉"——案例里正是"先补这项"这句与意图相反的回执。
+    expect(statusJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(statusJoined(h.root)).not.toContain('先补这项');
+    expect(userJoined(h.root)).toContain('jev 这个就不调研了');
+    expect(h.chat.pendingFoldIns).toHaveLength(1);
+    expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);
+    expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
+    expect(queueCard(h.root)).toBeUndefined();
+    // 取消型折入不做"补跑"兜底：没被汇合轮照办也不把"取消"当活重跑。
+    h.endTurn();
+    expect(h.sends).toHaveLength(0);
+  });
+
+  it('分类器把取消误判成 task 时宿主兜底：取消永不排队，按取消型折入走', async () => {
+    // 案例的真实形态：LLM 把"收掉一项"判成加活。提示词已教正；这里锁宿
+    // 主兜底——signals.cancelsPart 为真时 task 判定被改道，绝不进队列、
+    // 绝不机械折入。剧本用蛇形 cancels_part，走真解析。
+    const llm = scriptedLlm([
+      { match: '收掉', cls: { kind: 'task', reason: 'misjudge', confidence: 0.9, cancels_part: true } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push({ role: '调研 Agent', status: 'running' });
+
+    await h.chat.interject('知乎那项也收掉吧');
+    expect(llm.classifyCalls.length).toBe(1);
+    expect(statusJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(h.chat.pendingFoldIns).toHaveLength(1);
+    expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
+    expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);
+    expect(queueCard(h.root)).toBeUndefined();
+    h.endTurn();
+    expect(h.sends).toHaveLength(0);
   });
 });

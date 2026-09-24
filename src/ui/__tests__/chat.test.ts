@@ -970,7 +970,7 @@ describe('plan overview completion state', () => {
       expect(body.indexOf('this.settleAck(ack') !== -1 || body.indexOf('ack?.parentElement?.remove()') !== -1).toBe(true);
     }
     // 折入 / steer / 队列路径通过方法参数收场 ack。
-    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null)')).toBeGreaterThan(-1);
+    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null, cancels = false)')).toBeGreaterThan(-1);
     expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null)')).toBeGreaterThan(-1);
   });
 
@@ -1093,6 +1093,50 @@ describe('plan overview completion state', () => {
     // dispatchDeferred 一进门先结算折入，同一趟把兜底任务派出去。
     const dispatch = src.indexOf('private dispatchDeferred(): void');
     expect(src.slice(dispatch, dispatch + 400).indexOf('this.settleFoldIns()')).toBeGreaterThan(-1);
+  });
+
+  it('handles a cancelled branch of parallel work as a removal, never an addition (2026-09-24 取消案例)', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 真实事故：三方并行调研中"jev 这个就不调研了"被判成加活折入——回执
+    // "先补这项，再合并出一份覆盖全部的汇总"与意图正好相反。取消语义在
+    // 宿主侧必须全链路成立：回执说拿掉、汇合轮框架说排除、收尾兜底不重跑。
+    // 取消的机器可读标记是 signals.cancelsPart（快路径 CANCEL_PART_RE 或分
+    // 类器 cancels_part 都归一到它）。
+    expect(src.indexOf('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。')).toBeGreaterThan(-1);
+    const foldInFn = src.indexOf('private foldInScopeAddition(');
+    const foldInBody = src.slice(foldInFn, src.indexOf('private cancelFoldInstruction', foldInFn));
+    expect(foldInBody.indexOf('this.pendingFoldIns.push(')).toBeGreaterThan(-1);
+    expect(foldInBody.indexOf('mechanical, cancels')).toBeGreaterThan(-1);
+    expect(foldInBody.indexOf('? \'收到——这项收掉了')).toBeGreaterThan(-1);
+    // 汇合轮框架反着说死：不许为取消项派新委派、部分产出不进汇总、幸存分
+    // 支照常合并——绝不能沿用追加口径（"派出去做完…覆盖所有对象"）。
+    expect(src.indexOf('private cancelFoldInstruction(text: string): string')).toBeGreaterThan(-1);
+    const cancelFrame = src.indexOf('【中途取消，不是追加】');
+    expect(cancelFrame).toBeGreaterThan(-1);
+    const cancelFrameBody = src.slice(cancelFrame, cancelFrame + 400);
+    expect(cancelFrameBody.indexOf('不要再为它派任何委派')).toBeGreaterThan(-1);
+    expect(cancelFrameBody.indexOf('不写入最终汇总')).toBeGreaterThan(-1);
+    expect(cancelFrameBody.indexOf('只覆盖剩下的对象')).toBeGreaterThan(-1);
+    // 交付分流：取消型折入走取消框架，追加型照旧。
+    const deliver = src.indexOf('fold.cancels ? this.cancelFoldInstruction(fold.text) : this.foldInInstruction(fold.text)');
+    expect(deliver).toBeGreaterThan(-1);
+    // 收尾核验对取消型直接放行：排除一项永远不会产生新委派活动，按追加
+    // 的水位核验它恒算"没照办"，转排队只会把"取消"当活重跑（反向伤害）。
+    const settle = src.indexOf('private settleFoldIns(');
+    const settleBody = src.slice(settle, src.indexOf('private scheduleDeferred()', settle));
+    expect(settleBody.indexOf('if (fold.cancels) continue;')).toBeGreaterThan(-1);
+    // steer 分发透传取消标记；task 分发兜底改道——分类器万一仍把取消判成
+    // task（案例的真实形态），绝不排队、绝不机械折入。
+    const steer = src.indexOf("case 'steer': {");
+    const steerBody = src.slice(steer, src.indexOf("case 'question':", steer));
+    expect(steerBody.indexOf('decision.signals.cancelsPart === true')).toBeGreaterThan(-1);
+    const task = src.indexOf("case 'task': {");
+    const taskBody = src.slice(task, src.indexOf("case 'chatter':", task));
+    expect(taskBody.indexOf('decision.signals.cancelsPart === true')).toBeGreaterThan(-1);
+    const override = taskBody.indexOf('cancelsPart === true');
+    expect(taskBody.indexOf('this.foldInScopeAddition(text, images, displayText, false, ack, true)', override)).toBeGreaterThan(-1);
+    expect(taskBody.indexOf('this.steerRunningTurn(text, images, ack)', override)).toBeGreaterThan(-1);
+    expect(taskBody.indexOf('this.queueInterjectTask(', override)).toBeGreaterThan(taskBody.indexOf('if (decision.signals.cancelsPart === true)', override));
   });
 
   it('background sessions never yank the shared scroll container', () => {
