@@ -16,6 +16,7 @@ import {
   MAP_DSL_PROMPT,
   HUMAN_TONE_PROMPT,
   INSERTION_PROTOCOL_PROMPT,
+  COMPLEX_TASK_PROTOCOL_PROMPT,
   FILE_TOOLS_CORE,
   CAPABILITY_GAP_PROMPT,
   PRE_COMMIT_REVIEW_CONTRACT,
@@ -77,6 +78,31 @@ describe('L1 behavior contracts', () => {
     // 回复样式：一句说清 变更项/保留项/影响面；无关的已完成工作绝不丢弃。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('what changed, what stays, what it affects');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('never thrown away');
+  });
+
+  it('carries the complex-task conduct protocol (2026-09-24 复杂任务案例集)', () => {
+    // 10 例复杂任务案例集甄别后只固化四点真增量（其余点 tone/workflow/
+    // delivery 契约已覆盖）：
+    // ① 开场形状：一口气复述 + 2-4 条按假设推进（默认 + 错了坏哪），邀请纠正
+    //    一次就开干，绝不问卷、绝不挂起等答案——值得问的问题也自带默认。
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('<complex_task_protocol>');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('2–4 points you will proceed on BY ASSUMPTION');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never send a questionnaire');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never idle waiting for answers');
+    // ② 承重假设加廉价护栏：失配要被检测、给清晰提示，绝不静默失败。
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('fail loudly, never silently');
+    // ③ 失败表达全账：什么坏/为什么/修没修好/波及没有，且教训锁定防复发。
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('whether anything else was touched');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('lock the lesson in');
+    // ④ 不确定性不许包装成完成：mock/TODO/协议没给/必须用户亲手做的逐一点名留缝。
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('named AS such in the hand-over');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('the seam you left for it');
+    // ⑤ 收尾给裁决 + 效力边界（对哪成立、再扩要多少活）。
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain("where the deliverable's validity ends");
+    // 甄别否决项（负向锁）：固定产物名和结构化轨迹输出不得进协议——
+    // 定死即八股，机器侧轨迹由运行时（活动卡/可重放日志）原生承担。
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toContain('assumptions.md');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toContain('UPGRADE.md');
   });
 
   it('re-exports the always-on workflow + completion contracts', () => {

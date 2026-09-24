@@ -10,6 +10,7 @@ import { promptObservability, promptVersion, type PromptObservability } from './
 import {
   CAPABILITY_GAP_PROMPT,
   CHART_DSL_PROMPT,
+  COMPLEX_TASK_PROTOCOL_PROMPT,
   MAP_DSL_PROMPT,
   COMPLETION_PROMPT,
   DELIVERY_CONTRACT,
@@ -337,6 +338,11 @@ export class PromptAssembler {
       // user words or unneeded restarts) and STATIC (never changes mid-session),
       // so it lives in the stable zone, before the volatile tail.
       fragment('insertion_protocol', INSERTION_PROTOCOL_PROMPT, 106, true),
+      // Complex-task conduct — REQUIRED: on long tasks the kickoff/failure/
+      // fencing moves are the difference between a colleague and a receipt
+      // printer; dropping it under budget pressure is exactly the failure
+      // mode required-ness exists for.
+      fragment('complex_task', COMPLEX_TASK_PROTOCOL_PROMPT, 111, true),
       fragment('workflow', WORKFLOW_PROMPT, 90),
       fragment('completion', COMPLETION_PROMPT, 80),
       // Multi-agent delegation + delivery discipline are REQUIRED so they are
