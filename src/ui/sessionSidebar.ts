@@ -70,6 +70,16 @@ export interface SessionSidebarDeps {
 
 const COLLAPSED_GROUPS_KEY = 'pure_collapsed_groups';
 
+/** 删除一张会话卡后，焦点落到哪一支（2026-09-25 用户反馈）：视觉相邻的
+ *  下一张优先（接住它的位置），没有就上一张，列表只剩它自己则回 null
+ *  （调用方回退 landing）。`ids` 是渲染顺序的 data-sid 序列（分组内最新
+ *  在前），含将被删除的 sid 本身。纯函数便于守卫测试。 */
+export function pickNeighborSessionId(ids: string[], sid: string): string | null {
+  const idx = ids.indexOf(sid);
+  if (idx === -1) return ids[0] ?? null;
+  return ids[idx + 1] ?? ids[idx - 1] ?? null;
+}
+
 function loadCollapsedGroups(): Set<string> {
   try {
     const raw = localStorage.getItem(COLLAPSED_GROUPS_KEY);
@@ -468,14 +478,28 @@ export class SessionSidebar {
           const delegationNotice = this.deps.delegationNotice ? await this.deps.delegationNotice(sid) : null;
           const message = [retention, delegationNotice].filter(Boolean).join('\n') || t('confirm.deleteSession');
           if (!(await this.deps.confirm(message))) return;
+          // 删掉当前正看的会话时，焦点落到列表里相邻的下一支（2026-09-25
+          // 用户反馈）：旧行为 clear() 后落在 landing——体感等于点了一次
+          // 「新建对话」，凭空多出一个空白会话。只在列表已空时才回 landing。
+          // 邻居要在动手删除前从当前 DOM 里挑好（下一张卡优先，没有就上一张）。
+          const nextFocus = this.currentActiveId === sid ? this.neighborSessionId(sid) : null;
           // Tear the controller down BEFORE the disk delete: a background run
           // between the two steps would re-persist the session the user just
           // deleted, and a live-only entry (never persisted, sidebar-merged)
           // deletes cleanly even though it has no file to remove.
           if (this.currentActiveId === sid) {
             // Deleting the visible session: clear() cancels its run (explicit
-            // user intent) and bounces back to landing.
-            this.resetToLanding();
+            // user intent). With a neighbor we skip the landing bounce entirely
+            // — a warm switch never re-enters chat mode (renderMessages is the
+            // only caller that removes the landing class), so the bounce would
+            // stick on screen; switching straight to the neighbor instead keeps
+            // the transition seamless. No neighbor → full landing fallback.
+            if (nextFocus) {
+              this.deps.chat.clear();
+              this.deps.chat.setWorkspace('');
+            } else {
+              this.resetToLanding();
+            }
           } else {
             this.deps.chat.forgetSession(sid);
           }
@@ -487,6 +511,7 @@ export class SessionSidebar {
             return;
           }
           this.refresh();
+          if (nextFocus) void this.load(nextFocus);
         });
       });
     } catch {
@@ -509,6 +534,19 @@ export class SessionSidebar {
     this.deps.chat.setWorkspace('');
     this.setActive(null);
     this.deps.onChatCleared();
+  }
+
+  /** The session id to focus after the given card disappears (2026-09-25):
+   *  reads the rendered list's data-sid order and delegates to
+   *  pickNeighborSessionId. Null = nothing left → the caller may fall back
+   *  to landing. */
+  private neighborSessionId(sid: string): string | null {
+    const container = document.getElementById('sidebar-session-list');
+    if (!container) return null;
+    const ids = Array.from(container.querySelectorAll<HTMLElement>('.sidebar-session-item'))
+      .map(el => el.getAttribute('data-sid'))
+      .filter((v): v is string => !!v);
+    return pickNeighborSessionId(ids, sid);
   }
 
   // ── Sidebar: delete all sessions ──
