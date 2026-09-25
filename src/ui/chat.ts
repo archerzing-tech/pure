@@ -1586,7 +1586,7 @@ export class ChatController {
    * 可见会话的滚动/pill 行为完全不变。 */
   private scrollUi(chatEl: HTMLElement = this.scrollRoot()): void {
     if (!this.viewActive) return;
-    this.scrollUi(chatEl);
+    scrollChatToBottomIfPinned(chatEl);
   }
 
   private transcriptTarget(): HTMLElement {

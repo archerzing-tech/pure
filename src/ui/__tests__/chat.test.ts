@@ -9,6 +9,26 @@ import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 function readSource(url: URL): string {
   return readFileSync(url, 'utf8').replace(/\r\n/g, '\n');
 }
+// Regression guard (2026-09-25 用户实测「hello 也报 Maximum call stack size
+// exceeded」）：把滚动调用统一收口进 scrollUi() 时，批量替换把 scrollUi 自己
+// 的函数体也换成了 this.scrollUi(…)——无限自递归，第一次发送就爆栈。守卫：
+// scrollUi 体内必须调真正的 scrollChatToBottomIfPinned，且 chat.ts 里对该
+// 原始函数的直接调用只允许出现在 import 行和 scrollUi 体内。
+describe('scrollUi convergence guard', () => {
+  it('scrollUi calls the imported scrollChatToBottomIfPinned, never itself', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const fn = src.indexOf('private scrollUi(');
+    expect(fn).toBeGreaterThan(-1);
+    const body = src.slice(fn, fn + 400);
+    expect(body).toContain('scrollChatToBottomIfPinned(chatEl)');
+    expect(body).not.toContain('this.scrollUi(');
+    // 收口完整性：原始函数（带括号的调用形态）只许 scrollUi 体内这一处——
+    // 其他 28 个调用点全部走 this.scrollUi(…)（隐藏会话闸）。未来若要新增
+    // 原始直调，必须是有意识的决定（同步改这条守卫）。
+    const directCalls = src.split('scrollChatToBottomIfPinned(').length - 1;
+    expect(directCalls).toBe(1);
+  });
+});
 // Regression guard for the layered prompt (promptLayers.ts): a past splice
 // bug doubled the "Output style:" header in the composed GUI base prompt.
 // Each section header must appear EXACTLY once in every persona variant.
