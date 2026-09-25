@@ -475,6 +475,42 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(statusJoined(h.root)).not.toContain('看一下这句话怎么安排');
   });
 
+  it('1b question 入账：旁答后问答对折进运行回合（internal，重放不冒充用户）', async () => {
+    const llm = scriptedLlm([
+      { match: '老板', cls: { kind: 'question', reason: 'status question, answer out-of-band', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+
+    await h.chat.interject('我老板问报告什么时候好？');
+    expect(assistantJoined(h.root)).toContain('（边干边答）');
+    // 问答对已入账：internal 消息进 steer 队列，下个 THINK 边界模型读到，
+    // 最终汇总与旁答口径一致；重放不把它渲染成用户气泡。
+    const records = h.chat.pendingSteers.filter((e: { message: { internal?: boolean } }) => e.message.internal);
+    expect(records).toHaveLength(1);
+    expect((records[0] as { message: { content: string } }).message.content).toContain('我老板问报告什么时候好');
+    expect((records[0] as { message: { content: string } }).message.content).toContain('市场调研已完成大半');
+    expect((records[0] as { displayText: string }).displayText).toBe('');
+    // 回合就收尾：已答上的记录账已清——不再以任何形态重入。
+    h.endTurn();
+    expect(h.sends).toHaveLength(0);
+  });
+
+  it('1b 旁答失败不静默：明说没答上，问题原话收尾重入（承诺兑现）', async () => {
+    const llm = scriptedLlm([
+      { match: '老板', cls: { kind: 'question', reason: 'status question', confidence: 0.9 } },
+    ], { question: '' });
+    const h = makeHarness(llm);
+
+    await h.chat.interject('我老板问报告什么时候好？');
+    expect(statusJoined(h.root)).toContain('这个问题我暂时没答上来');
+    const records = h.chat.pendingSteers.filter((e: { message: { internal?: boolean } }) => e.message.internal);
+    expect(records).toHaveLength(1);
+    expect((records[0] as { displayText: string }).displayText).toBe('我老板问报告什么时候好？');
+    // 回合收尾：没答上的问题按用户原话重入——「收尾时一并答」的承诺兑现。
+    h.endTurn();
+    expect(h.sends).toEqual(['我老板问报告什么时候好？']);
+  });
+
   it('约束转达与叫停：steer 承诺一句话；停走正则直判不占分类往返', async () => {
     const llm = scriptedLlm([
       { match: '口语', cls: { kind: 'steer', reason: 'style tweak', confidence: 0.9 } },

@@ -2568,29 +2568,54 @@ export class ChatController {
 
   /** 插话重构 — answer a mid-run question out-of-band: one LLM call with the
    * current task snapshot (cheap REFLECT-phase adapter when 9.2 routing is
-   * on). The running turn is never touched — no abort, no message injection;
-   * the main loop doesn't even know it happened. */
+   * on). The running turn is never touched — no abort, no replan. 1b question
+   * 入账（对话智能升格）：旁答不再是一次性的——问答对折进运行回合的下个
+   * THINK 边界（internal 消息，模型读得到、转录有账、重放不冒充用户说话），
+   * 最终汇总与旁答口径不再打架；旁答失败不再静默，问题入账，收尾时统一答。 */
   private async answerMidrunQuestion(text: string, images: MessageImage[]): Promise<void> {
+    let answer = '';
     const llm = this.turnPhaseLlm ?? this.turnLlm;
-    if (!llm) return;
-    const system = `The user asked you something WHILE you are mid-task. Answer now, briefly and like a colleague who keeps working while talking: 2-4 sentences of plain flowing text in the user's language, no lists, no headings, no promises beyond what the current state supports. Here is where the task stands:
+    if (llm) {
+      const system = `The user asked you something WHILE you are mid-task. Answer now, briefly and like a colleague who keeps working while talking: 2-4 sentences of plain flowing text in the user's language, no lists, no headings, no promises beyond what the current state supports. Here is where the task stands:
 <current_task>
 ${this.buildInsertionContext(images).slice(0, 3_200)}
 </current_task>`;
-    const request: import('../shared/types').Message[] = [
-      { role: 'system', content: system },
-      { role: 'user', content: text, images },
-    ];
-    try {
-      const response = await llm.complete(request, [], this.abortController?.signal);
-      const answer = response.content?.trim();
-      if (!answer) return;
+      const request: import('../shared/types').Message[] = [
+        { role: 'system', content: system },
+        { role: 'user', content: text, images },
+      ];
+      try {
+        const response = await llm.complete(request, [], this.abortController?.signal);
+        answer = response.content?.trim() ?? '';
+      } catch {
+        answer = '';
+      }
+    }
+    if (this.abortController?.signal?.aborted) return; // 回合正被叫停——记录与提示都随止损走
+    if (answer) {
       const bubble = this.addBubble('assistant', '');
       bubble.textContent = `（边干边答）${answer}`;
-    } catch {
-      // 分类/回答这类旁路调用失败不该有声响——主任务还在跑，问题没答上
-      // 用户自然会再问一次。
+      this.recordSideAnswer(text, answer);
+    } else {
+      // 旁答失败不再静默：明说没答上，问题已入账，收尾时模型统一答。
+      this.addStatusBubble('这个问题我暂时没答上来——先记下了，收尾时一并答你。', false, false, 'info');
+      this.recordSideAnswer(text, '');
     }
+  }
+
+  /** 1b question 入账 — 把问答对（answer 为空 = 没答上）作为 internal 消息
+   * 折进运行回合：模型下个边界读到，最终输出与旁答口径一致。displayText 的
+   * 区分兜底在 dispatchDeferred：答上的记录回合就结束了 = 账已清，残留即弃；
+   * 没答上的把问题原话重入（「收尾时统一答」的承诺必须兑现）。 */
+  private recordSideAnswer(question: string, answer: string): void {
+    const content = answer
+      ? `【边干边答记录】用户刚才问：「${question}」，宿主已旁答：「${answer}」。知悉即可，后续输出与此口径一致，不必再答一遍。`
+      : `【边干边答记录】用户刚才问：「${question}」，宿主暂时没答上。收尾时在输出里把这个问题答了。`;
+    this.pendingSteers.push({
+      message: { role: 'user', content, internal: true },
+      target: this.hasDelegationInFlight() ? 'all' : 'parent',
+      displayText: answer ? '' : question,
+    });
   }
 
   /** 置信门的「问」在这里落地：分类器对一句破坏性插话（停/重开）明确报告了
@@ -2782,9 +2807,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // thing to do; so does pure: they open the next turn as the user's words.
     // 1a 定向投递 + 渲染一致性：重入用用户原话（displayText），不是引擎框架
     // 文——开场气泡、存档、重载看到的都是用户自己说的话。点名某支但那支已
-    // 收工的也一样：话不丢，作为用户的新指令重开。
-    if (this.pendingSteers.length > 0) {
-      const drained = this.pendingSteers.splice(0);
+    // 收工的也一样：话不丢，作为用户的新指令重开。1b 旁答记录按账处置：答
+    // 上的（displayText 空）账已清，残留即弃；没答上的把问题原话重入。
+    const leftoverSteers = this.pendingSteers.filter((entry) => !entry.message.internal || entry.displayText);
+    this.pendingSteers = []; // 没被带走的只剩「已答上的旁答记录」——账已清，弃
+    if (leftoverSteers.length > 0) {
+      const drained = leftoverSteers;
       this.autoContinue.cancel(); // the user's own words supersede '继续'
       const text = drained.map((entry) => entry.displayText || entry.message.content).join('\n');
       void this.send(text, drained.flatMap((entry) => entry.images ?? []));
