@@ -2480,10 +2480,15 @@ export class ChatController {
         // 点不出具体支时退回原路：取消口径折入 / 普通 steer。
         const stopish = decision.signals.branchStop === true || decision.signals.cancelsPart === true;
         if (stopish && this.hasDelegationInFlight()) {
-          const stopped = this.stopNamedBranch(text);
+          // 祈使「停掉那支」= 中止（判例 13 口径）；收掉一项「先停下」= 暂停
+          // （复测案例二口径：立即止损不烧完，活口比中止更大）。
+          const pause = decision.signals.branchStop !== true;
+          const stopped = this.stopNamedBranch(text, pause ? 'pause' : 'abort');
           if (stopped) {
             echoUserBubble();
-            this.settleAck(ack, `已停掉「${stopped}」那支——进度留了断点，随时可以让它接着跑，其余照常。`, true, 'info');
+            this.settleAck(ack, pause
+              ? `明白——「${stopped}」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。`
+              : `已停掉「${stopped}」那支——进度留了断点，随时可以让它接着跑，其余照常。`, true, 'info');
             return;
           }
           // 点不出具体支（或它刚好结算了）：退回取消折入——宁可折叠不误杀。
@@ -2519,7 +2524,7 @@ export class ChatController {
         // （第 2 期），停不了再按取消型 steer 折入。
         if (decision.signals.cancelsPart === true) {
           if (this.hasDelegationInFlight()) {
-            const stopped = this.stopNamedBranch(text);
+            const stopped = this.stopNamedBranch(text, 'pause');
             if (stopped) {
               echoUserBubble();
               this.settleAck(ack, `已停掉「${stopped}」那支——进度留了断点，随时可以让它接着跑，其余照常。`, true, 'info');
@@ -2530,6 +2535,19 @@ export class ChatController {
           }
           echoUserBubble();
           this.steerRunningTurn(text, images, ack);
+          return;
+        }
+        // 不重复做（2026-09-25 复测案例一）：加的活若某支在飞/已收工的支已
+        // 经覆盖（「新增一个平台，爱奇艺」而爱奇艺那路正在跑），如实回「已
+        // 经在跑/已在汇总里」，不重复派也不折入——重复派一支是白烧算力还
+        // 污染汇总。只认区分性命中（1a 同款纪律）：打平认不出 = 宁可照旧
+        // 折入，绝不拿"可能重复"当理由吞用户的活。
+        const covered = this.findCoveringBranch(text);
+        if (covered) {
+          echoUserBubble();
+          this.settleAck(ack, covered.status === 'done'
+            ? `这个刚才已经跑完了——「${covered.name}」那路的结果就在汇总里，不重复派。`
+            : `您说的这个已经在「${covered.name}」那路调研着了，不重复派——收齐后一并汇总给您。`, true, 'info');
           return;
         }
         // 阶段感知（2026-09-22 用户定稿）：并行委派还没收齐时插进来的追加活，
@@ -2567,16 +2585,37 @@ export class ChatController {
 
   /** 第 2 期分支中断（宿主半边）：从用户话里点名一支在飞委派并真停它。
    * 点名复用 1a 的区分词匹配器（只认只被一支含有的词，打平宁可不停）；
-   * 状态面用编排器 branchView()（权威账）过滤在飞支。点不到/它刚好结算了
-   * = 返回 null，调用方退回取消折入——宁可折叠不误杀。返回被停支的名字。 */
-  private stopNamedBranch(text: string): string | null {
+   * 匹配面 = 分支名 + 任务书片段（branchView 供数）——名字是代号，主题
+   * 在任务书里（「不要调研爆发点了」的「爆发点」未必在名字上）。状态面
+   * 用编排器 branchView()（权威账）过滤在飞支。点不到/它刚好结算了 =
+   * 返回 null，调用方退回取消折入——宁可折叠不误杀。mode：abort = 祈使
+   * 「停掉那支」（判例 13 的口径）；pause = 收掉一项「先停下」（复测案
+   * 例二的口径，留的活口更大）。返回被停支的名字。 */
+  private stopNamedBranch(text: string, mode: 'abort' | 'pause' = 'abort'): string | null {
     const orchestrator = this.codingAgentRef?.subagentOrchestrator;
     if (!orchestrator) return null;
     const live = orchestrator.branchView()
       .filter((b) => b.state === 'delegating' || b.state === 'running' || b.state === 'pausing');
-    const matched = matchInFlightBranch(text, live.map((b) => ({ callId: b.callId, name: b.agentName })));
-    if (!matched || !orchestrator.abortBranch(matched.callId)) return null;
+    const matched = matchInFlightBranch(text, live.map((b) => ({ callId: b.callId, name: b.agentName, snippet: b.inputSnippet })));
+    if (!matched) return null;
+    const stopped = mode === 'pause' ? orchestrator.pauseBranch(matched.callId) : orchestrator.abortBranch(matched.callId);
+    if (!stopped) return null;
     return matched.name;
+  }
+
+  /** 不重复做（2026-09-25 复测案例一）：这句加活是否已被某支覆盖。匹配面
+   * 与点名停同源（1a 区分词匹配器：名+角色+任务书片段，只认区分性命中），
+   * 范围扩到已收工的支（结果已经在汇总里的，同样不重派）。返回 null =
+   * 没认出覆盖，照旧折入/排队——宁可重复问一句，绝不吞用户的活。 */
+  private findCoveringBranch(text: string): { name: string; status: 'running' | 'done' } | null {
+    const candidates = this.agentActivities
+      .filter((item) => item.status === 'running' || item.status === 'done')
+      .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet }));
+    const matched = matchInFlightBranch(text, candidates);
+    if (!matched) return null;
+    const hit = this.agentActivities.find((item) => item.callId === matched.callId);
+    if (!hit) return null;
+    return { name: hit.agentName, status: hit.status === 'running' ? 'running' : 'done' };
   }
 
   /** 插话重构 — hand a remark to the RUNNING turn via the steering channel:

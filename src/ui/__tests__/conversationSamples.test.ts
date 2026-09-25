@@ -680,6 +680,55 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.pendingSteers).toHaveLength(0);
   });
 
+  it('复测案例一（2026-09-25）：加的活某支已经在跑——回「已经在跑着了」，不重复派', async () => {
+    // 真实事故：三路并行调研里爱奇艺本来就在跑，用户「新增一个平台，爱奇艺」
+    // 被当加活折入，收齐后还真派了第四支重跑一遍。不重复做：加活先对在飞/
+    // 已收工的支认一遍，认得出覆盖就如实回话，不折入不排队。
+    const llm = scriptedLlm([]); // 分类器按剧本默认判 task（真实链路同款）
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push(
+      { callId: 'call_a', agentName: '优酷调研员', status: 'running', inputSnippet: '调研优酷最新国漫上新信息' },
+      { callId: 'call_b', agentName: 'B站调研员', status: 'running', inputSnippet: '调研B站最新国漫上新信息' },
+      { callId: 'call_c', agentName: '爱奇艺调研员', status: 'running', inputSnippet: '调研爱奇艺最新国漫上新信息' },
+    );
+
+    await h.chat.interject('新增一个平台，爱奇艺');
+    expect(statusJoined(h.root)).toContain('您说的这个已经在「爱奇艺调研员」那路调研着了，不重复派——收齐后一并汇总给您。');
+    expect(userJoined(h.root)).toContain('新增一个平台，爱奇艺');
+    // 重复的那支永远不该被派出去：折入账是空的，队列卡也不出现。
+    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(queueCard(h.root)).toBeUndefined();
+  });
+
+  it('复测案例二（2026-09-25）：收掉一项 = 按任务书片段点名暂停那一支，不烧完不空折入', async () => {
+    // 真实事故：「不要调研"未来三年的爆发点"这个了」被折入等汇合——支照跑
+    // 算力照烧，最后才从结果里删。名字是代号（爆发点未必在名字上），点名
+    // 靠任务书片段；认出支 = 真暂停（不落中止），其余照跑。
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push({ role: '洞察报告', status: 'running' });
+    const paused: string[] = [];
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        branchView: () => [
+          { callId: 'call_trend', agentName: '趋势调研员', state: 'running', inputSnippet: '探索 agent 开发技术趋势' },
+          { callId: 'call_llm', agentName: '方向调研员', state: 'running', inputSnippet: 'LLM 的发展方向研判' },
+          { callId: 'call_burst', agentName: '爆发点分析员', state: 'running', inputSnippet: '研判未来三年的爆发点' },
+        ],
+        pauseBranch: (callId: string) => { paused.push(callId); return true; },
+        abortBranch: () => false,
+      },
+    };
+
+    await h.chat.interject('不要调研"未来三年的爆发点"这个了');
+    expect(llm.classifyCalls.length).toBe(0); // CANCEL_PART_RE 快路径
+    expect(paused).toEqual(['call_burst']);   // 片段点名，暂停那一支
+    expect(statusJoined(h.root)).toContain('明白——「爆发点分析员」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。');
+    // 真停了就不再折入：汇合轮没有这笔账。
+    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.pendingSteers).toHaveLength(0);
+  });
+
   it('分类器把取消误判成 task 时宿主兜底：取消永不排队，按取消型折入走', async () => {
     // 案例的真实形态：LLM 把"收掉一项"判成加活。提示词已教正；这里锁宿
     // 主兜底——signals.cancelsPart 为真时 task 判定被改道，绝不进队列、

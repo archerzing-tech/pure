@@ -985,4 +985,41 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     expect(seen.find((a) => a.callId === 'call_tree_cancel' && a.status === 'cancelled')).toBeDefined();
     expect((result.result as { reason?: string }).reason).toBe('cancelled');
   });
+
+  it('pauseBranch 点名暂停一支：按 paused 结算（不是 aborted），存档照存，兄弟支照常', async () => {
+    // 复测案例二（2026-09-25）：用户收掉一项说的是「先停下」，落暂停不落
+    // 中止。这条锁结算分流——branchController 上的 pause reason 绝不能被
+    // 布尔 aborted 检查吞成「用户叫停」。
+    const { sessions, store } = memoryStore();
+    const seen: SubagentActivity[] = [];
+    const orch = makeBranchOrchestrator(store, seen);
+
+    const pausing = orch.execute(branchToolCall('call_pauseme', { prompt: 'STOPME long research on 爆发点' }));
+    const sibling = orch.execute(branchToolCall('call_sibling', { prompt: 'quick research' }));
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(orch.pauseBranch('call_nope')).toBe(false);
+    // 注册表带上了任务书片段——按主题点名的匹配面（名字是代号）。
+    expect(orch.branchView().find((b) => b.callId === 'call_pauseme')?.inputSnippet).toContain('爆发点');
+
+    expect(orch.pauseBranch('call_pauseme')).toBe(true);
+    const [pauseResult, siblingResult] = await Promise.all([pausing, sibling]);
+
+    expect(pauseResult.success).toBe(false);
+    const payload = pauseResult.result as { aborted?: boolean; reason?: string };
+    expect(payload.aborted).toBe(true);
+    expect(String(payload.reason)).toContain('PAUSED');
+    expect(String(payload.reason)).not.toContain('STOPPED');
+    expect(String(payload.reason)).not.toContain('timed out');
+    const card = seen.find((a) => a.callId === 'call_pauseme' && a.status);
+    expect(card?.status).toBe('paused');
+    // 断点在结算前已落盘（persist-before-settle），想续随时同参重派。
+    const interruptedSaved = Array.from(sessions.entries()).some(([id, s]) => id.startsWith('sub_') && s.checkpoints.some((c) => c.label === 'subagent_interrupted'));
+    expect(interruptedSaved).toBe(true);
+
+    // 兄弟支零感知，照常交付；结算出账即销户，再暂停同一支 = false。
+    expect(siblingResult.success).toBe(true);
+    expect(orch.pauseBranch('call_pauseme')).toBe(false);
+    expect(orch.branchView()).toHaveLength(0);
+  });
 });

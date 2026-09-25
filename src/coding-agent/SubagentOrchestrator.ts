@@ -5,7 +5,7 @@
 
 import { AgentLoopEngine } from '../engine/AgentLoopEngine';
 import { parseToolArguments } from '../shared/parseRepair';
-import { BRANCH_ABORT_REASON, isPauseAbort } from '../shared/pauseSignal';
+import { BRANCH_ABORT_REASON, isBranchAbort, isPauseAbort, PAUSE_ABORT_REASON } from '../shared/pauseSignal';
 import { BranchLifecycle, type BranchState } from './branchLifecycle';
 import type {
   BudgetConfig,
@@ -223,10 +223,12 @@ export class SubagentOrchestrator implements ToolAdapter {
   private defs = new Map<string, SubagentDefinition>();
   private config: SubagentOrchestratorConfig;
   /** 对话智能升格第 2 期（分支中断）：在飞分支注册表——每支委派的 abort
-   * 把手（controller）+ 生命周期账本（machine）。abortBranch(callId) 按它
-   * 定向叫停；结算出账后即删（暂停支的续跑 = 同参重派新调用，新账本）。
-   * 这是「能 abort 的把手」账本，别与宿主 agentActivities（观测投影）混同。 */
-  private readonly branches = new Map<string, { controller: AbortController; machine: BranchLifecycle }>();
+   * 把手（controller）+ 生命周期账本（machine）+ 点名匹配面（任务书片段，
+   * 用户按主题停/续一支时名字里未必有那个词）。abortBranch/pauseBranch
+   * 按它定向叫停；结算出账后即删（暂停支的续跑 = 同参重派新调用，新账
+   * 本）。这是「能 abort 的把手」账本，别与宿主 agentActivities（观测投
+   * 影）混同。 */
+  private readonly branches = new Map<string, { controller: AbortController; machine: BranchLifecycle; inputSnippet?: string }>();
 
   constructor(config: SubagentOrchestratorConfig) {
     this.config = config;
@@ -411,6 +413,10 @@ export class SubagentOrchestrator implements ToolAdapter {
     // Parse args — slightly-broken LLM JSON is repaired first, so a single
     // trailing comma or unquoted key no longer drops the whole prompt payload.
     const args = parseToolArguments(toolCall.function.arguments);
+    // 注册表补点名匹配面（第 2 期）：branchView 的 snippet 供宿主按主题
+    // 点名停/续一支——名字是代号（researcher），主题在任务书里。
+    const registered = this.branches.get(toolCall.id);
+    if (registered) registered.inputSnippet = this.inputSnippet(args);
     emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, ...machine.describe() });
 
     // Liveness watchdog: abort only when NO progress event (token / state /
@@ -663,10 +669,12 @@ export class SubagentOrchestrator implements ToolAdapter {
           await persist('subagent_interrupted', event.payload.messages, event.payload.turnCount ?? 0);
           if (combinedSignal.aborted) {
             // 第 2 期分支中断（persist-before-settle：存档已在上一行落盘，才
-            // 结算）。branchController 是 abortBranch 的私有把手——它 aborted
-            // 当且仅当用户点名叫停这一支（老 webview 读不到 reason 也成立，
-            // 所以认布尔不认 reason）。产出不入账、断点照存、可另起续。
-            if (branchController.signal.aborted) {
+            // 结算）。branchController 是 abortBranch/pauseBranch 的私有把手
+            // ——往它上面写 reason 的只有编排器自己，所以按 reason 分流是可
+            // 靠的，而且必须如此：中止（BRANCH_ABORT_REASON）与暂停（PAUSE_
+            // ABORT_REASON）都要点这支的火，只有 reason 分得开两者终态。
+            // 产出不入账、断点照存、可另起续——两条路共享这组语义。
+            if (isBranchAbort(branchController.signal)) {
               const branchAbortNote = 'The user STOPPED this subtask mid-run. Its progress is saved; it will NOT be counted toward the overall task. To continue it later, re-delegate the SAME subtask with identical arguments — it will resume from its checkpoint, not start over.';
               machine.apply('abort', { abortCause: 'user-branch' });
               emit(progress?.onDone, { success: false, error: branchAbortNote, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
@@ -684,7 +692,7 @@ export class SubagentOrchestrator implements ToolAdapter {
             // re-delegation of the same subtask lands back here. Tell the UI
             // (paused card state) and the parent model (re-delegate hint)
             // instead of reporting a failure.
-            if (isPauseAbort(parentSignal) || isPauseAbort(combinedSignal)) {
+            if (isPauseAbort(parentSignal) || isPauseAbort(combinedSignal) || isPauseAbort(branchController.signal)) {
               const pausedNote = 'The user PAUSED this subtask mid-run. Its progress is saved; to continue, re-delegate the SAME subtask with identical arguments — it will resume from its checkpoint, not start over.';
               machine.apply('pauseSettled');
               emit(progress?.onDone, { success: false, error: pausedNote, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
@@ -830,14 +838,29 @@ export class SubagentOrchestrator implements ToolAdapter {
     return true;
   }
 
+  /** 同 abortBranch 的点名通路，但落「暂停」不落「中止」（2026-09-25 复测
+   * 案例二：用户收掉一项说的是「先停下」，不是「不要了」——暂停支断点照
+   * 存、产出不入账，想续随时同参重派，比中止留的活口更大）。已在暂停中/
+   * 已暂停/已结算 = false（幂等，调用方退回折入兜底）。 */
+  pauseBranch(callId: string): boolean {
+    const entry = this.branches.get(callId);
+    if (!entry) return false;
+    const applied = entry.machine.apply('pause');
+    if (!applied.ok) return false;
+    entry.controller.abort(PAUSE_ABORT_REASON);
+    return true;
+  }
+
   /** 在飞分支的只读视图（宿主点名寻址可用的权威面；宿主 agentActivities 是
-   * 它的观测投影，不是反过来）。 */
-  branchView(): Array<{ callId: string; agentName: string; state: BranchState; cause?: string }> {
+   * 它的观测投影，不是反过来）。inputSnippet 是按主题点名的匹配面——名字
+   * 是代号，主题在任务书里。 */
+  branchView(): Array<{ callId: string; agentName: string; state: BranchState; cause?: string; inputSnippet?: string }> {
     return Array.from(this.branches.entries()).map(([callId, entry]) => ({
       callId,
       agentName: entry.machine.agentName,
       state: entry.machine.state(),
       cause: entry.machine.cause(),
+      inputSnippet: entry.inputSnippet,
     }));
   }
 }
