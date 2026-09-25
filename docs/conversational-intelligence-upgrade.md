@@ -66,11 +66,13 @@
 
 **目标**：判例 1–4 全绿。这是「事后对齐 → 实时对齐」的地基，全是「通道已存在、差最后一接线」的活。
 
-**1a. 插话定向投递（信号寻址）**
-- `pendingSteers` 大池升级为带 target 的投递：steer/question 生成投递项 `{text, target: 'parent' | 子代理 callId | 'all'}`。用户话里点名某支（「jev 那个…」）→ 宿主分类时已能从 CANCEL_PART_RE/GOAL_CHANGE_RE 同族匹配到具名对象；不点名但对准在飞工作的 → `all` 或父级
-- GUI 路由改造（chat.ts:2464-2476）：委派在飞时 steer **不再**一律扣到 foldIn——带子代理 target 的直接进定向队列（子代理下个 THINK 边界取走，`AgentLoopEngine.ts:279` 拉取点已存在）；仅「新增工作」类仍走 foldIn 汇合轮
-- orchestrator 侧：按 callId 寻址分发（每个在飞委派一个队列引用），`SubagentOrchestrator.ts:465` 透传点改为取「自己那份 + 全体份」
-- 回执文案如实：「已直接转给正在跑的 XX 那一路」/「收齐后并入下一轮」两种，不再一律「已转达」
+**1a. 插话定向投递（信号寻址）✅ 已落地（2026-09-25，commit 0f98a72）**
+- 实现形态与原案两处有意偏差：①注册表用宿主 `agentActivities` 的**只读视图**（不另立账本，防缠三原则），编排器 AbortController 注册表按计划留给第 2 期；②点名匹配用**区分性 token 纯函数**（`src/shared/steerTargeting.ts`：候选词只被一支的 name+role+snippet 含有才算命中，打平宁可广播），不靠正则猜具名对象
+- `pendingSteers` 条目带 `{message, target, displayText}`：target = `'parent' | 'all' | {branchCallId, branchName}`；投递/消费语义单一口径在 steerTargeting（广播人人可读、只有父边界收走；点名只投被点名支、也只有它取走）
+- 编排器给每个分支的 takeSteerMessages 闭包包上分支身份（`{branchCallId, branchName}`），引擎拉取点零改动；折入闸门从「在飞恒 true」改为「父边界 && 无在飞」——身份检查结构性排除子代理偷折入
+- 在飞 steer 不再一律折入：非取消型定向/广播直达干活中的分支（`SteerInjected` 事件 → 卡片 📨 回执既有）；取消型（cancelsPart）仍折入汇合轮，真停留第 2 期
+- 回执按目的地区分：「已直接转给「X」那一路」/「在跑的几路都收到了」/父级照旧「已转达」
+- **渲染一致性同刀落地**：重放剥壳（三框架前缀 → 用户原话；【系统接管执行】机制行整条不上屏）；回合收尾残留插话以用户原话重入（不再是引擎框架文开场）
 
 **1b. question 入账**
 - `answerMidrunQuestion`（chat.ts:2540-2561）旁答保留，但问答对以一条系统消息折进运行回合上下文（模型下个边界可见，复用折入的投递闸门机制）；旁答失败不再静默，明说「这个问题我暂时没答上来，收尾时统一答」
@@ -81,9 +83,9 @@
 - 对写文件等**不可安全中断**的工具：声明 `metadata.interruptible`，不可中断的仍排空但回执如实（「这一步写盘中，等它落完（约 Ns），已跳过后面排队的事」）
 - Esc 语义统一：prompt 聚焦 Esc = pause、document Esc = cancel 的双轨收敛为一个确认层级（先 pause，再按一次=cancel，回执说清差别）
 
-**1d. 委派注册表（地基，第 2 期单支中断复用）**
-- SubagentOrchestrator 持有 DelegationRegistry：分派即注册 `{callId, role, name, stableSessionId, status, startedAt}`（本期只读，供 1a 寻址匹配「jev 那个」→ 具名分支；abort 通路第 2 期加）
-- 在飞分支清单进活动面板事件流（观测单向），宿主寻址/中止都以此为准，不再靠猜
+**1d. 委派注册表（地基，第 2 期单支中断复用）✅ 只读半已落地（随 1a，commit 0f98a72）**
+- 寻址数据源 = 宿主 `agentActivities`（callId/agentName/agentRole/inputSnippet 已在事件流里，观测单向）——不再另立 DelegationRegistry 花名册；第 2 期在编排器侧补 AbortController 注册表（只有「能 abort 的把手」是新产物）
+- 稳定 sessionId/startedAt 已在编排器内部存在，第 2 期按需暴露
 
 **验收**：真机判例 1–4 + 单测（定向投递寻址、宽限期状态机、isPauseAbort 可达性——用真实协调器而非绕行信号）；沿用 T01–T30 回放器加 4 条即时性判例。
 **量级**：中。第 1 期完成后即可发版实测。
@@ -161,6 +163,7 @@
 3. **防缠三原则**不破：产物唯一形态、观测单向、事件即接口——寻址投递、账本、优先级都走既有事件/快照通道，不开旁路
 4. **父子同权检查**：每期收尾时过一遍清单——这项能力父有子有没有？信号过边界丢不丢？重启后还在不在？
 5. token 成本：账本/寻址注入全部走预算压缩体系；插话分类 8s 超时 tradeoff 沿用，第 1 期顺带观测分类耗时分布，数据够再议便宜模型路由
+6. **UI 渲染一致性**（2026-09-25 用户定调）：会话过程不只是消息流——消息的显示、呈现、暂停、继续都必须「实时渲染 = 重载渲染」。规则：用户插话的持久形态只有引擎转录一份，UI 显示从内容派生（剥壳 choke point 单一：`transcriptProjection.visibleUserContent`），宿主机制行（系统接管口径等）永不冒充用户气泡；每期验收含「实时 vs 重载」对照判例（插话、卡片状态、继续条、回执的存活都要过一遍）
 
 ## 5. 风险清单
 
