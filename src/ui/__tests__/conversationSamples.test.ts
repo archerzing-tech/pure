@@ -530,6 +530,32 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.abortController.signal.reason).toBe('pure:pause');
   });
 
+  it('1a 定向投递（判例1）：在飞时点名某支 → 直达那支（区分词点名），没点名才广播', async () => {
+    const llm = scriptedLlm([
+      { match: '竞品', cls: { kind: 'steer', reason: 'redirect the competitor branch', confidence: 0.9 } },
+      { match: '方向', cls: { kind: 'steer', reason: 'general tightening', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+    // 两支在飞（蓝本判例1 场景缩影），宿主唯一账本 agentActivities 供寻址。
+    h.chat.agentActivities = [
+      { callId: 'call_a', agentName: '市场调研员', agentRole: 'researcher', inputSnippet: '调研海外市场规模与增长趋势', status: 'running' },
+      { callId: 'call_b', agentName: '竞品分析员', agentRole: 'analyst', inputSnippet: '分析主要竞品的定价策略', status: 'running' },
+    ];
+
+    // 点名：「竞品」「定价」只在竞品分析员的匹配面里 → 直达那支，其余照跑。
+    await h.chat.interject('竞品那支重点看下沉市场的定价。');
+    expect(statusJoined(h.root)).toContain('已直接转给「竞品分析员」那一路——它下个动作就带上，其余照跑。');
+    expect(h.chat.pendingSteers).toHaveLength(1);
+    expect(h.chat.pendingSteers[0].target).toEqual({ branchCallId: 'call_b', branchName: '竞品分析员' });
+    expect(h.chat.pendingSteers[0].displayText).toBe('竞品那支重点看下沉市场的定价。');
+
+    // 没点名：候选词两边都不沾 → 分不清宁可广播，给在飞的全体。
+    await h.chat.interject('方向都再收紧一点。');
+    expect(statusJoined(h.root)).toContain('在跑的几路都收到了——各自下个动作就带上。');
+    expect(h.chat.pendingSteers).toHaveLength(2);
+    expect(h.chat.pendingSteers[1].target).toBe('all');
+  });
+
   it('约束转达与叫停：steer 承诺一句话；停走正则直判不占分类往返', async () => {
     const llm = scriptedLlm([
       { match: '口语', cls: { kind: 'steer', reason: 'style tweak', confidence: 0.9 } },

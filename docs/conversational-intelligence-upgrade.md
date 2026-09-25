@@ -74,20 +74,22 @@
 - 回执按目的地区分：「已直接转给「X」那一路」/「在跑的几路都收到了」/父级照旧「已转达」
 - **渲染一致性同刀落地**：重放剥壳（三框架前缀 → 用户原话；【系统接管执行】机制行整条不上屏）；回合收尾残留插话以用户原话重入（不再是引擎框架文开场）
 
-**1b. question 入账**
-- `answerMidrunQuestion`（chat.ts:2540-2561）旁答保留，但问答对以一条系统消息折进运行回合上下文（模型下个边界可见，复用折入的投递闸门机制）；旁答失败不再静默，明说「这个问题我暂时没答上来，收尾时统一答」
+**1b. question 入账 ✅ 已落地（2026-09-25，commit 70e0b31）**
+- 实现形态：问答对走的是 pendingSteers 通道（不是另一条系统消息路）：`recordSideAnswer` 入账一条 `internal: true` 消息（引擎转录随存档走，重放由投影剥掉不冒充用户气泡），答上的 displayText=''（回合收尾账清即弃）、没答上的 displayText=问题原话（「收尾时一并答」承诺兑现为机制）；target 随在飞状态 parent/'all'
+- 旁答失败不再静默：明说「这个问题我暂时没答上来——先记下了，收尾时一并答你」
 
-**1c. 暂停真即时**
-- pause 语义重排：LLM 流照旧秒停；在飞工具进入 **宽限期**（默认 8s，可配）：宽限内自然收尾最理想；到期未完 → 转发 abort（复用 cancel 链的 forwardAbort）。`ToolExecutionCoordinator.ts:299-307` 的「pause 不转发」改为「pause 宽限后转发」，reason 送达 toolStop——**顺带修掉 `isPauseAbort` 在 GUI 活链路不可达的接线断层**（ToolRegistry.ts:233 的 parentSignal 现在从不携带 pause reason）
-- 委派工具在宽限到期被掐 → checkpoint 照存（`SubagentOrchestrator.ts:631-632` 已不分原因存），卡片如实标「宽限后中断，继续时从断点接」
-- 对写文件等**不可安全中断**的工具：声明 `metadata.interruptible`，不可中断的仍排空但回执如实（「这一步写盘中，等它落完（约 Ns），已跳过后面排队的事」）
-- Esc 语义统一：prompt 聚焦 Esc = pause、document Esc = cancel 的双轨收敛为一个确认层级（先 pause，再按一次=cancel，回执说清差别）
+**1c. 暂停真即时 ✅ 已落地（2026-09-25，commit 6793969）**
+- pause 语义重排：LLM 流照旧秒停；在飞工具进入 **宽限期**（`PAUSE_TOOL_GRACE_MS` 默认 8s，`ctx.pauseToolGraceMs` 可配）：宽限内自然收尾最理想；到期未完 → `toolStop.abort(PAUSE_ABORT_REASON)`——**`isPauseAbort` 在 GUI 活链路从此可达**（reason 顺 toolStop → ToolRegistry → parentSignal 送达编排器 ：650 的暂停存档分支），委派被掐 checkpoint 照存、卡片如实标暂停
+- `metadata.interruptible: false` 豁免：写盘类照旧排空到自然结束；**升级硬停（第二通道）比豁免大**——Esc 第二下/会话切换时立即掐
+- **升级硬停走独立信号通道**：主 controller 一经 abort，二次 abort 是规范级 no-op（reason 换不掉），故宿主每回合并建 `hardStopSignal`，随 CodingAgent → Harness → ctx 贯穿；协调器一听到就 clearTimeout + 立即按 PAUSE_ABORT_REASON 掐在飞工具，**记账仍归暂停**（断点照存、卡片 ⏸）
+- Esc 语义统一：Esc 双轨收敛为一个确认层级——第一下 = pause（「正在暂停」条），收尾期里再按 = 升级硬停；Stop 按钮照旧纯 pause
+- 排队工具暂停后不再启动（'paused — not started'），配对结果照给（转录不挂空 toolCall）
 
 **1d. 委派注册表（地基，第 2 期单支中断复用）✅ 只读半已落地（随 1a，commit 0f98a72）**
 - 寻址数据源 = 宿主 `agentActivities`（callId/agentName/agentRole/inputSnippet 已在事件流里，观测单向）——不再另立 DelegationRegistry 花名册；第 2 期在编排器侧补 AbortController 注册表（只有「能 abort 的把手」是新产物）
 - 稳定 sessionId/startedAt 已在编排器内部存在，第 2 期按需暴露
 
-**验收**：真机判例 1–4 + 单测（定向投递寻址、宽限期状态机、isPauseAbort 可达性——用真实协调器而非绕行信号）；沿用 T01–T30 回放器加 4 条即时性判例。
+**验收**：真机判例 1–4 + 单测（定向投递寻址、宽限期状态机、isPauseAbort 可达性——用真实协调器而非绕行信号）；沿用 T01–T30 回放器加 4 条即时性判例。**单测与回放 4 判例已全绿（2026-09-25）**：判例1=conversationSamples 定向投递回放（点名直达+没点名广播）+ steerTargeting 矩阵 + 编排器收件人捕获；判例2/3=ToolExecutionCoordinator 宽限状态机四测（宽限内完成/到期掐断带 pause reason=可达性证明/interruptible:false 排空/升级通道即时掐+压过豁免）+ Esc 两档回放；判例4=1b 旁答入账/失败重入回放。**待真机 1–4 实测后收官。**
 **量级**：中。第 1 期完成后即可发版实测。
 
 ### 第 2 期「分支中断」：停得下单支，续得回断点 ⭐ 用户点名的止损核心
