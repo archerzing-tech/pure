@@ -1,4 +1,5 @@
 import type { Plan } from '../coding-agent/types';
+import { t } from '../shared/i18n';
 
 export type PlanProgressStatus = 'active' | 'waiting' | 'complete';
 
@@ -247,4 +248,50 @@ export function shouldAdvancePlanAtTurnEnd(
   const markerAdvanced = completedPlan !== null
     && snapshot.currentPlan === completedPlan + 1;
   return !markerAdvanced;
+}
+
+/** 对话内进度播报的播种位：记住上一次播报时看到的状态，下一次事件与它比差。 */
+export interface PlanProgressNarrationSeed {
+  plan: Plan;
+  currentPlan: number;
+  complete: boolean;
+}
+
+/** 从快照取播种位（bind/恢复时用——恢复旧会话不回放历史播报）。 */
+export function planProgressNarrationSeedFrom(snapshot: PlanProgressSnapshot): PlanProgressNarrationSeed {
+  return {
+    plan: snapshot.plan,
+    currentPlan: snapshot.currentPlan,
+    complete: snapshot.status === 'complete' || snapshot.currentPlan > snapshot.plan.steps.length,
+  };
+}
+
+/**
+ * 顶部固定进度条的对话内替身（2026-09-25 用户定稿）：钉在聊天区上方的进度
+ * 细条拆除，阶段推进改成在对话流里说一句人话——已完成哪几步、正在跑哪
+ * 一步。纯函数：播种位 + 当前快照 → 要说的那句话（null = 无值得播报的变
+ * 化）。只播顶层阶段推进与整体完成：planReplaced 由计划卡头自己亮相，
+ * waiting 由暂停卡承担，子步（substeps）粒度流式转写里看得到，播了就是
+ * 刷屏。只认前进，不播回退（计划细化重排由卡头呈现）。
+ */
+export function formatPlanProgressNarration(
+  prev: PlanProgressNarrationSeed | null,
+  next: PlanProgressSnapshot,
+): string | null {
+  const total = next.plan.steps.length;
+  const complete = next.status === 'complete' || next.currentPlan > total;
+  if (!prev || prev.plan !== next.plan) return null;
+  if (complete) {
+    if (prev.complete) return null;
+    return total <= 1 ? t('plan.narrate.done1', '计划完成了。') : t('plan.narrate.done', '全部 {total} 步完成了。').replace('{total}', String(total));
+  }
+  if (next.currentPlan <= prev.currentPlan) return null;
+  const done = Math.min(next.currentPlan - 1, total);
+  const currentAction = next.plan.steps[next.currentPlan - 1]?.action ?? '';
+  const stepLabel = t('plan.narrate.step', '第 {n} 步：{action}').replace('{n}', String(next.currentPlan)).replace('{action}', currentAction);
+  if (done <= 1) {
+    const firstAction = next.plan.steps[0]?.action ?? '';
+    return t('plan.narrate.advance1', '第 1 步（{first}）完成了，正在跑{step}。').replace('{first}', firstAction).replace('{step}', stepLabel);
+  }
+  return t('plan.narrate.advance', '前 {done} 步都完成了，正在跑{step}。').replace('{done}', String(done)).replace('{step}', stepLabel);
 }

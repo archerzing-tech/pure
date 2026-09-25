@@ -987,12 +987,12 @@ const translations: Record<Language, Record<string, string>> = {
     'plan.step.parallelTip': '这一步和其他带同样标记的步骤相互独立，会并行推进',
     'plan.card.newTitle': '收到，这是一份新的计划：',
     'plan.card.reason': '因为你提到：“{reason}”',
-    'plan.pin.state.active': '执行中',
-    'plan.pin.state.waiting': '等待你的回复',
-    'plan.pin.state.complete': '已完成',
-    'plan.pin.step': '第 {n}/{total} 步',
-    'plan.pin.done': '全部 {total} 步已完成',
-    'plan.pin.jump': '回到完整计划',
+    // ── 对话内进度播报（固定进度条的替身）──
+    'plan.narrate.done1': '计划完成了。',
+    'plan.narrate.done': '全部 {total} 步完成了。',
+    'plan.narrate.step': '第 {n} 步：{action}',
+    'plan.narrate.advance1': '第 1 步（{first}）完成了，正在跑{step}。',
+    'plan.narrate.advance': '前 {done} 步都完成了，正在跑{step}。',
 
     // ── Composer quick selectors ──
     'composer.mode.title': '任务模式 — 自动:智能判断 · YOLO:直接执行 · 计划:先看计划再执行 · 构建:分阶段构建并汇报',
@@ -2106,12 +2106,12 @@ const translations: Record<Language, Record<string, string>> = {
     'plan.step.parallelTip': 'This step is independent of the other marked ones and runs in parallel',
     'plan.card.newTitle': 'Got it — this is a fresh plan:',
     'plan.card.reason': 'Because you said: “{reason}”',
-    'plan.pin.state.active': 'Executing',
-    'plan.pin.state.waiting': 'Waiting for your reply',
-    'plan.pin.state.complete': 'Completed',
-    'plan.pin.step': 'Step {n}/{total}',
-    'plan.pin.done': 'All {total} steps done',
-    'plan.pin.jump': 'Back to full plan',
+    // ── In-conversation plan progress narration ──
+    'plan.narrate.done1': 'Plan complete.',
+    'plan.narrate.done': 'All {total} steps are done.',
+    'plan.narrate.step': 'Step {n}: {action}',
+    'plan.narrate.advance1': 'Step 1 ({first}) is done — now running {step}.',
+    'plan.narrate.advance': 'The first {done} steps are done — now running {step}.',
 
     // ── Composer quick selectors ──
     'composer.mode.title': 'Task mode — Auto: decide per task · YOLO: run directly · Plan: review a plan first · Build: build in phases',

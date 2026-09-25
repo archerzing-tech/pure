@@ -1177,9 +1177,6 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
       await yieldIfNeeded();
     }
     if (!isCurrentRestore()) return;
-    // 恢复可能重建了计划卡：重新挂载固定进度条，让当前步骤在滚动后仍可见；
-    // 无活动计划时是幂等移除（no-op）。
-    chat.syncPlanProgressPin();
     // Only a restore that finished while still current marks the host complete:
     // a superseded (or failed) restore stays 'pending' so the sidebar rebuilds
     // it from disk on the next open instead of showing a half-rendered host.

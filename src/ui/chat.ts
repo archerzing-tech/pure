@@ -51,8 +51,7 @@ import {
   type PlanCardHandle,
 } from './plan';
 import { renderAttachmentCard } from './pasteChip';
-import { PlanProgressModel, shouldAdvancePlanAtTurnEnd, type PlanProgressSnapshot } from './planProgress';
-import { createPlanProgressPin, type PlanProgressPinHandle } from './planProgressBar';
+import { PlanProgressModel, formatPlanProgressNarration, planProgressNarrationSeedFrom, shouldAdvancePlanAtTurnEnd, type PlanProgressNarrationSeed, type PlanProgressSnapshot } from './planProgress';
 import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, registerToolOutputListener, registerDownloadProgressListener, cancelDownload, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
@@ -1291,7 +1290,7 @@ export interface ChatControllerOptions {
   host?: HTMLElement | null;
   /** False while this session is hidden behind another active conversation. A
    * hidden session keeps running — only its shared shell surfaces (activity
-   * rail, plan pin) are unmounted until the session becomes visible again. */
+   * rail, plan narration) are unmounted until the session becomes visible again. */
   viewActive?: boolean;
 }
 
@@ -1364,15 +1363,18 @@ export class ChatController {
   private activePlanProjectBuild = false;
   /** 会话级交付证据：构建计划曾在某一回合真实通过机械验证（typecheck/测试/构建）。
    * 后续纯总结轮没有工具调用、不会重跑验证，收尾时仍可据此把计划置为完成，
-   * 避免顶部进度条在项目交付后停在「执行中 第 N 步」。新对话/会话切换清零。 */
+   * 避免进度播报在项目交付后停在「执行中 第 N 步」。新对话/会话切换清零。 */
   private deliveryGatePassed = false;
   /** 本会话内已生成的第几个独立规划（1、2、…）。同一规划的细化/续跑不递增，
    * 只有新请求在对话里再开一份计划才 +1；会话切换/新对话清零。 */
   private planSeqCounter = 0;
   /** 当前活动规划的会话内编号（applyPlanProgressSnapshot 从快照恢复）。 */
   private activePlanSeq = 1;
-  /** 固定进度条：对话滚动时始终可见的当前步骤摘要，随活动计划卡挂载/卸载。 */
-  private planProgressPin: PlanProgressPinHandle | null = null;
+  /** 对话内进度播报（2026-09-25 顶部固定进度条拆除后的替身）：阶段推进不
+   * 再钉在聊天区上方，而是在对话流里说一句「已完成哪几步、正在跑哪步」。
+   * 播报位 = 上次播报时看到的快照形状，模型订阅里比差出话。 */
+  private planProgressNarrationSeed: PlanProgressNarrationSeed | null = null;
+  private activePlanProgressNarrator?: () => void;
   /** Task-scoped collaboration trace shared by live execution and restore. */
   private agentActivities: SessionAgentActivity[] = [];
   private agentActivityPanel: AgentActivityPanelHandle | null = null;
@@ -1531,17 +1533,15 @@ export class ChatController {
   /** Mark this session as the visible conversation (or as a hidden background
    * session). Switching NEVER cancels the session: a hidden session keeps its
    * run alive in its own transcript host and re-mounts its shared surfaces
-   * (activity rail / plan pin) when shown again. */
+   * (activity rail / plan narration) when shown again. */
   setViewActive(on: boolean): void {
     if (this.viewActive === on) return;
     this.viewActive = on;
     if (this.transcriptHost) this.transcriptHost.hidden = !on;
     if (on) {
       this.mountAgentActivityPanel();
-      this.syncPlanProgressPin();
     } else {
       this.hideAgentActivitySurface();
-      this.removePlanProgressPin();
     }
   }
 
@@ -1621,6 +1621,9 @@ export class ChatController {
   private detachActivePlanProgress(): void {
     this.activePlanProgressUnsubscribe?.();
     this.activePlanProgressUnsubscribe = undefined;
+    this.activePlanProgressNarrator?.();
+    this.activePlanProgressNarrator = undefined;
+    this.planProgressNarrationSeed = null;
     const persistence = this.activePlanProgressPersistence;
     this.activePlanProgressPersistence = undefined;
     if (persistence) {
@@ -1638,6 +1641,14 @@ export class ChatController {
     this.activePlanProgress = model;
     this.activePlanProjectBuild = model.getSnapshot().projectBuild === true;
     this.applyPlanProgressSnapshot(model.getSnapshot());
+    // 播报位从当前快照起算：bind/恢复不回放历史，之后每次前进才说话。
+    this.planProgressNarrationSeed = planProgressNarrationSeedFrom(model.getSnapshot());
+    this.activePlanProgressNarrator = model.subscribe((snapshot) => {
+      if (this.activePlanProgress !== model) return;
+      const line = formatPlanProgressNarration(this.planProgressNarrationSeed, snapshot);
+      this.planProgressNarrationSeed = planProgressNarrationSeedFrom(snapshot);
+      if (line) this.addStatusBubble(line, false, false, 'info');
+    }, { emitCurrent: false });
     const persistence = createSessionPlanProgressPersistence(sessionId, workspace);
     this.activePlanProgressPersistence = persistence;
     this.activePlanProgressUnsubscribe = model.subscribePersistence((snapshot) => {
@@ -1645,42 +1656,6 @@ export class ChatController {
       this.applyPlanProgressSnapshot(snapshot);
       persistence.persist(snapshot);
     }, { emitCurrent: false });
-  }
-
-  /** 固定进度条：挂载到聊天区顶部并绑定到当前进度模型（幂等复用同一个元素）。
-   * The pin lives at the top of the shared chat view, so only the VISIBLE
-   * session may create it; hidden sessions mount their own pin on activation. */
-  private ensurePlanProgressPin(model: PlanProgressModel): void {
-    if (!this.viewActive) return;
-    if (!this.planProgressPin) {
-      this.planProgressPin = createPlanProgressPin({
-        jumpTo: () => {
-          const liveCard = this.activePlanCardHandle?.el;
-          const restoredCard = document.querySelector<HTMLElement>(
-            `.plan-progress-row[data-plan-seq="${this.activePlanSeq}"]`,
-          );
-          const cardEl = liveCard?.isConnected ? liveCard : restoredCard;
-          if (cardEl?.isConnected) cardEl.scrollIntoView({ block: 'start', behavior: 'smooth' });
-        },
-      });
-      const chatView = document.getElementById('chat-view');
-      chatView?.insertBefore(this.planProgressPin.el, chatView.firstChild);
-    }
-    this.planProgressPin.bind(model);
-  }
-
-  /** 固定进度条：解除订阅并从 DOM 移除（计划卡被移除/会话切换/新对话）。 */
-  private removePlanProgressPin(): void {
-    if (!this.planProgressPin) return;
-    this.planProgressPin.unbind();
-    this.planProgressPin.el.remove();
-    this.planProgressPin = null;
-  }
-
-  /** 幂等同步（session restore 后调用）：有活动计划模型则挂载固定条，否则移除。 */
-  syncPlanProgressPin(): void {
-    if (this.activePlanProgress) this.ensurePlanProgressPin(this.activePlanProgress);
-    else this.removePlanProgressPin();
   }
 
   setSessionId(id: string) {
@@ -1704,12 +1679,10 @@ export class ChatController {
     this.agentActivityHistorical = false;
     this.clearAgentActivityPersistence();
     this.removeAgentActivityPanel();
-    // 会话切换 = 新的一次对话：规划编号重新起算，固定进度条随之移除
-    //（chatView 里它不会随 #chat 清空，必须显式卸载）。
+    // 会话切换 = 新的一次对话：规划编号重新起算，进度播报随之重新播种。
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
     this.deliveryGatePassed = false;
-    this.removePlanProgressPin();
     this.sessionId = id;
     this.contextEngine = undefined;
     this.preCompactedMessages = null;
@@ -1958,7 +1931,6 @@ export class ChatController {
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;
     this.activePlanCardSnapshot = null;
-    this.removePlanProgressPin();
     // The in-transcript plan/assessment cards must not stay stuck on
     // "等待你回复" next to a cancellation notice.
     this.pauseAssessmentFlow?.cancel('已取消本次执行计划。');
@@ -2191,7 +2163,6 @@ export class ChatController {
     this.removeAgentActivityPanel();
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
-    this.removePlanProgressPin();
 
     const savedPlanState = snapshot.uiState.planState;
     const savedPlanCard = [...snapshot.transcript].reverse().find((entry) => entry.planCard)?.planCard;
@@ -2948,7 +2919,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       this.detachActivePlanProgress();
       this.activePlanProgress = null;
       this.activePlanCardSnapshot = null;
-      this.removePlanProgressPin();
     }
     // Create the turn controller before any preflight await. Previously the
     // controller and streaming state were installed only after workspace
@@ -3983,7 +3953,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         this.detachActivePlanProgress();
         this.activePlanCardSnapshot = null;
         this.activePlanProgress = null;
-        this.removePlanProgressPin();
       };
       // A plan is useful for a real build even when no approval is needed.
       // Approval is a separate safety decision, not a consequence of the word
@@ -4049,8 +4018,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             }
             this.activePlanCardHandle = planCard;
             this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
-            // 固定进度条跟随当前计划卡：对话滚动时仍能看到走到第几步。
-            this.ensurePlanProgressPin(planProgress);
             scrollChatToBottomIfPinned(chatEl);
           };
           // 探查（工作区扫描）已完成：预检期的思考卡只是过渡反馈且没有内容，
@@ -4182,8 +4149,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         }
         this.activePlanCardHandle = planCard;
         this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
-        // 续跑复用同一计划编号；固定进度条跟随当前计划卡。
-        this.ensurePlanProgressPin(planProgress);
         // 仅当是明确续跑指令时才输出“继续处理第 x 阶段第 y 个 Todo”的生硬框架；
         // 中途的新诉求沿用计划上下文，但不套用该文案，直接自然处理。
         if (isExplicitContinuation(userText)) {
@@ -5319,7 +5284,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // 验证通过（真实 typecheck / 测试 / 构建全绿）即视为整个项目已交付，
             // 即使标记扫描的游标还停在列表中间——模型做文档类项目时后期常以自然
             // 语言叙述、漏发 `## 计划 n` 起始标记（或步骤 Todo 未逐项播报被
-            // canCompleteCurrentTodos 卡住），项目完成后进度条仍停在「第 N 步」。
+            // canCompleteCurrentTodos 卡住），项目完成后播报仍停在「第 N 步」。
             // 守卫：本轮已播报下一计划（游标正要由标记机制推进）时不抢跑。
             const deliveryCompletedPlan = planCard
               && needsDeliveryGate && qualityPassed === true
@@ -5332,7 +5297,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // 纯总结轮的交付兜底：构建计划的收尾回合常常不带工具调用（模型以自然语言
             // 总结并展示结果），deliveryResult 因此不会重算。只要本会话已真实通过过
             // 交付验证，且这轮是干净的总结/确认收尾，就视为项目已交付并把计划置为
-            // 完成——否则顶部进度条就停留在「执行中 第 N 步」，与对话窗口里已经结束
+            // 完成——否则进度播报就停留在「执行中 第 N 步」，与对话里已经结束
             // 的项目不一致。该轮未通过验证（或从未通过）时不触发，继续保持续跑上下文。
             const deliverySummarizedPlan = planCard
               && needsDeliveryGate && this.deliveryGatePassed === true
@@ -5941,11 +5906,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
-    // 新对话 = 新的一次会话：规划编号重新起算，固定进度条移除。
+    // 新对话 = 新的一次会话：规划编号重新起算，进度播报随之重新播种。
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
     this.deliveryGatePassed = false;
-    this.removePlanProgressPin();
     this.fileWriteVersions.clear();
     this.sessionArtifacts = [];
     this.sessionArtifactSeen.clear();
@@ -6854,10 +6818,6 @@ export class SessionChatManager {
 
   cancelPausedPlan(): boolean {
     return this.activeNow().cancelPausedPlan();
-  }
-
-  syncPlanProgressPin(): void {
-    this.activeNow().syncPlanProgressPin();
   }
 
   onSessionStatsChanged(fn: (stats: SessionStats) => void): void {

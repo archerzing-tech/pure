@@ -10,10 +10,17 @@ const sessionIds = new Set<string>();
 
 beforeAll(() => {
   GlobalRegistrator.register();
+  // 会话内进度播报直接追加进转写列：给这些集成测试挂上生产同款的最小外壳，
+  // 否则 ChatController 找不到 #chat（生产里由应用布局保证存在）。
+  const chatShell = document.createElement('div');
+  chatShell.id = 'chat';
+  document.body.appendChild(chatShell);
 });
 
 afterEach(async () => {
   document.querySelectorAll('.plan-progress-row').forEach((element) => element.remove());
+  document.querySelectorAll('.bubble.status').forEach((element) => element.remove());
+  document.getElementById('chat')?.replaceChildren();
   for (const sessionId of sessionIds) await deleteSession(sessionId);
   sessionIds.clear();
 });
