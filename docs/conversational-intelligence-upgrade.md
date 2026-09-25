@@ -102,9 +102,9 @@
 - **转移纪律**：结算类动作（spawned/pauseSettled/complete/fail）是运行结果的地面真相，从任何非终态可接受（漏看信号也对齐结果，不跟丢）；控制类动作（pause/abort）才查合法性——pause 幂等、终态拒绝、abort 压过一切
 - **异常/重试两层**：子代理内部自愈重试（failurePolicy 升级线以内）**不迁移状态**——发 `branch_retrying(attempt, cause)` 事件，卡片亮灯不惊动父；重试耗尽落已失败，失败后的重跑是**父的决策**（新一次启动 + 血缘号），不是状态机内的边。resume 找不到断点不许悄悄从头跑——明说「没找到存档，重新跑了」
 - **账本归属**：状态机住在编排器（它有生杀权），每支委派一条账（abort 把手 + 账本，`branches` 注册表）；宿主 agentActivities / GUI 卡片 / 父 OBSERVE 全是**投影**（观测单向，防缠三原则）；describe() 映射回既有活动词汇，卡片第一阶段零改动吃到真状态
-- **落地进度**：✅ 状态机本体 + 注册表 + abortBranch(callId) 定向叫停 + 分支结算分支（branchController aborted 当且仅当点名叫停，老 webview 读不到 reason 也成立）+ persist-before-settle 顺序（存档先落、再结算）——委派中首事件→运行中、四类结算点全走 describe() 单一写手
+- **落地进度**：✅ 状态机本体 + 注册表 + abortBranch(callId) 定向叫停 + 分支结算分支（branchController aborted 当且仅当点名叫停，老 webview 读不到 reason 也成立）+ persist-before-settle 顺序（存档先落、再结算）——委派中首事件→运行中、四类结算点全走 describe() 单一写手；✅ 宿主半边（c8d68e3）：BRANCH_STOP_RE 祈使快路径（判序最前——带锚的停比整树停/收活都具体）→ stopNamedBranch 复用 1a 区分词匹配器对 branchView() 点名 → abortBranch 真停，回执「已停掉「X」那支——进度留了断点」；点不出具体支退回取消折入（宁可折叠不误杀，绝不把「停掉」广播给所有在飞支——每支都可能把自己当成"那支"）
 
-- **定向 abort 通路（宿主半边）**：宿主分类出「停掉某支」（CANCEL_PART_RE/LLM cancelsPart 已有，补祈使式「停掉 X 那支」快路径）→ 按名字/callId 查 `branchView()`/agentActivities → 调 `abortBranch` → 子代理引擎 THINK 流秒停（既有 abort 链）；回执说清哪支被停、其余照跑
+- **定向 abort 通路（宿主半边）✅（c8d68e3）**：BRANCH_STOP_RE 祈使式「停掉 X 那支」快路径 + LLM cancelsPart 两路都先试点名真停 → 按名字/callId 查 `branchView()` → 调 `abortBranch` → 子代理引擎 THINK 流秒停（既有 abort 链）；回执说清哪支被停、其余照跑
 - **原子顺序锁死**：✅（编排器半边已锁：persist → settle）；宿主半边：被中止支的部分产出不入账从「提示词教学」升格为「机制强制」；排队未起飞的同名支一并清除
 - **分支级继续**：用户「把 jev 那支接着跑完」→ 同参重派 → 稳定 sessionId 命中断点 → engine.continue；三种「继续」（整树/单支/计划续跑）统一入口命名与回执口径——用户永远知道点的是哪个继续；血缘号（第 2 次/续跑徽标）随事件走
 - **relay 失效定义**：被中止支是 relay 上游时，下游 `relay.from` 消费者立即以明确错误落定（不挂死）；分派前拓扑检查提前报
