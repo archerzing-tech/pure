@@ -28,6 +28,7 @@ import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { describeTiming, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
 import { sanitizeSkillName } from './skillHub';
+import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -1428,8 +1429,12 @@ export class ChatController {
    * pushes here; the engine drains the queue at each THINK boundary (via
    * takeSteerMessages) so the very next round reconciles the words mid-flight —
    * no abort, no replan. Leftovers after the turn ends fall back to a normal
-   * send in dispatchDeferred so nothing typed is ever lost. */
-  private pendingSteers: import('../shared/types').Message[] = [];
+   * send in dispatchDeferred so nothing typed is ever lost.
+   * 1a 定向投递（对话智能升格）: 每条插话带着目的地入队——'parent' 只进父
+   * 引擎（委派不在飞时的普通顺路带上）、'all' 广播给所有在飞的活、点名某支
+   * 时直达那一支。渲染一致性：displayText 保存用户原话，回合结束后残留的
+   * 插话以原话重入（不是引擎框架文），重载后与实时所见一致。 */
+  private pendingSteers: Array<{ message: import('../shared/types').Message; target: SteerTarget; displayText: string; images?: import('../shared/types').MessageImage[] }> = [];
   /** 阶段感知的 scope 追加（2026-09-22 用户定稿）：并行委派还没收齐时插进
    * 来的追加活不走"收尾后排队"——那会先输出一份没有它的汇总。折入汇合轮：
    * 代执行回合（takeSyntheticToolCalls，2026-09-22 重设计）在委派收齐后的
@@ -2462,17 +2467,22 @@ export class ChatController {
         if (!this.isStreaming()) this.scheduleDeferred();
         return;
       case 'steer': {
-        // 委派在飞时 steer 的承诺（"下个动作带上"）结构性不可兑现：汇合轮
-        // 之前没有 THINK 边界，话被取走了也未必被照办（用户三次实测丢失）。
-        // 在飞期间 steer 不再是合法目的地——统一折入（强框架注入 + 收尾核验
-        // 兜底）。委派收齐后真正的"下个动作"存在，steer 照旧。取消型
-        // （cancelsPart，2026-09-24 取消案例）折入走取消框架与取消回执。
-        if (this.hasDelegationInFlight()) {
-          this.foldInScopeAddition(text, images, displayText, false, ack, decision.signals.cancelsPart === true); // steer 类：指令注入
+        // 取消型在飞期间仍折入（取消框架 + 取消回执，2026-09-24 取消案例）：
+        // 真正停掉某一支是第 2 期分支中断的事，这里的"收掉一项"靠汇合轮
+        // 核验兜底。非取消的 steer 走 1a 定向投递。
+        if (decision.signals.cancelsPart === true && this.hasDelegationInFlight()) {
+          this.foldInScopeAddition(text, images, displayText, false, ack, true);
           return;
         }
+        // 1a 定向投递：委派在飞时，用户的话按点名找收件人——点到某一支就
+        // 直达那一支（其余照跑），没点名就广播给所有在飞的活。委派不在飞
+        // 时照旧：父引擎下个 THINK 边界顺路带上。
         echoUserBubble();
-        this.steerRunningTurn(text, images, ack);
+        if (this.hasDelegationInFlight()) {
+          this.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text));
+        } else {
+          this.steerRunningTurn(text, images, ack);
+        }
         return;
       }
       case 'question':
@@ -2516,6 +2526,17 @@ export class ChatController {
     }
   }
 
+  /** 1a 定向投递 — 从 agentActivities（宿主唯一在飞账本，观测单向，不另立
+   * 注册表）取在飞分支视图，交给纯匹配器判断用户这句话点名了哪一支。返回
+   * 'all' = 没点名，按广播处理。 */
+  private matchSteerRecipient(text: string): SteerTarget {
+    const branches: InFlightBranch[] = this.agentActivities
+      .filter((item) => item.status === 'running')
+      .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet }));
+    const matched = matchInFlightBranch(text, branches);
+    return matched ? { branchCallId: matched.callId, branchName: matched.name } : 'all';
+  }
+
   /** 插话重构 — hand a remark to the RUNNING turn via the steering channel:
    * the engine drains it at the next THINK boundary and reconciles it in
    * stride. No abort, no replan, no queue — a nudge should steer, not
@@ -2523,14 +2544,26 @@ export class ChatController {
    * the model sees a bare mid-transcript user line and could read it as a new
    * turn's instruction — the frame marks it as a steer and points at the
    * <insertion_protocol> rules so the reconciliation follows the protocol
-   * (smallest action, state what changed/stays, never discard finished work). */
-  private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null): void {
+   * (smallest action, state what changed/stays, never discard finished work).
+   * 1a 定向投递：target='parent' 走父引擎；委派在飞时是 'all'（广播）或点名
+   * 某一支（直达，其余照跑）。收执按目的地说清楚话去了哪，别让用户猜。 */
+  private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null, target: SteerTarget = 'parent'): void {
     this.pendingSteers.push({
-      role: 'user',
-      content: `【用户插话·顺路带上】${text}\n（这是任务进行中的插话，不是新任务：按 <insertion_protocol> 判断它影响什么，选最小动作，手头的活继续。）`,
+      message: {
+        role: 'user',
+        content: `【用户插话·顺路带上】${text}\n（这是任务进行中的插话，不是新任务：按 <insertion_protocol> 判断它影响什么，选最小动作，手头的活继续。）`,
+        images,
+      },
+      target,
+      displayText: text,
       images,
     });
-    this.settleAck(ack, '已转达——手头的活不停，下个动作就带上。');
+    this.settleAck(ack,
+      target === 'parent'
+        ? '已转达——手头的活不停，下个动作就带上。'
+        : typeof target === 'string'
+          ? '在跑的几路都收到了——各自下个动作就带上。'
+          : `已直接转给「${target.branchName}」那一路——它下个动作就带上，其余照跑。`);
   }
 
   /** 插话重构 — answer a mid-run question out-of-band: one LLM call with the
@@ -2747,11 +2780,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 插话重构 — steers left over when the turn already ended never reached a
     // THINK boundary. A colleague would just say them out loud as the next
     // thing to do; so does pure: they open the next turn as the user's words.
+    // 1a 定向投递 + 渲染一致性：重入用用户原话（displayText），不是引擎框架
+    // 文——开场气泡、存档、重载看到的都是用户自己说的话。点名某支但那支已
+    // 收工的也一样：话不丢，作为用户的新指令重开。
     if (this.pendingSteers.length > 0) {
       const drained = this.pendingSteers.splice(0);
       this.autoContinue.cancel(); // the user's own words supersede '继续'
-      const text = drained.map((m) => m.content).join('\n');
-      void this.send(text, drained.flatMap((m) => m.images ?? []));
+      const text = drained.map((entry) => entry.displayText || entry.message.content).join('\n');
+      void this.send(text, drained.flatMap((entry) => entry.images ?? []));
       return;
     }
     if (this.pendingTasks.length > 0 && !this.autoContinue.pending) {
@@ -3568,17 +3604,24 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         llmFor,
         // 插话重构 — the engine pulls queued steers at each THINK boundary, so
         // a mid-run remark lands in the very next reasoning round instead of
-        // killing the turn.
-        takeSteerMessages: async () => {
-          const drained = this.pendingSteers;
-          this.pendingSteers = [];
-          // 折入只在"没有任何在飞委派"的边界处理——那恰好是父任务的汇合轮。
-          // steer 队列是父子引擎共享的（北极星第二步），子 agent 在调研中途
-          // 也有 THINK 边界；没有这个闸门，折入会被子 agent 偷走。子 agent
-          // 自身条目在跑时恒为 running，天然挡住。
-          if (this.hasDelegationInFlight()) {
-            return drained;
+        // killing the turn. 1a 定向投递：拉取者自带身份（分支由编排器包上
+        // branchCallId/branchName，不带参 = 父引擎），按身份过滤投递与消费。
+        takeSteerMessages: async (recipient) => {
+          const isBranch = Boolean(recipient?.branchCallId);
+          const drained: import('../shared/types').Message[] = [];
+          const remaining: typeof this.pendingSteers = [];
+          // 投递/消费语义（steerTargeting 单一口径）：点名条目只给被点名的那
+          // 一支、也只有它能取走；广播条目在飞分支人人可读（复制），只有父
+          // 边界能收走——话在回合收尾时仍归父处置，绝不因分支读过就丢。
+          for (const entry of this.pendingSteers) {
+            if (steerDeliversTo(entry.target, recipient)) drained.push(entry.message);
+            if (!steerConsumedBy(entry.target, recipient)) remaining.push(entry);
           }
+          this.pendingSteers = remaining;
+          // 折入只在父引擎边界（非分支拉取）且没有在飞委派时交付——那恰好是
+          // 父任务的汇合轮。旧实现靠"在飞恒 true"挡子代理偷折入，现在分支
+          // 拉取被身份检查结构性排除，闸门只留父级时序这一职责。
+          if (!isBranch && !this.hasDelegationInFlight()) {
           // 指令型折入：合并口径框架随转向通道注入。scope 追加（mechanical）
           // 不在这里交付——它们走 takeSyntheticToolCalls 的代执行回合（见下），
           // 这里只提前铺一句合并口径，交付标记留给代执行闭包。
@@ -3601,6 +3644,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               content: `【系统接管执行】用户中途追加的任务「${fold.text}」将在本轮由系统直接委派给 ${role} 执行，结果稍后回收到本对话。请在追加结果回收后，把本次任务全部产出（含这项追加）合并，输出一份覆盖所有对象的最终汇总。`,
               images: fold.images,
             });
+          }
           }
           return drained;
         },

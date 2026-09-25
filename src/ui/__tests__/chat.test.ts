@@ -971,7 +971,7 @@ describe('plan overview completion state', () => {
     }
     // 折入 / steer / 队列路径通过方法参数收场 ack。
     expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null, cancels = false)')).toBeGreaterThan(-1);
-    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null)')).toBeGreaterThan(-1);
+    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null, target: SteerTarget = \'parent\')')).toBeGreaterThan(-1);
   });
 
   it('honors the confidence gate in the interject path: destructive doubt asks, never aborts', () => {
@@ -1058,9 +1058,13 @@ describe('plan overview completion state', () => {
     // steer 闭包只管指令型折入的交付 + 代执行回合的合并口径铺垫（每条只铺
     // 一次）；机械折入留给代执行闭包。此前所有手搓 UI 补丁（宿主内直接
     // orchestrator.execute / 合成卡片 / 事件泵 / 思考卡接管）必须不存在。
-    const closure = src.indexOf('takeSteerMessages: async () =>');
+    // 1a 定向投递：闭包按拉取者身份过滤（recipient），折入闸门只认父引擎
+    // 边界（!isBranch）且无在飞委派——旧"在飞恒 return"让位给身份寻址。
+    const closure = src.indexOf('takeSteerMessages: async (recipient) =>');
     const closureBody = src.slice(closure, synth);
-    expect(closureBody.indexOf('if (this.hasDelegationInFlight())')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('!isBranch && !this.hasDelegationInFlight()')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('steerDeliversTo(entry.target, recipient)')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('steerConsumedBy(entry.target, recipient)')).toBeGreaterThan(-1);
     expect(closureBody.indexOf('fold.delivered || fold.mechanical) continue;')).toBeGreaterThan(-1);
     expect(closureBody.indexOf('fold.mergeFramed = true;')).toBeGreaterThan(-1);
     expect(closureBody.indexOf('subagentOrchestrator.execute(')).toBe(-1);

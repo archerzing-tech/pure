@@ -485,12 +485,12 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(statusJoined(h.root)).toContain('已转达——手头的活不停，下个动作就带上。');
     expect(h.chat.abortController.signal.aborted).toBe(false);
     // 回合收尾时没被 THINK 边界带走的 steer，作为下一回合开场——不丢。
-    // 2026-09-24 插话协议：注入带轻框架（标记插话 + 指向协议），用户原话原样在内。
+    // 1a + 渲染一致性（2026-09-25）：重入是用户原话，不是引擎框架文——
+    // 框架只在插话真被 THINK 边界注入时才存在，重开回合是用户自己的新指令。
     h.endTurn();
     expect(h.sends).toHaveLength(1);
-    expect(h.sends[0]).toContain('【用户插话·顺路带上】');
     expect(h.sends[0]).toContain('报告文案再口语一点。');
-    expect(h.sends[0]).toContain('<insertion_protocol>');
+    expect(h.sends[0]).not.toContain('【用户插话·顺路带上】');
 
     // 停是快路径：正则直判，一次 LLM 都不花。（steer 的回合已收尾，
     // 现在是下一个正在跑的回合里叫停。）

@@ -33,10 +33,31 @@ function stoppedTool(call: StoredToolCallInfo): TranscriptReplayBlock {
   };
 }
 
+/** 插话框架文（插话重构/1a 定向投递）：模型看到的是带框架的一行，用户看到的
+ * 必须是自己的原话——回放剥掉框架前缀和随附协议块，让重载渲染与实时回显
+ * 一致（实时回显从来只有原话）。三条前缀对应宿主三种入转录的框架（顺路带上
+ * / 中途追加 / 中途取消）。【系统接管执行】是宿主给模型的合并口径，压根不是
+ * 用户的声音——剥成空串，调用方整条跳过，不渲染成用户气泡。 */
+const USER_FRAME_PREFIXES = [
+  /^【用户插话·顺路带上】/,
+  /^【中途追加的任务，不是闲聊】用户要求在本次任务里追加：/,
+  /^【中途取消，不是追加】用户中途收掉了这项工作：/,
+];
+
 function visibleUserContent(content: string): string {
-  return content
-    .replace(/\s*\[(?:粘贴图片\/截图|Pasted screenshot\/image):[^\]]+\](?:\s*\n\s*(?:[~/]|[A-Za-z]:[\\/])[^\n]*)?/gi, '')
-    .trim();
+  let text = content
+    .replace(/\s*\[(?:粘贴图片\/截图|Pasted screenshot\/image):[^\]]+\](?:\s*\n\s*(?:[~/]|[A-Za-z]:[\\/])[^\n]*)?/gi, '');
+  if (USER_FRAME_PREFIXES.some((re) => re.test(text))) {
+    for (const re of USER_FRAME_PREFIXES) text = text.replace(re, '');
+    // 随附协议块只存在于框架文里，认得框架才碰尾部——普通用户消息里出现
+    // 「执行要求：」不会误伤。
+    text = text
+      .replace(/\n（这是任务进行中的插话[\s\S]*$/, '')
+      .replace(/\n执行要求：[\s\S]*$/, '');
+  } else if (/^【系统接管执行】/.test(text)) {
+    return '';
+  }
+  return text.trim();
 }
 
 function artifactsFromToolExecs(execs: ToolExecMeta[]): Array<{ path: string; op?: 'edit' | 'create' }> {
@@ -122,9 +143,12 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
       flushPending();
       flushTurnArtifacts();
       turnHasExplicitArtifacts = false;
-      lastUserRequest = entry.content ?? '';
-      if (entry.content || entry.images?.length || entry.attachments?.length) {
-        blocks.push({ type: 'user', content: visibleUserContent(entry.content ?? ''), images: entry.images ?? [], attachments: entry.attachments ?? [], repairs: entry.pathRepairs });
+      // 存在性判断用剥壳后的可见文本：插话框架剥出原话照常上屏；宿主机制
+      // 行（【系统接管执行】）剥成空串就整条不渲染——它不是用户说的话。
+      const visible = visibleUserContent(entry.content ?? '');
+      if (visible) lastUserRequest = visible;
+      if (visible || entry.images?.length || entry.attachments?.length) {
+        blocks.push({ type: 'user', content: visible, images: entry.images ?? [], attachments: entry.attachments ?? [], repairs: entry.pathRepairs });
       }
       continue;
     }
@@ -220,8 +244,13 @@ export function projectSessionEvents(events: import('./store').SessionEvent[]): 
         completedTools.length = 0;
         flushTurnArtifacts();
         turnHasExplicitArtifacts = false;
-        lastUserRequest = event.content ?? '';
-        blocks.push({ type: 'user', content: visibleUserContent(event.content ?? ''), images: event.images ?? [], attachments: event.attachments ?? [], repairs: event.pathRepairs });
+        {
+          const visible = visibleUserContent(event.content ?? '');
+          if (visible) lastUserRequest = visible;
+          if (visible || event.images?.length || event.attachments?.length) {
+            blocks.push({ type: 'user', content: visible, images: event.images ?? [], attachments: event.attachments ?? [], repairs: event.pathRepairs });
+          }
+        }
         break;
       case 'analysis':
         if (event.content) blocks.push({ type: 'analysis', text: event.content });

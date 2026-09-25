@@ -234,4 +234,63 @@ describe('projectTranscript', () => {
       userRequest: '把 config.json 改成多环境',
     });
   });
+
+  it('strips interjection frames so replay shows the user\'s own words (渲染一致性)', () => {
+    // 实时回显从来只有用户原话（echo bubble）；引擎转录里存的是框架文。
+    // 重放剥壳：三条框架前缀 + 随附协议块剥掉，上屏的是用户自己说的话——
+    // 重载后与实时所见一致，不再裸奔框架文。
+    const blocks = projectTranscript([
+      { id: 'u1', modelMessageIndex: 0, role: 'user', content: '调研一下竞品' },
+      {
+        id: 'u2',
+        modelMessageIndex: 1,
+        role: 'user',
+        content: '【用户插话·顺路带上】竞品那份先别收\n（这是任务进行中的插话，不是新任务：按 <insertion_protocol> 判断它影响什么，选最小动作，手头的活继续。）',
+      },
+      {
+        id: 'u3',
+        modelMessageIndex: 2,
+        role: 'user',
+        content: '【中途追加的任务，不是闲聊】用户要求在本次任务里追加：顺便查查他们的定价\n执行要求：把这项追加的工作像其他委派一样派出去做完。',
+      },
+      {
+        id: 'u4',
+        modelMessageIndex: 3,
+        role: 'user',
+        content: '【中途取消，不是追加】用户中途收掉了这项工作：定价不用查了\n执行要求：不要再为它派任何委派。',
+      },
+    ]);
+    const userBlocks = blocks.filter((b) => b.type === 'user');
+    expect(userBlocks).toHaveLength(4);
+    expect((userBlocks[1] as { content: string }).content).toBe('竞品那份先别收');
+    expect((userBlocks[2] as { content: string }).content).toBe('顺便查查他们的定价');
+    expect((userBlocks[3] as { content: string }).content).toBe('定价不用查了');
+  });
+
+  it('drops host machinery lines entirely (they are not the user\'s voice)', () => {
+    // 【系统接管执行】是宿主给模型的合并口径，实时路径从不上屏；重放也要
+    // 整条跳过，不能把它渲染成用户气泡冒充用户说话。
+    const blocks = projectTranscript([
+      { id: 'u1', modelMessageIndex: 0, role: 'user', content: '调研竞品' },
+      {
+        id: 'u2',
+        modelMessageIndex: 1,
+        role: 'user',
+        content: '【系统接管执行】用户中途追加的任务「查定价」将在本轮由系统直接委派给 researcher 执行，结果稍后回收到本对话。',
+      },
+      { id: 'a1', modelMessageIndex: 2, role: 'assistant', content: '好的。' },
+    ]);
+    const userBlocks = blocks.filter((b) => b.type === 'user');
+    expect(userBlocks).toHaveLength(1);
+    expect((userBlocks[0] as { content: string }).content).toBe('调研竞品');
+  });
+
+  it('never strips 执行要求 from a genuine unframed user message', () => {
+    // 尾部协议块只在认得框架前缀时才剥——用户自己的消息里出现「执行要求：」
+    // 不许误伤。
+    const blocks = projectTranscript([
+      { id: 'u1', modelMessageIndex: 0, role: 'user', content: '写个脚本\n执行要求：带错误处理' },
+    ]);
+    expect((blocks[0] as { content: string }).content).toBe('写个脚本\n执行要求：带错误处理');
+  });
 });

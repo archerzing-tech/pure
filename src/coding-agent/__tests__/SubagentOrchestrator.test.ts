@@ -699,6 +699,31 @@ describe('SubagentOrchestrator steer channel (北极星第二步)', () => {
     expect(result.success).toBe(true);
     expect(seen.some((a) => a.lifecycle === 'steered')).toBe(false);
   });
+
+  it('1a 定向投递：宿主闭包被包上分支身份（branchCallId/branchName）', async () => {
+    // 拉取者身份是寻址的地基：宿主闭包收到 {branchCallId, branchName} 才能把
+    // 用户点名的那支话直达这一支。编排器负责包身份，宿主负责过滤——引擎
+    // 无感知（闭包签名对引擎仍是 () => Message[] 的可选参形态）。
+    const recipients: Array<{ branchCallId?: string; branchName?: string } | undefined> = [];
+    const orch = new SubagentOrchestrator({
+      llm: new MockLLMAdapter('findings'),
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      takeSteerMessages: (recipient) => {
+        recipients.push(recipient);
+        return [];
+      },
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const call = toolCall('test_researcher', { prompt: 'research X' });
+    const result = await orch.execute(call);
+
+    expect(result.success).toBe(true);
+    expect(recipients.length).toBeGreaterThan(0);
+    expect(recipients[0]).toEqual({ branchCallId: call.id, branchName: 'test_researcher' });
+  });
 });
 
 // Agent run id（ag-xxxxxxxx，2026-09-20 用户要求）：每个委派一个可引用的短 ID。

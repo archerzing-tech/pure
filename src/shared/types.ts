@@ -223,8 +223,13 @@ export interface EngineContext {
    *  — the one point where appending keeps the message protocol clean (every
    *  tool result is already in; a user turn must never sit between an
    *  assistant tool_call and its result) — and reconciles it in the very next
-   *  reasoning round. Return-and-clear; absent ⇒ no steering channel. */
-  takeSteerMessages?: () => Message[] | Promise<Message[]>;
+   *  reasoning round. Return-and-clear; absent ⇒ no steering channel.
+   *  1a 定向投递（对话智能升格）: the caller identifies itself — a subagent
+   *  engine's ctx is wrapped by the orchestrator with its branch identity, a
+   *  bare call is the parent engine. The host closure filters the queue by
+   *  recipient so a user remark addressed at one branch reaches THAT branch
+   *  (and only it) while broadcast remarks reach everyone working. */
+  takeSteerMessages?: (recipient?: import('./steerTargeting').SteerRecipient) => Message[] | Promise<Message[]>;
   /** Host-owned actions for this round (代执行回合, 2026-09-22): when this
    *  returns calls at a THINK boundary, the engine skips the model call for
    *  that round and dispatches these calls through the NORMAL ACT pipeline —

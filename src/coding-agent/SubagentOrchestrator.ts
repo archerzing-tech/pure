@@ -204,11 +204,13 @@ export interface SubagentOrchestratorConfig {
    * host's interject classifier. While a delegation is in flight the PARENT is
    * blocked inside the tool batch, so its THINK-boundary drain can't run —
    * handing the same queue to the subagent's engine lets the correction reach
-   * whoever is actually working ("纠偏直达干活的人"). Drain semantics keep this
-   * duplication-free: a drained steer is gone, so the parent never sees it
-   * again at its own next THINK; with parallel delegations the first subagent
-   * THINK claims it — one user remark, one recipient. */
-  takeSteerMessages?: () => Message[] | Promise<Message[]>;
+   * whoever is actually working ("纠偏直达干活的人").
+   * 1a 定向投递（对话智能升格）: the orchestrator wraps the host closure with
+   * the branch's identity ({branchCallId, branchName}) so the host can filter —
+   * a remark addressed at this branch is delivered here and nowhere else; a
+   * broadcast remark is copied to every working branch and still consumed by
+   * the parent at the confluence round. */
+  takeSteerMessages?: (recipient?: import('../shared/steerTargeting').SteerRecipient) => Message[] | Promise<Message[]>;
   /** 阶段 13.3 — role name → 进化 overlay 文本（~/.pure/personas/<role>.overlay.md）。
    * 命中的角色在 spawn 时把 overlay 追加在 base persona 之后（只增补，不重写）；
    * 无命中的角色 prompt 逐字节不变。宿主装载（启动扫描），运行中不热删。 */
@@ -462,7 +464,15 @@ export class SubagentOrchestrator implements ToolAdapter {
       maxDepth: this.config.maxDepth ?? 1,
       // 插话通道：与父引擎共享宿主的 steer 队列（见 config 注释）。引擎在
       // THINK 边界拉取并注入为 user 消息，随子代理 transcript 一起存档。
-      takeSteerMessages: this.config.takeSteerMessages,
+      // 1a 定向投递：宿主闭包被包上本分支的身份——用户点名这一支的话在这里
+      // 被取走，广播话人人可读但只有父边界能收走（见 steerTargeting 语义）。
+      takeSteerMessages: this.config.takeSteerMessages
+        ? (recipient?: import('../shared/steerTargeting').SteerRecipient) => this.config.takeSteerMessages!({
+            ...recipient,
+            branchCallId: toolCall.id,
+            branchName: def.name,
+          })
+        : undefined,
     };
 
     // Stable subagent sessionId for checkpoint resume; only meaningful when a
