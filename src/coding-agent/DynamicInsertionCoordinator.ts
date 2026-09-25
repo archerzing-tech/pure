@@ -85,7 +85,7 @@ const GOAL_CHANGE_RE = /(?:推翻|重新来|重做|从头来|换个方案|换一
 // item runs to completion right after the current task. So obvious additions
 // skip the classifier entirely (like STOP_RE), conservative high-precision
 // family only, negated forms fall through to the LLM.
-const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先不)(?<!莫)(?:再加(?!一?句)|增加|增添|再添|再补(?!一?句)|再算上|再算一个|顺便(?!问|说|提|聊)(?:也)?(?:查|调研|研究|搜|分析|做|跑|处理|加)|也帮?我?(?:查|调研|研究|搜|分析|处理|跑)(?:一?下|一遍)?|把.{1,16}也(?:查|调研|研究|搜|分析|处理|跑|做|算)(?:一?下|一遍)?|同样(?:处理|调研|分析|跑|做)|也来一?份|add (?:one more|another)|also (?:add|check|research|look into|run|include))/i;
+export const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先不)(?<!莫)(?:再加(?!一?句)|增加|增添|再添|再补(?!一?句)|再算上|再算一个|顺便(?!问|说|提|聊)(?:也)?(?:查|调研|研究|搜|分析|做|跑|处理|加)|也帮?我?(?:查|调研|研究|搜|分析|处理|跑)(?:一?下|一遍)?|把.{1,16}也(?:查|调研|研究|搜|分析|处理|跑|做|算)(?:一?下|一遍)?|同样(?:处理|调研|分析|跑|做)|也来一?份|add (?:one more|another)|also (?:add|check|research|look into|run|include))/i;
 // Cancelling ONE PART of the running work ("X 就不调研了", "Y 那个不用查了"):
 // a steer with removal semantics, decided mechanically like the families
 // above. The 2026-09-24 real-world loss had exactly this shape — a branch of
@@ -96,7 +96,7 @@ const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先�
 // has), a negation marker is mandatory, and the 了/吧 tail keeps pure
 // keep-constraints ("不用改") out — anything softer falls through to the LLM,
 // including negated additions ("不用再加知乎了"), which stay unqueued.
-const CANCEL_PART_RE = /[^\n。！!？?]{0,24}(?:(?:不需|不用|不)要?再?|先不|别|莫)(?:帮?我?)?(?:查|调研|研究|分析|搜|跑|处理|翻译|改|写|画|生成)[^。，,；\n]{0,12}?(?:了|吧)(?![一-鿿A-Za-z])/i;
+export const CANCEL_PART_RE = /[^\n。！!？?]{0,24}(?:(?:不需|不用|不)要?再?|先不|别|莫)(?:帮?我?)?(?:查|调研|研究|分析|搜|跑|处理|翻译|改|写|画|生成)[^。，,；\n]{0,12}?(?:了|吧)(?![一-鿿A-Za-z])/i;
 // 祈使式「停掉某一支」（第 2 期分支中断快路径）：「停掉竞品那支」「把调研
 // 那路掐掉」「分析那条路停下来」。与 CANCEL_PART_RE（"X 就不调研了"——收
 // 掉一项出结果）的差别在时态：这是**现在就叫它停**，宿主点名寻址后直接

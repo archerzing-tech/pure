@@ -25,7 +25,7 @@ import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type Dynamic
 import { formatIntentPrompt, markParallelPlanSteps } from '../coding-agent/Planner';
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
-import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
+import { DynamicInsertionCoordinator, CANCEL_PART_RE, SCOPE_ADD_RE, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { describeTiming, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
 import { sanitizeSkillName } from './skillHub';
 import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
@@ -113,6 +113,14 @@ import { LiveTranscriptWindow, type LiveTurnHandle } from './liveTranscriptWindo
 import { setInlineCardHost } from './inlineCard';
 import { createPathRepairNote } from './pathRepairNote';
 import { warmPathIndex, type PathRepair } from './pathIndex';
+
+// 取消味的粗筛（2026-09-25 复测案例二串台）：分类器把「把 X 这个调研取消掉」
+// 这类话判成 task 且没带 cancelsPart 时，宿主若只认 cancelsPart 就会把它当
+// 加活送进去重/折入——回出「已经在调研着了，不重复派」这种答非所问的收执。
+// 这里用宽口的取消词族先嗅一遍：只要话里有取消味，task 判定先改走取消处理
+// （真停点名支 / 取消折入），去重检查只给真正的加活用。宁可多嗅不可漏嗅
+// ——误进取消路的代价是少排一个队（可恢复），漏进加活路的代价是反向执行。
+const CANCELISH_RE = /(?:不需|不用|不要|先不|别(?!的)|莫|取消|终止|中止|停[掉下来了]|砍掉|掐掉)/;
 
 // Insert a `-v{n}` segment before the extension (or append it for extension-less
 // files) so a written file `a/b/index.html` snapshots to `a/b/index-v1.html`.
@@ -268,8 +276,9 @@ export function hideNewContentHint(): void {
   scrollHintBtn = null;
 }
 
-/** Idempotent per-transcript wiring: bridges scrollPin observers → hint UI. */
-function wireNewContentHint(chatEl: HTMLElement): void {
+/** Idempotent per-transcript wiring: bridges scrollPin observers → hint UI.
+ * Exported for the replay suite's 串台 regression test (真实链路的接线口). */
+export function wireNewContentHint(chatEl: HTMLElement): void {
   if (chatEl.dataset.newContentHintWired === '1') return;
   chatEl.dataset.newContentHintWired = '1';
   setScrollPinObservers({
@@ -1555,6 +1564,10 @@ export class ChatController {
       this.mountAgentActivityPanel();
     } else {
       this.hideAgentActivitySurface();
+      // 「有新内容」pill 只属于可见会话（scrollUi 的闸保证只有可见会话能
+      // 亮它）——切走时这个会话不再是可见方，pill 留着就是替下一个会话
+      // 串台。就地收掉，新会话若真有未读内容会自己再亮。
+      hideNewContentHint();
     }
   }
 
@@ -1564,6 +1577,16 @@ export class ChatController {
     const host = this.transcriptHost;
     if (host?.isConnected) return host.parentElement ?? this.transcriptElement();
     return this.transcriptElement();
+  }
+
+  /** 串台修复（2026-09-25）：滚动框是各会话共享的——scrollRoot 永远是同一
+   * 个 #chat 盒子，等事件冒泡到观察者那层已经分不清是谁在写内容。所以闸设
+   * 在触发侧：隐藏会话照常写自己的转写，但不许碰共享滚动面——既不准把用
+   * 户正读着的那个会话拽走，也不准让「有新内容」pill 替别的会话亮起来。
+   * 可见会话的滚动/pill 行为完全不变。 */
+  private scrollUi(chatEl: HTMLElement = this.scrollRoot()): void {
+    if (!this.viewActive) return;
+    this.scrollUi(chatEl);
   }
 
   private transcriptTarget(): HTMLElement {
@@ -1952,7 +1975,7 @@ export class ChatController {
     this.pauseAssessmentFlow = null;
     const chatEl = this.scrollRoot();
     this.addStatusBubble('已取消本次执行计划，未执行任何改动。如需继续，请重新描述需求。', true, false);
-    scrollChatToBottomIfPinned(chatEl);
+    this.scrollUi(chatEl);
     // Re-persist without planState so a reload no longer restores the plan
     // cursor or the pause bubble's "waiting for reply" flags.
     void this.persistSession(this.messages, new Map(), [], this.sessionId, this.workspace);
@@ -2518,16 +2541,23 @@ export class ChatController {
         void this.answerMidrunQuestion(text, images);
         return;
       case 'task': {
-        // 取消不是活（2026-09-24 取消案例的宿主兜底）：分类器万一仍把"收掉
-        // 一项"判成 task（cancelsPart 为真），绝不能让它进队列或被机械折入
-        // ——排队一个"取消"等于把它当活跑，反向执行。先试真停点名的那支
-        // （第 2 期），停不了再按取消型 steer 折入。
-        if (decision.signals.cancelsPart === true) {
+        // 取消不是活（2026-09-24 取消案例的宿主兜底；2026-09-25 复测案例二
+        // 串台加宽）：分类器把收掉一项判成 task 时——无论带没带 cancelsPart
+        // ——绝不能让它走去重、排队或机械折入：排队一个"取消"等于把它当活
+        // 跑（反向执行），送去重会回出"已经在调研着了"这种答非所问。只要话
+        // 里有取消味（CANCELISH_RE 粗筛）就先走取消路：委派在飞时试真停点
+        // 名的那支。停支有闸（stoppable）：混着加活的话——「不要只查均价，
+        // 把区间也查了」——永不停支（会把"把区间也查了"的活一并停掉），只
+        // 取消折入。停不了/点不到具体支按取消型 steer 折入；委派不在飞交给
+        // 在跑的回合自己消化。
+        const cancelish = decision.signals.cancelsPart === true || CANCELISH_RE.test(text);
+        if (cancelish) {
           if (this.hasDelegationInFlight()) {
-            const stopped = this.stopNamedBranch(text, 'pause');
+            const stoppable = !SCOPE_ADD_RE.test(text);
+            const stopped = stoppable ? this.stopNamedBranch(text, 'pause') : null;
             if (stopped) {
               echoUserBubble();
-              this.settleAck(ack, `已停掉「${stopped}」那支——进度留了断点，随时可以让它接着跑，其余照常。`, true, 'info');
+              this.settleAck(ack, `明白——「${stopped}」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。`, true, 'info');
               return;
             }
             this.foldInScopeAddition(text, images, displayText, false, ack, true);
@@ -2545,9 +2575,10 @@ export class ChatController {
         const covered = this.findCoveringBranch(text);
         if (covered) {
           echoUserBubble();
+          const coveredName = this.branchLabel(covered.name, covered.callId);
           this.settleAck(ack, covered.status === 'done'
-            ? `这个刚才已经跑完了——「${covered.name}」那路的结果就在汇总里，不重复派。`
-            : `您说的这个已经在「${covered.name}」那路调研着了，不重复派——收齐后一并汇总给您。`, true, 'info');
+            ? `这个刚才已经跑完了——「${coveredName}」那路的结果就在汇总里，不重复派。`
+            : `您说的这个已经在「${coveredName}」那路调研着了，不重复派——收齐后一并汇总给您。`, true, 'info');
           return;
         }
         // 阶段感知（2026-09-22 用户定稿）：并行委派还没收齐时插进来的追加活，
@@ -2600,14 +2631,24 @@ export class ChatController {
     if (!matched) return null;
     const stopped = mode === 'pause' ? orchestrator.pauseBranch(matched.callId) : orchestrator.abortBranch(matched.callId);
     if (!stopped) return null;
-    return matched.name;
+    return this.branchLabel(matched.name, matched.callId);
+  }
+
+  /** 收执里引用支名时带上同任务第几号（researcher·2号）：同名多支时裸的
+   * 「researcher」指不清是哪一支，用户对不上号。只此一支时保持裸名——
+   * 「researcher」本来就清楚，别添噪音。 */
+  private branchLabel(name: string, callId: string): string {
+    const sameName = this.agentActivities.filter((item) => item.agentName === name);
+    if (sameName.length <= 1) return name;
+    const no = sameName.find((item) => item.callId === callId)?.instanceNo;
+    return no ? `${name}·${no}号` : name;
   }
 
   /** 不重复做（2026-09-25 复测案例一）：这句加活是否已被某支覆盖。匹配面
    * 与点名停同源（1a 区分词匹配器：名+角色+任务书片段，只认区分性命中），
    * 范围扩到已收工的支（结果已经在汇总里的，同样不重派）。返回 null =
    * 没认出覆盖，照旧折入/排队——宁可重复问一句，绝不吞用户的活。 */
-  private findCoveringBranch(text: string): { name: string; status: 'running' | 'done' } | null {
+  private findCoveringBranch(text: string): { name: string; callId: string; status: 'running' | 'done' } | null {
     const candidates = this.agentActivities
       .filter((item) => item.status === 'running' || item.status === 'done')
       .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet }));
@@ -2615,7 +2656,7 @@ export class ChatController {
     if (!matched) return null;
     const hit = this.agentActivities.find((item) => item.callId === matched.callId);
     if (!hit) return null;
-    return { name: hit.agentName, status: hit.status === 'running' ? 'running' : 'done' };
+    return { name: hit.agentName, callId: hit.callId, status: hit.status === 'running' ? 'running' : 'done' };
   }
 
   /** 插话重构 — hand a remark to the RUNNING turn via the steering channel:
@@ -3312,7 +3353,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         if (lines.length > 0) hasMore = true;
         else liveToolOutputQueue.delete(toolCallId);
       }
-      if (rendered) scrollChatToBottomIfPinned(chatEl);
+      if (rendered) this.scrollUi(chatEl);
       if (hasMore) scheduleLiveToolOutputFlush();
     };
     const scheduleLiveToolOutputFlush = (): void => {
@@ -3446,7 +3487,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       if (!thinkingCard || !thinkingPending) return;
       appendThinkingText(thinkingCard, thinkingPending);
       thinkingPending = '';
-      scrollChatToBottomIfPinned(chatEl);
+      this.scrollUi(chatEl);
     };
     // Tool-result gap watchdog: after a tool row finalizes (✓/✗), the model
     // must re-read the result and decide the next step — on slow models this
@@ -3471,7 +3512,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // Mark the card as a silence-waiter so the first real reasoning delta
         // resets this label back to the default thinking state.
         thinkingCard.card.classList.add('waiting');
-        scrollChatToBottomIfPinned(chatEl);
+        this.scrollUi(chatEl);
       }, TOOL_GAP_DEBOUNCE_MS);
     };
     const cancelToolGapCard = (): void => {
@@ -4177,7 +4218,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             }
             this.activePlanCardHandle = planCard;
             this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
-            scrollChatToBottomIfPinned(chatEl);
+            this.scrollUi(chatEl);
           };
           // 探查（工作区扫描）已完成：预检期的思考卡只是过渡反馈且没有内容，
           // 直接收走——不留下“思考完成却什么都没想”的空行。探索/契约结论与
@@ -4315,7 +4356,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         }
         // 用户回复即明确“开工”：聊天中的计划卡从「等待回复」切回「正在执行」。
         planProgress?.dispatch({ type: 'statusChanged', status: 'active' });
-        scrollChatToBottomIfPinned(chatEl);
+        this.scrollUi(chatEl);
       }
 
       if (needsDeliveryGate && !effectiveWorkspace) {
@@ -4535,7 +4576,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             output += fixEvent.payload.content;
             fixSegment.text = output;
             if (streamingRenderEnabled) {
-              scheduleStreamingRender(output, fixSegment.el, () => scrollChatToBottomIfPinned(chatEl));
+              scheduleStreamingRender(output, fixSegment.el, () => this.scrollUi(chatEl));
             } else {
               fixSegment.el.textContent = output;
             }
@@ -4549,7 +4590,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             });
             this.recordToolActivity(fixEvent.payload.toolName, undefined, ok);
             this.addStatusBubble(`${ok ? '🔧✅' : '🔧⛔'} 修复工具 ${fixEvent.payload.toolName}：${ok ? '已完成' : fixEvent.payload.result.error ?? '失败'}`, !ok, !ok, ok ? 'success' : undefined);
-            scrollChatToBottomIfPinned(chatEl);
+            this.scrollUi(chatEl);
           } else if (fixEvent.type === 'Completed') {
             latestMessages = fixEvent.payload.messages ?? latestMessages;
             if (!output && fixEvent.payload.finalOutput) {
@@ -4661,7 +4702,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 一个脉冲状态气泡放在最后：明确告诉用户“一切就绪，等你回复开工”，
         // 避免输入框恢复后看起来像流程悄悄停止了。
         this.addStatusBubble(`⏸ 已暂停在这里等你：直接回复即可开始第 1 项「${firstLabel}」。`, true, false);
-        scrollChatToBottomIfPinned(chatEl);
+        this.scrollUi(chatEl);
         await this.persistSession(
           pauseSnapshot,
           toolResults,
@@ -4790,7 +4831,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (!thinkingCard) {
                 thinkingCard = openThinkingCard();
                 thinkingCard.card.classList.add('waiting');
-                scrollChatToBottomIfPinned(chatEl);
+                this.scrollUi(chatEl);
               }
               setThinkingLabel(thinkingCard, '正在验证结果…');
               dismissThinkingHint(thinkingCard, HINT_LINGER_MS);
@@ -4819,7 +4860,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (!thinkingCard) {
                 thinkingCard = openThinkingCard();
                 thinkingCard.card.classList.add('waiting');
-                scrollChatToBottomIfPinned(chatEl);
+                this.scrollUi(chatEl);
               }
               const failureType = event.payload.failure.type;
               const failureLabel = failureType === 'llm_error'
@@ -4868,7 +4909,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                   // changed ones; the callback re-syncs scroll since the DOM
                   // mutates up to 100ms after the token that triggered it.
                   scheduleStreamingRender(text, seg.el, () => {
-                    scrollChatToBottomIfPinned(chatEl);
+                    this.scrollUi(chatEl);
                   });
                 } else {
                   // streamingRender disabled: plain-text fallback, full render
@@ -4882,7 +4923,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 // longer than the debounce re-opened it. The gap card is only
                 // for the silence AFTER a tool result, armed in ToolResult.)
               }
-              if (!streamingRenderEnabled) scrollChatToBottomIfPinned(chatEl);
+              if (!streamingRenderEnabled) this.scrollUi(chatEl);
             } else {
               // ── Tool call delta → append/update inline tool row ──
               // A tool call for an announced-but-blocked later plan is hard
@@ -4999,7 +5040,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             toolRowSinceSegment = true;
             if (subagentNames.has(toolName)) row.el.dataset.agentCallId = callId;
             pendingRows.set(callId, { row, toolName, args, toolCallId: callId });
-            scrollChatToBottomIfPinned(chatEl);
+            this.scrollUi(chatEl);
             break;
           }
 
@@ -5055,7 +5096,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // lines quote it); the conversation keeps clean cards.
               agentRow.subagentTrace = trace;
               appendToolStreamLine(agentRow.row, activity.kind === 'error' ? 'stderr' : 'stdout', line);
-              scrollChatToBottomIfPinned(chatEl);
+              this.scrollUi(chatEl);
             }
             break;
           }
@@ -5254,7 +5295,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             } else {
               this.addToolStatusBubble(toolName, status, duration);
             }
-            scrollChatToBottomIfPinned(chatEl);
+            this.scrollUi(chatEl);
             // The model now re-reads the tool result and plans the next step —
             // on slow models this gap is silent. Open a waiting card (debounced)
             // so the session never looks frozen between tool calls.
@@ -5279,7 +5320,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             }
             endThinking();
             this.addStatusBubble(`⚠️ ${event.payload.code}: ${event.payload.message}`, false, true);
-            scrollChatToBottomIfPinned(chatEl);
+            this.scrollUi(chatEl);
             break;
 
           case 'Completed': {
@@ -5325,7 +5366,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             let deliveryResult: DeliveryVerificationResult | null = null;
             if (needsDeliveryGate && hasToolWork && !event.payload.interrupted && gen === this.generation) {
               addDeliveryBubble('🧪 交付验证：正在重跑机械检查（typecheck / 测试 / 构建）…', true);
-              scrollChatToBottomIfPinned(chatEl);
+              this.scrollUi(chatEl);
               // Surface each mechanical check as it finishes so the user can see
               // the verification actually running (instead of a static bubble
               // that appears to do nothing before "passed").
@@ -5334,7 +5375,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 const icon = step.status === 'passed' ? '✅' : step.status === 'skipped' ? '⏭️' : '❌';
                 const dur = step.durationMs ? ` · ${(step.durationMs / 1000).toFixed(1)}s` : '';
                 this.addStatusBubble(`${icon} 交付验证 · ${step.label}（${step.command}）${dur}`, false, step.status === 'failed', step.status === 'passed' ? 'success' : undefined);
-                scrollChatToBottomIfPinned(chatEl);
+                this.scrollUi(chatEl);
               };
               deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep);
               while (
@@ -5376,7 +5417,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 : `⛔ 项目暂不交付：${deliveryVerificationSummary(deliveryResult)}`,
               !deliveryResult.passed, !deliveryResult.passed,
               deliveryResult.passed ? 'success' : undefined);
-              scrollChatToBottomIfPinned(chatEl);
+              this.scrollUi(chatEl);
             }
             if (deliveryResult && completionMessages && gen === this.generation) {
               const evidence = deliveryResult.steps.length > 0
@@ -5546,7 +5587,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 // with another session's messages. Guard on the generation so a
                 // stale render never scrolls the wrong transcript.
                 if (gen !== this.generation) return;
-                scrollChatToBottomIfPinned(chatEl);
+                this.scrollUi(chatEl);
               });
             }
             if (completionMessages) {
@@ -5586,7 +5627,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                     void this.send('用户已确认当前设计稿：请严格按照该设计稿开始实现，实现完成后继续执行交付验证管线。');
                   }).el);
                   this.addStatusBubble('⏸ 已按约定停在实现前：请在上方预览卡确认设计效果；确认前不会写实现代码，想调整直接回复意见。', true, false);
-                  scrollChatToBottomIfPinned(chatEl);
+                  this.scrollUi(chatEl);
                   designPreviewShown = true;
                 }
               } catch {
@@ -5634,7 +5675,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               renderArtifactCards(artifactRow, cardItems, computeProjectDir(cardItems) ?? effectiveWorkspace, { userRequest: userText, workspace: effectiveWorkspace });
               this.projectDirectoryShown = true;
               deliveredThisTurn = true;
-              scrollChatToBottomIfPinned(chatEl);
+              this.scrollUi(chatEl);
             }
             // 课后优化建议卡（非阻断）：交付通过且本回合写过文件时，给用户
             // 一个手动触发的「生成优化建议」入口。绝不自动跑——不烧 token、
@@ -5655,7 +5696,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                   return String(result.result ?? '');
                 },
               });
-              scrollChatToBottomIfPinned(chatEl);
+              this.scrollUi(chatEl);
             }
             if (assessmentFlow && designPreviewShown) {
               assessmentFlow.awaitPhase('execute', '设计稿已就绪，等待你在预览卡确认后开始实现…');
@@ -5747,7 +5788,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (!seg.text) continue;
               void renderMarkdown(stripToolCallXml(dedupePlanAnnouncements(seg.text)), seg.el).then(() => {
                 if (gen !== this.generation) return;
-                scrollChatToBottomIfPinned(chatEl);
+                this.scrollUi(chatEl);
               });
             }
             const hasContent = assistantSegments.some(s => s.el.textContent || s.el.children.length > 0);
@@ -5799,7 +5840,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // (e.g. max-steps reached) means the project is NOT done. The card
             // must only appear once on genuine completion (handled in the
             // Completed branch), so a mid-run abort never implies success.
-            scrollChatToBottomIfPinned(chatEl);
+            this.scrollUi(chatEl);
             break;
           }
         }
@@ -6587,7 +6628,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
   private addToolRow(toolName: string, args: Record<string, unknown>, parent: HTMLElement): ToolRowHandle {
     const row = createToolRow(toolName, args);
     parent.appendChild(row.el);
-    scrollChatToBottomIfPinned(this.scrollRoot());
+    this.scrollUi();
     return row;
   }
 

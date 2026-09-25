@@ -7,7 +7,8 @@
 // 子 Agent 摘要、变化点清单）不在宿主侧，不进本文件。
 
 import { describe, expect, it, afterEach } from 'bun:test';
-import { ChatController, setTimedInputSink } from '../chat';
+import { ChatController, setTimedInputSink, wireNewContentHint } from '../chat';
+import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned, setScrollPinObservers } from '../scrollPin';
 
 // ── 极小假 DOM：只为插话路径真正摸到的面负责 ─────────────────────────────
 
@@ -197,6 +198,9 @@ let restoreDom: (() => void) | null = null;
 function installDom(): FakeElement {
   const root = new FakeElement('div');
   (root as { _isRoot?: boolean })._isRoot = true;
+  // 「有新内容」pill 的挂载点（真实 DOM 里是 #chat 的静态祖先，会话切换
+  // 不重建它）——独立节点，不挂进 root 的父链，避免扰动既有用例的层级假设。
+  const chatView = new FakeElement('div');
   const prev = {
     document: (globalThis as { document?: unknown }).document,
     window: (globalThis as { window?: unknown }).window,
@@ -212,7 +216,15 @@ function installDom(): FakeElement {
       let at = -1;
       return { nextNode: () => { at += 1; return nodes[at] ?? null; } };
     },
-    getElementById: (id: string): FakeElement | null => (id === 'chat' ? root : null),
+    getElementById: (id: string): FakeElement | null => (id === 'chat' ? root : id === 'chat-view' ? chatView : null),
+    contains: (el: unknown): boolean => {
+      let cur = el as FakeElement | null;
+      while (cur) {
+        if (cur === chatView || cur === root) return true;
+        cur = cur.parentNode;
+      }
+      return false;
+    },
   };
   (globalThis as { document?: unknown }).document = fakeDocument;
   (globalThis as { window?: unknown }).window = {
@@ -237,6 +249,7 @@ function installDom(): FakeElement {
 
 afterEach(() => {
   setTimedInputSink(null);
+  setScrollPinObservers({}); // 观察者是模块级单口，别让本文件的接线漏进别的用例
   restoreDom?.();
 });
 
@@ -729,6 +742,78 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.pendingSteers).toHaveLength(0);
   });
 
+  it('复测案例二串台（2026-09-25）：取消话被判成 task 又没带 cancels_part——仍真停，绝不回「不重复派」', async () => {
+    // 真机串台形态：取消话被分类器判成 task 且没带 cancels_part，宿主只认
+    // cancelsPart，这句就落进去重检查，回出「已经在调研着了，不重复派」——
+    // 答非所问，支还在烧。宿主兜底加宽：话里有取消味（CANCELISH_RE）就走
+    // 取消路，去重只给真正的加活用。
+    const llm = scriptedLlm([]); // 剧本默认判 task、不带 cancels_part——串台同款
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push(
+      { callId: 'call_trend', agentName: '趋势调研员', status: 'running', inputSnippet: '探索 agent 开发技术趋势' },
+      { callId: 'call_burst', agentName: '爆发点分析员', status: 'running', inputSnippet: '研判未来三年的爆发点' },
+    );
+    const paused: string[] = [];
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        branchView: () => [
+          { callId: 'call_trend', agentName: '趋势调研员', state: 'running', inputSnippet: '探索 agent 开发技术趋势' },
+          { callId: 'call_llm', agentName: '方向调研员', state: 'running', inputSnippet: 'LLM 的发展方向研判' },
+          { callId: 'call_burst', agentName: '爆发点分析员', state: 'running', inputSnippet: '研判未来三年的爆发点' },
+        ],
+        pauseBranch: (callId: string) => { paused.push(callId); return true; },
+        abortBranch: () => false,
+      },
+    };
+
+    await h.chat.interject('把"未来三年的爆发点"这个调研取消掉');
+    expect(llm.classifyCalls.length).toBe(1); // 不走快路径——正是分类器判 task 的串台形态
+    expect(paused).toEqual(['call_burst']);   // 仍按任务书片段点名真停
+    const status = statusJoined(h.root);
+    expect(status).toContain('明白——「爆发点分析员」那路我先暂停了');
+    expect(status).not.toContain('不重复派'); // 去重回执绝不准碰取消话
+    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.pendingSteers).toHaveLength(0);
+  });
+
+  it('混着加活的取消话永不停支：整句按取消折入，不能把要加的活一并停掉', async () => {
+    // 「不要只查均价了，把区间也查一下」——停支有闸（stoppable）：SCOPE_ADD_RE
+    // 在场就只取消折入，否则"把区间也查了"的活会被一并停掉。
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push({ callId: 'call_price', agentName: '价格调研员', status: 'running', inputSnippet: '调研各平台均价' });
+    const paused: string[] = [];
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        branchView: () => [
+          { callId: 'call_price', agentName: '价格调研员', state: 'running', inputSnippet: '调研各平台均价' },
+        ],
+        pauseBranch: (callId: string) => { paused.push(callId); return true; },
+        abortBranch: () => false,
+      },
+    };
+
+    await h.chat.interject('不要只查均价了，把区间也查一下');
+    expect(paused).toHaveLength(0); // 闸生效：一句混话不停支
+    expect(h.chat.pendingFoldIns).toHaveLength(1);
+    expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
+    expect(statusJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+  });
+
+  it('同名多支时收执带序号：researcher·2号，用户对得上号', async () => {
+    // 真机观感：两支同名 researcher，收执里裸的「researcher」指不清是哪支。
+    // 同名不止一支时收执引用带 instanceNo（researcher·2号）。
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push(
+      { callId: 'call_r1', agentName: 'researcher', instanceNo: 1, status: 'running', inputSnippet: '调研优酷最新国漫上新' },
+      { callId: 'call_r2', agentName: 'researcher', instanceNo: 2, status: 'running', inputSnippet: '调研爱奇艺最新国漫上新' },
+    );
+
+    await h.chat.interject('新增一个平台，爱奇艺');
+    expect(statusJoined(h.root)).toContain('您说的这个已经在「researcher·2号」那路调研着了，不重复派——收齐后一并汇总给您。');
+  });
+
   it('分类器把取消误判成 task 时宿主兜底：取消永不排队，按取消型折入走', async () => {
     // 案例的真实形态：LLM 把"收掉一项"判成加活。提示词已教正；这里锁宿
     // 主兜底——signals.cancelsPart 为真时 task 判定被改道，绝不进队列、
@@ -748,5 +833,32 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(queueCard(h.root)).toBeUndefined();
     h.endTurn();
     expect(h.sends).toHaveLength(0);
+  });
+});
+
+// ── 「有新内容」tip（2026-09-25 用户实测串台）──────────────────────────────
+
+describe('「有新内容」tip 会话串台', () => {
+  it('切走会话时 pill 就地收掉，不替下一个会话串台', () => {
+    // 真实事故：多会话来回切，A 会话滚出底部后亮起的 tip 在切到 B 后还挂
+    // 在静态 #chat-view 上——替 B 串台。pill 只属于可见会话：切走即收。
+    const h = makeHarness(scriptedLlm([]));
+    const doc = (globalThis as { document?: { getElementById: (id: string) => FakeElement | null } }).document!;
+    const chatEl = doc.getElementById('chat')!;
+    const chatView = doc.getElementById('chat-view')!;
+    expect(chatView.children).toHaveLength(0);
+
+    // 真实链路的接线（send() 同款）：滚动框 + pill 观察。
+    wireScrollPin(chatEl as unknown as HTMLElement);
+    wireNewContentHint(chatEl as unknown as HTMLElement);
+    setPinnedToBottom(chatEl as unknown as HTMLElement, false); // 用户上翻读历史
+    scrollChatToBottomIfPinned(chatEl as unknown as HTMLElement); // 内容到达 → 应亮
+
+    const pill = chatView.children.find((c) => String((c as FakeElement).className).includes('new-content-hint'));
+    expect(pill).toBeTruthy();
+
+    // 切走（setViewActive 是所有会话切换的公共口）：pill 必须跟着走。
+    h.chat.setViewActive(false);
+    expect(chatView.children.filter((c) => String((c as FakeElement).className).includes('new-content-hint'))).toHaveLength(0);
   });
 });
