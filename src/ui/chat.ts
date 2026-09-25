@@ -2382,27 +2382,41 @@ export class ChatController {
     await run;
   }
 
-  /** Flip the interject ack from "looking at it" to its final one-line receipt.
-   * Same row, new words — the conversation gains a sentence instead of a second
-   * system line. keepPending keeps the shimmer through an async abort drain;
-   * kind upgrades the row's highlight to match the old dedicated receipts. */
+  /** Flip the interject ack from "looking at it" to its final receipt.
+   * 收执是 pure 在回话——用普通助手气泡（状态行的样子不像回话，2026-09-25
+   * 用户实测），气泡顶替 ack 行的原位：位置正对着回显气泡的后面（次序由
+   * placeEchoBeforeAck 保证：用户原话在前，宿主回话在后）。
+   * keepPending=true 是「话还没说完」的占位——停/改向/追问的后续还在途，
+   * 保留状态行 + 微光，等追问气泡或收尾扫除接管；只有终稿回执才转气泡。 */
   private settleAck(ack: HTMLElement | null, text: string, keepPending = false, kind?: 'success' | 'warn' | 'info'): void {
     if (!ack) return;
-    ack.textContent = text;
-    if (!keepPending) ack.parentElement?.classList.remove('pending');
-    if (kind) ack.classList.add(`hl-${kind}`);
-    linkifyPaths(ack);
+    const row = ack.parentElement;
+    if (keepPending || !row?.parentNode) {
+      ack.textContent = text;
+      if (kind) ack.classList.add(`hl-${kind}`);
+      linkifyPaths(ack);
+      return;
+    }
+    const bubble = this.addBubble('assistant', '');
+    bubble.textContent = text;
+    linkifyPaths(bubble);
+    const bubbleRow = bubble.parentElement;
+    if (bubbleRow) row.parentNode.insertBefore(bubbleRow, row);
+    row.remove();
   }
 
   /** 插话回显的次序保证：用户原话在前，宿主回执（ack 行）紧随其后。ack 在
-   * 插话瞬间就上屏（比秒级分类快），而回显气泡默认追加在它后面——不移一行，
-   * 「已收到…」这类回执就永远压在用户那句话的头上（用户实测报过这个顺序
-   * bug）。只在两行确实相邻时搬，避免打乱中间可能插进来的其他内容。 */
-  private placeAckAfterEcho(ack: HTMLElement | null, bubble: HTMLElement): void {
+   * 插话瞬间就上屏，而判定要等秒级分类——期间在飞回合还在往转写末尾流内
+   * 容（多 agent 在飞时几乎不间断）。第一版回显走「末尾追加 + 仅相邻才搬
+   * ack」，结果用户的话沉到一串流式行下面、回执压在原话头上（2026-09-25
+   * 用户复测）。改为插队：回显气泡直接插到 ack 行正前方——不管中间落了多
+   * 少流式行，顺序永远是【用户原话 → 宿主回话】，ack 随后原地顶替成收执。
+   * ack 已被摘掉的路径（旁答先删后答）退回末尾追加。 */
+  private placeEchoBeforeAck(ack: HTMLElement | null, bubble: HTMLElement): void {
     const ackRow = ack?.parentElement;
     const bubbleRow = bubble.parentElement;
-    if (ackRow && bubbleRow && ackRow.previousElementSibling === bubbleRow) {
-      bubbleRow.insertAdjacentElement('afterend', ackRow);
+    if (ackRow?.parentNode && bubbleRow) {
+      ackRow.parentNode.insertBefore(bubbleRow, ackRow);
     }
   }
 
@@ -2438,8 +2452,9 @@ export class ChatController {
     // feedback while the abort drains.
     const echoUserBubble = (): void => {
       const bubble = this.addBubble('user', displayText, images);
-      // 回执行跟随到气泡下面——用户的话在前，宿主的收执在后。
-      this.placeAckAfterEcho(ack, bubble);
+      // 回显插队到 ack 行前面——用户的话在前，宿主的收执在后（见
+      // placeEchoBeforeAck 注：末尾追加会让流式行把顺序冲乱）。
+      this.placeEchoBeforeAck(ack, bubble);
     };
     // 分类器不可用（turnLlm 还没立起来）也照走 decide(null)：协调器的兜底
     // 现在是 task（折入/排队，确定性目的地）——话绝不因没有分类器而失踪。
@@ -2473,6 +2488,10 @@ export class ChatController {
     }
     switch (decision.kind) {
       case 'stop':
+        // 整树停不重入 send()（没有 held insert），用户的原话不会在别处上屏
+        // ——补上回显，别让转写里只剩 pure 的一句话（插话没有回执时 transcript
+        // 必须仍能对上「谁说了什么」）。
+        echoUserBubble();
         this.settleAck(ack, '收到，停——正在收尾当前任务，已经跑完的部分都留着。', true, 'info');
         this.abortController?.abort();
         return;
@@ -2509,9 +2528,11 @@ export class ChatController {
           const stopped = this.stopNamedBranch(text, pause ? 'pause' : 'abort');
           if (stopped) {
             echoUserBubble();
+            // 停/暂停是宿主已完成的动作（sync 已落），收执是终稿——转普通
+            // 气泡（settleAck 终稿语义），不必等收尾扫除摘微光。
             this.settleAck(ack, pause
               ? `明白——「${stopped}」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。`
-              : `已停掉「${stopped}」那支——进度留了断点，随时可以让它接着跑，其余照常。`, true, 'info');
+              : `已停掉「${stopped}」那支——进度留了断点，随时可以让它接着跑，其余照常。`);
             return;
           }
           // 点不出具体支（或它刚好结算了）：退回取消折入——宁可折叠不误杀。
@@ -2557,7 +2578,8 @@ export class ChatController {
             const stopped = stoppable ? this.stopNamedBranch(text, 'pause') : null;
             if (stopped) {
               echoUserBubble();
-              this.settleAck(ack, `明白——「${stopped}」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。`, true, 'info');
+              // 宿主已完成暂停（sync 已落），收执是终稿——转普通气泡。
+              this.settleAck(ack, `明白——「${stopped}」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。`);
               return;
             }
             this.foldInScopeAddition(text, images, displayText, false, ack, true);
@@ -2576,9 +2598,10 @@ export class ChatController {
         if (covered) {
           echoUserBubble();
           const coveredName = this.branchLabel(covered.name, covered.callId);
+          // 去重回执是终稿（没有后续在途）——转普通气泡。
           this.settleAck(ack, covered.status === 'done'
             ? `这个刚才已经跑完了——「${coveredName}」那路的结果就在汇总里，不重复派。`
-            : `您说的这个已经在「${coveredName}」那路调研着了，不重复派——收齐后一并汇总给您。`, true, 'info');
+            : `您说的这个已经在「${coveredName}」那路调研着了，不重复派——收齐后一并汇总给您。`);
           return;
         }
         // 阶段感知（2026-09-22 用户定稿）：并行委派还没收齐时插进来的追加活，
@@ -2848,7 +2871,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * 两者收尾都核验，没兑现就转排队兜底，话绝不丢。 */
   private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null, cancels = false): void {
     const bubble = this.addBubble('user', displayText, images);
-    this.placeAckAfterEcho(ack, bubble);
+    this.placeEchoBeforeAck(ack, bubble);
     this.pendingFoldIns.push({ text, images, displayText, delivered: false, activityCountAtDelivery: -1, mechanical, cancels });
     // 取消型折入（2026-09-24 取消案例）：回执必须说"拿掉"，绝不能沿用追加
     // 口径——案例里用户收掉一项，回执却说"先补这项"，与意图正好相反。

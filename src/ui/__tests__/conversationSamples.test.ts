@@ -272,7 +272,7 @@ interface ScriptedLlm {
 }
 
 function scriptedLlm(
-  classifications: Array<{ match: string; cls: ScriptedClassification }>,
+  classifications: Array<{ match: string; cls: ScriptedClassification; during?: () => void }>,
   answers: { clarify?: string; question?: string } = {},
 ): ScriptedLlm {
   const classifyCalls: string[] = [];
@@ -282,6 +282,7 @@ function scriptedLlm(
       const user = String(messages[1]?.content ?? '');
       classifyCalls.push(user);
       const hit = classifications.find((c) => user.includes(c.match));
+      hit?.during?.(); // 判定途中的副作用（模拟在飞回合往转写里流行内容）
       const payload: ScriptedClassification = hit?.cls
         ?? { kind: 'task', reason: 'unmatched script line', confidence: 0.9 };
       const json = JSON.stringify(payload);
@@ -557,14 +558,14 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
     // 点名：「竞品」「定价」只在竞品分析员的匹配面里 → 直达那支，其余照跑。
     await h.chat.interject('竞品那支重点看下沉市场的定价。');
-    expect(statusJoined(h.root)).toContain('已直接转给「竞品分析员」那一路——它下个动作就带上，其余照跑。');
+    expect(assistantJoined(h.root)).toContain('已直接转给「竞品分析员」那一路——它下个动作就带上，其余照跑。');
     expect(h.chat.pendingSteers).toHaveLength(1);
     expect(h.chat.pendingSteers[0].target).toEqual({ branchCallId: 'call_b', branchName: '竞品分析员' });
     expect(h.chat.pendingSteers[0].displayText).toBe('竞品那支重点看下沉市场的定价。');
 
     // 没点名：候选词两边都不沾 → 分不清宁可广播，给在飞的全体。
     await h.chat.interject('方向都再收紧一点。');
-    expect(statusJoined(h.root)).toContain('在跑的几路都收到了——各自下个动作就带上。');
+    expect(assistantJoined(h.root)).toContain('在跑的几路都收到了——各自下个动作就带上。');
     expect(h.chat.pendingSteers).toHaveLength(2);
     expect(h.chat.pendingSteers[1].target).toBe('all');
   });
@@ -576,7 +577,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const h = makeHarness(llm);
 
     await h.chat.interject('报告文案再口语一点。');
-    expect(statusJoined(h.root)).toContain('已转达——手头的活不停，下个动作就带上。');
+    expect(assistantJoined(h.root)).toContain('已转达——手头的活不停，下个动作就带上。');
     expect(h.chat.abortController.signal.aborted).toBe(false);
     // 回合收尾时没被 THINK 边界带走的 steer，作为下一回合开场——不丢。
     // 1a + 渲染一致性（2026-09-25）：重入是用户原话，不是引擎框架文——
@@ -609,7 +610,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // SCOPE_ADD_RE 快路径：不经 LLM 直判加活。
     await h.chat.interject('再加一个爱奇艺平台');
     expect(llm.classifyCalls.length).toBe(0);
-    expect(statusJoined(h.root)).toContain('已收到——正在跑的活收齐后先补这项，再合并出一份覆盖全部的汇总。');
+    expect(assistantJoined(h.root)).toContain('已收到——正在跑的活收齐后先补这项，再合并出一份覆盖全部的汇总。');
     expect(userJoined(h.root)).toContain('爱奇艺平台');
     // 折入进 pendingFoldIns 等收尾核验，不占待办队列。
     expect(h.chat.pendingFoldIns).toHaveLength(1);
@@ -625,7 +626,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('jev 这个就不调研了');
     expect(llm.classifyCalls.length).toBe(0);
     // 回执必须说"拿掉"——案例里正是"先补这项"这句与意图相反的回执。
-    expect(statusJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(assistantJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
     expect(statusJoined(h.root)).not.toContain('先补这项');
     expect(userJoined(h.root)).toContain('jev 这个就不调研了');
     expect(h.chat.pendingFoldIns).toHaveLength(1);
@@ -658,7 +659,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('停掉竞品那支。');
     expect(llm.classifyCalls.length).toBe(0);
     expect(aborted).toEqual(['call_a']); // 点名直达，兄弟支照跑
-    expect(statusJoined(h.root)).toContain('已停掉「竞品分析员」那支——进度留了断点，随时可以让它接着跑，其余照常。');
+    expect(assistantJoined(h.root)).toContain('已停掉「竞品分析员」那支——进度留了断点，随时可以让它接着跑，其余照常。');
     expect(userJoined(h.root)).toContain('停掉竞品那支');
     // 真停不走折入/投递账：汇合轮没有这笔，steer 池也是空的。
     expect(h.chat.pendingFoldIns).toHaveLength(0);
@@ -689,7 +690,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.pendingFoldIns).toHaveLength(1);
     expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
     expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);
-    expect(statusJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(assistantJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
     expect(h.chat.pendingSteers).toHaveLength(0);
   });
 
@@ -706,7 +707,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     );
 
     await h.chat.interject('新增一个平台，爱奇艺');
-    expect(statusJoined(h.root)).toContain('您说的这个已经在「爱奇艺调研员」那路调研着了，不重复派——收齐后一并汇总给您。');
+    expect(assistantJoined(h.root)).toContain('您说的这个已经在「爱奇艺调研员」那路调研着了，不重复派——收齐后一并汇总给您。');
     expect(userJoined(h.root)).toContain('新增一个平台，爱奇艺');
     // 重复的那支永远不该被派出去：折入账是空的，队列卡也不出现。
     expect(h.chat.pendingFoldIns).toHaveLength(0);
@@ -736,7 +737,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('不要调研"未来三年的爆发点"这个了');
     expect(llm.classifyCalls.length).toBe(0); // CANCEL_PART_RE 快路径
     expect(paused).toEqual(['call_burst']);   // 片段点名，暂停那一支
-    expect(statusJoined(h.root)).toContain('明白——「爆发点分析员」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。');
+    expect(assistantJoined(h.root)).toContain('明白——「爆发点分析员」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。');
     // 真停了就不再折入：汇合轮没有这笔账。
     expect(h.chat.pendingFoldIns).toHaveLength(0);
     expect(h.chat.pendingSteers).toHaveLength(0);
@@ -769,7 +770,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('把"未来三年的爆发点"这个调研取消掉');
     expect(llm.classifyCalls.length).toBe(1); // 不走快路径——正是分类器判 task 的串台形态
     expect(paused).toEqual(['call_burst']);   // 仍按任务书片段点名真停
-    const status = statusJoined(h.root);
+    const status = statusJoined(h.root) + assistantJoined(h.root);
     expect(status).toContain('明白——「爆发点分析员」那路我先暂停了');
     expect(status).not.toContain('不重复派'); // 去重回执绝不准碰取消话
     expect(h.chat.pendingFoldIns).toHaveLength(0);
@@ -797,7 +798,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(paused).toHaveLength(0); // 闸生效：一句混话不停支
     expect(h.chat.pendingFoldIns).toHaveLength(1);
     expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
-    expect(statusJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(assistantJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
   });
 
   it('同名多支时收执带序号：researcher·2号，用户对得上号', async () => {
@@ -811,7 +812,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     );
 
     await h.chat.interject('新增一个平台，爱奇艺');
-    expect(statusJoined(h.root)).toContain('您说的这个已经在「researcher·2号」那路调研着了，不重复派——收齐后一并汇总给您。');
+    expect(assistantJoined(h.root)).toContain('您说的这个已经在「researcher·2号」那路调研着了，不重复派——收齐后一并汇总给您。');
   });
 
   it('分类器把取消误判成 task 时宿主兜底：取消永不排队，按取消型折入走', async () => {
@@ -826,13 +827,53 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
     await h.chat.interject('知乎那项也收掉吧');
     expect(llm.classifyCalls.length).toBe(1);
-    expect(statusJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(assistantJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
     expect(h.chat.pendingFoldIns).toHaveLength(1);
     expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
     expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);
     expect(queueCard(h.root)).toBeUndefined();
     h.endTurn();
     expect(h.sends).toHaveLength(0);
+  });
+});
+
+// ── 插话回执的次序与形态（2026-09-25 用户实测）────────────────────────────
+
+describe('插话回执次序与形态', () => {
+  it('判定期间有流式行插进来：用户原话仍在回执前面（多 agent 在飞必现的顺序倒挂）', async () => {
+    // 真实事故：ack 先上屏，秒级判定期间在飞回合不断往转写末尾流行内容，
+    // 回显走末尾追加 → 用户的话沉到流式行下面、回执压在原话头上。修后回显
+    // 插队到 ack 行正前，不管中间落了多少行，顺序永远是【原话 → 回话】。
+    let chat: Record<string, any> | null = null;
+    const llm = scriptedLlm([
+      { match: '爱奇艺', during: () => chat?.addStatusBubble('（在飞回合插进来的流式行）正在整理B站数据…', false), cls: { kind: 'task', reason: 'r', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+    chat = h.chat;
+    h.chat.agentActivities.push(
+      { callId: 'call_a', agentName: '爱奇艺调研员', status: 'running', inputSnippet: '调研爱奇艺最新国漫上新信息' },
+    );
+
+    await h.chat.interject('新增一个平台，爱奇艺');
+    const rows = h.root.querySelectorAll('.bubble-row');
+    const texts = rows.map((r) => r.textContent);
+    const userIdx = texts.findIndex((t) => t.includes('新增一个平台'));
+    const receiptIdx = rows.findIndex((r) => String(r.className).includes('assistant') && r.textContent.includes('不重复派'));
+    expect(userIdx).toBeGreaterThan(-1);
+    expect(receiptIdx).toBeGreaterThan(userIdx); // 原话在前，pure 在后
+  });
+
+  it('终稿回执是普通助手气泡，不再是状态行', async () => {
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push({ callId: 'call_a', agentName: '爱奇艺调研员', status: 'running', inputSnippet: '调研爱奇艺最新国漫上新信息' });
+
+    await h.chat.interject('新增一个平台，爱奇艺');
+    const receiptRow = h.root.querySelectorAll('.bubble-row.assistant').find((r) => r.textContent.includes('不重复派'));
+    expect(receiptRow).toBeTruthy();
+    // 收执带 pure 名（正常气泡的标签），且不再以状态行的样子出现。
+    expect(receiptRow!.textContent).toContain('pure');
+    expect(statusJoined(h.root)).not.toContain('不重复派');
   });
 });
 

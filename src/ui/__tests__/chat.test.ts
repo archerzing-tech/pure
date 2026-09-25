@@ -1083,12 +1083,13 @@ describe('plan overview completion state', () => {
     expect(startedBody.indexOf('pendingRows.has(callId)')).toBeGreaterThan(-1);
     expect(startedBody.indexOf("appendToolRow(toolName, args, subagentNames.has(toolName) ? 'agent' : 'tool')")).toBeGreaterThan(-1);
     expect(startedBody.indexOf('pendingRows.set(callId,')).toBeGreaterThan(-1);
-    // 插话回显次序（2026-09-23 用户实测：回执压在用户原话头上）：回显气泡后
-    // ack 行必须挪到气泡下面——折入与 echo 两条路径都要走 placeAckAfterEcho。
+    // 插话回显次序（2026-09-23 用户实测：回执压在用户原话头上；2026-09-25
+    // 复测升级：流式行插进判定窗口时「末尾追加+相邻才搬」失守，改为回显
+    // 插队到 ack 行正前）——折入与 echo 两条路径都要走 placeEchoBeforeAck。
     const foldInFn = src.indexOf('private foldInScopeAddition(');
-    expect(src.slice(foldInFn, foldInFn + 600).indexOf('this.placeAckAfterEcho(ack, bubble)')).toBeGreaterThan(-1);
+    expect(src.slice(foldInFn, foldInFn + 600).indexOf('this.placeEchoBeforeAck(ack, bubble)')).toBeGreaterThan(-1);
     const echoFn = src.indexOf('const echoUserBubble = (): void =>');
-    expect(src.slice(echoFn, echoFn + 400).indexOf('this.placeAckAfterEcho(ack, bubble)')).toBeGreaterThan(-1);
+    expect(src.slice(echoFn, echoFn + 400).indexOf('this.placeEchoBeforeAck(ack, bubble)')).toBeGreaterThan(-1);
     const settle = src.indexOf('private settleFoldIns(');
     expect(settle).toBeGreaterThan(-1);
     const settleBody = src.slice(settle, settle + 500);
