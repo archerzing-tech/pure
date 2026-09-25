@@ -1753,8 +1753,15 @@ body {
 .tool-row.failure {
   border-color: transparent;
 }
-.tool-row.stopped {
+.tool-row.stopped,
+.tool-row.paused {
   opacity: 0.65;
+}
+/* 分支中断的静音标识（2026-09-25）：⏸/⏹ 状态点随灰态走，不占绿/红通道
+   ——用户的暂停/取消决定既不是庆祝也不是警报。 */
+.tool-row.paused .tool-row-status,
+.tool-row.stopped .tool-row-status {
+  color: var(--text-tertiary);
 }
 
 .tool-row-summary {
@@ -9533,7 +9540,8 @@ button svg,
 .tool-row.tool-row.pending,
 .tool-row.tool-row.success,
 .tool-row.tool-row.failure,
-.tool-row.tool-row.stopped {
+.tool-row.tool-row.stopped,
+.tool-row.tool-row.paused {
   border-color: var(--border);
 }
 .tool-row .tool-row-summary,

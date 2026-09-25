@@ -317,8 +317,9 @@ export class CodingAgent {
       // 阶段 12: a pause lands on the onDone channel (it IS terminal for this
       // run) but must not read as "✓ 交付" or "✗ 中断" on the transcript card
       // — bridge it as its own event kind so consumers can render ⏸.
-      onDone: (a) => { publish(a, a.status === 'paused' ? 'paused' : 'done'); ui?.onDone?.(a); },
-      onError: (a) => { publish(a, a.status === 'paused' ? 'paused' : 'error'); ui?.onError?.(a); },
+      // 分支取消（2026-09-25）同理：⏹ 自己的行，绝不冒充交付。
+      onDone: (a) => { publish(a, a.status === 'paused' ? 'paused' : a.status === 'cancelled' ? 'cancelled' : 'done'); ui?.onDone?.(a); },
+      onError: (a) => { publish(a, a.status === 'paused' ? 'paused' : a.status === 'cancelled' ? 'cancelled' : 'error'); ui?.onError?.(a); },
     };
   }
 

@@ -598,9 +598,13 @@ describe('SubagentOrchestrator pause (阶段 12)', () => {
     setTimeout(() => abortPaused(ac), 10);
     const result = await exec;
 
-    expect(result.success).toBe(false);
-    const payload = result.result as { aborted?: boolean; reason?: string };
+    // 2026-09-25 复测：暂停不是失败。success:false 曾把 "Error: undefined"
+    // 喂给父模型、污染失败策略、让汇总写成"分支挂了"——现在是 success:true
+    // + outcome:'paused' 的专用标识。
+    expect(result.success).toBe(true);
+    const payload = result.result as { aborted?: boolean; reason?: string; outcome?: string };
     expect(payload.aborted).toBe(true);
+    expect(payload.outcome).toBe('paused');
     expect(String(payload.reason)).toContain('PAUSED');
     const paused = seen.find((a) => a.status === 'paused');
     expect(paused).toBeDefined();
@@ -947,10 +951,12 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     expect(orch.abortBranch('call_stopme')).toBe(true);
     const [stopmeResult, siblingResult] = await Promise.all([stopme, sibling]);
 
-    // 被叫停支：按中止结算，不是超时也不是失败。
-    expect(stopmeResult.success).toBe(false);
-    const payload = stopmeResult.result as { aborted?: boolean; reason?: string };
+    // 被叫停支：用户的决定不是失败（2026-09-25）——success:true +
+    // outcome:'stopped' 专用标识，不进失败策略，界面渲染静音 ⏹。
+    expect(stopmeResult.success).toBe(true);
+    const payload = stopmeResult.result as { aborted?: boolean; reason?: string; outcome?: string };
     expect(payload.aborted).toBe(true);
+    expect(payload.outcome).toBe('stopped');
     expect(String(payload.reason)).toContain('STOPPED');
     expect(String(payload.reason)).not.toContain('timed out');
     const stopmeCard = seen.find((a) => a.callId === 'call_stopme' && a.status);
@@ -1005,9 +1011,12 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     expect(orch.pauseBranch('call_pauseme')).toBe(true);
     const [pauseResult, siblingResult] = await Promise.all([pausing, sibling]);
 
-    expect(pauseResult.success).toBe(false);
-    const payload = pauseResult.result as { aborted?: boolean; reason?: string };
+    // 暂停不是失败（2026-09-25）：success:true + outcome:'paused'——父模型
+    // 读到的是"用户暂停、可续"，不是 Error；界面据此渲染灰 ⏸ 不染红。
+    expect(pauseResult.success).toBe(true);
+    const payload = pauseResult.result as { aborted?: boolean; reason?: string; outcome?: string };
     expect(payload.aborted).toBe(true);
+    expect(payload.outcome).toBe('paused');
     expect(String(payload.reason)).toContain('PAUSED');
     expect(String(payload.reason)).not.toContain('STOPPED');
     expect(String(payload.reason)).not.toContain('timed out');

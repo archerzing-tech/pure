@@ -677,12 +677,16 @@ export class SubagentOrchestrator implements ToolAdapter {
             if (isBranchAbort(branchController.signal)) {
               const branchAbortNote = 'The user STOPPED this subtask mid-run. Its progress is saved; it will NOT be counted toward the overall task. To continue it later, re-delegate the SAME subtask with identical arguments — it will resume from its checkpoint, not start over.';
               machine.apply('abort', { abortCause: 'user-branch' });
-              emit(progress?.onDone, { success: false, error: branchAbortNote, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+              // 用户叫停不是失败（2026-09-25 复测）：success:false 曾把
+              // "Error: undefined" 喂给父模型、触发失败策略、让汇总把
+              // "已暂停/已取消"写成"分支挂了"。success:true + outcome 标识
+              // 才是这套语义的正名；reason 留给模型，summary 留给界面。
+              emit(progress?.onDone, { success: true, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
               return {
                 id: toolCall.id,
                 toolName: def.name,
-                result: { aborted: true, agentId, reason: branchAbortNote, finalOutput },
-                success: false,
+                result: { aborted: true, agentId, outcome: 'stopped', reason: branchAbortNote, summary: '已按你的要求停止，进度已存档', finalOutput },
+                success: true,
                 duration: done(0),
               };
             }
@@ -695,12 +699,15 @@ export class SubagentOrchestrator implements ToolAdapter {
             if (isPauseAbort(parentSignal) || isPauseAbort(combinedSignal) || isPauseAbort(branchController.signal)) {
               const pausedNote = 'The user PAUSED this subtask mid-run. Its progress is saved; to continue, re-delegate the SAME subtask with identical arguments — it will resume from its checkpoint, not start over.';
               machine.apply('pauseSettled');
-              emit(progress?.onDone, { success: false, error: pausedNote, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+              // 同上：暂停不是失败，也不进失败策略。outcome:'paused' 是
+              // 界面的静音标识（灰卡 ⏸，不是红 ✗），reason 仍告诉父模型
+              // "同参重派即断点续跑"。
+              emit(progress?.onDone, { success: true, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
               return {
                 id: toolCall.id,
                 toolName: def.name,
-                result: { aborted: true, agentId, reason: pausedNote, finalOutput },
-                success: false,
+                result: { aborted: true, agentId, outcome: 'paused', reason: pausedNote, summary: '已暂停，进度已存档', finalOutput },
+                success: true,
                 duration: done(0),
               };
             }

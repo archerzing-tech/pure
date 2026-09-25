@@ -192,6 +192,11 @@ export interface ToolExecMeta {
   success: boolean;
   duration: number;
   /**
+   * 分支中断结算（第 2 期）：'paused' = 这支子 agent 被用户暂停，'stopped' =
+   * 被点名取消。重放时委派卡据此渲染灰态 ⏸/⏹，而不是成功 ✓ 或失败红 ✗。
+   */
+  outcome?: 'paused' | 'stopped';
+  /**
    * The JSON parameters the LLM passed to the tool (e.g. `{ query: "..." }`
    * for `web_search`). Optional because older saved sessions don't carry it;
    * the UI demotes to the compact one-line summary when it's undefined.

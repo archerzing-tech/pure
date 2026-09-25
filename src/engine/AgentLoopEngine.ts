@@ -53,6 +53,14 @@ function callKey(name: string, argsJson: string): string {
   try { parsed = JSON.parse(argsJson || '{}'); } catch { parsed = argsJson; }
   return `${name}::${typeof parsed === 'string' ? parsed : stableStringify(parsed)}`;
 }
+/** 分支中断标识（第 2 期）：委派结果带 outcome 时，这次"成功"是用户点名
+ *  暂停/停掉一支——不是可复用的成功（去重必须放行，重派即断点续跑）。 */
+function branchOutcomeOf(tr: { result: { result?: unknown } }): 'paused' | 'stopped' | undefined {
+  const r = tr.result?.result;
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return undefined;
+  const outcome = (r as { outcome?: unknown }).outcome;
+  return outcome === 'paused' || outcome === 'stopped' ? outcome : undefined;
+}
 const DEDUPE_NOTE = '[dedupe] This call is identical to the immediately preceding call (same tool, same arguments) — its result was REUSED instead of executing again. If you genuinely need fresh data, change the call or say why in your reply.';
 // Tool results (read_file of a big file, a giant build/test dump, …) are folded
 // into the LLM context verbatim. A huge result both inflates the prompt (slow
@@ -206,7 +214,7 @@ export class AgentLoopEngine {
     // rule holds within a round: only a call directly continuing a run of
     // identical calls dedupes; an identical call AFTER a different call runs
     // for real (e.g. re-reading a file the round itself just edited).
-    let lastExecuted: { key: string; text: string; ok: boolean } | null = null;
+    let lastExecuted: { key: string; text: string; ok: boolean; outcome?: 'paused' | 'stopped' } | null = null;
     // Survives THINK re-entries within one turn: caps how many times a stream
     // idle-timeout may be auto-resumed (see the THINK catch) so a pathological
     // stall can't loop forever.
@@ -529,7 +537,9 @@ export class AgentLoopEngine {
         let runAnchorId: string | null = null;
         for (const call of toolCalls) {
           const key = callKey(call.function.name, call.function.arguments);
-          if (lastExecuted && lastExecuted.ok && lastExecuted.key === key) {
+          // outcome 锚点（暂停/停掉的分支）永不跨轮复用：那记"成功"只是
+          // 中断结算，重派同一支必须真执行——引擎从存档断点续跑。
+          if (lastExecuted && lastExecuted.ok && !lastExecuted.outcome && lastExecuted.key === key) {
             dedupedCalls.push({ call, key });
             runKey = key;
             runAnchorId = null;
@@ -568,7 +578,13 @@ export class AgentLoopEngine {
         if (sameRoundDups.length > 0) {
           const passOne = new Map(executedResults.map((tr) => [tr.toolCallId, tr]));
           const retried = sameRoundDups
-            .filter((dup) => !passOne.get(dup.anchorId)?.result.success)
+            .filter((dup) => {
+              const anchor = passOne.get(dup.anchorId);
+              // 失败锚点的重试真执行；分支中断锚点（暂停/停掉）的重派同样
+              // 真执行——复用它等于把"已暂停"当结论。
+              if (!anchor?.result.success) return true;
+              return branchOutcomeOf(anchor) !== undefined;
+            })
             .map((dup) => dup.call);
           if (retried.length > 0) {
             for await (const step of this.runBatch(retried, ctx, budget)) {
@@ -594,7 +610,8 @@ export class AgentLoopEngine {
         }
         for (const dup of sameRoundDups) {
           const anchor = executedByCallId.get(dup.anchorId);
-          if (anchor?.result.success) {
+          // 分支中断锚点不进复用表（上面第二遍已为它真执行过一次）。
+          if (anchor?.result.success && branchOutcomeOf(anchor) === undefined) {
             reusedTextByCallId.set(dup.call.id, `${textOfResult(anchor)}\n\n${DEDUPE_NOTE}`);
           }
         }
@@ -630,6 +647,9 @@ export class AgentLoopEngine {
             key: callKey(lastExec.toolName, callFor?.function.arguments ?? ''),
             text: textOfResult(lastExec).slice(0, 8_000),
             ok: lastExec.result.success,
+            // 分支中断（暂停/停掉一支）的成功不可复用：同参重派是断点续跑
+            // 的入口，缓存回放会让"继续"永远停在上一轮的暂停快照上。
+            outcome: branchOutcomeOf(lastExec),
           };
         }
 

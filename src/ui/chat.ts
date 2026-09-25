@@ -5136,6 +5136,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             const toolName = event.payload.toolName;
             const duration = event.payload.duration;
             const rawResult = event.payload.result.result;
+            // 分支中断结算（第 2 期）：暂停/停掉一支子 agent 是用户自己的
+            // 决定，不是失败——委派卡走静音态（灰 + ⏸/⏹），计划卡读"已暂
+            // 停"，不进任何红色通道。
+            const branchOutcome = rawResult && typeof rawResult === 'object' && !Array.isArray(rawResult)
+              ? ((rawResult as { outcome?: unknown }).outcome === 'paused' ? 'paused' as const
+                : (rawResult as { outcome?: unknown }).outcome === 'stopped' ? 'stopped' as const
+                : undefined)
+              : undefined;
             // generate_image returns a structured summary (the LLM must never
             // see megabytes of base64): pull the human text out of the object.
             // Subagent tools (code_reviewer / bash_executor / …) return a
@@ -5217,6 +5225,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             toolResults.set(event.payload.toolCallId, {
               toolName,
               success: event.payload.result.success,
+              outcome: branchOutcome,
               duration,
               args: (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args,
               resultKind,
@@ -5232,7 +5241,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // successful verification commands advance the visible checklist.
             if (planCard) {
                 const cmd = String(resultArgs?.command ?? '');
-              if (event.payload.result.success && event.payload.toolName === 'execute_command' && isVerificationCommand(cmd)) {
+              if (branchOutcome) {
+                planCard.setActivity(branchOutcome === 'paused'
+                  ? `${toolName} 已暂停，进度已存档`
+                  : `${toolName} 已按你的要求停止，进度已存档`);
+              } else if (event.payload.result.success && event.payload.toolName === 'execute_command' && isVerificationCommand(cmd)) {
                 planCard.setActivity(`验证命令已通过：${cmd}，正在继续交付验证管线…`);
               } else if (event.payload.result.success) {
                 planCard.setActivity(`已完成 ${event.payload.toolName}，正在继续处理当前计划…`);
@@ -5300,6 +5313,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (pending.toolCallId && subagentNames.has(pending.toolName)) pending.row.el.dataset.agentCallId = pending.toolCallId;
               finalizeToolRow(pending.row, {
                 success: event.payload.result.success,
+                outcome: branchOutcome,
                 duration,
                 resultKind,
                 resultItems,
@@ -5316,7 +5330,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               pendingRows.delete(event.payload.toolCallId);
               pendingByName.delete(toolName);
             } else {
-              this.addToolStatusBubble(toolName, status, duration);
+              this.addToolStatusBubble(toolName, branchOutcome ? (branchOutcome === 'paused' ? '⏸' : '⏹') : status, duration);
             }
             this.scrollUi(chatEl);
             // The model now re-reads the tool result and plans the next step —

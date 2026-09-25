@@ -54,6 +54,12 @@ export interface ToolResult {
   error?: string;
   success: boolean;
   duration: number;
+  /** 分支中断标识（第 2 期）：用户点名暂停/停掉一支子 agent 时，这次委派
+   *  不算失败（success 必须为 true——false 会把 "Error: undefined" 喂给父
+   *  模型、污染失败策略、并让最终汇总把"已暂停"写成"失败了"），也不能当
+   *  可复用的成功去重（同参重派是断点续跑的入口，吞掉就永远续不上）。
+   *  'paused' = 暂停可续；'stopped' = 用户取消，不计入任务。 */
+  outcome?: 'paused' | 'stopped';
 }
 
 export interface ToolDefinition {
@@ -527,7 +533,7 @@ export interface SubagentActivityEvent {
   agentId?: string;
   agentName: string;
   agentRole?: string;
-  kind: 'start' | 'state' | 'tool' | 'done' | 'error' | 'paused' | 'steered' | 'waiting';
+  kind: 'start' | 'state' | 'tool' | 'done' | 'error' | 'paused' | 'cancelled' | 'steered' | 'waiting';
   state?: string;
   /** The tool the subagent invoked (kind 'tool'). */
   toolName?: string;

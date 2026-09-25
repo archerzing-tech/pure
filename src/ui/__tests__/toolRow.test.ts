@@ -678,6 +678,35 @@ describe('tool row renders generated images as <img> cards', () => {
     }
   });
 
+  it('a paused/stopped branch settlement settles calm (grey ⏸/⏹), never red failure', () => {
+    const restore = installFakeDocument();
+    try {
+      // 2026-09-25 复测：用户暂停/停掉一支子 agent 是用户自己的决定，
+      // 委派卡不许染红打 ✗——灰态 ⏸/⏹ 才是这套语义的正身。
+      for (const [outcome, mark, withDuration] of [
+        ['paused', '⏸', true],
+        ['stopped', '⏹', false],
+      ] as const) {
+        const row = createToolRow('code_reviewer', { prompt: 'review it' });
+        finalizeToolRow(row, {
+          success: true,
+          outcome,
+          duration: 4200,
+          resultText: '已暂停，进度已存档',
+        });
+        expect(row.details.classList.contains(outcome)).toBe(true);
+        expect(row.details.classList.contains('failure')).toBe(false);
+        expect(row.details.classList.contains('success')).toBe(false);
+        expect(row.details.classList.contains('pending')).toBe(false);
+        expect(row.statusEl.textContent).toBe(withDuration ? '⏸ 4.2s' : '⏹');
+        // 不是失败：tooltip 保持建行时的角色提示，没有失败原因。
+        expect(String(row.details.title ?? '')).not.toContain('已暂停');
+      }
+    } finally {
+      restore();
+    }
+  });
+
   it('a failed tool row gets the failure class and a hover tooltip with the error', () => {
     const restore = installFakeDocument();
     try {

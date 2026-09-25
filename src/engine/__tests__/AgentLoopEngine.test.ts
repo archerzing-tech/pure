@@ -1292,6 +1292,52 @@ describe('AgentLoopEngine', () => {
     expect(String(results[1]!.payload.result.result)).not.toContain('[dedupe]');
   });
 
+  it('never reuses a paused/stopped branch settlement — the identical re-delegation runs for real', async () => {
+    // 第 2 期分支续跑（2026-09-25）：被暂停/停掉的一支按 success:true +
+    // outcome 结算。这记"成功"绝不能进去重缓存——"把 X 那支接着跑完"
+    // 触发的同参重派必须真执行（引擎从存档断点续跑），而不是回放上一轮
+    // 的"已暂停"快照。
+    const engine = new AgentLoopEngine();
+    const executions: string[] = [];
+    const adapter: ToolAdapter = {
+      execute: async (tc: ToolCall): Promise<ToolResult> => {
+        executions.push(tc.function.arguments);
+        return {
+          id: tc.id,
+          toolName: tc.function.name,
+          result: { aborted: true, outcome: 'paused', reason: 'The user PAUSED this subtask mid-run.', summary: '已暂停，进度已存档' },
+          success: true,
+          duration: 5,
+        };
+      },
+      getMetadata: () => undefined,
+      getTools: () => [READ_FILE_TOOL],
+    };
+    const ctx = baseCtx({
+      llm: parallelRoundsLLM([[
+        { toolName: 'read_file', toolArgs: '{"path":"src/a.ts"}' },
+      ], [
+        { toolName: 'read_file', toolArgs: '{"path":"src/a.ts"}' },
+      ]], 'done'),
+      tools: adapter,
+      toolsDefs: [READ_FILE_TOOL],
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-dedupe-paused-branch', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // Round 2's identical call executed for real (resume path), no reuse.
+    expect(executions).toHaveLength(2);
+    const results = events.filter(e => e.type === 'ToolResult');
+    expect(results).toHaveLength(2);
+    expect(results[0]!.payload.result.success).toBe(true);
+    expect((results[0]!.payload.result.result as { outcome?: string }).outcome).toBe('paused');
+    expect(String(results[1]!.payload.result.result)).not.toContain('[dedupe]');
+    expect((results[1]!.payload.result.result as { outcome?: string }).outcome).toBe('paused');
+  });
+
   it('still executes an identical call that follows a different call', async () => {
     // [read(a), read(b), read(a)]: the second read(a) is NOT back-to-back —
     // the round itself may have changed the world in between, so deduping it

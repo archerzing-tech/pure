@@ -205,6 +205,10 @@ function clipSummary(text: string): string {
 export interface ToolRowResultMeta {
   success: boolean;
   duration: number;
+  /** 分支中断结算（第 2 期）：'paused' = 用户暂停了这支子 agent（灰卡 ⏸），
+   *  'stopped' = 用户点名取消（灰卡 ⏹）。二者都不是失败——不染红、不打 ✗，
+   *  也不读失败 tooltip。会话重放（ToolExecMeta）与实时结算共用本字段。 */
+  outcome?: 'paused' | 'stopped';
   resultKind?: 'search' | 'fetch' | 'image';
   resultItems?: Array<{ title: string; snippet: string; url: string }>;
   /** Generated images (data URLs) rendered as <img> cards, ChatGPT/Gemini style. */
@@ -841,12 +845,19 @@ export function updateToolRowArgs(
 export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): void {
   stopElapsedTicker(row);
   row.details.classList.remove('pending');
-  row.details.classList.add(meta.success ? 'success' : 'failure');
-  row.statusEl.textContent = `${meta.success ? '✓' : '✗'} ${formatDuration(meta.duration)}`;
-  // Failed rows carry the reason as a hover tooltip so the error is readable
-  // even when the row is collapsed (the Output panel stays expandable).
-  if (!meta.success && meta.resultText) {
-    row.details.title = meta.resultText.slice(0, 300);
+  // 分支中断（暂停/停掉一支子 agent）走静音结算：灰态 + ⏸/⏹，不染红、
+  // 不打 ✗——用户自己的决定不是错误（2026-09-25 复测）。
+  if (meta.outcome) {
+    row.details.classList.add(meta.outcome);
+    row.statusEl.textContent = meta.outcome === 'paused' ? `⏸ ${formatDuration(meta.duration)}` : '⏹';
+  } else {
+    row.details.classList.add(meta.success ? 'success' : 'failure');
+    row.statusEl.textContent = `${meta.success ? '✓' : '✗'} ${formatDuration(meta.duration)}`;
+    // Failed rows carry the reason as a hover tooltip so the error is readable
+    // even when the row is collapsed (the Output panel stays expandable).
+    if (!meta.success && meta.resultText) {
+      row.details.title = meta.resultText.slice(0, 300);
+    }
   }
 
   // Result body (clear first so double-invocation never duplicates output)
@@ -970,6 +981,10 @@ export function formatSubagentTraceLine(e: SubagentActivityEvent): string | null
       // 阶段 12: paused is not a failure — the archive is on disk and a
       // re-delegation resumes from it. Keep the line calm and actionable.
       return `⏸ ${who} 已暂停（进度已存档，点「继续」接着跑）`;
+    case 'cancelled':
+      // 分支取消（2026-09-25）：同 paused 一样静音——用户的决定不是失败，
+      // 绝不能渲染成 ✗ 或冒充 ✓ 交付。
+      return `⏹ ${who} 已按你的要求停止（进度已存档，重派同一任务可续）`;
     case 'steered':
       // 北极星第二步: delivery receipt for a mid-run steer — the user's own
       // bubble is already on screen; this line closes the "did it land?" loop.
