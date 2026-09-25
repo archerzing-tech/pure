@@ -96,12 +96,20 @@
 
 **目标**：判例 13–14 全绿。把「取消一支」从产出不算数（算力照烧到跑完）升级为真停 + 断点可续，收口 3f7a1ba 残差。
 
-- **定向 abort 通路**：注册表加 AbortController——宿主分类出「停掉某支」（CANCEL_PART_RE/LLM cancelsPart 已有，补祈使式「停掉 X 那支」快路径）→ 按名字/callId 查注册表 → 只 abort 该委派 → 子代理引擎 THINK 流秒停（既有 abort 链）、其自身在飞工具宽限+强杀（复用 1c 语义，经子代理自己的协调器递归）
-- **原子顺序锁死**：先 persist checkpoint、再向父级 settle 该工具调用（合成结果「该分支已被用户中止，断点已存」）；并行批其余成员零感知照跑；排队未起飞的同名支一并清除
-- **分支级继续**：用户「把 jev 那支接着跑完」→ 同参重派 → 稳定 sessionId 命中断点 → engine.continue；三种「继续」（整树/单支/计划续跑）统一入口命名与回执口径——用户永远知道点的是哪个继续
+**骨架规格（2026-09-25 用户设想 + 评审定稿）：子代理全生命周期状态机。** 用户原案「每个子 agent 具备启动/运行中/暂停/暂停中/resume/完成」评审后定型：四个主状态其实是四个**动作**（启动/暂停/继续/收尾），中间态才是**状态**；补第五个动作「中止」（止损是本期灵魂，「停掉这支」和「暂停这支」必须落不同终态）。
+
+- **状态集**（`src/coding-agent/branchLifecycle.ts`）：委派中 delegating / 运行中 running / 暂停收尾 pausing（宽限期内，永不驻留）/ 暂停中 paused（断点已存）/ 终态三兄弟：已完成 completed（产出入账）、已中止 aborted（用户叫停：产出不入账、断点照存、可另起续）、已失败 failed（挂 cause：error/timeout/stalled，父按原因选下一步）。中间态各有逃逸口（收尾 8s 宽限 1c 现成；委派中 spawn 超时），**永不驻留中间态**
+- **转移纪律**：结算类动作（spawned/pauseSettled/complete/fail）是运行结果的地面真相，从任何非终态可接受（漏看信号也对齐结果，不跟丢）；控制类动作（pause/abort）才查合法性——pause 幂等、终态拒绝、abort 压过一切
+- **异常/重试两层**：子代理内部自愈重试（failurePolicy 升级线以内）**不迁移状态**——发 `branch_retrying(attempt, cause)` 事件，卡片亮灯不惊动父；重试耗尽落已失败，失败后的重跑是**父的决策**（新一次启动 + 血缘号），不是状态机内的边。resume 找不到断点不许悄悄从头跑——明说「没找到存档，重新跑了」
+- **账本归属**：状态机住在编排器（它有生杀权），每支委派一条账（abort 把手 + 账本，`branches` 注册表）；宿主 agentActivities / GUI 卡片 / 父 OBSERVE 全是**投影**（观测单向，防缠三原则）；describe() 映射回既有活动词汇，卡片第一阶段零改动吃到真状态
+- **落地进度**：✅ 状态机本体 + 注册表 + abortBranch(callId) 定向叫停 + 分支结算分支（branchController aborted 当且仅当点名叫停，老 webview 读不到 reason 也成立）+ persist-before-settle 顺序（存档先落、再结算）——委派中首事件→运行中、四类结算点全走 describe() 单一写手
+
+- **定向 abort 通路（宿主半边）**：宿主分类出「停掉某支」（CANCEL_PART_RE/LLM cancelsPart 已有，补祈使式「停掉 X 那支」快路径）→ 按名字/callId 查 `branchView()`/agentActivities → 调 `abortBranch` → 子代理引擎 THINK 流秒停（既有 abort 链）；回执说清哪支被停、其余照跑
+- **原子顺序锁死**：✅（编排器半边已锁：persist → settle）；宿主半边：被中止支的部分产出不入账从「提示词教学」升格为「机制强制」；排队未起飞的同名支一并清除
+- **分支级继续**：用户「把 jev 那支接着跑完」→ 同参重派 → 稳定 sessionId 命中断点 → engine.continue；三种「继续」（整树/单支/计划续跑）统一入口命名与回执口径——用户永远知道点的是哪个继续；血缘号（第 2 次/续跑徽标）随事件走
 - **relay 失效定义**：被中止支是 relay 上游时，下游 `relay.from` 消费者立即以明确错误落定（不挂死）；分派前拓扑检查提前报
-- **卡片真实状态**：子代理卡片 paused/cancelled-by-user 真状态（第 1 期修好 isPauseAbort 后复用），回放从事件流重建，historical 兜底保留
-- **账目与观测**：branch_aborted / branch_resumed 成一等事件（活动面板 + turnTimings）；被中止分支的部分产出不入账从「提示词教学」升格为「机制强制」
+- **卡片真实状态**：子代理卡片 paused/cancelled-by-user 真状态（状态机 describe 已供数），回放从事件流重建，historical 兜底保留
+- **账目与观测**：branch_aborted / branch_resumed / branch_retrying 成一等事件（活动面板 + turnTimings）
 - **不误伤**：单支中止是回合内分支级事件，回合与 autoContinue 照跑，父在 OBSERVE 知道这支提前结束并自己调整汇总口径
 
 **验收**：真机判例 13–14 + 单测（定向 abort 只杀目标支、persist-先于-settle 顺序、relay 下游 fail-fast、排队支清除）；回放器加 2 条分支止损判例。

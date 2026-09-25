@@ -14,7 +14,7 @@ import { Tags, ToolRegistry } from '../ToolRegistry';
 import { MULTI_AGENT_PROTOCOL } from '../../shared/promptLayers';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
 import { abortPaused } from '../../shared/pauseSignal';
-import type { BudgetConfig, Checkpoint, IStateStore, LLMAdapter, LLMChunk, Message, ToolAdapter, ToolCall, ToolResult } from '../../shared/types';
+import type { BudgetConfig, Checkpoint, IStateStore, LLMAdapter, LLMChunk, Message, ToolAdapter, ToolCall, ToolDefinition, ToolResult } from '../../shared/types';
 import type { SubagentDefinition, SubagentResult } from '../types';
 
 const BUDGET: BudgetConfig = {
@@ -877,5 +877,112 @@ describe('SubagentOrchestrator persona overlays (北极星第 6 步 13.3)', () =
     expect(withEmpty.system).toBe(withoutConfig.system);
     expect(withEmpty.system.startsWith('You are test_researcher. Task: research X')).toBe(true);
     expect(withEmpty.system).toContain(ZH_NOTE);
+  });
+});
+
+describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => {
+  function memoryStore() {
+    const sessions = new Map<string, { checkpoints: Checkpoint[] }>();
+    const store: IStateStore = {
+      loadSession: () => null,
+      saveCheckpoint: async (id, cp) => {
+        const cur = sessions.get(id) ?? { checkpoints: [] };
+        cur.checkpoints.push(cp);
+        sessions.set(id, cur);
+      },
+      deleteSession: async (id) => { sessions.delete(id); },
+    };
+    return { sessions, store };
+  }
+
+  function branchToolCall(id: string, args: Record<string, unknown>): ToolCall {
+    return { id, index: 0, function: { name: 'test_researcher', arguments: JSON.stringify(args) } };
+  }
+
+  function branchLlm(): LLMAdapter {
+    // STOPME 任务挂到 signal 上（等被叫停）；其余任务 30ms 后正常交付。
+    return {
+      stream: async function* (messages: Message[], _tools: ToolDefinition[], signal?: AbortSignal): AsyncGenerator<LLMChunk, void, void> {
+        const last = messages[messages.length - 1];
+        const text = typeof last?.content === 'string' ? last.content : '';
+        if (text.includes('STOPME')) {
+          while (!signal?.aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          throw new Error('aborted');
+        }
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        yield { type: 'content', content: 'branch findings' };
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+  }
+
+  function makeBranchOrchestrator(store?: IStateStore, seen?: SubagentActivity[]): SubagentOrchestrator {
+    const orch = new SubagentOrchestrator({
+      llm: branchLlm(),
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      stateStore: store,
+      progress: seen ? { onDone: (a) => seen.push(a), onError: (a) => seen.push(a) } : undefined,
+    });
+    orch.register(subagentDef('test_researcher'));
+    return orch;
+  }
+
+  it('abortBranch 只杀被点名的那支：它按已中止结算（存档照存），同批兄弟照常交付', async () => {
+    const { sessions, store } = memoryStore();
+    const seen: SubagentActivity[] = [];
+    const orch = makeBranchOrchestrator(store, seen);
+
+    const stopme = orch.execute(branchToolCall('call_stopme', { prompt: 'STOPME long research' }));
+    const sibling = orch.execute(branchToolCall('call_sibling', { prompt: 'quick research' }));
+
+    // 在飞时注册表看得到它；先试一个不存在的 callId。
+    expect(orch.abortBranch('call_nope')).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(orch.branchView().some((b) => b.callId === 'call_stopme' && b.state === 'running')).toBe(true);
+
+    expect(orch.abortBranch('call_stopme')).toBe(true);
+    const [stopmeResult, siblingResult] = await Promise.all([stopme, sibling]);
+
+    // 被叫停支：按中止结算，不是超时也不是失败。
+    expect(stopmeResult.success).toBe(false);
+    const payload = stopmeResult.result as { aborted?: boolean; reason?: string };
+    expect(payload.aborted).toBe(true);
+    expect(String(payload.reason)).toContain('STOPPED');
+    expect(String(payload.reason)).not.toContain('timed out');
+    const stopmeCard = seen.find((a) => a.callId === 'call_stopme' && a.status);
+    expect(stopmeCard?.status).toBe('cancelled');
+    // 存档在结算前已落盘（persist-before-settle）——断点可另起续。
+    const subSessionId = Array.from(sessions.keys()).find((id) => id.startsWith('sub_'));
+    expect(subSessionId).toBeDefined();
+    expect(sessions.get(subSessionId!)!.checkpoints.some((c) => c.label === 'subagent_interrupted')).toBe(true);
+
+    // 兄弟支零感知：照常交付。
+    expect(siblingResult.success).toBe(true);
+    // 结算出账即销户：再叫停同一支 = false。
+    expect(orch.abortBranch('call_stopme')).toBe(false);
+    expect(orch.branchView()).toHaveLength(0);
+  });
+
+  it('整树取消仍按 cancelled 结算（原有语义不回归），pause 仍按 paused', async () => {
+    const ac = new AbortController();
+    const seen: SubagentActivity[] = [];
+    const orch = new SubagentOrchestrator({
+      llm: branchLlm(),
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      progress: { onDone: (a) => seen.push(a), onError: (a) => seen.push(a) },
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const exec = orch.execute(branchToolCall('call_tree_cancel', { prompt: 'STOPME long research' }), ac.signal);
+    setTimeout(() => ac.abort(), 10);
+    const result = await exec;
+    expect(seen.find((a) => a.callId === 'call_tree_cancel' && a.status === 'cancelled')).toBeDefined();
+    expect((result.result as { reason?: string }).reason).toBe('cancelled');
   });
 });

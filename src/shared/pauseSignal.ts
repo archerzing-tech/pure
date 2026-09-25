@@ -17,6 +17,17 @@
  * pause, not a user cancel. Any other abort stays a hard stop. */
 export const PAUSE_ABORT_REASON = 'pure:pause';
 
+/** 对话智能升格第 2 期（分支中断）：单支叫停的 abort reason。只打在被点名
+ * 分支自己的 controller 上（编排器分支注册表的把手），父级信号不动——同批
+ * 其余支零感知。子代理的引擎照走 Interrupted+checkpoint 链（存档不分原因），
+ * 编排器结算时按这个 reason 记「已中止」：产出不入账、断点照存、可另起续。 */
+export const BRANCH_ABORT_REASON = 'pure:branch-abort';
+
+export function isBranchAbort(signal: AbortSignal | null | undefined): boolean {
+  if (!signal?.aborted) return false;
+  return (signal as { reason?: unknown }).reason === BRANCH_ABORT_REASON;
+}
+
 /** 1c — how long an in-flight tool may keep running after a pause before the
  * abort is forwarded to it. Long enough for a quick command to land, short
  * enough that "pause" feels like pause. Override per engine context with

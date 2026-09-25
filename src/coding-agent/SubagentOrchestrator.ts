@@ -5,7 +5,8 @@
 
 import { AgentLoopEngine } from '../engine/AgentLoopEngine';
 import { parseToolArguments } from '../shared/parseRepair';
-import { isPauseAbort } from '../shared/pauseSignal';
+import { BRANCH_ABORT_REASON, isPauseAbort } from '../shared/pauseSignal';
+import { BranchLifecycle, type BranchState } from './branchLifecycle';
 import type {
   BudgetConfig,
   EngineContext,
@@ -221,6 +222,11 @@ export class SubagentOrchestrator implements ToolAdapter {
   private engine = new AgentLoopEngine();
   private defs = new Map<string, SubagentDefinition>();
   private config: SubagentOrchestratorConfig;
+  /** 对话智能升格第 2 期（分支中断）：在飞分支注册表——每支委派的 abort
+   * 把手（controller）+ 生命周期账本（machine）。abortBranch(callId) 按它
+   * 定向叫停；结算出账后即删（暂停支的续跑 = 同参重派新调用，新账本）。
+   * 这是「能 abort 的把手」账本，别与宿主 agentActivities（观测投影）混同。 */
+  private readonly branches = new Map<string, { controller: AbortController; machine: BranchLifecycle }>();
 
   constructor(config: SubagentOrchestratorConfig) {
     this.config = config;
@@ -325,6 +331,13 @@ export class SubagentOrchestrator implements ToolAdapter {
       };
     }
 
+    // 生命周期账本 + abort 把手（第 2 期分支中断）：每个受理的委派一支账。
+    // machine 是 status/lifecycle 的唯一写手（结算处统一 describe()），branch
+    // controller 并进 combinedSignal——abortBranch 只点这一支的火。
+    const machine = new BranchLifecycle(toolCall.id, def.name);
+    const branchController = new AbortController();
+    this.branches.set(toolCall.id, { controller: branchController, machine });
+
     // Per-call tool trace: keyed by the subagent's internal toolCallId so
     // parallel tool calls inside one round cannot clobber each other. Derived
     // from the subagent engine's ToolStarted/ToolResult events; emitted with
@@ -398,7 +411,7 @@ export class SubagentOrchestrator implements ToolAdapter {
     // Parse args — slightly-broken LLM JSON is repaired first, so a single
     // trailing comma or unquoted key no longer drops the whole prompt payload.
     const args = parseToolArguments(toolCall.function.arguments);
-    emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, status: 'running', lifecycle: 'started' });
+    emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, ...machine.describe() });
 
     // Liveness watchdog: abort only when NO progress event (token / state /
     // tool) has arrived for a while — a wedged run dies in minutes while
@@ -437,11 +450,12 @@ export class SubagentOrchestrator implements ToolAdapter {
       }, STALL_TICK_MS);
     };
 
-    // Build combined signal: parent abort OR total wall clock OR liveness.
+    // Build combined signal: parent abort OR branch-targeted abort OR total
+    // wall clock OR liveness.
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const combinedSignal = parentSignal
-      ? AbortSignal.any([parentSignal, timeoutSignal, watchdog.signal])
-      : AbortSignal.any([timeoutSignal, watchdog.signal]);
+      ? AbortSignal.any([parentSignal, branchController.signal, timeoutSignal, watchdog.signal])
+      : AbortSignal.any([branchController.signal, timeoutSignal, watchdog.signal]);
 
     // Engine context is per-segment (fresh budget per slice); the static
     // parts are hoisted. The subagent also verifies (default rule-based
@@ -536,6 +550,7 @@ export class SubagentOrchestrator implements ToolAdapter {
       const SEGMENT_RESUME_HINT = '[system] Your previous work slice ended (its time budget ran out). Nothing is broken — continue EXACTLY where the transcript above leaves off: do not restart, do not redo completed steps; finish the remaining work and deliver the final result.';
       let segment = 0;
       let carryMessages: Message[] | undefined;
+      let firstEventSeen = false;
       kickWatchdog();
 
       segmentLoop: while (true) {
@@ -546,7 +561,7 @@ export class SubagentOrchestrator implements ToolAdapter {
         if (segment > 1) {
           // Re-mark the roster card active so a slice boundary never reads as
           // the agent dying and respawning.
-          emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, status: 'running', lifecycle: 'started' });
+          emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, ...machine.describe() });
         }
         const stream = segment === 1
           ? (resumedMessages
@@ -564,6 +579,11 @@ export class SubagentOrchestrator implements ToolAdapter {
             );
 
         for await (const event of stream) {
+        if (!firstEventSeen) {
+          // 地面真相：子引擎吐出第一个事件 = 委派中 → 运行中。
+          firstEventSeen = true;
+          machine.apply('spawned');
+        }
         if (event.type === 'TokenDelta') {
           tokensUsed++;
           kickWatchdog();
@@ -621,7 +641,8 @@ export class SubagentOrchestrator implements ToolAdapter {
             }
           }
           await persist('subagent_completed', event.payload.messages, event.payload.turnCount ?? 0);
-          emit(progress?.onDone, { success: true, output: finalOutput, status: 'done', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+          machine.apply('complete');
+          emit(progress?.onDone, { success: true, output: finalOutput, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
           return {
             id: toolCall.id,
             toolName: def.name,
@@ -641,6 +662,22 @@ export class SubagentOrchestrator implements ToolAdapter {
         } else if (event.type === 'Interrupted') {
           await persist('subagent_interrupted', event.payload.messages, event.payload.turnCount ?? 0);
           if (combinedSignal.aborted) {
+            // 第 2 期分支中断（persist-before-settle：存档已在上一行落盘，才
+            // 结算）。branchController 是 abortBranch 的私有把手——它 aborted
+            // 当且仅当用户点名叫停这一支（老 webview 读不到 reason 也成立，
+            // 所以认布尔不认 reason）。产出不入账、断点照存、可另起续。
+            if (branchController.signal.aborted) {
+              const branchAbortNote = 'The user STOPPED this subtask mid-run. Its progress is saved; it will NOT be counted toward the overall task. To continue it later, re-delegate the SAME subtask with identical arguments — it will resume from its checkpoint, not start over.';
+              machine.apply('abort', { abortCause: 'user-branch' });
+              emit(progress?.onDone, { success: false, error: branchAbortNote, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+              return {
+                id: toolCall.id,
+                toolName: def.name,
+                result: { aborted: true, agentId, reason: branchAbortNote, finalOutput },
+                success: false,
+                duration: done(0),
+              };
+            }
             // 阶段 12 pause: the parent aborted with the pause reason — this is
             // NOT a cancellation. The archive above (subagent_interrupted) is
             // exactly the resume point; the stable sessionId guarantees a
@@ -649,7 +686,8 @@ export class SubagentOrchestrator implements ToolAdapter {
             // instead of reporting a failure.
             if (isPauseAbort(parentSignal) || isPauseAbort(combinedSignal)) {
               const pausedNote = 'The user PAUSED this subtask mid-run. Its progress is saved; to continue, re-delegate the SAME subtask with identical arguments — it will resume from its checkpoint, not start over.';
-              emit(progress?.onDone, { success: false, error: pausedNote, status: 'paused', lifecycle: 'paused', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+              machine.apply('pauseSettled');
+              emit(progress?.onDone, { success: false, error: pausedNote, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
               return {
                 id: toolCall.id,
                 toolName: def.name,
@@ -658,8 +696,8 @@ export class SubagentOrchestrator implements ToolAdapter {
                 duration: done(0),
               };
             }
-            const cancelled = parentSignal?.aborted === true && !timeoutSignal.aborted && !watchdog.signal.aborted;
-            const stalled = watchdog.signal.aborted && !timeoutSignal.aborted;
+            const cancelled = parentSignal?.aborted === true && !timeoutSignal.aborted && !watchdog.signal.aborted && !branchController.signal.aborted;
+            const stalled = watchdog.signal.aborted && !timeoutSignal.aborted && !branchController.signal.aborted;
             // A timeout here is the delegation's TOTAL wall (defaultTimeoutMs)
             // or the liveness watchdog, not a malfunction of any single slice.
             // The error tells the parent how to recover (re-delegate to
@@ -669,7 +707,8 @@ export class SubagentOrchestrator implements ToolAdapter {
               : stalled
                 ? `no progress for ${Math.max(1, Math.round(noProgressMs / 60_000))} minutes — the subagent appeared wedged (no tokens, no tool activity). Re-delegate the SAME subtask to retry from its checkpoint${finalOutput ? '; partial output was produced' : ''}.`
                 : `timed out after ${Math.round(def.defaultTimeoutMs / 1000)}s — the subagent used all ${maxSegments} work segment${maxSegments > 1 ? 's' : ''} and was still mid-task (generative tasks take a while). Re-delegate the SAME subtask to continue from its checkpoint${finalOutput ? '; partial output was produced' : ''}.`;
-            emit(progress?.onDone, { success: false, error: timeoutNote, status: cancelled ? 'cancelled' : 'timed_out', lifecycle: cancelled ? 'cancelled' : 'timed_out', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+            machine.apply(cancelled ? 'abort' : 'fail', cancelled ? { abortCause: 'tree-cancel' } : { failCause: stalled ? 'stalled' : 'timeout' });
+            emit(progress?.onDone, { success: false, error: timeoutNote, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
             return {
               id: toolCall.id,
               toolName: def.name,
@@ -687,7 +726,8 @@ export class SubagentOrchestrator implements ToolAdapter {
             await persist(`subagent_segment_${segment}`, carryMessages, event.payload.turnCount ?? 0);
             continue segmentLoop;
           }
-          emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+          machine.apply('fail', { failCause: 'error' });
+          emit(progress?.onDone, { success: false, error: event.payload.reason, output: finalOutput, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
           // A non-abort Interrupted (failure-policy stop, or the LAST slice's
           // budget exhaustion) is a REAL failure — report it as such to the
           // parent instead of falling through to the success result below
@@ -723,7 +763,8 @@ export class SubagentOrchestrator implements ToolAdapter {
           const errorText = isTimeout
             ? `${event.payload.message} — the subagent was still working when its time budget ran out (generative tasks take a while). Re-delegate the SAME subtask to continue from its checkpoint, or do the work directly in the main session.`
             : event.payload.message;
-          emit(progress?.onError, { error: errorText, status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+          machine.apply('fail', { failCause: 'error' });
+          emit(progress?.onError, { error: errorText, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
           return {
             id: toolCall.id,
             toolName: def.name,
@@ -759,7 +800,8 @@ export class SubagentOrchestrator implements ToolAdapter {
         duration: done(0),
       };
     } catch (err: any) {
-      emit(progress?.onError, { error: err?.message ?? String(err), status: 'failed', lifecycle: 'failed', durationMs: done(0), tokensUsed: 0, toolTrace: [...toolTrace.values()] });
+      machine.apply('fail', { failCause: 'error' });
+      emit(progress?.onError, { error: err?.message ?? String(err), ...machine.describe(), durationMs: done(0), tokensUsed: 0, toolTrace: [...toolTrace.values()] });
       return {
         id: toolCall.id,
         toolName: def.name,
@@ -770,7 +812,33 @@ export class SubagentOrchestrator implements ToolAdapter {
       };
     } finally {
       stopWatchdogTimer();
+      // 结算出账即销户（注册表只挂在飞分支；暂停支的续跑 = 同参重派新调用）。
+      this.branches.delete(toolCall.id);
     }
+  }
+
+  /** 对话智能升格第 2 期（分支中断）：按 callId 叫停一支在飞委派。只点这一
+   * 支的火（branchController 并在 combinedSignal 里，父级信号不动）——子引擎
+   * 照走 Interrupted+checkpoint 链，编排器按「已中止」结算：产出不入账、断
+   * 点照存、可另起续。同批其余支零感知。找不到这一支/它已结算 = false。 */
+  abortBranch(callId: string): boolean {
+    const entry = this.branches.get(callId);
+    if (!entry) return false;
+    const applied = entry.machine.apply('abort', { abortCause: 'user-branch' });
+    if (!applied.ok) return false;
+    entry.controller.abort(BRANCH_ABORT_REASON);
+    return true;
+  }
+
+  /** 在飞分支的只读视图（宿主点名寻址可用的权威面；宿主 agentActivities 是
+   * 它的观测投影，不是反过来）。 */
+  branchView(): Array<{ callId: string; agentName: string; state: BranchState; cause?: string }> {
+    return Array.from(this.branches.entries()).map(([callId, entry]) => ({
+      callId,
+      agentName: entry.machine.agentName,
+      state: entry.machine.state(),
+      cause: entry.machine.cause(),
+    }));
   }
 }
 
