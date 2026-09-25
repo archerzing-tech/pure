@@ -307,6 +307,10 @@ export interface InsertionClassification {
    *  routes the removal away from the task queue on this flag — queuing a
    *  removal would run the opposite of what was asked. */
   cancelsPart?: boolean;
+  /** 祈使式「停掉 X 那支」（第 2 期分支中断快路径）：真停一支在飞委派，
+   * 不等汇合轮。宿主先点名寻址（matchSteerRecipient），点到了就
+   * abortBranch；点不到退回取消折入——宁可折叠不误杀。 */
+  branchStop?: boolean;
 }
 
 const INSERTION_CLASSIFY_PROMPT = `You route a NEW user message that arrives WHILE an agent is already mid-task. Pick what a competent human colleague would do with it — the two hard rules: the user's words must never be dropped, and work must never restart without a real reason.

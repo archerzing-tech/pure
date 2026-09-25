@@ -97,6 +97,16 @@ const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先�
 // keep-constraints ("不用改") out — anything softer falls through to the LLM,
 // including negated additions ("不用再加知乎了"), which stay unqueued.
 const CANCEL_PART_RE = /[^\n。！!？?]{0,24}(?:(?:不需|不用|不)要?再?|先不|别|莫)(?:帮?我?)?(?:查|调研|研究|分析|搜|跑|处理|翻译|改|写|画|生成)[^。，,；\n]{0,12}?(?:了|吧)(?![一-鿿A-Za-z])/i;
+// 祈使式「停掉某一支」（第 2 期分支中断快路径）：「停掉竞品那支」「把调研
+// 那路掐掉」「分析那条路停下来」。与 CANCEL_PART_RE（"X 就不调研了"——收
+// 掉一项出结果）的差别在时态：这是**现在就叫它停**，宿主点名寻址后直接
+// abortBranch，不等汇合轮。锚定词必须是 那支/那路/那一路/那条/分支——没有
+// 点名锚的「停掉」是整树 stop（STOP_RE 管）或该归分类器的话，宁可慢不可错。
+// 动词前置（停掉X那支，含「停下」）、把字句（把X那路掐掉）、锚后追停
+// （X那支别跑了/那个分支停下来）三种语序都收。判定次序上它排在 STOP_RE
+// 和 CANCEL_PART_RE 之前：带点名锚的停比整树停、收活都具体——「停下竞品
+// 那支」不能被整树 abort，「那路别跑了」不能被折进汇合轮。
+const BRANCH_STOP_RE = /(?:停掉|停了|掐掉|砍掉|终止|取消|停下)(?:帮?我?)(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:停掉|停了|掐掉|砍掉|终止|取消|停下)(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:那支|那路|那一路|那条|那个分支)[^。\n！!？?]{0,10}(?:停下来|别跑|停了|不用跑|停掉|掐掉|砍掉|终止|取消)/i;
 
 export class DynamicInsertionCoordinator {
   private readonly classify: NonNullable<DynamicInsertionCoordinatorOptions['classify']>;
@@ -113,6 +123,16 @@ export class DynamicInsertionCoordinator {
     now = Date.now(),
   ): Promise<DynamicInsertionDecision> {
     const text = insertion.text.trim();
+    if (BRANCH_STOP_RE.test(text)) {
+      // 祈使式停一支（第 2 期）：宿主点名寻址后直接 abortBranch 真停。排在
+      // 一切整树/收活规则之前（理由见 BRANCH_STOP_RE 注）。点不到具体支时
+      // 宿主退回取消折入——宁可折叠不误杀（快路径只负责快，不负责赌）。
+      return this.build('steer', 'imperative branch-stop matched the fast path; the named branch is aborted now', {
+        confidence: RULE_CONFIDENCE,
+        timing: { mode: 'now' },
+        signals: { rule: 'BRANCH_STOP_RE', branchStop: true },
+      });
+    }
     if (STOP_RE.test(text)) {
       // Mechanical, high-precision, and latency-free: a stop must not wait on
       // (or be misread by) a classification round-trip.

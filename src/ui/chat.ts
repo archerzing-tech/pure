@@ -1468,6 +1468,10 @@ export class ChatController {
   private preCompactMessageCount = 0;
   private cancelPreCompaction: (() => void) | null = null;
   private mcpClient?: MCPClient;
+  /** 第 2 期分支中断：本会话 agent 的句柄（send 时构建，与 mcpClient 同点
+   * 赋值）。宿主的停支/续支控制流经它进编排器——观测仍单向（状态机在编排
+   * 器，宿主只见投影），这是控制面，不是第二本账。 */
+  private codingAgentRef?: import('../coding-agent/CodingAgent').CodingAgent;
   private deferredInitDone = false;
   // Session identity + MCP config the current mcpClient was built with. MCP
   // stdio transports are session-bound (the Rust registry keys subprocesses by
@@ -2471,13 +2475,26 @@ export class ChatController {
         if (!this.isStreaming()) this.scheduleDeferred();
         return;
       case 'steer': {
-        // 取消型在飞期间仍折入（取消框架 + 取消回执，2026-09-24 取消案例）：
-        // 真正停掉某一支是第 2 期分支中断的事，这里的"收掉一项"靠汇合轮
-        // 核验兜底。非取消的 steer 走 1a 定向投递。
-        if (decision.signals.cancelsPart === true && this.hasDelegationInFlight()) {
+        // 第 2 期分支中断：祈使式「停掉 X 那支」或取消型话里点得出具体支的
+        // ——真停那一支（abortBranch，产出不入账、断点照存），其余照跑。
+        // 点不出具体支时退回原路：取消口径折入 / 普通 steer。
+        const stopish = decision.signals.branchStop === true || decision.signals.cancelsPart === true;
+        if (stopish && this.hasDelegationInFlight()) {
+          const stopped = this.stopNamedBranch(text);
+          if (stopped) {
+            echoUserBubble();
+            this.settleAck(ack, `已停掉「${stopped}」那支——进度留了断点，随时可以让它接着跑，其余照常。`, true, 'info');
+            return;
+          }
+          // 点不出具体支（或它刚好结算了）：退回取消折入——宁可折叠不误杀。
+          // 绝不能往下走 1a 广播：「停掉那支」广播给所有在飞支，每支都可能
+          // 把自己当成"那支"自己停（反向执行最伤，2026-09-24 取消案例同源）。
           this.foldInScopeAddition(text, images, displayText, false, ack, true);
           return;
         }
+        // 非取消、非停支的 steer 走 1a 定向投递：委派在飞时按点名找收件人
+        // ——点到某一支就直达那一支（其余照跑），没点名就广播给所有在飞的
+        // 活。委派不在飞时照旧：父引擎下个 THINK 边界顺路带上。
         // 1a 定向投递：委派在飞时，用户的话按点名找收件人——点到某一支就
         // 直达那一支（其余照跑），没点名就广播给所有在飞的活。委派不在飞
         // 时照旧：父引擎下个 THINK 边界顺路带上。
@@ -2498,9 +2515,16 @@ export class ChatController {
       case 'task': {
         // 取消不是活（2026-09-24 取消案例的宿主兜底）：分类器万一仍把"收掉
         // 一项"判成 task（cancelsPart 为真），绝不能让它进队列或被机械折入
-        // ——排队一个"取消"等于把它当活跑，反向执行。按取消型 steer 处理。
+        // ——排队一个"取消"等于把它当活跑，反向执行。先试真停点名的那支
+        // （第 2 期），停不了再按取消型 steer 折入。
         if (decision.signals.cancelsPart === true) {
           if (this.hasDelegationInFlight()) {
+            const stopped = this.stopNamedBranch(text);
+            if (stopped) {
+              echoUserBubble();
+              this.settleAck(ack, `已停掉「${stopped}」那支——进度留了断点，随时可以让它接着跑，其余照常。`, true, 'info');
+              return;
+            }
             this.foldInScopeAddition(text, images, displayText, false, ack, true);
             return;
           }
@@ -2539,6 +2563,20 @@ export class ChatController {
       .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet }));
     const matched = matchInFlightBranch(text, branches);
     return matched ? { branchCallId: matched.callId, branchName: matched.name } : 'all';
+  }
+
+  /** 第 2 期分支中断（宿主半边）：从用户话里点名一支在飞委派并真停它。
+   * 点名复用 1a 的区分词匹配器（只认只被一支含有的词，打平宁可不停）；
+   * 状态面用编排器 branchView()（权威账）过滤在飞支。点不到/它刚好结算了
+   * = 返回 null，调用方退回取消折入——宁可折叠不误杀。返回被停支的名字。 */
+  private stopNamedBranch(text: string): string | null {
+    const orchestrator = this.codingAgentRef?.subagentOrchestrator;
+    if (!orchestrator) return null;
+    const live = orchestrator.branchView()
+      .filter((b) => b.state === 'delegating' || b.state === 'running' || b.state === 'pausing');
+    const matched = matchInFlightBranch(text, live.map((b) => ({ callId: b.callId, name: b.agentName })));
+    if (!matched || !orchestrator.abortBranch(matched.callId)) return null;
+    return matched.name;
   }
 
   /** 插话重构 — hand a remark to the RUNNING turn via the steering channel:
@@ -3776,6 +3814,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         this.mcpSessionId = sendSessionId;
         this.mcpConfigSnapshot = JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy, 'tools')]);
         this.mcpClient = codingAgent.mcpClient;
+        this.codingAgentRef = codingAgent;
         if (this.mcpClient && !fastConversationalTurn) {
           this.deferredInitDone = true;
           mcpConnectPromise = this.mcpClient.connectAll().catch((err: Error) => {

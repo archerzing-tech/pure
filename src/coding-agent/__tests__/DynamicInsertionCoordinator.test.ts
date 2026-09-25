@@ -61,6 +61,34 @@ describe('DynamicInsertionCoordinator', () => {
     expect(calls).toBe(0); // 与 STOP/加活同款：取消等不起、也赌不起一次分类往返
   });
 
+  it('routes imperative branch-stop to the fast path when a branch anchor is present (第 2 期分支中断)', async () => {
+    // 「停掉竞品那支」是现在就叫那一支停：不是收掉一项等汇合（CANCEL_PART），
+    // 更不是整树 abort（STOP）。判定次序上 BRANCH_STOP_RE 最先——「停下竞品
+    // 那支」不能被 STOP_RE 当整树停，「竞品那支别跑了」不能被 CANCEL_PART_RE
+    // 折进汇合轮；点不出具体支时由宿主退回取消折入（见 conversationSamples）。
+    let calls = 0;
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '', confidence: 1 }; } });
+    for (const text of ['停掉竞品那支', '停下竞品那支', '把调研那路掐掉', '竞品那支别跑了', '分析那个分支停下来']) {
+      const decision = await coordinator.decide(llm(), '正在并行调研竞品与各平台', { text });
+      expect(decision.kind).toBe('steer');
+      expect(decision.shouldAbort).toBe(false);
+      expect(decision.timing.mode).toBe('now');
+      expect(decision.signals.branchStop).toBe(true);
+      expect(decision.signals.rule).toBe('BRANCH_STOP_RE');
+    }
+    expect(calls).toBe(0); // 点名停与 STOP 同款：等不起、也赌不起一次分类往返
+    // 边界：否定将来时（就不用查了）仍是收活折入，不是真停；无锚的停下仍
+    // 是整树 stop；「先别停」是反义，锚在场也绝不误触。
+    const cancelish = await coordinator.decide(llm(), '', { text: '竞品那支就不用查了' });
+    expect(cancelish.signals.cancelsPart).toBe(true);
+    expect(cancelish.signals.branchStop).toBeUndefined();
+    const wholeTree = await coordinator.decide(llm(), '', { text: '停下来歇会' });
+    expect(wholeTree.kind).toBe('stop');
+    expect(wholeTree.signals.branchStop).toBeUndefined();
+    const keepGoing = await coordinator.decide(llm(), '', { text: '那支先别停' });
+    expect(keepGoing.signals.branchStop).toBeUndefined();
+  });
+
   it('still sends non-cancellation shapes to the classifier, unqueued', async () => {
     // 否定式加活（不用再加）、"取消"动词但无否定标记（把X取消掉）、无动
     // 词的"X 就先不用了"都不在快路径字面族里——交给 LLM 结合上下文裁决。

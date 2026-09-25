@@ -624,6 +624,62 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.sends).toHaveLength(0);
   });
 
+  it('委派在飞时点名停一支（第 2 期分支中断）：直达 abortBranch 真停，不折入不广播', async () => {
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push({ role: '竞品分析员', status: 'running' });
+    // 编排器是分支生死的权威账（第 2 期）：宿主经 branchView() 看在飞支、
+    // abortBranch() 只停点名那一支。假编排器锁的是宿主半边的寻址与回执。
+    const aborted: string[] = [];
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        branchView: () => [
+          { callId: 'call_a', agentName: '竞品分析员', state: 'running' },
+          { callId: 'call_b', agentName: '平台调研员', state: 'running' },
+        ],
+        abortBranch: (callId: string) => { aborted.push(callId); return true; },
+      },
+    };
+
+    // BRANCH_STOP_RE 快路径：不经 LLM 直判「现在就停那一支」。
+    await h.chat.interject('停掉竞品那支。');
+    expect(llm.classifyCalls.length).toBe(0);
+    expect(aborted).toEqual(['call_a']); // 点名直达，兄弟支照跑
+    expect(statusJoined(h.root)).toContain('已停掉「竞品分析员」那支——进度留了断点，随时可以让它接着跑，其余照常。');
+    expect(userJoined(h.root)).toContain('停掉竞品那支');
+    // 真停不走折入/投递账：汇合轮没有这笔，steer 池也是空的。
+    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.pendingSteers).toHaveLength(0);
+  });
+
+  it('点名停却点不出具体支：退回取消折入，绝不把「停掉」广播给所有在飞支', async () => {
+    // 「停掉那支」有锚无名——两支都可能是"那支"。打平宁可不停（1a 同款
+    // 纪律），但绝不能按普通 steer 广播：每支都可能把自己当成"那支"自己
+    // 停。兜底是取消折入——汇合轮按用户原话收掉那一项，产出不入账。
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push({ role: '竞品分析员', status: 'running' });
+    const aborted: string[] = [];
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        branchView: () => [
+          { callId: 'call_a', agentName: '竞品分析员', state: 'running' },
+          { callId: 'call_b', agentName: '平台调研员', state: 'running' },
+        ],
+        abortBranch: (callId: string) => { aborted.push(callId); return true; },
+      },
+    };
+
+    await h.chat.interject('停掉那支。');
+    expect(llm.classifyCalls.length).toBe(0);
+    expect(aborted).toHaveLength(0); // 打平宁可不停，绝不误杀
+    expect(h.chat.pendingFoldIns).toHaveLength(1);
+    expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
+    expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);
+    expect(statusJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(h.chat.pendingSteers).toHaveLength(0);
+  });
+
   it('分类器把取消误判成 task 时宿主兜底：取消永不排队，按取消型折入走', async () => {
     // 案例的真实形态：LLM 把"收掉一项"判成加活。提示词已教正；这里锁宿
     // 主兜底——signals.cancelsPart 为真时 task 判定被改道，绝不进队列、
