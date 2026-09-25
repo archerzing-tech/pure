@@ -339,8 +339,9 @@ export class CodingAgent {
     signal?: AbortSignal,
     images?: MessageImage[],
     semantic?: SemanticRouteDecision | null,
+    hardStopSignal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
-    yield* this.harness.run(systemPrompt, userPrompt, signal, images, semantic);
+    yield* this.harness.run(systemPrompt, userPrompt, signal, images, semantic, hardStopSignal);
   }
 
   /** Continue an existing session with a follow-up prompt. */
@@ -351,8 +352,9 @@ export class CodingAgent {
     signal?: AbortSignal,
     images?: MessageImage[],
     semantic?: SemanticRouteDecision | null,
+    hardStopSignal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
-    yield* this.harness.continueTurn(systemPrompt, messages, newUserPrompt, signal, images, semantic);
+    yield* this.harness.continueTurn(systemPrompt, messages, newUserPrompt, signal, images, semantic, hardStopSignal);
   }
 
   /** Get the underlying Harness instance (for advanced use). */

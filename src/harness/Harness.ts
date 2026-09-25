@@ -198,7 +198,7 @@ export class Harness {
     return this.config.toolsDefsProvider ? this.config.toolsDefsProvider() : this.config.toolsDefs;
   }
 
-  private buildContext(signal?: AbortSignal): EngineContext {
+  private buildContext(signal?: AbortSignal, hardStopSignal?: AbortSignal): EngineContext {
     return {
       llm: this.config.llm,
       // E0.3 — per-phase adapter selection (THINK/HANDOVER); the engine reads
@@ -221,6 +221,8 @@ export class Harness {
       failurePolicy: this.config.failurePolicy,
       continueGuard: this.config.continueGuard,
       signal,
+      // 1c 升级硬停第二通道：暂停宽限期内宿主再叫停时立即掐掉在飞工具。
+      hardStopSignal,
     };
   }
 
@@ -258,6 +260,7 @@ export class Harness {
     signal?: AbortSignal,
     images?: MessageImage[],
     semantic?: SemanticRouteDecision | null,
+    hardStopSignal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.verificationPassed = false;
@@ -306,7 +309,7 @@ export class Harness {
             messages: msgs,
             budget: this.config.budget,
           },
-          this.buildContext(signal),
+          this.buildContext(signal, hardStopSignal),
         )
       : this.engine.run(
           {
@@ -316,7 +319,7 @@ export class Harness {
             images,
             budget: this.config.budget,
           },
-          this.buildContext(signal),
+          this.buildContext(signal, hardStopSignal),
         );
 
     const traceId = this.observability.startRun({
@@ -529,6 +532,7 @@ export class Harness {
     signal?: AbortSignal,
     images?: MessageImage[],
     semantic?: SemanticRouteDecision | null,
+    hardStopSignal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.verificationPassed = false;
@@ -561,7 +565,7 @@ export class Harness {
         messages: msgs,
         budget: this.config.budget,
       },
-      this.buildContext(signal),
+      this.buildContext(signal, hardStopSignal),
     );
 
     const traceId = this.observability.startRun({

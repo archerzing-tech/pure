@@ -1,6 +1,6 @@
 import type { EngineContext, ToolCall, ToolResult } from '../shared/types';
 import { safeParseArgs } from '../shared/format';
-import { isPauseAbort } from '../shared/pauseSignal';
+import { isPauseAbort, PAUSE_TOOL_GRACE_MS, PAUSE_ABORT_REASON } from '../shared/pauseSignal';
 import { FileLockManager } from './FileLockManager';
 import { HOOK_BLOCK_EXIT_CODE, runUserHooksForEvent } from '../shared/userHookRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -271,18 +271,20 @@ export class ToolExecutionCoordinator {
         };
       }
     }
-    // 阶段 12 pause semantics (pauseSignal.ts): a PAUSE abort must NOT kill
-    // in-flight work — "hand the current step a clean finish, keep the
-    // archive". So the tool's view of the world hangs off its own toolStop
-    // controller, which forwards only NON-pause aborts; a pause therefore
-    // reaches the engine's THINK boundary (which yields Interrupted once the
-    // batch drains) but never the tool itself. The deadline race listens on a
-    // SECOND controller (raceStop) because onTimeout aborts toolStop to kill
-    // the tool — if the race itself listened to toolStop, that abort would
-    // surface as AbortError and mask the TimeoutError (the budget tests
-    // regress to "aborted" instead of "timed out"). On old webviews where
-    // AbortSignal.reason is unreadable, isPauseAbort is always false and this
-    // degrades to today's forward-everything hard stop.
+    // Pause semantics (pauseSignal.ts, 1c 暂停真即时): a PAUSE abort stops the
+    // LLM stream now and gives the in-flight tool a grace window to finish —
+    // if it does, its real result lands; if the grace expires, the abort is
+    // forwarded carrying the pause reason, so a subagent delegation's
+    // isPauseAbort(parentSignal) fires and its checkpoint + paused card path
+    // works on the live GUI route. interruptible:false tools drain forever,
+    // like the pre-1c pause. So the tool's view of the world hangs off its own
+    // toolStop controller; hard (non-pause) aborts still forward instantly.
+    // The deadline race listens on a SECOND controller (raceStop) because
+    // onTimeout aborts toolStop to kill the tool — if the race itself listened
+    // to toolStop, that abort would surface as AbortError and mask the
+    // TimeoutError (the budget tests regress to "aborted" instead of "timed
+    // out"). On old webviews where AbortSignal.reason is unreadable,
+    // isPauseAbort is always false and this degrades to the hard stop.
     if (ctx.signal?.aborted) {
       // Dequeued after the abort: a pause skips queued work entirely ("排队
       // 工具不再启动"), a hard stop used to start-then-kill them — either way
@@ -298,13 +300,38 @@ export class ToolExecutionCoordinator {
     }
     const toolStop = new AbortController();
     const raceStop = new AbortController();
+    // A tool may declare its own budget (subagent delegations bracket a whole
+    // nested agent loop); the generic cap covers everything that doesn't. The
+    // engine's remaining wall clock still wins. Hoisted above forwardAbort so
+    // the pause path can also read interruptible.
+    const metadata = ctx.tools!.getMetadata(call.function.name);
+    let pauseGraceTimer: ReturnType<typeof setTimeout> | undefined;
     const forwardAbort = (): void => {
       if (!isPauseAbort(ctx.signal)) {
         toolStop.abort(ctx.signal?.reason);
         raceStop.abort(ctx.signal?.reason);
+        return;
       }
+      // 1c 暂停真即时（对话智能升格）：pause 不再无限排空。在飞工具有一段
+      // 宽限（PAUSE_TOOL_GRACE_MS，ctx.pauseToolGraceMs 可配）：宽限内自然
+      // 收尾最理想；到期未完 → 转发 abort，且 reason 带着暂停标记——它顺着
+      // toolStop → parentSignal 送达子代理编排器，「暂停存档」从此在 GUI
+      // 活链路分得清（isPauseAbort 可达）。声明 interruptible: false 的工具
+      // 豁免：照旧排空到自然结束（写盘中的落盘动作不打断）。
+      if (metadata?.interruptible === false) return;
+      pauseGraceTimer = setTimeout(() => {
+        toolStop.abort(PAUSE_ABORT_REASON);
+        raceStop.abort(PAUSE_ABORT_REASON);
+      }, ctx.pauseToolGraceMs ?? PAUSE_TOOL_GRACE_MS);
+    };
+    // 升级硬停（Esc 第二下 / 会话切换叫停）：宽限不再等，立即按暂停记账掐掉。
+    const escalateHardStop = (): void => {
+      clearTimeout(pauseGraceTimer);
+      toolStop.abort(PAUSE_ABORT_REASON);
+      raceStop.abort(PAUSE_ABORT_REASON);
     };
     ctx.signal?.addEventListener('abort', forwardAbort, { once: true });
+    ctx.hardStopSignal?.addEventListener('abort', escalateHardStop, { once: true });
     const lockManager = ctx.lockManager ?? this.fallbackLock;
     let executed: ToolResult | undefined;
     try {
@@ -313,10 +340,6 @@ export class ToolExecutionCoordinator {
         else await lockManager.acquireRead(path, toolStop.signal);
       }
       try {
-        // A tool may declare its own budget (subagent delegations bracket a
-        // whole nested agent loop); the generic cap covers everything that
-        // doesn't. The engine's remaining wall clock still wins.
-        const metadata = ctx.tools!.getMetadata(call.function.name);
         const cap = Math.min(
           metadata?.timeoutMs ?? TOOL_EXECUTION_TIMEOUT_MS,
           budget.streamDeadlineMs(),
@@ -330,10 +353,20 @@ export class ToolExecutionCoordinator {
         );
       } finally {
         ctx.signal?.removeEventListener('abort', forwardAbort);
+        ctx.hardStopSignal?.removeEventListener('abort', escalateHardStop);
+        clearTimeout(pauseGraceTimer);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      executed = { id: call.id, toolName: call.function.name, error: message || 'unknown', success: false, duration: 0 };
+      // 宽限到期被掐的结果要说实话：不是工具自己错，是暂停的宽限到了。
+      const pausedKill = isPauseAbort(toolStop.signal);
+      executed = {
+        id: call.id,
+        toolName: call.function.name,
+        error: pausedKill ? '已暂停——宽限期内没跑完，这一步先断了（进度不受影响）' : (message || 'unknown'),
+        success: false,
+        duration: 0,
+      };
     } finally {
       if (path) lockManager.release(path);
     }

@@ -310,6 +310,8 @@ function makeHarness(llm: ScriptedLlm): {
   chat.liveTurn = turn;
   chat.streaming = true;
   chat.abortController = new AbortController();
+  // 1c：真实 run 路径随回合一并创建第二通道（升级硬停用），这里照装。
+  chat.hardStopController = new AbortController();
   chat.turnLlm = llm;
   return {
     chat,
@@ -509,6 +511,23 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 回合收尾：没答上的问题按用户原话重入——「收尾时一并答」的承诺兑现。
     h.endTurn();
     expect(h.sends).toEqual(['我老板问报告什么时候好？']);
+  });
+
+  it('1c Esc 统一：第一下暂停（pause reason），暂停收尾期再按升级硬停', () => {
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+
+    // 第一档：暂停——abort 带 pause reason，出现「正在暂停」条。
+    h.chat.escapeWhileStreaming();
+    expect(h.chat.abortController.signal.aborted).toBe(true);
+    expect(h.chat.abortController.signal.reason).toBe('pure:pause');
+    expect(h.chat.pausedResumeBar?.dataset.state).toBe('pausing');
+
+    // 第二档：收尾期里再按 = 升级硬停。主信号二次 abort 是 no-op（规范如此，
+    // reason 换不掉），升级走第二通道：硬停信号立即点火，记账仍归暂停。
+    h.chat.escapeWhileStreaming();
+    expect(h.chat.hardStopController.signal.aborted).toBe(true);
+    expect(h.chat.abortController.signal.reason).toBe('pure:pause');
   });
 
   it('约束转达与叫停：steer 承诺一句话；停走正则直判不占分类往返', async () => {

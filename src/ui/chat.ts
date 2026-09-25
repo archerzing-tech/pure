@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
-import { abortPaused } from '../shared/pauseSignal';
+import { abortPaused, isPauseAbort } from '../shared/pauseSignal';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
@@ -1324,6 +1324,10 @@ function installAgentActivityHostLayout(): void {
 export class ChatController {
   private streaming = false;
   private abortController: AbortController | null = null;
+  /** 1c 升级硬停：当本回合的 abortController 已经以 pause reason 中止后，
+   * 再叫停走这条第二通道——立即掐掉宽限内的在飞工具（主信号二次 abort 是
+   * no-op，升级必须走独立通道）。随回合创建、随释放置空。 */
+  private hardStopController: AbortController | null = null;
   /** 阶段 12: the 「继续」 affordance appended under a paused turn. One at a
    * time; dismissed by any new send (a send IS the resume) or by clicking. */
   private pausedResumeBar: HTMLElement | null = null;
@@ -2988,7 +2992,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // controller and streaming state were installed only after workspace
     // resolution, so Stop/Escape could not interrupt a slow startup probe.
     const turnController = new AbortController();
+    // 1c 升级硬停第二通道：暂停的宽限窗口里再叫停时，用它立即掐掉在飞工具
+    // （主 controller 已 abort，规范规定二次 abort 是 no-op，换不掉 reason）。
+    const turnHardStop = new AbortController();
     this.abortController = turnController;
+    this.hardStopController = turnHardStop;
     this.setStreaming(true);
     // Set by the Interrupted(paused) branch; the release path must not eat the
     // 「继续」 bar it just showed. Any other ending clears a stale pausing notice.
@@ -2997,6 +3005,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       if (this.abortController !== turnController) return;
       this.setStreaming(false);
       this.abortController = null;
+      this.hardStopController = null;
       if (!pausedThisTurn) this.dismissPausedResumeBar();
     };
     // A turn paused BEFORE the engine ran (Stop/Escape during pre-flight) keeps
@@ -4676,8 +4685,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // the plan, or a follow-up after the previous plan finished), do not
       // attach any stale plan presentation to the new turn.
       const events = this.hasHistory
-        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, semanticRoute)
-        : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages, semanticRoute);
+        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, semanticRoute, turnHardStop.signal)
+        : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages, semanticRoute, turnHardStop.signal);
       // 本轮是否至少有一个工具真实成功：全失败的工具轮既不能推进阶段，也不能
       // 作为“阶段完成”的证据（hasToolWork 只表示模型调用了工具，含失败）。
       let hasToolSuccess = false;
@@ -6009,7 +6018,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
   }
 
   cancel() {
+    const wasPausing = isPauseAbort(this.abortController?.signal);
     this.abortController?.abort();
+    // 1c 升级硬停：暂停的宽限窗口里再叫停，不等宽限——立即掐掉在飞工具
+    // （记账仍归暂停：断点照存、卡片如实标 ⏸）。
+    if (wasPausing) this.hardStopController?.abort();
     // Stop / Escape take the human back: kill any pending auto-continue too.
     this.autoContinue.cancel();
     this.activePlanCardHandle?.clearAutoContinue();
@@ -6030,6 +6043,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     abortPaused(this.abortController);
     this.autoContinue.cancel();
     this.activePlanCardHandle?.clearAutoContinue();
+  }
+
+  /** 1c Esc 语义统一（对话智能升格）：Esc 双轨收敛为一个确认层级——第一下
+   * Esc = 暂停（收尾、存档、可继续）；「正在暂停」的收尾期里再按一次 =
+   * 升级为硬停。差别由两条链路各自的条子说清（pausing 条 → 继续条 / 停止
+   * 回执），用户永远知道按的是哪一档。 */
+  escapeWhileStreaming(): void {
+    if (this.pausedResumeBar?.dataset.state === 'pausing') {
+      this.cancel();
+      return;
+    }
+    this.pause();
   }
 
   /** Transitional notice the instant the user asks for a pause. Replaced by
@@ -6804,6 +6829,11 @@ export class SessionChatManager {
    * there until that session is shown again. */
   pause(): void {
     this.activeNow().pause();
+  }
+
+  /** 1c Esc 统一：第一下暂停、暂停收尾期里再按升级硬停（转发到可见会话）。 */
+  escapeWhileStreaming(): void {
+    this.activeNow().escapeWhileStreaming();
   }
 
   cancelAutoContinue(): void {

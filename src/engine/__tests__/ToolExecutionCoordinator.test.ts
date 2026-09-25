@@ -166,21 +166,28 @@ describe('ToolExecutionCoordinator concurrency policy (2026-09-20)', () => {
   }, 5_000);
 });
 
-describe('ToolExecutionCoordinator pause semantics (阶段 12)', () => {
+describe('ToolExecutionCoordinator pause semantics (阶段 12 + 1c 暂停真即时)', () => {
   // Coordinator-local view of the pause contract: a PAUSE abort (reason
-  // PAUSE_ABORT_REASON) must never reach the tool — in-flight work finishes
-  // with a clean signal and its real result is returned; a plain abort still
-  // forwards (hard stop unchanged).
-  function makeSignalCtx(signal: AbortSignal | undefined, execute: (tc: ToolCall, signal?: AbortSignal) => Promise<ToolResult>): EngineContext {
+  // PAUSE_ABORT_REASON) gives the in-flight tool a grace window — finish
+  // within it and the real result lands; when the grace expires the abort
+  // IS forwarded carrying the pause reason (so subagent checkpoints and
+  // paused cards work on the live route), and interruptible:false tools
+  // drain forever like the pre-1c pause. A plain abort still forwards
+  // instantly (hard stop unchanged).
+  function makeSignalCtx(
+    signal: AbortSignal | undefined,
+    execute: (tc: ToolCall, signal?: AbortSignal) => Promise<ToolResult>,
+    options: { pauseToolGraceMs?: number; interruptible?: boolean; hardStopSignal?: AbortSignal } = {},
+  ): EngineContext {
     const tools: ToolAdapter = {
       getTools: () => [],
-      getMetadata: (name: string) => (name === 'writer' ? { isWrite: true } : undefined),
+      getMetadata: (name: string) => (name === 'writer' ? { isWrite: true, interruptible: options.interruptible } : undefined),
       execute,
     };
-    return { tools, signal } as unknown as EngineContext;
+    return { tools, signal, pauseToolGraceMs: options.pauseToolGraceMs, hardStopSignal: options.hardStopSignal } as unknown as EngineContext;
   }
 
-  it('a pause abort does not reach an in-flight tool; its real result is returned', async () => {
+  it('a pause abort does not reach an in-flight tool within the grace window; its real result is returned', async () => {
     const coordinator = new ToolExecutionCoordinator();
     const ac = new AbortController();
     let toolSawAbort = false;
@@ -191,9 +198,112 @@ describe('ToolExecutionCoordinator pause semantics (阶段 12)', () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
       toolSawAbort = signal?.aborted ?? false;
       return ok(tc);
-    });
+    }, { pauseToolGraceMs: 60_000 }); // 宽限远长于收尾：等价"宽限内完成"
 
     const gen = coordinator.executeStream([call('slow_read')], ctx, BUDGET);
+    const yielded: ExecutedToolResult[] = [];
+    const consume = (async () => {
+      for await (const tr of gen) yielded.push(tr);
+    })();
+    setTimeout(() => abortPaused(ac), 10);
+    await consume;
+
+    expect(toolSawAbort).toBe(false);
+    expect(yielded).toHaveLength(1);
+    expect(yielded[0].result.success).toBe(true);
+  }, 5_000);
+
+  it('1c: a tool still running when the grace expires is interrupted with the pause reason', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const ac = new AbortController();
+    let toolSignalAborted = false;
+    const ctx = makeSignalCtx(ac.signal, async (tc, signal) => {
+      // 活到宽限之后的工具：不读自己的 signal，硬睡——宽限到期由协调器掐。
+      signal?.addEventListener('abort', () => { toolSignalAborted = true; });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return ok(tc);
+    }, { pauseToolGraceMs: 25 });
+
+    const gen = coordinator.executeStream([call('stuck_tool')], ctx, BUDGET);
+    const yielded: ExecutedToolResult[] = [];
+    const consume = (async () => {
+      for await (const tr of gen) yielded.push(tr);
+    })();
+    setTimeout(() => abortPaused(ac), 10);
+    await consume;
+
+    // 宽限一到，abort 真的到了工具手上，且 reason 是暂停标记——子代理编排器
+    // 的 isPauseAbort(parentSignal) 在 GUI 活链路由此可达。
+    expect(toolSignalAborted).toBe(true);
+    expect(yielded).toHaveLength(1);
+    expect(yielded[0].result.success).toBe(false);
+    expect(String(yielded[0].result.error)).toContain('已暂停');
+  }, 5_000);
+
+  it('1c: the hardStop second channel kills the in-flight tool immediately, skipping the grace (Esc 第二下升级)', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const ac = new AbortController();
+    const hardStop = new AbortController();
+    let toolSignalAborted = false;
+    const ctx = makeSignalCtx(ac.signal, async (tc, signal) => {
+      // 睡得比宽限久：掐它的是 hardStop 第二通道，不是宽限到期。
+      signal?.addEventListener('abort', () => { toolSignalAborted = true; });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return ok(tc);
+    }, { pauseToolGraceMs: 30_000, hardStopSignal: hardStop.signal });
+
+    const gen = coordinator.executeStream([call('stuck_tool')], ctx, BUDGET);
+    const yielded: ExecutedToolResult[] = [];
+    const consume = (async () => {
+      for await (const tr of gen) yielded.push(tr);
+    })();
+    // 暂停与升级之间隔 10ms，宽限 30s——工具若还被掐，只能来自升级通道。
+    setTimeout(() => abortPaused(ac), 5);
+    setTimeout(() => hardStop.abort(), 15);
+    await consume;
+
+    expect(toolSignalAborted).toBe(true);
+    expect(yielded).toHaveLength(1);
+    expect(yielded[0].result.success).toBe(false);
+    expect(String(yielded[0].result.error)).toContain('已暂停');
+  }, 5_000);
+
+  it('1c: the hardStop channel also overrides the interruptible:false exemption (升级比豁免大)', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const ac = new AbortController();
+    const hardStop = new AbortController();
+    let toolSignalAborted = false;
+    const ctx = makeSignalCtx(ac.signal, async (tc, signal) => {
+      signal?.addEventListener('abort', () => { toolSignalAborted = true; });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return ok(tc);
+    }, { pauseToolGraceMs: 30_000, interruptible: false, hardStopSignal: hardStop.signal });
+
+    const gen = coordinator.executeStream([call('writer')], ctx, BUDGET);
+    const yielded: ExecutedToolResult[] = [];
+    const consume = (async () => {
+      for await (const tr of gen) yielded.push(tr);
+    })();
+    setTimeout(() => abortPaused(ac), 5);
+    setTimeout(() => hardStop.abort(), 15);
+    await consume;
+
+    expect(toolSignalAborted).toBe(true);
+    expect(yielded[0].result.success).toBe(false);
+    expect(String(yielded[0].result.error)).toContain('已暂停');
+  }, 5_000);
+
+  it('1c: interruptible:false drains forever — the grace never kills it', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const ac = new AbortController();
+    let toolSawAbort = false;
+    const ctx = makeSignalCtx(ac.signal, async (tc, signal) => {
+      signal?.addEventListener('abort', () => { toolSawAbort = true; });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return ok(tc);
+    }, { pauseToolGraceMs: 20, interruptible: false });
+
+    const gen = coordinator.executeStream([call('writer')], ctx, BUDGET);
     const yielded: ExecutedToolResult[] = [];
     const consume = (async () => {
       for await (const tr of gen) yielded.push(tr);

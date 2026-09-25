@@ -1347,7 +1347,8 @@ landingPrompt.addEventListener('keydown', (e) => {
     handleLandingSendOrStop();
   }
   if (e.key === 'Escape' && chat.isStreaming()) {
-    chat.cancel();
+    // 1c Esc 统一：与 document 层同一语义（先暂停，再按升级硬停）。
+    chat.escapeWhileStreaming();
   }
 });
 
@@ -1440,7 +1441,9 @@ document.addEventListener('keydown', (e) => {
   if (shouldCancelForEscape(e.key, chat.isStreaming())) {
     e.preventDefault();
     queuedWhileStreaming = null;
-    chat.cancel();
+    // 1c Esc 统一：第一下暂停、暂停收尾期里再按升级硬停——语义分层，
+    // 回执说清差别（chat.escapeWhileStreaming）。
+    chat.escapeWhileStreaming();
     return;
   }
   if (document.querySelector('.bubble-row.inline-card')) return;

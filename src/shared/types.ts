@@ -120,8 +120,11 @@ export interface ToolAdapter {
   /** `timeoutMs` lets a tool declare its own execution budget — the engine's
    * generic tool cap yields to it. Subagent delegations bracket a whole
    * nested agent loop, so they declare the budget their definition already
-   * carries instead of being strangled by the generic cap. */
-  getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean; timeoutMs?: number } | undefined;
+   * carries instead of being strangled by the generic cap. `interruptible:
+   * false` (1c) exempts a tool from the pause grace-kill: after a pause it
+   * drains to its natural end like the old pause semantics, for work that
+   * must not be interrupted mid-write. */
+  getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean; timeoutMs?: number; interruptible?: boolean } | undefined;
   getTools(): ToolDefinition[];
   getSnapshotPort?(): WorkspaceSnapshotPort | undefined;
 }
@@ -230,6 +233,16 @@ export interface EngineContext {
    *  recipient so a user remark addressed at one branch reaches THAT branch
    *  (and only it) while broadcast remarks reach everyone working. */
   takeSteerMessages?: (recipient?: import('./steerTargeting').SteerRecipient) => Message[] | Promise<Message[]>;
+  /** 1c 暂停真即时 — how long an in-flight tool keeps running after a pause
+   *  before the abort is forwarded to it (default PAUSE_TOOL_GRACE_MS).
+   *  Injectable so tests can exercise the grace state machine in milliseconds. */
+  pauseToolGraceMs?: number;
+  /** 1c 升级硬停 — second-channel signal the host can abort to SKIP the
+   *  remaining pause grace and kill in-flight tools immediately (still
+   *  carrying the pause reason, so accounting stays "paused"). The primary
+   *  ctx.signal is already aborted by then and per spec a second abort() on
+   *  it is a no-op — this channel is what makes Esc-twice = hard stop real. */
+  hardStopSignal?: AbortSignal;
   /** Host-owned actions for this round (代执行回合, 2026-09-22): when this
    *  returns calls at a THINK boundary, the engine skips the model call for
    *  that round and dispatches these calls through the NORMAL ACT pipeline —
