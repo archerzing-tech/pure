@@ -124,7 +124,15 @@ sessionSidebar = new SessionSidebar({
   loadSession,
   renderMessages: renderSessionMessages,
   showSessionLoading,
-  focusPrompt: focusPromptCaretEnd,
+  // 侧栏呈现「有内容的会话」必经此口，而 landing 会把整个转写列 display:none
+  // （#chat-view.landing #chat）——删卡/新建对话落 landing 后点在跑会话卡，
+  // warm 快路只聚焦不退 landing，浮窗挂出来了、转写看不见（2026-09-26 用户
+  // 反馈「切不过来/会话没显示出来」）。enterChatMode 幂等：已在聊天视图时
+  // 零成本，落到 landing 的空白分支走 onChatCleared 不经过这里。
+  focusPrompt: () => {
+    enterChatMode();
+    focusPromptCaretEnd();
+  },
   onSessionActivated: () => {
     queuedWhileStreaming = null;
     workspace.refresh();

@@ -61,7 +61,10 @@ export interface SessionSidebarDeps {
    * the chat DOM). Called only for COLD sessions — warm sessions already have
    * their live transcript mounted. */
   renderMessages(snapshot: SessionSnapshotV2, host: HTMLElement): Promise<void>;
-  /** Move keyboard focus into the composer (main.ts owns the input). */
+  /** Present a conversation with content: make sure the chat view is actually
+   * visible (exit the landing screen — it hides the whole transcript column
+   * via #chat-view.landing #chat) and move keyboard focus into the composer.
+   * Blank sessions go through onChatCleared instead and keep landing. */
   focusPrompt(): void;
   /** Show the chat-area loading overlay while a session restores (main.ts). */
   showSessionLoading(): void;
