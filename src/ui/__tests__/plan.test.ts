@@ -66,15 +66,19 @@ describe('formatPlanForPrompt', () => {
     expect(out).toContain('整体安排');
     expect(out).toContain('1. Understand: Read relevant files.');
     expect(out).toContain('2. Implement: Write the changes.');
-    expect(out).toContain('Use the approved plan as a flexible guide');
+    expect(out).toContain('Use this plan as a flexible guide');
     expect(out).toContain('show a Todo list only when it helps clarify the work');
-    expect(projectOut).toContain('top-level plan list');
+    // 2026-09-26 拆仪式：提示词不再强制「复述请求/完整打印计划清单/Todo 清单」
+    // ——计划卡就是那份清单，聊天里再抄一遍是用户点名的固定腔。
+    expect(projectOut).not.toContain('top-level plan list');
+    expect(projectOut).not.toContain('separate Todo list below the plan list');
+    expect(projectOut).not.toContain('restate the user request');
+    expect(projectOut).toContain('not a script to read back');
     expect(projectOut).toContain('todosRequired');
     expect(projectOut).toContain('machine-readable progress marks');
     expect(projectOut).toContain('do not dictate execution granularity');
     expect(projectOut).toContain('## 计划 n 已完成');
     expect(projectOut).toContain('plain language');
-    expect(projectOut).toContain('separate Todo list below the plan list');
     expect(projectOut).toContain('strict stage protocol');
     expect(projectOut).toContain('Do not call tools before that line');
     expect(projectOut).toContain('The interface advances the Todo list only in numeric order');
@@ -97,6 +101,8 @@ describe('formatPlanForPrompt', () => {
     // 引擎会空转完成，界面直接从计划跳到交付测试。
     expect(approved).toContain('already approved this plan, so start executing immediately');
     expect(approved).toContain('begin the most appropriate next action with real tool calls');
+    expect(approved).not.toContain('show the complete top-level plan list');
+    expect(approved).toContain('never re-print the full plan list in prose');
     expect(approved).not.toContain('at most ONE Todo');
     expect(approved).not.toContain('Never batch');
     // 未批准（自动检测复杂任务）：保留“计划就绪 → 等待用户回复开工”的安全暂停点，

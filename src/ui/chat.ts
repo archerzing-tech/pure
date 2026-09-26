@@ -22,7 +22,8 @@ import { ContextEngine, type ContextCompactionResult } from '../harness/ContextE
 import { isGitMutationCommand, Tags } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
-import { formatIntentPrompt, markParallelPlanSteps } from '../coding-agent/Planner';
+import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta } from '../coding-agent/Planner';
+import { buildPlanThinkingPrompt, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, CANCEL_PART_RE, SCOPE_ADD_RE, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
@@ -1200,6 +1201,10 @@ function yieldToNextPaint(signal?: AbortSignal): Promise<void> {
  * 套用与上下文无关的“探明工作区现状，完成第一处真实改动”这类固定话术——一个
  * “项目做完了运行不起来，你给看看”的排查请求，不该被当成从零构建来对待。
  */
+// 规划思考的超时上限：流式让用户全程看得见思考在长，宽裕收尾即可；
+// 到点手里有什么算什么（有叙述走叙述指引，全无则安静落回兜底）。
+const PLAN_THINKING_TIMEOUT_MS = 180_000;
+
 function deriveFallbackPlan(prompt: string): Plan {
   // 兜底计划：只引用用户这次请求的真实文本，按“先理解、再小步验证”的通用方式推进，
   // 绝不根据关键词把请求归类为“提问 / 创建 / 其他”之类的固定类型再去套模板。
@@ -2824,6 +2829,76 @@ export class ChatController {
           : `已直接转给「${target.branchName}」那一路——它下个动作就带上，其余照跑。`);
   }
 
+  /** 计划必须是当着用户想出来的（2026-09-26 用户定调）：一次流式 LLM 调用，
+   * 思考直接进对话气泡——形状由模型自己定（提示词不给提纲）——讲完从同一条
+   * 回复末尾解析 ```json 步骤清单。返回 null = 什么都没落地（调用方安静兜底，
+   * 绝不弹失败噪音：上一代 LLM 预分析就死在这上面）；返回无 plan 的 narration
+   * = 思考可见但步骤没解析成（调用方不再放假卡，以思考为指引）。超时上限
+   * 给足——流式期间用户看得见思考在长，不是盯着空等然后报错。 */
+  private async planByThinking(
+    chatEl: HTMLElement,
+    userText: string,
+    userImages: MessageImage[],
+    projectBuild: boolean,
+  ): Promise<{ narration: string; plan: Plan | null } | null> {
+    const llm = this.turnLlm;
+    if (!llm) return null;
+    const { system, user } = buildPlanThinkingPrompt(userText, { projectBuild, hasImages: userImages.length > 0 });
+    const request: import('../shared/types').Message[] = [
+      { role: 'system', content: system },
+      { role: 'user', content: user, images: userImages },
+    ];
+    // 独立的超时与中止转发：用户点「停止」立刻掐断；掐断后手里有什么算什么，
+    // 判断全在收尾——这一层绝不冒噪音。
+    const ac = new AbortController();
+    const forwardAbort = (): void => ac.abort();
+    this.abortController?.signal.addEventListener('abort', forwardAbort, { once: true });
+    const timer = setTimeout(forwardAbort, PLAN_THINKING_TIMEOUT_MS);
+    const bubble = this.addBubble('assistant', '');
+    let full = '';
+    try {
+      for await (const chunk of llm.stream(request, [], ac.signal)) {
+        if (this.abortController?.signal.aborted) break;
+        if (chunk.type === 'content' && chunk.content) {
+          full += chunk.content;
+          bubble.textContent = liveNarrationPortion(full);
+          this.scrollUi(chatEl);
+        } else if (chunk.type === 'done') {
+          break;
+        }
+      }
+    } catch {
+      // 超时/网络/中止：静默落到底部判定，一个字的噪音都不冒。
+    } finally {
+      clearTimeout(timer);
+      this.abortController?.signal.removeEventListener('abort', forwardAbort);
+    }
+    const { narration, planText } = splitNarrationAndPlan(full);
+    const narrationText = narration.trim();
+    if (this.abortController?.signal.aborted) {
+      // 用户主动停：叙述留在屏幕上（真实产出的记录），但不进上下文、不进持久化。
+      if (narrationText) bubble.textContent = narrationText;
+      else bubble.remove();
+      return null;
+    }
+    let plan: Plan | null = null;
+    if (planText.trim()) {
+      const parsed = parsePlanJsonWithMeta(planText);
+      if (isUsablePlan(parsed.plan)) plan = parsed.plan;
+    }
+    if (!narrationText && !plan) {
+      bubble.remove();
+      return null;
+    }
+    if (narrationText) {
+      bubble.textContent = narrationText;
+      this.scrollUi(chatEl);
+    } else {
+      bubble.remove();
+    }
+    return { narration: narrationText, plan };
+  }
+
   /** 插话重构 — answer a mid-run question out-of-band: one LLM call with the
    * current task snapshot (cheap REFLECT-phase adapter when 9.2 routing is
    * on). The running turn is never touched — no abort, no replan. 1b question
@@ -4396,11 +4471,27 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           const modeBubble = forcedMode
             ? this.addStatusBubble(t('plan.modeForced', '已按你的选择进入 {mode} 模式，正在生成执行计划…').replace('{mode}', modeLabel(analysis.mode)))
             : null;
-          // 计划直接来自本地规则分析（Planner.analyzeTask）：不再做 LLM 实时预分析。
-          // 规则分析没有给出计划时（如强制计划模式遇到简单任务），用一条按用户真实
-          // 诉求生成的起步步骤兜底，执行中由模型按实际情况推进，绝不假装“已经想清楚”，
-          // 也绝不套用与上下文无关的“探明工作区现状”之类固定话术。
-          let planForReview: Plan = analysis.plan ?? deriveFallbackPlan(userText);
+          // 计划必须是当着用户想出来的（2026-09-26 用户定调，彻底替换规则出卡）：
+          // 先让模型流式地把思考讲出来——形状模型自己定，提示词不给提纲——再从
+          // 同一条回复末尾解析它自己承诺的步骤清单（```json）。规则分析只剩两个
+          // 安静兜底位：用户强制模式的确认对话必须有一份具体方案可批、以及思考
+          // 完全没落地时。自动路径上宁可没有卡片，也不再拿写死步骤冒充规划；
+          // 任何失败都不留噪音——上一代 LLM 预分析就死在超时提示与通用兜底噪音上。
+          removeThinkingCard();
+          maybeShowAssessment();
+          maybeShowPlanSummary();
+          const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';
+          const thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate);
+          if (this.abortController?.signal.aborted) {
+            // 思考被用户掐断：请求留在对话里，计划流程一并收场（探针同款收尾）。
+            keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
+            return;
+          }
+          if (thought?.narration) {
+            // 思考已可见，并进入模型上下文：后续执行与交付都要对得上它（重放也在）。
+            this.messages.push({ role: 'assistant', content: thought.narration });
+          }
+          let planForReview: Plan | null = thought?.plan ?? null;
           // E2.3 — 策略层的 parallelRoles 接进计划卡：这里与 buildContext 用同一
           // 份输入复算一次 select（纯计算，无副作用），把推荐里可并行的角色域
           // 对到独立的只读步骤上；批准后的提示词让模型把这些步的派发合并进同一
@@ -4419,7 +4510,36 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               ? { tags: [semanticRoute.intent], complexity: semanticRoute.complexity, roles: semanticRoute.subagents }
               : undefined,
           });
-          planForReview = markParallelPlanSteps(planForReview, planStrategy.parallelRoles);
+          if (planForReview) {
+            planForReview = markParallelPlanSteps(planForReview, planStrategy.parallelRoles);
+          } else if (thought?.narration && !needsInteractiveApproval) {
+            // 有思考、没解析出结构化步骤：不放假卡。把思考本身当执行指引交给
+            // 引擎——写死步骤冒充规划正是这次要根除的模式。
+            this.addStatusBubble(
+              t('plan.narrationNoPlan', '思路讲完了，结构化步骤没能从里面解析出来——不硬凑卡片了，我按刚才的思路直接开工。'),
+              false, false, 'info',
+            );
+            userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate });
+            if (assessmentFlow) {
+              // 跳过了 approvePlan，评估卡的阶段不能悬在半空：同样落定。
+              assessmentFlow.completePhase('risk', `风险等级已确认：${riskLabelOf(effectiveIntent.riskLevel)}`);
+              assessmentFlow.completePhase('gate', effectiveIntent.requiresConfirmation
+                ? '影响范围已评估，安全闸门已通过。'
+                : '评估完成，当前请求可以进入执行阶段。');
+              assessmentFlow.setPhase('execute', '边界已确认，准备按小步策略执行…');
+            }
+            if (modeBubble) modeBubble.remove();
+          } else {
+            // 安静兜底：只有确认对话还必须有一份具体方案可批（强制模式/高风险）
+            // 时，规则步骤才最后一次出场；没有思考 narration 时一声不吭。
+            planForReview = analysis.plan ?? deriveFallbackPlan(userText);
+            if (thought?.narration) {
+              this.addStatusBubble(
+                t('plan.narrationFallback', '思路在上面，步骤清单没能解析出来——确认卡里先放一份起步安排，你看着批。'),
+                false, false, 'info',
+              );
+            }
+          }
           const showPlanCard = (plan: Plan, refining = false): void => {
             if (!planProgress) {
               // 新计划：本会话内计划编号 +1，并把触发它的用户输入带给卡头，
@@ -4445,13 +4565,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
             this.scrollUi(chatEl);
           };
-          // 探查（工作区扫描）已完成：预检期的思考卡只是过渡反馈且没有内容，
-          // 直接收走——不留下“思考完成却什么都没想”的空行。探索/契约结论与
-          // 评估卡此刻一并落定（规则层判断），随后渲染计划卡进入确认/执行流程。
-          removeThinkingCard();
-          maybeShowAssessment();
-          maybeShowPlanSummary();
-          showPlanCard(planForReview);
+          // 有模型的计划才有卡：渲染计划卡进入确认/执行流程；无卡路径（思考即
+          // 指引）在上面已把 userPlan 交好，直接落到引擎，不冒充有规划。
+          if (planForReview) {
+            // 收窄成非空常量：下面的闭包（approvePlan / requestPlanReview）里
+            // let 变量不带外层收窄，formatPlanForPrompt 要的是确切的 Plan。
+            const approvedPlan: Plan = planForReview;
+            showPlanCard(approvedPlan);
           const approvePlan = () => {
             if (assessmentFlow) {
               // 计划已确认：先落定风险与闸门两个前置节点，再进入执行。
@@ -4464,7 +4584,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // Keep the approved plan and cursor outside this send() so the next
             // user message continues the same phase/Todo instead of reopening
             // the planning interview.
-            this.activeComplexPlan = planForReview;
+            this.activeComplexPlan = approvedPlan;
             this.activePlanNumber = 1;
             this.activeTodoNumber = 1;
             this.activePlanStarted = false;
@@ -4474,7 +4594,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // 计划一就绪本轮直接开工（2026-09-17 产品决策：不再有“计划批准暂停”）
             // → approved=true，模型第一轮必须立即开始执行，不能再要求“等用户下一条
             // 消息才开工”，否则引擎第一轮就空转完成，界面会直接从计划跳到交付。
-            userPlan = formatPlanForPrompt(planForReview, needsDeliveryGate, true);
+            userPlan = (thought?.narration
+              ? `${planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true })}\n\n`
+              : '') + formatPlanForPrompt(approvedPlan, needsDeliveryGate, true);
             // Plan is ready: the bubble no longer promises generation.
             if (modeBubble) modeBubble.textContent = forcedMode
               ? t('plan.modeActive', '已切换为 {mode} 模式，按方案执行').replace('{mode}', modeLabel(analysis.mode))
@@ -4487,7 +4609,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           // （forceMode 是用户明确的“不要问我”选择）。
           // 高风险不再单独触发确认卡（2026-09-17 产品决策：默认自动允许，不等授权）；
           // 只有用户主动选择的计划/构建模式保留确认流程——那是模式本身的语义。
-          const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';
           if (needsInteractiveApproval) {
             if (riskReview) {
               assessmentFlow?.setPhase('gate', '高风险请求需要你的明确确认，尚未执行任何写入…');
@@ -4497,7 +4618,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // 高风险 / 项目级构建 / 用户手动选择计划·构建模式：在任何写入或破坏性
             // 动作前保留明确的确认点——先展示影响与计划，用户批准后才开始构建。
             const decision = await requestPlanReview(
-              { ...analysis, plan: planForReview, reasoning: planForReview.reasoning },
+              { ...analysis, plan: approvedPlan, reasoning: approvedPlan.reasoning },
               {
                 allowSkip: !needsDeliveryGate && !riskReview,
                 riskReview,
@@ -4529,6 +4650,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // Auto-detected work keeps moving. The plan is visible context,
             // not a second confirmation prompt the user has to dismiss.
             approvePlan();
+          }
           }
         } else if (forcedMode === 'plan' || forcedMode === 'build') {
           // The plan gate needs a real filesystem root (and the Planning skill);

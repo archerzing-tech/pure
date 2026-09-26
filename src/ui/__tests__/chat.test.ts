@@ -188,10 +188,11 @@ describe('plan pre-flight keeps its honest shape', () => {
     expect(src.indexOf('开工前先确认几个问题')).toBe(-1);
   });
 
-  it('no longer runs the LLM real-time pre-analysis (removed entirely)', () => {
+  it('the old silent pre-analysis pipeline stays dead; planning is now plan-by-thinking', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 实时分析从未稳定成功（10/10 项目全部超时/空输出），只会拖慢启动并把
-    // “实时分析未完成，已回退到通用步骤”的噪音留给用户。整条链路必须删干净。
+    // 旧实时分析从未稳定成功（10/10 项目全部超时/空输出），只会拖慢启动并把
+    // “实时分析未完成，已回退到通用步骤”的噪音留给用户。那条静默链路必须
+    // 保持删干净；2026-09-26 换上的是流式、可见、安静的 plan-by-thinking。
     expect(src.indexOf('generateTaskAnalysis')).toBe(-1);
     expect(src.indexOf('TASK_ANALYSIS_PROMPT')).toBe(-1);
     expect(src.indexOf('<intent_assessment>')).toBe(-1);
@@ -199,8 +200,8 @@ describe('plan pre-flight keeps its honest shape', () => {
     expect(src.indexOf('mergeIntentAssessments')).toBe(-1);
     expect(src.indexOf('实时分析未完成')).toBe(-1);
     expect(src.indexOf('已回退到通用步骤')).toBe(-1);
-    // 计划直接来自本地规则分析；没有计划时用按诉求生成的兜底，而非固定模板。
-    expect(src).toContain('let planForReview: Plan = analysis.plan ?? deriveFallbackPlan(userText)');
+    // 模型计划优先；规则计划只活在确认对话的兜底支里，自动路径宁可无卡。
+    expect(src).toContain('let planForReview: Plan | null = thought?.plan ?? null;');
   });
 });
 
@@ -433,14 +434,18 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     expect(firstProbe).toBeGreaterThan(eager);
   });
 
-  it('renders the heuristic plan card directly with no LLM pre-analysis round-trip', () => {
+  it('streams a visible planning round between the probe and the plan card (2026-09-26 反转)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 计划直接来自本地规则分析（Planner）：探针完成后立即渲染计划卡，
-    // 不再有 LLM 分析等待与“回退到通用步骤”的兜底分支。
+    // 计划必须是当着用户想出来的（2026-09-26 用户定调）：探针完成后先让模型
+    // 流式把思考讲出来，再从同一条回复解析计划；规则步骤只在确认对话兜底。
+    // 曾经的 LLM 预分析死于「静默 complete + 失败噪音」，这里必须是流式且安静。
     const probe = src.indexOf('await discoverWorkspace(');
-    const planRender = src.indexOf('showPlanCard(planForReview);');
+    const thinking = src.indexOf('await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate);');
+    const planRender = src.indexOf('showPlanCard(approvedPlan);');
     expect(probe).toBeGreaterThan(-1);
-    expect(planRender).toBeGreaterThan(probe);
+    expect(thinking).toBeGreaterThan(probe);
+    expect(planRender).toBeGreaterThan(thinking);
+    expect(src).toMatch(/llm\.stream\(request, \[\], ac\.signal\)/);
     expect(src).toMatch(/createPlanCard\(plan, refining, planProgress\)/);
     expect(src.indexOf('已回退到通用步骤')).toBe(-1);
   });
@@ -609,7 +614,7 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     // 计划就绪即开工（2026-09-17 起所有路径如此，不再有等待“开工”消息的分支）：
     // 模型第一轮必须立即执行——否则模型第一轮不调用工具，引擎空转完成，计划卡
     // 还停在第一步就突然进入交付验证、评估卡跳到“验证结果”。
-    expect(src).toContain('formatPlanForPrompt(planForReview, needsDeliveryGate, true)');
+    expect(src).toContain('formatPlanForPrompt(approvedPlan, needsDeliveryGate, true)');
   });
 });
 
@@ -1579,5 +1584,51 @@ describe('first-token preflight budgets', () => {
     // Three IPC reads for AGENTS.md used to run on every single turn.
     expect(src).toContain('let guiConventionsCache: { at: number; workspace: string; text: string } | null = null;');
     expect(src).toContain('const text = await readGuiConventions(ws);');
+  });
+});
+
+// 「计划必须是当着用户想出来的」（2026-09-26 用户定调）：规则出卡退出主路径，
+// 思考流式可见且不套提纲，失败必须安静（上一代 LLM 预分析就死在噪音上）。
+describe('plan-by-thinking flow', () => {
+  const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+
+  it('plans with a streaming model call before the plan card, not from rule steps', () => {
+    // 出卡之前必须先有 planByThinking；思考完全没落地才允许规则兜底。
+    const thinkingIdx = src.indexOf('const thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate);');
+    expect(thinkingIdx).toBeGreaterThan(-1);
+    const cardIdx = src.indexOf('showPlanCard(approvedPlan);');
+    expect(cardIdx).toBeGreaterThan(thinkingIdx);
+    // 模型计划优先；规则计划只活在「确认对话必须有一份具体方案」的兜底支里。
+    expect(src).toContain('let planForReview: Plan | null = thought?.plan ?? null;');
+    const fallbackIdx = src.indexOf('planForReview = analysis.plan ?? deriveFallbackPlan(userText);');
+    expect(fallbackIdx).toBeGreaterThan(thinkingIdx);
+    expect(src).toContain('} else if (thought?.narration && !needsInteractiveApproval) {');
+  });
+
+  it('thinking lands in the model context; both paths embed it into userPlan', () => {
+    // 新会话首回合 hasHistory=false，引擎输入读不到 this.messages——思考必须
+    // 原文嵌进 userPlan，「按上面那段思考开工」在首回合是指向空气的。
+    expect(src).toContain('this.messages.push({ role: \'assistant\', content: thought.narration });');
+    expect(src).toContain('userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate });');
+    expect(src).toContain("planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true })");
+    // 无卡路径跳过了 approvePlan：评估卡阶段必须同样落定，不能悬在半空。
+    expect(src).toContain("assessmentFlow.setPhase('execute', '边界已确认，准备按小步策略执行…');");
+  });
+
+  it('stays quiet on failure: no failure bubble anywhere in the planning call', () => {
+    const fnIdx = src.indexOf('private async planByThinking(');
+    expect(fnIdx).toBeGreaterThan(-1);
+    const endIdx = src.indexOf('private async answerMidrunQuestion', fnIdx);
+    expect(endIdx).toBeGreaterThan(fnIdx);
+    const fn = src.slice(fnIdx, endIdx);
+    // 超时/网络错误静默落到底部判定——绝不复刻旧预分析的失败提示噪音。
+    expect(fn).toContain('catch {');
+    expect(fn).not.toContain('addStatusBubble');
+    expect(fn).not.toContain('showError');
+    expect(fn).toContain('PLAN_THINKING_TIMEOUT_MS');
+    expect(fn).toContain('parsePlanJsonWithMeta(planText)');
+    // 思考与中止路径都要收干净计时器与转发监听。
+    expect(fn).toContain('clearTimeout(timer);');
+    expect(fn).toContain("removeEventListener('abort', forwardAbort);");
   });
 });
