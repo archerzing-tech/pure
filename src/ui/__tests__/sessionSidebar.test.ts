@@ -3,7 +3,7 @@
 // （渲染本身依赖 DOM/Tauri，不在这里覆盖。）
 
 import { describe, it, expect } from 'bun:test';
-import { assignShortIds, pickNeighborSessionId } from '../sessionSidebar';
+import { assignShortIds } from '../sessionSidebar';
 
 describe('SessionSidebar short id assignment', () => {
   it('每个可见卡片拿到确定的 6 位 base36 短 id', () => {
@@ -30,26 +30,5 @@ describe('SessionSidebar short id assignment', () => {
     const batch = assignShortIds(ids);
     const solo = assignShortIds([ids[1]]);
     expect(solo.get(ids[1])).toBe(batch.get(ids[1]));
-  });
-});
-
-describe('删除当前会话后的焦点去向（pickNeighborSessionId）', () => {
-  // 2026-09-25 用户反馈：删掉正看的会话不许凭空落到一个新建空白会话
-  // （等价点了「新建对话」）——焦点该去列表里相邻的下一支，全删光才回 landing。
-  it('中间的卡被删：焦点落到视觉位置的下一张', () => {
-    expect(pickNeighborSessionId(['a', 'b', 'c'], 'b')).toBe('c');
-  });
-
-  it('最后一张被删：焦点落回上一张', () => {
-    expect(pickNeighborSessionId(['a', 'b', 'c'], 'c')).toBe('b');
-  });
-
-  it('只剩一张时删除：null（调用方回退 landing）', () => {
-    expect(pickNeighborSessionId(['a'], 'a')).toBeNull();
-  });
-
-  it('sid 不在列表里（实时条目竞态）：兜底第一张，空列表 null', () => {
-    expect(pickNeighborSessionId(['a', 'b'], 'ghost')).toBe('a');
-    expect(pickNeighborSessionId([], 'ghost')).toBeNull();
   });
 });

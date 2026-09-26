@@ -137,6 +137,9 @@ sessionSidebar = new SessionSidebar({
   },
   onChatCleared: () => {
     goToLanding();
+    // 与「新建对话」同一收尾（2026-09-26 用户定调：删掉选中会话 = 开一个
+    // 新空白会话并聚焦）——焦点落进 landing 输入框，落点看得见。
+    landingPrompt.focus();
     workspace.refresh();
     updateContextPanelStage();
     void worktreeFinishCardRef?.refresh();
