@@ -6787,6 +6787,11 @@ export class SessionChatManager {
       if (streaming) runningSessionIds.add(sessionId);
       else runningSessionIds.delete(sessionId);
       if (changed) runningSessionsListeners.forEach((cb) => cb());
+      // 开跑即点亮（2026-09-26 用户反馈）：从 landing/新对话发出的第一回合
+      // 不经过任何 makeActive——侧栏的选中态还停在 null，任务卡片冒进列表
+      // 却没有选中态。可见会话一开跑就把高亮钉到它身上；后台会话开跑不抢
+      // 焦点（可见会话的高亮不动）。
+      if (streaming && controller === this.current) this.activeSessionCb?.(sessionId);
       // Only the visible conversation drives the shared streaming UI.
       if (controller === this.current) this.streamingCb?.(streaming);
     });

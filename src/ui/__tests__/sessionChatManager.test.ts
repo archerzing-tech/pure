@@ -199,6 +199,35 @@ describe('session chat manager (multi-session background execution)', () => {
     expect(manager.getRunningLiveSessions()).toHaveLength(0);
   });
 
+  it('the visible session lighting up fires the active-session callback (sidebar highlight follows first send)', () => {
+    // 2026-09-26 用户反馈：从 landing/新对话发出的第一回合不经过任何
+    // makeActive，任务卡片冒进侧栏列表却没有选中态。锁死：可见会话开跑
+    // 本身必须发 activeSession 回调，侧栏高亮随之点亮。
+    const manager = new SessionChatManager();
+    const seen: string[] = [];
+    manager.onActiveSessionChanged((id) => seen.push(id));
+    const a = manager.openSession('session-a'); // became current → callback
+    expect(seen).toEqual(['session-a']);
+
+    (a.controller as any).setStreaming(true);
+    expect(seen).toEqual(['session-a', 'session-a']);
+    // 停跑不发第二次（高亮已在其位，无需重复刷）。
+    (a.controller as any).setStreaming(false);
+    expect(seen).toHaveLength(2);
+  });
+
+  it('a background session starting to stream never steals the sidebar highlight', () => {
+    const manager = new SessionChatManager();
+    const seen: string[] = [];
+    manager.onActiveSessionChanged((id) => seen.push(id));
+    const a = manager.openSession('session-a');
+    manager.openSession('session-b'); // now visible
+    seen.length = 0;
+
+    (a.controller as any).setStreaming(true); // background run
+    expect(seen).toEqual([]); // visible session's highlight untouched
+  });
+
   it('numbers same-name subagent delegations per task (ui_designer（1）（2）…)', () => {
     const manager = new SessionChatManager();
     const flight = manager.openSession('session-flight');
