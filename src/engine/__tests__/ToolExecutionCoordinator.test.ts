@@ -236,9 +236,34 @@ describe('ToolExecutionCoordinator pause semantics (阶段 12 + 1c 暂停真即�
     // 的 isPauseAbort(parentSignal) 在 GUI 活链路由此可达。
     expect(toolSignalAborted).toBe(true);
     expect(yielded).toHaveLength(1);
-    expect(yielded[0].result.success).toBe(false);
-    expect(String(yielded[0].result.error)).toContain('已暂停');
+    // 用户暂停 ≠ 失败（2026-09-26 用户实测）：宽限到期被掐的结算走中断口径
+    // ——success:true + outcome:'paused'，不进失败策略、UI 不染红；内层对象
+    // 让引擎同参去重豁免（恢复后重发=真重跑）。
+    expect(yielded[0].result.success).toBe(true);
+    expect(yielded[0].result.outcome).toBe('paused');
+    const pausedSettlement = yielded[0].result.result as { aborted?: boolean; outcome?: string; summary?: string };
+    expect(pausedSettlement.aborted).toBe(true);
+    expect(pausedSettlement.outcome).toBe('paused');
+    expect(pausedSettlement.summary).toContain('已暂停');
   }, 5_000);
+
+  it('a queued call dequeued after a pause settles paused, not failed (2026-09-26 暂停正名)', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const ac = new AbortController();
+    let ran = false;
+    const ctx = makeSignalCtx(ac.signal, async (tc) => {
+      ran = true;
+      return ok(tc);
+    });
+    abortPaused(ac);
+    const yielded: ExecutedToolResult[] = [];
+    for await (const tr of coordinator.executeStream([call('queued_tool')], ctx, BUDGET)) yielded.push(tr);
+    expect(ran).toBe(false);
+    expect(yielded).toHaveLength(1);
+    expect(yielded[0].result.success).toBe(true);
+    expect(yielded[0].result.outcome).toBe('paused');
+    expect((yielded[0].result.result as { summary?: string }).summary).toContain('已暂停');
+  });
 
   it('1c: the hardStop second channel kills the in-flight tool immediately, skipping the grace (Esc 第二下升级)', async () => {
     const coordinator = new ToolExecutionCoordinator();
@@ -264,8 +289,11 @@ describe('ToolExecutionCoordinator pause semantics (阶段 12 + 1c 暂停真即�
 
     expect(toolSignalAborted).toBe(true);
     expect(yielded).toHaveLength(1);
-    expect(yielded[0].result.success).toBe(false);
-    expect(String(yielded[0].result.error)).toContain('已暂停');
+    // 升级硬停同样「按暂停记账」（escalateHardStop = 同一暂停标记立即掐）：
+    // 用户暂停 ≠ 失败，success:true + outcome:'paused'，不进失败策略、UI 不染红。
+    expect(yielded[0].result.success).toBe(true);
+    expect(yielded[0].result.outcome).toBe('paused');
+    expect((yielded[0].result.result as { summary?: string }).summary).toContain('已暂停');
   }, 5_000);
 
   it('1c: the hardStop channel also overrides the interruptible:false exemption (升级比豁免大)', async () => {
@@ -289,8 +317,11 @@ describe('ToolExecutionCoordinator pause semantics (阶段 12 + 1c 暂停真即�
     await consume;
 
     expect(toolSignalAborted).toBe(true);
-    expect(yielded[0].result.success).toBe(false);
-    expect(String(yielded[0].result.error)).toContain('已暂停');
+    // 升级硬停同样「按暂停记账」（escalateHardStop 的注释口径）：用户暂停
+    // ≠ 失败，success:true + outcome:'paused'，不进失败策略、UI 不染红。
+    expect(yielded[0].result.success).toBe(true);
+    expect(yielded[0].result.outcome).toBe('paused');
+    expect((yielded[0].result.result as { summary?: string }).summary).toContain('已暂停');
   }, 5_000);
 
   it('1c: interruptible:false drains forever — the grace never kills it', async () => {
@@ -343,9 +374,12 @@ describe('ToolExecutionCoordinator pause semantics (阶段 12 + 1c 暂停真即�
     const writerResult = yielded.find((tr) => tr.toolCallId === 'call_writer');
     // The transcript pairing still needs a result for every call id — it just
     // records that the call never started.
+    // 暂停跳过 ≠ 失败（2026-09-26 暂停正名）：success:true + outcome:'paused'，
+    // 不进失败策略；配对结果仍在，转录不悬空。
     expect(writerResult).toBeDefined();
-    expect(writerResult!.result.success).toBe(false);
-    expect(String(writerResult!.result.error)).toContain('paused');
+    expect(writerResult!.result.success).toBe(true);
+    expect(writerResult!.result.outcome).toBe('paused');
+    expect((writerResult!.result.result as { summary?: string }).summary).toContain('已暂停');
   }, 5_000);
 
   it('a plain abort still forwards to the in-flight tool (hard stop unchanged)', async () => {

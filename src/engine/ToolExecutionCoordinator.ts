@@ -330,10 +330,31 @@ export class ToolExecutionCoordinator {
       // 工具不再启动"), a hard stop used to start-then-kill them — either way
       // the call still needs a result or the transcript pairing would hang a
       // toolCall without an observation (next LLM call would 400).
-      const skipped = isPauseAbort(ctx.signal) ? 'paused — not started' : 'cancelled — not started';
+      // 暂停跳过 ≠ 失败（同宽限到期的口径）：success:false 会喂失败策略、
+      // UI 染红；outcome:'paused' 让同参重发真重跑（去重豁免走内层标识）。
+      if (isPauseAbort(ctx.signal)) {
+        return {
+          toolName: call.function.name,
+          result: {
+            id: call.id,
+            toolName: call.function.name,
+            result: {
+              aborted: true,
+              outcome: 'paused' as const,
+              reason: '用户暂停了这一轮，这个调用还在排队就被跳过了——进度不受影响；回合恢复后按需重做。',
+              summary: '已暂停——排队中还没开跑就先停了（进度不受影响）。',
+            },
+            success: true,
+            outcome: 'paused',
+            duration: 0,
+          },
+          duration: 0,
+          toolCallId: call.id,
+        };
+      }
       return {
         toolName: call.function.name,
-        result: { id: call.id, toolName: call.function.name, error: skipped, success: false, duration: 0 },
+        result: { id: call.id, toolName: call.function.name, error: 'cancelled — not started', success: false, duration: 0 },
         duration: 0,
         toolCallId: call.id,
       };
@@ -400,13 +421,35 @@ export class ToolExecutionCoordinator {
       const message = error instanceof Error ? error.message : String(error);
       // 宽限到期被掐的结果要说实话：不是工具自己错，是暂停的宽限到了。
       const pausedKill = isPauseAbort(toolStop.signal);
-      executed = {
-        id: call.id,
-        toolName: call.function.name,
-        error: pausedKill ? '已暂停——宽限期内没跑完，这一步先断了（进度不受影响）' : (message || 'unknown'),
-        success: false,
-        duration: 0,
-      };
+      if (pausedKill) {
+        // 用户暂停 ≠ 失败（2026-09-26 用户实测：Esc 暂停三支在飞调研，全部按
+        // success:false 进失败策略，上下文被灌进「连续失败 3 次，跳过它」的噪
+        // 音，下一轮重发就在失败语境里跑）。success:false 是失败口径——污染失
+        // 败策略、UI 染红打 ✗；outcome:'paused' 同时让引擎的同参去重豁免（恢复
+        // 后重发=真重跑，不被去重吞成回放）。结算体沿用双形状约定：外层 outcome
+        // 给引擎，内层对象给 UI（灰 ⏸），summary 说给人、reason 说给模型。
+        executed = {
+          id: call.id,
+          toolName: call.function.name,
+          result: {
+            aborted: true,
+            outcome: 'paused' as const,
+            reason: '用户暂停了这一轮，宽限期内这一步没跑完——进度不受影响；回合恢复后按需重做这一步。',
+            summary: '已暂停——宽限期内没跑完，这一步先断了（进度不受影响）。',
+          },
+          success: true,
+          outcome: 'paused',
+          duration: 0,
+        };
+      } else {
+        executed = {
+          id: call.id,
+          toolName: call.function.name,
+          error: message || 'unknown',
+          success: false,
+          duration: 0,
+        };
+      }
     } finally {
       if (path) lockManager.release(path);
     }
