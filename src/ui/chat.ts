@@ -3182,6 +3182,22 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       releaseSupersededTurn();
       return;
     }
+    // 提交即落盘（2026-09-26 用户定调）：新会话的第一条消息一发出去，磁盘上
+    // 立刻有这张卡（标题=输入前几个字，见 extractTitle），侧栏不再等首回合
+    // 跑完——流停与回合落盘之间的消失窗口也一并焊死。只在会话尚无历史时
+    // 做：后续回合结束时本来就有全量重写，别每回合双写。
+    if (!this.hasHistory) {
+      void this.persistSession(
+        limitMessageHistory([
+          ...this.messages,
+          { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments },
+        ]),
+        new Map<string, ToolExecMeta>(),
+        [],
+        sendSessionId,
+        sendWorkspace,
+      );
+    }
     linkifyPaths(userBubble);
     // Background sessions run their auto-continue chains inside the same
     // shared scroll container: yanking the viewport here used to drag the

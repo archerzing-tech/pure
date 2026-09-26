@@ -52,6 +52,7 @@ describe('SessionSidebar load() 进入契约', () => {
     opened: string[];
     live: Set<string>;
     messagesOf: (id: string) => unknown[];
+    streamingOf: (id: string) => boolean;
   }
 
   function makeSidebar(overrides: {
@@ -62,6 +63,7 @@ describe('SessionSidebar load() 进入契约', () => {
       opened: [],
       live: new Set<string>(),
       messagesOf: () => [],
+      streamingOf: () => false,
     };
     const events: string[] = [];
     const refreshes: number[] = [];
@@ -72,7 +74,10 @@ describe('SessionSidebar load() 进入契约', () => {
       openSession: (sessionId: string) => {
         state.opened.push(sessionId);
         return {
-          controller: { getMessages: () => state.messagesOf(sessionId) } as never,
+          controller: {
+            getMessages: () => state.messagesOf(sessionId),
+            isStreaming: () => state.streamingOf(sessionId),
+          } as never,
           host: document.createElement('div'),
           warm: state.live.has(sessionId),
         };
@@ -131,6 +136,23 @@ describe('SessionSidebar load() 进入契约', () => {
     expect(second.state.opened).toEqual(['session_live_running']);
     expect(second.events).toContain('focusPrompt');
     expect(second.events).not.toContain('landing');
+  });
+
+  it('预检窗口切回（无消息但在跑）：留在转写视图，绝不能被 landing 盖掉（2026-09-26 用户反馈）', async () => {
+    // send() 里用户消息要等引擎交接才进 modelContext——路由/预检的几秒里
+    // getMessages() 为空但回合已在跑。这时切走再切回，空白判定必须看
+    // isStreaming()，否则转写被 landing 顶掉。
+    const { sidebar, state, events } = makeSidebar({
+      chat: { hasOpenSession: (id) => id === 'session_preflight' },
+    });
+    state.live.add('session_preflight');
+    state.streamingOf = (id) => id === 'session_preflight';
+
+    await sidebar.load('session_preflight');
+
+    expect(state.opened).toEqual(['session_preflight']);
+    expect(events).toContain('focusPrompt');
+    expect(events).not.toContain('landing');
   });
 
   it('死卡（磁盘无、live 无）：点击触发列表刷新，把死条目清掉而不是永久无响应', async () => {

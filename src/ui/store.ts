@@ -1245,13 +1245,17 @@ export async function deleteAllSessions(): Promise<void> {
   } catch { /* ignore */ }
 }
 
-/** Derive a session title from its transcript: first user message, else a
- * placeholder. Exported so live-but-unpersisted sessions (running first turn)
- * can render the SAME title in the sidebar that persistence will give them. */
+/** Derive a session title from its transcript: first user message truncated to
+ * 6 characters (ellipsis when longer), else a placeholder. Exported so
+ * live-but-unpersisted sessions (running first turn) can render the SAME title
+ * in the sidebar that persistence will give them — and so 提交即落盘 makes that
+ * title appear the moment the user hits send (2026-09-26 用户定调：标题取输入
+ * 前 5-6 个字，太长省略；TS/Rust 两侧同规则，Rust 侧见 lib.rs extract_title). */
 export function extractTitle(messages: Message[]): string {
   const firstUser = messages.find(m => m.role === 'user' && m.content);
   if (firstUser?.content) {
-    return firstUser.content.slice(0, 60);
+    const chars = Array.from(firstUser.content);
+    return chars.slice(0, 6).join('') + (chars.length > 6 ? '…' : '');
   }
   return 'New chat';
 }

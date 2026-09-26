@@ -14068,12 +14068,14 @@ fn cleanup_all_session_files(dir: &std::path::Path, session_ids: &[String]) -> R
     Ok(())
 }
 
+// 标题取首条用户消息前 6 个字（超长加省略号）——与 TS 侧 extractTitle 同一
+// 规则（2026-09-26 用户定调），两侧不一致会出现落盘前后标题跳变。
 fn extract_title(messages: &[serde_json::Value]) -> String {
     for m in messages {
         if m.get("role").and_then(|r| r.as_str()) == Some("user") {
             if let Some(content) = m.get("content").and_then(|c| c.as_str()) {
-                let title: String = content.chars().take(60).collect();
-                return if title.len() < content.len() {
+                let title: String = content.chars().take(6).collect();
+                return if content.chars().count() > 6 {
                     format!("{}…", title)
                 } else {
                     title

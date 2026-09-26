@@ -332,7 +332,11 @@ export class SessionSidebar {
     this.deps.pasteChips.clear();
     this.setActive(id);
     this.deps.onSessionActivated();
-    if (opened.controller.getMessages().length === 0) this.deps.onChatCleared();
+    // 空白判定必须是「无消息且没在跑」：send() 里用户消息要等引擎交接才进
+    // modelContext，预检窗口内 getMessages() 为空但回合已经在跑——只看消息
+    // 会把正在进行的回合误判成空白卡，切回来被 landing 盖掉转写（2026-09-26
+    // 用户反馈「切回正在运行的会话显示不出来」）。
+    if (opened.controller.getMessages().length === 0 && !opened.controller.isStreaming()) this.deps.onChatCleared();
     else this.deps.focusPrompt();
   }
 

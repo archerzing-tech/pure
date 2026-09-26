@@ -191,9 +191,10 @@ describe('session chat manager (multi-session background execution)', () => {
     const running = manager.getRunningLiveSessions();
     expect(running).toHaveLength(1);
     expect(running[0].id).toBe('session-flight');
-    // Same title rule persistence will apply, so the live sidebar entry the
-    // user sees now matches the disk row that replaces it later.
-    expect(running[0].title).toBe('用canvas画一只会飞的小鸟');
+    // Same title rule persistence will apply (first 6 chars + ellipsis,
+    // 2026-09-26 用户定调), so the live sidebar entry the user sees now
+    // matches the disk row that replaces it later.
+    expect(running[0].title).toBe('用canva…');
 
     (flight.controller as any).setStreaming(false);
     expect(manager.getRunningLiveSessions()).toHaveLength(0);
