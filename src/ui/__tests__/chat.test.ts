@@ -991,7 +991,7 @@ describe('plan overview completion state', () => {
     }
     // 折入 / steer / 队列路径通过方法参数收场 ack。
     expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null, cancels = false)')).toBeGreaterThan(-1);
-    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null, target: SteerTarget = \'parent\')')).toBeGreaterThan(-1);
+    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null, target: SteerTarget = \'parent\', cancel = false)')).toBeGreaterThan(-1);
   });
 
   it('honors the confidence gate in the interject path: destructive doubt asks, never aborts', () => {
@@ -1161,8 +1161,9 @@ describe('plan overview completion state', () => {
     const override = taskBody.indexOf('cancelsPart === true');
     expect(taskBody.indexOf('this.foldInScopeAddition(text, images, displayText, false, ack, true)', override)).toBeGreaterThan(-1);
     // 委派未出生的窗口（2026-09-26）：转达引擎的调用挂 null ack——收执由
-    // 挂号处用取消口径的话说（「还没派的不会派出去」），不再用泛泛的"已转达"。
-    expect(taskBody.indexOf('this.steerRunningTurn(text, images, null)', override)).toBeGreaterThan(-1);
+    // 挂号处用取消口径的话说（「还没派的不会派出去」），不再用泛泛的"已转达"；
+    // cancel=true 走取消专用注入框架（"手头的活继续"会把取消引导成计划照旧）。
+    expect(taskBody.indexOf("this.steerRunningTurn(text, images, null, 'parent', true)", override)).toBeGreaterThan(-1);
     expect(taskBody.indexOf('this.queueInterjectTask(', override)).toBeGreaterThan(taskBody.indexOf('if (decision.signals.cancelsPart === true)', override));
   });
 
@@ -1183,6 +1184,13 @@ describe('plan overview completion state', () => {
     expect(taskBody.split('this.pendingCancels.push(text)').length - 1).toBe(2);
     // 无委派窗的收执说人话：没派的不会派，不是泛泛的"已转达"。
     expect(src.indexOf('这项不调研了：还没派的不会派出去，也不会进最终汇总。')).toBeGreaterThan(-1);
+    // 叙述一致性（2026-09-26 用户反馈）：取消型插话的转达走取消专用框架——
+    // 通用框架「手头的活继续」会把取消引导成"计划照旧"，模型照数三支，
+    // 收执说"不派了"、计划书里三支全名，自相矛盾。两处挂号调用都带 cancel=true。
+    expect(src.indexOf('cancel = false')).toBeGreaterThan(-1);
+    expect(src.indexOf('用户收掉了一个方向/话题')).toBeGreaterThan(-1);
+    expect(src.indexOf('只数实际会派的支')).toBeGreaterThan(-1);
+    expect(src.split("this.steerRunningTurn(text, images, null, 'parent', true)").length - 1).toBe(2);
     // 起飞闸接进引擎配置：区分词匹配 + 命中即拦 + 挂号一次性消费。
     expect(src.indexOf('gateDelegations: async (calls) =>')).toBeGreaterThan(-1);
     expect(src.indexOf('const matched = matchInFlightBranch(cancelText, remaining);')).toBeGreaterThan(-1);

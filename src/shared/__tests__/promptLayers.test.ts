@@ -82,6 +82,11 @@ describe('L1 behavior contracts', () => {
     // 部分产出不进合并，一句话交代取消与出结果的部分。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('named branch of parallel or delegated work cancelled mid-run');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('surviving branches keep running untouched');
+    // 派出前取消（2026-09-26 用户反馈）：计划当场缩，叙述只数会派的支并
+    // 同一口气点名弃掉的方向——收执说"不派了"、计划书却照数三支是自相矛盾。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('cancelled before its delegation even exists');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('count what you will actually dispatch');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('never announce the dropped one as still on the list');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('stays out of the final merge');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('the merge covers the survivors only');
   });

@@ -2565,7 +2565,7 @@ export class ChatController {
           // 不是唯一手段）。收执说清"没派的不会派"，别用泛泛的"已转达"。
           echoUserBubble();
           this.pendingCancels.push(text);
-          this.steerRunningTurn(text, images, null);
+          this.steerRunningTurn(text, images, null, 'parent', true);
           this.settleAck(ack, '好——这项不调研了：还没派的不会派出去，也不会进最终汇总。');
           return;
         }
@@ -2612,7 +2612,7 @@ export class ChatController {
           // 委派还没出生（2026-09-26 用户实测窗口）：话挂起飞闸 + 转达父引擎。
           echoUserBubble();
           this.pendingCancels.push(text);
-          this.steerRunningTurn(text, images, null);
+          this.steerRunningTurn(text, images, null, 'parent', true);
           this.settleAck(ack, '好——这项不调研了：还没派的不会派出去，也不会进最终汇总。');
           return;
         }
@@ -2719,11 +2719,17 @@ export class ChatController {
    * (smallest action, state what changed/stays, never discard finished work).
    * 1a 定向投递：target='parent' 走父引擎；委派在飞时是 'all'（广播）或点名
    * 某一支（直达，其余照跑）。收执按目的地说清楚话去了哪，别让用户猜。 */
-  private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null, target: SteerTarget = 'parent'): void {
+  private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null, target: SteerTarget = 'parent', cancel = false): void {
     this.pendingSteers.push({
       message: {
         role: 'user',
-        content: `【用户插话·顺路带上】${text}\n（这是任务进行中的插话，不是新任务：按 <insertion_protocol> 判断它影响什么，选最小动作，手头的活继续。）`,
+        // 取消型插话用专用框架（2026-09-26 用户反馈）：通用框架的「选最小
+        // 动作，手头的活继续」会把取消引导成"计划照旧"——模型照数三支，
+        // 叙述与闸的实际拦截自相矛盾（收执说不会派、计划书里三支全名）。
+        // 框架直接教它：计划当场缩，说话只数会派的支，弃掉的方向点名交代。
+        content: cancel
+          ? `【用户插话·顺路带上】${text}\n（这是任务进行中的取消，不是新任务：用户收掉了一个方向/话题。它不进计划、不派工、不进最终汇总——你现在规划或复述计划时，只数实际会派的支，明说：原规划几路、用户收掉了哪路、现在实际派出哪几路；别再把被收掉的方向当作仍在计划里的一路，也不要再为它派工。其余工作照常。）`
+          : `【用户插话·顺路带上】${text}\n（这是任务进行中的插话，不是新任务：按 <insertion_protocol> 判断它影响什么，选最小动作，手头的活继续。）`,
         images,
       },
       target,
