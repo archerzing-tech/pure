@@ -15,3 +15,7 @@ public/
 
 .freebuff/
 .claude/
+
+# 本地体检/回放脚本的临时产物与工作区（scripts/tmp-*.ts 的 --out 默认落点、
+# coding-testset 的 python venv 与 workspace），不该进版本库。
+tmp/
