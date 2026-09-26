@@ -675,7 +675,12 @@ export class SubagentOrchestrator implements ToolAdapter {
             // ABORT_REASON）都要点这支的火，只有 reason 分得开两者终态。
             // 产出不入账、断点照存、可另起续——两条路共享这组语义。
             if (isBranchAbort(branchController.signal)) {
-              const branchAbortNote = 'The user STOPPED this subtask mid-run. Its progress is saved; it will NOT be counted toward the overall task. To continue it later, re-delegate the SAME subtask with identical arguments — it will resume from its checkpoint, not start over.';
+              // 2026-09-26 大bug 复盘：note 是给父模型的行动指引，不是机制
+              // 说明书。"To continue it later, re-delegate…" 被父模型读成
+              // "该重派"，等兄弟支一交付就自作主张去续用户亲手停掉的支。
+              // 用户的去留是用户的决定：默认不重派、不等它，只有用户明确
+              // 要续才重派（机制本身不变——同参重派仍从存档续）。
+              const branchAbortNote = 'The user STOPPED this subtask mid-run — their deliberate choice to drop it. Do NOT re-delegate it and do NOT wait for it: it will NOT be counted toward the overall task. Proceed with the remaining work without it and note the stop in the final summary. Only re-delegate the SAME subtask (it resumes from its checkpoint, not start over) if the user EXPLICITLY asks to continue this branch later.';
               machine.apply('abort', { abortCause: 'user-branch' });
               // 用户叫停不是失败（2026-09-25 复测）：success:false 曾把
               // "Error: undefined" 喂给父模型、触发失败策略、让汇总把
@@ -690,18 +695,22 @@ export class SubagentOrchestrator implements ToolAdapter {
                 duration: done(0),
               };
             }
-            // 阶段 12 pause: the parent aborted with the pause reason — this is
-            // NOT a cancellation. The archive above (subagent_interrupted) is
-            // exactly the resume point; the stable sessionId guarantees a
-            // re-delegation of the same subtask lands back here. Tell the UI
-            // (paused card state) and the parent model (re-delegate hint)
-            // instead of reporting a failure.
+            // 阶段 12 pause: the pause reason on any of the three signals —
+            // NOT a cancellation. 哪个信号带 reason 决定 note 的去向：
+            // parentSignal 被暂停 = 整轮暂停，「继续」条承诺子 agent 从存档
+            // 续，恢复后父模型同参重派是对的，note 保留续跑指引；只有
+            // branchController 带 reason = 用户点名收掉这一支，去留是用户的
+            // 决定（2026-09-26 大bug：旧文案 "to continue, re-delegate" 被父
+            // 模型读成行动指令，兄弟支一交付就去续用户亲手暂停的支）。
             if (isPauseAbort(parentSignal) || isPauseAbort(combinedSignal) || isPauseAbort(branchController.signal)) {
-              const pausedNote = 'The user PAUSED this subtask mid-run. Its progress is saved; to continue, re-delegate the SAME subtask with identical arguments — it will resume from its checkpoint, not start over.';
+              const pausedNote = isPauseAbort(parentSignal)
+                ? 'The whole conversation turn was PAUSED by the user. This subtask\'s progress is saved; when the turn resumes, re-delegate the SAME subtask with identical arguments — it will resume from its checkpoint, not start over.'
+                : 'The user PAUSED this subtask mid-run — their deliberate choice to drop it from the current run. Do NOT re-delegate it and do NOT wait for it: proceed with the remaining work without it and mention the pause in the final summary. Only if the user EXPLICITLY asks to continue this branch later should you re-delegate the SAME subtask (it resumes from its checkpoint, not start over).';
               machine.apply('pauseSettled');
               // 同上：暂停不是失败，也不进失败策略。outcome:'paused' 是
-              // 界面的静音标识（灰卡 ⏸，不是红 ✗），reason 仍告诉父模型
-              // "同参重派即断点续跑"。
+              // 界面的静音标识（灰卡 ⏸，不是红 ✗）；reason 对整轮暂停是
+              // "恢复后同参重派即断点续跑"，对点名暂停是"别重派，等用户
+              // 发话"。
               emit(progress?.onDone, { success: true, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
               return {
                 id: toolCall.id,

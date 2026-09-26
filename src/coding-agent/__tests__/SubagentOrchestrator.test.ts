@@ -606,6 +606,8 @@ describe('SubagentOrchestrator pause (阶段 12)', () => {
     expect(payload.aborted).toBe(true);
     expect(payload.outcome).toBe('paused');
     expect(String(payload.reason)).toContain('PAUSED');
+    // 整轮暂停：「继续」条承诺子 agent 从存档续——恢复指引必须保留。
+    expect(String(payload.reason)).toContain('re-delegate');
     const paused = seen.find((a) => a.status === 'paused');
     expect(paused).toBeDefined();
     expect(paused!.lifecycle).toBe('paused');
@@ -1020,6 +1022,10 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     expect(String(payload.reason)).toContain('PAUSED');
     expect(String(payload.reason)).not.toContain('STOPPED');
     expect(String(payload.reason)).not.toContain('timed out');
+    // 2026-09-26 大bug：点名暂停的 note 绝不能唆使父模型自动重派——
+    // "可续"是留给用户发话的机制说明，不是父模型的行动指令。
+    expect(String(payload.reason)).toContain('Do NOT re-delegate');
+    expect(String(payload.reason)).not.toContain('to continue, re-delegate');
     const card = seen.find((a) => a.callId === 'call_pauseme' && a.status);
     expect(card?.status).toBe('paused');
     // 断点在结算前已落盘（persist-before-settle），想续随时同参重派。
