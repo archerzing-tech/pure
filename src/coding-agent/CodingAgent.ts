@@ -311,20 +311,27 @@ export class CodingAgent {
         durationMs: a.durationMs,
         tokensUsed: a.tokensUsed,
         resumed: a.resumed,
+        attempt: a.attempt,
+        cause: a.retryCause,
+        // 第 2 期第四刀：中断结局随一等事件走（'stopped' = 点名停掉/整树取消，
+        // 'paused' = 收掉一项先暂停）。
+        outcome: a.status === 'paused' ? 'paused' : a.status === 'cancelled' ? 'stopped' : undefined,
       });
     };
     return {
-      onStart: (a) => { publish(a, 'start'); ui?.onStart?.(a); },
+      // 第 2 期第四刀：命中 checkpoint 的续跑额外发一条 branch_resumed 一等
+      // 事件（面板/turn 账靠它认血缘），start 本身照发——卡片与 trace 不变。
+      onStart: (a) => { publish(a, 'start'); if (a.resumed) publish(a, 'branch_resumed'); ui?.onStart?.(a); },
       // 北极星第二步: a steer receipt rides the onState channel but bridges as
       // its own event kind so the transcript card can render 📨, not a state blip.
-      onState: (a) => { publish(a, a.lifecycle === 'steered' ? 'steered' : a.lifecycle === 'waiting' ? 'waiting' : 'state'); ui?.onState?.(a); },
+      onState: (a) => { publish(a, a.lifecycle === 'steered' ? 'steered' : a.lifecycle === 'waiting' ? 'waiting' : a.lifecycle === 'retrying' ? 'branch_retrying' : 'state'); ui?.onState?.(a); },
       onTool: (a) => { publish(a, 'tool'); ui?.onTool?.(a); },
       // 阶段 12: a pause lands on the onDone channel (it IS terminal for this
-      // run) but must not read as "✓ 交付" or "✗ 中断" on the transcript card
-      // — bridge it as its own event kind so consumers can render ⏸.
-      // 分支取消（2026-09-25）同理：⏹ 自己的行，绝不冒充交付。
-      onDone: (a) => { publish(a, a.status === 'paused' ? 'paused' : a.status === 'cancelled' ? 'cancelled' : 'done'); ui?.onDone?.(a); },
-      onError: (a) => { publish(a, a.status === 'paused' ? 'paused' : a.status === 'cancelled' ? 'cancelled' : 'error'); ui?.onError?.(a); },
+      // run) but must not read as "✓ 交付" or "✗ 中断" on the transcript card.
+      // 第 2 期第四刀：暂停与停掉统一成一等事件 branch_aborted（结局在
+      // outcome 里：paused / stopped），卡片/ trace 按 outcome 分好 ⏸ 与 ⏹。
+      onDone: (a) => { publish(a, a.status === 'paused' || a.status === 'cancelled' ? 'branch_aborted' : 'done'); ui?.onDone?.(a); },
+      onError: (a) => { publish(a, a.status === 'paused' || a.status === 'cancelled' ? 'branch_aborted' : 'error'); ui?.onError?.(a); },
     };
   }
 

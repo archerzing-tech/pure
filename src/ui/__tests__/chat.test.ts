@@ -1195,12 +1195,39 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('用户收掉了一个方向/话题')).toBeGreaterThan(-1);
     expect(src.indexOf('只数实际会派的支')).toBeGreaterThan(-1);
     expect(src.split("this.steerRunningTurn(text, images, null, 'parent', true)").length - 1).toBe(2);
-    // 起飞闸接进引擎配置：区分词匹配 + 命中即拦 + 挂号一次性消费。
+    // 起飞闸接进引擎配置：候选集由宿主备好，匹配与消费在纯函数
+    // planTakeoffGate（与测试共用同一套纪律）。
     expect(src.indexOf('gateDelegations: async (calls) =>')).toBeGreaterThan(-1);
-    expect(src.indexOf('const matched = matchInFlightBranch(cancelText, remaining);')).toBeGreaterThan(-1);
-    expect(src.indexOf('this.pendingCancels = this.pendingCancels.filter((t) => t !== cancelText);')).toBeGreaterThan(-1);
+    expect(src.indexOf('const { blocked, consumed } = planTakeoffGate(')).toBeGreaterThan(-1);
+    expect(src.indexOf('cancelReceiptTopic, planTakeoffGate')).toBeGreaterThan(-1);
     // 挂号不跨回合：finalize 与 new chat 两条清扫都要在。
     expect(src.split('this.pendingCancels = [];').length - 1).toBeGreaterThanOrEqual(2);
+  });
+
+  it('clears same-named branches queued but not yet airborne (第 2 期「排队未起飞的同名支」)', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 层定位：委派起飞闸。池内调用一起开跑（不存在"排在池里"的委派），
+    // relay 下游由 fail-fast 管；真正「已排队、还没起飞」的委派只有一种
+    // ——下一批次里父又派的那一支。所以停支的效力不只落在在飞那支：
+    // 用户原话同时挂上同一道起飞闸，同回合的重派在出生点就被拦下。
+    expect(src.indexOf('private pendingBranchStops: Array<{ text: string; label: string }> = [];')).toBeGreaterThan(-1);
+    const stopFn = src.indexOf('private stopNamedBranch(text: string, mode:');
+    expect(stopFn).toBeGreaterThan(-1);
+    const stopBody = src.slice(stopFn, src.indexOf('private resumeNamedBranch(', stopFn));
+    expect(stopBody.indexOf('if (!this.pendingBranchStops.some((s) => s.text === text)) this.pendingBranchStops.push({ text, label });')).toBeGreaterThan(-1);
+    // 两个停支入口（祈使停 + 取消型暂停）共用 stopNamedBranch，因此共用这道闸。
+    expect(src.split("this.stopNamedBranch(text, pause ? 'pause' : 'abort')").length - 1).toBe(1);
+    expect(src.split("this.stopNamedBranch(text, 'pause')").length - 1).toBe(1);
+    // 闸读两本挂号簿：停支的那本按 kind='stopped-branch' 出另一套收据。
+    expect(src.indexOf('this.pendingBranchStops.map((s) => s.text)')).toBeGreaterThan(-1);
+    expect(src.indexOf('this.pendingBranchStops = this.pendingBranchStops.filter((s) => !consumed.includes(s.text));')).toBeGreaterThan(-1);
+    // 合成重派豁免：resume_/foldin_ 承载用户**最新**的话（「接着跑」「再加
+    // 一个」），旧挂号无权否决——与挂号不跨回合同源纪律。
+    expect(src.indexOf("!c.id.startsWith('resume_') && !c.id.startsWith('foldin_')")).toBeGreaterThan(-1);
+    // 随回合清空（与 pendingCancels 同命）：回合收尾与 new chat 两条清扫都
+    // 要在——控制器跨会话单例，new chat 不摘簿子，旧会话的停支挂号会闯进
+    // 新会话把同话题的委派误杀在出生点。
+    expect(src.split('this.pendingBranchStops = [];').length - 1).toBeGreaterThanOrEqual(2);
   });
 
   it('re-delegates a NAMED paused branch with its original args (第 2 期第三刀)', () => {
@@ -1236,6 +1263,20 @@ describe('plan overview completion state', () => {
     expect(src.slice(dispatch, dispatch + 900).indexOf('this.settlePendingResumes()')).toBeGreaterThan(-1);
     // 分类器判据输入：暂停/已停的支作为可续跑候补喂给分类器（否则它看不见）。
     expect(src.indexOf('已暂停/已停的支（用户点名可让它们接着跑）')).toBeGreaterThan(-1);
+  });
+
+  it('records branch events into the turn ledger (第 2 期第四刀)', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 一等分支事件落进本回合的分支账（turnTimings.branches），随 turn finally
+    // 与 stats 一起入盘——事件、活动面板、账三个消费者同源。
+    const activityCase = src.indexOf("case 'SubagentActivity': {");
+    expect(activityCase).toBeGreaterThan(-1);
+    const body = src.slice(activityCase, activityCase + 2_000);
+    expect(body.indexOf("activity.kind === 'branch_aborted'")).toBeGreaterThan(-1);
+    expect(body.indexOf("activity.kind === 'branch_resumed'")).toBeGreaterThan(-1);
+    expect(body.indexOf("activity.kind === 'branch_retrying'")).toBeGreaterThan(-1);
+    expect(body.indexOf('turnTiming.branches ??= [];')).toBeGreaterThan(-1);
+    expect(body.indexOf('turnTiming.branches.push(')).toBeGreaterThan(-1);
   });
 
   it('background sessions never yank the shared scroll container', () => {

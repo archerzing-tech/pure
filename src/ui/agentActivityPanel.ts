@@ -51,6 +51,9 @@ export function isAgentActivityActive(activity: SessionAgentActivity): boolean {
     || activity.lifecycle === 'tool_running'
     || activity.lifecycle === 'observing'
     || activity.lifecycle === 'verifying'
+    // 第 2 期第四刀：自愈重试中的支仍在干活——它只是在自己纠错，不能被
+    // 归进已完成队列（那会把亮灯的卡片当死卡）。
+    || activity.lifecycle === 'retrying'
     || (!activity.lifecycle && (!activity.status || activity.status === 'running'));
 }
 
@@ -186,7 +189,13 @@ export function createAgentActivityPanel(
         entry = { row, badge, name, time };
         rows.set(activity.callId, entry);
       }
-      entry.row.className = `agent-worker agent-worker--${state}${entering ? ' agent-worker--entering' : ''}`;
+      // 第 2 期第四刀：分支事件在轨道卡上亮灯——续跑带一个安静的强调色，
+      // 自愈重试带一个脉冲（活性不靠文字，守住三行的卡片契约）。
+      const retrying = activeNow && (activity.attempt ?? 0) > 0;
+      entry.row.className = `agent-worker agent-worker--${state}`
+        + (entering ? ' agent-worker--entering' : '')
+        + (retrying ? ' agent-worker--retrying' : '')
+        + (activity.resumed ? ' agent-worker--resumed' : '');
       // Row 2: the machine id in FULL (web_searcher / code_reviewer / …) —
       // wraps instead of ellipsizing so the exact agent is always readable.
       entry.name.replaceChildren();
@@ -200,7 +209,11 @@ export function createAgentActivityPanel(
         idChip.title = 'Agent 运行 ID：报错或异常时引用它定位这个 agent';
         entry.name.append(idChip);
       }
-      entry.row.title = activity.agentRole || activity.agentName;
+      entry.row.title = [
+        activity.agentRole || activity.agentName,
+        activity.resumed ? '续跑（命中存档断点）' : '',
+        retrying ? `自愈重试第 ${activity.attempt} 次` : '',
+      ].filter(Boolean).join(' · ');
       entry.time.textContent = startedClock(activity.startedAt);
       list.appendChild(entry.row);
     }

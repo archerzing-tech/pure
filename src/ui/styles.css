@@ -1223,6 +1223,21 @@ body {
 }
 .agent-worker--paused,
 .agent-worker--cancelled { opacity: .72; }
+/* 第 2 期第四刀：分支事件亮灯。续跑（命中存档断点）用一圈内虚线——虚线是
+   outline，不跟 active 的呼吸动画抢 border/box-shadow。自愈重试用琥珀色脉冲
+   （它是"在纠错"，不是"在干活"，与青色呼吸区分开）。 */
+.agent-worker--resumed {
+  outline: 1px dashed color-mix(in srgb, #22d3ee 60%, transparent);
+  outline-offset: -2px;
+}
+.agent-worker--retrying {
+  border-color: color-mix(in srgb, #f59e0b 65%, var(--border-light));
+  animation: agentWorkerRetry 1.2s ease-in-out infinite;
+}
+@keyframes agentWorkerRetry {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0), var(--shadow-md); }
+  50% { box-shadow: 0 0 12px 0 rgba(245, 158, 11, 0.34), var(--shadow-md); }
+}
 .agent-worker--done { border-color: color-mix(in srgb, var(--success) 30%, var(--border-light)); }
 .agent-worker--failed,
 .agent-worker--timed-out { border-color: color-mix(in srgb, var(--danger) 36%, var(--border-light)); }
@@ -1290,6 +1305,7 @@ body {
   .agent-worker--entering { animation: none; }
   .agent-worker--active { animation: none; }
   .agent-worker--active .agent-worker-badge { animation: none; }
+  .agent-worker--retrying { animation: none; border-color: color-mix(in srgb, #f59e0b 65%, var(--border-light)); }
 }
 
 /* ── Narrow windows: the rail overlays the conversation, so it shrinks —

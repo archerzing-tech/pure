@@ -63,7 +63,7 @@ export interface SessionAgentActivity {
    * progress is archived and it resumes from its checkpoint on re-delegation.
    * 'steered' (北极星第二步): momentary steer receipt — the run continues.
    * 'waiting': provider silent ≥30s (queue/stall) — alive, not dead. */
-  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused' | 'steered' | 'waiting';
+  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused' | 'steered' | 'waiting' | 'retrying';
   /** Monotonic progress sequence for rejecting late concurrent updates. */
   sequence?: number;
   /** Epoch ms when this activity snapshot was emitted. */
@@ -80,6 +80,9 @@ export interface SessionAgentActivity {
   /** 分支级继续（第 2 期第三刀）：本次委派命中 checkpoint = 续跑，卡片带
    *  续跑徽标；随快照落盘，恢复后仍可辨认。 */
   resumed?: boolean;
+  /** 第 2 期第四刀：见过的最新自愈重试轮次（lifecycle 回到 started 后仍保留
+   *  ——轨道卡据此亮灯，告诉用户"它在自己纠错"而不是卡住）。 */
+  attempt?: number;
   startedAt?: number;
   timeoutMs?: number;
   parentCallId?: string;
@@ -651,6 +654,26 @@ export interface TurnTiming {
   contextMs: number | null;
   /** Send → turn end (completed, failed, or aborted). */
   totalMs: number | null;
+  /** 第 2 期第四刀：本回合的分支账——一等分支事件落成的流水（叫停/续跑/
+   *  自愈重试）。没有分支事件就不写字段（"无话可说"与"零事件"分开）。 */
+  branches?: BranchEventRecord[];
+}
+
+/** 一条分支事件记录（第 2 期第四刀）：分支事件一等化后的落账形态。 */
+export interface BranchEventRecord {
+  /** Epoch ms of the event. */
+  at: number;
+  /** Delegation toolCallId that spawned the branch. */
+  callId: string;
+  agentName: string;
+  /** 分支事件种类（与 SubagentActivityEvent.kind 对应）。 */
+  kind: 'branch_aborted' | 'branch_resumed' | 'branch_retrying';
+  /** branch_aborted 的结局；其他种类不带。 */
+  outcome?: 'paused' | 'stopped';
+  /** branch_retrying 的轮次。 */
+  attempt?: number;
+  /** branch_retrying 的原因摘要。 */
+  cause?: string;
 }
 
 export interface SessionStats {

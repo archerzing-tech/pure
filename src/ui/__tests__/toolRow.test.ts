@@ -727,6 +727,15 @@ describe('tool row renders generated images as <img> cards', () => {
         // 不是失败：tooltip 保持建行时的角色提示，没有失败原因。
         expect(String(row.details.title ?? '')).not.toContain('已暂停');
       }
+      // 回放重建的孤儿暂停卡（结算 ToolResult 没赶上落盘）duration=0：
+      // 裸 ⏸，不要 "⏸ 0ms" 这种噪音（第四刀收尾）。
+      const rebuilt = createToolRow('researcher', { topic: '竞品分析' });
+      finalizeToolRow(rebuilt, { success: true, outcome: 'paused', duration: 0, resultText: '已暂停，进度已存档（重派同一任务可续）' });
+      expect(rebuilt.statusEl.textContent).toBe('⏸');
+      // 中断结算卡不补「已完成，未产出文本结果」——那句话和"已暂停"自相矛盾。
+      const rebuiltBody = Array.from(rebuilt.resultEl.children as any as any[]).map((c: any) => c.textContent ?? '').join('');
+      expect(rebuiltBody).not.toContain('已完成，未产出文本结果');
+      expect(rebuiltBody).toContain('已暂停，进度已存档');
     } finally {
       restore();
     }
@@ -894,6 +903,23 @@ describe('formatSubagentTraceLine (delegation card interior trace)', () => {
       .toBe('✓ code_reviewer 交付 · 用时 1.5s');
     expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'error', error: 'budget exhausted' }))
       .toBe('✗ code_reviewer 中断：budget exhausted');
+  });
+
+  it('第 2 期第四刀：branch_aborted 按 outcome 分 ⏸/⏹，branch_retrying 有行，branch_resumed 不重复', () => {
+    // 暂停与停掉共用一个一等事件 branch_aborted，结局在 outcome——用户的决定
+    // 不是失败；自愈重试原来完全不可见，现在必须有一行。
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'researcher', kind: 'branch_aborted', outcome: 'paused' }))
+      .toBe('⏸ researcher 已暂停（进度已存档，点「继续」接着跑）');
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'researcher', kind: 'branch_aborted', outcome: 'stopped' }))
+      .toBe('⏹ researcher 已按你的要求停止（进度已存档，重派同一任务可续）');
+    // 缺 outcome 的历史/兜底形态按停掉渲染（不冒充交付）。
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'researcher', kind: 'branch_aborted' }))
+      .toContain('⏹ researcher');
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'researcher', kind: 'branch_retrying', attempt: 3, cause: 'transient 503' }))
+      .toBe('🔄 researcher 自愈重试（第 3 次）——transient 503');
+    // 续跑已由 start 行的（续跑·从存档断点）呈现，这里不再添重复行。
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'researcher', kind: 'branch_resumed', resumed: true }))
+      .toBeNull();
   });
 
   it('第 2 期第三刀：命中 checkpoint 的续跑支——血缘号从第一行就说清不是从头跑', () => {

@@ -117,6 +117,59 @@ describe('ToolExecutionCoordinator relay pipeline', () => {
     expect(research.result.error).toBe('provider 5xx');
   }, 5_000);
 
+  it('a paused upstream fails its consumer fast instead of feeding it the interruption snapshot (第 2 期第四刀)', async () => {
+    // 被用户点名暂停的上游支结算体是 success:true + outcome（用户的决定不是
+    // 失败）——旧判定只看 success，下游会拿着中断快照（finalOutput 常为空）
+    // 继续跑，甚至把结算体 JSON 当成 input。第四刀：中断上游同样算「死」，
+    // 下游立即以明确错误落定，不挂死。
+    const coordinator = new ToolExecutionCoordinator();
+    let plannerRan = false;
+    const ctx = makeContext(async (tc) => {
+      if (tc.function.name === 'researcher') {
+        return {
+          id: tc.id, toolName: tc.function.name, success: true, duration: 1,
+          result: { aborted: true, outcome: 'paused', summary: '已暂停，进度已存档', finalOutput: '' },
+        };
+      }
+      plannerRan = true;
+      return { id: tc.id, toolName: tc.function.name, result: 'ok', success: true, duration: 1 };
+    });
+
+    const results = await collect(coordinator.executeStream([
+      call('c1', 'researcher', { relay: { as: 'research' } }),
+      call('c2', 'planner', { relay: { from: { research: 'context' } } }),
+    ], ctx, BUDGET));
+
+    expect(plannerRan).toBe(false);
+    const skip = results.find((tr) => tr.toolCallId === 'c2')!;
+    expect(skip.result.success).toBe(false);
+    expect(String(skip.result.error)).toContain('被用户暂停');
+    expect(String(skip.result.error)).toContain('research');
+    // 上游自己的结算体原样保留（卡片/回放靠它读 outcome，不能被打磨）。
+    const research = results.find((tr) => tr.toolCallId === 'c1')!;
+    expect(research.result.success).toBe(true);
+    expect((research.result.result as { outcome?: string }).outcome).toBe('paused');
+  }, 5_000);
+
+  it('a stopped upstream says 停掉 rather than 暂停 in its consumer error', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const ctx = makeContext(async (tc) => (
+      tc.function.name === 'stage_a'
+        ? { id: tc.id, toolName: tc.function.name, success: true, duration: 1, result: { aborted: true, outcome: 'stopped', finalOutput: 'partial' } }
+        : { id: tc.id, toolName: tc.function.name, result: 'ok', success: true, duration: 1 }
+    ));
+
+    const results = await collect(coordinator.executeStream([
+      call('c1', 'stage_a', { relay: { as: 'a' } }),
+      call('c2', 'stage_b', { relay: { from: { a: 'input' } } }),
+    ], ctx, BUDGET));
+
+    const skip = results.find((tr) => tr.toolCallId === 'c2')!;
+    expect(skip.result.success).toBe(false);
+    expect(String(skip.result.error)).toContain('被用户停掉');
+    expect(String(skip.result.error)).not.toContain('被用户暂停');
+  }, 5_000);
+
   it('a consumer failure keeps the upstream FULL output for re-planning', async () => {
     const coordinator = new ToolExecutionCoordinator();
     const ctx = makeContext(async (tc) => (

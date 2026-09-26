@@ -56,6 +56,8 @@ describe('agent activity panel', () => {
     expect(isAgentActivityActive(activity({ lifecycle: 'done', status: 'done' }))).toBe(false);
     expect(isAgentActivityActive(activity({ lifecycle: 'failed', status: 'failed' }))).toBe(false);
     expect(isAgentActivityActive(activity({ lifecycle: 'cancelled', status: 'cancelled' }))).toBe(false);
+    // 第 2 期第四刀：自愈重试中的支仍在干活，不能被归进已完成队列。
+    expect(isAgentActivityActive(activity({ lifecycle: 'retrying' }))).toBe(true);
   });
 
   it('keeps the quotable run id as a chip on the floating card (the transcript card carries none)', () => {
@@ -322,6 +324,24 @@ describe('agent activity panel', () => {
     document.body.appendChild(panel.el);
     panel.update([activity({ lifecycle: 'tool_running', toolName: 'read_file' })], { historical: true, sessionId: 's1' });
     expect(panel.el.querySelector('[data-call-id="call-1"]')?.className).not.toContain('agent-worker--entering');
+  });
+
+  it('lights up branch events on the card: resumed gets an accent ring, retrying a pulse (第 2 期第四刀)', () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([activity({ callId: 'r', lifecycle: 'started', status: 'running', resumed: true })]);
+    expect(panel.el.querySelector('[data-call-id="r"]')?.className).toContain('agent-worker--resumed');
+
+    // 自愈重试：脉冲类 + 悬停说明第几次——卡片本身不加文字，守住三行契约。
+    panel.update([activity({ callId: 'r', lifecycle: 'started', status: 'running', resumed: true, attempt: 2 })]);
+    const row = panel.el.querySelector('[data-call-id="r"]') as HTMLElement;
+    expect(row.className).toContain('agent-worker--retrying');
+    expect(row.title).toContain('自愈重试第 2 次');
+
+    // 终态卡片不再亮灯（亮灯描述的是"正在自己纠错"）。
+    panel.update([activity({ callId: 'r', lifecycle: 'cancelled', status: 'cancelled', attempt: 2 })]);
+    expect(panel.el.querySelector('[data-call-id="r"]')?.className).not.toContain('agent-worker--retrying');
+    panel.el.remove();
   });
 
   it('never leaks an agent card across sessions on a shared panel', () => {

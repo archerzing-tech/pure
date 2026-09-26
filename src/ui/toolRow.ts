@@ -852,8 +852,9 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
     // 出生即拦（委派起飞闸）与跑过再停要一眼分得开：合成取消结果
     // duration=0、代理从未出生，状态行直说「未派出·已取消」——一张灰色
     // 委派卡光秃秃一个 ⏹ 会被读成"三个都派了"（2026-09-26 用户复测）。
+    // 暂停卡的 0ms 同理是噪音（回放重建的孤儿卡拿不到真实时长）——裸 ⏸。
     row.statusEl.textContent = meta.outcome === 'paused'
-      ? `⏸ ${formatDuration(meta.duration)}`
+      ? meta.duration > 0 ? `⏸ ${formatDuration(meta.duration)}` : '⏸'
       : meta.duration === 0 ? '⏹ 未派出·已取消' : '⏹';
   } else {
     row.details.classList.add(meta.success ? 'success' : 'failure');
@@ -953,11 +954,15 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
     // Do not change the open state here. Every row starts open, and preserving
     // the native details state lets the user's collapse/reopen choice win even
     // when a result arrives asynchronously.
-  } else if (meta.success && isSubagentTool(row.toolName)) {
+  } else if (meta.success && isSubagentTool(row.toolName) && !meta.outcome) {
     // Subagent success with no text payload: the engine's finalOutput is empty
     // when the sub-agent's last round issued tool calls (content = ""), so
     // finalize gets nothing to render. An EMPTY Output panel next to a green
     // rail card reads as a desync bug — show the handoff explicitly instead.
+    // Interrupted settlements (outcome ⏸/⏹) are excluded: their "success" is
+    // the user's own pause/stop, not a delivery — the archived-progress note
+    // from the trace line already says what happened, and an extra
+    // "已完成，未产出文本结果" would contradict it.
     const note = document.createElement('div');
     note.className = 'tool-result-empty';
     note.textContent = '子 Agent 已完成，未产出文本结果 —— 结论已直接交给主 agent 汇总。';
@@ -992,8 +997,23 @@ export function formatSubagentTraceLine(e: SubagentActivityEvent): string | null
       return `⏸ ${who} 已暂停（进度已存档，点「继续」接着跑）`;
     case 'cancelled':
       // 分支取消（2026-09-25）：同 paused 一样静音——用户的决定不是失败，
-      // 绝不能渲染成 ✗ 或冒充 ✓ 交付。
+      // 绝不能渲染成 ✗ 或冒充 ✓ 交付。（历史快照里的旧 kind，新事件走
+      // branch_aborted。）
       return `⏹ ${who} 已按你的要求停止（进度已存档，重派同一任务可续）`;
+    case 'branch_aborted':
+      // 第 2 期第四刀：暂停与停掉共一个一等事件，结局在 outcome——按它分
+      // ⏸ 与 ⏹，用户的决定不是失败。
+      return e.outcome === 'paused'
+        ? `⏸ ${who} 已暂停（进度已存档，点「继续」接着跑）`
+        : `⏹ ${who} 已按你的要求停止（进度已存档，重派同一任务可续）`;
+    case 'branch_resumed':
+      // 续跑已由 start 行（▶ …（续跑·从存档断点））呈现——这里不再添重复
+      // 行，只把这件事实作为一等事件交给 panel/turn 账记录。
+      return null;
+    case 'branch_retrying':
+      // 第 2 期第四刀：自愈重试原来完全不可见——卡片亮灯的同一件事在 trace
+      // 里也要有一行，否则用户只看到长时间卡住。
+      return `🔄 ${who} 自愈重试${e.attempt != null ? `（第 ${e.attempt} 次）` : ''}${e.cause ? `——${clipSummary(e.cause)}` : ''}`;
     case 'steered':
       // 北极星第二步: delivery receipt for a mid-run steer — the user's own
       // bubble is already on screen; this line closes the "did it land?" loop.

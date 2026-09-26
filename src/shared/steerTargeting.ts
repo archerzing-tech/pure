@@ -90,6 +90,46 @@ export function matchInFlightBranch(text: string, branches: InFlightBranch[]): I
   return bestHits > 0 && !tied ? best : null;
 }
 
+/** 起飞闸的一条拦截记录：说给协调器发合成结果用。kind 决定收据口径——
+ * 出生前被取消 vs 用户已点名停掉那一支后父又重派了一次。 */
+export interface TakeoffBlock {
+  callId: string;
+  reason: string;
+  kind: 'cancelled-before-dispatch' | 'stopped-branch';
+}
+
+/**
+ * 委派起飞闸：给一批**尚未起飞**的委派候选过闸，返回该在出生点拦下的那
+ * 几支。两群挂号共用同一套区分词匹配器、同一份纪律（只认区分性命中，打平/
+ * 认不出=放行——宁可漏拦交给父边界消化，绝不误杀）：
+ * - cancelTexts：用户赶在这支出生之前收掉它的话（'cancelled-before-dispatch'）。
+ * - stoppedTexts：用户已点名停掉某一支的话——同一回合里父若又派了一次同一
+ *   目标，那一支就是「排队未起飞」的同名支（'stopped-branch'）。真停的效力
+ *   因此不依赖父听不听话。
+ * 命中即消费（一次性）：返回的 consumed 是本次兑现掉的用户原话，调用方据此
+ * 从挂号簿里剪掉。跨回合的挂号由调用方负责清空（新一轮的「继续/再跑」是
+ * 用户最新的指令，旧挂号无权否决它）。
+ */
+export function planTakeoffGate(
+  candidates: InFlightBranch[],
+  cancelTexts: string[],
+  stoppedTexts: string[],
+): { blocked: TakeoffBlock[]; consumed: string[] } {
+  const blocked: TakeoffBlock[] = [];
+  const consumed: string[] = [];
+  if (candidates.length === 0) return { blocked, consumed };
+  const stillOpen = (): InFlightBranch[] => candidates.filter((c) => !blocked.some((b) => b.callId === c.callId));
+  const tryOne = (text: string, kind: TakeoffBlock['kind']): void => {
+    const matched = matchInFlightBranch(text, stillOpen());
+    if (!matched) return;
+    blocked.push({ callId: matched.callId, reason: text, kind });
+    consumed.push(text);
+  };
+  for (const text of cancelTexts) tryOne(text, 'cancelled-before-dispatch');
+  for (const text of stoppedTexts) tryOne(text, 'stopped-branch');
+  return { blocked, consumed };
+}
+
 /** 这条 steer 要不要「读给」这个拉取者听（复制语义：广播条目人人有份）。 */
 export function steerDeliversTo(target: SteerTarget, recipient?: SteerRecipient): boolean {
   if (target === 'all') return true;

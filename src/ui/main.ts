@@ -996,7 +996,9 @@ function hideSessionLoading(): void {
 }
 
 async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLElement) {
-  const blocks = projectCanonicalSession(snapshot.events, snapshot.transcript);
+  // 活动档案同路进投影：孤儿委派卡（结算 ToolResult 没赶上落盘）据此重建
+  // 「用户暂停/停掉」的中断结算（第四刀收尾），普通调用保持原兜底。
+  const blocks = projectCanonicalSession(snapshot.events, snapshot.transcript, snapshot.uiState?.agentActivities);
   const grouped = groupConversationTurns(blocks);
   const segments = segmentConversationTurns(grouped.turns);
   const restoreGroups = [
@@ -1071,11 +1073,17 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
         for (const item of run) {
           const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
           if (item.stopped) {
-            // Restored orphan (its turn died before any result) — same
-            // self-explaining interruption line as the live sweep, so a
-            // historical gray card never reads as an unexplained failure.
-            markToolRowStopped(row);
-            appendToolStreamLine(row, 'stdout', '本轮输出在此中断，该调用未执行完成');
+            // Restored orphan. Two species now: (a) a subagent delegation the
+            // activity ledger marks paused/cancelled — rebuild the user's
+            // interruption settlement (grey ⏸/⏹ + the archived trace) instead
+            // of a mystery card; (b) anything else keeps the historic
+            // self-explaining interruption line.
+            if (item.exec.outcome) {
+              finalizeToolRow(row, item.exec);
+            } else {
+              markToolRowStopped(row);
+              appendToolStreamLine(row, 'stdout', '本轮输出在此中断，该调用未执行完成');
+            }
           } else finalizeToolRow(row, item.exec);
           grid.appendChild(row.el);
         }

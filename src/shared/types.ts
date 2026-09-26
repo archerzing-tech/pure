@@ -265,8 +265,13 @@ export interface EngineContext {
    *  步、不守还没出生的支。宿主在每批工具调用起飞前拿到整批调用（完整候
    *  选集——区分词匹配器看到全部兄弟任务书，绝不会单支误杀），返回要拦下
    *  的 callId 与原因；协调器给这些调用直接发「用户已取消」的合成结果，
-   *  分支根本不出生。Absent ⇒ 无闸（CLI / 子代理引擎照旧）。 */
-  gateDelegations?: (calls: ToolCall[]) => Promise<Array<{ callId: string; reason: string }>>;
+   *  分支根本不出生。Absent ⇒ 无闸（CLI / 子代理引擎照旧）。
+   *  kind 决定收据口径（2026-09-26 第 2 期「排队未起飞的同名支一并清除」）：
+   *  'cancelled-before-dispatch' = 用户赶在这支出生前就收掉了它；
+   *  'stopped-branch' = 用户已点名停掉那一支，这一路是父在同一回合里又派
+   *  的一次重派——话要说明白「你已经停过它，重派被拦下，断点还在能续」。
+   *  缺省按前者（历史行为）。 */
+  gateDelegations?: (calls: ToolCall[]) => Promise<Array<{ callId: string; reason: string; kind?: 'cancelled-before-dispatch' | 'stopped-branch' }>>;
   /**
    * Live subagent interior activity as FIRST-CLASS engine events (2026-09-19).
    * CodingAgent maps the orchestrator's progress-sink callbacks onto this
@@ -540,7 +545,11 @@ export interface SubagentActivityEvent {
   agentId?: string;
   agentName: string;
   agentRole?: string;
-  kind: 'start' | 'state' | 'tool' | 'done' | 'error' | 'paused' | 'cancelled' | 'steered' | 'waiting';
+  /** 第 2 期第四刀：分支级事件是一等的——branch_aborted（用户叫停，含整树
+   *  取消）、branch_resumed（同参重派命中 checkpoint 续跑）、branch_retrying
+   *  （子代理内部自愈重试，不迁移状态、不惊动父）。它们进活动面板与 turnTimings
+   *  的分支账，不再只是从 lifecycle 推出来的影子。 */
+  kind: 'start' | 'state' | 'tool' | 'done' | 'error' | 'paused' | 'cancelled' | 'steered' | 'waiting' | 'branch_aborted' | 'branch_resumed' | 'branch_retrying';
   state?: string;
   /** The tool the subagent invoked (kind 'tool'). */
   toolName?: string;
@@ -556,6 +565,13 @@ export interface SubagentActivityEvent {
   /** 分支级继续（第 2 期第三刀）：本次委派命中了上一条 checkpoint = 续跑
    *  而非从头跑。血缘/续跑徽标随事件走（onStart/onDone 均带）。 */
   resumed?: boolean;
+  /** branch_aborted 的结局：'stopped'（点名停掉/整树取消）或 'paused'
+   *  （收掉一项先暂停）。用户的决定不是失败——账上要分得清。 */
+  outcome?: 'paused' | 'stopped';
+  /** branch_retrying：这是第几次自愈重试（1 起）。 */
+  attempt?: number;
+  /** branch_retrying 的原因（失败摘要，供面板/turn 账读）。 */
+  cause?: string;
 }
 
 export type EngineEvent =

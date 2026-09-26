@@ -75,6 +75,41 @@ describe('ToolExecutionCoordinator 委派起飞闸', () => {
     expect(streamed.find((r) => r.id === 'c1')?.result).toBe('ran:c1');
   });
 
+  it('点名停支后的同回合重派（kind=stopped-branch）：两套话分家，断点还在能续', async () => {
+    const tools = new FakeTools();
+    const coordinator = new ToolExecutionCoordinator();
+    const ctx = {
+      tools,
+      // 呼叫停支：宿主已经真停了「竞品」那支（编排器侧），闸只是拦住父的
+      // 同回合重派——收据不能说成「你在派出前收掉了」（用户是停的在飞支）。
+      gateDelegations: async (calls: ToolCall[]) => calls
+        .filter((c) => c.function.arguments.includes('竞品'))
+        .map((c) => ({ callId: c.id, reason: '停掉竞品那支', kind: 'stopped-branch' as const })),
+    } as unknown as EngineContext;
+
+    const streamed: ToolResult[] = [];
+    for await (const tr of coordinator.executeStream(
+      [delegate('d1', '竞品定价策略'), delegate('d2', 'LLM 的发展方向')],
+      ctx,
+      BUDGET,
+    )) {
+      streamed.push(tr.result);
+    }
+
+    expect(streamed).toHaveLength(2);
+    const stopped = streamed.find((r) => r.id === 'd1');
+    expect(stopped?.success).toBe(true);
+    expect(stopped?.outcome).toBe('stopped');
+    const inner = (stopped?.result ?? {}) as { summary?: string; reason?: string };
+    expect(inner.summary).toContain('你已经停过了');
+    expect(inner.summary).toContain('断点还在');
+    // 模型侧：明确「别自行重派，只有用户要续跑才允许」。
+    expect(inner.reason).toContain('已被用户点名停掉');
+    expect(inner.reason).toContain('不要自行重派');
+    // 重派的那一支根本不出生；兄弟支照跑。
+    expect(tools.calls.map((c) => c.id)).toEqual(['d2']);
+  });
+
   it('闸放行（无挂号/认不出）：全部调用照常执行，无合成结果', async () => {
     const tools = new FakeTools();
     const coordinator = new ToolExecutionCoordinator();

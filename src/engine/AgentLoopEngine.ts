@@ -6,6 +6,7 @@
 import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, SubagentActivityEvent } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
 import { interruptedReasonFor } from '../shared/pauseSignal';
+import { branchOutcomeOf } from '../shared/branchOutcome';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
 import { BudgetManager } from './BudgetManager';
@@ -52,14 +53,6 @@ function callKey(name: string, argsJson: string): string {
   let parsed: unknown;
   try { parsed = JSON.parse(argsJson || '{}'); } catch { parsed = argsJson; }
   return `${name}::${typeof parsed === 'string' ? parsed : stableStringify(parsed)}`;
-}
-/** 分支中断标识（第 2 期）：委派结果带 outcome 时，这次"成功"是用户点名
- *  暂停/停掉一支——不是可复用的成功（去重必须放行，重派即断点续跑）。 */
-function branchOutcomeOf(tr: { result: { result?: unknown } }): 'paused' | 'stopped' | undefined {
-  const r = tr.result?.result;
-  if (!r || typeof r !== 'object' || Array.isArray(r)) return undefined;
-  const outcome = (r as { outcome?: unknown }).outcome;
-  return outcome === 'paused' || outcome === 'stopped' ? outcome : undefined;
 }
 const DEDUPE_NOTE = '[dedupe] This call is identical to the immediately preceding call (same tool, same arguments) — its result was REUSED instead of executing again. If you genuinely need fresh data, change the call or say why in your reply.';
 // Tool results (read_file of a big file, a giant build/test dump, …) are folded

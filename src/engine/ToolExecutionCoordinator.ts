@@ -1,6 +1,7 @@
 import type { EngineContext, ToolCall, ToolResult } from '../shared/types';
 import { safeParseArgs } from '../shared/format';
 import { isPauseAbort, PAUSE_TOOL_GRACE_MS, PAUSE_ABORT_REASON } from '../shared/pauseSignal';
+import { branchOutcomeOf } from '../shared/branchOutcome';
 import { FileLockManager } from './FileLockManager';
 import { HOOK_BLOCK_EXIT_CODE, runUserHooksForEvent } from '../shared/userHookRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -81,11 +82,22 @@ export class ToolExecutionCoordinator {
     // 不走 success:false——那是失败口径，会把用户决定污染成任务失败），
     // 不再进执行池，分支根本不出生。
     const gated = ctx.gateDelegations ? await ctx.gateDelegations(toolCalls) : [];
-    const blockedReason = new Map(gated.map((g) => [g.callId, g.reason]));
+    const blockedReason = new Map(gated.map((g) => [g.callId, { reason: g.reason, kind: g.kind ?? 'cancelled-before-dispatch' }]));
     if (blockedReason.size > 0) {
       for (const call of toolCalls) {
-        const reason = blockedReason.get(call.id);
-        if (reason === undefined) continue;
+        const gate = blockedReason.get(call.id);
+        if (gate === undefined) continue;
+        const reason = gate.reason;
+        // 两种拦截动机说两种话（第 2 期「排队未起飞的同名支一并清除」）：
+        // 出生前被取消 vs 用户已点名停掉那支后父又重派了一次。收据都要说清
+        // 断点还在、能续（用户停的不是「这条路永远作废」）。
+        const stoppedBranch = gate.kind === 'stopped-branch';
+        const modelReason = stoppedBranch
+          ? `这支已被用户点名停掉（用户原话：${reason}），本次重派未执行。未产生新的产出；它的断点已存档，只有用户明确要求续跑时才允许再派工，不要自行重派。`
+          : `用户在派出前收掉了这项（用户原话：${reason}）。未执行、无产出，最终汇总不要包含它，也不要再为它派工。`;
+        const humanSummary = stoppedBranch
+          ? `这一路你已经停过了（“${reason}”）：父又派了一次，我当场拦下，没有重复烧算力；断点还在，想让它接着跑随时说。`
+          : `你在派出前收掉了这一路（“${reason}”）：没派出去、没有产出，也不会进最终汇总。`;
         yield {
           toolName: call.function.name,
           result: {
@@ -99,8 +111,8 @@ export class ToolExecutionCoordinator {
             result: {
               aborted: true,
               outcome: 'stopped' as const,
-              reason: `用户在派出前收掉了这项（用户原话：${reason}）。未执行、无产出，最终汇总不要包含它，也不要再为它派工。`,
-              summary: `你在派出前收掉了这一路（“${reason}”）：没派出去、没有产出，也不会进最终汇总。`,
+              reason: modelReason,
+              summary: humanSummary,
             },
             success: true,
             outcome: 'stopped',
@@ -190,19 +202,33 @@ export class ToolExecutionCoordinator {
         // reason naming the dead stage (its error rides along for triage).
         // 起飞闸拦下的调用不进池（合成取消结果已在上面发出）；它若是 relay
         // 阶段，下游按 deadStage 的既有路跳过——不会拿到被取消阶段的产出。
+        // 第 2 期第四刀：被用户暂停/停掉的上游支同样算「死」——它的结算体
+        // 是 success:true + outcome（用户的决定不是失败），但那份产出是中断
+        // 快照，绝不能当原料灌给下游（否则下游拿着空产出继续跑，还把中断
+        // 结算体的 JSON 当成 input）。下游立即以明确错误落定，不挂死。
         if (blockedReason.has(node.call.id)) continue;
         const deadStage = node.decl?.from
-          ? Object.keys(node.decl.from).find((stage) => stageOutputs.get(stage)?.result.success !== true)
+          ? Object.keys(node.decl.from).find((stage) => {
+              const upstream = stageOutputs.get(stage);
+              return upstream === undefined
+                || upstream.result.success !== true
+                || branchOutcomeOf(upstream) !== undefined;
+            })
           : undefined;
         if (deadStage !== undefined) {
-          const upstreamError = stageOutputs.get(deadStage)?.result.error ?? '未知原因';
+          const upstream = stageOutputs.get(deadStage);
+          const interrupted = branchOutcomeOf(upstream);
+          const upstreamError = upstream?.result.error ?? '未知原因';
           const detail = upstreamError.length > 200 ? `${upstreamError.slice(0, 200)}…` : upstreamError;
+          const skipError = interrupted
+            ? `relay 上游阶段 "${deadStage}" 被用户${interrupted === 'paused' ? '暂停' : '停掉'}，本调用未执行——上游进度已存档（同参重派它续跑成功后再发这一跳）。`
+            : `relay 上游阶段 "${deadStage}" 执行失败（${detail}），本调用未执行——修复后可直接重新发起，上游完整产出见上方。`;
           const skip: ExecutedToolResult = {
             toolName: node.call.function.name,
             result: {
               id: node.call.id,
               toolName: node.call.function.name,
-              error: `relay 上游阶段 "${deadStage}" 执行失败（${detail}），本调用未执行——修复后可直接重新发起，上游完整产出见上方。`,
+              error: skipError,
               success: false,
               duration: 0,
             },

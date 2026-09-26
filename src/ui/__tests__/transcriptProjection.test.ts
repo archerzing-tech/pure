@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import { projectTranscript, type TranscriptReplayBlock } from '../transcriptProjection';
+import { projectTranscript, rebuildInterruptedToolExec, type TranscriptReplayBlock } from '../transcriptProjection';
+import { projectCanonicalSession } from '../sessionEvents';
 import type { TranscriptEntry } from '../store';
 
 function types(blocks: TranscriptReplayBlock[]): string[] {
@@ -292,5 +293,94 @@ describe('projectTranscript', () => {
       { id: 'u1', modelMessageIndex: 0, role: 'user', content: '写个脚本\n执行要求：带错误处理' },
     ]);
     expect((blocks[0] as { content: string }).content).toBe('写个脚本\n执行要求：带错误处理');
+  });
+});
+
+describe('orphaned delegation cards rebuild the user interruption from the activity ledger (第 2 期第四刀收尾)', () => {
+  // 场景：用户暂停/停掉一支子 agent 后整轮被掐（Esc/暂停），这支的结算
+  // ToolResult 没赶上落盘——转录只剩 tool_call，回放此前一律渲染成
+  // 「本轮输出在此中断」的谜之灰卡，用户主动中断的事实全丢。
+  const entries: TranscriptEntry[] = [
+    {
+      id: 'a1',
+      modelMessageIndex: 0,
+      role: 'assistant',
+      content: '',
+      toolCalls: [
+        { id: 'call-paused', toolName: 'researcher', args: { topic: '竞品分析' } },
+        { id: 'call-orphan', toolName: 'read_file', args: { path: 'a.ts' } },
+      ],
+    },
+    { id: 'u1', modelMessageIndex: 1, role: 'user', content: '继续' },
+  ];
+
+  it('rebuilds a paused delegation from the ledger: grey settlement + trace narrative, never the mystery line', () => {
+    const blocks = projectTranscript(entries, [
+      {
+        callId: 'call-paused',
+        agentName: '资料调研',
+        lifecycle: 'paused',
+        status: 'paused',
+        toolTrace: [
+          { name: 'web_search', args: 'query=竞品', status: 'completed' },
+          { name: 'read_file', args: 'path=notes.md', status: 'running' },
+        ],
+      },
+    ]);
+    const toolBlocks = blocks.filter((b) => b.type === 'tool') as Array<Extract<TranscriptReplayBlock, { type: 'tool' }>>;
+    expect(toolBlocks).toHaveLength(2);
+    const paused = toolBlocks[0];
+    expect(paused.stopped).toBe(true);
+    expect(paused.exec.outcome).toBe('paused');
+    expect(paused.exec.success).toBe(true);
+    expect(paused.exec.resultText).toContain('已暂停');
+    expect(paused.exec.subagentTrace).toEqual(['✓ web_search 完成', '→ read_file path=notes.md']);
+    // 非委派/无档案的孤儿仍走原兜底（谜之灰卡只属于真被捎死的调用）。
+    expect(toolBlocks[1].exec.outcome).toBeUndefined();
+    expect(toolBlocks[1]).toMatchObject({ stopped: true, exec: { success: false } });
+  });
+
+  it('rebuilds a cancelled delegation with the stopped wording', () => {
+    const blocks = projectTranscript(entries, [
+      { callId: 'call-paused', agentName: '资料调研', lifecycle: 'cancelled', status: 'cancelled' },
+    ]);
+    const toolBlocks = blocks.filter((b) => b.type === 'tool') as Array<Extract<TranscriptReplayBlock, { type: 'tool' }>>;
+    expect(toolBlocks[0].exec.outcome).toBe('stopped');
+    expect(toolBlocks[0].exec.resultText).toContain('已按你的要求停止');
+  });
+
+  it('keeps the historic fallback when the ledger has no entry for the call', () => {
+    const blocks = projectTranscript(entries, [
+      { callId: 'call-other', agentName: '资料调研', lifecycle: 'paused' },
+    ]);
+    const toolBlocks = blocks.filter((b) => b.type === 'tool') as Array<Extract<TranscriptReplayBlock, { type: 'tool' }>>;
+    expect(toolBlocks[0].exec.outcome).toBeUndefined();
+    expect(toolBlocks[1].exec.outcome).toBeUndefined();
+    expect(toolBlocks[0]).toMatchObject({ stopped: true, exec: { success: false } });
+    expect(toolBlocks[1]).toMatchObject({ stopped: true, exec: { success: false } });
+  });
+
+  it('rebuild works through the canonical entrypoint (v3 events path)', () => {
+    const eventSession: import('../store').SessionEvent[] = [
+      { id: 'e1', type: 'assistant', toolCalls: [{ id: 'call-paused', toolName: 'researcher', args: { topic: '竞品分析' } }] },
+      { id: 'e2', type: 'user', content: '继续' },
+    ];
+    const blocks = projectCanonicalSession(eventSession, [], [
+      { callId: 'call-paused', agentName: '资料调研', lifecycle: 'paused', toolTrace: [{ name: 'web_search', status: 'completed' }] },
+    ]);
+    const toolBlocks = blocks.filter((b) => b.type === 'tool') as Array<Extract<TranscriptReplayBlock, { type: 'tool' }>>;
+    expect(toolBlocks[0].exec.outcome).toBe('paused');
+    expect(toolBlocks[0].exec.subagentTrace).toEqual(['✓ web_search 完成']);
+  });
+
+  it('rebuildInterruptedToolExec keeps the plain fallback for a non-terminal lifecycle', () => {
+    // lifecycle 未到终态（running/done/failed…）的档案不参与重建——那是
+    // 回合中断的另一种兜底（stopped:true 谜之灰卡）的事，不是中断结算。
+    const exec = rebuildInterruptedToolExec(
+      { callId: 'call-x', agentName: '资料调研', lifecycle: 'started' },
+      { id: 'call-x', toolName: 'researcher', args: {} },
+    );
+    expect(exec.outcome).toBeUndefined();
+    expect(exec.success).toBe(false);
   });
 });

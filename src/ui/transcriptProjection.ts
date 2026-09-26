@@ -5,6 +5,7 @@ import {
   buildTranscriptToolExec,
   getTranscriptContent,
   getTranscriptThinkingSegments,
+  type SessionAgentActivity,
   type ToolExecMeta,
   type StoredToolCallInfo,
   type TranscriptEntry,
@@ -20,16 +21,50 @@ export type TranscriptReplayBlock =
   | { type: 'tool'; exec: ToolExecMeta; stopped: boolean }
   | { type: 'artifact'; items: Array<{ path: string; op?: 'edit' | 'create' }>; userRequest?: string };
 
-function stoppedTool(call: StoredToolCallInfo): TranscriptReplayBlock {
+/**
+ * 分支中断第四刀（收尾）：孤儿委派卡的中断结算从活动档案重建。
+ *
+ * 一个被用户暂停/停掉的子 agent 支，其结算 ToolResult 常常没赶上落盘——
+ * 整轮暂停/Esc 掐断时转录里只剩 tool_call，此前回放一律走「本轮输出在此
+ * 中断，该调用未执行完成」的谜之灰卡，用户主动中断的事实全丢。而
+ * uiState.agentActivities 本来就按 callId 记着 lifecycle paused/cancelled
+ * （同一份快照），这里把它接进回放：档案在，就按 25e8d1a 的中断口径重建
+ * 结算（灰态 ⏸/⏹ + success:true + outcome），并从 toolTrace 还原卡的内部
+ * 叙事；档案不在（真被掐死在出生前的普通调用）才退回原兜底。
+ */
+export function rebuildInterruptedToolExec(activity: SessionAgentActivity, call: StoredToolCallInfo): ToolExecMeta {
+  const outcome = activity.lifecycle === 'paused' ? 'paused' as const
+    : activity.lifecycle === 'cancelled' ? 'stopped' as const
+    : undefined;
+  if (!outcome) {
+    return { toolName: call.toolName, success: false, duration: 0, args: call.args };
+  }
+  return {
+    toolName: call.toolName,
+    success: true,
+    outcome,
+    duration: 0,
+    args: call.args,
+    resultText: outcome === 'paused' ? '已暂停，进度已存档（重派同一任务可续）' : '已按你的要求停止，进度已存档（重派同一任务可续）',
+    subagentTrace: (activity.toolTrace ?? []).map((step) => step.status === 'failed'
+      ? `✗ ${step.name}${step.args ? ` ${step.args}` : ''}`
+      : step.status === 'completed' ? `✓ ${step.name} 完成`
+        : `→ ${step.name}${step.args ? ` ${step.args}` : ''}`),
+  };
+}
+
+/** Interrupted-call fallback enriched from the activity ledger (see
+ * rebuildInterruptedToolExec): only subagent delegations the ledger marks
+ * paused/cancelled rebuild as a user-interruption settlement; anything else
+ * keeps the historic "orphaned call" shape. */
+function stoppedTool(call: StoredToolCallInfo, activity?: SessionAgentActivity): TranscriptReplayBlock {
+  const exec = activity && (activity.lifecycle === 'paused' || activity.lifecycle === 'cancelled')
+    ? rebuildInterruptedToolExec(activity, call)
+    : { toolName: call.toolName, success: false, duration: 0, args: call.args };
   return {
     type: 'tool',
     stopped: true,
-    exec: {
-      toolName: call.toolName,
-      success: false,
-      duration: 0,
-      args: call.args,
-    },
+    exec,
   };
 }
 
@@ -85,9 +120,10 @@ function artifactsFromToolExecs(execs: ToolExecMeta[]): Array<{ path: string; op
   return [...paths].map(([path, op]) => (op === 'edit' ? { path, op } : { path }));
 }
 
-export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayBlock[] {
+export function projectTranscript(entries: TranscriptEntry[], agentActivities?: SessionAgentActivity[]): TranscriptReplayBlock[] {
   const blocks: TranscriptReplayBlock[] = [];
   const pending = new Map<string, StoredToolCallInfo>();
+  const activityByCall = new Map((agentActivities ?? []).filter((a) => a.callId).map((a) => [a.callId, a]));
   const completedTools: ToolExecMeta[] = [];
   let lastUserRequest = '';
 
@@ -107,7 +143,7 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
   };
 
   const flushPending = (): void => {
-    for (const call of pending.values()) blocks.push(stoppedTool(call));
+    for (const call of pending.values()) blocks.push(stoppedTool(call, activityByCall.get(call.id)));
     pending.clear();
   };
 
@@ -200,9 +236,10 @@ export function projectTranscript(entries: TranscriptEntry[]): TranscriptReplayB
   return blocks;
 }
 
-export function projectSessionEvents(events: import('./store').SessionEvent[]): TranscriptReplayBlock[] {
+export function projectSessionEvents(events: import('./store').SessionEvent[], agentActivities?: SessionAgentActivity[]): TranscriptReplayBlock[] {
   const blocks: TranscriptReplayBlock[] = [];
   const pending = new Map<string, StoredToolCallInfo>();
+  const activityByCall = new Map((agentActivities ?? []).filter((a) => a.callId).map((a) => [a.callId, a]));
   const completedTools: ToolExecMeta[] = [];
   let lastUserRequest = '';
   const turnArtifactPaths = new Map<string, { path: string; op?: 'edit' | 'create' }>();
@@ -230,7 +267,7 @@ export function projectSessionEvents(events: import('./store').SessionEvent[]): 
     }
   };
   const flushPending = (): void => {
-    for (const call of pending.values()) blocks.push(stoppedTool(call));
+    for (const call of pending.values()) blocks.push(stoppedTool(call, activityByCall.get(call.id)));
     pending.clear();
   };
 

@@ -58,6 +58,35 @@ describe('session stats persistence', () => {
       expect(loaded.turnTimings).toEqual([
         { ts: 1_728_000_000_000, ttftMs: 8420, routeMs: 6100, probeMs: 12, contextMs: 340, totalMs: 15_230 },
       ]);
+
+      // 第 2 期第四刀：分支账（turnTimings.branches）也要跟着往返——它记的是
+      // 本回合的叫停/续跑/自愈重试流水，丢失就等于观测白做。
+      saveSessionStats(sessionId, {
+        turns: 1,
+        searches: [],
+        fileWrites: [],
+        fileReads: [],
+        commands: [],
+        turnTimings: [{
+          ts: 1_728_000_000_001,
+          ttftMs: 1200,
+          routeMs: null,
+          probeMs: 3,
+          contextMs: 40,
+          totalMs: 9000,
+          branches: [
+            { at: 1_728_000_000_002, callId: 'call_b', agentName: 'researcher', kind: 'branch_aborted', outcome: 'paused' },
+            { at: 1_728_000_000_003, callId: 'call_b', agentName: 'researcher', kind: 'branch_resumed' },
+            { at: 1_728_000_000_004, callId: 'call_b', agentName: 'researcher', kind: 'branch_retrying', attempt: 2, cause: 'transient 503' },
+          ],
+        }],
+      });
+      const withBranches = loadSessionStats(sessionId);
+      expect(withBranches.turnTimings?.[0].branches).toEqual([
+        { at: 1_728_000_000_002, callId: 'call_b', agentName: 'researcher', kind: 'branch_aborted', outcome: 'paused' },
+        { at: 1_728_000_000_003, callId: 'call_b', agentName: 'researcher', kind: 'branch_resumed' },
+        { at: 1_728_000_000_004, callId: 'call_b', agentName: 'researcher', kind: 'branch_retrying', attempt: 2, cause: 'transient 503' },
+      ]);
     } finally {
       (globalThis as any).localStorage = previousStorage;
     }

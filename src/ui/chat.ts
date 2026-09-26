@@ -28,7 +28,7 @@ import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, CANCEL_PART_RE, SCOPE_ADD_RE, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { describeTiming, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
 import { sanitizeSkillName } from './skillHub';
-import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, cancelReceiptTopic, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
+import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, cancelReceiptTopic, planTakeoffGate, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -1456,6 +1456,16 @@ export class ChatController {
    * 远是新指令，挂号绝不跨回合拦活。
    */
   private pendingCancels: string[] = [];
+  /**
+   * 排队未起飞的同名支清除（第 2 期「原子顺序锁死」宿主半边）：点名真停
+   * 不是一次性的——用户停掉的那支如果父在同一回合里又派了一遍（模型没听
+   * 结算理由里那句「不要再为它派工」），那一支就是「已排队、还没起飞」的
+   * 同名支，出生点就该拦下。停支的效力因此不靠父的自觉：stopNamedBranch
+   * 成功即把用户原话挂上同一道起飞闸，gateDelegations 按区分词认出同目标
+   * 的重派（kind='stopped-branch'，收据说清「你已经停过它、断点还在」）。
+   * 与 pendingCancels 同命：命中即消费、随回合清空。
+   */
+  private pendingBranchStops: Array<{ text: string; label: string }> = [];
   /** 分支级继续（第 2 期第三刀）：点名把某一支已暂停/已停的委派接着跑完
    * 时，宿主用**原始参数**同参重派——稳定 sessionId 命中 checkpoint，子引
    * 擎走 continue 而不是从头 run。原始参数在委派批次起飞时捕获（见
@@ -2725,7 +2735,11 @@ export class ChatController {
     if (!matched) return null;
     const stopped = mode === 'pause' ? orchestrator.pauseBranch(matched.callId) : orchestrator.abortBranch(matched.callId);
     if (!stopped) return null;
-    return this.branchLabel(matched.name, matched.callId);
+    const label = this.branchLabel(matched.name, matched.callId);
+    // 排队未起飞的同名支清除：停支同时挂上起飞闸，同回合里父若再派同一支，
+    // 出生点拦下（真停的效力不依赖父听不听话）。同一支只挂一次。
+    if (!this.pendingBranchStops.some((s) => s.text === text)) this.pendingBranchStops.push({ text, label });
+    return label;
   }
 
   /** 分支级继续（第 2 期第三刀）：从用户话里点名一支**已暂停/已停**的委
@@ -3075,8 +3089,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const leftoverSteers = this.pendingSteers.filter((entry) => !entry.message.internal || entry.displayText);
     this.pendingSteers = []; // 没被带走的只剩「已答上的旁答记录」——账已清，弃
     // 起飞闸挂号随回合清空：残留的取消挂号若跨回合，会拦下用户后来明确
-    // 要「继续/再跑」的那支——那是新指令，挂号没资格否决它。
+    // 要「继续/再跑」的那支——那是新指令，挂号没资格否决它。点名停支的
+    // 挂号同理：下一回合的重派是新指令，本轮的门闩不该越回合生效。
     this.pendingCancels = [];
+    this.pendingBranchStops = [];
     if (leftoverSteers.length > 0) {
       const drained = leftoverSteers;
       this.autoContinue.cancel(); // the user's own words supersede '继续'
@@ -4001,7 +4017,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 点名路无支可点——话挂在 pendingCancels，批次在这里起飞时按区分词
         // 匹配兑现。候选集=本批全部委派（区分词匹配器看得到全部兄弟任务书
         // ——「调研」这类家家都有的词永远指不出单支，打平/认不出=放行，
-        // 话留给父引擎边界消化）；命中即拦、挂号一次性消费。
+        // 话留给父引擎边界消化）；命中即拦、挂号一次性消费。第 2 期把同一
+        // 道闸扩给点名真停（pendingBranchStops）：停掉的那支若被父在同回合
+        // 重派，同样在出生点拦下，两群挂号分开说收据（kind）。
         gateDelegations: async (calls) => {
           // 分支级继续的地基：每个委派的原始参数在这里捕获（同参重派命中
           // checkpoint 的唯一凭据）。先于闸、与有无取消挂号无关。
@@ -4009,9 +4027,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             if (!subagentNames.has(c.function.name) || this.delegationArgs.has(c.id)) continue;
             this.delegationArgs.set(c.id, { name: c.function.name, args: c.function.arguments });
           }
-          if (this.pendingCancels.length === 0) return [];
+          if (this.pendingCancels.length === 0 && this.pendingBranchStops.length === 0) return [];
+          // 合成重派豁免：takeSyntheticToolCalls 出来的调用（resume_/foldin_）
+          // 承载的是用户**最新**的话（「接着跑」、「再加一个」），挂号无权否
+          // 决它——这与挂号随回合清空同源纪律：最新的指令永远赢。
           const candidates = calls
-            .filter((c) => subagentNames.has(c.function.name))
+            .filter((c) => subagentNames.has(c.function.name) && !c.id.startsWith('resume_') && !c.id.startsWith('foldin_'))
             .map((c) => {
               let snippet = '';
               try {
@@ -4022,13 +4043,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               return { callId: c.id, name: c.function.name, snippet };
             });
           if (candidates.length === 0) return [];
-          const blocked: Array<{ callId: string; reason: string }> = [];
-          for (const cancelText of [...this.pendingCancels]) {
-            const remaining = candidates.filter((c) => !blocked.some((b) => b.callId === c.callId));
-            const matched = matchInFlightBranch(cancelText, remaining);
-            if (!matched) continue;
-            blocked.push({ callId: matched.callId, reason: cancelText });
-            this.pendingCancels = this.pendingCancels.filter((t) => t !== cancelText);
+          // 匹配口径与消费纪律都在纯函数里（steerTargeting.planTakeoffGate）：
+          // 与测试共用同一套，宿主只负责备好候选集与两本挂号簿。
+          const { blocked, consumed } = planTakeoffGate(
+            candidates,
+            [...this.pendingCancels],
+            this.pendingBranchStops.map((s) => s.text),
+          );
+          if (consumed.length > 0) {
+            this.pendingCancels = this.pendingCancels.filter((t) => !consumed.includes(t));
+            this.pendingBranchStops = this.pendingBranchStops.filter((s) => !consumed.includes(s.text));
           }
           return blocked;
         },
@@ -5284,6 +5308,20 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // toolResults. A delegation card no longer sits silently spinning
             // while its sub-agent works.
             const activity = event.payload;
+            // 第 2 期第四刀：分支级事件一等化——同一份事件同时又进轨道卡（经
+            // updateAgentActivity 的 lifecycle/attempt/resumed）又落进本回合的
+            // 分支账（turnTimings.branches），随 turn finally 一起入盘。
+            if (activity.kind === 'branch_aborted' || activity.kind === 'branch_resumed' || activity.kind === 'branch_retrying') {
+              turnTiming.branches ??= [];
+              turnTiming.branches.push({
+                at: Date.now(),
+                callId: activity.callId,
+                agentName: activity.agentName,
+                kind: activity.kind,
+                ...(activity.kind === 'branch_aborted' ? { outcome: activity.outcome ?? 'stopped' as const } : {}),
+                ...(activity.kind === 'branch_retrying' ? { attempt: activity.attempt, cause: activity.cause } : {}),
+              });
+            }
             const trace = subagentTraceByCall.get(activity.callId) ?? [];
             subagentTraceByCall.set(activity.callId, trace);
             const line = formatSubagentTraceLine(activity);
@@ -6312,6 +6350,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 插话重构 — new chat discards steers aimed at the old conversation.
     this.pendingSteers = [];
     this.pendingCancels = [];
+    this.pendingBranchStops = [];
     this.pendingFoldIns = [];
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;

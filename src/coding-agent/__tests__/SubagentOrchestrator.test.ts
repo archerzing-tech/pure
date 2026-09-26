@@ -1038,3 +1038,51 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     expect(orch.branchView()).toHaveLength(0);
   });
 });
+
+describe('SubagentOrchestrator branch events (第 2 期第四刀)', () => {
+  it('emits a first-class branch_retrying receipt on a self-heal retry, without moving the state machine', async () => {
+    // failurePolicy 的 retry/reflect 是子代理自己的自愈线：进程继续、状态机
+    // 不动、父零感知——但用户必须看得见「它在自己纠错」而不是卡住。
+    const seen: SubagentActivity[] = [];
+    let turn = 0;
+    const llm: LLMAdapter = {
+      async *stream(): AsyncGenerator<LLMChunk, void, void> {
+        turn++;
+        if (turn === 1) {
+          const tc = { id: 'call_boom', index: 0, function: { name: 'flaky_tool', arguments: '{}' } };
+          yield { type: 'tool_call', index: 0, id: 'call_boom', name: 'flaky_tool', arguments: '{}' };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+          return;
+        }
+        yield { type: 'done', content: 'recovered deliverable', toolCalls: [] };
+      },
+      async complete() { return { content: '', toolCalls: [] }; },
+    };
+    const flakyAdapter: ToolAdapter = {
+      getTools: () => [{ name: 'flaky_tool', description: 'f', input_schema: {} }],
+      getMetadata: () => ({ isWrite: false }),
+      execute: async (tc: ToolCall): Promise<ToolResult> => ({
+        id: tc.id, toolName: tc.function.name, success: false, error: 'transient 503', duration: 1,
+      }),
+    };
+    const orch = new SubagentOrchestrator({
+      llm,
+      parentTools: flakyAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      progress: { onState: (a) => seen.push(a) },
+      failurePolicy: { decide: () => ({ kind: 'retry', hint: 'continue' }) },
+    });
+    orch.register(subagentDef('test_retry'));
+
+    const result = await orch.execute(toolCall('test_retry', { prompt: 'x' }));
+    expect(result.success).toBe(true);
+
+    const retry = seen.find((a) => a.lifecycle === 'retrying');
+    expect(retry).toBeDefined();
+    expect(retry!.attempt).toBe(1);
+    expect(String(retry!.retryCause)).toContain('503');
+    // 自愈不迁移状态：重试之后照常跑完，不需要人工介入。
+    expect(result.success).toBe(true);
+  });
+});

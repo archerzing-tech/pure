@@ -90,8 +90,11 @@ export interface SubagentActivity {
    * subagent's next THINK — a momentary receipt, the run itself continues.
    * 'waiting': no progress for 30s (usually the model endpoint queueing) —
    * the run is alive but the provider is silent; reported so the card never
-   * reads as dead. */
-  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused' | 'steered' | 'waiting';
+   * reads as dead.
+   * 'retrying' (第 2 期第四刀): the failure policy chose retry/reflect inside
+   * the subagent — a self-heal, the run continues and the state machine does
+   * NOT move (the card lights up, the parent is not disturbed). */
+  lifecycle?: 'queued' | 'started' | 'tool_running' | 'observing' | 'verifying' | 'done' | 'failed' | 'timed_out' | 'cancelled' | 'paused' | 'steered' | 'waiting' | 'retrying';
   /** High-level outcome (filled by onStart/onDone/onError). */
   status?: SubagentStatus;
   /** Monotonic per-call progress sequence; stale UI updates must be ignored. */
@@ -110,6 +113,9 @@ export interface SubagentActivity {
    * 重派 → 稳定 sessionId），子引擎走的是 continue 而不是从头 run。血缘/
    * 续跑徽标的唯一事实来源，随 onStart / onDone 事件一起走。 */
   resumed?: boolean;
+  /** 第 2 期第四刀：自愈重试的轮次（lifecycle 'retrying'）与原因摘要。 */
+  attempt?: number;
+  retryCause?: string;
   /** Epoch ms when the subagent started. */
   startedAt?: number;
   /** Subagent's hard timeout budget (ms). */
@@ -523,6 +529,9 @@ export class SubagentOrchestrator implements ToolAdapter {
       let finalOutput: string | undefined;
       let tokensUsed = 0;
       let usage: TokenUsage | undefined;
+      // 第 2 期第四刀：子代理内部自愈重试的轮次（failurePolicy retry/reflect）。
+      // 不迁移状态机——卡片亮灯 + 一条 branch_retrying 一等事件，父不被打扰。
+      let retryAttempt = 0;
 
       const persist = async (label: string, messages: Message[] | undefined, turnCount: number): Promise<void> => {
         const store = this.config.stateStore;
@@ -607,6 +616,22 @@ export class SubagentOrchestrator implements ToolAdapter {
                 : event.payload.to === 'TERMINATE' ? 'done'
                   : 'started';
           emit(progress?.onState, { state: event.payload.to, lifecycle, toolState: event.payload.to === 'ACT' ? undefined : 'completed' });
+        } else if (event.type === 'FailurePolicyDecision') {
+          // 第 2 期第四刀：failurePolicy 的 retry/reflect 是子代理自己的自愈
+          // 线（不清状态、不动状态机）——发 branch_retrying 让卡片亮灯，父与
+          // 兄弟支零感知。degrade/stop 是往失败走的路，不在此列（重试耗尽
+          // 落已失败是另一条结算路）。
+          const action = event.payload.action;
+          if (action.kind === 'retry' || action.kind === 'reflect') {
+            retryAttempt++;
+            kickWatchdog();
+            emit(progress?.onState, {
+              state: 'RETRY',
+              lifecycle: 'retrying',
+              attempt: retryAttempt,
+              retryCause: event.payload.failure?.message,
+            });
+          }
         } else if (event.type === 'SteerInjected') {
           // 插话已并入子代理的下一轮 THINK —— 给活动卡一条可见回执（lifecycle
           // 'steered' → 卡片 trace 行 📨），别让用户猜"话到底递到没有"。
