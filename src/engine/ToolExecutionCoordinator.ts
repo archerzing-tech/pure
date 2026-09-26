@@ -74,6 +74,33 @@ export class ToolExecutionCoordinator {
     budget: ToolExecutionBudget,
   ): AsyncGenerator<ExecutedToolResult, void, unknown> {
     if (!ctx.tools) return;
+    // 委派起飞闸（2026-09-26 用户实测：插话落在委派发生之前，取消型插话
+    // 找不到可停的支）。起飞前把整批调用交给宿主过一遍——这里是全批次唯
+    // 一可见点（relay 分层前），宿主的区分词匹配能看到全部兄弟任务书，不
+    // 会单支误杀。被拦的调用当场拿到合成结果（success:true + 取消说明，
+    // 不走 success:false——那是失败口径，会把用户决定污染成任务失败），
+    // 不再进执行池，分支根本不出生。
+    const gated = ctx.gateDelegations ? await ctx.gateDelegations(toolCalls) : [];
+    const blockedReason = new Map(gated.map((g) => [g.callId, g.reason]));
+    if (blockedReason.size > 0) {
+      for (const call of toolCalls) {
+        const reason = blockedReason.get(call.id);
+        if (reason === undefined) continue;
+        yield {
+          toolName: call.function.name,
+          result: {
+            id: call.id,
+            toolName: call.function.name,
+            result: `（用户取消）用户在派出前收掉了这项：${reason}。未执行、无产出，最终汇总不要包含它，也不要再为它派工。`,
+            success: true,
+            outcome: 'stopped',
+            duration: 0,
+          },
+          duration: 0,
+          toolCallId: call.id,
+        };
+      }
+    }
     // Known narrow edge: the engine's consecutive-identical dedupe keys on
     // (name, raw arguments) — the raw string still contains the relay
     // DECLARATION but not the substituted upstream output. A model re-sending
@@ -151,6 +178,9 @@ export class ToolExecutionCoordinator {
       for (const node of level) {
         // Fail-fast: a consumer whose upstream failed is skipped with a
         // reason naming the dead stage (its error rides along for triage).
+        // 起飞闸拦下的调用不进池（合成取消结果已在上面发出）；它若是 relay
+        // 阶段，下游按 deadStage 的既有路跳过——不会拿到被取消阶段的产出。
+        if (blockedReason.has(node.call.id)) continue;
         const deadStage = node.decl?.from
           ? Object.keys(node.decl.from).find((stage) => stageOutputs.get(stage)?.result.success !== true)
           : undefined;

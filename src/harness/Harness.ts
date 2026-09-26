@@ -131,6 +131,9 @@ export interface HarnessConfig {
   /** 代执行回合（2026-09-22 插话重设计）：宿主在 THINK 边界给出的本轮
    *  toolCalls，引擎跳过模型调用走原生 ACT 管线。Omitted = 无代执行。 */
   takeSyntheticToolCalls?: EngineContext['takeSyntheticToolCalls'];
+  /** 委派起飞闸（2026-09-26 用户实测）：宿主在每批工具调用起飞前拦下被
+   *  用户取消的委派。Omitted = 无闸（CLI / 子代理引擎照旧）。 */
+  gateDelegations?: EngineContext['gateDelegations'];
   /** Live subagent activity feed (parallel multi-agent): the engine subscribes
    *  a reader per tool batch and re-emits the events as `SubagentActivity`.
    *  Omitted = silent tools (CLI / nested subagent runs), as before. */
@@ -208,6 +211,8 @@ export class Harness {
       takeSteerMessages: this.config.takeSteerMessages,
       // 代执行回合：宿主给出的本轮 toolCalls，非空则本轮跳过模型调用。
       takeSyntheticToolCalls: this.config.takeSyntheticToolCalls,
+      // 委派起飞闸：宿主在批次起飞前拦下被用户取消的委派。
+      gateDelegations: this.config.gateDelegations,
       // Live subagent interior events, re-emitted during tool batches.
       subagentEvents: this.config.subagentEvents,
       tools: this.config.tools,

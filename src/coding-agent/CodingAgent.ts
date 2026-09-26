@@ -91,6 +91,9 @@ export interface CodingAgentConfig {
    *  toolCalls——引擎跳过模型调用，走原生 ACT 管线。只接父引擎；子代理
    *  引擎不传（折入的交付只属于父任务汇合轮，闸门在宿主闭包里）。 */
   takeSyntheticToolCalls?: EngineContext['takeSyntheticToolCalls'];
+  /** 委派起飞闸（2026-09-26）：宿主在每批工具调用起飞前拦下被用户取消的
+   *  委派。只接父引擎；子代理引擎不传（取消是用户对父任务批次说的话）。 */
+  gateDelegations?: EngineContext['gateDelegations'];
   /** Live subagent activity feed (parallel multi-agent): a fanout owned by
    * the host. CodingAgent publishes every orchestrator progress callback onto
    * it, and the Harness hands it to the engine context, which subscribes a
@@ -272,6 +275,7 @@ export class CodingAgent {
       llmFor: config.llmFor,
       takeSteerMessages: config.takeSteerMessages,
       takeSyntheticToolCalls: config.takeSyntheticToolCalls,
+      gateDelegations: config.gateDelegations,
       subagentEvents: config.subagentEvents,
       reflection: config.reflection,
     });

@@ -1160,8 +1160,35 @@ describe('plan overview completion state', () => {
     expect(taskBody.indexOf('decision.signals.cancelsPart === true')).toBeGreaterThan(-1);
     const override = taskBody.indexOf('cancelsPart === true');
     expect(taskBody.indexOf('this.foldInScopeAddition(text, images, displayText, false, ack, true)', override)).toBeGreaterThan(-1);
-    expect(taskBody.indexOf('this.steerRunningTurn(text, images, ack)', override)).toBeGreaterThan(-1);
+    // 委派未出生的窗口（2026-09-26）：转达引擎的调用挂 null ack——收执由
+    // 挂号处用取消口径的话说（「还没派的不会派出去」），不再用泛泛的"已转达"。
+    expect(taskBody.indexOf('this.steerRunningTurn(text, images, null)', override)).toBeGreaterThan(-1);
     expect(taskBody.indexOf('this.queueInterjectTask(', override)).toBeGreaterThan(taskBody.indexOf('if (decision.signals.cancelsPart === true)', override));
+  });
+
+  it('a cancel arriving BEFORE any delegation exists gates the branch at birth (2026-09-26 插话先于委派)', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 用户实测：插话落在委派出生之前——点名路（abortBranch）无支可点，
+    // 折入路只守汇报步，三支照派、取消落空。修法=委派起飞闸：话挂
+    // pendingCancels，批次起飞时 gateDelegations 按区分词匹配兑现（整批
+    // 调用一起做候选集，「调研」这类共用词永远指不出单支）；挂号一次性
+    // 消费、随回合清空——用户后来的「继续/再跑」是新指令，挂号无权否决。
+    expect(src.indexOf('private pendingCancels: string[] = [];')).toBeGreaterThan(-1);
+    // 四个挂号入口：steer 案（无委派窗 + 在飞点不出支的折入）、task 案（同两处）。
+    const steer = src.indexOf("case 'steer': {");
+    const steerBody = src.slice(steer, src.indexOf("case 'question':", steer));
+    expect(steerBody.split('this.pendingCancels.push(text)').length - 1).toBe(2);
+    const task = src.indexOf("case 'task': {");
+    const taskBody = src.slice(task, src.indexOf("case 'chatter':", task));
+    expect(taskBody.split('this.pendingCancels.push(text)').length - 1).toBe(2);
+    // 无委派窗的收执说人话：没派的不会派，不是泛泛的"已转达"。
+    expect(src.indexOf('这项不调研了：还没派的不会派出去，也不会进最终汇总。')).toBeGreaterThan(-1);
+    // 起飞闸接进引擎配置：区分词匹配 + 命中即拦 + 挂号一次性消费。
+    expect(src.indexOf('gateDelegations: async (calls) =>')).toBeGreaterThan(-1);
+    expect(src.indexOf('const matched = matchInFlightBranch(cancelText, remaining);')).toBeGreaterThan(-1);
+    expect(src.indexOf('this.pendingCancels = this.pendingCancels.filter((t) => t !== cancelText);')).toBeGreaterThan(-1);
+    // 挂号不跨回合：finalize 与 new chat 两条清扫都要在。
+    expect(src.split('this.pendingCancels = [];').length - 1).toBeGreaterThanOrEqual(2);
   });
 
   it('background sessions never yank the shared scroll container', () => {

@@ -260,6 +260,13 @@ export interface EngineContext {
    *  AFTER the addition's result is already in its transcript. Absent or
    *  empty ⇒ the model is consulted normally. */
   takeSyntheticToolCalls?: () => ToolCall[] | Promise<ToolCall[]>;
+  /** 委派起飞闸（2026-09-26 用户实测）：插话落在委派发生之前时，取消型
+   *  插话找不到可停的支——点名路（abortBranch）无支可点，折入路只守汇报
+   *  步、不守还没出生的支。宿主在每批工具调用起飞前拿到整批调用（完整候
+   *  选集——区分词匹配器看到全部兄弟任务书，绝不会单支误杀），返回要拦下
+   *  的 callId 与原因；协调器给这些调用直接发「用户已取消」的合成结果，
+   *  分支根本不出生。Absent ⇒ 无闸（CLI / 子代理引擎照旧）。 */
+  gateDelegations?: (calls: ToolCall[]) => Promise<Array<{ callId: string; reason: string }>>;
   /**
    * Live subagent interior activity as FIRST-CLASS engine events (2026-09-19).
    * CodingAgent maps the orchestrator's progress-sink callbacks onto this

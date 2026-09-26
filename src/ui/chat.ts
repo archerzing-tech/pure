@@ -1448,6 +1448,14 @@ export class ChatController {
    * 时直达那一支。渲染一致性：displayText 保存用户原话，回合结束后残留的
    * 插话以原话重入（不是引擎框架文），重载后与实时所见一致。 */
   private pendingSteers: Array<{ message: import('../shared/types').Message; target: SteerTarget; displayText: string; images?: import('../shared/types').MessageImage[] }> = [];
+  /**
+   * 委派起飞闸的挂号簿（2026-09-26 用户实测）：取消型插话落在委派出生之
+   * 前时，点名路（abortBranch）无支可点，折入路只守汇报步、守不到还没出
+   * 生的支——话先挂在这里，等委派批次起飞时由 gateDelegations 按区分词匹
+   * 配兑现（命中即拦，一次性消费）。回合收尾清空：用户的「继续/再跑」永
+   * 远是新指令，挂号绝不跨回合拦活。
+   */
+  private pendingCancels: string[] = [];
   /** 阶段感知的 scope 追加（2026-09-22 用户定稿）：并行委派还没收齐时插进
    * 来的追加活不走"收尾后排队"——那会先输出一份没有它的汇总。折入汇合轮：
    * 代执行回合（takeSyntheticToolCalls，2026-09-22 重设计）在委派收齐后的
@@ -2538,6 +2546,9 @@ export class ChatController {
           // 点不出具体支（或它刚好结算了）：退回取消折入——宁可折叠不误杀。
           // 绝不能往下走 1a 广播：「停掉那支」广播给所有在飞支，每支都可能
           // 把自己当成"那支"自己停（反向执行最伤，2026-09-24 取消案例同源）。
+          // 折入只守汇报步；同回合父若再为这个话题派工，起飞闸（挂号簿）
+          // 在出生点拦下。
+          this.pendingCancels.push(text);
           this.foldInScopeAddition(text, images, displayText, false, ack, true);
           return;
         }
@@ -2547,6 +2558,17 @@ export class ChatController {
         // 1a 定向投递：委派在飞时，用户的话按点名找收件人——点到某一支就
         // 直达那一支（其余照跑），没点名就广播给所有在飞的活。委派不在飞
         // 时照旧：父引擎下个 THINK 边界顺路带上。
+        if (stopish && !this.hasDelegationInFlight()) {
+          // 插话落在委派出生之前（2026-09-26 用户实测）：此刻无支可停，话
+          // 挂上起飞闸——委派批次出生时按区分词拦下被取消的那支；同时照旧
+          // 转达父引擎，父在派工前读到的话计划本身就会少这一路（闸是保底，
+          // 不是唯一手段）。收执说清"没派的不会派"，别用泛泛的"已转达"。
+          echoUserBubble();
+          this.pendingCancels.push(text);
+          this.steerRunningTurn(text, images, null);
+          this.settleAck(ack, '好——这项不调研了：还没派的不会派出去，也不会进最终汇总。');
+          return;
+        }
         echoUserBubble();
         if (this.hasDelegationInFlight()) {
           this.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text));
@@ -2582,11 +2604,16 @@ export class ChatController {
               this.settleAck(ack, `明白——「${stopped}」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。`);
               return;
             }
+            // 点不出支的取消折入：折入守汇报步，挂号守同回合再出生的支。
+            this.pendingCancels.push(text);
             this.foldInScopeAddition(text, images, displayText, false, ack, true);
             return;
           }
+          // 委派还没出生（2026-09-26 用户实测窗口）：话挂起飞闸 + 转达父引擎。
           echoUserBubble();
-          this.steerRunningTurn(text, images, ack);
+          this.pendingCancels.push(text);
+          this.steerRunningTurn(text, images, null);
+          this.settleAck(ack, '好——这项不调研了：还没派的不会派出去，也不会进最终汇总。');
           return;
         }
         // 不重复做（2026-09-25 复测案例一）：加的活若某支在飞/已收工的支已
@@ -2956,6 +2983,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 上的（displayText 空）账已清，残留即弃；没答上的把问题原话重入。
     const leftoverSteers = this.pendingSteers.filter((entry) => !entry.message.internal || entry.displayText);
     this.pendingSteers = []; // 没被带走的只剩「已答上的旁答记录」——账已清，弃
+    // 起飞闸挂号随回合清空：残留的取消挂号若跨回合，会拦下用户后来明确
+    // 要「继续/再跑」的那支——那是新指令，挂号没资格否决它。
+    this.pendingCancels = [];
     if (leftoverSteers.length > 0) {
       const drained = leftoverSteers;
       this.autoContinue.cancel(); // the user's own words supersede '继续'
@@ -3869,6 +3899,35 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             calls.push({ id: callId, index: calls.length, function: { name: role, arguments: JSON.stringify({ prompt: brief }) } });
           }
           return calls;
+        },
+        // 委派起飞闸（2026-09-26 用户实测）：取消型插话落在委派出生之前时，
+        // 点名路无支可点——话挂在 pendingCancels，批次在这里起飞时按区分词
+        // 匹配兑现。候选集=本批全部委派（区分词匹配器看得到全部兄弟任务书
+        // ——「调研」这类家家都有的词永远指不出单支，打平/认不出=放行，
+        // 话留给父引擎边界消化）；命中即拦、挂号一次性消费。
+        gateDelegations: async (calls) => {
+          if (this.pendingCancels.length === 0) return [];
+          const candidates = calls
+            .filter((c) => subagentNames.has(c.function.name))
+            .map((c) => {
+              let snippet = '';
+              try {
+                const parsed = JSON.parse(c.function.arguments || '{}') as Record<string, unknown>;
+                const raw = parsed.prompt ?? parsed.task ?? parsed.question ?? parsed.topic ?? parsed.instructions;
+                if (typeof raw === 'string') snippet = raw;
+              } catch { /* 参数没解析开就只拿名字当匹配面 */ }
+              return { callId: c.id, name: c.function.name, snippet };
+            });
+          if (candidates.length === 0) return [];
+          const blocked: Array<{ callId: string; reason: string }> = [];
+          for (const cancelText of [...this.pendingCancels]) {
+            const remaining = candidates.filter((c) => !blocked.some((b) => b.callId === c.callId));
+            const matched = matchInFlightBranch(cancelText, remaining);
+            if (!matched) continue;
+            blocked.push({ callId: matched.callId, reason: cancelText });
+            this.pendingCancels = this.pendingCancels.filter((t) => t !== cancelText);
+          }
+          return blocked;
         },
         toolAdapter,
         subagents,
@@ -6146,6 +6205,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.interjectReceiptRows.clear();
     // 插话重构 — new chat discards steers aimed at the old conversation.
     this.pendingSteers = [];
+    this.pendingCancels = [];
     this.pendingFoldIns = [];
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
