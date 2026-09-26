@@ -16,9 +16,9 @@ import { estimateCostUsd, formatCostUsd, formatTokensCompact } from '../shared/u
 import {
   deleteAllSessions,
   deleteSession,
-  loadSession,
   loadSessionList,
   loadSessionStatsForList,
+  type LoadedSession,
   type SessionMeta,
   type SessionStats,
   type SessionSnapshotV2,
@@ -43,6 +43,9 @@ export interface SessionSidebarDeps {
   };
   pasteChips: { clear(): void };
   confirm(message: string): Promise<boolean>;
+  /** Disk read for one session (null when it has no archive). Injected so the
+   * load() flow is drivable without the Tauri bridge. */
+  loadSession(sessionId: string): Promise<LoadedSession | null>;
   /** Roadmap 4.4 retention notice: when the session's workspace is one of the
    * auto-created worktrees (4.1) with unmerged work, return the delete
    * confirmation text that says the worktree SURVIVES the delete (and where).
@@ -64,7 +67,10 @@ export interface SessionSidebarDeps {
   showSessionLoading(): void;
   /** After a session was activated — its workspace may have changed. */
   onSessionActivated(): void;
-  /** After the active session was cleared/deleted — back to landing. */
+  /** After the active session was cleared/deleted — back to landing. Also
+   * fired when a click ENTERS an empty session: a blank conversation's
+   * natural view IS the landing screen, and the landing focus is what makes
+   * the switch visible (see presentSession). */
   onChatCleared(): void;
 }
 
@@ -231,24 +237,40 @@ export class SessionSidebar {
    * rebuilt from its stored snapshot. */
   async load(id: string): Promise<void> {
     const seq = ++this.loadSequence;
-    const loaded = await loadSession(id);
+    const loaded = await this.deps.loadSession(id);
     // Live-only fallback: the session streams but has no disk snapshot yet
     // (first turn still running). The controller owns the whole transcript in
     // memory — re-show it warm instead of silently dropping the click.
     if (!loaded && this.deps.chat.hasOpenSession(id)) {
       if (this.isLoadStale(seq)) return;
-      this.deps.chat.openSession(id);
+      const opened = this.deps.chat.openSession(id);
       if (this.isLoadStale(seq)) return;
-      this.deps.pasteChips.clear();
-      this.setActive(id);
-      this.deps.onSessionActivated();
-      this.deps.focusPrompt();
+      this.presentSession(opened, id);
       return;
     }
     // A newer load request superseded this one (rapid session clicking): the
     // latest click owns the transcript — drop this stale result entirely,
     // including its tail effects (render / focus).
-    if (this.isLoadStale(seq) || !loaded || loaded.snapshot.modelContext.messages.length === 0) return;
+    if (this.isLoadStale(seq)) return;
+    if (!loaded) {
+      // Neither a disk archive nor a live controller: a stale card (deleted
+      // from another window, swept by the empty-session prune). Re-render so
+      // the dead entry leaves the list instead of sitting there as a click
+      // that does nothing.
+      this.refresh();
+      return;
+    }
+    if (loaded.snapshot.modelContext.messages.length === 0) {
+      // Empty-content session (a "New chat" card): with multiple sessions it
+      // is a real card in the list, and clicking it must ENTER it. The old
+      // silent return predates multi-session — back then the only empty
+      // transcript was the one already on screen, so "nothing to load" was
+      // true; now it reads as a dead card (2026-09-26 用户反馈).
+      const opened = this.deps.chat.openSession(id);
+      if (this.isLoadStale(seq)) return;
+      this.presentSession(opened, id, loaded.workspace || '');
+      return;
+    }
     const opened = this.deps.chat.openSession(id);
     if (this.isLoadStale(seq)) return;
     this.deps.pasteChips.clear();
@@ -291,6 +313,27 @@ export class SessionSidebar {
   /** True when a load captured at `seq` has been superseded by a newer click. */
   private isLoadStale(seq: number): boolean {
     return seq !== this.loadSequence;
+  }
+
+  /** Make an opened session the visible one and PRESENT it. An empty
+   * conversation's natural view is the landing screen — focus goes to the
+   * landing input, which also gives the click a visible effect when the user
+   * was already on landing (otherwise switching to a blank card shows no
+   * change at all and reads as "切不进去", 2026-09-26 用户反馈). A live
+   * session with in-flight content keeps its transcript + composer focus.
+   * `restoreWorkspace` re-applies a cold session's stored workspace (live
+   * controllers own theirs in memory). */
+  private presentSession(
+    opened: { controller: ChatController; host: HTMLElement; warm: boolean },
+    id: string,
+    restoreWorkspace?: string,
+  ): void {
+    if (!opened.warm && restoreWorkspace !== undefined) this.deps.chat.setWorkspace(restoreWorkspace);
+    this.deps.pasteChips.clear();
+    this.setActive(id);
+    this.deps.onSessionActivated();
+    if (opened.controller.getMessages().length === 0) this.deps.onChatCleared();
+    else this.deps.focusPrompt();
   }
 
   // ── Session list rendering ──

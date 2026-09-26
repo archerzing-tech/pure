@@ -24,7 +24,7 @@ import { isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
 import { createTauriObservationSink } from '../shared/tauriObservationSink';
 import { promptObservability } from '../shared/promptObservability';
 import { workspaceBase } from '../shared/paths';
-import { loadSessionList, loadSessionStatsForList, flushSessionSaves, saveSessionWorkspace, type SessionMeta, type SessionStats, type TurnTiming } from './store';
+import { loadSession, loadSessionList, loadSessionStatsForList, flushSessionSaves, saveSessionWorkspace, type SessionMeta, type SessionStats, type TurnTiming } from './store';
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -121,6 +121,7 @@ sessionSidebar = new SessionSidebar({
   chat,
   pasteChips,
   confirm: confirmDialog,
+  loadSession,
   renderMessages: renderSessionMessages,
   showSessionLoading,
   focusPrompt: focusPromptCaretEnd,
