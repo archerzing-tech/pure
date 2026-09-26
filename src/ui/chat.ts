@@ -28,7 +28,7 @@ import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, CANCEL_PART_RE, SCOPE_ADD_RE, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { describeTiming, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
 import { sanitizeSkillName } from './skillHub';
-import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
+import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, cancelReceiptTopic, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -2390,6 +2390,16 @@ export class ChatController {
     await run;
   }
 
+  /** 出生前取消的收执：能从原话里点出被收掉的话题就点名（与停支收执带
+   * 「${stopped}」同一人味，2026-09-26 用户实测反馈固定话术里「这项」是
+   * 空的），提不出再退回「这项」的说法——不装懂。 */
+  private settleCancelBeforeDispatchAck(ack: HTMLElement | null, text: string): void {
+    const topic = cancelReceiptTopic(text);
+    this.settleAck(ack, topic
+      ? `好——“${topic}”这项不做了：还没派的不会派出去，也不会进最终汇总。`
+      : '好——这项不做了：还没派的不会派出去，也不会进最终汇总。');
+  }
+
   /** Flip the interject ack from "looking at it" to its final receipt.
    * 收执是 pure 在回话——用普通助手气泡（状态行的样子不像回话，2026-09-25
    * 用户实测），气泡顶替 ack 行的原位：位置正对着回显气泡的后面（次序由
@@ -2566,7 +2576,7 @@ export class ChatController {
           echoUserBubble();
           this.pendingCancels.push(text);
           this.steerRunningTurn(text, images, null, 'parent', true);
-          this.settleAck(ack, '好——这项不调研了：还没派的不会派出去，也不会进最终汇总。');
+          this.settleCancelBeforeDispatchAck(ack, text);
           return;
         }
         echoUserBubble();
@@ -2613,7 +2623,7 @@ export class ChatController {
           echoUserBubble();
           this.pendingCancels.push(text);
           this.steerRunningTurn(text, images, null, 'parent', true);
-          this.settleAck(ack, '好——这项不调研了：还没派的不会派出去，也不会进最终汇总。');
+          this.settleCancelBeforeDispatchAck(ack, text);
           return;
         }
         // 不重复做（2026-09-25 复测案例一）：加的活若某支在飞/已收工的支已

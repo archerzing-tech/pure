@@ -105,3 +105,35 @@ export function steerConsumedBy(target: SteerTarget, recipient?: SteerRecipient)
   if (target === 'all') return !recipient?.branchCallId;
   return recipient?.branchCallId === target.branchCallId || (recipient?.branchName !== undefined && recipient.branchName === target.branchName);
 }
+
+/**
+ * 出生前取消的收执要点名被收掉的话题（用户实测反馈：固定话术里「这项」
+ * 是空的，真人同事会说「“未来三年的爆发点”这项不做了」）。纯字符串零
+ * 延迟——收执必须抢在委派卡之前，等不得模型。判据同样保守：
+ * - 引号里的大概率就是话题本身（用户自己就这么说），最先认；
+ * - 没引号就剥祈使框架（「X 这个不要调研了」「不要调研 X 了」）取主干；
+ * - 提不出（全是指代词、太短、太长、混着加活）返回 null——收执退回
+ *   「这项」的说法，绝不装懂点名。
+ */
+export function cancelReceiptTopic(text: string): string | null {
+  const s = text.trim();
+  if (!s) return null;
+  // 1) 引号话题：中英引号都认，取第一段 2–30 字的。
+  for (const m of s.matchAll(/[“"「『]([^”"」』]{2,30})[”"」』]/g)) {
+    const t = m[1].trim();
+    if (t && !STEER_STOP_TOKENS.has(t)) return t;
+  }
+  // 2) 话题在前、祈使收尾：「未来三年的爆发点这个不要调研了」「jev 就不查了」。
+  const topicFirst = s.match(/^(.{2,30}?)\s*[，,]?\s*(?:这|那)?(?:个|项)?[，,]?\s*(?:就|先|也)?(?:不要|别|不用|不需|先不|不)再?(?:调研|查|研究|分析|讨论|做|弄|写|聊|管|跑|看)了?[。！!～\s]*$/);
+  if (topicFirst) {
+    const t = topicFirst[1].trim().replace(/[，,。！!～\s]+$/, '');
+    if (t.length >= 2 && t.length <= 30 && !STEER_STOP_TOKENS.has(t)) return t;
+  }
+  // 3) 祈使开头、话题收尾：「不要调研未来三年的爆发点了」。
+  const verbFirst = s.match(/^(?:不要|别|不用|先不|不)再?(?:调研|查|研究|分析|讨论|做|弄|写|聊|管|跑|看)\s*(.{2,30}?)(?:这|那)?(?:个|项)?(?:了|啦)?[。！!～\s]*$/);
+  if (verbFirst) {
+    const t = verbFirst[1].trim().replace(/^[，,。！!～\s]+/, '').replace(/[，,。！!～\s]+$/, '');
+    if (t.length >= 2 && t.length <= 30 && !STEER_STOP_TOKENS.has(t)) return t;
+  }
+  return null;
+}

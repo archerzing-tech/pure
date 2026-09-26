@@ -4,7 +4,7 @@
 // 高于广播的代价（多读一行）。
 
 import { describe, expect, it } from 'bun:test';
-import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, type InFlightBranch } from '../steerTargeting';
+import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, cancelReceiptTopic, type InFlightBranch } from '../steerTargeting';
 
 const branches: InFlightBranch[] = [
   { callId: 'call_a', name: 'code_editor', role: '负责代码修改', snippet: '把登录模块改成手机号验证' },
@@ -86,5 +86,33 @@ describe('steerDeliversTo / steerConsumedBy — 投递与消费矩阵', () => {
     expect(steerConsumedBy(target, branchA)).toBe(true);
     expect(steerConsumedBy(target, branchB)).toBe(false);
     expect(steerConsumedBy(target, parent)).toBe(false);
+  });
+});
+
+describe('cancelReceiptTopic — 出生前取消的收执点名', () => {
+  it('引号里的话题最先认（用户自己就这么说）', () => {
+    expect(cancelReceiptTopic('“未来三年的爆发点” 这个不要调研了')).toBe('未来三年的爆发点');
+    expect(cancelReceiptTopic('“agent 开发技术趋势”这项砍掉')).toBe('agent 开发技术趋势');
+    expect(cancelReceiptTopic('「竞品定价」就不要了')).toBe('竞品定价');
+  });
+
+  it('没引号剥祈使框架取主干：话题在前', () => {
+    expect(cancelReceiptTopic('未来三年的爆发点这个不要调研了')).toBe('未来三年的爆发点');
+    expect(cancelReceiptTopic('未来三年的爆发点就不要查了')).toBe('未来三年的爆发点');
+  });
+
+  it('没引号剥祈使框架取主干：祈使在前', () => {
+    expect(cancelReceiptTopic('不要调研未来三年的爆发点了')).toBe('未来三年的爆发点');
+  });
+
+  it('拉丁话题整取', () => {
+    expect(cancelReceiptTopic('jev 这个就不调研了')).toBe('jev');
+  });
+
+  it('提不出就 null：指代词、太短、混着加活，绝不装懂点名', () => {
+    expect(cancelReceiptTopic('这个不要调研了')).toBeNull();
+    expect(cancelReceiptTopic('不要只查均价了，把区间也查了')).toBeNull();
+    expect(cancelReceiptTopic('都别做了')).toBeNull();
+    expect(cancelReceiptTopic('')).toBeNull();
   });
 });

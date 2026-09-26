@@ -1182,8 +1182,12 @@ describe('plan overview completion state', () => {
     const task = src.indexOf("case 'task': {");
     const taskBody = src.slice(task, src.indexOf("case 'chatter':", task));
     expect(taskBody.split('this.pendingCancels.push(text)').length - 1).toBe(2);
-    // 无委派窗的收执说人话：没派的不会派，不是泛泛的"已转达"。
-    expect(src.indexOf('这项不调研了：还没派的不会派出去，也不会进最终汇总。')).toBeGreaterThan(-1);
+    // 无委派窗的收执说人话：没派的不会派，不是泛泛的"已转达"；收执点名
+    // 走 settleCancelBeforeDispatchAck（2026-09-26 用户实测反馈固定话术里
+    // 「这项」是空的——能抽出话题就点名，与停支收执同一人味）。
+    expect(src.indexOf('private settleCancelBeforeDispatchAck(ack: HTMLElement | null, text: string): void')).toBeGreaterThan(-1);
+    expect(src.indexOf('还没派的不会派出去，也不会进最终汇总。')).toBeGreaterThan(-1);
+    expect(src.split('this.settleCancelBeforeDispatchAck(ack, text)').length - 1).toBe(2);
     // 叙述一致性（2026-09-26 用户反馈）：取消型插话的转达走取消专用框架——
     // 通用框架「手头的活继续」会把取消引导成"计划照旧"，模型照数三支，
     // 收执说"不派了"、计划书里三支全名，自相矛盾。两处挂号调用都带 cancel=true。
