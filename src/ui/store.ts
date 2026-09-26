@@ -77,6 +77,9 @@ export interface SessionAgentActivity {
   durationMs?: number;
   tokensUsed?: number;
   inputSnippet?: string;
+  /** 分支级继续（第 2 期第三刀）：本次委派命中 checkpoint = 续跑，卡片带
+   *  续跑徽标；随快照落盘，恢复后仍可辨认。 */
+  resumed?: boolean;
   startedAt?: number;
   timeoutMs?: number;
   parentCallId?: string;

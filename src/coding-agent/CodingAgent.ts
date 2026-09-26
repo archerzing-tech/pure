@@ -310,6 +310,7 @@ export class CodingAgent {
         summary: a.inputSnippet,
         durationMs: a.durationMs,
         tokensUsed: a.tokensUsed,
+        resumed: a.resumed,
       });
     };
     return {

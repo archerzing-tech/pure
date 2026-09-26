@@ -553,6 +553,9 @@ export interface SubagentActivityEvent {
   summary?: string;
   durationMs?: number;
   tokensUsed?: number;
+  /** 分支级继续（第 2 期第三刀）：本次委派命中了上一条 checkpoint = 续跑
+   *  而非从头跑。血缘/续跑徽标随事件走（onStart/onDone 均带）。 */
+  resumed?: boolean;
 }
 
 export type EngineEvent =

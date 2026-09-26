@@ -107,6 +107,12 @@ export const CANCEL_PART_RE = /[^\n。！!？?]{0,24}(?:(?:不需|不用|不)要
 // 和 CANCEL_PART_RE 之前：带点名锚的停比整树停、收活都具体——「停下竞品
 // 那支」不能被整树 abort，「那路别跑了」不能被折进汇合轮。
 const BRANCH_STOP_RE = /(?:停掉|停了|掐掉|砍掉|终止|取消|停下)(?:帮?我?)(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:停掉|停了|掐掉|砍掉|终止|取消|停下)(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:那支|那路|那一路|那条|那个分支)[^。\n！!？?]{0,10}(?:停下来|别跑|停了|不用跑|停掉|掐掉|砍掉|终止|取消)/i;
+// 分支级继续（第 2 期第三刀）：「把竞品那支接着跑完」「让报价那路继续」。
+// 与 BRANCH_STOP_RE 同款：必须有分支锚（那支/那路/…），续跑动词前后皆可——
+// 命中即由宿主按 callId 找到那支已暂停/已停的档案，用**原始参数**同参重派
+// （稳定 sessionId 命中断点 → 引擎 continue）。没有点名锚的「继续」是整树
+// 续跑（走「继续」条），绝不在这里赌。
+export const RESUME_BRANCH_RE = /(?:继续|接着|续上|接续)(?:帮?我?)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)[^。\n！!？?]{0,12}?(?:接着|继续|续上|接着跑|继续跑|跑完|接着弄|继续弄|接着做|继续做|接着干|继续干)/i;
 
 export class DynamicInsertionCoordinator {
   private readonly classify: NonNullable<DynamicInsertionCoordinatorOptions['classify']>;
@@ -131,6 +137,17 @@ export class DynamicInsertionCoordinator {
         confidence: RULE_CONFIDENCE,
         timing: { mode: 'now' },
         signals: { rule: 'BRANCH_STOP_RE', branchStop: true },
+      });
+    }
+    if (RESUME_BRANCH_RE.test(text)) {
+      // 分支级继续（第 2 期第三刀）：点名把某一支接着跑完。宿主按区分词找到
+      // 那支已暂停/已停的档案，用原始参数同参重派——稳定 sessionId 命中
+      // checkpoint 续跑，不从头做。排在 STOP/收活/加活之前：带点名锚的
+      // 「接着跑」比整树续跑、加活都具体。
+      return this.build('steer', 'named-branch resume matched the fast path; the branch is re-delegated from its checkpoint', {
+        confidence: RULE_CONFIDENCE,
+        timing: { mode: 'now' },
+        signals: { rule: 'RESUME_BRANCH_RE', resumesBranch: true },
       });
     }
     if (STOP_RE.test(text)) {
@@ -191,6 +208,7 @@ export class DynamicInsertionCoordinator {
       signals: {
         classifier: 'llm',
         ...(result.cancelsPart ? { cancelsPart: true } : {}),
+        ...(result.resumesPart ? { resumesBranch: true } : {}),
         ...(result.confidenceDefaulted ? { confidenceDefaulted: true } : {}),
         ...(result.when ? { when: result.when } : {}),
       },

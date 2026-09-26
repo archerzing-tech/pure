@@ -973,9 +973,13 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
  */
 export function formatSubagentTraceLine(e: SubagentActivityEvent): string | null {
   const who = e.agentName || 'subagent';
+  // 分支级继续（第 2 期第三刀）：血缘号——同参重派命中断点的这次委派带
+  // 「续跑」标记，行文从第一行就说清它不是从头跑（数据来自 onStart 的
+  // resumed，随 trace 行落盘，重放同形）。
+  const resumeTag = e.resumed ? '（续跑·从存档断点）' : '';
   switch (e.kind) {
     case 'start':
-      return e.summary ? `▶ ${who} 接活：${clipSummary(e.summary)}` : `▶ ${who} 开工`;
+      return e.summary ? `▶ ${who}${resumeTag} 接活：${clipSummary(e.summary)}` : `▶ ${who}${resumeTag} 开工`;
     case 'tool':
       if (!e.toolName) return null;
       if (e.toolState === 'completed') return `✓ ${e.toolName} 完成`;

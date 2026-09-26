@@ -896,6 +896,16 @@ describe('formatSubagentTraceLine (delegation card interior trace)', () => {
       .toBe('✗ code_reviewer 中断：budget exhausted');
   });
 
+  it('第 2 期第三刀：命中 checkpoint 的续跑支——血缘号从第一行就说清不是从头跑', () => {
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'start', resumed: true, summary: 'continue the review' }))
+      .toBe('▶ code_reviewer（续跑·从存档断点） 接活：continue the review');
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'start', resumed: true }))
+      .toBe('▶ code_reviewer（续跑·从存档断点） 开工');
+    // 非续跑行不带标记：一次普通首次委派不能被读成续跑。
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'start' }))
+      .toBe('▶ code_reviewer 开工');
+  });
+
   it('clips long asks and drops contentless kinds', () => {
     const longAsk = 'x'.repeat(200);
     const line = formatSubagentTraceLine({ callId: 'c1', agentName: 'code_editor', kind: 'start', summary: longAsk })!;

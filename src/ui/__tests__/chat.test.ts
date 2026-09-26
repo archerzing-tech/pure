@@ -1203,6 +1203,41 @@ describe('plan overview completion state', () => {
     expect(src.split('this.pendingCancels = [];').length - 1).toBeGreaterThanOrEqual(2);
   });
 
+  it('re-delegates a NAMED paused branch with its original args (第 2 期第三刀)', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 「把 X 那支接着跑完」：续跑的唯一凭据是**原始参数**——稳定 sessionId
+    // 命中 checkpoint，子引擎 continue。原始参数在委派批次起飞时捕获。
+    expect(src.indexOf('private delegationArgs = new Map<string, { name: string; args: string }>();')).toBeGreaterThan(-1);
+    expect(src.indexOf('this.delegationArgs.set(c.id, { name: c.function.name, args: c.function.arguments })')).toBeGreaterThan(-1);
+    expect(src.indexOf('private pendingResumes: Array<{ callId: string; name: string; args: string; label: string; text: string; images: MessageImage[] }> = [];')).toBeGreaterThan(-1);
+    // 宿主入口：resumesBranch 信号 → 点名（已暂停/已取消的支）→ 排队同参重派；
+    // 排在停支/取消之前（带点名锚的「接着跑」最具体）。
+    const steer = src.indexOf("case 'steer': {");
+    const steerBody = src.slice(steer, src.indexOf("case 'question':", steer));
+    expect(steerBody.indexOf('decision.signals.resumesBranch === true')).toBeGreaterThan(-1);
+    expect(steerBody.indexOf('this.resumeNamedBranch(text)')).toBeGreaterThan(-1);
+    expect(steerBody.indexOf('resumesBranch === true')).toBeLessThan(steerBody.indexOf('decision.signals.branchStop === true'));
+    const resumeFn = src.indexOf('private resumeNamedBranch(text: string): string | null');
+    expect(resumeFn).toBeGreaterThan(-1);
+    const resumeBody = src.slice(resumeFn, src.indexOf('private branchLabel(', resumeFn));
+    expect(resumeBody.indexOf("item.status === 'paused' || item.status === 'cancelled'")).toBeGreaterThan(-1);
+    expect(resumeBody.indexOf('this.delegationArgs.get(matched.callId)')).toBeGreaterThan(-1);
+    expect(resumeBody.indexOf('this.pendingResumes.push(')).toBeGreaterThan(-1);
+    // 消费端：委派收齐后的 THINK 边界用原始参数包成普通委派调用还引擎。
+    const synth = src.indexOf('takeSyntheticToolCalls: async () =>');
+    expect(synth).toBeGreaterThan(-1);
+    const synthBody = src.slice(synth, synth + 3_500);
+    expect(synthBody.indexOf('for (const resume of this.pendingResumes.splice(0))')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('arguments: resume.args')).toBeGreaterThan(-1);
+    // 兜底：没赶上 THINK 边界 → 收尾转成排队的新指令，话绝不丢；由
+    // dispatchDeferred 在折入核验同拍结算。
+    expect(src.indexOf('private settlePendingResumes(): void')).toBeGreaterThan(-1);
+    const dispatch = src.indexOf('private dispatchDeferred(): void');
+    expect(src.slice(dispatch, dispatch + 900).indexOf('this.settlePendingResumes()')).toBeGreaterThan(-1);
+    // 分类器判据输入：暂停/已停的支作为可续跑候补喂给分类器（否则它看不见）。
+    expect(src.indexOf('已暂停/已停的支（用户点名可让它们接着跑）')).toBeGreaterThan(-1);
+  });
+
   it('background sessions never yank the shared scroll container', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 后台会话的自动续跑也走 send()：无守卫的 forceScrollToBottom 会把用户

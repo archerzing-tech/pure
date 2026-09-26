@@ -1456,6 +1456,15 @@ export class ChatController {
    * 远是新指令，挂号绝不跨回合拦活。
    */
   private pendingCancels: string[] = [];
+  /** 分支级继续（第 2 期第三刀）：点名把某一支已暂停/已停的委派接着跑完
+   * 时，宿主用**原始参数**同参重派——稳定 sessionId 命中 checkpoint，子引
+   * 擎走 continue 而不是从头 run。原始参数在委派批次起飞时捕获（见
+   * gateDelegations）：callId → { name, args }。拿不到原始参数的旧会话退回
+   * 让父模型重派（可能从头跑）。 */
+  private delegationArgs = new Map<string, { name: string; args: string }>();
+  /** 待同参重派的分支：委派收齐后的 THINK 边界由 takeSyntheticToolCalls
+   * 包成普通委派调用还引擎（卡片/明细/回放全部原生）。 */
+  private pendingResumes: Array<{ callId: string; name: string; args: string; label: string; text: string; images: MessageImage[] }> = [];
   /** 阶段感知的 scope 追加（2026-09-22 用户定稿）：并行委派还没收齐时插进
    * 来的追加活不走"收尾后排队"——那会先输出一份没有它的汇总。折入汇合轮：
    * 代执行回合（takeSyntheticToolCalls，2026-09-22 重设计）在委派收齐后的
@@ -2338,7 +2347,15 @@ export class ChatController {
     // 下个动作时才可兑现——在飞/收尾的事实是 steer vs task 判定的关键输入。
     if (this.agentActivities.length > 0) {
       const inFlight = this.agentActivities.filter((item) => item.status === 'running').length;
+      const standby = this.agentActivities.filter((item) => item.status === 'paused' || item.status === 'cancelled');
       parts.push(`并行委派：共 ${this.agentActivities.length} 个，在飞 ${inFlight} 个${inFlight === 0 ? '（已收齐，任务即将汇总收尾）' : ''}`);
+      // 分支级继续的判据输入：被暂停/被停的支是可续跑的候补，分类器只有
+      // 看见它们存在，才能把「把 X 那支接着跑完」判成 resumes_part（第 2 期
+      // 第三刀）。名单带任务书片段——名字是代号，用户点的是主题。
+      if (standby.length > 0) {
+        const names = standby.map((item) => `${item.agentName}${item.inputSnippet ? `（${item.inputSnippet}）` : ''}`);
+        parts.push(`已暂停/已停的支（用户点名可让它们接着跑）: ${names.join('、')}`);
+      }
     }
     if (this.sessionArtifacts.length > 0) {
       parts.push(`本会话已写入文件：${this.sessionArtifacts.slice(0, 12).map((a) => a.path).join(', ')}`);
@@ -2535,6 +2552,23 @@ export class ChatController {
         if (!this.isStreaming()) this.scheduleDeferred();
         return;
       case 'steer': {
+        // 分支级继续（第 2 期第三刀）：点名把一支**已暂停/已停**的委派接着
+        // 跑完——用原始参数同参重派（稳定 sessionId 命中 checkpoint → 子引
+        // 擎 continue），排在停支/取消/普通 steer 之前（带点名锚的「接着跑」
+        // 比整树续跑、加活都具体）。点不出具体支或拿不到原参，落下去走普通
+        // steer——让父模型从上下文重派（旧会话的兜底，可能从头跑）。
+        if (decision.signals.resumesBranch === true) {
+          const resumed = this.resumeNamedBranch(text);
+          if (resumed) {
+            echoUserBubble();
+            // 续跑由机制保证（同参重派在委派收齐后的代执行回合落定），收执
+            // 是终稿——转普通气泡（与停支/暂停收执同一形态）。
+            this.settleAck(ack, this.hasDelegationInFlight()
+              ? `好——让「${resumed}」那路接着跑，它从存档的断点续，不从头做；等手头这批收齐就接上。`
+              : `好——让「${resumed}」那路接着跑，它从存档的断点续，不从头做。`);
+            return;
+          }
+        }
         // 第 2 期分支中断：祈使式「停掉 X 那支」或取消型话里点得出具体支的
         // ——真停那一支（abortBranch，产出不入账、断点照存），其余照跑。
         // 点不出具体支时退回原路：取消口径折入 / 普通 steer。
@@ -2692,6 +2726,28 @@ export class ChatController {
     const stopped = mode === 'pause' ? orchestrator.pauseBranch(matched.callId) : orchestrator.abortBranch(matched.callId);
     if (!stopped) return null;
     return this.branchLabel(matched.name, matched.callId);
+  }
+
+  /** 分支级继续（第 2 期第三刀）：从用户话里点名一支**已暂停/已停**的委
+   * 派，用**原始参数**排队同参重派——稳定 sessionId 命中 checkpoint，子引
+   * 擎走 continue 而不是从头 run。点名复用 1a 区分词匹配器（只认只被一支
+   * 含有的词，打平宁可续不了也不赌）；候选 = 已暂停/已取消的支（在飞的支
+   * 走 steer，已完成的支结果已在汇总，无需重跑）。拿不到原始参数（旧会话/
+   * 非本会话捕获）返回 null，调用方落回普通 steer 让父模型重派。返回被续
+   * 支的展示名（含同名序号）。 */
+  private resumeNamedBranch(text: string): string | null {
+    const candidates: InFlightBranch[] = this.agentActivities
+      .filter((item) => item.status === 'paused' || item.status === 'cancelled')
+      .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet }));
+    const matched = matchInFlightBranch(text, candidates);
+    if (!matched) return null;
+    const original = this.delegationArgs.get(matched.callId);
+    if (!original) return null;
+    // 同一支只排一次：重复点名不重复派工（第二遍无意义，还会撞去重）。
+    if (this.pendingResumes.some((r) => r.callId === matched.callId)) return null;
+    const label = this.branchLabel(matched.name, matched.callId);
+    this.pendingResumes.push({ callId: matched.callId, name: original.name, args: original.args, label, text, images: [] });
+    return label;
   }
 
   /** 收执里引用支名时带上同任务第几号（researcher·2号）：同名多支时裸的
@@ -2960,6 +3016,23 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     }
   }
 
+  /** 分支级继续的兜底：同参重派没赶在回合最后一个 THINK 边界落地（模型直
+   * 奔汇总 / 回合提前终止）——留在队列里的就转成用户的新指令重入，父从上下文
+   * 重派同一委派（相同参数 → 相同 sessionId → 仍从断点续）。话绝不丢。由
+   * dispatchDeferred 在回合收尾时调用。 */
+  private settlePendingResumes(): void {
+    if (this.pendingResumes.length === 0) return;
+    const resumes = this.pendingResumes.splice(0);
+    this.pendingTasks.push({
+      // 指令型兜底：明确让父用相同参数重派（否则它可能把这句读成新活从头
+      // 跑）。displayText 仍是用户原话——渲染一致性与实时所见同形。
+      text: resumes.map((r) => `【分支级继续】用户要求把之前暂停的「${r.label}」那支接着跑完：请用相同参数重新委派同一子任务，它会从存档的断点续跑，不要从头做。用户原话：“${r.text}”`).join('\n'),
+      images: resumes.flatMap((r) => r.images ?? []),
+      displayText: resumes.map((r) => r.text).join('\n'),
+      ts: Date.now(),
+    });
+  }
+
   /** Schedule the deferred dispatch just after a turn fully finalizes. */
   private scheduleDeferred(): void {
     window.setTimeout(() => this.dispatchDeferred(), 40);
@@ -2983,6 +3056,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 折入追加的收尾核验先行：没被照办的转进 pendingTasks，下面同一趟
     // dispatchDeferred 就会把它们作为新指令派发出去。
     this.settleFoldIns();
+    // 分支级继续的兜底同拍：没赶上 THINK 边界的同参重派转成排队的新指令。
+    this.settlePendingResumes();
     if (this.relatedInsert) {
       const ri = this.relatedInsert;
       this.relatedInsert = null;
@@ -3914,6 +3989,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             const brief = `用户的主任务：「${userText}」。任务进行中用户追加了新要求：${fold.text}。请只针对这项追加内容完成工作，口径与主任务其他部分一致（如调研需给出时间范围、来源、关键事实与遗留风险），不要重复主任务已覆盖的其他对象。`;
             calls.push({ id: callId, index: calls.length, function: { name: role, arguments: JSON.stringify({ prompt: brief }) } });
           }
+          // 分支级继续（第 2 期第三刀）：点名续跑的那支用**原始参数**同参
+          // 重派——稳定 sessionId 命中 checkpoint，子引擎 continue。
+          for (const resume of this.pendingResumes.splice(0)) {
+            this.addStatusBubble(`「${resume.label}」那路接上了——从存档断点续跑，不从头做。`, false, false, 'info');
+            calls.push({ id: `resume_${resume.callId}`, index: calls.length, function: { name: resume.name, arguments: resume.args } });
+          }
           return calls;
         },
         // 委派起飞闸（2026-09-26 用户实测）：取消型插话落在委派出生之前时，
@@ -3922,6 +4003,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // ——「调研」这类家家都有的词永远指不出单支，打平/认不出=放行，
         // 话留给父引擎边界消化）；命中即拦、挂号一次性消费。
         gateDelegations: async (calls) => {
+          // 分支级继续的地基：每个委派的原始参数在这里捕获（同参重派命中
+          // checkpoint 的唯一凭据）。先于闸、与有无取消挂号无关。
+          for (const c of calls) {
+            if (!subagentNames.has(c.function.name) || this.delegationArgs.has(c.id)) continue;
+            this.delegationArgs.set(c.id, { name: c.function.name, args: c.function.arguments });
+          }
           if (this.pendingCancels.length === 0) return [];
           const candidates = calls
             .filter((c) => subagentNames.has(c.function.name))

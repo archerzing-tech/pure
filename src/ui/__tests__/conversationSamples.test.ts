@@ -835,6 +835,60 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     h.endTurn();
     expect(h.sends).toHaveLength(0);
   });
+
+  it('第 2 期第三刀：点名把一支已暂停的委派接着跑完——同参重派，不从头做', async () => {
+    // 用户真机诉求：「把 jev 那支接着跑完」。名字是代号，点名靠区分词；
+    // 关键在"用原始参数"——稳定 sessionId 命中 checkpoint，子引擎 continue。
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities = [
+      { callId: 'call_b', agentName: '竞品分析员', agentRole: 'analyst', inputSnippet: '分析主要竞品的定价策略', status: 'paused' },
+      { callId: 'call_a', agentName: '市场调研员', agentRole: 'researcher', inputSnippet: '调研海外市场规模', status: 'running' },
+    ];
+    // 原始参数在委派批次起飞时被 gateDelegations 捕获（同参重派的唯一凭据）。
+    h.chat.delegationArgs.set('call_b', { name: 'competitor_analyst', args: '{"prompt":"分析主要竞品的定价策略"}' });
+
+    // RESUME_BRANCH_RE 快路径：不经 LLM 直判「把那一支接着跑完」。
+    await h.chat.interject('把竞品那支接着跑完。');
+    expect(llm.classifyCalls.length).toBe(0);
+    expect(assistantJoined(h.root)).toContain('好——让「竞品分析员」那路接着跑，它从存档的断点续，不从头做；等手头这批收齐就接上。');
+    expect(userJoined(h.root)).toContain('把竞品那支接着跑完');
+    // 排上了同参重派：**原始参数**原样，不是新任务。
+    expect(h.chat.pendingResumes).toHaveLength(1);
+    expect(h.chat.pendingResumes[0].name).toBe('competitor_analyst');
+    expect(h.chat.pendingResumes[0].args).toBe('{"prompt":"分析主要竞品的定价策略"}');
+    // 续跑既不是折入也不是普通 steer：两个池子都干净。
+    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.pendingSteers).toHaveLength(0);
+  });
+
+  it('第 2 期第三刀：同参重派没赶上 THINK 边界——收尾转成排队的新指令，话绝不丢', async () => {
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities = [
+      { callId: 'call_b', agentName: '竞品分析员', status: 'paused', inputSnippet: '分析主要竞品的定价策略' },
+    ];
+    h.chat.delegationArgs.set('call_b', { name: 'competitor_analyst', args: '{"prompt":"分析主要竞品的定价策略"}' });
+
+    await h.chat.interject('把竞品那支接着跑完。');
+    expect(h.chat.pendingResumes).toHaveLength(1);
+    // 回合在落地前就收尾了：兜底把它当用户的新指令重入（父从上下文重派）。
+    h.endTurn();
+    expect(h.chat.pendingResumes).toHaveLength(0);
+    expect(h.sends).toHaveLength(1);
+    expect(h.sends[0]).toContain('把竞品那支接着跑完');
+  });
+
+  it('第 2 期第三刀：点不出具体支（无暂停支/打平）——退回普通 steer，让父模型重派', async () => {
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities = []; // 没有可续跑的候补
+
+    await h.chat.interject('把竞品那支接着跑完。');
+    expect(h.chat.pendingResumes).toHaveLength(0);
+    // 退回 steer（转达父引擎），话不丢。
+    expect(h.chat.pendingSteers).toHaveLength(1);
+  });
 });
 
 // ── 插话回执的次序与形态（2026-09-25 用户实测）────────────────────────────

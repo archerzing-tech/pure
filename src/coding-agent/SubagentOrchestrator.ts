@@ -106,6 +106,10 @@ export interface SubagentActivity {
   tokensUsed?: number;
   /** Truncated summary of the delegated task (args.prompt/task) for the card header. */
   inputSnippet?: string;
+  /** 分支级继续（第 2 期第三刀）：这一次委派命中了上一条 checkpoint（同参
+   * 重派 → 稳定 sessionId），子引擎走的是 continue 而不是从头 run。血缘/
+   * 续跑徽标的唯一事实来源，随 onStart / onDone 事件一起走。 */
+  resumed?: boolean;
   /** Epoch ms when the subagent started. */
   startedAt?: number;
   /** Subagent's hard timeout budget (ms). */
@@ -417,7 +421,19 @@ export class SubagentOrchestrator implements ToolAdapter {
     // 点名停/续一支——名字是代号（researcher），主题在任务书里。
     const registered = this.branches.get(toolCall.id);
     if (registered) registered.inputSnippet = this.inputSnippet(args);
-    emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, ...machine.describe() });
+    // Stable subagent sessionId for checkpoint resume; only meaningful when a
+    // stateStore is configured (CLI / GUI 进程内). Same parent session + agent
+    // + task input → same sessionId → a re-delegated identical sub-task
+    // continues. Use `_`/`.`/`-` only — FSStore rejects sessionIds with `:` or
+    // other path characters (path-traversal guard).
+    const parentSessionId = (this.config.parentSessionId ?? 'cli').replace(/[^A-Za-z0-9._-]/g, '_');
+    const sessionId = this.config.stateStore
+      ? `sub_${parentSessionId}_${def.name}_${this.stableHash([def.name, JSON.stringify(args)])}`
+      : `subagent_${def.name}_${startTime}`;
+    // 分支级继续（第 2 期第三刀）：同参重派命中上一条 checkpoint = 续跑，
+    // 不是从头跑。这是血缘/续跑徽标的唯一事实来源，onStart 起可见。
+    const resumedFromCheckpoint = Boolean(this.config.stateStore?.loadSession(sessionId)?.state?.messages?.length);
+    emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, resumed: resumedFromCheckpoint, ...machine.describe() });
 
     // Liveness watchdog: abort only when NO progress event (token / state /
     // tool) has arrived for a while — a wedged run dies in minutes while
@@ -495,16 +511,6 @@ export class SubagentOrchestrator implements ToolAdapter {
         : undefined,
     };
 
-    // Stable subagent sessionId for checkpoint resume; only meaningful when a
-    // stateStore is configured (CLI). Same parent session + agent + task input
-    // → same sessionId → a re-delegated identical sub-task continues. Use
-    // `_`/`.`/`-` only — FSStore rejects sessionIds with `:` or other path
-    // characters (path-traversal guard).
-    const parentSessionId = (this.config.parentSessionId ?? 'cli').replace(/[^A-Za-z0-9._-]/g, '_');
-    const sessionId = this.config.stateStore
-      ? `sub_${parentSessionId}_${def.name}_${this.stableHash([def.name, JSON.stringify(args)])}`
-      : `subagent_${def.name}_${startTime}`;
-
     try {
       // 13.3 合并点：base（代码里，不动）+ 进化 overlay（命中才追加）+ 机械性
       // 汇报格式说明。删 overlay 文件即回滚——下一个会话自然回原样。
@@ -567,7 +573,7 @@ export class SubagentOrchestrator implements ToolAdapter {
         if (segment > 1) {
           // Re-mark the roster card active so a slice boundary never reads as
           // the agent dying and respawning.
-          emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, ...machine.describe() });
+          emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, resumed: resumedFromCheckpoint, ...machine.describe() });
         }
         const stream = segment === 1
           ? (resumedMessages
@@ -658,6 +664,7 @@ export class SubagentOrchestrator implements ToolAdapter {
               agentName: def.name,
               success: true,
               output: finalOutput,
+              resumed: resumedFromCheckpoint,
               duration: done(0),
               tokensUsed,
               usage,
@@ -690,7 +697,7 @@ export class SubagentOrchestrator implements ToolAdapter {
               return {
                 id: toolCall.id,
                 toolName: def.name,
-                result: { aborted: true, agentId, outcome: 'stopped', reason: branchAbortNote, summary: '已按你的要求停止，进度已存档', finalOutput },
+                result: { aborted: true, agentId, outcome: 'stopped', reason: branchAbortNote, summary: '已按你的要求停止，进度已存档', finalOutput, resumed: resumedFromCheckpoint },
                 success: true,
                 duration: done(0),
               };
@@ -715,7 +722,7 @@ export class SubagentOrchestrator implements ToolAdapter {
               return {
                 id: toolCall.id,
                 toolName: def.name,
-                result: { aborted: true, agentId, outcome: 'paused', reason: pausedNote, summary: '已暂停，进度已存档', finalOutput },
+                result: { aborted: true, agentId, outcome: 'paused', reason: pausedNote, summary: '已暂停，进度已存档', finalOutput, resumed: resumedFromCheckpoint },
                 success: true,
                 duration: done(0),
               };

@@ -311,6 +311,12 @@ export interface InsertionClassification {
    * 不等汇合轮。宿主先点名寻址（matchSteerRecipient），点到了就
    * abortBranch；点不到退回取消折入——宁可折叠不误杀。 */
   branchStop?: boolean;
+  /** 分支级继续（第 2 期第三刀）：「把 X 那支接着跑完」——宿主点名找到那支
+   * 已暂停/已停的档案，用**原始参数**同参重派（稳定 sessionId 命中断点 →
+   * 引擎 continue）；点不到具体支或拿不到原参退回让父模型重派。
+   * 命名与 cancelsPart 同风格（分类器 JSON 字段 resumes_part → 这里），
+   * coordinator 再转成信号 resumesBranch。 */
+  resumesPart?: boolean;
 }
 
 const INSERTION_CLASSIFY_PROMPT = `You route a NEW user message that arrives WHILE an agent is already mid-task. Pick what a competent human colleague would do with it — the two hard rules: the user's words must never be dropped, and work must never restart without a real reason.
@@ -327,7 +333,7 @@ The new message the user just inserted mid-run:
 
 Categories (pick exactly one):
 - "question": the user asks something and expects an answer NOW — a status check ("跑完了吗", "现在到哪了"), a request for explanation, a decision only they can make. Answering must not disturb the running task.
-- "steer": the message guides HOW the current work proceeds and every bit of work already underway stays valid — a small tweak ("记得跑测试", "文案再口语一点"), a style preference, a caution, a constraint, extra detail that narrows without adding work. Steer works only as a promise ("the next step will take it into account"), so it requires a real next step to still happen; if the task is wrapping up or blocked waiting on parallel delegations to return, there is no such step and the message would be silently lost. Removing or cancelling a NAMED PART of the running work — one branch, topic, or item of a multi-part job ("X 就不调研了", "Y 那个别查了", "Z 不用了") — is steer, and this stays true while parallel delegations are out: the merge round that collects them is exactly the step that honors the removal (the cancelled part just leaves the result), so set "cancels_part": true. A removal is NEVER "task" — queuing a removal would run the exact opposite of what was asked — and "goal-change" only if the WHOLE direction is overturned, not one part of it.
+- "steer": the message guides HOW the current work proceeds and every bit of work already underway stays valid — a small tweak ("记得跑测试", "文案再口语一点"), a style preference, a caution, a constraint, extra detail that narrows without adding work. Steer works only as a promise ("the next step will take it into account"), so it requires a real next step to still happen; if the task is wrapping up or blocked waiting on parallel delegations to return, there is no such step and the message would be silently lost. Removing or cancelling a NAMED PART of the running work — one branch, topic, or item of a multi-part job ("X 就不调研了", "Y 那个别查了", "Z 不用了") — is steer, and this stays true while parallel delegations are out: the merge round that collects them is exactly the step that honors the removal (the cancelled part just leaves the result), so set "cancels_part": true. A removal is NEVER "task" — queuing a removal would run the exact opposite of what was asked — and "goal-change" only if the WHOLE direction is overturned, not one part of it. Resuming a NAMED STANDBY branch is also steer: when the user points at one branch that was previously stopped or paused mid-run and asks to carry it on ("把竞品那支接着跑完", "让报价那路继续"), set "resumes_part": true — the host re-delegates that branch with its original arguments so it continues from its saved checkpoint instead of starting over. A resume is NEVER "task": the branch already has its own run and checkpoint, and queuing it as new work would start it from scratch.
 - "premise-change": the user corrects a FACT that the current work is built on — origin/place, dates/timing, environment ("我用的是 Windows"), versions, budget, who owns what, an "already/currently X" assumption. The goal itself stands, but anything being computed from the wrong fact comes out worthless, so the running work must be cut short and redone from the corrected fact ("其实我在西安，不是广东", "预算只有三千，不是一万"). Judge this over steer whenever the correction would change the ANSWER, not just its wording.
 - "goal-change": the user overturns the current direction — replace the goal/approach/output, undo what was built, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…").
 - "task": any NEW, completable item of work — even one that EXTENDS the current job ("再加一个 X 平台", "顺便也查一下 Y", "把 Z 也照样处理"), another file, another feature, a separate errand. A scope addition must go here, never steer: queuing runs it to completion right after the current task, so nothing is forgotten; steering it only promises "the next step will pick it up" — a promise that goes unfulfilled when no real next step remains. When torn between steer and task over an addition of work, pick task. The reverse is just as fixed: a REMOVAL of work never goes here — a message that cancels or drops part of the job is a steer no matter how much it reads like a to-do, because queuing it would execute the opposite of what was asked.
@@ -336,7 +342,7 @@ Categories (pick exactly one):
 One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the category of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"question|steer|premise-change|goal-change|task|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true}
+{"kind":"question|steer|premise-change|goal-change|task|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"resumes_part":true}
 
 "confidence" is how sure you are of the KIND and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
@@ -356,7 +362,11 @@ explicitly belongs after the current task, and null when no timing was said.
 
 "cancels_part": include it as true ONLY when kind is "steer" AND the message
 cancels or removes a named part of the running work ("X 就不调研了"); omit it
-for every other message.`;
+for every other message.
+
+"resumes_part": include it as true ONLY when kind is "steer" AND the message
+asks to carry on ONE named branch that was previously stopped or paused
+("把 X 那支接着跑完"); omit it for every other message.`;
 
 /**
  * Lightweight single-call routing of a message the user inserts while the
@@ -396,7 +406,7 @@ export async function classifyInsertion(
     { role: 'user', content: prompt, images },
   ];
   const KINDS: readonly string[] = ['question', 'steer', 'premise-change', 'goal-change', 'task', 'chatter'];
-  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown }>(
+  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown; resumesPart?: unknown; resumes_part?: unknown }>(
     llm,
     request,
     signal,
@@ -425,6 +435,7 @@ export async function classifyInsertion(
       // 契约字段是蛇形 cancels_part（见提示词 JSON 样例）；驼峰兜底防模型
       // 自行改写。两处都严格 === true，缺省即 false。
       ...(parsed.cancels_part === true || parsed.cancelsPart === true ? { cancelsPart: true } : {}),
+      ...(parsed.resumes_part === true || parsed.resumesPart === true ? { resumesPart: true } : {}),
     };
   }
   return fallback;
