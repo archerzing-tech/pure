@@ -5319,7 +5319,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (branchOutcome) {
                 planCard.setActivity(branchOutcome === 'paused'
                   ? `${toolName} 已暂停，进度已存档`
-                  : `${toolName} 已按你的要求停止，进度已存档`);
+                  // 出生即拦（起飞闸）：没有进度可言，别说"已存档"。
+                  : duration === 0
+                    ? `${toolName} 未派出——你提前收掉了它，不进汇总`
+                    : `${toolName} 已按你的要求停止，进度已存档`);
               } else if (event.payload.result.success && event.payload.toolName === 'execute_command' && isVerificationCommand(cmd)) {
                 planCard.setActivity(`验证命令已通过：${cmd}，正在继续交付验证管线…`);
               } else if (event.payload.result.success) {

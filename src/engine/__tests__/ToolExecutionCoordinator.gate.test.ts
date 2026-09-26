@@ -60,8 +60,15 @@ describe('ToolExecutionCoordinator 委派起飞闸', () => {
     const cancelled = streamed.find((r) => r.id === 'c3');
     expect(cancelled?.success).toBe(true);
     expect(cancelled?.outcome).toBe('stopped');
-    expect(String(cancelled?.result)).toContain('用户取消');
-    expect(String(cancelled?.result)).toContain('最终汇总不要包含');
+    // 内层结算体对齐真停支形态：UI 从这里读 outcome（灰态）和 summary（卡面
+    // 正文）——内层若是纯字符串，outcome 被漏读，卡片按绿✓成功结算（2026-09-26 用户复测）。
+    const inner = (cancelled?.result ?? {}) as { aborted?: boolean; outcome?: string; reason?: string; summary?: string };
+    expect(inner.aborted).toBe(true);
+    expect(inner.outcome).toBe('stopped');
+    expect(inner.summary).toContain('派出前收掉了这一路');
+    // 模型侧指令在 reason：别算进汇总、别再派工。
+    expect(inner.reason).toContain('最终汇总不要包含');
+    expect(inner.reason).toContain('不要再为它派工');
     // 适配器只见到没被拦的两支——被取消的分支根本不出生。
     expect(tools.calls.map((c) => c.id).sort()).toEqual(['c1', 'c2']);
     // 兄弟支拿到的是真实执行结果，不是取消说明。

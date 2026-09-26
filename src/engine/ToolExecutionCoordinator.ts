@@ -91,7 +91,17 @@ export class ToolExecutionCoordinator {
           result: {
             id: call.id,
             toolName: call.function.name,
-            result: `（用户取消）用户在派出前收掉了这项：${reason}。未执行、无产出，最终汇总不要包含它，也不要再为它派工。`,
+            // 结算体对齐真停支的既定形态（{aborted, outcome, reason,
+            // summary}）：UI 从内层对象读 outcome 才走灰态、从 summary 取
+            // 卡面正文——内层是纯字符串时 outcome 会被整个漏读，卡片按
+            // 绿✓成功结算，被拦的支看起来像真跑完（2026-09-26 用户复测）。
+            // reason 说给模型（别算进汇总、别再派工），summary 说给人。
+            result: {
+              aborted: true,
+              outcome: 'stopped' as const,
+              reason: `用户在派出前收掉了这项（用户原话：${reason}）。未执行、无产出，最终汇总不要包含它，也不要再为它派工。`,
+              summary: `你在派出前收掉了这一路（“${reason}”）：没派出去、没有产出，也不会进最终汇总。`,
+            },
             success: true,
             outcome: 'stopped',
             duration: 0,

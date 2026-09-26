@@ -849,7 +849,12 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
   // 不打 ✗——用户自己的决定不是错误（2026-09-25 复测）。
   if (meta.outcome) {
     row.details.classList.add(meta.outcome);
-    row.statusEl.textContent = meta.outcome === 'paused' ? `⏸ ${formatDuration(meta.duration)}` : '⏹';
+    // 出生即拦（委派起飞闸）与跑过再停要一眼分得开：合成取消结果
+    // duration=0、代理从未出生，状态行直说「未派出·已取消」——一张灰色
+    // 委派卡光秃秃一个 ⏹ 会被读成"三个都派了"（2026-09-26 用户复测）。
+    row.statusEl.textContent = meta.outcome === 'paused'
+      ? `⏸ ${formatDuration(meta.duration)}`
+      : meta.duration === 0 ? '⏹ 未派出·已取消' : '⏹';
   } else {
     row.details.classList.add(meta.success ? 'success' : 'failure');
     row.statusEl.textContent = `${meta.success ? '✓' : '✗'} ${formatDuration(meta.duration)}`;

@@ -678,6 +678,31 @@ describe('tool row renders generated images as <img> cards', () => {
     }
   });
 
+  it('a delegate blocked at birth by the takeoff gate reads 未派出·已取消, not a bare ⏹', () => {
+    const restore = installFakeDocument();
+    try {
+      // 2026-09-26 用户复测：出生即拦的委派卡光秃秃一个 ⏹ 会被读成
+      // "三个都派了"。duration=0（代理从未出生）时状态行直说未派出；
+      // 跑过再停的支（duration>0）保持原样。
+      const blocked = createToolRow('researcher', { topic: '未来三年的爆发点' });
+      finalizeToolRow(blocked, {
+        success: true,
+        outcome: 'stopped',
+        duration: 0,
+        resultText: '你在派出前收掉了这一路（“未来三年这个就不调研了”）：没派出去、没有产出，也不会进最终汇总。',
+      });
+      expect(blocked.statusEl.textContent).toBe('⏹ 未派出·已取消');
+      expect(blocked.details.classList.contains('stopped')).toBe(true);
+      expect(blocked.details.classList.contains('success')).toBe(false);
+      // 对照：跑过再停（有真实时长）仍是 ⏹，不带未派出字样。
+      const stoppedMidrun = createToolRow('researcher', { topic: 'LLM 的发展方向' });
+      finalizeToolRow(stoppedMidrun, { success: true, outcome: 'stopped', duration: 4200, resultText: '已按你的要求停止，进度已存档' });
+      expect(stoppedMidrun.statusEl.textContent).toBe('⏹');
+    } finally {
+      restore();
+    }
+  });
+
   it('a paused/stopped branch settlement settles calm (grey ⏸/⏹), never red failure', () => {
     const restore = installFakeDocument();
     try {
