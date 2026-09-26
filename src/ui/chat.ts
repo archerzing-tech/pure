@@ -4,7 +4,7 @@
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
 import { abortPaused, isPauseAbort } from '../shared/pauseSignal';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort } from '../shared/providers';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { blockedHosts } from '../shared/netGuard';
@@ -928,7 +928,10 @@ function createPermissionHandler(config: PureConfig, hostFor?: () => HTMLElement
 
 // Exported for the Settings evolution dashboard (13.3 part 3), which drafts a
 // persona overlay and runs its A/B gate on the SAME provider/adapter pipeline.
-export function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdapter {
+export function createLLMAdapter(
+  config: ReturnType<typeof loadConfig>,
+  opts: { disableThinking?: boolean } = {},
+): LLMAdapter {
   if (!config) {
     throw new Error('No configuration');
   }
@@ -969,7 +972,12 @@ export function createLLMAdapter(config: ReturnType<typeof loadConfig>): LLMAdap
   // extraBody plumb and anthropic endpoints reject unknown top-level fields,
   // so this stays an OpenAI-protocol-only parameter for now.
   const reasoning = resolveReasoningEffort({ ...config, protocol });
-  const extraBody = reasoning.effort ? { reasoning_effort: reasoning.effort } : undefined;
+  // 规划思考调用（disableThinking）在支持的 provider 上显式关掉暗推理：
+  // 可见叙述本身就是思考，暗推理只把第一个可见字推迟 90s+（见
+  // planThinkingOffExtraBody 的实测注）。不支持的 provider 得 undefined，
+  // 什么 extra 都不加。
+  const extraBody = (opts.disableThinking ? planThinkingOffExtraBody(config.provider, baseURL) : undefined)
+    ?? (reasoning.effort ? { reasoning_effort: reasoning.effort } : undefined);
   const apiKey = custom?.apiKey ?? builtinOverride?.apiKey ?? config.apiKey;
   if (protocol === 'anthropic' && !isTauriRuntime()) {
     if (!apiKey && !isCustomKeyless(customs, config.provider)) throw new Error('No API key configured');
@@ -1443,6 +1451,11 @@ export class ChatController {
   /** The LLM adapter for the current turn — interject() reuses it to classify
    * a mid-run insert (set by send(); null before first run). */
   private turnLlm?: import('../shared/types').LLMAdapter;
+  /** 规划专用适配器：本调用的唯一使命是当着用户把思考讲出来——GLM 的暗推理
+   * 在这路上是纯重复税（实测 baseline 首字 97.7s，关思考后 1.4s），所以规划
+   * 实例关掉暗思考，主回合适配器保持原样（set by send()）。
+   * 换掉 createLLMAdapter 签名会牵连非 Tauri 路径与测试，所以走独立实例。 */
+  private planLlm?: import('../shared/types').LLMAdapter;
   /** 插话重构 — steering channel into the RUNNING turn. classifyAndApplyInterject
    * pushes here; the engine drains the queue at each THINK boundary (via
    * takeSteerMessages) so the very next round reconciles the words mid-flight —
@@ -2833,15 +2846,19 @@ export class ChatController {
    * 思考直接进对话气泡——形状由模型自己定（提示词不给提纲）——讲完从同一条
    * 回复末尾解析 ```json 步骤清单。返回 null = 什么都没落地（调用方安静兜底，
    * 绝不弹失败噪音：上一代 LLM 预分析就死在这上面）；返回无 plan 的 narration
-   * = 思考可见但步骤没解析成（调用方不再放假卡，以思考为指引）。超时上限
-   * 给足——流式期间用户看得见思考在长，不是盯着空等然后报错。 */
+   * = 思考可见但步骤没解析成（调用方不再放假卡，以思考为指引）。
+   * 死空气回归（2026-09-26 用户报「改坏了」）的两处对策：走关暗思考的规划
+   * 适配器 this.planLlm（GLM 上首字 97.7s→1.4s）；气泡懒创建 + streaming
+   * 光标，第一个可见字落屏才收思考卡（onFirstVisible，方法收尾兜底再收一次）
+   * ——安静期的等待由思考卡顶着，绝不出现没人说话的空档。 */
   private async planByThinking(
     chatEl: HTMLElement,
     userText: string,
     userImages: MessageImage[],
     projectBuild: boolean,
+    onFirstVisible?: () => void,
   ): Promise<{ narration: string; plan: Plan | null } | null> {
-    const llm = this.turnLlm;
+    const llm = this.planLlm ?? this.turnLlm;
     if (!llm) return null;
     const { system, user } = buildPlanThinkingPrompt(userText, { projectBuild, hasImages: userImages.length > 0 });
     const request: import('../shared/types').Message[] = [
@@ -2854,15 +2871,29 @@ export class ChatController {
     const forwardAbort = (): void => ac.abort();
     this.abortController?.signal.addEventListener('abort', forwardAbort, { once: true });
     const timer = setTimeout(forwardAbort, PLAN_THINKING_TIMEOUT_MS);
-    const bubble = this.addBubble('assistant', '');
+    // 气泡懒创建：第一个可见字到了才落，落时带 streaming 光标并收思考卡。
+    // onFirstVisible 即调用方的 removeThinkingCard（幂等）：首字收一次，此后
+    // 每个内容块再收一次——顺路吃掉静看门狗在叙述中途弹的「正在思考下一步…」
+    // 空档卡（叙述气泡本身就是活的指示器，空档卡在它旁边纯属噪音）；方法收尾
+    // 再兜一次，有字没字都由这里收口。
+    let bubble: HTMLElement | null = null;
+    const reveal = (): void => { onFirstVisible?.(); };
     let full = '';
     try {
       for await (const chunk of llm.stream(request, [], ac.signal)) {
         if (this.abortController?.signal.aborted) break;
         if (chunk.type === 'content' && chunk.content) {
           full += chunk.content;
-          bubble.textContent = liveNarrationPortion(full);
-          this.scrollUi(chatEl);
+          const live = liveNarrationPortion(full);
+          if (!bubble && live.trim()) {
+            bubble = this.addBubble('assistant', '');
+            bubble.classList.add('streaming');
+          }
+          if (bubble) {
+            bubble.textContent = live;
+            this.scrollUi(chatEl);
+            reveal();
+          }
         } else if (chunk.type === 'done') {
           break;
         }
@@ -2872,13 +2903,16 @@ export class ChatController {
     } finally {
       clearTimeout(timer);
       this.abortController?.signal.removeEventListener('abort', forwardAbort);
+      reveal();
     }
     const { narration, planText } = splitNarrationAndPlan(full);
     const narrationText = narration.trim();
     if (this.abortController?.signal.aborted) {
       // 用户主动停：叙述留在屏幕上（真实产出的记录），但不进上下文、不进持久化。
-      if (narrationText) bubble.textContent = narrationText;
-      else bubble.remove();
+      if (bubble && narrationText) {
+        bubble.textContent = narrationText;
+        bubble.classList.remove('streaming');
+      } else bubble?.remove();
       return null;
     }
     let plan: Plan | null = null;
@@ -2887,14 +2921,17 @@ export class ChatController {
       if (isUsablePlan(parsed.plan)) plan = parsed.plan;
     }
     if (!narrationText && !plan) {
-      bubble.remove();
+      bubble?.remove();
       return null;
     }
-    if (narrationText) {
-      bubble.textContent = narrationText;
-      this.scrollUi(chatEl);
-    } else {
-      bubble.remove();
+    if (bubble) {
+      if (narrationText) {
+        bubble.textContent = narrationText;
+        bubble.classList.remove('streaming');
+        this.scrollUi(chatEl);
+      } else {
+        bubble.remove();
+      }
     }
     return { narration: narrationText, plan };
   }
@@ -3917,6 +3954,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
 
       const llm = createLLMAdapter(config);
       this.turnLlm = llm;
+      // 规划实例：planByThinking 的流式思考轮走它。GLM 端点上关暗思考
+      // （planThinkingOffExtraBody），让「当着用户想」的第一个字秒级出现——
+      // 死空气是上一版回归的根因（75s 无人说话，用户以为死了）。
+      // 其他 provider 不给开关（planThinkingOffExtraBody 返回 undefined），
+      // 于是回落到 reasoning_effort，与主回合行为一致。
+      this.planLlm = createLLMAdapter(config, { disableThinking: true });
       // 9.2 — per-phase model routing (experimental). Each phase naming a
       // different model gets its own same-provider adapter through the shared
       // factory; blank / main-model entries fall through to `llm` via the E0.3
@@ -4477,13 +4520,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           // 安静兜底位：用户强制模式的确认对话必须有一份具体方案可批、以及思考
           // 完全没落地时。自动路径上宁可没有卡片，也不再拿写死步骤冒充规划；
           // 任何失败都不留噪音——上一代 LLM 预分析就死在超时提示与通用兜底噪音上。
-          removeThinkingCard();
+          // 思考卡在规划期间保持活着（死空气回归的教训：75s 无人说话 = 用户以为
+          // 死了）；第一个可见字落屏时由 planByThinking 揭卡，叙述气泡接着顶上。
+          if (thinkingCard) setThinkingLabel(thinkingCard, '正在想这个任务怎么做…');
           maybeShowAssessment();
           maybeShowPlanSummary();
           const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';
-          const thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate);
+          const thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);
           if (this.abortController?.signal.aborted) {
             // 思考被用户掐断：请求留在对话里，计划流程一并收场（探针同款收尾）。
+            removeThinkingCard();
             keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
             return;
           }

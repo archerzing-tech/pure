@@ -675,6 +675,27 @@ export function firstTokenHintTimeoutMs(provider: string | undefined | null, mod
   return slowFirstToken ? 30_000 : 15_000;
 }
 
+/**
+ * 规划思考调用的「关暗思考」参数（2026-09-26 实测）：GLM 5.3 对规划类长回答
+ * 先暗推理才吐第一个可见字——anthropic 兼容端点实测 97.7s，而规划调用的
+ * 可见叙述本身就是思考，暗推理是 90 秒的纯重复税。GLM（bigmodel）接受
+ * `thinking: {"type": "disabled"}`：第一个可见字 1.4s，叙述质量不降。
+ * 其他 provider 没有验证过「开着不炸」的等价参数（DeepSeek 无开关、官方
+ * Anthropic 以省略为关），返回 undefined 由调用方跳过——静默期靠思考卡
+ * 的存活与慢响应提示顶着。
+ */
+export function planThinkingOffExtraBody(
+  provider: string | undefined | null,
+  baseURL: string | undefined | null,
+): Record<string, unknown> | undefined {
+  const id = `${provider ?? ''}`.toLowerCase();
+  const host = `${baseURL ?? ''}`.toLowerCase();
+  if (id.includes('glm') || host.includes('bigmodel')) {
+    return { thinking: { type: 'disabled' } };
+  }
+  return undefined;
+}
+
 /** True for the deepseek-* providers (shared API base / budget tuning). */
 export function isDeepSeekFamily(id: string | undefined | null): boolean {
   return providerDef(id)?.deepSeekFamily ?? false;

@@ -440,7 +440,7 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     // 流式把思考讲出来，再从同一条回复解析计划；规则步骤只在确认对话兜底。
     // 曾经的 LLM 预分析死于「静默 complete + 失败噪音」，这里必须是流式且安静。
     const probe = src.indexOf('await discoverWorkspace(');
-    const thinking = src.indexOf('await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate);');
+    const thinking = src.indexOf('await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);');
     const planRender = src.indexOf('showPlanCard(approvedPlan);');
     expect(probe).toBeGreaterThan(-1);
     expect(thinking).toBeGreaterThan(probe);
@@ -448,6 +448,13 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     expect(src).toMatch(/llm\.stream\(request, \[\], ac\.signal\)/);
     expect(src).toMatch(/createPlanCard\(plan, refining, planProgress\)/);
     expect(src.indexOf('已回退到通用步骤')).toBe(-1);
+    // 死空气回归的锁定（2026-09-26）：规划期间思考卡活着顶着（「正在想这个任务
+    // 怎么做…」），第一个可见字落屏才收卡（removeThinkingCard 作揭卡回调传入），
+    // 规划调用走关暗思考的专用适配器（this.planLlm）。
+    expect(src).toMatch(/if \(thinkingCard\) setThinkingLabel\(thinkingCard, '正在想这个任务怎么做…'\)/);
+    expect(src).toMatch(/planByThinking\(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard\)/);
+    expect(src).toMatch(/const llm = this\.planLlm \?\? this\.turnLlm;/);
+    expect(src).toMatch(/this\.planLlm = createLLMAdapter\(config, \{ disableThinking: true \}\);/);
   });
 
   it('shows the assessment card after the workspace probe, never synchronously at send start', () => {
@@ -1594,7 +1601,7 @@ describe('plan-by-thinking flow', () => {
 
   it('plans with a streaming model call before the plan card, not from rule steps', () => {
     // 出卡之前必须先有 planByThinking；思考完全没落地才允许规则兜底。
-    const thinkingIdx = src.indexOf('const thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate);');
+    const thinkingIdx = src.indexOf('const thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);');
     expect(thinkingIdx).toBeGreaterThan(-1);
     const cardIdx = src.indexOf('showPlanCard(approvedPlan);');
     expect(cardIdx).toBeGreaterThan(thinkingIdx);
