@@ -2287,6 +2287,8 @@ export class ChatController {
     // 状态叙述行的账随快照回来：之后的每次持久化都带上它们（连同新行），
     // 回放与后续保存不断档。
     this.statusLines = (snapshot.statusLines ?? []).map(line => ({ ...line }));
+    // 押账的规划叙述属于被切走的那一回合，不跟进来（插入点已随会话切换作废）。
+    this.pendingPlanNarration = null;
     // ⑥ 长会话恢复后立刻把 trim/摘要挪进 idle 窗口，首次发送不再在关键路径上
     // 同步等压实（见 preCompactAfterLoad）。
     this.preCompactAfterLoad();
@@ -3412,6 +3414,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 1c 升级硬停第二通道：暂停的宽限窗口里再叫停时，用它立即掐掉在飞工具
     // （主 controller 已 abort，规范规定二次 abort 是 no-op，换不掉 reason）。
     const turnHardStop = new AbortController();
+    // 上一回合异常残留的押账叙述在这里作废：它的插入点（那一回合的用户消息）
+    // 已经错过了，留着只会插进错误的回合（2026-09-27 时序修正）。
+    this.pendingPlanNarration = null;
     this.abortController = turnController;
     this.hardStopController = turnHardStop;
     this.setStreaming(true);
@@ -3438,10 +3443,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       turnToolResults: Map<string, ToolExecMeta>,
       phases: Array<{ text: string; assistantIndex: number }>,
     ): Message[] => {
-      const pausedMessages = limitMessageHistory([
-        ...this.messages,
-        { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments },
-      ]);
+      // 押账的规划叙述跟在请求后面入账（2026-09-27 时序修正）：先请求后思考。
+      const pendingNarration = this.takePendingPlanNarration();
+      const appended: Message[] = [{ role: 'user', content: userText, images: userImages, attachments: userMessageAttachments }];
+      if (pendingNarration) appended.push(pendingNarration);
+      const pausedMessages = limitMessageHistory([...this.messages, ...appended]);
       this.messages = pausedMessages;
       this.hasHistory = true;
       void this.persistSession(pausedMessages, turnToolResults, phases, sendSessionId, sendWorkspace);
@@ -3547,7 +3553,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
 
     let finalMessages: Message[] = [];
     let interruptedMessages: Message[] | undefined;
-    const thinkingAssistantOffset = this.messages.filter(message => message.role === 'assistant').length;
+    // let：规划叙述押账后要 +1（叙述将占住回合内第一个 assistant 位，
+    // 引擎思考段的索引随之顺延，persist 时才能对上同一份 canonical）。
+    let thinkingAssistantOffset = this.messages.filter(message => message.role === 'assistant').length;
     let assistantIteration = -1;
     const thinkingPhases: Array<{ text: string; assistantIndex: number }> = [];
     // The preflight analysis card is separate from engine reasoning, but it is
@@ -4565,8 +4573,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             return;
           }
           if (thought?.narration) {
-            // 思考已可见，并进入模型上下文：后续执行与交付都要对得上它（重放也在）。
-            this.messages.push({ role: 'assistant', content: thought.narration });
+            // 思考已可见，并将进入模型上下文：后续执行与交付都要对得上它（重放也在）。
+            // 2026-09-27 时序修正：先押账不入 canonical——它发生在用户请求之后，
+            // 等请求落账（合并/暂停提交）时插到请求后面；此前直接 push 会排出
+            // [思考, 请求]，切回历史会话就成了“pure 先思考，人的话在后头”。
+            // 叙述将占住回合内第一个 assistant 位，思考段的索引随之顺延。
+            this.pendingPlanNarration = thought.narration;
+            thinkingAssistantOffset += 1;
           }
           let planForReview: Plan | null = thought?.plan ?? null;
           // E2.3 — 策略层的 parallelRoles 接进计划卡：这里与 buildContext 用同一
@@ -6063,7 +6076,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // HVC 复测存档 [system, 叙述, userTC, userTC] 的来源）。interrupted
             // 且 Interrupted 已 merge 过时这里必须跳过。
             if (completionMessages && !interruptedMessages) {
-              finalMessages = mergeTranscriptWithTurn(this.messages, completionMessages, userText);
+              // 押账的规划叙述插在本回合用户消息后面（2026-09-27 时序修正）。
+              finalMessages = mergeTranscriptWithTurn(this.messages, completionMessages, userText, this.takePendingPlanNarration());
               this.messages = limitMessageHistory(finalMessages);
               this.hasHistory = true;
               // Background pre-compaction: trim + LLM-summarize the model
@@ -6223,7 +6237,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             assessmentFlow?.cancel(`运行已中断：${event.payload.reason}`);
             endThinking();
             if (event.payload.messages) {
-              interruptedMessages = mergeTranscriptWithTurn(this.messages, event.payload.messages, userText);
+              // 押账的规划叙述插在本回合用户消息后面（2026-09-27 时序修正）：
+              // 中断回合同样先请求后思考，别让思考在回放里跑到提问前面。
+              interruptedMessages = mergeTranscriptWithTurn(this.messages, event.payload.messages, userText, this.takePendingPlanNarration());
               // Safeguard against a lost in-flight partial reply: the DOM's
               // accumulated text is the ground truth for what the user actually
               // SAW this turn. If the engine's final messages (which depends on
@@ -6592,6 +6608,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.pauseAssessmentFlow = null;
     // 新对话 = 新账本：状态叙述行不跨会话携带。
     this.statusLines = [];
+    // 押账的规划叙述同理：插入点属于旧会话的回合，不跨会话携带。
+    this.pendingPlanNarration = null;
     // Invalidate any background pre-compaction from the previous session.
     this.preCompactedMessages = null;
     this.preCompactSourceMessages = null;
@@ -7067,6 +7085,19 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * （settleAck/modeBubble/蒸馏收尾）走 parentElement 解析，行方（收尾扫除）
    * 直接命中，不依赖 querySelector。 */
   private statusRecords = new WeakMap<HTMLElement, StatusLineRecord>();
+
+  /** 规划叙述的押账（2026-09-27 时序修正）：planByThinking 想出来的思考发生
+   * 在用户请求之后，canonical 里必须排在请求后面。它不再直接 push（那会把
+   * 顺序打成 [思考, 请求]，回放就成了“先思考后提问”），先押在这里，等回合
+   * 的用户消息落进转录（完成/中断合并、暂停提交）时插到它后面。
+   * takePendingPlanNarration 取走即清，插入点各自消费一次。 */
+  private pendingPlanNarration: string | null = null;
+
+  private takePendingPlanNarration(): Message | undefined {
+    const narration = this.pendingPlanNarration;
+    this.pendingPlanNarration = null;
+    return narration ? { role: 'assistant', content: narration } : undefined;
+  }
 
   private anchorIndex(): number {
     return this.messages.length - 1;

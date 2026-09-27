@@ -13,6 +13,7 @@ import type { Message, MessageAttachment, MessageImage, TokenUsage, GeneratedIma
 import type { IntentAssessment, Plan } from '../coding-agent/types';
 import type { PlanProgressSnapshot } from './planProgress';
 import type { PathRepair } from './pathIndex';
+import { relocatePreflightNarration } from '../shared/conversation';
 
 export const SESSION_SNAPSHOT_VERSION = 3;
 
@@ -524,14 +525,77 @@ function snapshotV2ToV3(snapshot: SessionSnapshotV2Legacy, statusLines: StatusLi
   return { version: 3, modelContext: snapshot.modelContext, events, uiState: snapshot.uiState, transcript: snapshot.transcript, statusLines: statusLines.length > 0 ? statusLines : undefined };
 }
 
+/**
+ * 2a7c950 旧账修复（2026-09-27，用户报「切历史会话 pure 先思考、人的输入在
+ * 后面，时间反了」）：规划叙述曾被直接 push 进转录，排在用户请求之前——真
+ * 实时序是先请求后思考。载入即治：把首条用户条目之前的 assistant 连段搬回
+ * 用户之后，modelMessageIndex 与状态行锚点同步重排，回放、后续模型上下文、
+ * 再次持久化都按真实时序走。正常数据原样返回。只治会话开头的倒置（用户报
+ * 的正是“第一句就反了”）；后续回合的同类倒置没有形状判据（回合以 assistant
+ * 收尾是常态），由源头修复兜住——新回合的叙述改为押账待插
+ * （见 mergeTranscriptWithTurn），不再先进 canonical。
+ */
+const IDENTITY_ANCHOR_REMAP = (index: number): number => index;
+
+function healLeadingNarrationEntries(entries: TranscriptEntry[]): { entries: TranscriptEntry[]; remapAnchor: (index: number) => number } {
+  const firstUser = entries.findIndex(entry => entry.role === 'user');
+  if (firstUser <= 0) return { entries, remapAnchor: IDENTITY_ANCHOR_REMAP };
+  const head = entries.slice(0, firstUser);
+  if (head.length === 0 || head.some(entry => entry.role !== 'assistant')) return { entries, remapAnchor: IDENTITY_ANCHOR_REMAP };
+  const narratorIndices = head.map(entry => entry.modelMessageIndex);
+  if (narratorIndices.some(index => !Number.isFinite(index))) return { entries, remapAnchor: IDENTITY_ANCHOR_REMAP };
+  const base = Math.min(...narratorIndices);
+  const userIndex = entries[firstUser].modelMessageIndex;
+  const healed = [
+    { ...entries[firstUser], modelMessageIndex: base },
+    ...head.map(entry => ({ ...entry, modelMessageIndex: entry.modelMessageIndex + 1 })),
+    ...entries.slice(firstUser + 1),
+  ];
+  const remapAnchor = (index: number): number => {
+    if (index === userIndex) return base;
+    if (narratorIndices.includes(index)) return index + 1;
+    return index;
+  };
+  return { entries: healed, remapAnchor };
+}
+
+function healLeadingNarrationEvents(events: SessionEvent[]): SessionEvent[] {
+  const firstUser = events.findIndex(event => event.type === 'user');
+  if (firstUser <= 0) return events;
+  const head = events.slice(0, firstUser);
+  if (head.length === 0 || head.some(event => event.type !== 'thinking' && event.type !== 'assistant')) return events;
+  return [events[firstUser], ...head, ...events.slice(firstUser + 1)];
+}
+
 export function normalizeSessionSnapshot(raw: unknown): SessionSnapshot {
   if (raw && typeof raw === 'object') {
     const candidate = raw as { version?: unknown; modelContext?: { messages?: unknown }; events?: unknown; transcript?: unknown; messages?: unknown; uiState?: SessionUiState };
     if (candidate.version === 3 && candidate.modelContext && Array.isArray(candidate.events)) {
-      return { version: 3, revision: typeof (candidate as { revision?: unknown }).revision === 'number' ? (candidate as { revision: number }).revision : 0, modelContext: { messages: (candidate.modelContext.messages ?? []) as Message[] }, events: candidate.events as SessionEvent[], uiState: candidate.uiState ?? {}, transcript: Array.isArray(candidate.transcript) ? candidate.transcript as TranscriptEntry[] : [], statusLines: Array.isArray((candidate as { statusLines?: unknown }).statusLines) ? (candidate as { statusLines: StatusLineRecord[] }).statusLines : undefined };
+      // 载入即治叙述倒置（2a7c950 旧账，见 healLeadingNarrationEntries）：
+      // 条目、事件、模型上下文三份视图同治，状态行锚点随条目重排。
+      const healedTranscript = healLeadingNarrationEntries(
+        Array.isArray(candidate.transcript) ? candidate.transcript as TranscriptEntry[] : [],
+      );
+      const rawStatusLines = Array.isArray((candidate as { statusLines?: unknown }).statusLines)
+        ? (candidate as { statusLines: StatusLineRecord[] }).statusLines : undefined;
+      return {
+        version: 3,
+        revision: typeof (candidate as { revision?: unknown }).revision === 'number' ? (candidate as { revision: number }).revision : 0,
+        modelContext: { messages: relocatePreflightNarration((candidate.modelContext.messages ?? []) as Message[]) },
+        events: healLeadingNarrationEvents(candidate.events as SessionEvent[]),
+        uiState: candidate.uiState ?? {},
+        transcript: healedTranscript.entries,
+        statusLines: rawStatusLines?.map(line => ({ ...line, afterIndex: healedTranscript.remapAnchor(line.afterIndex) })),
+      };
     }
     if (candidate.version === 2 && candidate.modelContext && Array.isArray(candidate.transcript)) {
-      return snapshotV2ToV3(candidate as SessionSnapshotV2Legacy);
+      // v2 同治：条目搬正后事件由 snapshotV2ToV3 派生，顺序自然跟上。
+      const healedTranscript = healLeadingNarrationEntries(candidate.transcript as TranscriptEntry[]);
+      return snapshotV2ToV3({
+        ...(candidate as unknown as SessionSnapshotV2Legacy),
+        transcript: healedTranscript.entries,
+        modelContext: { messages: relocatePreflightNarration((candidate.modelContext.messages ?? []) as Message[]) },
+      });
     }
     if (Array.isArray(candidate.messages)) return createSessionSnapshotFromLegacy(candidate.messages as StoredMessage[]);
   }

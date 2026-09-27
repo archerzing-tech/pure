@@ -1615,7 +1615,10 @@ describe('plan-by-thinking flow', () => {
   it('thinking lands in the model context; both paths embed it into userPlan', () => {
     // 新会话首回合 hasHistory=false，引擎输入读不到 this.messages——思考必须
     // 原文嵌进 userPlan，「按上面那段思考开工」在首回合是指向空气的。
-    expect(src).toContain('this.messages.push({ role: \'assistant\', content: thought.narration });');
+    // 2026-09-27 时序修正：思考押账（pendingPlanNarration），等本回合用户消息
+    // 落账时插到它后面；直接 push 会让回放里思考抢在用户请求前面。
+    expect(src).toContain('this.pendingPlanNarration = thought.narration;');
+    expect(src).not.toContain("this.messages.push({ role: 'assistant', content: thought.narration })");
     expect(src).toContain('userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate });');
     expect(src).toContain("planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true })");
     // 无卡路径跳过了 approvePlan：评估卡阶段必须同样落定，不能悬在半空。
@@ -1663,7 +1666,7 @@ describe('plan-by-thinking flow', () => {
     // [system, 叙述, userTC, userTC] 的来源）。Completed 侧必须让位。
     const completedIdx = src.indexOf("case 'Completed': {");
     expect(completedIdx).toBeGreaterThan(-1);
-    const mergeIdx = src.indexOf('finalMessages = mergeTranscriptWithTurn(this.messages, completionMessages, userText);', completedIdx);
+    const mergeIdx = src.indexOf('finalMessages = mergeTranscriptWithTurn(this.messages, completionMessages, userText, this.takePendingPlanNarration());', completedIdx);
     expect(mergeIdx).toBeGreaterThan(completedIdx);
     const guard = src.slice(Math.max(0, mergeIdx - 400), mergeIdx);
     expect(guard).toContain('!interruptedMessages');
