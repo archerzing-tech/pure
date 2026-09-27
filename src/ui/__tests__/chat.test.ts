@@ -1638,4 +1638,21 @@ describe('plan-by-thinking flow', () => {
     expect(fn).toContain('clearTimeout(timer);');
     expect(fn).toContain("removeEventListener('abort', forwardAbort);");
   });
+
+  it('the stall watchdog treats active streaming as alive (2026-09-27 欲言又止修复)', () => {
+    // burst 间停顿不是安静：看门狗必须看「流活动保鲜戳」，否则在活跃流式的
+    // 停顿里弹「正在思考下一步…」、下一个事件又收掉——卡片反复闪现闪没。
+    expect(src).toContain('const GAP_STREAM_QUIET_MS = 4_000;');
+    expect(src).toContain('if (Date.now() - this.lastStreamActivityAt < GAP_STREAM_QUIET_MS) return;');
+    // 保鲜戳由两处流循环刷新：引擎事件循环 + 规划叙述块循环。
+    expect(src).toContain('private lastStreamActivityAt = 0;');
+    const refreshes = src.split('this.lastStreamActivityAt = Date.now();').length - 1;
+    expect(refreshes).toBe(2);
+    // 引擎事件循环的第一件事就是刷新（每个事件都算活着）。
+    const loopIdx = src.indexOf('for await (const event of events) {');
+    expect(loopIdx).toBeGreaterThan(-1);
+    const refreshIdx = src.indexOf('this.lastStreamActivityAt = Date.now();', loopIdx);
+    expect(refreshIdx).toBeGreaterThan(loopIdx);
+    expect(src.slice(loopIdx, refreshIdx)).not.toContain('\n\n');
+  });
 });

@@ -1213,6 +1213,12 @@ function yieldToNextPaint(signal?: AbortSignal): Promise<void> {
 // 到点手里有什么算什么（有叙述走叙述指引，全无则安静落回兜底）。
 const PLAN_THINKING_TIMEOUT_MS = 180_000;
 
+// 静看门狗的「流活动保鲜」窗：引擎/规划流的事件间隔低于它时 UI 已 visibly
+// 活着（气泡在长、卡在流），看门狗绝不开口。突发式生成在 burst 之间停
+// 3-4 秒是常态，阈值必须盖过典型停顿——否则空档卡在活跃流式里反复弹了收、
+// 收了弹（2026-09-27 用户报「欲言又止，闪动一下又没了，连续几次」）。
+const GAP_STREAM_QUIET_MS = 4_000;
+
 function deriveFallbackPlan(prompt: string): Plan {
   // 兜底计划：只引用用户这次请求的真实文本，按“先理解、再小步验证”的通用方式推进，
   // 绝不根据关键词把请求归类为“提问 / 创建 / 其他”之类的固定类型再去套模板。
@@ -1456,6 +1462,9 @@ export class ChatController {
    * 实例关掉暗思考，主回合适配器保持原样（set by send()）。
    * 换掉 createLLMAdapter 签名会牵连非 Tauri 路径与测试，所以走独立实例。 */
   private planLlm?: import('../shared/types').LLMAdapter;
+  /** 最近一次流活动的时间戳（引擎事件、规划叙述块都刷新它）。静看门狗据此
+   * 分辨「真安静」与「活跃流式的 burst 间停顿」——后者不该弹空档卡。 */
+  private lastStreamActivityAt = 0;
   /** 插话重构 — steering channel into the RUNNING turn. classifyAndApplyInterject
    * pushes here; the engine drains the queue at each THINK boundary (via
    * takeSteerMessages) so the very next round reconciles the words mid-flight —
@@ -2884,6 +2893,7 @@ export class ChatController {
         if (this.abortController?.signal.aborted) break;
         if (chunk.type === 'content' && chunk.content) {
           full += chunk.content;
+          this.lastStreamActivityAt = Date.now();
           const live = liveNarrationPortion(full);
           if (!bubble && live.trim()) {
             bubble = this.addBubble('assistant', '');
@@ -3836,6 +3846,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         clearInterval(stallWatchdog);
         return;
       }
+      // 流活动保鲜：burst 间停顿不是安静，UI 正 visibly 活着（气泡在长）。
+      // 看门狗在这种停顿里弹空档卡、下一个事件又收掉 = 卡片反复闪现（用户
+      // 报「欲言又止」）——只有真安静超过阈值才轮到它开口。
+      if (Date.now() - this.lastStreamActivityAt < GAP_STREAM_QUIET_MS) return;
       if (!thinkingCard && pendingRows.size === 0 && pendingByName.size === 0) {
         scheduleToolGapCard();
       }
@@ -5203,6 +5217,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 作为“阶段完成”的证据（hasToolWork 只表示模型调用了工具，含失败）。
       let hasToolSuccess = false;
       for await (const event of events) {
+        // 每个引擎事件都是流活着的证据：刷新保鲜戳，看门狗在 burst 间停顿里闭嘴。
+        this.lastStreamActivityAt = Date.now();
 
         // Session switched mid-stream (sidebar click / new chat): stop writing
         // into the new transcript immediately. The engine is aborted via
