@@ -1,6 +1,7 @@
 // src/ui/__tests__/sessionSidebar.test.ts
 // 侧栏会话卡片的纯函数测试：短 id 指纹的确定性、批内唯一性与格式；
-// 外加 load() 的进入契约（2026-09-26 用户反馈：点 "New chat" 卡切不进去）。
+// 外加 load() 的进入契约（2026-09-26 用户反馈：点 "New chat" 卡切不进去）
+// 与列表形态（2026-09-27 用户定调：会话就是会话，不按工作区分组）。
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -35,6 +36,62 @@ describe('SessionSidebar short id assignment', () => {
   });
 });
 
+// makeSidebar 供本文件两个 describe 共用：load() 进入契约 + 列表形态。
+interface FakeChatState {
+  opened: string[];
+  live: Set<string>;
+  messagesOf: (id: string) => unknown[];
+  streamingOf: (id: string) => boolean;
+}
+
+function makeSidebar(overrides: {
+  disk?: (id: string) => unknown;
+  chat?: Partial<SessionSidebarDeps['chat']>;
+} = {}): { sidebar: SessionSidebar; state: FakeChatState; events: string[]; refreshes: number[] } {
+  const state: FakeChatState = {
+    opened: [],
+    live: new Set<string>(),
+    messagesOf: () => [],
+    streamingOf: () => false,
+  };
+  const events: string[] = [];
+  const refreshes: number[] = [];
+  const chat: SessionSidebarDeps['chat'] = {
+    clear: () => {},
+    setWorkspace: () => {},
+    syncEffectiveWorkspace: async () => {},
+    openSession: (sessionId: string) => {
+      state.opened.push(sessionId);
+      return {
+        controller: {
+          getMessages: () => state.messagesOf(sessionId),
+          isStreaming: () => state.streamingOf(sessionId),
+        } as never,
+        host: document.createElement('div'),
+        warm: state.live.has(sessionId),
+      };
+    },
+    forgetSession: () => {},
+    clearAll: () => {},
+    getRunningLiveSessions: () => [],
+    hasOpenSession: (sessionId: string) => state.live.has(sessionId),
+    ...overrides.chat,
+  };
+  const sidebar = new SessionSidebar({
+    chat,
+    pasteChips: { clear: () => events.push('chips') },
+    confirm: async () => true,
+    loadSession: async (id) => (overrides.disk ? (overrides.disk(id) as never) : null),
+    renderMessages: async () => { events.push('rendered'); },
+    focusPrompt: () => events.push('focusPrompt'),
+    showSessionLoading: () => {},
+    onSessionActivated: () => events.push('activated'),
+    onChatCleared: () => events.push('landing'),
+  });
+  sidebar.refresh = () => refreshes.push(1);
+  return { sidebar, state, events, refreshes };
+}
+
 describe('SessionSidebar load() 进入契约', () => {
   beforeAll(() => {
     GlobalRegistrator.register();
@@ -47,61 +104,6 @@ describe('SessionSidebar load() 进入契约', () => {
   beforeEach(() => {
     document.body.innerHTML = '<div id="sidebar-session-list"></div>';
   });
-
-  interface FakeChatState {
-    opened: string[];
-    live: Set<string>;
-    messagesOf: (id: string) => unknown[];
-    streamingOf: (id: string) => boolean;
-  }
-
-  function makeSidebar(overrides: {
-    disk?: (id: string) => unknown;
-    chat?: Partial<SessionSidebarDeps['chat']>;
-  } = {}): { sidebar: SessionSidebar; state: FakeChatState; events: string[]; refreshes: number[] } {
-    const state: FakeChatState = {
-      opened: [],
-      live: new Set<string>(),
-      messagesOf: () => [],
-      streamingOf: () => false,
-    };
-    const events: string[] = [];
-    const refreshes: number[] = [];
-    const chat: SessionSidebarDeps['chat'] = {
-      clear: () => {},
-      setWorkspace: () => {},
-      syncEffectiveWorkspace: async () => {},
-      openSession: (sessionId: string) => {
-        state.opened.push(sessionId);
-        return {
-          controller: {
-            getMessages: () => state.messagesOf(sessionId),
-            isStreaming: () => state.streamingOf(sessionId),
-          } as never,
-          host: document.createElement('div'),
-          warm: state.live.has(sessionId),
-        };
-      },
-      forgetSession: () => {},
-      clearAll: () => {},
-      getRunningLiveSessions: () => [],
-      hasOpenSession: (sessionId: string) => state.live.has(sessionId),
-      ...overrides.chat,
-    };
-    const sidebar = new SessionSidebar({
-      chat,
-      pasteChips: { clear: () => events.push('chips') },
-      confirm: async () => true,
-      loadSession: async (id) => (overrides.disk ? (overrides.disk(id) as never) : null),
-      renderMessages: async () => { events.push('rendered'); },
-      focusPrompt: () => events.push('focusPrompt'),
-      showSessionLoading: () => {},
-      onSessionActivated: () => events.push('activated'),
-      onChatCleared: () => events.push('landing'),
-    });
-    sidebar.refresh = () => refreshes.push(1);
-    return { sidebar, state, events, refreshes };
-  }
 
   it('空内容磁盘卡（"New chat"）：点击必须切进去，落点是 landing（2026-09-26 用户反馈）', async () => {
     const { sidebar, state, events } = makeSidebar({
@@ -180,5 +182,70 @@ describe('SessionSidebar load() 进入契约', () => {
     expect(events).toContain('activated');
     expect(events).toContain('focusPrompt');
     expect(events).not.toContain('landing');
+  });
+});
+
+// 列表形态（2026-09-27 用户定调）：「会话就是会话，跟放在哪个工作空间无关」
+// ——列表一律按最近更新时间平铺，不再按工作区分组建组头、不再可折叠。
+describe('SessionSidebar 列表不按工作区分组', () => {
+  // happy-dom 全局注册是进程级单例：本 describe 自己注册就必须自己注销，
+  // 否则注册被本文件攥着，后面的测试文件 register 时直接炸
+  // （「already globally registered」）。前一个 describe 注销过，这里重新注册。
+  let registeredHere = false;
+  beforeAll(() => {
+    if (!(globalThis as any).document?.body) {
+      GlobalRegistrator.register();
+      registeredHere = true;
+    }
+  });
+
+  afterAll(() => {
+    if (registeredHere) {
+      GlobalRegistrator.unregister();
+      registeredHere = false;
+    }
+  });
+
+  const meta = (id: string, title: string, updatedAt: number, workspace?: string) => ({
+    id, title, createdAt: updatedAt - 1000, updatedAt, messageCount: 3,
+    ...(workspace ? { workspace } : {}),
+  });
+
+  it('不同工作区的会话按最近更新平铺：新会话在上，没有组头没有折叠', async () => {
+    localStorage.setItem('pure_sessions', JSON.stringify([
+      meta('session_1000_1', '旧会话·工作区A', 1000, '/ws/a'),
+      meta('session_2000_1', '新会话·无工作区', 2000),
+      meta('session_3000_1', '最新会话·工作区B', 3000, '/ws/b'),
+      meta('session_2500_1', '次新会话·工作区A', 2500, '/ws/a'),
+    ]));
+
+    const { sidebar } = makeSidebar();
+    document.body.innerHTML = '<div id="sidebar-session-list"></div>';
+    await (sidebar as unknown as { renderList(): Promise<void> }).renderList();
+
+    const container = document.getElementById('sidebar-session-list')!;
+    // 没有组头、没有折叠容器：会话卡片是列表的直接子元素。
+    expect(container.querySelectorAll('.sidebar-session-group').length).toBe(0);
+    expect(container.querySelectorAll('.sidebar-session-group-label').length).toBe(0);
+    // 四张卡片全部在场，顺序 = updatedAt 降序——跨工作区交错，不被分组重排。
+    const sids = [...container.querySelectorAll('.sidebar-session-item')]
+      .map((el) => el.getAttribute('data-sid'));
+    expect(sids).toEqual(['session_3000_1', 'session_2500_1', 'session_2000_1', 'session_1000_1']);
+  });
+
+  it('卡片信息一个不少：id 章、删除按钮照旧（平铺不砍功能）', async () => {
+    localStorage.setItem('pure_sessions', JSON.stringify([
+      meta('session_1000_1', '某个会话', 1000, '/ws/a'),
+    ]));
+
+    const { sidebar } = makeSidebar();
+    document.body.innerHTML = '<div id="sidebar-session-list"></div>';
+    await (sidebar as unknown as { renderList(): Promise<void> }).renderList();
+
+    const container = document.getElementById('sidebar-session-list')!;
+    expect(container.querySelectorAll('.sidebar-session-item').length).toBe(1);
+    expect(container.querySelector('.sidebar-session-item-id')).toBeTruthy();
+    expect(container.querySelector('.sidebar-session-delete')).toBeTruthy();
+    expect(container.querySelector('.sidebar-session-item-time')).toBeTruthy();
   });
 });

@@ -1,6 +1,7 @@
 // src/ui/sessionSidebar.ts
-// Session sidebar controller: renders the session list (grouped by workspace),
-// handles group collapse persistence, session switching, single-session
+// Session sidebar controller: renders the session list (flat, most-recent
+// first — a session is a session regardless of which workspace it ran in),
+// handles session switching, single-session
 // deletion and the delete-all action. Extracted from main.ts so the app shell stays a
 // thin wiring layer. The chat transcript itself is rendered by main.ts via the
 // renderMessages dependency.
@@ -9,7 +10,6 @@ import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { showToast } from '../shared/toast';
 import { isTauriRuntime } from '../shared/tauri';
-import { workspaceBase } from '../shared/paths';
 import { relativeTime } from '../shared/format';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { estimateCostUsd, formatCostUsd, formatTokensCompact } from '../shared/usage';
@@ -77,22 +77,6 @@ export interface SessionSidebarDeps {
   onChatCleared(): void;
 }
 
-const COLLAPSED_GROUPS_KEY = 'pure_collapsed_groups';
-
-function loadCollapsedGroups(): Set<string> {
-  try {
-    const raw = localStorage.getItem(COLLAPSED_GROUPS_KEY);
-    if (raw) return new Set(JSON.parse(raw) as string[]);
-  } catch { /* ignore */ }
-  return new Set();
-}
-
-function saveCollapsedGroups(groups: Set<string>): void {
-  try {
-    localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...groups]));
-  } catch { /* ignore */ }
-}
-
 /** Session ids embed their creation time (`session_<ms>_<seq>`); live-only
  * sidebar entries have no SessionMeta on disk, so recover the timestamp from
  * the id itself for createdAt display/sorting. */
@@ -157,7 +141,6 @@ export async function openPureWindow(sessionId?: string): Promise<void> {
 export class SessionSidebar {
   private deps: SessionSidebarDeps;
   private currentActiveId: string | null = null;
-  private collapsedGroups = loadCollapsedGroups();
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private idleRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   private idleRefreshHandle: number | undefined;
@@ -209,7 +192,7 @@ export class SessionSidebar {
   /**
    * Refresh after a low-priority metadata change without competing with the
    * interaction that caused it. Workspace selection already updates the
-   * visible workspace immediately; rebuilding the whole grouped sidebar can
+   * visible workspace immediately; rebuilding the whole sidebar can
    * involve IPC and stats reads, so defer that work until the WebView is idle.
    */
   refreshIdle(): void {
@@ -415,40 +398,20 @@ export class SessionSidebar {
         return `<span class="sidebar-session-item-usage">${line}</span>`;
       };
 
-      // Group sessions by their workspace (Claude Desktop style project
-      // grouping): a sticky folder header per workspace, sessions beneath it.
-      const groups = new Map<string, SessionMeta[]>();
-      for (const s of sorted) {
-        const key = s.workspace || '';
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key)!.push(s);
-      }
-
-      container.innerHTML = [...groups.entries()].map(([ws, sessions]) => {
-        const key = ws || '';
-        const collapsed = this.collapsedGroups.has(key);
-        const chevron = `<svg class="group-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`;
-        const label = ws
-          ? `<button class="sidebar-session-group-label" data-group="${escapeHtml(key)}" title="${escapeHtml(ws)}" aria-expanded="${collapsed ? 'false' : 'true'}">
-               ${chevron}
-               <svg class="wp-folder-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-               <span class="group-name">${escapeHtml(workspaceBase(ws))}</span>
-             </button>`
-          : `<button class="sidebar-session-group-label" data-group="" aria-expanded="${collapsed ? 'false' : 'true'}">
-               ${chevron}
-               <span class="group-name">${t('workspace.none')}</span>
-             </button>`;
-        const items = sessions.map(s => {
-          const title = escapeHtml(s.title.slice(0, 50));
-          // A pulsing dot marks sessions whose controller is still streaming —
-          // including background sessions the user has navigated away from.
-          const dot = isSessionRunning(s.id)
-            ? `<span class="sidebar-session-running-dot" role="status" aria-label="${escapeHtml(t('sidebar.running'))}" title="${escapeHtml(t('sidebar.running'))}"></span>`
-            : '';
-          // Card meta row: unique id chip (click copies the full id) + the
-          // last-updated time, which also makes the updatedAt sort legible.
-          const when = escapeHtml(relativeTime(s.updatedAt, Date.now()));
-          return `<div class="sidebar-session-item${dot ? ' session-running' : ''}" data-sid="${s.id}">
+      // 会话就是会话（2026-09-27 用户定调）：列表不再按工作区分组——会话
+      // 跟放在哪个工作空间无关，一律按最近更新时间平铺；每张卡片保留原来的
+      // 全部信息（id 章、更新时间、用量、在跑圆点、删除）。
+      container.innerHTML = sorted.map(s => {
+        const title = escapeHtml(s.title.slice(0, 50));
+        // A pulsing dot marks sessions whose controller is still streaming —
+        // including background sessions the user has navigated away from.
+        const dot = isSessionRunning(s.id)
+          ? `<span class="sidebar-session-running-dot" role="status" aria-label="${escapeHtml(t('sidebar.running'))}" title="${escapeHtml(t('sidebar.running'))}"></span>`
+          : '';
+        // Card meta row: unique id chip (click copies the full id) + the
+        // last-updated time, which also makes the updatedAt sort legible.
+        const when = escapeHtml(relativeTime(s.updatedAt, Date.now()));
+        return `<div class="sidebar-session-item${dot ? ' session-running' : ''}" data-sid="${s.id}">
           <div class="sidebar-session-item-main">
             <div class="sidebar-session-item-top">${dot}<span class="sidebar-session-item-title" title="${title}">${title}</span></div>
             <div class="sidebar-session-item-meta">
@@ -461,27 +424,10 @@ export class SessionSidebar {
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>`;
-        }).join('');
-        return `<div class="sidebar-session-group${collapsed ? ' collapsed' : ''}">${label}<div class="sidebar-session-group-items">${items}</div></div>`;
       }).join('');
 
       // Restore active state
       this.setActive(this.currentActiveId);
-
-      // Toggle group collapse on header click
-      container.querySelectorAll('.sidebar-session-group-label').forEach(el => {
-        el.addEventListener('click', () => {
-          const group = el.closest('.sidebar-session-group') as HTMLElement | null;
-          if (!group) return;
-          // The header button carries the same data-group as the one used to
-          // render the group — read it directly from the clicked element.
-          const key = el.getAttribute('data-group') || '';
-          this.toggleGroupCollapsed(key);
-          const nowCollapsed = this.collapsedGroups.has(key);
-          group.classList.toggle('collapsed', nowCollapsed);
-          el.setAttribute('aria-expanded', nowCollapsed ? 'false' : 'true');
-        });
-      });
 
       // Click session → load it
       container.querySelectorAll('.sidebar-session-item').forEach(el => {
@@ -544,15 +490,6 @@ export class SessionSidebar {
     } catch {
       container.innerHTML = `<div class="sidebar-session-empty">${t('session.loadError')}</div>`;
     }
-  }
-
-  private toggleGroupCollapsed(key: string): void {
-    if (this.collapsedGroups.has(key)) {
-      this.collapsedGroups.delete(key);
-    } else {
-      this.collapsedGroups.add(key);
-    }
-    saveCollapsedGroups(this.collapsedGroups);
   }
 
   /** Clear the active session state and bounce the UI back to landing. */

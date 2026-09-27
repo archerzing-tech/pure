@@ -3880,66 +3880,7 @@ body {
   to   { opacity: 1; transform: scale(1) translateY(0); }
 }
 
-/* ── Sidebar sessions grouped by workspace ── */
-
-.sidebar-session-group-label {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  width: 100%;
-  padding: 10px 8px 4px;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-tertiary);
-  position: sticky;
-  top: 0;
-  background: var(--bg-sidebar);
-  z-index: 1;
-  border: none;
-  font-family: inherit;
-  text-align: left;
-  cursor: pointer;
-  -webkit-app-region: no-drag;
-  transition: color 0.15s var(--ease-out);
-}
-
-.sidebar-session-group-label:hover {
-  color: var(--text);
-}
-
-.sidebar-session-group-label svg {
-  flex-shrink: 0;
-}
-
-.sidebar-session-group-label .group-chevron {
-  transition: transform 0.2s var(--ease-out);
-  color: var(--text-tertiary);
-}
-
-.sidebar-session-group-label:hover .group-chevron {
-  color: var(--text-secondary);
-}
-
-.sidebar-session-group.collapsed .group-chevron {
-  transform: rotate(-90deg);
-}
-
-.sidebar-session-group.collapsed .sidebar-session-group-items {
-  display: none;
-}
-
-.sidebar-session-group-label .group-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-transform: none;
-  font-weight: 600;
-  letter-spacing: 0;
-}
+/* ── Sidebar sessions (flat, most-recent first — no workspace grouping) ── */
 
 @keyframes inputBarIn {
   from { opacity: 0; transform: translateY(12px); }
@@ -6822,11 +6763,6 @@ select:focus-visible,
 #sidebar-sessions-label {
   letter-spacing: 0.1em;
   font-size: 10px;
-}
-
-.sidebar-session-group-label {
-  padding: 12px 8px 5px;
-  letter-spacing: 0.08em;
 }
 
 .sidebar-session-item {
