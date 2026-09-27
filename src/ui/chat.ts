@@ -2380,8 +2380,14 @@ export class ChatController {
    * judge whether a mid-run insert is related. */
   private buildInsertionContext(images?: MessageImage[]): string {
     const parts: string[] = [];
-    const lastUser = [...this.messages].reverse().find((m) => m.role === 'user');
-    if (lastUser?.content) parts.push(`用户当前诉求：${lastUser.content.slice(0, 400)}`);
+    // 正在跑的请求优先于 canonical：用户消息要等回合结束才落账（2026-09-27
+    // 排队事故的根因之一），第一回合插话时 canonical 是空的——分类器当时看
+    // 到的"当前任务"是一句"（当前任务）"，自然把"加几朵云"判成新任务。
+    // 活回合手里就有用户的原话（beginLiveTurn 存的）。
+    const runningRequest = this.liveTurn?.userText?.trim();
+    const lastUser = runningRequest ? null : [...this.messages].reverse().find((m) => m.role === 'user');
+    const currentAsk = runningRequest ?? lastUser?.content ?? '';
+    if (currentAsk) parts.push(`用户当前诉求：${currentAsk.slice(0, 400)}`);
     if (images?.length) parts.push(`（本回合含 ${images.length} 张图片）`);
     const plan = this.activeComplexPlan;
     if (plan && plan.steps.length > 0) {
@@ -2464,6 +2470,16 @@ export class ChatController {
       : '好——这项不做了：还没派的不会派出去，也不会进最终汇总。');
   }
 
+  /** 插话临时回执的直接退场：行摘掉的同时账上销账。此前各路径只
+   * parentElement.remove()——账本里这条状态行永远留着，快照把它拼回事件
+   * 流，回放凭空多出一句“收到——看一下这句话怎么安排…”（2026-09-27 真实
+   * 会话实证：画图会话的事件流第 0 条就是这句）。settleAck 之外的每一条
+   * 丢弃路都走这里。 */
+  private discardAckRow(ack: HTMLElement | null): void {
+    this.removeStatusLine(ack);
+    ack?.parentElement?.remove();
+  }
+
   /** Flip the interject ack from "looking at it" to its final receipt.
    * 收执是 pure 在回话——用普通助手气泡（状态行的样子不像回话，2026-09-25
    * 用户实测），气泡顶替 ack 行的原位：位置正对着回显气泡的后面（次序由
@@ -2530,7 +2546,7 @@ export class ChatController {
     if (!this.isStreaming()) {
       // The turn is over; a normal send renders the user's own bubble, so the
       // provisional ack would only orphan a promise nobody keeps.
-      ack?.parentElement?.remove();
+      this.discardAckRow(ack);
       void this.send(text, images, displayText);
       return;
     }
@@ -2555,7 +2571,7 @@ export class ChatController {
       // insert; queue it so it still runs as a task. The queue card that
       // queueInterjectTask renders is the receipt; the provisional ack would
       // only duplicate it.
-      ack?.parentElement?.remove();
+      this.discardAckRow(ack);
       this.queueInterjectTask(text, images, displayText);
       return;
     }
@@ -2563,7 +2579,7 @@ export class ChatController {
     // 执行——不管分类器把它读成什么（stop 除外：停是立即的，timing 恒为 now）。
     // 少了这一步，"下午三点再跑一遍"会被当成当场追加的活跑掉。
     if (decision.timing.mode === 'at' && this.deferTimedInsert(decision.timing, text, images, displayText)) {
-      ack?.parentElement?.remove();
+      this.discardAckRow(ack);
       return;
     }
     // 置信门在这里兑现（此前门只改写决策、分发按 kind 照走——低置信的
@@ -2575,6 +2591,23 @@ export class ChatController {
       this.settleAck(ack, '先不动手——这句话我拿不准，问你一句…', true);
       echoUserBubble();
       void this.askMidrunClarification(decision, text, images, ack);
+      return;
+    }
+    // 思考窗吸收（2026-09-27 用户定调）：预检思考还活着时，"往当前正在产出
+    // 的那一件东西里加内容"的插话（分类器给了 supplements_current）不排队、
+    // 不广播——排队会把一件事拆成两件（先画鸟、再单独补云），构图就断了。
+    // 正确动作是趁模型还在想，把话并进请求一起想（applyPreflightSupplements
+    // 在 planByThinking 返回时并入 userText），第一版产出就带上。取消/停支/
+    // 续支的话不是加内容，不吸收，照走各自的路。
+    if (this.planPreflightActive
+      && (decision.kind === 'steer' || decision.kind === 'task')
+      && decision.signals.supplementsCurrent === true
+      && decision.signals.cancelsPart !== true
+      && decision.signals.branchStop !== true
+      && decision.signals.resumesBranch !== true) {
+      echoUserBubble();
+      this.pendingPreflightSupplements.push({ text, images });
+      this.settleAck(ack, '收到——这句来得正好，我还在想，一并想进去再动手。');
       return;
     }
     switch (decision.kind) {
@@ -2679,7 +2712,7 @@ export class ChatController {
       }
       case 'question':
         // 回答气泡马上就来（旁路一次 LLM 调用），临时回执不再留行。
-        ack?.parentElement?.remove();
+        this.discardAckRow(ack);
         echoUserBubble();
         void this.answerMidrunQuestion(text, images);
         return;
@@ -2739,7 +2772,7 @@ export class ChatController {
           this.foldInScopeAddition(text, images, displayText, true, ack); // scope 追加：机械执行
         } else {
           // 队列卡本身就是回执（逐条可见、就地更新），临时回执不再留行。
-          ack?.parentElement?.remove();
+          this.discardAckRow(ack);
           this.queueInterjectTask(text, images, displayText);
         }
         return;
@@ -2747,7 +2780,7 @@ export class ChatController {
       case 'chatter':
         // 收下了。同事埋头干活时说了句"哈哈"，你不会停下来回一句"收到"——
         // 气泡已上屏，这就够了，别再打扰干活的人。临时回执也一并收走。
-        ack?.parentElement?.remove();
+        this.discardAckRow(ack);
         echoUserBubble();
         return;
     }
@@ -3043,7 +3076,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       }
     }
     // 临时回执的历史使命完成：问题气泡接管对话。
-    ack?.parentElement?.remove();
+    this.discardAckRow(ack);
     const bubble = this.addBubble('assistant', '');
     bubble.textContent = question || fallback;
   }
@@ -3417,6 +3450,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 上一回合异常残留的押账叙述在这里作废：它的插入点（那一回合的用户消息）
     // 已经错过了，留着只会插进错误的回合（2026-09-27 时序修正）。
     this.pendingPlanNarration = null;
+    // 新回合开始：思考窗暂存与开关清零（上一回合没被 planByThinking 消化的
+    // 补充在这里作废——它们的插入点错过了，别漏进这个回合的请求正文）。
+    this.pendingPreflightSupplements = [];
+    this.planPreflightActive = false;
     this.abortController = turnController;
     this.hardStopController = turnHardStop;
     this.setStreaming(true);
@@ -4565,7 +4602,20 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           maybeShowAssessment();
           maybeShowPlanSummary();
           const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';
-          const thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);
+          // 思考窗吸收：开窗到关窗之间，插话分类若判 supplements_current 就落进
+          // 暂存（classifyAndApplyInterject 的吸收分支）。返回的瞬间并账——补充
+          // 统统并进请求正文（【你在思考时补充】块，图随文走），引擎第一轮、
+          // canonical、暂停提交看到的都是同一段合并文本；补充是明文块不剥壳，
+          // 回放也保得住用户原话。必须在 aborted 检查之前并：暂停路径提交的
+          // 同样是合并后的文本。
+          this.planPreflightActive = true;
+          let thought: Awaited<ReturnType<ChatController['planByThinking']>>;
+          try {
+            thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);
+          } finally {
+            this.planPreflightActive = false;
+          }
+          userText = this.applyPreflightSupplements(userText, userImages);
           if (this.abortController?.signal.aborted) {
             // 思考被用户掐断：请求留在对话里，计划流程一并收场（探针同款收尾）。
             removeThinkingCard();
@@ -6507,54 +6557,62 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // back to "not generating". releaseSupersededTurn() is idempotent for
       // the already-released early-return paths.
       const ownsTurn = this.abortController === turnController;
-      this.finishLiveTurn(liveTurn);
-      releaseSupersededTurn();
-      // Long-task auto-continue: schedule the next round only when THIS turn
-      // still owns the controller (a newer send superseding us cancels the
-      // chain) and the round recorded eligible signals. Streaming is already
-      // released here and the session persisted, so the fire-time checks are
-      // race-free; the scheduler's token guards against any late cancel().
-      const pendingAuto = this.pendingAutoContinue;
-      this.pendingAutoContinue = null;
-      if (ownsTurn && pendingAuto !== null && gen === this.generation) {
-        const cfgNow = loadConfig();
-        if (cfgNow?.autoContinue === true) {
-          const max = cfgNow.autoContinueMaxRounds ?? DEFAULT_AUTO_CONTINUE_MAX_ROUNDS;
-          const scheduled = this.autoContinue.schedule(
-            pendingAuto,
-            max,
-            AUTO_CONTINUE_DELAY_MS,
-            () => this.fireAutoContinue(),
-          );
-          // Reflect the chain state on the plan card: a scheduled next round
-          // keeps the badge (advanced to the pending round), the chain ending
-          // (terminal / budget / stall) clears it.
-          if (scheduled) this.activePlanCardHandle?.setAutoContinue(this.autoContinue.roundCount + 1, max);
-          else {
-            this.activePlanCardHandle?.clearAutoContinue();
-            // The chain ended WITHOUT a scheduled round — say WHY instead of
-            // letting the badge silently vanish (capped vs stalled).
-            const deny = this.autoContinue.denyReason;
-            if (deny === 'budget') {
-              this.addStatusBubble(t('chat.autoContinue.capped').replace('{n}', String(this.autoContinue.roundCount)).replace('{max}', String(max)), false, false);
-            } else if (deny === 'stall') {
-              this.addStatusBubble(t('chat.autoContinue.stalled'), false, false);
+      try {
+        this.finishLiveTurn(liveTurn);
+        releaseSupersededTurn();
+        // Long-task auto-continue: schedule the next round only when THIS turn
+        // still owns the controller (a newer send superseding us cancels the
+        // chain) and the round recorded eligible signals. Streaming is already
+        // released here and the session persisted, so the fire-time checks are
+        // race-free; the scheduler's token guards against any late cancel().
+        const pendingAuto = this.pendingAutoContinue;
+        this.pendingAutoContinue = null;
+        if (ownsTurn && pendingAuto !== null && gen === this.generation) {
+          const cfgNow = loadConfig();
+          if (cfgNow?.autoContinue === true) {
+            const max = cfgNow.autoContinueMaxRounds ?? DEFAULT_AUTO_CONTINUE_MAX_ROUNDS;
+            const scheduled = this.autoContinue.schedule(
+              pendingAuto,
+              max,
+              AUTO_CONTINUE_DELAY_MS,
+              () => this.fireAutoContinue(),
+            );
+            // Reflect the chain state on the plan card: a scheduled next round
+            // keeps the badge (advanced to the pending round), the chain ending
+            // (terminal / budget / stall) clears it.
+            if (scheduled) this.activePlanCardHandle?.setAutoContinue(this.autoContinue.roundCount + 1, max);
+            else {
+              this.activePlanCardHandle?.clearAutoContinue();
+              // The chain ended WITHOUT a scheduled round — say WHY instead of
+              // letting the badge silently vanish (capped vs stalled).
+              const deny = this.autoContinue.denyReason;
+              if (deny === 'budget') {
+                this.addStatusBubble(t('chat.autoContinue.capped').replace('{n}', String(this.autoContinue.roundCount)).replace('{max}', String(max)), false, false);
+              } else if (deny === 'stall') {
+                this.addStatusBubble(t('chat.autoContinue.stalled'), false, false);
+              }
             }
+          } else {
+            // Auto-continue turned off mid-chain — drop the badge.
+            this.activePlanCardHandle?.clearAutoContinue();
           }
         } else {
-          // Auto-continue turned off mid-chain — drop the badge.
+          // No eligible signals / superseded turn: the chain is over.
           this.activePlanCardHandle?.clearAutoContinue();
         }
-      } else {
-        // No eligible signals / superseded turn: the chain is over.
-        this.activePlanCardHandle?.clearAutoContinue();
+      } finally {
+        // After a turn fully finalizes (this turn still owns the controller),
+        // fold in any RELATED insert or start the next queued UNRELATED task once
+        // the current task/plan is terminal (no auto-continue pending). Defers via
+        // a timer so it never re-enters send() synchronously from inside the
+        // finally stack.
+        // 兜底加固（2026-09-27 排队事故的第二层）：以前这行裸排在收尾末尾，
+        // 上面任何一步先抛（统计、徽章、配置读取……），派发定时器就装不上
+        // ——排队卡挂着，活永远没人派。包进 finally：收尾路再怎么断，排队
+        // 的扫除照跑。与 setStreaming(false) 的空闲扫除互为备份（那边管
+        // "置 false 的每条路"，这边管"ownsTurn 的收尾整体"）。
+        if (ownsTurn) this.scheduleDeferred();
       }
-      // After a turn fully finalizes (this turn still owns the controller),
-      // fold in any RELATED insert or start the next queued UNRELATED task once
-      // the current task/plan is terminal (no auto-continue pending). Defers via
-      // a timer so it never re-enters send() synchronously from inside the
-      // finally stack.
-      if (ownsTurn) this.scheduleDeferred();
     }
   }
 
@@ -6577,6 +6635,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.pendingTasks = [];
     this.queueCardEl?.parentElement?.remove();
     this.queueCardEl = null;
+    // 思考窗吸收的暂存一并清场：新对话不带上一段的补充。
+    this.pendingPreflightSupplements = [];
+    this.planPreflightActive = false;
     this.relatedInsert = null;
     this.interjectReceiptRows.clear();
     // 插话重构 — new chat discards steers aimed at the old conversation.
@@ -7099,6 +7160,24 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     return narration ? { role: 'assistant', content: narration } : undefined;
   }
 
+  /** 思考窗吸收（2026-09-27 用户定调）：预检思考（planByThinking）还在流式
+   * 进行时，用户插话往**当前正在产出的那一件东西里**加内容（画小鸟时“背景
+   * 加几朵会动的云”）——这不是第二件活，是这一件的构图变了对。排队会把
+   * 一件事拆成两件（先画鸟、再单独补云）；正确动作是趁模型还在想，把话并
+   * 进请求一起想，第一版产出就带上。分类器给出 supplements_current 且预检
+   * 活着时，插话落到这里；planByThinking 返回时 applyPreflightSupplements
+   * 把它们并进引擎看到的请求正文。 */
+  private planPreflightActive = false;
+  private pendingPreflightSupplements: Array<{ text: string; images: MessageImage[] }> = [];
+
+  private applyPreflightSupplements(userText: string, userImages: MessageImage[]): string {
+    const taken = this.pendingPreflightSupplements.splice(0);
+    if (taken.length === 0) return userText;
+    for (const supplement of taken) userImages.push(...supplement.images);
+    const block = taken.map((s) => `【你在思考时补充】${s.text}`).join('\n');
+    return `${userText}\n\n${block}`;
+  }
+
   private anchorIndex(): number {
     return this.messages.length - 1;
   }
@@ -7182,6 +7261,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
   private setStreaming(v: boolean) {
     this.streaming = v;
     this.onStreamingChange?.(v);
+    // 空闲即扫除（2026-09-27 排队事故的第三层）：落到 false 是"回合结束"的
+    // 权威时刻——以前只有 send() finally 末尾一处 scheduleDeferred，任何一段
+    // 收尾代码先抛了（或被上位的 try 提前带走），排队任务的派发定时器就永远
+    // 不再装上，队列卡挂在屏上、活再也没人做。这里兜底：所有置 false 的路
+    // （正常收尾、被接管、测试、未来新路径）统一触发一次扫除；dispatch/
+    // schedule 自身幂等，与 finally 里的那次重复无害。
+    if (!v) this.scheduleDeferred();
   }
 }
 

@@ -209,6 +209,7 @@ export class DynamicInsertionCoordinator {
         classifier: 'llm',
         ...(result.cancelsPart ? { cancelsPart: true } : {}),
         ...(result.resumesPart ? { resumesBranch: true } : {}),
+        ...(result.supplementsCurrent ? { supplementsCurrent: true } : {}),
         ...(result.confidenceDefaulted ? { confidenceDefaulted: true } : {}),
         ...(result.when ? { when: result.when } : {}),
       },

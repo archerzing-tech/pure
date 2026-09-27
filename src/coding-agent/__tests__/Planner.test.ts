@@ -730,6 +730,44 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     );
     expect(plain.cancelsPart).toBeUndefined();
   });
+
+  it('teaches the supplements_current carve-out: refining THE ONE deliverable in flight is not a second item (2026-09-27 排队事故)', () => {
+    // 真实事故：画小鸟时补一句"背景上加一些会动的云朵"，被当成第二件活
+    // 排队，队列的活又丢了——图上没有云。构图补充必须吸收进正在想的那一
+    // 件：提示词把"往当前产出的那一件东西里加内容"这个例外说死。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    expect(promptStart).toBeGreaterThan(-1);
+    const exception = src.indexOf('REFINES THE ONE THING being produced', promptStart);
+    expect(exception).toBeGreaterThan(-1);
+    const exceptionBody = src.slice(exception, exception + 900);
+    expect(exceptionBody).toContain('supplements_current');
+    expect(exceptionBody).toContain('A SECOND deliverable');
+    // JSON 契约字段：仅 steer + 加进当前产出物时为真。
+    const fieldDoc = src.indexOf('"supplements_current": include it as true ONLY when kind is "steer"', promptStart);
+    expect(fieldDoc).toBeGreaterThan(-1);
+  });
+
+  it('parses the supplements_current contract field through to the classification', async () => {
+    const hit = await classifyInsertion(
+      mockLlm('{"kind":"steer","reason":"adds clouds INSIDE the picture being drawn","confidence":0.9,"supplements_current":true}'),
+      'context', '背景上加一些会动的云朵',
+    );
+    expect(hit.kind).toBe('steer');
+    expect(hit.supplementsCurrent).toBe(true);
+    // 蛇形/驼峰双写法都认（模型两条路都可能回）。
+    const camel = await classifyInsertion(
+      mockLlm('{"kind":"task","reason":"misrouted","confidence":0.9,"supplementsCurrent":true}'),
+      'context', '背景上加一些会动的云朵',
+    );
+    expect(camel.supplementsCurrent).toBe(true);
+    // 缺省/非 true 都不带标记——宿主只认严格 === true。
+    const plain = await classifyInsertion(
+      mockLlm('{"kind":"task","reason":"unrelated errand","confidence":0.9,"supplements_current":false}'),
+      'context', '明天北京天气怎么样',
+    );
+    expect(plain.supplementsCurrent).toBeUndefined();
+  });
 });
 
 describe('markParallelPlanSteps (E2.3)', () => {

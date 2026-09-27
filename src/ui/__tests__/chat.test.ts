@@ -999,7 +999,8 @@ describe('plan overview completion state', () => {
       const at = src.indexOf(marker);
       expect(at).toBeGreaterThan(-1);
       const body = src.slice(at, src.indexOf("case '", at + marker.length) === -1 ? src.length : src.indexOf("case '", at + marker.length));
-      expect(body.indexOf('this.settleAck(ack') !== -1 || body.indexOf('ack?.parentElement?.remove()') !== -1).toBe(true);
+      // discardAckRow（2026-09-27）：直接摘行的统一出口——摘行的同时账上销账。
+      expect(body.indexOf('this.settleAck(ack') !== -1 || body.indexOf('this.discardAckRow(ack)') !== -1).toBe(true);
     }
     // 折入 / steer / 队列路径通过方法参数收场 ack。
     expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null, cancels = false)')).toBeGreaterThan(-1);
@@ -1544,12 +1545,17 @@ describe('superseded-turn finally teardown', () => {
   it('cleans turn-scoped UI up in the finally for generation-guard exits', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // chat.ts has an inner finally (pause-path cleanup at ~3553); the turn
-    // teardown lives in doSend's LAST finally.
-    const finallyIdx = src.lastIndexOf('} finally {');
+    // teardown lives in doSend's LAST outer finally. The inner one (the
+    // 2026-09-27 drain sweep wrap) sits INSIDE it — anchor on the teardown
+    // body, not on lastIndexOf alone.
+    const teardownAnchor = src.indexOf('this.finishLiveTurn(liveTurn);\n        releaseSupersededTurn();');
+    expect(teardownAnchor).toBeGreaterThan(-1);
+    const finallyIdx = src.lastIndexOf('} finally {', teardownAnchor);
     expect(finallyIdx).toBeGreaterThan(-1);
-    // 3200: the finally also carries the turn-timing commit (first-token
-    // observability) ahead of the teardown calls asserted below.
-    const finallyBlock = src.slice(finallyIdx, finallyIdx + 3200);
+    // the finally also carries the turn-timing commit (first-token
+    // observability) ahead of the teardown calls asserted below, and the
+    // auto-continue block + drain-sweep finally after them.
+    const finallyBlock = src.slice(finallyIdx, teardownAnchor + 4200);
     // Same teardown set the Interrupted branch runs, inside the finally:
     expect(finallyBlock).toContain('endThinking();');
     expect(finallyBlock).toContain('resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);');
@@ -1558,6 +1564,8 @@ describe('superseded-turn finally teardown', () => {
     // Assessment card force-cancel is scoped to the superseded path — a
     // normal turn's flow must not be rewritten by the finally.
     expect(finallyBlock).toContain('if (gen !== this.generation) assessmentFlow?.cancel(');
+    // The drain schedule survives any teardown throw (2026-09-27 排队事故)。
+    expect(finallyBlock).toContain('if (ownsTurn) this.scheduleDeferred();');
   });
 });
 
@@ -1601,7 +1609,8 @@ describe('plan-by-thinking flow', () => {
 
   it('plans with a streaming model call before the plan card, not from rule steps', () => {
     // 出卡之前必须先有 planByThinking；思考完全没落地才允许规则兜底。
-    const thinkingIdx = src.indexOf('const thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);');
+    // 2026-09-27 思考窗吸收：调用包在 planPreflightActive 的开/关窗里。
+    const thinkingIdx = src.indexOf('thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);');
     expect(thinkingIdx).toBeGreaterThan(-1);
     const cardIdx = src.indexOf('showPlanCard(approvedPlan);');
     expect(cardIdx).toBeGreaterThan(thinkingIdx);
@@ -1670,5 +1679,57 @@ describe('plan-by-thinking flow', () => {
     expect(mergeIdx).toBeGreaterThan(completedIdx);
     const guard = src.slice(Math.max(0, mergeIdx - 400), mergeIdx);
     expect(guard).toContain('!interruptedMessages');
+  });
+
+  it('the idle transition sweeps the deferred dispatch on its own (2026-09-27 排队事故第三层)', () => {
+    // 派发定时器曾只在 send() finally 末尾一处装上：收尾代码任何一步先抛，
+    // 排队任务就永远没人派（队列卡挂着、活再没跑）。修后两道保险都在源里：
+    // setStreaming(false) 的空闲扫除 + finally 包裹的 ownsTurn 派发。
+    const streamingIdx = src.indexOf('private setStreaming(v: boolean) {');
+    expect(streamingIdx).toBeGreaterThan(-1);
+    const body = src.slice(streamingIdx, src.indexOf('\n  }', streamingIdx));
+    expect(body).toContain('if (!v) this.scheduleDeferred();');
+    // finally 兜底：ownsTurn 派发包在 try/finally 里，收尾路再怎么断都装上。
+    const finallyIdx = src.indexOf('this.finishLiveTurn(liveTurn);\n        releaseSupersededTurn();');
+    expect(finallyIdx).toBeGreaterThan(-1);
+    const guardIdx = src.indexOf('} finally {', finallyIdx);
+    expect(guardIdx).toBeGreaterThan(finallyIdx);
+    const sweep = src.slice(guardIdx, src.indexOf('\n      }', guardIdx));
+    expect(sweep).toContain('if (ownsTurn) this.scheduleDeferred();');
+  });
+
+  it('preflight absorption: the window flag wraps planByThinking and merges before the abort check (2026-09-27 排队事故)', () => {
+    // 思考窗吸收的三件套：开窗在 planByThinking 前、关窗在 finally（抛了也
+    // 关）、并账在 aborted 检查前（暂停路径提交的也是合并后的文本）。
+    const flagIdx = src.indexOf('this.planPreflightActive = true;');
+    expect(flagIdx).toBeGreaterThan(-1);
+    const callIdx = src.indexOf('thought = await this.planByThinking(', flagIdx);
+    expect(callIdx).toBeGreaterThan(flagIdx);
+    const closeIdx = src.indexOf('this.planPreflightActive = false;', callIdx);
+    expect(closeIdx).toBeGreaterThan(callIdx);
+    // 并账先于中止检查：keepOrDropUserBubble 提交合并文本。
+    const mergeIdx = src.indexOf('userText = this.applyPreflightSupplements(userText, userImages);', closeIdx);
+    expect(mergeIdx).toBeGreaterThan(closeIdx);
+    const abortIdx = src.indexOf('if (this.abortController?.signal.aborted)', mergeIdx);
+    expect(abortIdx).toBeGreaterThan(mergeIdx);
+    // 吸收分支不吞取消/停支/续支：三闸齐备。
+    const absorbIdx = src.indexOf('this.pendingPreflightSupplements.push({ text, images });');
+    expect(absorbIdx).toBeGreaterThan(-1);
+    const absorbGuard = src.slice(src.lastIndexOf('if (this.planPreflightActive', absorbIdx), absorbIdx);
+    expect(absorbGuard).toContain("decision.signals.cancelsPart !== true");
+    expect(absorbGuard).toContain("decision.signals.branchStop !== true");
+    expect(absorbGuard).toContain("decision.signals.resumesBranch !== true");
+  });
+
+  it('every ack discard path settles the ledger — no ghost status rows in replays (2026-09-27 排队事故)', () => {
+    // ack 行被直接 parentElement.remove() 后账本记录还在：快照把它拼回事件
+    // 流，回放凭空多一句"收到——看一下这句话怎么安排…"（真实画图会话事件
+    // 流第 0 条）。统一出口 discardAckRow = 销账 + 摘行；settleAck 之外的
+    // 丢弃路必须全部走它。
+    const helperIdx = src.indexOf('private discardAckRow(ack: HTMLElement | null): void {');
+    expect(helperIdx).toBeGreaterThan(-1);
+    // helper 自身那一处 remove 是实现本体；除此之外不允许再出现直接摘行。
+    const withoutHelper = src.slice(0, helperIdx) + src.slice(src.indexOf('\n  }', helperIdx));
+    expect(withoutHelper.includes('ack?.parentElement?.remove()')).toBe(false);
   });
 });

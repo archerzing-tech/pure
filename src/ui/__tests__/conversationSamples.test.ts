@@ -263,6 +263,7 @@ interface ScriptedClassification {
   /** 与真模型按提示词契约回的字段同名（蛇形）——剧本原样 JSON.stringify，
    *  走 classifyInsertion 的真解析，回放保真。 */
   cancels_part?: boolean;
+  supplements_current?: boolean;
 }
 
 interface ScriptedLlm {
@@ -888,6 +889,151 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.pendingResumes).toHaveLength(0);
     // 退回 steer（转达父引擎），话不丢。
     expect(h.chat.pendingSteers).toHaveLength(1);
+  });
+});
+
+// ── 思考窗吸收（2026-09-27 画鸟排队事故 + 用户定调）────────────────────────
+// 用户在预检思考还活着时补一句"背景上加一些会动的云朵"——这是往正在产出的
+// 那一张图里加内容，不是第二件活。排队把它拆成两件事（先画鸟、再单独补云），
+// 而队列的活还会丢（真实事故：队列卡挂过、活再没跑，图上永远没有云）。正确
+// 动作：趁模型还在想，把话并进请求一起想，第一版产出就带上。
+
+describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
+  it('画鸟时补云（steer+supplements_current）：不排队、不折入——并进请求一起想', async () => {
+    const llm = scriptedLlm([
+      { match: '云朵', cls: { kind: 'steer', reason: 'adds elements INSIDE the one picture being produced', confidence: 0.9, supplements_current: true } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.planPreflightActive = true; // 预检思考（planByThinking）还在流式进行
+
+    await h.chat.interject('背景上加一些会动的云朵');
+    // 回执说"一并想进去"，不是排队的话术；队列卡绝不出现。
+    expect(assistantJoined(h.root)).toContain('收到——这句来得正好，我还在想，一并想进去再动手。');
+    expect(queueCard(h.root)).toBeUndefined();
+    expect(h.chat.pendingTasks).toHaveLength(0);
+    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    // 用户原话上屏（转写对得上谁说了什么），临时回执不留状态行。
+    expect(userJoined(h.root)).toContain('云朵');
+    expect(statusJoined(h.root)).not.toContain('一并想进去');
+
+    // 落进思考窗暂存，等 planByThinking 返回时并进请求正文。
+    expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
+    const merged = h.chat.applyPreflightSupplements('给我画一个动态的图片，图片内容是一只小鸟在天空飞翔', []);
+    expect(merged).toContain('一只小鸟在天空飞翔');
+    expect(merged).toContain('【你在思考时补充】背景上加一些会动的云朵');
+    // 并账即清账：同一段补充不会并两次（引擎第一轮 + canonical 各看一遍是
+    // 同一份合并文本，不是两次拼接）。
+    expect(h.chat.pendingPreflightSupplements).toHaveLength(0);
+    expect(h.chat.applyPreflightSupplements('再来一句', [])).toBe('再来一句');
+  });
+
+  it('分类器判成 task 但给了 supplements_current：同样吸收，绝不排队', async () => {
+    // 真实事故的精确形态：老提示词把一切加内容都路由成 task。分类器给了
+    // supplements_current 就该被吸收——kind 不是豁免凭据。
+    const llm = scriptedLlm([
+      { match: '云朵', cls: { kind: 'task', reason: 'scope addition, but INSIDE the current deliverable', confidence: 0.9, supplements_current: true } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.planPreflightActive = true;
+
+    await h.chat.interject('背景上加一些会动的云朵');
+    expect(llm.classifyCalls.length).toBe(1);
+    expect(queueCard(h.root)).toBeUndefined();
+    expect(h.chat.pendingTasks).toHaveLength(0);
+    expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
+    expect(assistantJoined(h.root)).toContain('一并想进去再动手');
+  });
+
+  it('取消话不是加内容：思考窗开着也不吸收，照走取消路', async () => {
+    // "云朵那个就不要了"（不碰 CANCEL_PART_RE 快路径的字面族，走真分类）
+    // 若被吸收，图上该消失的云就留下了——与意图相反。cancels_part 在场
+    // 一律不吸收。
+    const llm = scriptedLlm([
+      { match: '云朵', cls: { kind: 'steer', reason: 'removes one element', confidence: 0.9, cancels_part: true } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.planPreflightActive = true;
+
+    await h.chat.interject('云朵那个就不要了');
+    expect(h.chat.pendingPreflightSupplements).toHaveLength(0);
+    // 取消路照走：委派不在飞 → 起飞闸挂号 + 转达父引擎。
+    expect(h.chat.pendingCancels).toHaveLength(1);
+    expect(queueCard(h.root)).toBeUndefined();
+  });
+
+  it('思考窗关了（思考已完、产出已在跑）：同样的补充不吸收，走普通 steer', async () => {
+    // planByThinking 已经返回，请求正文并不进去了——此刻的补充只能转达给
+    // 在跑的回合（下个 THINK 边界带上），收尾没被带走的按用户原话重入。
+    const llm = scriptedLlm([
+      { match: '云朵', cls: { kind: 'steer', reason: 'supplement, but the window is closed', confidence: 0.9, supplements_current: true } },
+    ]);
+    const h = makeHarness(llm);
+    // planPreflightActive 默认 false：真实链路里 applyPreflightSupplements
+    // 的 finally 已把它关上。
+
+    await h.chat.interject('背景上加一些会动的云朵');
+    expect(h.chat.pendingPreflightSupplements).toHaveLength(0);
+    expect(h.chat.pendingSteers).toHaveLength(1);
+    expect(queueCard(h.root)).toBeUndefined();
+  });
+
+  it('排队事故的兜底不回归：不相关的新活照样排队，队列卡照出', async () => {
+    // 吸收只管"正在产出的那一件东西"；第二件活（画完图后要一份年报）还是
+    // 走队列——这是一条路上的两件事，不是一件东西的构图变了。
+    const llm = scriptedLlm([
+      { match: '年报', cls: { kind: 'task', reason: 'a second, unrelated deliverable', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.planPreflightActive = true;
+
+    await h.chat.interject('顺便再帮我写一份 Q4 年报。');
+    expect(h.chat.pendingPreflightSupplements).toHaveLength(0);
+    const card = queueCard(h.root);
+    expect(card).toBeDefined();
+    expect(card!.textContent).toContain('待办队列（1 件）');
+  });
+
+  it('分类上下文看得到正在跑的请求：第一回合 canonical 还空着，活回合手里有原话', async () => {
+    // 事故根因之一：分类器当时看到的"当前任务"是一句占位——canonical 要等
+    // 回合结束才落账，第一回合插话时它就是空的，"加几朵云"自然被判成新任务。
+    // 修后 buildInsertionContext 优先读 liveTurn.userText。
+    const h = makeHarness(scriptedLlm([]));
+    const ctx = h.chat.buildInsertionContext([]);
+    expect(ctx).toContain('Q3 海外市场进入方案'); // liveTurn.userText（beginLiveTurn 存的）
+    expect(ctx).not.toContain('用户当前诉求：（当前任务）');
+    expect(ctx).not.toContain('用户当前诉求：\n');
+  });
+
+  it('空闲即扫除：setStreaming(false) 自己触发派发——收尾代码断了队列也不丢', async () => {
+    // 事故根因之三：派发定时器只在 send() finally 末尾一处装上，前面任何
+    // 一步抛出就永远不装了。修后"落到空闲"这个事实本身就是扫除信号。
+    const llm = scriptedLlm([
+      { match: '云朵', cls: { kind: 'task', reason: 'unrelated errand', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+
+    await h.chat.interject('背景上加一些会动的云朵');
+    expect(queueCard(h.root)).toBeDefined();
+    // 不调 endTurn（不手动 dispatchDeferred）：只把流态置空。
+    h.chat.setStreaming(false);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(h.sends).toEqual(['背景上加一些会动的云朵']);
+    expect(queueCard(h.root)).toBeUndefined();
+  });
+
+  it('排队路的临时回执不留幽灵账：摘行的同时销账，回放不再凭空多一句', async () => {
+    // 真实会话实证：画图会话的事件流第 0 条就是"收到——看一下这句话怎么
+    // 安排…"——ack 行被直接 remove() 后账本里的记录还在，快照把它拼回去。
+    const llm = scriptedLlm([
+      { match: '云朵', cls: { kind: 'task', reason: 'unrelated errand', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+
+    await h.chat.interject('背景上加一些会动的云朵');
+    const ghosts = (h.chat.statusLines as Array<{ text: string }>).filter((l) => l.text.includes('看一下这句话怎么安排'));
+    expect(ghosts).toHaveLength(0);
+    // 屏上也确实没有这行（队列卡就是回执）。
+    expect(statusJoined(h.root)).not.toContain('看一下这句话怎么安排');
   });
 });
 

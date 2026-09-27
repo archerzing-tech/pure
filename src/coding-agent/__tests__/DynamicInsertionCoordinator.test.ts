@@ -114,6 +114,22 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.signals.cancelsPart).toBe(true);
   });
 
+  it('threads a classifier supplementsCurrent verdict into the decision signals (2026-09-27 思考窗吸收)', async () => {
+    // 画鸟时补云被排队、队列又丢——宿主的吸收分支只认 signals.supplementsCurrent
+    // 这一个读取点；分类器的判定必须原样过河，不能在协调器里沉底。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'task', reason: 'misrouted by an older prompt', confidence: 0.9, supplementsCurrent: true }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '背景上加一些会动的云朵' });
+    expect(decision.kind).toBe('task');
+    expect(decision.signals.supplementsCurrent).toBe(true);
+    // 没给的判定不带标记——宿主只认严格 === true。
+    const plain = await new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'task', reason: 'unrelated errand', confidence: 0.9 }),
+    }).decide(llm(), 'current task', { text: '明天北京天气怎么样' });
+    expect(plain.signals.supplementsCurrent).toBeUndefined();
+  });
+
   it('lets negated additions fall through to the classifier', async () => {
     // 否定前置（不用加/别再加/不要再加）不是加活——绝不能误送排队。
     const coordinator = new DynamicInsertionCoordinator({
