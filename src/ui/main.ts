@@ -6,7 +6,7 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, runningSessionIdList, setTimedInputSink, BASE_SYSTEM_PROMPT, type TimedInputRequest } from './chat';
+import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, runningSessionIdList, setTimedInputSink, BASE_SYSTEM_PROMPT, buildStatusRow, type TimedInputRequest } from './chat';
 import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRoute';
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
@@ -1157,6 +1157,11 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
               () => chat.cancelPausedPlan(),
             );
           }
+        } else if (block.type === 'status') {
+          // 状态叙述行回位（2026-09-27 一致性定调）：与实况同一张脸
+          // （buildStatusRow 一个出处），位置由事件拼接保序。
+          const { row } = buildStatusRow(block.text, { pending: false, error: block.error, kind: block.kind });
+          target.appendChild(row);
         } else if (block.type === 'artifact') {
           const artifactRow = document.createElement('div');
           artifactRow.className = 'bubble-row artifact-row';
@@ -1645,8 +1650,11 @@ function handleSendOrStop() {
     queuedWhileStreaming = null;
     // 阶段 12: the button pauses (drain-style, resumable) instead of hard-
     // stopping — in-flight tools finish into the archive and a 继续 brings
-    // the whole fan-out back from its checkpoints.
-    chat.pause();
+    // the whole fan-out back from its checkpoints. 1c 双档：收尾期里再点一下
+    // 升级为立即硬停（2026-09-27 用户反馈：收尾的几十秒里连点是无声 no-op，
+    // 读起来就是"按钮失灵、Esc 才管用"——现在按钮与 Esc 同一套 escapeWhileStreaming，
+    // 第一击暂停、再击立即停，两扇门一个语义）。
+    chat.escapeWhileStreaming();
     return;
   }
   sendMessage(promptEl);
@@ -1655,7 +1663,7 @@ function handleSendOrStop() {
 function handleLandingSendOrStop() {
   if (chat.isStreaming()) {
     queuedWhileStreaming = null;
-    chat.pause();
+    chat.escapeWhileStreaming();
     return;
   }
   sendMessage(landingPrompt);

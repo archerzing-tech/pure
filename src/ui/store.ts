@@ -160,6 +160,9 @@ export interface SessionEvent {
   assessment?: IntentAssessment;
   planCard?: PlanCardSnapshot;
   isPlanPause?: boolean;
+  /** status 事件的叙述文本与着色（kind/error），content 复用主字段。 */
+  kind?: 'success' | 'warn' | 'info';
+  error?: boolean;
 }
 
 export interface SessionSnapshotV2Legacy {
@@ -169,6 +172,21 @@ export interface SessionSnapshotV2Legacy {
   };
   transcript: TranscriptEntry[];
   uiState: SessionUiState;
+}
+
+/**
+ * 一条实时转写里的状态叙述行（回执、阶段播报、验证轮次……addStatusBubble 的
+ * 全部产出）。2026-09-27 用户定调「切回历史会话要和实际对话一模一样」：这些
+ * 行过去只进 DOM 不落盘，回放里整段消失。入账按 afterIndex 锚定——出账时
+ * modelContext 最后一条消息的下标，回放插在该消息的全部事件之后（多条同锚
+ * 保持入账次序），顺序与实况一致。
+ */
+export interface StatusLineRecord {
+  afterIndex: number;
+  text: string;
+  pending?: boolean;
+  error?: boolean;
+  kind?: 'success' | 'warn' | 'info';
 }
 
 export interface SessionSnapshotV3 {
@@ -181,6 +199,7 @@ export interface SessionSnapshotV3 {
   events: SessionEvent[];
   uiState: SessionUiState;
   transcript: TranscriptEntry[];
+  statusLines?: StatusLineRecord[];
 }
 
 export type SessionSnapshot = SessionSnapshotV3;
@@ -368,6 +387,7 @@ export function createSessionSnapshot(
   modelMessages: Message[],
   source: TranscriptDraft[] | StoredMessage[],
   uiState: Partial<SessionUiState> = {},
+  statusLines: StatusLineRecord[] = [],
 ): SessionSnapshotV3 {
   const drafts = source.length > 0 && 'message' in source[0]
     ? source as TranscriptDraft[]
@@ -409,7 +429,7 @@ export function createSessionSnapshot(
     transcript,
     uiState: { planState: latestPlanState ?? null, ...uiState },
   };
-  return { ...snapshotV2ToV3(legacy), transcript, revision: 0 };
+  return { ...snapshotV2ToV3(legacy, statusLines), transcript, revision: 0 };
 }
 
 export function createSessionSnapshotFromLegacy(messages: StoredMessage[]): SessionSnapshotV3 {
@@ -459,11 +479,31 @@ function eventId(index: number, type: SessionEvent['type']): string {
   return `event-${index}-${type}`;
 }
 
-function snapshotV2ToV3(snapshot: SessionSnapshotV2Legacy): SessionSnapshotV3 {
+function snapshotV2ToV3(snapshot: SessionSnapshotV2Legacy, statusLines: StatusLineRecord[] = []): SessionSnapshotV3 {
   const events: SessionEvent[] = [];
+  // 状态叙述行按 afterIndex 锚定拼接（见 StatusLineRecord）：锚点消息的全部
+  // 事件落完后插入，多条同锚保持入账次序；锚 -1（首条消息之前）排最前。
+  // 实时转写里这些行就长在消息与工具卡之间——拼接后回放的顺序与实况一致。
+  const statusByAnchor = new Map<number, StatusLineRecord[]>();
+  let statusSeq = 0;
+  for (const line of statusLines) {
+    const list = statusByAnchor.get(line.afterIndex);
+    if (list) list.push(line);
+    else statusByAnchor.set(line.afterIndex, [line]);
+  }
+  const flushStatuses = (anchor: number): void => {
+    const list = statusByAnchor.get(anchor);
+    if (!list) return;
+    statusByAnchor.delete(anchor);
+    for (const line of list) {
+      events.push({ id: `status-${statusSeq++}`, type: 'status', content: line.text, kind: line.kind, error: line.error });
+    }
+  };
+  flushStatuses(-1);
   for (const entry of snapshot.transcript) {
     if (entry.role === 'user') {
       events.push({ id: entry.id, type: 'user', content: entry.content ?? '', images: entry.images, attachments: entry.attachments, pathRepairs: entry.pathRepairs, internal: entry.internal });
+      flushStatuses(entry.modelMessageIndex);
       continue;
     }
     if (entry.analysis) events.push({ id: `${entry.id}-analysis`, type: 'analysis', content: entry.analysis });
@@ -479,15 +519,16 @@ function snapshotV2ToV3(snapshot: SessionSnapshotV2Legacy): SessionSnapshotV3 {
     } else if (entry.role === 'tool') {
       events.push({ id: `${entry.id}-result`, type: 'tool_result', content: entry.content ?? '', toolCallId: entry.toolCallId, toolName: entry.toolName, toolExec: entry.toolExec });
     }
+    flushStatuses(entry.modelMessageIndex);
   }
-  return { version: 3, modelContext: snapshot.modelContext, events, uiState: snapshot.uiState, transcript: snapshot.transcript };
+  return { version: 3, modelContext: snapshot.modelContext, events, uiState: snapshot.uiState, transcript: snapshot.transcript, statusLines: statusLines.length > 0 ? statusLines : undefined };
 }
 
-function normalizeSessionSnapshot(raw: unknown): SessionSnapshot {
+export function normalizeSessionSnapshot(raw: unknown): SessionSnapshot {
   if (raw && typeof raw === 'object') {
     const candidate = raw as { version?: unknown; modelContext?: { messages?: unknown }; events?: unknown; transcript?: unknown; messages?: unknown; uiState?: SessionUiState };
     if (candidate.version === 3 && candidate.modelContext && Array.isArray(candidate.events)) {
-      return { version: 3, revision: typeof (candidate as { revision?: unknown }).revision === 'number' ? (candidate as { revision: number }).revision : 0, modelContext: { messages: (candidate.modelContext.messages ?? []) as Message[] }, events: candidate.events as SessionEvent[], uiState: candidate.uiState ?? {}, transcript: Array.isArray(candidate.transcript) ? candidate.transcript as TranscriptEntry[] : [] };
+      return { version: 3, revision: typeof (candidate as { revision?: unknown }).revision === 'number' ? (candidate as { revision: number }).revision : 0, modelContext: { messages: (candidate.modelContext.messages ?? []) as Message[] }, events: candidate.events as SessionEvent[], uiState: candidate.uiState ?? {}, transcript: Array.isArray(candidate.transcript) ? candidate.transcript as TranscriptEntry[] : [], statusLines: Array.isArray((candidate as { statusLines?: unknown }).statusLines) ? (candidate as { statusLines: StatusLineRecord[] }).statusLines : undefined };
     }
     if (candidate.version === 2 && candidate.modelContext && Array.isArray(candidate.transcript)) {
       return snapshotV2ToV3(candidate as SessionSnapshotV2Legacy);
@@ -924,7 +965,12 @@ function limitSessionSnapshot(snapshot: SessionSnapshotV3, maxMessages = MAX_PER
   const events = dropped > 0
     ? snapshot.events.slice(Math.max(0, snapshot.events.length - Math.max(1, messages.length * 8)))
     : snapshot.events;
-  return { ...snapshot, modelContext: { messages }, events, transcript: snapshot.transcript.filter(entry => entry.modelMessageIndex >= dropped) };
+  // 状态叙述行与 transcript 同一命运：锚点消息被裁掉的行一并裁掉，防止
+  // LS 降级副本里留下永远拼不回事件流的悬锚行。
+  const statusLines = dropped > 0
+    ? (snapshot.statusLines ?? []).filter(line => line.afterIndex >= dropped)
+    : snapshot.statusLines;
+  return { ...snapshot, modelContext: { messages }, events, transcript: snapshot.transcript.filter(entry => entry.modelMessageIndex >= dropped), statusLines };
 }
 
 /** localStorage is ~5MB in WebKit and the session payload is by far the largest

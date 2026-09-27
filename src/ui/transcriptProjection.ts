@@ -19,6 +19,7 @@ export type TranscriptReplayBlock =
   | { type: 'plan' }
   | { type: 'assistant'; content: string; isPlanPause: boolean }
   | { type: 'tool'; exec: ToolExecMeta; stopped: boolean }
+  | { type: 'status'; text: string; kind?: 'success' | 'warn' | 'info'; error?: boolean }
   | { type: 'artifact'; items: Array<{ path: string; op?: 'edit' | 'create' }>; userRequest?: string };
 
 /**
@@ -350,6 +351,11 @@ export function projectSessionEvents(events: import('./store').SessionEvent[], a
         registerCalls(event);
         break;
       case 'status':
+        // 状态叙述行回位：实时转写里它们长在消息与工具卡之间，持久化拼接时
+        // 就落在同一位置——这里原样放行，回放顺序与实况一致（2026-09-27）。
+        if (event.content) {
+          blocks.push({ type: 'status', text: event.content, kind: event.kind, error: event.error });
+        }
         break;
     }
   }

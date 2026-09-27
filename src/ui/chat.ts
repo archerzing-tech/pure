@@ -5,7 +5,7 @@
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
 import { abortPaused, isPauseAbort } from '../shared/pauseSignal';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence } from './store';
+import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, resolveNetRoute, netRouteProxyPair, recordNetOutcome } from '../shared/netRoute';
@@ -1878,12 +1878,15 @@ export class ChatController {
    */
   private async runSkillDistill(instruction: string): Promise<void> {
     this.addBubble('user', instruction);
-    const wrapper = this.addStatusBubble(t('skill.distill.running'), true);
-    const bubble = wrapper.querySelector<HTMLElement>('.bubble');
+    // addStatusBubble 返回的是气泡本身（不是行）——旧代码把它当行再
+    // querySelector('.bubble')，拿到 null，成败终稿从来没写上去过。
+    const bubble = this.addStatusBubble(t('skill.distill.running'), true);
+    const row = bubble.parentElement;
     const fail = (text: string) => {
-      wrapper.classList.remove('pending');
-      wrapper.classList.add('error');
-      if (bubble) bubble.textContent = text;
+      row?.classList.remove('pending');
+      row?.classList.add('error');
+      bubble.textContent = text;
+      this.patchStatusLine(bubble, { text, pending: false, error: true });
     };
     try {
       if (!isTauriRuntime()) {
@@ -1906,9 +1909,11 @@ export class ChatController {
         return;
       }
       await invoke('write_app_skill', { name: skill.name, description: skill.description, body: skill.body });
-      wrapper.classList.remove('pending');
-      wrapper.classList.add('hl-success');
-      if (bubble) bubble.textContent = t('skill.distill.done').replace('{name}', skill.name);
+      row?.classList.remove('pending');
+      bubble.classList.add('hl-success');
+      const done = t('skill.distill.done').replace('{name}', skill.name);
+      bubble.textContent = done;
+      this.patchStatusLine(bubble, { text: done, pending: false, kind: 'success' });
     } catch (err) {
       fail(t('chat.error', 'Error: {msg}').replace('{msg}', err instanceof Error ? err.message : String(err)));
     }
@@ -2279,6 +2284,9 @@ export class ChatController {
       if (savedProgress.status === 'complete') this.activePlanCardSnapshot = null;
     }
     this.hasHistory = this.messages.length > 0;
+    // 状态叙述行的账随快照回来：之后的每次持久化都带上它们（连同新行），
+    // 回放与后续保存不断档。
+    this.statusLines = (snapshot.statusLines ?? []).map(line => ({ ...line }));
     // ⑥ 长会话恢复后立刻把 trim/摘要挪进 idle 窗口，首次发送不再在关键路径上
     // 同步等压实（见 preCompactAfterLoad）。
     this.preCompactAfterLoad();
@@ -2467,6 +2475,8 @@ export class ChatController {
       ack.textContent = text;
       if (kind) ack.classList.add(`hl-${kind}`);
       linkifyPaths(ack);
+      // 账随行走：占位文本换成后续回执的过渡稿，回放看到的也是这一稿。
+      this.patchStatusLine(ack, { text, ...(kind ? { kind } : {}) });
       return;
     }
     const bubble = this.addBubble('assistant', '');
@@ -2475,6 +2485,9 @@ export class ChatController {
     const bubbleRow = bubble.parentElement;
     if (bubbleRow) row.parentNode.insertBefore(bubbleRow, row);
     row.remove();
+    // ack 行被终稿气泡顶替：账上销掉这条状态行，回放不复活它
+    // （终稿气泡走正常消息通道持久化，与实况一致）。
+    this.removeStatusLine(ack);
   }
 
   /** 插话回显的次序保证：用户原话在前，宿主回执（ack 行）紧随其后。ack 在
@@ -2499,7 +2512,11 @@ export class ChatController {
    * (the re-entry/new-send entry) so every path that ends the wait sweeps. */
   private settleInterjectReceipts(): void {
     if (this.interjectReceiptRows.size === 0) return;
-    for (const row of this.interjectReceiptRows) row.classList.remove('pending');
+    for (const row of this.interjectReceiptRows) {
+      row.classList.remove('pending');
+      // 收尾扫除摘掉微光：账上的 pending 一并落定，回放不再闪着「还在等」。
+      this.patchStatusRecord(this.statusRecords.get(row), { pending: false });
+    }
     this.interjectReceiptRows.clear();
   }
 
@@ -4588,7 +4605,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 : '评估完成，当前请求可以进入执行阶段。');
               assessmentFlow.setPhase('execute', '边界已确认，准备按小步策略执行…');
             }
-            if (modeBubble) modeBubble.remove();
+            if (modeBubble) {
+              modeBubble.remove();
+              this.removeStatusLine(modeBubble);
+            }
           } else {
             // 安静兜底：只有确认对话还必须有一份具体方案可批（强制模式/高风险）
             // 时，规则步骤才最后一次出场；没有思考 narration 时一声不吭。
@@ -4658,9 +4678,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               ? `${planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true })}\n\n`
               : '') + formatPlanForPrompt(approvedPlan, needsDeliveryGate, true);
             // Plan is ready: the bubble no longer promises generation.
-            if (modeBubble) modeBubble.textContent = forcedMode
-              ? t('plan.modeActive', '已切换为 {mode} 模式，按方案执行').replace('{mode}', modeLabel(analysis.mode))
-              : t('plan.humanActive', '方案已经整理好，按实际进展继续推进。');
+            if (modeBubble) {
+              const settled = forcedMode
+                ? t('plan.modeActive', '已切换为 {mode} 模式，按方案执行').replace('{mode}', modeLabel(analysis.mode))
+                : t('plan.humanActive', '方案已经整理好，按实际进展继续推进。');
+              modeBubble.textContent = settled;
+              this.patchStatusLine(modeBubble, { text: settled, pending: false });
+            }
             planCard?.setActivity(needsInteractiveApproval
               ? '方案已经整理好，等待你确认后开始。'
               : '方案已经整理好，马上从第一项开始验证。');
@@ -4697,12 +4721,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               removeThinkingCard();
               keepOrDropUserBubble(stopped ? '⏸ 已暂停：你的请求已保留在对话中。' : '已取消本次执行计划，你的请求已保留在对话中。');
               modeBubble?.remove();
+              this.removeStatusLine(modeBubble);
               return; // finally resets streaming
             }
             if (decision === 'skip') {
               assessmentFlow?.skipPhase('gate', '你跳过了计划确认，继续按普通流程处理…');
               discardPlanCard();
               modeBubble?.remove();
+              this.removeStatusLine(modeBubble);
             } else {
               approvePlan();
             }
@@ -6564,6 +6590,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.projectDirectoryShown = false;
     this.pausePlanCard = null;
     this.pauseAssessmentFlow = null;
+    // 新对话 = 新账本：状态叙述行不跨会话携带。
+    this.statusLines = [];
     // Invalidate any background pre-compaction from the previous session.
     this.preCompactedMessages = null;
     this.preCompactSourceMessages = null;
@@ -6635,7 +6663,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     bar.dataset.state = 'pausing';
     const note = document.createElement('span');
     note.className = 'paused-resume-note';
-    note.textContent = t('chat.paused.draining', '⏸ 正在暂停：等在跑的步骤收尾（子 agent 会存档进度），马上停下…');
+    note.textContent = t('chat.paused.draining', '⏸ 正在暂停：等在跑的步骤收尾（子 agent 会存档进度）——等不及就再点 ⏹ 或按 Esc，立即停。');
     bar.appendChild(note);
     this.transcriptElement().appendChild(bar);
     this.pausedResumeBar = bar;
@@ -6840,7 +6868,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const nextSnapshotV2 = createSessionSnapshot(canonicalMessages, transcriptDrafts, {
       planProgress: progressSnapshot,
       planState: turnPlanState,
-    });
+    }, this.statusLines);
     const events = nextSnapshotV2.events;
     const nextSnapshot: SessionSnapshot = {
       version: 3,
@@ -7032,24 +7060,64 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.addStatusBubble(text, false, false, 'info');
   }
 
+  /** 状态叙述行的账（2026-09-27 一致性定调：切回历史会话要与实际对话一模一样）。
+   * 这些行过去只进 DOM，回放里整段消失；现在随快照持久化、按锚点拼回事件流。 */
+  private statusLines: StatusLineRecord[] = [];
+  /** 按行（wrapper）索引账面记录：所有改动点手里都拿得到行——气泡方
+   * （settleAck/modeBubble/蒸馏收尾）走 parentElement 解析，行方（收尾扫除）
+   * 直接命中，不依赖 querySelector。 */
+  private statusRecords = new WeakMap<HTMLElement, StatusLineRecord>();
+
+  private anchorIndex(): number {
+    return this.messages.length - 1;
+  }
+
+  private patchStatusRecord(record: StatusLineRecord | undefined, patch: Partial<Omit<StatusLineRecord, 'afterIndex'>>): void {
+    if (!record) return;
+    if (patch.text !== undefined) record.text = patch.text;
+    if (patch.pending !== undefined) record.pending = patch.pending || undefined;
+    if (patch.error !== undefined) record.error = patch.error || undefined;
+    if (patch.kind !== undefined) record.kind = patch.kind;
+  }
+
+  /** 状态行变了（settleAck 终稿、修复轮次、成败收尾），账上的记录跟着改——
+   * 不然回放的是出生时的草稿文本，不是用户实际看到的终稿。 */
+  private patchStatusLine(bubble: HTMLElement | null, patch: Partial<Omit<StatusLineRecord, 'afterIndex'>>): void {
+    const row = bubble?.parentElement;
+    this.patchStatusRecord(row ? this.statusRecords.get(row) : undefined, patch);
+  }
+
+  private removeStatusRow(row: HTMLElement | null): void {
+    if (!row) return;
+    const record = this.statusRecords.get(row);
+    if (!record) return;
+    const i = this.statusLines.indexOf(record);
+    if (i >= 0) this.statusLines.splice(i, 1);
+  }
+
+  /** 状态行被从转写里摘掉（ack 终稿顶替、modeBubble 让位计划卡），账上的
+   * 记录同步销账——回放不复活用户已经看着它消失的行。 */
+  private removeStatusLine(bubble: HTMLElement | null): void {
+    this.removeStatusRow(bubble?.parentElement ?? null);
+  }
+
   private addStatusBubble(
     text: string,
     pending = false,
     isError = false,
     kind: 'success' | 'warn' | 'info' | undefined = undefined,
   ): HTMLElement {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'bubble-row status';
-    if (pending) wrapper.classList.add('pending');
-    if (isError) wrapper.classList.add('error');
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble status';
-    if (isError) bubble.classList.add('error');
-    if (kind) bubble.classList.add(`hl-${kind}`);
-    bubble.textContent = text;
-    linkifyPaths(bubble);
-    wrapper.appendChild(bubble);
-    this.appendToTranscript(wrapper);
+    const { row, bubble } = buildStatusRow(text, { pending, error: isError, kind });
+    this.appendToTranscript(row);
+    const record: StatusLineRecord = {
+      afterIndex: this.anchorIndex(),
+      text,
+      ...(pending ? { pending: true } : {}),
+      ...(isError ? { error: true } : {}),
+      ...(kind ? { kind } : {}),
+    };
+    this.statusLines.push(record);
+    this.statusRecords.set(row, record);
     return bubble;
   }
 
@@ -7161,6 +7229,26 @@ export function onRunningSessionsChanged(cb: () => void): () => void {
   return () => {
     runningSessionsListeners.delete(cb);
   };
+}
+
+/** 状态叙述行的统一 DOM 形状：实时入账（addStatusBubble）与回放重放
+ * （renderSessionMessages）都从这里长出来——两条路一张脸，回放才像实况。 */
+export function buildStatusRow(
+  text: string,
+  opts: { pending?: boolean; error?: boolean; kind?: 'success' | 'warn' | 'info' } = {},
+): { row: HTMLElement; bubble: HTMLElement } {
+  const row = document.createElement('div');
+  row.className = 'bubble-row status';
+  if (opts.pending) row.classList.add('pending');
+  if (opts.error) row.classList.add('error');
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble status';
+  if (opts.error) bubble.classList.add('error');
+  if (opts.kind) bubble.classList.add(`hl-${opts.kind}`);
+  bubble.textContent = text;
+  linkifyPaths(bubble);
+  row.appendChild(bubble);
+  return { row, bubble };
 }
 
 export class SessionChatManager {
