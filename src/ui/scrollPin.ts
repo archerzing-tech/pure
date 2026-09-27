@@ -121,3 +121,48 @@ export function forceScrollToBottom(el: HTMLElement): void {
   setPinnedToBottom(el, true);
   scrollChatToBottomIfPinned(el);
 }
+
+// ── Interior follow-tail (tool cards: 子 agent 委派卡、流式命令面板) ──
+// A tool card's Output panel (.tool-row-scroll) owns its OWN scrollbar. While
+// a sub-agent streams its interior trace (or a command streams its log), new
+// lines land below the fold every few hundred ms — the panel follows the tail
+// on its own so the newest line stays in view without the user chasing it.
+// Same pin policy as the transcript, scoped to the card: the moment the user
+// scrolls up inside the panel to re-read an earlier trace line, following
+// stops; it resumes when they scroll back to the bottom. Deliberately a
+// SEPARATE wiring from wireScrollPin, and with NO observers: a card's scroll
+// events must never reach the #chat affordances — the「有新内容」pill is a
+// transcript signal, and an interior panel is not the transcript.
+
+export function wireInnerFollowTail(el: HTMLElement): void {
+  if (el.dataset.innerFollowWired === '1') return;
+  el.dataset.innerFollowWired = '1';
+  el.addEventListener('scroll', () => {
+    // Same self-write swallow as the transcript pin: the scroll event our own
+    // tail-follow fired is not user intent (see selfScrollWrites above).
+    if (selfScrollWrites.get(el)) {
+      selfScrollWrites.delete(el);
+      return;
+    }
+    setPinnedToBottom(el, isNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight));
+  }, { passive: true });
+}
+
+export function followInnerTail(el: HTMLElement): void {
+  if (!isPinnedToBottom(el)) return;
+  if (scrollFrames.has(el)) return;
+  if (typeof requestAnimationFrame !== 'function') return;
+  scrollFrames.set(el, requestAnimationFrame(() => {
+    scrollFrames.delete(el);
+    if (!isPinnedToBottom(el)) return;
+    const target = el.scrollHeight;
+    // Same skip as scrollChatToBottomIfPinned: nothing to write when the
+    // content fits the panel (no scroll event would fire and the marker
+    // would linger, swallowing a later genuine user scroll) or when we're
+    // already at the bottom.
+    if (el.scrollHeight > el.clientHeight && el.scrollTop !== target) {
+      selfScrollWrites.set(el, true);
+      el.scrollTop = target;
+    }
+  }));
+}

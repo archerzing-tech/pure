@@ -7,6 +7,7 @@
 // render identically.
 
 import { linkifyPaths } from './pathLink';
+import { wireInnerFollowTail, followInnerTail } from './scrollPin';
 import { formatBytes } from '../shared/format';
 import { stripAnsi } from '../shared/ansi';
 import { isTauriRuntime } from '../shared/tauri';
@@ -229,6 +230,11 @@ export interface ToolRowHandle {
   resultEl: HTMLElement;
   expandButton: HTMLButtonElement;
   toolName: string;
+  // The card's interior scroll window (.tool-row-scroll — Input+Output live
+  // in it). appendToolStreamLine follow-tails it while a sub-agent's trace
+  // (or a command log) streams, so the newest line stays in view unless the
+  // user scrolled up inside the panel (scrollPin pin policy, card-scoped).
+  scrollEl: HTMLElement;
   // Browser interval id for the elapsed-seconds pending heartbeat (see
   // startElapsedTicker); undefined when no window (DOM tests) or after stop.
   elapsedTimer?: number;
@@ -601,6 +607,11 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   // frame's bottom edge (zero gap) until the user scrolled the inner body.
   const scroll = document.createElement('div');
   scroll.className = 'tool-row-scroll';
+  // Follow-tail wiring for this panel's own scrollbar: while content streams
+  // in (子 agent trace lines, a live command log), appendToolStreamLine keeps
+  // the newest line in view — unless the user scrolled up inside the panel to
+  // re-read, which unpins until they return to the bottom.
+  wireInnerFollowTail(scroll);
 
   const usesTerminalPanel = shouldUseTerminalPanel(toolName);
 
@@ -657,7 +668,7 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   // input/output as it executes; clicking the summary still toggles it.
   if (shouldExpandToolRowInitially(toolName)) details.open = true;
 
-  const handle: ToolRowHandle = { el: wrapper, details, statusEl, argsEl, inputSection, resultEl, expandButton, toolName };
+  const handle: ToolRowHandle = { el: wrapper, details, statusEl, argsEl, inputSection, resultEl, expandButton, toolName, scrollEl: scroll };
   startElapsedTicker(handle);
   return handle;
 }
@@ -1203,6 +1214,7 @@ export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stder
       if (kind === 'stdout' && isStepHeaderLine(clean)) last.classList.add('stream-step');
       last.textContent = '';
       appendHighlightSegments(last, clean);
+      followInnerTail(row.scrollEl);
       return;
     }
     // No previous line to redraw yet — fall through and append the first one.
@@ -1216,6 +1228,9 @@ export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stder
   if (kind === 'stdout' && isStepHeaderLine(clean)) div.classList.add('stream-step');
   appendHighlightSegments(div, clean);
   row.resultEl.appendChild(div);
+  // 尾随滚动：卡片自己的面板跟着最新内容走（用户在面板里向上翻了就停，
+  // 回到底部再续）——委派卡的子 agent 轨迹、命令日志都从这里长出来。
+  followInnerTail(row.scrollEl);
 }
 
 // ── Generated-image gallery (generate_image tool results) ──

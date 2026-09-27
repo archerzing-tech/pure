@@ -6,7 +6,7 @@
 // the UI suite.
 
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
-import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned, forceScrollToBottom, isNearBottom, setScrollPinObservers } from '../scrollPin';
+import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned, forceScrollToBottom, isNearBottom, setScrollPinObservers, wireInnerFollowTail, followInnerTail } from '../scrollPin';
 
 // Deterministic rAF: collect callbacks and flush them on demand instead of
 // depending on real animation frames.
@@ -255,5 +255,124 @@ describe('scrollPin observers (new-content-below hint)', () => {
     flushRaf(); // the self-scroll write leaves the marker for the scroll event
     el.dispatchEvent('scroll');
     expect(pins).toEqual([]);
+  });
+});
+
+// 工具卡片内嵌滚动面的尾随（2026-09-27 子 agent 卡片自动滚到最新内容）：
+// .tool-row-scroll 有自己的滚动条，策略与转写 pin 完全同构但互不相干——
+// 卡片内部滚动绝不能碰 #chat 的「有新内容」pill 观察者。
+describe('inner follow-tail (tool-card interior panels)', () => {
+  it('follows the tail while pinned, coalescing bursts into one frame', () => {
+    const { el } = makeChatEl();
+    wireInnerFollowTail(el as unknown as HTMLElement);
+
+    followInnerTail(el as unknown as HTMLElement);
+    followInnerTail(el as unknown as HTMLElement);
+    followInnerTail(el as unknown as HTMLElement);
+    expect(rafCallbacks.length).toBe(1);
+    flushRaf();
+    expect(el.scrollTop).toBe(SCROLL_HEIGHT);
+  });
+
+  it('stops following once the user scrolled up inside the panel', () => {
+    const { el, setTop } = makeChatEl();
+    wireInnerFollowTail(el as unknown as HTMLElement);
+    setTop(100); // 200px above the bottom — user is re-reading an earlier trace line
+    el.dispatchEvent('scroll'); // → unpinned
+
+    followInnerTail(el as unknown as HTMLElement);
+    expect(rafCallbacks.length).toBe(0);
+    expect(el.scrollTop).toBe(100);
+  });
+
+  it('resumes following when the user returns to the panel bottom', () => {
+    const { el, setTop } = makeChatEl();
+    wireInnerFollowTail(el as unknown as HTMLElement);
+    setTop(100);
+    el.dispatchEvent('scroll');
+    followInnerTail(el as unknown as HTMLElement);
+    expect(rafCallbacks.length).toBe(0);
+
+    setTop(SCROLL_HEIGHT); // scrolled back down to the newest line → re-pinned
+    el.dispatchEvent('scroll');
+    followInnerTail(el as unknown as HTMLElement);
+    flushRaf();
+    expect(el.scrollTop).toBe(SCROLL_HEIGHT);
+  });
+
+  it('a scroll event fired by our own tail write never unpins, even when content grew in between', () => {
+    let scrollHeight = 900;
+    let scrollTop = 0;
+    const listeners: Record<string, Array<(ev: unknown) => void>> = {};
+    const el = {
+      dataset: {} as Record<string, string>,
+      get scrollTop() { return scrollTop; },
+      set scrollTop(v: number) { scrollTop = v; },
+      get scrollHeight() { return scrollHeight; },
+      get clientHeight() { return 320; },
+      addEventListener(type: string, fn: (ev: unknown) => void) {
+        (listeners[type] ??= []).push(fn);
+      },
+      dispatchEvent(type: string) {
+        for (const fn of listeners[type] ?? []) fn({});
+      },
+    };
+
+    wireInnerFollowTail(el as unknown as HTMLElement);
+    followInnerTail(el as unknown as HTMLElement);
+    flushRaf();
+    expect(scrollTop).toBe(900);
+
+    // The write's own scroll event arrives AFTER an async content growth —
+    // exactly the race that must not unpin the panel (same as the transcript).
+    scrollHeight = 1200;
+    el.dispatchEvent('scroll');
+
+    followInnerTail(el as unknown as HTMLElement);
+    flushRaf();
+    expect(scrollTop).toBe(1200);
+  });
+
+  it('skips the write when the content fits the panel (no lingering self-write marker)', () => {
+    // 300px of content in a 600px panel: nothing to scroll (a collapsed
+    // <details> or a short Output reads the same — zero geometry).
+    const listeners: Record<string, Array<(ev: unknown) => void>> = {};
+    const fitEl = {
+      dataset: {} as Record<string, string>,
+      get scrollTop() { return 0; },
+      set scrollTop(_v: number) { throw new Error('must not write scrollTop when content fits'); },
+      get scrollHeight() { return 300; },
+      get clientHeight() { return 600; },
+      addEventListener(type: string, fn: (ev: unknown) => void) {
+        (listeners[type] ??= []).push(fn);
+      },
+      dispatchEvent(type: string) {
+        for (const fn of listeners[type] ?? []) fn({});
+      },
+    };
+    wireInnerFollowTail(fitEl as unknown as HTMLElement);
+    followInnerTail(fitEl as unknown as HTMLElement);
+    flushRaf(); // no write, no crash — and no marker left behind
+
+    // A later genuine user scroll (impossible here, but the event could still
+    // fire from any cause) must not be swallowed by a stale marker.
+    fitEl.dispatchEvent('scroll');
+    followInnerTail(fitEl as unknown as HTMLElement);
+    flushRaf();
+  });
+
+  it('never touches the #chat observers — an interior panel is not the transcript', () => {
+    const { el, setTop } = makeChatEl();
+    const pins: boolean[] = [];
+    const news: string[] = [];
+    setScrollPinObservers({ onPinStateChange: (_el, p) => pins.push(p), onUnpinnedNewContent: () => news.push('new') });
+    wireInnerFollowTail(el as unknown as HTMLElement);
+
+    setTop(100);
+    el.dispatchEvent('scroll'); // a genuine user scroll INSIDE the card
+    followInnerTail(el as unknown as HTMLElement);
+
+    expect(pins).toEqual([]); // pill policy untouched by card scrolling
+    expect(news).toEqual([]);
   });
 });

@@ -1186,3 +1186,97 @@ describe('tool card scroll cost', () => {
     expect(scroll).not.toContain('contain: layout paint style');
   });
 });
+
+// 子 agent 委派卡（以及一切流式工具卡）的内嵌滚动面尾随（2026-09-27）：
+// createToolRow 给 .tool-row-scroll 接了 scrollPin 的卡内 pin 策略，
+// appendToolStreamLine 每长出一行就把还在底部的面板带到最新内容处；用户在
+// 面板里向上翻过就不再拽，回到底部再续。fake DOM 的元素没有滚动几何，
+// 这里手动给数（installFakeDocument 只造普通对象）。
+describe('tool row interior follow-tail (subagent trace panels)', () => {
+  const rafCallbacks: FrameRequestCallback[] = [];
+  const originalRaf = globalThis.requestAnimationFrame;
+  const stubRaf = (): void => {
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      rafCallbacks.push(cb);
+      return rafCallbacks.length;
+    };
+  };
+  const flushRaf = (): void => {
+    for (const cb of rafCallbacks.splice(0)) cb(performance.now());
+  };
+
+  // Depth-first walk for the card's .tool-row-scroll window (the fake
+  // document's querySelector returns null everywhere).
+  const findScrollEl = (el: any): any => {
+    if (String(el.className).includes('tool-row-scroll')) return el;
+    for (const child of el.children ?? []) {
+      const hit = findScrollEl(child);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  // Give the panel real scroll numbers; born at the bottom (a fresh card has
+  // no manual scroll-away yet → pinned).
+  const giveGeometry = (el: any, scrollHeight: number, clientHeight: number): void => {
+    let scrollTop = scrollHeight - clientHeight;
+    Object.defineProperty(el, 'scrollTop', { get: () => scrollTop, set: (v: number) => { scrollTop = v; } });
+    Object.defineProperty(el, 'scrollHeight', { get: () => scrollHeight });
+    Object.defineProperty(el, 'clientHeight', { get: () => clientHeight });
+    (el as any)._setTop = (v: number) => { scrollTop = v; };
+  };
+
+  it('follows streamed lines to the newest content while the user is at the bottom', () => {
+    stubRaf();
+    const restoreDoc = installFakeDocument();
+    try {
+      const row = createToolRow('code_reviewer', { prompt: '审查这份实现的边界条件' });
+      const scroll = findScrollEl(row.el);
+      expect(scroll).toBeTruthy();
+      expect(scroll.dataset.innerFollowWired).toBe('1');
+      giveGeometry(scroll, 900, 320);
+
+      appendToolStreamLine(row, 'stdout', '▶ code_reviewer 接活：审查边界条件');
+      expect(rafCallbacks.length).toBe(1);
+      flushRaf();
+      expect(scroll.scrollTop).toBe(900); // newest line stays in view
+
+      appendToolStreamLine(row, 'stdout', '→ read_file src/engine.ts');
+      flushRaf();
+      expect(scroll.scrollTop).toBe(900);
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf;
+      restoreDoc();
+    }
+  });
+
+  it('stops following once the user scrolled up inside the panel, resumes at the bottom', () => {
+    stubRaf();
+    const restoreDoc = installFakeDocument();
+    try {
+      const row = createToolRow('code_reviewer', { prompt: '审查这份实现的边界条件' });
+      const scroll = findScrollEl(row.el);
+      giveGeometry(scroll, 900, 320);
+
+      appendToolStreamLine(row, 'stdout', '▶ code_reviewer 接活：审查边界条件');
+      flushRaf();
+
+      // 用户向上翻面板回读更早的轨迹行 → 不再拽。
+      scroll._setTop(120);
+      scroll._listeners.scroll();
+      appendToolStreamLine(row, 'stdout', '→ read_file src/engine.ts');
+      expect(rafCallbacks.length).toBe(1); // no new frame scheduled
+      expect(scroll.scrollTop).toBe(120); // and no yank
+
+      // 回到底部 → 尾随续上。
+      scroll._setTop(900);
+      scroll._listeners.scroll();
+      appendToolStreamLine(row, 'stdout', '✓ code_reviewer 交付');
+      flushRaf();
+      expect(scroll.scrollTop).toBe(900);
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf;
+      restoreDoc();
+    }
+  });
+});
